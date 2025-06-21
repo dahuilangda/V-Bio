@@ -1,0 +1,12 @@
+boltz
+flask
+celery
+redis
+gunicorn
+requests
+streamlit
+streamlit-ketcher
+pyyaml
+biopython
+py3dmol
+numpy
