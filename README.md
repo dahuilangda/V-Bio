@@ -1,6 +1,6 @@
 # Boltz-WebUI
 
-**Boltz-WebUI** 是一个为 `boltz` 结构预测工具开发的 Web 应用。本项目通过整合 Streamlit 前端、Flask API 以及 Celery 任务队列，将 `boltz` 的预测流程封装成一个完整的服务。用户可以通过网页提交预测任务，系统后端会自动处理任务排队、多 GPU 并行计算以及结果的统一管理，目的是帮助使用者更方便地运行预测，并有效利用计算资源。
+**Boltz-WebUI** 是一个为 `boltz-2` 结构预测工具开发的 Web 应用。本项目通过整合 Streamlit 前端、Flask API 以及 Celery 任务队列，将 `boltz-2` 的预测流程封装成一个完整的服务。用户可以通过网页提交预测任务，系统后端会自动处理任务排队、多 GPU 并行计算以及结果的统一管理，目的是帮助使用者更方便地运行预测，并有效利用计算资源。
 
 ![Boltz-WebUI Logo](images/Boltz-WebUI-1.png)
 
@@ -124,7 +124,6 @@ export API_SECRET_TOKEN='your-super-secret-and-long-token'
          -H "X-API-Token: your-secret-token" \
          -F "yaml_file=@/path/to/your/input.yaml" \
          -F "use_msa_server=true" \
-         -F "priority=high" \
          http://127.0.0.1:5000/predict
     ```
 
