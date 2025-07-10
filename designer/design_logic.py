@@ -93,7 +93,7 @@ class ProteinDesigner:
                     print("Warning: No candidates were successfully evaluated in this generation. Retrying.")
                     continue
                 
-                # --- NEW: Log results from this generation to the CSV ---
+                # --- Log results from this generation to the CSV ---
                 with open(output_csv_path, 'a', newline='') as f:
                     writer = csv.writer(f)
                     for seq, score in valid_results:
@@ -124,7 +124,6 @@ class ProteinDesigner:
         return overall_best_sequence, overall_best_score
 
     def _create_candidate_yaml(self, sequence: str, chain_id: str) -> str:
-        # ... (This function remains unchanged from the previous version) ...
         config = self.base_config.copy()
         found = False
         for i, seq_block in enumerate(config.get('sequences', [])):
