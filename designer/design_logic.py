@@ -43,8 +43,8 @@ class ProteinDesigner:
         if not all_results:
             print("Warning: No results were generated to save to CSV.")
             return
-        all_results.sort(key=lambda x: x.get('score_iptm', 0.0), reverse=True)
-        header = ['rank', 'generation', 'sequence', 'score_iptm', 'ptm', 'complex_plddt', 'binder_avg_plddt']
+        all_results.sort(key=lambda x: x.get('iptm', 0.0), reverse=True)
+        header = ['rank', 'generation', 'sequence', 'iptm', 'ptm', 'complex_plddt', 'binder_avg_plddt']
         if keep_temp_files:
             header.append('results_path')
         print(f"\nWriting {len(all_results)} total results to {os.path.abspath(output_csv_path)}...")
@@ -104,7 +104,7 @@ class ProteinDesigner:
                         parent = random.choice(elite_population)
                         mutated_seq = mutate_sequence(
                             parent['sequence'],
-                            mutation_rate=0.2,
+                            mutation_rate=0.1,
                             plddt_scores=parent['metrics'].get('plddts', [])
                         )
                         candidates_to_evaluate.append((i + 1, mutated_seq, binder_chain_id))
