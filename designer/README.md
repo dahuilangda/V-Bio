@@ -70,5 +70,3 @@ python designer/run_design.py \
   * `--population_size`: Number of parallel jobs to run in each generation. Default is 16.
   * `--output_csv`: Path to save the summary CSV file of all evaluated designs.
   * `--keep_temp_files`: If set, temporary files will not be deleted after the run. Useful for debugging.
-
-```
