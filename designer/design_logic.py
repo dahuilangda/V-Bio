@@ -31,7 +31,6 @@ class ProteinDesigner:
         A worker function to process a single candidate.
         This function is designed to be called by a thread pool executor.
         """
-        # ... (This function remains unchanged from the previous version) ...
         generation_index, sequence, binder_chain_id = candidate_sequence_info
         print(f"  [Gen {generation_index}] Evaluating candidate...")
         candidate_yaml_path = self._create_candidate_yaml(sequence, binder_chain_id)
