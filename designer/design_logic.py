@@ -145,8 +145,8 @@ class ProteinDesigner:
         # --- Final Processing ---
         print("\n--- Design Run Finished ---")
         if all_results_data:
-            final_best_score = max(r['score_iptm'] for r in all_results_data)
-            final_best_seq = next(r['sequence'] for r in all_results_data if r['score_iptm'] == final_best_score)
+            final_best_score = max(r['iptm'] for r in all_results_data)
+            final_best_seq = next(r['sequence'] for r in all_results_data if r['iptm'] == final_best_score)
             print(f"Final best sequence: {final_best_seq}")
             print(f"Final best score (ipTM): {final_best_score:.4f}")
 
