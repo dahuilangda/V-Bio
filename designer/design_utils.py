@@ -34,11 +34,16 @@ BLOSUM62 = {
 def generate_random_sequence(length: int) -> str:
     return "".join(random.choice(AMINO_ACIDS) for _ in range(length))
 
-def mutate_sequence(sequence: str, mutation_rate: float = 0.1, plddt_scores: list = None) -> str:
+def mutate_sequence(
+    sequence: str, 
+    mutation_rate: float = 0.1, 
+    plddt_scores: list = None,
+    temperature: float = 1.0
+) -> str:
     """
     Introduces point mutations into a sequence.
     - Positions are chosen based on low pLDDT scores.
-    - Amino acid substitutions are guided by the BLOSUM62 matrix.
+    - Amino acid substitutions are guided by the BLOSUM62 matrix using a Softmax function.
     """
     new_sequence = list(sequence)
     num_mutations = int(len(sequence) * mutation_rate)
@@ -47,6 +52,7 @@ def mutate_sequence(sequence: str, mutation_rate: float = 0.1, plddt_scores: lis
     # --- Step 1: Choose WHERE to mutate (pLDDT-guided) ---
     positions_to_mutate = []
     if plddt_scores and len(plddt_scores) == len(sequence):
+        # Invert scores to use as weights (low plddt = high weight)
         weights = [100.0 - score for score in plddt_scores]
         total_weight = sum(weights)
         if total_weight > 0:
@@ -55,33 +61,35 @@ def mutate_sequence(sequence: str, mutation_rate: float = 0.1, plddt_scores: lis
             k = min(num_mutations, len(indices))
             positions_to_mutate = np.random.choice(indices, size=k, replace=False, p=probabilities)
         else:
-            positions_to_mutate = random.sample(range(len(sequence)), k=num_mutations)
+            positions_to_mutate = random.sample(range(len(sequence)), k=min(num_mutations, len(sequence)))
     else:
         if plddt_scores:
              print("Warning: pLDDT scores length mismatch. Falling back to random mutation position.")
-        positions_to_mutate = random.sample(range(len(sequence)), k=num_mutations)
+        positions_to_mutate = random.sample(range(len(sequence)), k=min(num_mutations, len(sequence)))
 
-    # --- Step 2: Choose WHAT to mutate to (BLOSUM62-guided) ---
+    # --- Step 2: Choose WHAT to mutate to (BLOSUM62-guided with Softmax) ---
     for pos in positions_to_mutate:
         original_aa = new_sequence[pos]
-        
-        # Get the substitution scores for the original amino acid from BLOSUM62
         substitution_scores = BLOSUM62.get(original_aa, {})
         
-        # Create a weighted list of possible new amino acids
         possible_aas = []
-        weights = []
+        scores = []
         for aa in AMINO_ACIDS:
-            if aa != original_aa: # Ensure we actually make a mutation
+            if aa != original_aa:
                 possible_aas.append(aa)
-                # Convert BLOSUM score to a positive weight. Adding 5 makes all scores >= 1.
-                weight = substitution_scores.get(aa, 0) + 5 
-                weights.append(weight)
+                # Raw BLOSUM score, default to 0 if not found
+                scores.append(substitution_scores.get(aa, 0))
 
         if not possible_aas: continue
 
-        # Choose the new amino acid based on the BLOSUM-derived weights
-        new_aa = random.choices(possible_aas, weights=weights, k=1)[0]
+        # Convert scores to probabilities using Softmax
+        # The 'temperature' here controls the sharpness of the distribution
+        # High temp -> more random, Low temp -> more greedy towards best BLOSUM score
+        scores_array = np.array(scores) / temperature
+        probabilities = np.exp(scores_array) / np.sum(np.exp(scores_array))
+
+        # Choose the new amino acid based on the probabilities
+        new_aa = np.random.choice(possible_aas, p=probabilities)
         new_sequence[pos] = new_aa
         
     return "".join(new_sequence)
