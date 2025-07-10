@@ -10,59 +10,27 @@ def main():
     parser = argparse.ArgumentParser(description="Run a parallel protein design job using the Boltz-WebUI API.")
     
     # --- Input Arguments ---
-    parser.add_argument(
-        "--yaml_template", 
-        required=True, 
-        help="Path to the template YAML file describing the target and ligand."
-    )
-    parser.add_argument(
-        "--binder_chain", 
-        required=True, 
-        help="The chain ID of the protein to be designed (e.g., 'A')."
-    )
-    parser.add_argument(
-        "--binder_length", 
-        required=True, 
-        type=int, 
-        help="The length of the protein binder to design."
-    )
+    parser.add_argument("--yaml_template", required=True, help="Path to the template YAML file.")
+    parser.add_argument("--binder_chain", required=True, help="The chain ID of the protein to be designed (e.g., 'A').")
+    parser.add_argument("--binder_length", required=True, type=int, help="The length of the protein binder.")
 
     # --- Run Control Arguments ---
+    parser.add_argument("--iterations", type=int, default=20, help="Number of design-evaluate generations to run.")
+    parser.add_argument("--population_size", type=int, default=4, help="Number of parallel jobs per generation.")
     parser.add_argument(
-        "--iterations", 
-        type=int, 
-        default=20, 
-        help="Number of design-evaluate generations to run. Total jobs = iterations * population_size."
-    )
-    parser.add_argument(
-        "--population_size",
+        "--num_elites",
         type=int,
-        default=8,
-        help="Number of parallel jobs to run in each generation. Set this to match your backend capacity (e.g., 16)."
+        default=1,
+        help="Number of top candidates (lineages) to maintain and evolve in parallel. Should be less than population_size."
     )
 
     # --- Output & Logging Arguments ---
-    parser.add_argument(
-        "--output_csv",
-        default=f"design_summary_{int(time.time())}.csv",
-        help="Path for the output CSV file to log all evaluated designs. Default: design_summary_<timestamp>.csv"
-    )
-    parser.add_argument(
-        "--keep_temp_files",
-        action="store_true",
-        help="If set, do not delete the temporary directory containing all intermediate YAML and result files."
-    )
+    parser.add_argument("--output_csv", default=f"design_summary_{int(time.time())}.csv", help="Path for the output CSV summary file.")
+    parser.add_argument("--keep_temp_files", action="store_true", help="If set, do not delete the temporary directory.")
     
     # --- API Connection Arguments ---
-    parser.add_argument(
-        "--server_url", 
-        default="http://127.0.0.1:5000", 
-        help="URL of the Boltz-WebUI prediction API server."
-    )
-    parser.add_argument(
-        "--api_token", 
-        help="Your secret API token. If not provided, it will be read from the API_SECRET_TOKEN environment variable."
-    )
+    parser.add_argument("--server_url", default="http://127.0.0.1:5000", help="URL of the Boltz-WebUI prediction API server.")
+    parser.add_argument("--api_token", help="Your secret API token. Can also be set via API_SECRET_TOKEN environment variable.")
 
     args = parser.parse_args()
 
@@ -81,6 +49,7 @@ def main():
     designer.run(
         iterations=args.iterations,
         population_size=args.population_size,
+        num_elites=args.num_elites, # Pass the new argument
         binder_chain_id=args.binder_chain,
         binder_length=args.binder_length,
         output_csv_path=args.output_csv,
