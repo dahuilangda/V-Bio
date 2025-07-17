@@ -4,22 +4,34 @@ import os
 import json
 import tempfile
 import shutil
-from pathlib import Path
 import traceback
 
 sys.path.append(os.getcwd())
-from boltz_wrapper import run_prediction
+from boltz_wrapper import predict
 
 def find_results_dir(base_dir: str) -> str:
+    result_path = None
+    max_depth = -1
     for root, dirs, files in os.walk(base_dir):
-        if any(f.endswith(".cif") or f.endswith(".pdb") for f in files):
-            print(f"Found results in directory: {root}", file=sys.stderr)
-            return root
-    raise FileNotFoundError(f"Could not find any directory containing .cif or .pdb files within the base directory {base_dir}")
+        if any(f.endswith((".cif", ".pdb", ".json")) for f in files):
+            depth = root.count(os.sep)
+            if depth > max_depth:
+                max_depth = depth
+                result_path = root
+
+    if result_path:
+        print(f"Found results in directory: {result_path}", file=sys.stderr)
+        return result_path
+
+    raise FileNotFoundError(f"Could not find any directory containing result files within the base directory {base_dir}")
 
 def main():
     """
-    独立的预测进程入口。
+    Main function to run a single prediction based on arguments provided in a JSON file.
+    The JSON file should contain the necessary parameters for the prediction, including:
+    - output_archive_path: Path where the output archive will be saved.
+    - yaml_content: YAML content as a string that will be written to a temporary file.
+    - Other parameters that will be passed to the predict function as command-line arguments.
     """
     if len(sys.argv) != 2:
         print("Usage: python run_single_prediction.py <args_file_path>")
@@ -31,30 +43,46 @@ def main():
         with open(args_file_path, 'r') as f:
             predict_args = json.load(f)
 
-        # 1. 从参数中获取父进程指定的输出路径
         output_archive_path = predict_args.pop("output_archive_path")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             yaml_content = predict_args.pop("yaml_content")
-            
-            # 使用 with 语句确保临时 yaml 文件被自动清理
+
             tmp_yaml_path = os.path.join(temp_dir, 'data.yaml')
             with open(tmp_yaml_path, 'w') as tmp_yaml:
                 tmp_yaml.write(yaml_content)
 
-            predict_args['devices'] = [0]
             predict_args['data'] = tmp_yaml_path
             predict_args['out_dir'] = temp_dir
-            predict_args['accelerator'] = 'gpu'
             
-            run_prediction(**predict_args)
+            POSITIONAL_KEYS = ['data']
+            
+            cmd_positional = []
+            cmd_options = []
+
+            for key, value in predict_args.items():
+                if key in POSITIONAL_KEYS:
+                    cmd_positional.append(str(value))
+                else:
+                    if value is None:
+                        continue
+                    if isinstance(value, bool):
+                        if value:
+                            cmd_options.append(f'--{key}')
+                    else:
+                        cmd_options.append(f'--{key}')
+                        cmd_options.append(str(value))
+
+            cmd_args = cmd_positional + cmd_options
+
+            print(f"DEBUG: Invoking predict with args: {cmd_args}", file=sys.stderr)
+            predict.main(args=cmd_args, standalone_mode=False)
 
             output_directory_path = find_results_dir(temp_dir)
 
             if not os.listdir(output_directory_path):
                 raise NotADirectoryError(f"Prediction result directory was found but is empty: {output_directory_path}")
 
-            # 2. 使用父进程提供的路径来创建压缩包
             archive_base_name = output_archive_path.rsplit('.', 1)[0]
             
             created_archive_path = shutil.make_archive(

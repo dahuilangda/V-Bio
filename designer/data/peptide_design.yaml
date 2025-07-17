@@ -1,0 +1,13 @@
+version: 1
+sequences:
+- protein:
+    id:
+    - A
+    # This sequence will be replaced by the script
+    sequence: XXXXXXXXXXXXXXXXXXXX
+    msa: empty
+- protein:
+    id:
+    - B
+    sequence: AFSGTWQVYAQENYEEFLKALALPEDLIKMARDIKPIVEIQQKGDDFVVTSKTPRQTVTNSFTLGKEADITTMDGKKLKCTVHLANGKLVCKSEKFSHEQEVKGNEMVETITFGGVTLIRRSKRV
+    msa: empty
