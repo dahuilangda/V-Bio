@@ -13,7 +13,7 @@ def find_results_dir(base_dir: str) -> str:
     result_path = None
     max_depth = -1
     for root, dirs, files in os.walk(base_dir):
-        if any(f.endswith((".cif", ".pdb", ".json")) for f in files):
+        if any(f.endswith((".cif")) for f in files):
             depth = root.count(os.sep)
             if depth > max_depth:
                 max_depth = depth
