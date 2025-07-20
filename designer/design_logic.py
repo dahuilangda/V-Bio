@@ -66,14 +66,14 @@ class Designer:
 
         Args:
             candidate_info (tuple): 包含 (generation_index, sequence, 
-                                      binder_chain_id, design_params) 的元组。
+                                          binder_chain_id, design_params) 的元组。
 
         Returns:
             tuple: 包含 (sequence, metrics, results_path) 的元组。如果失败，
                    metrics 和 results_path 将为 None。
         """
         generation_index, sequence, binder_chain_id, design_params = candidate_info
-        logger.info(f"[Gen {generation_index}] Evaluating candidate sequence: {sequence[:10]}...")
+        logger.info(f"[Gen {generation_index}] Evaluating candidate sequence: {sequence[:20]}...")
         
         try:
             candidate_yaml_path = self._create_candidate_yaml(sequence, binder_chain_id, design_params)
@@ -97,7 +97,7 @@ class Designer:
         metrics = parse_confidence_metrics(results_path, binder_chain_id)
         iptm_score = metrics.get('iptm', 0.0)
         plddt_score = metrics.get('binder_avg_plddt', 0.0)
-        logger.info(f"Candidate '{sequence[:10]}...' evaluated. ipTM: {iptm_score:.4f}, pLDDT: {plddt_score:.2f}")
+        logger.info(f"Candidate '{sequence[:20]}...' evaluated. ipTM: {iptm_score:.4f}, pLDDT: {plddt_score:.2f}")
         return (sequence, metrics, results_path)
 
     def _write_summary_csv(self, all_results: list, output_csv_path: str, keep_temp_files: bool):
@@ -144,6 +144,7 @@ class Designer:
         num_elites: int,
         binder_chain_id: str,
         binder_length: int,
+        initial_binder_sequence: str,
         glycan_ccd: str,
         glycan_chain_id: str,
         glycosylation_site: int, # 0-based index
@@ -156,8 +157,17 @@ class Designer:
         执行使用演化策略的主要并行设计循环。
 
         Args:
-            (省略了其他参数的文档以保持简洁)
-            ...
+            iterations (int): 设计循环的代数。
+            population_size (int): 每代的候选数量。
+            num_elites (int): 要保留到下一代的精英数量。
+            binder_chain_id (str): 要设计的肽链的ID。
+            binder_length (int): 肽链的长度。
+            initial_binder_sequence (str, optional): 用于生成第一代的初始序列。如果为None，则随机生成。
+            glycan_ccd (str, optional): 糖基的CCD代码。
+            glycan_chain_id (str): 糖基的链ID。
+            glycosylation_site (int, optional): 糖基化位点 (0-based)。
+            output_csv_path (str): 输出CSV文件的路径。
+            keep_temp_files (bool): 是否保留临时文件。
             weight_iptm (float): 复合评分中ipTM分数的权重。
             weight_plddt (float): 复合评分中binder平均pLDDT分数的权重。
         """
@@ -173,9 +183,9 @@ class Designer:
             'glycosylation_site': glycosylation_site,
         }
         if design_params['is_glycopeptide']:
-             logger.info(f"Glycopeptide design mode activated for glycan '{glycan_ccd}' on chain {glycan_chain_id} at site {glycosylation_site + 1}.")
-             if glycosylation_site is None:
-                 raise ValueError("`glycosylation_site` must be provided for glycopeptide design.")
+            logger.info(f"Glycopeptide design mode activated for glycan '{glycan_ccd}' on chain {glycan_chain_id} at site {glycosylation_site + 1}.")
+            if glycosylation_site is None:
+                raise ValueError("`glycosylation_site` must be provided for glycopeptide design.")
 
         # 定义复合分数计算函数
         def calculate_composite_score(metrics: dict) -> float:
@@ -197,15 +207,34 @@ class Designer:
                 # --- 1. 候选者生成 ---
                 candidates_to_evaluate = []
                 if not elite_population:
-                    logger.info(f"Seeding first generation with {population_size} random sequences...")
-                    for _ in range(population_size):
-                        random_seq = generate_random_sequence(
-                            binder_length, 
-                            glycosylation_site, 
-                            glycan_ccd=design_params.get('glycan_ccd')
-                        )
-                        candidates_to_evaluate.append((i + 1, random_seq, binder_chain_id, design_params))
+                    # 第一代：基于输入或随机生成
+                    if initial_binder_sequence:
+                        logger.info(f"Seeding first generation from provided sequence: {initial_binder_sequence[:20]}...")
+                        # 1. 添加原始序列作为候选者
+                        candidates_to_evaluate.append((i + 1, initial_binder_sequence, binder_chain_id, design_params))
+                        # 2. 通过突变原始序列生成其余的种群
+                        num_mutants = population_size - 1
+                        for _ in range(num_mutants):
+                            mutated_seq = mutate_sequence(
+                                initial_binder_sequence,
+                                mutation_rate=0.1, # 为初始多样性设置一个合理的突变率
+                                plddt_scores=None,   # 初始序列没有pLDDT分数
+                                glycosylation_site=glycosylation_site,
+                                glycan_ccd=design_params.get('glycan_ccd')
+                            )
+                            candidates_to_evaluate.append((i + 1, mutated_seq, binder_chain_id, design_params))
+                    else:
+                        # 回退到原始的随机生成逻辑
+                        logger.info(f"Seeding first generation with {population_size} random sequences...")
+                        for _ in range(population_size):
+                            random_seq = generate_random_sequence(
+                                binder_length, 
+                                glycosylation_site, 
+                                glycan_ccd=design_params.get('glycan_ccd')
+                            )
+                            candidates_to_evaluate.append((i + 1, random_seq, binder_chain_id, design_params))
                 else:
+                    # 后续代：从精英群体进化
                     logger.info(f"Evolving {len(elite_population)} elite sequences...")
                     for elite in elite_population:
                         candidates_to_evaluate.append((i + 1, elite['sequence'], binder_chain_id, design_params))

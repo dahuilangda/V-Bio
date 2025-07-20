@@ -52,6 +52,7 @@ def main():
     input_group.add_argument("--yaml_template", required=True, help="定义受体/骨架的模板YAML文件路径。")
     input_group.add_argument("--binder_chain", required=True, help="要设计的肽链的链ID (例如, 'B')。")
     input_group.add_argument("--binder_length", required=True, type=int, help="要设计的肽链的长度。")
+    input_group.add_argument("--initial_binder_sequence", type=str, default=None, help="可选的初始肽链序列。如果提供，将以此为起点生成第一代，而不是完全随机。")
 
     # --- 演化算法控制 ---
     run_group = parser.add_argument_group('演化算法控制')
@@ -87,6 +88,9 @@ def main():
     if args.glycosylation_site is not None:
         if not (1 <= args.glycosylation_site <= args.binder_length):
             parser.error(f"--glycosylation_site 必须是介于 1 和肽链长度 {args.binder_length} 之间的有效位置。")
+    
+    if args.initial_binder_sequence and len(args.initial_binder_sequence) != args.binder_length:
+        parser.error(f"--initial_binder_sequence 的长度 ({len(args.initial_binder_sequence)}) 必须与 --binder_length ({args.binder_length}) 匹配。")
 
     if not np.isclose(args.weight_iptm + args.weight_plddt, 1.0):
         logger.warning(f"Weights for ipTM ({args.weight_iptm}) and pLDDT ({args.weight_plddt}) do not sum to 1.0. "
@@ -115,6 +119,7 @@ def main():
             num_elites=args.num_elites,
             binder_chain_id=args.binder_chain,
             binder_length=args.binder_length,
+            initial_binder_sequence=args.initial_binder_sequence,
             glycan_ccd=args.glycan_ccd,
             glycan_chain_id=args.glycan_chain,
             glycosylation_site=args.glycosylation_site - 1 if args.glycosylation_site is not None else None,
