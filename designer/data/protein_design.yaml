@@ -1,12 +1,6 @@
 version: 1
 sequences:
-- protein:
-    id:
-    - A
-    # This sequence will be replaced by the script
-    sequence: XXXXXXXXXXXXXXXXXXXX
-    msa: empty
 - ligand:
     id:
-    - B
+    - A
     smiles: O=C(NCc1cocn1)c1cnn(C)c1C(=O)Nc1ccn2cc(nc2n1)c1ccccc1
