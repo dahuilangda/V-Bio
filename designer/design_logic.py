@@ -54,8 +54,7 @@ class Designer:
         
         self.evaluated_sequences = set()
         
-        # --- 新增: 初始化自适应超参数 ---
-        # 这些参数将在运行时根据种群多样性进行动态调整。
+        # --- 初始化自适应超参数 ---
         self.hparams = {
             'mutation_rate': 0.1,         # 初始突变率
             'pos_select_temp': 1.0,       # 初始pLDDT位置选择温度
@@ -100,7 +99,6 @@ class Designer:
     
     def _write_summary_csv(self, all_results: list, output_csv_path: str, keep_temp_files: bool):
         """将所有已评估候选者的摘要写入CSV文件，按复合分数排名。"""
-        # (此函数保持不变, 代码省略)
         if not all_results:
             logger.warning("No results were generated to save to CSV.")
             return
@@ -200,7 +198,6 @@ class Designer:
             'is_glycopeptide': bool(glycan_ccd), 'glycan_ccd': glycan_ccd,
             'glycan_chain_id': glycan_chain_id, 'glycosylation_site': glycosylation_site
         }
-        # ... (参数验证和初始化逻辑与之前相同, 此处省略)
 
         def calculate_composite_score(metrics: dict) -> float:
             iptm = metrics.get('iptm', 0.0)
@@ -210,7 +207,6 @@ class Designer:
         elite_population = []
         all_results_data = []
 
-        # (初始序列处理逻辑与之前相同, 此处省略)
         if initial_binder_sequence and initial_binder_sequence not in self.evaluated_sequences:
             self.evaluated_sequences.add(initial_binder_sequence)
             _, metrics, res_path = self._evaluate_one_candidate((0, initial_binder_sequence, binder_chain_id, design_params))
@@ -263,7 +259,6 @@ class Designer:
                 results = list(executor.map(self._evaluate_one_candidate, candidates_to_evaluate))
                 valid_results = [res for res in results if res[1] is not None]
 
-                # (评估后处理和精英选择逻辑与之前相同, 此处省略)
                 if not valid_results and not elite_population:
                      logger.critical("First generation failed completely. Stopping run.")
                      break
@@ -304,7 +299,6 @@ class Designer:
                 logger.info(f"--- Generation finished in {end_time - start_time:.2f} seconds ---")
 
         # --- 最终处理 ---
-        # (最终处理和文件清理逻辑与之前相同, 此处省略)
         logger.info("\n--- Design Run Finished ---")
         if all_results_data:
             final_best_entry = max(all_results_data, key=lambda r: r['composite_score'])
@@ -321,7 +315,6 @@ class Designer:
 
     def _create_candidate_yaml(self, sequence: str, chain_id: str, design_params: dict) -> str:
         """为候选序列动态创建Boltz YAML配置文件。"""
-        # (此函数保持不变, 代码省略)
         config = copy.deepcopy(self.base_config)
         if 'sequences' not in config or not isinstance(config.get('sequences'), list):
             config['sequences'] = []

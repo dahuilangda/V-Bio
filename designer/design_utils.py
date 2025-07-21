@@ -161,7 +161,7 @@ def mutate_sequence(
         # 如果没有提供pLDDT，则随机选择突变位置
         positions_to_mutate = random.sample(available_indices, k=min(num_mutations, len(available_indices)))
 
-    # --- 步骤 2: 选择替换的氨基酸 (BLOSUM62指导) ---
+    # --- 步骤 2: 选择替换的氨基酸 (BLOSUM62) ---
     for pos in positions_to_mutate:
         original_aa = new_sequence[pos]
         substitution_scores = BLOSUM62.get(original_aa, {})
@@ -191,7 +191,6 @@ def mutate_sequence(
 
 def parse_confidence_metrics(results_path: str, binder_chain_id: str) -> dict:
     """从Boltz预测输出文件中解析关键的置信度指标（如ipTM, pLDDT）。"""
-    # (此函数保持不变, 代码省略)
     metrics = {
         'iptm': 0.0, 'ptm': 0.0, 'complex_plddt': 0.0,
         'binder_avg_plddt': 0.0, 'plddts': []
