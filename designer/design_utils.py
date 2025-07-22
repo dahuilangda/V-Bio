@@ -28,17 +28,47 @@ AMINO_ACIDS = "ARNDCQEGHILKMFPSTWYV"
 
 # --- 糖化学常量 ---
 MONOSACCHARIDES = {
-    'NAG': {'atom': 'C1', 'type': ['N-linked', 'O-linked']},
-    'GAL': {'atom': 'C1', 'type': ['N-linked', 'O-linked']},
-    'MAN': {'atom': 'C1', 'type': ['N-linked']},
-    'FUC': {'atom': 'C1', 'type': ['N-linked', 'O-linked']},
-    'GLC': {'atom': 'C1', 'type': ['N-linked', 'O-linked']},
-    'SIA': {'atom': 'C2', 'type': ['O-linked']},
+    # 最常见的N-连接糖基化起始糖
+    'NAG': {'atom': 'C1', 'type': ['N-linked', 'O-linked'], 'name': 'N-乙酰葡糖胺', 'eng_name': 'N-acetylglucosamine'},
+    
+    # 常见的高甘露糖型糖链组分
+    'MAN': {'atom': 'C1', 'type': ['N-linked'], 'name': '甘露糖', 'eng_name': 'Mannose'},
+    
+    # 复合型糖链的末端糖
+    'GAL': {'atom': 'C1', 'type': ['N-linked', 'O-linked'], 'name': '半乳糖', 'eng_name': 'Galactose'},
+    
+    # 分支糖链，增加分子多样性
+    'FUC': {'atom': 'C1', 'type': ['N-linked', 'O-linked'], 'name': '岩藻糖', 'eng_name': 'Fucose'},
+    
+    # 带负电荷的末端糖（神经氨酸/唾液酸）
+    'NAN': {'atom': 'C2', 'type': ['O-linked'], 'name': '神经氨酸', 'eng_name': 'Neuraminic acid'},
+    
+    # 额外的常用糖基
+    'GLC': {'atom': 'C1', 'type': ['N-linked', 'O-linked'], 'name': '葡萄糖', 'eng_name': 'Glucose'},
+    'XYL': {'atom': 'C1', 'type': ['N-linked'], 'name': '木糖', 'eng_name': 'Xylose'},
+    'GLCNAC': {'atom': 'C1', 'type': ['N-linked', 'O-linked'], 'name': 'N-乙酰葡糖胺', 'eng_name': 'N-acetylglucosamine'},
+    'GALNAC': {'atom': 'C1', 'type': ['O-linked'], 'name': 'N-乙酰半乳糖胺', 'eng_name': 'N-acetylgalactosamine'},
+    'GLCA': {'atom': 'C1', 'type': ['O-linked'], 'name': '葡萄糖醛酸', 'eng_name': 'Glucuronic acid'},
+    
+    # 历史兼容性保留（SIA是旧的神经氨酸代号）
+    'SIA': {'atom': 'C2', 'type': ['O-linked'], 'name': '唾液酸', 'eng_name': 'Sialic acid'},
 }
 
 GLYCOSYLATION_SITES = {
-    'N-linked': {'N': 'ND2'},
-    'O-linked': {'S': 'OG', 'T': 'OG1'}
+    # N-连接糖基化：发生在天冬酰胺(N)上，通常在Asn-X-Ser/Thr基序中
+    'N-linked': {
+        'N': 'ND2'  # 天冬酰胺的侧链胺基氮原子
+    },
+    # O-连接糖基化：发生在丝氨酸(S)或苏氨酸(T)的羟基上
+    'O-linked': {
+        'S': 'OG',    # 丝氨酸的羟基氧原子
+        'T': 'OG1',   # 苏氨酸的羟基氧原子
+        'Y': 'OH'     # 酪氨酸的酚羟基（较少见但存在）
+    },
+    # C-连接糖基化：较少见，发生在色氨酸上
+    'C-linked': {
+        'W': 'CD1'    # 色氨酸吲哚环的C2位
+    }
 }
 
 # BLOSUM62 替换矩阵
@@ -75,6 +105,8 @@ def get_valid_residues_for_glycan(glycan_ccd: str) -> list:
         valid_residues.extend(GLYCOSYLATION_SITES['N-linked'].keys())
     if 'O-linked' in allowed_types:
         valid_residues.extend(GLYCOSYLATION_SITES['O-linked'].keys())
+    if 'C-linked' in allowed_types:
+        valid_residues.extend(GLYCOSYLATION_SITES['C-linked'].keys())
     if not valid_residues:
         raise ValueError(f"No valid glycosylation types found for glycan '{glycan_ccd}'.")
     return list(set(valid_residues))
@@ -88,7 +120,10 @@ def generate_random_sequence(length: int, glycosylation_site: int = None, glycan
             if glycan_ccd:
                 valid_residues = get_valid_residues_for_glycan(glycan_ccd)
             else:
-                valid_residues = list(GLYCOSYLATION_SITES['N-linked'].keys()) + list(GLYCOSYLATION_SITES['O-linked'].keys())
+                # 默认包含所有类型的糖基化位点
+                valid_residues = (list(GLYCOSYLATION_SITES['N-linked'].keys()) + 
+                                list(GLYCOSYLATION_SITES['O-linked'].keys()) + 
+                                list(GLYCOSYLATION_SITES['C-linked'].keys()))
             seq[glycosylation_site] = random.choice(valid_residues)
         else:
             raise ValueError("glycosylation_site index is out of bounds for the given sequence length.")

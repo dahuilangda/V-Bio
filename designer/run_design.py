@@ -59,6 +59,7 @@ def main():
     run_group.add_argument("--iterations", type=int, default=20, help="设计-评估循环的代数。")
     run_group.add_argument("--population_size", type=int, default=8, help="每一代中并行评估的候选数量。")
     run_group.add_argument("--num_elites", type=int, default=2, help="要保留并用于下一代演化的精英候选数量。必须小于 population_size。")
+    run_group.add_argument("--mutation_rate", type=float, default=0.3, help="序列突变率 (0.0-1.0)。控制每一代中发生突变的概率。")
     run_group.add_argument("--weight-iptm", type=float, default=0.7, help="复合评分中 ipTM 分数的权重。")
     run_group.add_argument("--weight-plddt", type=float, default=0.3, help="复合评分中 binder 平均 pLDDT 分数的权重。")
 
@@ -120,6 +121,7 @@ def main():
             binder_chain_id=args.binder_chain,
             binder_length=args.binder_length,
             initial_binder_sequence=args.initial_binder_sequence,
+            mutation_rate=args.mutation_rate,
             glycan_ccd=args.glycan_ccd,
             glycan_chain_id=args.glycan_chain,
             glycosylation_site=args.glycosylation_site - 1 if args.glycosylation_site is not None else None,

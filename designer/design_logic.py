@@ -121,6 +121,35 @@ class Designer:
             logger.info(f"Summary CSV successfully saved to {output_csv_path}")
         except IOError as e:
             logger.error(f"Could not write to CSV file at {output_csv_path}. Reason: {e}")
+
+    def _update_realtime_csv(self, all_results: list, output_csv_path: str, keep_temp_files: bool):
+        """实时更新CSV文件，在每一代结束后调用，只显示当前最佳的前10个结果。"""
+        if not all_results:
+            return
+        
+        # 按复合分数排序，只保留前10个
+        all_results.sort(key=lambda x: x.get('composite_score', 0.0), reverse=True)
+        top_results = all_results[:10]
+        
+        header = ['rank', 'generation', 'sequence', 'composite_score', 'iptm', 'binder_avg_plddt', 'ptm', 'complex_plddt']
+        if keep_temp_files:
+            header.append('results_path')
+            
+        try:
+            with open(output_csv_path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=header)
+                writer.writeheader()
+                for i, result_data in enumerate(top_results):
+                    result_data_copy = result_data.copy()  # 避免修改原始数据
+                    result_data_copy['rank'] = i + 1
+                    for key in ['composite_score', 'iptm', 'ptm', 'complex_plddt', 'binder_avg_plddt']:
+                        if key in result_data_copy and isinstance(result_data_copy[key], float):
+                            result_data_copy[key] = f"{result_data_copy[key]:.4f}"
+                    row_to_write = {key: result_data_copy.get(key, 'N/A') for key in header}
+                    writer.writerow(row_to_write)
+            logger.info(f"Real-time CSV updated with top {len(top_results)} results")
+        except IOError as e:
+            logger.error(f"Could not write to real-time CSV file at {output_csv_path}. Reason: {e}")
             
     def _update_adaptive_hparams(self, attempts: int, population_size: int):
         """根据种群多样性指标（生成尝试次数）动态调整超参数。"""
@@ -178,6 +207,7 @@ class Designer:
         # 从 kwargs 中解包参数，提供默认值
         population_size = kwargs.get('population_size', 8)
         num_elites = kwargs.get('num_elites', 2)
+        mutation_rate = kwargs.get('mutation_rate', 0.3)
         binder_chain_id = kwargs['binder_chain_id']
         binder_length = kwargs['binder_length']
         initial_binder_sequence = kwargs.get('initial_binder_sequence')
@@ -191,6 +221,7 @@ class Designer:
 
         logger.info("--- Starting Multi-Lineage Design Run with Adaptive Hyperparameters ---")
         logger.info(f"Scoring weights -> ipTM: {weight_iptm}, pLDDT: {weight_plddt}")
+        logger.info(f"Mutation rate: {mutation_rate}")
         if num_elites >= population_size:
             raise ValueError("`num_elites` must be less than `population_size`.")
         
@@ -239,7 +270,7 @@ class Designer:
                         parent = random.choice(elite_population)
                         new_seq = mutate_sequence(
                             parent['sequence'],
-                            mutation_rate=self.hparams['mutation_rate'],
+                            mutation_rate=mutation_rate,  # 使用传入的mutation_rate参数
                             plddt_scores=parent['metrics'].get('plddts', []),
                             glycosylation_site=glycosylation_site,
                             glycan_ccd=design_params.get('glycan_ccd'),
@@ -287,6 +318,10 @@ class Designer:
                 # --- 3. 动态调整超参数 ---
                 self._update_adaptive_hparams(attempts, len(candidates_to_evaluate))
                 
+                # --- 4. 实时更新CSV文件 ---
+                if all_results_data:
+                    self._update_realtime_csv(all_results_data, output_csv_path, keep_temp_files)
+                
                 # 日志记录
                 if elite_population:
                     best_elite = elite_population[0]
@@ -306,12 +341,110 @@ class Designer:
             logger.info(f"Final best composite score: {final_best_entry['composite_score']:.4f} "
                         f"(ipTM: {final_best_entry.get('iptm', 0.0):.4f}, "
                         f"pLDDT: {final_best_entry.get('binder_avg_plddt', 0.0):.2f})")
+            
+            # 应用阈值过滤和Top10选择
+            filtered_results = self._filter_and_select_top_results(all_results_data)
+            logger.info(f"Filtered results: {len(filtered_results)} sequences above threshold")
+            
         self._write_summary_csv(all_results_data, output_csv_path, keep_temp_files)
+        
+        # 生成结果ZIP包（如果有符合条件的结果）
+        if all_results_data:
+            zip_path = self._generate_results_zip(filtered_results, output_csv_path, keep_temp_files)
+            if zip_path:
+                logger.info(f"Results ZIP package generated: {zip_path}")
+        
         if not keep_temp_files:
             logger.info(f"Cleaning up temporary directory: {self.work_dir}")
             shutil.rmtree(self.work_dir)
         else:
             logger.info(f"Temporary files are kept in: {os.path.abspath(self.work_dir)}")
+    
+    def _filter_and_select_top_results(self, all_results_data: list, score_threshold: float = 0.6, max_results: int = 10) -> list:
+        """
+        过滤并选择最佳结果。
+        
+        Args:
+            all_results_data: 所有设计结果
+            score_threshold: 最低分数阈值
+            max_results: 最大返回结果数量
+            
+        Returns:
+            符合条件的Top结果列表
+        """
+        # 按复合分数排序
+        sorted_results = sorted(all_results_data, key=lambda x: x.get('composite_score', 0.0), reverse=True)
+        
+        # 应用阈值过滤
+        filtered_results = [r for r in sorted_results if r.get('composite_score', 0.0) >= score_threshold]
+        
+        # 取Top N
+        top_results = filtered_results[:max_results]
+        
+        logger.info(f"Applied filters: score >= {score_threshold}, top {max_results}")
+        logger.info(f"Results summary: {len(sorted_results)} total -> {len(filtered_results)} above threshold -> {len(top_results)} selected")
+        
+        return top_results
+    
+    def _generate_results_zip(self, filtered_results: list, output_csv_path: str, keep_temp_files: bool) -> str:
+        """
+        生成包含CIF文件和摘要的ZIP压缩包。
+        
+        Args:
+            filtered_results: 过滤后的结果列表
+            output_csv_path: CSV文件路径
+            keep_temp_files: 是否保留临时文件
+            
+        Returns:
+            ZIP文件路径
+        """
+        if not filtered_results:
+            logger.warning("No results to package - skipping ZIP generation")
+            return None
+            
+        import zipfile
+        
+        zip_filename = output_csv_path.replace('.csv', '_results.zip')
+        
+        try:
+            with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                # 添加摘要CSV文件
+                if os.path.exists(output_csv_path):
+                    zipf.write(output_csv_path, 'design_summary.csv')
+                
+                # 添加Top结果的CIF文件
+                for i, result in enumerate(filtered_results, 1):
+                    results_path = result.get('results_path')
+                    if results_path and os.path.exists(results_path):
+                        # 查找CIF文件
+                        for file in os.listdir(results_path):
+                            if file.endswith('.cif'):
+                                cif_path = os.path.join(results_path, file)
+                                # 重命名为有意义的名称
+                                new_name = f"rank_{i:02d}_score_{result.get('composite_score', 0):.3f}_{result.get('sequence', 'unknown')[:10]}.cif"
+                                zipf.write(cif_path, f"structures/{new_name}")
+                                break
+                
+                # 添加结果摘要JSON
+                results_json = {
+                    'summary': {
+                        'total_designs': len(filtered_results),
+                        'best_score': filtered_results[0].get('composite_score', 0) if filtered_results else 0,
+                        'threshold_applied': 0.6,
+                        'generation_time': time.strftime('%Y-%m-%d %H:%M:%S')
+                    },
+                    'top_results': filtered_results
+                }
+                
+                import json
+                zipf.writestr('results_summary.json', json.dumps(results_json, indent=2))
+                
+            logger.info(f"Successfully created results package: {zip_filename}")
+            return zip_filename
+            
+        except Exception as e:
+            logger.error(f"Failed to create results ZIP: {e}")
+            return None
 
     def _create_candidate_yaml(self, sequence: str, chain_id: str, design_params: dict) -> str:
         """为候选序列动态创建Boltz YAML配置文件。"""
