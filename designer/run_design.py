@@ -62,6 +62,23 @@ def main():
     run_group.add_argument("--mutation_rate", type=float, default=0.3, help="序列突变率 (0.0-1.0)。控制每一代中发生突变的概率。")
     run_group.add_argument("--weight-iptm", type=float, default=0.7, help="复合评分中 ipTM 分数的权重。")
     run_group.add_argument("--weight-plddt", type=float, default=0.3, help="复合评分中 binder 平均 pLDDT 分数的权重。")
+    
+    # --- 增强功能选项 ---
+    enhanced_group = parser.add_argument_group('增强功能选项')
+    enhanced_group.add_argument("--enable-enhanced", action="store_true", default=True, 
+                               help="启用增强版功能：自适应突变、Pareto优化、收敛检测等。")
+    enhanced_group.add_argument("--disable-enhanced", action="store_true", 
+                               help="禁用增强版功能，使用传统算法。")
+    enhanced_group.add_argument("--convergence-window", type=int, default=5, 
+                               help="收敛检测的滑动窗口大小。")
+    enhanced_group.add_argument("--convergence-threshold", type=float, default=0.001, 
+                               help="收敛检测的分数方差阈值。")
+    enhanced_group.add_argument("--max-stagnation", type=int, default=3, 
+                               help="触发早停的最大停滞周期数。")
+    enhanced_group.add_argument("--initial-temperature", type=float, default=1.0, 
+                               help="自适应突变的初始温度。")
+    enhanced_group.add_argument("--min-temperature", type=float, default=0.1, 
+                               help="自适应突变的最小温度。")
 
     # --- 糖肽设计 (可选) ---
     glyco_group = parser.add_argument_group('糖肽设计 (可选)')
@@ -112,6 +129,23 @@ def main():
         # 2. 初始化 Designer
         logger.info(f"Initializing Designer with YAML template: {args.yaml_template}")
         designer = Designer(base_yaml_path=args.yaml_template, client=client)
+        
+        # 配置增强功能
+        if hasattr(args, 'disable_enhanced') and args.disable_enhanced:
+            designer.enable_enhanced_features = False
+            logger.info("Enhanced features disabled - using traditional algorithms")
+        else:
+            designer.enable_enhanced_features = getattr(args, 'enable_enhanced', True)
+            if designer.enable_enhanced_features:
+                # 配置增强功能参数
+                designer.convergence_window = getattr(args, 'convergence_window', 5)
+                designer.convergence_threshold = getattr(args, 'convergence_threshold', 0.001)
+                designer.max_stagnation = getattr(args, 'max_stagnation', 3)
+                designer.temperature = getattr(args, 'initial_temperature', 1.0)
+                designer.min_temperature = getattr(args, 'min_temperature', 0.1)
+                logger.info("Enhanced features enabled with custom parameters")
+            else:
+                logger.info("Enhanced features disabled - using traditional algorithms")
 
         # 3. 开始设计任务
         designer.run(

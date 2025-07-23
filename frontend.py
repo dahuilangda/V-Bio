@@ -412,6 +412,18 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
                 "--keep_temp_files"  # 保留临时文件以便下载结构
             ]
             
+            # 添加增强功能参数
+            if params.get('enable_enhanced', True):
+                cmd.extend([
+                    "--convergence-window", str(params.get('convergence_window', 5)),
+                    "--convergence-threshold", str(params.get('convergence_threshold', 0.001)),
+                    "--max-stagnation", str(params.get('max_stagnation', 3)),
+                    "--initial-temperature", str(params.get('initial_temperature', 1.0)),
+                    "--min-temperature", str(params.get('min_temperature', 0.1))
+                ])
+            else:
+                cmd.append("--disable-enhanced")
+            
             # 添加糖肽相关参数
             if params.get('design_type') == 'glycopeptide' and params.get('glycan_type'):
                 cmd.extend([
@@ -486,7 +498,14 @@ def submit_designer_job(
     elite_size: int = 3,
     mutation_rate: float = 0.3,
     glycan_type: str = None,
-    glycosylation_site: int = None
+    glycosylation_site: int = None,
+    # 增强功能参数
+    convergence_window: int = 5,
+    convergence_threshold: float = 0.001,
+    max_stagnation: int = 3,
+    initial_temperature: float = 1.0,
+    min_temperature: float = 0.1,
+    enable_enhanced: bool = True
 ) -> dict:
     """提交 Designer 任务"""
     try:
@@ -508,7 +527,14 @@ def submit_designer_job(
             'population_size': population_size,
             'elite_size': elite_size,
             'mutation_rate': mutation_rate,
-            'work_dir': work_dir
+            'work_dir': work_dir,
+            # 增强功能参数
+            'convergence_window': convergence_window,
+            'convergence_threshold': convergence_threshold,
+            'max_stagnation': max_stagnation,
+            'initial_temperature': initial_temperature,
+            'min_temperature': min_temperature,
+            'enable_enhanced': enable_enhanced
         }
         
         if design_type == 'glycopeptide' and glycan_type:
@@ -1030,7 +1056,8 @@ def load_designer_results(task_id: str, work_dir: str) -> dict:
                         'score': float(row.get('composite_score', 0.0)) if pd.notna(row.get('composite_score')) else 0.0,
                         'iptm': float(row.get('iptm', 0.0)) if pd.notna(row.get('iptm')) else 0.0,
                         'plddt': float(row.get('binder_avg_plddt', 0.0)) if pd.notna(row.get('binder_avg_plddt')) else 0.0,
-                        'generation': int(row.get('generation', 1)) if pd.notna(row.get('generation')) else 1
+                        'generation': int(row.get('generation', 1)) if pd.notna(row.get('generation')) else 1,
+                        'results_path': row.get('results_path', '') if pd.notna(row.get('results_path')) else ''
                     }
                     best_sequences.append(seq_data)
                     
@@ -2124,6 +2151,34 @@ with tab2:
         
         # 演化算法参数
         st.subheader("演化算法参数", anchor=False)
+        
+        # 优化模式选择 (新增)
+        st.subheader("🚀 优化模式选择", anchor=False)
+        optimization_mode = st.selectbox(
+            "选择优化策略",
+            options=["balanced", "stable", "aggressive", "conservative", "custom"],
+            format_func=lambda x: {
+                "balanced": "⚖️ 平衡模式 (推荐)",
+                "stable": "🎯 平稳优化",
+                "aggressive": "🔥 激进探索", 
+                "conservative": "🛡️ 保守设计",
+                "custom": "⚙️ 自定义配置"
+            }[x],
+            index=0,
+            help="选择预设的优化策略或自定义配置。不同策略适用于不同的设计场景。",
+            disabled=designer_is_running
+        )
+        
+        # 显示模式说明
+        mode_descriptions = {
+            "balanced": "⚖️ **平衡模式**: 综合考虑探索性和收敛性，适用于大多数设计任务。",
+            "stable": "🎯 **平稳优化**: 稳定收敛，减少分数波动，适用于需要可重复结果的场景。",
+            "aggressive": "🔥 **激进探索**: 快速突破局部最优，适用于初始分数较低或需要大幅改进的场景。",
+            "conservative": "🛡️ **保守设计**: 小步优化，适用于已有较好序列或对稳定性要求高的场景。",
+            "custom": "⚙️ **自定义配置**: 手动调整所有参数，适用于高级用户。"
+        }
+        st.info(mode_descriptions[optimization_mode])
+        
         col3, col4, col5 = st.columns(3)
         
         with col3:
@@ -2170,6 +2225,113 @@ with tab2:
                 help="每一代中发生突变的概率。",
                 disabled=designer_is_running
             )
+        
+        # 高级参数配置
+        if optimization_mode == "custom":
+            st.subheader("🔧 高级参数配置", anchor=False)
+            col_adv1, col_adv2, col_adv3 = st.columns(3)
+            
+            with col_adv1:
+                convergence_window = st.number_input(
+                    "收敛窗口",
+                    min_value=3,
+                    max_value=10,
+                    value=5,
+                    help="收敛检测的滑动窗口大小。较小值更敏感。",
+                    disabled=designer_is_running
+                )
+                
+                convergence_threshold = st.number_input(
+                    "收敛阈值",
+                    min_value=0.0001,
+                    max_value=0.01,
+                    value=0.001,
+                    format="%.4f",
+                    help="收敛检测的分数方差阈值。较小值更严格。",
+                    disabled=designer_is_running
+                )
+            
+            with col_adv2:
+                max_stagnation = st.number_input(
+                    "最大停滞周期",
+                    min_value=1,
+                    max_value=10,
+                    value=3,
+                    help="触发早停的最大停滞周期数。较小值更激进。",
+                    disabled=designer_is_running
+                )
+                
+                initial_temperature = st.number_input(
+                    "初始温度",
+                    min_value=0.1,
+                    max_value=5.0,
+                    value=1.0,
+                    step=0.1,
+                    help="自适应突变的初始温度。较高值更探索性。",
+                    disabled=designer_is_running
+                )
+            
+            with col_adv3:
+                min_temperature = st.number_input(
+                    "最小温度",
+                    min_value=0.01,
+                    max_value=1.0,
+                    value=0.1,
+                    step=0.01,
+                    help="自适应突变的最小温度。较高值保持更多随机性。",
+                    disabled=designer_is_running
+                )
+                
+                enable_enhanced = st.checkbox(
+                    "启用增强功能",
+                    value=True,
+                    help="启用自适应突变、Pareto优化等增强功能。",
+                    disabled=designer_is_running
+                )
+        else:
+            # 预设模式的参数映射
+            preset_params = {
+                "balanced": {
+                    "convergence_window": 5,
+                    "convergence_threshold": 0.001,
+                    "max_stagnation": 3,
+                    "initial_temperature": 1.0,
+                    "min_temperature": 0.1,
+                    "enable_enhanced": True
+                },
+                "stable": {
+                    "convergence_window": 5,
+                    "convergence_threshold": 0.001,
+                    "max_stagnation": 3,
+                    "initial_temperature": 1.0,
+                    "min_temperature": 0.1,
+                    "enable_enhanced": True
+                },
+                "aggressive": {
+                    "convergence_window": 3,
+                    "convergence_threshold": 0.002,
+                    "max_stagnation": 2,
+                    "initial_temperature": 2.0,
+                    "min_temperature": 0.2,
+                    "enable_enhanced": True
+                },
+                "conservative": {
+                    "convergence_window": 6,
+                    "convergence_threshold": 0.0005,
+                    "max_stagnation": 5,
+                    "initial_temperature": 0.5,
+                    "min_temperature": 0.05,
+                    "enable_enhanced": True
+                }
+            }
+            
+            params = preset_params[optimization_mode]
+            convergence_window = params["convergence_window"]
+            convergence_threshold = params["convergence_threshold"]
+            max_stagnation = params["max_stagnation"]
+            initial_temperature = params["initial_temperature"]
+            min_temperature = params["min_temperature"]
+            enable_enhanced = params["enable_enhanced"]
         
         # 糖肽特有参数
         if design_type == "glycopeptide":
@@ -2247,7 +2409,14 @@ with tab2:
                     elite_size=elite_size,
                     mutation_rate=mutation_rate,
                     glycan_type=glycan_type,
-                    glycosylation_site=glycosylation_site
+                    glycosylation_site=glycosylation_site,
+                    # 增强功能参数
+                    convergence_window=convergence_window,
+                    convergence_threshold=convergence_threshold,
+                    max_stagnation=max_stagnation,
+                    initial_temperature=initial_temperature,
+                    min_temperature=min_temperature,
+                    enable_enhanced=enable_enhanced
                 )
                 
                 if result['success']:
@@ -2714,21 +2883,54 @@ with tab2:
                     col_metrics[2].metric("pLDDT", f"{seq_data.get('plddt', 0):.3f}")
                     col_metrics[3].metric("发现代数", seq_data.get('generation', 'N/A'))
                     
-                    # 提供操作按钮
-                    col_actions = st.columns(3)
-                    with col_actions[0]:
-                        if st.button(f"⚽️ 复制序列", key=f"copy_seq_{i}"):
-                            st.code(seq_data['sequence'])
-                            st.toast("✅ 序列已显示，请手动复制", icon="📋")
-                    
-                    with col_actions[1]:
-                        if st.button(f"🔬 快速预测", key=f"predict_seq_{i}"):
-                            st.info("💡 请复制此序列到「结构预测」标签页进行3D结构预测。")
-                    
-                    with col_actions[2]:
-                        # 如果有CIF文件路径，提供单独下载
-                        cif_info = seq_data.get('cif_file', '可用')
-                        st.markdown(f"🗂️ 结构文件: {cif_info}")
+                    # 下载结构文件
+                    results_path = seq_data.get('results_path', '')
+                    if results_path and os.path.exists(results_path):
+                        # 查找CIF文件
+                        cif_files = [f for f in os.listdir(results_path) if f.endswith('.cif')]
+                        if cif_files:
+                            # 优先选择rank_1的文件，否则选择第一个
+                            cif_file = next((f for f in cif_files if 'rank_1' in f), cif_files[0])
+                            cif_path = os.path.join(results_path, cif_file)
+                            
+                            try:
+                                with open(cif_path, 'r') as f:
+                                    cif_data = f.read()
+                                
+                                col_download = st.columns(2)
+                                with col_download[0]:
+                                    st.download_button(
+                                        label="📄 下载 CIF",
+                                        data=cif_data,
+                                        file_name=f"rank_{rank}_designed_structure.cif",
+                                        mime="chemical/x-cif",
+                                        use_container_width=True,
+                                        key=f"download_cif_{i}",
+                                        help="下载该设计序列的3D结构文件 (CIF格式)"
+                                    )
+                                
+                                with col_download[1]:
+                                    # 转换为PDB格式并下载
+                                    try:
+                                        pdb_data = export_to_pdb(cif_data)
+                                        st.download_button(
+                                            label="📥 下载 PDB",
+                                            data=pdb_data,
+                                            file_name=f"rank_{rank}_designed_structure.pdb",
+                                            mime="chemical/x-pdb",
+                                            use_container_width=True,
+                                            key=f"download_pdb_{i}",
+                                            help="下载该设计序列的3D结构文件 (PDB格式)"
+                                        )
+                                    except Exception as e:
+                                        st.caption(f"PDB转换失败: {str(e)}")
+                                        
+                            except Exception as e:
+                                st.caption(f"⚠️ 结构文件读取失败: {str(e)}")
+                        else:
+                            st.caption("⚠️ 未找到结构文件")
+                    else:
+                        st.caption("⚠️ 结构文件路径不可用")
         
         # 演化历史图表
         st.subheader("📈 演化历史", anchor=False)
@@ -2748,7 +2950,7 @@ with tab2:
         # 下载设计结果
         st.markdown("<b>📥 下载设计结果</b>", unsafe_allow_html=True)
         
-        col_download = st.columns(3)
+        col_download = st.columns(2)
         
         # 1. CSV 下载
         with col_download[0]:
@@ -2757,7 +2959,7 @@ with tab2:
                 sequences_csv_str = sequences_csv.to_csv(index=False)
                 
                 st.download_button(
-                    label="🥉 Top序列 (CSV)",
+                    label="📊 Top序列 (CSV)",
                     data=sequences_csv_str,
                     file_name=f"top_designed_sequences_{st.session_state.designer_task_id}.csv",
                     mime="text/csv",
@@ -2788,55 +2990,6 @@ with tab2:
                 use_container_width=True,
                 help="下载包含演化历史的完整结果数据"
             )
-        
-        # 3. 结构文件 ZIP 下载
-        with col_download[2]:
-            if top_sequences:
-                # 检查是否有结构ZIP文件可用
-                zip_file_path = None
-                if st.session_state.designer_work_dir:
-                    # 尝试多种可能的ZIP文件名模式
-                    zip_patterns = [
-                        f"design_summary_{st.session_state.designer_task_id}_results.zip",
-                        f"design_results_{st.session_state.designer_task_id}_structures.zip",
-                        f"{st.session_state.designer_task_id}_results.zip"
-                    ]
-                    
-                    for pattern in zip_patterns:
-                        potential_zip = os.path.join(st.session_state.designer_work_dir, pattern)
-                        if os.path.exists(potential_zip):
-                            zip_file_path = potential_zip
-                            break
-                    
-                    # 如果没找到，扫描目录中所有ZIP文件
-                    if not zip_file_path:
-                        try:
-                            for filename in os.listdir(st.session_state.designer_work_dir):
-                                if filename.endswith('.zip') and 'results' in filename:
-                                    zip_file_path = os.path.join(st.session_state.designer_work_dir, filename)
-                                    break
-                        except Exception:
-                            pass
-                
-                if zip_file_path and os.path.exists(zip_file_path):
-                    try:
-                        with open(zip_file_path, 'rb') as f:
-                            zip_data = f.read()
-                        
-                        st.download_button(
-                            label="🗂️ 结构文件 (ZIP)",
-                            data=zip_data,
-                            file_name=f"designed_structures_{st.session_state.designer_task_id}.zip",
-                            mime="application/zip",
-                            use_container_width=True,
-                            help=f"下载 {len(top_sequences)} 个高质量设计的3D结构文件 (CIF格式)"
-                        )
-                    except Exception as e:
-                        st.button("🗂️ ZIP下载", disabled=True, help=f"文件读取错误: {str(e)}")
-                else:
-                    st.button("🗂️ ZIP下载", disabled=True, help="结构文件准备中...")
-            else:
-                st.button("🗂️ ZIP下载", disabled=True, help="无可用结构文件")
     
     # 显示错误信息
     if st.session_state.designer_error:

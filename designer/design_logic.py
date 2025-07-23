@@ -31,7 +31,12 @@ from design_utils import (
     parse_confidence_metrics,
     MONOSACCHARIDES,
     GLYCOSYLATION_SITES,
-    get_valid_residues_for_glycan
+    get_valid_residues_for_glycan,
+    AdvancedMutationEngine,
+    ParetoOptimizer,
+    calculate_sequence_similarity,
+    extract_sequence_features,
+    analyze_population_diversity
 )
 
 logger = logging.getLogger(__name__)
@@ -65,12 +70,36 @@ class Designer:
             'pos_select_temp': {'base': 1.0, 'max': 10.0, 'decay': 0.9, 'increase': 1.5},
         }
         
+        # === 增强版功能集成 ===
+        self.mutation_engine = AdvancedMutationEngine()
+        self.pareto_optimizer = ParetoOptimizer()
+        self.enable_enhanced_features = True  # 控制是否使用增强功能
+        
+        # 收敛检测参数
+        self.convergence_window = 5
+        self.convergence_threshold = 0.001
+        self.score_history = []
+        self.stagnation_counter = 0
+        self.max_stagnation = 3
+        
+        # 温度和自适应参数
+        self.temperature = 1.0
+        self.min_temperature = 0.1
+        self.temperature_decay = 0.95
+        
         logger.info(f"Temporary working directory created at: {os.path.abspath(self.work_dir)}")
+        if self.enable_enhanced_features:
+            logger.info("Enhanced features enabled: adaptive mutations, Pareto optimization, convergence detection")
 
     def _evaluate_one_candidate(self, candidate_info: tuple) -> tuple:
         """提交单个候选者进行评估，轮询结果，并解析指标。"""
-        generation_index, sequence, binder_chain_id, design_params = candidate_info
-        logger.info(f"[Gen {generation_index}] Evaluating new unique candidate: {sequence[:20]}...")
+        if len(candidate_info) >= 5:
+            generation_index, sequence, binder_chain_id, design_params, strategy_used = candidate_info
+        else:
+            generation_index, sequence, binder_chain_id, design_params = candidate_info
+            strategy_used = 'unknown'
+            
+        logger.info(f"[Gen {generation_index}] Evaluating new unique candidate: {sequence[:20]}... (Strategy: {strategy_used})")
         
         try:
             candidate_yaml_path = self._create_candidate_yaml(sequence, binder_chain_id, design_params)
@@ -92,6 +121,7 @@ class Designer:
             return (sequence, None, None)
 
         metrics = parse_confidence_metrics(results_path, binder_chain_id)
+        metrics['mutation_strategy'] = strategy_used  # 添加策略信息
         iptm_score = metrics.get('iptm', 0.0)
         plddt_score = metrics.get('binder_avg_plddt', 0.0)
         logger.info(f"Candidate '{sequence[:20]}...' evaluated. ipTM: {iptm_score:.4f}, pLDDT: {plddt_score:.2f}")
@@ -260,26 +290,46 @@ class Designer:
 
                 while len(candidates_to_evaluate) < population_size and attempts < max_attempts:
                     new_seq = None
+                    strategy_used = None
+                    
                     if not elite_population:
                         if not candidates_to_evaluate:
                             logger.info(f"Seeding generation with {population_size} new random sequences...")
                         new_seq = generate_random_sequence(binder_length, glycosylation_site, design_params.get('glycan_ccd'))
+                        strategy_used = 'random'
                     else:
                         if not candidates_to_evaluate:
                             logger.info(f"Evolving {len(elite_population)} elites to create {population_size} new candidates...")
-                        parent = random.choice(elite_population)
-                        new_seq = mutate_sequence(
-                            parent['sequence'],
-                            mutation_rate=mutation_rate,  # 使用传入的mutation_rate参数
-                            plddt_scores=parent['metrics'].get('plddts', []),
-                            glycosylation_site=glycosylation_site,
-                            glycan_ccd=design_params.get('glycan_ccd'),
-                            position_selection_temp=self.hparams['pos_select_temp']
-                        )
+                        
+                        if self.enable_enhanced_features:
+                            # 使用增强的自适应突变
+                            parent = random.choice(elite_population)
+                            elite_sequences = [e['sequence'] for e in elite_population]
+                            
+                            new_seq, strategy_used = self.mutation_engine.adaptive_mutate(
+                                parent['sequence'],
+                                parent_metrics=parent['metrics'],
+                                elite_sequences=elite_sequences,
+                                temperature=self.temperature
+                            )
+                        else:
+                            # 使用原始突变方法
+                            parent = random.choice(elite_population)
+                            new_seq = mutate_sequence(
+                                parent['sequence'],
+                                mutation_rate=mutation_rate,
+                                plddt_scores=parent['metrics'].get('plddts', []),
+                                glycosylation_site=glycosylation_site,
+                                glycan_ccd=design_params.get('glycan_ccd'),
+                                position_selection_temp=self.hparams['pos_select_temp']
+                            )
+                            strategy_used = 'traditional'
                     
                     if new_seq and new_seq not in self.evaluated_sequences:
                         self.evaluated_sequences.add(new_seq)
-                        candidates_to_evaluate.append((i + 1, new_seq, binder_chain_id, design_params))
+                        candidate_info = (i + 1, new_seq, binder_chain_id, design_params)
+                        candidate_info = candidate_info + (strategy_used,)  # 添加策略信息
+                        candidates_to_evaluate.append(candidate_info)
                     attempts += 1
                 
                 if not candidates_to_evaluate:
@@ -294,29 +344,125 @@ class Designer:
                      logger.critical("First generation failed completely. Stopping run.")
                      break
                 
+                # 增强功能：学习序列模式
+                if self.enable_enhanced_features:
+                    for seq, metrics, res_path in valid_results:
+                        composite_score = calculate_composite_score(metrics)
+                        self.mutation_engine.learn_from_sequence(seq, composite_score)
+                
+                # 处理结果
+                current_generation_results = []
                 for seq, metrics, res_path in valid_results:
                     metrics['composite_score'] = calculate_composite_score(metrics)
                     entry = {'generation': i + 1, 'sequence': seq, **metrics}
                     if keep_temp_files and res_path: entry['results_path'] = os.path.abspath(res_path)
                     all_results_data.append(entry)
+                    current_generation_results.append(entry)
                 
-                all_results_data.sort(key=lambda x: x.get('composite_score', 0.0), reverse=True)
-                new_elites = []
-                seen_elite_seqs = set()
-                for result in all_results_data:
-                    if len(new_elites) >= num_elites: break
-                    sequence = result.get('sequence')
-                    if sequence not in seen_elite_seqs:
+                # === 增强版精英选择 (Pareto优化) ===
+                if self.enable_enhanced_features and current_generation_results:
+                    # 更新Pareto前沿
+                    self.pareto_optimizer.update_pareto_front(current_generation_results)
+                    
+                    # 从Pareto前沿和传统排序中选择精英
+                    pareto_elites = self.pareto_optimizer.get_diverse_elites(max(1, num_elites // 2))
+                    
+                    # 按复合分数排序选择剩余精英
+                    all_results_data.sort(key=lambda x: x.get('composite_score', 0.0), reverse=True)
+                    traditional_elites = []
+                    pareto_sequences = {e.get('sequence') for e in pareto_elites}
+                    
+                    for result in all_results_data:
+                        if len(traditional_elites) >= num_elites - len(pareto_elites):
+                            break
+                        if result.get('sequence') not in pareto_sequences:
+                            traditional_elites.append(result)
+                    
+                    # 合并精英群体
+                    combined_elites = pareto_elites + traditional_elites
+                    
+                    # 添加Pareto标记
+                    pareto_sequences_set = {e.get('sequence') for e in pareto_elites}
+                    for result in all_results_data:
+                        result['is_pareto_optimal'] = result.get('sequence') in pareto_sequences_set
+                    
+                    new_elites = []
+                    for result in combined_elites[:num_elites]:
                         elite_entry = {
-                            'sequence': sequence,
-                            'metrics': result 
+                            'sequence': result.get('sequence'),
+                            'metrics': result
                         }
                         new_elites.append(elite_entry)
-                        seen_elite_seqs.add(sequence)
-                elite_population = new_elites
+                    
+                    elite_population = new_elites
+                else:
+                    # 传统精英选择
+                    all_results_data.sort(key=lambda x: x.get('composite_score', 0.0), reverse=True)
+                    new_elites = []
+                    seen_elite_seqs = set()
+                    for result in all_results_data:
+                        if len(new_elites) >= num_elites: break
+                        sequence = result.get('sequence')
+                        if sequence not in seen_elite_seqs:
+                            elite_entry = {
+                                'sequence': sequence,
+                                'metrics': result 
+                            }
+                            new_elites.append(elite_entry)
+                            seen_elite_seqs.add(sequence)
+                    elite_population = new_elites
                 
                 # --- 3. 动态调整超参数 ---
                 self._update_adaptive_hparams(attempts, len(candidates_to_evaluate))
+                
+                # === 增强版功能：收敛检测和温度调整 ===
+                if self.enable_enhanced_features and elite_population:
+                    current_best_score = elite_population[0]['metrics'].get('composite_score', 0.0)
+                    self.score_history.append(current_best_score)
+                    
+                    # 检测收敛
+                    if len(self.score_history) >= self.convergence_window:
+                        recent_scores = self.score_history[-self.convergence_window:]
+                        score_variance = max(recent_scores) - min(recent_scores)
+                        
+                        if score_variance < self.convergence_threshold:
+                            self.stagnation_counter += 1
+                            logger.info(f"Convergence detected: score variance {score_variance:.4f} < threshold {self.convergence_threshold}")
+                            
+                            if self.stagnation_counter >= self.max_stagnation:
+                                logger.info(f"Early stopping triggered after {self.stagnation_counter} stagnation cycles")
+                                break
+                        else:
+                            self.stagnation_counter = 0
+                    
+                    # 温度调整
+                    if self.stagnation_counter > 0:
+                        # 增加温度促进探索
+                        self.temperature = min(10.0, self.temperature * 1.1)
+                        logger.debug(f"Increasing temperature to {self.temperature:.2f} due to stagnation")
+                    else:
+                        # 逐渐降低温度
+                        self.temperature = max(self.min_temperature, self.temperature * self.temperature_decay)
+                        logger.debug(f"Cooling temperature to {self.temperature:.2f}")
+                    
+                    # 更新突变策略成功率
+                    if len(current_generation_results) > 0:
+                        best_current_score = max(r.get('composite_score', 0.0) for r in current_generation_results)
+                        if len(self.score_history) > 1:
+                            previous_best = self.score_history[-2]
+                            improvement = best_current_score - previous_best
+                            
+                            # 更新策略成功率
+                            for result in current_generation_results:
+                                strategy = result.get('mutation_strategy')
+                                if strategy and strategy != 'random':
+                                    self.mutation_engine.update_strategy_success(strategy, improvement)
+                    
+                    # 多样性分析
+                    elite_sequences = [e['sequence'] for e in elite_population]
+                    diversity_metrics = analyze_population_diversity(elite_sequences)
+                    logger.debug(f"Population diversity - similarity: {diversity_metrics.get('avg_pairwise_similarity', 0):.3f}, "
+                               f"entropy: {diversity_metrics.get('position_entropy', 0):.3f}")
                 
                 # --- 4. 实时更新CSV文件 ---
                 if all_results_data:

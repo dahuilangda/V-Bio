@@ -1,12 +1,26 @@
 # 🧬 De Novo 多肽/糖肽设计器
 
-一款用于多肽与糖肽从头设计 (`de novo design`) 的命令行工具，专为科研人员设计。该工具通过调用本地部署的 `Boltz-WebUI` 预测服务作为计算后端，利用演化算法在序列空间中进行探索，以发现具有高结合潜力的新分子。
+一款用于多肽与糖肽从头设计 (`de novo design`) 的命令行工具，专为科研人员设计。该工具通过调用本地部署的 `Boltz-WebUI` 预测服务作为计算后端，在序列空间中进行探索，以发现具有高结合潜力的新分子。
 
 ## ✨ 核心特性
 
-  - **生物学约束**: 设计糖肽时，工具会自动验证并确保糖基连接到化学上兼容的氨基酸残基上（例如，N-连锁聚糖连接到天冬酰胺'N'）。
-  - **pLDDT指导的突变**: 演化过程优先在结构预测置信度较低 (pLDDT分数低) 的区域引入突变，以高效探索构象空间。
-  - **并行评估**: 在每个演化代数中，通过多线程并行提交和评估多个候选序列，显著加快设计周期。
+### 🔬 基础功能
+- **生物学约束**: 设计糖肽时，工具会自动验证并确保糖基连接到化学上兼容的氨基酸残基上（例如，N-连锁聚糖连接到天冬酰胺'N'）。
+- **pLDDT指导的突变**: 演化过程优先在结构预测置信度较低 (pLDDT分数低) 的区域引入突变，以高效探索构象空间。
+- **并行评估**: 在每个演化代数中，通过多线程并行提交和评估多个候选序列，显著加快设计周期。
+
+### 🚀 增强版功能
+- **自适应突变策略**: 5种智能突变策略自动选择和学习
+  - 保守突变：基于BLOSUM62矩阵的高分替换
+  - 激进突变：大范围序列空间探索  
+  - Motif导引：基于有益模式的定向突变
+  - 能量导引：基于能量景观的温度控制
+  - 多样性驱动：防止群体过度收敛
+- **Pareto多目标优化**: 同时优化ipTM和pLDDT，避免单一目标偏向
+- **智能收敛检测**: 自动早停机制，防止过度训练和资源浪费
+- **序列模式学习**: 位置特异性偏好学习和motif自动发现
+- **群体多样性维护**: 实时监测和调整探索策略
+
 
 ## 🔧 环境准备
 
@@ -76,7 +90,7 @@ set API_SECRET_TOKEN="your-super-secret-and-long-token"
 
 以下为运行脚本的命令示例。
 
-#### **命令示例 1: 从零开始设计蛋白Binder**
+#### **命令示例 1: 基础设计（自动使用增强功能）**
 
 ```bash
 python run_design.py \
@@ -91,7 +105,9 @@ python run_design.py \
     --output_csv "binder_design_run_summary.csv"
 ```
 
-#### **命令示例 2: 从指定序列开始优化**
+#### **命令示例 2: 平稳优化模式（推荐）**
+
+适用于需要稳定探索的场景，减少过度波动：
 
 ```bash
 python run_design.py \
@@ -102,12 +118,35 @@ python run_design.py \
     --iterations 20 \
     --population_size 16 \
     --num_elites 4 \
-    --output_csv "binder_optimization_run.csv"
+    --convergence-window 5 \
+    --convergence-threshold 0.001 \
+    --max-stagnation 3 \
+    --initial-temperature 1.0 \
+    --output_csv "binder_optimization_stable.csv"
 ```
 
-#### **命令示例 3: 设计一个糖肽**
+#### **命令示例 3: 激进探索模式**
 
-此示例设计一个长度为15个残基的肽，并在其第3个位置连接一个甘露糖（'MAN'）。
+适用于需要快速突破局部最优的场景：
+
+```bash
+python run_design.py \
+    --yaml_template /path/to/your/template_protein.yaml \
+    --binder_chain "B" \
+    --binder_length 15 \
+    --iterations 30 \
+    --population_size 12 \
+    --num_elites 2 \
+    --convergence-window 3 \
+    --max-stagnation 2 \
+    --initial-temperature 2.0 \
+    --min-temperature 0.2 \
+    --output_csv "aggressive_design_run.csv"
+```
+
+#### **命令示例 4: 糖肽设计（增强版）**
+
+此示例设计一个长度为15个残基的肽，并在其第3个位置连接一个甘露糖（'MAN'）：
 
 ```bash
 python run_design.py \
@@ -122,8 +161,24 @@ python run_design.py \
     --glycan_chain "C" \
     --weight-iptm 0.7 \
     --weight-plddt 0.3 \
-    --output_csv "glycopeptide_design_run_summary.csv" \
+    --convergence-window 4 \
+    --max-stagnation 3 \
+    --output_csv "glycopeptide_enhanced_design.csv" \
     --keep_temp_files
+```
+
+#### **命令示例 5: 传统模式（兼容性）**
+
+如需使用传统算法（不推荐，仅用于对比）：
+
+```bash
+python run_design.py \
+    --yaml_template /path/to/your/template_protein.yaml \
+    --binder_chain "B" \
+    --binder_length 20 \
+    --iterations 25 \
+    --disable-enhanced \
+    --output_csv "traditional_design.csv"
 ```
 
 ## ⚙️ 命令行参数详解
@@ -141,6 +196,24 @@ python run_design.py \
   - `--population_size`: 每代并行评估的候选数量。 (默认: `8`)
   - `--num_elites`: 保留到下一代的顶级候选（精英）数量。必须小于`population_size`。 (默认: `2`)
   - `--weight-iptm` / `--weight-plddt`: 分别是复合评分函数中 `ipTM` 和 `pLDDT` 的权重。 (默认: `0.7` / `0.3`)
+
+#### 增强功能选项 🚀
+
+  - `--enable-enhanced` / `--disable-enhanced`: 启用/禁用增强版功能。(默认: 启用)
+  - `--convergence-window`: 收敛检测的滑动窗口大小。较小值更敏感。 (默认: `5`)
+  - `--convergence-threshold`: 收敛检测的分数方差阈值。较小值更严格。 (默认: `0.001`)
+  - `--max-stagnation`: 触发早停的最大停滞周期数。较小值更激进。 (默认: `3`)
+  - `--initial-temperature`: 自适应突变的初始温度。较高值更探索性。 (默认: `1.0`)
+  - `--min-temperature`: 自适应突变的最小温度。较高值保持更多随机性。 (默认: `0.1`)
+
+#### 🎯 优化模式推荐
+
+| 模式 | 收敛窗口 | 停滞阈值 | 初始温度 | 适用场景 |
+|------|----------|----------|----------|----------|
+| **平稳优化** | 5 | 3 | 1.0 | 标准设计，稳定收敛 |
+| **激进探索** | 3 | 2 | 2.0 | 突破局部最优，快速探索 |
+| **精细调优** | 7 | 4 | 0.8 | 已有好序列，精细优化 |
+| **保守设计** | 6 | 5 | 0.5 | 对稳定性要求高的场景 |
 
 #### 糖肽设计 (可选)
 
@@ -163,5 +236,20 @@ python run_design.py \
 程序运行结束后，会生成以下输出：
 
   - **控制台日志**: 实时显示演化进程、每一代的最佳分数、警告和错误信息。
-  - **CSV汇总文件 (`--output_csv`)**: 包含所有已评估序列的详细信息及其评分指标（`composite_score`, `ipTM`, `pLDDT` 等）。文件已按综合分数从高到低排序。
+  - **CSV汇总文件 (`--output_csv`)**: 包含所有已评估序列的详细信息及其评分指标（`composite_score`, `ipTM`, `pLDDT` 等）。
+    - 🆕 **新增字段**: `mutation_strategy` (使用的突变策略), `is_pareto_optimal` (是否为Pareto最优解)
+    - 文件已按综合分数从高到低排序。
   - **临时文件 (`--keep_temp_files`)**: 如果选择保留，工作目录中将包含每次API调用的输入（YAML）、输出（PDB/CIF）和置信度文件，可用于后续分析或调试。
+
+### 📈 性能监控
+
+增强版提供更丰富的运行状态信息：
+
+```
+[INFO] Generation 5 complete. Best score: 0.8542 (ipTM: 0.8901, pLDDT: 78.43)
+[INFO] Enhanced features enabled with custom parameters
+[DEBUG] Strategy success rates: conservative=0.75, aggressive=0.32, motif_guided=0.68
+[DEBUG] Population diversity - similarity: 0.423, entropy: 2.87
+[INFO] Convergence detected: score variance 0.0008 < threshold 0.001
+[INFO] Early stopping triggered after 3 stagnation cycles
+```
