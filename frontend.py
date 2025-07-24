@@ -18,6 +18,7 @@ import pandas as pd
 import glob
 from datetime import datetime
 import tempfile
+import random
 from streamlit_ketcher import st_ketcher
 import hashlib
 import shutil
@@ -663,7 +664,7 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
         os.makedirs(work_dir, exist_ok=True)
         
         # 尝试集成实际的 Designer 模块
-        designer_script_path = './designer/run_design.py'
+        designer_script_path = os.path.join(os.getcwd(), 'designer', 'run_design.py')
         
         if os.path.exists(designer_script_path):
             # 计算设计链ID - 寻找下一个可用的链ID
@@ -695,7 +696,7 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
             
             # 构建运行命令，直接传递参数
             cmd = [
-                "python", "run_design.py",
+                "python", "run_design.py",  # 相对于designer目录
                 "--yaml_template", params.get('template_path', ''),
                 "--binder_chain", binder_chain_id,  # 动态设计链ID
                 "--binder_length", str(params.get('binder_length', 20)),
@@ -734,7 +735,6 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
                 
                 if len(initial_seq) < target_length:
                     # 序列太短，随机补全
-                    import random
                     amino_acids = "ACDEFGHIKLMNPQRSTVWY"
                     padding = ''.join(random.choices(amino_acids, k=target_length - len(initial_seq)))
                     initial_seq = initial_seq + padding
@@ -743,45 +743,89 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
                     initial_seq = initial_seq[:target_length]
                 
                 cmd.extend([
-                    "--initial_sequence", initial_seq
+                    "--initial_binder_sequence", initial_seq
                 ])
             
-            # 添加MSA参数
-            if params.get('use_msa', False):
-                cmd.append("--use_msa")
+            # 添加服务器URL参数
+            server_url = params.get('server_url', 'http://127.0.0.1:5000')
+            cmd.extend(["--server_url", server_url])
+            
+            # 添加API令牌参数（如果有的话）
+            api_token = os.environ.get('API_SECRET_TOKEN')
+            if api_token:
+                cmd.extend(["--api_token", api_token])
             
             # 在后台运行设计任务
+            # 先创建状态文件，表示任务已开始
+            status_file = os.path.join(work_dir, 'status.json')
+            initial_status_data = {
+                'task_id': params.get('task_id', 'unknown'),
+                'status': 'starting',
+                'start_time': datetime.now().isoformat(),
+                'params': params,
+                'process_id': None  # 先设为None，进程启动后更新
+            }
+            
+            with open(status_file, 'w') as f:
+                json.dump(initial_status_data, f, indent=2)
+            
             # 创建日志文件
             log_file = os.path.join(work_dir, 'design.log')
             
-            with open(log_file, 'w') as log:
-                log.write(f"设计任务开始: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                log.write(f"参数: {json.dumps(params, indent=2)}\n")
-                log.write(f"命令: {' '.join(cmd)}\n")
-                log.write("-" * 50 + "\n")
-                
-                # 启动异步进程
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    cwd='./designer'
-                )
-                
-                # 将进程ID写入状态文件
-                status_file = os.path.join(work_dir, 'status.json')
-                status_data = {
+            try:
+                with open(log_file, 'w') as log:
+                    log.write(f"设计任务开始: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    log.write(f"参数: {json.dumps(params, indent=2)}\n")
+                    log.write(f"命令: {' '.join(cmd)}\n")
+                    log.write("-" * 50 + "\n")
+                    log.flush()  # 确保内容写入文件
+                    
+                    # 设置环境变量
+                    env = os.environ.copy()
+                    env['PYTHONPATH'] = os.path.join(os.getcwd(), "designer") + ":" + env.get('PYTHONPATH', '')
+                    
+                    # 启动异步进程
+                    process = subprocess.Popen(
+                        cmd,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        cwd=os.path.join(os.getcwd(), "designer"),  # 切换到designer目录以便相对导入工作
+                        env=env
+                    )
+                    
+                    # 更新状态文件，添加进程ID
+                    updated_status_data = {
+                        'task_id': params.get('task_id', 'unknown'),
+                        'status': 'running',
+                        'process_id': process.pid,
+                        'start_time': datetime.now().isoformat(),
+                        'params': params
+                    }
+                    
+                    with open(status_file, 'w') as f:
+                        json.dump(updated_status_data, f, indent=2)
+                    
+                    return "running"
+                    
+            except Exception as process_error:
+                # 如果进程启动失败，更新状态文件为失败
+                error_status_data = {
                     'task_id': params.get('task_id', 'unknown'),
-                    'status': 'running',
-                    'process_id': process.pid,
-                    'start_time': datetime.now().isoformat(),
-                    'params': params
+                    'status': 'failed',
+                    'start_time': initial_status_data['start_time'],
+                    'end_time': datetime.now().isoformat(),
+                    'params': params,
+                    'error': f"进程启动失败: {str(process_error)}"
                 }
                 
                 with open(status_file, 'w') as f:
-                    json.dump(status_data, f, indent=2)
+                    json.dump(error_status_data, f, indent=2)
                 
-                return "running"
+                # 同时记录到日志文件中
+                with open(log_file, 'a') as log:
+                    log.write(f"\n❌ 进程启动失败: {str(process_error)}\n")
+                
+                return "failed"
         else:
             # Designer 脚本不存在，返回错误
             print(f"❌ Designer 脚本未找到: {designer_script_path}")
@@ -804,6 +848,24 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
             
     except Exception as e:
         print(f"Error in run_designer_workflow: {e}")
+        
+        # 确保即使出错也创建状态文件
+        try:
+            status_file = os.path.join(work_dir, 'status.json')
+            status_data = {
+                'task_id': params.get('task_id', 'unknown'),
+                'status': 'failed',
+                'start_time': datetime.now().isoformat(),
+                'end_time': datetime.now().isoformat(),
+                'params': params,
+                'error': f"Workflow execution error: {str(e)}"
+            }
+            
+            with open(status_file, 'w') as f:
+                json.dump(status_data, f, indent=2)
+        except Exception as status_error:
+            print(f"Failed to create error status file: {status_error}")
+        
         return "failed"
 
 
@@ -835,6 +897,38 @@ def submit_designer_job(
 ) -> dict:
     """提交 Designer 任务"""
     try:
+        # 如果启用MSA，先预生成必要的MSA缓存
+        if use_msa:
+            # 解析模板YAML以提取需要MSA的蛋白质序列
+            try:
+                template_data = yaml.safe_load(template_yaml_content)
+                target_protein_sequences = []
+                
+                if 'sequences' in template_data:
+                    for seq_item in template_data['sequences']:
+                        if 'protein' in seq_item:
+                            protein_data = seq_item['protein']
+                            sequence = protein_data.get('sequence', '').strip()
+                            msa_setting = protein_data.get('msa', 'auto')  # 默认auto生成MSA
+                            
+                            # 只有当MSA设置不是'empty'时才计入需要MSA的蛋白质
+                            # 注意：binder蛋白质在设计过程中会被动态添加，其MSA总是设置为'empty'
+                            if sequence and msa_setting != 'empty':
+                                target_protein_sequences.append(sequence)
+                
+                # 显示MSA信息（但不预生成，让Boltz在设计过程中自动处理）
+                if target_protein_sequences:
+                    cached_count = sum(1 for seq in target_protein_sequences if has_cached_msa(seq))
+                    if cached_count > 0:
+                        st.info(f"✅ 发现 {cached_count}/{len(target_protein_sequences)} 个目标蛋白质已有MSA缓存，将加速设计过程", icon="⚡")
+                    else:
+                        st.info(f"ℹ️ 检测到 {len(target_protein_sequences)} 个目标蛋白质需要MSA，Boltz将在设计过程中自动生成", icon="🧬")
+                else:
+                    st.info("ℹ️ 模板中无需MSA的目标蛋白质", icon="💡")
+                    
+            except Exception as e:
+                st.warning(f"⚠️ 模板解析过程中出现错误: {e}，设计将继续进行", icon="⚠️")
+        
         # 创建临时工作目录
         work_dir = tempfile.mkdtemp(prefix="boltz_designer_")
         template_path = os.path.join(work_dir, "template.yaml")
@@ -930,10 +1024,31 @@ def get_designer_status(task_id: str, work_dir: str = None) -> dict:
         status_file = os.path.join(work_dir, 'status.json')
         
         if not os.path.exists(status_file):
+            # 提供更详细的诊断信息
+            work_dir_contents = []
+            try:
+                work_dir_contents = os.listdir(work_dir)
+            except Exception as e:
+                work_dir_contents = [f"Error listing directory: {e}"]
+            
+            # 检查是否有日志文件可以提供线索
+            log_file = os.path.join(work_dir, 'design.log')
+            log_info = "无日志文件"
+            if os.path.exists(log_file):
+                try:
+                    with open(log_file, 'r') as f:
+                        log_content = f.read()
+                        # 提取最后几行或错误信息
+                        log_lines = log_content.strip().split('\n')
+                        if log_lines:
+                            log_info = f"日志最后几行: {' | '.join(log_lines[-3:])}"
+                except Exception as e:
+                    log_info = f"读取日志失败: {e}"
+            
             return {
                 'task_id': task_id,
-                'state': 'UNKNOWN',
-                'error': '状态文件不存在'
+                'state': 'FAILED',
+                'error': f'状态文件不存在。工作目录: {work_dir}, 目录内容: {work_dir_contents}, {log_info}'
             }
         
         with open(status_file, 'r') as f:
@@ -963,8 +1078,55 @@ def get_designer_status(task_id: str, work_dir: str = None) -> dict:
             
             # 如果进程已结束，检测完成状态
             if not process_still_running:
-                # 检查是否有CSV结果文件存在
-                csv_files = []
+                # 首先检查是否有错误
+                error_detected = False
+                error_message = ""
+                try:
+                    log_file = os.path.join(work_dir, 'design.log')
+                    if os.path.exists(log_file):
+                        with open(log_file, 'r') as f:
+                            log_content = f.read()
+                            # 检查常见的错误标识
+                            error_indicators = [
+                                'error: unrecognized arguments',
+                                'error:',
+                                'Error:',
+                                'ERROR:',
+                                'Traceback',
+                                'usage:',  # 当参数错误时会显示用法
+                                'FileNotFoundError',
+                                'ModuleNotFoundError',
+                                'ConnectionError'
+                            ]
+                            for indicator in error_indicators:
+                                if indicator in log_content:
+                                    error_detected = True
+                                    # 提取错误信息的关键部分
+                                    lines = log_content.split('\n')
+                                    for i, line in enumerate(lines):
+                                        if indicator in line:
+                                            # 取该行及其后几行作为错误信息
+                                            error_lines = lines[i:i+3]
+                                            error_message = '\n'.join(error_lines).strip()
+                                            break
+                                    break
+                except Exception:
+                    pass
+                
+                if error_detected:
+                    # 更新状态为失败
+                    status_data['status'] = 'failed'
+                    status_data['end_time'] = datetime.now().isoformat()
+                    status_data['error'] = error_message
+                    
+                    with open(status_file, 'w') as f:
+                        json.dump(status_data, f, indent=2)
+                    
+                    current_status = 'failed'
+                else:
+                    # 没有检测到错误，继续原来的完成检测逻辑
+                    # 检查是否有CSV结果文件存在
+                    csv_files = []
                 try:
                     for filename in os.listdir(work_dir):
                         if filename.startswith('design_summary_') and filename.endswith('.csv'):
@@ -1085,6 +1247,9 @@ def get_designer_status(task_id: str, work_dir: str = None) -> dict:
                 result['progress'] = final_progress
                 result['progress']['estimated_progress'] = 1.0
                 result['progress']['status_message'] = '设计任务已完成'
+        elif current_status == 'failed':
+            # 失败状态时提供错误信息
+            result['error'] = status_data.get('error', '设计任务失败')
         
         # 添加结果摘要（如果已完成）
         if current_status == 'completed' and 'results_summary' in status_data:
@@ -3002,6 +3167,25 @@ with tab2:
     # 添加MSA验证 - 检查是否有蛋白质组分启用了MSA
     protein_components_with_msa = [comp for comp in st.session_state.designer_components 
                                   if comp['type'] == 'protein' and comp.get('sequence', '').strip() and comp.get('use_msa', True)]
+    
+    # MSA预生成提示
+    if protein_components_with_msa:
+        uncached_proteins = [comp for comp in protein_components_with_msa 
+                           if not has_cached_msa(comp.get('sequence', '').strip())]
+        
+        if uncached_proteins:
+            st.info(f"""
+💡 **MSA预生成提示**: 检测到 {len(uncached_proteins)} 个目标蛋白质需要生成MSA。
+            
+系统将在设计开始前为这些蛋白质预生成MSA缓存，避免并行设计时重复计算MSA：
+            
+{chr(10).join([f'• {comp.get("sequence", "")[:30]}{"..." if len(comp.get("sequence", "")) > 30 else ""} (组分 {i+1})' 
+              for i, comp in enumerate(uncached_proteins)])}
+            
+⏳ 这个过程可能需要几分钟，但会显著提升后续设计任务的效率。
+            """, icon="🧬")
+        else:
+            st.success(f"✅ 所有 {len(protein_components_with_msa)} 个目标蛋白质已有MSA缓存，设计将快速开始！", icon="⚡")
     
     # 提交设计任务
     if st.button("🚀 开始分子设计", type="primary", disabled=(not designer_is_valid or designer_is_running), use_container_width=True):

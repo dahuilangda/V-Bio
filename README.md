@@ -160,37 +160,6 @@ export API_SECRET_TOKEN='your-super-secret-and-long-token'
              http://127.0.0.1:5000/tasks/some-task-id-in-queue/move
         ```
 
-#### **MSA 缓存管理**
-
-系统支持 MSA（Multiple Sequence Alignment）智能缓存，为每个蛋白质组分单独缓存 MSA 数据，显著加速重复预测。
-
-  * **获取缓存统计**: `GET /api/msa/cache/stats`
-
-      * **认证**: 需要 API 令牌
-      * **描述**: 获取 MSA 缓存的统计信息，包括文件数量、总大小、最早和最新文件时间。
-      * **示例**:
-        ```bash
-        curl -H "X-API-Token: your-secret-token" http://127.0.0.1:5000/api/msa/cache/stats
-        ```
-
-  * **智能清理缓存**: `POST /api/msa/cache/cleanup`
-
-      * **认证**: 需要 API 令牌
-      * **描述**: 自动清理过期缓存文件（超过7天）和超量缓存文件（超过5GB），返回清理统计。
-      * **示例**:
-        ```bash
-        curl -X POST -H "X-API-Token: your-secret-token" http://127.0.0.1:5000/api/msa/cache/cleanup
-        ```
-
-  * **清空全部缓存**: `POST /api/msa/cache/clear`
-
-      * **认证**: 需要 API 令牌
-      * **描述**: 清空所有 MSA 缓存文件。谨慎使用！
-      * **示例**:
-        ```bash
-        curl -X POST -H "X-API-Token: your-secret-token" http://127.0.0.1:5000/api/msa/cache/clear
-        ```
-
 #### **查询状态与下载结果**
 
 这两个接口是公开的，**无需** `X-API-Token` 即可访问，方便用户和前端轮询。
@@ -230,3 +199,34 @@ export API_SECRET_TOKEN='your-super-secret-and-long-token'
         ```
 
     如果文件不存在或任务未完成，将返回 404 Not Found 错误。
+
+#### **MSA 缓存管理**
+
+系统支持 MSA（Multiple Sequence Alignment）智能缓存，为每个蛋白质组分单独缓存 MSA 数据，显著加速重复预测。
+
+  * **获取缓存统计**: `GET /api/msa/cache/stats`
+
+      * **认证**: 需要 API 令牌
+      * **描述**: 获取 MSA 缓存的统计信息，包括文件数量、总大小、最早和最新文件时间。
+      * **示例**:
+        ```bash
+        curl -H "X-API-Token: your-secret-token" http://127.0.0.1:5000/api/msa/cache/stats
+        ```
+
+  * **智能清理缓存**: `POST /api/msa/cache/cleanup`
+
+      * **认证**: 需要 API 令牌
+      * **描述**: 自动清理过期缓存文件（超过7天）和超量缓存文件（超过5GB），返回清理统计。
+      * **示例**:
+        ```bash
+        curl -X POST -H "X-API-Token: your-secret-token" http://127.0.0.1:5000/api/msa/cache/cleanup
+        ```
+
+  * **清空全部缓存**: `POST /api/msa/cache/clear`
+
+      * **认证**: 需要 API 令牌
+      * **描述**: 清空所有 MSA 缓存文件。谨慎使用！
+      * **示例**:
+        ```bash
+        curl -X POST -H "X-API-Token: your-secret-token" http://127.0.0.1:5000/api/msa/cache/clear
+        ```
