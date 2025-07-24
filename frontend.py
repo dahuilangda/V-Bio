@@ -19,6 +19,8 @@ import glob
 from datetime import datetime
 import tempfile
 from streamlit_ketcher import st_ketcher
+import hashlib
+import shutil
 
 try:
     import psutil
@@ -53,6 +55,14 @@ DESIGNER_CONFIG = {
     'work_dir': '/tmp/boltz_designer',
     'api_token': os.getenv('API_SECRET_TOKEN', 'your_default_api_token'),
     'server_url': API_URL
+}
+
+# MSA 缓存配置
+MSA_CACHE_CONFIG = {
+    'cache_dir': '/tmp/boltz_msa_cache',
+    'max_cache_size_gb': 5.0,  # 最大缓存大小（GB）
+    'cache_expiry_days': 30,   # 缓存过期时间（天）
+    'enable_cache': True       # 是否启用缓存
 }
 
 
@@ -173,6 +183,156 @@ def export_to_pdb(cif_content: str) -> str:
     pdb_io.save(pdb_buffer)
     return pdb_buffer.getvalue()
 
+# ========== MSA 缓存相关函数 ==========
+
+def get_sequence_hash(sequence: str) -> str:
+    """计算序列的MD5哈希值作为缓存键"""
+    return hashlib.md5(sequence.encode('utf-8')).hexdigest()
+
+def ensure_msa_cache_dir():
+    """确保MSA缓存目录存在"""
+    cache_dir = MSA_CACHE_CONFIG['cache_dir']
+    os.makedirs(cache_dir, exist_ok=True)
+    return cache_dir
+
+def get_msa_cache_path(sequence: str) -> str:
+    """获取序列对应的MSA缓存文件路径"""
+    cache_dir = ensure_msa_cache_dir()
+    seq_hash = get_sequence_hash(sequence)
+    return os.path.join(cache_dir, f"msa_{seq_hash}.a3m")
+
+def has_cached_msa(sequence: str) -> bool:
+    """检查序列是否有有效的MSA缓存"""
+    if not MSA_CACHE_CONFIG['enable_cache']:
+        return False
+    
+    cache_path = get_msa_cache_path(sequence)
+    if not os.path.exists(cache_path):
+        return False
+    
+    # 检查缓存是否过期
+    cache_age_days = (time.time() - os.path.getmtime(cache_path)) / (24 * 3600)
+    if cache_age_days > MSA_CACHE_CONFIG['cache_expiry_days']:
+        try:
+            os.remove(cache_path)
+        except:
+            pass
+        return False
+    
+    # 检查文件是否有效（非空且格式正确）
+    try:
+        with open(cache_path, 'r') as f:
+            content = f.read().strip()
+            if len(content) > 0 and content.startswith('>'):
+                return True
+    except:
+        pass
+    
+    return False
+
+def get_cached_msa_content(sequence: str) -> str:
+    """获取缓存的MSA内容"""
+    if not has_cached_msa(sequence):
+        return None
+    
+    try:
+        cache_path = get_msa_cache_path(sequence)
+        with open(cache_path, 'r') as f:
+            return f.read()
+    except Exception as e:
+        print(f"读取MSA缓存失败: {e}")
+        return None
+
+def cache_msa_content(sequence: str, msa_content: str) -> bool:
+    """缓存MSA内容到文件"""
+    if not MSA_CACHE_CONFIG['enable_cache']:
+        return False
+    
+    try:
+        cache_path = get_msa_cache_path(sequence)
+        with open(cache_path, 'w') as f:
+            f.write(msa_content)
+        return True
+    except Exception as e:
+        print(f"缓存MSA失败: {e}")
+        return False
+
+def get_cache_stats() -> dict:
+    """获取缓存统计信息"""
+    cache_dir = MSA_CACHE_CONFIG['cache_dir']
+    if not os.path.exists(cache_dir):
+        return {
+            'total_files': 0,
+            'total_size_mb': 0,
+            'oldest_file': None,
+            'newest_file': None
+        }
+    
+    cache_files = [f for f in os.listdir(cache_dir) if f.startswith('msa_') and f.endswith('.a3m')]
+    total_size = 0
+    oldest_time = float('inf')
+    newest_time = 0
+    
+    for file in cache_files:
+        file_path = os.path.join(cache_dir, file)
+        try:
+            file_size = os.path.getsize(file_path)
+            file_time = os.path.getmtime(file_path)
+            total_size += file_size
+            oldest_time = min(oldest_time, file_time)
+            newest_time = max(newest_time, file_time)
+        except:
+            continue
+    
+    return {
+        'total_files': len(cache_files),
+        'total_size_mb': total_size / (1024 * 1024),
+        'oldest_file': datetime.fromtimestamp(oldest_time).strftime('%Y-%m-%d %H:%M:%S') if oldest_time != float('inf') else None,
+        'newest_file': datetime.fromtimestamp(newest_time).strftime('%Y-%m-%d %H:%M:%S') if newest_time > 0 else None
+    }
+
+def get_smart_msa_default(components: list) -> bool:
+    """
+    智能决定新蛋白质组分的MSA默认值
+    
+    策略：
+    1. 如果没有蛋白质组分，新组分默认不启用MSA
+    2. 如果只有一个蛋白质组分且有缓存，新组分默认启用MSA（利用缓存优势）
+    3. 如果只有一个蛋白质组分且无缓存，新组分默认不启用MSA（避免额外计算）
+    4. 如果已有多个蛋白质组分，跟随第一个组分的MSA设置
+    5. 这样可以优化用户体验，减少不必要的MSA计算
+    """
+    if not components:
+        return False  # 第一个组分默认不启用MSA
+    
+    # 找到所有蛋白质组分
+    protein_components = [comp for comp in components if comp.get('type') == 'protein']
+    
+    if not protein_components:
+        return False  # 没有蛋白质组分时，新组分默认不启用MSA
+    
+    # 检查第一个蛋白质组分是否有有效序列和缓存
+    first_protein = protein_components[0]
+    first_sequence = first_protein.get('sequence', '').strip()
+    
+    if not first_sequence:
+        return False  # 第一个蛋白质没有序列，新组分默认不启用MSA
+    
+    # 统计有序列的蛋白质组分数量
+    proteins_with_sequence = [comp for comp in protein_components if comp.get('sequence', '').strip()]
+    
+    # 如果第一个蛋白质有缓存
+    if has_cached_msa(first_sequence):
+        # 如果只有第一个蛋白质有序列（还没有其他组分），新组分默认启用MSA
+        if len(proteins_with_sequence) <= 1:
+            return True
+        # 如果已经有多个蛋白质组分，跟随第一个组分的MSA设置
+        else:
+            return first_protein.get('use_msa', True)
+    
+    # 第一个蛋白质没有缓存，新组分默认不启用MSA
+    return False
+
 def submit_job(yaml_content: str, use_msa: bool) -> str:
     """
     提交预测任务到后端 API。
@@ -183,7 +343,9 @@ def submit_job(yaml_content: str, use_msa: bool) -> str:
     
     response = requests.post(f"{API_URL}/predict", files=files, data=data, headers=headers)
     response.raise_for_status()
-    return response.json()['task_id']
+    task_id = response.json()['task_id']
+    
+    return task_id
 
 def get_status(task_id: str) -> dict:
     """
@@ -236,6 +398,7 @@ def download_and_process_results(task_id: str) -> tuple[dict, bytes]:
 def generate_yaml_from_state():
     """
     Generates the YAML configuration string based on the current session state.
+    确保所有蛋白质组分使用一致的MSA策略以避免Boltz的"混合MSA"错误。
     """
     if not st.session_state.get('components'):
         return None
@@ -243,6 +406,34 @@ def generate_yaml_from_state():
     sequences_list = []
     chain_letters = string.ascii_uppercase + string.ascii_lowercase + string.digits
     next_letter_idx = 0
+    
+    # 第一步：分析所有蛋白质组分的MSA情况
+    protein_components = [comp for comp in st.session_state.components if comp['type'] == 'protein']
+    
+    # 检查MSA缓存情况
+    msa_strategy = "mixed"  # none, cached, auto, mixed
+    if protein_components:
+        cached_count = 0
+        enabled_count = 0
+        total_proteins = len(protein_components)
+        
+        for comp in protein_components:
+            if comp.get('use_msa', True):
+                enabled_count += 1
+                if has_cached_msa(comp['sequence']):
+                    cached_count += 1
+        
+        # 决定MSA策略
+        if enabled_count == 0:
+            msa_strategy = "none"  # 所有蛋白质都禁用MSA
+        elif cached_count == enabled_count and enabled_count == total_proteins:
+            msa_strategy = "cached"  # 所有启用MSA的蛋白质都有缓存
+        elif cached_count == 0 and enabled_count == total_proteins:
+            msa_strategy = "auto"  # 所有蛋白质都启用MSA但无缓存
+        else:
+            # 混合情况：部分有缓存、部分无缓存、部分禁用MSA
+            # 这种情况允许混合，因为empty MSA不会与cached/auto冲突
+            msa_strategy = "mixed"
     
     for comp in st.session_state.components:
         num_copies = comp.get('num_copies', 1)
@@ -261,8 +452,49 @@ def generate_yaml_from_state():
             component_dict['sequence'] = comp['sequence']
             if comp['type'] == 'protein' and comp.get('cyclic', False):
                 component_dict['cyclic'] = True
-            if comp['type'] == 'protein' and not st.session_state.use_msa_server:
-                component_dict['msa'] = 'empty'
+            
+            # MSA处理：基于统一的MSA策略
+            if comp['type'] == 'protein':
+                comp_use_msa = comp.get('use_msa', True)
+                
+                if msa_strategy == "none" or not comp_use_msa:
+                    component_dict['msa'] = 'empty'
+                elif msa_strategy == "cached":
+                    # 所有蛋白质都使用缓存的MSA
+                    sequence = comp['sequence']
+                    component_dict['msa'] = get_msa_cache_path(sequence)
+                elif msa_strategy == "auto":
+                    # 所有蛋白质都使用自动生成的MSA（不设置msa字段）
+                    pass  # 不设置msa字段，让系统自动生成
+                elif msa_strategy == "mixed":
+                    # 混合策略：避免混合custom和auto-generated MSA
+                    # 策略：检查是否所有启用MSA的蛋白质都有缓存
+                    # 如果有任何启用MSA的蛋白质没有缓存，则全部使用auto-generated
+                    
+                    # 检查所有启用MSA的蛋白质是否都有缓存
+                    enabled_proteins_with_msa = [p for p in protein_components if p.get('use_msa', True)]
+                    all_enabled_have_cache = all(
+                        has_cached_msa(p['sequence']) for p in enabled_proteins_with_msa
+                    ) if enabled_proteins_with_msa else True
+                    
+                    if not comp_use_msa:
+                        component_dict['msa'] = 'empty'
+                    else:
+                        sequence = comp['sequence']
+                        has_cache = has_cached_msa(sequence)
+                        
+                        if all_enabled_have_cache:
+                            # 只有当所有启用MSA的蛋白质都有缓存时，才使用缓存
+                            if has_cache:
+                                component_dict['msa'] = get_msa_cache_path(sequence)
+                            else:
+                                # 这种情况理论上不应该发生，因为我们已经检查了all_enabled_have_cache
+                                pass  # 不设置msa字段，让系统自动生成
+                        else:
+                            # 如果有任何启用MSA的蛋白质没有缓存，则全部使用auto-generated
+                            # 不设置msa字段，让系统自动生成
+                            pass
+                    
         elif comp['type'] == 'ligand':
             # 对于ketcher输入，实际存储的是SMILES，所以统一使用smiles字段
             input_method = comp['input_method']
@@ -301,10 +533,37 @@ def create_designer_template_yaml(target_protein_sequence: str, target_chain_id:
     }
     return yaml.dump(template_dict, sort_keys=False, indent=2, default_flow_style=False)
 
-def create_designer_complex_yaml(components: list) -> str:
-    """为多组分复合物创建 Designer 的模板 YAML 配置"""
+def create_designer_complex_yaml(components: list, use_msa: bool = False) -> str:
+    """为多组分复合物创建 Designer 的模板 YAML 配置
+    当 use_msa=True 时，只对现有的目标蛋白质使用MSA，binder不使用MSA
+    避免混合custom和auto-generated MSA以防止Boltz错误
+    """
     sequences_list = []
     chain_counter = 0  # 用于自动分配链ID
+    
+    # 预先分析所有蛋白质组分的MSA情况，避免mixed MSA错误
+    protein_components = [comp for comp in components if comp['type'] == 'protein' and comp.get('sequence', '').strip()]
+    
+    # 检查MSA策略
+    msa_strategy = "none"
+    if use_msa and protein_components:
+        cached_count = 0
+        enabled_count = 0
+        
+        for comp in protein_components:
+            if comp.get('use_msa', True):
+                enabled_count += 1
+                if has_cached_msa(comp['sequence']):
+                    cached_count += 1
+        
+        if enabled_count == 0:
+            msa_strategy = "none"
+        elif cached_count > 0:
+            # 有缓存的情况：优先使用缓存策略，避免混合
+            msa_strategy = "cached"
+        else:
+            # 无缓存的情况：使用auto策略
+            msa_strategy = "auto"
     
     for comp in components:
         if not comp.get('sequence', '').strip():
@@ -319,13 +578,49 @@ def create_designer_complex_yaml(components: list) -> str:
             chain_counter += 1
             
             if comp['type'] == 'protein':
-                component_dict = {
-                    'protein': {
-                        'id': chain_id,
-                        'sequence': comp['sequence'],
-                        'msa': 'empty'
-                    }
+                # MSA处理：只对目标蛋白质使用MSA，binder蛋白质不使用MSA
+                protein_dict = {
+                    'id': chain_id,
+                    'sequence': comp['sequence']
                 }
+                
+                # 注意：这里不处理环肽选项，因为分子设计中的环肽是针对结合肽的，不是目标蛋白质
+                # 环肽选项将在设计算法中处理
+                
+                # 分子设计逻辑：如果启用MSA，则只对现有的目标组分使用MSA
+                # binder蛋白质（将要设计的）总是不使用MSA
+                if use_msa:
+                    # 对于目标蛋白质（现有组分），检查MSA设置
+                    comp_use_msa = comp.get('use_msa', True)
+                    
+                    if not comp_use_msa:
+                        protein_dict['msa'] = 'empty'
+                    else:
+                        sequence = comp['sequence']
+                        
+                        if msa_strategy == "cached":
+                            # 缓存策略：只有当所有启用MSA的蛋白质都有缓存时才使用缓存策略
+                            # 否则全部使用auto-generated策略
+                            enabled_proteins_with_msa = [p for p in protein_components if p.get('use_msa', True)]
+                            all_enabled_have_cache = all(
+                                has_cached_msa(p['sequence']) for p in enabled_proteins_with_msa
+                            ) if enabled_proteins_with_msa else True
+                            
+                            if all_enabled_have_cache and has_cached_msa(sequence):
+                                protein_dict['msa'] = get_msa_cache_path(sequence)
+                            else:
+                                # 有蛋白质没有缓存，全部使用auto-generated
+                                pass  # 不设置msa字段，让系统自动生成并缓存
+                        elif msa_strategy == "auto":
+                            # 自动生成策略：不设置msa字段，让系统自动生成
+                            pass  # 不设置msa字段
+                        else:  # msa_strategy == "none"
+                            protein_dict['msa'] = 'empty'
+                else:
+                    # 如果全局不启用MSA，所有蛋白质都设为empty
+                    protein_dict['msa'] = 'empty'
+                
+                component_dict = {'protein': protein_dict}
             elif comp['type'] == 'dna':
                 component_dict = {
                     'dna': {
@@ -431,6 +726,30 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
                     "--glycosylation_site", str(params.get('glycosylation_site', 10))
                 ])
             
+            # 添加初始序列参数
+            if params.get('use_initial_sequence') and params.get('initial_sequence'):
+                # 处理初始序列长度匹配
+                initial_seq = params.get('initial_sequence', '').upper()
+                target_length = params.get('binder_length', 20)
+                
+                if len(initial_seq) < target_length:
+                    # 序列太短，随机补全
+                    import random
+                    amino_acids = "ACDEFGHIKLMNPQRSTVWY"
+                    padding = ''.join(random.choices(amino_acids, k=target_length - len(initial_seq)))
+                    initial_seq = initial_seq + padding
+                elif len(initial_seq) > target_length:
+                    # 序列太长，截取前面部分
+                    initial_seq = initial_seq[:target_length]
+                
+                cmd.extend([
+                    "--initial_sequence", initial_seq
+                ])
+            
+            # 添加MSA参数
+            if params.get('use_msa', False):
+                cmd.append("--use_msa")
+            
             # 在后台运行设计任务
             # 创建日志文件
             log_file = os.path.join(work_dir, 'design.log')
@@ -505,7 +824,14 @@ def submit_designer_job(
     max_stagnation: int = 3,
     initial_temperature: float = 1.0,
     min_temperature: float = 0.1,
-    enable_enhanced: bool = True
+    enable_enhanced: bool = True,
+    # 新增初始序列参数
+    use_initial_sequence: bool = False,
+    initial_sequence: str = None,
+    # 环状结合肽参数
+    cyclic_binder: bool = False,
+    # 新增MSA参数
+    use_msa: bool = False
 ) -> dict:
     """提交 Designer 任务"""
     try:
@@ -534,7 +860,14 @@ def submit_designer_job(
             'max_stagnation': max_stagnation,
             'initial_temperature': initial_temperature,
             'min_temperature': min_temperature,
-            'enable_enhanced': enable_enhanced
+            'enable_enhanced': enable_enhanced,
+            # 初始序列参数
+            'use_initial_sequence': use_initial_sequence,
+            'initial_sequence': initial_sequence,
+            # 环状结合肽参数
+            'cyclic_binder': cyclic_binder,
+            # MSA参数
+            'use_msa': use_msa
         }
         
         if design_type == 'glycopeptide' and glycan_type:
@@ -1228,7 +1561,7 @@ if 'designer_config' not in st.session_state: st.session_state.designer_config =
 
 if not st.session_state.components:
     st.session_state.components.append({
-        'id': str(uuid.uuid4()), 'type': 'protein', 'num_copies': 1, 'sequence': '', 'input_method': 'smiles', 'cyclic': False
+        'id': str(uuid.uuid4()), 'type': 'protein', 'num_copies': 1, 'sequence': '', 'input_method': 'smiles', 'cyclic': False, 'use_msa': False
     })
 
 # CSS 样式
@@ -1524,7 +1857,10 @@ with tab1:
                 else:
                     label = f"输入 {selected_type.capitalize()} 序列"
                 
-                st.session_state.components[i]['sequence'] = st.text_area(
+                # 保存旧序列用于变化检测
+                old_sequence = component.get('sequence', '')
+                
+                new_sequence = st.text_area(
                     label, 
                     height=120, key=f"seq_{component['id']}",
                     value=component.get('sequence', ''),
@@ -1533,15 +1869,98 @@ with tab1:
                     disabled=is_running
                 )
                 
-                # Add cyclic peptide option for protein type
+                # 检测序列是否发生变化
+                sequence_changed = new_sequence != old_sequence
+                
+                # 更新序列到session state
+                st.session_state.components[i]['sequence'] = new_sequence
+                
+                # 如果序列发生变化，进行必要的状态调整和刷新
+                if sequence_changed:
+                    # 对于蛋白质类型，进行智能MSA调整
+                    if selected_type == 'protein':
+                        # 当只有一个蛋白质组分时，基于缓存状态智能设置MSA
+                        protein_components = [comp for comp in st.session_state.components if comp.get('type') == 'protein']
+                        if len(protein_components) == 1:  # 只有当前这一个蛋白质组分
+                            if new_sequence.strip():  # 有序列
+                                # 根据缓存状态智能设置MSA
+                                if has_cached_msa(new_sequence.strip()):
+                                    st.session_state.components[i]['use_msa'] = True
+                                else:
+                                    st.session_state.components[i]['use_msa'] = False
+                            else:  # 序列为空
+                                st.session_state.components[i]['use_msa'] = False
+                    
+                    # 更激进的刷新策略：只要序列发生变化就刷新
+                    # 这确保界面状态能及时更新
+                    st.rerun()
+                
+                # Add cyclic peptide option and MSA settings for protein type
                 if selected_type == 'protein':
-                    st.session_state.components[i]['cyclic'] = st.checkbox(
-                        "环肽 (Cyclic Peptide)",
-                        value=st.session_state.components[i].get('cyclic', False),
-                        key=f"cyclic_{component['id']}",
-                        help="勾选此项表示该蛋白质序列是一个环状肽。对于环肽，模型将尝试生成闭合的环状结构。",
-                        disabled=is_running
-                    )
+                    # 使用最新的序列值（直接从session_state获取最新更新的值）
+                    protein_sequence = st.session_state.components[i].get('sequence', '').strip()
+                    
+                    # 合并环肽选项和MSA选项到同一行
+                    if protein_sequence:
+                        # 有序列时：环肽选项 + MSA选项 + 缓存状态
+                        protein_opts_cols = st.columns([1.5, 1.5, 1, 1])
+                        
+                        with protein_opts_cols[0]:
+                            # 使用独立变量接收checkbox值，然后更新session_state
+                            cyclic_value = st.checkbox(
+                                "环肽 (Cyclic)",
+                                value=st.session_state.components[i].get('cyclic', False),
+                                key=f"cyclic_{component['id']}",
+                                help="勾选此项表示该蛋白质序列是一个环状肽。对于环肽，模型将尝试生成闭合的环状结构。",
+                                disabled=is_running
+                            )
+                            # 检测状态变化并更新
+                            if cyclic_value != st.session_state.components[i].get('cyclic', False):
+                                st.session_state.components[i]['cyclic'] = cyclic_value
+                                st.rerun()
+                        
+                        with protein_opts_cols[1]:
+                            # 使用独立变量接收checkbox值，然后更新session_state
+                            msa_value = st.checkbox(
+                                "启用 MSA",
+                                value=st.session_state.components[i].get('use_msa', True),
+                                key=f"msa_{component['id']}",
+                                help="为此蛋白质组分生成多序列比对以提高预测精度。取消勾选可以跳过MSA生成，节省时间。",
+                                disabled=is_running
+                            )
+                            # 检测状态变化并更新
+                            if msa_value != st.session_state.components[i].get('use_msa', True):
+                                st.session_state.components[i]['use_msa'] = msa_value
+                                st.rerun()
+                        
+                        with protein_opts_cols[2]:
+                            # 显示此组分的缓存状态 - 基于最新序列值
+                            if has_cached_msa(protein_sequence):
+                                st.markdown("🟢&nbsp;**已缓存**", unsafe_allow_html=True)
+                            else:
+                                st.markdown("🟡&nbsp;**未缓存**", unsafe_allow_html=True)
+                        
+                        with protein_opts_cols[3]:
+                            # 显示缓存状态的详细信息 - 基于最新序列值
+                            if has_cached_msa(protein_sequence):
+                                st.markdown("⚡&nbsp;快速加载", unsafe_allow_html=True)
+                            else:
+                                st.markdown("🔄&nbsp;需要生成", unsafe_allow_html=True)
+                    else:
+                        # 无序列时：只显示环肽选项，MSA设置为默认值
+                        cyclic_value = st.checkbox(
+                            "环肽 (Cyclic Peptide)",
+                            value=st.session_state.components[i].get('cyclic', False),
+                            key=f"cyclic_{component['id']}",
+                            help="勾选此项表示该蛋白质序列是一个环状肽。对于环肽，模型将尝试生成闭合的环状结构。",
+                            disabled=is_running
+                        )
+                        # 使用中间变量检测状态变化
+                        if cyclic_value != st.session_state.components[i].get('cyclic', False):
+                            st.session_state.components[i]['cyclic'] = cyclic_value
+                            st.rerun()
+                        # 序列为空时，默认启用MSA但不显示缓存状态
+                        st.session_state.components[i]['use_msa'] = st.session_state.components[i].get('use_msa', True)
             
             delete_col, _ = st.columns([10, 1])
             with delete_col:
@@ -1554,26 +1973,111 @@ with tab1:
             st.rerun()
 
         st.markdown("---")
-        st.button("➕ 添加新组分", on_click=lambda: st.session_state.components.append({'id': str(uuid.uuid4()), 'type': 'protein', 'num_copies': 1, 'sequence': '', 'input_method': 'smiles', 'cyclic': False}), disabled=is_running, use_container_width=True)
+        
+        def add_new_component():
+            """添加新组分并智能设置MSA默认值"""
+            smart_msa_default = get_smart_msa_default(st.session_state.components)
+            st.session_state.components.append({
+                'id': str(uuid.uuid4()), 
+                'type': 'protein', 
+                'num_copies': 1, 
+                'sequence': '', 
+                'input_method': 'smiles', 
+                'cyclic': False,
+                'use_msa': smart_msa_default
+            })
+        
+        st.button("➕ 添加新组分", on_click=add_new_component, disabled=is_running, use_container_width=True)
 
         st.subheader("全局与高级设置", anchor=False)
-
-        st.session_state.use_msa_server = st.checkbox(
-            "启用 MSA 序列搜索 (推荐用于蛋白质)",
-            value=st.session_state.get('use_msa_server', False),
-            help="勾选此项将使用外部服务器为蛋白质序列生成多序列比对(MSA)。这可以显著提升对新颖蛋白质的预测精度，但会增加任务耗时。",
-            disabled=is_running
-        )
+        
+        # 创建两列布局
+        col_global_left, col_global_right = st.columns(2)
+        
+        with col_global_left:
+            # 显示MSA使用概览（基于统一策略）
+            protein_components = [comp for comp in st.session_state.components 
+                                if comp['type'] == 'protein' and comp.get('sequence', '').strip()]
+            
+            if protein_components:
+                # 确定统一的MSA策略
+                cached_count = sum(1 for comp in protein_components 
+                                 if comp.get('use_msa', True) and has_cached_msa(comp['sequence']))
+                enabled_count = sum(1 for comp in protein_components if comp.get('use_msa', True))
+                total_proteins = len(protein_components)
+                
+                # 应用统一策略逻辑
+                if enabled_count == 0:
+                    strategy = "none"
+                    strategy_desc = "跳过MSA生成"
+                elif cached_count == enabled_count and enabled_count == total_proteins:
+                    strategy = "cached"  
+                    strategy_desc = "使用缓存MSA"
+                elif cached_count == 0 and enabled_count == total_proteins:
+                    strategy = "auto"
+                    strategy_desc = "自动生成MSA"
+                else:
+                    # 混合情况
+                    strategy = "mixed"
+                    strategy_desc = "混合MSA策略"
+                
+                st.markdown("**MSA 使用概览**")
+                if strategy == "none":
+                    st.info(f"ℹ️ 所有蛋白质组分都跳过MSA生成")
+                    st.caption("⚡ 这将显著加快预测速度，但可能影响精度")
+                elif strategy == "cached":
+                    st.success(f"✅ 全部 {total_proteins} 个蛋白质组分使用缓存MSA")
+                    st.caption("🚀 使用预缓存的MSA将显著加快预测速度")
+                elif strategy == "auto":
+                    st.info(f"🔄 全部 {total_proteins} 个蛋白质组分自动生成MSA")
+                    st.caption("🧬 将为每个蛋白质查找同源序列并生成MSA")
+                elif strategy == "mixed":
+                    disabled_count = total_proteins - enabled_count
+                    st.warning(f"� 混合MSA策略：{cached_count} 个缓存，{enabled_count - cached_count} 个自动生成，{disabled_count} 个跳过")
+                    st.caption("💡 每个蛋白质组分将根据其设置独立处理MSA")
+            else:
+                st.info("👆 添加蛋白质组分后可配置MSA选项")
+                st.caption("💡 智能MSA策略：第一个蛋白质有缓存时，后续组分才默认启用MSA")
+        
+        with col_global_right:
+            # MSA缓存管理（与分子设计相同的逻辑）
+            st.markdown("**MSA 缓存状态**")
+            
+            # 获取缓存统计信息（只显示，不提供清理功能）
+            cache_stats = get_cache_stats()
+            
+            if cache_stats['total_files'] > 0:
+                st.caption(f"📁 {cache_stats['total_files']} 个缓存文件 ({cache_stats['total_size_mb']:.1f} MB)")
+                
+                # 检查当前蛋白质组分的缓存状态
+                protein_components = [comp for comp in st.session_state.components 
+                                    if comp['type'] == 'protein' and comp.get('sequence', '').strip()]
+                
+                if protein_components:
+                    st.markdown("**蛋白质组分缓存状态：**")
+                    for i, comp in enumerate(protein_components):
+                        sequence = comp['sequence']
+                        comp_id = comp.get('id', f'protein_{i+1}')
+                        if has_cached_msa(sequence):
+                            st.success(f"✅ {comp_id}: 已缓存", icon="💾")
+                        else:
+                            st.info(f"ℹ️ {comp_id}: 未缓存", icon="💾")
+            else:
+                st.caption("暂无MSA缓存")
         
         has_ligand_component = any(comp['type'] == 'ligand' for comp in st.session_state.components)
         if has_ligand_component:
-            st.session_state.properties['affinity'] = st.checkbox(
+            affinity_value = st.checkbox(
                 "🔬 计算结合亲和力 (Affinity)",
                 value=st.session_state.properties.get('affinity', False),
                 disabled=is_running,
                 help="勾选后，模型将尝试预测小分子与大分子组分之间的结合亲和力。请确保至少输入了一个小分子组分。"
             )
-            if st.session_state.properties['affinity']:
+            # 使用中间变量检测状态变化
+            if affinity_value != st.session_state.properties.get('affinity', False):
+                st.session_state.properties['affinity'] = affinity_value
+                st.rerun()
+            if st.session_state.properties.get('affinity', False):
                 chain_letter_idx = 0
                 valid_ligand_chains = []
                 for comp in st.session_state.components:
@@ -1637,14 +2141,25 @@ with tab1:
         st.session_state.raw_zip = None
         st.session_state.error = None
         
+        # 检查是否有蛋白质组分需要MSA
+        protein_components = [comp for comp in st.session_state.components 
+                            if comp['type'] == 'protein' and comp.get('sequence', '').strip()]
+        use_msa_for_job = any(comp.get('use_msa', True) for comp in protein_components)
+        
         with st.spinner("⏳ 正在提交任务，请稍候..."):
             try:
                 task_id = submit_job(
                     yaml_content=yaml_preview,
-                    use_msa=st.session_state.use_msa_server
+                    use_msa=use_msa_for_job
                 )
                 st.session_state.task_id = task_id
-                st.toast(f"🎉 任务已成功提交！任务ID: {task_id}", icon="✅")
+                
+                # 显示MSA使用情况
+                if use_msa_for_job:
+                    msa_enabled_count = sum(1 for comp in protein_components if comp.get('use_msa', True))
+                    st.toast(f"🎉 任务已提交！将为 {msa_enabled_count} 个蛋白质组分生成MSA", icon="✅")
+                else:
+                    st.toast(f"🎉 任务已提交！跳过MSA生成，预测将更快完成", icon="⚡")
                 st.rerun()
             except requests.exceptions.RequestException as e:
                 st.error(f"⚠️ **任务提交失败：无法连接到API服务器或服务器返回错误**。请检查后端服务是否运行正常。详情: {e}")
@@ -1736,11 +2251,22 @@ with tab1:
     if st.session_state.error:
         st.error("ℹ️ 任务执行失败，详细信息如下：")
         st.json(st.session_state.error)
-        if st.button("🔄 重置并重新开始", type="secondary"):
-            for key in ['task_id', 'results', 'raw_zip', 'error', 'components', 'properties', 'use_msa_server']:
-                if key in st.session_state:
-                    del st.session_state[key]
-            st.rerun()
+        
+        col_reset = st.columns(2)
+        with col_reset[0]:
+            if st.button("🔄 重置并重新开始", type="secondary", use_container_width=True):
+                for key in ['task_id', 'results', 'raw_zip', 'error', 'components', 'properties', 'use_msa_server']:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                st.rerun()
+        
+        with col_reset[1]:
+            if st.button("🔧 保留配置重新设计", type="primary", use_container_width=True):
+                # 只清除任务状态，保留配置信息
+                for key in ['task_id', 'results', 'raw_zip', 'error']:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                st.rerun()
 
     if st.session_state.results:
         st.divider()
@@ -1908,7 +2434,7 @@ with tab2:
         # 初始化 Designer 组分状态
         if 'designer_components' not in st.session_state:
             st.session_state.designer_components = [
-                {'id': str(uuid.uuid4()), 'type': 'protein', 'sequence': '', 'num_copies': 1}
+                {'id': str(uuid.uuid4()), 'type': 'protein', 'sequence': '', 'num_copies': 1, 'use_msa': False}
             ]
         
         # 组分管理
@@ -1966,7 +2492,10 @@ with tab2:
             
             # 序列输入
             if component['type'] == 'protein':
-                component['sequence'] = st.text_area(
+                # 保存旧序列用于变化检测
+                old_sequence = component.get('sequence', '')
+                
+                new_sequence = st.text_area(
                     f"蛋白质序列 ({'单体' if num_copies == 1 else f'{num_copies}聚体'})",
                     height=100,
                     value=component.get('sequence', ''),
@@ -1975,8 +2504,75 @@ with tab2:
                     disabled=designer_is_running,
                     help="输入此蛋白质链的完整氨基酸序列。"
                 )
+                
+                # 检测序列是否发生变化
+                sequence_changed = new_sequence != old_sequence
+                
+                # 更新序列到组分
+                component['sequence'] = new_sequence
+                
+                # 如果序列发生变化，进行智能MSA调整和刷新
+                if sequence_changed:
+                    # 当只有一个蛋白质组分时，基于缓存状态智能设置MSA
+                    protein_components = [comp for comp in st.session_state.designer_components if comp.get('type') == 'protein']
+                    if len(protein_components) == 1:  # 只有当前这一个蛋白质组分
+                        if new_sequence.strip():  # 有序列
+                            # 根据缓存状态智能设置MSA
+                            if has_cached_msa(new_sequence.strip()):
+                                component['use_msa'] = True
+                            else:
+                                component['use_msa'] = False
+                        else:  # 序列为空
+                            component['use_msa'] = False
+                    
+                    # 更激进的刷新策略：只要序列发生变化就刷新
+                    # 这确保界面状态能及时更新
+                    st.rerun()
+                
+                # 为分子设计中的蛋白质组分添加MSA选项（移除环肽选项，因为环肽是针对结合肽的）
+                # 使用最新的序列值（直接从组分获取最新更新的值）
+                protein_sequence = component.get('sequence', '').strip()
+                
+                # MSA选项和缓存状态
+                if protein_sequence:
+                    # 有序列时：MSA选项 + 缓存状态
+                    protein_opts_cols = st.columns([2, 1.5, 1.5])
+                    
+                    with protein_opts_cols[0]:
+                        msa_value = st.checkbox(
+                            "启用 MSA",
+                            value=component.get('use_msa', True),
+                            key=f"designer_msa_{component['id']}",
+                            help="为此蛋白质组分生成多序列比对以提高预测精度。取消勾选可以跳过MSA生成，节省时间。",
+                            disabled=designer_is_running
+                        )
+                        # 使用中间变量检测状态变化
+                        if msa_value != component.get('use_msa', True):
+                            component['use_msa'] = msa_value
+                            st.rerun()
+                    
+                    with protein_opts_cols[1]:
+                        # 显示此组分的缓存状态 - 基于最新序列值
+                        if has_cached_msa(protein_sequence):
+                            st.markdown("🟢&nbsp;**已缓存**", unsafe_allow_html=True)
+                        else:
+                            st.markdown("🟡&nbsp;**未缓存**", unsafe_allow_html=True)
+                    
+                    with protein_opts_cols[2]:
+                        # 显示缓存状态的详细信息 - 基于最新序列值
+                        if has_cached_msa(protein_sequence):
+                            st.markdown("⚡&nbsp;快速加载", unsafe_allow_html=True)
+                        else:
+                            st.markdown("🔄&nbsp;需要生成", unsafe_allow_html=True)
+                else:
+                    # 序列为空时，默认启用MSA但不显示缓存状态
+                    component['use_msa'] = component.get('use_msa', True)
+                    
+                # 清除可能残留的环肽设置（因为在分子设计中，环肽是针对结合肽的，不是目标蛋白）
+                if 'cyclic' in component:
+                    del component['cyclic']
             elif component['type'] == 'dna':
-                component['sequence'] = st.text_area(
+                dna_sequence = st.text_area(
                     f"DNA序列 ({'单链' if num_copies == 1 else f'{num_copies}链'})",
                     height=100,
                     value=component.get('sequence', ''),
@@ -1985,8 +2581,9 @@ with tab2:
                     disabled=designer_is_running,
                     help="输入DNA核苷酸序列（A、T、G、C）。"
                 )
+                component['sequence'] = dna_sequence
             elif component['type'] == 'rna':
-                component['sequence'] = st.text_area(
+                rna_sequence = st.text_area(
                     f"RNA序列 ({'单链' if num_copies == 1 else f'{num_copies}链'})",
                     height=100,
                     value=component.get('sequence', ''),
@@ -1995,6 +2592,7 @@ with tab2:
                     disabled=designer_is_running,
                     help="输入RNA核苷酸序列（A、U、G、C）。"
                 )
+                component['sequence'] = rna_sequence
             else:  # ligand
                 component['input_method'] = st.radio(
                     "小分子输入方式",
@@ -2049,23 +2647,25 @@ with tab2:
             st.rerun()
         
         # 添加组分按钮
-        if st.button("➕ 添加新组分", disabled=designer_is_running, help="添加新的蛋白质、DNA/RNA或小分子组分"):
+        def add_new_designer_component():
+            """添加新的设计组分并智能设置MSA默认值"""
+            smart_msa_default = get_smart_msa_default(st.session_state.designer_components)
             st.session_state.designer_components.append({
                 'id': str(uuid.uuid4()),
                 'type': 'protein',
                 'sequence': '',
-                'num_copies': 1
+                'num_copies': 1,
+                'use_msa': smart_msa_default
             })
+        
+        if st.button("➕ 添加新组分", disabled=designer_is_running, help="添加新的蛋白质、DNA/RNA或小分子组分"):
+            add_new_designer_component()
             st.rerun()
         
-        # 设计目标
-        st.subheader("设计目标", anchor=False)
-        
-        # 分别检查生物大分子和小分子目标
+        # 后台计算目标链ID和结合肽链ID（不显示给用户）
         target_bio_chains = [comp for comp in st.session_state.designer_components if comp['type'] in ['protein', 'dna', 'rna'] and comp.get('sequence', '').strip()]
         target_ligand_chains = [comp for comp in st.session_state.designer_components if comp['type'] == 'ligand' and comp.get('sequence', '').strip()]
         
-        # 自动计算目标链ID和结合肽链ID
         if target_bio_chains or target_ligand_chains:
             # 计算总链数以确定结合肽的链ID
             total_chains = 0
@@ -2076,58 +2676,13 @@ with tab2:
             # 结合肽链ID自动为下一个可用链ID
             binder_chain_id = string.ascii_uppercase[total_chains] if total_chains < 26 else f"Z{total_chains-25}"
             target_chain_id = 'A'  # 默认目标为第一个链
-            
-            # 显示设计模式和目标类型
-            if target_bio_chains and target_ligand_chains:
-                # 混合模式：既有生物大分子又有小分子
-                bio_types = []
-                for comp in target_bio_chains:
-                    comp_type_name = {"protein": "蛋白质", "dna": "DNA", "rna": "RNA"}[comp['type']]
-                    copies = comp.get('num_copies', 1)
-                    if copies > 1:
-                        bio_types.append(f"{comp_type_name}({copies}聚体)")
-                    else:
-                        bio_types.append(comp_type_name)
-                
-                ligand_count = sum(comp.get('num_copies', 1) for comp in target_ligand_chains)
-                ligand_desc = f"{ligand_count}个小分子" if ligand_count > 1 else "小分子"
-                
-                bio_desc = "、".join(bio_types)
-                target_desc = f"{bio_desc} 和 {ligand_desc}"
-                st.info(f"💡 **混合设计模式**: 针对 **{target_desc}** 复合物设计结合肽，将作为链 **{binder_chain_id}** 形成复合物。", icon="🔗")
-                
-            elif target_bio_chains:
-                # 正向设计：给定生物大分子，设计结合肽
-                target_types = []
-                for comp in target_bio_chains:
-                    comp_type_name = {"protein": "蛋白质", "dna": "DNA", "rna": "RNA"}[comp['type']]
-                    copies = comp.get('num_copies', 1)
-                    if copies > 1:
-                        target_types.append(f"{comp_type_name}({copies}聚体)")
-                    else:
-                        target_types.append(comp_type_name)
-                
-                target_desc = "、".join(target_types)
-                st.info(f"💡 **正向设计模式**: 针对 **{target_desc}** 设计结合肽，将作为链 **{binder_chain_id}** 形成复合物。", icon="🧬")
-                
-            else:
-                # 反向设计：给定小分子，设计结合蛋白
-                ligand_count = sum(comp.get('num_copies', 1) for comp in target_ligand_chains)
-                ligand_desc = f"{ligand_count}个小分子" if ligand_count > 1 else "小分子"
-                st.info(f"💡 **反向设计模式**: 针对 **{ligand_desc}** 设计结合蛋白质，将作为链 **{binder_chain_id}** 形成复合物。", icon="�")
         else:
             target_chain_id = 'A'
             binder_chain_id = 'B'
-            # 只有当用户确实有组分但没有目标组分时才显示警告
-            has_any_components = any(comp.get('sequence', '').strip() for comp in st.session_state.designer_components)
-            if has_any_components:
-                st.warning("请至少添加一个蛋白质、DNA、RNA或小分子组分作为设计目标。", icon="⚠️")
-            else:
-                st.info("💡 请添加目标复合物组分以开始分子设计。支持正向设计（给定蛋白质设计结合肽）和反向设计（给定小分子设计结合蛋白）。", icon="ℹ️")
         
         # 设计类型选择
         st.subheader("设计参数", anchor=False)
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         
         with col1:
             design_type = st.selectbox(
@@ -2148,6 +2703,50 @@ with tab2:
                 help="设计的结合肽的氨基酸残基数量。",
                 disabled=designer_is_running
             )
+        
+        with col3:
+            # 使用空字符串占位以保持对齐
+            st.write("")  # 这会创建与其他列标签相同的垂直空间
+            cyclic_binder = st.checkbox(
+                "环状结合肽",
+                value=False,
+                help="勾选此项将设计的结合肽设计为环状肽，具有闭合的环状结构。",
+                disabled=designer_is_running
+            )
+        
+        # 初始序列设置
+        st.subheader("🧬 初始序列设置", anchor=False)
+        use_initial_sequence = st.checkbox(
+            "使用初始序列作为演化起点",
+            value=False,
+            help="启用后可以提供一个初始序列作为演化算法的起点，而不是完全随机生成。",
+            disabled=designer_is_running
+        )
+        
+        initial_sequence = None
+        if use_initial_sequence:
+            initial_sequence = st.text_input(
+                "初始序列",
+                value="",
+                placeholder="例如: MVSKGEELFTGVVPILVELD...",
+                help=f"输入初始氨基酸序列。长度应该等于结合肽长度({binder_length})。如果长度不匹配，系统会自动调整。",
+                disabled=designer_is_running
+            )
+            
+            if initial_sequence:
+                seq_len = len(initial_sequence)
+                if seq_len != binder_length:
+                    if seq_len < binder_length:
+                        st.warning(f"⚠️ 初始序列长度({seq_len})小于目标长度({binder_length})，将随机补全缺失部分。")
+                    else:
+                        st.warning(f"⚠️ 初始序列长度({seq_len})大于目标长度({binder_length})，将截取前{binder_length}个氨基酸。")
+                else:
+                    st.success(f"✅ 初始序列长度({seq_len})与目标长度匹配。")
+                
+                # 显示序列预览
+                st.code(initial_sequence, language="text")
+            else:
+                st.info("💡 请输入一个有效的氨基酸序列作为演化起点。")
         
         # 演化算法参数
         st.subheader("演化算法参数", anchor=False)
@@ -2387,6 +2986,23 @@ with tab2:
             designer_is_valid = False
             validation_message = f"糖基化位点必须在 1 到 {binder_length} 范围内。"
     
+    # 添加初始序列验证
+    if use_initial_sequence:
+        if not initial_sequence or not initial_sequence.strip():
+            designer_is_valid = False
+            validation_message = "启用初始序列时必须提供有效的氨基酸序列。"
+        else:
+            # 验证序列是否只包含标准氨基酸
+            valid_amino_acids = set("ACDEFGHIKLMNPQRSTVWY")
+            invalid_chars = set(initial_sequence.upper()) - valid_amino_acids
+            if invalid_chars:
+                designer_is_valid = False
+                validation_message = f"初始序列包含无效字符: {', '.join(invalid_chars)}。请只使用标准的20种氨基酸字母。"
+    
+    # 添加MSA验证 - 检查是否有蛋白质组分启用了MSA
+    protein_components_with_msa = [comp for comp in st.session_state.designer_components 
+                                  if comp['type'] == 'protein' and comp.get('sequence', '').strip() and comp.get('use_msa', True)]
+    
     # 提交设计任务
     if st.button("🚀 开始分子设计", type="primary", disabled=(not designer_is_valid or designer_is_running), use_container_width=True):
         st.session_state.designer_task_id = None
@@ -2395,8 +3011,11 @@ with tab2:
         
         with st.spinner("⏳ 正在启动设计任务，请稍候..."):
             try:
-                # 创建复合物模板 YAML
-                template_yaml = create_designer_complex_yaml(st.session_state.designer_components)
+                # 检查是否有任何蛋白质组分启用了MSA
+                any_msa_enabled = any(comp.get('use_msa', True) for comp in st.session_state.designer_components if comp['type'] == 'protein')
+                
+                # 创建复合物模板 YAML - 传递MSA参数
+                template_yaml = create_designer_complex_yaml(st.session_state.designer_components, use_msa=any_msa_enabled)
                 
                 # 提交设计任务
                 result = submit_designer_job(
@@ -2416,7 +3035,14 @@ with tab2:
                     max_stagnation=max_stagnation,
                     initial_temperature=initial_temperature,
                     min_temperature=min_temperature,
-                    enable_enhanced=enable_enhanced
+                    enable_enhanced=enable_enhanced,
+                    # 新增初始序列参数
+                    use_initial_sequence=use_initial_sequence,
+                    initial_sequence=initial_sequence if use_initial_sequence else None,
+                    # 环状结合肽参数
+                    cyclic_binder=cyclic_binder,
+                    # 传递是否有MSA启用的信息（用于日志记录）
+                    use_msa=any_msa_enabled
                 )
                 
                 if result['success']:
@@ -2995,8 +3621,19 @@ with tab2:
     if st.session_state.designer_error:
         st.error("ℹ️ 设计任务执行失败，详细信息如下：")
         st.json(st.session_state.designer_error)
-        if st.button("🔄 重置设计器", type="secondary"):
-            for key in ['designer_task_id', 'designer_results', 'designer_error', 'designer_config']:
-                if key in st.session_state:
-                    del st.session_state[key]
-            st.rerun()
+        
+        col_reset = st.columns(2)
+        with col_reset[0]:
+            if st.button("🔄 重置设计器", type="secondary", use_container_width=True):
+                for key in ['designer_task_id', 'designer_results', 'designer_error', 'designer_config', 'designer_components']:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                st.rerun()
+        
+        with col_reset[1]:
+            if st.button("🔧 保留配置重新设计", type="primary", use_container_width=True):
+                # 只清除任务状态，保留组分配置和设计参数
+                for key in ['designer_task_id', 'designer_results', 'designer_error']:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                st.rerun()

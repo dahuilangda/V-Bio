@@ -1,5 +1,9 @@
 import os
 import logging
+import glob
+import time
+import hashlib
+from datetime import datetime
 from functools import wraps
 from flask import Flask, request, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
@@ -17,6 +21,14 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = config.RESULTS_BASE_DIR
+
+# MSA 缓存配置
+MSA_CACHE_CONFIG = {
+    'cache_dir': '/tmp/boltz_msa_cache',
+    'max_age_days': 7,  # 缓存文件最大保存天数
+    'max_size_gb': 5,   # 缓存目录最大大小（GB）
+    'enable_cache': True
+}
 
 try:
     os.makedirs(config.RESULTS_BASE_DIR, exist_ok=True)
@@ -313,6 +325,219 @@ def move_task(task_id):
     except Exception as e:
         logger.exception(f"Failed to move task {task_id}: {e}")
         return jsonify({'error': 'Failed to move task.', 'details': str(e)}), 500
+
+
+# --- MSA 缓存管理 API ---
+
+def get_msa_cache_stats():
+    """获取MSA缓存统计信息"""
+    cache_dir = MSA_CACHE_CONFIG['cache_dir']
+    if not os.path.exists(cache_dir):
+        return {
+            'total_files': 0,
+            'total_size_mb': 0,
+            'oldest_file': None,
+            'newest_file': None
+        }
+    
+    msa_files = glob.glob(os.path.join(cache_dir, "msa_*.a3m"))
+    
+    if not msa_files:
+        return {
+            'total_files': 0,
+            'total_size_mb': 0,
+            'oldest_file': None,
+            'newest_file': None
+        }
+    
+    total_size = sum(os.path.getsize(f) for f in msa_files)
+    file_times = [(f, os.path.getmtime(f)) for f in msa_files]
+    file_times.sort(key=lambda x: x[1])
+    
+    oldest_file = datetime.fromtimestamp(file_times[0][1])
+    newest_file = datetime.fromtimestamp(file_times[-1][1])
+    
+    return {
+        'total_files': len(msa_files),
+        'total_size_mb': round(total_size / (1024 * 1024), 2),
+        'oldest_file': oldest_file.strftime('%Y-%m-%d %H:%M:%S'),
+        'newest_file': newest_file.strftime('%Y-%m-%d %H:%M:%S')
+    }
+
+def cleanup_expired_msa_cache():
+    """清理过期的MSA缓存文件"""
+    cache_dir = MSA_CACHE_CONFIG['cache_dir']
+    if not os.path.exists(cache_dir):
+        return {'removed_files': 0, 'freed_space_mb': 0}
+    
+    max_age_seconds = MSA_CACHE_CONFIG['max_age_days'] * 24 * 3600
+    current_time = time.time()
+    
+    msa_files = glob.glob(os.path.join(cache_dir, "msa_*.a3m"))
+    removed_files = 0
+    freed_space = 0
+    
+    for file_path in msa_files:
+        file_age = current_time - os.path.getmtime(file_path)
+        if file_age > max_age_seconds:
+            file_size = os.path.getsize(file_path)
+            try:
+                os.remove(file_path)
+                removed_files += 1
+                freed_space += file_size
+                logger.info(f"清理过期MSA缓存文件: {os.path.basename(file_path)}")
+            except Exception as e:
+                logger.error(f"清理缓存文件失败 {file_path}: {e}")
+    
+    return {
+        'removed_files': removed_files,
+        'freed_space_mb': round(freed_space / (1024 * 1024), 2)
+    }
+
+def cleanup_oversized_msa_cache():
+    """清理超出大小限制的MSA缓存文件（按访问时间删除最旧的）"""
+    cache_dir = MSA_CACHE_CONFIG['cache_dir']
+    if not os.path.exists(cache_dir):
+        return {'removed_files': 0, 'freed_space_mb': 0}
+    
+    max_size_bytes = MSA_CACHE_CONFIG['max_size_gb'] * 1024 * 1024 * 1024
+    msa_files = glob.glob(os.path.join(cache_dir, "msa_*.a3m"))
+    
+    if not msa_files:
+        return {'removed_files': 0, 'freed_space_mb': 0}
+    
+    # 计算当前总大小
+    file_info = [(f, os.path.getsize(f), os.path.getatime(f)) for f in msa_files]
+    current_size = sum(info[1] for info in file_info)
+    
+    if current_size <= max_size_bytes:
+        return {'removed_files': 0, 'freed_space_mb': 0}
+    
+    # 按访问时间排序（最旧的在前）
+    file_info.sort(key=lambda x: x[2])
+    
+    removed_files = 0
+    freed_space = 0
+    
+    for file_path, file_size, _ in file_info:
+        if current_size <= max_size_bytes:
+            break
+        
+        try:
+            os.remove(file_path)
+            removed_files += 1
+            freed_space += file_size
+            current_size -= file_size
+            logger.info(f"清理超量MSA缓存文件: {os.path.basename(file_path)}")
+        except Exception as e:
+            logger.error(f"清理缓存文件失败 {file_path}: {e}")
+    
+    return {
+        'removed_files': removed_files,
+        'freed_space_mb': round(freed_space / (1024 * 1024), 2)
+    }
+
+@app.route('/api/msa/cache/stats', methods=['GET'])
+@require_api_token
+def get_msa_cache_stats_api():
+    """获取MSA缓存统计信息API"""
+    try:
+        stats = get_msa_cache_stats()
+        return jsonify({
+            'success': True,
+            'data': stats
+        }), 200
+    except Exception as e:
+        logger.exception(f"获取MSA缓存统计失败: {e}")
+        return jsonify({
+            'error': 'Failed to get MSA cache statistics',
+            'details': str(e)
+        }), 500
+
+@app.route('/api/msa/cache/cleanup', methods=['POST'])
+@require_api_token
+def cleanup_msa_cache_api():
+    """清理MSA缓存API"""
+    try:
+        # 获取清理前的统计
+        stats_before = get_msa_cache_stats()
+        
+        # 清理过期文件
+        expired_result = cleanup_expired_msa_cache()
+        
+        # 清理超量文件
+        oversized_result = cleanup_oversized_msa_cache()
+        
+        # 获取清理后的统计
+        stats_after = get_msa_cache_stats()
+        
+        result = {
+            'before': stats_before,
+            'after': stats_after,
+            'expired_cleanup': expired_result,
+            'oversized_cleanup': oversized_result,
+            'total_removed': expired_result['removed_files'] + oversized_result['removed_files'],
+            'total_freed_mb': expired_result['freed_space_mb'] + oversized_result['freed_space_mb']
+        }
+        
+        logger.info(f"MSA缓存清理完成: 删除 {result['total_removed']} 个文件，释放 {result['total_freed_mb']} MB空间")
+        
+        return jsonify({
+            'success': True,
+            'data': result
+        }), 200
+        
+    except Exception as e:
+        logger.exception(f"MSA缓存清理失败: {e}")
+        return jsonify({
+            'error': 'Failed to cleanup MSA cache',
+            'details': str(e)
+        }), 500
+
+@app.route('/api/msa/cache/clear', methods=['POST'])
+@require_api_token
+def clear_all_msa_cache_api():
+    """清空所有MSA缓存API"""
+    try:
+        cache_dir = MSA_CACHE_CONFIG['cache_dir']
+        if not os.path.exists(cache_dir):
+            return jsonify({
+                'success': True,
+                'data': {'removed_files': 0, 'freed_space_mb': 0}
+            }), 200
+        
+        msa_files = glob.glob(os.path.join(cache_dir, "msa_*.a3m"))
+        removed_files = 0
+        freed_space = 0
+        
+        for file_path in msa_files:
+            try:
+                file_size = os.path.getsize(file_path)
+                os.remove(file_path)
+                removed_files += 1
+                freed_space += file_size
+                logger.info(f"清空MSA缓存文件: {os.path.basename(file_path)}")
+            except Exception as e:
+                logger.error(f"清空缓存文件失败 {file_path}: {e}")
+        
+        result = {
+            'removed_files': removed_files,
+            'freed_space_mb': round(freed_space / (1024 * 1024), 2)
+        }
+        
+        logger.info(f"MSA缓存清空完成: 删除 {result['removed_files']} 个文件，释放 {result['freed_space_mb']} MB空间")
+        
+        return jsonify({
+            'success': True,
+            'data': result
+        }), 200
+        
+    except Exception as e:
+        logger.exception(f"MSA缓存清空失败: {e}")
+        return jsonify({
+            'error': 'Failed to clear MSA cache',
+            'details': str(e)
+        }), 500
 
 
 if __name__ == '__main__':
