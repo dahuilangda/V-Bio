@@ -1936,15 +1936,41 @@ with tab1:
                 method_options = ["smiles", "ccd", "ketcher"]
                 current_method_index = method_options.index(component.get('input_method', 'smiles'))
                 
-                st.session_state.components[i]['input_method'] = st.radio(
+                # 保存旧输入方式用于变化检测
+                old_input_method = component.get('input_method', 'smiles')
+                
+                new_input_method = st.radio(
                     "小分子输入方式", method_options, key=f"ligand_type_{component['id']}",
                     index=current_method_index, disabled=is_running, horizontal=True,
                     help="选择通过SMILES字符串、PDB CCD代码或分子编辑器输入小分子。"
                 )
                 
+                # 检测输入方式是否发生变化
+                input_method_changed = new_input_method != old_input_method
+                
+                # 更新输入方式
+                st.session_state.components[i]['input_method'] = new_input_method
+                
+                # 如果输入方式发生变化，清除序列内容并触发刷新
+                if input_method_changed:
+                    # 清除序列内容（不同输入方式的格式不同）
+                    st.session_state.components[i]['sequence'] = ''
+                    
+                    # 显示输入方式变化的提示信息
+                    method_display_names = {
+                        "smiles": "SMILES 字符串",
+                        "ccd": "PDB CCD 代码", 
+                        "ketcher": "分子编辑器"
+                    }
+                    st.toast(f"输入方式已更新为 {method_display_names.get(new_input_method, new_input_method)}", icon="🔄")
+                    
+                    # 立即触发刷新以更新界面
+                    st.rerun()
+                
                 num_copies = component.get('num_copies', 1)
                 
-                if st.session_state.components[i]['input_method'] == 'smiles':
+                # 直接使用radio返回的值来显示对应的输入控件
+                if new_input_method == 'smiles':
                     st.session_state.components[i]['sequence'] = st.text_input(
                         f"SMILES 字符串 ({'单分子' if num_copies == 1 else f'{num_copies}个分子'})",
                         value=component.get('sequence', ''),
@@ -1954,7 +1980,7 @@ with tab1:
                         help="输入SMILES（简化分子线性输入系统）字符串来描述分子结构。"
                     )
                 
-                elif st.session_state.components[i]['input_method'] == 'ccd':
+                elif new_input_method == 'ccd':
                     st.session_state.components[i]['sequence'] = st.text_input(
                         f"CCD 代码 ({'单分子' if num_copies == 1 else f'{num_copies}个分子'})",
                         value=component.get('sequence', ''),
@@ -2188,21 +2214,16 @@ with tab1:
                 
                 st.markdown("**MSA 使用概览**")
                 if strategy == "none":
-                    st.info(f"ℹ️ 所有蛋白质组分都跳过MSA生成")
-                    st.caption("⚡ 这将显著加快预测速度，但可能影响精度")
+                    st.info(f"跳过所有 MSA 生成")
                 elif strategy == "cached":
-                    st.success(f"✅ 全部 {total_proteins} 个蛋白质组分使用缓存MSA")
-                    st.caption("🚀 使用预缓存的MSA将显著加快预测速度")
+                    st.success(f"使用已缓存的 MSA")
                 elif strategy == "auto":
-                    st.info(f"🔄 全部 {total_proteins} 个蛋白质组分自动生成MSA")
-                    st.caption("🧬 将为每个蛋白质查找同源序列并生成MSA")
+                    st.info(f"自动生成全部 MSA")
                 elif strategy == "mixed":
                     disabled_count = total_proteins - enabled_count
-                    st.warning(f"� 混合MSA策略：{cached_count} 个缓存，{enabled_count - cached_count} 个自动生成，{disabled_count} 个跳过")
-                    st.caption("💡 每个蛋白质组分将根据其设置独立处理MSA")
+                    st.warning(f"混合MSA策略：{cached_count} 个缓存，{enabled_count - cached_count} 个自动生成，{disabled_count} 个跳过")
             else:
                 st.info("👆 添加蛋白质组分后可配置MSA选项")
-                st.caption("💡 智能MSA策略：第一个蛋白质有缓存时，后续组分才默认启用MSA")
         
         with col_global_right:
             # MSA缓存管理（与分子设计相同的逻辑）
@@ -2616,7 +2637,10 @@ with tab2:
                 current_type = component.get('type', 'protein')
                 current_type_index = comp_type_options.index(current_type) if current_type in comp_type_options else 0
                 
-                component['type'] = st.selectbox(
+                # 保存旧类型用于变化检测
+                old_type = current_type
+                
+                new_type = st.selectbox(
                     "组分类型",
                     options=comp_type_options,
                     format_func=lambda x: {
@@ -2630,6 +2654,43 @@ with tab2:
                     disabled=designer_is_running,
                     help="选择此组分的分子类型：蛋白质、DNA、RNA或小分子配体。"
                 )
+                
+                # 检测类型是否发生变化
+                type_changed = new_type != old_type
+                
+                # 更新组分类型
+                component['type'] = new_type
+                
+                # 如果类型发生变化，清除相关设置并触发刷新
+                if type_changed:
+                    # 清除序列内容（不同类型的序列格式不同）
+                    component['sequence'] = ''
+                    
+                    # 清除类型特定的设置
+                    if 'use_msa' in component:
+                        del component['use_msa']
+                    if 'cyclic' in component:
+                        del component['cyclic']
+                    if 'input_method' in component:
+                        del component['input_method']
+                    
+                    # 根据新类型设置默认值
+                    if new_type == 'protein':
+                        component['use_msa'] = get_smart_msa_default(st.session_state.designer_components)
+                    elif new_type == 'ligand':
+                        component['input_method'] = 'smiles'
+                    
+                    # 显示类型变化的提示信息
+                    type_display_names = {
+                        "protein": "🧬 蛋白质/肽链",
+                        "dna": "🧬 DNA",
+                        "rna": "🧬 RNA", 
+                        "ligand": "💊 辅酶/小分子"
+                    }
+                    st.toast(f"组分类型已更新为 {type_display_names.get(new_type, new_type)}", icon="🔄")
+                    
+                    # 立即触发刷新以更新界面
+                    st.rerun()
             
             # 拷贝数设置
             with cols_comp[1]:
@@ -2690,45 +2751,29 @@ with tab2:
                         else:  # 序列为空
                             component['use_msa'] = False
                     
-                    # 更激进的刷新策略：只要序列发生变化就刷新
                     # 这确保界面状态能及时更新
                     st.rerun()
                 
-                # 为分子设计中的蛋白质组分添加MSA选项（移除环肽选项，因为环肽是针对结合肽的）
-                # 使用最新的序列值（直接从组分获取最新更新的值）
-                protein_sequence = component.get('sequence', '').strip()
-                
-                # MSA选项和缓存状态
-                if protein_sequence:
-                    # 有序列时：MSA选项 + 缓存状态
-                    protein_opts_cols = st.columns([2, 1.5, 1.5])
-                    
-                    with protein_opts_cols[0]:
-                        msa_value = st.checkbox(
-                            "启用 MSA",
-                            value=component.get('use_msa', True),
-                            key=f"designer_msa_{component['id']}",
-                            help="为此蛋白质组分生成多序列比对以提高预测精度。取消勾选可以跳过MSA生成，节省时间。",
-                            disabled=designer_is_running
-                        )
-                        # 使用中间变量检测状态变化
-                        if msa_value != component.get('use_msa', True):
-                            component['use_msa'] = msa_value
-                            st.rerun()
-                    
-                    with protein_opts_cols[1]:
-                        # 显示此组分的缓存状态 - 基于最新序列值
-                        if has_cached_msa(protein_sequence):
-                            st.markdown("🟢&nbsp;**已缓存**", unsafe_allow_html=True)
+                # MSA选项 - 使用最新的序列值
+                designer_sequence = component.get('sequence', '').strip()
+                if designer_sequence:
+                    # 有序列时：只显示MSA选项
+                    msa_value = st.checkbox(
+                        "启用 MSA",
+                        value=component.get('use_msa', True),
+                        key=f"designer_msa_{component['id']}",
+                        help="为此蛋白质组分生成多序列比对以提高预测精度。取消勾选可以跳过MSA生成，节省时间。",
+                        disabled=designer_is_running
+                    )
+                    # 使用中间变量检测状态变化
+                    if msa_value != component.get('use_msa', True):
+                        component['use_msa'] = msa_value
+                        # 显示MSA状态变化的提示
+                        if msa_value:
+                            st.toast("✅ 已启用 MSA 生成", icon="🧬")
                         else:
-                            st.markdown("🟡&nbsp;**未缓存**", unsafe_allow_html=True)
-                    
-                    with protein_opts_cols[2]:
-                        # 显示缓存状态的详细信息 - 基于最新序列值
-                        if has_cached_msa(protein_sequence):
-                            st.markdown("⚡&nbsp;快速加载", unsafe_allow_html=True)
-                        else:
-                            st.markdown("🔄&nbsp;需要生成", unsafe_allow_html=True)
+                            st.toast("❌ 已禁用 MSA 生成", icon="⚡")
+                        st.rerun()
                 else:
                     # 序列为空时，默认启用MSA但不显示缓存状态
                     component['use_msa'] = component.get('use_msa', True)
@@ -2759,7 +2804,10 @@ with tab2:
                 )
                 component['sequence'] = rna_sequence
             else:  # ligand
-                component['input_method'] = st.radio(
+                # 保存旧输入方式用于变化检测
+                old_input_method = component.get('input_method', 'smiles')
+                
+                new_input_method = st.radio(
                     "小分子输入方式",
                     ["smiles", "ccd", "ketcher"],
                     key=f"designer_method_{component['id']}",
@@ -2768,7 +2816,30 @@ with tab2:
                     help="选择通过SMILES字符串、PDB CCD代码或分子编辑器输入小分子。"
                 )
                 
-                if component.get('input_method', 'smiles') == 'smiles':
+                # 检测输入方式是否发生变化
+                input_method_changed = new_input_method != old_input_method
+                
+                # 更新输入方式
+                component['input_method'] = new_input_method
+                
+                # 如果输入方式发生变化，清除序列内容并触发刷新
+                if input_method_changed:
+                    # 清除序列内容（不同输入方式的格式不同）
+                    component['sequence'] = ''
+                    
+                    # 显示输入方式变化的提示信息
+                    method_display_names = {
+                        "smiles": "SMILES 字符串",
+                        "ccd": "PDB CCD 代码", 
+                        "ketcher": "分子编辑器"
+                    }
+                    st.toast(f"输入方式已更新为 {method_display_names.get(new_input_method, new_input_method)}", icon="🔄")
+                    
+                    # 立即触发刷新以更新界面
+                    st.rerun()
+                
+                # 直接使用radio返回的值来显示对应的输入控件
+                if new_input_method == 'smiles':
                     component['sequence'] = st.text_input(
                         f"SMILES 字符串 ({'单分子' if num_copies == 1 else f'{num_copies}个分子'})",
                         value=component.get('sequence', ''),
@@ -2776,7 +2847,7 @@ with tab2:
                         key=f"designer_seq_{component['id']}",
                         disabled=designer_is_running
                     )
-                elif component.get('input_method', 'smiles') == 'ccd':
+                elif new_input_method == 'ccd':
                     component['sequence'] = st.text_input(
                         f"CCD 代码 ({'单分子' if num_copies == 1 else f'{num_copies}个分子'})",
                         value=component.get('sequence', ''),
@@ -3167,25 +3238,6 @@ with tab2:
     # 添加MSA验证 - 检查是否有蛋白质组分启用了MSA
     protein_components_with_msa = [comp for comp in st.session_state.designer_components 
                                   if comp['type'] == 'protein' and comp.get('sequence', '').strip() and comp.get('use_msa', True)]
-    
-    # MSA预生成提示
-    if protein_components_with_msa:
-        uncached_proteins = [comp for comp in protein_components_with_msa 
-                           if not has_cached_msa(comp.get('sequence', '').strip())]
-        
-        if uncached_proteins:
-            st.info(f"""
-💡 **MSA预生成提示**: 检测到 {len(uncached_proteins)} 个目标蛋白质需要生成MSA。
-            
-系统将在设计开始前为这些蛋白质预生成MSA缓存，避免并行设计时重复计算MSA：
-            
-{chr(10).join([f'• {comp.get("sequence", "")[:30]}{"..." if len(comp.get("sequence", "")) > 30 else ""} (组分 {i+1})' 
-              for i, comp in enumerate(uncached_proteins)])}
-            
-⏳ 这个过程可能需要几分钟，但会显著提升后续设计任务的效率。
-            """, icon="🧬")
-        else:
-            st.success(f"✅ 所有 {len(protein_components_with_msa)} 个目标蛋白质已有MSA缓存，设计将快速开始！", icon="⚡")
     
     # 提交设计任务
     if st.button("🚀 开始分子设计", type="primary", disabled=(not designer_is_valid or designer_is_running), use_container_width=True):
