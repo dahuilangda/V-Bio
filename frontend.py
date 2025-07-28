@@ -66,6 +66,628 @@ MSA_CACHE_CONFIG = {
     'enable_cache': True       # 是否启用缓存
 }
 
+# 氨基酸三字母到单字母的映射
+AMINO_ACID_MAPPING = {
+    'ALA': 'A', 'ARG': 'R', 'ASN': 'N', 'ASP': 'D', 'CYS': 'C',
+    'GLU': 'E', 'GLN': 'Q', 'GLY': 'G', 'HIS': 'H', 'ILE': 'I',
+    'LEU': 'L', 'LYS': 'K', 'MET': 'M', 'PHE': 'F', 'PRO': 'P',
+    'SER': 'S', 'THR': 'T', 'TRP': 'W', 'TYR': 'Y', 'VAL': 'V'
+}
+
+# 氨基酸特异性原子名
+AMINO_ACID_ATOMS = {
+    'A': ['N', 'CA', 'C', 'O', 'CB'],  # Alanine
+    'R': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD', 'NE', 'CZ', 'NH1', 'NH2'],  # Arginine
+    'N': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'OD1', 'ND2'],  # Asparagine
+    'D': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'OD1', 'OD2'],  # Aspartic acid
+    'C': ['N', 'CA', 'C', 'O', 'CB', 'SG'],  # Cysteine
+    'E': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD', 'OE1', 'OE2'],  # Glutamic acid
+    'Q': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD', 'OE1', 'NE2'],  # Glutamine
+    'G': ['N', 'CA', 'C', 'O'],  # Glycine
+    'H': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'ND1', 'CD2', 'CE1', 'NE2'],  # Histidine
+    'I': ['N', 'CA', 'C', 'O', 'CB', 'CG1', 'CG2', 'CD1'],  # Isoleucine
+    'L': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD1', 'CD2'],  # Leucine
+    'K': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD', 'CE', 'NZ'],  # Lysine
+    'M': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'SD', 'CE'],  # Methionine
+    'F': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ'],  # Phenylalanine
+    'P': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD'],  # Proline
+    'S': ['N', 'CA', 'C', 'O', 'CB', 'OG'],  # Serine
+    'T': ['N', 'CA', 'C', 'O', 'CB', 'OG1', 'CG2'],  # Threonine
+    'W': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD1', 'CD2', 'NE1', 'CE2', 'CE3', 'CZ2', 'CZ3', 'CH2'],  # Tryptophan
+    'Y': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ', 'OH'],  # Tyrosine
+    'V': ['N', 'CA', 'C', 'O', 'CB', 'CG1', 'CG2']  # Valine
+}
+
+# DNA核苷酸特异性原子名
+DNA_BASE_ATOMS = {
+    'A': ['N1', 'C2', 'N3', 'C4', 'C5', 'C6', 'N6', 'N7', 'C8', 'N9'],  # Adenine
+    'T': ['N1', 'C2', 'O2', 'N3', 'C4', 'O4', 'C5', 'C7', 'C6'],  # Thymine
+    'G': ['N1', 'C2', 'N2', 'N3', 'C4', 'C5', 'C6', 'O6', 'N7', 'C8', 'N9'],  # Guanine
+    'C': ['N1', 'C2', 'O2', 'N3', 'C4', 'N4', 'C5', 'C6']  # Cytosine
+}
+
+# RNA核苷酸特异性原子名
+RNA_BASE_ATOMS = {
+    'A': ['N1', 'C2', 'N3', 'C4', 'C5', 'C6', 'N6', 'N7', 'C8', 'N9'],  # Adenine
+    'U': ['N1', 'C2', 'O2', 'N3', 'C4', 'O4', 'C5', 'C6'],  # Uracil
+    'G': ['N1', 'C2', 'N2', 'N3', 'C4', 'C5', 'C6', 'O6', 'N7', 'C8', 'N9'],  # Guanine
+    'C': ['N1', 'C2', 'O2', 'N3', 'C4', 'N4', 'C5', 'C6']  # Cytosine
+}
+
+# 通用原子名（作为备选）
+COMMON_ATOMS = {
+    'protein': ['CA', 'CB', 'CG', 'CD', 'CE', 'CZ', 'N', 'C', 'O', 'OG', 'OH', 'SD', 'SG', 'NE', 'NH1', 'NH2', 'ND1', 'ND2', 'NE2'],
+    'dna': ['P', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "C1'", 'N1', 'N2', 'N3', 'N4', 'N6', 'N7', 'N9', 'O2', 'O4', 'O6'],
+    'rna': ['P', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "O2'", "C1'", 'N1', 'N2', 'N3', 'N4', 'N6', 'N7', 'N9', 'O2', 'O4', 'O6'],
+    'ligand': ['C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'N1', 'N2', 'N3', 'O1', 'O2', 'O3', 'S1', 'P1']
+}
+
+def get_available_chain_ids(components):
+    """
+    根据组分计算可用的链ID列表
+    返回: (all_chain_ids, chain_descriptions)
+    """
+    chain_ids = []
+    chain_descriptions = {}
+    chain_counter = 0
+    
+    for comp in components:
+        if comp.get('sequence', '').strip():
+            comp_type = comp.get('type', 'protein')
+            num_copies = comp.get('num_copies', 1)
+            
+            for copy_idx in range(num_copies):
+                if chain_counter < 26:
+                    chain_id = string.ascii_uppercase[chain_counter]
+                else:
+                    chain_id = f"Z{chain_counter-25}"
+                
+                chain_ids.append(chain_id)
+                
+                # 生成链描述
+                if comp_type == 'protein':
+                    type_icon = '🧬'
+                elif comp_type == 'dna':
+                    type_icon = '🔗'
+                elif comp_type == 'rna':
+                    type_icon = '📜'
+                elif comp_type == 'ligand':
+                    type_icon = '💊'
+                else:
+                    type_icon = '🔸'
+                
+                if num_copies > 1:
+                    chain_descriptions[chain_id] = f"{type_icon} 链 {chain_id} ({comp_type.upper()} 拷贝 {copy_idx+1}/{num_copies})"
+                else:
+                    chain_descriptions[chain_id] = f"{type_icon} 链 {chain_id} ({comp_type.upper()})"
+                
+                chain_counter += 1
+    
+    return chain_ids, chain_descriptions
+
+def get_residue_info(components, chain_id, residue_number):
+    """
+    根据链ID和残基编号获取残基信息
+    返回: (residue_name, residue_type, sequence_length, is_valid_residue)
+    """
+    # 找到对应的组分
+    chain_counter = 0
+    for comp in components:
+        if comp.get('sequence', '').strip():
+            num_copies = comp.get('num_copies', 1)
+            for copy_idx in range(num_copies):
+                current_chain = string.ascii_uppercase[chain_counter] if chain_counter < 26 else f"Z{chain_counter-25}"
+                
+                if current_chain == chain_id:
+                    comp_type = comp.get('type', 'protein')
+                    sequence = comp.get('sequence', '').strip()
+                    sequence_length = len(sequence)
+                    is_valid_residue = 1 <= residue_number <= sequence_length
+                    
+                    if comp_type == 'protein':
+                        if is_valid_residue:
+                            amino_acid = sequence[residue_number - 1].upper()
+                            # 查找三字母代码
+                            three_letter = None
+                            for three, one in AMINO_ACID_MAPPING.items():
+                                if one == amino_acid:
+                                    three_letter = three
+                                    break
+                            
+                            if three_letter:
+                                return f"{three_letter} ({amino_acid})", comp_type, sequence_length, True
+                            else:
+                                return f"残基 {amino_acid}", comp_type, sequence_length, True
+                        else:
+                            return f"残基 {residue_number} (超出序列范围)", comp_type, sequence_length, False
+                    
+                    elif comp_type in ['dna', 'rna']:
+                        if is_valid_residue:
+                            nucleotide = sequence[residue_number - 1].upper()
+                            return f"核苷酸 {nucleotide}", comp_type, sequence_length, True
+                        else:
+                            return f"核苷酸 {residue_number} (超出序列范围)", comp_type, sequence_length, False
+                    
+                    elif comp_type == 'ligand':
+                        # 对于小分子，残基编号通常为1
+                        if residue_number == 1:
+                            return f"小分子", comp_type, 1, True
+                        else:
+                            return f"小分子残基 {residue_number} (通常为1)", comp_type, 1, False
+                
+                chain_counter += 1
+    
+    return f"残基 {residue_number}", "unknown", 0, False
+
+def parse_smiles_atoms(smiles_string):
+    """
+    从SMILES字符串解析可能的原子类型
+    这是一个简化的SMILES解析器，用于提取原子类型
+    """
+    if not smiles_string or not smiles_string.strip():
+        return []
+    
+    import re
+    
+    # 提取所有原子符号（考虑常见的有机原子）
+    atom_pattern = r'[CNOSPF]|Br|Cl|[cnospf]'  # 大写为芳香性，小写为脂肪性
+    atoms = re.findall(atom_pattern, smiles_string)
+    
+    # 统计原子类型并生成可能的原子名
+    atom_counts = {}
+    for atom in atoms:
+        atom_upper = atom.upper()
+        atom_counts[atom_upper] = atom_counts.get(atom_upper, 0) + 1
+    
+    # 生成原子名列表
+    atom_names = []
+    for atom_type, count in atom_counts.items():
+        for i in range(1, min(count + 1, 10)):  # 限制最多显示9个同类原子
+            atom_names.append(f"{atom_type}{i}")
+    
+    # 添加一些常见的小分子原子名
+    common_ligand_atoms = ['C1', 'C2', 'C3', 'N1', 'N2', 'O1', 'O2', 'S1', 'P1']
+    for atom in common_ligand_atoms:
+        if atom not in atom_names:
+            atom_names.append(atom)
+    
+    return sorted(atom_names)
+
+def get_available_atoms(components, chain_id, residue_number, molecule_type=None):
+    """
+    根据具体的残基信息获取可用原子列表
+    """
+    atom_list = ['']  # 空选项表示整个残基
+    
+    if not components or not chain_id:
+        return atom_list + COMMON_ATOMS.get(molecule_type or 'protein', [])
+    
+    # 获取残基的详细信息
+    try:
+        residue_info, mol_type, seq_length, is_valid = get_residue_info(components, chain_id, residue_number)
+        
+        if not is_valid:
+            return atom_list + COMMON_ATOMS.get(mol_type, [])
+        
+        if mol_type == 'protein':
+            # 获取对应的组分和残基
+            chain_counter = 0
+            for comp in components:
+                if comp.get('sequence', '').strip():
+                    num_copies = comp.get('num_copies', 1)
+                    for copy_idx in range(num_copies):
+                        current_chain = string.ascii_uppercase[chain_counter] if chain_counter < 26 else f"Z{chain_counter-25}"
+                        
+                        if current_chain == chain_id:
+                            sequence = comp.get('sequence', '').strip()
+                            if 1 <= residue_number <= len(sequence):
+                                amino_acid = sequence[residue_number - 1].upper()
+                                # 返回该氨基酸特有的原子名
+                                specific_atoms = AMINO_ACID_ATOMS.get(amino_acid, [])
+                                if specific_atoms:
+                                    return atom_list + specific_atoms
+                                else:
+                                    return atom_list + COMMON_ATOMS['protein']
+                        
+                        chain_counter += 1
+        
+        elif mol_type in ['dna', 'rna']:
+            # 获取对应的核苷酸
+            chain_counter = 0
+            for comp in components:
+                if comp.get('sequence', '').strip():
+                    num_copies = comp.get('num_copies', 1)
+                    for copy_idx in range(num_copies):
+                        current_chain = string.ascii_uppercase[chain_counter] if chain_counter < 26 else f"Z{chain_counter-25}"
+                        
+                        if current_chain == chain_id:
+                            sequence = comp.get('sequence', '').strip()
+                            if 1 <= residue_number <= len(sequence):
+                                nucleotide = sequence[residue_number - 1].upper()
+                                # 添加骨架原子
+                                backbone_atoms = ['P', "O5'", "C5'", "C4'", "O4'", "C3'", "O3'", "C2'", "C1'"]
+                                if mol_type == 'rna':
+                                    backbone_atoms.append("O2'")
+                                
+                                # 添加碱基特异性原子
+                                base_atoms = []
+                                if mol_type == 'dna':
+                                    base_atoms = DNA_BASE_ATOMS.get(nucleotide, [])
+                                elif mol_type == 'rna':
+                                    base_atoms = RNA_BASE_ATOMS.get(nucleotide, [])
+                                
+                                return atom_list + backbone_atoms + base_atoms
+                        
+                        chain_counter += 1
+        
+        elif mol_type == 'ligand':
+            # 获取对应的小分子SMILES
+            chain_counter = 0
+            for comp in components:
+                if comp.get('sequence', '').strip():
+                    num_copies = comp.get('num_copies', 1)
+                    for copy_idx in range(num_copies):
+                        current_chain = string.ascii_uppercase[chain_counter] if chain_counter < 26 else f"Z{chain_counter-25}"
+                        
+                        if current_chain == chain_id:
+                            smiles = comp.get('sequence', '').strip()
+                            # 从SMILES解析原子名
+                            smiles_atoms = parse_smiles_atoms(smiles)
+                            if smiles_atoms:
+                                return atom_list + smiles_atoms
+                            else:
+                                return atom_list + COMMON_ATOMS['ligand']
+                        
+                        chain_counter += 1
+    
+    except Exception as e:
+        print(f"Error in get_available_atoms: {e}")
+    
+    # 默认返回通用原子名
+    return atom_list + COMMON_ATOMS.get(molecule_type or 'protein', [])
+
+# ========== 约束UI渲染函数 ==========
+
+def render_contact_constraint_ui(constraint, key_prefix, available_chains, chain_descriptions, is_running):
+    """渲染Contact约束的UI配置"""
+    st.markdown("**Contact约束配置** - 定义两个残基间的接触距离")
+    
+    # Token 1配置
+    st.markdown("**Token 1 (残基 1)**")
+    token1_cols = st.columns(2)
+    
+    with token1_cols[0]:
+        # 链ID选择下拉框
+        current_token1_chain = constraint.get('token1_chain', 'A')
+        if current_token1_chain not in available_chains and available_chains:
+            current_token1_chain = available_chains[0]
+        
+        if available_chains:
+            chain_index = available_chains.index(current_token1_chain) if current_token1_chain in available_chains else 0
+            token1_chain = st.selectbox(
+                "链 ID",
+                options=available_chains,
+                index=chain_index,
+                format_func=lambda x: chain_descriptions.get(x, f"链 {x}"),
+                key=f"{key_prefix}_token1_chain",
+                disabled=is_running,
+                help="选择第一个残基所在的链"
+            )
+            
+            # 检测链ID变化并触发更新
+            if token1_chain != current_token1_chain:
+                constraint['token1_chain'] = token1_chain
+                st.rerun()
+        else:
+            token1_chain = st.text_input(
+                "链 ID",
+                value=current_token1_chain,
+                key=f"{key_prefix}_token1_chain",
+                disabled=is_running,
+                help="请先添加组分序列"
+            )
+    
+    with token1_cols[1]:
+        current_token1_residue = constraint.get('token1_residue', 1)
+        token1_residue = st.number_input(
+            "残基编号",
+            min_value=1,
+            value=current_token1_residue,
+            key=f"{key_prefix}_token1_residue",
+            disabled=is_running,
+            help="残基编号 (从1开始)"
+        )
+        
+        # 检测残基编号变化并触发更新
+        if token1_residue != current_token1_residue:
+            constraint['token1_residue'] = token1_residue
+            st.rerun()
+        
+        # 显示残基信息和验证
+        if available_chains and token1_chain in available_chains:
+            residue_info, molecule_type, seq_length, is_valid = get_residue_info(st.session_state.components, token1_chain, token1_residue)
+            if is_valid:
+                st.caption(f"📍 {residue_info}")
+            else:
+                st.error(f"❌ {residue_info} (序列长度: {seq_length})")
+        else:
+            molecule_type = 'protein'
+    
+    # Token 2配置
+    st.markdown("**Token 2 (残基 2)**")
+    token2_cols = st.columns(2)
+    
+    with token2_cols[0]:
+        # 链ID选择下拉框
+        current_token2_chain = constraint.get('token2_chain', 'B')
+        if current_token2_chain not in available_chains and available_chains:
+            current_token2_chain = available_chains[1] if len(available_chains) > 1 else available_chains[0]
+        
+        if available_chains:
+            chain_index = available_chains.index(current_token2_chain) if current_token2_chain in available_chains else (1 if len(available_chains) > 1 else 0)
+            token2_chain = st.selectbox(
+                "链 ID",
+                options=available_chains,
+                index=chain_index,
+                format_func=lambda x: chain_descriptions.get(x, f"链 {x}"),
+                key=f"{key_prefix}_token2_chain",
+                disabled=is_running,
+                help="选择第二个残基所在的链"
+            )
+            
+            # 检测链ID变化并触发更新
+            if token2_chain != current_token2_chain:
+                constraint['token2_chain'] = token2_chain
+                st.rerun()
+        else:
+            token2_chain = st.text_input(
+                "链 ID",
+                value=current_token2_chain,
+                key=f"{key_prefix}_token2_chain",
+                disabled=is_running,
+                help="请先添加组分序列"
+            )
+    
+    with token2_cols[1]:
+        current_token2_residue = constraint.get('token2_residue', 1)
+        token2_residue = st.number_input(
+            "残基编号",
+            min_value=1,
+            value=current_token2_residue,
+            key=f"{key_prefix}_token2_residue",
+            disabled=is_running,
+            help="残基编号 (从1开始)"
+        )
+        
+        # 检测残基编号变化并触发更新
+        if token2_residue != current_token2_residue:
+            constraint['token2_residue'] = token2_residue
+            st.rerun()
+        
+        # 显示残基信息和验证
+        if available_chains and token2_chain in available_chains:
+            residue_info2, molecule_type2, seq_length2, is_valid2 = get_residue_info(st.session_state.components, token2_chain, token2_residue)
+            if is_valid2:
+                st.caption(f"📍 {residue_info2}")
+            else:
+                st.error(f"❌ {residue_info2} (序列长度: {seq_length2})")
+        else:
+            molecule_type2 = 'protein'
+            is_valid2 = True
+    
+    # 距离和强制执行设置
+    distance_cols = st.columns(2)
+    with distance_cols[0]:
+        current_max_distance = constraint.get('max_distance', 5.0)
+        max_distance = st.number_input(
+            "最大距离 (Å)",
+            min_value=1.0,
+            max_value=50.0,
+            value=current_max_distance,
+            step=0.5,
+            key=f"{key_prefix}_max_distance",
+            disabled=is_running,
+            help="两个残基之间的最大允许距离（埃）"
+        )
+        
+        # 检测距离变化并触发更新
+        if max_distance != current_max_distance:
+            constraint['max_distance'] = max_distance
+            st.rerun()
+    
+    with distance_cols[1]:
+        current_force_constraint = constraint.get('force', False)
+        force_constraint = st.checkbox(
+            "强制执行约束",
+            value=current_force_constraint,
+            key=f"{key_prefix}_force",
+            disabled=is_running,
+            help="是否使用势能函数强制执行此约束"
+        )
+        
+        # 检测强制约束变化并触发更新
+        if force_constraint != current_force_constraint:
+            constraint['force'] = force_constraint
+            st.rerun()
+    
+    # 更新约束数据
+    constraint.update({
+        'token1_chain': token1_chain,
+        'token1_residue': token1_residue,
+        'token2_chain': token2_chain,
+        'token2_residue': token2_residue,
+        'max_distance': max_distance,
+        'force': force_constraint
+    })
+
+def render_bond_constraint_ui(constraint, key_prefix, available_chains, chain_descriptions, is_running):
+    """渲染Bond约束的UI配置"""
+    st.markdown("**Bond约束配置** - 定义两个原子间的共价键")
+    
+    # Atom 1配置
+    st.markdown("**Atom 1 (原子 1)**")
+    atom1_cols = st.columns(3)
+    
+    with atom1_cols[0]:
+        # 链ID选择
+        current_atom1_chain = constraint.get('atom1_chain', 'A')
+        if current_atom1_chain not in available_chains and available_chains:
+            current_atom1_chain = available_chains[0]
+        
+        if available_chains:
+            chain_index = available_chains.index(current_atom1_chain) if current_atom1_chain in available_chains else 0
+            atom1_chain = st.selectbox(
+                "链 ID",
+                options=available_chains,
+                index=chain_index,
+                format_func=lambda x: chain_descriptions.get(x, f"链 {x}"),
+                key=f"{key_prefix}_atom1_chain",
+                disabled=is_running,
+                help="选择第一个原子所在的链"
+            )
+            
+            if atom1_chain != current_atom1_chain:
+                constraint['atom1_chain'] = atom1_chain
+                st.rerun()
+        else:
+            atom1_chain = st.text_input(
+                "链 ID",
+                value=current_atom1_chain,
+                key=f"{key_prefix}_atom1_chain",
+                disabled=is_running
+            )
+    
+    with atom1_cols[1]:
+        current_atom1_residue = constraint.get('atom1_residue', 1)
+        atom1_residue = st.number_input(
+            "残基编号",
+            min_value=1,
+            value=current_atom1_residue,
+            key=f"{key_prefix}_atom1_residue",
+            disabled=is_running,
+            help="残基编号 (从1开始)"
+        )
+        
+        if atom1_residue != current_atom1_residue:
+            constraint['atom1_residue'] = atom1_residue
+            st.rerun()
+    
+    with atom1_cols[2]:
+        # 原子名选择（Bond约束必须指定原子）
+        if available_chains and atom1_chain in available_chains:
+            residue_info, molecule_type, seq_length, is_valid = get_residue_info(st.session_state.components, atom1_chain, atom1_residue)
+            available_atoms = get_available_atoms(st.session_state.components, atom1_chain, atom1_residue, molecule_type)
+        else:
+            available_atoms = get_available_atoms(None, None, None, 'protein')
+            molecule_type = 'protein'
+        
+        # 移除空选项，Bond必须指定原子
+        available_atoms = [a for a in available_atoms if a.strip()]
+        
+        current_atom1_atom = constraint.get('atom1_atom', 'CA')
+        if current_atom1_atom not in available_atoms and available_atoms:
+            current_atom1_atom = available_atoms[0]
+        
+        atom_index = available_atoms.index(current_atom1_atom) if current_atom1_atom in available_atoms else 0
+        atom1_atom = st.selectbox(
+            "原子名 (必选)",
+            options=available_atoms,
+            index=atom_index,
+            key=f"{key_prefix}_atom1_atom",
+            disabled=is_running,
+            help="必须选择具体的原子名称"
+        )
+        
+        if atom1_atom != current_atom1_atom:
+            constraint['atom1_atom'] = atom1_atom
+            st.rerun()
+    
+    # Atom 2配置
+    st.markdown("**Atom 2 (原子 2)**")
+    atom2_cols = st.columns(3)
+    
+    with atom2_cols[0]:
+        # 链ID选择
+        current_atom2_chain = constraint.get('atom2_chain', 'B')
+        if current_atom2_chain not in available_chains and available_chains:
+            current_atom2_chain = available_chains[1] if len(available_chains) > 1 else available_chains[0]
+        
+        if available_chains:
+            chain_index = available_chains.index(current_atom2_chain) if current_atom2_chain in available_chains else (1 if len(available_chains) > 1 else 0)
+            atom2_chain = st.selectbox(
+                "链 ID",
+                options=available_chains,
+                index=chain_index,
+                format_func=lambda x: chain_descriptions.get(x, f"链 {x}"),
+                key=f"{key_prefix}_atom2_chain",
+                disabled=is_running,
+                help="选择第二个原子所在的链"
+            )
+            
+            if atom2_chain != current_atom2_chain:
+                constraint['atom2_chain'] = atom2_chain
+                st.rerun()
+        else:
+            atom2_chain = st.text_input(
+                "链 ID",
+                value=current_atom2_chain,
+                key=f"{key_prefix}_atom2_chain",
+                disabled=is_running
+            )
+    
+    with atom2_cols[1]:
+        current_atom2_residue = constraint.get('atom2_residue', 1)
+        atom2_residue = st.number_input(
+            "残基编号",
+            min_value=1,
+            value=current_atom2_residue,
+            key=f"{key_prefix}_atom2_residue",
+            disabled=is_running,
+            help="残基编号 (从1开始)"
+        )
+        
+        if atom2_residue != current_atom2_residue:
+            constraint['atom2_residue'] = atom2_residue
+            st.rerun()
+    
+    with atom2_cols[2]:
+        # 原子名选择（Bond约束必须指定原子）
+        if available_chains and atom2_chain in available_chains:
+            residue_info2, molecule_type2, seq_length2, is_valid2 = get_residue_info(st.session_state.components, atom2_chain, atom2_residue)
+            available_atoms2 = get_available_atoms(st.session_state.components, atom2_chain, atom2_residue, molecule_type2)
+        else:
+            available_atoms2 = get_available_atoms(None, None, None, 'protein')
+        
+        # 移除空选项
+        available_atoms2 = [a for a in available_atoms2 if a.strip()]
+        
+        current_atom2_atom = constraint.get('atom2_atom', 'CA')
+        if current_atom2_atom not in available_atoms2 and available_atoms2:
+            current_atom2_atom = available_atoms2[0]
+        
+        atom_index2 = available_atoms2.index(current_atom2_atom) if current_atom2_atom in available_atoms2 else 0
+        atom2_atom = st.selectbox(
+            "原子名 (必选)",
+            options=available_atoms2,
+            index=atom_index2,
+            key=f"{key_prefix}_atom2_atom",
+            disabled=is_running,
+            help="必须选择具体的原子名称"
+        )
+        
+        if atom2_atom != current_atom2_atom:
+            constraint['atom2_atom'] = atom2_atom
+            st.rerun()
+    
+    # 更新约束数据
+    constraint.update({
+        'atom1_chain': atom1_chain,
+        'atom1_residue': atom1_residue,
+        'atom1_atom': atom1_atom,
+        'atom2_chain': atom2_chain,
+        'atom2_residue': atom2_residue,
+        'atom2_atom': atom2_atom
+    })
 
 def read_cif_from_string(cif_content: str) -> Structure:
     """Parses a CIF string into a BioPython Structure object."""
@@ -513,6 +1135,56 @@ def generate_yaml_from_state():
     
     if st.session_state.properties.get('affinity') and st.session_state.properties.get('binder'):
         final_yaml_dict['properties'] = [{'affinity': {'binder': st.session_state.properties['binder']}}]
+    
+    # 添加所有类型的约束
+    if st.session_state.get('constraints'):
+        constraints_list = []
+        
+        for constraint in st.session_state.constraints:
+            constraint_type = constraint.get('type', 'contact')
+            
+            if constraint_type == 'contact':
+                # Contact约束
+                # 构建token1和token2 - 根据Boltz格式要求
+                if constraint.get('token1_atom'):
+                    token1 = [constraint['token1_chain'], constraint['token1_atom']]
+                else:
+                    token1 = [constraint['token1_chain'], constraint['token1_residue']]
+                    
+                if constraint.get('token2_atom'):
+                    token2 = [constraint['token2_chain'], constraint['token2_atom']]
+                else:
+                    token2 = [constraint['token2_chain'], constraint['token2_residue']]
+                
+                constraint_dict = {
+                    'contact': {
+                        'token1': token1,
+                        'token2': token2,
+                        'max_distance': constraint['max_distance'],
+                        'force': constraint.get('force', False)
+                    }
+                }
+                
+            elif constraint_type == 'bond':
+                # Bond约束
+                atom1 = [constraint['atom1_chain'], constraint['atom1_residue'], constraint['atom1_atom']]
+                atom2 = [constraint['atom2_chain'], constraint['atom2_residue'], constraint['atom2_atom']]
+                
+                constraint_dict = {
+                    'bond': {
+                        'atom1': atom1,
+                        'atom2': atom2
+                    }
+                }
+            
+            else:
+                # 未知约束类型，跳过
+                continue
+                
+            constraints_list.append(constraint_dict)
+        
+        if constraints_list:
+            final_yaml_dict['constraints'] = constraints_list
         
     return yaml.dump(final_yaml_dict, sort_keys=False, indent=2, default_flow_style=False)
 
@@ -534,7 +1206,7 @@ def create_designer_template_yaml(target_protein_sequence: str, target_chain_id:
     }
     return yaml.dump(template_dict, sort_keys=False, indent=2, default_flow_style=False)
 
-def create_designer_complex_yaml(components: list, use_msa: bool = False) -> str:
+def create_designer_complex_yaml(components: list, use_msa: bool = False, constraints: list = None) -> str:
     """为多组分复合物创建 Designer 的模板 YAML 配置
     当 use_msa=True 时，只对现有的目标蛋白质使用MSA，binder不使用MSA
     避免混合custom和auto-generated MSA以防止Boltz错误
@@ -655,6 +1327,49 @@ def create_designer_complex_yaml(components: list, use_msa: bool = False) -> str
         raise ValueError("没有有效的组分序列")
         
     template_dict = {'version': 1, 'sequences': sequences_list}
+    
+    # 添加所有类型的约束
+    if constraints:
+        constraints_list = []
+        
+        for constraint in constraints:
+            constraint_type = constraint.get('type', 'contact')
+            
+            if constraint_type == 'contact':
+                # Contact约束 - 只到残基级别
+                token1 = [constraint['token1_chain'], constraint['token1_residue']]
+                token2 = [constraint['token2_chain'], constraint['token2_residue']]
+                
+                constraint_dict = {
+                    'contact': {
+                        'token1': token1,
+                        'token2': token2,
+                        'max_distance': constraint['max_distance'],
+                        'force': constraint.get('force', False)
+                    }
+                }
+                
+            elif constraint_type == 'bond':
+                # Bond约束 - 到原子级别
+                atom1 = [constraint['atom1_chain'], constraint['atom1_residue'], constraint['atom1_atom']]
+                atom2 = [constraint['atom2_chain'], constraint['atom2_residue'], constraint['atom2_atom']]
+                
+                constraint_dict = {
+                    'bond': {
+                        'atom1': atom1,
+                        'atom2': atom2
+                    }
+                }
+            
+            else:
+                # 未知约束类型，跳过
+                continue
+                
+            constraints_list.append(constraint_dict)
+        
+        if constraints_list:
+            template_dict['constraints'] = constraints_list
+    
     return yaml.dump(template_dict, sort_keys=False, indent=2, default_flow_style=False)
 
 def run_designer_workflow(params: dict, work_dir: str) -> str:
@@ -1710,6 +2425,7 @@ st.set_page_config(layout="centered", page_title="Boltz-WebUI", page_icon="🧬"
 
 # 初始化 session state
 if 'components' not in st.session_state: st.session_state.components = []
+if 'constraints' not in st.session_state: st.session_state.constraints = []
 if 'task_id' not in st.session_state: st.session_state.task_id = None
 if 'results' not in st.session_state: st.session_state.results = None
 if 'raw_zip' not in st.session_state: st.session_state.raw_zip = None
@@ -2306,6 +3022,125 @@ with tab1:
                 st.session_state.properties['affinity'] = False
                 st.session_state.properties['binder'] = None
 
+        # === 约束配置 ===
+        st.markdown("---")
+        st.subheader("🔗 分子约束 (可选)", anchor=False)
+        st.markdown("设置分子结构约束，包括键约束、口袋约束和接触约束。")
+        
+        # 显示现有的约束
+        constraint_id_to_delete = None
+        for i, constraint in enumerate(st.session_state.constraints[:]):
+            constraint_type = constraint.get('type', 'contact')
+            
+            # 根据约束类型显示不同的标题
+            constraint_labels = {
+                'bond': '🔗 键约束',
+                'contact': '📍 接触约束'
+            }
+            
+            with st.expander(f"{constraint_labels.get(constraint_type, '📍 约束')} {i+1}", expanded=True):
+                col1, col2 = st.columns([5, 1])
+                
+                with col1:
+                    # 约束类型选择
+                    st.markdown("**约束类型**")
+                    constraint_type = st.selectbox(
+                        "选择约束类型",
+                        options=['contact', 'bond'],
+                        format_func=lambda x: {
+                            'contact': '📍 Contact - 接触约束 (两个残基间距离)',
+                            'bond': '🔗 Bond - 键约束 (两个原子间共价键)'
+                        }[x],
+                        index=['contact', 'bond'].index(constraint.get('type', 'contact')),
+                        key=f"constraint_type_{i}",
+                        disabled=is_running,
+                        help="选择约束的类型：接触距离或共价键"
+                    )
+                    
+                    # 检测约束类型变化并触发更新
+                    if constraint_type != constraint.get('type', 'contact'):
+                        constraint['type'] = constraint_type
+                        # 清除不相关的配置
+                        if constraint_type == 'bond':
+                            # bond只需要atom1和atom2
+                            constraint.pop('binder', None)
+                            constraint.pop('contacts', None)
+                        elif constraint_type == 'contact':
+                            # contact需要token1和token2
+                            constraint.pop('atom1_chain', None)
+                            constraint.pop('atom1_residue', None)
+                            constraint.pop('atom1_atom', None)
+                            constraint.pop('atom2_chain', None)
+                            constraint.pop('atom2_residue', None)
+                            constraint.pop('atom2_atom', None)
+                        st.rerun()
+                    
+                    # 获取可用链ID和描述
+                    available_chains, chain_descriptions = get_available_chain_ids(st.session_state.components)
+                    
+                    st.markdown("---")
+                    
+                    # 根据约束类型显示不同的配置UI
+                    if constraint_type == 'contact':
+                        # Contact约束配置
+                        render_contact_constraint_ui(constraint, f"constraint_{i}", available_chains, chain_descriptions, is_running)
+                    elif constraint_type == 'bond':
+                        # Bond约束配置
+                        render_bond_constraint_ui(constraint, f"constraint_{i}", available_chains, chain_descriptions, is_running)
+                
+                with col2:
+                    if st.button("🗑️", key=f"del_constraint_{i}", help="删除此约束", disabled=is_running):
+                        constraint_id_to_delete = i
+        
+        # 删除约束
+        if constraint_id_to_delete is not None:
+            del st.session_state.constraints[constraint_id_to_delete]
+            st.rerun()
+        
+        # 添加新约束按钮
+        st.markdown("---")
+        add_constraint_cols = st.columns(2)
+        
+        with add_constraint_cols[0]:
+            if st.button("➕ 添加 Contact 约束", key="add_contact_constraint", disabled=is_running, help="添加接触距离约束"):
+                st.session_state.constraints.append({
+                    'type': 'contact',
+                    'token1_chain': 'A',
+                    'token1_residue': 1,
+                    'token2_chain': 'B',
+                    'token2_residue': 1,
+                    'max_distance': 5.0,
+                    'force': False
+                })
+                st.rerun()
+        
+        with add_constraint_cols[1]:
+            if st.button("➕ 添加 Bond 约束", key="add_bond_constraint", disabled=is_running, help="添加共价键约束"):
+                st.session_state.constraints.append({
+                    'type': 'bond',
+                    'atom1_chain': 'A',
+                    'atom1_residue': 1,
+                    'atom1_atom': 'CA',
+                    'atom2_chain': 'B',
+                    'atom2_residue': 1,
+                    'atom2_atom': 'CA'
+                })
+                st.rerun()
+        
+        if st.session_state.constraints:
+            constraint_count = len(st.session_state.constraints)
+            constraint_types = {}
+            for c in st.session_state.constraints:
+                ctype = c.get('type', 'contact')
+                constraint_types[ctype] = constraint_types.get(ctype, 0) + 1
+            
+            constraint_type_names = {'contact': 'Contact', 'bond': 'Bond'}
+            type_summary = ', '.join([f"{count}个{constraint_type_names[ctype]}" 
+                                    for ctype, count in constraint_types.items()])
+            st.info(f"💡 已配置 {constraint_count} 个约束：{type_summary}")
+        else:
+            st.info("💡 暂无约束。可根据需要添加Contact或Bond约束。")
+
     is_valid, validation_message = validate_inputs(st.session_state.components)
     yaml_preview = generate_yaml_from_state() if is_valid else None
 
@@ -2441,7 +3276,7 @@ with tab1:
         col_reset = st.columns(2)
         with col_reset[0]:
             if st.button("🔄 重置并重新开始", type="secondary", use_container_width=True):
-                for key in ['task_id', 'results', 'raw_zip', 'error', 'components', 'properties', 'use_msa_server']:
+                for key in ['task_id', 'results', 'raw_zip', 'error', 'components', 'contacts', 'properties', 'use_msa_server']:
                     if key in st.session_state:
                         del st.session_state[key]
                 st.rerun()
@@ -2622,6 +3457,10 @@ with tab2:
             st.session_state.designer_components = [
                 {'id': str(uuid.uuid4()), 'type': 'protein', 'sequence': '', 'num_copies': 1, 'use_msa': False}
             ]
+        
+        # 初始化约束状态
+        if 'designer_constraints' not in st.session_state:
+            st.session_state.designer_constraints = []
         
         # 组分管理
         designer_id_to_delete = None
@@ -2814,7 +3653,7 @@ with tab2:
                     horizontal=True,
                     disabled=designer_is_running,
                     help="选择通过SMILES字符串、PDB CCD代码或分子编辑器输入小分子。"
-                )
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        )
                 
                 # 检测输入方式是否发生变化
                 input_method_changed = new_input_method != old_input_method
@@ -2915,6 +3754,124 @@ with tab2:
         else:
             target_chain_id = 'A'
             binder_chain_id = 'B'
+        
+        # === 分子约束配置 ===
+        st.subheader("🔗 分子约束 (可选)", anchor=False)
+        st.markdown("设置分子结构约束，包括键约束、口袋约束和接触约束。")
+        
+        # 显示现有的约束
+        constraint_id_to_delete = None
+        for i, constraint in enumerate(st.session_state.designer_constraints[:]):
+            constraint_type = constraint.get('type', 'contact')
+            
+            # 根据约束类型显示不同的标题
+            constraint_labels = {
+                'bond': '🔗 键约束',
+                'contact': '📍 接触约束'
+            }
+            
+            with st.expander(f"{constraint_labels.get(constraint_type, '📍 约束')} {i+1}", expanded=True):
+                col1, col2 = st.columns([5, 1])
+                
+                with col1:
+                    # 约束类型选择
+                    st.markdown("**约束类型**")
+                    constraint_type = st.selectbox(
+                        "选择约束类型",
+                        options=['contact', 'bond'],
+                        format_func=lambda x: {
+                            'contact': '📍 Contact - 接触约束 (两个残基间距离)',
+                            'bond': '🔗 Bond - 键约束 (两个原子间共价键)'
+                        }[x],
+                        index=['contact', 'bond'].index(constraint.get('type', 'contact')),
+                        key=f"designer_constraint_type_{i}",
+                        disabled=designer_is_running,
+                        help="选择约束的类型：接触距离或共价键"
+                    )
+                    
+                    # 检测约束类型变化并触发更新
+                    if constraint_type != constraint.get('type', 'contact'):
+                        constraint['type'] = constraint_type
+                        # 清除不相关的配置
+                        if constraint_type == 'bond':
+                            constraint.pop('binder', None)
+                            constraint.pop('contacts', None)
+                        elif constraint_type == 'contact':
+                            constraint.pop('atom1_chain', None)
+                            constraint.pop('atom1_residue', None)
+                            constraint.pop('atom1_atom', None)
+                            constraint.pop('atom2_chain', None)
+                            constraint.pop('atom2_residue', None)
+                            constraint.pop('atom2_atom', None)
+                        st.rerun()
+                    
+                    # 获取可用链ID和描述
+                    available_chains, chain_descriptions = get_available_chain_ids(st.session_state.designer_components)
+                    
+                    st.markdown("---")
+                    
+                    # 根据约束类型显示不同的配置UI
+                    if constraint_type == 'contact':
+                        # Contact约束配置
+                        render_contact_constraint_ui(constraint, f"designer_{i}", available_chains, chain_descriptions, designer_is_running)
+                    elif constraint_type == 'bond':
+                        # Bond约束配置
+                        render_bond_constraint_ui(constraint, f"designer_{i}", available_chains, chain_descriptions, designer_is_running)
+                
+                with col2:
+                    if st.button("🗑️", key=f"designer_del_constraint_{i}", help="删除此约束", disabled=designer_is_running):
+                        constraint_id_to_delete = i
+        
+        # 删除约束
+        if constraint_id_to_delete is not None:
+            del st.session_state.designer_constraints[constraint_id_to_delete]
+            st.rerun()
+        
+        # 添加新约束按钮
+        st.markdown("---")
+        add_constraint_cols = st.columns(2)
+        
+        with add_constraint_cols[0]:
+            if st.button("➕ 添加 Contact 约束", key="add_designer_contact_constraint", disabled=designer_is_running, help="添加接触距离约束"):
+                st.session_state.designer_constraints.append({
+                    'type': 'contact',
+                    'token1_chain': 'A',
+                    'token1_residue': 1,
+                    'token2_chain': 'B',
+                    'token2_residue': 1,
+                    'max_distance': 5.0,
+                    'force': False
+                })
+                st.rerun()
+        
+        with add_constraint_cols[1]:
+            if st.button("➕ 添加 Bond 约束", key="add_designer_bond_constraint", disabled=designer_is_running, help="添加共价键约束"):
+                st.session_state.designer_constraints.append({
+                    'type': 'bond',
+                    'atom1_chain': 'A',
+                    'atom1_residue': 1,
+                    'atom1_atom': 'CA',
+                    'atom2_chain': 'B',
+                    'atom2_residue': 1,
+                    'atom2_atom': 'CA'
+                })
+                st.rerun()
+        
+        if st.session_state.designer_constraints:
+            constraint_count = len(st.session_state.designer_constraints)
+            constraint_types = {}
+            for c in st.session_state.designer_constraints:
+                ctype = c.get('type', 'contact')
+                constraint_types[ctype] = constraint_types.get(ctype, 0) + 1
+            
+            constraint_type_names = {'contact': 'Contact', 'bond': 'Bond'}
+            type_summary = ', '.join([f"{count}个{constraint_type_names[ctype]}" 
+                                    for ctype, count in constraint_types.items()])
+            st.info(f"💡 已配置 {constraint_count} 个约束：{type_summary}")
+        else:
+            st.info("💡 暂无约束。可根据需要添加Contact或Bond约束。")
+        
+        st.markdown("---")
         
         # 设计类型选择
         st.subheader("设计参数", anchor=False)
@@ -3250,8 +4207,12 @@ with tab2:
                 # 检查是否有任何蛋白质组分启用了MSA
                 any_msa_enabled = any(comp.get('use_msa', True) for comp in st.session_state.designer_components if comp['type'] == 'protein')
                 
-                # 创建复合物模板 YAML - 传递MSA参数
-                template_yaml = create_designer_complex_yaml(st.session_state.designer_components, use_msa=any_msa_enabled)
+                # 创建复合物模板 YAML - 传递MSA参数和所有类型的约束
+                template_yaml = create_designer_complex_yaml(
+                    st.session_state.designer_components, 
+                    use_msa=any_msa_enabled,
+                    constraints=st.session_state.designer_constraints
+                )
                 
                 # 提交设计任务
                 result = submit_designer_job(
@@ -3861,7 +4822,7 @@ with tab2:
         col_reset = st.columns(2)
         with col_reset[0]:
             if st.button("🔄 重置设计器", type="secondary", use_container_width=True):
-                for key in ['designer_task_id', 'designer_results', 'designer_error', 'designer_config', 'designer_components']:
+                for key in ['designer_task_id', 'designer_results', 'designer_error', 'designer_config', 'designer_components', 'designer_constraints']:
                     if key in st.session_state:
                         del st.session_state[key]
                 st.rerun()
