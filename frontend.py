@@ -1250,6 +1250,9 @@ def create_designer_template_yaml(target_protein_sequence: str, target_chain_id:
 def create_designer_complex_yaml(components: list, use_msa: bool = False, constraints: list = None) -> str:
     """为多组分复合物创建 Designer 的模板 YAML 配置
     当 use_msa=True 时，只对现有的目标蛋白质使用MSA，binder不使用MSA
+    MSA策略：
+    - 有缓存时：优先使用本地缓存的MSA文件
+    - 无缓存时：使用MSA服务器(use_msa_server)自动生成MSA
     避免混合custom和auto-generated MSA以防止Boltz错误
     """
     sequences_list = []
@@ -1276,7 +1279,8 @@ def create_designer_complex_yaml(components: list, use_msa: bool = False, constr
             # 有缓存的情况：优先使用缓存策略，避免混合
             msa_strategy = "cached"
         else:
-            # 无缓存的情况：使用auto策略
+            # 无缓存的情况：使用MSA服务器自动生成策略
+            # 当序列找不到MSA缓存时，将通过use_msa_server参数启用MSA服务器
             msa_strategy = "auto"
     
     for comp in components:
@@ -1326,8 +1330,9 @@ def create_designer_complex_yaml(components: list, use_msa: bool = False, constr
                                 # 有蛋白质没有缓存，全部使用auto-generated
                                 pass  # 不设置msa字段，让系统自动生成并缓存
                         elif msa_strategy == "auto":
-                            # 自动生成策略：不设置msa字段，让系统自动生成
-                            pass  # 不设置msa字段
+                            # 自动生成策略：当序列找不到MSA缓存时，使用MSA服务器生成
+                            # 设置use_msa_server标志，确保Boltz使用MSA服务器
+                            pass  # 不设置msa字段，让系统使用MSA服务器自动生成
                         else:  # msa_strategy == "none"
                             protein_dict['msa'] = 'empty'
                 else:
@@ -1510,6 +1515,10 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
             api_token = os.environ.get('API_SECRET_TOKEN')
             if api_token:
                 cmd.extend(["--api_token", api_token])
+            
+            # 添加MSA参数：当序列找不到MSA缓存时使用MSA服务器
+            if params.get('use_msa', False):
+                cmd.append("--use_msa_server")
             
             # 在后台运行设计任务
             # 先创建状态文件，表示任务已开始

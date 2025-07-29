@@ -47,10 +47,17 @@ class Designer:
     管理蛋白质和糖肽的多谱系、梯度自由设计优化循环。
     集成了自适应机制以动态调整探索强度，防止过早收敛。
     """
-    def __init__(self, base_yaml_path: str, client: BoltzApiClient):
-        """初始化Designer实例。"""
+    def __init__(self, base_yaml_path: str, client: BoltzApiClient, use_msa_server: bool = False):
+        """初始化Designer实例。
+        
+        Args:
+            base_yaml_path: 基础YAML配置文件路径
+            client: BoltzApiClient实例
+            use_msa_server: 当序列找不到MSA缓存时是否使用MSA服务器
+        """
         self.base_yaml_path = base_yaml_path
         self.client = client
+        self.use_msa_server = use_msa_server
         with open(base_yaml_path, 'r') as f:
             self.base_config = yaml.safe_load(f)
         
@@ -107,7 +114,7 @@ class Designer:
             logger.error(f"Failed to create YAML for sequence '{sequence}'. Skipping. Reason: {e}")
             return (sequence, None, None)
 
-        task_id = self.client.submit_job(candidate_yaml_path)
+        task_id = self.client.submit_job(candidate_yaml_path, use_msa_server=self.use_msa_server)
         if not task_id:
             return (sequence, None, None)
 

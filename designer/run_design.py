@@ -95,6 +95,8 @@ def main():
     api_group = parser.add_argument_group('API 连接')
     api_group.add_argument("--server_url", default="http://127.0.0.1:5000", help="Boltz-WebUI 预测 API 服务器的URL。")
     api_group.add_argument("--api_token", help="您的API密钥。也可以通过 'API_SECRET_TOKEN' 环境变量设置。")
+    api_group.add_argument("--use_msa_server", action="store_true", default=False, 
+                          help="当序列找不到MSA缓存时，是否使用MSA服务器自动生成MSA。启用此选项可提高预测精度但会增加计算时间。")
 
     args = parser.parse_args()
 
@@ -128,7 +130,9 @@ def main():
 
         # 2. 初始化 Designer
         logger.info(f"Initializing Designer with YAML template: {args.yaml_template}")
-        designer = Designer(base_yaml_path=args.yaml_template, client=client)
+        if args.use_msa_server:
+            logger.info("MSA server enabled: will use MSA server for sequences without cache")
+        designer = Designer(base_yaml_path=args.yaml_template, client=client, use_msa_server=args.use_msa_server)
         
         # 配置增强功能
         if hasattr(args, 'disable_enhanced') and args.disable_enhanced:
