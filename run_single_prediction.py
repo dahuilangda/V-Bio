@@ -9,6 +9,7 @@ import yaml
 import hashlib
 import glob
 import csv
+import zipfile
 from pathlib import Path
 
 sys.path.append(os.getcwd())
@@ -235,6 +236,106 @@ def find_results_dir(base_dir: str) -> str:
 
     raise FileNotFoundError(f"Could not find any directory containing result files within the base directory {base_dir}")
 
+def get_cached_a3m_files(yaml_content: str) -> list:
+    """
+    获取与当前预测任务相关的a3m缓存文件
+    返回缓存文件路径列表
+    """
+    cached_a3m_files = []
+    
+    if not MSA_CACHE_CONFIG['enable_cache']:
+        return cached_a3m_files
+    
+    try:
+        # 解析YAML获取蛋白质序列
+        yaml_data = yaml.safe_load(yaml_content)
+        protein_sequences = {}
+        
+        # 提取所有蛋白质序列
+        for entity in yaml_data.get('sequences', []):
+            if entity.get('protein', {}).get('id'):
+                protein_id = entity['protein']['id']
+                sequence = entity['protein'].get('sequence', '')
+                if sequence:
+                    protein_sequences[protein_id] = sequence
+        
+        if not protein_sequences:
+            print("未找到蛋白质序列，跳过a3m文件收集", file=sys.stderr)
+            return cached_a3m_files
+        
+        cache_dir = MSA_CACHE_CONFIG['cache_dir']
+        if not os.path.exists(cache_dir):
+            return cached_a3m_files
+        
+        print(f"查找缓存的a3m文件，蛋白质组分: {list(protein_sequences.keys())}", file=sys.stderr)
+        
+        # 为每个蛋白质序列查找对应的缓存文件
+        for protein_id, sequence in protein_sequences.items():
+            seq_hash = get_sequence_hash(sequence)
+            cache_file_path = os.path.join(cache_dir, f"msa_{seq_hash}.a3m")
+            
+            if os.path.exists(cache_file_path):
+                cached_a3m_files.append({
+                    'path': cache_file_path,
+                    'protein_id': protein_id,
+                    'filename': f"{protein_id}_msa.a3m"
+                })
+                print(f"找到缓存文件: {protein_id} -> {cache_file_path}", file=sys.stderr)
+        
+        print(f"总共找到 {len(cached_a3m_files)} 个a3m缓存文件", file=sys.stderr)
+        
+    except Exception as e:
+        print(f"获取a3m缓存文件失败: {e}", file=sys.stderr)
+    
+    return cached_a3m_files
+
+def create_archive_with_a3m(output_archive_path: str, output_directory_path: str, yaml_content: str):
+    """
+    创建包含预测结果和a3m缓存文件的zip归档
+    """
+    try:
+        # 获取相关的a3m缓存文件
+        cached_a3m_files = get_cached_a3m_files(yaml_content)
+        
+        # 创建zip文件
+        with zipfile.ZipFile(output_archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # 添加预测结果文件
+            for root, dirs, files in os.walk(output_directory_path):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    # 计算相对路径，保持目录结构
+                    arcname = os.path.relpath(file_path, output_directory_path)
+                    zipf.write(file_path, arcname)
+                    print(f"添加结果文件: {arcname}", file=sys.stderr)
+            
+            # 添加a3m缓存文件
+            if cached_a3m_files:
+                # 在zip中创建msa目录
+                for a3m_info in cached_a3m_files:
+                    cache_file_path = a3m_info['path']
+                    filename = a3m_info['filename']
+                    # 将a3m文件放在msa子目录中
+                    arcname = f"msa/{filename}"
+                    zipf.write(cache_file_path, arcname)
+                    print(f"添加a3m缓存文件: {arcname}", file=sys.stderr)
+                
+                print(f"✅ 成功添加 {len(cached_a3m_files)} 个a3m缓存文件到zip归档", file=sys.stderr)
+            else:
+                print("⚠️ 未找到相关的a3m缓存文件", file=sys.stderr)
+        
+        print(f"✅ 归档创建完成: {output_archive_path}", file=sys.stderr)
+        
+    except Exception as e:
+        print(f"❌ 创建包含a3m文件的归档失败: {e}", file=sys.stderr)
+        # 如果失败，回退到原来的方式
+        archive_base_name = output_archive_path.rsplit('.', 1)[0]
+        created_archive_path = shutil.make_archive(
+            base_name=archive_base_name,
+            format='zip',
+            root_dir=output_directory_path
+        )
+        print(f"回退到标准归档方式: {created_archive_path}", file=sys.stderr)
+
 def main():
     """
     Main function to run a single prediction based on arguments provided in a JSON file.
@@ -296,18 +397,13 @@ def main():
             if not os.listdir(output_directory_path):
                 raise NotADirectoryError(f"Prediction result directory was found but is empty: {output_directory_path}")
 
-            archive_base_name = output_archive_path.rsplit('.', 1)[0]
-            
-            created_archive_path = shutil.make_archive(
-                base_name=archive_base_name,
-                format='zip',
-                root_dir=output_directory_path
-            )
+            # 使用新的函数创建包含a3m文件的归档
+            create_archive_with_a3m(output_archive_path, output_directory_path, yaml_content)
 
-            if not os.path.exists(created_archive_path):
-                raise FileNotFoundError(f"CRITICAL ERROR: Archive not found at {created_archive_path} immediately after creation.")
+            if not os.path.exists(output_archive_path):
+                raise FileNotFoundError(f"CRITICAL ERROR: Archive not found at {output_archive_path} immediately after creation.")
             
-            print(f"DEBUG: Archive successfully created at: {created_archive_path}", file=sys.stderr)
+            print(f"DEBUG: Archive successfully created at: {output_archive_path}", file=sys.stderr)
 
     except Exception as e:
         print(f"Error during prediction subprocess: {e}\n{traceback.format_exc()}", file=sys.stderr)
