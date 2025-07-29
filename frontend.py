@@ -165,6 +165,29 @@ def get_available_chain_ids(components):
     
     return chain_ids, chain_descriptions
 
+def get_chain_type(components, chain_id):
+    """
+    根据链ID获取链的类型
+    返回: 'protein', 'dna', 'rna', 'ligand', 或 'unknown'
+    """
+    if not components or not chain_id:
+        return 'unknown'
+    
+    # 找到对应的组分
+    chain_counter = 0
+    for comp in components:
+        if comp.get('sequence', '').strip():
+            num_copies = comp.get('num_copies', 1)
+            for copy_idx in range(num_copies):
+                current_chain = string.ascii_uppercase[chain_counter] if chain_counter < 26 else f"Z{chain_counter-25}"
+                
+                if current_chain == chain_id:
+                    return comp.get('type', 'unknown')
+                
+                chain_counter += 1
+    
+    return 'unknown'
+
 def get_residue_info(components, chain_id, residue_number):
     """
     根据链ID和残基编号获取残基信息
@@ -1146,15 +1169,33 @@ def generate_yaml_from_state():
             if constraint_type == 'contact':
                 # Contact约束
                 # 构建token1和token2 - 根据Boltz格式要求
+                
+                # 处理token1
                 if constraint.get('token1_atom'):
                     token1 = [constraint['token1_chain'], constraint['token1_atom']]
                 else:
-                    token1 = [constraint['token1_chain'], constraint['token1_residue']]
+                    # 检查链的类型来决定使用残基编号还是特殊处理
+                    chain1_type = get_chain_type(st.session_state.components, constraint['token1_chain'])
+                    if chain1_type == 'ligand':
+                        # 对于配体，总是使用残基索引1（配体只有一个残基）
+                        token1 = [constraint['token1_chain'], 1]
+                    else:
+                        # 对于蛋白质/DNA/RNA，使用残基编号（从1开始）
+                        token1 = [constraint['token1_chain'], constraint['token1_residue']]
                     
+                # 处理token2
                 if constraint.get('token2_atom'):
                     token2 = [constraint['token2_chain'], constraint['token2_atom']]
                 else:
-                    token2 = [constraint['token2_chain'], constraint['token2_residue']]
+                    # 检查链的类型来决定使用残基编号还是特殊处理
+                    chain2_type = get_chain_type(st.session_state.components, constraint['token2_chain'])
+                    if chain2_type == 'ligand':
+                        # 对于配体，总是使用残基索引1（配体只有一个残基）
+                        token2 = [constraint['token2_chain'], 1]
+                    else:
+                        # 对于蛋白质/DNA/RNA，使用残基编号（从1开始）
+                        token2 = [constraint['token2_chain'], constraint['token2_residue']]
+                        token2 = [constraint['token2_chain'], constraint['token2_residue']]
                 
                 constraint_dict = {
                     'contact': {
@@ -3165,7 +3206,24 @@ with tab1:
         # 检查是否有蛋白质组分需要MSA
         protein_components = [comp for comp in st.session_state.components 
                             if comp['type'] == 'protein' and comp.get('sequence', '').strip()]
-        use_msa_for_job = any(comp.get('use_msa', True) for comp in protein_components)
+        
+        # 智能检测MSA策略：如果YAML中已有MSA路径（缓存），则不使用MSA服务器
+        use_msa_for_job = False
+        if protein_components:
+            yaml_data = yaml.safe_load(yaml_preview)
+            has_msa_in_yaml = False
+            
+            # 检查YAML中是否已经包含MSA信息
+            for sequence_item in yaml_data.get('sequences', []):
+                if 'protein' in sequence_item:
+                    protein_data = sequence_item['protein']
+                    if protein_data.get('msa') and protein_data['msa'] != 'empty':
+                        has_msa_in_yaml = True
+                        break
+            
+            # 如果YAML中没有MSA信息，且有蛋白质启用了MSA，则使用MSA服务器
+            if not has_msa_in_yaml:
+                use_msa_for_job = any(comp.get('use_msa', True) for comp in protein_components)
         
         with st.spinner("⏳ 正在提交任务，请稍候..."):
             try:
@@ -3179,6 +3237,8 @@ with tab1:
                 if use_msa_for_job:
                     msa_enabled_count = sum(1 for comp in protein_components if comp.get('use_msa', True))
                     st.toast(f"🎉 任务已提交！将为 {msa_enabled_count} 个蛋白质组分生成MSA", icon="✅")
+                elif has_msa_in_yaml:
+                    st.toast(f"🎉 任务已提交！使用缓存的MSA文件，预测将更快完成", icon="⚡")
                 else:
                     st.toast(f"🎉 任务已提交！跳过MSA生成，预测将更快完成", icon="⚡")
                 st.rerun()

@@ -3,14 +3,18 @@ import logging
 import glob
 import time
 import hashlib
-from datetime import datetime
+import psutil
+import signal
+from datetime import datetime, timedelta
 from functools import wraps
+from typing import Dict, List, Optional
 from flask import Flask, request, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
 from celery.result import AsyncResult
 import config
 from celery_app import celery_app
 from tasks import predict_task
+from gpu_manager import get_redis_client, release_gpu, get_gpu_status
 
 # --- Configure Logging ---
 logging.basicConfig(
@@ -18,6 +22,217 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# --- Task Monitor Class ---
+class TaskMonitor:
+    """任务监控和清理工具，集成在API服务器中"""
+    
+    def __init__(self):
+        self.redis_client = get_redis_client()
+        self.max_task_duration = timedelta(hours=3)  # 最长允许运行时间
+        self.max_stuck_duration = timedelta(minutes=30)  # 无进展的最长时间
+        
+    def get_stuck_tasks(self) -> List[Dict]:
+        """检测卡死的任务"""
+        stuck_tasks = []
+        gpu_status = get_gpu_status()
+        
+        for gpu_id, task_id in gpu_status['in_use'].items():
+            task_info = self._analyze_task(task_id)
+            if task_info and task_info['is_stuck']:
+                task_info['gpu_id'] = gpu_id
+                stuck_tasks.append(task_info)
+                
+        return stuck_tasks
+    
+    def _analyze_task(self, task_id: str) -> Optional[Dict]:
+        """分析单个任务状态"""
+        try:
+            # 获取Celery任务结果
+            result = AsyncResult(task_id, app=celery_app)
+            
+            # 获取任务启动时间（从Redis或其他地方）
+            task_start_key = f"task_start:{task_id}"
+            start_time_str = self.redis_client.get(task_start_key)
+            
+            if not start_time_str:
+                # 如果没有记录开始时间，假设是最近开始的
+                start_time = datetime.now() - timedelta(minutes=5)
+                self.redis_client.setex(task_start_key, 86400, start_time.isoformat())
+            else:
+                start_time = datetime.fromisoformat(start_time_str)
+            
+            # 获取任务最后更新时间
+            last_update_key = f"task_update:{task_id}"
+            last_update_str = self.redis_client.get(last_update_key)
+            last_update = datetime.fromisoformat(last_update_str) if last_update_str else start_time
+            
+            now = datetime.now()
+            running_time = now - start_time
+            stuck_time = now - last_update
+            
+            # 检查是否卡死
+            is_stuck = False
+            reason = ""
+            
+            if running_time > self.max_task_duration:
+                is_stuck = True
+                reason = f"运行时间过长 ({running_time})"
+            elif stuck_time > self.max_stuck_duration and result.state in ['PENDING', 'PROGRESS']:
+                is_stuck = True
+                reason = f"无进展时间过长 ({stuck_time})"
+            elif result.state == 'FAILURE':
+                is_stuck = True
+                reason = "任务已失败但GPU未释放"
+            
+            # 检查进程是否存在
+            processes = self._find_task_processes(task_id)
+            if not processes and result.state in ['PENDING', 'PROGRESS']:
+                is_stuck = True
+                reason = "任务进程不存在但状态显示运行中"
+            
+            return {
+                'task_id': task_id,
+                'state': result.state,
+                'start_time': start_time.isoformat(),
+                'last_update': last_update.isoformat(),
+                'running_time': str(running_time),
+                'stuck_time': str(stuck_time),
+                'is_stuck': is_stuck,
+                'reason': reason,
+                'processes': len(processes),
+                'meta': result.info if hasattr(result, 'info') else {}
+            }
+            
+        except Exception as e:
+            logger.error(f"分析任务 {task_id} 时出错: {e}")
+            return None
+    
+    def _find_task_processes(self, task_id: str) -> List[Dict]:
+        """查找与任务相关的进程"""
+        processes = []
+        
+        try:
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'create_time', 'cpu_percent']):
+                try:
+                    cmdline = ' '.join(proc.info['cmdline'] or [])
+                    if task_id in cmdline or f"boltz_task_{task_id}" in cmdline:
+                        processes.append({
+                            'pid': proc.info['pid'],
+                            'name': proc.info['name'],
+                            'cmdline': cmdline,
+                            'create_time': datetime.fromtimestamp(proc.info['create_time']).isoformat(),
+                            'cpu_percent': proc.cpu_percent()
+                        })
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+                    
+        except Exception as e:
+            logger.error(f"查找进程时出错: {e}")
+            
+        return processes
+    
+    def kill_stuck_tasks(self, task_ids: List[str] = None, force: bool = False) -> Dict:
+        """清理卡死的任务"""
+        if task_ids is None:
+            stuck_tasks = self.get_stuck_tasks()
+            task_ids = [task['task_id'] for task in stuck_tasks]
+        
+        results = {
+            'killed_tasks': [],
+            'failed_to_kill': [],
+            'released_gpus': []
+        }
+        
+        for task_id in task_ids:
+            try:
+                success = self._kill_single_task(task_id, force)
+                if success:
+                    results['killed_tasks'].append(task_id)
+                else:
+                    results['failed_to_kill'].append(task_id)
+            except Exception as e:
+                logger.error(f"清理任务 {task_id} 时出错: {e}")
+                results['failed_to_kill'].append(task_id)
+        
+        # 释放GPU
+        gpu_status = get_gpu_status()
+        for gpu_id, task_id in gpu_status['in_use'].items():
+            if task_id in results['killed_tasks']:
+                try:
+                    release_gpu(int(gpu_id), task_id)
+                    results['released_gpus'].append(gpu_id)
+                    logger.info(f"已释放GPU {gpu_id} (任务 {task_id})")
+                except Exception as e:
+                    logger.error(f"释放GPU {gpu_id} 时出错: {e}")
+        
+        return results
+    
+    def _kill_single_task(self, task_id: str, force: bool = False) -> bool:
+        """清理单个任务"""
+        try:
+            # 撤销Celery任务
+            celery_app.control.revoke(task_id, terminate=True)
+            logger.info(f"已撤销Celery任务: {task_id}")
+            
+            # 查找并终止相关进程
+            processes = self._find_task_processes(task_id)
+            for proc_info in processes:
+                try:
+                    proc = psutil.Process(proc_info['pid'])
+                    if force:
+                        proc.kill()
+                        logger.info(f"已强制终止进程 {proc_info['pid']}")
+                    else:
+                        proc.terminate()
+                        logger.info(f"已发送终止信号给进程 {proc_info['pid']}")
+                        
+                        # 等待进程退出
+                        try:
+                            proc.wait(timeout=10)
+                        except psutil.TimeoutExpired:
+                            proc.kill()
+                            logger.info(f"进程 {proc_info['pid']} 未响应终止信号，已强制终止")
+                            
+                except psutil.NoSuchProcess:
+                    logger.info(f"进程 {proc_info['pid']} 已不存在")
+                except Exception as e:
+                    logger.error(f"终止进程 {proc_info['pid']} 时出错: {e}")
+                    return False
+            
+            # 清理Redis中的任务记录
+            self.redis_client.delete(f"task_start:{task_id}")
+            self.redis_client.delete(f"task_update:{task_id}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"清理任务 {task_id} 时出错: {e}")
+            return False
+    
+    def clean_completed_tasks(self) -> Dict:
+        """清理已完成但未释放GPU的任务"""
+        gpu_status = get_gpu_status()
+        results = {
+            'cleaned_gpus': [],
+            'failed_to_clean': []
+        }
+        
+        for gpu_id, task_id in gpu_status['in_use'].items():
+            try:
+                result = AsyncResult(task_id, app=celery_app)
+                if result.state in ['SUCCESS', 'FAILURE', 'REVOKED']:
+                    release_gpu(int(gpu_id), task_id)
+                    results['cleaned_gpus'].append(gpu_id)
+                    logger.info(f"已清理GPU {gpu_id} (任务 {task_id}, 状态: {result.state})")
+            except Exception as e:
+                logger.error(f"清理GPU {gpu_id} 时出错: {e}")
+                results['failed_to_clean'].append(gpu_id)
+        
+        return results
+
+# 创建全局任务监控实例
+task_monitor = TaskMonitor()
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = config.RESULTS_BASE_DIR
@@ -538,6 +753,157 @@ def clear_all_msa_cache_api():
             'error': 'Failed to clear MSA cache',
             'details': str(e)
         }), 500
+
+# --- Task Monitoring API Endpoints ---
+
+@app.route('/monitor/status', methods=['GET'])
+@require_api_token
+def get_monitor_status():
+    """获取任务和GPU状态"""
+    try:
+        gpu_status = get_gpu_status()
+        stuck_tasks = task_monitor.get_stuck_tasks()
+        
+        # 获取所有正在运行任务的详细信息
+        running_tasks = []
+        for gpu_id, task_id in gpu_status['in_use'].items():
+            task_info = task_monitor._analyze_task(task_id)
+            if task_info:
+                task_info['gpu_id'] = gpu_id
+                running_tasks.append(task_info)
+        
+        result = {
+            'gpu_status': {
+                'available_count': gpu_status['available_count'],
+                'available': gpu_status['available'],
+                'in_use_count': gpu_status['in_use_count'],
+                'in_use': gpu_status['in_use']
+            },
+            'running_tasks': running_tasks,
+            'stuck_tasks': stuck_tasks,
+            'stuck_count': len(stuck_tasks),
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        logger.info(f"任务状态查询: {len(running_tasks)} 个运行中任务, {len(stuck_tasks)} 个卡死任务")
+        
+        return jsonify({
+            'success': True,
+            'data': result
+        }), 200
+        
+    except Exception as e:
+        logger.exception(f"获取任务状态失败: {e}")
+        return jsonify({
+            'error': 'Failed to get task status',
+            'details': str(e)
+        }), 500
+
+@app.route('/monitor/clean', methods=['POST'])
+@require_api_token
+def clean_stuck_tasks():
+    """清理卡死的任务"""
+    try:
+        force = request.json.get('force', False) if request.json else False
+        task_ids = request.json.get('task_ids') if request.json else None
+        
+        # 如果没有指定task_ids，则清理所有卡死的任务
+        if task_ids is None:
+            # 先清理已完成但未释放GPU的任务
+            clean_results = task_monitor.clean_completed_tasks()
+            # 然后清理卡死的任务
+            kill_results = task_monitor.kill_stuck_tasks(force=force)
+        else:
+            clean_results = {'cleaned_gpus': [], 'failed_to_clean': []}
+            kill_results = task_monitor.kill_stuck_tasks(task_ids, force=force)
+        
+        result = {
+            'cleaned_completed_tasks': clean_results,
+            'killed_stuck_tasks': kill_results,
+            'total_cleaned_gpus': len(clean_results['cleaned_gpus']) + len(kill_results['released_gpus']),
+            'total_killed_tasks': len(kill_results['killed_tasks'])
+        }
+        
+        logger.info(f"任务清理完成: 清理了 {result['total_cleaned_gpus']} 个GPU, 终止了 {result['total_killed_tasks']} 个任务")
+        
+        return jsonify({
+            'success': True,
+            'data': result
+        }), 200
+        
+    except Exception as e:
+        logger.exception(f"清理任务失败: {e}")
+        return jsonify({
+            'error': 'Failed to clean tasks',
+            'details': str(e)
+        }), 500
+
+@app.route('/monitor/kill-all', methods=['POST'])
+@require_api_token  
+def kill_all_tasks():
+    """强制清理所有任务（紧急情况）"""
+    try:
+        force = request.json.get('force', True) if request.json else True
+        
+        # 获取所有正在使用GPU的任务
+        gpu_status = get_gpu_status()
+        all_task_ids = list(gpu_status['in_use'].values())
+        
+        if not all_task_ids:
+            return jsonify({
+                'success': True,
+                'data': {
+                    'message': '没有找到正在运行的任务',
+                    'killed_tasks': [],
+                    'released_gpus': []
+                }
+            }), 200
+        
+        # 强制清理所有任务
+        results = task_monitor.kill_stuck_tasks(all_task_ids, force=force)
+        
+        logger.warning(f"紧急清理所有任务: 终止了 {len(results['killed_tasks'])} 个任务, 释放了 {len(results['released_gpus'])} 个GPU")
+        
+        return jsonify({
+            'success': True,
+            'data': results
+        }), 200
+        
+    except Exception as e:
+        logger.exception(f"紧急清理失败: {e}")
+        return jsonify({
+            'error': 'Failed to kill all tasks',
+            'details': str(e)
+        }), 500
+
+@app.route('/monitor/health', methods=['GET'])
+def health_check():
+    """健康检查端点（不需要认证）"""
+    try:
+        gpu_status = get_gpu_status()
+        stuck_tasks = task_monitor.get_stuck_tasks()
+        
+        is_healthy = len(stuck_tasks) == 0
+        
+        result = {
+            'healthy': is_healthy,
+            'gpu_available': gpu_status['available_count'],
+            'gpu_in_use': gpu_status['in_use_count'], 
+            'stuck_tasks_count': len(stuck_tasks),
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        status_code = 200 if is_healthy else 503
+        
+        return jsonify(result), status_code
+        
+    except Exception as e:
+        logger.exception(f"健康检查失败: {e}")
+        return jsonify({
+            'healthy': False,
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 503
 
 
 if __name__ == '__main__':

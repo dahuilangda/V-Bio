@@ -4,6 +4,19 @@
 
 ![Boltz-WebUI Logo](images/Boltz-WebUI-1.png)
 
+## 目录 (Table of Contents)
+
+- [核心特性 (Features)](#核心特性-features)
+- [安装部署 (Installation)](#安装部署-installation)
+- [使用指南 (Usage)](#使用指南-usage)
+  - [启动平台服务](#启动平台服务)
+  - [通过 API 使用 (高级)](#通过-api-使用-高级)
+  - [任务监控与系统管理](#任务监控与系统管理)
+  - [系统服务管理](#系统服务管理)
+  - [自动化监控特性](#自动化监控特性)
+- [故障排除 (Troubleshooting)](#故障排除-troubleshooting)
+
+
 ## 核心特性 (Features)
 
   * **🚀 智能任务调度**
@@ -25,6 +38,10 @@
   * **🖱️ 一键式任务提交**
 
       * 用户无需关心复杂的命令行参数，只需在网页上填写序列、选择目标，即可一键提交预测任务。
+
+  * **🔍 智能监控系统**
+
+      * 内置自动化任务监控，实时检测卡死任务和异常状态，自动释放被占用的GPU资源，确保系统高可用性和资源利用效率。
 
 ## 安装部署 (Installation)
 
@@ -75,7 +92,23 @@ docker run -d -p 6379:6379 --name boltz-webui-redis redis:latest
 
 ### **启动平台服务**
 
-您需要打开 **4 个**独立的终端窗口来分别运行平台的不同组件。在**每一个**窗口中都必须能访问到 `API_SECRET_TOKEN` 环境变量。
+#### **方式一：统一启动 (推荐生产环境)**
+
+**简单一键启动所有服务 (包含自动监控):**
+
+```bash
+# 设置环境变量
+export API_SECRET_TOKEN='your-super-secret-and-long-token'
+
+# 一键启动所有服务
+bash run.sh all
+```
+
+服务全部启动后，在浏览器中访问 `http://<您的服务器IP>:8501` 即可开始使用。
+
+#### **方式二：分组件启动 (开发调试)**
+
+您需要打开 **5 个**独立的终端窗口来分别运行平台的不同组件。在**每一个**窗口中都必须能访问到 `API_SECRET_TOKEN` 环境变量。
 
 **首先，设置环境变量 (在每个终端中或在 `.bashrc`/`.zshrc` 中设置):**
 
@@ -101,14 +134,18 @@ export API_SECRET_TOKEN='your-super-secret-and-long-token'
     bash run.sh flask
     ```
 
-4.  **终端 4 - 启动 Streamlit 前端界面**:
+4.  **终端 4 - 启动任务监控系统**:
+
+    ```bash
+    bash run.sh monitor
+    ```
+
+5.  **终端 5 - 启动 Streamlit 前端界面**:
 
     ```bash
     source venv/bin/activate
     streamlit run frontend.py
     ```
-
-服务全部启动后，在浏览器中访问 `http://<您的服务器IP>:8501` 即可开始使用。
 
 ### **通过 API 使用 (高级)**
 
@@ -230,3 +267,240 @@ export API_SECRET_TOKEN='your-super-secret-and-long-token'
         ```bash
         curl -X POST -H "X-API-Token: your-secret-token" http://127.0.0.1:5000/api/msa/cache/clear
         ```
+
+#### **任务监控与系统管理**
+
+系统集成了智能任务监控功能，能够自动检测和清理卡死任务，释放被占用的GPU资源。监控系统通过API端点提供服务，支持自动化运维。
+
+  * **系统健康检查**: `GET /monitor/health`
+
+      * **认证**: 无需认证
+      * **描述**: 快速检查系统整体健康状态，包括GPU可用性和卡死任务统计。
+      * **示例**:
+        ```bash
+        curl http://127.0.0.1:5000/monitor/health
+        ```
+      * **返回示例**:
+        ```json
+        {
+          "healthy": true,
+          "gpu_available": 4,
+          "gpu_in_use": 2,
+          "stuck_tasks_count": 0,
+          "timestamp": "2025-01-15T10:30:00"
+        }
+        ```
+
+  * **详细状态查询**: `GET /monitor/status`
+
+      * **认证**: 需要 API 令牌
+      * **描述**: 获取系统详细状态，包括所有运行中任务的信息和卡死任务的详细诊断。
+      * **示例**:
+        ```bash
+        curl -H "X-API-Token: your-secret-token" http://127.0.0.1:5000/monitor/status
+        ```
+      * **返回内容**: GPU状态、运行中任务列表、卡死任务诊断、系统时间戳等。
+
+  * **智能任务清理**: `POST /monitor/clean`
+
+      * **认证**: 需要 API 令牌
+      * **描述**: 自动检测并清理卡死任务，释放被占用的GPU资源。可选择性清理指定任务或自动清理所有问题任务。
+      * **参数**:
+        - `force` (boolean): 是否强制终止进程
+        - `task_ids` (array): 指定要清理的任务ID列表（可选）
+      * **示例**:
+        ```bash
+        # 自动清理所有卡死任务
+        curl -X POST \
+             -H "X-API-Token: your-secret-token" \
+             -H "Content-Type: application/json" \
+             -d '{"force": false}' \
+             http://127.0.0.1:5000/monitor/clean
+        
+        # 清理指定任务
+        curl -X POST \
+             -H "X-API-Token: your-secret-token" \
+             -H "Content-Type: application/json" \
+             -d '{"task_ids": ["task-id-1", "task-id-2"], "force": true}' \
+             http://127.0.0.1:5000/monitor/clean
+        ```
+
+  * **紧急清理**: `POST /monitor/kill-all`
+
+      * **认证**: 需要 API 令牌
+      * **描述**: 紧急情况下强制清理所有正在运行的任务。请谨慎使用！
+      * **参数**:
+        - `force` (boolean): 强制终止所有进程（默认为true）
+      * **示例**:
+        ```bash
+        curl -X POST \
+             -H "X-API-Token: your-secret-token" \
+             -H "Content-Type: application/json" \
+             -d '{"force": true}' \
+             http://127.0.0.1:5000/monitor/kill-all
+        ```
+
+### **系统服务管理**
+
+为了简化运维管理，系统提供了统一的服务管理脚本 `run.sh`，支持一键启动、停止和监控所有服务组件。
+
+#### **统一服务启动 (推荐生产环境)**
+
+```bash
+# 一键启动所有服务（包含自动监控）
+bash run.sh all
+
+# 检查所有服务状态
+bash run.sh status
+
+# 手动触发任务清理
+bash run.sh clean
+
+# 停止所有服务
+bash run.sh stop
+```
+
+#### **分组件启动 (开发调试)**
+
+```bash
+# 1. 初始化GPU池
+bash run.sh init
+
+# 2. 启动API服务器
+bash run.sh flask
+
+# 3. 启动工作进程
+bash run.sh celery
+
+# 4. 启动监控守护进程
+bash run.sh monitor
+```
+
+#### **服务状态监控**
+
+```bash
+# 查看系统整体状态
+bash run.sh status
+
+# 实时监控日志
+tail -f flask.log      # API服务器日志
+tail -f celery.log     # 工作进程日志
+tail -f monitor.log    # 监控系统日志
+```
+
+### **自动化监控特性**
+
+#### **智能检测机制**
+
+系统每5分钟自动执行健康检查，检测以下异常情况：
+
+- **长时间运行**: 任务运行时间超过3小时
+- **进程卡死**: 任务无进展时间超过30分钟
+- **状态异常**: 任务已失败但GPU未释放
+- **进程丢失**: 任务进程不存在但状态显示运行中
+
+#### **自动恢复操作**
+
+发现异常时，监控系统会自动执行：
+
+1. 撤销Celery任务
+2. 终止相关进程
+3. 释放被占用的GPU资源
+4. 清理Redis中的任务记录
+5. 记录详细的操作日志
+
+#### **监控配置**
+
+监控系统的关键参数可以通过修改 `api_server.py` 中的 `TaskMonitor` 类进行调整：
+
+```python
+self.max_task_duration = timedelta(hours=3)      # 最长允许运行时间
+self.max_stuck_duration = timedelta(minutes=30) # 无进展的最长时间
+```
+
+## 故障排除 (Troubleshooting)
+
+### **GPU资源被占用无法释放**
+
+这是最常见的问题，通常由任务异常终止或进程卡死导致。
+
+**解决方案**:
+
+```bash
+# 方法1: 使用集成监控系统（推荐）
+bash run.sh status  # 检查系统状态
+bash run.sh clean   # 自动清理问题任务
+
+# 方法2: 通过API接口
+curl http://localhost:5000/monitor/health  # 检查健康状态
+curl -X POST -H "X-API-Token: your-token" \
+     -H "Content-Type: application/json" \
+     -d '{"force": false}' \
+     http://localhost:5000/monitor/clean
+
+# 方法3: 紧急情况使用独立工具
+python3 task_monitor.py status
+python3 task_monitor.py clean
+python3 task_monitor.py kill-all --force  # 强制清理
+```
+
+### **服务启动失败**
+
+**常见原因及解决方案**:
+
+1. **Redis未启动**:
+   ```bash
+   docker run -d -p 6379:6379 --name boltz-webui-redis redis:latest
+   ```
+
+2. **GPU池未初始化**:
+   ```bash
+   bash run.sh init
+   ```
+
+3. **端口被占用**:
+   ```bash
+   # 检查端口占用
+   lsof -i :5000  # Flask API
+   lsof -i :8501  # Streamlit
+   
+   # 终止占用进程
+   bash run.sh stop
+   ```
+
+4. **权限问题**:
+   ```bash
+   # 确保结果目录有写入权限
+   chmod 755 /path/to/results
+   
+   # 确保脚本有执行权限
+   chmod +x run.sh
+   ```
+
+### **任务处理异常**
+
+**症状**: 任务提交后长时间处于PENDING状态或突然失败。
+
+**排查步骤**:
+
+1. **检查Celery工作进程**:
+   ```bash
+   bash run.sh status
+   tail -f celery.log
+   ```
+
+2. **检查GPU可用性**:
+   ```bash
+   nvidia-smi
+   bash run.sh status
+   ```
+
+3. **检查任务详细状态**:
+   ```bash
+   curl -H "X-API-Token: your-token" http://localhost:5000/monitor/status
+   ```
+
+4. **清理卡死任务**:
+   ```bash
+   bash run.sh clean
+   ```
