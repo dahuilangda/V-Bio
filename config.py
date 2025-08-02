@@ -58,6 +58,11 @@ RESULTS_BASE_DIR = os.environ.get("RESULTS_BASE_DIR", "/data/boltz_central_resul
 # Worker 将使用此 URL 来上传结果和更新状态
 CENTRAL_API_URL = os.environ.get("CENTRAL_API_URL", "http://localhost:5000")
 
+# -- MSA 服务器地址 --
+# ColabFold MSA 服务器的 URL，用于生成多序列比对
+# 默认使用 ColabFold 官方服务器，也可以使用本地服务器
+MSA_SERVER_URL = os.environ.get("MSA_SERVER_URL", "https://api.colabfold.com")
+
 
 # ==============================================================================
 # 4. 安全性配置 (Security)

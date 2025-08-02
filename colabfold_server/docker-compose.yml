@@ -1,0 +1,13 @@
+services:
+  colabfold-api:
+    build: .
+    container_name: colabfold_api_server
+    restart: on-failure:5
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./databases:/app/databases
+      - ./jobs:/app/jobs
+      - ./config.json:/app/config.json:ro
+    shm_size: '16gb'
+    mem_limit: '32g'

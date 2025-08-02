@@ -1,0 +1,361 @@
+# ColabFold MSA Server
+
+**ColabFold MSA Server** 提供本地的多序列比对（Multiple Sequence Alignment, MSA）服务。
+
+## 目录 (Table of Contents)
+
+- [安装部署 (Installation)](#安装部署-installation)
+- [使用指南 (Usage)](#使用指南-usage)
+  - [快速启动](#快速启动)
+  - [数据库管理](#数据库管理)
+  - [API 使用](#api-使用)
+  - [性能调优](#性能调优)
+- [配置说明 (Configuration)](#配置说明-configuration)
+- [故障排除 (Troubleshooting)](#故障排除-troubleshooting)
+- [维护指南 (Maintenance)](#维护指南-maintenance)
+
+
+## 安装部署 (Installation)
+
+### 前置要求
+
+* **操作系统**: Linux (推荐 Ubuntu 20.04+)
+* **容器运行时**: Docker 20.0+, Docker Compose 2.0+
+* **存储空间**: 至少 500GB 可用空间（用于数据库）
+* **内存**: 至少 16GB RAM（推荐 32GB+）
+* **网络**: 稳定的网络连接（用于数据库下载）
+
+### 快速安装
+
+#### 第 1 步：下载项目代码
+
+```bash
+# 如果尚未克隆主项目
+git clone https://github.com/dahuilangda/Boltz-WebUI.git
+cd Boltz-WebUI/colabfold_server
+```
+
+#### 第 2 步：准备数据库
+
+**注意**: 首次运行需要下载约 200-300GB 的数据库文件，请确保有足够的存储空间和时间。
+
+```bash
+# 设置数据库存储路径（可选，默认为当前目录下的 databases）
+export DB_DIR="/path/to/your/databases"
+
+# 运行数据库准备脚本
+chmod +x prepare_databases.sh
+./prepare_databases.sh
+```
+
+#### 第 3 步：构建和启动服务
+
+```bash
+# 使用 Docker Compose 构建并启动服务
+docker compose up -d --build
+
+# 查看服务状态
+docker compose ps
+
+# 查看日志
+docker compose logs -f colabfold-api
+```
+
+## 使用指南 (Usage)
+
+### 快速启动
+
+#### 启动服务
+
+```bash
+# 前台运行（用于调试）
+docker compose up
+
+# 后台运行（生产环境）
+docker compose up -d
+```
+
+#### 停止服务
+
+```bash
+# 停止服务
+docker compose down
+
+# 停止服务并删除卷（谨慎使用）
+docker compose down -v
+```
+
+#### 重启服务
+
+```bash
+# 重启所有服务
+docker compose restart
+
+# 重启特定服务
+docker compose restart colabfold-api
+```
+
+### 数据库管理
+
+#### 手动数据库更新
+
+```bash
+# 进入容器
+docker compose exec colabfold-api bash
+
+# 在容器内运行数据库更新脚本
+./start.sh
+```
+
+#### 数据库状态检查
+
+```bash
+# 检查数据库文件完整性
+ls -la databases/
+du -sh databases/*
+
+# 检查数据库索引状态
+docker-compose exec colabfold-api mmseqs databases
+```
+
+### API 使用
+
+#### 基本 API 端点
+
+服务默认运行在 `http://localhost:8080`
+
+**提交 MSA 搜索任务**:
+```bash
+curl -X POST \
+     -H "Content-Type: application/json" \
+     -d '{"q": ">query\nMKFLILLFNILCLF...", "mode": "colabfold"}' \
+     http://localhost:8080/ticket/msa
+```
+
+**查询任务状态**:
+```bash
+curl http://localhost:8080/ticket/{ticket_id}
+```
+
+**下载结果**:
+```bash
+curl http://localhost:8080/result/download/{ticket_id}
+```
+
+#### 集成到 Boltz-WebUI
+
+MSA 服务器已经集成到主 Boltz-WebUI 系统中。在 `config.py` 中配置：
+
+```python
+# 配置 MSA 服务器地址
+MSA_SERVER_URL = "http://localhost:8080"  # 本地部署
+# 或
+MSA_SERVER_URL = "https://api.colabfold.com"  # 使用 ColabFold 公共服务
+```
+
+### 性能调优
+
+#### 调整工作进程数
+
+编辑 `config.json`:
+```json
+{
+  "local": {
+    "workers": 8  // 根据 CPU 核心数调整
+  }
+}
+```
+
+#### 内存和存储优化
+
+编辑 `docker-compose.yml`:
+```yaml
+services:
+  colabfold-api:
+    mem_limit: '64g'  # 根据可用内存调整
+    shm_size: '32gb'  # 共享内存大小
+```
+
+## 配置说明 (Configuration)
+
+### 主要配置文件
+
+#### config.json
+
+主要的服务器配置文件：
+
+```json
+{
+    "app": "colabfold",
+    "verbose": true,
+    "server": {
+        "address": "0.0.0.0:8080",
+        "dbmanagment": false,
+        "cors": true
+    },
+    "paths": {
+        "databases": "/app/databases",
+        "results": "/app/jobs",
+        "temporary": "/app/tmp",
+        "colabfold": {
+            "parallelstages": true,
+            "uniref": "/app/databases/uniref30_2302_db",
+            "pdb": "/app/databases/pdb100_230517",
+            "environmental": "/app/databases/colabfold_envdb_202108_db",
+            "pdb70": "/app/databases/pdb100_230517"
+        }
+    },
+    "local": {
+        "workers": 4
+    }
+}
+```
+
+#### docker-compose.yml
+
+Docker 服务配置：
+
+```yaml
+services:
+  colabfold-api:
+    build: .
+    container_name: colabfold_api_server
+    restart: on-failure:5
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./databases:/app/databases
+      - ./jobs:/app/jobs
+      - ./config.json:/app/config.json:ro
+    shm_size: '16gb'
+    mem_limit: '32g'
+```
+
+### 环境变量
+
+| 变量名 | 描述 | 默认值 |
+|--------|------|---------|
+| `DB_DIR` | 数据库存储目录 | `/app/databases` |
+| `PDB_SERVER` | PDB 同步服务器 | `rsync.wwpdb.org::ftp` |
+| `PDB_PORT` | PDB 服务器端口 | `33444` |
+| `GPU` | 启用 GPU 支持 | 空（禁用） |
+
+## 故障排除 (Troubleshooting)
+
+### 常见问题
+
+#### 1. 服务无法启动
+
+**症状**: 容器启动失败或立即退出
+
+**解决方案**:
+```bash
+# 检查日志
+docker-compose logs colabfold-api
+
+# 检查配置文件语法
+cat config.json | python -m json.tool
+
+# 检查端口占用
+netstat -tulpn | grep 8080
+```
+
+#### 2. 数据库下载失败
+
+**症状**: 数据库准备脚本报错
+
+**解决方案**:
+```bash
+# 检查网络连接
+ping ftp.uniprot.org
+
+# 检查磁盘空间
+df -h
+
+# 手动重试下载
+./prepare_databases.sh
+```
+
+#### 3. MSA 搜索超时
+
+**症状**: API 请求超时或返回错误
+
+**解决方案**:
+```bash
+# 检查服务状态
+docker-compose ps
+
+# 增加超时设置
+# 在 config.json 中调整超时参数
+
+# 重启服务
+docker-compose restart
+```
+
+#### 4. 内存不足
+
+**症状**: 容器因内存不足被杀死
+
+**解决方案**:
+```bash
+# 增加内存限制
+# 编辑 docker-compose.yml 中的 mem_limit
+
+# 减少并发工作进程
+# 编辑 config.json 中的 workers 数量
+
+# 监控内存使用
+docker stats colabfold_api_server
+```
+
+### 日志分析
+
+#### 查看详细日志
+
+```bash
+# 实时日志
+docker-compose logs -f colabfold-api
+
+# 最近的日志
+docker-compose logs --tail=100 colabfold-api
+
+# 保存日志到文件
+docker-compose logs colabfold-api > msa_server.log
+```
+
+#### 调试模式
+
+```bash
+# 使用调试启动脚本
+docker-compose exec colabfold-api ./start_debug.sh
+
+# 进入容器进行手动调试
+docker-compose exec colabfold-api bash
+```
+
+## 维护指南 (Maintenance)
+
+### 定期维护任务
+
+#### 数据库更新（每月）
+
+```bash
+# 停止服务
+docker-compose down
+
+# 更新数据库
+./prepare_databases.sh
+
+# 重新启动服务
+docker-compose up -d
+```
+
+#### 清理临时文件（每周）
+
+```bash
+# 清理作业目录
+docker-compose exec colabfold-api find /app/jobs -type f -mtime +7 -delete
+
+# 清理临时目录
+docker-compose exec colabfold-api rm -rf /app/tmp/*
+```

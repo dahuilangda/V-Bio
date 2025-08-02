@@ -1,0 +1,51 @@
+{
+    "app": "colabfold",
+    "verbose": true,
+    "server" : {
+        "address"    : "0.0.0.0:8080",
+        "dbmanagment": false,
+        "cors"       : true
+    },
+    "paths" : {
+        "databases"    : "/app/databases",
+        "results"      : "/app/jobs",
+        "temporary"    : "/app/tmp",
+        "colabfold"    : {
+            "parallelstages": true,
+            "uniref"        : "/app/databases/uniref30_2302_db",
+            "pdb"           : "/app/databases/pdb100_230517",
+            "environmental" : "/app/databases/colabfold_envdb_202108_db",
+            "pdb70"         : "/app/databases/pdb100_230517",
+            "pdbdivided"    : "/app/databases/pdb/divided",
+            "pdbobsolete"   : "/app/databases/pdb/obsolete"
+        },
+        "mmseqs"       : "/app/mmseqs/bin/mmseqs"
+    },
+    "local" : {
+        "workers"  : 4
+    },
+    "redis" : {
+        "network"  : "tcp",
+        "address"  : "172.17.3.200:6379",
+        "password" : "",
+        "index"    : 0
+    },
+    "mail" : {
+        "type"      : "null",
+        "sender"    : "dahuilangda@hotmail.com",
+        "templates" : {
+            "success" : {
+                "subject" : "Done -- %s",
+                "body"    : "Dear User,\nThe results of your submitted job are available now at https://search.mmseqs.com/queue/%s .\n"
+            },
+            "timeout" : {
+                "subject" : "Timeout -- %s",
+                "body"    : "Dear User,\nYour submitted job timed out. More details are available at https://search.mmseqs.com/queue/%s .\nPlease adjust the job and submit it again.\n"
+            },
+            "error"   : {
+                "subject" : "Error -- %s",
+                "body"    : "Dear User,\nYour submitted job failed. More details are available at https://search.mmseqs.com/queue/%s .\nPlease submit your job later again.\n"
+            }
+        }
+    }
+}

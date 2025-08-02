@@ -10,10 +10,13 @@ import hashlib
 import glob
 import csv
 import zipfile
+import requests
+import time
 from pathlib import Path
 
 sys.path.append(os.getcwd())
 from boltz_wrapper import predict
+from config import MSA_SERVER_URL
 
 # MSA 缓存配置
 MSA_CACHE_CONFIG = {
@@ -24,6 +27,193 @@ MSA_CACHE_CONFIG = {
 def get_sequence_hash(sequence: str) -> str:
     """计算序列的MD5哈希值作为缓存键"""
     return hashlib.md5(sequence.encode('utf-8')).hexdigest()
+
+def request_msa_from_server(sequence: str, timeout: int = 600) -> dict:
+    """
+    从 ColabFold MSA 服务器请求多序列比对
+    
+    Args:
+        sequence: 蛋白质序列（FASTA 格式）
+        timeout: 请求超时时间（秒）
+    
+    Returns:
+        包含 MSA 结果的字典，如果失败则返回 None
+    """
+    try:
+        print(f"🔍 正在从 MSA 服务器请求多序列比对: {MSA_SERVER_URL}", file=sys.stderr)
+        
+        # 准备请求数据
+        # 确保序列是 FASTA 格式
+        if not sequence.startswith('>'):
+            sequence = f">query\n{sequence}"
+        
+        # ColabFold MSA 服务器使用 form data 格式
+        payload = {
+            "q": sequence,
+            "mode": "colabfold"
+        }
+        
+        # 提交搜索任务
+        submit_url = f"{MSA_SERVER_URL}/ticket/msa"
+        print(f"📤 提交 MSA 搜索任务到: {submit_url}", file=sys.stderr)
+        
+        response = requests.post(submit_url, data=payload, timeout=30)
+        if response.status_code != 200:
+            print(f"❌ MSA 任务提交失败: {response.status_code} - {response.text}", file=sys.stderr)
+            return None
+        
+        result = response.json()
+        ticket_id = result.get("id")
+        if not ticket_id:
+            print(f"❌ 未获取到有效的任务 ID: {result}", file=sys.stderr)
+            return None
+        
+        print(f"✅ MSA 任务已提交，任务 ID: {ticket_id}", file=sys.stderr)
+        
+        # 轮询结果
+        result_url = f"{MSA_SERVER_URL}/ticket/{ticket_id}"
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            try:
+                print(f"⏳ 检查 MSA 任务状态...", file=sys.stderr)
+                response = requests.get(result_url, timeout=30)
+                
+                if response.status_code == 200:
+                    result_data = response.json()
+                    if result_data.get("status") == "COMPLETE":
+                        print(f"✅ MSA 搜索完成，获取到结果", file=sys.stderr)
+                        return result_data
+                    elif result_data.get("status") == "ERROR":
+                        print(f"❌ MSA 搜索失败: {result_data.get('error', '未知错误')}", file=sys.stderr)
+                        return None
+                    else:
+                        print(f"⏳ MSA 任务状态: {result_data.get('status', 'PENDING')}", file=sys.stderr)
+                elif response.status_code == 404:
+                    print(f"⏳ 任务尚未完成或不存在", file=sys.stderr)
+                else:
+                    print(f"⚠️ 检查状态时出现错误: {response.status_code}", file=sys.stderr)
+                
+            except requests.exceptions.RequestException as e:
+                print(f"⚠️ 检查状态时网络错误: {e}", file=sys.stderr)
+            
+            # 等待一段时间再次检查
+            time.sleep(10)
+        
+        print(f"⏰ MSA 搜索超时 ({timeout}秒)", file=sys.stderr)
+        return None
+        
+    except Exception as e:
+        print(f"❌ MSA 服务器请求失败: {e}", file=sys.stderr)
+        return None
+
+def save_msa_result_to_file(msa_result: dict, output_path: str) -> bool:
+    """
+    将 MSA 结果保存到文件
+    
+    Args:
+        msa_result: MSA 服务器返回的结果
+        output_path: 输出文件路径
+    
+    Returns:
+        是否成功保存
+    """
+    try:
+        # 根据结果格式保存为 A3M 文件
+        if 'entries' in msa_result:
+            with open(output_path, 'w') as f:
+                for entry in msa_result['entries']:
+                    name = entry.get('name', 'unknown')
+                    sequence = entry.get('sequence', '')
+                    if sequence:
+                        f.write(f">{name}\n{sequence}\n")
+            return True
+        else:
+            print(f"❌ MSA 结果格式不支持: {msa_result.keys()}", file=sys.stderr)
+            return False
+            
+    except Exception as e:
+        print(f"❌ 保存 MSA 结果失败: {e}", file=sys.stderr)
+        return False
+
+def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
+    """
+    为 YAML 中的蛋白质序列生成 MSA
+    
+    Args:
+        yaml_content: YAML 配置内容
+        temp_dir: 临时目录
+    
+    Returns:
+        是否成功生成 MSA
+    """
+    try:
+        print(f"🧬 开始为蛋白质序列生成 MSA", file=sys.stderr)
+        
+        # 解析 YAML 获取蛋白质序列
+        yaml_data = yaml.safe_load(yaml_content)
+        protein_sequences = {}
+        
+        for entity in yaml_data.get('sequences', []):
+            if entity.get('protein', {}).get('id'):
+                protein_id = entity['protein']['id']
+                sequence = entity['protein'].get('sequence', '')
+                if sequence:
+                    protein_sequences[protein_id] = sequence
+        
+        if not protein_sequences:
+            print("❌ 未找到蛋白质序列，跳过 MSA 生成", file=sys.stderr)
+            return False
+        
+        print(f"🔍 找到 {len(protein_sequences)} 个蛋白质序列需要生成 MSA", file=sys.stderr)
+        
+        # 为每个蛋白质序列生成 MSA
+        success_count = 0
+        for protein_id, sequence in protein_sequences.items():
+            print(f"🧬 正在为蛋白质 {protein_id} 生成 MSA...", file=sys.stderr)
+            
+            # 检查临时目录中是否已经存在
+            output_path = os.path.join(temp_dir, f"{protein_id}_msa.a3m")
+            if os.path.exists(output_path):
+                print(f"✅ 临时目录中已存在 MSA 文件: {output_path}", file=sys.stderr)
+                success_count += 1
+                continue
+            
+            # 检查缓存（统一使用 msa_ 前缀）
+            sequence_hash = get_sequence_hash(sequence)
+            cache_dir = MSA_CACHE_CONFIG['cache_dir']
+            cached_msa_path = os.path.join(cache_dir, f"msa_{sequence_hash}.a3m")
+            
+            if MSA_CACHE_CONFIG['enable_cache'] and os.path.exists(cached_msa_path):
+                print(f"✅ 找到缓存的 MSA 文件: {cached_msa_path}", file=sys.stderr)
+                # 复制到临时目录
+                shutil.copy2(cached_msa_path, output_path)
+                success_count += 1
+                continue
+            
+            # 从服务器请求 MSA
+            msa_result = request_msa_from_server(sequence)
+            if msa_result:
+                # 保存到临时目录
+                if save_msa_result_to_file(msa_result, output_path):
+                    success_count += 1
+                    
+                    # 缓存结果（统一使用 msa_ 前缀）
+                    if MSA_CACHE_CONFIG['enable_cache']:
+                        os.makedirs(cache_dir, exist_ok=True)
+                        shutil.copy2(output_path, cached_msa_path)
+                        print(f"💾 MSA 结果已缓存: {cached_msa_path}", file=sys.stderr)
+                else:
+                    print(f"❌ 保存 MSA 文件失败: {protein_id}", file=sys.stderr)
+            else:
+                print(f"❌ 获取 MSA 失败: {protein_id}", file=sys.stderr)
+        
+        print(f"✅ MSA 生成完成: {success_count}/{len(protein_sequences)} 个成功", file=sys.stderr)
+        return success_count > 0
+        
+    except Exception as e:
+        print(f"❌ 生成 MSA 时出现错误: {e}", file=sys.stderr)
+        return False
 
 def cache_msa_files_from_temp_dir(temp_dir: str, yaml_content: str):
     """
@@ -365,6 +555,17 @@ def main():
 
             predict_args['data'] = tmp_yaml_path
             predict_args['out_dir'] = temp_dir
+            
+            # 在预测之前生成 MSA（如果配置了 MSA 服务器）
+            if MSA_SERVER_URL and MSA_SERVER_URL != "":
+                print(f"🧬 开始使用 MSA 服务器生成多序列比对: {MSA_SERVER_URL}", file=sys.stderr)
+                msa_generated = generate_msa_for_sequences(yaml_content, temp_dir)
+                if msa_generated:
+                    print(f"✅ MSA 生成成功，将用于结构预测", file=sys.stderr)
+                else:
+                    print(f"⚠️ MSA 生成失败，将使用默认方法进行预测", file=sys.stderr)
+            else:
+                print(f"ℹ️ 未配置 MSA 服务器，跳过 MSA 生成", file=sys.stderr)
             
             POSITIONAL_KEYS = ['data']
             
