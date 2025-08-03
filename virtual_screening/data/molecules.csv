@@ -1,0 +1,11 @@
+molecule_id,smiles,name,molecular_weight
+compound_001,CCO,ethanol,46.07
+compound_002,c1ccccc1,benzene,78.11
+compound_003,CC(C)C,isobutane,58.12
+compound_004,CCCCO,butanol,74.12
+compound_005,c1ccc(cc1)O,phenol,94.11
+compound_006,CC(=O)C,acetone,58.08
+compound_007,CCN(CC)CC,triethylamine,101.19
+compound_008,c1ccc2ccccc2c1,naphthalene,128.17
+compound_009,CC(C)(C)O,tert-butanol,74.12
+compound_010,c1ccc(cc1)N,aniline,93.13
