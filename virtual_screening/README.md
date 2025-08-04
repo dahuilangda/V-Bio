@@ -160,7 +160,7 @@ python run_screening.py \
 python run_screening.py \
     --target data/target.yaml \
     --library data/molecules.csv \
-    --output_dir results \
+    --output_dir small_molecule_results \
     --report_only \
     --api_token your_token
 ```
@@ -177,7 +177,7 @@ python run_screening.py \
 ### 多肽筛选
 ```bash
 python run_screening.py \
-    --target data/protein_target.yaml \
+    --target data/target.yaml \
     --library data/peptides.fasta \
     --library_type peptide \
     --output_dir peptide_results \
@@ -188,8 +188,8 @@ python run_screening.py \
 ### 小分子筛选
 ```bash
 python run_screening.py \
-    --target data/protein_target.yaml \
-    --library data/small_molecules.csv \
+    --target data/target.yaml \
+    --library data/molecules.csv \
     --library_type small_molecule \
     --output_dir drug_results \
     --binding_affinity_weight 0.8 \
@@ -200,8 +200,8 @@ python run_screening.py \
 ### 快速测试（少量分子）
 ```bash
 python run_screening.py \
-    --target data/example_target.yaml \
-    --library data/example_library.csv \
+    --target data/target.yaml \
+    --library data/molecules.csv \
     --output_dir test_run \
     --max_molecules 5 \
     --batch_size 1 \
