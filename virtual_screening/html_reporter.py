@@ -1097,9 +1097,7 @@ class HTMLReporter:
             
             # 获取前10名分子
             logger.info("正在获取前10名分子...")
-            top_molecules = sorted(self.screening_results, 
-                                 key=lambda x: x.combined_score if x.combined_score is not None else 0, 
-                                 reverse=True)[:10]
+            top_molecules = self._get_top_molecules(10)
             
             # 生成HTML内容
             logger.info("正在生成HTML内容...")
@@ -1118,6 +1116,73 @@ class HTMLReporter:
             logger.error(f"生成HTML报告失败: {e}")
             logger.error(f"完整错误信息: {traceback.format_exc()}")
             return ""
+    
+    def _get_top_molecules(self, count: int = 10):
+        """根据分子类型获取排序后的前N名分子"""
+        def _scoring_key(result):
+            """为分子计算综合排序分数"""
+            if result.mol_type == "small_molecule":
+                # 小分子使用综合评分：Binding Prob高、IC50低、ipTM高、pLDDT高
+                scores = []
+                weights = []
+                
+                # 1. 结合概率 (权重: 0.3)
+                binding_prob = 0.0
+                if hasattr(result, 'properties') and result.properties:
+                    binding_prob = result.properties.get('binding_probability', 0.0)
+                if isinstance(binding_prob, (int, float)):
+                    scores.append(binding_prob)
+                    weights.append(0.3)
+                
+                # 2. IC50转换为分数 (权重: 0.3) - IC50越低分数越高
+                ic50_score = 0.0
+                if hasattr(result, 'properties') and result.properties:
+                    ic50_uM = result.properties.get('ic50_uM')
+                    if isinstance(ic50_uM, (int, float)) and ic50_uM > 0:
+                        # 使用对数转换，IC50越小分数越高
+                        # 1μM对应分数0.5，0.1μM对应分数约0.75，0.01μM对应分数约1.0
+                        ic50_score = max(0, 1 - (np.log10(ic50_uM) + 2) / 4)  # 范围约0-1
+                if ic50_score > 0:
+                    scores.append(ic50_score)
+                    weights.append(0.3)
+                
+                # 3. ipTM分数 (权重: 0.2)
+                iptm = 0.0
+                if hasattr(result, 'properties') and result.properties:
+                    iptm = result.properties.get('iptm', 0.0)
+                if not isinstance(iptm, (int, float)) or iptm <= 0:
+                    iptm = result.binding_score if result.binding_score is not None else 0.0
+                if isinstance(iptm, (int, float)):
+                    scores.append(iptm)
+                    weights.append(0.2)
+                
+                # 4. pLDDT分数 (权重: 0.2)
+                plddt = 0.0
+                if hasattr(result, 'properties') and result.properties:
+                    plddt = result.properties.get('plddt', 0.0)
+                if not isinstance(plddt, (int, float)) or plddt <= 0:
+                    plddt = (result.structural_score * 100) if result.structural_score is not None else 0.0
+                if isinstance(plddt, (int, float)):
+                    # pLDDT通常是0-100，归一化到0-1
+                    plddt_normalized = plddt / 100.0 if plddt > 1 else plddt
+                    scores.append(plddt_normalized)
+                    weights.append(0.2)
+                
+                # 计算加权平均分
+                if scores and weights:
+                    total_weight = sum(weights)
+                    weighted_score = sum(s * w for s, w in zip(scores, weights)) / total_weight
+                    return weighted_score
+                else:
+                    # 如果没有小分子特有数据，回退到combined_score
+                    return result.combined_score if result.combined_score is not None else 0.0
+            else:
+                # 非小分子使用原来的combined_score排序
+                return result.combined_score if result.combined_score is not None else 0.0
+        
+        # 排序并获取前N名
+        sorted_results = sorted(self.screening_results, key=_scoring_key, reverse=True)
+        return sorted_results[:count]
     
     def _calculate_statistics(self) -> Dict[str, Any]:
         """计算详细统计信息"""
@@ -1335,17 +1400,17 @@ class HTMLReporter:
                 # 结合概率信息（小分子专用）
                 binding_probability = result.properties.get('binding_probability')
                 if binding_probability is not None:
-                    # 使用百分比格式显示结合概率
-                    prob_class = "binding-prob-highlight" if isinstance(binding_probability, (int, float)) and binding_probability > 0.7 else "detail-item"
+                    # 使用AlphaFold颜色原则显示结合概率
+                    binding_prob_color = self._get_alphafold_color(binding_probability, "confidence")
                     
                     # 使用百分比区间信息
                     binding_range_percent = result.properties.get('binding_probability_range_percent')
                     prob_display = binding_range_percent if binding_range_percent else f"{binding_probability*100:.1f}%"
                     
                     scientific_info += f'''
-                    <div class="{prob_class}">
+                    <div class="detail-item alphafold-style" style="border-left: 4px solid {binding_prob_color};">
                         <span>Binding Prob:</span>
-                        <span>{prob_display}</span>
+                        <span style="color: {binding_prob_color}; font-weight: bold;">{prob_display}</span>
                     </div>'''
                 
                 # pIC50 信息
@@ -1406,16 +1471,12 @@ class HTMLReporter:
                 
                 <div class="molecule-details">
                     <div class="detail-item alphafold-style" style="border-left: 4px solid {iptm_color};">
-                        <span>ipTM Score:</span>
+                        <span>ipTM:</span>
                         <span style="color: {iptm_color}; font-weight: bold;">{iptm:.3f}</span>
                     </div>
                     <div class="detail-item alphafold-style" style="border-left: 4px solid {plddt_color};">
                         <span>pLDDT:</span>
                         <span style="color: {plddt_color}; font-weight: bold;">{plddt:.1f}</span>
-                    </div>
-                    <div class="detail-item alphafold-style" style="border-left: 4px solid {combined_color};">
-                        <span>Combined Score:</span>
-                        <span style="color: {combined_color}; font-weight: bold;">{result.combined_score:.3f}</span>
                     </div>
                     {scientific_info}
                 </div>
