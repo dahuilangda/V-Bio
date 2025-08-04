@@ -146,28 +146,45 @@ class ScoringSystem:
         
         return float(np.mean(confidence_scores)) if confidence_scores else 0.0
     
-    def calculate_combined_score(self, binding_score: float, structural_score: float, 
-                               confidence_score: float) -> float:
-        """计算综合评分"""
-        combined = (
-            binding_score * self.weights.get("binding_affinity", 0.6) +
-            structural_score * self.weights.get("structural_stability", 0.2) +
-            confidence_score * self.weights.get("confidence", 0.2)
-        )
-        return float(combined)
+    def calculate_combined_score(self, metrics: Dict[str, Any], mol_type: str) -> float:
+        """根据分子类型计算综合评分"""
+        if mol_type == "small_molecule":
+            # 小分子：binding_probability、iptm、plddt、IC50
+            binding_prob = float(metrics.get('binding_probability', 0.0) or 0.0)
+            iptm = float(metrics.get('iptm', 0.0) or 0.0)
+            plddt = float(metrics.get('plddt', 0.0) or 0.0)
+            ic50 = float(metrics.get('ic50_uM', 0.0) or 0.0)
+            # IC50越小越好，做反向归一化（假设最大100000，最小0.01）
+            ic50_score = 0.0
+            if ic50 > 0:
+                ic50_score = max(0.0, min(1.0, (5 - np.log10(ic50)) / 5))  # 0.01uM得1分，100000uM得0分
+            # 权重可根据实际需求调整
+            w = self.weights if self.weights else {}
+            combined = (
+                binding_prob * w.get('binding_probability', 0.4) +
+                iptm * w.get('iptm', 0.3) +
+                plddt * w.get('plddt', 0.2) +
+                ic50_score * w.get('ic50', 0.1)
+            )
+            return float(combined)
+        else:
+            # 多肽：iptm、plddt
+            iptm = float(metrics.get('iptm', 0.0) or 0.0)
+            plddt = float(metrics.get('plddt', 0.0) or 0.0)
+            w = self.weights if self.weights else {}
+            combined = (
+                iptm * w.get('iptm', 0.7) +
+                plddt * w.get('plddt', 0.3)
+            )
+            return float(combined)
     
     def score_molecule(self, molecule: Molecule, prediction_results: Dict[str, Any]) -> ScreeningResult:
-        """为单个分子计算所有评分"""
-        # 解析预测结果中的指标
+        """为单个分子计算所有评分（根据分子类型调整综合评分）"""
         metrics = self._parse_prediction_metrics(prediction_results)
-        
-        # 计算各项评分
         binding_score = self.calculate_binding_score(metrics)
         structural_score = self.calculate_structural_score(metrics)
         confidence_score = self.calculate_confidence_score(metrics)
-        combined_score = self.calculate_combined_score(binding_score, structural_score, confidence_score)
-        
-        # 创建筛选结果
+        combined_score = self.calculate_combined_score(metrics, molecule.mol_type)
         result = ScreeningResult(
             molecule_id=molecule.id,
             molecule_name=molecule.name,
@@ -179,10 +196,7 @@ class ScoringSystem:
             combined_score=combined_score,
             properties=molecule.properties.copy()
         )
-        
-        # 添加预测指标到属性中
         result.properties.update(metrics)
-        
         return result
     
     def _parse_prediction_metrics(self, prediction_results: Dict[str, Any]) -> Dict[str, float]:
