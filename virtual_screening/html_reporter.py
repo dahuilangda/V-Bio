@@ -211,32 +211,78 @@ class HTMLReporter:
                 with open(affinity_file, 'r') as f:
                     affinity_data = json.load(f)
                 
-                # 主要亲和力预测值
-                affinity_pred_value = affinity_data.get("affinity_pred_value")
-                if affinity_pred_value is not None:
-                    # 转换为IC50 (μM)：模型输出是log(IC50)，其中IC50以μM为单位
-                    ic50_uM = 10 ** affinity_pred_value
+                # 收集所有亲和力预测值
+                affinity_values = []
+                binding_probabilities = []
+                
+                # 收集 affinity_pred_value, affinity_pred_value1, affinity_pred_value2
+                for key in ['affinity_pred_value', 'affinity_pred_value1', 'affinity_pred_value2']:
+                    value = affinity_data.get(key)
+                    if value is not None:
+                        affinity_values.append(value)
+                
+                # 收集 affinity_probability_binary, affinity_probability_binary1, affinity_probability_binary2  
+                for key in ['affinity_probability_binary', 'affinity_probability_binary1', 'affinity_probability_binary2']:
+                    value = affinity_data.get(key)
+                    if value is not None:
+                        binding_probabilities.append(value)
+                
+                # 计算亲和力预测值的平均值和标准差
+                if affinity_values:
+                    import numpy as np
+                    affinity_mean = np.mean(affinity_values)
+                    affinity_std = np.std(affinity_values) if len(affinity_values) > 1 else 0.0
+                    
+                    # 转换为IC50 (μM)：模型输出是log(IC50 in μM)
+                    # 例如：模型输出 -3 对应 IC50 = 10^(-3) = 0.001 μM = 1 nM
+                    ic50_uM = 10 ** affinity_mean
                     properties['ic50_uM'] = ic50_uM
                     
-                    # 计算pIC50：pIC50 = -log10(IC50_M) = -log10(IC50_μM * 1e-6) = 6 - log10(IC50_μM)
-                    properties['pIC50'] = 6 - affinity_pred_value
+                    # 计算pIC50：pIC50 = -log10(IC50_M)
+                    # IC50_M = IC50_μM * 1e-6，所以 pIC50 = -log10(IC50_μM * 1e-6) = 6 - log10(IC50_μM) = 6 - affinity_mean
+                    properties['pIC50'] = 6 - affinity_mean
                     
-                    # 转换为kcal/mol：根据文档 y --> (6 - y) * 1.364
-                    properties['affinity_kcal_mol'] = (6 - affinity_pred_value) * 1.364
+                    # 转换为结合自由能 kcal/mol：根据文档 y --> (6 - y) * 1.364
+                    # 这里 y 是模型输出的 affinity_pred_value (log(IC50 in μM))
+                    properties['affinity_kcal_mol'] = (6 - affinity_mean) * 1.364
                     
                     # 为了兼容旧的属性名
                     properties['affinity'] = properties['affinity_kcal_mol']
+                    
+                    # 保存平均值和标准差信息
+                    properties['affinity_pred_value_mean'] = affinity_mean
+                    properties['affinity_pred_value_std'] = affinity_std
+                    properties['affinity_pred_value_range'] = f"{affinity_mean:.3f} ± {affinity_std:.3f}"
+                    
+                    # 计算IC50区间（用于显示），统一使用μM单位
+                    ic50_min = 10 ** (affinity_mean - affinity_std)
+                    ic50_max = 10 ** (affinity_mean + affinity_std)
+                    # 统一使用μM单位和±格式
+                    ic50_range_display = f"{ic50_uM:.3f} ± {(ic50_max - ic50_min)/2:.3f} μM"
+                    properties['ic50_range_display'] = ic50_range_display
+                    
+                    # 保存原始预测值（用于向后兼容）
+                    properties['affinity_pred_value'] = affinity_mean
                 
-                # 结合概率（主要用于命中发现）
-                binding_probability = affinity_data.get("affinity_probability_binary")
-                if binding_probability is not None:
-                    properties['binding_probability'] = binding_probability
+                # 计算结合概率的平均值和标准差
+                if binding_probabilities:
+                    binding_prob_mean = np.mean(binding_probabilities)
+                    binding_prob_std = np.std(binding_probabilities) if len(binding_probabilities) > 1 else 0.0
+                    
+                    properties['binding_probability'] = binding_prob_mean
+                    properties['binding_probability_mean'] = binding_prob_mean
+                    properties['binding_probability_std'] = binding_prob_std
+                    properties['binding_probability_range'] = f"{binding_prob_mean:.3f} ± {binding_prob_std:.3f}"
+                    
+                    # 添加百分比格式的结合概率
+                    properties['binding_probability_percent'] = binding_prob_mean * 100
+                    properties['binding_probability_percent_std'] = binding_prob_std * 100
+                    properties['binding_probability_range_percent'] = f"{binding_prob_mean*100:.1f}% ± {binding_prob_std*100:.1f}%"
+                    
+                    # 保存原始值（用于向后兼容）
+                    properties['affinity_probability_binary'] = binding_prob_mean
                 
-                # 保存原始预测值
-                properties['affinity_pred_value'] = affinity_pred_value
-                properties['affinity_probability_binary'] = binding_probability
-                
-                logger.debug(f"加载亲和力数据: IC50={ic50_uM:.3f}μM, 结合概率={binding_probability:.3f}")
+                logger.debug(f"加载亲和力数据: 平均IC50={ic50_uM:.3f}μM (±{affinity_std:.3f}), 平均结合概率={binding_prob_mean:.3f} (±{binding_prob_std:.3f})")
             
             # 2. 加载置信度数据
             confidence_file = os.path.join(task_dir, "confidence_data_model_0.json")
@@ -273,26 +319,31 @@ class HTMLReporter:
     def _find_task_directory(self, result: "ScreeningResult") -> Optional[str]:
         """查找对应结果的task目录"""
         try:
-            # 在输出目录中查找task_*目录
-            base_dir = self.output_dir
+            # 在输出目录的tasks子目录中查找task_*目录
+            tasks_base_dir = os.path.join(self.output_dir, "tasks")
+            
+            if not os.path.exists(tasks_base_dir):
+                logger.debug(f"Tasks目录不存在: {tasks_base_dir}")
+                return None
             
             # 查找所有task目录
-            task_dirs = [d for d in os.listdir(base_dir) 
-                        if d.startswith('task_') and os.path.isdir(os.path.join(base_dir, d))]
+            task_dirs = [d for d in os.listdir(tasks_base_dir) 
+                        if d.startswith('task_') and os.path.isdir(os.path.join(tasks_base_dir, d))]
             
             if not task_dirs:
+                logger.debug(f"在{tasks_base_dir}中未找到task目录")
                 return None
             
             # 策略1：通过结果中的structure_path查找
             if hasattr(result, 'structure_path') and result.structure_path:
                 for task_dir in task_dirs:
                     if task_dir in result.structure_path:
-                        full_path = os.path.join(base_dir, task_dir)
+                        full_path = os.path.join(tasks_base_dir, task_dir)
                         logger.debug(f"通过structure_path找到task目录: {full_path}")
                         return full_path
             
             # 策略2：通过分子名称或ID匹配（如果在immediate_reports中有记录）
-            immediate_dir = os.path.join(base_dir, "immediate_reports")
+            immediate_dir = os.path.join(self.output_dir, "immediate_reports")
             if os.path.exists(immediate_dir):
                 for report_file in os.listdir(immediate_dir):
                     if report_file.endswith('.csv'):
@@ -310,7 +361,7 @@ class HTMLReporter:
                                 structure_path = matching_rows.iloc[0]['structure_path']
                                 for task_dir in task_dirs:
                                     if task_dir in str(structure_path):
-                                        full_path = os.path.join(base_dir, task_dir)
+                                        full_path = os.path.join(tasks_base_dir, task_dir)
                                         logger.debug(f"通过immediate报告找到task目录: {full_path}")
                                         return full_path
                         except Exception as e:
@@ -323,7 +374,7 @@ class HTMLReporter:
             if len(task_dirs) > 0:
                 # 简单按索引匹配（不够精确，但总比没有好）
                 index = hash(result.molecule_id) % len(task_dirs)
-                full_path = os.path.join(base_dir, task_dirs[index])
+                full_path = os.path.join(tasks_base_dir, task_dirs[index])
                 logger.debug(f"使用哈希匹配找到task目录: {full_path}")
                 return full_path
             
@@ -348,39 +399,18 @@ class HTMLReporter:
             logger.debug(f"计算分子描述符失败: {e}")
     
     def _generate_fallback_properties(self, result: "ScreeningResult", index: int):
-        """生成回退的估算属性（向后兼容）"""
-        import random
-        random.seed(42 + index)  # 确保可重复性
+        """生成回退的基础属性（仅分子描述符，不包含亲和力估算）"""
         
         if result.mol_type == "small_molecule":
-            # 基于现有评分估算属性
-            iptm = result.properties.get('iptm', result.binding_score)
-            if iptm > 0:
-                # IC50估算
-                base_ic50 = 10.0 * (1.1 - iptm) ** 3
-                noise_factor = 1 + random.uniform(-0.3, 0.3)
-                estimated_ic50 = base_ic50 * noise_factor
-                estimated_ic50 = max(0.001, min(1000.0, estimated_ic50))
-                
-                result.properties['ic50_uM'] = estimated_ic50
-                result.properties['pIC50'] = -math.log10(estimated_ic50 / 1000000)
-            
-            # 结合概率估算
-            combined_score = result.combined_score
-            confidence_score = result.confidence_score
-            base_prob = combined_score * 0.8 + confidence_score * 0.2
-            noise_factor = 1 + random.uniform(-0.1, 0.1)
-            binding_probability = max(0.0, min(1.0, base_prob * noise_factor))
-            result.properties['binding_probability'] = binding_probability
-            
-            # 亲和力估算
-            if iptm > 0:
-                delta_g = -12.0 * iptm + random.uniform(-1.0, 1.0)
-                result.properties['affinity'] = delta_g
-            
-            # 分子描述符
+            # 仅计算分子描述符 - 这些是基于SMILES的真实化学性质计算
             if RDKIT_AVAILABLE and result.sequence:
                 self._calculate_molecular_descriptors(result, result.properties)
+                logger.debug(f"为 {result.molecule_name} 计算了分子描述符 (MW, LogP, HBD, HBA, TPSA)")
+            else:
+                logger.debug(f"RDKit不可用或无SMILES，跳过 {result.molecule_name} 的分子描述符计算")
+        
+        # 记录：不生成任何亲和力数据
+        logger.debug(f"不生成 {result.molecule_name} 的亲和力数据 - 仅使用来自affinity_data.json的真实计算结果")
 
     def _apply_clean_style(self, ax):
         """应用清洁的图表样式，移除顶部和右侧边框"""
@@ -1289,18 +1319,12 @@ class HTMLReporter:
             
             # 小分子特有的指标
             if result.mol_type == "small_molecule" and hasattr(result, 'properties') and result.properties:
-                # IC50 信息
+                # IC50 信息（使用平均值）
                 ic50_uM = result.properties.get('ic50_uM')
                 if ic50_uM is not None:
-                    # 智能格式化IC50值
-                    if ic50_uM < 0.001:
-                        ic50_display = f"{ic50_uM*1000:.2f} nM"
-                    elif ic50_uM < 1:
-                        ic50_display = f"{ic50_uM*1000:.1f} nM"
-                    elif ic50_uM < 1000:
-                        ic50_display = f"{ic50_uM:.2f} μM"
-                    else:
-                        ic50_display = f"{ic50_uM/1000:.2f} mM"
+                    # 统一使用μM单位显示IC50
+                    ic50_range = result.properties.get('ic50_range_display')
+                    ic50_display = ic50_range if ic50_range else f"{ic50_uM:.3f} μM"
                     
                     scientific_info += f'''
                     <div class="detail-item affinity-highlight">
@@ -1311,12 +1335,17 @@ class HTMLReporter:
                 # 结合概率信息（小分子专用）
                 binding_probability = result.properties.get('binding_probability')
                 if binding_probability is not None:
-                    # 使用不同的颜色和样式来突出显示结合概率
+                    # 使用百分比格式显示结合概率
                     prob_class = "binding-prob-highlight" if isinstance(binding_probability, (int, float)) and binding_probability > 0.7 else "detail-item"
+                    
+                    # 使用百分比区间信息
+                    binding_range_percent = result.properties.get('binding_probability_range_percent')
+                    prob_display = binding_range_percent if binding_range_percent else f"{binding_probability*100:.1f}%"
+                    
                     scientific_info += f'''
                     <div class="{prob_class}">
                         <span>Binding Prob:</span>
-                        <span>{binding_probability:.3f}</span>
+                        <span>{prob_display}</span>
                     </div>'''
                 
                 # pIC50 信息
@@ -1328,13 +1357,13 @@ class HTMLReporter:
                         <span>{pIC50:.2f}</span>
                     </div>'''
                 
-                # 结合能信息
-                delta_g = result.properties.get('delta_g_kcal_mol')
-                if delta_g is not None:
+                # 结合自由能信息（kcal/mol）
+                affinity_kcal_mol = result.properties.get('affinity_kcal_mol')
+                if affinity_kcal_mol is not None:
                     scientific_info += f'''
                     <div class="detail-item">
                         <span>ΔG:</span>
-                        <span>{delta_g:.2f} kcal/mol</span>
+                        <span>{affinity_kcal_mol:.2f} kcal/mol</span>
                     </div>'''
             
             # 通用指标（所有分子类型）

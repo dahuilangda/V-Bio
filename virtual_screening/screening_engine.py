@@ -1456,6 +1456,35 @@ class SimpleScreeningEngine:
                 output_dir=self.config.output_dir
             )
             
+            # 在生成报告前，让HTMLReporter加载真实的task数据并更新results
+            logger.info("更新结果对象中的task数据...")
+            updated_count = 0
+            for result in self.screening_results:
+                task_properties = reporter._load_task_results(result)
+                if task_properties:
+                    # 记录更新前的字段数量
+                    old_count = len(result.properties) if result.properties else 0
+                    result.properties = task_properties
+                    new_count = len(task_properties)
+                    updated_count += 1
+                    
+                    # 检查是否包含新的区间字段
+                    has_range_fields = any(field in task_properties for field in 
+                                         ['affinity_pred_value_range', 'binding_probability_range', 'ic50_range_display'])
+                    
+                    if updated_count <= 3:  # 只记录前3个结果的详细信息
+                        logger.info(f"更新了 {result.molecule_name}: {old_count} -> {new_count} 字段, 包含区间字段: {has_range_fields}")
+                        if has_range_fields:
+                            for field in ['affinity_pred_value_range', 'binding_probability_range', 'ic50_range_display']:
+                                if field in task_properties:
+                                    logger.info(f"   {field}: {task_properties[field]}")
+            
+            logger.info(f"共更新了 {updated_count} 个结果对象的属性")
+            
+            # 重新保存包含完整数据的CSV文件
+            self._save_complete_results()
+            self._save_top_results()
+            
             # 先生成图表
             plots = reporter.generate_screening_plots()
             logger.info(f"生成了 {len(plots)} 个图表")
