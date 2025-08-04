@@ -1561,15 +1561,16 @@ class HTMLReporter:
             # 亲和力统计
             affinity_stats = ""
             if 'affinity' in stats:
-                strong_affinity_count = sum(1 for r in self.screening_results 
+                strong_affinity_count = sum(1 for r in self.screening_results
                                           if hasattr(r, 'properties') and r.properties and
-                                          isinstance(r.properties.get('affinity'), (int, float)) and
-                                          r.properties.get('affinity', 0) < -8.0)  # 强结合 < -8 kcal/mol
+                                          isinstance(r.properties.get('ic50_uM'), (int, float)) and
+                                          r.properties.get('ic50_uM', 99999999999) < 0.05)
+                                          
                 best_affinity = stats['affinity']['min']
                 affinity_stats += f'''
                 <div class="stats-card">
                     <div class="stats-value">{strong_affinity_count}</div>
-                    <div>Strong Binders (<-8 kcal/mol)</div>
+                    <div>Strong Binders (< -8 kcal/mol)</div>
                 </div>
                 <div class="stats-card">
                     <div class="stats-value">{best_affinity:.1f}</div>
