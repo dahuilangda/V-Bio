@@ -80,7 +80,6 @@ class ScreeningConfig:
     auto_enable_affinity: bool = True  # 自动启用亲和力计算
     enable_affinity: bool = False
     target_sequence: str = ""
-    
     def __post_init__(self):
         if self.scoring_weights is None:
             self.scoring_weights = {
@@ -88,6 +87,20 @@ class ScreeningConfig:
                 "structural_stability": 0.2,
                 "confidence": 0.2
             }
+    
+    def __getattr__(self, name):
+        """防御性属性访问，防止访问不存在的属性时出错"""
+        if name.endswith('_weight'):
+            # 如果尝试访问旧的权重属性，从scoring_weights中提取
+            weight_type = name.replace('_weight', '')
+            if weight_type == 'binding_affinity':
+                return self.scoring_weights.get('binding_affinity', 0.6)
+            elif weight_type == 'structural_stability':
+                return self.scoring_weights.get('structural_stability', 0.2)
+            elif weight_type == 'confidence':
+                return self.scoring_weights.get('confidence', 0.2)
+        
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
 class ScoringSystem:
     """评分系统"""
@@ -840,8 +853,12 @@ class SimpleScreeningEngine:
         task_dir = os.path.join(self.config.output_dir, "tasks")
         if os.path.exists(task_dir):
             task_smiles = 0
+            failed_files = 0
+            total_files = 0
+            
             for task_file in os.listdir(task_dir):
                 if task_file.endswith('.json'):
+                    total_files += 1
                     try:
                         task_path = os.path.join(task_dir, task_file)
                         with open(task_path, 'r') as f:
@@ -855,10 +872,18 @@ class SimpleScreeningEngine:
                                 task_smiles += 1
                                 
                     except Exception as e:
+                        failed_files += 1
                         logger.warning(f"读取任务记录 {task_file} 失败: {e}")
+                        # 如果失败文件太多，可能是系统性问题
+                        if failed_files > 10 and failed_files > total_files * 0.1:
+                            logger.error(f"任务记录读取失败率过高 ({failed_files}/{total_files})，可能存在系统性问题")
+                            break
             
             if task_smiles > 0:
                 logger.info(f"从任务记录加载了额外 {task_smiles} 个已完成的SMILES")
+            
+            if failed_files > 0:
+                logger.warning(f"共有 {failed_files} 个任务记录文件读取失败")
         
         logger.info(f"总计加载了 {len(completed_smiles)} 个已完成的SMILES用于续算")
         return completed_smiles
@@ -956,35 +981,220 @@ class SimpleScreeningEngine:
     def _load_existing_results(self) -> List[ScreeningResult]:
         """加载已有结果"""
         results_file = os.path.join(self.config.output_dir, "screening_results_complete.csv")
-        if not os.path.exists(results_file):
-            return []
+        if os.path.exists(results_file):
+            try:
+                df = pd.read_csv(results_file)
+                results = []
+                
+                for _, row in df.iterrows():
+                    result = ScreeningResult(
+                        molecule_id=row.get('molecule_id', ''),
+                        molecule_name=row.get('molecule_name', ''),
+                        sequence=row.get('sequence', ''),
+                        mol_type=row.get('mol_type', ''),
+                        binding_score=float(row.get('binding_score', 0.0)),
+                        confidence_score=float(row.get('confidence_score', 0.0)),
+                        structural_score=float(row.get('structural_score', 0.0)),
+                        combined_score=float(row.get('combined_score', 0.0)),
+                        rank=int(row.get('rank', 0)),
+                        structure_path=row.get('structure_path', ''),
+                        properties={}
+                    )
+                    results.append(result)
+                
+                logger.info(f"从CSV文件加载了 {len(results)} 个已有结果")
+                return results
+                
+            except Exception as e:
+                logger.error(f"从CSV文件加载已有结果失败: {e}")
         
+        # 如果没有CSV文件，尝试从任务记录重建结果
+        logger.info("未找到结果CSV文件，尝试从任务记录重建结果...")
+        return self._rebuild_results_from_tasks()
+    
+    def _parse_result_dir(self, result_dir: str) -> Dict[str, Any]:
+        """解析结果目录，提取预测指标"""
         try:
-            df = pd.read_csv(results_file)
-            results = []
+            result_data = {}
             
-            for _, row in df.iterrows():
-                result = ScreeningResult(
-                    molecule_id=row.get('molecule_id', ''),
-                    molecule_name=row.get('molecule_name', ''),
-                    sequence=row.get('sequence', ''),
-                    mol_type=row.get('mol_type', ''),
-                    binding_score=float(row.get('binding_score', 0.0)),
-                    confidence_score=float(row.get('confidence_score', 0.0)),
-                    structural_score=float(row.get('structural_score', 0.0)),
-                    combined_score=float(row.get('combined_score', 0.0)),
-                    rank=int(row.get('rank', 0)),
-                    structure_path=row.get('structure_path', ''),
-                    properties={}
-                )
-                results.append(result)
+            # 1. 查找confidence_data_model_0.json文件（实际的文件名）
+            confidence_file = os.path.join(result_dir, "confidence_data_model_0.json")
+            if os.path.exists(confidence_file):
+                with open(confidence_file, 'r') as f:
+                    confidence_data = json.load(f)
+                
+                # 提取confidence相关指标，使用实际的字段名
+                result_data.update({
+                    'confidence': confidence_data.get('confidence_score', 0.0),
+                    'iptm': confidence_data.get('iptm', 0.0),
+                    'ptm': confidence_data.get('ptm', 0.0),
+                    'plddt': confidence_data.get('complex_plddt', 0.0),
+                    'ligand_iptm': confidence_data.get('ligand_iptm', 0.0),
+                    'protein_iptm': confidence_data.get('protein_iptm', 0.0),
+                    'complex_iplddt': confidence_data.get('complex_iplddt', 0.0)
+                })
+                logger.debug(f"读取置信度数据: confidence={result_data['confidence']:.4f}, iptm={result_data['iptm']:.4f}, ptm={result_data['ptm']:.4f}")
             
-            logger.info(f"加载了 {len(results)} 个已有结果")
-            return results
+            # 2. 查找affinity_data.json文件（亲和力数据）
+            affinity_file = os.path.join(result_dir, "affinity_data.json")
+            if os.path.exists(affinity_file):
+                with open(affinity_file, 'r') as f:
+                    affinity_data = json.load(f)
+                
+                # 提取亲和力预测值
+                affinity_pred = affinity_data.get('affinity_pred_value', None)
+                binding_prob = affinity_data.get('affinity_probability_binary', None)
+                
+                if affinity_pred is not None:
+                    # 计算IC50相关指标
+                    # 根据文档：affinity_pred_value是log(IC50)，单位为μM
+                    # IC50 (μM) = 10^affinity_pred_value
+                    ic50_uM = 10 ** affinity_pred
+                    
+                    # 计算pIC50 = -log10(IC50_M) = -log10(IC50_uM * 1e-6) = 6 - log10(IC50_uM)
+                    pIC50 = 6 - affinity_pred
+                    
+                    # 计算结合自由能 ΔG (kcal/mol) = (6 - affinity_pred) * 1.364
+                    delta_g_kcal_mol = pIC50 * 1.364
+                    
+                    result_data.update({
+                        'affinity_pred_value': affinity_pred,  # 原始预测值
+                        'ic50_uM': ic50_uM,                    # IC50 (μM)
+                        'pIC50': pIC50,                        # pIC50
+                        'delta_g_kcal_mol': delta_g_kcal_mol,  # ΔG (kcal/mol)
+                        'binding_probability': binding_prob,    # 结合概率
+                        'affinity': affinity_pred  # 用于后续计算
+                    })
+                    
+                    logger.debug(f"读取亲和力数据: 预测值={affinity_pred:.4f}, IC50={ic50_uM:.2f}μM, pIC50={pIC50:.2f}, ΔG={delta_g_kcal_mol:.2f}kcal/mol")
+            
+            # 3. 兼容旧格式：查找confidence_metrics.json
+            if not result_data:
+                confidence_metrics_file = os.path.join(result_dir, "confidence_metrics.json")
+                if os.path.exists(confidence_metrics_file):
+                    with open(confidence_metrics_file, 'r') as f:
+                        return json.load(f)
+            
+            return result_data if result_data else {}
             
         except Exception as e:
-            logger.error(f"加载已有结果失败: {e}")
+            logger.error(f"解析结果目录失败: {e}")
+            import traceback
+            logger.error(f"错误详情: {traceback.format_exc()}")
+            return None
+
+    def _rebuild_results_from_tasks(self) -> List[ScreeningResult]:
+        """从任务记录重建筛选结果"""
+        task_dir = os.path.join(self.config.output_dir, "tasks")
+        if not os.path.exists(task_dir):
+            logger.warning("任务目录不存在，无法重建结果")
             return []
+        
+        results = []
+        completed_tasks = 0
+        failed_tasks = 0
+        
+        for task_file in os.listdir(task_dir):
+            if not task_file.endswith('.json'):
+                continue
+            
+            try:
+                task_path = os.path.join(task_dir, task_file)
+                with open(task_path, 'r') as f:
+                    task_record = json.load(f)
+                
+                if task_record.get('status') != 'completed':
+                    failed_tasks += 1
+                    continue
+                
+                # 从任务记录重建结果
+                task_id = task_record.get('task_id', '')
+                molecule_id = task_record.get('molecule_id', '')
+                molecule_name = task_record.get('molecule_name', '')
+                sequence = task_record.get('sequence', '')
+                mol_type = task_record.get('mol_type', '')
+                
+                # 查找对应的结果目录
+                result_dir = os.path.join(task_dir, f"task_{task_id}")
+                if not os.path.exists(result_dir):
+                    # 尝试替代路径
+                    result_dir = os.path.join(self.config.output_dir, "tasks", f"task_{task_id}")
+                
+                if os.path.exists(result_dir):
+                    # 解析结果数据
+                    prediction_results = self._parse_result_dir(result_dir)
+                    if prediction_results:
+                        # 创建临时分子对象
+                        molecule = type('Molecule', (), {
+                            'id': molecule_id,
+                            'name': molecule_name,
+                            'sequence': sequence,
+                            'mol_type': mol_type,
+                            'properties': task_record.get('properties', {})
+                        })()
+                        
+                        # 计算评分
+                        screening_result = self.scoring_system.score_molecule(molecule, prediction_results)
+                        screening_result.structure_path = result_dir
+                        
+                        results.append(screening_result)
+                        completed_tasks += 1
+                    else:
+                        logger.warning(f"无法解析任务 {task_id} 的结果数据")
+                        failed_tasks += 1
+                else:
+                    logger.warning(f"未找到任务 {task_id} 的结果目录")
+                    failed_tasks += 1
+                    
+            except Exception as e:
+                logger.warning(f"处理任务记录 {task_file} 失败: {e}")
+                failed_tasks += 1
+        
+        logger.info(f"从任务记录重建结果完成: 成功 {completed_tasks}, 失败 {failed_tasks}")
+        
+        if not results:
+            logger.warning("未能从任务文件重建任何结果")
+            logger.error("可能的原因:")
+            logger.error("1. 任务文件损坏或格式不正确")
+            logger.error("2. 任务尚未完成（状态不是'completed'）")
+            logger.error("3. 结果文件不存在或为空")
+            logger.error("4. 任务文件中缺少必要的评分数据")
+            
+            # 输出任务状态统计
+            logger.error("尝试检查任务文件内容...")
+            self._debug_task_status()
+        
+        return results
+    
+    def _debug_task_status(self):
+        """调试任务状态"""
+        task_dir = os.path.join(self.config.output_dir, "tasks")
+        if not os.path.exists(task_dir):
+            return
+        
+        status_count = {}
+        sample_files = []
+        
+        for task_file in os.listdir(task_dir):
+            if task_file.endswith('.json') and len(sample_files) < 3:
+                try:
+                    task_path = os.path.join(task_dir, task_file)
+                    with open(task_path, 'r') as f:
+                        task_record = json.load(f)
+                    
+                    status = task_record.get('status', 'unknown')
+                    status_count[status] = status_count.get(status, 0) + 1
+                    
+                    sample_files.append(f"  - {task_file}: 状态={status}")
+                    
+                except Exception as e:
+                    status_count['error'] = status_count.get('error', 0) + 1
+        
+        for status, count in status_count.items():
+            logger.error(f"  状态 '{status}': {count} 个任务")
+        
+        for sample in sample_files:
+            logger.error(sample)
     
     def _preprocess_molecules(self, library: MoleculeLibrary) -> List[Molecule]:
         """预处理分子"""
@@ -1193,6 +1403,28 @@ class SimpleScreeningEngine:
     def _save_summary(self):
         """保存筛选摘要"""
         try:
+            # 手动构建配置字典，避免序列化问题
+            config_dict = {
+                'target_yaml': self.config.target_yaml,
+                'library_path': self.config.library_path,
+                'library_type': self.config.library_type,
+                'output_dir': self.config.output_dir,
+                'max_molecules': self.config.max_molecules,
+                'batch_size': self.config.batch_size,
+                'max_workers': self.config.max_workers,
+                'timeout': self.config.timeout,
+                'retry_attempts': self.config.retry_attempts,
+                'scoring_weights': self.config.scoring_weights,
+                'min_binding_score': self.config.min_binding_score,
+                'top_n': self.config.top_n,
+                'use_msa_server': self.config.use_msa_server,
+                'save_structures': self.config.save_structures,
+                'generate_plots': self.config.generate_plots,
+                'auto_enable_affinity': getattr(self.config, 'auto_enable_affinity', True),
+                'enable_affinity': getattr(self.config, 'enable_affinity', False),
+                'target_sequence': getattr(self.config, 'target_sequence', '')
+            }
+            
             summary = {
                 'total_screened': len(self.screening_results),
                 'successful_predictions': len(self.screening_results),
@@ -1200,7 +1432,7 @@ class SimpleScreeningEngine:
                 'success_rate': len(self.screening_results) / (len(self.screening_results) + len(self.failed_molecules)) if (len(self.screening_results) + len(self.failed_molecules)) > 0 else 0,
                 'top_score': self.screening_results[0].combined_score if self.screening_results else 0.0,
                 'average_score': np.mean([r.combined_score for r in self.screening_results]) if self.screening_results else 0.0,
-                'screening_config': asdict(self.config),
+                'screening_config': config_dict,
                 'timestamp': time.time()
             }
             
