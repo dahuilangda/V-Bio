@@ -3453,8 +3453,20 @@ with tab1:
             
             if affinity_data and st.session_state.properties.get('affinity'):
                 st.markdown("<br><b>亲和力预测指标</b>", unsafe_allow_html=True)
-                log_ic50_in_uM = affinity_data.get("affinity_pred_value")
-                if log_ic50_in_uM is not None:
+                
+                # 收集所有亲和力预测值 - 参考虚拟筛选中的处理方式
+                affinity_values = []
+                for key in ['affinity_pred_value', 'affinity_pred_value1', 'affinity_pred_value2']:
+                    value = affinity_data.get(key)
+                    if value is not None:
+                        affinity_values.append(value)
+                
+                # 使用平均值作为最终的亲和力预测值
+                if affinity_values:
+                    import numpy as np
+                    log_ic50_in_uM = np.mean(affinity_values)
+                    affinity_std = np.std(affinity_values) if len(affinity_values) > 1 else 0.0
+                    
                     ic50_uM = math.pow(10, log_ic50_in_uM)
                     if ic50_uM > 1000:
                         display_ic50 = f"{ic50_uM/1000:.3f} mM"
@@ -3466,13 +3478,52 @@ with tab1:
                     pIC50 = 6 - log_ic50_in_uM
                     delta_g = -1.364 * pIC50
                     
-                    st.metric("预测 IC50", display_ic50, help="预测的半数抑制浓度 (IC50) 是指结合体（Binder）抑制其靶标 50% 所需的浓度。它是衡量效力的常用指标，数值越低表示预测的亲和力越强。")
-                    affinity_cols = st.columns(2)
-                    affinity_cols[0].metric("预测 pIC50", f"{pIC50:.3f}", help="pIC50 是 IC50 值的负对数 (pIC50 = -log10(IC50 in M))。这个标度更便于比较，数值越高表示预测的亲和力越强。")
-                    affinity_cols[1].metric("结合自由能 (ΔG)", f"{delta_g:.3f} kcal/mol", help="预测的吉布斯自由能 (ΔG) 反映了结合事件的自发性，由 pIC50 计算得出。负值越大，表明结合作用越强、越有利。")
-                binder_prob = affinity_data.get("affinity_probability_binary")
-                if binder_prob is not None:
-                    st.metric("结合概率", f"{binder_prob:.2%}", help="模型预测结合体与其余组分形成稳定复合物的概率。百分比越高，表明模型对这是一个真实的结合事件越有信心。")
+                    # 根据是否有多个预测值来决定显示格式
+                    if len(affinity_values) > 1:
+                        # 计算IC50的标准差范围
+                        ic50_std_lower = math.pow(10, log_ic50_in_uM - affinity_std)
+                        ic50_std_upper = math.pow(10, log_ic50_in_uM + affinity_std)
+                        
+                        # 格式化IC50显示（带标准差）
+                        if ic50_uM > 1000:
+                            display_ic50_with_std = f"{ic50_uM/1000:.3f} ± {(ic50_std_upper-ic50_std_lower)/2000:.3f} mM"
+                        elif ic50_uM > 1000000:
+                            display_ic50_with_std = f"{ic50_uM/1000000:.3f} ± {(ic50_std_upper-ic50_std_lower)/2000000:.3f} M"
+                        else:
+                            display_ic50_with_std = f"{ic50_uM:.3f} ± {(ic50_std_upper-ic50_std_lower)/2:.3f} μM"
+                            
+                        st.metric("预测 IC50", display_ic50_with_std, help=f"预测的半数抑制浓度 (IC50)，基于 {len(affinity_values)} 个预测值的平均结果。数值越低表示预测的亲和力越强。")
+                        affinity_cols = st.columns(2)
+                        affinity_cols[0].metric("预测 pIC50", f"{pIC50:.3f} ± {affinity_std:.3f}", help=f"pIC50 是 IC50 值的负对数，基于 {len(affinity_values)} 个预测值的平均结果。数值越高表示预测的亲和力越强。")
+                        affinity_cols[1].metric("结合自由能 (ΔG)", f"{delta_g:.3f} ± {affinity_std*1.364:.3f} kcal/mol", help=f"预测的吉布斯自由能 (ΔG)，基于 {len(affinity_values)} 个预测值的平均结果。负值越大，表明结合作用越强、越有利。")
+                    else:
+                        st.metric("预测 IC50", display_ic50, help="预测的半数抑制浓度 (IC50) 是指结合体（Binder）抑制其靶标 50% 所需的浓度。它是衡量效力的常用指标，数值越低表示预测的亲和力越强。")
+                        affinity_cols = st.columns(2)
+                        affinity_cols[0].metric("预测 pIC50", f"{pIC50:.3f}", help="pIC50 是 IC50 值的负对数 (pIC50 = -log10(IC50 in M))。这个标度更便于比较，数值越高表示预测的亲和力越强。")
+                        affinity_cols[1].metric("结合自由能 (ΔG)", f"{delta_g:.3f} kcal/mol", help="预测的吉布斯自由能 (ΔG) 反映了结合事件的自发性，由 pIC50 计算得出。负值越大，表明结合作用越强、越有利。")
+                    
+                # 收集结合概率值 - 处理多个结合概率预测值
+                binding_probabilities = []
+                for key in ['affinity_probability_binary', 'affinity_probability_binary1', 'affinity_probability_binary2']:
+                    value = affinity_data.get(key)
+                    if value is not None:
+                        binding_probabilities.append(value)
+                
+                # 使用平均的结合概率
+                if binding_probabilities:
+                    binder_prob = np.mean(binding_probabilities)
+                    binding_prob_std = np.std(binding_probabilities) if len(binding_probabilities) > 1 else 0.0
+                    
+                    # 根据是否有多个预测值来决定显示格式
+                    if len(binding_probabilities) > 1:
+                        st.metric("结合概率", f"{binder_prob:.2%} ± {binding_prob_std:.2%}", help=f"模型预测结合体与其余组分形成稳定复合物的概率，基于 {len(binding_probabilities)} 个预测值的平均结果。百分比越高，表明模型对这是一个真实的结合事件越有信心。")
+                    else:
+                        st.metric("结合概率", f"{binder_prob:.2%}", help="模型预测结合体与其余组分形成稳定复合物的概率。百分比越高，表明模型对这是一个真实的结合事件越有信心。")
+                else:
+                    # 如果没有收集到多个值，尝试获取单个值
+                    binder_prob = affinity_data.get("affinity_probability_binary")
+                    if binder_prob is not None:
+                        st.metric("结合概率", f"{binder_prob:.2%}", help="模型预测结合体与其余组分形成稳定复合物的概率。百分比越高，表明模型对这是一个真实的结合事件越有信心。")
             else:
                 st.info("💡 如需亲和力预测结果，请在步骤1中勾选 **计算结合亲和力 (Affinity)** 选项。", icon="ℹ️")
 
@@ -4334,7 +4385,120 @@ with tab2:
     # 显示设计进度和结果
     if st.session_state.designer_task_id and not st.session_state.designer_results:
         st.divider()
-        st.header("🔄 **步骤 2: 设计进度监控**", anchor=False)
+        
+        # 标题和停止按钮在同一行
+        col_title, col_stop = st.columns([3, 2])
+        with col_title:
+            st.header("🔄 **步骤 2: 设计进度监控**", anchor=False)
+        with col_stop:
+            # 创建更美观的停止按钮样式
+            st.markdown("""
+            <style>
+            .stop-button {
+                background: linear-gradient(135deg, #ff6b6b, #ee5a52);
+                border: none;
+                border-radius: 12px;
+                color: white;
+                padding: 10px 20px;
+                font-size: 14px;
+                font-weight: 600;
+                cursor: pointer;
+                transition: all 0.3s ease;
+                box-shadow: 0 4px 12px rgba(255, 107, 107, 0.3);
+                width: 100%;
+                text-align: center;
+                margin-top: 8px;
+            }
+            .stop-button:hover {
+                background: linear-gradient(135deg, #ff5252, #d32f2f);
+                transform: translateY(-2px);
+                box-shadow: 0 6px 16px rgba(255, 107, 107, 0.4);
+            }
+            </style>
+            """, unsafe_allow_html=True)
+            
+            if st.button("🛑 紧急停止", 
+                        type="secondary", 
+                        use_container_width=True, 
+                        help="安全终止正在进行的设计任务，已完成的工作将被保存",
+                        key="stop_design_btn"):
+                # 停止设计任务
+                try:
+                    # 首先尝试通过设计管理器优雅停止
+                    try:
+                        import sys
+                        designer_path = os.path.join(os.path.dirname(__file__), 'designer')
+                        if designer_path not in sys.path:
+                            sys.path.append(designer_path)
+                        from design_manager import design_manager
+                        
+                        graceful_stop_success = design_manager.stop_current_design()
+                        if graceful_stop_success:
+                            st.info("🔄 已发送优雅停止信号，等待任务完成当前迭代...")
+                    except Exception as e:
+                        st.warning(f"优雅停止失败，将使用强制终止: {e}")
+                        graceful_stop_success = False
+                    
+                    work_dir = st.session_state.get('designer_work_dir', None)
+                    if work_dir:
+                        # 读取状态文件以获取进程ID
+                        status_file = os.path.join(work_dir, 'status.json')
+                        if os.path.exists(status_file):
+                            with open(status_file, 'r') as f:
+                                status_info = json.load(f)
+                                process_id = status_info.get('process_id')
+                                
+                                if process_id and psutil:
+                                    try:
+                                        # 终止run_design.py进程
+                                        if psutil.pid_exists(process_id):
+                                            proc = psutil.Process(process_id)
+                                            # 检查确实是我们的进程
+                                            cmdline = proc.cmdline()
+                                            if cmdline and 'run_design.py' in ' '.join(cmdline):
+                                                proc.terminate()  # 优雅终止
+                                                # 等待一段时间后强制终止
+                                                try:
+                                                    proc.wait(timeout=5)
+                                                    st.toast("✅ 设计任务已成功停止", icon="🛑")
+                                                except psutil.TimeoutExpired:
+                                                    proc.kill()  # 强制终止
+                                                    st.toast("⚠️ 设计任务已强制停止", icon="🛑")
+                                                
+                                                # 更新状态文件
+                                                status_info['status'] = 'cancelled'
+                                                status_info['end_time'] = datetime.now().isoformat()
+                                                status_info['error'] = '用户手动停止'
+                                                with open(status_file, 'w') as f:
+                                                    json.dump(status_info, f, indent=2)
+                                                
+                                                # 清理session state
+                                                st.session_state.designer_task_id = None
+                                                st.session_state.designer_work_dir = None
+                                                st.session_state.designer_results = None
+                                                st.session_state.designer_error = {"error_message": "用户手动停止任务", "type": "User Cancelled"}
+                                                
+                                                st.rerun()
+                                            else:
+                                                st.error("❌ 无法确认进程身份，停止失败")
+                                        else:
+                                            st.warning("⚠️ 设计进程可能已经结束")
+                                            # 清理session state
+                                            st.session_state.designer_task_id = None
+                                            st.session_state.designer_work_dir = None
+                                            st.session_state.designer_results = None
+                                            st.rerun()
+                                    except Exception as e:
+                                        st.error(f"❌ 停止进程时发生错误: {e}")
+                                else:
+                                    st.error("❌ 无法获取进程信息或psutil不可用")
+                        else:
+                            st.error("❌ 找不到任务状态文件")
+                    else:
+                        st.error("❌ 找不到任务工作目录")
+                        
+                except Exception as e:
+                    st.error(f"❌ 停止任务时发生错误: {e}")
         
         if not st.session_state.designer_error:
             # 检查任务状态并处理错误
