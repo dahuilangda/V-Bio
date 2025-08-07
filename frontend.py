@@ -2041,21 +2041,30 @@ def parse_design_progress(log_file: str, params: dict) -> dict:
         total_generations = params.get('generations', 5)
         best_score = 0.0
         current_status = "initializing"
-        pending_tasks = 0
-        completed_tasks = 0
+        
+        # 使用集合来跟踪唯一的任务ID
+        pending_task_ids = set()
+        completed_task_ids = set()
         current_best_sequences = []  # 从CSV文件读取的当前最佳序列列表
         
         # 分析日志内容
         for line in lines:
             line = line.strip()
             
-            # 检测任务状态
-            if 'Polling task' in line and 'PENDING' in line:
-                pending_tasks += 1
-                current_status = "waiting_for_prediction"
-            elif 'Polling task' in line and 'SUCCESS' in line:
-                completed_tasks += 1
-                current_status = "processing_results"
+            # 检测任务状态 - 提取任务ID避免重复计数
+            if 'Polling task' in line:
+                # 尝试提取任务ID
+                task_id_match = re.search(r'task[_\s]*([a-f0-9\-]+)', line, re.IGNORECASE)
+                task_id = task_id_match.group(1) if task_id_match else None
+                
+                if 'PENDING' in line and task_id:
+                    pending_task_ids.add(task_id)
+                    current_status = "waiting_for_prediction"
+                elif 'SUCCESS' in line and task_id:
+                    completed_task_ids.add(task_id)
+                    # 如果任务完成了，从pending中移除
+                    pending_task_ids.discard(task_id)
+                    current_status = "processing_results"
             elif 'Generation' in line or 'generation' in line or '代演化' in line:
                 # 提取世代信息 - 匹配多种格式
                 gen_matches = re.findall(r'(?:Generation|第)\s*(\d+)', line, re.IGNORECASE)
@@ -2179,6 +2188,10 @@ def parse_design_progress(log_file: str, params: dict) -> dict:
             # 没有CSV文件时，将评分重置为0
             best_score = 0.0
         
+        # 计算最终的任务数
+        pending_tasks = len(pending_task_ids)
+        completed_tasks = len(completed_task_ids)
+        
         # 计算进度
         if total_generations > 0:
             progress_ratio = min(current_generation / total_generations, 1.0)
@@ -2187,7 +2200,8 @@ def parse_design_progress(log_file: str, params: dict) -> dict:
         
         # 根据任务状态调整进度显示
         if current_status == "waiting_for_prediction" and pending_tasks > 0:
-            status_msg = f"等待结构预测完成 ({completed_tasks}/{pending_tasks + completed_tasks} 个任务已完成)"
+            total_prediction_tasks = pending_tasks + completed_tasks
+            status_msg = f"等待结构预测完成 ({completed_tasks}/{total_prediction_tasks} 个任务已完成)"
         elif current_status == "evolving":
             if current_generation > 0:
                 status_msg = f"第 {current_generation}/{total_generations} 代演化"
