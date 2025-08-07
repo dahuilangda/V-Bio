@@ -4980,20 +4980,56 @@ with tab2:
                                     )
                                 
                                 with col_download[1]:
-                                    # 转换为PDB格式并下载
+                                    # 查看相互作用按钮
+                                    if st.button(
+                                        "🔬 查看相互作用",
+                                        use_container_width=True,
+                                        key=f"view_interaction_{i}",
+                                        help="在3D视图中查看该设计序列与目标的相互作用"
+                                    ):
+                                        # 使用session state来控制3D显示状态
+                                        if f"show_3d_{i}" not in st.session_state:
+                                            st.session_state[f"show_3d_{i}"] = False
+                                        st.session_state[f"show_3d_{i}"] = not st.session_state.get(f"show_3d_{i}", False)
+                                        st.rerun()
+                                
+                                # 3D结构显示区域 - 跨越整个宽度
+                                if st.session_state.get(f"show_3d_{i}", False):
+                                    st.markdown("---")
+                                    st.markdown("**🔬 3D结构与相互作用**")
+                                    
                                     try:
-                                        pdb_data = export_to_pdb(cif_data)
-                                        st.download_button(
-                                            label="📥 下载 PDB",
-                                            data=pdb_data,
-                                            file_name=f"rank_{rank}_designed_structure.pdb",
-                                            mime="chemical/x-pdb",
-                                            use_container_width=True,
-                                            key=f"download_pdb_{i}",
-                                            help="下载该设计序列的3D结构文件 (PDB格式)"
+                                        # 读取结构并提取B因子信息
+                                        structure = read_cif_from_string(cif_data)
+                                        protein_bfactors = extract_protein_residue_bfactors(structure)
+                                        
+                                        # 使用AlphaFold颜色方案(pLDDT)显示结构
+                                        view_html = visualize_structure_py3dmol(
+                                            cif_content=cif_data,
+                                            residue_bfactors=protein_bfactors,
+                                            protein_style='cartoon',
+                                            ligand_style='ball-and-stick',
+                                            spin=False,
+                                            color_scheme='pLDDT'
                                         )
+                                        st.components.v1.html(view_html, height=500, scrolling=False)
+                                        
+                                        st.markdown("**颜色说明：**")
+                                        st.markdown("""
+                                        - 🔵 **蓝色**：高置信度区域 (pLDDT > 90)
+                                        - 🟦 **浅蓝色**：较高置信度 (pLDDT 70-90)  
+                                        - 🟡 **黄色**：中等置信度 (pLDDT 50-70)
+                                        - 🟠 **橙色**：低置信度区域 (pLDDT < 50)
+                                        """)
+                                        
+                                        # 添加关闭按钮
+                                        if st.button("❌ 关闭3D视图", key=f"close_3d_{i}", help="隐藏3D结构显示"):
+                                            st.session_state[f"show_3d_{i}"] = False
+                                            st.rerun()
+                                        
                                     except Exception as e:
-                                        st.caption(f"PDB转换失败: {str(e)}")
+                                        st.error(f"❌ 3D结构显示失败: {str(e)}")
+                                        st.exception(e)
                                         
                             except Exception as e:
                                 st.caption(f"⚠️ 结构文件读取失败: {str(e)}")
