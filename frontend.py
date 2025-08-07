@@ -3471,7 +3471,7 @@ with tab1:
                     if ic50_uM > 1000:
                         display_ic50 = f"{ic50_uM/1000:.3f} mM"
                     elif ic50_uM > 1000000:
-                         display_ic50 = f"{ic50_uM/1000000:.3f} M"
+                        display_ic50 = f"{ic50_uM/1000000:.3f} M"
                     else:
                         display_ic50 = f"{ic50_uM:.3f} µM"
                     
@@ -3493,14 +3493,14 @@ with tab1:
                             display_ic50_with_std = f"{ic50_uM:.3f} ± {(ic50_std_upper-ic50_std_lower)/2:.3f} μM"
                             
                         st.metric("预测 IC50", display_ic50_with_std, help=f"预测的半数抑制浓度 (IC50)，基于 {len(affinity_values)} 个预测值的平均结果。数值越低表示预测的亲和力越强。")
-                        affinity_cols = st.columns(2)
-                        affinity_cols[0].metric("预测 pIC50", f"{pIC50:.3f} ± {affinity_std:.3f}", help=f"pIC50 是 IC50 值的负对数，基于 {len(affinity_values)} 个预测值的平均结果。数值越高表示预测的亲和力越强。")
-                        affinity_cols[1].metric("结合自由能 (ΔG)", f"{delta_g:.3f} ± {affinity_std*1.364:.3f} kcal/mol", help=f"预测的吉布斯自由能 (ΔG)，基于 {len(affinity_values)} 个预测值的平均结果。负值越大，表明结合作用越强、越有利。")
+                        # affinity_cols = st.columns(2)
+                        # affinity_cols[0].metric("pIC50", f"{pIC50:.3f} ± {affinity_std:.3f}", help=f"pIC50 是 IC50 值的负对数，基于 {len(affinity_values)} 个预测值的平均结果。数值越高表示预测的亲和力越强。")
+                        # affinity_cols[1].metric("ΔG (kcal/mol)", f"{delta_g:.3f} ± {affinity_std*1.364:.3f}", help=f"预测的吉布斯自由能 (ΔG)，基于 {len(affinity_values)} 个预测值的平均结果。负值越大，表明结合作用越强、越有利。")
                     else:
                         st.metric("预测 IC50", display_ic50, help="预测的半数抑制浓度 (IC50) 是指结合体（Binder）抑制其靶标 50% 所需的浓度。它是衡量效力的常用指标，数值越低表示预测的亲和力越强。")
-                        affinity_cols = st.columns(2)
-                        affinity_cols[0].metric("预测 pIC50", f"{pIC50:.3f}", help="pIC50 是 IC50 值的负对数 (pIC50 = -log10(IC50 in M))。这个标度更便于比较，数值越高表示预测的亲和力越强。")
-                        affinity_cols[1].metric("结合自由能 (ΔG)", f"{delta_g:.3f} kcal/mol", help="预测的吉布斯自由能 (ΔG) 反映了结合事件的自发性，由 pIC50 计算得出。负值越大，表明结合作用越强、越有利。")
+                        # affinity_cols = st.columns(2)
+                        # affinity_cols[0].metric("pIC50", f"{pIC50:.3f}", help="pIC50 是 IC50 值的负对数 (pIC50 = -log10(IC50 in M))。这个标度更便于比较，数值越高表示预测的亲和力越强。")
+                        # affinity_cols[1].metric("ΔG (kcal/mol)", f"{delta_g:.3f}", help="预测的吉布斯自由能 (ΔG) 反映了结合事件的自发性，由 pIC50 计算得出。负值越大，表明结合作用越强、越有利。")
                     
                 # 收集结合概率值 - 处理多个结合概率预测值
                 binding_probabilities = []
