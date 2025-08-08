@@ -4130,11 +4130,15 @@ with tab2:
             )
         
         with col5:
+            # 计算合理的精英保留数范围和默认值
+            max_elite_size = min(10, max(1, population_size//2))  # 确保至少为1
+            default_elite_size = max(1, min(max_elite_size, min(5, max(1, population_size//3))))  # 确保在有效范围内
+            
             elite_size = st.number_input(
                 "精英保留数",
-                min_value=2,
-                max_value=min(10, population_size//2),
-                value=max(2, min(5, population_size//3)),
+                min_value=1,
+                max_value=max_elite_size,
+                value=default_elite_size,
                 step=1,
                 help="每一代中保留的最优个体数量。",
                 disabled=designer_is_running
