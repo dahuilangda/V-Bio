@@ -4700,14 +4700,17 @@ with tab2:
                                 
                                 # 显示当前最佳序列
                                 if current_best_sequences:
-                                    with st.expander(f"🏆 当前最佳序列 (第 {current_gen} 代)", expanded=True):
+                                    # 显示代数时减1，因为实际演化是从第0代开始
+                                    display_gen = max(1, current_gen)  # 确保显示至少为第1代
+                                    with st.expander(f"🏆 当前最佳序列 (第 {display_gen} 代)", expanded=True):
                                         for i, seq_info in enumerate(current_best_sequences[:3]):
                                             rank = i + 1
                                             score = seq_info.get('score', 0)
                                             sequence = seq_info.get('sequence', '')
                                             iptm = seq_info.get('iptm', 0)
                                             plddt = seq_info.get('plddt', 0)
-                                            generation = current_gen
+                                            # 使用CSV中的generation字段，如果没有则使用当前代数
+                                            generation = seq_info.get('generation', display_gen)
                                             
                                             if not sequence or len(sequence) < 8:
                                                 continue
@@ -5053,7 +5056,58 @@ with tab2:
         })
         
         if not chart_data.empty:
-            st.line_chart(chart_data.set_index('代数'))
+            # 使用Altair创建更精细的图表，动态调整Y轴范围
+            try:
+                import altair as alt
+                
+                # 计算合适的Y轴范围
+                all_scores = []
+                if '最佳评分' in chart_data.columns:
+                    all_scores.extend(chart_data['最佳评分'].dropna().tolist())
+                if '平均评分' in chart_data.columns:
+                    all_scores.extend(chart_data['平均评分'].dropna().tolist())
+                
+                if all_scores:
+                    min_score = min(all_scores)
+                    max_score = max(all_scores)
+                    score_range = max_score - min_score
+                    
+                    # 动态调整Y轴范围，给予一些边距
+                    if score_range > 0:
+                        y_min = max(0, min_score - score_range * 0.1)  # 下边距10%，但不低于0
+                        y_max = min(1, max_score + score_range * 0.1)  # 上边距10%，但不高于1
+                    else:
+                        # 如果所有分数都相同，给一个小范围
+                        y_min = max(0, min_score - 0.05)
+                        y_max = min(1, max_score + 0.05)
+                    
+                    # 重新构建数据用于Altair
+                    chart_data_melted = chart_data.melt(id_vars=['代数'], 
+                                                       value_vars=['最佳评分', '平均评分'],
+                                                       var_name='指标', value_name='评分')
+                    
+                    # 创建Altair图表
+                    chart = alt.Chart(chart_data_melted).mark_line(point=True).encode(
+                        x=alt.X('代数:O', title='演化代数'),
+                        y=alt.Y('评分:Q', title='评分', scale=alt.Scale(domain=[y_min, y_max])),
+                        color=alt.Color('指标:N', 
+                                      scale=alt.Scale(range=['#1f77b4', '#ff7f0e']),  # 蓝色和橙色
+                                      legend=alt.Legend(title="评分类型")),
+                        tooltip=['代数:O', '指标:N', '评分:Q']
+                    ).properties(
+                        width=600,
+                        height=300,
+                        title="分子设计演化历史"
+                    )
+                    
+                    st.altair_chart(chart, use_container_width=True)
+                else:
+                    # 如果没有有效数据，使用默认图表
+                    st.line_chart(chart_data.set_index('代数'))
+                    
+            except ImportError:
+                # 如果没有安装Altair，使用默认的line_chart但仍然有一些优化
+                st.line_chart(chart_data.set_index('代数'))
         else:
             st.info("暂无演化历史数据可显示。")
         
