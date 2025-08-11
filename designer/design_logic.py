@@ -47,17 +47,19 @@ class Designer:
     管理蛋白质和糖肽的多谱系、梯度自由设计优化循环。
     集成了自适应机制以动态调整探索强度，防止过早收敛。
     """
-    def __init__(self, base_yaml_path: str, client: BoltzApiClient, use_msa_server: bool = False):
+    def __init__(self, base_yaml_path: str, client: BoltzApiClient, use_msa_server: bool = False, model_name: str = None):
         """初始化Designer实例。
         
         Args:
             base_yaml_path: 基础YAML配置文件路径
             client: BoltzApiClient实例
             use_msa_server: 当序列找不到MSA缓存时是否使用MSA服务器
+            model_name: 指定使用的模型名称（如boltz1），糖肽设计时会自动使用
         """
         self.base_yaml_path = base_yaml_path
         self.client = client
         self.use_msa_server = use_msa_server
+        self.model_name = model_name  # 存储模型名称
         with open(base_yaml_path, 'r') as f:
             self.base_config = yaml.safe_load(f)
         
@@ -114,7 +116,12 @@ class Designer:
             logger.error(f"Failed to create YAML for sequence '{sequence}'. Skipping. Reason: {e}")
             return (sequence, None, None)
 
-        task_id = self.client.submit_job(candidate_yaml_path, use_msa_server=self.use_msa_server)
+        # 动态确定模型名称：如果有糖肽修饰，使用boltz1；否则使用默认设置
+        model_name = "boltz1" if design_params.get('is_glycopeptide') else self.model_name
+        if model_name == "boltz1":
+            logger.debug(f"Using boltz1 model for glycopeptide design")
+        
+        task_id = self.client.submit_job(candidate_yaml_path, use_msa_server=self.use_msa_server, model_name=model_name)
         if not task_id:
             return (sequence, None, None)
 
@@ -248,9 +255,9 @@ class Designer:
         binder_chain_id = kwargs['binder_chain_id']
         binder_length = kwargs['binder_length']
         initial_binder_sequence = kwargs.get('initial_binder_sequence')
-        glycan_ccd = kwargs.get('glycan_ccd')
+        glycan_modification = kwargs.get('glycan_modification')
         glycan_chain_id = kwargs.get('glycan_chain_id', 'C')
-        glycosylation_site = kwargs.get('glycosylation_site')
+        modification_site = kwargs.get('modification_site')
         output_csv_path = kwargs.get('output_csv_path', f"design_summary_{int(time.time())}.csv")
         keep_temp_files = kwargs.get('keep_temp_files', False)
         weight_iptm = kwargs.get('weight_iptm', 0.7)
@@ -263,8 +270,8 @@ class Designer:
             raise ValueError("`num_elites` must be less than `population_size`.")
         
         design_params = {
-            'is_glycopeptide': bool(glycan_ccd), 'glycan_ccd': glycan_ccd,
-            'glycan_chain_id': glycan_chain_id, 'glycosylation_site': glycosylation_site
+            'is_glycopeptide': bool(glycan_modification), 'glycan_modification': glycan_modification,
+            'glycan_chain_id': glycan_chain_id, 'modification_site': modification_site
         }
 
         def calculate_composite_score(metrics: dict) -> float:
@@ -302,7 +309,7 @@ class Designer:
                     if not elite_population:
                         if not candidates_to_evaluate:
                             logger.info(f"Seeding generation with {population_size} new random sequences...")
-                        new_seq = generate_random_sequence(binder_length, glycosylation_site, design_params.get('glycan_ccd'))
+                        new_seq = generate_random_sequence(binder_length, modification_site, design_params.get('glycan_modification'))
                         strategy_used = 'random'
                     else:
                         if not candidates_to_evaluate:
@@ -326,8 +333,8 @@ class Designer:
                                 parent['sequence'],
                                 mutation_rate=mutation_rate,
                                 plddt_scores=parent['metrics'].get('plddts', []),
-                                glycosylation_site=glycosylation_site,
-                                glycan_ccd=design_params.get('glycan_ccd'),
+                                modification_site=modification_site,
+                                glycan_modification=design_params.get('glycan_modification'),
                                 position_selection_temp=self.hparams['pos_select_temp']
                             )
                             strategy_used = 'traditional'
@@ -613,40 +620,33 @@ class Designer:
                 break
         
         if not found_chain:
-            config['sequences'].append({'protein': {'id': chain_id, 'sequence': sequence, 'msa': 'empty'}})
+            protein_entry = {'protein': {'id': chain_id, 'sequence': sequence, 'msa': 'empty'}}
+            config['sequences'].append(protein_entry)
 
+        # 新的基于modifications的糖基化处理
         if design_params.get('is_glycopeptide'):
-            site_idx = design_params['glycosylation_site']
-            glycan_ccd = design_params['glycan_ccd']
-            residue_at_site = sequence[site_idx]
+            site_idx = design_params['modification_site']  # 0-based
+            glycan_modification = design_params['glycan_modification']
             
-            valid_residues = get_valid_residues_for_glycan(glycan_ccd)
-            if residue_at_site not in valid_residues:
-                raise ValueError(
-                    f"Residue '{residue_at_site}' at site {site_idx + 1} is not a valid attachment point "
-                    f"for the '{glycan_ccd}' glycan (requires one of: {valid_residues})."
-                )
-
-            attachment_atom = None
-            if residue_at_site in GLYCOSYLATION_SITES['N-linked']:
-                attachment_atom = GLYCOSYLATION_SITES['N-linked'][residue_at_site]
-            elif residue_at_site in GLYCOSYLATION_SITES['O-linked']:
-                attachment_atom = GLYCOSYLATION_SITES['O-linked'][residue_at_site]
-
-            if not attachment_atom:
-                raise ValueError(f"Could not find attachment atom for residue '{residue_at_site}'.")
-
-            config['sequences'].append({'ligand': {'id': design_params['glycan_chain_id'], 'ccd': glycan_ccd}})
-
-            if 'constraints' not in config or not isinstance(config.get('constraints'), list):
-                config['constraints'] = []
+            # 直接使用glycan_modification作为CCD代码（如"MANS"）
+            # 验证CCD代码格式
+            if len(glycan_modification) != 4:
+                raise ValueError(f"Invalid glycan modification '{glycan_modification}'. Expected 4-character CCD code like 'MANS'.")
             
-            config['constraints'].append({
-                'bond': {
-                    'atom1': [chain_id, site_idx + 1, attachment_atom],
-                    'atom2': [design_params['glycan_chain_id'], 1, MONOSACCHARIDES[glycan_ccd]['atom']]
-                }
-            })
+            # 为蛋白质序列添加modifications
+            for i, seq_block in enumerate(config['sequences']):
+                if ('protein' in seq_block and 
+                    seq_block.get('protein', {}).get('id') == chain_id):
+                    
+                    if 'modifications' not in seq_block['protein']:
+                        seq_block['protein']['modifications'] = []
+                    
+                    # 添加糖基化修饰
+                    seq_block['protein']['modifications'].append({
+                        'position': site_idx + 1,  # 转换为1-based索引
+                        'ccd': glycan_modification
+                    })
+                    break
 
         yaml_path = os.path.join(self.work_dir, f"candidate_{os.getpid()}_{hash(sequence)}.yaml")
         with open(yaml_path, 'w') as f:

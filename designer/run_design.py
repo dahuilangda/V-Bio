@@ -1,18 +1,5 @@
 # /Boltz-WebUI/designer/run_design.py
 
-"""
-run_design.py
-
-该脚本是高级（糖）肽设计器的命令行界面（CLI）入口点。
-
-功能：
-- 解析命令行参数以配置设计任务。
-- 设置全局日志记录系统。
-- 验证用户输入。
-- 初始化API客户端和`Designer`类。
-- 启动并管理整个设计流程。
-"""
-
 import argparse
 import os
 import time
@@ -20,7 +7,6 @@ import logging
 import sys
 import numpy as np
 
-# 假设api_client在同一目录下或在PYTHONPATH中
 from api_client import BoltzApiClient
 from design_logic import Designer
 
@@ -82,9 +68,9 @@ def main():
 
     # --- 糖肽设计 (可选) ---
     glyco_group = parser.add_argument_group('糖肽设计 (可选)')
-    glyco_group.add_argument("--glycan_ccd", type=str, default=None, help="通过提供糖基的PDB CCD代码 (例如 'MAN') 来激活糖肽设计模式。")
+    glyco_group.add_argument("--glycan_modification", type=str, default=None, help="通过提供糖肽修饰的CCD代码 (例如 'MANS') 来激活糖肽设计模式。")
     glyco_group.add_argument("--glycan_chain", type=str, default='C', help="在生成的YAML文件中分配给糖基配体的链ID。")
-    glyco_group.add_argument("--glycosylation_site", type=int, default=None, help="肽链序列上用于共价连接糖基的位置 (1-based索引)。")
+    glyco_group.add_argument("--modification_site", type=int, default=None, help="肽链序列上用于应用糖肽修饰的位置 (1-based索引)。")
 
     # --- 输出与日志 ---
     output_group = parser.add_argument_group('输出与日志')
@@ -95,19 +81,22 @@ def main():
     api_group = parser.add_argument_group('API 连接')
     api_group.add_argument("--server_url", default="http://127.0.0.1:5000", help="Boltz-WebUI 预测 API 服务器的URL。")
     api_group.add_argument("--api_token", help="您的API密钥。也可以通过 'API_SECRET_TOKEN' 环境变量设置。")
-    api_group.add_argument("--use_msa_server", action="store_true", default=False, 
-                          help="当序列找不到MSA缓存时，是否使用MSA服务器自动生成MSA。启用此选项可提高预测精度但会增加计算时间。")
+    api_group.add_argument("--no_msa_server", action="store_true", default=False, 
+                          help="禁用MSA服务器。默认情况下，当序列找不到MSA缓存时，会使用MSA服务器自动生成MSA以提高预测精度。")
 
     args = parser.parse_args()
 
+    # 处理MSA服务器设置（默认启用，除非明确禁用）
+    use_msa_server = not args.no_msa_server
+
     # --- 验证参数 ---
     logger.info("Validating command-line arguments...")
-    if args.glycan_ccd and args.glycosylation_site is None:
-        parser.error("当指定 --glycan_ccd 时，必须同时提供 --glycosylation_site。")
+    if args.glycan_modification and args.modification_site is None:
+        parser.error("当指定 --glycan_modification 时，必须同时提供 --modification_site。")
     
-    if args.glycosylation_site is not None:
-        if not (1 <= args.glycosylation_site <= args.binder_length):
-            parser.error(f"--glycosylation_site 必须是介于 1 和肽链长度 {args.binder_length} 之间的有效位置。")
+    if args.modification_site is not None:
+        if not (1 <= args.modification_site <= args.binder_length):
+            parser.error(f"--modification_site 必须是介于 1 和肽链长度 {args.binder_length} 之间的有效位置。")
     
     if args.initial_binder_sequence and len(args.initial_binder_sequence) != args.binder_length:
         parser.error(f"--initial_binder_sequence 的长度 ({len(args.initial_binder_sequence)}) 必须与 --binder_length ({args.binder_length}) 匹配。")
@@ -130,9 +119,17 @@ def main():
 
         # 2. 初始化 Designer
         logger.info(f"Initializing Designer with YAML template: {args.yaml_template}")
-        if args.use_msa_server:
+        if use_msa_server:
             logger.info("MSA server enabled: will use MSA server for sequences without cache")
-        designer = Designer(base_yaml_path=args.yaml_template, client=client, use_msa_server=args.use_msa_server)
+        else:
+            logger.info("MSA server disabled: will use empty MSA for sequences without cache")
+        
+        # 根据是否有糖肽修饰选择合适的模型
+        model_name = "boltz1" if args.glycan_modification else None
+        if model_name:
+            logger.info(f"Glycopeptide design detected - using model: {model_name}")
+        
+        designer = Designer(base_yaml_path=args.yaml_template, client=client, use_msa_server=use_msa_server, model_name=model_name)
         
         # 配置增强功能
         if hasattr(args, 'disable_enhanced') and args.disable_enhanced:
@@ -160,9 +157,9 @@ def main():
             binder_length=args.binder_length,
             initial_binder_sequence=args.initial_binder_sequence,
             mutation_rate=args.mutation_rate,
-            glycan_ccd=args.glycan_ccd,
+            glycan_modification=args.glycan_modification,
             glycan_chain_id=args.glycan_chain,
-            glycosylation_site=args.glycosylation_site - 1 if args.glycosylation_site is not None else None,
+            modification_site=args.modification_site - 1 if args.modification_site is not None else None,
             output_csv_path=args.output_csv,
             keep_temp_files=args.keep_temp_files,
             weight_iptm=args.weight_iptm,

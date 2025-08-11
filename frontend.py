@@ -979,12 +979,14 @@ def get_smart_msa_default(components: list) -> bool:
     # 第一个蛋白质没有缓存，新组分默认不启用MSA
     return False
 
-def submit_job(yaml_content: str, use_msa: bool) -> str:
+def submit_job(yaml_content: str, use_msa: bool, model_name: str = None) -> str:
     """
     提交预测任务到后端 API。
     """
     files = {'yaml_file': ('input.yaml', yaml_content)}
     data = {'use_msa_server': str(use_msa).lower(), 'priority': 'high'}
+    if model_name:
+        data['model'] = model_name
     headers = {'X-API-Token': os.getenv('API_SECRET_TOKEN', 'your_default_api_token')}
     
     response = requests.post(f"{API_URL}/predict", files=files, data=data, headers=headers)
@@ -1481,11 +1483,11 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
             else:
                 cmd.append("--disable-enhanced")
             
-            # 添加糖肽相关参数
+            # 添加糖肽相关参数 - 使用新的modifications方法
             if params.get('design_type') == 'glycopeptide' and params.get('glycan_type'):
                 cmd.extend([
-                    "--glycan_ccd", params.get('glycan_type'),
-                    "--glycosylation_site", str(params.get('glycosylation_site', 10))
+                    "--glycan_modification", params.get('glycan_type'),  # 改为modification
+                    "--modification_site", str(params.get('glycosylation_site', 10))  # 改为modification_site
                 ])
             
             # 添加初始序列参数
@@ -1516,9 +1518,9 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
             if api_token:
                 cmd.extend(["--api_token", api_token])
             
-            # 添加MSA参数：当序列找不到MSA缓存时使用MSA服务器
-            if params.get('use_msa', False):
-                cmd.append("--use_msa_server")
+            # 添加MSA参数：默认启用MSA服务器，除非明确禁用
+            if not params.get('use_msa', True):
+                cmd.append("--no_msa_server")
             
             # 在后台运行设计任务
             # 先创建状态文件，表示任务已开始
@@ -3232,6 +3234,8 @@ with tab1:
         
         # 智能检测MSA策略：如果YAML中已有MSA路径（缓存），则不使用MSA服务器
         use_msa_for_job = False
+        has_glycopeptide_modifications = False
+        
         if protein_components:
             yaml_data = yaml.safe_load(yaml_preview)
             has_msa_in_yaml = False
@@ -3244,15 +3248,27 @@ with tab1:
                         has_msa_in_yaml = True
                         break
             
+            # 检查是否有糖肽修饰（非天然氨基酸）
+            for sequence_item in yaml_data.get('sequences', []):
+                if 'protein' in sequence_item:
+                    protein_data = sequence_item['protein']
+                    if protein_data.get('modifications'):
+                        has_glycopeptide_modifications = True
+                        break
+            
             # 如果YAML中没有MSA信息，且有蛋白质启用了MSA，则使用MSA服务器
             if not has_msa_in_yaml:
                 use_msa_for_job = any(comp.get('use_msa', True) for comp in protein_components)
+        
+        # 如果有糖肽修饰，使用 boltz1 模型
+        model_name = "boltz1" if has_glycopeptide_modifications else None
         
         with st.spinner("⏳ 正在提交任务，请稍候..."):
             try:
                 task_id = submit_job(
                     yaml_content=yaml_preview,
-                    use_msa=use_msa_for_job
+                    use_msa=use_msa_for_job,
+                    model_name=model_name
                 )
                 st.session_state.task_id = task_id
                 
@@ -3264,6 +3280,11 @@ with tab1:
                     st.toast(f"🎉 任务已提交！使用缓存的MSA文件，预测将更快完成", icon="⚡")
                 else:
                     st.toast(f"🎉 任务已提交！跳过MSA生成，预测将更快完成", icon="⚡")
+                
+                # 显示模型使用情况
+                if model_name:
+                    st.toast(f"🧬 检测到糖肽修饰，使用 {model_name} 模型进行预测", icon="🍬")
+                
                 st.rerun()
             except requests.exceptions.RequestException as e:
                 st.error(f"⚠️ **任务提交失败：无法连接到API服务器或服务器返回错误**。请检查后端服务是否运行正常。详情: {e}")
@@ -4266,30 +4287,52 @@ with tab2:
         # 糖肽特有参数
         if design_type == "glycopeptide":
             with col7:
-                # 糖基类型选项和描述
+                # 糖基类型选项和描述 - 更新为4字母CCD代码
                 glycan_options = {
-                    "NAG": "N-乙酰葡糖胺 (N-acetylglucosamine) - 最常见的N-连接糖基化起始糖",
-                    "MAN": "甘露糖 (Mannose) - 常见的高甘露糖型糖链组分",
-                    "GAL": "半乳糖 (Galactose) - 复合型糖链的末端糖",
-                    "FUC": "岩藻糖 (Fucose) - 分支糖链，增加分子多样性",
-                    "NAN": "神经氨酸 (Neuraminic acid/Sialic acid) - 带负电荷的末端糖",
-                    "GLC": "葡萄糖 (Glucose) - 基础单糖，能量代谢相关",
-                    "XYL": "木糖 (Xylose) - 植物糖蛋白常见糖基",
-                    "GALNAC": "N-乙酰半乳糖胺 (N-acetylgalactosamine) - O-连接糖基化起始糖",
-                    "GLCA": "葡萄糖醛酸 (Glucuronic acid) - 带负电荷，参与解毒代谢"
+                    "NAGS": "NAG + Serine - N-乙酰葡糖胺与丝氨酸的糖苷键",
+                    "NAGT": "NAG + Threonine - N-乙酰葡糖胺与苏氨酸的糖苷键",
+                    "NAGN": "NAG + Asparagine - N-乙酰葡糖胺与天冬酰胺的糖苷键",
+                    "NAGY": "NAG + Tyrosine - N-乙酰葡糖胺与酪氨酸的糖苷键",
+                    "MANS": "MAN + Serine - 甘露糖与丝氨酸的糖苷键",
+                    "MANT": "MAN + Threonine - 甘露糖与苏氨酸的糖苷键",
+                    "MANN": "MAN + Asparagine - 甘露糖与天冬酰胺的糖苷键",
+                    "MANY": "MAN + Tyrosine - 甘露糖与酪氨酸的糖苷键",
+                    "GALS": "GAL + Serine - 半乳糖与丝氨酸的糖苷键",
+                    "GALT": "GAL + Threonine - 半乳糖与苏氨酸的糖苷键",
+                    "GALN": "GAL + Asparagine - 半乳糖与天冬酰胺的糖苷键",
+                    "GALY": "GAL + Tyrosine - 半乳糖与酪氨酸的糖苷键",
+                    "FUCS": "FUC + Serine - 岩藻糖与丝氨酸的糖苷键",
+                    "FUCT": "FUC + Threonine - 岩藻糖与苏氨酸的糖苷键",
+                    "FUCN": "FUC + Asparagine - 岩藻糖与天冬酰胺的糖苷键",
+                    "FUCY": "FUC + Tyrosine - 岩藻糖与酪氨酸的糖苷键",
+                    "NANS": "NAN + Serine - 神经氨酸与丝氨酸的糖苷键",
+                    "NANT": "NAN + Threonine - 神经氨酸与苏氨酸的糖苷键",
+                    "NANN": "NAN + Asparagine - 神经氨酸与天冬酰胺的糖苷键",
+                    "NANY": "NAN + Tyrosine - 神经氨酸与酪氨酸的糖苷键",
+                    "GLCS": "GLC + Serine - 葡萄糖与丝氨酸的糖苷键",
+                    "GLCT": "GLC + Threonine - 葡萄糖与苏氨酸的糖苷键",
+                    "GLCN": "GLC + Asparagine - 葡萄糖与天冬酰胺的糖苷键",
+                    "GLCY": "GLC + Tyrosine - 葡萄糖与酪氨酸的糖苷键"
                 }
                 
                 glycan_type = st.selectbox(
-                    "糖基类型",
-                    options=list(glycan_options.keys()),
-                    format_func=lambda x: f"{glycan_options[x].split(' (')[0]} ({x})",
-                    index=0,  # 默认选择 NAG
-                    help="选择要在糖肽中使用的糖基类型。不同糖基具有不同的化学性质和生物学功能。",
+                    "糖肽修饰类型",
+                    options=["请选择..."] + list(glycan_options.keys()),
+                    format_func=lambda x: f"{x} - {glycan_options[x]}" if x in glycan_options else x,
+                    index=0,  # 默认显示"请选择..."
+                    help="选择要使用的糖肽修饰类型。每种修饰都是糖基与特定氨基酸的共价结合产物，已预生成到CCD缓存中。",
                     disabled=designer_is_running
                 )
                 
-                # 显示选中糖基的详细信息
-                st.info(f"**{glycan_type}**: {glycan_options[glycan_type]}", icon="🍯")
+                # 只有选择了有效的糖肽修饰才显示详细信息
+                if glycan_type != "请选择..." and glycan_type in glycan_options:
+                    # 显示选中糖肽修饰的详细信息
+                    st.info(f"**{glycan_type}**: {glycan_options[glycan_type]}", icon="🍯")
+                else:
+                    glycan_type = None  # 设置为None以便后续验证
+                
+                # # 提示用户检查CCD缓存
+                # st.caption("💡 如需初始化糖肽修饰CCD缓存，请运行：`python glycopeptide_generator.py`")
             
             # 糖基化位点参数
             glycosylation_site = st.number_input(
@@ -4298,7 +4341,7 @@ with tab2:
                 max_value=binder_length,
                 value=min(10, binder_length),  # 默认位点10，但不超过肽长度
                 step=1,
-                help=f"肽链上用于连接糖基的氨基酸位置 (1-{binder_length})。",
+                help=f"肽链上用于应用糖肽修饰的氨基酸位置 (1-{binder_length})。该位置的氨基酸将被替换为对应的糖肽修饰。",
                 disabled=designer_is_running
             )
         else:
@@ -4952,7 +4995,38 @@ with tab2:
                     f"**第 {rank} 名** {score_color} 评分: {score:.3f}", 
                     expanded=(i < 3)  # 默认展开前3个
                 ):
-                    st.code(seq_data['sequence'], language="text")
+                    # 显示序列
+                    sequence = seq_data['sequence']
+                    st.code(sequence, language="text")
+                    
+                    # 显示糖基化信息（如果是糖肽设计）
+                    designer_config = st.session_state.get('designer_config', {})
+                    if designer_config.get('design_type') == 'glycopeptide':
+                        glycan_type = designer_config.get('glycan_type')
+                        glycosylation_site = designer_config.get('glycosylation_site')
+                        
+                        if glycan_type and glycosylation_site:
+                            # 从 design_utils.py 的常量中获取糖基信息
+                            glycan_info_map = {
+                                "NAG": "N-乙酰葡糖胺 (N-acetylglucosamine)",
+                                "MAN": "甘露糖 (Mannose)", 
+                                "GAL": "半乳糖 (Galactose)",
+                                "FUC": "岩藻糖 (Fucose)",
+                                "NAN": "神经氨酸 (Neuraminic acid)",
+                                "GLC": "葡萄糖 (Glucose)",
+                                "XYL": "木糖 (Xylose)",
+                                "GALNAC": "N-乙酰半乳糖胺 (N-acetylgalactosamine)",
+                                "GLCA": "葡萄糖醛酸 (Glucuronic acid)"
+                            }
+                            
+                            glycan_name = glycan_info_map.get(glycan_type, f"{glycan_type} 糖基")
+                            
+                            # 只有当糖基化位点异常时才显示警告
+                            if not (1 <= glycosylation_site <= len(sequence)):
+                                st.warning(
+                                    f"⚠️ **糖基化位点异常**: 预设位点 {glycosylation_site} 超出序列长度 ({len(sequence)})",
+                                    icon="⚠️"
+                                )
                     
                     col_metrics = st.columns(4)
                     col_metrics[0].metric("综合评分", f"{score:.3f}")

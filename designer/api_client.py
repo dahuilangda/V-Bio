@@ -17,19 +17,23 @@ class BoltzApiClient:
         self.headers = {"X-API-Token": api_token}
         print(f"API Client initialized for server: {self.server_url}")
 
-    def submit_job(self, yaml_path: str, use_msa_server: bool = False) -> Optional[str]:
+    def submit_job(self, yaml_path: str, use_msa_server: bool = False, model_name: str = None) -> Optional[str]:
         """Submits a prediction job using a YAML file.
         
         Args:
             yaml_path: Path to the YAML configuration file
             use_msa_server: Whether to use MSA server when sequences don't have cached MSAs
+            model_name: Specific model to use (e.g., 'boltz1' for glycopeptide design)
         """
         predict_url = f"{self.server_url}/predict"
         try:
             with open(yaml_path, 'rb') as f:
                 files = {'yaml_file': (os.path.basename(yaml_path), f)}
-                # 添加 use_msa_server 参数，当序列找不到MSA缓存时使用MSA服务器
+                # 添加参数
                 data = {'use_msa_server': str(use_msa_server).lower(), 'priority': 'high'}
+                # 如果指定了模型，添加模型参数
+                if model_name:
+                    data['model'] = model_name
                 response = requests.post(predict_url, headers=self.headers, files=files, data=data, timeout=30)
 
             if response.status_code == 202:
@@ -37,6 +41,8 @@ class BoltzApiClient:
                 print(f"Successfully submitted job. Task ID: {task_id}")
                 if use_msa_server:
                     print(f"MSA server enabled: will generate MSAs for sequences without cache")
+                if model_name:
+                    print(f"Using model: {model_name}")
                 return task_id
             else:
                 print(f"Error submitting job: {response.status_code} - {response.text}")

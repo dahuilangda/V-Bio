@@ -548,6 +548,12 @@ def main():
 
         with tempfile.TemporaryDirectory() as temp_dir:
             yaml_content = predict_args.pop("yaml_content")
+            
+            # 处理模型参数 - 从 model_name 映射为 model
+            model_name = predict_args.pop("model_name", None)
+            if model_name:
+                predict_args['model'] = model_name
+                print(f"DEBUG: Using model: {model_name}", file=sys.stderr)
 
             tmp_yaml_path = os.path.join(temp_dir, 'data.yaml')
             with open(tmp_yaml_path, 'w') as tmp_yaml:

@@ -2,6 +2,36 @@
 
 一款用于多肽与糖肽从头设计 (`de novo design`) 的命令行工具，专为科研人员设计。该工具通过调用本地部署的 `Boltz-WebUI` 预测服务作为计算后端，在序列空间中进行探索，以发现具有高结合潜力的新分子。
 
+## 🚀 快速开始
+
+### 🔨 基础肽设计
+```bash
+# 设置API密钥
+export API_SECRET_TOKEN='your-token'
+
+# 运行基础肽设计
+python run_design.py \
+    --yaml_template template.yaml \
+    --binder_chain "B" \
+    --binder_length 20 \
+    --iterations 30
+```
+
+### 🍬 糖肽设计（使用boltz1模型）
+```bash
+# 初始化糖肽CCD缓存（首次使用）
+python glycopeptide_generator.py --generate-all
+
+# 运行糖肽设计
+python run_design.py \
+    --yaml_template template.yaml \
+    --binder_chain "B" \
+    --binder_length 15 \
+    --glycan_modification "MANS" \
+    --modification_site 5 \
+    --iterations 25
+```
+
 ## ✨ 核心特性
 
 ### 🔬 基础功能
@@ -20,6 +50,12 @@
 - **智能收敛检测**: 自动早停机制，防止过度训练和资源浪费
 - **序列模式学习**: 位置特异性偏好学习和motif自动发现
 - **群体多样性维护**: 实时监测和调整探索策略
+
+### 🍬 糖肽设计功能
+- **自动模型选择**: 检测到糖肽修饰时自动使用 `boltz1` 模型，无需手动指定
+- **智能CCD缓存管理**: 基于Benjamin Fry方法学的共价残基修饰系统
+- **24种糖肽组合**: 支持6种糖基×4种氨基酸的完整修饰组合
+- **化学正确性验证**: 确保糖苷键形成遵循正确的脱水缩合机制
 
 
 ## 🔧 环境准备
@@ -156,8 +192,8 @@ python run_design.py \
     --iterations 30 \
     --population_size 12 \
     --num_elites 3 \
-    --glycan_ccd "MAN" \
-    --glycosylation_site 3 \
+    --glycan_modification "MANS" \
+    --modification_site 3 \
     --glycan_chain "C" \
     --weight-iptm 0.7 \
     --weight-plddt 0.3 \
@@ -166,6 +202,8 @@ python run_design.py \
     --output_csv "glycopeptide_enhanced_design.csv" \
     --keep_temp_files
 ```
+
+> **🍬 自动模型选择**: 当检测到 `--glycan_modification` 参数时，系统会自动使用 `boltz1` 模型进行预测，无需手动指定 `--model` 参数。这确保了糖肽等非天然氨基酸能够得到正确的结构预测。
 
 #### **命令示例 5: 传统模式（兼容性）**
 
@@ -217,9 +255,51 @@ python run_design.py \
 
 #### 糖肽设计 (可选)
 
-  - `--glycan_ccd`: 激活糖肽设计模式。提供聚糖的3字母PDB CCD代码 (例如, `MAN`, `NAG`, `GAL`)。 (默认: `None`)
-  - `--glycosylation_site`: 在binder序列上共价连接聚糖的位置 **(1-based索引)**。如果使用了`--glycan_ccd`，此项为**必需**。
+  - `--glycan_modification`: 激活糖肽设计模式。提供糖肽修饰的4字母CCD代码 (例如, `MANS`, `NAGS`, `GALT`)。这些修饰已预生成到CCD缓存中。 (默认: `None`)
+  - `--modification_site`: 在binder序列上应用糖肽修饰的位置 **(1-based索引)**。如果使用了`--glycan_modification`，此项为**必需**。
   - `--glycan_chain`: 分配给聚糖配体的唯一链ID。 (默认: `C`)
+
+##### 🍬 糖肽修饰CCD缓存初始化
+
+在使用糖肽设计功能之前，需要先初始化Boltz CCD缓存，将糖基化修饰的非标准氨基酸添加到缓存中。这基于Benjamin Fry的通用共价残基修饰方法。
+
+**快速初始化所有糖肽修饰：**
+
+```bash
+cd designer/
+python glycopeptide_generator.py --generate-all
+```
+
+这将生成24种糖肽修饰组合并添加到Boltz CCD缓存：
+
+| 糖基 | 氨基酸 | CCD代码 | 连接类型 | 化学反应 |
+|------|--------|---------|----------|----------|
+| MAN (甘露糖) | N,S,T,Y | MANN,MANS,MANT,MANY | N-连接/O-连接 | Ser-OG + MAN-C1-OH → Ser-OG-MAN + H2O |
+| NAG (N-乙酰葡糖胺) | N,S,T,Y | NAGN,NAGS,NAGT,NAGY | N-连接/O-连接 | Asn-ND2 + NAG-C1-OH → Asn-ND2-NAG + H2O |
+| GAL (半乳糖) | N,S,T,Y | GALN,GALS,GALT,GALY | N-连接/O-连接 | Thr-OG1 + GAL-C1-OH → Thr-OG1-GAL + H2O |
+| FUC (岩藻糖) | N,S,T,Y | FUCN,FUCS,FUCT,FUCY | N-连接/O-连接 | Tyr-OH + FUC-C1-OH → Tyr-OH-FUC + H2O |
+| GLC (葡萄糖) | N,S,T,Y | GLCN,GLCS,GLCT,GLCY | N-连接/O-连接 | 脱水缩合反应 |
+| XYL (木糖) | N,S,T,Y | XYLN,XYLS,XYLT,XYLY | N-连接/O-连接 | 脱水缩合反应 |
+
+**生成特定修饰：**
+
+```bash
+# 生成丝氨酸-甘露糖修饰
+python glycopeptide_generator.py --specific S MAN
+
+# 生成天冬酰胺-N-乙酰葡糖胺修饰
+python glycopeptide_generator.py --specific N NAG
+```
+
+**查看可用修饰：**
+
+```bash
+python glycopeptide_generator.py --list-only
+```
+
+**注意事项：**
+- 首次使用前必须运行 `--generate-all` 初始化CCD缓存
+- 系统会自动检测Boltz缓存位置（通常在 `~/.boltz/ccd.pkl`）
 
 #### 输出与日志
 
@@ -230,6 +310,7 @@ python run_design.py \
 
   - `--server_url`: 运行中的Boltz-WebUI预测API的URL。 (默认: `http://127.0.0.1:5000`)
   - `--api_token`: API密钥。建议通过 `API_SECRET_TOKEN` 环境变量设置。
+  - `--no_msa_server`: 禁用MSA服务器。**默认情况下MSA服务器已启用**，当序列找不到MSA缓存时会自动生成MSA以提高预测精度。使用此参数可禁用MSA生成以加快预测速度（但可能降低精度）。 (默认: `False`)
 
 ## 📊 输出解读
 
@@ -253,3 +334,27 @@ python run_design.py \
 [INFO] Convergence detected: score variance 0.0008 < threshold 0.001
 [INFO] Early stopping triggered after 3 stagnation cycles
 ```
+
+## 🛠️ 故障排除
+
+### 常见问题
+
+**问题**: 糖肽设计报错 "CCD代码未找到"
+```bash
+# 解决方案：初始化糖肽CCD缓存
+python glycopeptide_generator.py --generate-all
+```
+
+**问题**: API连接失败
+```bash
+# 检查Boltz-WebUI是否运行在正确端口
+curl http://127.0.0.1:5000/health
+
+# 检查API密钥是否正确设置
+echo $API_SECRET_TOKEN
+```
+
+### 最佳实践
+- **MSA设置**: 保持默认设置（MSA服务器启用）以获得最佳预测质量
+- **收敛参数**: 对于糖肽设计，推荐使用较小的收敛窗口（3-4）以应对复杂性
+- **温度控制**: 复杂设计任务可以提高初始温度（1.5-2.0）增强探索能力

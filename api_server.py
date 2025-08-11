@@ -302,6 +302,11 @@ def handle_predict():
     use_msa_server = use_msa_server_str == 'true'
     logger.info(f"use_msa_server parameter received: {use_msa_server} for client {request.remote_addr}.")
     
+    # 处理模型参数
+    model_name = request.form.get('model', None)
+    if model_name:
+        logger.info(f"model parameter received: {model_name} for client {request.remote_addr}.")
+    
     priority = request.form.get('priority', 'default').lower()
     if priority not in ['high', 'default']:
         logger.warning(f"Invalid priority '{priority}' provided by client {request.remote_addr}. Defaulting to 'default'.")
@@ -312,7 +317,8 @@ def handle_predict():
 
     predict_args = {
         'yaml_content': yaml_content,
-        'use_msa_server': use_msa_server
+        'use_msa_server': use_msa_server,
+        'model_name': model_name
     }
 
     try:

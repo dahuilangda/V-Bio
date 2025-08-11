@@ -32,43 +32,156 @@ AMINO_ACIDS = "ARNDCQEGHILKMFPSTWYV"
 # --- 糖化学常量 ---
 MONOSACCHARIDES = {
     # 最常见的N-连接糖基化起始糖
-    'NAG': {'atom': 'C1', 'type': ['N-linked', 'O-linked'], 'name': 'N-乙酰葡糖胺', 'eng_name': 'N-acetylglucosamine'},
+    'NAG': {
+        'atom': 'C1', 
+        'type': ['N-linked', 'O-linked'], 
+        'name': 'N-乙酰葡糖胺', 
+        'eng_name': 'N-acetylglucosamine',
+        'smiles': 'CC(=O)N[C@H]1[C@@H](CO)O[C@H](O[C@H]2[C@H](O)[C@@H](O)[C@H](O)[C@@H](CO)O2)[C@H](O)[C@H]1O',
+        'molecular_weight': 221.21,
+        'linkage_atoms': {'N-linked': 'ND2', 'O-linked': 'OG'}
+    },
     
-    # 常见的高甘露糖型糖链组分
-    'MAN': {'atom': 'C1', 'type': ['N-linked'], 'name': '甘露糖', 'eng_name': 'Mannose'},
+    # 常见的高甘露糖型糖链组分，C1位羟基氧原子在脱水缩合后成为连接Ser/Thr的桥梁氧原子
+    'MAN': {
+        'atom': 'C1', 
+        'type': ['N-linked', 'O-linked'], 
+        'name': '甘露糖', 
+        'eng_name': 'Mannose',
+        'smiles': 'O[C@H]1[C@H](O)[C@@H](O)[C@@H](O)[C@H](O)[C@@H]1O',
+        'molecular_weight': 180.16,
+        'linkage_atoms': {'N-linked': 'ND2', 'O-linked': 'OG'}
+    },
     
     # 复合型糖链的末端糖
-    'GAL': {'atom': 'C1', 'type': ['N-linked', 'O-linked'], 'name': '半乳糖', 'eng_name': 'Galactose'},
+    'GAL': {
+        'atom': 'C1', 
+        'type': ['N-linked', 'O-linked'], 
+        'name': '半乳糖', 
+        'eng_name': 'Galactose',
+        'smiles': 'O[C@H]1[C@H](O)[C@H](O)[C@@H](O)[C@H](O)[C@@H]1O',
+        'molecular_weight': 180.16,
+        'linkage_atoms': {'N-linked': 'ND2', 'O-linked': 'OG'}
+    },
     
     # 分支糖链，增加分子多样性
-    'FUC': {'atom': 'C1', 'type': ['N-linked', 'O-linked'], 'name': '岩藻糖', 'eng_name': 'Fucose'},
+    'FUC': {
+        'atom': 'C1', 
+        'type': ['N-linked', 'O-linked'], 
+        'name': '岩藻糖', 
+        'eng_name': 'Fucose',
+        'smiles': 'C[C@H]1O[C@H](O)[C@H](O)[C@H](O)[C@H]1O',
+        'molecular_weight': 164.16,
+        'linkage_atoms': {'N-linked': 'ND2', 'O-linked': 'OG'}
+    },
     
     # 带负电荷的末端糖（神经氨酸/唾液酸）
-    'NAN': {'atom': 'C2', 'type': ['O-linked'], 'name': '神经氨酸', 'eng_name': 'Neuraminic acid'},
+    'NAN': {
+        'atom': 'C2', 
+        'type': ['O-linked'], 
+        'name': '神经氨酸', 
+        'eng_name': 'Neuraminic acid',
+        'smiles': 'CC(=O)N[C@H]1[C@@H](O)[C@H](O)[C@@H](O[C@H]2[C@H](O)[C@@H](O)[C@H](O)[C@@H](CO)O2)[C@H](C(O)=O)[C@@H]1O',
+        'molecular_weight': 309.27,
+        'linkage_atoms': {'O-linked': 'OG'}
+    },
     
     # 额外的常用糖基
-    'GLC': {'atom': 'C1', 'type': ['N-linked', 'O-linked'], 'name': '葡萄糖', 'eng_name': 'Glucose'},
-    'XYL': {'atom': 'C1', 'type': ['N-linked'], 'name': '木糖', 'eng_name': 'Xylose'},
-    'GLCNAC': {'atom': 'C1', 'type': ['N-linked', 'O-linked'], 'name': 'N-乙酰葡糖胺', 'eng_name': 'N-acetylglucosamine'},
-    'GALNAC': {'atom': 'C1', 'type': ['O-linked'], 'name': 'N-乙酰半乳糖胺', 'eng_name': 'N-acetylgalactosamine'},
-    'GLCA': {'atom': 'C1', 'type': ['O-linked'], 'name': '葡萄糖醛酸', 'eng_name': 'Glucuronic acid'},
+    'GLC': {
+        'atom': 'C1', 
+        'type': ['N-linked', 'O-linked'], 
+        'name': '葡萄糖', 
+        'eng_name': 'Glucose',
+        'smiles': 'O[C@H]1[C@H](O)[C@@H](O)[C@H](O)[C@H](O)[C@@H]1O',
+        'molecular_weight': 180.16,
+        'linkage_atoms': {'N-linked': 'ND2', 'O-linked': 'OG'}
+    },
+    
+    'XYL': {
+        'atom': 'C1', 
+        'type': ['N-linked'], 
+        'name': '木糖', 
+        'eng_name': 'Xylose',
+        'smiles': 'O[C@H]1[C@H](O)[C@@H](O)[C@H](O)[C@H]1O',
+        'molecular_weight': 150.13,
+        'linkage_atoms': {'N-linked': 'ND2'}
+    },
+    
+    'GLCNAC': {
+        'atom': 'C1', 
+        'type': ['N-linked', 'O-linked'], 
+        'name': 'N-乙酰葡糖胺', 
+        'eng_name': 'N-acetylglucosamine',
+        'smiles': 'CC(=O)N[C@H]1[C@@H](CO)O[C@H](O)[C@H](O)[C@H]1O',
+        'molecular_weight': 221.21,
+        'linkage_atoms': {'N-linked': 'ND2', 'O-linked': 'OG'}
+    },
+    
+    'GALNAC': {
+        'atom': 'C1', 
+        'type': ['O-linked'], 
+        'name': 'N-乙酰半乳糖胺', 
+        'eng_name': 'N-acetylgalactosamine',
+        'smiles': 'CC(=O)N[C@H]1[C@@H](CO)O[C@H](O)[C@H](O)[C@H]1O',
+        'molecular_weight': 221.21,
+        'linkage_atoms': {'O-linked': 'OG'}
+    },
+    
+    'GLCA': {
+        'atom': 'C1', 
+        'type': ['O-linked'], 
+        'name': '葡萄糖醛酸', 
+        'eng_name': 'Glucuronic acid',
+        'smiles': 'O[C@H]1[C@H](O)[C@@H](O)[C@H](O)[C@H](C(O)=O)[C@@H]1O',
+        'molecular_weight': 194.14,
+        'linkage_atoms': {'O-linked': 'OG'}
+    },
     
     # 历史兼容性保留（SIA是旧的神经氨酸代号）
-    'SIA': {'atom': 'C2', 'type': ['O-linked'], 'name': '唾液酸', 'eng_name': 'Sialic acid'},
+    'SIA': {
+        'atom': 'C2', 
+        'type': ['O-linked'], 
+        'name': '唾液酸', 
+        'eng_name': 'Sialic acid',
+        'smiles': 'CC(=O)N[C@H]1[C@@H](O)[C@H](O)[C@@H](O)[C@H](C(O)=O)[C@@H]1O',
+        'molecular_weight': 309.27,
+        'linkage_atoms': {'O-linked': 'OG'}
+    },
+    
+    # 扩展的糖基库 - 用于复杂糖基化模式
+    'RHAB': {
+        'atom': 'C1',
+        'type': ['O-linked'],
+        'name': '鼠李糖',
+        'eng_name': 'Rhamnose',
+        'smiles': 'C[C@H]1O[C@H](O)[C@@H](O)[C@H](O)[C@H]1O',
+        'molecular_weight': 164.16,
+        'linkage_atoms': {'O-linked': 'OG'}
+    },
+    
+    'ARA': {
+        'atom': 'C1',
+        'type': ['O-linked'],
+        'name': '阿拉伯糖',
+        'eng_name': 'Arabinose',
+        'smiles': 'O[C@H]1[C@@H](O)[C@H](O)[C@H](O)[C@H]1O',
+        'molecular_weight': 150.13,
+        'linkage_atoms': {'O-linked': 'OG'}
+    },
 }
 
 GLYCOSYLATION_SITES = {
-    # N-连接糖基化：发生在天冬酰胺(N)上，通常在Asn-X-Ser/Thr基序中
+    # N-连接糖基化：糖基C1位羟基与天冬酰胺侧链胺基脱氨基化形成糖苷键，通常在Asn-X-Ser/Thr基序中
     'N-linked': {
         'N': 'ND2'  # 天冬酰胺的侧链胺基氮原子
     },
-    # O-连接糖基化：发生在丝氨酸(S)或苏氨酸(T)的羟基上
+    # O-连接糖基化：糖基C1羟基氧原子脱水缩合后成为连接氨基酸侧链的桥梁氧原子
     'O-linked': {
-        'S': 'OG',    # 丝氨酸的羟基氧原子
-        'T': 'OG1',   # 苏氨酸的羟基氧原子
-        'Y': 'OH'     # 酪氨酸的酚羟基（较少见但存在）
+        'S': 'OG',    # 丝氨酸的羟基氧原子 (MAN-C1-O-Ser桥连)
+        'T': 'OG1',   # 苏氨酸的羟基氧原子 (MAN-C1-O-Thr桥连)
+        'Y': 'OH'     # 酪氨酸的酚羟基氧原子 (较少见但存在)
     },
-    # C-连接糖基化：较少见，发生在色氨酸上
+    # C-连接糖基化：较少见，糖基直接与色氨酸吲哚环C原子连接
     'C-linked': {
         'W': 'CD1'    # 色氨酸吲哚环的C2位
     }
@@ -115,21 +228,19 @@ def get_valid_residues_for_glycan(glycan_ccd: str) -> list:
     return list(set(valid_residues))
 
 
-def generate_random_sequence(length: int, glycosylation_site: int = None, glycan_ccd: str = None) -> str:
+def generate_random_sequence(length: int, modification_site: int = None, glycan_modification: str = None) -> str:
     """生成一个随机的氨基酸序列。"""
     seq = list("".join(random.choice(AMINO_ACIDS) for _ in range(length)))
-    if glycosylation_site is not None:
-        if 0 <= glycosylation_site < length:
-            if glycan_ccd:
-                valid_residues = get_valid_residues_for_glycan(glycan_ccd)
-            else:
-                # 默认包含所有类型的糖基化位点
-                valid_residues = (list(GLYCOSYLATION_SITES['N-linked'].keys()) + 
-                                list(GLYCOSYLATION_SITES['O-linked'].keys()) + 
-                                list(GLYCOSYLATION_SITES['C-linked'].keys()))
-            seq[glycosylation_site] = random.choice(valid_residues)
+    if modification_site is not None:
+        if 0 <= modification_site < length:
+            # 由于现在使用预生成的糖肽修饰（如MANS），我们不需要验证特定残基
+            # 而是使用任何适合糖基化的残基
+            valid_residues = (list(GLYCOSYLATION_SITES['N-linked'].keys()) + 
+                            list(GLYCOSYLATION_SITES['O-linked'].keys()) + 
+                            list(GLYCOSYLATION_SITES['C-linked'].keys()))
+            seq[modification_site] = random.choice(valid_residues)
         else:
-            raise ValueError("glycosylation_site index is out of bounds for the given sequence length.")
+            raise ValueError("modification_site index is out of bounds for the given sequence length.")
     return "".join(seq)
 
 
@@ -138,8 +249,8 @@ def mutate_sequence(
     mutation_rate: float = 0.1,
     plddt_scores: list = None,
     temperature: float = 1.0,
-    glycosylation_site: int = None,
-    glycan_ccd: str = None,
+    modification_site: int = None,
+    glycan_modification: str = None,
     position_selection_temp: float = 1.0
 ) -> str:
     """
@@ -158,8 +269,8 @@ def mutate_sequence(
         mutation_rate (float): 序列中要突变的残基比例。
         plddt_scores (list, optional): 与序列对应的pLDDT分数列表。
         temperature (float): Softmax函数的温度因子，用于氨基酸替换选择。
-        glycosylation_site (int, optional): 要保护的糖基化位点（0-based索引）。
-        glycan_ccd (str, optional): 聚糖的CCD代码，用于验证糖基化位点。
+        modification_site (int, optional): 要保护的糖基化位点（0-based索引）。
+        glycan_modification (str, optional): 糖肽修饰的CCD代码，用于验证修饰位点。
         position_selection_temp (float): 用于调节pLDDT指导位置选择的温度因子。
 
     Returns:
@@ -170,8 +281,8 @@ def mutate_sequence(
 
     # --- 步骤 1: 选择突变位置 (pLDDT指导) ---
     available_indices = list(range(len(sequence)))
-    if glycosylation_site is not None and glycosylation_site in available_indices:
-        available_indices.remove(glycosylation_site)
+    if modification_site is not None and modification_site in available_indices:
+        available_indices.remove(modification_site)
 
     if not available_indices:
         logger.warning("No available positions to mutate after excluding the glycosylation site. Returning original sequence.")
@@ -213,17 +324,7 @@ def mutate_sequence(
 
         new_aa = np.random.choice(possible_aas, p=probabilities)
         new_sequence[pos] = new_aa
-        
-    # --- 步骤 3: 确保糖基化位点对于指定的聚糖仍然有效 ---
-    if glycosylation_site is not None and glycan_ccd:
-        valid_residues = get_valid_residues_for_glycan(glycan_ccd)
-        if new_sequence[glycosylation_site] not in valid_residues:
-            logger.debug(
-                f"Correcting glycosylation site {glycosylation_site} from "
-                f"'{new_sequence[glycosylation_site]}' to a valid residue for '{glycan_ccd}'."
-            )
-            new_sequence[glycosylation_site] = random.choice(valid_residues)
-
+    
     return "".join(new_sequence)
 
 
@@ -737,3 +838,267 @@ def analyze_population_diversity(sequences: List[str]) -> Dict[str, float]:
         'num_unique_sequences': len(set(sequences)),
         'diversity_index': 1.0 - avg_similarity  # 多样性指数
     }
+
+
+# === 糖肽修饰相关辅助函数 ===
+
+def get_glycopeptide_ccd_code(glycan_code: str, amino_acid: str) -> str:
+    """生成糖肽的CCD代码"""
+    return f"{glycan_code}_{amino_acid}"
+
+
+def validate_glycosylation_compatibility(amino_acid: str, glycan_code: str) -> bool:
+    """验证氨基酸与糖基的兼容性"""
+    if glycan_code not in MONOSACCHARIDES:
+        return False
+    
+    glycan_info = MONOSACCHARIDES[glycan_code]
+    allowed_types = glycan_info.get('type', [])
+    
+    # 检查氨基酸是否支持任何允许的糖基化类型
+    for linkage_type in allowed_types:
+        if linkage_type in GLYCOSYLATION_SITES:
+            if amino_acid in GLYCOSYLATION_SITES[linkage_type]:
+                return True
+    
+    return False
+
+
+def get_optimal_linkage_type(amino_acid: str, glycan_code: str) -> str:
+    """获取氨基酸和糖基的最佳连接类型"""
+    if not validate_glycosylation_compatibility(amino_acid, glycan_code):
+        raise ValueError(f"Incompatible combination: {amino_acid} with {glycan_code}")
+    
+    glycan_info = MONOSACCHARIDES[glycan_code]
+    allowed_types = glycan_info.get('type', [])
+    
+    # 优先级：N-linked > O-linked > C-linked
+    priority = ['N-linked', 'O-linked', 'C-linked']
+    
+    for linkage_type in priority:
+        if linkage_type in allowed_types and linkage_type in GLYCOSYLATION_SITES:
+            if amino_acid in GLYCOSYLATION_SITES[linkage_type]:
+                return linkage_type
+    
+    # 如果没有找到优先的类型，返回第一个可用的
+    for linkage_type in allowed_types:
+        if linkage_type in GLYCOSYLATION_SITES:
+            if amino_acid in GLYCOSYLATION_SITES[linkage_type]:
+                return linkage_type
+    
+    raise ValueError(f"No compatible linkage type found for {amino_acid} and {glycan_code}")
+
+
+def calculate_glycopeptide_properties(glycan_code: str) -> Dict[str, float]:
+    """计算糖肽的理化性质"""
+    if glycan_code not in MONOSACCHARIDES:
+        return {}
+    
+    glycan_info = MONOSACCHARIDES[glycan_code]
+    
+    properties = {
+        'molecular_weight': glycan_info.get('molecular_weight', 0.0),
+        'hydrophilic_contribution': 0.8,  # 糖基通常是亲水的
+        'flexibility_increase': 0.6,      # 糖基增加分子柔性
+        'surface_exposure': 0.9,          # 糖基通常暴露在表面
+    }
+    
+    # 根据糖基类型调整性质
+    if 'NAN' in glycan_code or 'SIA' in glycan_code:
+        properties['charge'] = -1.0  # 唾液酸带负电荷
+    else:
+        properties['charge'] = 0.0
+    
+    if 'FUC' in glycan_code:
+        properties['steric_hindrance'] = 0.7  # 岩藻糖空间位阻较大
+    else:
+        properties['steric_hindrance'] = 0.3
+    
+    return properties
+
+
+def suggest_glycosylation_sites(sequence: str, target_properties: Dict = None) -> List[Dict]:
+    """建议蛋白质序列的糖基化位点"""
+    suggestions = []
+    
+    # 默认目标属性
+    if target_properties is None:
+        target_properties = {
+            'increase_solubility': True,
+            'increase_stability': True,
+            'avoid_active_sites': True,
+        }
+    
+    for i, aa in enumerate(sequence):
+        position = i + 1
+        
+        # 检查该氨基酸是否可以糖基化
+        compatible_glycans = []
+        for glycan_code, glycan_info in MONOSACCHARIDES.items():
+            if validate_glycosylation_compatibility(aa, glycan_code):
+                compatible_glycans.append({
+                    'glycan_code': glycan_code,
+                    'glycan_name': glycan_info.get('name', ''),
+                    'linkage_type': get_optimal_linkage_type(aa, glycan_code),
+                    'properties': calculate_glycopeptide_properties(glycan_code)
+                })
+        
+        if compatible_glycans:
+            # 根据目标属性排序
+            if target_properties.get('increase_solubility', False):
+                compatible_glycans.sort(
+                    key=lambda x: x['properties'].get('hydrophilic_contribution', 0),
+                    reverse=True
+                )
+            
+            suggestions.append({
+                'position': position,
+                'amino_acid': aa,
+                'compatible_glycans': compatible_glycans
+            })
+    
+    return suggestions
+
+
+def generate_glycosylation_patterns(
+    sequence: str, 
+    max_sites: int = 3,
+    pattern_type: str = 'balanced'
+) -> List[List[Dict]]:
+    """
+    生成糖基化模式
+    
+    Args:
+        sequence: 蛋白质序列
+        max_sites: 最大糖基化位点数
+        pattern_type: 模式类型 ('balanced', 'high_density', 'terminal_focused')
+    
+    Returns:
+        糖基化模式列表，每个模式是位点配置的列表
+    """
+    from itertools import combinations
+    
+    # 获取所有可能的糖基化位点
+    potential_sites = suggest_glycosylation_sites(sequence)
+    
+    if not potential_sites:
+        return []
+    
+    patterns = []
+    
+    # 根据模式类型调整策略
+    if pattern_type == 'balanced':
+        # 均匀分布的糖基化位点
+        step = max(1, len(potential_sites) // max_sites)
+        selected_sites = potential_sites[::step][:max_sites]
+        
+        for site in selected_sites:
+            # 为每个位点选择最佳糖基
+            best_glycan = site['compatible_glycans'][0] if site['compatible_glycans'] else None
+            if best_glycan:
+                patterns.append([{
+                    'position': site['position'],
+                    'amino_acid': site['amino_acid'],
+                    'glycan': best_glycan['glycan_code']
+                }])
+    
+    elif pattern_type == 'high_density':
+        # 高密度糖基化
+        for num_sites in range(1, min(max_sites + 1, len(potential_sites) + 1)):
+            for site_combination in combinations(potential_sites[:max_sites*2], num_sites):
+                pattern = []
+                for site in site_combination:
+                    best_glycan = site['compatible_glycans'][0] if site['compatible_glycans'] else None
+                    if best_glycan:
+                        pattern.append({
+                            'position': site['position'],
+                            'amino_acid': site['amino_acid'],
+                            'glycan': best_glycan['glycan_code']
+                        })
+                if pattern:
+                    patterns.append(pattern)
+    
+    elif pattern_type == 'terminal_focused':
+        # 关注N端和C端的糖基化
+        n_terminal_sites = [s for s in potential_sites if s['position'] <= len(sequence) // 3]
+        c_terminal_sites = [s for s in potential_sites if s['position'] >= 2 * len(sequence) // 3]
+        
+        for sites_group in [n_terminal_sites, c_terminal_sites]:
+            for site in sites_group[:max_sites//2 + 1]:
+                best_glycan = site['compatible_glycans'][0] if site['compatible_glycans'] else None
+                if best_glycan:
+                    patterns.append([{
+                        'position': site['position'],
+                        'amino_acid': site['amino_acid'],
+                        'glycan': best_glycan['glycan_code']
+                    }])
+    
+    # 限制返回的模式数量
+    return patterns[:20]  # 最多返回20种模式
+
+
+def create_modification_based_yaml(
+    sequence: str,
+    glycosylation_pattern: List[Dict],
+    chain_id: str = 'A',
+    msa_type: str = 'empty'
+) -> str:
+    """
+    创建基于modifications的Boltz YAML配置
+    
+    Args:
+        sequence: 蛋白质序列
+        glycosylation_pattern: 糖基化模式
+        chain_id: 链ID
+        msa_type: MSA类型
+    
+    Returns:
+        YAML配置字符串
+    """
+    import yaml
+    
+    # 构建modifications列表
+    modifications = []
+    for site in glycosylation_pattern:
+        position = site['position']
+        glycan = site['glycan']
+        amino_acid = site.get('amino_acid', sequence[position-1] if position <= len(sequence) else 'N')
+        
+        ccd_code = get_glycopeptide_ccd_code(glycan, amino_acid)
+        modifications.append({
+            'position': position,
+            'ccd': ccd_code
+        })
+    
+    # 构建YAML配置
+    config = {
+        'version': 1,
+        'sequences': [{
+            'protein': {
+                'id': [chain_id],
+                'sequence': sequence,
+                'msa': msa_type,
+                'modifications': modifications
+            }
+        }]
+    }
+    
+    return yaml.dump(config, default_flow_style=False, sort_keys=False)
+
+
+def compare_glycosylation_strategies(sequence: str) -> Dict[str, List[Dict]]:
+    """比较不同的糖基化策略"""
+    strategies = {}
+    
+    # 生成不同类型的糖基化模式
+    pattern_types = ['balanced', 'high_density', 'terminal_focused']
+    
+    for pattern_type in pattern_types:
+        patterns = generate_glycosylation_patterns(
+            sequence, 
+            max_sites=3, 
+            pattern_type=pattern_type
+        )
+        strategies[pattern_type] = patterns
+    
+    return strategies
