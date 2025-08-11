@@ -5006,23 +5006,44 @@ with tab2:
                         glycosylation_site = designer_config.get('glycosylation_site')
                         
                         if glycan_type and glycosylation_site:
-                            # 从 design_utils.py 的常量中获取糖基信息
+                            # 糖基类型和氨基酸的映射信息
                             glycan_info_map = {
-                                "NAG": "N-乙酰葡糖胺 (N-acetylglucosamine)",
-                                "MAN": "甘露糖 (Mannose)", 
-                                "GAL": "半乳糖 (Galactose)",
-                                "FUC": "岩藻糖 (Fucose)",
-                                "NAN": "神经氨酸 (Neuraminic acid)",
-                                "GLC": "葡萄糖 (Glucose)",
-                                "XYL": "木糖 (Xylose)",
-                                "GALNAC": "N-乙酰半乳糖胺 (N-acetylgalactosamine)",
-                                "GLCA": "葡萄糖醛酸 (Glucuronic acid)"
+                                "NAGS": "NAG + Serine - N-乙酰葡糖胺与丝氨酸的糖苷键",
+                                "NAGT": "NAG + Threonine - N-乙酰葡糖胺与苏氨酸的糖苷键",
+                                "NAGN": "NAG + Asparagine - N-乙酰葡糖胺与天冬酰胺的糖苷键",
+                                "NAGY": "NAG + Tyrosine - N-乙酰葡糖胺与酪氨酸的糖苷键",
+                                "MANS": "MAN + Serine - 甘露糖与丝氨酸的糖苷键",
+                                "MANT": "MAN + Threonine - 甘露糖与苏氨酸的糖苷键",
+                                "MANN": "MAN + Asparagine - 甘露糖与天冬酰胺的糖苷键",
+                                "MANY": "MAN + Tyrosine - 甘露糖与酪氨酸的糖苷键",
+                                "GALS": "GAL + Serine - 半乳糖与丝氨酸的糖苷键",
+                                "GALT": "GAL + Threonine - 半乳糖与苏氨酸的糖苷键",
+                                "GALN": "GAL + Asparagine - 半乳糖与天冬酰胺的糖苷键",
+                                "GALY": "GAL + Tyrosine - 半乳糖与酪氨酸的糖苷键",
+                                "FUCS": "FUC + Serine - 岩藻糖与丝氨酸的糖苷键",
+                                "FUCT": "FUC + Threonine - 岩藻糖与苏氨酸的糖苷键",
+                                "FUCN": "FUC + Asparagine - 岩藻糖与天冬酰胺的糖苷键",
+                                "FUCY": "FUC + Tyrosine - 岩藻糖与酪氨酸的糖苷键",
+                                "NANS": "NAN + Serine - 神经氨酸与丝氨酸的糖苷键",
+                                "NANT": "NAN + Threonine - 神经氨酸与苏氨酸的糖苷键",
+                                "NANN": "NAN + Asparagine - 神经氨酸与天冬酰胺的糖苷键",
+                                "NANY": "NAN + Tyrosine - 神经氨酸与酪氨酸的糖苷键",
+                                "GLCS": "GLC + Serine - 葡萄糖与丝氨酸的糖苷键",
+                                "GLCT": "GLC + Threonine - 葡萄糖与苏氨酸的糖苷键",
+                                "GLCN": "GLC + Asparagine - 葡萄糖与天冬酰胺的糖苷键",
+                                "GLCY": "GLC + Tyrosine - 葡萄糖与酪氨酸的糖苷键"
                             }
                             
-                            glycan_name = glycan_info_map.get(glycan_type, f"{glycan_type} 糖基")
+                            glycan_description = glycan_info_map.get(glycan_type, f"{glycan_type} 糖基修饰")
                             
-                            # 只有当糖基化位点异常时才显示警告
-                            if not (1 <= glycosylation_site <= len(sequence)):
+                            # 显示糖基化修饰信息
+                            if 1 <= glycosylation_site <= len(sequence):
+                                target_aa = sequence[glycosylation_site - 1]  # 1-based to 0-based indexing
+                                st.info(
+                                    f"🍯 **糖基化修饰**: 位点 {glycosylation_site} ({target_aa}) - {glycan_description}",
+                                    icon="🍯"
+                                )
+                            else:
                                 st.warning(
                                     f"⚠️ **糖基化位点异常**: 预设位点 {glycosylation_site} 超出序列长度 ({len(sequence)})",
                                     icon="⚠️"
@@ -5193,7 +5214,44 @@ with tab2:
         # 1. CSV 下载
         with col_download[0]:
             if top_sequences:
-                sequences_csv = pd.DataFrame(top_sequences)
+                # 创建增强的CSV数据，包含糖肽修饰信息
+                sequences_for_csv = []
+                designer_config = st.session_state.get('designer_config', {})
+                
+                for seq_data in top_sequences:
+                    enhanced_seq_data = seq_data.copy()
+                    
+                    # 如果是糖肽设计，添加修饰信息
+                    if designer_config.get('design_type') == 'glycopeptide':
+                        glycan_type = designer_config.get('glycan_type')
+                        glycosylation_site = designer_config.get('glycosylation_site')
+                        
+                        if glycan_type and glycosylation_site:
+                            # 糖基类型映射
+                            glycan_info_map = {
+                                "NAGS": "NAG+Ser", "NAGT": "NAG+Thr", "NAGN": "NAG+Asn", "NAGY": "NAG+Tyr",
+                                "MANS": "MAN+Ser", "MANT": "MAN+Thr", "MANN": "MAN+Asn", "MANY": "MAN+Tyr",
+                                "GALS": "GAL+Ser", "GALT": "GAL+Thr", "GALN": "GAL+Asn", "GALY": "GAL+Tyr",
+                                "FUCS": "FUC+Ser", "FUCT": "FUC+Thr", "FUCN": "FUC+Asn", "FUCY": "FUC+Tyr",
+                                "NANS": "NAN+Ser", "NANT": "NAN+Thr", "NANN": "NAN+Asn", "NANY": "NAN+Tyr",
+                                "GLCS": "GLC+Ser", "GLCT": "GLC+Thr", "GLCN": "GLC+Asn", "GLCY": "GLC+Tyr"
+                            }
+                            
+                            enhanced_seq_data['glycan_type'] = glycan_type
+                            enhanced_seq_data['glycosylation_site'] = glycosylation_site
+                            enhanced_seq_data['glycan_description'] = glycan_info_map.get(glycan_type, glycan_type)
+                            
+                            # 标记修饰位点上的氨基酸（如果位点有效）
+                            sequence = seq_data.get('sequence', '')
+                            if sequence and 1 <= glycosylation_site <= len(sequence):
+                                target_aa = sequence[glycosylation_site - 1]
+                                enhanced_seq_data['modified_residue'] = f"{target_aa}{glycosylation_site}"
+                            else:
+                                enhanced_seq_data['modified_residue'] = f"Position{glycosylation_site}(out_of_range)"
+                    
+                    sequences_for_csv.append(enhanced_seq_data)
+                
+                sequences_csv = pd.DataFrame(sequences_for_csv)
                 sequences_csv_str = sequences_csv.to_csv(index=False)
                 
                 st.download_button(
@@ -5202,7 +5260,7 @@ with tab2:
                     file_name=f"top_designed_sequences_{st.session_state.designer_task_id}.csv",
                     mime="text/csv",
                     use_container_width=True,
-                    help=f"下载前 {len(top_sequences)} 个高质量设计序列"
+                    help=f"下载前 {len(top_sequences)} 个高质量设计序列（包含糖基化修饰信息）"
                 )
             else:
                 st.button("📊 CSV下载", disabled=True, help="无符合条件的序列")

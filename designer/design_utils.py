@@ -343,13 +343,25 @@ def parse_confidence_metrics(results_path: str, binder_chain_id: str) -> dict:
                 'ptm': data.get('ptm', 0.0),
                 'complex_plddt': data.get('complex_plddt', 0.0)
             })
-            pair_iptm = data.get('pair_chains_iptm', {})
-            chain_ids = list(pair_iptm.keys())
-            if len(chain_ids) > 1:
-                c1, c2 = chain_ids[0], chain_ids[1]
-                metrics['iptm'] = pair_iptm.get(c1, {}).get(c2, 0.0)
+            # 优先使用整体的 iptm 值，它更好地反映了整个复合体的相互作用质量
+            metrics['iptm'] = data.get('iptm', 0.0)
+            
+            # 如果没有整体 iptm，则尝试从链间矩阵计算
             if metrics['iptm'] == 0.0:
-                metrics['iptm'] = data.get('iptm', 0.0)
+                pair_iptm = data.get('pair_chains_iptm', {})
+                chain_ids = list(pair_iptm.keys())
+                if len(chain_ids) > 1:
+                    # 对于糖肽，计算所有链间相互作用的平均值
+                    inter_chain_iptms = []
+                    for c1 in chain_ids:
+                        for c2 in chain_ids:
+                            if c1 != c2:  # 只考虑不同链之间的相互作用
+                                iptm_val = pair_iptm.get(c1, {}).get(c2, 0.0)
+                                if iptm_val > 0:
+                                    inter_chain_iptms.append(iptm_val)
+                    
+                    if inter_chain_iptms:
+                        metrics['iptm'] = sum(inter_chain_iptms) / len(inter_chain_iptms)
     except Exception as e:
         logger.warning(f"Could not parse confidence metrics from JSON in {results_path}. Error: {e}")
 
