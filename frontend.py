@@ -5040,12 +5040,12 @@ with tab2:
                             if 1 <= glycosylation_site <= len(sequence):
                                 target_aa = sequence[glycosylation_site - 1]  # 1-based to 0-based indexing
                                 st.info(
-                                    f"🍯 **糖基化修饰**: 位点 {glycosylation_site} ({target_aa}) - {glycan_description}",
+                                    f"**糖基化修饰**: 位点 {glycosylation_site} ({target_aa}) - {glycan_description}",
                                     icon="🍯"
                                 )
                             else:
                                 st.warning(
-                                    f"⚠️ **糖基化位点异常**: 预设位点 {glycosylation_site} 超出序列长度 ({len(sequence)})",
+                                    f"**糖基化位点异常**: 预设位点 {glycosylation_site} 超出序列长度 ({len(sequence)})",
                                     icon="⚠️"
                                 )
                     
