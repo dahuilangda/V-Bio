@@ -4287,32 +4287,32 @@ with tab2:
         # 糖肽特有参数
         if design_type == "glycopeptide":
             with col7:
-                # 糖基类型选项和描述 - 更新为4字母CCD代码
+                # 糖基类型选项和描述
                 glycan_options = {
-                    "NAGS": "NAG + Serine - N-乙酰葡糖胺与丝氨酸的糖苷键",
-                    "NAGT": "NAG + Threonine - N-乙酰葡糖胺与苏氨酸的糖苷键",
-                    "NAGN": "NAG + Asparagine - N-乙酰葡糖胺与天冬酰胺的糖苷键",
-                    "NAGY": "NAG + Tyrosine - N-乙酰葡糖胺与酪氨酸的糖苷键",
-                    "MANS": "MAN + Serine - 甘露糖与丝氨酸的糖苷键",
-                    "MANT": "MAN + Threonine - 甘露糖与苏氨酸的糖苷键",
-                    "MANN": "MAN + Asparagine - 甘露糖与天冬酰胺的糖苷键",
-                    "MANY": "MAN + Tyrosine - 甘露糖与酪氨酸的糖苷键",
-                    "GALS": "GAL + Serine - 半乳糖与丝氨酸的糖苷键",
-                    "GALT": "GAL + Threonine - 半乳糖与苏氨酸的糖苷键",
-                    "GALN": "GAL + Asparagine - 半乳糖与天冬酰胺的糖苷键",
-                    "GALY": "GAL + Tyrosine - 半乳糖与酪氨酸的糖苷键",
-                    "FUCS": "FUC + Serine - 岩藻糖与丝氨酸的糖苷键",
-                    "FUCT": "FUC + Threonine - 岩藻糖与苏氨酸的糖苷键",
-                    "FUCN": "FUC + Asparagine - 岩藻糖与天冬酰胺的糖苷键",
-                    "FUCY": "FUC + Tyrosine - 岩藻糖与酪氨酸的糖苷键",
-                    "NANS": "NAN + Serine - 神经氨酸与丝氨酸的糖苷键",
-                    "NANT": "NAN + Threonine - 神经氨酸与苏氨酸的糖苷键",
-                    "NANN": "NAN + Asparagine - 神经氨酸与天冬酰胺的糖苷键",
-                    "NANY": "NAN + Tyrosine - 神经氨酸与酪氨酸的糖苷键",
-                    "GLCS": "GLC + Serine - 葡萄糖与丝氨酸的糖苷键",
-                    "GLCT": "GLC + Threonine - 葡萄糖与苏氨酸的糖苷键",
-                    "GLCN": "GLC + Asparagine - 葡萄糖与天冬酰胺的糖苷键",
-                    "GLCY": "GLC + Tyrosine - 葡萄糖与酪氨酸的糖苷键"
+                    "NAGS": "N-乙酰葡糖胺-丝氨酸",
+                    "NAGT": "N-乙酰葡糖胺-苏氨酸的糖苷键",
+                    "NAGN": "N-乙酰葡糖胺-天冬酰胺的糖苷键",
+                    "NAGY": "N-乙酰葡糖胺-酪氨酸的糖苷键",
+                    "MANS": "甘露糖-丝氨酸",
+                    "MANT": "甘露糖-苏氨酸",
+                    "MANN": "甘露糖-天冬酰胺",
+                    "MANY": "甘露糖-酪氨酸",
+                    "GALS": "半乳糖-丝氨酸",
+                    "GALT": "半乳糖-苏氨酸",
+                    "GALN": "半乳糖-天冬酰胺",
+                    "GALY": "半乳糖-酪氨酸",
+                    "FUCS": "岩藻糖-丝氨酸",
+                    "FUCT": "岩藻糖-苏氨酸",
+                    "FUCN": "岩藻糖与天冬酰胺",
+                    "FUCY": "岩藻糖-酪氨酸",
+                    "NANS": "神经氨酸-丝氨酸",
+                    "NANT": "神经氨酸-苏氨酸",
+                    "NANN": "神经氨酸-天冬酰胺",
+                    "NANY": "神经氨酸-酪氨酸",
+                    "GLCS": "葡萄糖-丝氨酸",
+                    "GLCT": "葡萄糖-苏氨酸",
+                    "GLCN": "葡萄糖-天冬酰胺",
+                    "GLCY": "葡萄糖-酪氨酸"
                 }
                 
                 glycan_type = st.selectbox(
@@ -4326,8 +4326,37 @@ with tab2:
                 
                 # 只有选择了有效的糖肽修饰才显示详细信息
                 if glycan_type != "请选择..." and glycan_type in glycan_options:
+                    # 创建更详细的糖基化信息映射
+                    detailed_glycan_info = {
+                        "NAGS": "NAG + Serine → N-乙酰葡糖胺丝氨酸糖基化",
+                        "NAGT": "NAG + Threonine → N-乙酰葡糖胺苏氨酸糖基化",
+                        "NAGN": "NAG + Asparagine → N-乙酰葡糖胺天冬酰胺糖基化",
+                        "NAGY": "NAG + Tyrosine → N-乙酰葡糖胺酪氨酸糖基化",
+                        "MANS": "MAN + Serine → 甘露糖丝氨酸糖基化",
+                        "MANT": "MAN + Threonine → 甘露糖苏氨酸糖基化",
+                        "MANN": "MAN + Asparagine → 甘露糖天冬酰胺糖基化",
+                        "MANY": "MAN + Tyrosine → 甘露糖酪氨酸糖基化",
+                        "GALS": "GAL + Serine → 半乳糖丝氨酸糖基化",
+                        "GALT": "GAL + Threonine → 半乳糖苏氨酸糖基化",
+                        "GALN": "GAL + Asparagine → 半乳糖天冬酰胺糖基化",
+                        "GALY": "GAL + Tyrosine → 半乳糖酪氨酸糖基化",
+                        "FUCS": "FUC + Serine → 岩藻糖丝氨酸糖基化",
+                        "FUCT": "FUC + Threonine → 岩藻糖苏氨酸糖基化",
+                        "FUCN": "FUC + Asparagine → 岩藻糖天冬酰胺糖基化",
+                        "FUCY": "FUC + Tyrosine → 岩藻糖酪氨酸糖基化",
+                        "NANS": "NAN + Serine → 神经氨酸丝氨酸糖基化",
+                        "NANT": "NAN + Threonine → 神经氨酸苏氨酸糖基化",
+                        "NANN": "NAN + Asparagine → 神经氨酸天冬酰胺糖基化",
+                        "NANY": "NAN + Tyrosine → 神经氨酸酪氨酸糖基化",
+                        "GLCS": "GLC + Serine → 葡萄糖丝氨酸糖基化",
+                        "GLCT": "GLC + Threonine → 葡萄糖苏氨酸糖基化",
+                        "GLCN": "GLC + Asparagine → 葡萄糖天冬酰胺糖基化",
+                        "GLCY": "GLC + Tyrosine → 葡萄糖酪氨酸糖基化"
+                    }
+                    
                     # 显示选中糖肽修饰的详细信息
-                    st.info(f"**{glycan_type}**: {glycan_options[glycan_type]}", icon="🍯")
+                    detailed_info = detailed_glycan_info.get(glycan_type, f"{glycan_type} 糖基化修饰")
+                    st.info(f"**{glycan_type}**: {detailed_info}", icon="🍯")
                 else:
                     glycan_type = None  # 设置为None以便后续验证
                 
@@ -4339,7 +4368,7 @@ with tab2:
                 "糖基化位点",
                 min_value=1,
                 max_value=binder_length,
-                value=min(10, binder_length),  # 默认位点10，但不超过肽长度
+                value=min(1, binder_length),  # 默认位点1，但不超过肽长度
                 step=1,
                 help=f"肽链上用于应用糖肽修饰的氨基酸位置 (1-{binder_length})。该位置的氨基酸将被替换为对应的糖肽修饰。",
                 disabled=designer_is_running
@@ -5006,43 +5035,48 @@ with tab2:
                         glycosylation_site = designer_config.get('glycosylation_site')
                         
                         if glycan_type and glycosylation_site:
-                            # 糖基类型和氨基酸的映射信息
+                            # 糖基类型和对应氨基酸的映射信息 - 结果显示专用版本
                             glycan_info_map = {
-                                "NAGS": "NAG + Serine - N-乙酰葡糖胺与丝氨酸的糖苷键",
-                                "NAGT": "NAG + Threonine - N-乙酰葡糖胺与苏氨酸的糖苷键",
-                                "NAGN": "NAG + Asparagine - N-乙酰葡糖胺与天冬酰胺的糖苷键",
-                                "NAGY": "NAG + Tyrosine - N-乙酰葡糖胺与酪氨酸的糖苷键",
-                                "MANS": "MAN + Serine - 甘露糖与丝氨酸的糖苷键",
-                                "MANT": "MAN + Threonine - 甘露糖与苏氨酸的糖苷键",
-                                "MANN": "MAN + Asparagine - 甘露糖与天冬酰胺的糖苷键",
-                                "MANY": "MAN + Tyrosine - 甘露糖与酪氨酸的糖苷键",
-                                "GALS": "GAL + Serine - 半乳糖与丝氨酸的糖苷键",
-                                "GALT": "GAL + Threonine - 半乳糖与苏氨酸的糖苷键",
-                                "GALN": "GAL + Asparagine - 半乳糖与天冬酰胺的糖苷键",
-                                "GALY": "GAL + Tyrosine - 半乳糖与酪氨酸的糖苷键",
-                                "FUCS": "FUC + Serine - 岩藻糖与丝氨酸的糖苷键",
-                                "FUCT": "FUC + Threonine - 岩藻糖与苏氨酸的糖苷键",
-                                "FUCN": "FUC + Asparagine - 岩藻糖与天冬酰胺的糖苷键",
-                                "FUCY": "FUC + Tyrosine - 岩藻糖与酪氨酸的糖苷键",
-                                "NANS": "NAN + Serine - 神经氨酸与丝氨酸的糖苷键",
-                                "NANT": "NAN + Threonine - 神经氨酸与苏氨酸的糖苷键",
-                                "NANN": "NAN + Asparagine - 神经氨酸与天冬酰胺的糖苷键",
-                                "NANY": "NAN + Tyrosine - 神经氨酸与酪氨酸的糖苷键",
-                                "GLCS": "GLC + Serine - 葡萄糖与丝氨酸的糖苷键",
-                                "GLCT": "GLC + Threonine - 葡萄糖与苏氨酸的糖苷键",
-                                "GLCN": "GLC + Asparagine - 葡萄糖与天冬酰胺的糖苷键",
-                                "GLCY": "GLC + Tyrosine - 葡萄糖与酪氨酸的糖苷键"
+                                "NAGS": ("S", "N-乙酰葡糖胺丝氨酸糖基化"),
+                                "NAGT": ("T", "N-乙酰葡糖胺苏氨酸糖基化"),
+                                "NAGN": ("N", "N-乙酰葡糖胺天冬酰胺糖基化"),
+                                "NAGY": ("Y", "N-乙酰葡糖胺酪氨酸糖基化"),
+                                "MANS": ("S", "甘露糖丝氨酸糖基化"),
+                                "MANT": ("T", "甘露糖苏氨酸糖基化"),
+                                "MANN": ("N", "甘露糖天冬酰胺糖基化"),
+                                "MANY": ("Y", "甘露糖酪氨酸糖基化"),
+                                "GALS": ("S", "半乳糖丝氨酸糖基化"),
+                                "GALT": ("T", "半乳糖苏氨酸糖基化"),
+                                "GALN": ("N", "半乳糖天冬酰胺糖基化"),
+                                "GALY": ("Y", "半乳糖酪氨酸糖基化"),
+                                "FUCS": ("S", "岩藻糖丝氨酸糖基化"),
+                                "FUCT": ("T", "岩藻糖苏氨酸糖基化"),
+                                "FUCN": ("N", "岩藻糖天冬酰胺糖基化"),
+                                "FUCY": ("Y", "岩藻糖酪氨酸糖基化"),
+                                "NANS": ("S", "神经氨酸丝氨酸糖基化"),
+                                "NANT": ("T", "神经氨酸苏氨酸糖基化"),
+                                "NANN": ("N", "神经氨酸天冬酰胺糖基化"),
+                                "NANY": ("Y", "神经氨酸酪氨酸糖基化"),
+                                "GLCS": ("S", "葡萄糖丝氨酸糖基化"),
+                                "GLCT": ("T", "葡萄糖苏氨酸糖基化"),
+                                "GLCN": ("N", "葡萄糖天冬酰胺糖基化"),
+                                "GLCY": ("Y", "葡萄糖酪氨酸糖基化")
                             }
                             
-                            glycan_description = glycan_info_map.get(glycan_type, f"{glycan_type} 糖基修饰")
+                            # 获取糖基化修饰信息
+                            glycan_info = glycan_info_map.get(glycan_type, (glycan_type[-1], f"{glycan_type} 糖基化修饰"))
+                            expected_aa, glycan_description = glycan_info
                             
-                            # 显示糖基化修饰信息
+                            # 显示糖基化修饰信息 - 显示预期的氨基酸类型而不是设计序列中的任意氨基酸
                             if 1 <= glycosylation_site <= len(sequence):
-                                target_aa = sequence[glycosylation_site - 1]  # 1-based to 0-based indexing
+                                actual_aa = sequence[glycosylation_site - 1]  # 设计序列中实际的氨基酸
                                 st.info(
-                                    f"**糖基化修饰**: 位点 {glycosylation_site} ({target_aa}) - {glycan_description}",
+                                    f"**糖基化修饰**: 位点 {glycosylation_site} ({expected_aa}) - {glycan_description}",
                                     icon="🍯"
                                 )
+                                # 如果实际氨基酸与预期不同，显示提示
+                                if actual_aa != expected_aa:
+                                    st.caption(f"💡 注意：设计序列该位点为 {actual_aa}，预测时将被 {glycan_type} 修饰替换")
                             else:
                                 st.warning(
                                     f"**糖基化位点异常**: 预设位点 {glycosylation_site} 超出序列长度 ({len(sequence)})",
@@ -5227,27 +5261,33 @@ with tab2:
                         glycosylation_site = designer_config.get('glycosylation_site')
                         
                         if glycan_type and glycosylation_site:
-                            # 糖基类型映射
+                            # 糖基类型映射 - 与结果显示部分保持一致
                             glycan_info_map = {
-                                "NAGS": "NAG+Ser", "NAGT": "NAG+Thr", "NAGN": "NAG+Asn", "NAGY": "NAG+Tyr",
-                                "MANS": "MAN+Ser", "MANT": "MAN+Thr", "MANN": "MAN+Asn", "MANY": "MAN+Tyr",
-                                "GALS": "GAL+Ser", "GALT": "GAL+Thr", "GALN": "GAL+Asn", "GALY": "GAL+Tyr",
-                                "FUCS": "FUC+Ser", "FUCT": "FUC+Thr", "FUCN": "FUC+Asn", "FUCY": "FUC+Tyr",
-                                "NANS": "NAN+Ser", "NANT": "NAN+Thr", "NANN": "NAN+Asn", "NANY": "NAN+Tyr",
-                                "GLCS": "GLC+Ser", "GLCT": "GLC+Thr", "GLCN": "GLC+Asn", "GLCY": "GLC+Tyr"
+                                "NAGS": ("S", "NAG+Ser"), "NAGT": ("T", "NAG+Thr"), "NAGN": ("N", "NAG+Asn"), "NAGY": ("Y", "NAG+Tyr"),
+                                "MANS": ("S", "MAN+Ser"), "MANT": ("T", "MAN+Thr"), "MANN": ("N", "MAN+Asn"), "MANY": ("Y", "MAN+Tyr"),
+                                "GALS": ("S", "GAL+Ser"), "GALT": ("T", "GAL+Thr"), "GALN": ("N", "GAL+Asn"), "GALY": ("Y", "GAL+Tyr"),
+                                "FUCS": ("S", "FUC+Ser"), "FUCT": ("T", "FUC+Thr"), "FUCN": ("N", "FUC+Asn"), "FUCY": ("Y", "FUC+Tyr"),
+                                "NANS": ("S", "NAN+Ser"), "NANT": ("T", "NAN+Thr"), "NANN": ("N", "NAN+Asn"), "NANY": ("Y", "NAN+Tyr"),
+                                "GLCS": ("S", "GLC+Ser"), "GLCT": ("T", "GLC+Thr"), "GLCN": ("N", "GLC+Asn"), "GLCY": ("Y", "GLC+Tyr")
                             }
                             
                             enhanced_seq_data['glycan_type'] = glycan_type
                             enhanced_seq_data['glycosylation_site'] = glycosylation_site
-                            enhanced_seq_data['glycan_description'] = glycan_info_map.get(glycan_type, glycan_type)
                             
-                            # 标记修饰位点上的氨基酸（如果位点有效）
+                            # 获取预期氨基酸和简化描述
+                            glycan_info = glycan_info_map.get(glycan_type, (glycan_type[-1], glycan_type))
+                            expected_aa, short_description = glycan_info
+                            enhanced_seq_data['glycan_description'] = short_description
+                            
+                            # 标记修饰位点上的预期氨基酸（而不是设计序列中的实际氨基酸）
                             sequence = seq_data.get('sequence', '')
                             if sequence and 1 <= glycosylation_site <= len(sequence):
-                                target_aa = sequence[glycosylation_site - 1]
-                                enhanced_seq_data['modified_residue'] = f"{target_aa}{glycosylation_site}"
+                                actual_aa = sequence[glycosylation_site - 1]
+                                enhanced_seq_data['modified_residue'] = f"{expected_aa}{glycosylation_site}"
+                                enhanced_seq_data['actual_residue'] = f"{actual_aa}{glycosylation_site}"  # 记录实际氨基酸用于对比
                             else:
-                                enhanced_seq_data['modified_residue'] = f"Position{glycosylation_site}(out_of_range)"
+                                enhanced_seq_data['modified_residue'] = f"{expected_aa}{glycosylation_site}(out_of_range)"
+                                enhanced_seq_data['actual_residue'] = f"Position{glycosylation_site}(out_of_range)"
                     
                     sequences_for_csv.append(enhanced_seq_data)
                 
