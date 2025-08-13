@@ -4797,7 +4797,43 @@ with tab2:
                                                 score_color = "🔴"
                                             
                                             st.markdown(f"**#{rank}** {score_color} 综合评分: {score:.3f} | ipTM: {iptm:.3f} | pLDDT: {plddt:.1f} | 代数: {generation}")
-                                            st.code(sequence, language="text")
+                                            
+                                            # 检查是否为糖肽设计，如果是则显示修饰后的序列
+                                            designer_config = st.session_state.get('designer_config', {})
+                                            if designer_config.get('design_type') == 'glycopeptide':
+                                                glycan_type = designer_config.get('glycan_type')
+                                                glycosylation_site = designer_config.get('glycosylation_site')
+                                                
+                                                if glycan_type and glycosylation_site and 1 <= glycosylation_site <= len(sequence):
+                                                    # 糖基类型映射
+                                                    glycan_info_map = {
+                                                        "NAGS": "S", "NAGT": "T", "NAGN": "N", "NAGY": "Y",
+                                                        "MANS": "S", "MANT": "T", "MANN": "N", "MANY": "Y",
+                                                        "GALS": "S", "GALT": "T", "GALN": "N", "GALY": "Y",
+                                                        "FUCS": "S", "FUCT": "T", "FUCN": "N", "FUCY": "Y",
+                                                        "NANS": "S", "NANT": "T", "NANN": "N", "NANY": "Y",
+                                                        "GLCS": "S", "GLCT": "T", "GLCN": "N", "GLCY": "Y"
+                                                    }
+                                                    
+                                                    expected_aa = glycan_info_map.get(glycan_type, glycan_type[-1])
+                                                    glycan_base = glycan_type[:3]
+                                                    
+                                                    # 构建修饰后的序列
+                                                    modified_sequence_parts = list(sequence)
+                                                    modified_sequence_parts[glycosylation_site - 1] = f"{expected_aa}({glycan_base})"
+                                                    
+                                                    if glycosylation_site < len(sequence):
+                                                        modified_sequence_display = "".join(modified_sequence_parts[:glycosylation_site]) + "-" + "".join(modified_sequence_parts[glycosylation_site:])
+                                                    else:
+                                                        modified_sequence_display = "".join(modified_sequence_parts)
+                                                    
+                                                    st.code(modified_sequence_display, language="text")
+                                                else:
+                                                    # 糖肽设计但糖基化信息不完整，显示原始序列
+                                                    st.code(sequence, language="text")
+                                            else:
+                                                # 非糖肽设计，显示原始序列
+                                                st.code(sequence, language="text")
                                         
                                         if len(current_best_sequences) > 3:
                                             st.caption(f"还有 {len(current_best_sequences) - 3} 个候选序列...")
@@ -5024,12 +5060,10 @@ with tab2:
                     f"**第 {rank} 名** {score_color} 评分: {score:.3f}", 
                     expanded=(i < 3)  # 默认展开前3个
                 ):
-                    # 显示序列
-                    sequence = seq_data['sequence']
-                    st.code(sequence, language="text")
-                    
                     # 显示糖基化信息（如果是糖肽设计）
                     designer_config = st.session_state.get('designer_config', {})
+                    sequence = seq_data['sequence']
+                    
                     if designer_config.get('design_type') == 'glycopeptide':
                         glycan_type = designer_config.get('glycan_type')
                         glycosylation_site = designer_config.get('glycosylation_site')
@@ -5067,21 +5101,36 @@ with tab2:
                             glycan_info = glycan_info_map.get(glycan_type, (glycan_type[-1], f"{glycan_type} 糖基化修饰"))
                             expected_aa, glycan_description = glycan_info
                             
-                            # 显示糖基化修饰信息 - 显示预期的氨基酸类型而不是设计序列中的任意氨基酸
+                            # 显示糖基化修饰信息
                             if 1 <= glycosylation_site <= len(sequence):
-                                actual_aa = sequence[glycosylation_site - 1]  # 设计序列中实际的氨基酸
                                 st.info(
                                     f"**糖基化修饰**: 位点 {glycosylation_site} ({expected_aa}) - {glycan_description}",
                                     icon="🍯"
                                 )
-                                # 如果实际氨基酸与预期不同，显示提示
-                                if actual_aa != expected_aa:
-                                    st.caption(f"💡 注意：设计序列该位点为 {actual_aa}，预测时将被 {glycan_type} 修饰替换")
+                                
+                                # 构建并显示修饰后的序列表示
+                                glycan_base = glycan_type[:3]  # 提取糖基类型前缀 (如 MAN, NAG, GAL等)
+                                modified_sequence_parts = list(sequence)
+                                modified_sequence_parts[glycosylation_site - 1] = f"{expected_aa}({glycan_base})"
+                                
+                                # 在修饰位点后添加连字符分隔，使其更清晰
+                                if glycosylation_site < len(sequence):
+                                    modified_sequence_display = "".join(modified_sequence_parts[:glycosylation_site]) + "-" + "".join(modified_sequence_parts[glycosylation_site:])
+                                else:
+                                    modified_sequence_display = "".join(modified_sequence_parts)
+                                
+                                st.code(modified_sequence_display, language="text")
                             else:
                                 st.warning(
                                     f"**糖基化位点异常**: 预设位点 {glycosylation_site} 超出序列长度 ({len(sequence)})",
                                     icon="⚠️"
                                 )
+                        else:
+                            # 如果糖肽设计但没有糖基化信息，显示原始序列
+                            st.code(sequence, language="text")
+                    else:
+                        # 非糖肽设计，显示原始序列
+                        st.code(sequence, language="text")
                     
                     col_metrics = st.columns(4)
                     col_metrics[0].metric("综合评分", f"{score:.3f}")
