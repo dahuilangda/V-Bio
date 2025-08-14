@@ -169,14 +169,6 @@ firefox optimization_with_report/optimization_report.html
 ### 前置条件
 
 1. **确保Boltz-WebUI服务器运行**
-```bash
-# 在主目录启动API服务器
-cd /data/boltz_webui  
-python api_server.py &
-
-# 验证服务器状态
-curl http://localhost:5000/health
-```
 
 2. **验证MMPDB数据库**
 ```bash
