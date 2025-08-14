@@ -183,13 +183,46 @@ class OptimizationEngine:
                     break
                 
                 # Remove duplicates and previously evaluated compounds
-                seen_smiles = {c.smiles for c in all_evaluated_candidates}
-                unique_candidates = [c for c in iteration_candidates if c.smiles not in seen_smiles]
+                # Use normalized SMILES for more accurate duplicate detection
+                seen_smiles = set()
+                for c in all_evaluated_candidates:
+                    try:
+                        from rdkit import Chem
+                        mol = Chem.MolFromSmiles(c.smiles)
+                        if mol:
+                            canonical_smiles = Chem.MolToSmiles(mol, canonical=True)
+                            seen_smiles.add(canonical_smiles)
+                        else:
+                            seen_smiles.add(c.smiles)  # Fallback
+                    except:
+                        seen_smiles.add(c.smiles)  # Fallback
+                
+                unique_candidates = []
+                for c in iteration_candidates:
+                    try:
+                        from rdkit import Chem
+                        mol = Chem.MolFromSmiles(c.smiles)
+                        if mol:
+                            canonical_smiles = Chem.MolToSmiles(mol, canonical=True)
+                            if canonical_smiles not in seen_smiles:
+                                unique_candidates.append(c)
+                                seen_smiles.add(canonical_smiles)  # Add to prevent internal duplicates
+                        else:
+                            # Invalid SMILES, skip
+                            logger.warning(f"跳过无效的 SMILES: {c.smiles}")
+                    except Exception as e:
+                        logger.warning(f"处理 SMILES {c.smiles} 时出错: {e}")
                 
                 logger.info(f"第 {iteration + 1} 代总共生成 {len(iteration_candidates)} 个候选，去重后剩余 {len(unique_candidates)} 个")
                 
                 if not unique_candidates:
                     logger.warning(f"第 {iteration + 1} 代没有新的候选化合物，停止进化")
+                    # 如果第二代开始没有候选，可能是过度保守，让我们查看原因
+                    if iteration > 0:
+                        logger.info(f"调试信息: 第 {iteration + 1} 代生成的原始候选:")
+                        for i, c in enumerate(iteration_candidates[:5]):  # 只显示前5个
+                            logger.info(f"  {i+1}. {c.smiles}")
+                        logger.info(f"已评估的候选SMILES数量: {len(seen_smiles)}")
                     break
                 
                 # Evaluate candidates using batch processing

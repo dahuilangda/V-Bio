@@ -262,11 +262,74 @@ def main():
         # Generate HTML report if requested
         if args.generate_report:
             try:
-                analyzer = OptimizationAnalyzer(args.output_dir)
-                report_file = analyzer.generate_html_report(results)
-                logger.info(f"HTML报告已生成: {report_file}")
+                # 准备优化数据用于分析器
+                optimization_data = {
+                    'original_compound': args.input_compound or 'batch_input',
+                    'strategy': args.optimization_strategy,
+                    'execution_time': 0,  # 这个值会从结果中获取
+                    'statistics': {},
+                    'top_candidates': []
+                }
+                
+                # 从results中提取数据
+                if args.input_compound and 'single_compound' in results:
+                    result = results['single_compound']
+                    optimization_data['execution_time'] = result.execution_time
+                    optimization_data['top_candidates'] = result.top_candidates or []
+                    optimization_data['statistics'] = {
+                        'total_candidates': len(result.candidates),
+                        'successful_evaluations': len(result.scores),
+                        'success_rate': len(result.scores) / len(result.candidates) if result.candidates else 0
+                    }
+                else:
+                    # 批处理结果
+                    all_candidates = []
+                    total_time = 0
+                    total_candidates = 0
+                    successful_evaluations = 0
+                    
+                    for compound_id, result in results.items():
+                        if hasattr(result, 'top_candidates') and result.top_candidates:
+                            all_candidates.extend(result.top_candidates)
+                        if hasattr(result, 'execution_time'):
+                            total_time += result.execution_time
+                        if hasattr(result, 'candidates'):
+                            total_candidates += len(result.candidates)
+                        if hasattr(result, 'scores'):
+                            successful_evaluations += len(result.scores)
+                    
+                    # 按评分排序并取前10个
+                    all_candidates.sort(key=lambda x: x.get('combined_score', 0), reverse=True)
+                    optimization_data['top_candidates'] = all_candidates[:10]
+                    optimization_data['execution_time'] = total_time
+                    optimization_data['statistics'] = {
+                        'total_compounds': len(results),
+                        'total_candidates': total_candidates,
+                        'successful_evaluations': successful_evaluations,
+                        'success_rate': successful_evaluations / total_candidates if total_candidates else 0
+                    }
+                
+                # 初始化分析器
+                analyzer = OptimizationAnalyzer(optimization_data, args.output_dir)
+                
+                # 生成图表
+                plots = analyzer.generate_optimization_plots()
+                logger.info(f"成功生成 {len(plots)} 个分析图表")
+                
+                # 保存CSV结果
+                analyzer.save_results_to_csv()
+                logger.info("分析结果已保存为CSV格式")
+                
+                # 生成HTML报告
+                html_report_path = analyzer.generate_html_report(results)
+                logger.info(f"HTML报告已生成: {html_report_path}")
+                
+                logger.info(f"优化分析完成，结果保存在: {args.output_dir}")
+                
             except Exception as e:
-                logger.warning(f"生成HTML报告失败: {e}")
+                logger.warning(f"生成分析报告失败: {e}")
+                import traceback
+                logger.debug(f"详细错误信息: {traceback.format_exc()}")
         
         logger.info("=== 优化任务完成 ===")
         print(f"结果保存在: {args.output_dir}")

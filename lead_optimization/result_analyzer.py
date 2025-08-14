@@ -100,6 +100,16 @@ class OptimizationAnalyzer:
         
         logger.info(f"优化结果分析器初始化完成，共 {len(self.results)} 个候选化合物")
     
+    def _json_serializer(self, obj):
+        """自定义JSON序列化器，处理numpy类型"""
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+    
     def _results_to_dataframe(self) -> pd.DataFrame:
         """将结果转换为DataFrame"""
         data = []
@@ -125,8 +135,11 @@ class OptimizationAnalyzer:
                     "novelty": result.scores.get("novelty", 0)
                 })
             
-            # 添加分子属性
-            if result.properties:
+            # 计算分子属性（如果没有提供的话）
+            if not result.properties and RDKIT_AVAILABLE:
+                calculated_props = self._calculate_molecular_properties(result.smiles)
+                row.update(calculated_props)
+            elif result.properties:
                 row.update({
                     "molecular_weight": result.properties.get("molecular_weight", 0),
                     "logp": result.properties.get("logp", 0),
@@ -141,6 +154,27 @@ class OptimizationAnalyzer:
             data.append(row)
         
         return pd.DataFrame(data)
+    
+    def _calculate_molecular_properties(self, smiles: str) -> Dict[str, float]:
+        """计算分子属性"""
+        try:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                return {}
+            
+            return {
+                "molecular_weight": Descriptors.MolWt(mol),
+                "logp": Descriptors.MolLogP(mol),
+                "hbd": Descriptors.NumHDonors(mol),
+                "hba": Descriptors.NumHAcceptors(mol),
+                "tpsa": Descriptors.TPSA(mol),
+                "rotatable_bonds": Descriptors.NumRotatableBonds(mol),
+                "aromatic_rings": Descriptors.NumAromaticRings(mol),
+                "heavy_atoms": Descriptors.HeavyAtomCount(mol)
+            }
+        except Exception as e:
+            logger.warning(f"计算分子属性失败 {smiles}: {e}")
+            return {}
     
     def save_results_to_csv(self):
         """保存结果为CSV格式，类似virtual_screening"""
@@ -198,7 +232,7 @@ class OptimizationAnalyzer:
             
             summary_file = os.path.join(self.output_dir, "optimization_summary.json")
             with open(summary_file, 'w', encoding='utf-8') as f:
-                json.dump(summary, f, indent=2, ensure_ascii=False)
+                json.dump(summary, f, indent=2, ensure_ascii=False, default=self._json_serializer)
             
             logger.info(f"优化摘要已保存: {summary_file}")
             
@@ -324,11 +358,23 @@ class OptimizationAnalyzer:
     def _generate_confidence_analysis_plot(self) -> Optional[Dict[str, str]]:
         """生成置信度分析图"""
         try:
+            # 检查是否有有效的置信度数据
+            has_confidence_data = ('confidence_score' in self.df.columns and 
+                                 self.df['confidence_score'].sum() > 0 and 
+                                 self.df['confidence_score'].var() > 0)
+            
+            has_boltz_metrics = ('iptm' in self.df.columns and 'ptm' in self.df.columns and
+                               (self.df['iptm'].sum() > 0 or self.df['ptm'].sum() > 0))
+            
+            if not has_confidence_data and not has_boltz_metrics:
+                logger.warning("没有有效的置信度数据，跳过置信度分析图生成")
+                return None
+            
             fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
             fig.suptitle('Structural Confidence Analysis', fontsize=16, fontweight='bold')
             
             # 置信度分布
-            if 'confidence_score' in self.df.columns and self.df['confidence_score'].sum() > 0:
+            if has_confidence_data:
                 confidence_scores = self.df['confidence_score'].values
                 ax1.hist(confidence_scores, bins=20, alpha=0.7, color='#9b59b6', edgecolor='black')
                 ax1.set_xlabel('Confidence Score')
@@ -338,9 +384,14 @@ class OptimizationAnalyzer:
                            label=f'Mean: {np.mean(confidence_scores):.3f}')
                 ax1.legend()
                 ax1.grid(True, alpha=0.3)
+            else:
+                ax1.text(0.5, 0.5, 'No valid confidence\ndata available', 
+                        ha='center', va='center', transform=ax1.transAxes,
+                        fontsize=12, bbox=dict(boxstyle="round", facecolor='wheat'))
+                ax1.set_title('Confidence Score Distribution')
             
             # iPTM vs PTM散点图
-            if 'iptm' in self.df.columns and 'ptm' in self.df.columns:
+            if has_boltz_metrics:
                 scatter = ax2.scatter(self.df['iptm'], self.df['ptm'], 
                            c=self.df['combined_score'], cmap='viridis', 
                            alpha=0.7, s=60)
@@ -350,26 +401,41 @@ class OptimizationAnalyzer:
                 cbar = plt.colorbar(scatter, ax=ax2)
                 cbar.set_label('Combined Score')
                 ax2.grid(True, alpha=0.3)
+            else:
+                ax2.text(0.5, 0.5, 'No Boltz metrics\navailable', 
+                        ha='center', va='center', transform=ax2.transAxes,
+                        fontsize=12, bbox=dict(boxstyle="round", facecolor='wheat'))
+                ax2.set_title('iPTM vs PTM Correlation')
             
             # 置信度vs综合评分
-            if 'confidence_score' in self.df.columns:
+            if has_confidence_data:
                 ax3.scatter(self.df['confidence_score'], self.df['combined_score'],
                            alpha=0.6, color='#1abc9c', s=60)
                 ax3.set_xlabel('Confidence Score')
                 ax3.set_ylabel('Combined Score')
                 ax3.set_title('Confidence vs Combined Score')
                 
-                # 添加趋势线
-                if len(self.df) > 1:
-                    z = np.polyfit(self.df['confidence_score'], self.df['combined_score'], 1)
-                    p = np.poly1d(z)
-                    ax3.plot(self.df['confidence_score'], p(self.df['confidence_score']), 
-                            "r--", alpha=0.8, label='Trend')
-                    ax3.legend()
+                # 添加趋势线（只有当数据有变化时）
+                if len(self.df) > 1 and self.df['confidence_score'].var() > 1e-10:
+                    try:
+                        z = np.polyfit(self.df['confidence_score'], self.df['combined_score'], 1)
+                        p = np.poly1d(z)
+                        ax3.plot(self.df['confidence_score'], p(self.df['confidence_score']), 
+                                "r--", alpha=0.8, label='Trend')
+                        ax3.legend()
+                    except (np.linalg.LinAlgError, np.RankWarning):
+                        # SVD收敛失败时跳过趋势线
+                        logger.debug("趋势线计算失败，跳过")
+                        pass
                 ax3.grid(True, alpha=0.3)
+            else:
+                ax3.text(0.5, 0.5, 'No confidence data\nfor correlation analysis', 
+                        ha='center', va='center', transform=ax3.transAxes,
+                        fontsize=12, bbox=dict(boxstyle="round", facecolor='wheat'))
+                ax3.set_title('Confidence vs Combined Score')
             
             # 置信度分级统计
-            if 'confidence_score' in self.df.columns:
+            if has_confidence_data:
                 confidence_bins = pd.cut(self.df['confidence_score'], 
                                        bins=[0, 0.5, 0.7, 0.9, 1.0],
                                        labels=['Low (<0.5)', 'Medium (0.5-0.7)', 
@@ -382,6 +448,11 @@ class OptimizationAnalyzer:
                                                   autopct='%1.1f%%',
                                                   colors=colors,
                                                   startangle=90)
+                ax4.set_title('Confidence Level Distribution')
+            else:
+                ax4.text(0.5, 0.5, 'No confidence data\nfor level analysis', 
+                        ha='center', va='center', transform=ax4.transAxes,
+                        fontsize=12, bbox=dict(boxstyle="round", facecolor='wheat'))
                 ax4.set_title('Confidence Level Distribution')
             
             plt.tight_layout()
@@ -633,7 +704,7 @@ class OptimizationAnalyzer:
                             textcoords="offset points", xytext=(0,10), ha='center')
             
             # 置信度vs评分散点图
-            if 'confidence_score' in top_candidates.columns:
+            if 'confidence_score' in top_candidates.columns and top_candidates['confidence_score'].var() > 1e-10:
                 scatter = ax4.scatter(top_candidates['confidence_score'], 
                                      top_candidates['combined_score'],
                                      c=range(1, top_n + 1), cmap='viridis_r',
@@ -651,6 +722,21 @@ class OptimizationAnalyzer:
                 cbar = plt.colorbar(scatter, ax=ax4)
                 cbar.set_label('Rank')
                 ax4.grid(True, alpha=0.3)
+            else:
+                # 如果没有有效的置信度数据，显示排名vs评分的柱状图
+                bars = ax4.bar(range(1, top_n + 1), top_candidates['combined_score'],
+                              color='#9b59b6', alpha=0.8)
+                ax4.set_xlabel('Candidate Rank')
+                ax4.set_ylabel('Combined Score')
+                ax4.set_title('Top Candidates Score Distribution')
+                ax4.set_xticks(range(1, top_n + 1))
+                ax4.grid(True, alpha=0.3)
+                
+                # 添加数值标签
+                for i, bar in enumerate(bars):
+                    height = bar.get_height()
+                    ax4.text(bar.get_x() + bar.get_width()/2., height,
+                            f'{height:.3f}', ha='center', va='bottom')
             
             plt.tight_layout()
             
@@ -699,3 +785,315 @@ class OptimizationAnalyzer:
                 })
         
         return summary
+
+    def generate_html_report(self, results: Dict[str, Any]) -> str:
+        """生成HTML报告"""
+        try:
+            html_template = self._create_html_template()
+            
+            # 准备数据
+            report_data = {
+                'title': f'Lead Optimization Report - {self.strategy.title()}',
+                'original_compound': self.original_compound,
+                'strategy': self.strategy,
+                'execution_time': f"{self.execution_time / 60:.1f} minutes",
+                'total_candidates': len(self.results),
+                'statistics': self.statistics,
+                'top_candidates': self.results[:10],  # Top 10
+                'plots': []
+            }
+            
+            # 添加图表
+            plots = self.generate_optimization_plots()
+            for plot in plots:
+                if plot and 'filename' in plot:
+                    report_data['plots'].append({
+                        'title': plot['title'],
+                        'description': plot['description'],
+                        'filename': plot['filename']
+                    })
+            
+            # 生成HTML内容
+            compounds_html = self._generate_compounds_html(report_data['top_candidates'])
+            plots_html = self._generate_plots_html(report_data['plots'])
+            
+            html_content = html_template.format(
+                title=report_data['title'],
+                original_compound=report_data['original_compound'],
+                strategy=report_data['strategy'],
+                execution_time=report_data['execution_time'],
+                total_candidates=report_data['total_candidates'],
+                timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                compounds_html=compounds_html,
+                plots_html=plots_html
+            )
+            
+            # 保存HTML文件
+            html_path = os.path.join(self.output_dir, "optimization_report.html")
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            logger.info(f"HTML报告已生成: {html_path}")
+            return html_path
+            
+        except Exception as e:
+            logger.error(f"生成HTML报告失败: {e}")
+            raise
+    
+    def _generate_compounds_html(self, compounds: List) -> str:
+        """生成候选化合物的HTML"""
+        html_parts = []
+        
+        for i, compound in enumerate(compounds[:10]):  # Top 10
+            is_best = i == 0
+            rank_class = "best" if is_best else ""
+            
+            # 尝试生成分子结构图
+            structure_html = self._generate_molecule_structure(compound.smiles, f"compound_{i+1}")
+            
+            compound_html = f'''
+            <div class="compound {rank_class}">
+                <div class="compound-header">
+                    <span class="rank-badge {rank_class}">#{compound.rank}</span>
+                    <span class="score">{compound.combined_score:.4f}</span>
+                </div>
+                
+                <div class="smiles">{compound.smiles}</div>
+                
+                {structure_html}
+                
+                <div class="properties">
+                    <p><strong>Generation Method:</strong> {compound.generation_method or 'N/A'}</p>
+                    <p><strong>Transformation Rule:</strong> {compound.transformation_rule or 'N/A'}</p>
+                </div>
+            </div>
+            '''
+            html_parts.append(compound_html)
+        
+        return '\n'.join(html_parts)
+    
+    def _generate_plots_html(self, plots: List[Dict]) -> str:
+        """生成图表的HTML"""
+        html_parts = []
+        
+        for plot in plots:
+            plot_html = f'''
+            <div class="plot">
+                <h3>{plot['title']}</h3>
+                <p>{plot['description']}</p>
+                <img src="plots/{plot['filename']}" alt="{plot['title']}">
+            </div>
+            '''
+            html_parts.append(plot_html)
+        
+        return '\n'.join(html_parts)
+    
+    def _generate_molecule_structure(self, smiles: str, filename: str) -> str:
+        """生成分子结构图"""
+        if not RDKIT_AVAILABLE:
+            return '<p><em>RDKit not available for structure visualization</em></p>'
+        
+        try:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                return '<p><em>Invalid SMILES for structure generation</em></p>'
+            
+            # 生成分子图片
+            img = Draw.MolToImage(mol, size=(400, 300))
+            
+            # 保存图片
+            img_dir = os.path.join(self.output_dir, "structures")
+            os.makedirs(img_dir, exist_ok=True)
+            img_path = os.path.join(img_dir, f"{filename}.png")
+            img.save(img_path)
+            
+            return f'<img src="structures/{filename}.png" alt="Molecular Structure" style="max-width: 400px; margin: 10px 0;">'
+            
+        except Exception as e:
+            logger.warning(f"生成分子结构图失败: {e}")
+            return '<p><em>Structure generation failed</em></p>'
+    
+    def _create_html_template(self) -> str:
+        """创建HTML模板"""
+        return '''
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title}</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f7fa;
+        }}
+        
+        .header {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            text-align: center;
+        }}
+        
+        .header h1 {{
+            margin: 0;
+            font-size: 2.5em;
+        }}
+        
+        .summary {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }}
+        
+        .summary-card {{
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }}
+        
+        .summary-card h3 {{
+            margin-top: 0;
+            color: #667eea;
+        }}
+        
+        .compounds-section {{
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }}
+        
+        .compound {{
+            border: 2px solid #e1e8ed;
+            border-radius: 10px;
+            margin: 20px 0;
+            padding: 20px;
+            transition: all 0.3s ease;
+        }}
+        
+        .compound:hover {{
+            border-color: #667eea;
+            box-shadow: 0 4px 20px rgba(102, 126, 234, 0.1);
+        }}
+        
+        .compound.best {{
+            border-color: #28a745;
+            background: linear-gradient(45deg, rgba(40, 167, 69, 0.05), rgba(40, 167, 69, 0.02));
+        }}
+        
+        .compound-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }}
+        
+        .rank-badge {{
+            background: #667eea;
+            color: white;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-weight: bold;
+        }}
+        
+        .rank-badge.best {{
+            background: #28a745;
+        }}
+        
+        .score {{
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #28a745;
+        }}
+        
+        .smiles {{
+            font-family: 'Courier New', monospace;
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            word-break: break-all;
+            margin: 10px 0;
+        }}
+        
+        .plots-section {{
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }}
+        
+        .plot {{
+            margin: 30px 0;
+            text-align: center;
+        }}
+        
+        .plot img {{
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }}
+        
+        .plot h3 {{
+            color: #667eea;
+            margin-bottom: 10px;
+        }}
+        
+        .plot p {{
+            color: #666;
+            margin-bottom: 20px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>{title}</h1>
+        <p>Generated on {timestamp}</p>
+    </div>
+    
+    <div class="summary">
+        <div class="summary-card">
+            <h3>🎯 Original Compound</h3>
+            <div class="smiles">{original_compound}</div>
+        </div>
+        
+        <div class="summary-card">
+            <h3>🔬 Strategy</h3>
+            <p><strong>{strategy}</strong></p>
+        </div>
+        
+        <div class="summary-card">
+            <h3>⏱️ Execution Time</h3>
+            <p><strong>{execution_time}</strong></p>
+        </div>
+        
+        <div class="summary-card">
+            <h3>📊 Results</h3>
+            <p><strong>{total_candidates}</strong> candidates generated</p>
+        </div>
+    </div>
+    
+    <div class="compounds-section">
+        <h2>🏆 Top Candidate Compounds</h2>
+        {compounds_html}
+    </div>
+    
+    <div class="plots-section">
+        <h2>📈 Analysis Plots</h2>
+        {plots_html}
+    </div>
+</body>
+</html>
+'''
