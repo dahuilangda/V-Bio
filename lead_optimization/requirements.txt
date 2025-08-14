@@ -1,0 +1,21 @@
+mmpdb==2.1
+rdkit>=2023.3.1
+requests>=2.28.0
+urllib3>=1.26.0
+pyyaml>=6.0
+pandas>=1.5.0
+numpy>=1.24.0
+matplotlib>=3.6.0
+seaborn>=0.12.0
+scipy>=1.9.0
+scikit-learn>=1.2.0
+networkx>=3.0
+plotly>=5.13.0
+tqdm>=4.64.0
+joblib>=1.2.0
+psutil>=5.9.0
+
+# Optional dependencies for advanced features
+jupyter>=1.0.0
+ipywidgets>=8.0.0
+py3Dmol>=2.0.0

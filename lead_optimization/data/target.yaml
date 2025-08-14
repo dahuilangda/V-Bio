@@ -1,0 +1,26 @@
+# Boltz 目标蛋白配置文件
+# 用于先导化合物优化的标准格式
+
+version: 1
+
+sequences:
+  # 蛋白质序列定义
+  - protein:
+      id: A
+      sequence: "DIFNRDPRDHYDLLQRLGGGTYGEVFKARDKVSGDLVALKMVKMEPDDDVSTLQKEILILKTCRHANIVAYHGSYLWLQKLWICMEFCGAGSLQDIYQVTGSLSELQISYVCREVLQGLAYLHSQKKIHRDIKGANILINDAGEVRLADFGISAQIGATLARRLAFIGTPYWMAPEVAAVALKGCYNELCDIWSLGITAIELAELQPPLFDVHPLRVLFLMTKSGYQPPRLKEKGKWSAAFHNFIKVTLTKSPKKRPSATKMLSHQLVSQPGLNRGLILDLLDKLKNP"
+
+# constraints:
+#   # 口袋约束 - 定义配体结合位点
+#   - pocket:
+#       binder: L                    # 配体链ID
+#       contacts: [[A, 15], [A, 25], [A, 35]]  # 目标结合位点残基 [链ID, 残基索引]
+#       max_distance: 5.0            # 最大结合距离（埃）
+#       force: false                 # 是否使用势函数强制满足约束
+
+
+# 可选：结构模板
+# templates:
+#   - cif: "./path/to/template.cif"    # 结构模板文件路径
+#     chain_id: [A]                    # 要模板化的链ID
+#     force: false                     # 是否使用势函数强制遵循模板
+#     threshold: 2.0                   # 偏差阈值（埃）

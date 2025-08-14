@@ -1,0 +1,94 @@
+# Default configuration for lead optimization
+# /data/boltz_webui/lead_optimization/config/default_config.yaml
+
+# Boltz-WebUI API configuration
+boltz_api:
+  server_url: "http://localhost:5000"
+  api_token: ""  # Set your API token here
+  timeout: 1800  # 30 minutes
+  retry_attempts: 3
+  retry_delay: 10
+  max_concurrent_jobs: 10
+  poll_interval: 30
+
+# MMP database configuration
+mmp_database:
+  database_path: "data/chembl_mmp.mmpdb"
+  reference_data_path: "data/chembl_compounds.smi"
+  max_heavy_atoms: 50
+  min_heavy_atoms: 5
+  max_pairs_per_transform: 1000
+  similarity_threshold: 0.8
+
+# Optimization parameters
+optimization:
+  max_candidates: 100
+  max_generations: 50
+  population_size: 200
+  mutation_rate: 0.1
+  crossover_rate: 0.8
+  selection_pressure: 2.0
+  diversity_penalty: 0.1
+  
+  # Scaffold hopping
+  scaffold_similarity_threshold: 0.3
+  scaffold_diversity_weight: 0.2
+  
+  # Fragment replacement
+  fragment_size_min: 3
+  fragment_size_max: 8
+  fragment_replacement_rate: 0.3
+
+# Scoring weights (will be normalized)
+scoring_weights:
+  binding_affinity: 0.4
+  selectivity: 0.2
+  drug_likeness: 0.15
+  synthetic_accessibility: 0.1
+  novelty: 0.1
+  stability: 0.05
+
+# Filtering criteria
+filters:
+  # Lipinski Rule of Five
+  mw_max: 500.0
+  logp_max: 5.0
+  hbd_max: 5
+  hba_max: 10
+  
+  # Additional criteria
+  tpsa_max: 140.0
+  rotatable_bonds_max: 10
+  formal_charge_range: [-2, 2]
+  
+  # Synthetic accessibility
+  sa_score_max: 6.0
+  
+  # Similarity constraints
+  parent_similarity_min: 0.3
+  parent_similarity_max: 0.9
+  
+  # PAINS filtering
+  filter_pains: true
+  filter_reactive: true
+
+# Parallel processing
+parallel:
+  max_workers: 8
+  chunk_size: 100
+  use_multiprocessing: true
+  memory_limit_gb: 16.0
+
+# Output configuration
+output:
+  save_structures: true
+  generate_plots: true
+  generate_html_report: true
+  save_optimization_tree: true
+  structure_format: "sdf"  # sdf, mol2, pdb
+  plot_format: "png"  # png, svg, pdf
+
+# Global settings
+random_seed: 42
+verbosity: 1  # 0=quiet, 1=info, 2=debug
+temp_dir: "tmp"
