@@ -300,8 +300,8 @@ sequences:
 output_directory/
 ├── 📄 optimization_results.csv          # 主要结果CSV文件
 ├── 📄 optimization_summary.json         # 完整结果JSON摘要
-├── � top_candidates.csv               # 顶级候选化合物详细信息
-├── �📁 results/                         # Boltz预测详细结果
+├── 📄 top_candidates.csv               # 顶级候选化合物详细信息
+├── 📁 results/                         # Boltz预测详细结果
 │   ├── cand_0001/
 │   │   ├── affinity_data.json
 │   │   ├── confidence_data_model_0.json
