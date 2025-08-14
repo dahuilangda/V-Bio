@@ -14,16 +14,18 @@ from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, asdict
 
 from rdkit import Chem
+from rdkit.Chem import rdMolDescriptors
 
 from config import OptimizationConfig
 from api_client import BoltzOptimizationClient
 from mmp_engine import MMPEngine
 from scoring_system import MultiObjectiveScoring, CompoundScore
+from molecular_evolution import MolecularEvolutionEngine
+from diversity_selector import DiversitySelector
 from exceptions import OptimizationError, InvalidCompoundError
 
 logger = logging.getLogger(__name__)
 
-@dataclass
 @dataclass
 class OptimizationResult:
     """Results from optimization run"""
@@ -47,6 +49,10 @@ class OptimizationCandidate:
     smiles: str
     compound_id: str
     mmp_transformation: str
+    generation_method: str = "mmpdb"
+    transformation_rule: str = ""
+    parent_smiles: str = ""
+    similarity: float = 0.0
     prediction_results: Dict[str, Any] = None
     scores: CompoundScore = None
 
@@ -63,6 +69,7 @@ class OptimizationEngine:
         self.boltz_client = BoltzOptimizationClient(config.boltz_api)
         self.mmp_engine = MMPEngine(config.mmp_database)
         self.scoring_system = MultiObjectiveScoring(config.scoring_weights, config.filters)
+        self.diversity_selector = DiversitySelector()
         
         # Results storage
         self.optimization_results: List[CompoundScore] = []
@@ -83,7 +90,12 @@ class OptimizationEngine:
                          output_dir: Optional[str] = None,
                          iterations: int = 1,
                          batch_size: int = 4,
-                         top_k_per_iteration: int = 5) -> OptimizationResult:
+                         top_k_per_iteration: int = 5,
+                         diversity_weight: float = 0.3,
+                         similarity_threshold: float = 0.5,
+                         max_similarity_threshold: float = 0.9,
+                         diversity_selection_strategy: str = "tanimoto_diverse",
+                         max_chiral_centers: int = None) -> OptimizationResult:
         """
         Optimize a single compound using MMPDB + Boltz-WebUI with iterative evolution
         
@@ -146,7 +158,11 @@ class OptimizationEngine:
                 if iteration == 0:
                     # First generation: explore around original compound
                     logger.info(f"🌱 第一代：从原始化合物生成候选")
-                    candidates = self._generate_candidates_with_mmpdb(compound_smiles, strategy, max_candidates)
+                    candidates = self._generate_candidates_with_mmpdb(
+                        compound_smiles, strategy, max_candidates, iteration, iterations,
+                        diversity_weight=diversity_weight, similarity_threshold=similarity_threshold,
+                        max_chiral_centers=max_chiral_centers, reference_smiles=compound_smiles
+                    )
                     if candidates:
                         iteration_candidates.extend(candidates)
                 else:
@@ -168,13 +184,23 @@ class OptimizationEngine:
                         # Generate candidates based on evolution strategies
                         for parent_smiles, evo_strategy, weight in strategies[:max_candidates]:
                             logger.info(f"  从 {parent_smiles[:30]}... 使用策略 {evo_strategy}")
-                            candidates = self._generate_candidates_with_mmpdb(parent_smiles, evo_strategy, max(1, int(max_candidates * weight)))
+                            candidates = self._generate_candidates_with_mmpdb(
+                                parent_smiles, evo_strategy, max(1, int(max_candidates * weight)), 
+                                iteration, iterations, diversity_weight=diversity_weight, 
+                                similarity_threshold=similarity_threshold,
+                                max_chiral_centers=max_chiral_centers, reference_smiles=compound_smiles
+                            )
                             if candidates:
                                 iteration_candidates.extend(candidates[:int(max_candidates * weight)])
                     else:
                         # Not enough candidates yet, continue with current seeds
                         for seed_compound in current_seeds:
-                            candidates = self._generate_candidates_with_mmpdb(seed_compound, strategy, max_candidates // len(current_seeds))
+                            candidates = self._generate_candidates_with_mmpdb(
+                                seed_compound, strategy, max_candidates // len(current_seeds), 
+                                iteration, iterations, diversity_weight=diversity_weight, 
+                                similarity_threshold=similarity_threshold,
+                                max_chiral_centers=max_chiral_centers, reference_smiles=compound_smiles
+                            )
                             if candidates:
                                 iteration_candidates.extend(candidates)
                 
@@ -308,44 +334,139 @@ class OptimizationEngine:
     def _generate_candidates_with_mmpdb(self, 
                                        compound_smiles: str, 
                                        strategy: str, 
-                                       max_candidates: int) -> List[OptimizationCandidate]:
-        """Generate candidate compounds using MMPDB"""
+                                       max_candidates: int,
+                                       iteration: int = 0,
+                                       max_iterations: int = 1,
+                                       diversity_weight: float = 0.3,
+                                       similarity_threshold: float = 0.4,
+                                       max_chiral_centers: int = None,
+                                       reference_smiles: str = None) -> List[OptimizationCandidate]:
+        """Generate candidate compounds using MMPDB with intelligent diversity selection"""
         try:
+            # Calculate reference chiral centers if not provided
+            if max_chiral_centers is None and reference_smiles:
+                max_chiral_centers = self._count_chiral_centers(reference_smiles)
+                logger.info(f"参考化合物手性中心数量: {max_chiral_centers}")
+            elif max_chiral_centers is None:
+                max_chiral_centers = self._count_chiral_centers(compound_smiles)
+                logger.info(f"原始化合物手性中心数量: {max_chiral_centers}")
+            
+            # Calculate adaptive similarity threshold for progressive convergence
+            # Early iterations: lower similarity (more diverse)
+            # Later iterations: higher similarity (more conservative)
+            progress = iteration / max_iterations if max_iterations > 1 else 0
+            base_similarity = 0.2  # Start with more diversity
+            target_similarity = similarity_threshold  # Use provided threshold as target
+            adaptive_similarity_threshold = base_similarity + (target_similarity - base_similarity) * progress
+            
             logger.info(f"Generating candidates with MMPDB, strategy: {strategy}")
+            logger.info(f"迭代 {iteration+1}/{max_iterations}, 相似性阈值: {adaptive_similarity_threshold:.3f}")
+            
+            # Generate raw candidates (more than needed for selection)
+            raw_candidate_count = max_candidates * 4  # Generate 4x more for better diversity selection
             
             if strategy == "scaffold_hopping":
-                mmp_results = self.mmp_engine.scaffold_hopping(compound_smiles, max_candidates * 2)  # Generate more, then select
+                mmp_results = self.mmp_engine.scaffold_hopping(compound_smiles, raw_candidate_count, adaptive_similarity_threshold)
             elif strategy == "fragment_replacement":
-                mmp_results = self.mmp_engine.fragment_replacement(compound_smiles, max_candidates * 2)
+                mmp_results = self.mmp_engine.fragment_replacement(compound_smiles, raw_candidate_count, adaptive_similarity_threshold)
             else:
-                # Default to scaffold hopping
-                mmp_results = self.mmp_engine.scaffold_hopping(compound_smiles, max_candidates * 2)
+                # Default to scaffold hopping with adaptive threshold
+                mmp_results = self.mmp_engine.scaffold_hopping(compound_smiles, raw_candidate_count, adaptive_similarity_threshold)
             
             logger.info(f"MMPDB generated {len(mmp_results)} raw candidates")
             
-            # Sort by similarity/quality and take top candidates
-            if len(mmp_results) > max_candidates:
-                # Sort by similarity score (descending) - higher similarity is often better for optimization
-                sorted_results = sorted(mmp_results, key=lambda x: x.get('similarity', 0), reverse=True)
-                mmp_results = sorted_results[:max_candidates]
-                logger.info(f"Selected top {max_candidates} candidates based on similarity")
+            if not mmp_results:
+                return []
             
-            candidates = []
-            for i, result in enumerate(mmp_results):
+            # Convert MMPDB results to OptimizationCandidate objects
+            all_candidates = []
+            for result in mmp_results:
+                # Check chiral center constraint
+                if max_chiral_centers is not None:
+                    chiral_count = self._count_chiral_centers(result['smiles'])
+                    if chiral_count > max_chiral_centers:
+                        logger.debug(f"跳过化合物 {result['smiles'][:50]}... (手性中心数量: {chiral_count} > {max_chiral_centers})")
+                        continue
+                
                 self.candidate_counter += 1
                 candidate = OptimizationCandidate(
                     smiles=result['smiles'],
                     compound_id=f"cand_{self.candidate_counter:04d}",
-                    mmp_transformation=result.get('transformation_rule', result.get('transformation_description', 'unknown'))
+                    mmp_transformation=result.get('transformation_rule', result.get('transformation_description', 'mmpdb_transform')),
+                    generation_method=result.get('generation_method', 'mmpdb'),
+                    transformation_rule=result.get('transformation_rule', result.get('transformation_description', 'mmpdb_transform')),
+                    parent_smiles=result.get('parent_smiles', compound_smiles),
+                    similarity=result.get('similarity', 0.0)
                 )
-                candidates.append(candidate)
+                all_candidates.append(candidate)
             
-            logger.info(f"Generated {len(candidates)} candidates from MMPDB")
-            return candidates
+            # Use DiversitySelector for intelligent candidate selection
+            if len(all_candidates) > max_candidates:
+                # Determine selection strategy based on iteration progress
+                if progress < 0.3:
+                    # Early stage: prioritize diversity
+                    selection_strategy = 'scaffold_diverse'
+                    current_diversity_weight = max(0.7, diversity_weight + 0.2)
+                elif progress < 0.7:
+                    # Middle stage: hybrid approach
+                    selection_strategy = 'hybrid'
+                    current_diversity_weight = diversity_weight
+                else:
+                    # Late stage: balance similarity and diversity
+                    selection_strategy = 'tanimoto_diverse'
+                    current_diversity_weight = max(0.1, diversity_weight - 0.2)
+                
+                logger.info(f"Using {selection_strategy} selection with diversity weight {current_diversity_weight:.2f}")
+                
+                # Extract SMILES for diversity selection
+                candidate_smiles = [candidate.smiles for candidate in all_candidates]
+                
+                # Use diversity selector to pick best candidates
+                candidate_dicts = [{'smiles': candidate.smiles, 'similarity': candidate.similarity} 
+                                 for candidate in all_candidates]
+                
+                selected_candidates_list = self.diversity_selector.select_diverse_candidates(
+                    candidates=candidate_dicts,
+                    target_count=max_candidates,
+                    parent_smiles=compound_smiles
+                )
+                
+                # Extract selected indices by matching SMILES
+                selected_indices = []
+                for selected_dict in selected_candidates_list:
+                    for i, candidate in enumerate(all_candidates):
+                        if candidate.smiles == selected_dict['smiles']:
+                            selected_indices.append(i)
+                            break
+                
+                selected_candidates = [all_candidates[i] for i in selected_indices]
+                logger.info(f"Selected {len(selected_candidates)} diverse candidates using {selection_strategy}")
+                
+            else:
+                selected_candidates = all_candidates
+                logger.info(f"Using all {len(selected_candidates)} candidates (below max threshold)")
+            
+            logger.info(f"Final candidate set: {len(selected_candidates)} compounds")
+            return selected_candidates
             
         except Exception as e:
             logger.error(f"MMPDB candidate generation failed: {e}")
             return []
+    
+    def _count_chiral_centers(self, smiles: str) -> int:
+        """Count the number of chiral centers in a molecule"""
+        try:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                return 0
+            
+            # Find chiral centers
+            chiral_centers = Chem.FindMolChiralCenters(mol, includeUnassigned=True)
+            return len(chiral_centers)
+            
+        except Exception as e:
+            logger.debug(f"Failed to count chiral centers for {smiles}: {e}")
+            return 0
     
     def _evaluate_candidates_with_boltz(self, 
                                        candidates: List[OptimizationCandidate],
@@ -367,9 +488,13 @@ class OptimizationEngine:
         # Set current output dir for debug YAML saving
         self._current_output_dir = output_dir
         
-        # Initialize real-time CSV file
+        # Initialize real-time CSV file only if it doesn't exist
         csv_file = os.path.join(output_dir, "optimization_results.csv")
-        self._initialize_csv_file(csv_file)
+        if not os.path.exists(csv_file):
+            self._initialize_csv_file(csv_file)
+            logger.info(f"Initialized new CSV file: {csv_file}")
+        else:
+            logger.info(f"Using existing CSV file: {csv_file}")
         
         logger.info(f"Evaluating {len(candidates)} candidates with Boltz-WebUI")
         logger.info(f"Real-time results will be saved to: {csv_file}")
@@ -687,11 +812,20 @@ class OptimizationEngine:
                     'smiles': score.smiles,
                     'compound_id': candidate.compound_id,
                     'mmp_transformation': candidate.mmp_transformation,
+                    'generation_method': candidate.generation_method,
+                    'transformation_rule': candidate.transformation_rule,
                     'combined_score': score.combined_score,
                     'binding_affinity': score.binding_affinity,
+                    'binding_probability': getattr(score, 'binding_probability', 0.0),
+                    'ic50_um': getattr(score, 'ic50_um', 0.0),
                     'drug_likeness': score.drug_likeness,
                     'synthetic_accessibility': score.synthetic_accessibility,
-                    'properties': score.properties
+                    'molecular_weight': score.properties.get('molecular_weight', 0.0) if score.properties else 0.0,
+                    'logp': score.properties.get('logp', 0.0) if score.properties else 0.0,
+                    'plddt': getattr(score, 'plddt', 0.0),
+                    'iptm': getattr(score, 'iptm', 0.0),
+                    'properties': score.properties,
+                    'boltz_metrics': getattr(score, 'boltz_metrics', {})
                 })
         
         return top_candidates
@@ -804,6 +938,10 @@ class OptimizationEngine:
             'smiles': candidate.smiles,
             'combined_score': candidate.scores.combined_score if candidate.scores else 0.0,
             'mmp_transformation': candidate.mmp_transformation,
+            'generation_method': getattr(candidate, 'generation_method', 'mmpdb'),
+            'transformation_rule': getattr(candidate, 'transformation_rule', candidate.mmp_transformation),
+            'parent_smiles': getattr(candidate, 'parent_smiles', ''),
+            'similarity': getattr(candidate, 'similarity', 0.0),
             'status': getattr(candidate, 'status', 'completed')
         }
         

@@ -8,9 +8,22 @@ import time
 import yaml
 import logging
 from typing import List, Dict, Tuple, Optional, Any
-from .optimization_engine import OptimizationCandidate
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+@dataclass
+class OptimizationCandidate:
+    """Individual optimization candidate - local definition to avoid circular import"""
+    smiles: str
+    compound_id: str
+    mmp_transformation: str
+    generation_method: str = "mmpdb"
+    transformation_rule: str = ""
+    parent_smiles: str = ""
+    similarity: float = 0.0
+    prediction_results: Dict[str, Any] = None
+    scores: Any = None
 
 class BatchEvaluator:
     """批次评估器，支持批量提交和管理Boltz任务"""

@@ -84,7 +84,12 @@ def run_single_optimization(engine: OptimizationEngine,
                           output_dir: str,
                           iterations: int = 1,
                           batch_size: int = 4,
-                          top_k_per_iteration: int = 5) -> OptimizationResult:
+                          top_k_per_iteration: int = 5,
+                          diversity_weight: float = 0.3,
+                          similarity_threshold: float = 0.5,
+                          max_similarity_threshold: float = 0.9,
+                          diversity_selection_strategy: str = "tanimoto_diverse",
+                          max_chiral_centers: int = None) -> OptimizationResult:
     """Run optimization for a single compound with iterative evolution"""
     logger = logging.getLogger(__name__)
     
@@ -95,6 +100,9 @@ def run_single_optimization(engine: OptimizationEngine,
     logger.info(f"每轮最大候选数: {max_candidates}")
     logger.info(f"批次大小: {batch_size}")
     logger.info(f"每轮保留前K: {top_k_per_iteration}")
+    logger.info(f"多样性权重: {diversity_weight}")
+    logger.info(f"相似性范围: {similarity_threshold} - {max_similarity_threshold}")
+    logger.info(f"多样性选择策略: {diversity_selection_strategy}")
     
     try:
         result = engine.optimize_compound(
@@ -105,7 +113,12 @@ def run_single_optimization(engine: OptimizationEngine,
             output_dir=output_dir,
             iterations=iterations,
             batch_size=batch_size,
-            top_k_per_iteration=top_k_per_iteration
+            top_k_per_iteration=top_k_per_iteration,
+            diversity_weight=diversity_weight,
+            similarity_threshold=similarity_threshold,
+            max_similarity_threshold=max_similarity_threshold,
+            diversity_selection_strategy=diversity_selection_strategy,
+            max_chiral_centers=max_chiral_centers
         )
         
         logger.info("=== 优化完成 ===")
@@ -192,6 +205,21 @@ def main():
     parser.add_argument("--top_k_per_iteration", type=int, default=5,
                        help="Top compounds to use as seeds for next iteration")
     
+    # Diversity control options
+    parser.add_argument("--diversity_weight", type=float, default=0.3,
+                       help="Weight for diversity in compound selection (0.0-1.0)")
+    parser.add_argument("--similarity_threshold", type=float, default=0.5,
+                       help="Minimum similarity threshold for candidate selection")
+    parser.add_argument("--max_similarity_threshold", type=float, default=0.9,
+                       help="Maximum similarity threshold to avoid too similar compounds")
+    parser.add_argument("--diversity_selection_strategy", type=str, default="tanimoto_diverse",
+                       choices=["tanimoto_diverse", "scaffold_diverse", "property_diverse", "hybrid"],
+                       help="Strategy for diverse compound selection")
+    
+    # Chirality control
+    parser.add_argument("--max_chiral_centers", type=int, default=None,
+                       help="Maximum number of chiral centers allowed in generated compounds (default: same as reference)")
+    
     # Output options
     parser.add_argument("--output_dir", type=str, help="Output directory")
     parser.add_argument("--generate_report", action="store_true", help="Generate HTML report")
@@ -241,7 +269,12 @@ def main():
                 output_dir=args.output_dir,
                 iterations=args.iterations,
                 batch_size=args.batch_size,
-                top_k_per_iteration=args.top_k_per_iteration
+                top_k_per_iteration=args.top_k_per_iteration,
+                diversity_weight=args.diversity_weight,
+                similarity_threshold=args.similarity_threshold,
+                max_similarity_threshold=args.max_similarity_threshold,
+                diversity_selection_strategy=args.diversity_selection_strategy,
+                max_chiral_centers=args.max_chiral_centers
             )
             results["single_compound"] = result
             

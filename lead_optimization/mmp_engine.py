@@ -83,13 +83,16 @@ class MMPEngine:
                 max_candidates
             )
             
-            # 过滤相似度
+            # 过滤相似度和同位素
             filtered_candidates = []
             for candidate in candidates:
+                # 检查相似性阈值
                 if candidate.get('similarity', 0) >= similarity_threshold:
-                    filtered_candidates.append(candidate)
+                    # 过滤同位素标记的化合物
+                    if not _contains_isotopes(candidate['smiles']):
+                        filtered_candidates.append(candidate)
             
-            logger.info(f"骨架跃迁生成了 {len(filtered_candidates)} 个候选物")
+            logger.info(f"骨架跃迁生成了 {len(filtered_candidates)} 个候选物 (相似性>{similarity_threshold:.2f}, 无同位素)")
             return filtered_candidates
             
         except Exception as e:
@@ -99,12 +102,12 @@ class MMPEngine:
     def fragment_replacement(self, 
                            target_smiles: str,
                            max_candidates: int = 100,
-                           fragment_size_range: Tuple[int, int] = (3, 8)) -> List[Dict[str, Any]]:
+                           similarity_threshold: float = 0.4) -> List[Dict[str, Any]]:
         """
         使用mmpdb命令行工具进行片段替换
         """
-        # 片段替换和骨架跃迁使用相同的mmpdb功能
-        return self.scaffold_hopping(target_smiles, max_candidates, 0.4)
+        # 片段替换和骨架跃迁使用相同的mmpdb功能，但使用更保守的相似性阈值
+        return self.scaffold_hopping(target_smiles, max_candidates, similarity_threshold)
 
 
 def query_mmpdb_command_line(target_smiles: str, 
@@ -153,15 +156,19 @@ def query_mmpdb_command_line(target_smiles: str,
                         transformed_smiles = parts[1].strip()
                         
                         if transformed_smiles and transformed_smiles != target_smiles:
+                            # 过滤掉同位素标记的化合物
+                            if _contains_isotopes(transformed_smiles):
+                                continue
+                            
                             # 计算相似度
                             similarity = calculate_tanimoto_similarity(target_smiles, transformed_smiles)
                             
                             candidates.append({
                                 'smiles': transformed_smiles,
-                                'generation_method': 'mmpdb_command_line',
+                                'generation_method': 'mmpdb_transform',
                                 'parent_smiles': target_smiles,
                                 'transformation_description': f"mmpdb转换 (ID: {mmp_id})",
-                                'transformation_rule': f"mmp_id_{mmp_id}",
+                                'transformation_rule': f"mmp_rule_{mmp_id}",
                                 'similarity': similarity,
                                 'properties': calculate_basic_properties(transformed_smiles)
                             })
@@ -197,6 +204,14 @@ def calculate_tanimoto_similarity(smiles1: str, smiles2: str) -> float:
         pass
     
     return 0.0
+
+
+def _contains_isotopes(smiles: str) -> bool:
+    """检查SMILES字符串是否包含同位素标记"""
+    import re
+    # 检查是否包含同位素标记，如 [11CH3], [2H], [13C] 等
+    isotope_pattern = r'\[\d+[A-Z]'
+    return bool(re.search(isotope_pattern, smiles))
 
 
 def calculate_basic_properties(smiles: str) -> Dict[str, float]:

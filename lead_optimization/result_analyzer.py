@@ -61,10 +61,20 @@ class OptimizationResult:
         self.transformation_rule = data.get('transformation_rule', '')
         self.boltz_metrics = data.get('boltz_metrics', {})
         
-        # 从boltz_metrics中提取置信度等信息
-        self.confidence_score = self.boltz_metrics.get('confidence', 0.0)
-        self.iptm = self.boltz_metrics.get('iptm', 0.0)
-        self.ptm = self.boltz_metrics.get('ptm', 0.0)
+        # 从boltz_metrics中提取置信度等信息，同时检查顶层数据
+        self.confidence_score = self.boltz_metrics.get('confidence', data.get('confidence_score', 0.0))
+        self.iptm = self.boltz_metrics.get('iptm', data.get('iptm', 0.0))
+        self.ptm = self.boltz_metrics.get('ptm', data.get('ptm', 0.0))
+        self.plddt = self.boltz_metrics.get('plddt', data.get('plddt', 0.0))
+        
+        # 从顶层数据中提取关键评分指标
+        self.binding_affinity = data.get('binding_affinity', 0.0)
+        self.binding_probability = data.get('binding_probability', 0.0)
+        self.ic50_um = data.get('ic50_um', 0.0)
+        
+        # 从properties中提取分子属性
+        self.molecular_weight = self.properties.get('molecular_weight', data.get('molecular_weight', 0.0))
+        self.logp = self.properties.get('logp', data.get('logp', 0.0))
         
         # 提取结构文件路径
         result_files = self.boltz_metrics.get('result_files', {})
@@ -121,8 +131,13 @@ class OptimizationAnalyzer:
                 "confidence_score": result.confidence_score,
                 "iptm": result.iptm,
                 "ptm": result.ptm,
+                "plddt": getattr(result, 'plddt', 0.0),
                 "generation_method": result.generation_method,
-                "transformation_rule": result.transformation_rule
+                "transformation_rule": result.transformation_rule,
+                "binding_probability": getattr(result, 'binding_probability', 0.0),
+                "ic50_um": getattr(result, 'ic50_um', 0.0),
+                "molecular_weight": getattr(result, 'molecular_weight', 0.0),
+                "logp": getattr(result, 'logp', 0.0)
             }
             
             # 添加评分信息
@@ -179,11 +194,6 @@ class OptimizationAnalyzer:
     def save_results_to_csv(self):
         """保存结果为CSV格式，类似virtual_screening"""
         try:
-            # 保存完整结果
-            complete_results_path = os.path.join(self.output_dir, "optimization_results_complete.csv")
-            self.df.to_csv(complete_results_path, index=False, encoding='utf-8')
-            logger.info(f"完整结果已保存: {complete_results_path}")
-            
             # 保存Top结果
             top_n = min(10, len(self.df))
             top_results = self.df.head(top_n)
@@ -358,102 +368,110 @@ class OptimizationAnalyzer:
     def _generate_confidence_analysis_plot(self) -> Optional[Dict[str, str]]:
         """生成置信度分析图"""
         try:
-            # 检查是否有有效的置信度数据
+            # 检查是否有有效的置信度数据 - 使用plddt和iptm作为置信度指标
             has_confidence_data = ('confidence_score' in self.df.columns and 
                                  self.df['confidence_score'].sum() > 0 and 
                                  self.df['confidence_score'].var() > 0)
             
-            has_boltz_metrics = ('iptm' in self.df.columns and 'ptm' in self.df.columns and
-                               (self.df['iptm'].sum() > 0 or self.df['ptm'].sum() > 0))
+            has_plddt = ('plddt' in self.df.columns and 
+                        self.df['plddt'].sum() > 0 and 
+                        len(self.df['plddt'].dropna()) > 0)
             
-            if not has_confidence_data and not has_boltz_metrics:
+            has_iptm = ('iptm' in self.df.columns and 
+                       self.df['iptm'].sum() > 0 and 
+                       len(self.df['iptm'].dropna()) > 0)
+            
+            # 至少要有一种置信度数据
+            if not (has_confidence_data or has_plddt or has_iptm):
                 logger.warning("没有有效的置信度数据，跳过置信度分析图生成")
                 return None
+            
+            logger.info(f"置信度数据可用: plddt={has_plddt}, iptm={has_iptm}, confidence_score={has_confidence_data}")
             
             fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
             fig.suptitle('Structural Confidence Analysis', fontsize=16, fontweight='bold')
             
-            # 置信度分布
-            if has_confidence_data:
+            # 使用plddt作为主要置信度指标
+            if has_plddt:
+                confidence_scores = self.df['plddt'].values
+                confidence_label = 'pLDDT Score'
+            elif has_iptm:
+                confidence_scores = self.df['iptm'].values  
+                confidence_label = 'ipTM Score'
+            elif has_confidence_data:
                 confidence_scores = self.df['confidence_score'].values
-                ax1.hist(confidence_scores, bins=20, alpha=0.7, color='#9b59b6', edgecolor='black')
-                ax1.set_xlabel('Confidence Score')
-                ax1.set_ylabel('Frequency')
-                ax1.set_title('Confidence Score Distribution')
-                ax1.axvline(np.mean(confidence_scores), color='red', linestyle='--', 
-                           label=f'Mean: {np.mean(confidence_scores):.3f}')
-                ax1.legend()
-                ax1.grid(True, alpha=0.3)
-            else:
-                ax1.text(0.5, 0.5, 'No valid confidence\ndata available', 
-                        ha='center', va='center', transform=ax1.transAxes,
-                        fontsize=12, bbox=dict(boxstyle="round", facecolor='wheat'))
-                ax1.set_title('Confidence Score Distribution')
+                confidence_label = 'Confidence Score'
             
-            # iPTM vs PTM散点图
-            if has_boltz_metrics:
-                scatter = ax2.scatter(self.df['iptm'], self.df['ptm'], 
+            # 置信度分布
+            ax1.hist(confidence_scores, bins=20, alpha=0.7, color='#9b59b6', edgecolor='black')
+            ax1.set_xlabel(confidence_label)
+            ax1.set_ylabel('Frequency')
+            ax1.set_title(f'{confidence_label} Distribution')
+            ax1.axvline(np.mean(confidence_scores), color='red', linestyle='--', 
+                       label=f'Mean: {np.mean(confidence_scores):.3f}')
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+            
+            # iPTM vs binding affinity散点图 (如果有iptm数据)
+            if has_iptm and 'binding_affinity' in self.df.columns:
+                scatter = ax2.scatter(self.df['iptm'], self.df['binding_affinity'], 
                            c=self.df['combined_score'], cmap='viridis', 
                            alpha=0.7, s=60)
                 ax2.set_xlabel('iPTM Score')
-                ax2.set_ylabel('PTM Score')
-                ax2.set_title('iPTM vs PTM Correlation')
+                ax2.set_ylabel('Binding Affinity')
+                ax2.set_title('iPTM vs Binding Affinity')
                 cbar = plt.colorbar(scatter, ax=ax2)
                 cbar.set_label('Combined Score')
                 ax2.grid(True, alpha=0.3)
             else:
-                ax2.text(0.5, 0.5, 'No Boltz metrics\navailable', 
+                ax2.text(0.5, 0.5, 'No iPTM data\navailable', 
                         ha='center', va='center', transform=ax2.transAxes,
                         fontsize=12, bbox=dict(boxstyle="round", facecolor='wheat'))
-                ax2.set_title('iPTM vs PTM Correlation')
+                ax2.set_title('iPTM vs Binding Affinity')
             
             # 置信度vs综合评分
-            if has_confidence_data:
-                ax3.scatter(self.df['confidence_score'], self.df['combined_score'],
-                           alpha=0.6, color='#1abc9c', s=60)
-                ax3.set_xlabel('Confidence Score')
-                ax3.set_ylabel('Combined Score')
-                ax3.set_title('Confidence vs Combined Score')
-                
-                # 添加趋势线（只有当数据有变化时）
-                if len(self.df) > 1 and self.df['confidence_score'].var() > 1e-10:
-                    try:
-                        z = np.polyfit(self.df['confidence_score'], self.df['combined_score'], 1)
-                        p = np.poly1d(z)
-                        ax3.plot(self.df['confidence_score'], p(self.df['confidence_score']), 
-                                "r--", alpha=0.8, label='Trend')
-                        ax3.legend()
-                    except (np.linalg.LinAlgError, np.RankWarning):
-                        # SVD收敛失败时跳过趋势线
-                        logger.debug("趋势线计算失败，跳过")
-                        pass
-                ax3.grid(True, alpha=0.3)
-            else:
-                ax3.text(0.5, 0.5, 'No confidence data\nfor correlation analysis', 
-                        ha='center', va='center', transform=ax3.transAxes,
-                        fontsize=12, bbox=dict(boxstyle="round", facecolor='wheat'))
-                ax3.set_title('Confidence vs Combined Score')
+            ax3.scatter(confidence_scores, self.df['combined_score'],
+                       alpha=0.6, color='#1abc9c', s=60)
+            ax3.set_xlabel(confidence_label)
+            ax3.set_ylabel('Combined Score')
+            ax3.set_title(f'{confidence_label} vs Combined Score')
+            
+            # 添加趋势线（只有当数据有变化时）
+            if len(self.df) > 1 and np.var(confidence_scores) > 1e-10:
+                try:
+                    z = np.polyfit(confidence_scores, self.df['combined_score'], 1)
+                    p = np.poly1d(z)
+                    ax3.plot(confidence_scores, p(confidence_scores), 
+                            "r--", alpha=0.8, label='Trend')
+                    ax3.legend()
+                except (np.linalg.LinAlgError, np.RankWarning):
+                    # SVD收敛失败时跳过趋势线
+                    logger.debug("趋势线计算失败，跳过")
+                    pass
+            ax3.grid(True, alpha=0.3)
             
             # 置信度分级统计
-            if has_confidence_data:
-                confidence_bins = pd.cut(self.df['confidence_score'], 
-                                       bins=[0, 0.5, 0.7, 0.9, 1.0],
-                                       labels=['Low (<0.5)', 'Medium (0.5-0.7)', 
-                                              'High (0.7-0.9)', 'Very High (>0.9)'])
-                confidence_counts = confidence_bins.value_counts()
-                
-                colors = ['#e74c3c', '#f39c12', '#2ecc71', '#3498db']
-                wedges, texts, autotexts = ax4.pie(confidence_counts.values, 
-                                                  labels=confidence_counts.index,
-                                                  autopct='%1.1f%%',
-                                                  colors=colors,
-                                                  startangle=90)
-                ax4.set_title('Confidence Level Distribution')
-            else:
-                ax4.text(0.5, 0.5, 'No confidence data\nfor level analysis', 
-                        ha='center', va='center', transform=ax4.transAxes,
-                        fontsize=12, bbox=dict(boxstyle="round", facecolor='wheat'))
-                ax4.set_title('Confidence Level Distribution')
+            confidence_bins = pd.cut(confidence_scores, 
+                                   bins=4, 
+                                   labels=['Low', 'Medium-Low', 'Medium-High', 'High'])
+            bin_counts = confidence_bins.value_counts().sort_index()
+            
+            colors = ['#e74c3c', '#f39c12', '#f1c40f', '#27ae60']
+            bars = ax4.bar(range(len(bin_counts)), bin_counts.values, 
+                          color=colors, alpha=0.7, edgecolor='black')
+            ax4.set_xlabel(f'{confidence_label} Level')
+            ax4.set_ylabel('Count')
+            ax4.set_title(f'{confidence_label} Level Distribution')
+            ax4.set_xticks(range(len(bin_counts)))
+            ax4.set_xticklabels(bin_counts.index, rotation=45)
+            
+            # 添加数值标签
+            for i, bar in enumerate(bars):
+                height = bar.get_height()
+                ax4.text(bar.get_x() + bar.get_width()/2., height + 0.1,
+                        f'{int(height)}',
+                        ha='center', va='bottom')
+            ax4.grid(True, alpha=0.3)
             
             plt.tight_layout()
             
@@ -481,13 +499,21 @@ class OptimizationAnalyzer:
             # 分子量分布
             if 'molecular_weight' in self.df.columns:
                 mw_data = self.df['molecular_weight'].values
-                ax1.hist(mw_data, bins=20, alpha=0.7, color='#34495e', edgecolor='black')
-                ax1.set_xlabel('Molecular Weight (Da)')
-                ax1.set_ylabel('Frequency')
-                ax1.set_title('Molecular Weight Distribution')
-                ax1.axvline(500, color='red', linestyle='--', label='Lipinski Limit (500)')
-                ax1.legend()
-                ax1.grid(True, alpha=0.3)
+                mw_data = mw_data[mw_data > 0]  # 过滤零值
+                if len(mw_data) > 0:
+                    bins = min(10, max(3, len(mw_data)))  # 动态调整bin数量
+                    ax1.hist(mw_data, bins=bins, alpha=0.7, color='#34495e', edgecolor='black')
+                    ax1.set_xlabel('Molecular Weight (Da)')
+                    ax1.set_ylabel('Frequency')
+                    ax1.set_title('Molecular Weight Distribution')
+                    ax1.axvline(500, color='red', linestyle='--', label='Lipinski Limit (500)')
+                    ax1.legend()
+                    ax1.grid(True, alpha=0.3)
+                else:
+                    ax1.text(0.5, 0.5, 'No molecular weight\ndata available', 
+                            ha='center', va='center', transform=ax1.transAxes,
+                            fontsize=12, bbox=dict(boxstyle="round", facecolor='wheat'))
+                    ax1.set_title('Molecular Weight Distribution')
             
             # LogP vs 分子量
             if 'logp' in self.df.columns and 'molecular_weight' in self.df.columns:
@@ -541,13 +567,21 @@ class OptimizationAnalyzer:
             # TPSA分布
             if 'tpsa' in self.df.columns:
                 tpsa_data = self.df['tpsa'].values
-                ax4.hist(tpsa_data, bins=20, alpha=0.7, color='#16a085', edgecolor='black')
-                ax4.set_xlabel('TPSA (Ų)')
-                ax4.set_ylabel('Frequency')
-                ax4.set_title('Topological Polar Surface Area Distribution')
-                ax4.axvline(140, color='red', linestyle='--', label='Permeability Limit (140)')
-                ax4.legend()
-                ax4.grid(True, alpha=0.3)
+                tpsa_data = tpsa_data[tpsa_data > 0]  # 过滤零值
+                if len(tpsa_data) > 0:
+                    bins = min(10, max(3, len(tpsa_data)))  # 动态调整bin数量
+                    ax4.hist(tpsa_data, bins=bins, alpha=0.7, color='#16a085', edgecolor='black')
+                    ax4.set_xlabel('TPSA (Ų)')
+                    ax4.set_ylabel('Frequency')
+                    ax4.set_title('Topological Polar Surface Area Distribution')
+                    ax4.axvline(140, color='red', linestyle='--', label='Permeability Limit (140)')
+                    ax4.legend()
+                    ax4.grid(True, alpha=0.3)
+                else:
+                    ax4.text(0.5, 0.5, 'No TPSA data\navailable', 
+                            ha='center', va='center', transform=ax4.transAxes,
+                            fontsize=12, bbox=dict(boxstyle="round", facecolor='wheat'))
+                    ax4.set_title('Topological Polar Surface Area Distribution')
             
             plt.tight_layout()
             
@@ -817,6 +851,11 @@ class OptimizationAnalyzer:
             compounds_html = self._generate_compounds_html(report_data['top_candidates'])
             plots_html = self._generate_plots_html(report_data['plots'])
             
+            # 生成原始化合物结构图
+            original_structure_html = self._generate_molecule_structure(
+                self.original_compound, "original_compound"
+            )
+            
             html_content = html_template.format(
                 title=report_data['title'],
                 original_compound=report_data['original_compound'],
@@ -825,7 +864,8 @@ class OptimizationAnalyzer:
                 total_candidates=report_data['total_candidates'],
                 timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 compounds_html=compounds_html,
-                plots_html=plots_html
+                plots_html=plots_html,
+                original_structure_html=original_structure_html
             )
             
             # 保存HTML文件
@@ -863,8 +903,23 @@ class OptimizationAnalyzer:
                 {structure_html}
                 
                 <div class="properties">
-                    <p><strong>Generation Method:</strong> {compound.generation_method or 'N/A'}</p>
-                    <p><strong>Transformation Rule:</strong> {compound.transformation_rule or 'N/A'}</p>
+                    <div class="property-grid">
+                        <div class="property-item">
+                            <strong>IC50 (μM):</strong> {getattr(compound, 'ic50_um', 'N/A')}
+                        </div>
+                        <div class="property-item">
+                            <strong>Binding Probability:</strong> {getattr(compound, 'binding_probability', 'N/A')}
+                        </div>
+                        <div class="property-item">
+                            <strong>Molecular Weight:</strong> {getattr(compound, 'molecular_weight', 'N/A')}
+                        </div>
+                        <div class="property-item">
+                            <strong>LogP:</strong> {getattr(compound, 'logp', 'N/A')}
+                        </div>
+                        <div class="property-item">
+                            <strong>Transformation Rule:</strong> {getattr(compound, 'transformation_rule', 'N/A')}
+                        </div>
+                    </div>
                 </div>
             </div>
             '''
@@ -898,8 +953,8 @@ class OptimizationAnalyzer:
             if mol is None:
                 return '<p><em>Invalid SMILES for structure generation</em></p>'
             
-            # 生成分子图片
-            img = Draw.MolToImage(mol, size=(400, 300))
+            # 生成分子图片 - 调整为更合适的尺寸
+            img = Draw.MolToImage(mol, size=(300, 200))
             
             # 保存图片
             img_dir = os.path.join(self.output_dir, "structures")
@@ -907,7 +962,7 @@ class OptimizationAnalyzer:
             img_path = os.path.join(img_dir, f"{filename}.png")
             img.save(img_path)
             
-            return f'<img src="structures/{filename}.png" alt="Molecular Structure" style="max-width: 400px; margin: 10px 0;">'
+            return f'<img src="structures/{filename}.png" alt="Molecular Structure" class="molecule-image">'
             
         except Exception as e:
             logger.warning(f"生成分子结构图失败: {e}")
@@ -959,11 +1014,21 @@ class OptimizationAnalyzer:
             padding: 20px;
             border-radius: 8px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden; /* 防止内容溢出 */
         }}
         
         .summary-card h3 {{
             margin-top: 0;
             color: #667eea;
+        }}
+        
+        .summary-card img {{
+            max-width: 100%;
+            height: auto;
+            max-height: 200px;
+            display: block;
+            margin: 10px auto;
+            border-radius: 5px;
         }}
         
         .compounds-section {{
@@ -1026,6 +1091,20 @@ class OptimizationAnalyzer:
             margin: 10px 0;
         }}
         
+        .property-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            margin-top: 15px;
+        }}
+        
+        .property-item {{
+            padding: 8px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }}
+        
         .plots-section {{
             background: white;
             padding: 30px;
@@ -1067,6 +1146,7 @@ class OptimizationAnalyzer:
         <div class="summary-card">
             <h3>🎯 Original Compound</h3>
             <div class="smiles">{original_compound}</div>
+            {original_structure_html}
         </div>
         
         <div class="summary-card">
