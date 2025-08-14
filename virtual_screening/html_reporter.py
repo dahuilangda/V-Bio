@@ -48,9 +48,10 @@ logger = logging.getLogger(__name__)
 class HTMLReporter:
     """报告生成器"""
     
-    def __init__(self, screening_results: List["ScreeningResult"], output_dir: str):
+    def __init__(self, screening_results: List["ScreeningResult"], output_dir: str, target_sequence: str = ""):
         self.screening_results = screening_results
         self.output_dir = output_dir
+        self.target_sequence = target_sequence
         self.plots_dir = os.path.join(output_dir, "plots")
         os.makedirs(self.plots_dir, exist_ok=True)
         
@@ -61,6 +62,8 @@ class HTMLReporter:
         self._enhance_results_with_calculated_properties()
         
         logger.info(f"报告生成器已初始化，结果数量: {len(screening_results)}")
+        if target_sequence:
+            logger.info(f"Target序列长度: {len(target_sequence)}")
     
     def _setup_professional_style(self):
         """设置图表参数"""
@@ -652,9 +655,14 @@ class HTMLReporter:
             
             fig, ax = plt.subplots(figsize=(14, 10))
             
-            # 准备数据
-            names = [f"{r.molecule_name[:15]}..." if len(r.molecule_name) > 15 else r.molecule_name 
-                    for r in top_20]
+            # 准备数据，确保名称是字符串
+            names = []
+            for r in top_20:
+                mol_name = str(r.molecule_name) if r.molecule_name is not None else "Unknown"
+                if len(mol_name) > 15:
+                    mol_name = f"{mol_name[:15]}..."
+                names.append(mol_name)
+            
             scores = [r.combined_score for r in top_20]
             
             # 根据分数使用AlphaFold颜色
@@ -1284,8 +1292,18 @@ class HTMLReporter:
         
         return stats
     
-    def _generate_2d_structure(self, smiles: str, mol_name: str) -> str:
-        """生成2D分子结构SVG"""
+    def _generate_2d_structure(self, sequence: str, mol_name: str, mol_type: str = "small_molecule", 
+                              structure_path: str = "", target_sequence: str = "") -> str:
+        """根据分子类型生成2D结构展示"""
+        if mol_type == "peptide":
+            return self._generate_peptide_sequence_view(sequence, mol_name, structure_path, target_sequence)
+        elif mol_type == "small_molecule":
+            return self._generate_small_molecule_2d(sequence, mol_name)
+        else:
+            return f'<div class="no-structure">Structure display not supported for {mol_type}</div>'
+    
+    def _generate_small_molecule_2d(self, smiles: str, mol_name: str) -> str:
+        """生成小分子2D结构SVG"""
         if not RDKIT_AVAILABLE:
             return f'<div class="no-structure">RDKit not available for {mol_name}</div>'
         
@@ -1356,6 +1374,274 @@ class HTMLReporter:
                 <p style="font-size: 0.7em; color: #999;">Error: {str(e)[:50]}</p>
             </div>'''
     
+    def _generate_peptide_sequence_view(self, sequence: str, mol_name: str, structure_path: str = "", target_sequence: str = "") -> str:
+        """生成多肽序列的2D可视化展示，基于pLDDT值着色"""
+        try:
+            # 获取每个残基的pLDDT值，跳过target部分
+            target_length = len(target_sequence) if target_sequence else 0
+            plddt_values = self._extract_plddt_from_cif(structure_path, sequence, target_length)
+            
+            # 如果没有pLDDT数据，使用默认展示
+            if not plddt_values:
+                return self._generate_simple_peptide_view(sequence, mol_name)
+            
+            # 生成着色的多肽序列
+            return self._generate_colored_peptide_sequence(sequence, plddt_values, mol_name)
+            
+        except Exception as e:
+            logger.warning(f"生成多肽序列视图失败 {mol_name}: {e}")
+            return self._generate_simple_peptide_view(sequence, mol_name)
+    
+    def _extract_plddt_from_cif(self, structure_path: str, sequence: str, target_length: int = 0) -> List[float]:
+        """从CIF文件中提取peptide链(B链)的pLDDT值
+        
+        Args:
+            structure_path: CIF文件路径
+            sequence: peptide序列
+            target_length: target蛋白序列长度（用于跳过A链）
+        
+        Returns:
+            List[float]: peptide每个残基的pLDDT值
+        """
+        if not structure_path or not os.path.exists(structure_path):
+            logger.debug(f"CIF文件不存在: {structure_path}")
+            return []
+        
+        try:
+            with open(structure_path, 'r') as f:
+                lines = f.readlines()
+            
+            peptide_plddt = []
+            
+            # 查找残基信息部分（格式：残基编号 模型编号 链ID 链内残基编号 残基名 占有率 pLDDT）
+            for line in lines:
+                line = line.strip()
+                
+                # 跳过空行和注释
+                if not line or line.startswith('#'):
+                    continue
+                
+                # 解析残基数据行
+                parts = line.split()
+                if len(parts) >= 7:
+                    try:
+                        residue_num = int(parts[0])
+                        model_id = int(parts[1])  
+                        chain_id = parts[2]
+                        chain_residue_num = int(parts[3])
+                        residue_name = parts[4]
+                        occupancy = float(parts[5])
+                        plddt = float(parts[6])
+                        
+                        # 只提取B链（peptide链）的数据
+                        if chain_id == 'B':
+                            peptide_plddt.append((chain_residue_num, residue_name, plddt))
+                            logger.debug(f"B链残基 {chain_residue_num}: {residue_name} pLDDT={plddt}")
+                            
+                    except (ValueError, IndexError):
+                        # 不是残基数据行，跳过
+                        continue
+            
+            if not peptide_plddt:
+                logger.warning(f"未找到B链的pLDDT数据")
+                return []
+            
+            # 按链内残基编号排序
+            peptide_plddt.sort(key=lambda x: x[0])
+            
+            # 提取pLDDT值
+            plddt_values = [plddt for _, _, plddt in peptide_plddt]
+            
+            logger.info(f"从CIF文件成功提取 {len(plddt_values)} 个B链残基的pLDDT值")
+            logger.debug(f"pLDDT值范围: {min(plddt_values):.1f} - {max(plddt_values):.1f}")
+            
+            # 如果pLDDT值的数量与序列长度不匹配，进行调整
+            if len(plddt_values) != len(sequence):
+                logger.warning(f"pLDDT值数量({len(plddt_values)})与peptide序列长度({len(sequence)})不匹配")
+                if len(plddt_values) > len(sequence):
+                    # 截断多余的值
+                    plddt_values = plddt_values[:len(sequence)]
+                    logger.info(f"截断pLDDT值到序列长度: {len(plddt_values)}")
+                else:
+                    # 用平均值填充缺失的值
+                    avg_plddt = sum(plddt_values) / len(plddt_values) if plddt_values else 70.0
+                    while len(plddt_values) < len(sequence):
+                        plddt_values.append(avg_plddt)
+                    logger.info(f"用平均pLDDT值({avg_plddt:.1f})填充到序列长度: {len(plddt_values)}")
+            
+            return plddt_values
+            
+        except Exception as e:
+            logger.error(f"从CIF文件提取pLDDT值失败: {e}")
+            import traceback
+            logger.debug(f"详细错误信息: {traceback.format_exc()}")
+            return []
+    
+    def _generate_colored_peptide_sequence(self, sequence: str, plddt_values: List[float], mol_name: str) -> str:
+        """生成基于pLDDT值着色的多肽序列"""
+        try:
+            # 确保pLDDT值和序列长度匹配
+            if len(plddt_values) != len(sequence):
+                logger.warning(f"pLDDT值数量({len(plddt_values)})与序列长度({len(sequence)})不匹配")
+                return self._generate_simple_peptide_view(sequence, mol_name)
+            
+            sequence_html = '<div style="font-family: monospace; font-size: 14px; line-height: 1.5; padding: 15px; background: #f8f9fa; border-radius: 8px; border: 1px solid #ddd;">'
+            sequence_html += f'<div style="text-align: center; margin-bottom: 10px; font-weight: bold; color: #2c3e50;">{mol_name}</div>'
+            sequence_html += '<div style="text-align: center; margin-bottom: 15px;">'
+            
+            # 生成序列，每行显示10个残基
+            residues_per_line = 10
+            for i in range(0, len(sequence), residues_per_line):
+                sequence_html += '<div style="margin: 8px 0;">'
+                
+                # 添加位置标号
+                start_pos = i + 1
+                end_pos = min(i + residues_per_line, len(sequence))
+                sequence_html += f'<span style="color: #6c757d; font-size: 10px; margin-right: 10px;">{start_pos:3d}-{end_pos:3d}:</span>'
+                
+                # 添加着色的残基
+                for j in range(i, min(i + residues_per_line, len(sequence))):
+                    residue = sequence[j]
+                    plddt = plddt_values[j]
+                    
+                    # 根据pLDDT值确定AlphaFold颜色
+                    color = self._get_alphafold_color_for_plddt(plddt)
+                    
+                    # 创建残基元素，包含工具提示
+                    sequence_html += f'''
+                    <span style="
+                        background-color: {color};
+                        color: white;
+                        padding: 2px 4px;
+                        margin: 1px;
+                        border-radius: 3px;
+                        text-shadow: 1px 1px 1px rgba(0,0,0,0.5);
+                        font-weight: bold;
+                        cursor: help;
+                    " title="Residue {residue}{j+1}, pLDDT: {plddt:.1f}">{residue}</span>'''
+                
+                sequence_html += '</div>'
+            
+            sequence_html += '</div>'
+            
+            # 添加颜色图例
+            sequence_html += self._generate_alphafold_legend()
+            
+            # 添加序列信息
+            avg_plddt = sum(plddt_values) / len(plddt_values)
+            min_plddt = min(plddt_values)
+            max_plddt = max(plddt_values)
+            
+            sequence_html += f'''
+            <div style="margin-top: 15px; padding: 10px; background: rgba(0,0,0,0.05); border-radius: 5px; font-size: 12px;">
+                <div><strong>Sequence Length:</strong> {len(sequence)} residues</div>
+                <div><strong>Average pLDDT:</strong> {avg_plddt:.1f}</div>
+                <div><strong>pLDDT Range:</strong> {min_plddt:.1f} - {max_plddt:.1f}</div>
+            </div>
+            '''
+            
+            sequence_html += '</div>'
+            return sequence_html
+            
+        except Exception as e:
+            logger.error(f"生成着色多肽序列失败: {e}")
+            return self._generate_simple_peptide_view(sequence, mol_name)
+    
+    def _get_alphafold_color_for_plddt(self, plddt: float) -> str:
+        """根据pLDDT值返回AlphaFold标准颜色"""
+        # AlphaFold颜色方案：
+        # 90-100: 深蓝色 (#0053D6) - 非常高置信度
+        # 70-90:  浅蓝色 (#65CBF3) - 高置信度  
+        # 50-70:  黄色   (#FFDB13) - 中等置信度
+        # 30-50:  橙色   (#FF7D45) - 低置信度
+        # 0-30:   红色   (#FF0000) - 非常低置信度
+        
+        if plddt >= 90:
+            return '#0053D6'      # 深蓝色 - 非常高置信度
+        elif plddt >= 70:
+            return '#65CBF3'      # 浅蓝色 - 高置信度
+        elif plddt >= 50:
+            return '#FFDB13'      # 黄色 - 中等置信度
+        elif plddt >= 30:
+            return '#FF7D45'      # 橙色 - 低置信度
+        else:
+            return '#FF0000'      # 红色 - 非常低置信度
+    
+    def _generate_alphafold_legend(self) -> str:
+        """生成AlphaFold颜色图例"""
+        return f'''
+        <div style="margin-top: 10px; text-align: center;">
+            <div style="font-size: 11px; color: #6c757d; margin-bottom: 5px;"><strong>pLDDT Confidence Scale (AlphaFold)</strong></div>
+            <div style="display: inline-flex; align-items: center; gap: 15px; flex-wrap: wrap; justify-content: center;">
+                <span style="display: flex; align-items: center;">
+                    <div style="width: 15px; height: 15px; background: #0053D6; margin-right: 5px; border-radius: 2px;"></div>
+                    <span style="font-size: 10px;">90-100</span>
+                </span>
+                <span style="display: flex; align-items: center;">
+                    <div style="width: 15px; height: 15px; background: #65CBF3; margin-right: 5px; border-radius: 2px;"></div>
+                    <span style="font-size: 10px;">70-90</span>
+                </span>
+                <span style="display: flex; align-items: center;">
+                    <div style="width: 15px; height: 15px; background: #FFDB13; margin-right: 5px; border-radius: 2px;"></div>
+                    <span style="font-size: 10px;">50-70</span>
+                </span>
+                <span style="display: flex; align-items: center;">
+                    <div style="width: 15px; height: 15px; background: #FF7D45; margin-right: 5px; border-radius: 2px;"></div>
+                    <span style="font-size: 10px;">30-50</span>
+                </span>
+                <span style="display: flex; align-items: center;">
+                    <div style="width: 15px; height: 15px; background: #FF0000; margin-right: 5px; border-radius: 2px;"></div>
+                    <span style="font-size: 10px;">0-30</span>
+                </span>
+            </div>
+        </div>
+        '''
+    
+    def _generate_simple_peptide_view(self, sequence: str, mol_name: str) -> str:
+        """生成简单的多肽序列视图（当无pLDDT数据时使用）"""
+        sequence_html = '<div style="font-family: monospace; font-size: 14px; line-height: 1.5; padding: 15px; background: #f8f9fa; border-radius: 8px; border: 1px solid #ddd;">'
+        sequence_html += f'<div style="text-align: center; margin-bottom: 10px; font-weight: bold; color: #2c3e50;">{mol_name}</div>'
+        sequence_html += '<div style="text-align: center; margin-bottom: 15px;">'
+        
+        # 生成序列，每行显示10个残基
+        residues_per_line = 10
+        for i in range(0, len(sequence), residues_per_line):
+            sequence_html += '<div style="margin: 8px 0;">'
+            
+            # 添加位置标号
+            start_pos = i + 1
+            end_pos = min(i + residues_per_line, len(sequence))
+            sequence_html += f'<span style="color: #6c757d; font-size: 10px; margin-right: 10px;">{start_pos:3d}-{end_pos:3d}:</span>'
+            
+            # 添加残基（使用统一的灰色）
+            for j in range(i, min(i + residues_per_line, len(sequence))):
+                residue = sequence[j]
+                sequence_html += f'''
+                <span style="
+                    background-color: #6c757d;
+                    color: white;
+                    padding: 2px 4px;
+                    margin: 1px;
+                    border-radius: 3px;
+                    text-shadow: 1px 1px 1px rgba(0,0,0,0.5);
+                    font-weight: bold;
+                " title="Residue {residue}{j+1}">{residue}</span>'''
+            
+            sequence_html += '</div>'
+        
+        sequence_html += '</div>'
+        
+        # 添加序列信息
+        sequence_html += f'''
+        <div style="margin-top: 15px; padding: 10px; background: rgba(0,0,0,0.05); border-radius: 5px; font-size: 12px; text-align: center;">
+            <div><strong>Sequence Length:</strong> {len(sequence)} residues</div>
+            <div style="color: #6c757d; font-style: italic; margin-top: 5px;">No pLDDT data available - uniform coloring applied</div>
+        </div>
+        '''
+        
+        sequence_html += '</div>'
+        return sequence_html
+    
     def _generate_html_template(self, stats: Dict[str, Any], 
                                            top_molecules: List[Dict], 
                                            plots: List[str]) -> str:
@@ -1374,10 +1660,26 @@ class HTMLReporter:
         for i, result in enumerate(top_molecules):
             # 生成2D结构
             structure_svg = ""
+            # 构造正确的CIF文件路径
+            task_dir = getattr(result, 'structure_path', '')
+            cif_path = ""
+            if task_dir and os.path.isdir(task_dir):
+                cif_path = os.path.join(task_dir, 'data_model_0.cif')
+                if not os.path.exists(cif_path):
+                    cif_path = ""
+            elif task_dir and task_dir.endswith('.cif') and os.path.exists(task_dir):
+                cif_path = task_dir
+            
             if result.mol_type == "small_molecule":
-                structure_svg = self._generate_2d_structure(result.sequence, result.molecule_name)
+                structure_svg = self._generate_2d_structure(result.sequence, result.molecule_name, 
+                                                           result.mol_type, cif_path,
+                                                           self.target_sequence)
+            elif result.mol_type == "peptide":
+                structure_svg = self._generate_2d_structure(result.sequence, result.molecule_name, 
+                                                           result.mol_type, cif_path,
+                                                           self.target_sequence)
             else:
-                structure_svg = '<div class="no-structure">3D structure preview not available for peptides</div>'
+                structure_svg = '<div class="no-structure">Structure display not supported for this molecule type</div>'
             
             # 亲和力和科学指标信息
             scientific_info = ""

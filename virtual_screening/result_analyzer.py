@@ -1318,7 +1318,8 @@ h1 {{ color: #2c3e50; text-align: center; }}
         
         for idx, row in top_hits.iterrows():
             # 尝试生成2D结构图像
-            structure_img = self._generate_2d_structure(row['sequence'], row['mol_type'])
+            structure_img = self._generate_2d_structure(row['sequence'], row['mol_type'], 
+                                                       row.get('structure_path', ''))
             
             # 获取亲和力信息
             affinity_info = ""
@@ -1357,15 +1358,24 @@ h1 {{ color: #2c3e50; text-align: center; }}
         structures_html += '</div>'
         return structures_html
     
-    def _generate_2d_structure(self, sequence: str, mol_type: str) -> str:
-        """生成2D分子结构图像"""
-        if not RDKIT_AVAILABLE or mol_type != "small_molecule":
+    def _generate_2d_structure(self, sequence: str, mol_type: str, structure_path: str = "") -> str:
+        """根据分子类型生成结构展示"""
+        if mol_type == "peptide":
+            return self._generate_peptide_sequence_view(sequence, structure_path)
+        elif mol_type == "small_molecule":
+            return self._generate_small_molecule_2d(sequence)
+        else:
             return f'<div style="padding: 20px; background: #f0f0f0; border-radius: 5px; text-align: center;">Structure: {sequence[:50]}...</div>'
+    
+    def _generate_small_molecule_2d(self, smiles: str) -> str:
+        """生成小分子2D结构图像"""
+        if not RDKIT_AVAILABLE:
+            return f'<div style="padding: 20px; background: #f0f0f0; border-radius: 5px; text-align: center;">RDKit not available</div>'
         
         try:
-            mol = Chem.MolFromSmiles(sequence)
+            mol = Chem.MolFromSmiles(smiles)
             if mol is None:
-                return f'<div style="padding: 20px; background: #f0f0f0; border-radius: 5px; text-align: center;">Invalid SMILES: {sequence[:50]}...</div>'
+                return f'<div style="padding: 20px; background: #f0f0f0; border-radius: 5px; text-align: center;">Invalid SMILES: {smiles[:50]}...</div>'
             
             # 生成2D图像
             drawer = rdMolDraw2D.MolDraw2DSVG(300, 300)
@@ -1385,7 +1395,55 @@ h1 {{ color: #2c3e50; text-align: center; }}
         
         except Exception as e:
             logger.warning(f"生成2D结构失败: {e}")
-            return f'<div style="padding: 20px; background: #f0f0f0; border-radius: 5px; text-align: center;">Structure: {sequence[:50]}...</div>'
+            return f'<div style="padding: 20px; background: #f0f0f0; border-radius: 5px; text-align: center;">Structure: {smiles[:50]}...</div>'
+    
+    def _generate_peptide_sequence_view(self, sequence: str, structure_path: str = "") -> str:
+        """生成多肽序列视图"""
+        try:
+            # 简化版多肽序列显示（可以根据需要扩展为从CIF读取pLDDT）
+            sequence_html = '<div style="font-family: monospace; font-size: 12px; line-height: 1.4; padding: 10px; background: #f8f9fa; border-radius: 5px; border: 1px solid #ddd; max-width: 100%; overflow-wrap: break-word;">'
+            sequence_html += f'<div style="text-align: center; margin-bottom: 8px; font-weight: bold; color: #2c3e50;">Peptide Sequence</div>'
+            
+            # 生成序列，每行显示15个残基
+            residues_per_line = 15
+            for i in range(0, len(sequence), residues_per_line):
+                sequence_html += '<div style="margin: 4px 0; text-align: center;">'
+                
+                # 添加位置标号
+                start_pos = i + 1
+                end_pos = min(i + residues_per_line, len(sequence))
+                sequence_html += f'<span style="color: #6c757d; font-size: 9px; margin-right: 8px;">{start_pos:2d}-{end_pos:2d}:</span>'
+                
+                # 添加残基
+                for j in range(i, min(i + residues_per_line, len(sequence))):
+                    residue = sequence[j]
+                    # 使用统一的蓝灰色
+                    sequence_html += f'''
+                    <span style="
+                        background-color: #6c757d;
+                        color: white;
+                        padding: 1px 3px;
+                        margin: 1px;
+                        border-radius: 2px;
+                        font-weight: bold;
+                        font-size: 10px;
+                    " title="Residue {residue}{j+1}">{residue}</span>'''
+                
+                sequence_html += '</div>'
+            
+            # 添加序列信息
+            sequence_html += f'''
+            <div style="margin-top: 8px; padding: 5px; background: rgba(0,0,0,0.05); border-radius: 3px; font-size: 10px; text-align: center;">
+                <strong>Length:</strong> {len(sequence)} residues
+            </div>
+            '''
+            
+            sequence_html += '</div>'
+            return sequence_html
+            
+        except Exception as e:
+            logger.warning(f"生成多肽序列视图失败: {e}")
+            return f'<div style="padding: 20px; background: #f0f0f0; border-radius: 5px; text-align: center;">Peptide: {sequence[:50]}...</div>'
     
     def _generate_affinity_section(self) -> str:
         """生成亲和力分析部分"""

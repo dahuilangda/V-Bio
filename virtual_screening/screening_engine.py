@@ -1464,10 +1464,14 @@ class SimpleScreeningEngine:
         try:
             logger.info("开始生成HTML报告...")
             
+            # 获取target序列
+            target_sequence = self._extract_target_protein_sequence() or ""
+            
             # 创建HTML报告生成器
             reporter = HTMLReporter(
                 screening_results=self.screening_results,
-                output_dir=self.config.output_dir
+                output_dir=self.config.output_dir,
+                target_sequence=target_sequence
             )
             
             # 在生成报告前，让HTMLReporter加载真实的task数据并更新results
