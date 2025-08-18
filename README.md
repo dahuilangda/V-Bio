@@ -16,7 +16,6 @@
   - [自动化监控特性](#自动化监控特性)
 - [故障排除 (Troubleshooting)](#故障排除-troubleshooting)
 
-
 ## 核心特性 (Features)
 
   * **🚀 智能任务调度**
@@ -50,6 +49,9 @@
   * **📦 完整结果归档**
 
       * 预测结果自动打包为zip文件，包含结构预测文件和对应的MSA缓存文件，提供完整的分析数据包。
+
+## 视频演示 (Video Demo)
+[https://www.bilibili.com/video/BV1tcYWz1E7f/](https://www.bilibili.com/video/BV1tcYWz1E7f/)
 
 ## 安装部署 (Installation)
 
