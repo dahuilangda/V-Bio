@@ -29,10 +29,15 @@ def main():
     logger = logging.getLogger(__name__)
 
     parser = argparse.ArgumentParser(
-        description="使用 Boltz-WebUI API 运行并行的蛋白质或糖肽设计任务。",
+        description="使用 Boltz-WebUI API 运行并行的蛋白质、糖肽或双环肽设计任务。",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
+    # --- 设计模式选择 ---
+    design_mode_group = parser.add_argument_group('设计模式')
+    design_mode_group.add_argument("--design_type", type=str, default="linear", choices=["linear", "glycopeptide", "bicyclic"],
+                                 help="选择设计类型：'linear'（线性多肽），'glycopeptide'（糖肽），或 'bicyclic'（双环肽）。")
+
     # --- 输入与目标定义 ---
     input_group = parser.add_argument_group('输入与目标定义')
     input_group.add_argument("--yaml_template", required=True, help="定义受体/骨架的模板YAML文件路径。")
@@ -51,26 +56,24 @@ def main():
     
     # --- 增强功能选项 ---
     enhanced_group = parser.add_argument_group('增强功能选项')
-    enhanced_group.add_argument("--enable-enhanced", action="store_true", default=True, 
-                               help="启用增强版功能：自适应突变、Pareto优化、收敛检测等。")
-    enhanced_group.add_argument("--disable-enhanced", action="store_true", 
-                               help="禁用增强版功能，使用传统算法。")
-    enhanced_group.add_argument("--convergence-window", type=int, default=5, 
-                               help="收敛检测的滑动窗口大小。")
-    enhanced_group.add_argument("--convergence-threshold", type=float, default=0.001, 
-                               help="收敛检测的分数方差阈值。")
-    enhanced_group.add_argument("--max-stagnation", type=int, default=3, 
-                               help="触发早停的最大停滞周期数。")
-    enhanced_group.add_argument("--initial-temperature", type=float, default=1.0, 
-                               help="自适应突变的初始温度。")
-    enhanced_group.add_argument("--min-temperature", type=float, default=0.1, 
-                               help="自适应突变的最小温度。")
+    enhanced_group.add_argument("--enable-enhanced", action="store_true", default=True, help="启用增强版功能：自适应突变、Pareto优化、收敛检测等。")
+    enhanced_group.add_argument("--disable-enhanced", action="store_true", help="禁用增强版功能，使用传统算法。")
+    enhanced_group.add_argument("--convergence-window", type=int, default=5, help="收敛检测的滑动窗口大小。")
+    enhanced_group.add_argument("--convergence-threshold", type=float, default=0.001, help="收敛检测的分数方差阈值。")
+    enhanced_group.add_argument("--max-stagnation", type=int, default=3, help="触发早停的最大停滞周期数。")
+    enhanced_group.add_argument("--initial-temperature", type=float, default=1.0, help="自适应突变的初始温度。")
+    enhanced_group.add_argument("--min-temperature", type=float, default=0.1, help="自适应突变的最小温度。")
 
     # --- 糖肽设计 (可选) ---
-    glyco_group = parser.add_argument_group('糖肽设计 (可选)')
-    glyco_group.add_argument("--glycan_modification", type=str, default=None, help="通过提供糖肽修饰的CCD代码 (例如 'MANS') 来激活糖肽设计模式。")
+    glyco_group = parser.add_argument_group('糖肽设计')
+    glyco_group.add_argument("--glycan_modification", type=str, default=None, help="通过提供糖肽修饰的CCD代码 (例如 'MANS') 来激活糖肽设计模式。仅在 --design_type=glycopeptide 时使用。")
     glyco_group.add_argument("--glycan_chain", type=str, default='C', help="在生成的YAML文件中分配给糖基配体的链ID。")
     glyco_group.add_argument("--modification_site", type=int, default=None, help="肽链序列上用于应用糖肽修饰的位置 (1-based索引)。")
+
+    # --- 双环肽设计 (可选) ---
+    bicyclic_group = parser.add_argument_group('双环肽设计')
+    bicyclic_group.add_argument("--linker_ccd", type=str, default="SEZ", help="用于形成双环的连接体配体的CCD代码。仅在 --design_type=bicyclic 时使用。")
+    bicyclic_group.add_argument("--cys_positions", type=int, nargs=2, default=None, help="除末端外，另外两个半胱氨酸的初始位置(1-based索引)，例如 --cys_positions 4 10。如果未提供，将随机选择。仅在 --design_type=bicyclic 时使用。")
 
     # --- 输出与日志 ---
     output_group = parser.add_argument_group('输出与日志')
@@ -81,8 +84,7 @@ def main():
     api_group = parser.add_argument_group('API 连接')
     api_group.add_argument("--server_url", default="http://127.0.0.1:5000", help="Boltz-WebUI 预测 API 服务器的URL。")
     api_group.add_argument("--api_token", help="您的API密钥。也可以通过 'API_SECRET_TOKEN' 环境变量设置。")
-    api_group.add_argument("--no_msa_server", action="store_true", default=False, 
-                          help="禁用MSA服务器。默认情况下，当序列找不到MSA缓存时，会使用MSA服务器自动生成MSA以提高预测精度。")
+    api_group.add_argument("--no_msa_server", action="store_true", default=False, help="禁用MSA服务器。默认情况下，当序列找不到MSA缓存时，会使用MSA服务器自动生成MSA以提高预测精度。")
 
     args = parser.parse_args()
 
@@ -91,19 +93,30 @@ def main():
 
     # --- 验证参数 ---
     logger.info("Validating command-line arguments...")
-    if args.glycan_modification and args.modification_site is None:
-        parser.error("当指定 --glycan_modification 时，必须同时提供 --modification_site。")
-    
-    if args.modification_site is not None:
+    # 糖肽设计验证
+    if args.design_type == "glycopeptide":
+        if not args.glycan_modification or not args.modification_site:
+            parser.error("对于糖肽设计，--glycan_modification 和 --modification_site 都是必需的。")
         if not (1 <= args.modification_site <= args.binder_length):
             parser.error(f"--modification_site 必须是介于 1 和肽链长度 {args.binder_length} 之间的有效位置。")
+    
+    # 双环肽设计验证
+    elif args.design_type == "bicyclic":
+        if not args.linker_ccd:
+            parser.error("对于双环肽设计，--linker_ccd 是必需的。")
+        if args.cys_positions:
+            if len(set(args.cys_positions)) != 2:
+                parser.error("--cys_positions 必须提供两个不同的位置。")
+            if any(p < 1 or p >= args.binder_length for p in args.cys_positions):
+                parser.error(f"--cys_positions 的位置必须在 1 和 {args.binder_length - 1} 之间。")
+            if args.binder_length in args.cys_positions:
+                parser.error(f"末端位置 ({args.binder_length}) 由系统自动设为半胱氨酸，请不要在 --cys_positions 中指定。")
     
     if args.initial_binder_sequence and len(args.initial_binder_sequence) != args.binder_length:
         parser.error(f"--initial_binder_sequence 的长度 ({len(args.initial_binder_sequence)}) 必须与 --binder_length ({args.binder_length}) 匹配。")
 
     if not np.isclose(args.weight_iptm + args.weight_plddt, 1.0):
-        logger.warning(f"Weights for ipTM ({args.weight_iptm}) and pLDDT ({args.weight_plddt}) do not sum to 1.0. "
-                       "This is recommended but not strictly required.")
+        logger.warning(f"Weights for ipTM ({args.weight_iptm}) and pLDDT ({args.weight_plddt}) do not sum to 1.0. This is recommended but not strictly required.")
 
     api_token = args.api_token or os.environ.get('API_SECRET_TOKEN')
     if not api_token:
@@ -124,10 +137,10 @@ def main():
         else:
             logger.info("MSA server disabled: will use empty MSA for sequences without cache")
         
-        # 根据是否有糖肽修饰选择合适的模型
-        model_name = "boltz1" if args.glycan_modification else None
+        # 根据是否有糖肽或双环肽修饰选择合适的模型
+        model_name = "boltz1" if args.design_type in ["glycopeptide"] else None
         if model_name:
-            logger.info(f"Glycopeptide design detected - using model: {model_name}")
+            logger.info(f"{args.design_type.capitalize()} design detected - using model: {model_name}")
         
         designer = Designer(base_yaml_path=args.yaml_template, client=client, use_msa_server=use_msa_server, model_name=model_name)
         
@@ -149,22 +162,35 @@ def main():
                 logger.info("Enhanced features disabled - using traditional algorithms")
 
         # 3. 开始设计任务
-        designer.run(
-            iterations=args.iterations,
-            population_size=args.population_size,
-            num_elites=args.num_elites,
-            binder_chain_id=args.binder_chain,
-            binder_length=args.binder_length,
-            initial_binder_sequence=args.initial_binder_sequence,
-            mutation_rate=args.mutation_rate,
-            glycan_modification=args.glycan_modification,
-            glycan_chain_id=args.glycan_chain,
-            modification_site=args.modification_site - 1 if args.modification_site is not None else None,
-            output_csv_path=args.output_csv,
-            keep_temp_files=args.keep_temp_files,
-            weight_iptm=args.weight_iptm,
-            weight_plddt=args.weight_plddt
-        )
+        design_kwargs = {
+            'iterations': args.iterations,
+            'population_size': args.population_size,
+            'num_elites': args.num_elites,
+            'binder_chain_id': args.binder_chain,
+            'binder_length': args.binder_length,
+            'initial_binder_sequence': args.initial_binder_sequence,
+            'mutation_rate': args.mutation_rate,
+            'output_csv_path': args.output_csv,
+            'keep_temp_files': args.keep_temp_files,
+            'weight_iptm': args.weight_iptm,
+            'weight_plddt': args.weight_plddt,
+            'design_type': args.design_type,
+        }
+
+        if args.design_type == "glycopeptide":
+            design_kwargs.update({
+                'glycan_modification': args.glycan_modification,
+                'glycan_chain_id': args.glycan_chain,
+                'modification_site': args.modification_site - 1 if args.modification_site is not None else None,
+            })
+        elif args.design_type == "bicyclic":
+            design_kwargs.update({
+                'linker_ccd': args.linker_ccd,
+                'cys_positions': [p - 1 for p in args.cys_positions] if args.cys_positions else None,
+            })
+
+        designer.run(**design_kwargs)
+
     except (ValueError, KeyError) as e:
         logger.critical(f"A critical configuration or value error occurred: {e}", exc_info=True)
     except Exception as e:

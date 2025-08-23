@@ -1,16 +1,18 @@
-# 🧬 De Novo 多肽/糖肽设计器
+# 🧬 De Novo 多肽/糖肽/双环肽设计器
 
-一款用于多肽与糖肽从头设计 (`de novo design`) 的命令行工具，专为科研人员设计。该工具通过调用本地部署的 `Boltz-WebUI` 预测服务作为计算后端，在序列空间中进行探索，以发现具有高结合潜力的新分子。
+一款用于多肽、糖肽及双环肽从头设计 (`de novo design`) 的命令行工具，专为科研人员设计。该工具通过调用本地部署的 `Boltz-WebUI` 预测服务作为计算后端，在序列空间中进行探索，以发现具有高结合潜力的新分子。
 
 ## 🚀 快速开始
 
 ### 🔨 基础肽设计
+
 ```bash
 # 设置API密钥
 export API_SECRET_TOKEN='your-token'
 
 # 运行基础肽设计
 python run_design.py \
+    --design_type "linear" \
     --yaml_template template.yaml \
     --binder_chain "B" \
     --binder_length 20 \
@@ -18,12 +20,14 @@ python run_design.py \
 ```
 
 ### 🍬 糖肽设计（使用boltz1模型）
+
 ```bash
 # 初始化糖肽CCD缓存（首次使用）
-python glycopeptide_generator.py --generate-all
+python designer/glycopeptide_generator.py --generate-all
 
 # 运行糖肽设计
 python run_design.py \
+    --design_type "glycopeptide" \
     --yaml_template template.yaml \
     --binder_chain "B" \
     --binder_length 15 \
@@ -32,31 +36,52 @@ python run_design.py \
     --iterations 25
 ```
 
+### 🚲 双环肽设计
+
+```bash
+# 运行双环肽设计
+python run_design.py \
+    --design_type "bicyclic" \
+    --yaml_template template.yaml \
+    --binder_chain "B" \
+    --binder_length 25 \
+    --cys_positions 4 15 \
+    --linker_ccd "SEZ" \
+    --iterations 10
+```
+
 ## ✨ 核心特性
 
 ### 🔬 基础功能
-- **生物学约束**: 设计糖肽时，工具会自动验证并确保糖基连接到化学上兼容的氨基酸残基上（例如，N-连锁聚糖连接到天冬酰胺'N'）。
-- **pLDDT指导的突变**: 演化过程优先在结构预测置信度较低 (pLDDT分数低) 的区域引入突变，以高效探索构象空间。
-- **并行评估**: 在每个演化代数中，通过多线程并行提交和评估多个候选序列，显著加快设计周期。
+
+  - **生物学约束**: 设计糖肽时，工具会自动验证并确保糖基连接到化学上兼容的氨基酸残基上（例如，N-连锁聚糖连接到天冬酰胺'N'）。
+  - **pLDDT指导的突变**: 演化过程优先在结构预测置信度较低 (pLDDT分数低) 的区域引入突变，以高效探索构象空间。
+  - **并行评估**: 在每个演化代数中，通过多线程并行提交和评估多个候选序列，显著加快设计周期。
 
 ### 🚀 增强版功能
-- **自适应突变策略**: 5种智能突变策略自动选择和学习
-  - 保守突变：基于BLOSUM62矩阵的高分替换
-  - 激进突变：大范围序列空间探索  
-  - Motif导引：基于有益模式的定向突变
-  - 能量导引：基于能量景观的温度控制
-  - 多样性驱动：防止群体过度收敛
-- **Pareto多目标优化**: 同时优化ipTM和pLDDT，避免单一目标偏向
-- **智能收敛检测**: 自动早停机制，防止过度训练和资源浪费
-- **序列模式学习**: 位置特异性偏好学习和motif自动发现
-- **群体多样性维护**: 实时监测和调整探索策略
+
+  - **自适应突变策略**: 5种智能突变策略自动选择和学习
+      - 保守突变：基于BLOSUM62矩阵的高分替换
+      - 激进突变：大范围序列空间探索
+      - Motif导引：基于有益模式的定向突变
+      - 能量导引：基于能量景观的温度控制
+      - 多样性驱动：防止群体过度收敛
+  - **Pareto多目标优化**: 同时优化ipTM和pLDDT，避免单一目标偏向
+  - **智能收敛检测**: 自动早停机制，防止过度训练和资源浪费
+  - **序列模式学习**: 位置特异性偏好学习和motif自动发现
+  - **群体多样性维护**: 实时监测和调整探索策略
 
 ### 🍬 糖肽设计功能
-- **自动模型选择**: 检测到糖肽修饰时自动使用 `boltz1` 模型，无需手动指定
-- **智能CCD缓存管理**: 基于Benjamin Fry方法学的共价残基修饰系统
-- **24种糖肽组合**: 支持6种糖基×4种氨基酸的完整修饰组合
-- **化学正确性验证**: 确保糖苷键形成遵循正确的脱水缩合机制
 
+  - **自动模型选择**: 检测到糖肽修饰时自动使用 `boltz1` 模型，无需手动指定。
+  - **化学正确性验证**: 确保糖苷键形成遵循正确的化学原理。
+
+### 🚲 双环肽设计功能
+
+  - **自动环化约束**: 自动在YAML中生成连接体（ligand）和键约束（constraints），将肽链中的三个半胱氨酸（Cys）与指定连接体共价连接。
+  - **位置可变的半胱氨酸**: 保证一个Cys残基固定在肽链末端，另外两个的位置可在设计过程中动态优化，探索最佳环化构象。
+  - **可扩展的连接体库**: 支持多种连接体（当前实现`SEZ`），并为未来添加新连接体提供了接口。
+  - **专用模型支持**: 与糖肽设计类似，自动调用`boltz1`模型以准确预测非标准拓扑结构。
 
 ## 🔧 环境准备
 
@@ -108,6 +133,23 @@ sequences:
 # 脚本将根据命令行参数自动添加肽链、聚糖以及它们之间的共价键。
 ```
 
+#### **示例 3: 双环肽设计**
+
+模板与糖肽设计类似，仅包含受体蛋白。
+
+**`template_bicyclic.yaml`:**
+
+```yaml
+version: 1
+sequences:
+- protein:
+    id: A
+    # 靶点受体蛋白的完整序列
+    sequence: MTEYKLVVVGAGGVGKSALTVQFVQGIFVEYDPTHFESTEKT....
+    msa: empty
+# 脚本将自动添加包含3个半胱氨酸的肽链、连接体配体以及它们之间的成键约束。
+```
+
 ### 步骤 2: 设置API令牌
 
 建议将API密钥设置为环境变量。
@@ -130,6 +172,7 @@ set API_SECRET_TOKEN="your-super-secret-and-long-token"
 
 ```bash
 python run_design.py \
+    --design_type "linear" \
     --yaml_template /path/to/your/template_protein.yaml \
     --binder_chain "B" \
     --binder_length 100 \
@@ -147,6 +190,7 @@ python run_design.py \
 
 ```bash
 python run_design.py \
+    --design_type "linear" \
     --yaml_template /path/to/your/template_protein.yaml \
     --binder_chain "B" \
     --binder_length 12 \
@@ -167,6 +211,7 @@ python run_design.py \
 
 ```bash
 python run_design.py \
+    --design_type "linear" \
     --yaml_template /path/to/your/template_protein.yaml \
     --binder_chain "B" \
     --binder_length 15 \
@@ -182,10 +227,11 @@ python run_design.py \
 
 #### **命令示例 4: 糖肽设计（增强版）**
 
-此示例设计一个长度为15个残基的肽，并在其第3个位置连接一个甘露糖（'MAN'）：
+此示例设计一个长度为15个残基的肽，并在其第3个位置连接一个甘露糖（通过`MANS`修饰）：
 
 ```bash
 python run_design.py \
+    --design_type "glycopeptide" \
     --yaml_template /path/to/your/template_glycopeptide.yaml \
     --binder_chain "B" \
     --binder_length 15 \
@@ -203,14 +249,34 @@ python run_design.py \
     --keep_temp_files
 ```
 
-> **🍬 自动模型选择**: 当检测到 `--glycan_modification` 参数时，系统会自动使用 `boltz1` 模型进行预测，无需手动指定 `--model` 参数。这确保了糖肽等非天然氨基酸能够得到正确的结构预测。
+#### **命令示例 5: 双环肽设计**
 
-#### **命令示例 5: 传统模式（兼容性）**
+此示例设计一个长度为25的肽链，其第4位、第15位和末位（第25位）为半胱氨酸，并通过`SEZ`连接体形成双环结构。
+
+```bash
+python run_design.py \
+    --design_type "bicyclic" \
+    --yaml_template /path/to/your/template_bicyclic.yaml \
+    --binder_chain "B" \
+    --binder_length 25 \
+    --iterations 40 \
+    --population_size 16 \
+    --num_elites 4 \
+    --linker_ccd "SEZ" \
+    --cys_positions 4 15 \
+    --output_csv "bicyclic_peptide_design.csv" \
+    --keep_temp_files
+```
+
+> **🤖 自动模型选择**: 当使用 `--design_type "glycopeptide"` 或 `--design_type "bicyclic"` 时，系统会自动采用 `boltz1` 模型进行预测，无需手动指定。这确保了包含非标准残基或拓扑的分子能够得到正确的结构预测。
+
+#### **命令示例 6: 传统模式（兼容性）**
 
 如需使用传统算法（不推荐，仅用于对比）：
 
 ```bash
 python run_design.py \
+    --design_type "linear" \
     --yaml_template /path/to/your/template_protein.yaml \
     --binder_chain "B" \
     --binder_length 20 \
@@ -220,6 +286,10 @@ python run_design.py \
 ```
 
 ## ⚙️ 命令行参数详解
+
+#### 设计模式
+
+  - `--design_type`: **(必需)** 选择设计类型。可选值: `linear` (线性多肽), `glycopeptide` (糖肽), `bicyclic` (双环肽)。 (默认: `linear`)
 
 #### 输入与目标定义
 
@@ -253,7 +323,7 @@ python run_design.py \
 | **精细调优** | 7 | 4 | 0.8 | 已有好序列，精细优化 |
 | **保守设计** | 6 | 5 | 0.5 | 对稳定性要求高的场景 |
 
-#### 糖肽设计 (可选)
+#### 糖肽设计 (当 `--design_type=glycopeptide` 时)
 
   - `--glycan_modification`: 激活糖肽设计模式。提供糖肽修饰的4字母CCD代码 (例如, `MANS`, `NAGS`, `GALT`)。这些修饰已预生成到CCD缓存中。 (默认: `None`)
   - `--modification_site`: 在binder序列上应用糖肽修饰的位置 **(1-based索引)**。如果使用了`--glycan_modification`，此项为**必需**。
@@ -285,21 +355,27 @@ python glycopeptide_generator.py --generate-all
 
 ```bash
 # 生成丝氨酸-甘露糖修饰
-python glycopeptide_generator.py --specific S MAN
+python designer/glycopeptide_generator.py --specific S MAN
 
 # 生成天冬酰胺-N-乙酰葡糖胺修饰
-python glycopeptide_generator.py --specific N NAG
+python designer/glycopeptide_generator.py --specific N NAG
 ```
 
 **查看可用修饰：**
 
 ```bash
-python glycopeptide_generator.py --list-only
+python designer/glycopeptide_generator.py --list-only
 ```
 
 **注意事项：**
-- 首次使用前必须运行 `--generate-all` 初始化CCD缓存
-- 系统会自动检测Boltz缓存位置（通常在 `~/.boltz/ccd.pkl`）
+
+  - 首次使用前必须运行 `--generate-all` 初始化CCD缓存
+  - 系统会自动检测Boltz缓存位置（通常在 `~/.boltz/ccd.pkl`）
+
+#### 双环肽设计 (当 `--design_type=bicyclic` 时)
+
+  - `--linker_ccd`: 用于形成双环的连接体配体的CCD代码。 (默认: `SEZ`)
+  - `--cys_positions`: (可选) 提供两个**1-based索引**，用于指定除C端残基外的另外两个半胱氨酸的**初始位置**。例如 `--cys_positions 4 10`。如果未提供，将随机选择两个初始位置。注：第三个半胱氨酸被强制固定在肽链的最后一个位置。
 
 #### 输出与日志
 
@@ -318,8 +394,8 @@ python glycopeptide_generator.py --list-only
 
   - **控制台日志**: 实时显示演化进程、每一代的最佳分数、警告和错误信息。
   - **CSV汇总文件 (`--output_csv`)**: 包含所有已评估序列的详细信息及其评分指标（`composite_score`, `ipTM`, `pLDDT` 等）。
-    - 🆕 **新增字段**: `mutation_strategy` (使用的突变策略), `is_pareto_optimal` (是否为Pareto最优解)
-    - 文件已按综合分数从高到低排序。
+      - 🆕 **新增字段**: `mutation_strategy` (使用的突变策略), `is_pareto_optimal` (是否为Pareto最优解)
+      - 文件已按综合分数从高到低排序。
   - **临时文件 (`--keep_temp_files`)**: 如果选择保留，工作目录中将包含每次API调用的输入（YAML）、输出（PDB/CIF）和置信度文件，可用于后续分析或调试。
 
 ### 📈 性能监控
@@ -340,12 +416,14 @@ python glycopeptide_generator.py --list-only
 ### 常见问题
 
 **问题**: 糖肽设计报错 "CCD代码未找到"
+
 ```bash
 # 解决方案：初始化糖肽CCD缓存
-python glycopeptide_generator.py --generate-all
+python designer/glycopeptide_generator.py --generate-all
 ```
 
 **问题**: API连接失败
+
 ```bash
 # 检查Boltz-WebUI是否运行在正确端口
 curl http://127.0.0.1:5000/health
@@ -355,6 +433,7 @@ echo $API_SECRET_TOKEN
 ```
 
 ### 最佳实践
-- **MSA设置**: 保持默认设置（MSA服务器启用）以获得最佳预测质量
-- **收敛参数**: 对于糖肽设计，推荐使用较小的收敛窗口（3-4）以应对复杂性
-- **温度控制**: 复杂设计任务可以提高初始温度（1.5-2.0）增强探索能力
+
+  - **MSA设置**: 保持默认设置（MSA服务器启用）以获得最佳预测质量
+  - **收敛参数**: 对于糖肽或双环肽等复杂设计，推荐使用较小的收敛窗口（3-4）以应对复杂性
+  - **温度控制**: 复杂设计任务可以提高初始温度（1.5-2.0）增强探索能力

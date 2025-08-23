@@ -42,6 +42,12 @@ from design_utils import (
 logger = logging.getLogger(__name__)
 
 
+LINKER_ATOM_MAP = {
+    'SEZ': ['CD', 'C1', 'C2'] 
+    # 可以添加其他连接体, 例如: 'XYZ': ['A1', 'A2', 'A3']
+}
+
+
 class Designer:
     """
     管理蛋白质和糖肽的多谱系、梯度自由设计优化循环。
@@ -116,10 +122,11 @@ class Designer:
             logger.error(f"Failed to create YAML for sequence '{sequence}'. Skipping. Reason: {e}")
             return (sequence, None, None)
 
-        # 动态确定模型名称：如果有糖肽修饰，使用boltz1；否则使用默认设置
-        model_name = "boltz1" if design_params.get('is_glycopeptide') else self.model_name
+        # 动态确定模型名称
+        design_type = design_params.get('design_type', 'linear')
+        model_name = "boltz1" if design_type in ['glycopeptide'] else self.model_name
         if model_name == "boltz1":
-            logger.debug(f"Using boltz1 model for glycopeptide design")
+            logger.debug(f"Using boltz1 model for {design_type} design")
         
         task_id = self.client.submit_job(candidate_yaml_path, use_msa_server=self.use_msa_server, model_name=model_name)
         if not task_id:
@@ -243,7 +250,7 @@ class Designer:
                     f"pLDDT Temp: {self.hparams['pos_select_temp']:.2f}."
                 )
 
-    def run(self, iterations: int, **kwargs):
+    def run(self, **kwargs):
         """
         执行使用演化策略的主要并行设计循环。
         **kwargs 包含了所有其他的运行参数。
@@ -255,24 +262,32 @@ class Designer:
         binder_chain_id = kwargs['binder_chain_id']
         binder_length = kwargs['binder_length']
         initial_binder_sequence = kwargs.get('initial_binder_sequence')
-        glycan_modification = kwargs.get('glycan_modification')
-        glycan_chain_id = kwargs.get('glycan_chain_id', 'C')
-        modification_site = kwargs.get('modification_site')
         output_csv_path = kwargs.get('output_csv_path', f"design_summary_{int(time.time())}.csv")
         keep_temp_files = kwargs.get('keep_temp_files', False)
         weight_iptm = kwargs.get('weight_iptm', 0.7)
         weight_plddt = kwargs.get('weight_plddt', 0.3)
+        design_type = kwargs.get('design_type', 'linear')
+        iterations = kwargs.get('iterations', 20)
 
-        logger.info("--- Starting Multi-Lineage Design Run with Adaptive Hyperparameters ---")
+        logger.info(f"--- Starting Design Run (Type: {design_type.capitalize()}) with Adaptive Hyperparameters ---")
         logger.info(f"Scoring weights -> ipTM: {weight_iptm}, pLDDT: {weight_plddt}")
         logger.info(f"Mutation rate: {mutation_rate}")
         if num_elites >= population_size:
             raise ValueError("`num_elites` must be less than `population_size`.")
         
-        design_params = {
-            'is_glycopeptide': bool(glycan_modification), 'glycan_modification': glycan_modification,
-            'glycan_chain_id': glycan_chain_id, 'modification_site': modification_site
-        }
+        # 初始化设计参数字典
+        design_params = {'design_type': design_type}
+        if design_type == 'glycopeptide':
+            design_params.update({
+                'glycan_modification': kwargs.get('glycan_modification'),
+                'modification_site': kwargs.get('modification_site'),
+                'glycan_chain_id': kwargs.get('glycan_chain_id', 'C')
+            })
+        elif design_type == 'bicyclic':
+            design_params.update({
+                'linker_ccd': kwargs.get('linker_ccd'),
+                'cys_positions': kwargs.get('cys_positions')
+            })
 
         def calculate_composite_score(metrics: dict) -> float:
             iptm = metrics.get('iptm', 0.0)
@@ -302,24 +317,28 @@ class Designer:
                 max_attempts = population_size * 25
                 attempts = 0
 
+                generation_seeding_message_printed = False
                 while len(candidates_to_evaluate) < population_size and attempts < max_attempts:
                     new_seq = None
                     strategy_used = None
                     
                     if not elite_population:
-                        if not candidates_to_evaluate:
+                        if not generation_seeding_message_printed:
                             logger.info(f"Seeding generation with {population_size} new random sequences...")
-                        new_seq = generate_random_sequence(binder_length, modification_site, design_params.get('glycan_modification'))
+                            generation_seeding_message_printed = True
+                        new_seq = generate_random_sequence(binder_length, design_params)
                         strategy_used = 'random'
                     else:
-                        if not candidates_to_evaluate:
+                        if not generation_seeding_message_printed:
                             logger.info(f"Evolving {len(elite_population)} elites to create {population_size} new candidates...")
+                            generation_seeding_message_printed = True
                         
                         if self.enable_enhanced_features:
                             # 使用增强的自适应突变
                             parent = random.choice(elite_population)
                             elite_sequences = [e['sequence'] for e in elite_population]
                             
+                            # TODO: Enhance adaptive_mutate for bicyclic peptides
                             new_seq, strategy_used = self.mutation_engine.adaptive_mutate(
                                 parent['sequence'],
                                 parent_metrics=parent['metrics'],
@@ -333,8 +352,7 @@ class Designer:
                                 parent['sequence'],
                                 mutation_rate=mutation_rate,
                                 plddt_scores=parent['metrics'].get('plddts', []),
-                                modification_site=modification_site,
-                                glycan_modification=design_params.get('glycan_modification'),
+                                design_params=design_params,
                                 position_selection_temp=self.hparams['pos_select_temp']
                             )
                             strategy_used = 'traditional'
@@ -623,30 +641,52 @@ class Designer:
             protein_entry = {'protein': {'id': chain_id, 'sequence': sequence, 'msa': 'empty'}}
             config['sequences'].append(protein_entry)
 
-        # 新的基于modifications的糖基化处理
-        if design_params.get('is_glycopeptide'):
+        design_type = design_params.get('design_type', 'linear')
+
+        # 糖肽设计处理
+        if design_type == 'glycopeptide':
             site_idx = design_params['modification_site']  # 0-based
             glycan_modification = design_params['glycan_modification']
             
-            # 直接使用glycan_modification作为CCD代码（如"MANS"）
-            # 验证CCD代码格式
             if len(glycan_modification) != 4:
                 raise ValueError(f"Invalid glycan modification '{glycan_modification}'. Expected 4-character CCD code like 'MANS'.")
             
             # 为蛋白质序列添加modifications
             for i, seq_block in enumerate(config['sequences']):
-                if ('protein' in seq_block and 
-                    seq_block.get('protein', {}).get('id') == chain_id):
-                    
+                if ('protein' in seq_block and seq_block.get('protein', {}).get('id') == chain_id):
                     if 'modifications' not in seq_block['protein']:
                         seq_block['protein']['modifications'] = []
                     
-                    # 添加糖基化修饰
                     seq_block['protein']['modifications'].append({
                         'position': site_idx + 1,  # 转换为1-based索引
                         'ccd': glycan_modification
                     })
                     break
+        
+        # 双环肽设计处理
+        elif design_type == 'bicyclic':
+            linker_ccd = design_params.get('linker_ccd')
+            if not linker_ccd:
+                raise ValueError("Linker CCD must be provided for bicyclic peptide design.")
+            
+            # 1. 添加配体 (ligand)
+            ligand_entry = {'ligand': {'id': 'L', 'ccd': linker_ccd}}
+            config['sequences'].append(ligand_entry)
+
+            # 2. 添加约束 (constraints)
+            cys_indices = [i for i, aa in enumerate(sequence) if aa == 'C']
+            if len(cys_indices) != 3:
+                raise ValueError(f"Bicyclic peptide sequence must contain exactly 3 Cysteines, but found {len(cys_indices)} in '{sequence}'.")
+            
+            linker_atoms = LINKER_ATOM_MAP.get(linker_ccd)
+            if not linker_atoms or len(linker_atoms) != 3:
+                raise KeyError(f"Linker '{linker_ccd}' is not defined in LINKER_ATOM_MAP or does not have 3 attachment points.")
+            
+            config['constraints'] = [
+                {'bond': {'atom1': [chain_id, cys_indices[0] + 1, 'SG'], 'atom2': ['L', 1, linker_atoms[0]]}},
+                {'bond': {'atom1': [chain_id, cys_indices[1] + 1, 'SG'], 'atom2': ['L', 1, linker_atoms[1]]}},
+                {'bond': {'atom1': [chain_id, cys_indices[2] + 1, 'SG'], 'atom2': ['L', 1, linker_atoms[2]]}},
+            ]
 
         yaml_path = os.path.join(self.work_dir, f"candidate_{os.getpid()}_{hash(sequence)}.yaml")
         with open(yaml_path, 'w') as f:

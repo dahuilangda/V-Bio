@@ -28,6 +28,17 @@ logger = logging.getLogger(__name__)
 # --- 核心常量 ---
 
 AMINO_ACIDS = "ARNDCQEGHILKMFPSTWYV"
+AMINO_ACIDS_NO_CYS = "ARNDQEGHILKMFPSTWYV" # 用于双环肽设计，避免生成额外的Cys
+
+# --- 双环肽连接子 ---
+BICYCLIC_LINKERS = {
+    'SEZ': {
+        'ccd': 'SEZ',
+        'name': '1,3,5-三甲基苯',
+        'eng_name': '1,3,5-trimethylbenzene',
+        'attachment_atoms': ['CD', 'C1', 'C2']  # 连接到Cys的SG原子的配体原子
+    },
+}
 
 # --- 糖化学常量 ---
 MONOSACCHARIDES = {
@@ -227,94 +238,250 @@ def get_valid_residues_for_glycan(glycan_ccd: str) -> list:
         raise ValueError(f"No valid glycosylation types found for glycan '{glycan_ccd}'.")
     return list(set(valid_residues))
 
-
-def generate_random_sequence(length: int, modification_site: int = None, glycan_modification: str = None) -> str:
-    """生成一个随机的氨基酸序列。"""
-    seq = list("".join(random.choice(AMINO_ACIDS) for _ in range(length)))
-    if modification_site is not None:
-        if 0 <= modification_site < length:
-            # 由于现在使用预生成的糖肽修饰（如MANS），我们不需要验证特定残基
-            # 而是使用任何适合糖基化的残基
-            valid_residues = (list(GLYCOSYLATION_SITES['N-linked'].keys()) + 
-                            list(GLYCOSYLATION_SITES['O-linked'].keys()) + 
-                            list(GLYCOSYLATION_SITES['C-linked'].keys()))
-            seq[modification_site] = random.choice(valid_residues)
-        else:
-            raise ValueError("modification_site index is out of bounds for the given sequence length.")
+def generate_random_bicyclic_sequence(length: int) -> str:
+    """
+    为双环肽设计生成一个随机序列，包含三个Cys，其中一个在末尾。
+    """
+    if length < 3:
+        raise ValueError("Sequence length must be at least 3 for bicyclic peptide design.")
+    
+    # 1. 生成不含Cys的随机序列
+    seq = list("".join(random.choice(AMINO_ACIDS_NO_CYS) for _ in range(length)))
+    
+    # 2. 在末尾放置一个Cys
+    seq[-1] = 'C'
+    
+    # 3. 在其余位置随机选择两个不同位置放置Cys
+    available_indices = list(range(length - 1))
+    cys_pos1, cys_pos2 = random.sample(available_indices, 2)
+    seq[cys_pos1] = 'C'
+    seq[cys_pos2] = 'C'
+    
     return "".join(seq)
 
+# def generate_random_sequence(length: int, modification_site: int = None, glycan_modification: str = None) -> str:
+#     """生成一个随机的氨基酸序列。"""
+#     seq = list("".join(random.choice(AMINO_ACIDS) for _ in range(length)))
+#     if modification_site is not None:
+#         if 0 <= modification_site < length:
+#             # 由于现在使用预生成的糖肽修饰（如MANS），我们不需要验证特定残基
+#             # 而是使用任何适合糖基化的残基
+#             valid_residues = (list(GLYCOSYLATION_SITES['N-linked'].keys()) + 
+#                             list(GLYCOSYLATION_SITES['O-linked'].keys()) + 
+#                             list(GLYCOSYLATION_SITES['C-linked'].keys()))
+#             seq[modification_site] = random.choice(valid_residues)
+#         else:
+#             raise ValueError("modification_site index is out of bounds for the given sequence length.")
+#     return "".join(seq)
+
+def generate_random_sequence(length: int, design_params: dict) -> str:
+    """根据设计参数生成一个随机的氨基酸序列。"""
+    design_type = design_params.get('design_type', 'linear')
+    
+    # --- 双环肽的特殊生成逻辑 ---
+    if design_type == 'bicyclic':
+        if length < 3:
+            raise ValueError("Bicyclic peptide length must be at least 3.")
+        seq = list("".join(random.choice(AMINO_ACIDS_NO_CYS) for _ in range(length)))
+        
+        # 固定最后一个位置为Cys
+        seq[-1] = 'C'
+        
+        # 确定另外两个Cys的位置
+        cys_positions = design_params.get('cys_positions')
+        if cys_positions and len(cys_positions) == 2:
+            pos1, pos2 = cys_positions[0], cys_positions[1]
+        else:
+            # 随机选择两个不与末端重复的位置
+            available_indices = list(range(length - 1))
+            pos1, pos2 = random.sample(available_indices, 2)
+        
+        seq[pos1] = 'C'
+        seq[pos2] = 'C'
+        
+        return "".join(seq)
+
+    # --- 糖肽的特殊生成逻辑 ---
+    elif design_type == 'glycopeptide':
+        seq = list("".join(random.choice(AMINO_ACIDS) for _ in range(length)))
+        modification_site = design_params.get('modification_site')
+        if modification_site is not None:
+            if 0 <= modification_site < length:
+                valid_residues = (list(GLYCOSYLATION_SITES['N-linked'].keys()) +
+                                  list(GLYCOSYLATION_SITES['O-linked'].keys()) +
+                                  list(GLYCOSYLATION_SITES['C-linked'].keys()))
+                seq[modification_site] = random.choice(valid_residues)
+            else:
+                raise ValueError("modification_site index is out of bounds for the given sequence length.")
+        return "".join(seq)
+
+    # --- 默认线性多肽逻辑 ---
+    else:
+        return "".join(random.choice(AMINO_ACIDS) for _ in range(length))
+
+
+# def mutate_sequence(
+#     sequence: str,
+#     mutation_rate: float = 0.1,
+#     plddt_scores: list = None,
+#     temperature: float = 1.0,
+#     modification_site: int = None,
+#     glycan_modification: str = None,
+#     position_selection_temp: float = 1.0
+# ) -> str:
+#     """
+#     对序列进行点突变，突变过程受pLDDT和BLOSUM62矩阵指导。
+
+#     - **突变位置选择**: 优先选择pLDDT分数较低（即模型预测的低置信度）的区域。
+#       `position_selection_temp` 参数用于调节该选择压力：
+#         - temp=1.0: 标准权重。
+#         - temp>1.0: 降低pLDDT的影响，位置选择更趋于随机，增强探索性。
+#         - temp<1.0: 增强pLDDT的影响，位置选择更集中于低分区域，增强利用性。
+#     - **氨基酸替换选择**: 通过带温度的Softmax函数和BLOSUM62矩阵进行加权。
+#     - **糖基化位点保护**: 指定的糖基化位点将被保护，确保其残基始终与指定的聚糖类型兼容。
+
+#     Args:
+#         sequence (str): 原始氨基酸序列。
+#         mutation_rate (float): 序列中要突变的残基比例。
+#         plddt_scores (list, optional): 与序列对应的pLDDT分数列表。
+#         temperature (float): Softmax函数的温度因子，用于氨基酸替换选择。
+#         modification_site (int, optional): 要保护的糖基化位点（0-based索引）。
+#         glycan_modification (str, optional): 糖肽修饰的CCD代码，用于验证修饰位点。
+#         position_selection_temp (float): 用于调节pLDDT指导位置选择的温度因子。
+
+#     Returns:
+#         str: 突变后的新序列。
+#     """
+#     new_sequence = list(sequence)
+#     num_mutations = max(1, int(len(sequence) * mutation_rate))
+
+#     # --- 步骤 1: 选择突变位置 (pLDDT指导) ---
+#     available_indices = list(range(len(sequence)))
+#     if modification_site is not None and modification_site in available_indices:
+#         available_indices.remove(modification_site)
+
+#     if not available_indices:
+#         logger.warning("No available positions to mutate after excluding the glycosylation site. Returning original sequence.")
+#         return sequence
+
+#     positions_to_mutate = []
+#     if plddt_scores and len(plddt_scores) == len(sequence):
+#         # 根据 (100 - pLDDT) 对位置进行加权，优先选择低置信度区域
+#         # 应用 position_selection_temp 来调整选择压力
+#         safe_temp = max(position_selection_temp, 1e-6) # 避免除以零
+#         weights = [(100.0 - plddt_scores[i]) / safe_temp for i in available_indices]
+        
+#         total_weight = sum(weights)
+#         if total_weight > 0:
+#             probabilities = [w / total_weight for w in weights]
+#             k = min(num_mutations, len(available_indices))
+#             positions_to_mutate = np.random.choice(available_indices, size=k, replace=False, p=probabilities)
+#         else:
+#             # 如果所有pLDDT都为100或权重因其他原因失效，则随机选择
+#             logger.debug("All pLDDT scores are high; falling back to random position selection.")
+#             positions_to_mutate = random.sample(available_indices, k=min(num_mutations, len(available_indices)))
+#     else:
+#         if plddt_scores:
+#             logger.warning("pLDDT scores length mismatch or not provided. Falling back to random position selection.")
+#         # 如果没有提供pLDDT，则随机选择突变位置
+#         positions_to_mutate = random.sample(available_indices, k=min(num_mutations, len(available_indices)))
+
+#     # --- 步骤 2: 选择替换的氨基酸 (BLOSUM62) ---
+#     for pos in positions_to_mutate:
+#         original_aa = new_sequence[pos]
+#         substitution_scores = BLOSUM62.get(original_aa, {})
+#         possible_aas = [aa for aa in AMINO_ACIDS if aa != original_aa]
+#         if not possible_aas: continue
+
+#         scores = [substitution_scores.get(aa, 0) for aa in possible_aas]
+#         scores_array = np.array(scores) / temperature
+#         probabilities = np.exp(scores_array - np.max(scores_array)) # Softmax
+#         probabilities /= np.sum(probabilities)
+
+#         new_aa = np.random.choice(possible_aas, p=probabilities)
+#         new_sequence[pos] = new_aa
+    
+#     return "".join(new_sequence)
 
 def mutate_sequence(
     sequence: str,
     mutation_rate: float = 0.1,
     plddt_scores: list = None,
-    temperature: float = 1.0,
-    modification_site: int = None,
-    glycan_modification: str = None,
-    position_selection_temp: float = 1.0
+    design_params: dict = None,
+    position_selection_temp: float = 1.0,
+    temperature: float = 1.0 # 兼容旧版调用
 ) -> str:
     """
     对序列进行点突变，突变过程受pLDDT和BLOSUM62矩阵指导。
-
-    - **突变位置选择**: 优先选择pLDDT分数较低（即模型预测的低置信度）的区域。
-      `position_selection_temp` 参数用于调节该选择压力：
-        - temp=1.0: 标准权重。
-        - temp>1.0: 降低pLDDT的影响，位置选择更趋于随机，增强探索性。
-        - temp<1.0: 增强pLDDT的影响，位置选择更集中于低分区域，增强利用性。
-    - **氨基酸替换选择**: 通过带温度的Softmax函数和BLOSUM62矩阵进行加权。
-    - **糖基化位点保护**: 指定的糖基化位点将被保护，确保其残基始终与指定的聚糖类型兼容。
-
-    Args:
-        sequence (str): 原始氨基酸序列。
-        mutation_rate (float): 序列中要突变的残基比例。
-        plddt_scores (list, optional): 与序列对应的pLDDT分数列表。
-        temperature (float): Softmax函数的温度因子，用于氨基酸替换选择。
-        modification_site (int, optional): 要保护的糖基化位点（0-based索引）。
-        glycan_modification (str, optional): 糖肽修饰的CCD代码，用于验证修饰位点。
-        position_selection_temp (float): 用于调节pLDDT指导位置选择的温度因子。
-
-    Returns:
-        str: 突变后的新序列。
+    根据 design_params 中的 design_type 适配不同的突变策略。
     """
     new_sequence = list(sequence)
     num_mutations = max(1, int(len(sequence) * mutation_rate))
+    design_type = design_params.get('design_type', 'linear')
 
-    # --- 步骤 1: 选择突变位置 (pLDDT指导) ---
-    available_indices = list(range(len(sequence)))
-    if modification_site is not None and modification_site in available_indices:
-        available_indices.remove(modification_site)
-
-    if not available_indices:
-        logger.warning("No available positions to mutate after excluding the glycosylation site. Returning original sequence.")
-        return sequence
-
-    positions_to_mutate = []
-    if plddt_scores and len(plddt_scores) == len(sequence):
-        # 根据 (100 - pLDDT) 对位置进行加权，优先选择低置信度区域
-        # 应用 position_selection_temp 来调整选择压力
-        safe_temp = max(position_selection_temp, 1e-6) # 避免除以零
-        weights = [(100.0 - plddt_scores[i]) / safe_temp for i in available_indices]
+    # --- 步骤 1: 确定可突变的位置 ---
+    protected_indices = set()
+    if design_type == 'glycopeptide':
+        mod_site = design_params.get('modification_site')
+        if mod_site is not None:
+            protected_indices.add(mod_site)
+    elif design_type == 'bicyclic':
+        # 在双环肽中，Cys的位置是可变的，但它们的数量和末端位置是固定的
+        # 因此，我们将Cys位置视为可交换的，而不是完全受保护的
+        cys_indices = {i for i, aa in enumerate(sequence) if aa == 'C'}
         
-        total_weight = sum(weights)
-        if total_weight > 0:
-            probabilities = [w / total_weight for w in weights]
-            k = min(num_mutations, len(available_indices))
-            positions_to_mutate = np.random.choice(available_indices, size=k, replace=False, p=probabilities)
+        # 新增逻辑：以一定概率移动一个Cys的位置
+        CYS_MOVE_PROBABILITY = 0.25 
+        if random.random() < CYS_MOVE_PROBABILITY:
+            variable_cys_indices = sorted(list(cys_indices - {len(sequence) - 1}))
+            if len(variable_cys_indices) == 2:
+                cys_to_move = random.choice(variable_cys_indices)
+                
+                available_swap_indices = [i for i in range(len(sequence) - 1) if i not in cys_indices]
+                if available_swap_indices:
+                    new_pos = random.choice(available_swap_indices)
+                    
+                    # 交换位置，并用随机氨基酸填充旧的Cys位置
+                    new_sequence[cys_to_move] = random.choice(AMINO_ACIDS_NO_CYS)
+                    new_sequence[new_pos] = 'C'
+                    logger.debug(f"Bicyclic mutation: Moved Cys from {cys_to_move} to {new_pos}")
+                    # 在移动Cys后，更新序列和Cys位置以进行后续突变
+                    sequence = "".join(new_sequence)
+                    cys_indices = {i for i, aa in enumerate(sequence) if aa == 'C'}
+
+        protected_indices.update(cys_indices)
+
+    available_indices = [i for i in range(len(sequence)) if i not in protected_indices]
+    if not available_indices:
+        logger.warning("No available positions to mutate after excluding protected sites. Returning current sequence.")
+        return "".join(new_sequence)
+    
+    # --- 步骤 2: 选择突变位置 (pLDDT指导) ---
+    k = min(num_mutations, len(available_indices))
+    if plddt_scores and len(plddt_scores) == len(sequence):
+        safe_temp = max(position_selection_temp, 1e-6)
+        weights = np.array([(100.0 - plddt_scores[i]) for i in available_indices])
+        
+        # 应用温度调整
+        probabilities = np.exp(weights / safe_temp)
+        probabilities /= np.sum(probabilities)
+
+        if np.isnan(probabilities).any(): # 如果概率计算出错，回退到随机选择
+             positions_to_mutate = random.sample(available_indices, k=k)
         else:
-            # 如果所有pLDDT都为100或权重因其他原因失效，则随机选择
-            logger.debug("All pLDDT scores are high; falling back to random position selection.")
-            positions_to_mutate = random.sample(available_indices, k=min(num_mutations, len(available_indices)))
+             positions_to_mutate = np.random.choice(available_indices, size=k, replace=False, p=probabilities)
     else:
         if plddt_scores:
-            logger.warning("pLDDT scores length mismatch or not provided. Falling back to random position selection.")
-        # 如果没有提供pLDDT，则随机选择突变位置
-        positions_to_mutate = random.sample(available_indices, k=min(num_mutations, len(available_indices)))
+            logger.warning("pLDDT scores length mismatch. Falling back to random position selection.")
+        positions_to_mutate = random.sample(available_indices, k=k)
 
-    # --- 步骤 2: 选择替换的氨基酸 (BLOSUM62) ---
+    # --- 步骤 3: 选择替换的氨基酸 (BLOSUM62指导) ---
     for pos in positions_to_mutate:
         original_aa = new_sequence[pos]
         substitution_scores = BLOSUM62.get(original_aa, {})
-        possible_aas = [aa for aa in AMINO_ACIDS if aa != original_aa]
+        
+        # 对于双环肽，确保不会突变为Cys
+        possible_aas = [aa for aa in (AMINO_ACIDS_NO_CYS if design_type == 'bicyclic' else AMINO_ACIDS) if aa != original_aa]
         if not possible_aas: continue
 
         scores = [substitution_scores.get(aa, 0) for aa in possible_aas]
