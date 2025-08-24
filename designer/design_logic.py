@@ -76,8 +76,8 @@ class Designer:
         
         # --- 初始化自适应超参数 ---
         self.hparams = {
-            'mutation_rate': 0.1,         # 初始突变率
-            'pos_select_temp': 1.0,       # 初始pLDDT位置选择温度
+            'mutation_rate': 0.1,        # 初始突变率
+            'pos_select_temp': 1.0,      # 初始pLDDT位置选择温度
         }
         # 定义超参数的边界和调整因子，以提供专业且可控的调整
         self.hparam_configs = {
@@ -153,16 +153,20 @@ class Designer:
         if not all_results:
             logger.warning("No results were generated to save to CSV.")
             return
-        all_results.sort(key=lambda x: x.get('composite_score', 0.0), reverse=True)
+        
+        # 创建数据的深拷贝以避免修改原始数据
+        results_to_write = copy.deepcopy(all_results)
+        results_to_write.sort(key=lambda x: x.get('composite_score', 0.0), reverse=True)
+        
         header = ['rank', 'generation', 'sequence', 'composite_score', 'iptm', 'binder_avg_plddt', 'ptm', 'complex_plddt']
         if keep_temp_files:
             header.append('results_path')
-        logger.info(f"Writing {len(all_results)} total results to {os.path.abspath(output_csv_path)}...")
+        logger.info(f"Writing {len(results_to_write)} total results to {os.path.abspath(output_csv_path)}...")
         try:
             with open(output_csv_path, 'w', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=header)
                 writer.writeheader()
-                for i, result_data in enumerate(all_results):
+                for i, result_data in enumerate(results_to_write):
                     result_data['rank'] = i + 1
                     for key in ['composite_score', 'iptm', 'ptm', 'complex_plddt', 'binder_avg_plddt']:
                         if key in result_data and isinstance(result_data[key], float):
@@ -178,9 +182,10 @@ class Designer:
         if not all_results:
             return
         
-        # 按复合分数排序，只保留前10个
-        all_results.sort(key=lambda x: x.get('composite_score', 0.0), reverse=True)
-        top_results = all_results[:10]
+        # 创建数据的深拷贝以避免修改原始数据
+        results_to_write = copy.deepcopy(all_results)
+        results_to_write.sort(key=lambda x: x.get('composite_score', 0.0), reverse=True)
+        top_results = results_to_write[:10]
         
         header = ['rank', 'generation', 'sequence', 'composite_score', 'iptm', 'binder_avg_plddt', 'ptm', 'complex_plddt']
         if keep_temp_files:
@@ -191,12 +196,11 @@ class Designer:
                 writer = csv.DictWriter(f, fieldnames=header)
                 writer.writeheader()
                 for i, result_data in enumerate(top_results):
-                    result_data_copy = result_data.copy()  # 避免修改原始数据
-                    result_data_copy['rank'] = i + 1
+                    result_data['rank'] = i + 1
                     for key in ['composite_score', 'iptm', 'ptm', 'complex_plddt', 'binder_avg_plddt']:
-                        if key in result_data_copy and isinstance(result_data_copy[key], float):
-                            result_data_copy[key] = f"{result_data_copy[key]:.4f}"
-                    row_to_write = {key: result_data_copy.get(key, 'N/A') for key in header}
+                        if key in result_data and isinstance(result_data[key], float):
+                            result_data[key] = f"{result_data[key]:.4f}"
+                    row_to_write = {key: result_data.get(key, 'N/A') for key in header}
                     writer.writerow(row_to_write)
             logger.info(f"Real-time CSV updated with top {len(top_results)} results")
         except IOError as e:
@@ -244,11 +248,11 @@ class Designer:
             
             if is_decaying:
                  logger.info(
-                    f"Sufficient diversity (avg attempts: {avg_attempts:.1f}). "
-                    f"Decaying exploration pressure towards baseline. "
-                    f"Current mutation rate: {self.hparams['mutation_rate']:.3f}, "
-                    f"pLDDT Temp: {self.hparams['pos_select_temp']:.2f}."
-                )
+                     f"Sufficient diversity (avg attempts: {avg_attempts:.1f}). "
+                     f"Decaying exploration pressure towards baseline. "
+                     f"Current mutation rate: {self.hparams['mutation_rate']:.3f}, "
+                     f"pLDDT Temp: {self.hparams['pos_select_temp']:.2f}."
+                 )
 
     def run(self, **kwargs):
         """
@@ -373,8 +377,8 @@ class Designer:
                 valid_results = [res for res in results if res[1] is not None]
 
                 if not valid_results and not elite_population:
-                     logger.critical("First generation failed completely. Stopping run.")
-                     break
+                      logger.critical("First generation failed completely. Stopping run.")
+                      break
                 
                 # 增强功能：学习序列模式
                 if self.enable_enhanced_features:
@@ -494,7 +498,7 @@ class Designer:
                     elite_sequences = [e['sequence'] for e in elite_population]
                     diversity_metrics = analyze_population_diversity(elite_sequences)
                     logger.debug(f"Population diversity - similarity: {diversity_metrics.get('avg_pairwise_similarity', 0):.3f}, "
-                               f"entropy: {diversity_metrics.get('position_entropy', 0):.3f}")
+                                f"entropy: {diversity_metrics.get('position_entropy', 0):.3f}")
                 
                 # --- 4. 实时更新CSV文件 ---
                 if all_results_data:
@@ -598,20 +602,25 @@ class Designer:
                         for file in os.listdir(results_path):
                             if file.endswith('.cif'):
                                 cif_path = os.path.join(results_path, file)
-                                # 重命名为有意义的名称
-                                new_name = f"rank_{i:02d}_score_{result.get('composite_score', 0):.3f}_{result.get('sequence', 'unknown')[:10]}.cif"
+                                score = float(result.get('composite_score', 0.0))
+                                new_name = f"rank_{i:02d}_score_{score:.3f}_{result.get('sequence', 'unknown')[:10]}.cif"
                                 zipf.write(cif_path, f"structures/{new_name}")
                                 break
                 
                 # 添加结果摘要JSON
+                # 创建一个不包含文件路径的副本用于JSON序列化
+                results_for_json = copy.deepcopy(filtered_results)
+                for res in results_for_json:
+                    res.pop('results_path', None)
+
                 results_json = {
                     'summary': {
-                        'total_designs': len(filtered_results),
-                        'best_score': filtered_results[0].get('composite_score', 0) if filtered_results else 0,
+                        'total_designs': len(results_for_json),
+                        'best_score': results_for_json[0].get('composite_score', 0) if results_for_json else 0,
                         'threshold_applied': 0.6,
                         'generation_time': time.strftime('%Y-%m-%d %H:%M:%S')
                     },
-                    'top_results': filtered_results
+                    'top_results': results_for_json
                 }
                 
                 import json
@@ -621,7 +630,7 @@ class Designer:
             return zip_filename
             
         except Exception as e:
-            logger.error(f"Failed to create results ZIP: {e}")
+            logger.error(f"Failed to create results ZIP: {e}", exc_info=True)
             return None
 
     def _create_candidate_yaml(self, sequence: str, chain_id: str, design_params: dict) -> str:
