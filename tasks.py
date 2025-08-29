@@ -98,7 +98,7 @@ class TaskProgressTracker:
         except Exception as e:
             logger.error(f"Failed to register process for task {self.task_id}: {e}")
 
-def upload_result_to_central_api(task_id: str, local_file_path: str) -> dict:
+def upload_result_to_central_api(task_id: str, local_file_path: str, filename: str) -> dict:
     """
     Uploads a local file to the centralized API server.
     """
@@ -106,7 +106,7 @@ def upload_result_to_central_api(task_id: str, local_file_path: str) -> dict:
     logger.info(f"Task {task_id}: Starting upload from '{local_file_path}' to '{upload_url}'.")
 
     with open(local_file_path, 'rb') as f:
-        files = {'file': (f"{task_id}_results.zip", f)}
+        files = {'file': (filename, f)}
         
         response = requests.post(
             upload_url,
@@ -210,7 +210,7 @@ def predict_task(self, predict_args: dict):
         logger.info(f"Task {task_id}: Results archive found at '{output_archive_path}'. Initiating upload.")
         tracker.update_status("uploading", "Uploading results to central API")
         
-        upload_response = upload_result_to_central_api(task_id, output_archive_path)
+        upload_response = upload_result_to_central_api(task_id, output_archive_path, os.path.basename(output_archive_path))
         
         final_meta = {
             'status': 'Complete', 
@@ -345,3 +345,162 @@ def cleanup_stuck_task(self, task_id):
     except Exception as e:
         logger.error(f"Failed to cleanup task {task_id}: {e}")
         return {"status": "error", "message": str(e)}
+
+from Bio.PDB import PDBParser, MMCIFIO
+import io
+
+@celery_app.task(bind=True)
+def affinity_task(self, affinity_args: dict):
+    """
+    Celery task for running affinity prediction.
+    """
+    gpu_id = -1
+    task_id = self.request.id
+    task_temp_dir = None
+    tracker = None
+
+    try:
+        redis_client = get_redis_client()
+        tracker = TaskProgressTracker(task_id, redis_client)
+        tracker.start_heartbeat()
+        tracker.update_status("starting", "Initializing affinity task")
+
+        logger.info(f"Task {task_id}: Attempting to acquire GPU for affinity prediction.")
+        tracker.update_status("acquiring_gpu", "Waiting for GPU allocation")
+
+        gpu_id = acquire_gpu(task_id=task_id, timeout=3600)
+        self.update_state(state='PROGRESS', meta={'status': f'Acquired GPU {gpu_id}. Starting affinity prediction.'})
+        logger.info(f"Task {task_id}: Acquired GPU {gpu_id}. Creating temporary directory.")
+        tracker.update_status("gpu_acquired", f"Using GPU {gpu_id}")
+
+        task_temp_dir = tempfile.mkdtemp(prefix=f"boltz_affinity_task_{task_id}_")
+        
+        # Write input file content to a temporary file
+        input_file_content = affinity_args['input_file_content']
+        input_filename = affinity_args['input_filename']
+        input_file_path = os.path.join(task_temp_dir, input_filename)
+        with open(input_file_path, 'w') as f:
+            f.write(input_file_content)
+
+        if input_filename.lower().endswith('.pdb'):
+            cif_filename = f"{os.path.splitext(input_filename)[0]}.cif"
+            cif_path = os.path.join(task_temp_dir, cif_filename)
+            try:
+                subprocess.run(["maxit", "-input", input_file_path, "-output", cif_path, "-o", "1"], check=True, capture_output=True, text=True)
+                input_file_path = cif_path
+                input_filename = cif_filename
+            except subprocess.CalledProcessError as e:
+                logger.error(f"maxit failed for {input_filename}: {e.stderr}")
+                raise e
+
+        output_csv_path = os.path.join(task_temp_dir, f"{task_id}_affinity_results.csv")
+
+        args_for_script = {
+            'task_temp_dir': task_temp_dir,
+            'input_file_path': input_file_path,
+            'ligand_resname': affinity_args['ligand_resname'],
+            'output_csv_path': output_csv_path
+        }
+
+        args_file_path = os.path.join(task_temp_dir, 'args.json')
+        with open(args_file_path, 'w') as f:
+            json.dump(args_for_script, f)
+        
+        logger.info(f"Task {task_id}: Arguments saved to '{args_file_path}'.")
+        tracker.update_status("preparing", "Setting up temporary workspace for affinity prediction")
+
+        proc_env = os.environ.copy()
+        proc_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+        command = [
+            sys.executable,
+            "run_affinity_prediction.py",
+            args_file_path
+        ]
+
+        logger.info(f"Task {task_id}: Running affinity prediction on GPU {gpu_id}. Command: {' '.join(command)}")
+        self.update_state(state='PROGRESS', meta={'status': f'Running affinity prediction on GPU {gpu_id}'})
+        tracker.update_status("running", f"Executing affinity prediction with GPU {gpu_id}")
+
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=proc_env
+        )
+
+        tracker.register_process(process.pid)
+
+        try:
+            stdout, stderr = process.communicate(timeout=SUBPROCESS_TIMEOUT)
+        except subprocess.TimeoutExpired as e:
+            process.kill()
+            stdout, stderr = process.communicate()
+            error_message = (
+                f"Subprocess for affinity task {task_id} timed out after {SUBPROCESS_TIMEOUT} seconds.\n"
+                f"Stderr:\n{stderr}\nStdout:\n{stdout}"
+            )
+            logger.error(error_message)
+            tracker.update_status("timeout", f"Process timeout after {SUBPROCESS_TIMEOUT}s")
+            raise TimeoutError(error_message) from e
+
+        if process.returncode != 0:
+            error_message = f"Subprocess for affinity task {task_id} failed with exit code {process.returncode}.\nStderr:\n{stderr}\nStdout:\n{stdout}"
+            logger.error(error_message)
+            tracker.update_status("failed", f"Process failed with exit code {process.returncode}")
+            raise RuntimeError(error_message)
+
+        logger.info(f"Task {task_id}: Affinity subprocess completed successfully. Checking for results CSV.")
+        tracker.update_status("processing_output", "Processing affinity results")
+
+        if not os.path.exists(output_csv_path):
+            error_message = f"Subprocess completed, but no results CSV found at expected path: {output_csv_path}. Stderr: {stderr}"
+            logger.error(error_message)
+            tracker.update_status("failed", "No results CSV found")
+            raise FileNotFoundError(error_message)
+        
+        import zipfile
+        output_archive_path = os.path.join(task_temp_dir, f"{task_id}_affinity_results.zip")
+        with zipfile.ZipFile(output_archive_path, 'w') as zipf:
+            zipf.write(output_csv_path, os.path.basename(output_csv_path))
+            zipf.write(input_file_path, os.path.basename(input_file_path))
+
+        logger.info(f"Task {task_id}: Results archived to '{output_archive_path}'.")
+
+        upload_response = upload_result_to_central_api(task_id, output_archive_path, os.path.basename(output_archive_path))
+
+        final_meta = {
+            'status': 'Complete',
+            'gpu_id': gpu_id,
+            'upload_info': upload_response,
+            'result_file': os.path.basename(output_archive_path)
+        }
+        self.update_state(state='SUCCESS', meta=final_meta)
+        logger.info(f"Task {task_id}: Affinity prediction completed and results uploaded successfully. Final status: SUCCESS.")
+        tracker.update_status("completed", "Task completed successfully")
+        return final_meta
+
+    except Exception as e:
+        logger.error(f"Task {task_id} failed: {e}", exc_info=True)
+        if tracker:
+            tracker.update_status("failed", str(e))
+        self.update_state(state='FAILURE', meta={
+            'exc_type': type(e).__name__,
+            'exc_message': str(e),
+            'traceback': traceback.format_exc(),
+        })
+        raise e
+
+    finally:
+        if gpu_id != -1:
+            release_gpu(gpu_id=gpu_id, task_id=task_id)
+            logger.info(f"Task {task_id}: Released GPU {gpu_id}.")
+
+        if task_temp_dir and os.path.exists(task_temp_dir):
+            shutil.rmtree(task_temp_dir)
+            logger.info(f"Task {task_id}: Cleaned up temporary directory '{task_temp_dir}'.")
+
+        if tracker:
+            tracker.stop_heartbeat()
+            logger.info(f"Task {task_id}: Cleanup completed")

@@ -13,7 +13,7 @@ from werkzeug.utils import secure_filename
 from celery.result import AsyncResult
 import config
 from celery_app import celery_app
-from tasks import predict_task
+from tasks import predict_task, affinity_task
 from gpu_manager import get_redis_client, release_gpu, get_gpu_status
 
 # --- Configure Logging ---
@@ -327,6 +327,61 @@ def handle_predict():
     except Exception as e:
         logger.exception(f"Failed to dispatch Celery task for prediction request from {request.remote_addr}: {e}")
         return jsonify({'error': 'Failed to dispatch prediction task.', 'details': str(e)}), 500
+    
+    return jsonify({'task_id': task.id}), 202
+
+
+@app.route('/api/affinity', methods=['POST'])
+@require_api_token
+def handle_affinity():
+    """
+    Receives affinity prediction requests, and dispatches Celery tasks.
+    """
+    logger.info("Received affinity prediction request.")
+
+    if 'input_file' not in request.files:
+        logger.error("Missing 'input_file' in affinity prediction request. Client IP: %s", request.remote_addr)
+        return jsonify({'error': "Request form must contain a 'input_file' part"}), 400
+
+    input_file = request.files['input_file']
+    
+    if input_file.filename == '':
+        logger.error("No selected file for 'input_file' in affinity prediction request.")
+        return jsonify({'error': 'No selected file for input_file'}), 400
+
+    try:
+        input_file_content = input_file.read().decode('utf-8')
+        logger.debug("Input file successfully read and decoded.")
+    except UnicodeDecodeError:
+        logger.error(f"Failed to decode input_file as UTF-8. Client IP: {request.remote_addr}")
+        return jsonify({'error': "Failed to decode input_file. Ensure it's a valid UTF-8 text file."}), 400
+    except IOError as e:
+        logger.exception(f"Failed to read input_file from request: {e}. Client IP: {request.remote_addr}")
+        return jsonify({'error': f"Failed to read input_file: {e}"}), 400
+
+    ligand_resname = request.form.get('ligand_resname', 'LIG')
+    logger.info(f"ligand_resname parameter received: {ligand_resname} for client {request.remote_addr}.")
+    
+    priority = request.form.get('priority', 'default').lower()
+    if priority not in ['high', 'default']:
+        logger.warning(f"Invalid priority '{priority}' provided by client {request.remote_addr}. Defaulting to 'default'.")
+        priority = 'default'
+
+    target_queue = config.HIGH_PRIORITY_QUEUE if priority == 'high' else config.DEFAULT_QUEUE
+    logger.info(f"Affinity prediction priority: {priority}, targeting queue: '{target_queue}' for client {request.remote_addr}.")
+
+    affinity_args = {
+        'input_file_content': input_file_content,
+        'input_filename': secure_filename(input_file.filename),
+        'ligand_resname': ligand_resname
+    }
+
+    try:
+        task = affinity_task.apply_async(args=[affinity_args], queue=target_queue)
+        logger.info(f"Affinity task {task.id} dispatched to queue: '{target_queue}'.")
+    except Exception as e:
+        logger.exception(f"Failed to dispatch Celery task for affinity prediction request from {request.remote_addr}: {e}")
+        return jsonify({'error': 'Failed to dispatch affinity prediction task.', 'details': str(e)}), 500
     
     return jsonify({'task_id': task.id}), 202
 

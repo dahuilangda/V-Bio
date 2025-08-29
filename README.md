@@ -154,7 +154,7 @@ export API_SECRET_TOKEN='your-super-secret-and-long-token'
 
     ```bash
     source venv/bin/activate
-    streamlit run frontend.py
+    streamlit run frontend/app.py
     ```
 
 ### **通过 API 使用 (高级)**
@@ -172,6 +172,22 @@ export API_SECRET_TOKEN='your-super-secret-and-long-token'
          -F "yaml_file=@/path/to/your/input.yaml" \
          -F "use_msa_server=true" \
          http://127.0.0.1:5000/predict
+    ```
+
+#### **提交亲和力预测任务**
+
+  * **端点**: `POST /api/affinity`
+  * **认证**: 需要 API 令牌
+  * **参数**:
+    * `input_file`: 蛋白质-配体复合物的 PDB 或 CIF 文件。
+    * `ligand_resname`: 配体在结构文件中的残基名 (例如: `LIG`, `UNK`)。
+  * **示例**:
+    ```bash
+    curl -X POST \
+         -H "X-API-Token: your-secret-token" \
+         -F "input_file=@/path/to/your/complex.pdb" \
+         -F "ligand_resname=LIG" \
+         http://127.0.0.1:5000/api/affinity
     ```
 
 #### **管理任务**
