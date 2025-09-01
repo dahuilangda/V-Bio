@@ -424,16 +424,6 @@ def get_ligand_resnames_from_pdb(file_content: str) -> list[str]:
                 resnames.add(resname)
     return sorted(list(resnames))
 
-def get_ligand_resnames_from_pdb(file_content: str) -> list[str]:
-    """Extracts ligand residue names from a PDB file content."""
-    resnames = set()
-    for line in file_content.split('\n'):
-        if line.startswith('HETATM'):
-            resname = line[17:20].strip()
-            if resname:
-                resnames.add(resname)
-    return sorted(list(resnames))
-
 
 def visualize_structure_py3dmol(
     cif_content: str,

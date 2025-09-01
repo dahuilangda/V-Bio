@@ -32,7 +32,37 @@ def render_affinity_page():
     with st.expander("🔧 **步骤 1: 上传您的结构文件**", expanded=not is_running and st.session_state.affinity_results is None):
         uploaded_file = st.file_uploader("上传 PDB 或 CIF 文件", type=['pdb', 'cif'], disabled=is_running)
 
-        ligand_resname = st.text_input("配体残基名", value="LIG", disabled=is_running, help="请输入您在PDB文件中为配体指定的三个字母的残基名，例如 LIG, UNK, DRG 等。")
+        # Show detected ligands if file is uploaded
+        if uploaded_file is not None and not is_running:
+            file_content = uploaded_file.getvalue().decode("utf-8")
+            if uploaded_file.name.lower().endswith('.pdb'):
+                detected_ligands = get_ligand_resnames_from_pdb(file_content)
+                if detected_ligands:
+                    st.success(f"✅ 检测到配体残基名: {', '.join(detected_ligands)}")
+                    st.session_state.ligand_resnames = detected_ligands
+                else:
+                    st.warning("⚠️ **警告**: 在PDB文件中未检测到HETATM记录。请确认文件包含配体分子。")
+                    st.session_state.ligand_resnames = []
+            else:
+                st.info("ℹ️ 对于CIF文件，配体检测将在预测过程中进行。")
+
+        ligand_resname = st.text_input(
+            "配体残基名", 
+            value="LIG" if not st.session_state.ligand_resnames else st.session_state.ligand_resnames[0], 
+            disabled=is_running, 
+            help="请输入您在PDB文件中为配体指定的三个字母的残基名，例如 LIG, UNK, DRG 等。"
+        )
+        
+        # Show dropdown for detected ligands
+        if st.session_state.ligand_resnames and len(st.session_state.ligand_resnames) > 1:
+            selected_ligand = st.selectbox(
+                "或选择检测到的配体残基名:",
+                [""] + st.session_state.ligand_resnames,
+                disabled=is_running,
+                help="从检测到的配体残基名中选择一个"
+            )
+            if selected_ligand:
+                ligand_resname = selected_ligand
 
         if st.button("🚀 开始亲和力预测", type="primary", disabled=is_running or not uploaded_file or not ligand_resname, use_container_width=True):
             st.session_state.affinity_task_id = None
@@ -97,7 +127,28 @@ def render_affinity_page():
                         elif current_state == 'FAILURE':
                             st.session_state.affinity_error = status_data.get('info', {})
                             error_message = st.session_state.affinity_error.get('exc_message', '未知错误')
-                            st.error(f"❌ **任务失败**：{error_message}")
+                            
+                            # Provide more user-friendly error messages
+                            if "No HETATM records found" in error_message:
+                                user_friendly_message = ("❌ **配体未找到**: 在您上传的文件中未找到指定的配体残基名。"
+                                                        "请检查文件是否包含配体分子，或确认配体残基名是否正确。")
+                            elif "Ligand residue name" in error_message and "not found" in error_message:
+                                user_friendly_message = ("❌ **配体残基名错误**: 在文件中未找到您指定的配体残基名。"
+                                                        "请检查错误信息中列出的可用残基名，然后重新选择正确的配体残基名。")
+                            elif "No ligand molecules found" in error_message:
+                                user_friendly_message = ("❌ **无配体分子**: 上传的文件中未检测到配体分子。"
+                                                        "亲和力预测需要蛋白质-配体复合物结构。请上传包含配体的结构文件。")
+                            elif "Failed to parse ligand" in error_message:
+                                user_friendly_message = ("❌ **配体解析失败**: 无法解析指定的配体结构。"
+                                                        "配体的原子坐标可能有问题，请检查文件格式和配体结构的完整性。")
+                            else:
+                                user_friendly_message = f"❌ **任务失败**: {error_message}"
+                            
+                            st.error(user_friendly_message)
+                            
+                            # Show detailed error in expander
+                            with st.expander("🔍 查看详细错误信息"):
+                                st.text(error_message)
                             break
                         else:
                             st.markdown('<div class="loader"></div>', unsafe_allow_html=True)

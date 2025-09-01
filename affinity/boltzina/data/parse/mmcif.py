@@ -1,6 +1,7 @@
 import contextlib
 from collections import defaultdict
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Optional
 
 import gemmi
@@ -10,7 +11,7 @@ from rdkit.Chem import AllChem
 from rdkit.Chem.rdchem import Mol
 from sklearn.neighbors import KDTree
 
-from boltz.data import const
+from boltz.data import const, mol
 from boltz.data.mol import load_molecules
 from boltz.data.types import (
     AtomV2,
@@ -102,24 +103,40 @@ class ParsedStructure:
 ####################################################################################################
 
 
-def get_mol(ccd: str, mols: dict, moldir: str) -> Mol:
-    """Get mol from CCD code.
-
-    Return mol with ccd from mols if it is in mols. Otherwise load it from moldir,
-    add it to mols, and return the mol.
+def get_mol(ccd: str, mols: dict[str, mol.Mol], moldir: Path) -> mol.Mol:
     """
-    mol = mols.get(ccd)
-    if mol is None:
-        # Load molecule
-        mol = load_molecules(moldir, [ccd])[ccd]
+    Get the CCD mol with improved safety to prevent library contamination.
 
-        # Add to resource
-        # if isinstance(mols, dict):
-        #     mols[ccd] = mol
-        # else:
-        #     mols.set(ccd, mol)
+    Args:
+        ccd: CCD name.
+        mols: Dict to store mols (used as read-only cache).
+        moldir: Directory for mol files.
 
-    return mol
+    Returns:
+        mol: Boltz molecule.
+
+    """
+    # First check if it's already in the cache
+    cached_mol = mols.get(ccd)
+    if cached_mol is not None:
+        return cached_mol
+    
+    # Try to load from standard CCD
+    try:
+        loaded_mol = load_molecules(moldir, [ccd])[ccd]
+        # Note: We intentionally do NOT add to mols dict to prevent contamination
+        # The calling code should manage temporary additions if needed
+        return loaded_mol
+    except ValueError as e:
+        # Handle case where CCD component is not found
+        if "not found" in str(e):
+            raise ValueError(f"CCD component '{ccd}' not found in chemical component dictionary. "
+                           f"This might be a custom ligand name. Please ensure the ligand name "
+                           f"corresponds to a valid PDB chemical component or use a standard "
+                           f"ligand residue name (e.g., ATP, ADP, GTP, etc.). "
+                           f"Original error: {e}")
+        else:
+            raise e
 
 
 def get_dates(block: gemmi.cif.Block) -> tuple[str, str, str]:
