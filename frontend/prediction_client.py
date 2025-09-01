@@ -43,9 +43,12 @@ def predict_affinity(input_file_content: str, input_filename: str, ligand_resnam
 
 def predict_affinity_separate(protein_content: str, protein_filename: str, 
                              ligand_content: bytes, ligand_filename: str, 
-                             ligand_resname: str, output_prefix: str = "complex"):
+                             ligand_resname: str = "LIG", output_prefix: str = "complex"):
     """
     Sends separate protein and ligand files for affinity prediction to the backend API.
+    
+    Note: ligand_resname is kept for backward compatibility but is automatically 
+    set to "LIG" by the backend for separate inputs.
     """
     endpoint = f"{API_URL}/api/affinity_separate"
     headers = {'X-API-Token': API_TOKEN}

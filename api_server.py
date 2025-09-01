@@ -429,7 +429,8 @@ def handle_affinity_separate():
         return jsonify({'error': f"Failed to read files: {e}"}), 400
 
     # Get optional parameters
-    ligand_resname = request.form.get('ligand_resname', 'LIG')
+    # For separate inputs, ligand_resname is handled automatically by the system
+    ligand_resname = request.form.get('ligand_resname', 'LIG')  # Keep for backward compatibility but will be overridden
     output_prefix = request.form.get('output_prefix', 'complex')
     
     priority = request.form.get('priority', 'default').lower()

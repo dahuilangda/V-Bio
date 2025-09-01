@@ -7,6 +7,7 @@ import math
 import numpy as np
 import zipfile
 import py3Dmol
+import os
 
 from frontend.prediction_client import predict_affinity, predict_affinity_separate, get_status
 from frontend.utils import get_ligand_resnames_from_pdb, read_cif_from_string, extract_protein_residue_bfactors, visualize_structure_py3dmol
@@ -29,7 +30,7 @@ def render_affinity_page():
 
     is_running = st.session_state.affinity_task_id is not None and st.session_state.affinity_results is None and st.session_state.affinity_error is None
 
-    with st.expander("� **步骤 1: 上传结构文件**", expanded=not is_running and st.session_state.affinity_results is None):
+    with st.expander("🏃‍♀️ **步骤 1: 上传结构文件**", expanded=not is_running and st.session_state.affinity_results is None):
         # Mode selection with better wording
         st.markdown("**选择您的文件类型：**")
         input_mode = st.radio(
@@ -126,20 +127,26 @@ def render_affinity_page():
             if protein_file and ligand_file:
                 st.session_state.ligand_resnames = []
             
-            # Ligand name for separate mode
-            ligand_resname = st.text_input(
-                "配体名称", 
-                value="LIG",
-                disabled=is_running, 
-                help="为小分子配体指定一个三字母名称，如 LIG、UNK 等"
-            )
+            # For separate mode, automatically use "LIG" as ligand name
+            if input_mode == "蛋白质 + 小分子":
+                ligand_resname = "LIG"  # Automatically set, no user input needed
+                # st.info("💡 分开上传模式下，系统将自动生成标准PDB复合物文件，配体名称自动设为 'LIG'")
+            else:
+                # Ligand name for complex mode only
+                ligand_resname = st.text_input(
+                    "配体名称", 
+                    value="LIG",
+                    disabled=is_running, 
+                    help="为小分子配体指定一个三字母名称，如 LIG、UNK 等"
+                )
 
         # Submit button with better validation
         files_ready = False
         if input_mode == "完整复合物":
             files_ready = uploaded_file is not None and ligand_resname.strip()
         else:
-            files_ready = protein_file is not None and ligand_file is not None and ligand_resname.strip()
+            # For separate inputs, only need both files (ligand_resname is automatic)
+            files_ready = protein_file is not None and ligand_file is not None
 
         # Show what's missing if not ready
         if not files_ready and not is_running:
@@ -150,12 +157,11 @@ def render_affinity_page():
                 if not ligand_resname.strip():
                     missing_items.append("配体名称")
             else:
+                # For separate inputs, only check files (ligand_resname is automatic)
                 if not protein_file:
                     missing_items.append("蛋白质结构文件")
                 if not ligand_file:
                     missing_items.append("小分子结构文件")
-                if not ligand_resname.strip():
-                    missing_items.append("配体名称")
             
             if missing_items:
                 st.warning(f"⚠️ 请完成以下步骤: {' • '.join(missing_items)}")
@@ -218,14 +224,52 @@ def render_affinity_page():
                                 response.raise_for_status()
                                 
                                 with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+                                    cif_content = None
+                                    pdb_content = None
+                                    
                                     for filename in z.namelist():
                                         if filename.endswith('.csv'):
                                             with z.open(filename) as f:
                                                 df = pd.read_csv(f)
                                                 st.session_state.affinity_results = df
-                                        elif filename.endswith('.pdb') or filename.endswith('.cif'):
+                                        elif filename.endswith('.cif'):
                                             with z.open(filename) as f:
-                                                st.session_state.affinity_cif = f.read().decode("utf-8")
+                                                cif_content = f.read().decode("utf-8")
+                                        elif filename.endswith('.pdb'):
+                                            with z.open(filename) as f:
+                                                pdb_content = f.read().decode("utf-8")
+                                    
+                                    # Prefer CIF content, fallback to PDB with conversion
+                                    if cif_content:
+                                        st.session_state.affinity_cif = cif_content
+                                    elif pdb_content:
+                                        # Convert PDB to CIF for visualization
+                                        try:
+                                            import tempfile
+                                            import subprocess
+                                            
+                                            with tempfile.NamedTemporaryFile(mode='w', suffix='.pdb', delete=False) as pdb_file:
+                                                pdb_file.write(pdb_content)
+                                                pdb_file_path = pdb_file.name
+                                            
+                                            cif_file_path = pdb_file_path.replace('.pdb', '.cif')
+                                            result = subprocess.run(['maxit', '-input', pdb_file_path, '-output', cif_file_path, '-o', '1'], 
+                                                                  check=True, capture_output=True, text=True)
+                                            
+                                            if os.path.exists(cif_file_path):
+                                                with open(cif_file_path, 'r') as f:
+                                                    converted_cif = f.read()
+                                                st.session_state.affinity_cif = converted_cif
+                                                
+                                            # Clean up temp files
+                                            os.unlink(pdb_file_path)
+                                            if os.path.exists(cif_file_path):
+                                                os.unlink(cif_file_path)
+                                                
+                                        except Exception as conv_error:
+                                            # If conversion fails, store PDB content for debugging
+                                            st.session_state.affinity_cif = pdb_content
+                                            print(f"Warning: Could not convert PDB to CIF: {conv_error}")
 
                                 st.toast("✅ 结果已成功加载！", icon="🎊")
                                 st.rerun()
@@ -380,7 +424,37 @@ def render_affinity_page():
                     )
                     st.components.v1.html(view_html, height=600, scrolling=False)
                 except Exception as e:
-                    st.error(f"❌ 无法加载3D结构：{e}")
+                    error_msg = str(e)
+                    st.error(f"❌ 无法加载3D结构：{error_msg}")
+                    
+                    # Debug information to help identify the issue
+                    with st.expander("🐛 调试信息", expanded=False):
+                        cif_content = st.session_state.affinity_cif
+                        st.write("**CIF内容统计:**")
+                        st.write(f"- 总长度: {len(cif_content)} 字符")
+                        st.write(f"- 是否以 'data_' 开头: {cif_content.strip().startswith('data_')}")
+                        st.write(f"- 包含 '_atom_site' 标签: {'_atom_site' in cif_content}")
+                        
+                        # Show first few lines
+                        lines = cif_content.split('\n')[:10]
+                        st.write("**前10行内容:**")
+                        st.code('\n'.join(lines), language="text")
+                        
+                        # Test individual components
+                        st.write("**组件测试:**")
+                        try:
+                            import py3Dmol
+                            view = py3Dmol.view(width='100%', height=600)
+                            view.addModel(cif_content, 'cif')
+                            st.success("✓ py3Dmol 可以解析 CIF 内容")
+                        except Exception as py3d_error:
+                            st.error(f"✗ py3Dmol 解析失败: {py3d_error}")
+                        
+                        try:
+                            structure_test = read_cif_from_string(cif_content)
+                            st.success("✓ BioPython 可以解析 CIF 内容")
+                        except Exception as bio_error:
+                            st.error(f"✗ BioPython 解析失败: {bio_error}")
 
         with col2:
             results_df = st.session_state.affinity_results

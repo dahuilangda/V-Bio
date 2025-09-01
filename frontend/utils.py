@@ -270,9 +270,26 @@ def get_available_atoms(components, chain_id, residue_number, molecule_type=None
 def read_cif_from_string(cif_content: str) -> Structure:
     """Parses a CIF string into a BioPython Structure object."""
     parser = MMCIFParser(QUIET=True)
-    file_like = io.StringIO(cif_content)
-    structure = parser.get_structure('protein', file_like)
-    return structure
+    
+    # Ensure the CIF content has the proper header
+    cif_content = cif_content.strip()
+    if not cif_content:
+        raise ValueError("CIF content is empty")
+        
+    if not cif_content.startswith('data_'):
+        # Add a proper mmCIF header if missing
+        cif_content = f"data_structure\n#\n{cif_content}"
+    
+    # Verify essential mmCIF sections exist
+    if '_atom_site' not in cif_content:
+        raise ValueError("CIF content missing essential '_atom_site' section")
+    
+    try:
+        file_like = io.StringIO(cif_content)
+        structure = parser.get_structure('protein', file_like)
+        return structure
+    except Exception as e:
+        raise ValueError(f"Failed to parse CIF content: {e}") from e
 
 def extract_protein_residue_bfactors(structure: Structure):
     """Extracts b-factors for protein/rna/dna residues only."""

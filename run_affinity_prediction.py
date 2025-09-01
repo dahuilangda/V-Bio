@@ -24,12 +24,21 @@ def run_prediction(args_path: str):
         ligand_resname = args.get('ligand_resname', 'LIG')
         output_csv_path = args['output_csv_path']
 
-        # Initialize Boltzina
-        boltzina = Boltzina(
-            output_dir=os.path.join(task_temp_dir, 'boltzina_output'),
-            work_dir=os.path.join(task_temp_dir, 'boltzina_work'),
-            ligand_resname=ligand_resname
-        )
+        # Check if this is separate input mode or complex file mode
+        if 'protein_file_path' in args and 'ligand_file_path' in args:
+            # For separate inputs, always use "LIG" as ligand name
+            boltzina = Boltzina(
+                output_dir=os.path.join(task_temp_dir, 'boltzina_output'),
+                work_dir=os.path.join(task_temp_dir, 'boltzina_work'),
+                ligand_resname="LIG"  # Fixed ligand name for separate inputs
+            )
+        else:
+            # For complex file mode, use the provided ligand_resname
+            boltzina = Boltzina(
+                output_dir=os.path.join(task_temp_dir, 'boltzina_output'),
+                work_dir=os.path.join(task_temp_dir, 'boltzina_work'),
+                ligand_resname=ligand_resname
+            )
 
         # Check if this is separate input mode or complex file mode
         if 'protein_file_path' in args and 'ligand_file_path' in args:

@@ -374,6 +374,8 @@ def affinity_task(self, affinity_args: dict):
         task_temp_dir = tempfile.mkdtemp(prefix=f"boltz_affinity_task_{task_id}_")
         
         # Handle different input modes: complex file vs separate files
+        input_file_path = None  # Initialize to avoid UnboundLocalError
+        
         if 'protein_file_content' in affinity_args and 'ligand_file_content' in affinity_args:
             # Separate protein and ligand files mode
             protein_content = affinity_args['protein_file_content']
@@ -396,11 +398,15 @@ def affinity_task(self, affinity_args: dict):
             
             output_csv_path = os.path.join(task_temp_dir, f"{task_id}_affinity_results.csv")
             
+            # For separate inputs, we'll update input_file_path after prediction to use generated complex
+            input_file_path = protein_file_path  # Temporary, will be updated after prediction
+            input_filename = protein_filename    # Temporary, will be updated after prediction
+            
             args_for_script = {
                 'task_temp_dir': task_temp_dir,
                 'protein_file_path': protein_file_path,
                 'ligand_file_path': ligand_file_path,
-                'ligand_resname': affinity_args.get('ligand_resname', 'LIG'),
+                'ligand_resname': 'LIG',  # Fixed ligand name for separate inputs
                 'output_prefix': affinity_args.get('output_prefix', 'complex'),
                 'output_csv_path': output_csv_path
             }
@@ -416,13 +422,61 @@ def affinity_task(self, affinity_args: dict):
             if input_filename.lower().endswith('.pdb'):
                 cif_filename = f"{os.path.splitext(input_filename)[0]}.cif"
                 cif_path = os.path.join(task_temp_dir, cif_filename)
+                
+                # Check if maxit is available
                 try:
-                    subprocess.run(["maxit", "-input", input_file_path, "-output", cif_path, "-o", "1"], check=True, capture_output=True, text=True)
+                    # subprocess.run(["maxit", "--help"], capture_output=True, check=True)
+                    #上面的不行, 换一种
+                    subprocess.run(["which", "maxit"], capture_output=True, check=True)
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    error_message = (
+                        "maxit tool is not installed or not accessible. "
+                        "Please install maxit to convert PDB files to mmCIF format. "
+                        "You can install it from: https://sw-tools.rcsb.org/apps/MAXIT/index.html"
+                    )
+                    logger.error(error_message)
+                    tracker.update_status("failed", "maxit tool not available")
+                    raise RuntimeError(error_message)
+                
+                try:
+                    result = subprocess.run(["maxit", "-input", input_file_path, "-output", cif_path, "-o", "1"], 
+                                          check=True, capture_output=True, text=True)
+                    
+                    # Verify the generated CIF file has proper format and content
+                    if os.path.exists(cif_path):
+                        with open(cif_path, 'r') as f:
+                            cif_content = f.read().strip()
+                        
+                        # Check if the CIF file is empty or has content
+                        if not cif_content:
+                            error_message = f"maxit generated empty CIF file for {input_filename}"
+                            logger.error(error_message)
+                            tracker.update_status("failed", "Empty CIF file generated")
+                            raise RuntimeError(error_message)
+                        
+                        # Check if the CIF file starts with data_ directive
+                        if not cif_content.startswith('data_'):
+                            # Fix the CIF file by adding proper header
+                            fixed_content = f"data_protein\n#\n{cif_content}"
+                            with open(cif_path, 'w') as f:
+                                f.write(fixed_content)
+                            logger.info(f"Fixed CIF format for {cif_filename} - added data_ header")
+                        
+                        # Verify the fixed file can be read
+                        with open(cif_path, 'r') as f:
+                            final_content = f.read()
+                        
+                        if len(final_content) < 50:  # Suspiciously short file
+                            logger.warning(f"Generated CIF file seems unusually short: {len(final_content)} characters")
+                    
                     input_file_path = cif_path
                     input_filename = cif_filename
+                    logger.info(f"Successfully converted {input_filename} to CIF format using maxit")
                 except subprocess.CalledProcessError as e:
-                    logger.error(f"maxit failed for {input_filename}: {e.stderr}")
-                    raise e
+                    error_message = f"maxit failed for {input_filename}: {e.stderr}"
+                    logger.error(error_message)
+                    tracker.update_status("failed", "PDB to CIF conversion failed")
+                    raise RuntimeError(error_message) from e
 
             output_csv_path = os.path.join(task_temp_dir, f"{task_id}_affinity_results.csv")
 
@@ -495,7 +549,57 @@ def affinity_task(self, affinity_args: dict):
         output_archive_path = os.path.join(task_temp_dir, f"{task_id}_affinity_results.zip")
         with zipfile.ZipFile(output_archive_path, 'w') as zipf:
             zipf.write(output_csv_path, os.path.basename(output_csv_path))
-            zipf.write(input_file_path, os.path.basename(input_file_path))
+            
+            # For separate inputs, include the generated complex file if it exists
+            if 'protein_file_path' in args_for_script and 'ligand_file_path' in args_for_script:
+                # Look for generated complex files
+                combined_dir = os.path.join(task_temp_dir, 'boltzina_output', 'combined_complexes')
+                if os.path.exists(combined_dir):
+                    for file in os.listdir(combined_dir):
+                        if file.endswith('.pdb'):
+                            complex_file_path = os.path.join(combined_dir, file)
+                            zipf.write(complex_file_path, f"generated_complex_{file}")
+                            
+                            # Convert the generated complex to CIF for 3D visualization
+                            cif_filename = f"{os.path.splitext(file)[0]}.cif"
+                            cif_path = os.path.join(task_temp_dir, cif_filename)
+                            
+                            try:
+                                # Check if maxit is available
+                                subprocess.run(["which", "maxit"], capture_output=True, check=True)
+                                
+                                # Convert to CIF
+                                result = subprocess.run(["maxit", "-input", complex_file_path, "-output", cif_path, "-o", "1"], 
+                                                      check=True, capture_output=True, text=True)
+                                
+                                # Verify and fix CIF format
+                                if os.path.exists(cif_path):
+                                    with open(cif_path, 'r') as f:
+                                        cif_content = f.read().strip()
+                                    
+                                    if cif_content and '_atom_site' in cif_content:
+                                        if not cif_content.startswith('data_'):
+                                            fixed_content = f"data_complex\n#\n{cif_content}"
+                                            with open(cif_path, 'w') as f:
+                                                f.write(fixed_content)
+                                            logger.info(f"Fixed CIF format for {cif_filename}")
+                                        
+                                        # Add CIF file to archive
+                                        zipf.write(cif_path, f"complex_{cif_filename}")
+                                        logger.info(f"Generated and included CIF file: {cif_filename}")
+                                    else:
+                                        logger.warning(f"Generated CIF file is incomplete or missing _atom_site section")
+                                        
+                            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                                logger.warning(f"Could not convert complex to CIF format: {e}")
+                                # CIF conversion failure is not critical, continue without it
+                            
+                            input_file_path = complex_file_path  # Update for logging
+                            break
+            
+            # Include original input file if it exists
+            if input_file_path and os.path.exists(input_file_path):
+                zipf.write(input_file_path, os.path.basename(input_file_path))
 
         logger.info(f"Task {task_id}: Results archived to '{output_archive_path}'.")
 

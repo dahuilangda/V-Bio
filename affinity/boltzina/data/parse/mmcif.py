@@ -440,8 +440,14 @@ def parse_ccd_residue(  # noqa: PLR0915, C901
             )
             bfactor = gemmi_mol[0].b_iso
         ref_atom = ref_mol.GetAtoms()[0]
+        if ref_atom.HasProp("name"):
+            atom_name = ref_atom.GetProp("name")
+        else:
+            # Fallback to element symbol if name property is missing
+            atom_name = ref_atom.GetSymbol()
+        
         atom = ParsedAtom(
-            name=ref_atom.GetProp("name"),
+            name=atom_name,
             coords=pos,
             is_present=is_present,
             bfactor=bfactor,
@@ -478,7 +484,11 @@ def parse_ccd_residue(  # noqa: PLR0915, C901
 
     for i, atom in enumerate(ref_mol.GetAtoms()):
         # Get atom name, charge, element and reference coordinates
-        atom_name = atom.GetProp("name")
+        if atom.HasProp("name"):
+            atom_name = atom.GetProp("name")
+        else:
+            # Fallback to element symbol + index if name property is missing
+            atom_name = f"{atom.GetSymbol()}{i+1}"
 
         # If the atom is a leaving atom, skip if not in the PDB and is_covalent
         if (
@@ -648,7 +658,14 @@ def parse_polymer(  # noqa: C901, PLR0915, PLR0912
         ref_mol = AllChem.RemoveHs(ref_mol, sanitize=False)
 
         # Only use reference atoms set in constants
-        ref_name_to_atom = {a.GetProp("name"): a for a in ref_mol.GetAtoms()}
+        ref_name_to_atom = {}
+        for a in ref_mol.GetAtoms():
+            if a.HasProp("name"):
+                name = a.GetProp("name")
+            else:
+                # Fallback to element symbol + index if name property is missing
+                name = f"{a.GetSymbol()}{a.GetIdx()}"
+            ref_name_to_atom[name] = a
         ref_atoms = [ref_name_to_atom[a] for a in const.ref_atoms[res_name]]
 
         # Iterate, always in the same order
@@ -656,7 +673,11 @@ def parse_polymer(  # noqa: C901, PLR0915, PLR0912
 
         for ref_atom in ref_atoms:
             # Get atom name
-            atom_name = ref_atom.GetProp("name")
+            if ref_atom.HasProp("name"):
+                atom_name = ref_atom.GetProp("name")
+            else:
+                # Fallback to element symbol + index if name property is missing
+                atom_name = f"{ref_atom.GetSymbol()}{ref_atom.GetIdx()}"
 
             # Get coordinates from PDB
             if atom_name in name_to_atom:
