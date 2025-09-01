@@ -386,6 +386,79 @@ def handle_affinity():
     return jsonify({'task_id': task.id}), 202
 
 
+@app.route('/api/affinity_separate', methods=['POST'])
+@require_api_token
+def handle_affinity_separate():
+    """
+    Receives affinity prediction requests with separate protein and ligand files,
+    and dispatches Celery tasks.
+    """
+    logger.info("Received separate affinity prediction request.")
+
+    # Check for required files
+    if 'protein_file' not in request.files or 'ligand_file' not in request.files:
+        logger.error("Missing required files in separate affinity prediction request. Client IP: %s", request.remote_addr)
+        return jsonify({'error': "Request form must contain both 'protein_file' and 'ligand_file' parts"}), 400
+
+    protein_file = request.files['protein_file']
+    ligand_file = request.files['ligand_file']
+    
+    if protein_file.filename == '' or ligand_file.filename == '':
+        logger.error("No selected files for separate affinity prediction request.")
+        return jsonify({'error': 'Both protein_file and ligand_file must be selected'}), 400
+
+    try:
+        # Read protein file
+        protein_file_content = protein_file.read().decode('utf-8')
+        
+        # Read ligand file (might be binary for SDF)
+        ligand_file.seek(0)  # Reset file pointer
+        try:
+            ligand_file_content = ligand_file.read().decode('utf-8')
+        except UnicodeDecodeError:
+            # For binary SDF files, read as bytes then decode
+            ligand_file.seek(0)
+            ligand_file_content = ligand_file.read().decode('utf-8', errors='replace')
+        
+        logger.debug("Protein and ligand files successfully read.")
+    except UnicodeDecodeError:
+        logger.error(f"Failed to decode files as UTF-8. Client IP: {request.remote_addr}")
+        return jsonify({'error': "Failed to decode files. Ensure they are valid text files."}), 400
+    except IOError as e:
+        logger.exception(f"Failed to read files from request: {e}. Client IP: {request.remote_addr}")
+        return jsonify({'error': f"Failed to read files: {e}"}), 400
+
+    # Get optional parameters
+    ligand_resname = request.form.get('ligand_resname', 'LIG')
+    output_prefix = request.form.get('output_prefix', 'complex')
+    
+    priority = request.form.get('priority', 'default').lower()
+    if priority not in ['high', 'default']:
+        logger.warning(f"Invalid priority '{priority}' provided by client {request.remote_addr}. Defaulting to 'default'.")
+        priority = 'default'
+
+    target_queue = config.HIGH_PRIORITY_QUEUE if priority == 'high' else config.DEFAULT_QUEUE
+    logger.info(f"Separate affinity prediction priority: {priority}, targeting queue: '{target_queue}' for client {request.remote_addr}.")
+
+    affinity_args = {
+        'protein_file_content': protein_file_content,
+        'ligand_file_content': ligand_file_content,
+        'protein_filename': secure_filename(protein_file.filename),
+        'ligand_filename': secure_filename(ligand_file.filename),
+        'ligand_resname': ligand_resname,
+        'output_prefix': output_prefix
+    }
+
+    try:
+        task = affinity_task.apply_async(args=[affinity_args], queue=target_queue)
+        logger.info(f"Separate affinity task {task.id} dispatched to queue: '{target_queue}'.")
+    except Exception as e:
+        logger.exception(f"Failed to dispatch Celery task for separate affinity prediction request from {request.remote_addr}: {e}")
+        return jsonify({'error': 'Failed to dispatch separate affinity prediction task.', 'details': str(e)}), 500
+    
+    return jsonify({'task_id': task.id}), 202
+
+
 @app.route('/status/<task_id>', methods=['GET'])
 def get_task_status(task_id):
     """

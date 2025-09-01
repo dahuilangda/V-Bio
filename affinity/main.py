@@ -443,6 +443,178 @@ class Boltzina:
             self._cleanup_temporary_ligands()
             print("CCD cache cleanup completed.")
 
+    def predict_with_separate_inputs(self, protein_file: str, ligand_file: str, output_prefix: str = "combined_complex"):
+        """Predict binding affinity using separate protein PDB and ligand SDF files."""
+        try:
+            protein_path = Path(protein_file)
+            ligand_path = Path(ligand_file)
+            
+            # Validate input files
+            if not protein_path.exists():
+                raise FileNotFoundError(f"Protein file not found: {protein_file}")
+            if not ligand_path.exists():
+                raise FileNotFoundError(f"Ligand file not found: {ligand_file}")
+            
+            if protein_path.suffix.lower() not in ['.pdb', '.cif']:
+                raise ValueError("Protein file must be PDB or CIF format")
+            if ligand_path.suffix.lower() not in ['.sdf', '.mol', '.mol2']:
+                raise ValueError("Ligand file must be SDF, MOL, or MOL2 format")
+            
+            print(f"Processing protein: {protein_path.name}")
+            print(f"Processing ligand: {ligand_path.name}")
+            
+            # Create combined complex structure
+            complex_file = self._create_combined_complex(protein_path, ligand_path, output_prefix)
+            
+            # Use existing prediction pipeline
+            self.predict([str(complex_file)])
+            
+        finally:
+            # Always cleanup temporary ligands, even if an error occurred
+            self._cleanup_temporary_ligands()
+            print("CCD cache cleanup completed.")
+
+    def _create_combined_complex(self, protein_file: Path, ligand_file: Path, output_prefix: str) -> Path:
+        """Create a combined PDB file from separate protein and ligand files."""
+        combined_dir = self.output_dir / "combined_complexes"
+        combined_dir.mkdir(exist_ok=True)
+        
+        combined_file = combined_dir / f"{output_prefix}_complex.pdb"
+        
+        # Load ligand from SDF/MOL file
+        ligand_mol = self._load_ligand_from_file(ligand_file)
+        if ligand_mol is None:
+            raise ValueError(f"Failed to load ligand from {ligand_file}")
+        
+        # Add ligand to CCD temporarily
+        self._add_temporary_ligand_to_ccd(self.ligand_resname, ligand_mol)
+        
+        # Read protein file
+        if protein_file.suffix.lower() == '.pdb':
+            protein_content = protein_file.read_text()
+        elif protein_file.suffix.lower() == '.cif':
+            # Convert CIF to PDB for easier manipulation
+            temp_pdb = self._cif_to_pdb(protein_file)
+            if temp_pdb is None:
+                raise ValueError(f"Failed to convert CIF to PDB: {protein_file}")
+            protein_content = temp_pdb.read_text()
+        else:
+            raise ValueError(f"Unsupported protein file format: {protein_file.suffix}")
+        
+        # Generate ligand coordinates and add to protein
+        ligand_pdb_lines = self._generate_ligand_pdb_lines(ligand_mol, self.ligand_resname)
+        
+        # Combine protein and ligand
+        combined_content = self._combine_protein_ligand(protein_content, ligand_pdb_lines)
+        
+        # Write combined file
+        combined_file.write_text(combined_content)
+        print(f"Created combined complex: {combined_file}")
+        
+        return combined_file
+
+    def _load_ligand_from_file(self, ligand_file: Path):
+        """Load ligand molecule from SDF, MOL, or MOL2 file."""
+        from rdkit import Chem
+        from rdkit.Chem import rdMolFiles
+        
+        try:
+            if ligand_file.suffix.lower() in ['.sdf']:
+                supplier = Chem.SDMolSupplier(str(ligand_file))
+                mol = next(supplier)
+            elif ligand_file.suffix.lower() in ['.mol']:
+                mol = Chem.MolFromMolFile(str(ligand_file))
+            elif ligand_file.suffix.lower() in ['.mol2']:
+                mol = Chem.MolFromMol2File(str(ligand_file))
+            else:
+                raise ValueError(f"Unsupported ligand file format: {ligand_file.suffix}")
+            
+            if mol is None:
+                raise ValueError("Failed to parse ligand molecule")
+            
+            # Add hydrogens and optimize geometry
+            mol = Chem.AddHs(mol)
+            
+            # Try to optimize 3D coordinates if they don't exist
+            if mol.GetNumConformers() == 0:
+                from rdkit.Chem import AllChem
+                AllChem.EmbedMolecule(mol, randomSeed=42)
+                AllChem.MMFFOptimizeMolecule(mol)
+                print("Generated 3D coordinates for ligand")
+            
+            return mol
+            
+        except Exception as e:
+            print(f"Error loading ligand from {ligand_file}: {e}")
+            return None
+
+    def _cif_to_pdb(self, cif_file: Path) -> Optional[Path]:
+        """Convert CIF file to PDB format using maxit."""
+        pdb_dir = self.output_dir / "temp_pdb_files"
+        pdb_dir.mkdir(exist_ok=True)
+        
+        pdb_file = pdb_dir / f"{cif_file.stem}.pdb"
+        
+        try:
+            cmd = ["maxit", "-input", str(cif_file), "-output", str(pdb_file), "-o", "1"]
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            return pdb_file
+        except subprocess.CalledProcessError as e:
+            print(f"Error converting CIF to PDB: {e.stderr}")
+            return None
+
+    def _generate_ligand_pdb_lines(self, mol, resname: str, chain_id: str = "L") -> List[str]:
+        """Generate PDB HETATM lines for a ligand molecule."""
+        from rdkit import Chem
+        
+        pdb_lines = []
+        atom_idx = 1
+        
+        # Get conformer (3D coordinates)
+        if mol.GetNumConformers() == 0:
+            print("Warning: No 3D coordinates found for ligand")
+            return []
+        
+        conf = mol.GetConformer()
+        
+        for atom in mol.GetAtoms():
+            pos = conf.GetAtomPosition(atom.GetIdx())
+            element = atom.GetSymbol()
+            
+            # Get atom name, try to use a reasonable naming scheme
+            atom_name = f"{element}{atom.GetIdx() + 1}"
+            if len(atom_name) > 4:
+                atom_name = atom_name[:4]
+            
+            # Format PDB HETATM line
+            pdb_line = f"HETATM{atom_idx:5d} {atom_name:4s} {resname:3s} {chain_id:1s}   1    " \
+                      f"{pos.x:8.3f}{pos.y:8.3f}{pos.z:8.3f}  1.00 20.00           {element:2s}"
+            
+            pdb_lines.append(pdb_line)
+            atom_idx += 1
+        
+        return pdb_lines
+
+    def _combine_protein_ligand(self, protein_content: str, ligand_lines: List[str]) -> str:
+        """Combine protein PDB content with ligand lines."""
+        lines = protein_content.splitlines()
+        
+        # Find insertion point (before END or at the end)
+        insert_idx = len(lines)
+        for i, line in enumerate(lines):
+            if line.startswith('END'):
+                insert_idx = i
+                break
+        
+        # Insert ligand lines
+        combined_lines = lines[:insert_idx] + ligand_lines + lines[insert_idx:]
+        
+        # Add TER record after ligand if END exists
+        if insert_idx < len(lines) and lines[insert_idx].startswith('END'):
+            combined_lines.insert(-1, "TER")
+        
+        return '\n'.join(combined_lines)
+
     def _pdb_to_cif(self, pdb_file: Path) -> Optional[Path]:
         cif_dir = self.output_dir / "cif_files"
         cif_dir.mkdir(exist_ok=True)
@@ -808,13 +980,50 @@ class Boltzina:
 
 def main():
     parser = argparse.ArgumentParser(description="Predict binding affinity for protein-ligand complexes using Boltzina.")
-    parser.add_argument("input_files", nargs="+", help="One or more PDB or CIF files of protein-ligand complexes.")
+    
+    # Create subparsers for different modes
+    subparsers = parser.add_subparsers(dest='mode', help='Prediction modes')
+    
+    # Mode 1: Complex files
+    complex_parser = subparsers.add_parser('complex', help='Predict from protein-ligand complex files')
+    complex_parser.add_argument("input_files", nargs="+", help="One or more PDB or CIF files of protein-ligand complexes.")
+    complex_parser.add_argument("--output_dir", default="boltzina_output", help="Directory to save results.")
+    complex_parser.add_argument("--ligand_resname", default="LIG", help="Residue name of the ligand in PDB files (e.g., LIG, UNK).")
+    
+    # Mode 2: Separate files
+    separate_parser = subparsers.add_parser('separate', help='Predict from separate protein and ligand files')
+    separate_parser.add_argument("--protein", required=True, help="Protein structure file (PDB or CIF format).")
+    separate_parser.add_argument("--ligand", required=True, help="Ligand structure file (SDF, MOL, or MOL2 format).")
+    separate_parser.add_argument("--output_dir", default="boltzina_output", help="Directory to save results.")
+    separate_parser.add_argument("--output_prefix", default="complex", help="Prefix for output files.")
+    separate_parser.add_argument("--ligand_resname", default="LIG", help="Residue name to assign to the ligand.")
+    
+    # Legacy mode for backward compatibility
+    parser.add_argument("input_files", nargs="*", help="One or more PDB or CIF files (legacy mode).")
     parser.add_argument("--output_dir", default="boltzina_output", help="Directory to save results.")
-    parser.add_argument("--ligand_resname", default="LIG", help="Residue name of the ligand in PDB files (e.g., LIG, UNK).")
+    parser.add_argument("--ligand_resname", default="LIG", help="Residue name of the ligand.")
+    parser.add_argument("--protein", help="Protein structure file (for separate mode).")
+    parser.add_argument("--ligand", help="Ligand structure file (for separate mode).")
+    parser.add_argument("--output_prefix", default="complex", help="Prefix for output files.")
+    
     args = parser.parse_args()
-
+    
     boltzina = Boltzina(output_dir=args.output_dir, ligand_resname=args.ligand_resname)
-    boltzina.predict(args.input_files)
+    
+    # Determine which mode to use
+    if args.mode == 'complex':
+        boltzina.predict(args.input_files)
+    elif args.mode == 'separate':
+        boltzina.predict_with_separate_inputs(args.protein, args.ligand, args.output_prefix)
+    else:
+        # Legacy mode
+        if args.protein and args.ligand:
+            boltzina.predict_with_separate_inputs(args.protein, args.ligand, args.output_prefix)
+        elif args.input_files:
+            boltzina.predict(args.input_files)
+        else:
+            parser.print_help()
+            print("\nError: You must provide either complex files or separate protein and ligand files.")
 
 if __name__ == "__main__":
     main()

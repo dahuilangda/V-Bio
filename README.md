@@ -176,19 +176,53 @@ export API_SECRET_TOKEN='your-super-secret-and-long-token'
 
 #### **提交亲和力预测任务**
 
+**方式一：复合物文件预测**
+
   * **端点**: `POST /api/affinity`
   * **认证**: 需要 API 令牌
   * **参数**:
     * `input_file`: 蛋白质-配体复合物的 PDB 或 CIF 文件。
     * `ligand_resname`: 配体在结构文件中的残基名 (例如: `LIG`, `UNK`)。
+    * `priority`: 任务优先级 (`high` 或 `default`)
   * **示例**:
     ```bash
     curl -X POST \
          -H "X-API-Token: your-secret-token" \
          -F "input_file=@/path/to/your/complex.pdb" \
          -F "ligand_resname=LIG" \
+         -F "priority=default" \
          http://127.0.0.1:5000/api/affinity
     ```
+
+**方式二：分开输入蛋白质和小分子文件**
+
+  * **端点**: `POST /api/affinity_separate`
+  * **认证**: 需要 API 令牌
+  * **参数**:
+    * `protein_file`: 蛋白质结构文件 (PDB 或 CIF 格式)
+    * `ligand_file`: 小分子结构文件 (SDF, MOL, 或 MOL2 格式)
+    * `ligand_resname`: 要分配给配体的残基名 (例如: `LIG`, `UNK`)
+    * `output_prefix`: 输出文件前缀 (默认: `complex`)
+    * `priority`: 任务优先级 (`high` 或 `default`)
+  * **示例**:
+    ```bash
+    curl -X POST \
+         -H "X-API-Token: your-secret-token" \
+         -F "protein_file=@/path/to/protein.pdb" \
+         -F "ligand_file=@/path/to/ligand.sdf" \
+         -F "ligand_resname=LIG" \
+         -F "output_prefix=my_complex" \
+         -F "priority=default" \
+         http://127.0.0.1:5000/api/affinity_separate
+    ```
+  * **支持的文件格式**:
+    * 蛋白质文件: `.pdb`, `.cif`
+    * 小分子文件: `.sdf`, `.mol`, `.mol2`
+  * **工作流程**:
+    1. 系统自动加载小分子文件并生成3D坐标（如需要）
+    2. 将蛋白质和小分子合并成完整的复合物结构
+    3. 使用标准亲和力预测流程进行分析
+    4. 输出预测结果到CSV文件
 
 #### **管理任务**
 

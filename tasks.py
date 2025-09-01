@@ -345,9 +345,7 @@ def cleanup_stuck_task(self, task_id):
     except Exception as e:
         logger.error(f"Failed to cleanup task {task_id}: {e}")
         return {"status": "error", "message": str(e)}
-
-from Bio.PDB import PDBParser, MMCIFIO
-import io
+    
 
 @celery_app.task(bind=True)
 def affinity_task(self, affinity_args: dict):
@@ -375,32 +373,65 @@ def affinity_task(self, affinity_args: dict):
 
         task_temp_dir = tempfile.mkdtemp(prefix=f"boltz_affinity_task_{task_id}_")
         
-        # Write input file content to a temporary file
-        input_file_content = affinity_args['input_file_content']
-        input_filename = affinity_args['input_filename']
-        input_file_path = os.path.join(task_temp_dir, input_filename)
-        with open(input_file_path, 'w') as f:
-            f.write(input_file_content)
+        # Handle different input modes: complex file vs separate files
+        if 'protein_file_content' in affinity_args and 'ligand_file_content' in affinity_args:
+            # Separate protein and ligand files mode
+            protein_content = affinity_args['protein_file_content']
+            ligand_content = affinity_args['ligand_file_content']
+            protein_filename = affinity_args['protein_filename']
+            ligand_filename = affinity_args['ligand_filename']
+            
+            # Write protein file
+            protein_file_path = os.path.join(task_temp_dir, protein_filename)
+            with open(protein_file_path, 'w') as f:
+                f.write(protein_content)
+            
+            # Write ligand file
+            ligand_file_path = os.path.join(task_temp_dir, ligand_filename)
+            with open(ligand_file_path, 'wb' if ligand_filename.lower().endswith('.sdf') else 'w') as f:
+                if ligand_filename.lower().endswith('.sdf'):
+                    f.write(ligand_content.encode('utf-8'))
+                else:
+                    f.write(ligand_content)
+            
+            output_csv_path = os.path.join(task_temp_dir, f"{task_id}_affinity_results.csv")
+            
+            args_for_script = {
+                'task_temp_dir': task_temp_dir,
+                'protein_file_path': protein_file_path,
+                'ligand_file_path': ligand_file_path,
+                'ligand_resname': affinity_args.get('ligand_resname', 'LIG'),
+                'output_prefix': affinity_args.get('output_prefix', 'complex'),
+                'output_csv_path': output_csv_path
+            }
+            
+        else:
+            # Original complex file mode
+            input_file_content = affinity_args['input_file_content']
+            input_filename = affinity_args['input_filename']
+            input_file_path = os.path.join(task_temp_dir, input_filename)
+            with open(input_file_path, 'w') as f:
+                f.write(input_file_content)
 
-        if input_filename.lower().endswith('.pdb'):
-            cif_filename = f"{os.path.splitext(input_filename)[0]}.cif"
-            cif_path = os.path.join(task_temp_dir, cif_filename)
-            try:
-                subprocess.run(["maxit", "-input", input_file_path, "-output", cif_path, "-o", "1"], check=True, capture_output=True, text=True)
-                input_file_path = cif_path
-                input_filename = cif_filename
-            except subprocess.CalledProcessError as e:
-                logger.error(f"maxit failed for {input_filename}: {e.stderr}")
-                raise e
+            if input_filename.lower().endswith('.pdb'):
+                cif_filename = f"{os.path.splitext(input_filename)[0]}.cif"
+                cif_path = os.path.join(task_temp_dir, cif_filename)
+                try:
+                    subprocess.run(["maxit", "-input", input_file_path, "-output", cif_path, "-o", "1"], check=True, capture_output=True, text=True)
+                    input_file_path = cif_path
+                    input_filename = cif_filename
+                except subprocess.CalledProcessError as e:
+                    logger.error(f"maxit failed for {input_filename}: {e.stderr}")
+                    raise e
 
-        output_csv_path = os.path.join(task_temp_dir, f"{task_id}_affinity_results.csv")
+            output_csv_path = os.path.join(task_temp_dir, f"{task_id}_affinity_results.csv")
 
-        args_for_script = {
-            'task_temp_dir': task_temp_dir,
-            'input_file_path': input_file_path,
-            'ligand_resname': affinity_args['ligand_resname'],
-            'output_csv_path': output_csv_path
-        }
+            args_for_script = {
+                'task_temp_dir': task_temp_dir,
+                'input_file_path': input_file_path,
+                'ligand_resname': affinity_args['ligand_resname'],
+                'output_csv_path': output_csv_path
+            }
 
         args_file_path = os.path.join(task_temp_dir, 'args.json')
         with open(args_file_path, 'w') as f:

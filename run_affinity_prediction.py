@@ -14,17 +14,15 @@ logger = logging.getLogger(__name__)
 def run_prediction(args_path: str):
     """
     Runs the affinity prediction based on arguments from a JSON file.
+    Supports both complex file mode and separate protein/ligand mode.
     """
     try:
         with open(args_path, 'r') as f:
             args = json.load(f)
         
         task_temp_dir = args['task_temp_dir']
-        input_file_path = args['input_file_path']
-        ligand_resname = args['ligand_resname']
+        ligand_resname = args.get('ligand_resname', 'LIG')
         output_csv_path = args['output_csv_path']
-
-        logger.info(f"Starting affinity prediction for {input_file_path}")
 
         # Initialize Boltzina
         boltzina = Boltzina(
@@ -33,8 +31,30 @@ def run_prediction(args_path: str):
             ligand_resname=ligand_resname
         )
 
-        # Run prediction
-        boltzina.predict([input_file_path])
+        # Check if this is separate input mode or complex file mode
+        if 'protein_file_path' in args and 'ligand_file_path' in args:
+            # Separate protein and ligand files mode
+            protein_file_path = args['protein_file_path']
+            ligand_file_path = args['ligand_file_path']
+            output_prefix = args.get('output_prefix', 'complex')
+            
+            logger.info(f"Starting affinity prediction with separate files:")
+            logger.info(f"  Protein: {protein_file_path}")
+            logger.info(f"  Ligand: {ligand_file_path}")
+            
+            # Run prediction with separate inputs
+            boltzina.predict_with_separate_inputs(protein_file_path, ligand_file_path, output_prefix)
+            
+        elif 'input_file_path' in args:
+            # Original complex file mode
+            input_file_path = args['input_file_path']
+            logger.info(f"Starting affinity prediction for complex file: {input_file_path}")
+            
+            # Run prediction with complex file
+            boltzina.predict([input_file_path])
+            
+        else:
+            raise ValueError("Missing required file arguments. Expected either 'input_file_path' or both 'protein_file_path' and 'ligand_file_path'")
 
         # Save results
         boltzina.save_results_csv(output_csv_path)

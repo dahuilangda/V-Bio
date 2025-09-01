@@ -41,6 +41,30 @@ def predict_affinity(input_file_content: str, input_filename: str, ligand_resnam
     response.raise_for_status()
     return response.json().get('task_id')
 
+def predict_affinity_separate(protein_content: str, protein_filename: str, 
+                             ligand_content: bytes, ligand_filename: str, 
+                             ligand_resname: str, output_prefix: str = "complex"):
+    """
+    Sends separate protein and ligand files for affinity prediction to the backend API.
+    """
+    endpoint = f"{API_URL}/api/affinity_separate"
+    headers = {'X-API-Token': API_TOKEN}
+    
+    files = {
+        'protein_file': (protein_filename, protein_content, 'application/octet-stream'),
+        'ligand_file': (ligand_filename, ligand_content, 'application/octet-stream')
+    }
+    
+    data = {
+        'ligand_resname': ligand_resname,
+        'output_prefix': output_prefix,
+        'priority': 'default'
+    }
+
+    response = requests.post(endpoint, headers=headers, files=files, data=data)
+    response.raise_for_status()
+    return response.json().get('task_id')
+
 
 def get_status(task_id: str):
     """
