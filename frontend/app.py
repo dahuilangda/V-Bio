@@ -173,8 +173,101 @@ st.markdown(f"""
 st.title("🧬 Boltz-WebUI")
 st.markdown("蛋白质-分子复合物结构预测与设计平台")
 
+query_params = st.query_params
+task_type = query_params.get('task_type', 'prediction')
+task_id = query_params.get('task_id')
+
+if task_type == 'designer':
+    target_tab_index = 1
+elif task_type == 'affinity':
+    target_tab_index = 2
+else:
+    target_tab_index = 0
+
+
+should_switch = task_id is not None and target_tab_index > 0
 # 创建选项卡
 tab1, tab2, tab3 = st.tabs(["结构预测", "分子设计", "亲和力预测"])
+
+if should_switch:
+
+    st.components.v1.html(f"""
+    <div id="tab-switcher"></div>
+    <script>
+    console.log("=== 开始选项卡切换 ===");
+    console.log("URL indicates task_type: {task_type}, switching to tab {target_tab_index}");
+    
+    function findAndClickTab() {{
+        console.log("尝试查找选项卡...");
+        
+        // 多种选择器策略
+        let tabs = document.querySelectorAll('[data-baseweb="tab"]');
+        console.log("策略1 - [data-baseweb='tab']:", tabs.length);
+        
+        if (tabs.length === 0) {{
+            tabs = document.querySelectorAll('button[role="tab"]');
+            console.log("策略2 - button[role='tab']:", tabs.length);
+        }}
+        
+        if (tabs.length === 0) {{
+            tabs = document.querySelectorAll('.stTabs button');
+            console.log("策略3 - .stTabs button:", tabs.length);
+        }}
+        
+        if (tabs.length === 0) {{
+            tabs = document.querySelectorAll('div[data-testid="stTabs"] button');
+            console.log("策略4 - div[data-testid='stTabs'] button:", tabs.length);
+        }}
+        
+        console.log("最终找到选项卡数量:", tabs.length);
+        console.log("目标索引:", {target_tab_index});
+        
+        if (tabs.length > {target_tab_index}) {{
+            const targetTab = tabs[{target_tab_index}];
+            console.log("找到目标选项卡:", targetTab);
+            console.log("选项卡文本:", targetTab.textContent);
+            
+            // 点击选项卡
+            targetTab.click();
+            console.log("已点击选项卡");
+            
+            // 添加明显的视觉反馈
+            targetTab.style.backgroundColor = '#4CAF50';
+            targetTab.style.color = 'white';
+            setTimeout(() => {{
+                targetTab.style.backgroundColor = '';
+                targetTab.style.color = '';
+            }}, 2000);
+            
+            return true;
+        }} else {{
+            console.log("ERROR: 未找到目标选项卡，索引超出范围");
+            return false;
+        }}
+    }}
+    
+    // 多次尝试，增加延迟时间
+    let attempts = 0;
+    const maxAttempts = 10;
+    
+    function attemptSwitch() {{
+        attempts++;
+        console.log(`尝试 ${{attempts}}/${{maxAttempts}}`);
+        
+        if (findAndClickTab()) {{
+            console.log("选项卡切换成功！");
+        }} else if (attempts < maxAttempts) {{
+            console.log("切换失败，将重试...");
+            setTimeout(attemptSwitch, 200);
+        }} else {{
+            console.log("达到最大重试次数，切换失败");
+        }}
+    }}
+    
+    // 开始尝试
+    setTimeout(attemptSwitch, 100);
+    </script>
+    """, height=50)
 
 with tab1:
     render_prediction_page()

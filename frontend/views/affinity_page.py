@@ -17,12 +17,6 @@ def render_affinity_page():
     st.markdown("### 🔬 结合亲和力预测")
     st.markdown("预测蛋白质与小分子配体之间的结合强度，帮助您评估分子间的相互作用。")
 
-    # 检查是否有其他类型的活跃任务
-    if hasattr(st.session_state, 'task_id') and st.session_state.task_id:
-        st.info(f"💡 您有一个正在进行的 **结构预测** 任务 (`{st.session_state.task_id[:8]}...`)，请切换到 **结构预测** 选项卡查看进度。", icon="🔬")
-    elif hasattr(st.session_state, 'designer_task_id') and st.session_state.designer_task_id:
-        st.info(f"💡 您有一个正在进行的 **分子设计** 任务 (`{st.session_state.designer_task_id[:8]}...`)，请切换到 **分子设计** 选项卡查看进度。", icon="🧪")
-
     # Initialize session state variables
     if 'affinity_task_id' not in st.session_state:
         st.session_state.affinity_task_id = None

@@ -34,9 +34,6 @@ class URLStateManager:
             'task_type': task_type
         }
         
-        # 设置选项卡索引
-        st.session_state.active_tab_index = 0  # 结构预测选项卡
-        
         # 如果提供了配置信息，将其序列化存储
         if components:
             try:
@@ -67,8 +64,9 @@ class URLStateManager:
         URLStateManager.set_query_params(**params)
     
     @staticmethod
-    def update_url_for_designer_task(task_id: str, work_dir: str = None):
+    def update_url_for_designer_task(task_id: str, work_dir: str = None, components=None, constraints=None, config=None):
         """为设计任务更新URL参数"""
+        import json
         params = {
             'task_id': task_id,
             'task_type': 'designer'
@@ -76,17 +74,41 @@ class URLStateManager:
         if work_dir:
             params['work_dir'] = work_dir
         
-        # 设置选项卡索引
-        st.session_state.active_tab_index = 1  # 分子设计选项卡
+        # 如果提供了配置信息，将其序列化存储
+        if components or constraints or config:
+            try:
+                designer_config = {
+                    'components': components or [],
+                    'constraints': constraints or [],
+                    'config': config or {}
+                }
+                
+                # 简化组件信息，只保存关键数据
+                if components:
+                    simplified_components = []
+                    for comp in components:
+                        if comp.get('sequence', '').strip():  # 只保存有序列的组件
+                            simplified_comp = {
+                                'id': comp.get('id'),
+                                'type': comp.get('type', 'protein'),
+                                'sequence': comp.get('sequence', ''),
+                                'num_copies': comp.get('num_copies', 1),
+                                'use_msa': comp.get('use_msa', False)
+                            }
+                            simplified_components.append(simplified_comp)
+                    designer_config['components'] = simplified_components
+                
+                if designer_config['components'] or designer_config['constraints'] or designer_config['config']:
+                    params['designer_config'] = json.dumps(designer_config)
+            except Exception as e:
+                # 如果序列化失败，不保存配置
+                print(f"Failed to serialize designer config: {e}")
         
         URLStateManager.set_query_params(**params)
     
     @staticmethod
     def update_url_for_affinity_task(task_id: str):
         """为亲和力预测任务更新URL参数"""
-        # 设置选项卡索引
-        st.session_state.active_tab_index = 2  # 亲和力预测选项卡
-        
         URLStateManager.set_query_params(
             task_id=task_id,
             task_type='affinity'
@@ -97,8 +119,9 @@ class URLStateManager:
         """清除所有URL参数"""
         for key in list(st.query_params.keys()):
             del st.query_params[key]
-        # 重置选项卡索引为默认值
-        st.session_state.active_tab_index = 0
+        # 重置自动切换标志，允许下次URL状态恢复时重新切换
+        if 'last_switched_url' in st.session_state:
+            st.session_state.last_switched_url = ''
     
     @staticmethod
     def restore_state_from_url():
@@ -112,6 +135,7 @@ class URLStateManager:
         task_type = query_params.get('task_type', 'prediction')
         work_dir = query_params.get('work_dir')
         config_str = query_params.get('config')
+        designer_config_str = query_params.get('designer_config')
         
         if not task_id:
             return False
@@ -126,7 +150,6 @@ class URLStateManager:
                     st.session_state.results = None
                     st.session_state.error = None
                     st.session_state.raw_zip = None
-                    st.session_state.active_tab_index = 0  # 结构预测选项卡
                     restored = True
                     
                     # 恢复配置信息
@@ -174,8 +197,42 @@ class URLStateManager:
                     st.session_state.designer_work_dir = work_dir
                     st.session_state.designer_results = None
                     st.session_state.designer_error = None
-                    st.session_state.active_tab_index = 1  # 分子设计选项卡
                     restored = True
+                    
+                    # 恢复分子设计配置信息
+                    if designer_config_str:
+                        try:
+                            designer_config_data = json.loads(designer_config_str)
+                            components = designer_config_data.get('components', [])
+                            constraints = designer_config_data.get('constraints', [])
+                            config = designer_config_data.get('config', {})
+                            
+                            # 恢复组件配置
+                            if components:
+                                restored_components = []
+                                for comp in components:
+                                    restored_comp = {
+                                        'id': comp.get('id', str(uuid.uuid4())),
+                                        'type': comp.get('type', 'protein'),
+                                        'sequence': comp.get('sequence', ''),
+                                        'num_copies': comp.get('num_copies', 1),
+                                        'use_msa': comp.get('use_msa', False)
+                                    }
+                                    restored_components.append(restored_comp)
+                                st.session_state.designer_components = restored_components
+                            
+                            # 恢复约束配置
+                            if constraints:
+                                st.session_state.designer_constraints = constraints
+                            
+                            # 恢复其他配置
+                            if config:
+                                st.session_state.designer_config.update(config)
+                        
+                        except (json.JSONDecodeError, KeyError) as e:
+                            print(f"Failed to restore designer config from URL: {e}")
+                            # 配置恢复失败，但任务ID仍然有效
+                    
                     st.toast(f"🔗 从URL恢复设计任务: {task_id[:8]}...", icon="🧪")
             
             elif task_type == 'affinity':
@@ -184,7 +241,6 @@ class URLStateManager:
                     st.session_state.affinity_task_id = task_id
                     st.session_state.affinity_results = None
                     st.session_state.affinity_error = None
-                    st.session_state.active_tab_index = 2  # 亲和力预测选项卡
                     restored = True
                     st.toast(f"🔗 从URL恢复亲和力任务: {task_id[:8]}...", icon="🧬")
                 

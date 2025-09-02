@@ -30,12 +30,6 @@ def render_designer_page():
     st.markdown("### 🧪 从头分子设计")
     st.markdown("使用演化算法设计分子结合体，优化其与目标复合物的结合亲和力。")
     
-    # 检查是否有其他类型的活跃任务
-    if hasattr(st.session_state, 'task_id') and st.session_state.task_id:
-        st.info(f"💡 您有一个正在进行的 **结构预测** 任务 (`{st.session_state.task_id[:8]}...`)，请切换到 **结构预测** 选项卡查看进度。", icon="🔬")
-    elif hasattr(st.session_state, 'affinity_task_id') and st.session_state.affinity_task_id:
-        st.info(f"💡 您有一个正在进行的 **亲和力预测** 任务 (`{st.session_state.affinity_task_id[:8]}...`)，请切换到 **亲和力预测** 选项卡查看进度。", icon="🧬")
-    
     designer_is_running = (
         st.session_state.designer_task_id is not None and 
         st.session_state.designer_results is None and 
@@ -810,10 +804,13 @@ def render_designer_page():
                     st.session_state.designer_work_dir = result['work_dir']
                     st.session_state.designer_config = result['params']
                     
-                    # 更新URL参数以保持设计任务状态
+                    # 更新URL参数以保持设计任务状态和配置
                     URLStateManager.update_url_for_designer_task(
                         task_id=result['task_id'], 
-                        work_dir=result['work_dir']
+                        work_dir=result['work_dir'],
+                        components=st.session_state.designer_components,
+                        constraints=st.session_state.designer_constraints,
+                        config=st.session_state.designer_config
                     )
                     
                     st.toast(f"🎉 设计任务已成功启动！任务ID: {result['task_id']}", icon="✅")
