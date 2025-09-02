@@ -174,7 +174,10 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
     try:
         os.makedirs(work_dir, exist_ok=True)
         
-        designer_script_path = os.path.join(os.getcwd(), 'designer', 'run_design.py')
+        # 使用模块文件的路径来构建designer脚本的绝对路径
+        current_file_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(current_file_dir)  # 上一级目录
+        designer_script_path = os.path.join(project_root, 'designer', 'run_design.py')
         
         if os.path.exists(designer_script_path):
             target_chain_id = params.get('target_chain_id', 'A')
@@ -282,13 +285,15 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
                     log.flush()
                     
                     env = os.environ.copy()
-                    env['PYTHONPATH'] = os.path.join(os.getcwd(), "designer") + ":" + env.get('PYTHONPATH', '')
+                    # 使用project_root来设置PYTHONPATH和工作目录
+                    designer_dir = os.path.join(project_root, "designer")
+                    env['PYTHONPATH'] = designer_dir + ":" + env.get('PYTHONPATH', '')
                     
                     process = subprocess.Popen(
                         cmd,
                         stdout=log,
                         stderr=subprocess.STDOUT,
-                        cwd=os.path.join(os.getcwd(), "designer"),
+                        cwd=designer_dir,
                         env=env
                     )
                     
@@ -724,8 +729,9 @@ def parse_design_progress(log_file: str, params: dict) -> dict:
         for line in lines:
             line = line.strip()
             
+            # 检查任务提交和状态
             if 'Polling task' in line:
-                task_id_match = re.search(r'task[_\]*([a-f0-9\-]+)', line, re.IGNORECASE)
+                task_id_match = re.search(r'task[_]*([a-f0-9\-]+)', line, re.IGNORECASE)
                 task_id = task_id_match.group(1) if task_id_match else None
                 
                 if 'PENDING' in line and task_id:
@@ -735,24 +741,51 @@ def parse_design_progress(log_file: str, params: dict) -> dict:
                     completed_task_ids.add(task_id)
                     pending_task_ids.discard(task_id)
                     current_status = "processing_results"
-            elif 'Generation' in line or 'generation' in line or '代演化' in line:
-                gen_matches = re.findall(r'(?:Generation|第)\s*(\d+)', line, re.IGNORECASE)
-                if gen_matches:
-                    current_generation = max(current_generation, int(gen_matches[-1]))
-                    current_status = "evolving"
-                    
-                gen_match = re.search(r'第\s*(\d+)/(\d+)\s*代演化', line)
-                if gen_match:
-                    current_generation = int(gen_match.group(1))
-                    total_generations = int(gen_match.group(2))
-                    current_status = "evolving"
-                    
-            elif 'Completed generation' in line or '完成第' in line or 'Generation.*complete' in line:
-                gen_matches = re.findall(r'(\d+)', line)
-                if gen_matches:
-                    current_generation = max(current_generation, int(gen_matches[-1]))
-                    current_status = "evolving"
             
+            # 检查演化过程的多种日志格式
+            elif any(keyword in line for keyword in ['Generation', 'generation', '代演化', '开始第', '完成第', '代数', '第', '代']):
+                # 匹配各种可能的代数格式
+                generation_patterns = [
+                    r'第\s*(\d+)/(\d+)\s*代演化',  # 优先匹配完整格式 "第X/Y代演化"
+                    r'(?:Generation|第)\s*(\d+)',
+                    r'(?:开始第|完成第)\s*(\d+)\s*代',
+                    r'generation\s*(\d+)',
+                    r'Gen\s*(\d+)',
+                    r'代数[:\s]*(\d+)',
+                    r'第(\d+)代',
+                    r'(\d+)代演化'
+                ]
+                
+                generation_found = False
+                for pattern in generation_patterns:
+                    gen_matches = re.findall(pattern, line, re.IGNORECASE)
+                    if gen_matches:
+                        if isinstance(gen_matches[0], tuple):
+                            # 处理 "第X/Y代演化" 格式
+                            current_generation = max(current_generation, int(gen_matches[0][0]))
+                            if len(gen_matches[0]) > 1:
+                                total_generations = int(gen_matches[0][1])
+                        else:
+                            current_generation = max(current_generation, int(gen_matches[-1]))
+                        current_status = "evolving"
+                        generation_found = True
+                        break
+                
+                # 如果没有匹配到具体数字，但包含演化相关关键词，说明至少在运行中
+                if not generation_found and current_generation == 0:
+                    if any(keyword in line for keyword in ['演化', '代', 'generation', 'Gen']):
+                        current_status = "evolving"
+            
+            # 检查任务初始化状态
+            elif any(keyword in line.lower() for keyword in ['starting design', '开始设计', '初始化', 'initializing']):
+                if current_generation == 0:
+                    current_status = "initializing"
+            
+            # 检查设计完成状态
+            elif any(keyword in line.lower() for keyword in ['design completed', '设计完成', 'finished', 'all done']):
+                current_status = "completed"
+            
+            # 检查评分信息
             if any(keyword in line.lower() for keyword in ['best score', '最佳评分', 'best:', 'top score', 'highest score']):
                 score_matches = re.findall(r'(\d+\.?\d*(?:[eE][+-]?\d+)?)', line)
                 if score_matches:
@@ -842,11 +875,13 @@ def parse_design_progress(log_file: str, params: dict) -> dict:
         pending_tasks = len(pending_task_ids)
         completed_tasks = len(completed_task_ids)
         
-        if total_generations > 0:
+        # 计算进度比例
+        if total_generations > 0 and current_generation > 0:
             progress_ratio = min(current_generation / total_generations, 1.0)
         else:
-            progress_ratio = 0.0
+            progress_ratio = 0.05 if current_status != "initializing" else 0.01
         
+        # 改进状态消息逻辑
         if current_status == "waiting_for_prediction" and pending_tasks > 0:
             total_prediction_tasks = pending_tasks + completed_tasks
             status_msg = f"等待结构预测完成 ({completed_tasks}/{total_prediction_tasks} 个任务已完成)"
@@ -854,11 +889,35 @@ def parse_design_progress(log_file: str, params: dict) -> dict:
             if current_generation > 0:
                 status_msg = f"第 {current_generation}/{total_generations} 代演化"
             else:
-                status_msg = "初始化演化算法"
+                status_msg = "准备开始演化算法"
         elif current_status == "processing_results":
-            status_msg = "处理预测结果"
+            status_msg = "处理预测结果中"
+        elif current_status == "completed":
+            status_msg = "设计任务已完成"
+            progress_ratio = 1.0
+        elif current_status == "initializing":
+            # 检查日志内容，判断是否真的在初始化
+            if len(lines) > 10:  # 如果有足够的日志内容
+                if any('Starting' in line or '开始' in line or 'Running' in line for line in lines[-10:]):
+                    status_msg = "设计任务正在启动..."
+                    progress_ratio = 0.05
+                else:
+                    status_msg = "初始化中..."
+                    progress_ratio = 0.01
+            else:
+                status_msg = "任务启动中..."
+                progress_ratio = 0.01
         else:
-            status_msg = "初始化中"
+            # 默认状态 - 分析日志内容
+            if pending_tasks > 0 or completed_tasks > 0:
+                status_msg = "处理中..."
+                progress_ratio = 0.1
+            elif current_generation > 0:
+                status_msg = f"第 {current_generation}/{total_generations} 代演化"
+                progress_ratio = min(current_generation / total_generations, 1.0)
+            else:
+                status_msg = "任务进行中..."
+                progress_ratio = 0.05
         
         return {
             'current_generation': current_generation,

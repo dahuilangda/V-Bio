@@ -46,6 +46,13 @@ start_celery() {
     celery -A celery_app worker -l info --concurrency=${CONCURRENCY} -Q high_priority,default --max-tasks-per-child 1
 }
 
+# Function to start the Streamlit frontend
+start_frontend() {
+    echo "Starting Streamlit frontend..."
+    cd frontend
+    streamlit run app.py --server.port=8501 --server.address=0.0.0.0
+}
+
 # Function to start automatic task monitoring and cleanup
 start_monitor() {
     echo "Starting automatic task monitoring and cleanup..."
@@ -162,12 +169,15 @@ case "$1" in
         fi
         start_celery
         ;;
+    frontend)
+        start_frontend
+        ;;
     monitor)
         start_monitor
         ;;
     all)
         echo "Starting all services in the background for development..."
-        echo "Use 'pkill -f gunicorn', 'pkill -f celery', and 'pkill -f monitor_daemon' to stop them."
+        echo "Use 'bash run.sh stop' to stop all services."
         
         # 1. Initialize the pool
         initialize_pool
@@ -184,8 +194,43 @@ case "$1" in
         echo "Starting task monitor in background..."
         nohup bash "$0" monitor > monitor.log 2>&1 &
         
-        echo "All services started. Check flask.log, celery.log, and monitor.log for output."
+        # 5. Start frontend in the background
+        echo "Starting Streamlit frontend in background..."
+        cd frontend
+        nohup streamlit run app.py --server.port=8501 --server.address=0.0.0.0 > ../streamlit.log 2>&1 &
+        cd ..
+        
+        echo "All services started. Check flask.log, celery.log, monitor.log, and streamlit.log for output."
+        echo "Access the web interface at: http://localhost:8501"
         echo "Run 'tail -f monitor.log' to monitor task cleanup activities."
+        ;;
+    dev)
+        echo "Starting all services with frontend for development..."
+        echo "This will start backend services in background and frontend in foreground."
+        
+        # 1. Initialize the pool
+        initialize_pool
+        
+        # 2. Start Flask in the background
+        echo "Starting Flask API server in background..."
+        nohup gunicorn --workers 4 --bind 0.0.0.0:5000 --timeout 120 "api_server:app" > flask.log 2>&1 &
+        
+        # 3. Start Celery in the background
+        echo "Starting Celery worker in background..."
+        nohup bash "$0" celery > celery.log 2>&1 &
+        
+        # 4. Start monitoring daemon in the background
+        echo "Starting task monitor in background..."
+        nohup bash "$0" monitor > monitor.log 2>&1 &
+        
+        # 给后端服务一点启动时间
+        echo "Waiting for backend services to start..."
+        sleep 3
+        
+        # 5. Start frontend in foreground
+        echo "Starting Streamlit frontend..."
+        echo "Access the web interface at: http://localhost:8501"
+        start_frontend
         ;;
     status)
         echo "Checking system status..."
@@ -208,6 +253,12 @@ case "$1" in
             echo "✅ Task monitor is running"
         else
             echo "❌ Task monitor is not running"
+        fi
+        
+        if pgrep -f "streamlit.*app.py" > /dev/null; then
+            echo "✅ Streamlit frontend is running"
+        else
+            echo "❌ Streamlit frontend is not running"
         fi
         
         echo ""
@@ -264,17 +315,20 @@ except Exception as e:
         pkill -f "gunicorn.*api_server" && echo "Stopped Flask API server" || echo "Flask API server was not running"
         pkill -f "celery.*worker" && echo "Stopped Celery worker" || echo "Celery worker was not running"
         pkill -f "monitor_daemon" && echo "Stopped task monitor" || echo "Task monitor was not running"
+        pkill -f "streamlit.*app.py" && echo "Stopped Streamlit frontend" || echo "Streamlit frontend was not running"
         
         # 清理临时文件
         rm -f monitor_daemon.py
         ;;
     *)
-        echo "Usage: $0 {init|celery|flask|monitor|all|status|clean|stop}"
+        echo "Usage: $0 {init|celery|flask|frontend|monitor|all|dev|status|clean|stop}"
         echo "  init     - Initializes the Redis GPU pool. Run this once before starting workers."
         echo "  celery   - Starts the Celery workers. Requires 'init' to be run first."
         echo "  flask    - Starts the Flask API server."
+        echo "  frontend - Starts the Streamlit web interface."
         echo "  monitor  - Starts the automatic task monitoring daemon."
-        echo "  all      - Starts all services in the background (for development only)."
+        echo "  all      - Starts all services in the background (for production)."
+        echo "  dev      - Starts backend services in background and frontend in foreground (for development)."
         echo "  status   - Shows the status of all services and system health."
         echo "  clean    - Manually trigger task cleanup via API."
         echo "  stop     - Stops all running services."

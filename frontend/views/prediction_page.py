@@ -21,6 +21,7 @@ from frontend.utils import (
 )
 from frontend.prediction_client import submit_job, get_status, download_and_process_results
 from frontend.ui_components import render_contact_constraint_ui, render_bond_constraint_ui
+from frontend.url_state import URLStateManager
 
 def render_prediction_page():
     st.markdown("### 🔬 分子复合物结构预测")
@@ -505,7 +506,7 @@ def render_prediction_page():
             if has_ketcher:
                 st.info("💡 **注意**: Ketcher 绘制的分子已自动转换为 `smiles` 字段，这是 Boltz 模型要求的格式。", icon="🔄")
 
-    if st.button("🚀 提交预测任务", type="primary", disabled=(not is_valid or is_running), use_container_width=True):
+    if st.button("🚀 提交预测任务", key="submit_prediction", type="primary", disabled=(not is_valid or is_running), use_container_width=True):
         st.session_state.task_id = None
         st.session_state.results = None
         st.session_state.raw_zip = None
@@ -548,6 +549,14 @@ def render_prediction_page():
                     model_name=model_name
                 )
                 st.session_state.task_id = task_id
+                
+                # 更新URL参数以保持任务状态和配置
+                URLStateManager.update_url_for_prediction_task(
+                    task_id=task_id, 
+                    components=st.session_state.components,
+                    constraints=st.session_state.constraints, 
+                    properties=st.session_state.properties
+                )
                 
                 if use_msa_for_job:
                     msa_enabled_count = sum(1 for comp in protein_components if comp.get('use_msa', True))
@@ -652,14 +661,20 @@ def render_prediction_page():
         
         col_reset = st.columns(2)
         with col_reset[0]:
-            if st.button("🔄 重置并重新开始", type="secondary", use_container_width=True):
-                for key in ['task_id', 'results', 'raw_zip', 'error', 'components', 'contacts', 'properties', 'use_msa_server']:
+            if st.button("🔄 重置并重新开始", key="reset_prediction", type="secondary", use_container_width=True):
+                # 清除URL参数
+                URLStateManager.clear_url_params()
+                # 清除所有相关的session state
+                for key in ['task_id', 'results', 'raw_zip', 'error', 'components', 'constraints', 'properties', 'use_msa_server']:
                     if key in st.session_state:
                         del st.session_state[key]
                 st.rerun()
         
         with col_reset[1]:
-            if st.button("🔧 保留配置重新设计", type="primary", use_container_width=True):
+            if st.button("🔧 保留配置重新设计", key="retry_prediction", type="primary", use_container_width=True):
+                # 清除URL参数
+                URLStateManager.clear_url_params()
+                # 只清除任务相关的状态，保留配置
                 for key in ['task_id', 'results', 'raw_zip', 'error']:
                     if key in st.session_state:
                         del st.session_state[key]

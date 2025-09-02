@@ -12,6 +12,7 @@ from frontend.state import initialize_session_state
 from frontend.views.prediction_page import render_prediction_page
 from frontend.views.designer_page import render_designer_page
 from frontend.views.affinity_page import render_affinity_page
+from frontend.url_state import URLStateManager
 
 st.set_page_config(layout="centered", page_title="Boltz-WebUI", page_icon="🧬")
 

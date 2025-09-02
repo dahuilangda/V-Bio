@@ -24,6 +24,7 @@ from frontend.designer_client import (
 )
 from frontend.ui_components import render_contact_constraint_ui, render_bond_constraint_ui
 from frontend.utils import visualize_structure_py3dmol
+from frontend.url_state import URLStateManager
 
 def render_designer_page():
     st.markdown("### 🧪 从头分子设计")
@@ -278,7 +279,7 @@ def render_designer_page():
                 'use_msa': smart_msa_default
             })
         
-        if st.button("➕ 添加新组分", disabled=designer_is_running, help="添加新的蛋白质、DNA/RNA或小分子组分"):
+        if st.button("➕ 添加新组分", key="add_new_component", disabled=designer_is_running, help="添加新的蛋白质、DNA/RNA或小分子组分"):
             add_new_designer_component()
             st.rerun()
         
@@ -759,7 +760,7 @@ def render_designer_page():
     protein_components_with_msa = [comp for comp in st.session_state.designer_components 
                                   if comp['type'] == 'protein' and comp.get('sequence', '').strip() and comp.get('use_msa', True)]
     
-    if st.button("🚀 开始分子设计", type="primary", disabled=(not designer_is_valid or designer_is_running), use_container_width=True):
+    if st.button("🚀 开始分子设计", key="start_designer", type="primary", disabled=(not designer_is_valid or designer_is_running), use_container_width=True):
         st.session_state.designer_task_id = None
         st.session_state.designer_results = None
         st.session_state.designer_error = None
@@ -802,6 +803,13 @@ def render_designer_page():
                     st.session_state.designer_task_id = result['task_id']
                     st.session_state.designer_work_dir = result['work_dir']
                     st.session_state.designer_config = result['params']
+                    
+                    # 更新URL参数以保持设计任务状态
+                    URLStateManager.update_url_for_designer_task(
+                        task_id=result['task_id'], 
+                        work_dir=result['work_dir']
+                    )
+                    
                     st.toast(f"🎉 设计任务已成功启动！任务ID: {result['task_id']}", icon="✅")
                     st.rerun()
                 else:
@@ -1588,14 +1596,18 @@ def render_designer_page():
         
         col_reset = st.columns(2)
         with col_reset[0]:
-            if st.button("🔄 重置设计器", type="secondary", use_container_width=True):
+            if st.button("🔄 重置设计器", key="reset_designer", type="secondary", use_container_width=True):
+                # 清除URL参数
+                URLStateManager.clear_url_params()
                 for key in ['designer_task_id', 'designer_results', 'designer_error', 'designer_config', 'designer_components', 'designer_constraints']:
                     if key in st.session_state:
                         del st.session_state[key]
                 st.rerun()
         
         with col_reset[1]:
-            if st.button("🔧 保留配置重新设计", type="primary", use_container_width=True):
+            if st.button("🔧 保留配置重新设计", key="redesign_with_config", type="primary", use_container_width=True):
+                # 清除URL参数
+                URLStateManager.clear_url_params()
                 for key in ['designer_task_id', 'designer_results', 'designer_error']:
                     if key in st.session_state:
                         del st.session_state[key]

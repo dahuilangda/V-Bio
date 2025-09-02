@@ -110,15 +110,22 @@ docker run -d -p 6379:6379 --name boltz-webui-redis redis:latest
 # 设置环境变量
 export API_SECRET_TOKEN='your-super-secret-and-long-token'
 
-# 一键启动所有服务
+# 开发模式：后端后台运行，前端前台运行（推荐）
+bash run.sh dev
+
+# 或者生产模式：全部后台运行
 bash run.sh all
 ```
 
 服务全部启动后，在浏览器中访问 `http://<您的服务器IP>:8501` 即可开始使用。
 
+**注意**: 
+- `bash run.sh dev` 模式下，前端在前台运行便于查看日志，按 Ctrl+C 可停止前端
+- `bash run.sh all` 模式下，所有服务都在后台运行，使用 `bash run.sh stop` 停止
+
 #### **方式二：分组件启动 (开发调试)**
 
-您需要打开 **5 个**独立的终端窗口来分别运行平台的不同组件。在**每一个**窗口中都必须能访问到 `API_SECRET_TOKEN` 环境变量。
+您需要打开 **6 个**独立的终端窗口来分别运行平台的不同组件。在**每一个**窗口中都必须能访问到 `API_SECRET_TOKEN` 环境变量。
 
 **首先，设置环境变量 (在每个终端中或在 `.bashrc`/`.zshrc` 中设置):**
 
@@ -153,8 +160,17 @@ export API_SECRET_TOKEN='your-super-secret-and-long-token'
 5.  **终端 5 - 启动 Streamlit 前端界面**:
 
     ```bash
-    source venv/bin/activate
-    streamlit run frontend/app.py
+    bash run.sh frontend
+    ```
+
+6.  **终端 6 - 监控系统状态** (可选):
+
+    ```bash
+    # 实时查看系统状态
+    bash run.sh status
+    
+    # 或监控日志
+    tail -f flask.log
     ```
 
 ### **通过 API 使用 (高级)**
@@ -404,19 +420,16 @@ export API_SECRET_TOKEN='your-super-secret-and-long-token'
 
 ### **系统服务管理**
 
-为了简化运维管理，系统提供了统一的服务管理脚本 `run.sh`，支持一键启动、停止和监控所有服务组件。
+为了简化运维管理，系统提供了统一的服务管理脚本 `run.sh`，支持一键启动、停止和监控所有服务组件（包括前端界面）。
 
-#### **统一服务启动 (推荐生产环境)**
+#### **快速启动模式**
 
 ```bash
-# 一键启动所有服务（包含自动监控）
+# 开发模式：后端服务在后台运行，前端在前台运行（推荐开发使用）
+bash run.sh dev
+
+# 生产模式：所有服务在后台运行（推荐生产环境）  
 bash run.sh all
-
-# 检查所有服务状态
-bash run.sh status
-
-# 手动触发任务清理
-bash run.sh clean
 
 # 停止所有服务
 bash run.sh stop
@@ -434,7 +447,10 @@ bash run.sh flask
 # 3. 启动工作进程
 bash run.sh celery
 
-# 4. 启动监控守护进程
+# 4. 启动前端界面
+bash run.sh frontend
+
+# 5. 启动监控守护进程
 bash run.sh monitor
 ```
 
@@ -444,11 +460,36 @@ bash run.sh monitor
 # 查看系统整体状态
 bash run.sh status
 
+# 手动触发任务清理
+bash run.sh clean
+
 # 实时监控日志
 tail -f flask.log      # API服务器日志
 tail -f celery.log     # 工作进程日志
 tail -f monitor.log    # 监控系统日志
+tail -f streamlit.log  # 前端界面日志
 ```
+
+#### **可用命令列表**
+
+| 命令 | 说明 | 适用场景 |
+|------|------|----------|
+| `bash run.sh dev` | 开发模式启动（前端前台运行） | 开发调试 |
+| `bash run.sh all` | 生产模式启动（全后台运行） | 生产部署 |
+| `bash run.sh frontend` | 仅启动前端界面 | 前端开发 |
+| `bash run.sh flask` | 仅启动API服务器 | 后端调试 |
+| `bash run.sh celery` | 仅启动工作进程 | 任务处理测试 |
+| `bash run.sh monitor` | 仅启动监控守护进程 | 系统监控 |
+| `bash run.sh status` | 查看所有服务状态 | 运维监控 |
+| `bash run.sh clean` | 手动清理问题任务 | 故障恢复 |
+| `bash run.sh stop` | 停止所有服务 | 系统维护 |
+
+#### **访问地址**
+
+启动成功后，可通过以下地址访问：
+- **Web界面**: http://localhost:8501
+- **API服务**: http://localhost:5000  
+- **Redis服务**: localhost:6379
 
 ### **自动化监控特性**
 

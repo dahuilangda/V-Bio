@@ -11,6 +11,7 @@ import os
 
 from frontend.prediction_client import predict_affinity, predict_affinity_separate, get_status
 from frontend.utils import get_ligand_resnames_from_pdb, read_cif_from_string, extract_protein_residue_bfactors, visualize_structure_py3dmol
+from frontend.url_state import URLStateManager
 
 def render_affinity_page():
     st.markdown("### 🔬 结合亲和力预测")
@@ -166,7 +167,7 @@ def render_affinity_page():
             if missing_items:
                 st.warning(f"⚠️ 请完成以下步骤: {' • '.join(missing_items)}")
 
-        if st.button("🚀 开始预测", type="primary", disabled=is_running or not files_ready, use_container_width=True):
+        if st.button("🚀 开始预测", key="start_affinity", type="primary", disabled=is_running or not files_ready, use_container_width=True):
             st.session_state.affinity_task_id = None
             st.session_state.affinity_results = None
             st.session_state.affinity_error = None
@@ -180,6 +181,8 @@ def render_affinity_page():
                         file_content = uploaded_file.getvalue().decode("utf-8")
                         file_name = uploaded_file.name
                         task_id = predict_affinity(file_content, file_name, ligand_resname.strip())
+                        # 更新URL参数以保持亲和力任务状态
+                        URLStateManager.update_url_for_affinity_task(task_id)
                     else:
                         # Separate files mode - remove output_prefix parameter
                         protein_file.seek(0)
@@ -194,6 +197,10 @@ def render_affinity_page():
                         )
                     
                     st.session_state.affinity_task_id = task_id
+                    
+                    # 更新URL参数以保持亲和力任务状态
+                    URLStateManager.update_url_for_affinity_task(task_id)
+                    
                     st.toast("🎉 任务已成功提交！", icon="✅")
                     st.rerun()
                 except requests.exceptions.RequestException as e:
@@ -377,7 +384,9 @@ def render_affinity_page():
         st.error("ℹ️ 任务执行失败，详细信息如下：")
         st.json(st.session_state.affinity_error)
         
-        if st.button("🔄 重置并重新开始", type="secondary", use_container_width=True):
+        if st.button("🔄 重置并重新开始", key="reset_affinity", type="secondary", use_container_width=True):
+            # 清除URL参数
+            URLStateManager.clear_url_params()
             st.session_state.affinity_task_id = None
             st.session_state.affinity_results = None
             st.session_state.affinity_error = None
