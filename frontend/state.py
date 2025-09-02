@@ -28,6 +28,9 @@ def initialize_session_state():
     if 'ligand_resnames' not in st.session_state: st.session_state.ligand_resnames = []
     if 'affinity_cif' not in st.session_state: st.session_state.affinity_cif = None
     
+    # Tab state management for URL restoration
+    if 'active_tab_index' not in st.session_state: st.session_state.active_tab_index = 0
+    
     # URL state management
     if 'url_state_initialized' not in st.session_state: st.session_state.url_state_initialized = False
 

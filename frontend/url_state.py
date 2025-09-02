@@ -34,6 +34,9 @@ class URLStateManager:
             'task_type': task_type
         }
         
+        # 设置选项卡索引
+        st.session_state.active_tab_index = 0  # 结构预测选项卡
+        
         # 如果提供了配置信息，将其序列化存储
         if components:
             try:
@@ -72,11 +75,18 @@ class URLStateManager:
         }
         if work_dir:
             params['work_dir'] = work_dir
+        
+        # 设置选项卡索引
+        st.session_state.active_tab_index = 1  # 分子设计选项卡
+        
         URLStateManager.set_query_params(**params)
     
     @staticmethod
     def update_url_for_affinity_task(task_id: str):
         """为亲和力预测任务更新URL参数"""
+        # 设置选项卡索引
+        st.session_state.active_tab_index = 2  # 亲和力预测选项卡
+        
         URLStateManager.set_query_params(
             task_id=task_id,
             task_type='affinity'
@@ -87,6 +97,8 @@ class URLStateManager:
         """清除所有URL参数"""
         for key in list(st.query_params.keys()):
             del st.query_params[key]
+        # 重置选项卡索引为默认值
+        st.session_state.active_tab_index = 0
     
     @staticmethod
     def restore_state_from_url():
@@ -114,6 +126,7 @@ class URLStateManager:
                     st.session_state.results = None
                     st.session_state.error = None
                     st.session_state.raw_zip = None
+                    st.session_state.active_tab_index = 0  # 结构预测选项卡
                     restored = True
                     
                     # 恢复配置信息
@@ -161,6 +174,7 @@ class URLStateManager:
                     st.session_state.designer_work_dir = work_dir
                     st.session_state.designer_results = None
                     st.session_state.designer_error = None
+                    st.session_state.active_tab_index = 1  # 分子设计选项卡
                     restored = True
                     st.toast(f"🔗 从URL恢复设计任务: {task_id[:8]}...", icon="🧪")
             
@@ -170,6 +184,7 @@ class URLStateManager:
                     st.session_state.affinity_task_id = task_id
                     st.session_state.affinity_results = None
                     st.session_state.affinity_error = None
+                    st.session_state.active_tab_index = 2  # 亲和力预测选项卡
                     restored = True
                     st.toast(f"🔗 从URL恢复亲和力任务: {task_id[:8]}...", icon="🧬")
                 

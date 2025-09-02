@@ -30,6 +30,12 @@ def render_designer_page():
     st.markdown("### 🧪 从头分子设计")
     st.markdown("使用演化算法设计分子结合体，优化其与目标复合物的结合亲和力。")
     
+    # 检查是否有其他类型的活跃任务
+    if hasattr(st.session_state, 'task_id') and st.session_state.task_id:
+        st.info(f"💡 您有一个正在进行的 **结构预测** 任务 (`{st.session_state.task_id[:8]}...`)，请切换到 **结构预测** 选项卡查看进度。", icon="🔬")
+    elif hasattr(st.session_state, 'affinity_task_id') and st.session_state.affinity_task_id:
+        st.info(f"💡 您有一个正在进行的 **亲和力预测** 任务 (`{st.session_state.affinity_task_id[:8]}...`)，请切换到 **亲和力预测** 选项卡查看进度。", icon="🧬")
+    
     designer_is_running = (
         st.session_state.designer_task_id is not None and 
         st.session_state.designer_results is None and 
