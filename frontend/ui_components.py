@@ -33,7 +33,7 @@ def render_contact_constraint_ui(constraint, key_prefix, available_chains, chain
                 format_func=lambda x: chain_descriptions.get(x, f"链 {x}"),
                 key=f"{key_prefix}_token1_chain",
                 disabled=is_running,
-                help="选择第一个残基所在的链"
+                help="选择第一个残基所在的链。可选择BINDER_CHAIN来引用即将设计的结合肽"
             )
             
             if token1_chain != current_token1_chain:
@@ -63,7 +63,10 @@ def render_contact_constraint_ui(constraint, key_prefix, available_chains, chain
             constraint['token1_residue'] = token1_residue
             st.rerun()
         
-        if available_chains and token1_chain in available_chains:
+        # 显示残基信息，对BINDER_CHAIN特殊处理
+        if token1_chain == 'BINDER_CHAIN':
+            st.caption(f"🎯 设计中的结合肽，残基 {token1_residue}")
+        elif available_chains and token1_chain in available_chains:
             residue_info, molecule_type, seq_length, is_valid = get_residue_info(st.session_state.components, token1_chain, token1_residue)
             if is_valid:
                 st.caption(f"📍 {residue_info}")
@@ -90,7 +93,7 @@ def render_contact_constraint_ui(constraint, key_prefix, available_chains, chain
                 format_func=lambda x: chain_descriptions.get(x, f"链 {x}"),
                 key=f"{key_prefix}_token2_chain",
                 disabled=is_running,
-                help="选择第二个残基所在的链"
+                help="选择第二个残基所在的链。可选择BINDER_CHAIN来引用即将设计的结合肽"
             )
             
             if token2_chain != current_token2_chain:
@@ -120,7 +123,10 @@ def render_contact_constraint_ui(constraint, key_prefix, available_chains, chain
             constraint['token2_residue'] = token2_residue
             st.rerun()
         
-        if available_chains and token2_chain in available_chains:
+        # 显示残基信息，对BINDER_CHAIN特殊处理
+        if token2_chain == 'BINDER_CHAIN':
+            st.caption(f"🎯 设计中的结合肽，残基 {token2_residue}")
+        elif available_chains and token2_chain in available_chains:
             residue_info2, molecule_type2, seq_length2, is_valid2 = get_residue_info(st.session_state.components, token2_chain, token2_residue)
             if is_valid2:
                 st.caption(f"📍 {residue_info2}")
@@ -192,7 +198,7 @@ def render_bond_constraint_ui(constraint, key_prefix, available_chains, chain_de
                 format_func=lambda x: chain_descriptions.get(x, f"链 {x}"),
                 key=f"{key_prefix}_atom1_chain",
                 disabled=is_running,
-                help="选择第一个原子所在的链"
+                help="选择第一个原子所在的链。可选择BINDER_CHAIN来引用即将设计的结合肽"
             )
             
             if atom1_chain != current_atom1_chain:
@@ -222,7 +228,12 @@ def render_bond_constraint_ui(constraint, key_prefix, available_chains, chain_de
             st.rerun()
     
     with atom1_cols[2]:
-        if available_chains and atom1_chain in available_chains:
+        # 对BINDER_CHAIN特殊处理原子选择
+        if atom1_chain == 'BINDER_CHAIN':
+            # 为结合肽提供常见的蛋白质原子选项
+            available_atoms = ['CA', 'CB', 'N', 'C', 'O', 'CG', 'CD', 'CE', 'CZ', 'OG', 'OH', 'SD', 'SG', 'NE', 'NH1', 'NH2', 'ND1', 'ND2', 'NE2']
+            molecule_type = 'protein'
+        elif available_chains and atom1_chain in available_chains:
             residue_info, molecule_type, seq_length, is_valid = get_residue_info(st.session_state.components, atom1_chain, atom1_residue)
             available_atoms = get_available_atoms(st.session_state.components, atom1_chain, atom1_residue, molecule_type)
         else:
@@ -242,12 +253,22 @@ def render_bond_constraint_ui(constraint, key_prefix, available_chains, chain_de
             index=atom_index,
             key=f"{key_prefix}_atom1_atom",
             disabled=is_running,
-            help="必须选择具体的原子名称"
+            help="必须选择具体的原子名称。对于BINDER_CHAIN，将根据生成的氨基酸类型动态匹配"
         )
         
         if atom1_atom != current_atom1_atom:
             constraint['atom1_atom'] = atom1_atom
             st.rerun()
+        
+        # 显示原子信息
+        if atom1_chain == 'BINDER_CHAIN':
+            st.caption(f"🎯 结合肽残基 {atom1_residue} 的 {atom1_atom} 原子")
+        elif available_chains and atom1_chain in available_chains:
+            residue_info, molecule_type, seq_length, is_valid = get_residue_info(st.session_state.components, atom1_chain, atom1_residue)
+            if is_valid:
+                st.caption(f"📍 {residue_info} - {atom1_atom}")
+            else:
+                st.error(f"❌ {residue_info}")
     
     st.markdown("**Atom 2 (原子 2)**")
     atom2_cols = st.columns(3)
@@ -266,7 +287,7 @@ def render_bond_constraint_ui(constraint, key_prefix, available_chains, chain_de
                 format_func=lambda x: chain_descriptions.get(x, f"链 {x}"),
                 key=f"{key_prefix}_atom2_chain",
                 disabled=is_running,
-                help="选择第二个原子所在的链"
+                help="选择第二个原子所在的链。可选择BINDER_CHAIN来引用即将设计的结合肽"
             )
             
             if atom2_chain != current_atom2_chain:
@@ -296,7 +317,11 @@ def render_bond_constraint_ui(constraint, key_prefix, available_chains, chain_de
             st.rerun()
     
     with atom2_cols[2]:
-        if available_chains and atom2_chain in available_chains:
+        # 对BINDER_CHAIN特殊处理原子选择
+        if atom2_chain == 'BINDER_CHAIN':
+            # 为结合肽提供常见的蛋白质原子选项
+            available_atoms2 = ['CA', 'CB', 'N', 'C', 'O', 'CG', 'CD', 'CE', 'CZ', 'OG', 'OH', 'SD', 'SG', 'NE', 'NH1', 'NH2', 'ND1', 'ND2', 'NE2']
+        elif available_chains and atom2_chain in available_chains:
             residue_info2, molecule_type2, seq_length2, is_valid2 = get_residue_info(st.session_state.components, atom2_chain, atom2_residue)
             available_atoms2 = get_available_atoms(st.session_state.components, atom2_chain, atom2_residue, molecule_type2)
         else:
@@ -315,12 +340,22 @@ def render_bond_constraint_ui(constraint, key_prefix, available_chains, chain_de
             index=atom_index2,
             key=f"{key_prefix}_atom2_atom",
             disabled=is_running,
-            help="必须选择具体的原子名称"
+            help="必须选择具体的原子名称。对于BINDER_CHAIN，将根据生成的氨基酸类型动态匹配"
         )
         
         if atom2_atom != current_atom2_atom:
             constraint['atom2_atom'] = atom2_atom
             st.rerun()
+        
+        # 显示原子信息
+        if atom2_chain == 'BINDER_CHAIN':
+            st.caption(f"🎯 结合肽残基 {atom2_residue} 的 {atom2_atom} 原子")
+        elif available_chains and atom2_chain in available_chains:
+            residue_info2, molecule_type2, seq_length2, is_valid2 = get_residue_info(st.session_state.components, atom2_chain, atom2_residue)
+            if is_valid2:
+                st.caption(f"📍 {residue_info2} - {atom2_atom}")
+            else:
+                st.error(f"❌ {residue_info2}")
     
     constraint.update({
         'atom1_chain': atom1_chain,
@@ -329,6 +364,163 @@ def render_bond_constraint_ui(constraint, key_prefix, available_chains, chain_de
         'atom2_chain': atom2_chain,
         'atom2_residue': atom2_residue,
         'atom2_atom': atom2_atom
+    })
+
+def render_pocket_constraint_ui(constraint, key_prefix, available_chains, chain_descriptions, is_running):
+    """渲染Pocket约束的UI配置"""
+    st.markdown("**Pocket约束配置** - 定义结合肽与特定口袋的结合约束")
+    
+    # Binder配置
+    st.markdown("**结合肽 (Binder)**")
+    binder_cols = st.columns(2)
+    
+    with binder_cols[0]:
+        current_binder = constraint.get('binder', 'BINDER_CHAIN')
+        if current_binder not in available_chains and available_chains:
+            # 对于pocket约束，binder通常是BINDER_CHAIN
+            current_binder = 'BINDER_CHAIN' if 'BINDER_CHAIN' in available_chains else available_chains[0]
+        
+        if available_chains:
+            chain_index = available_chains.index(current_binder) if current_binder in available_chains else 0
+            binder = st.selectbox(
+                "结合肽链 ID",
+                options=available_chains,
+                index=chain_index,
+                format_func=lambda x: chain_descriptions.get(x, f"链 {x}"),
+                key=f"{key_prefix}_binder",
+                disabled=is_running,
+                help="选择作为结合体的链ID，通常为BINDER_CHAIN"
+            )
+            
+            if binder != current_binder:
+                constraint['binder'] = binder
+                st.rerun()
+        else:
+            binder = st.text_input(
+                "结合肽链 ID",
+                value=current_binder,
+                key=f"{key_prefix}_binder",
+                disabled=is_running,
+                help="请先添加组分序列"
+            )
+    
+    with binder_cols[1]:
+        if binder == 'BINDER_CHAIN':
+            st.caption("🎯 即将设计的结合肽")
+        elif available_chains and binder in available_chains:
+            st.caption(f"📍 {chain_descriptions.get(binder, f'链 {binder}')}")
+    
+    # Contacts配置
+    st.markdown("**口袋接触点 (Contacts)**")
+    st.caption("定义构成结合口袋的残基/原子")
+    
+    contacts = constraint.get('contacts', [])
+    if not contacts:
+        contacts = [['A', 1]]  # 默认添加一个接触点
+        constraint['contacts'] = contacts
+    
+    contacts_to_delete = []
+    for j, contact in enumerate(contacts):
+        contact_cols = st.columns([2, 2, 1])
+        
+        with contact_cols[0]:
+            contact_chain = contact[0] if len(contact) > 0 else 'A'
+            if contact_chain not in available_chains and available_chains:
+                contact_chain = available_chains[0]
+            
+            if available_chains:
+                chain_index = available_chains.index(contact_chain) if contact_chain in available_chains else 0
+                new_contact_chain = st.selectbox(
+                    f"接触点 {j+1} 链ID",
+                    options=available_chains,
+                    index=chain_index,
+                    format_func=lambda x: chain_descriptions.get(x, f"链 {x}"),
+                    key=f"{key_prefix}_contact_{j}_chain",
+                    disabled=is_running,
+                    help="构成口袋的残基所在链"
+                )
+                # 修复：添加链ID变更检测和更新
+                if new_contact_chain != contact_chain:
+                    contact[0] = new_contact_chain
+                    constraint['contacts'] = contacts
+                    st.rerun()
+                else:
+                    contact[0] = new_contact_chain
+        
+        with contact_cols[1]:
+            contact_residue = contact[1] if len(contact) > 1 else 1
+            new_contact_residue = st.number_input(
+                f"接触点 {j+1} 残基",
+                min_value=1,
+                value=contact_residue,
+                key=f"{key_prefix}_contact_{j}_residue",
+                disabled=is_running,
+                help="残基编号或原子名称"
+            )
+            # 修复：添加残基变更检测和更新
+            if new_contact_residue != contact_residue:
+                contact[1] = new_contact_residue
+                constraint['contacts'] = contacts
+                st.rerun()
+            else:
+                contact[1] = new_contact_residue
+        
+        with contact_cols[2]:
+            if st.button("🗑️", key=f"{key_prefix}_del_contact_{j}", help="删除此接触点", disabled=is_running):
+                contacts_to_delete.append(j)
+    
+    # 删除标记的接触点
+    for j in reversed(contacts_to_delete):
+        del contacts[j]
+    
+    if contacts_to_delete:
+        constraint['contacts'] = contacts
+        st.rerun()
+    
+    # 添加新接触点按钮
+    if st.button("➕ 添加接触点", key=f"{key_prefix}_add_contact", disabled=is_running, help="添加新的口袋接触点"):
+        contacts.append(['A', 1])
+        constraint['contacts'] = contacts
+        st.rerun()
+    
+    # 距离和力参数
+    distance_force_cols = st.columns(2)
+    with distance_force_cols[0]:
+        current_max_distance = constraint.get('max_distance', 5.0)
+        max_distance = st.number_input(
+            "最大距离 (Å)",
+            min_value=1.0,
+            max_value=50.0,
+            value=current_max_distance,
+            step=0.5,
+            key=f"{key_prefix}_pocket_max_distance",
+            disabled=is_running,
+            help="结合肽与口袋接触点的最大允许距离（埃）"
+        )
+        
+        if max_distance != current_max_distance:
+            constraint['max_distance'] = max_distance
+            st.rerun()
+    
+    with distance_force_cols[1]:
+        current_force_constraint = constraint.get('force', False)
+        force_constraint = st.checkbox(
+            "强制执行约束",
+            value=current_force_constraint,
+            key=f"{key_prefix}_pocket_force",
+            disabled=is_running,
+            help="是否使用势能函数强制执行此口袋约束"
+        )
+        
+        if force_constraint != current_force_constraint:
+            constraint['force'] = force_constraint
+            st.rerun()
+    
+    constraint.update({
+        'binder': binder,
+        'contacts': contacts,
+        'max_distance': max_distance,
+        'force': force_constraint
     })
 
 

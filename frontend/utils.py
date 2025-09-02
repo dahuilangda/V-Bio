@@ -65,6 +65,26 @@ def get_available_chain_ids(components):
     
     return chain_ids, chain_descriptions
 
+def get_available_chain_ids_for_designer(components, binder_chain_id=None):
+    """
+    为设计器页面获取可用的链ID列表，包括BINDER_CHAIN占位符
+    返回: (all_chain_ids, chain_descriptions)
+    """
+    # 获取现有组分的链ID
+    existing_chain_ids, existing_descriptions = get_available_chain_ids(components)
+    
+    # 添加BINDER_CHAIN占位符
+    all_chain_ids = existing_chain_ids + ['BINDER_CHAIN']
+    all_descriptions = existing_descriptions.copy()
+    
+    # 为BINDER_CHAIN添加描述
+    if binder_chain_id:
+        all_descriptions['BINDER_CHAIN'] = f"🎯 设计中的结合肽 (将分配链 {binder_chain_id})"
+    else:
+        all_descriptions['BINDER_CHAIN'] = f"🎯 设计中的结合肽 (链ID待分配)"
+    
+    return all_chain_ids, all_descriptions
+
 def get_chain_type(components, chain_id):
     """
     根据链ID获取链的类型

@@ -159,6 +159,18 @@ def create_designer_complex_yaml(components: list, use_msa: bool = False, constr
                     }
                 }
             
+            elif constraint_type == 'pocket':
+                contacts = constraint.get('contacts', [])
+                
+                constraint_dict = {
+                    'pocket': {
+                        'binder': constraint['binder'],
+                        'contacts': contacts,
+                        'max_distance': constraint['max_distance'],
+                        'force': constraint.get('force', False)
+                    }
+                }
+            
             else:
                 continue
                 
@@ -216,6 +228,10 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
                 "--output_csv", os.path.join(work_dir, f"design_summary_{params.get('task_id', 'unknown')}.csv"),
                 "--keep_temp_files"
             ]
+            
+            # 添加用户约束文件路径（如果存在）
+            if params.get('constraints_path'):
+                cmd.extend(["--user_constraints", params.get('constraints_path')])
             
             if params.get('enable_enhanced', True):
                 cmd.extend([
@@ -388,7 +404,8 @@ def submit_designer_job(
     sequence_mask: str = None,
     cyclic_binder: bool = False,
     include_cysteine: bool = True,
-    use_msa: bool = False
+    use_msa: bool = False,
+    user_constraints: list = None  # 新增：用户约束
 ) -> dict:
     """提交 Designer 任务"""
     try:
@@ -425,8 +442,15 @@ def submit_designer_job(
         with open(template_path, 'w') as f:
             f.write(template_yaml_content)
         
+        # 保存用户约束到单独的文件
+        constraints_path = os.path.join(work_dir, "user_constraints.json")
+        if user_constraints:
+            with open(constraints_path, 'w') as f:
+                json.dump(user_constraints, f, indent=2)
+        
         design_params = {
             'template_path': template_path,
+            'constraints_path': constraints_path if user_constraints else None,  # 新增：约束文件路径
             'design_type': design_type,
             'binder_length': binder_length,
             'target_chain_id': target_chain_id,
@@ -446,7 +470,8 @@ def submit_designer_job(
             'sequence_mask': sequence_mask,
             'cyclic_binder': cyclic_binder,
             'include_cysteine': include_cysteine,
-            'use_msa': use_msa
+            'use_msa': use_msa,
+            'user_constraints': user_constraints or []  # 新增：用户约束
         }
         
         if design_type == 'glycopeptide' and glycan_type:

@@ -272,15 +272,22 @@ class Designer:
         weight_plddt = kwargs.get('weight_plddt', 0.3)
         design_type = kwargs.get('design_type', 'linear')
         iterations = kwargs.get('iterations', 20)
+        user_constraints = kwargs.get('user_constraints', [])  # 新增：用户约束
 
         logger.info(f"--- Starting Design Run (Type: {design_type.capitalize()}) with Adaptive Hyperparameters ---")
         logger.info(f"Scoring weights -> ipTM: {weight_iptm}, pLDDT: {weight_plddt}")
         logger.info(f"Mutation rate: {mutation_rate}")
+        if user_constraints:
+            logger.info(f"User constraints: {len(user_constraints)} constraint(s) will be applied to binder chain {binder_chain_id}")
         if num_elites >= population_size:
             raise ValueError("`num_elites` must be less than `population_size`.")
         
         # 初始化设计参数字典
-        design_params = {'design_type': design_type}
+        design_params = {
+            'design_type': design_type,
+            'binder_chain_id': binder_chain_id,  # 新增：传递结合肽链ID
+            'user_constraints': user_constraints  # 新增：传递用户约束
+        }
         if design_type == 'glycopeptide':
             design_params.update({
                 'glycan_modification': kwargs.get('glycan_modification'),
@@ -698,7 +705,108 @@ class Designer:
                 {'bond': {'atom1': [chain_id, cys_indices[2] + 1, 'SG'], 'atom2': ['L', 1, linker_atoms[2]]}},
             ]
 
+        # 处理用户自定义约束 - 动态替换结合肽链ID
+        user_constraints = design_params.get('user_constraints', [])
+        if user_constraints:
+            if 'constraints' not in config:
+                config['constraints'] = []
+            
+            # 获取动态分配的结合肽链ID
+            binder_chain_id = design_params.get('binder_chain_id', chain_id)
+            
+            for constraint in user_constraints:
+                processed_constraint = self._process_user_constraint(constraint, binder_chain_id)
+                if processed_constraint:
+                    config['constraints'].append(processed_constraint)
+
         yaml_path = os.path.join(self.work_dir, f"candidate_{os.getpid()}_{hash(sequence)}.yaml")
         with open(yaml_path, 'w') as f:
             yaml.dump(config, f, sort_keys=False)
         return yaml_path
+    
+    def _process_user_constraint(self, constraint: dict, binder_chain_id: str) -> dict:
+        """
+        处理用户定义的约束，将BINDER_CHAIN占位符替换为实际的结合肽链ID
+        
+        Args:
+            constraint: 用户定义的约束字典
+            binder_chain_id: 实际的结合肽链ID
+            
+        Returns:
+            处理后的约束字典，如果约束无效则返回None
+        """
+        try:
+            constraint_type = constraint.get('type', 'contact')
+            
+            if constraint_type == 'contact':
+                # 处理contact约束
+                token1_chain = constraint.get('token1_chain', '')
+                token2_chain = constraint.get('token2_chain', '')
+                
+                # 替换BINDER_CHAIN占位符
+                if token1_chain == 'BINDER_CHAIN':
+                    token1_chain = binder_chain_id
+                if token2_chain == 'BINDER_CHAIN':
+                    token2_chain = binder_chain_id
+                
+                processed_constraint = {
+                    'contact': {
+                        'token1': [token1_chain, constraint.get('token1_residue', 1)],
+                        'token2': [token2_chain, constraint.get('token2_residue', 1)],
+                        'max_distance': constraint.get('max_distance', 5.0),
+                        'force': constraint.get('force', False)
+                    }
+                }
+                return processed_constraint
+                
+            elif constraint_type == 'bond':
+                # 处理bond约束
+                atom1_chain = constraint.get('atom1_chain', '')
+                atom2_chain = constraint.get('atom2_chain', '')
+                
+                # 替换BINDER_CHAIN占位符
+                if atom1_chain == 'BINDER_CHAIN':
+                    atom1_chain = binder_chain_id
+                if atom2_chain == 'BINDER_CHAIN':
+                    atom2_chain = binder_chain_id
+                
+                processed_constraint = {
+                    'bond': {
+                        'atom1': [atom1_chain, constraint.get('atom1_residue', 1), constraint.get('atom1_atom', 'CA')],
+                        'atom2': [atom2_chain, constraint.get('atom2_residue', 1), constraint.get('atom2_atom', 'CA')]
+                    }
+                }
+                return processed_constraint
+                
+            elif constraint_type == 'pocket':
+                # 处理pocket约束
+                binder = constraint.get('binder', '')
+                if binder == 'BINDER_CHAIN':
+                    binder = binder_chain_id
+                
+                contacts = constraint.get('contacts', [])
+                processed_contacts = []
+                for contact in contacts:
+                    if len(contact) >= 2:
+                        contact_chain = contact[0]
+                        if contact_chain == 'BINDER_CHAIN':
+                            contact_chain = binder_chain_id
+                        processed_contacts.append([contact_chain, contact[1]])
+                
+                processed_constraint = {
+                    'pocket': {
+                        'binder': binder,
+                        'contacts': processed_contacts,
+                        'max_distance': constraint.get('max_distance', 5.0),
+                        'force': constraint.get('force', False)
+                    }
+                }
+                return processed_constraint
+            
+            else:
+                logger.warning(f"Unsupported constraint type: {constraint_type}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Failed to process user constraint: {e}")
+            return None

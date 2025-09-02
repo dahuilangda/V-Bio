@@ -10,6 +10,7 @@ import psutil
 
 from frontend.utils import (
     get_available_chain_ids, 
+    get_available_chain_ids_for_designer,  # 新增：设计器专用函数
     get_smart_msa_default, 
     validate_designer_inputs, 
     has_cached_msa,
@@ -22,7 +23,7 @@ from frontend.designer_client import (
     get_designer_status, 
     load_designer_results
 )
-from frontend.ui_components import render_contact_constraint_ui, render_bond_constraint_ui
+from frontend.ui_components import render_contact_constraint_ui, render_bond_constraint_ui, render_pocket_constraint_ui
 from frontend.utils import visualize_structure_py3dmol
 from frontend.url_state import URLStateManager
 
@@ -297,13 +298,17 @@ def render_designer_page():
         st.subheader("🔗 分子约束 (可选)", anchor=False)
         st.markdown("设置分子结构约束，包括键约束、口袋约束和接触约束。")
         
+        # 移除链ID说明信息
+        # st.info(f"💡 **可用链ID说明**: 目标分子链已分配，设计的结合肽将分配到链 **{binder_chain_id}**。在约束设置中，您可以使用 **'BINDER_CHAIN'** 作为占位符来引用即将生成的结合肽。", icon="🧬")
+        
         constraint_id_to_delete = None
         for i, constraint in enumerate(st.session_state.designer_constraints[:]):
             constraint_type = constraint.get('type', 'contact')
             
             constraint_labels = {
                 'bond': '🔗 键约束',
-                'contact': '📍 接触约束'
+                'contact': '📍 接触约束',
+                'pocket': '🕳️ 口袋约束'
             }
             
             with st.expander(f"{constraint_labels.get(constraint_type, '📍 约束')} {i+1}", expanded=True):
@@ -313,15 +318,16 @@ def render_designer_page():
                     st.markdown("**约束类型**")
                     constraint_type = st.selectbox(
                         "选择约束类型",
-                        options=['contact', 'bond'],
+                        options=['contact', 'bond', 'pocket'],
                         format_func=lambda x: {
                             'contact': '📍 Contact - 接触约束 (两个残基间距离)',
-                            'bond': '🔗 Bond - 键约束 (两个原子间共价键)'
+                            'bond': '🔗 Bond - 键约束 (两个原子间共价键)',
+                            'pocket': '🕳️ Pocket - 口袋约束 (结合肽与特定口袋的结合)'
                         }[x],
-                        index=['contact', 'bond'].index(constraint.get('type', 'contact')),
+                        index=['contact', 'bond', 'pocket'].index(constraint.get('type', 'contact')) if constraint.get('type', 'contact') in ['contact', 'bond', 'pocket'] else 0,
                         key=f"designer_constraint_type_{i}",
                         disabled=designer_is_running,
-                        help="选择约束的类型：接触距离或共价键"
+                        help="选择约束的类型：接触距离、共价键或口袋结合"
                     )
                     
                     if constraint_type != constraint.get('type', 'contact'):
@@ -329,6 +335,12 @@ def render_designer_page():
                         if constraint_type == 'bond':
                             constraint.pop('binder', None)
                             constraint.pop('contacts', None)
+                            constraint.pop('token1_chain', None)
+                            constraint.pop('token1_residue', None)
+                            constraint.pop('token2_chain', None)
+                            constraint.pop('token2_residue', None)
+                            constraint.pop('max_distance', None)
+                            constraint.pop('force', None)
                         elif constraint_type == 'contact':
                             constraint.pop('atom1_chain', None)
                             constraint.pop('atom1_residue', None)
@@ -336,9 +348,22 @@ def render_designer_page():
                             constraint.pop('atom2_chain', None)
                             constraint.pop('atom2_residue', None)
                             constraint.pop('atom2_atom', None)
+                            constraint.pop('binder', None)
+                            constraint.pop('contacts', None)
+                        elif constraint_type == 'pocket':
+                            constraint.pop('atom1_chain', None)
+                            constraint.pop('atom1_residue', None)
+                            constraint.pop('atom1_atom', None)
+                            constraint.pop('atom2_chain', None)
+                            constraint.pop('atom2_residue', None)
+                            constraint.pop('atom2_atom', None)
+                            constraint.pop('token1_chain', None)
+                            constraint.pop('token1_residue', None)
+                            constraint.pop('token2_chain', None)
+                            constraint.pop('token2_residue', None)
                         st.rerun()
                     
-                    available_chains, chain_descriptions = get_available_chain_ids(st.session_state.designer_components)
+                    available_chains, chain_descriptions = get_available_chain_ids_for_designer(st.session_state.designer_components, binder_chain_id)
                     
                     st.markdown("---")
                     
@@ -346,6 +371,8 @@ def render_designer_page():
                         render_contact_constraint_ui(constraint, f"designer_{i}", available_chains, chain_descriptions, designer_is_running)
                     elif constraint_type == 'bond':
                         render_bond_constraint_ui(constraint, f"designer_{i}", available_chains, chain_descriptions, designer_is_running)
+                    elif constraint_type == 'pocket':
+                        render_pocket_constraint_ui(constraint, f"designer_{i}", available_chains, chain_descriptions, designer_is_running)
                 
                 with col2:
                     if st.button("🗑️", key=f"designer_del_constraint_{i}", help="删除此约束", disabled=designer_is_running):
@@ -356,15 +383,15 @@ def render_designer_page():
             st.rerun()
         
         st.markdown("---")
-        add_constraint_cols = st.columns(2)
+        add_constraint_cols = st.columns(3)
         
         with add_constraint_cols[0]:
             if st.button("➕ 添加 Contact 约束", key="add_designer_contact_constraint", disabled=designer_is_running, help="添加接触距离约束"):
                 st.session_state.designer_constraints.append({
                     'type': 'contact',
-                    'token1_chain': 'A',
+                    'token1_chain': target_chain_id,  # 默认指向目标链
                     'token1_residue': 1,
-                    'token2_chain': 'B',
+                    'token2_chain': 'BINDER_CHAIN',  # 使用占位符指向结合肽
                     'token2_residue': 1,
                     'max_distance': 5.0,
                     'force': False
@@ -375,12 +402,23 @@ def render_designer_page():
             if st.button("➕ 添加 Bond 约束", key="add_designer_bond_constraint", disabled=designer_is_running, help="添加共价键约束"):
                 st.session_state.designer_constraints.append({
                     'type': 'bond',
-                    'atom1_chain': 'A',
+                    'atom1_chain': target_chain_id,  # 默认指向目标链
                     'atom1_residue': 1,
                     'atom1_atom': 'CA',
-                    'atom2_chain': 'B',
+                    'atom2_chain': 'BINDER_CHAIN',  # 使用占位符指向结合肽
                     'atom2_residue': 1,
                     'atom2_atom': 'CA'
+                })
+                st.rerun()
+        
+        with add_constraint_cols[2]:
+            if st.button("➕ 添加 Pocket 约束", key="add_designer_pocket_constraint", disabled=designer_is_running, help="添加口袋结合约束"):
+                st.session_state.designer_constraints.append({
+                    'type': 'pocket',
+                    'binder': 'BINDER_CHAIN',
+                    'contacts': [[target_chain_id, 1], [target_chain_id, 2]],
+                    'max_distance': 5.0,
+                    'force': False
                 })
                 st.rerun()
         
@@ -390,12 +428,12 @@ def render_designer_page():
             for c in st.session_state.designer_constraints:
                 constraint_types[c.get('type', 'contact')] += 1
             
-            constraint_type_names = {'contact': 'Contact', 'bond': 'Bond'}
-            type_summary = ', '.join([f"{count}个{constraint_type_names[ctype]}" 
+            constraint_type_names = {'contact': 'Contact', 'bond': 'Bond', 'pocket': 'Pocket'}
+            type_summary = ', '.join([f"{count}个{constraint_type_names.get(ctype, ctype)}" 
                                     for ctype, count in constraint_types.items()])
             st.info(f"💡 已配置 {constraint_count} 个约束：{type_summary}")
         else:
-            st.info("💡 暂无约束。可根据需要添加Contact或Bond约束。")
+            st.info("💡 暂无约束。可根据需要添加Contact、Bond或Pocket约束。")
         
         st.markdown("---")
         
@@ -816,7 +854,8 @@ def render_designer_page():
                     sequence_mask=sequence_mask,
                     cyclic_binder=cyclic_binder,
                     include_cysteine=include_cysteine,
-                    use_msa=any_msa_enabled
+                    use_msa=any_msa_enabled,
+                    user_constraints=st.session_state.designer_constraints  # 新增：传递用户约束
                 )
                 
                 if result['success']:

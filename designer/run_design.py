@@ -6,6 +6,7 @@ import time
 import logging
 import sys
 import numpy as np
+import json  # 新增：用于处理约束文件
 
 from api_client import BoltzApiClient
 from design_logic import Designer
@@ -44,6 +45,7 @@ def main():
     input_group.add_argument("--binder_chain", required=True, help="要设计的肽链的链ID (例如, 'B')。")
     input_group.add_argument("--binder_length", required=True, type=int, help="要设计的肽链的长度。")
     input_group.add_argument("--initial_binder_sequence", type=str, default=None, help="可选的初始肽链序列。如果提供，将以此为起点生成第一代，而不是完全随机。")
+    input_group.add_argument("--user_constraints", type=str, default=None, help="用户定义约束的JSON文件路径。约束将应用于生成的结合肽。")  # 新增：约束文件参数
 
     # --- 演化算法控制 ---
     run_group = parser.add_argument_group('演化算法控制')
@@ -125,6 +127,16 @@ def main():
     
     logger.info("Arguments validated successfully.")
 
+    # 加载用户约束（如果提供）
+    user_constraints = []
+    if args.user_constraints and os.path.exists(args.user_constraints):
+        try:
+            with open(args.user_constraints, 'r') as f:
+                user_constraints = json.load(f)
+            logger.info(f"Loaded {len(user_constraints)} user-defined constraints from {args.user_constraints}")
+        except Exception as e:
+            logger.warning(f"Failed to load user constraints from {args.user_constraints}: {e}")
+
     try:
         # 1. 初始化 API 客户端
         logger.info(f"Initializing API client for server: {args.server_url}")
@@ -175,6 +187,7 @@ def main():
             'weight_iptm': args.weight_iptm,
             'weight_plddt': args.weight_plddt,
             'design_type': args.design_type,
+            'user_constraints': user_constraints  # 新增：用户约束
         }
 
         if args.design_type == "glycopeptide":
