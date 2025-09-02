@@ -174,7 +174,7 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
     try:
         os.makedirs(work_dir, exist_ok=True)
         
-        designer_script_path = os.path.join(os.getcwd(), '..', 'designer', 'run_design.py')
+        designer_script_path = os.path.join(os.getcwd(), 'designer', 'run_design.py')
         
         if os.path.exists(designer_script_path):
             target_chain_id = params.get('target_chain_id', 'A')
@@ -282,13 +282,13 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
                     log.flush()
                     
                     env = os.environ.copy()
-                    env['PYTHONPATH'] = os.path.join(os.getcwd(), "..", "designer") + ":" + env.get('PYTHONPATH', '')
+                    env['PYTHONPATH'] = os.path.join(os.getcwd(), "designer") + ":" + env.get('PYTHONPATH', '')
                     
                     process = subprocess.Popen(
                         cmd,
                         stdout=log,
                         stderr=subprocess.STDOUT,
-                        cwd=os.path.join(os.getcwd(), "..", "designer"),
+                        cwd=os.path.join(os.getcwd(), "designer"),
                         env=env
                     )
                     
