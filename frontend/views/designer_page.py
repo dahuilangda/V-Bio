@@ -431,6 +431,25 @@ def render_designer_page():
                 disabled=designer_is_running
             )
         
+        # 添加半胱氨酸控制选项
+        st.subheader("🧪 氨基酸组成控制", anchor=False)
+        col_cys, col_cys_desc = st.columns([1, 2])
+        
+        with col_cys:
+            include_cysteine = st.checkbox(
+                "包含半胱氨酸",
+                value=True,
+                help="是否在设计的序列中包含半胱氨酸(Cys)。取消勾选将避免生成含有半胱氨酸的序列。",
+                disabled=designer_is_running
+            )
+        
+        with col_cys_desc:
+            if include_cysteine:
+                st.info("✅ 允许使用半胱氨酸(C)，可形成二硫键增强结构稳定性")
+            else:
+                st.warning("⚠️ 禁用半胱氨酸(C)，避免不必要的二硫键形成")
+                st.caption("注意：不使用半胱氨酸可能会降低肽链的结构稳定性，但避免了复杂的二硫键配对问题。")
+        
         st.subheader("🧬 初始序列设置", anchor=False)
         use_initial_sequence = st.checkbox(
             "使用初始序列作为演化起点",
@@ -796,6 +815,7 @@ def render_designer_page():
                     initial_sequence=initial_sequence if use_initial_sequence else None,
                     sequence_mask=sequence_mask,
                     cyclic_binder=cyclic_binder,
+                    include_cysteine=include_cysteine,
                     use_msa=any_msa_enabled
                 )
                 

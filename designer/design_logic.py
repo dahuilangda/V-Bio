@@ -347,7 +347,8 @@ class Designer:
                                 parent['sequence'],
                                 parent_metrics=parent['metrics'],
                                 elite_sequences=elite_sequences,
-                                temperature=self.temperature
+                                temperature=self.temperature,
+                                design_params=design_params
                             )
                         else:
                             # 使用原始突变方法

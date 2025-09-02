@@ -277,11 +277,19 @@ def generate_random_bicyclic_sequence(length: int) -> str:
 def generate_random_sequence(length: int, design_params: dict) -> str:
     """根据设计参数生成一个随机的氨基酸序列。"""
     design_type = design_params.get('design_type', 'linear')
+    include_cysteine = design_params.get('include_cysteine', True)
+    
+    # 选择氨基酸字符串
+    if include_cysteine:
+        amino_acid_set = AMINO_ACIDS
+    else:
+        amino_acid_set = AMINO_ACIDS_NO_CYS
     
     # --- 双环肽的特殊生成逻辑 ---
     if design_type == 'bicyclic':
         if length < 3:
             raise ValueError("Bicyclic peptide length must be at least 3.")
+        # 双环肽需要Cys，即使用户禁用了半胱氨酸
         seq = list("".join(random.choice(AMINO_ACIDS_NO_CYS) for _ in range(length)))
         
         # 固定最后一个位置为Cys
@@ -303,7 +311,7 @@ def generate_random_sequence(length: int, design_params: dict) -> str:
 
     # --- 糖肽的特殊生成逻辑 ---
     elif design_type == 'glycopeptide':
-        seq = list("".join(random.choice(AMINO_ACIDS) for _ in range(length)))
+        seq = list("".join(random.choice(amino_acid_set) for _ in range(length)))
         modification_site = design_params.get('modification_site')
         if modification_site is not None:
             if 0 <= modification_site < length:
@@ -317,7 +325,7 @@ def generate_random_sequence(length: int, design_params: dict) -> str:
 
     # --- 默认线性多肽逻辑 ---
     else:
-        return "".join(random.choice(AMINO_ACIDS) for _ in range(length))
+        return "".join(random.choice(amino_acid_set) for _ in range(length))
 
 
 # def mutate_sequence(
@@ -476,13 +484,25 @@ def mutate_sequence(
         positions_to_mutate = random.sample(available_indices, k=k)
 
     # --- 步骤 3: 选择替换的氨基酸 (BLOSUM62指导) ---
+    include_cysteine = design_params.get('include_cysteine', True) if design_params else True
+    
     for pos in positions_to_mutate:
         original_aa = new_sequence[pos]
         substitution_scores = BLOSUM62.get(original_aa, {})
         
-        # 对于双环肽，确保不会突变为Cys
-        possible_aas = [aa for aa in (AMINO_ACIDS_NO_CYS if design_type == 'bicyclic' else AMINO_ACIDS) if aa != original_aa]
-        if not possible_aas: continue
+        # 选择可用的氨基酸集合
+        if design_type == 'bicyclic':
+            # 双环肽设计中，确保不会突变为Cys（Cys位置由设计类型控制）
+            possible_aas = [aa for aa in AMINO_ACIDS_NO_CYS if aa != original_aa]
+        elif include_cysteine:
+            # 包含半胱氨酸
+            possible_aas = [aa for aa in AMINO_ACIDS if aa != original_aa]
+        else:
+            # 不包含半胱氨酸
+            possible_aas = [aa for aa in AMINO_ACIDS_NO_CYS if aa != original_aa]
+            
+        if not possible_aas: 
+            continue
 
         scores = [substitution_scores.get(aa, 0) for aa in possible_aas]
         scores_array = np.array(scores) / temperature
@@ -649,10 +669,14 @@ class AdvancedMutationEngine:
         return 'conservative'
     
     def conservative_mutation(self, sequence: str, plddt_scores: List[float] = None, 
-                            num_mutations: int = None) -> str:
+                            num_mutations: int = None, design_params: dict = None) -> str:
         """保守突变：偏向BLOSUM62高分替换"""
         if num_mutations is None:
             num_mutations = max(1, len(sequence) // 8)
+        
+        # 获取包含半胱氨酸的设置
+        include_cysteine = design_params.get('include_cysteine', True) if design_params else True
+        amino_acid_set = AMINO_ACIDS if include_cysteine else AMINO_ACIDS_NO_CYS
         
         new_sequence = list(sequence)
         
@@ -678,8 +702,9 @@ class AdvancedMutationEngine:
         
         for pos in positions:
             original_aa = sequence[pos]
+            # 只考虑允许的氨基酸类型
             candidates = [(aa, score) for aa, score in BLOSUM62.get(original_aa, {}).items()
-                         if aa != original_aa and score > 0]
+                         if aa != original_aa and score > 0 and aa in amino_acid_set]
             
             if candidates:
                 weights = [score for _, score in candidates]
@@ -695,32 +720,38 @@ class AdvancedMutationEngine:
                         break
                 new_sequence[pos] = chosen_aa
             else:
-                # 使用位置偏好
+                # 使用位置偏好（仅限允许的氨基酸）
                 if pos in self.position_preferences:
                     pos_prefs = self.position_preferences[pos]
                     if pos_prefs:
-                        best_aa = max(pos_prefs.items(), key=lambda x: x[1])[0]
-                        if best_aa != original_aa:
-                            new_sequence[pos] = best_aa
+                        valid_prefs = {aa: score for aa, score in pos_prefs.items() if aa in amino_acid_set}
+                        if valid_prefs:
+                            best_aa = max(valid_prefs.items(), key=lambda x: x[1])[0]
+                            if best_aa != original_aa:
+                                new_sequence[pos] = best_aa
         
         return ''.join(new_sequence)
     
-    def aggressive_mutation(self, sequence: str, num_mutations: int = None) -> str:
+    def aggressive_mutation(self, sequence: str, num_mutations: int = None, design_params: dict = None) -> str:
         """激进突变：大范围探索"""
         if num_mutations is None:
             num_mutations = max(2, len(sequence) // 4)
+        
+        # 获取包含半胱氨酸的设置
+        include_cysteine = design_params.get('include_cysteine', True) if design_params else True
+        amino_acid_set = AMINO_ACIDS if include_cysteine else AMINO_ACIDS_NO_CYS
         
         new_sequence = list(sequence)
         positions = random.sample(range(len(sequence)), min(num_mutations, len(sequence)))
         
         for pos in positions:
             current_aa = sequence[pos]
-            new_aa = random.choice([aa for aa in AMINO_ACIDS if aa != current_aa])
+            new_aa = random.choice([aa for aa in amino_acid_set if aa != current_aa])
             new_sequence[pos] = new_aa
         
         return ''.join(new_sequence)
     
-    def motif_guided_mutation(self, sequence: str) -> str:
+    def motif_guided_mutation(self, sequence: str, design_params: dict = None) -> str:
         """motif导引突变"""
         new_sequence = list(sequence)
         
@@ -751,7 +782,7 @@ class AdvancedMutationEngine:
         
         return ''.join(new_sequence)
     
-    def energy_guided_mutation(self, sequence: str, temperature: float = 1.0) -> str:
+    def energy_guided_mutation(self, sequence: str, temperature: float = 1.0, design_params: dict = None) -> str:
         """能量导引突变"""
         new_sequence = list(sequence)
         num_mutations = max(1, len(sequence) // 6)
@@ -794,10 +825,14 @@ class AdvancedMutationEngine:
         
         return ''.join(new_sequence)
     
-    def diversity_driven_mutation(self, sequence: str, elite_sequences: List[str]) -> str:
+    def diversity_driven_mutation(self, sequence: str, elite_sequences: List[str], design_params: dict = None) -> str:
         """多样性驱动突变"""
         if not elite_sequences:
-            return self.aggressive_mutation(sequence)
+            return self.aggressive_mutation(sequence, design_params=design_params)
+        
+        # 获取包含半胱氨酸的设置
+        include_cysteine = design_params.get('include_cysteine', True) if design_params else True
+        amino_acid_set = AMINO_ACIDS if include_cysteine else AMINO_ACIDS_NO_CYS
         
         new_sequence = list(sequence)
         
@@ -833,35 +868,35 @@ class AdvancedMutationEngine:
                                if len(elite_seq) > pos]
             aa_counts = Counter(elite_aas_at_pos)
             
-            rare_aas = [aa for aa in AMINO_ACIDS 
+            rare_aas = [aa for aa in amino_acid_set 
                        if aa != current_aa and aa_counts.get(aa, 0) <= 1]
             
             if rare_aas:
                 new_sequence[pos] = random.choice(rare_aas)
             else:
-                new_sequence[pos] = random.choice([aa for aa in AMINO_ACIDS if aa != current_aa])
+                new_sequence[pos] = random.choice([aa for aa in amino_acid_set if aa != current_aa])
         
         return ''.join(new_sequence)
     
     def adaptive_mutate(self, sequence: str, parent_metrics: Dict = None, 
                        elite_sequences: List[str] = None, 
-                       temperature: float = 1.0) -> Tuple[str, str]:
+                       temperature: float = 1.0, design_params: dict = None) -> Tuple[str, str]:
         """执行自适应突变"""
         strategy = self.select_mutation_strategy()
         
         if strategy == 'conservative':
             plddt_scores = parent_metrics.get('plddts', []) if parent_metrics else []
-            mutated_sequence = self.conservative_mutation(sequence, plddt_scores)
+            mutated_sequence = self.conservative_mutation(sequence, plddt_scores, design_params=design_params)
         elif strategy == 'aggressive':
-            mutated_sequence = self.aggressive_mutation(sequence)
+            mutated_sequence = self.aggressive_mutation(sequence, design_params=design_params)
         elif strategy == 'motif_guided':
-            mutated_sequence = self.motif_guided_mutation(sequence)
+            mutated_sequence = self.motif_guided_mutation(sequence, design_params=design_params)
         elif strategy == 'energy_guided':
-            mutated_sequence = self.energy_guided_mutation(sequence, temperature)
+            mutated_sequence = self.energy_guided_mutation(sequence, temperature, design_params=design_params)
         elif strategy == 'diversity_driven':
-            mutated_sequence = self.diversity_driven_mutation(sequence, elite_sequences or [])
+            mutated_sequence = self.diversity_driven_mutation(sequence, elite_sequences or [], design_params=design_params)
         else:
-            mutated_sequence = self.conservative_mutation(sequence)
+            mutated_sequence = self.conservative_mutation(sequence, design_params=design_params)
         
         return mutated_sequence, strategy
     

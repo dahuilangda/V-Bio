@@ -387,6 +387,7 @@ def submit_designer_job(
     initial_sequence: str = None,
     sequence_mask: str = None,
     cyclic_binder: bool = False,
+    include_cysteine: bool = True,
     use_msa: bool = False
 ) -> dict:
     """提交 Designer 任务"""
@@ -444,6 +445,7 @@ def submit_designer_job(
             'initial_sequence': initial_sequence,
             'sequence_mask': sequence_mask,
             'cyclic_binder': cyclic_binder,
+            'include_cysteine': include_cysteine,
             'use_msa': use_msa
         }
         
