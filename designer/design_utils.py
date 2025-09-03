@@ -241,6 +241,7 @@ def get_valid_residues_for_glycan(glycan_ccd: str) -> list:
 def generate_random_bicyclic_sequence(length: int) -> str:
     """
     为双环肽设计生成一个随机序列，包含三个Cys，其中一个在末尾。
+    确保序列中恰好包含3个半胱氨酸，不多不少。
     """
     if length < 3:
         raise ValueError("Sequence length must be at least 3 for bicyclic peptide design.")
@@ -248,16 +249,26 @@ def generate_random_bicyclic_sequence(length: int) -> str:
     # 1. 生成不含Cys的随机序列
     seq = list("".join(random.choice(AMINO_ACIDS_NO_CYS) for _ in range(length)))
     
-    # 2. 在末尾放置一个Cys
+    # 2. 在末尾放置一个Cys（固定末端Cys）
     seq[-1] = 'C'
     
     # 3. 在其余位置随机选择两个不同位置放置Cys
-    available_indices = list(range(length - 1))
+    available_indices = list(range(length - 1))  # 不包括末尾位置
+    if len(available_indices) < 2:
+        raise ValueError("Sequence length too short for bicyclic peptide (need at least 3 positions)")
+    
     cys_pos1, cys_pos2 = random.sample(available_indices, 2)
     seq[cys_pos1] = 'C'
     seq[cys_pos2] = 'C'
     
-    return "".join(seq)
+    final_sequence = "".join(seq)
+    
+    # 验证结果
+    cys_count = final_sequence.count('C')
+    if cys_count != 3:
+        raise ValueError(f"Generated bicyclic sequence has {cys_count} Cys, expected 3")
+    
+    return final_sequence
 
 # def generate_random_sequence(length: int, modification_site: int = None, glycan_modification: str = None) -> str:
 #     """生成一个随机的氨基酸序列。"""
@@ -278,6 +289,7 @@ def generate_random_sequence(length: int, design_params: dict) -> str:
     """根据设计参数生成一个随机的氨基酸序列。"""
     design_type = design_params.get('design_type', 'linear')
     include_cysteine = design_params.get('include_cysteine', True)
+    sequence_mask = design_params.get('sequence_mask')
     
     # 选择氨基酸字符串
     if include_cysteine:
@@ -285,47 +297,67 @@ def generate_random_sequence(length: int, design_params: dict) -> str:
     else:
         amino_acid_set = AMINO_ACIDS_NO_CYS
     
-    # --- 双环肽的特殊生成逻辑 ---
-    if design_type == 'bicyclic':
-        if length < 3:
-            raise ValueError("Bicyclic peptide length must be at least 3.")
-        # 双环肽需要Cys，即使用户禁用了半胱氨酸
-        seq = list("".join(random.choice(AMINO_ACIDS_NO_CYS) for _ in range(length)))
+    # 处理sequence_mask
+    if sequence_mask:
+        # 移除分隔符并转换为大写
+        mask_clean = sequence_mask.replace('-', '').replace('_', '').replace(' ', '').upper()
+        if len(mask_clean) != length:
+            raise ValueError(f"Sequence mask length ({len(mask_clean)}) must match binder length ({length})")
         
-        # 固定最后一个位置为Cys
-        seq[-1] = 'C'
-        
-        # 确定另外两个Cys的位置
-        cys_positions = design_params.get('cys_positions')
-        if cys_positions and len(cys_positions) == 2:
-            pos1, pos2 = cys_positions[0], cys_positions[1]
-        else:
-            # 随机选择两个不与末端重复的位置
-            available_indices = list(range(length - 1))
-            pos1, pos2 = random.sample(available_indices, 2)
-        
-        seq[pos1] = 'C'
-        seq[pos2] = 'C'
-        
-        return "".join(seq)
-
-    # --- 糖肽的特殊生成逻辑 ---
-    elif design_type == 'glycopeptide':
-        seq = list("".join(random.choice(amino_acid_set) for _ in range(length)))
-        modification_site = design_params.get('modification_site')
-        if modification_site is not None:
-            if 0 <= modification_site < length:
-                valid_residues = (list(GLYCOSYLATION_SITES['N-linked'].keys()) +
-                                  list(GLYCOSYLATION_SITES['O-linked'].keys()) +
-                                  list(GLYCOSYLATION_SITES['C-linked'].keys()))
-                seq[modification_site] = random.choice(valid_residues)
+        # 根据mask生成序列
+        seq = []
+        for i, char in enumerate(mask_clean):
+            if char == 'X':
+                seq.append(random.choice(amino_acid_set))
             else:
-                raise ValueError("modification_site index is out of bounds for the given sequence length.")
-        return "".join(seq)
-
-    # --- 默认线性多肽逻辑 ---
+                seq.append(char)  # 固定氨基酸
     else:
-        return "".join(random.choice(amino_acid_set) for _ in range(length))
+        # 原有逻辑：根据设计类型生成序列
+        seq = []
+        
+        # --- 双环肽的特殊生成逻辑 ---
+        if design_type == 'bicyclic':
+            if length < 3:
+                raise ValueError("Bicyclic peptide length must be at least 3.")
+            # 双环肽需要Cys，即使用户禁用了半胱氨酸
+            seq = list("".join(random.choice(AMINO_ACIDS_NO_CYS) for _ in range(length)))
+            
+            # 固定最后一个位置为Cys
+            seq[-1] = 'C'
+            
+            # 确定另外两个Cys的位置
+            cys_positions = design_params.get('cys_positions')
+            if cys_positions and len(cys_positions) == 2:
+                pos1, pos2 = cys_positions[0], cys_positions[1]
+            else:
+                # 随机选择两个不与末端重复的位置
+                available_indices = list(range(length - 1))
+                pos1, pos2 = random.sample(available_indices, 2)
+            
+            seq[pos1] = 'C'
+            seq[pos2] = 'C'
+            
+            return "".join(seq)
+
+        # --- 糖肽的特殊生成逻辑 ---
+        elif design_type == 'glycopeptide':
+            seq = list("".join(random.choice(amino_acid_set) for _ in range(length)))
+            modification_site = design_params.get('modification_site')
+            if modification_site is not None:
+                if 0 <= modification_site < length:
+                    valid_residues = (list(GLYCOSYLATION_SITES['N-linked'].keys()) +
+                                      list(GLYCOSYLATION_SITES['O-linked'].keys()) +
+                                      list(GLYCOSYLATION_SITES['C-linked'].keys()))
+                    seq[modification_site] = random.choice(valid_residues)
+                else:
+                    raise ValueError("modification_site index is out of bounds for the given sequence length.")
+            return "".join(seq)
+
+        # --- 默认线性多肽逻辑 ---
+        else:
+            seq = [random.choice(amino_acid_set) for _ in range(length)]
+    
+    return "".join(seq)
 
 
 # def mutate_sequence(
@@ -425,38 +457,75 @@ def mutate_sequence(
     """
     new_sequence = list(sequence)
     num_mutations = max(1, int(len(sequence) * mutation_rate))
-    design_type = design_params.get('design_type', 'linear')
+    design_type = design_params.get('design_type', 'linear') if design_params else 'linear'
+    sequence_mask = design_params.get('sequence_mask') if design_params else None
 
     # --- 步骤 1: 确定可突变的位置 ---
     protected_indices = set()
+    
+    # 处理sequence_mask约束
+    if sequence_mask:
+        mask_clean = sequence_mask.replace('-', '').replace('_', '').replace(' ', '').upper()
+        for i, char in enumerate(mask_clean):
+            if char != 'X':  # 非X位置是固定位置，不能突变
+                protected_indices.add(i)
+    
+    # 其他设计类型的保护位置
     if design_type == 'glycopeptide':
-        mod_site = design_params.get('modification_site')
+        mod_site = design_params.get('modification_site') if design_params else None
         if mod_site is not None:
             protected_indices.add(mod_site)
     elif design_type == 'bicyclic':
-        # 在双环肽中，Cys的位置是可变的，但它们的数量和末端位置是固定的
-        # 因此，我们将Cys位置视为可交换的，而不是完全受保护的
+        # 双环肽中，半胱氨酸数量必须恰好为3个
         cys_indices = {i for i, aa in enumerate(sequence) if aa == 'C'}
         
-        # 新增逻辑：以一定概率移动一个Cys的位置
-        CYS_MOVE_PROBABILITY = 0.25 
-        if random.random() < CYS_MOVE_PROBABILITY:
+        # 验证当前序列的Cys数量
+        if len(cys_indices) != 3:
+            logger.warning(f"Bicyclic sequence has {len(cys_indices)} Cys, correcting to 3")
+            # 如果Cys数量不对，重新生成符合要求的序列
+            try:
+                corrected_seq = list(sequence)
+                # 移除所有Cys
+                for i in range(len(corrected_seq)):
+                    if corrected_seq[i] == 'C':
+                        corrected_seq[i] = random.choice(AMINO_ACIDS_NO_CYS)
+                
+                # 重新添加3个Cys
+                corrected_seq[-1] = 'C'  # 末端Cys
+                available_indices = list(range(len(corrected_seq) - 1))
+                if len(available_indices) >= 2:
+                    pos1, pos2 = random.sample(available_indices, 2)
+                    corrected_seq[pos1] = 'C'
+                    corrected_seq[pos2] = 'C'
+                
+                sequence = "".join(corrected_seq)
+                new_sequence = list(sequence)
+                cys_indices = {i for i, aa in enumerate(sequence) if aa == 'C'}
+            except Exception as e:
+                logger.error(f"Failed to correct bicyclic sequence: {e}")
+        
+        # 双环肽突变策略：以一定概率移动一个Cys的位置
+        CYS_MOVE_PROBABILITY = 0.15  # 降低概率避免过度变化
+        if random.random() < CYS_MOVE_PROBABILITY and len(cys_indices) == 3:
             variable_cys_indices = sorted(list(cys_indices - {len(sequence) - 1}))
             if len(variable_cys_indices) == 2:
                 cys_to_move = random.choice(variable_cys_indices)
                 
-                available_swap_indices = [i for i in range(len(sequence) - 1) if i not in cys_indices]
+                available_swap_indices = [i for i in range(len(sequence) - 1) 
+                                        if i not in cys_indices and i not in protected_indices]
                 if available_swap_indices:
                     new_pos = random.choice(available_swap_indices)
                     
                     # 交换位置，并用随机氨基酸填充旧的Cys位置
                     new_sequence[cys_to_move] = random.choice(AMINO_ACIDS_NO_CYS)
                     new_sequence[new_pos] = 'C'
-                    logger.debug(f"Bicyclic mutation: Moved Cys from {cys_to_move} to {new_pos}")
-                    # 在移动Cys后，更新序列和Cys位置以进行后续突变
+                    logger.debug(f"Bicyclic mutation: Moved Cys from {cys_to_move+1} to {new_pos+1}")
+                    
+                    # 更新序列和Cys位置
                     sequence = "".join(new_sequence)
                     cys_indices = {i for i, aa in enumerate(sequence) if aa == 'C'}
 
+        # 保护所有Cys位置不被常规突变
         protected_indices.update(cys_indices)
 
     available_indices = [i for i in range(len(sequence)) if i not in protected_indices]
@@ -677,28 +746,38 @@ class AdvancedMutationEngine:
         # 获取包含半胱氨酸的设置
         include_cysteine = design_params.get('include_cysteine', True) if design_params else True
         amino_acid_set = AMINO_ACIDS if include_cysteine else AMINO_ACIDS_NO_CYS
+        sequence_mask = design_params.get('sequence_mask') if design_params else None
         
         new_sequence = list(sequence)
         
+        # 确定可突变的位置
+        available_positions = list(range(len(sequence)))
+        if sequence_mask:
+            mask_clean = sequence_mask.replace('-', '').replace('_', '').replace(' ', '').upper()
+            available_positions = [i for i, char in enumerate(mask_clean) if char == 'X']
+        
+        if not available_positions:
+            return sequence
+        
         # 选择突变位置
         if plddt_scores and len(plddt_scores) == len(sequence):
-            weights = [(100 - score) ** 2 for score in plddt_scores]
-            total_weight = sum(weights)
+            available_weights = [(100 - plddt_scores[i]) ** 2 for i in available_positions]
+            total_weight = sum(available_weights)
             if total_weight > 0:
                 positions = []
-                for _ in range(num_mutations):
+                for _ in range(min(num_mutations, len(available_positions))):
                     r = random.random() * total_weight
                     cumsum = 0
-                    for i, w in enumerate(weights):
-                        cumsum += w
+                    for j, i in enumerate(available_positions):
+                        cumsum += available_weights[j]
                         if r <= cumsum:
                             positions.append(i)
                             break
                 positions = list(set(positions))
             else:
-                positions = random.sample(range(len(sequence)), num_mutations)
+                positions = random.sample(available_positions, min(num_mutations, len(available_positions)))
         else:
-            positions = random.sample(range(len(sequence)), num_mutations)
+            positions = random.sample(available_positions, min(num_mutations, len(available_positions)))
         
         for pos in positions:
             original_aa = sequence[pos]
@@ -740,9 +819,20 @@ class AdvancedMutationEngine:
         # 获取包含半胱氨酸的设置
         include_cysteine = design_params.get('include_cysteine', True) if design_params else True
         amino_acid_set = AMINO_ACIDS if include_cysteine else AMINO_ACIDS_NO_CYS
+        sequence_mask = design_params.get('sequence_mask') if design_params else None
         
         new_sequence = list(sequence)
-        positions = random.sample(range(len(sequence)), min(num_mutations, len(sequence)))
+        
+        # 确定可突变的位置
+        available_positions = list(range(len(sequence)))
+        if sequence_mask:
+            mask_clean = sequence_mask.replace('-', '').replace('_', '').replace(' ', '').upper()
+            available_positions = [i for i, char in enumerate(mask_clean) if char == 'X']
+        
+        if not available_positions:
+            return sequence
+            
+        positions = random.sample(available_positions, min(num_mutations, len(available_positions)))
         
         for pos in positions:
             current_aa = sequence[pos]
@@ -754,6 +844,16 @@ class AdvancedMutationEngine:
     def motif_guided_mutation(self, sequence: str, design_params: dict = None) -> str:
         """motif导引突变"""
         new_sequence = list(sequence)
+        sequence_mask = design_params.get('sequence_mask') if design_params else None
+        
+        # 确定可突变的位置
+        available_positions = list(range(len(sequence)))
+        if sequence_mask:
+            mask_clean = sequence_mask.replace('-', '').replace('_', '').replace(' ', '').upper()
+            available_positions = [i for i, char in enumerate(mask_clean) if char == 'X']
+        
+        if not available_positions:
+            return sequence
         
         # 选择有益motif
         all_motifs = {**self.beneficial_motifs, **dict(self.motif_patterns)}
@@ -761,13 +861,22 @@ class AdvancedMutationEngine:
         
         if beneficial_motifs:
             motif = random.choice(beneficial_motifs)
-            if len(motif) <= len(sequence):
-                start_pos = random.randint(0, len(sequence) - len(motif))
-                for i, aa in enumerate(motif):
-                    new_sequence[start_pos + i] = aa
+            if len(motif) <= len(available_positions):
+                # 尝试在可用位置中插入motif
+                max_start = max(0, len(sequence) - len(motif))
+                attempts = 0
+                while attempts < 10:
+                    start_pos = random.randint(0, max_start)
+                    # 检查motif位置是否都可变
+                    motif_positions = list(range(start_pos, start_pos + len(motif)))
+                    if all(pos in available_positions for pos in motif_positions):
+                        for i, aa in enumerate(motif):
+                            new_sequence[start_pos + i] = aa
+                        break
+                    attempts += 1
         
-        # 额外保守突变
-        remaining_pos = [i for i in range(len(sequence)) if new_sequence[i] == sequence[i]]
+        # 额外保守突变（仅在可变位置）
+        remaining_pos = [i for i in available_positions if new_sequence[i] == sequence[i]]
         if remaining_pos:
             num_additional = min(2, len(remaining_pos))
             additional_positions = random.sample(remaining_pos, num_additional)
@@ -786,10 +895,20 @@ class AdvancedMutationEngine:
         """能量导引突变"""
         new_sequence = list(sequence)
         num_mutations = max(1, len(sequence) // 6)
+        sequence_mask = design_params.get('sequence_mask') if design_params else None
         
-        # 获取低保守性位置
+        # 确定可突变的位置
+        available_positions = list(range(len(sequence)))
+        if sequence_mask:
+            mask_clean = sequence_mask.replace('-', '').replace('_', '').replace(' ', '').upper()
+            available_positions = [i for i, char in enumerate(mask_clean) if char == 'X']
+        
+        if not available_positions:
+            return sequence
+        
+        # 获取低保守性位置（在可变位置中）
         variable_positions = []
-        for i in range(len(sequence)):
+        for i in available_positions:
             if i in self.position_preferences:
                 total_weight = sum(self.position_preferences[i].values())
                 current_weight = self.position_preferences[i].get(sequence[i], 0)
@@ -800,10 +919,7 @@ class AdvancedMutationEngine:
         if len(variable_positions) >= num_mutations:
             positions = random.sample(variable_positions, num_mutations)
         else:
-            positions = variable_positions + random.sample(
-                [i for i in range(len(sequence)) if i not in variable_positions],
-                min(num_mutations - len(variable_positions), len(sequence) - len(variable_positions))
-            )
+            positions = random.sample(available_positions, min(num_mutations, len(available_positions)))
         
         for pos in positions:
             current_aa = sequence[pos]
@@ -833,8 +949,18 @@ class AdvancedMutationEngine:
         # 获取包含半胱氨酸的设置
         include_cysteine = design_params.get('include_cysteine', True) if design_params else True
         amino_acid_set = AMINO_ACIDS if include_cysteine else AMINO_ACIDS_NO_CYS
+        sequence_mask = design_params.get('sequence_mask') if design_params else None
         
         new_sequence = list(sequence)
+        
+        # 确定可突变的位置
+        available_positions = list(range(len(sequence)))
+        if sequence_mask:
+            mask_clean = sequence_mask.replace('-', '').replace('_', '').replace(' ', '').upper()
+            available_positions = [i for i, char in enumerate(mask_clean) if char == 'X']
+        
+        if not available_positions:
+            return sequence
         
         # 计算相似性
         similarities = []
@@ -847,13 +973,15 @@ class AdvancedMutationEngine:
         
         # 根据相似性调整突变强度
         if avg_similarity > 0.8:
-            num_mutations = max(3, len(sequence) // 3)
+            num_mutations = max(3, len(available_positions) // 3)
         else:
-            num_mutations = max(1, len(sequence) // 6)
+            num_mutations = max(1, len(available_positions) // 6)
         
-        # 选择差异小的位置进行突变
+        num_mutations = min(num_mutations, len(available_positions))
+        
+        # 选择差异小的位置进行突变（在可变位置中）
         position_differences = []
-        for i in range(len(sequence)):
+        for i in available_positions:
             diff_count = sum(1 for elite_seq in elite_sequences 
                            if len(elite_seq) > i and elite_seq[i] != sequence[i])
             position_differences.append((i, diff_count))

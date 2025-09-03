@@ -43,7 +43,8 @@ logger = logging.getLogger(__name__)
 
 
 LINKER_ATOM_MAP = {
-    'SEZ': ['CD', 'C1', 'C2'] 
+    'SEZ': ['CD', 'C1', 'C2'],
+    '29N': ['C16', 'C19', 'C25'],
     # 可以添加其他连接体, 例如: 'XYZ': ['A1', 'A2', 'A3']
 }
 
@@ -266,6 +267,7 @@ class Designer:
         binder_chain_id = kwargs['binder_chain_id']
         binder_length = kwargs['binder_length']
         initial_binder_sequence = kwargs.get('initial_binder_sequence')
+        sequence_mask = kwargs.get('sequence_mask')
         output_csv_path = kwargs.get('output_csv_path', f"design_summary_{int(time.time())}.csv")
         keep_temp_files = kwargs.get('keep_temp_files', False)
         weight_iptm = kwargs.get('weight_iptm', 0.7)
@@ -286,7 +288,8 @@ class Designer:
         design_params = {
             'design_type': design_type,
             'binder_chain_id': binder_chain_id,  # 新增：传递结合肽链ID
-            'user_constraints': user_constraints  # 新增：传递用户约束
+            'user_constraints': user_constraints,  # 新增：传递用户约束
+            'sequence_mask': sequence_mask  # 新增：传递序列掩码
         }
         if design_type == 'glycopeptide':
             design_params.update({

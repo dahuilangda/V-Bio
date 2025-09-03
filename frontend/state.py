@@ -19,6 +19,15 @@ def initialize_session_state():
     if 'designer_results' not in st.session_state: st.session_state.designer_results = None
     if 'designer_error' not in st.session_state: st.session_state.designer_error = None
     if 'designer_config' not in st.session_state: st.session_state.designer_config = {}
+
+    # Bicyclic Designer-related session state
+    if 'bicyclic_task_id' not in st.session_state: st.session_state.bicyclic_task_id = None
+    if 'bicyclic_work_dir' not in st.session_state: st.session_state.bicyclic_work_dir = None
+    if 'bicyclic_results' not in st.session_state: st.session_state.bicyclic_results = None
+    if 'bicyclic_error' not in st.session_state: st.session_state.bicyclic_error = None
+    if 'bicyclic_config' not in st.session_state: st.session_state.bicyclic_config = {}
+    if 'bicyclic_components' not in st.session_state: st.session_state.bicyclic_components = []
+    if 'bicyclic_constraints' not in st.session_state: st.session_state.bicyclic_constraints = []
     
     # Affinity-related session state
     if 'affinity_task_id' not in st.session_state: st.session_state.affinity_task_id = None

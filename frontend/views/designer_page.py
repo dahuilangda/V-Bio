@@ -28,8 +28,27 @@ from frontend.utils import visualize_structure_py3dmol
 from frontend.url_state import URLStateManager
 
 def render_designer_page():
-    st.markdown("### 🧪 从头分子设计")
+    st.markdown("### 🧪 分子设计")
     st.markdown("使用演化算法设计分子结合体，优化其与目标复合物的结合亲和力。")
+    
+    # 添加设计类型选择器
+    st.markdown("---")
+    col_design_type, col_design_info = st.columns([1, 2])
+    
+    with col_design_type:
+        design_type_selector = st.selectbox(
+            "选择设计类型",
+            options=["peptide", "glycopeptide"],
+            format_func=lambda x: "🧬 多肽设计" if x == "peptide" else "🍯 糖肽设计",
+            help="选择要设计的分子类型。多肽设计适合大多数蛋白质结合需求，糖肽设计可添加糖基修饰。",
+            key="main_design_type_selector"
+        )
+    
+    with col_design_info:
+        if design_type_selector == "peptide":
+            st.info("🧬 **多肽设计**: 设计天然或修饰的氨基酸序列，具有优化的结合亲和力和特异性。", icon="💡")
+        else:
+            st.info("🍯 **糖肽设计**: 设计含有糖基修饰的多肽，增强稳定性和生物活性，常用于免疫调节和细胞识别。", icon="💡")
     
     designer_is_running = (
         st.session_state.designer_task_id is not None and 
@@ -437,163 +456,189 @@ def render_designer_page():
         
         st.markdown("---")
         
-        st.subheader("设计参数", anchor=False)
-        col1, col2, col3 = st.columns(3)
+        st.subheader("🎯 设计参数", anchor=False)
         
-        with col1:
-            design_type = st.selectbox(
-                "设计类型",
-                options=["peptide", "glycopeptide"],
-                format_func=lambda x: "🧬 多肽设计" if x == "peptide" else "🍯 糖肽设计",
-                help="选择是设计普通多肽还是含有糖基修饰的糖肽。",
-                disabled=designer_is_running
-            )
-        
-        with col2:
-            binder_length = st.number_input(
-                "结合肽长度",
-                min_value=5,
-                max_value=50,
-                value=20,
-                step=1,
-                help="设计的结合肽的氨基酸残基数量。",
-                disabled=designer_is_running
-            )
-        
-        with col3:
-            st.write("")
-            cyclic_binder = st.checkbox(
-                "环状结合肽",
-                value=False,
-                help="勾选此项将设计的结合肽设计为环状肽，具有闭合的环状结构。",
-                disabled=designer_is_running
-            )
-        
-        # 添加半胱氨酸控制选项
-        st.subheader("🧪 氨基酸组成控制", anchor=False)
-        col_cys, col_cys_desc = st.columns([1, 2])
-        
-        with col_cys:
-            include_cysteine = st.checkbox(
-                "包含半胱氨酸",
-                value=True,
-                help="是否在设计的序列中包含半胱氨酸(Cys)。取消勾选将避免生成含有半胱氨酸的序列。",
-                disabled=designer_is_running
-            )
-        
-        with col_cys_desc:
-            if include_cysteine:
-                st.info("✅ 允许使用半胱氨酸(C)，可形成二硫键增强结构稳定性")
-            else:
-                st.warning("⚠️ 禁用半胱氨酸(C)，避免不必要的二硫键形成")
-                st.caption("注意：不使用半胱氨酸可能会降低肽链的结构稳定性，但避免了复杂的二硫键配对问题。")
-        
-        st.subheader("🧬 初始序列设置", anchor=False)
-        use_initial_sequence = st.checkbox(
-            "使用初始序列作为演化起点",
-            value=False,
-            help="启用后可以提供一个初始序列作为演化算法的起点，而不是完全随机生成。",
-            disabled=designer_is_running
-        )
-        
-        initial_sequence = None
-        if use_initial_sequence:
-            initial_sequence = st.text_input(
-                "初始序列",
-                value="",
-                placeholder="例如: MVSKGEELFTGVVPILVELD...",
-                help=f"输入初始氨基酸序列。长度应该等于结合肽长度({binder_length})。如果长度不匹配，系统会自动调整。",
-                disabled=designer_is_running
-            )
+        # 简化设计参数设置
+        with st.expander("📝 **基本设置**", expanded=True):
+            col1, col2, col3 = st.columns(3)
             
-            if initial_sequence:
-                seq_len = len(initial_sequence)
-                if seq_len != binder_length:
-                    if seq_len < binder_length:
-                        st.warning(f"⚠️ 初始序列长度({seq_len})小于目标长度({binder_length})，将随机补全缺失部分。")
+            with col1:
+                binder_length = st.number_input(
+                    "结合肽长度",
+                    min_value=5,
+                    max_value=50,
+                    value=20,
+                    step=1,
+                    help="设计的结合肽的氨基酸残基数量。",
+                    disabled=designer_is_running
+                )
+            
+            with col2:
+                cyclic_binder = st.checkbox(
+                    "环状结构",
+                    value=False,
+                    help="勾选此项将设计的结合肽设计为环状肽，具有闭合的环状结构。",
+                    disabled=designer_is_running
+                )
+            
+            with col3:
+                if design_type_selector == "glycopeptide":
+                    glycan_options = {
+                        "NAGS": "NAG-Ser (N-乙酰葡糖胺-丝氨酸)",
+                        "NAGT": "NAG-Thr (N-乙酰葡糖胺-苏氨酸)",
+                        "NAGN": "NAG-Asn (N-乙酰葡糖胺-天冬酰胺)",
+                        "MANS": "MAN-Ser (甘露糖-丝氨酸)",
+                        "MANT": "MAN-Thr (甘露糖-苏氨酸)",
+                        "GALS": "GAL-Ser (半乳糖-丝氨酸)",
+                        "GALT": "GAL-Thr (半乳糖-苏氨酸)"
+                    }
+                    
+                    glycan_type = st.selectbox(
+                        "糖基类型",
+                        options=["请选择..."] + list(glycan_options.keys()),
+                        format_func=lambda x: glycan_options[x] if x in glycan_options else x,
+                        index=0,
+                        help="选择要使用的糖基修饰类型。",
+                        disabled=designer_is_running
+                    )
+                    
+                    if glycan_type != "请选择..." and glycan_type in glycan_options:
+                        glycosylation_site = st.number_input(
+                            "糖基化位点",
+                            min_value=1,
+                            max_value=binder_length,
+                            value=min(5, binder_length),
+                            step=1,
+                            help=f"肽链上用于应用糖基修饰的氨基酸位置 (1-{binder_length})。",
+                            disabled=designer_is_running
+                        )
                     else:
-                        st.warning(f"⚠️ 初始序列长度({seq_len})大于目标长度({binder_length})，将截取前{binder_length}个氨基酸。")
+                        glycan_type = None
+                        glycosylation_site = None
                 else:
-                    st.success(f"✅ 初始序列长度({seq_len})与目标长度匹配。")
-                
-                st.code(initial_sequence, language="text")
-            else:
-                st.info("💡 请输入一个有效的氨基酸序列作为演化起点。")
-
-        sequence_mask = st.text_input(
-            "序列掩码 (可选)",
-            placeholder="例如: 3A,10V,12W",
-            help="固定序列中的特定氨基酸。格式: 'pos1AA1,pos2AA2,...' (例如 '3A,10V')。位置为1-based索引，不区分大小写。这些位置在演化过程中不会被突变。",
-            disabled=designer_is_running
-        )
+                    glycan_type = None
+                    glycosylation_site = None
+                    st.write("")  # 占位符
         
-        st.subheader("演化算法参数", anchor=False)
-        
-        st.subheader("🚀 优化模式选择", anchor=False)
-        optimization_mode = st.selectbox(
-            "选择优化策略",
-            options=["balanced", "stable", "aggressive", "conservative", "custom"],
-            format_func=lambda x: {
-                "balanced": "⚖️ 平衡模式 (推荐)",
-                "stable": "🎯 平稳优化",
-                "aggressive": "🔥 激进探索", 
-                "conservative": "🛡️ 保守设计",
-                "custom": "⚙️ 自定义配置"
-            }[x],
-            index=0,
-            help="选择预设的优化策略或自定义配置。不同策略适用于不同的设计场景。",
-            disabled=designer_is_running
-        )
-        
-        mode_descriptions = {
-            "balanced": "⚖️ **平衡模式**: 综合考虑探索性和收敛性，适用于大多数设计任务。",
-            "stable": "🎯 **平稳优化**: 稳定收敛，减少分数波动，适用于需要可重复结果的场景。",
-            "aggressive": "🔥 **激进探索**: 快速突破局部最优，适用于初始分数较低或需要大幅改进的场景。",
-            "conservative": "🛡️ **保守设计**: 小步优化，适用于已有较好序列或对稳定性要求高的场景。",
-            "custom": "⚙️ **自定义配置**: 手动调整所有参数，适用于高级用户。"
-        }
-        st.info(mode_descriptions[optimization_mode])
-        
-        col3, col4, col5 = st.columns(3)
-        
-        with col3:
-            generations = st.number_input(
-                "演化代数",
-                min_value=2,
-                max_value=20,
-                value=8,
-                step=1,
-                help="演化算法的迭代次数。更多代数通常产生更好的结果，但需要更长时间。",
+        # 高级设置 - 默认折叠
+        with st.expander("⚙️ **高级设置** (可选)", expanded=False):
+            st.markdown("**🧬 初始序列设置**")
+            use_initial_sequence = st.checkbox(
+                "使用初始序列作为演化起点",
+                value=False,
+                help="启用后可以提供一个初始序列作为演化算法的起点，而不是完全随机生成。",
                 disabled=designer_is_running
             )
-        
-        with col4:
-            population_size = st.number_input(
-                "种群大小",
-                min_value=2,
-                max_value=50,
-                value=12,
-                step=1,
-                help="每一代中的候选序列数量。",
-                disabled=designer_is_running
-            )
-        
-        with col5:
-            max_elite_size = min(10, max(1, population_size//2))
-            default_elite_size = max(1, min(max_elite_size, min(5, max(1, population_size//3))))
             
-            elite_size = st.number_input(
-                "精英保留数",
-                min_value=1,
-                max_value=max_elite_size,
-                value=default_elite_size,
-                step=1,
-                help="每一代中保留的最优个体数量。",
+            initial_sequence = None
+            if use_initial_sequence:
+                initial_sequence = st.text_input(
+                    "初始序列",
+                    value="",
+                    placeholder="例如: MVSKGEELFTGVVPILVELD...",
+                    help=f"输入初始氨基酸序列。长度应该等于结合肽长度({binder_length})。",
+                    disabled=designer_is_running
+                )
+                
+                if initial_sequence:
+                    seq_len = len(initial_sequence)
+                    if seq_len != binder_length:
+                        if seq_len < binder_length:
+                            st.warning(f"⚠️ 初始序列长度({seq_len})小于目标长度({binder_length})，将随机补全。")
+                        else:
+                            st.warning(f"⚠️ 初始序列长度({seq_len})大于目标长度({binder_length})，将截取前{binder_length}个氨基酸。")
+                    else:
+                        st.success(f"✅ 初始序列长度匹配。")
+
+            sequence_mask = st.text_input(
+                "序列掩码",
+                placeholder="例如: X-A-X-L-X-X-X-P-X-X",
+                help="指定固定位置的氨基酸。格式: 'X-A-X-L-X'，其中X表示可变位置，字母表示固定氨基酸。长度必须与肽链长度匹配。支持使用'-'、'_'或空格作为分隔符。",
+                key="designer_sequence_mask"
+            )
+            
+            if sequence_mask and sequence_mask.strip():
+                # 验证sequence_mask格式
+                mask_clean = sequence_mask.replace('-', '').replace('_', '').replace(' ', '').upper()
+                if len(mask_clean) != binder_length:
+                    st.error(f"❌ 序列掩码长度 ({len(mask_clean)}) 与肽链长度 ({binder_length}) 不匹配。")
+                else:
+                    # 验证字符是否有效
+                    valid_chars = set('ACDEFGHIKLMNPQRSTVWYX')
+                    invalid_chars = set(mask_clean) - valid_chars
+                    if invalid_chars:
+                        st.error(f"❌ 序列掩码包含无效字符: {invalid_chars}。只允许标准氨基酸字符和X（表示可变位置）。")
+                    else:
+                        fixed_positions = [(i, char) for i, char in enumerate(mask_clean) if char != 'X']
+                        if fixed_positions:
+                            pos_info = ', '.join([f"位置{i+1}={char}" for i, char in fixed_positions])
+                            st.success(f"✅ 序列掩码有效。固定位置: {pos_info}")
+                        else:
+                            st.info("ℹ️ 序列掩码中所有位置都是可变的。")
+            else:
+                sequence_mask = ""  # 确保为空字符串而不是None
+            
+            st.markdown("**🚀 演化算法参数**")
+            optimization_mode = st.selectbox(
+                "优化策略",
+                options=["balanced", "stable", "aggressive", "conservative"],
+                format_func=lambda x: {
+                    "balanced": "⚖️ 平衡模式 (推荐)",
+                    "stable": "� 平稳优化",
+                    "aggressive": "🔥 激进探索", 
+                    "conservative": "🛡️ 保守设计"
+                }[x],
+                index=0,
+                help="选择预设的优化策略。平衡模式适用于大多数设计任务。",
                 disabled=designer_is_running
             )
-        
-        col6, col7 = st.columns(2)
-        with col6:
+            
+            mode_descriptions = {
+                "balanced": "⚖️ **平衡模式**: 综合考虑探索性和收敛性，适用于大多数设计任务。",
+                "stable": "🎯 **平稳优化**: 稳定收敛，减少分数波动，适用于需要可重复结果的场景。",
+                "aggressive": "🔥 **激进探索**: 快速突破局部最优，适用于初始分数较低的场景。",
+                "conservative": "🛡️ **保守设计**: 小步优化，适用于已有较好序列的场景。"
+            }
+            st.info(mode_descriptions[optimization_mode])
+            
+            col_adv1, col_adv2, col_adv3 = st.columns(3)
+            
+            with col_adv1:
+                generations = st.number_input(
+                    "演化代数",
+                    min_value=2,
+                    max_value=20,
+                    value=8,
+                    step=1,
+                    help="演化算法的迭代次数。",
+                    disabled=designer_is_running
+                )
+            
+            with col_adv2:
+                population_size = st.number_input(
+                    "种群大小",
+                    min_value=2,
+                    max_value=50,
+                    value=12,
+                    step=1,
+                    help="每一代中的候选序列数量。",
+                    disabled=designer_is_running
+                )
+            
+            with col_adv3:
+                max_elite_size = min(10, max(1, population_size//2))
+                default_elite_size = max(1, min(max_elite_size, min(5, max(1, population_size//3))))
+                
+                elite_size = st.number_input(
+                    "精英保留数",
+                    min_value=1,
+                    max_value=max_elite_size,
+                    value=default_elite_size,
+                    step=1,
+                    help="每一代中保留的最优个体数量。",
+                    disabled=designer_is_running
+                )
+            
             mutation_rate = st.slider(
                 "突变率",
                 min_value=0.1,
@@ -603,69 +648,8 @@ def render_designer_page():
                 help="每一代中发生突变的概率。",
                 disabled=designer_is_running
             )
-        
-        if optimization_mode == "custom":
-            st.subheader("🔧 高级参数配置", anchor=False)
-            col_adv1, col_adv2, col_adv3 = st.columns(3)
             
-            with col_adv1:
-                convergence_window = st.number_input(
-                    "收敛窗口",
-                    min_value=3,
-                    max_value=10,
-                    value=5,
-                    help="收敛检测的滑动窗口大小。较小值更敏感。",
-                    disabled=designer_is_running
-                )
-                
-                convergence_threshold = st.number_input(
-                    "收敛阈值",
-                    min_value=0.0001,
-                    max_value=0.01,
-                    value=0.001,
-                    format="%.4f",
-                    help="收敛检测的分数方差阈值。较小值更严格。",
-                    disabled=designer_is_running
-                )
-            
-            with col_adv2:
-                max_stagnation = st.number_input(
-                    "最大停滞周期",
-                    min_value=1,
-                    max_value=10,
-                    value=3,
-                    help="触发早停的最大停滞周期数。较小值更激进。",
-                    disabled=designer_is_running
-                )
-                
-                initial_temperature = st.number_input(
-                    "初始温度",
-                    min_value=0.1,
-                    max_value=5.0,
-                    value=1.0,
-                    step=0.1,
-                    help="自适应突变的初始温度。较高值更探索性。",
-                    disabled=designer_is_running
-                )
-            
-            with col_adv3:
-                min_temperature = st.number_input(
-                    "最小温度",
-                    min_value=0.01,
-                    max_value=1.0,
-                    value=0.1,
-                    step=0.01,
-                    help="自适应突变的最小温度。较高值保持更多随机性。",
-                    disabled=designer_is_running
-                )
-                
-                enable_enhanced = st.checkbox(
-                    "启用增强功能",
-                    value=True,
-                    help="启用自适应突变、Pareto优化等增强功能。",
-                    disabled=designer_is_running
-                )
-        else:
+            # 设置预设参数
             preset_params = {
                 "balanced": {
                     "convergence_window": 5,
@@ -709,93 +693,29 @@ def render_designer_page():
             min_temperature = params["min_temperature"]
             enable_enhanced = params["enable_enhanced"]
         
-        if design_type == "glycopeptide":
-            with col7:
-                glycan_options = {
-                    "NAGS": "N-乙酰葡糖胺-丝氨酸",
-                    "NAGT": "N-乙酰葡糖胺-苏氨酸的糖苷键",
-                    "NAGN": "N-乙酰葡糖胺-天冬酰胺的糖苷键",
-                    "NAGY": "N-乙酰葡糖胺-酪氨酸的糖苷键",
-                    "MANS": "甘露糖-丝氨酸",
-                    "MANT": "甘露糖-苏氨酸",
-                    "MANN": "甘露糖-天冬酰胺",
-                    "MANY": "甘露糖-酪氨酸",
-                    "GALS": "半乳糖-丝氨酸",
-                    "GALT": "半乳糖-苏氨酸",
-                    "GALN": "半乳糖-天冬酰胺",
-                    "GALY": "半乳糖-酪氨酸",
-                    "FUCS": "岩藻糖-丝氨酸",
-                    "FUCT": "岩藻糖-苏氨酸",
-                    "FUCN": "岩藻糖与天冬酰胺",
-                    "FUCY": "岩藻糖-酪氨酸",
-                    "NANS": "神经氨酸-丝氨酸",
-                    "NANT": "神经氨酸-苏氨酸",
-                    "NANN": "神经氨酸-天冬酰胺",
-                    "NANY": "神经氨酸-酪氨酸",
-                    "GLCS": "葡萄糖-丝氨酸",
-                    "GLCT": "葡萄糖-苏氨酸",
-                    "GLCN": "葡萄糖-天冬酰胺",
-                    "GLCY": "葡萄糖-酪氨酸"
-                }
-                
-                glycan_type = st.selectbox(
-                    "糖肽修饰类型",
-                    options=["请选择..."] + list(glycan_options.keys()),
-                    format_func=lambda x: f"{x} - {glycan_options[x]}" if x in glycan_options else x,
-                    index=0,
-                    help="选择要使用的糖肽修饰类型。每种修饰都是糖基与特定氨基酸的共价结合产物，已预生成到CCD缓存中。",
-                    disabled=designer_is_running
-                )
-                
-                if glycan_type != "请选择..." and glycan_type in glycan_options:
-                    detailed_glycan_info = {
-                        "NAGS": "NAG + Serine → N-乙酰葡糖胺丝氨酸糖基化",
-                        "NAGT": "NAG + Threonine → N-乙酰葡糖胺苏氨酸糖基化",
-                        "NAGN": "NAG + Asparagine → N-乙酰葡糖胺天冬酰胺糖基化",
-                        "NAGY": "NAG + Tyrosine → N-乙酰葡糖胺酪氨酸糖基化",
-                        "MANS": "MAN + Serine → 甘露糖丝氨酸糖基化",
-                        "MANT": "MAN + Threonine → 甘露糖苏氨酸糖基化",
-                        "MANN": "MAN + Asparagine → 甘露糖天冬酰胺糖基化",
-                        "MANY": "MAN + Tyrosine → 甘露糖酪氨酸糖基化",
-                        "GALS": "GAL + Serine → 半乳糖丝氨酸糖基化",
-                        "GALT": "GAL + Threonine → 半乳糖苏氨酸糖基化",
-                        "GALN": "GAL + Asparagine → 半乳糖天冬酰胺糖基化",
-                        "GALY": "GAL + Tyrosine → 半乳糖酪氨酸糖基化",
-                        "FUCS": "FUC + Serine → 岩藻糖丝氨酸糖基化",
-                        "FUCT": "FUC + Threonine → 岩藻糖苏氨酸糖基化",
-                        "FUCN": "FUC + Asparagine → 岩藻糖天冬酰胺糖基化",
-                        "FUCY": "FUC + Tyrosine → 岩藻糖酪氨酸糖基化",
-                        "NANS": "NAN + Serine → 神经氨酸丝氨酸糖基化",
-                        "NANT": "NAN + Threonine → 神经氨酸苏氨酸糖基化",
-                        "NANN": "NAN + Asparagine → 神经氨酸天冬酰胺糖基化",
-                        "NANY": "NAN + Tyrosine → 神经氨酸酪氨酸糖基化",
-                        "GLCS": "GLC + Serine → 葡萄糖丝氨酸糖基化",
-                        "GLCT": "GLC + Threonine → 葡萄糖苏氨酸糖基化",
-                        "GLCN": "GLC + Asparagine → 葡萄糖天冬酰胺糖基化",
-                        "GLCY": "GLC + Tyrosine → 葡萄糖酪氨酸糖基化"
-                    }
-                    
-                    detailed_info = detailed_glycan_info.get(glycan_type, f"{glycan_type} 糖基化修饰")
-                    st.info(f"**{glycan_type}**: {detailed_info}", icon="🍯")
-                else:
-                    glycan_type = None
-                
-            glycosylation_site = st.number_input(
-                "糖基化位点",
-                min_value=1,
-                max_value=binder_length,
-                value=min(1, binder_length),
-                step=1,
-                help=f"肽链上用于应用糖肽修饰的氨基酸位置 (1-{binder_length})。该位置的氨基酸将被替换为对应的糖肽修饰。",
+        # 添加半胱氨酸控制选项
+        st.subheader("🧪 氨基酸组成控制", anchor=False)
+        col_cys, col_cys_desc = st.columns([1, 2])
+        
+        with col_cys:
+            include_cysteine = st.checkbox(
+                "包含半胱氨酸",
+                value=False,  # 默认不勾选
+                help="是否在设计的序列中包含半胱氨酸(Cys)。取消勾选将避免生成含有半胱氨酸的序列。",
                 disabled=designer_is_running
             )
-        else:
-            glycan_type = None
-            glycosylation_site = None
+        
+        with col_cys_desc:
+            if include_cysteine:
+                st.info("✅ 允许使用半胱氨酸(C)，可形成二硫键增强结构稳定性")
+            else:
+                st.warning("⚠️ 禁用半胱氨酸(C)，避免不必要的二硫键形成")
+                st.caption("注意：不使用半胱氨酸可能会降低肽链的结构稳定性，但避免了复杂的二硫键配对问题。")
     
+    # 检查输入验证
     designer_is_valid, validation_message = validate_designer_inputs(st.session_state.designer_components)
     
-    if design_type == "glycopeptide":
+    if design_type_selector == "glycopeptide":
         if not glycan_type:
             designer_is_valid = False
             validation_message = "糖肽设计模式需要选择糖基类型。"
@@ -817,6 +737,74 @@ def render_designer_page():
     protein_components_with_msa = [comp for comp in st.session_state.designer_components 
                                   if comp['type'] == 'protein' and comp.get('sequence', '').strip() and comp.get('use_msa', True)]
     
+    # 设置默认参数值 (来自高级设置中定义的参数)
+    # 在高级设置展开时会被覆盖
+    default_generations = 8
+    default_population_size = 12
+    default_elite_size = max(1, min(5, max(1, default_population_size//3)))
+    default_mutation_rate = 0.3
+    default_optimization_mode = "balanced"
+    default_use_initial_sequence = False
+    default_initial_sequence = None
+    default_sequence_mask = ""
+    
+    # 从高级设置中获取参数，如果没有设置则使用默认值
+    generations = st.session_state.get('designer_generations', default_generations)
+    population_size = st.session_state.get('designer_population_size', default_population_size)
+    elite_size = st.session_state.get('designer_elite_size', default_elite_size)
+    mutation_rate = st.session_state.get('designer_mutation_rate', default_mutation_rate)
+    optimization_mode = st.session_state.get('designer_optimization_mode', default_optimization_mode)
+    use_initial_sequence = st.session_state.get('designer_use_initial_sequence', default_use_initial_sequence)
+    initial_sequence = st.session_state.get('designer_initial_sequence', default_initial_sequence)
+    sequence_mask = st.session_state.get('designer_sequence_mask', default_sequence_mask)
+    
+    # 设置优化参数
+    preset_params = {
+        "balanced": {
+            "convergence_window": 5,
+            "convergence_threshold": 0.001,
+            "max_stagnation": 3,
+            "initial_temperature": 1.0,
+            "min_temperature": 0.1,
+            "enable_enhanced": True
+        },
+        "stable": {
+            "convergence_window": 5,
+            "convergence_threshold": 0.001,
+            "max_stagnation": 3,
+            "initial_temperature": 1.0,
+            "min_temperature": 0.1,
+            "enable_enhanced": True
+        },
+        "aggressive": {
+            "convergence_window": 3,
+            "convergence_threshold": 0.002,
+            "max_stagnation": 2,
+            "initial_temperature": 2.0,
+            "min_temperature": 0.2,
+            "enable_enhanced": True
+        },
+        "conservative": {
+            "convergence_window": 6,
+            "convergence_threshold": 0.0005,
+            "max_stagnation": 5,
+            "initial_temperature": 0.5,
+            "min_temperature": 0.05,
+            "enable_enhanced": True
+        }
+    }
+    
+    params = preset_params.get(optimization_mode, preset_params["balanced"])
+    convergence_window = params["convergence_window"]
+    convergence_threshold = params["convergence_threshold"]
+    max_stagnation = params["max_stagnation"]
+    initial_temperature = params["initial_temperature"]
+    min_temperature = params["min_temperature"]
+    enable_enhanced = params["enable_enhanced"]
+    
+    # 设置目标链ID
+    target_chain_id = 'A'
+    
     if st.button("🚀 开始分子设计", key="start_designer", type="primary", disabled=(not designer_is_valid or designer_is_running), use_container_width=True):
         st.session_state.designer_task_id = None
         st.session_state.designer_results = None
@@ -834,7 +822,7 @@ def render_designer_page():
                 
                 result = submit_designer_job(
                     template_yaml_content=template_yaml,
-                    design_type=design_type,
+                    design_type=design_type_selector,
                     binder_length=binder_length,
                     target_chain_id=target_chain_id,
                     generations=generations,

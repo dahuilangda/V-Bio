@@ -14,6 +14,9 @@ from frontend.utils import get_ligand_resnames_from_pdb, read_cif_from_string, e
 from frontend.url_state import URLStateManager
 
 def render_affinity_page():
+    # 尝试从URL恢复状态
+    URLStateManager.restore_state_from_url()
+    
     st.markdown("### 🔬 结合亲和力预测")
     st.markdown("预测蛋白质与小分子配体之间的结合强度，帮助您评估分子间的相互作用。")
 

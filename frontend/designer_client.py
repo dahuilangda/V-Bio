@@ -244,11 +244,28 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
             else:
                 cmd.append("--disable-enhanced")
             
-            if params.get('design_type') == 'glycopeptide' and params.get('glycan_type'):
+            # 添加设计类型参数
+            design_type = params.get('design_type', 'linear')
+            cmd.extend(["--design_type", design_type])
+            
+            if design_type == 'glycopeptide' and params.get('glycan_type'):
                 cmd.extend([
                     "--glycan_modification", params.get('glycan_type'),
                     "--modification_site", str(params.get('glycosylation_site', 10))
                 ])
+            
+            # 添加双环肽参数处理
+            elif design_type == 'bicyclic':
+                linker_ccd = params.get('linker_ccd', 'SEZ')
+                cmd.extend(["--linker_ccd", linker_ccd])
+                
+                # 处理Cys位置参数
+                if params.get('cys_positions'):
+                    cys_positions = params.get('cys_positions')
+                    if isinstance(cys_positions, list) and len(cys_positions) >= 2:
+                        # 转换为1-based索引
+                        cys_1based = [pos + 1 for pos in cys_positions[:2]]
+                        cmd.extend(["--cys_positions"] + [str(pos) for pos in cys_1based])
             
             if params.get('use_initial_sequence') and params.get('initial_sequence'):
                 initial_seq = params.get('initial_sequence', '').upper()
@@ -265,8 +282,11 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
                     "--initial_binder_sequence", initial_seq
                 ])
 
+            # 添加sequence_mask参数支持
             if params.get('sequence_mask'):
-                cmd.extend(["--sequence_mask", params['sequence_mask']])
+                cmd.extend([
+                    "--sequence_mask", params.get('sequence_mask')
+                ])
             
             server_url = params.get('server_url', 'http://127.0.0.1:5000')
             cmd.extend(["--server_url", server_url])
@@ -405,7 +425,8 @@ def submit_designer_job(
     cyclic_binder: bool = False,
     include_cysteine: bool = True,
     use_msa: bool = False,
-    user_constraints: list = None  # 新增：用户约束
+    user_constraints: list = None,  # 用户约束
+    bicyclic_params: dict = None  # 双环肽参数
 ) -> dict:
     """提交 Designer 任务"""
     try:
@@ -477,6 +498,9 @@ def submit_designer_job(
         if design_type == 'glycopeptide' and glycan_type:
             design_params['glycan_type'] = glycan_type
             design_params['glycosylation_site'] = glycosylation_site
+        
+        if design_type == 'bicyclic' and bicyclic_params:
+            design_params.update(bicyclic_params)
         
         task_id = f"designer_{int(time.time())}_{uuid.uuid4().hex[:8]}"
         design_params['task_id'] = task_id
@@ -557,6 +581,9 @@ def get_designer_status(task_id: str, work_dir: str = None) -> dict:
         
         current_status = status_data.get('status', 'unknown')
         
+        # 初始化csv_files，避免后续代码中的UnboundLocalError
+        csv_files = []
+        
         process_still_running = False
         
         if current_status == 'running':
@@ -614,7 +641,10 @@ def get_designer_status(task_id: str, work_dir: str = None) -> dict:
                     
                     current_status = 'failed'
                 else:
-                    csv_files = []
+                    # CSV文件扫描逻辑已移到统一位置
+                    pass
+                
+                # 扫描CSV文件（对所有状态都执行）
                 try:
                     for filename in os.listdir(work_dir):
                         if filename.startswith('design_summary_') and filename.endswith('.csv'):

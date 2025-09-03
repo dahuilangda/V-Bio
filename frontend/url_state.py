@@ -64,12 +64,12 @@ class URLStateManager:
         URLStateManager.set_query_params(**params)
     
     @staticmethod
-    def update_url_for_designer_task(task_id: str, work_dir: str = None, components=None, constraints=None, config=None):
+    def update_url_for_designer_task(task_id: str, work_dir: str = None, components=None, constraints=None, config=None, task_type: str = 'designer'):
         """为设计任务更新URL参数"""
         import json
         params = {
             'task_id': task_id,
-            'task_type': 'designer'
+            'task_type': task_type  # 支持不同类型的设计任务
         }
         if work_dir:
             params['work_dir'] = work_dir
@@ -191,7 +191,7 @@ class URLStateManager:
                     st.toast(f"🔗 从URL恢复预测任务: {task_id[:8]}...", icon="🔄")
             
             elif task_type == 'designer':
-                # 恢复设计任务状态
+                # 恢复分子设计任务状态
                 if st.session_state.designer_task_id != task_id:
                     st.session_state.designer_task_id = task_id
                     st.session_state.designer_work_dir = work_dir
@@ -234,6 +234,51 @@ class URLStateManager:
                             # 配置恢复失败，但任务ID仍然有效
                     
                     st.toast(f"🔗 从URL恢复设计任务: {task_id[:8]}...", icon="🧪")
+            
+            elif task_type == 'bicyclic_designer':
+                # 恢复双环肽设计任务状态
+                if st.session_state.bicyclic_task_id != task_id:
+                    st.session_state.bicyclic_task_id = task_id
+                    st.session_state.bicyclic_work_dir = work_dir
+                    st.session_state.bicyclic_results = None
+                    st.session_state.bicyclic_error = None
+                    restored = True
+                    
+                    # 恢复双环肽设计配置信息
+                    if designer_config_str:
+                        try:
+                            designer_config_data = json.loads(designer_config_str)
+                            components = designer_config_data.get('components', [])
+                            constraints = designer_config_data.get('constraints', [])
+                            config = designer_config_data.get('config', {})
+                            
+                            # 恢复组件配置
+                            if components:
+                                restored_components = []
+                                for comp in components:
+                                    restored_comp = {
+                                        'id': comp.get('id', str(uuid.uuid4())),
+                                        'type': comp.get('type', 'protein'),
+                                        'sequence': comp.get('sequence', ''),
+                                        'num_copies': comp.get('num_copies', 1),
+                                        'use_msa': comp.get('use_msa', False)
+                                    }
+                                    restored_components.append(restored_comp)
+                                st.session_state.bicyclic_components = restored_components
+                            
+                            # 恢复约束配置
+                            if constraints:
+                                st.session_state.bicyclic_constraints = constraints
+                            
+                            # 恢复其他配置
+                            if config:
+                                st.session_state.bicyclic_config.update(config)
+                        
+                        except (json.JSONDecodeError, KeyError) as e:
+                            print(f"Failed to restore bicyclic designer config from URL: {e}")
+                            # 配置恢复失败，但任务ID仍然有效
+                    
+                    st.toast(f"🔗 从URL恢复双环肽设计任务: {task_id[:8]}...", icon="🚲")
             
             elif task_type == 'affinity':
                 # 恢复亲和力预测任务状态

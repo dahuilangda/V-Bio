@@ -45,6 +45,7 @@ def main():
     input_group.add_argument("--binder_chain", required=True, help="要设计的肽链的链ID (例如, 'B')。")
     input_group.add_argument("--binder_length", required=True, type=int, help="要设计的肽链的长度。")
     input_group.add_argument("--initial_binder_sequence", type=str, default=None, help="可选的初始肽链序列。如果提供，将以此为起点生成第一代，而不是完全随机。")
+    input_group.add_argument("--sequence_mask", type=str, default=None, help="序列掩码，用于指定固定位置的氨基酸。格式：'X-A-X-L-X'，其中X表示可变位置，字母表示固定氨基酸。长度必须与binder_length匹配。")
     input_group.add_argument("--user_constraints", type=str, default=None, help="用户定义约束的JSON文件路径。约束将应用于生成的结合肽。")  # 新增：约束文件参数
 
     # --- 演化算法控制 ---
@@ -74,7 +75,7 @@ def main():
 
     # --- 双环肽设计 (可选) ---
     bicyclic_group = parser.add_argument_group('双环肽设计')
-    bicyclic_group.add_argument("--linker_ccd", type=str, default="SEZ", help="用于形成双环的连接体配体的CCD代码。仅在 --design_type=bicyclic 时使用。")
+    bicyclic_group.add_argument("--linker_ccd", type=str, default="SEZ", choices=["SEZ", "29N"], help="用于形成双环的连接体配体的CCD代码。仅在 --design_type=bicyclic 时使用。")
     bicyclic_group.add_argument("--cys_positions", type=int, nargs=2, default=None, help="除末端外，另外两个半胱氨酸的初始位置(1-based索引)，例如 --cys_positions 4 10。如果未提供，将随机选择。仅在 --design_type=bicyclic 时使用。")
 
     # --- 输出与日志 ---
@@ -116,6 +117,21 @@ def main():
     
     if args.initial_binder_sequence and len(args.initial_binder_sequence) != args.binder_length:
         parser.error(f"--initial_binder_sequence 的长度 ({len(args.initial_binder_sequence)}) 必须与 --binder_length ({args.binder_length}) 匹配。")
+
+    # sequence_mask验证
+    if args.sequence_mask:
+        # 移除可能的分隔符并验证长度
+        mask_positions = args.sequence_mask.replace('-', '').replace('_', '').replace(' ', '')
+        if len(mask_positions) != args.binder_length:
+            parser.error(f"--sequence_mask 的长度 ({len(mask_positions)}) 必须与 --binder_length ({args.binder_length}) 匹配。")
+        
+        # 验证字符是否有效
+        valid_chars = set('ACDEFGHIKLMNPQRSTVWYX')
+        invalid_chars = set(mask_positions.upper()) - valid_chars
+        if invalid_chars:
+            parser.error(f"--sequence_mask 包含无效字符: {invalid_chars}。只允许标准氨基酸字符和X（表示可变位置）。")
+        
+        logger.info(f"Sequence mask validated: {args.sequence_mask}")
 
     if not np.isclose(args.weight_iptm + args.weight_plddt, 1.0):
         logger.warning(f"Weights for ipTM ({args.weight_iptm}) and pLDDT ({args.weight_plddt}) do not sum to 1.0. This is recommended but not strictly required.")
@@ -181,6 +197,7 @@ def main():
             'binder_chain_id': args.binder_chain,
             'binder_length': args.binder_length,
             'initial_binder_sequence': args.initial_binder_sequence,
+            'sequence_mask': args.sequence_mask,
             'mutation_rate': args.mutation_rate,
             'output_csv_path': args.output_csv,
             'keep_temp_files': args.keep_temp_files,

@@ -19,6 +19,19 @@ python run_design.py \
     --iterations 30
 ```
 
+### 🎯 约束肽设计（使用序列掩码）
+
+```bash
+# 固定关键位置的氨基酸进行设计
+python run_design.py \
+    --design_type "linear" \
+    --yaml_template template.yaml \
+    --binder_chain "B" \
+    --binder_length 15 \
+    --sequence_mask "X-W-X-F-X-X-X-R-X-D-X-X-X-P-X" \
+    --iterations 25
+```
+
 ### 🍬 糖肽设计（使用boltz1模型）
 
 ```bash
@@ -57,6 +70,7 @@ python run_design.py \
   - **生物学约束**: 设计糖肽时，工具会自动验证并确保糖基连接到化学上兼容的氨基酸残基上（例如，N-连锁聚糖连接到天冬酰胺'N'）。
   - **pLDDT指导的突变**: 演化过程优先在结构预测置信度较低 (pLDDT分数低) 的区域引入突变，以高效探索构象空间。
   - **并行评估**: 在每个演化代数中，通过多线程并行提交和评估多个候选序列，显著加快设计周期。
+  - **🎯 序列掩码约束**: **(新增)** 支持指定序列中固定位置的氨基酸，允许保持已知的活性位点或结构motif，同时优化其他可变位置。
 
 ### 🚀 增强版功能
 
@@ -270,7 +284,47 @@ python run_design.py \
 
 > **🤖 自动模型选择**: 当使用 `--design_type "glycopeptide"` 或 `--design_type "bicyclic"` 时，系统会自动采用 `boltz1` 模型进行预测，无需手动指定。这确保了包含非标准残基或拓扑的分子能够得到正确的结构预测。
 
-#### **命令示例 6: 传统模式（兼容性）**
+#### **命令示例 6: 序列掩码约束设计** 🎯
+
+此示例展示如何在设计过程中固定特定位置的氨基酸（如保持活性位点或结构motif）：
+
+```bash
+python run_design.py \
+    --design_type "linear" \
+    --yaml_template /path/to/your/template_protein.yaml \
+    --binder_chain "B" \
+    --binder_length 12 \
+    --sequence_mask "X-W-X-X-F-X-X-R-G-D-X-X" \
+    --iterations 25 \
+    --population_size 10 \
+    --num_elites 3 \
+    --output_csv "constrained_design.csv"
+```
+
+在此例中：
+- 位置2固定为色氨酸(W) - 可能的疏水相互作用位点
+- 位置5固定为苯丙氨酸(F) - 芳香环相互作用
+- 位置8固定为精氨酸(R) - 带正电荷，可能的静电相互作用
+- 位置9固定为甘氨酸(G) - 提供构象灵活性
+- 位置10固定为天冬氨酸(D) - 带负电荷，可能的氢键或盐桥
+- 其他位置(X)允许自由优化
+
+**序列掩码格式支持:**
+```bash
+# 使用连字符 (推荐)
+--sequence_mask "X-W-X-X-F-X-X-R-G-D-X-X"
+
+# 使用下划线
+--sequence_mask "X_W_X_X_F_X_X_R_G_D_X_X"
+
+# 使用空格
+--sequence_mask "X W X X F X X R G D X X"
+
+# 不使用分隔符
+--sequence_mask "XWXXFXXRGDXX"
+```
+
+#### **命令示例 7: 传统模式（兼容性）**
 
 如需使用传统算法（不推荐，仅用于对比）：
 
@@ -297,6 +351,8 @@ python run_design.py \
   - `--binder_chain` **(必需)**: 待设计肽链的链ID (例如, "B")。
   - `--binder_length` **(必需)**: 待设计肽链的长度。
   - `--initial_binder_sequence`: (可选) 提供一个初始肽链序列作为优化的起点。如果未提供，将从随机序列开始。
+  - `--sequence_mask`: **(新增)** 序列掩码，用于指定固定位置的氨基酸。格式：`X-A-X-L-X`，其中X表示可变位置，字母表示固定氨基酸。长度必须与 `binder_length` 匹配。支持多种分隔符（`-`、`_`、空格）。
+  - `--user_constraints`: (可选) 用户定义约束的JSON文件路径。约束将应用于生成的结合肽。
 
 #### 演化算法控制
 
@@ -415,6 +471,26 @@ python designer/glycopeptide_generator.py --list-only
 
 ### 常见问题
 
+**问题**: 序列掩码长度不匹配错误
+
+```bash
+# 错误示例：掩码长度与肽链长度不匹配
+python run_design.py --binder_length 10 --sequence_mask "X-A-X-L-X"  # 只有5个位置
+
+# 解决方案：确保掩码长度与肽链长度完全匹配
+python run_design.py --binder_length 10 --sequence_mask "X-A-X-L-X-X-X-P-X-X"  # 10个位置
+```
+
+**问题**: 序列掩码包含无效字符
+
+```bash
+# 错误示例：使用了非标准氨基酸字符
+--sequence_mask "X-A-X-B-X"  # B不是标准氨基酸
+
+# 解决方案：只使用20种标准氨基酸和X
+--sequence_mask "X-A-X-L-X"  # 正确
+```
+
 **问题**: 糖肽设计报错 "CCD代码未找到"
 
 ```bash
@@ -437,3 +513,8 @@ echo $API_SECRET_TOKEN
   - **MSA设置**: 保持默认设置（MSA服务器启用）以获得最佳预测质量
   - **收敛参数**: 对于糖肽或双环肽等复杂设计，推荐使用较小的收敛窗口（3-4）以应对复杂性
   - **温度控制**: 复杂设计任务可以提高初始温度（1.5-2.0）增强探索能力
+  - **🎯 序列掩码使用**:
+    - 固定已知的活性位点或关键相互作用残基
+    - 避免过度约束（固定位置过多会限制设计空间）
+    - 对双环肽设计时注意半胱氨酸位置由系统自动管理
+    - 结合初始序列（`--initial_binder_sequence`）使用时确保兼容性
