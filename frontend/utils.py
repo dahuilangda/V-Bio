@@ -334,15 +334,6 @@ def get_color_from_bfactor(bfactor: float) -> str:
     elif 50 <= bfactor < 70: return '#FFDB13'
     else: return '#FF7D45'
 
-def export_to_pdb(cif_content: str) -> str:
-    """Converts CIF content to PDB string."""
-    structure = read_cif_from_string(cif_content)
-    pdb_io = PDBIO()
-    pdb_io.set_structure(structure)
-    pdb_buffer = io.StringIO()
-    pdb_io.save(pdb_buffer)
-    return pdb_buffer.getvalue()
-
 # ========== MSA Cache Functions ==========
 
 def get_sequence_hash(sequence: str) -> str:
@@ -674,7 +665,20 @@ def generate_yaml_from_state():
                 else:
                     chain1_type = get_chain_type(st.session_state.components, constraint['token1_chain'])
                     if chain1_type == 'ligand':
-                        token1 = [constraint['token1_chain'], 1]
+                        # 根据官方文档，配体分子应使用原子名称而不是残基索引
+                        # 对于简单的单原子配体如[Zn]，使用原子符号作为原子名称
+                        ligand_smiles = None
+                        if hasattr(st.session_state, 'components') and constraint['token1_chain'] in st.session_state.components:
+                            component = st.session_state.components[constraint['token1_chain']]
+                            ligand_smiles = component.get('smiles', '')
+                        
+                        # 对于简单的单原子配体，使用原子符号
+                        if ligand_smiles and ligand_smiles.strip('[]').isalpha() and len(ligand_smiles.strip('[]')) <= 2:
+                            atom_name = ligand_smiles.strip('[]')  # 如 [Zn] -> Zn
+                            token1 = [constraint['token1_chain'], atom_name]
+                        else:
+                            # 对于复杂配体，使用残基索引1（根据文档）
+                            token1 = [constraint['token1_chain'], 1]
                     else:
                         token1 = [constraint['token1_chain'], constraint['token1_residue']]
                     
@@ -683,7 +687,20 @@ def generate_yaml_from_state():
                 else:
                     chain2_type = get_chain_type(st.session_state.components, constraint['token2_chain'])
                     if chain2_type == 'ligand':
-                        token2 = [constraint['token2_chain'], 1]
+                        # 根据官方文档，配体分子应使用原子名称而不是残基索引
+                        # 对于简单的单原子配体如[Zn]，使用原子符号作为原子名称
+                        ligand_smiles = None
+                        if hasattr(st.session_state, 'components') and constraint['token2_chain'] in st.session_state.components:
+                            component = st.session_state.components[constraint['token2_chain']]
+                            ligand_smiles = component.get('smiles', '')
+                        
+                        # 对于简单的单原子配体，使用原子符号
+                        if ligand_smiles and ligand_smiles.strip('[]').isalpha() and len(ligand_smiles.strip('[]')) <= 2:
+                            atom_name = ligand_smiles.strip('[]')  # 如 [Zn] -> Zn
+                            token2 = [constraint['token2_chain'], atom_name]
+                        else:
+                            # 对于复杂配体，使用残基索引1（根据文档）
+                            token2 = [constraint['token2_chain'], 1]
                     else:
                         token2 = [constraint['token2_chain'], constraint['token2_residue']]
                 
@@ -704,6 +721,45 @@ def generate_yaml_from_state():
                     'bond': {
                         'atom1': atom1,
                         'atom2': atom2
+                    }
+                }
+                
+            elif constraint_type == 'pocket':
+                # 处理pocket约束
+                binder = constraint.get('binder', 'BINDER_CHAIN')
+                contacts = constraint.get('contacts', [])
+                
+                # 处理contacts中的配体链
+                processed_contacts = []
+                for contact in contacts:
+                    if len(contact) >= 2:
+                        chain_id, residue_or_atom = contact[0], contact[1]
+                        chain_type = get_chain_type(st.session_state.components, chain_id)
+                        
+                        if chain_type == 'ligand':
+                            # 对于配体，智能处理原子名称
+                            ligand_smiles = None
+                            if hasattr(st.session_state, 'components') and chain_id in st.session_state.components:
+                                component = st.session_state.components[chain_id]
+                                ligand_smiles = component.get('smiles', '')
+                            
+                            # 对于简单单原子配体，使用原子符号
+                            if ligand_smiles and ligand_smiles.strip('[]').isalpha() and len(ligand_smiles.strip('[]')) <= 2:
+                                atom_name = ligand_smiles.strip('[]')
+                                processed_contacts.append([chain_id, atom_name])
+                            else:
+                                # 复杂配体使用残基索引1
+                                processed_contacts.append([chain_id, 1])
+                        else:
+                            # 蛋白质/DNA/RNA使用残基索引
+                            processed_contacts.append([chain_id, residue_or_atom])
+                
+                constraint_dict = {
+                    'pocket': {
+                        'binder': binder,
+                        'contacts': processed_contacts,
+                        'max_distance': constraint.get('max_distance', 6.0),
+                        'force': constraint.get('force', False)
                     }
                 }
             

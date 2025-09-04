@@ -14,14 +14,25 @@ from frontend.utils import (
     get_smart_msa_default, 
     validate_inputs, 
     generate_yaml_from_state, 
-    export_to_pdb,
     get_cache_stats,
     has_cached_msa,
     visualize_structure_py3dmol
 )
 from frontend.prediction_client import submit_job, get_status, download_and_process_results
-from frontend.ui_components import render_contact_constraint_ui, render_bond_constraint_ui
+from frontend.ui_components import render_contact_constraint_ui, render_bond_constraint_ui, render_pocket_constraint_ui
 from frontend.url_state import URLStateManager
+
+def get_smart_constraint_recommendations(components):
+    """根据组分类型智能推荐约束类型"""
+    has_ligand = any(comp.get('type') == 'ligand' for comp in components)
+    has_biomolecules = any(comp.get('type') in ['protein', 'rna', 'dna'] for comp in components)
+    
+    if has_ligand:
+        return ['pocket', 'bond'], "检测到小分子配体，推荐使用Pocket和Bond约束"
+    elif has_biomolecules:
+        return ['contact', 'bond'], "检测到蛋白质/DNA/RNA，推荐使用Contact和Bond约束"
+    else:
+        return ['contact', 'pocket', 'bond'], "可使用所有约束类型"
 
 def render_prediction_page():
     st.markdown("### 🔬 分子复合物结构预测")
@@ -390,7 +401,12 @@ def render_prediction_page():
 
         st.markdown("---")
         st.subheader("🔗 分子约束 (可选)", anchor=False)
-        st.markdown("设置分子结构约束，包括键约束、口袋约束和接触约束。" )
+        st.markdown("设置分子结构约束，包括键约束、口袋约束和接触约束。")
+        
+        # 智能约束推荐
+        recommended_constraints, recommendation_message = get_smart_constraint_recommendations(st.session_state.components)
+        if recommendation_message:
+            st.info(f"💡 **推荐**：{recommendation_message}")
         
         constraint_id_to_delete = None
         for i, constraint in enumerate(st.session_state.constraints[:]):
@@ -398,7 +414,8 @@ def render_prediction_page():
             
             constraint_labels = {
                 'bond': '🔗 键约束',
-                'contact': '📍 接触约束'
+                'contact': '📍 接触约束',
+                'pocket': '🕳️ 口袋约束'
             }
             
             with st.expander(f"{constraint_labels.get(constraint_type, '📍 约束')} {i+1}", expanded=True):
@@ -406,24 +423,42 @@ def render_prediction_page():
                 
                 with col1:
                     st.markdown("**约束类型**")
+                    
+                    # 构建选项列表和格式函数
+                    all_options = ['contact', 'bond', 'pocket']
+                    format_funcs = {
+                        'contact': '📍 Contact - 接触约束 (两个残基间距离)',
+                        'bond': '🔗 Bond - 键约束 (两个原子间共价键)',
+                        'pocket': '🕳️ Pocket - 口袋约束 (小分子与蛋白质口袋的相互作用)'
+                    }
+                    
+                    # 为推荐的约束类型添加标记
+                    def format_constraint_option(x):
+                        base_text = format_funcs[x]
+                        if x in recommended_constraints:
+                            return f"{base_text}"
+                        return base_text
+                    
                     constraint_type = st.selectbox(
                         "选择约束类型",
-                        options=['contact', 'bond'],
-                        format_func=lambda x: {
-                            'contact': '📍 Contact - 接触约束 (两个残基间距离)',
-                            'bond': '🔗 Bond - 键约束 (两个原子间共价键)'
-                        }[x],
-                        index=['contact', 'bond'].index(constraint.get('type', 'contact')),
+                        options=all_options,
+                        format_func=format_constraint_option,
+                        index=all_options.index(constraint.get('type', 'contact')) if constraint.get('type', 'contact') in all_options else 0,
                         key=f"constraint_type_{i}",
                         disabled=is_running,
-                        help="选择约束的类型：接触距离或共价键"
+                        help="选择约束的类型。⭐标记表示根据您的分子组合推荐的约束类型。"
                     )
                     
                     if constraint_type != constraint.get('type', 'contact'):
                         constraint['type'] = constraint_type
+                        # 清理不同约束类型的特定字段
                         if constraint_type == 'bond':
                             constraint.pop('binder', None)
                             constraint.pop('contacts', None)
+                            constraint.pop('token1_chain', None)
+                            constraint.pop('token1_residue', None)
+                            constraint.pop('token2_chain', None)
+                            constraint.pop('token2_residue', None)
                         elif constraint_type == 'contact':
                             constraint.pop('atom1_chain', None)
                             constraint.pop('atom1_residue', None)
@@ -431,6 +466,19 @@ def render_prediction_page():
                             constraint.pop('atom2_chain', None)
                             constraint.pop('atom2_residue', None)
                             constraint.pop('atom2_atom', None)
+                            constraint.pop('binder', None)
+                            constraint.pop('contacts', None)
+                        elif constraint_type == 'pocket':
+                            constraint.pop('atom1_chain', None)
+                            constraint.pop('atom1_residue', None)
+                            constraint.pop('atom1_atom', None)
+                            constraint.pop('atom2_chain', None)
+                            constraint.pop('atom2_residue', None)
+                            constraint.pop('atom2_atom', None)
+                            constraint.pop('token1_chain', None)
+                            constraint.pop('token1_residue', None)
+                            constraint.pop('token2_chain', None)
+                            constraint.pop('token2_residue', None)
                         st.rerun()
                     
                     available_chains, chain_descriptions = get_available_chain_ids(st.session_state.components)
@@ -441,6 +489,8 @@ def render_prediction_page():
                         render_contact_constraint_ui(constraint, f"constraint_{i}", available_chains, chain_descriptions, is_running)
                     elif constraint_type == 'bond':
                         render_bond_constraint_ui(constraint, f"constraint_{i}", available_chains, chain_descriptions, is_running)
+                    elif constraint_type == 'pocket':
+                        render_pocket_constraint_ui(constraint, f"constraint_{i}", available_chains, chain_descriptions, is_running)
                 
                 with col2:
                     if st.button("🗑️", key=f"del_constraint_{i}", help="删除此约束", disabled=is_running):
@@ -451,10 +501,17 @@ def render_prediction_page():
             st.rerun()
         
         st.markdown("---")
-        add_constraint_cols = st.columns(2)
+        st.markdown("**添加新约束**")
+        
+        # 根据智能推荐显示不同的按钮
+        add_constraint_cols = st.columns(3)
         
         with add_constraint_cols[0]:
-            if st.button("➕ 添加 Contact 约束", key="add_contact_constraint", disabled=is_running, help="添加接触距离约束"):
+            button_text = "➕ 添加 Contact 约束"
+            if 'contact' in recommended_constraints:
+                button_text = "➕ 添加 Contact 约束"
+            
+            if st.button(button_text, key="add_contact_constraint", disabled=is_running, help="添加接触距离约束"):
                 st.session_state.constraints.append({
                     'type': 'contact',
                     'token1_chain': 'A',
@@ -467,7 +524,26 @@ def render_prediction_page():
                 st.rerun()
         
         with add_constraint_cols[1]:
-            if st.button("➕ 添加 Bond 约束", key="add_bond_constraint", disabled=is_running, help="添加共价键约束"):
+            button_text = "➕ 添加 Pocket 约束"
+            if 'pocket' in recommended_constraints:
+                button_text = "➕ 添加 Pocket 约束"
+                
+            if st.button(button_text, key="add_pocket_constraint", disabled=is_running, help="添加小分子-蛋白质口袋结合约束"):
+                st.session_state.constraints.append({
+                    'type': 'pocket',
+                    'binder': 'A',
+                    'contacts': [['B', 1]],
+                    'max_distance': 5.0,
+                    'force': False
+                })
+                st.rerun()
+        
+        with add_constraint_cols[2]:
+            button_text = "➕ 添加 Bond 约束"
+            if 'bond' in recommended_constraints:
+                button_text = "➕ 添加 Bond 约束"
+                
+            if st.button(button_text, key="add_bond_constraint", disabled=is_running, help="添加共价键约束"):
                 st.session_state.constraints.append({
                     'type': 'bond',
                     'atom1_chain': 'A',
@@ -486,12 +562,12 @@ def render_prediction_page():
                 ctype = c.get('type', 'contact')
                 constraint_types[ctype] = constraint_types.get(ctype, 0) + 1
             
-            constraint_type_names = {'contact': 'Contact', 'bond': 'Bond'}
-            type_summary = ', '.join([f"{count}个{constraint_type_names[ctype]}" 
+            constraint_type_names = {'contact': 'Contact', 'bond': 'Bond', 'pocket': 'Pocket'}
+            type_summary = ', '.join([f"{count}个{constraint_type_names.get(ctype, ctype)}" 
                                     for ctype, count in constraint_types.items()])
             st.info(f"💡 已配置 {constraint_count} 个约束：{type_summary}")
         else:
-            st.info("💡 暂无约束。可根据需要添加Contact或Bond约束。" )
+            st.info("💡 暂无约束。可根据您的分子组合添加推荐的约束类型。")
 
     is_valid, validation_message = validate_inputs(st.session_state.components)
     yaml_preview = generate_yaml_from_state() if is_valid else None
@@ -848,13 +924,8 @@ def render_prediction_page():
                     help="下载包含所有预测结果（CIF、JSON指标等）的原始ZIP文件。"
                 )
             
-            cols_download = st.columns(2)
-            with cols_download[0]:
-                if cif_data:
-                    st.download_button("📥 下载 PDB", export_to_pdb(cif_data), "predicted_structure.pdb", "chemical/x-pdb", use_container_width=True, help="下载预测结构的PDB格式文件。" )
-            with cols_download[1]:
-                 if cif_data:
-                    st.download_button("📄 下载 CIF", cif_data, "predicted_structure.cif", "chemical/x-cif", use_container_width=True, help="下载预测结构的CIF格式文件。" )
+            if cif_data:
+                st.download_button("📄 下载 CIF", cif_data, "predicted_structure.cif", "chemical/x-cif", use_container_width=True, help="下载预测结构的CIF格式文件。" )
             
             all_json_data = {"confidence": confidence_data, "affinity": affinity_data}
             st.download_button(

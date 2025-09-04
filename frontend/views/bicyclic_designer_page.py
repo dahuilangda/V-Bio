@@ -62,7 +62,8 @@ def render_bicyclic_designer_page():
     with st.expander("🎯 **步骤 1: 设置设计目标**", expanded=not designer_is_running and not st.session_state.bicyclic_results):
         st.markdown("配置您的双环肽设计任务参数。")
         
-        if 'bicyclic_components' not in st.session_state:
+        # 确保总是有默认组件（即使URL恢复状态后也要检查）
+        if 'bicyclic_components' not in st.session_state or not st.session_state.bicyclic_components:
             st.session_state.bicyclic_components = [
                 {'id': str(uuid.uuid4()), 'type': 'protein', 'sequence': '', 'num_copies': 1, 'use_msa': False}
             ]
@@ -85,6 +86,8 @@ def render_bicyclic_designer_page():
                 current_type = component.get('type', 'protein')
                 current_type_index = comp_type_options.index(current_type) if current_type in comp_type_options else 0
                 
+                old_type = current_type
+                
                 new_type = st.selectbox(
                     "组分类型",
                     options=comp_type_options,
@@ -100,7 +103,36 @@ def render_bicyclic_designer_page():
                     help="选择此组分的分子类型：蛋白质、DNA、RNA或小分子配体。"
                 )
                 
+                type_changed = new_type != old_type
+                
                 component['type'] = new_type
+                
+                if type_changed:
+                    component['sequence'] = ''
+                    
+                    # 清理旧的字段
+                    if 'use_msa' in component:
+                        del component['use_msa']
+                    if 'cyclic' in component:
+                        del component['cyclic']
+                    if 'input_method' in component:
+                        del component['input_method']
+                    
+                    # 根据新类型设置默认字段
+                    if new_type == 'protein':
+                        component['use_msa'] = get_smart_msa_default(st.session_state.bicyclic_components)
+                    elif new_type == 'ligand':
+                        component['input_method'] = 'smiles'
+                    
+                    type_display_names = {
+                        "protein": "🧬 蛋白质/肽链",
+                        "dna": "🧬 DNA",
+                        "rna": "🧬 RNA", 
+                        "ligand": "💊 辅酶/小分子"
+                    }
+                    st.toast(f"组分类型已更新为 {type_display_names.get(new_type, new_type)}", icon="🔄")
+                    
+                    st.rerun()
             
             with cols_comp[1]:
                 component['num_copies'] = st.number_input(
@@ -119,10 +151,16 @@ def render_bicyclic_designer_page():
                     if st.button("🗑️", key=f"bicyclic_del_{component['id']}", help="删除此组分", disabled=designer_is_running):
                         designer_id_to_delete = component['id']
             
+            num_copies = component.get('num_copies', 1)
+            if num_copies > 1:
+                st.caption(f"💡 此组分将创建 {num_copies} 个拷贝，自动分配链ID")
+            
             # 根据类型显示序列输入
             if component['type'] == 'protein':
-                protein_sequence = st.text_area(
-                    f"蛋白质序列",
+                old_sequence = component.get('sequence', '')
+                
+                new_sequence = st.text_area(
+                    f"蛋白质序列 ({'单体' if num_copies == 1 else f'{num_copies}聚体'})",
                     height=100,
                     value=component.get('sequence', ''),
                     placeholder="例如: MVSKGEELFTGVVPILVELDGDVNGHKFSVSGEGEGDATYGKLTLKFICTTGKLPVPWPTLV...",
@@ -130,17 +168,42 @@ def render_bicyclic_designer_page():
                     disabled=designer_is_running,
                     help="输入此蛋白质链的完整氨基酸序列。"
                 )
-                component['sequence'] = protein_sequence
                 
-                if protein_sequence.strip():
+                sequence_changed = new_sequence != old_sequence
+                
+                component['sequence'] = new_sequence
+                
+                if sequence_changed:
+                    protein_components = [comp for comp in st.session_state.bicyclic_components if comp.get('type') == 'protein']
+                    if len(protein_components) == 1:
+                        if new_sequence.strip():
+                            if has_cached_msa(new_sequence.strip()):
+                                component['use_msa'] = True
+                            else:
+                                component['use_msa'] = False
+                        else:
+                            component['use_msa'] = False
+                    
+                    st.rerun()
+                
+                bicyclic_sequence = component.get('sequence', '').strip()
+                if bicyclic_sequence:
                     msa_value = st.checkbox(
                         "启用 MSA",
                         value=component.get('use_msa', True),
                         key=f"bicyclic_msa_{component['id']}",
-                        help="为此蛋白质组分生成多序列比对以提高预测精度。",
+                        help="为此蛋白质组分生成多序列比对以提高预测精度。取消勾选可以跳过MSA生成，节省时间。",
                         disabled=designer_is_running
                     )
-                    component['use_msa'] = msa_value
+                    if msa_value != component.get('use_msa', True):
+                        component['use_msa'] = msa_value
+                        if msa_value:
+                            st.toast("✅ 已启用 MSA 生成", icon="🧬")
+                        else:
+                            st.toast("❌ 已禁用 MSA 生成", icon="⚡")
+                        st.rerun()
+                else:
+                    component['use_msa'] = component.get('use_msa', True)
             
             elif component['type'] in ['dna', 'rna']:
                 seq_type = "DNA" if component['type'] == 'dna' else "RNA"
@@ -160,7 +223,9 @@ def render_bicyclic_designer_page():
             elif component['type'] == 'ligand':
                 from streamlit_ketcher import st_ketcher
                 
-                input_method = st.radio(
+                old_input_method = component.get('input_method', 'smiles')
+                
+                new_input_method = st.radio(
                     "小分子输入方式",
                     ["smiles", "ccd", "ketcher"],
                     key=f"bicyclic_method_{component['id']}",
@@ -168,19 +233,34 @@ def render_bicyclic_designer_page():
                     disabled=designer_is_running,
                     help="选择通过SMILES字符串、PDB CCD代码或分子编辑器输入小分子。"
                 )
-                component['input_method'] = input_method
                 
-                if input_method == 'smiles':
+                input_method_changed = new_input_method != old_input_method
+                
+                component['input_method'] = new_input_method
+                
+                if input_method_changed:
+                    component['sequence'] = ''
+                    
+                    method_display_names = {
+                        "smiles": "SMILES 字符串",
+                        "ccd": "PDB CCD 代码", 
+                        "ketcher": "分子编辑器"
+                    }
+                    st.toast(f"输入方式已更新为 {method_display_names.get(new_input_method, new_input_method)}", icon="🔄")
+                    
+                    st.rerun()
+                
+                if new_input_method == 'smiles':
                     component['sequence'] = st.text_input(
-                        "SMILES 字符串",
+                        f"SMILES 字符串 ({'单分子' if num_copies == 1 else f'{num_copies}个分子'})",
                         value=component.get('sequence', ''),
                         placeholder="例如: CC(=O)NC1=CC=C(C=C1)O",
                         key=f"bicyclic_seq_{component['id']}",
                         disabled=designer_is_running
                     )
-                elif input_method == 'ccd':
+                elif new_input_method == 'ccd':
                     component['sequence'] = st.text_input(
-                        "CCD 代码",
+                        f"CCD 代码 ({'单分子' if num_copies == 1 else f'{num_copies}个分子'})",
                         value=component.get('sequence', ''),
                         placeholder="例如: HEM, NAD, ATP",
                         key=f"bicyclic_seq_{component['id']}",
@@ -195,10 +275,17 @@ def render_bicyclic_designer_page():
                     )
                     
                     if smiles_from_ketcher is not None and smiles_from_ketcher != current_smiles:
-                        component['sequence'] = smiles_from_ketcher
+                        st.session_state.bicyclic_components[i]['sequence'] = smiles_from_ketcher
                         if smiles_from_ketcher:
                             st.toast("✅ SMILES 字符串已成功更新！", icon="🧪")
                         st.rerun()
+                    
+                    current_smiles_display = st.session_state.bicyclic_components[i].get('sequence', '')
+                    if current_smiles_display:
+                        st.caption("✨ 当前 SMILES 字符串:")
+                        st.code(current_smiles_display, language='smiles')
+                    else:
+                        st.info("👆 请开始绘制或粘贴，SMILES 将会显示在这里。")
         
         if designer_id_to_delete:
             st.session_state.bicyclic_components = [c for c in st.session_state.bicyclic_components if c['id'] != designer_id_to_delete]
@@ -214,7 +301,7 @@ def render_bicyclic_designer_page():
                 'use_msa': smart_msa_default
             })
         
-        if st.button("➕ 添加新组分", key="add_bicyclic_component", disabled=designer_is_running):
+        if st.button("➕ 添加新组分", key="add_bicyclic_component", disabled=designer_is_running, help="添加新的蛋白质、DNA/RNA或小分子组分"):
             add_new_bicyclic_component()
             st.rerun()
         
@@ -247,13 +334,13 @@ def render_bicyclic_designer_page():
                     key="bicyclic_linker_ccd"
                 )            
             with col4:
-                # 半胱氨酸生成控制
+                # 半胱氨酸生成控制 - 与分子设计保持一致
                 include_extra_cysteine = st.checkbox(
-                    "避免额外Cys",
-                    value=True,
-                    help="防止生成多余的半胱氨酸。双环肽需要恰好3个Cys，启用此选项可避免序列中出现额外的半胱氨酸。",
+                    "包含额外Cys",
+                    value=False,  # 默认不包含，与分子设计保持一致
+                    help="是否允许生成额外的半胱氨酸。双环肽需要恰好3个Cys，通常不需要额外的半胱氨酸。",
                     disabled=designer_is_running,
-                    key="bicyclic_avoid_extra_cys"
+                    key="bicyclic_include_extra_cys"
                 )
             
             with col3:
@@ -658,13 +745,13 @@ def render_bicyclic_designer_page():
                     constraints=st.session_state.bicyclic_constraints
                 )
                 
-                                # 准备双环肽特殊参数
+                # 准备双环肽特殊参数
                 bicyclic_params = {
                     'cys_positions': cys_positions,
                     'cys_position_mode': cys_position_mode,
                     'fix_terminal_cys': fix_terminal_cys,
                     'linker_ccd': linker_ccd,  # 添加连接体参数
-                    'include_extra_cysteine': not include_extra_cysteine  # 避免额外Cys
+                    'include_extra_cysteine': include_extra_cysteine  # 直接传递，与分子设计保持一致
                 }
                 
                 result = submit_designer_job(
@@ -755,42 +842,101 @@ def render_bicyclic_designer_page():
                     help="安全终止正在进行的双环肽设计任务，已完成的工作将被保存",
                     key="stop_bicyclic_design_btn"):
             try:
-                try:
-                    from designer.design_manager import design_manager
-                    
-                    # Ensure the design_manager has the correct process info
-                    work_dir = st.session_state.get('bicyclic_work_dir', None)
-                    if work_dir:
-                        status_file = os.path.join(work_dir, 'status.json')
-                        if os.path.exists(status_file):
+                from designer.design_manager import design_manager
+                
+                # 尝试从状态文件获取进程信息
+                work_dir = st.session_state.get('bicyclic_work_dir', None)
+                process_found = False
+                
+                if work_dir and os.path.exists(work_dir):
+                    status_file = os.path.join(work_dir, 'status.json')
+                    if os.path.exists(status_file):
+                        try:
                             with open(status_file, 'r') as f:
                                 status_info = json.load(f)
                                 process_id = status_info.get('process_id')
                                 if process_id:
                                     design_manager.set_current_process_info(process_id, status_file)
+                                    process_found = True
+                                    st.info(f"🎯 找到设计进程 ID: {process_id}")
                                 else:
-                                    st.warning("⚠️ 无法获取进程ID，可能无法优雅停止。")
+                                    st.warning("⚠️ 状态文件中未找到进程ID")
+                        except (json.JSONDecodeError, KeyError) as e:
+                            st.error(f"❌ 读取状态文件失败: {e}")
+                    else:
+                        st.warning("⚠️ 任务状态文件不存在")
+                else:
+                    st.warning("⚠️ 任务工作目录不存在")
+                
+                # 如果没有找到进程信息，尝试通过进程名查找
+                if not process_found:
+                    try:
+                        import psutil
+                        design_processes = []
+                        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                            try:
+                                cmdline = proc.info.get('cmdline', [])
+                                if any('run_design' in str(cmd) for cmd in cmdline):
+                                    design_processes.append(proc.info['pid'])
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                continue
+                        
+                        if design_processes:
+                            # 使用最新的设计进程
+                            latest_pid = max(design_processes)
+                            design_manager.set_current_process_info(latest_pid, None)
+                            process_found = True
+                            st.info(f"🔍 通过进程名找到设计进程 ID: {latest_pid}")
                         else:
-                            st.warning("⚠️ 任务状态文件不存在，可能无法优雅停止。")
-                    else:
-                        st.warning("⚠️ 任务工作目录不存在，可能无法优雅停止。")
+                            st.warning("⚠️ 未找到正在运行的设计进程")
+                    except Exception as e:
+                        st.error(f"❌ 搜索设计进程失败: {e}")
 
-                    graceful_stop_success = design_manager.stop_current_design()
-                    if graceful_stop_success:
-                        st.info("🔄 已发送停止信号，等待任务终止...")
-                        # Clear session state to reflect the stop
-                        st.session_state.bicyclic_task_id = None
-                        st.session_state.bicyclic_work_dir = None
-                        st.session_state.bicyclic_results = None
-                        st.session_state.bicyclic_error = {"error_message": "用户手动停止任务", "type": "User Cancelled"}
-                        st.rerun()
-                    else:
-                        st.error("❌ 停止双环肽设计任务失败。")
-                except Exception as e:
-                    st.error(f"❌ 停止任务时发生错误: {e}")
+                # 尝试停止进程
+                if process_found or design_manager.current_process_id:
+                    with st.spinner("⏳ 正在停止双环肽设计任务..."):
+                        graceful_stop_success = design_manager.stop_current_design()
+                        
+                        if graceful_stop_success:
+                            st.success("✅ 双环肽设计任务已成功停止")
+                            # 更新状态文件标记任务已停止
+                            if work_dir and os.path.exists(work_dir):
+                                status_file = os.path.join(work_dir, 'status.json')
+                                if os.path.exists(status_file):
+                                    try:
+                                        with open(status_file, 'r+') as f:
+                                            status_data = json.load(f)
+                                            status_data['state'] = 'CANCELLED'
+                                            status_data['error'] = '用户手动停止任务'
+                                            f.seek(0)
+                                            json.dump(status_data, f, indent=2)
+                                            f.truncate()
+                                    except Exception as e:
+                                        st.warning(f"⚠️ 更新状态文件失败: {e}")
+                            
+                            # 清理session状态
+                            st.session_state.bicyclic_task_id = None
+                            st.session_state.bicyclic_work_dir = None
+                            st.session_state.bicyclic_results = None
+                            st.session_state.bicyclic_error = {"error_message": "用户手动停止任务", "type": "User Cancelled"}
+                            
+                            # 清理URL参数
+                            URLStateManager.clear_url_params()
+                            
+                            st.rerun()
+                        else:
+                            st.error("❌ 停止双环肽设计任务失败")
+                else:
+                    st.error("❌ 未找到要停止的设计进程")
                     
             except Exception as e:
                 st.error(f"❌ 停止任务时发生错误: {e}")
+                # 即使出错也清理状态，避免界面卡死
+                st.session_state.bicyclic_task_id = None
+                st.session_state.bicyclic_work_dir = None
+                st.session_state.bicyclic_results = None
+                st.session_state.bicyclic_error = {"error_message": f"停止任务出错: {e}", "type": "Stop Error"}
+                st.rerun()
         
         if not st.session_state.bicyclic_error:
             try:
@@ -954,6 +1100,16 @@ def render_bicyclic_designer_page():
                     st.markdown(f"**序列**: {highlighted_sequence}", unsafe_allow_html=True)
                     st.caption(f"🔗 半胱氨酸位置: {', '.join(map(str, cys_positions))}")
                     
+                    # 显示连接体类型
+                    bicyclic_config = st.session_state.get('bicyclic_config', {})
+                    linker_type = bicyclic_config.get('linker_ccd', 'SEZ')
+                    linker_descriptions = {
+                        'SEZ': '1,3,5-trimethylbenzene (TRIS连接体)',
+                        '29N': '1-[3,5-di(propanoyl)-1,3,5-triazinan-1-yl]propan-1-one (大环连接体)'
+                    }
+                    linker_desc = linker_descriptions.get(linker_type, f'{linker_type} 连接体')
+                    st.info(f"🔗 **连接体类型**: {linker_type} - {linker_desc}", icon="⚡")
+                    
                     # 显示预测的环结构
                     if len(cys_positions) == 3:
                         st.markdown("**🔗 预测环结构:**")
@@ -1038,7 +1194,50 @@ def render_bicyclic_designer_page():
         })
         
         if not chart_data.empty:
-            st.line_chart(chart_data.set_index('代数'))
+            try:
+                import altair as alt
+                
+                all_scores = []
+                if '最佳评分' in chart_data.columns:
+                    all_scores.extend(chart_data['最佳评分'].dropna().tolist())
+                if '平均评分' in chart_data.columns:
+                    all_scores.extend(chart_data['平均评分'].dropna().tolist())
+                
+                if all_scores:
+                    min_score = min(all_scores)
+                    max_score = max(all_scores)
+                    score_range = max_score - min_score
+                    
+                    if score_range > 0:
+                        y_min = max(0, min_score - score_range * 0.1)
+                        y_max = min(1, max_score + score_range * 0.1)
+                    else:
+                        y_min = max(0, min_score - 0.05)
+                        y_max = min(1, max_score + 0.05)
+                    
+                    chart_data_melted = chart_data.melt(id_vars=['代数'], 
+                                                       value_vars=['最佳评分', '平均评分'],
+                                                       var_name='指标', value_name='评分')
+                    
+                    chart = alt.Chart(chart_data_melted).mark_line(point=True).encode(
+                        x=alt.X('代数:O', title='演化代数', axis=alt.Axis(labelAngle=0)),
+                        y=alt.Y('评分:Q', title='评分', scale=alt.Scale(domain=[y_min, y_max])),
+                        color=alt.Color('指标:N', 
+                                      scale=alt.Scale(range=['#1f77b4', '#ff7f0e']),
+                                      legend=alt.Legend(title="评分类型")),
+                        tooltip=['代数:O', '指标:N', '评分:Q']
+                    ).properties(
+                        width=600,
+                        height=300,
+                        title="双环肽设计演化历史"
+                    )
+                    
+                    st.altair_chart(chart, use_container_width=True)
+                else:
+                    st.line_chart(chart_data.set_index('代数'))
+                    
+            except ImportError:
+                st.line_chart(chart_data.set_index('代数'))
         else:
             st.info("暂无演化历史数据。")
         

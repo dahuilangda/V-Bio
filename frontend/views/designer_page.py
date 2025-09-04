@@ -702,7 +702,8 @@ def render_designer_page():
                 "包含半胱氨酸",
                 value=False,  # 默认不勾选
                 help="是否在设计的序列中包含半胱氨酸(Cys)。取消勾选将避免生成含有半胱氨酸的序列。",
-                disabled=designer_is_running
+                disabled=designer_is_running,
+                key="designer_include_cysteine"
             )
         
         with col_cys_desc:
@@ -1540,7 +1541,7 @@ def render_designer_page():
                                                        var_name='指标', value_name='评分')
                     
                     chart = alt.Chart(chart_data_melted).mark_line(point=True).encode(
-                        x=alt.X('代数:O', title='演化代数'),
+                        x=alt.X('代数:O', title='演化代数', axis=alt.Axis(labelAngle=0)),
                         y=alt.Y('评分:Q', title='评分', scale=alt.Scale(domain=[y_min, y_max])),
                         color=alt.Color('指标:N', 
                                       scale=alt.Scale(range=['#1f77b4', '#ff7f0e']),

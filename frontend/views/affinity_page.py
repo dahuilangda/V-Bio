@@ -20,19 +20,22 @@ def render_affinity_page():
     st.markdown("### 🔬 结合亲和力预测")
     st.markdown("预测蛋白质与小分子配体之间的结合强度，帮助您评估分子间的相互作用。")
 
-    # Initialize session state variables
+    # Initialize affinity-specific session state variables with unique prefixes
     if 'affinity_task_id' not in st.session_state:
         st.session_state.affinity_task_id = None
     if 'affinity_results' not in st.session_state:
         st.session_state.affinity_results = None
     if 'affinity_error' not in st.session_state:
         st.session_state.affinity_error = None
-    if 'ligand_resnames' not in st.session_state:
-        st.session_state.ligand_resnames = []
+    if 'affinity_ligand_resnames' not in st.session_state:
+        st.session_state.affinity_ligand_resnames = []
     if 'affinity_cif' not in st.session_state:
         st.session_state.affinity_cif = None
 
-    is_running = st.session_state.affinity_task_id is not None and st.session_state.affinity_results is None and st.session_state.affinity_error is None
+    # Use affinity-specific variables to avoid conflicts with other tasks
+    is_running = (st.session_state.affinity_task_id is not None and 
+                 st.session_state.affinity_results is None and 
+                 st.session_state.affinity_error is None)
 
     with st.expander("🏃‍♀️ **步骤 1: 上传结构文件**", expanded=not is_running and st.session_state.affinity_results is None):
         # Mode selection with better wording
@@ -69,10 +72,10 @@ def render_affinity_page():
                     detected_ligands = get_ligand_resnames_from_pdb(file_content)
                     if detected_ligands:
                         st.success(f"✅ 自动检测到配体: {', '.join(detected_ligands)}")
-                        st.session_state.ligand_resnames = detected_ligands
+                        st.session_state.affinity_ligand_resnames = detected_ligands
                     else:
                         st.warning("⚠️ 未在文件中检测到配体分子，请确认文件包含小分子配体")
-                        st.session_state.ligand_resnames = []
+                        st.session_state.affinity_ligand_resnames = []
                 else:
                     st.info("ℹ️ CIF文件的配体检测将在预测过程中进行")
 
@@ -81,17 +84,17 @@ def render_affinity_page():
             with col1:
                 ligand_resname = st.text_input(
                     "配体名称", 
-                    value="LIG" if not st.session_state.ligand_resnames else st.session_state.ligand_resnames[0], 
+                    value="LIG" if not st.session_state.affinity_ligand_resnames else st.session_state.affinity_ligand_resnames[0], 
                     disabled=is_running, 
                     help="输入配体在结构文件中的三字母代码，如 LIG、UNK、ATP 等"
                 )
             
             with col2:
                 # Show dropdown for detected ligands
-                if st.session_state.ligand_resnames and len(st.session_state.ligand_resnames) > 1:
+                if st.session_state.affinity_ligand_resnames and len(st.session_state.affinity_ligand_resnames) > 1:
                     selected_ligand = st.selectbox(
                         "或选择已检测到的配体:",
-                        ["手动输入"] + st.session_state.ligand_resnames,
+                        ["手动输入"] + st.session_state.affinity_ligand_resnames,
                         disabled=is_running,
                         help="从自动检测到的配体中选择"
                     )
@@ -129,7 +132,7 @@ def render_affinity_page():
             
             # Reset detected ligands for separate mode
             if protein_file and ligand_file:
-                st.session_state.ligand_resnames = []
+                st.session_state.affinity_ligand_resnames = []
             
             # For separate mode, automatically use "LIG" as ligand name
             if input_mode == "蛋白质 + 小分子":
@@ -393,7 +396,7 @@ def render_affinity_page():
             st.session_state.affinity_task_id = None
             st.session_state.affinity_results = None
             st.session_state.affinity_error = None
-            st.session_state.ligand_resnames = []
+            st.session_state.affinity_ligand_resnames = []
             st.session_state.affinity_cif = None
             st.rerun()
 

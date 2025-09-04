@@ -269,16 +269,33 @@ class URLStateManager:
                             # 恢复约束配置
                             if constraints:
                                 st.session_state.bicyclic_constraints = constraints
+                                print(f"Restored {len(constraints)} bicyclic constraints from URL")
+                            else:
+                                print("No bicyclic constraints to restore from URL")
                             
                             # 恢复其他配置
                             if config:
                                 st.session_state.bicyclic_config.update(config)
+                                print(f"Restored {len(config)} bicyclic config items from URL")
                         
                         except (json.JSONDecodeError, KeyError) as e:
                             print(f"Failed to restore bicyclic designer config from URL: {e}")
                             # 配置恢复失败，但任务ID仍然有效
                     
-                    st.toast(f"🔗 从URL恢复双环肽设计任务: {task_id[:8]}...", icon="🚲")
+                    # 显示更详细的恢复信息
+                    restore_info = []
+                    if 'bicyclic_components' in st.session_state and st.session_state.bicyclic_components:
+                        restore_info.append(f"{len(st.session_state.bicyclic_components)}组件")
+                    if 'bicyclic_constraints' in st.session_state and st.session_state.bicyclic_constraints:
+                        restore_info.append(f"{len(st.session_state.bicyclic_constraints)}约束")
+                    if 'bicyclic_config' in st.session_state and st.session_state.bicyclic_config:
+                        restore_info.append(f"配置")
+                    
+                    if restore_info:
+                        details = "、".join(restore_info)
+                        st.toast(f"🔗 从URL恢复双环肽设计: {task_id[:8]}... (包含{details})", icon="🚲")
+                    else:
+                        st.toast(f"🔗 从URL恢复双环肽设计任务: {task_id[:8]}...", icon="🚲")
             
             elif task_type == 'affinity':
                 # 恢复亲和力预测任务状态
