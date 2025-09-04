@@ -1166,7 +1166,7 @@ def render_bicyclic_designer_page():
                                             residue_bfactors=protein_bfactors,
                                             protein_style='cartoon',
                                             ligand_style='ball-and-stick',
-                                            spin=True,
+                                            spin=False,
                                             color_scheme='pLDDT'
                                         )
                                         st.components.v1.html(view_html, height=500, scrolling=False)
