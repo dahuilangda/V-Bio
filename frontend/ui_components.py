@@ -11,14 +11,16 @@ from frontend.utils import (
     get_color_from_bfactor
 )
 
-def render_contact_constraint_ui(constraint, key_prefix, available_chains, chain_descriptions, is_running):
+def render_contact_constraint_ui(constraint, key_prefix, available_chains, chain_descriptions, is_running, components=None):
     """渲染Contact约束的UI配置"""
     st.markdown("**Contact约束配置** - 定义两个残基间的接触距离")
     
-    # 自动检测当前使用的组件数据源
+    # 获取当前组件数据 - 优先使用传入的组件数据
     def _get_current_components():
         """获取当前上下文中的组件数据"""
-        if hasattr(st.session_state, 'bicyclic_components'):
+        if components is not None:
+            return components
+        elif hasattr(st.session_state, 'bicyclic_components'):
             return st.session_state.bicyclic_components
         elif hasattr(st.session_state, 'designer_components'):
             return st.session_state.designer_components
@@ -114,6 +116,9 @@ def render_contact_constraint_ui(constraint, key_prefix, available_chains, chain
             if chain1_type == 'ligand':
                 st.caption(f"💊 配体分子 (将自动使用原子名称或残基索引)")
                 is_valid = True  # 配体总是有效的
+            elif seq_length == 0:
+                # 序列为空时的提示
+                st.info(f"ℹ️ 请先完成链 {token1_chain} 的序列输入")
             elif is_valid:
                 st.caption(f"📍 {residue_info}")
             else:
@@ -198,6 +203,9 @@ def render_contact_constraint_ui(constraint, key_prefix, available_chains, chain
             if chain2_type == 'ligand':
                 st.caption(f"💊 配体分子 (将自动使用原子名称或残基索引)")
                 is_valid2 = True  # 配体总是有效的
+            elif seq_length2 == 0:
+                # 序列为空时的提示
+                st.info(f"ℹ️ 请先完成链 {token2_chain} 的序列输入")
             elif is_valid2:
                 st.caption(f"📍 {residue_info2}")
             else:
@@ -247,14 +255,16 @@ def render_contact_constraint_ui(constraint, key_prefix, available_chains, chain
         'force': force_constraint
     })
 
-def render_bond_constraint_ui(constraint, key_prefix, available_chains, chain_descriptions, is_running):
+def render_bond_constraint_ui(constraint, key_prefix, available_chains, chain_descriptions, is_running, components=None):
     """渲染Bond约束的UI配置"""
     st.markdown("**Bond约束配置** - 定义两个原子间的共价键")
     
-    # 自动检测当前使用的组件数据源
+    # 获取当前组件数据 - 优先使用传入的组件数据
     def _get_current_components():
         """获取当前上下文中的组件数据"""
-        if hasattr(st.session_state, 'bicyclic_components'):
+        if components is not None:
+            return components
+        elif hasattr(st.session_state, 'bicyclic_components'):
             return st.session_state.bicyclic_components
         elif hasattr(st.session_state, 'designer_components'):
             return st.session_state.designer_components
@@ -352,7 +362,10 @@ def render_bond_constraint_ui(constraint, key_prefix, available_chains, chain_de
             from frontend.utils import get_residue_info
             current_components = _get_current_components()
             residue_info, molecule_type, seq_length, is_valid = get_residue_info(current_components, atom1_chain, atom1_residue)
-            if is_valid:
+            if seq_length == 0:
+                # 序列为空时的提示
+                st.info(f"ℹ️ 请先完成链 {atom1_chain} 的序列输入")
+            elif is_valid:
                 st.caption(f"📍 {residue_info} - {atom1_atom}")
             else:
                 st.error(f"❌ {residue_info}")
@@ -444,7 +457,10 @@ def render_bond_constraint_ui(constraint, key_prefix, available_chains, chain_de
             from frontend.utils import get_residue_info
             current_components = _get_current_components()
             residue_info2, molecule_type2, seq_length2, is_valid2 = get_residue_info(current_components, atom2_chain, atom2_residue)
-            if is_valid2:
+            if seq_length2 == 0:
+                # 序列为空时的提示
+                st.info(f"ℹ️ 请先完成链 {atom2_chain} 的序列输入")
+            elif is_valid2:
                 st.caption(f"📍 {residue_info2} - {atom2_atom}")
             else:
                 st.error(f"❌ {residue_info2}")
@@ -458,15 +474,17 @@ def render_bond_constraint_ui(constraint, key_prefix, available_chains, chain_de
         'atom2_atom': atom2_atom
     })
 
-def render_pocket_constraint_ui(constraint, key_prefix, available_chains, chain_descriptions, is_running):
+def render_pocket_constraint_ui(constraint, key_prefix, available_chains, chain_descriptions, is_running, components=None):
     """渲染Pocket约束的UI配置"""
     st.markdown("**Pocket约束配置** - 定义分子与蛋白质口袋的结合约束")
     st.info("💡 **Pocket约束专用于蛋白质-小分子相互作用**：精确处理小分子配体与蛋白质结合口袋的相互作用")
     
-    # 自动检测当前使用的组件数据源
+    # 获取当前组件数据 - 优先使用传入的组件数据
     def _get_current_components():
         """获取当前上下文中的组件数据"""
-        if hasattr(st.session_state, 'bicyclic_components'):
+        if components is not None:
+            return components
+        elif hasattr(st.session_state, 'bicyclic_components'):
             return st.session_state.bicyclic_components
         elif hasattr(st.session_state, 'designer_components'):
             return st.session_state.designer_components
@@ -581,7 +599,10 @@ def render_pocket_constraint_ui(constraint, key_prefix, available_chains, chain_
                     st.caption("💊 配体分子 (将自动使用原子名称)")
                 else:
                     residue_info, molecule_type, seq_length, is_valid = get_residue_info(current_components, contact[0], new_contact_residue)
-                    if is_valid:
+                    if seq_length == 0:
+                        # 序列为空时的提示
+                        st.info(f"ℹ️ 请先完成链 {contact[0]} 的序列输入")
+                    elif is_valid:
                         st.caption(f"📍 {residue_info}")
                     else:
                         st.error(f"❌ {residue_info} (序列长度: {seq_length})")

@@ -32,36 +32,43 @@ def get_available_chain_ids(components):
     chain_counter = 0
     
     for comp in components:
-        if comp.get('sequence', '').strip():
-            comp_type = comp.get('type', 'protein')
-            num_copies = comp.get('num_copies', 1)
+        # 修改：为所有组分分配链ID，无论是否有序列
+        comp_type = comp.get('type', 'protein')
+        sequence = comp.get('sequence', '').strip()
+        num_copies = comp.get('num_copies', 1)
+        
+        for copy_idx in range(num_copies):
+            if chain_counter < 26:
+                chain_id = string.ascii_uppercase[chain_counter]
+            else:
+                chain_id = f"Z{chain_counter-25}"
             
-            for copy_idx in range(num_copies):
-                if chain_counter < 26:
-                    chain_id = string.ascii_uppercase[chain_counter]
-                else:
-                    chain_id = f"Z{chain_counter-25}"
-                
-                chain_ids.append(chain_id)
-                
-                # 生成链描述
-                if comp_type == 'protein':
-                    type_icon = '🧬'
-                elif comp_type == 'dna':
-                    type_icon = '🔗'
-                elif comp_type == 'rna':
-                    type_icon = '📜'
-                elif comp_type == 'ligand':
-                    type_icon = '💊'
-                else:
-                    type_icon = '🔸'
-                
-                if num_copies > 1:
-                    chain_descriptions[chain_id] = f"{type_icon} 链 {chain_id} ({comp_type.upper()} 拷贝 {copy_idx+1}/{num_copies})"
-                else:
-                    chain_descriptions[chain_id] = f"{type_icon} 链 {chain_id} ({comp_type.upper()})"
-                
-                chain_counter += 1
+            chain_ids.append(chain_id)
+            
+            # 生成链描述
+            if comp_type == 'protein':
+                type_icon = '🧬'
+            elif comp_type == 'dna':
+                type_icon = '🔗'
+            elif comp_type == 'rna':
+                type_icon = '📜'
+            elif comp_type == 'ligand':
+                type_icon = '💊'
+            else:
+                type_icon = '🔸'
+            
+            # 添加序列状态信息
+            if sequence:
+                seq_status = ""
+            else:
+                seq_status = " (序列待输入)"
+            
+            if num_copies > 1:
+                chain_descriptions[chain_id] = f"{type_icon} 链 {chain_id} ({comp_type.upper()} 拷贝 {copy_idx+1}/{num_copies}){seq_status}"
+            else:
+                chain_descriptions[chain_id] = f"{type_icon} 链 {chain_id} ({comp_type.upper()}){seq_status}"
+            
+            chain_counter += 1
     
     return chain_ids, chain_descriptions
 
@@ -93,18 +100,19 @@ def get_chain_type(components, chain_id):
     if not components or not chain_id:
         return 'unknown'
     
-    # 找到对应的组分
+    # 找到对应的组分 - 修改：处理所有组分，无论是否有序列
     chain_counter = 0
     for comp in components:
-        if comp.get('sequence', '').strip():
-            num_copies = comp.get('num_copies', 1)
-            for copy_idx in range(num_copies):
-                current_chain = string.ascii_uppercase[chain_counter] if chain_counter < 26 else f"Z{chain_counter-25}"
-                
-                if current_chain == chain_id:
-                    return comp.get('type', 'unknown')
-                
-                chain_counter += 1
+        # 处理所有组分，不只是有序列的
+        comp_type = comp.get('type', 'protein')
+        num_copies = comp.get('num_copies', 1)
+        for copy_idx in range(num_copies):
+            current_chain = string.ascii_uppercase[chain_counter] if chain_counter < 26 else f"Z{chain_counter-25}"
+            
+            if current_chain == chain_id:
+                return comp_type
+            
+            chain_counter += 1
     
     return 'unknown'
 
@@ -113,52 +121,62 @@ def get_residue_info(components, chain_id, residue_number):
     根据链ID和残基编号获取残基信息
     返回: (residue_name, residue_type, sequence_length, is_valid_residue)
     """
-    # 找到对应的组分
+    if not components:
+        return f"残基 {residue_number}", "unknown", 0, False
+    
+    # 找到对应的组分 - 修改逻辑以包含所有组分
     chain_counter = 0
     for comp in components:
-        if comp.get('sequence', '').strip():
-            num_copies = comp.get('num_copies', 1)
-            for copy_idx in range(num_copies):
-                current_chain = string.ascii_uppercase[chain_counter] if chain_counter < 26 else f"Z{chain_counter-25}"
+        # 检查组分是否存在（无论序列是否为空）
+        comp_type = comp.get('type', 'protein')
+        sequence = comp.get('sequence', '').strip()
+        num_copies = comp.get('num_copies', 1)
+        
+        for copy_idx in range(num_copies):
+            current_chain = string.ascii_uppercase[chain_counter] if chain_counter < 26 else f"Z{chain_counter-25}"
+            
+            if current_chain == chain_id:
+                sequence_length = len(sequence)
+                is_valid_residue = sequence_length > 0 and 1 <= residue_number <= sequence_length
                 
-                if current_chain == chain_id:
-                    comp_type = comp.get('type', 'protein')
-                    sequence = comp.get('sequence', '').strip()
-                    sequence_length = len(sequence)
-                    is_valid_residue = 1 <= residue_number <= sequence_length
-                    
-                    if comp_type == 'protein':
-                        if is_valid_residue:
-                            amino_acid = sequence[residue_number - 1].upper()
-                            # 查找三字母代码
-                            three_letter = None
-                            for three, one in AMINO_ACID_MAPPING.items():
-                                if one == amino_acid:
-                                    three_letter = three
-                                    break
-                            
-                            if three_letter:
-                                return f"{three_letter} ({amino_acid})", comp_type, sequence_length, True
-                            else:
-                                return f"残基 {amino_acid}", comp_type, sequence_length, True
+                if comp_type == 'protein':
+                    if is_valid_residue:
+                        amino_acid = sequence[residue_number - 1].upper()
+                        # 查找三字母代码
+                        three_letter = None
+                        for three, one in AMINO_ACID_MAPPING.items():
+                            if one == amino_acid:
+                                three_letter = three
+                                break
+                        
+                        if three_letter:
+                            return f"{three_letter} ({amino_acid})", comp_type, sequence_length, True
+                        else:
+                            return f"残基 {amino_acid}", comp_type, sequence_length, True
+                    else:
+                        if sequence_length == 0:
+                            return f"残基 {residue_number} (序列为空)", comp_type, sequence_length, False
                         else:
                             return f"残基 {residue_number} (超出序列范围)", comp_type, sequence_length, False
-                    
-                    elif comp_type in ['dna', 'rna']:
-                        if is_valid_residue:
-                            nucleotide = sequence[residue_number - 1].upper()
-                            return f"核苷酸 {nucleotide}", comp_type, sequence_length, True
+                
+                elif comp_type in ['dna', 'rna']:
+                    if is_valid_residue:
+                        nucleotide = sequence[residue_number - 1].upper()
+                        return f"核苷酸 {nucleotide}", comp_type, sequence_length, True
+                    else:
+                        if sequence_length == 0:
+                            return f"核苷酸 {residue_number} (序列为空)", comp_type, sequence_length, False
                         else:
                             return f"核苷酸 {residue_number} (超出序列范围)", comp_type, sequence_length, False
-                    
-                    elif comp_type == 'ligand':
-                        # 对于小分子，残基编号通常为1
-                        if residue_number == 1:
-                            return f"小分子", comp_type, 1, True
-                        else:
-                            return f"小分子残基 {residue_number} (通常为1)", comp_type, 1, False
                 
-                chain_counter += 1
+                elif comp_type == 'ligand':
+                    # 对于小分子，残基编号通常为1
+                    if residue_number == 1:
+                        return f"小分子", comp_type, 1, True
+                    else:
+                        return f"小分子残基 {residue_number} (通常为1)", comp_type, 1, False
+            
+            chain_counter += 1
     
     return f"残基 {residue_number}", "unknown", 0, False
 

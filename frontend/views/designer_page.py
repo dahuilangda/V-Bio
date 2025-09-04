@@ -387,11 +387,11 @@ def render_designer_page():
                     st.markdown("---")
                     
                     if constraint_type == 'contact':
-                        render_contact_constraint_ui(constraint, f"designer_{i}", available_chains, chain_descriptions, designer_is_running)
+                        render_contact_constraint_ui(constraint, f"designer_{i}", available_chains, chain_descriptions, designer_is_running, st.session_state.designer_components)
                     elif constraint_type == 'bond':
-                        render_bond_constraint_ui(constraint, f"designer_{i}", available_chains, chain_descriptions, designer_is_running)
+                        render_bond_constraint_ui(constraint, f"designer_{i}", available_chains, chain_descriptions, designer_is_running, st.session_state.designer_components)
                     elif constraint_type == 'pocket':
-                        render_pocket_constraint_ui(constraint, f"designer_{i}", available_chains, chain_descriptions, designer_is_running)
+                        render_pocket_constraint_ui(constraint, f"designer_{i}", available_chains, chain_descriptions, designer_is_running, st.session_state.designer_components)
                 
                 with col2:
                     if st.button("🗑️", key=f"designer_del_constraint_{i}", help="删除此约束", disabled=designer_is_running):
