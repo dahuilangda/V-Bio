@@ -334,14 +334,20 @@ def render_bicyclic_designer_page():
                     key="bicyclic_linker_ccd"
                 )            
             with col4:
-                # 半胱氨酸生成控制 - 与分子设计保持一致
+                # 双环肽氨基酸组成控制 - 智能控制额外半胱氨酸
+                st.markdown("**🧪 氨基酸组成**")
                 include_extra_cysteine = st.checkbox(
-                    "包含额外Cys",
-                    value=False,  # 默认不包含，与分子设计保持一致
-                    help="是否允许生成额外的半胱氨酸。双环肽需要恰好3个Cys，通常不需要额外的半胱氨酸。",
+                    "允许额外半胱氨酸",
+                    value=False,  # 双环肽默认不需要额外Cys
+                    help="是否允许在必需的3个半胱氨酸之外生成额外的半胱氨酸。通常不建议启用。",
                     disabled=designer_is_running,
                     key="bicyclic_include_extra_cys"
                 )
+                
+                if include_extra_cysteine:
+                    st.caption("⚠️ 额外的半胱氨酸可能干扰双环结构")
+                else:
+                    st.caption("✅ 仅使用必需的3个半胱氨酸")
             
             with col3:
                 cys_position_mode = st.selectbox(
@@ -751,8 +757,11 @@ def render_bicyclic_designer_page():
                     'cys_position_mode': cys_position_mode,
                     'fix_terminal_cys': fix_terminal_cys,
                     'linker_ccd': linker_ccd,  # 添加连接体参数
-                    'include_extra_cysteine': include_extra_cysteine  # 直接传递，与分子设计保持一致
                 }
+                
+                # 双环肽的半胱氨酸控制：include_extra_cysteine=False 意味着不包含额外半胱氨酸
+                # 这对应于新系统中的 include_cysteine=False（除了必需的3个Cys外不生成额外Cys）
+                include_cysteine_for_design = include_extra_cysteine
                 
                 result = submit_designer_job(
                     template_yaml_content=template_yaml,
@@ -773,7 +782,7 @@ def render_bicyclic_designer_page():
                     initial_sequence=initial_sequence if use_initial_sequence else None,
                     sequence_mask=sequence_mask,
                     cyclic_binder=False,  # 双环肽有特殊的环状逻辑
-                    include_cysteine=True,  # 双环肽必须包含半胱氨酸
+                    include_cysteine=include_cysteine_for_design,  # 控制是否允许额外半胱氨酸
                     use_msa=any_msa_enabled,
                     user_constraints=st.session_state.bicyclic_constraints,
                     bicyclic_params=bicyclic_params  # 传递双环肽参数

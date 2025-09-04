@@ -78,6 +78,10 @@ def main():
     bicyclic_group.add_argument("--linker_ccd", type=str, default="SEZ", choices=["SEZ", "29N"], help="用于形成双环的连接体配体的CCD代码。仅在 --design_type=bicyclic 时使用。")
     bicyclic_group.add_argument("--cys_positions", type=int, nargs=2, default=None, help="除末端外，另外两个半胱氨酸的初始位置(1-based索引)，例如 --cys_positions 4 10。如果未提供，将随机选择。仅在 --design_type=bicyclic 时使用。")
 
+    # --- 氨基酸组成控制 ---
+    amino_acid_group = parser.add_argument_group('氨基酸组成控制')
+    amino_acid_group.add_argument("--no_cysteine", action="store_true", default=False, help="禁用半胱氨酸(Cys)，避免不必要的二硫键形成。")
+
     # --- 输出与日志 ---
     output_group = parser.add_argument_group('输出与日志')
     output_group.add_argument("--output_csv", default=f"design_summary_{int(time.time())}.csv", help="输出所有评估设计结果的CSV汇总文件路径。")
@@ -132,6 +136,10 @@ def main():
             parser.error(f"--sequence_mask 包含无效字符: {invalid_chars}。只允许标准氨基酸字符和X（表示可变位置）。")
         
         logger.info(f"Sequence mask validated: {args.sequence_mask}")
+
+    # 半胱氨酸参数处理
+    include_cysteine = not args.no_cysteine  # 简化为单一逻辑
+    logger.info(f"Cysteine setting: {'enabled' if include_cysteine else 'disabled'}")
 
     if not np.isclose(args.weight_iptm + args.weight_plddt, 1.0):
         logger.warning(f"Weights for ipTM ({args.weight_iptm}) and pLDDT ({args.weight_plddt}) do not sum to 1.0. This is recommended but not strictly required.")
@@ -204,6 +212,7 @@ def main():
             'weight_iptm': args.weight_iptm,
             'weight_plddt': args.weight_plddt,
             'design_type': args.design_type,
+            'include_cysteine': include_cysteine,  # 使用计算后的值
             'user_constraints': user_constraints  # 新增：用户约束
         }
 

@@ -288,6 +288,10 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
                     "--sequence_mask", params.get('sequence_mask')
                 ])
             
+            # 添加半胱氨酸控制参数
+            if not params.get('include_cysteine', True):  # 默认为True，只有明确设为False时才添加--no_cysteine
+                cmd.append("--no_cysteine")
+            
             server_url = params.get('server_url', 'http://127.0.0.1:5000')
             cmd.extend(["--server_url", server_url])
             

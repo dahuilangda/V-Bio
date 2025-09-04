@@ -38,23 +38,20 @@ def render_designer_page():
     with col_design_type:
         design_type_selector = st.selectbox(
             "选择设计类型",
-            options=["peptide", "glycopeptide", "bicyclic"],
+            options=["peptide", "glycopeptide"],
             format_func=lambda x: {
                 "peptide": "🧬 多肽设计",
-                "glycopeptide": "🍯 糖肽设计", 
-                "bicyclic": "🔗 双环肽设计"
+                "glycopeptide": "🍯 糖肽设计"
             }[x],
-            help="选择要设计的分子类型。多肽设计适合大多数蛋白质结合需求，糖肽设计可添加糖基修饰，双环肽设计可增强稳定性。",
+            help="选择要设计的分子类型。多肽设计适合大多数蛋白质结合需求，糖肽设计可添加糖基修饰。",
             key="main_design_type_selector"
         )
     
     with col_design_info:
         if design_type_selector == "peptide":
             st.info("🧬 **多肽设计**: 设计天然或修饰的氨基酸序列，具有优化的结合亲和力和特异性。", icon="💡")
-        elif design_type_selector == "glycopeptide":
+        else:  # glycopeptide
             st.info("🍯 **糖肽设计**: 设计含有糖基修饰的多肽，增强稳定性和生物活性，常用于免疫调节和细胞识别。", icon="💡")
-        else:  # bicyclic
-            st.info("🔗 **双环肽设计**: 设计具有分子内二硫键的环状多肽，具有增强的稳定性和特异性。", icon="💡")
     
     designer_is_running = (
         st.session_state.designer_task_id is not None and 
@@ -699,25 +696,52 @@ def render_designer_page():
             min_temperature = params["min_temperature"]
             enable_enhanced = params["enable_enhanced"]
         
-        # 添加半胱氨酸控制选项
+        # 添加半胱氨酸控制选项 - 根据设计类型智能控制
         st.subheader("🧪 氨基酸组成控制", anchor=False)
+        
+        # 根据设计类型确定默认值和是否禁用
+        if design_type_selector == "peptide":
+            # 多肽设计：用户可选择，默认不包含（避免复杂的二硫键）
+            cys_default = False
+            cys_disabled = False
+            cys_help = "是否在多肽设计中包含半胱氨酸(Cys)。建议禁用以避免不必要的二硫键形成。"
+        elif design_type_selector == "glycopeptide":
+            # 糖肽设计：用户可选择，默认不包含（糖基修饰已提供稳定性）
+            cys_default = False
+            cys_disabled = False
+            cys_help = "是否在糖肽设计中包含半胱氨酸(Cys)。糖基修饰已提供额外稳定性，建议禁用半胱氨酸。"
+        else:
+            # 默认情况
+            cys_default = False
+            cys_disabled = False
+            cys_help = "是否在设计的序列中包含半胱氨酸(Cys)。取消勾选将避免生成含有半胱氨酸的序列。"
+        
         col_cys, col_cys_desc = st.columns([1, 2])
         
         with col_cys:
             include_cysteine = st.checkbox(
                 "包含半胱氨酸",
-                value=False,  # 默认不勾选
-                help="是否在设计的序列中包含半胱氨酸(Cys)。取消勾选将避免生成含有半胱氨酸的序列。",
-                disabled=designer_is_running,
+                value=cys_default,
+                help=cys_help,
+                disabled=designer_is_running or cys_disabled,
                 key="designer_include_cysteine"
             )
         
         with col_cys_desc:
             if include_cysteine:
-                st.info("✅ 允许使用半胱氨酸(C)，可形成二硫键增强结构稳定性")
+                if design_type_selector == "peptide":
+                    st.info("✅ 允许使用半胱氨酸(C)，可形成二硫键增强结构稳定性")
+                    st.caption("💡 提示：多肽中的半胱氨酸可能形成复杂的二硫键网络")
+                elif design_type_selector == "glycopeptide":
+                    st.info("✅ 允许使用半胱氨酸(C)，与糖基修饰协同增强稳定性")
+                    st.caption("💡 提示：糖肽中的半胱氨酸可提供额外的结构约束")
             else:
-                st.warning("⚠️ 禁用半胱氨酸(C)，避免不必要的二硫键形成")
-                st.caption("注意：不使用半胱氨酸可能会降低肽链的结构稳定性，但避免了复杂的二硫键配对问题。")
+                if design_type_selector == "peptide":
+                    st.warning("⚠️ 禁用半胱氨酸(C)，避免不必要的二硫键形成")
+                    st.caption("推荐：多肽设计中禁用半胱氨酸可简化结构并避免错误折叠")
+                elif design_type_selector == "glycopeptide":
+                    st.warning("⚠️ 禁用半胱氨酸(C)，依靠糖基修饰提供稳定性")
+                    st.caption("推荐：糖肽的糖基修饰已提供足够稳定性，无需额外二硫键")
     
     # 检查输入验证
     designer_is_valid, validation_message = validate_designer_inputs(st.session_state.designer_components)
