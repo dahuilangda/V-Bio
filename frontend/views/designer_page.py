@@ -38,17 +38,23 @@ def render_designer_page():
     with col_design_type:
         design_type_selector = st.selectbox(
             "选择设计类型",
-            options=["peptide", "glycopeptide"],
-            format_func=lambda x: "🧬 多肽设计" if x == "peptide" else "🍯 糖肽设计",
-            help="选择要设计的分子类型。多肽设计适合大多数蛋白质结合需求，糖肽设计可添加糖基修饰。",
+            options=["peptide", "glycopeptide", "bicyclic"],
+            format_func=lambda x: {
+                "peptide": "🧬 多肽设计",
+                "glycopeptide": "🍯 糖肽设计", 
+                "bicyclic": "🔗 双环肽设计"
+            }[x],
+            help="选择要设计的分子类型。多肽设计适合大多数蛋白质结合需求，糖肽设计可添加糖基修饰，双环肽设计可增强稳定性。",
             key="main_design_type_selector"
         )
     
     with col_design_info:
         if design_type_selector == "peptide":
             st.info("🧬 **多肽设计**: 设计天然或修饰的氨基酸序列，具有优化的结合亲和力和特异性。", icon="💡")
-        else:
+        elif design_type_selector == "glycopeptide":
             st.info("🍯 **糖肽设计**: 设计含有糖基修饰的多肽，增强稳定性和生物活性，常用于免疫调节和细胞识别。", icon="💡")
+        else:  # bicyclic
+            st.info("🔗 **双环肽设计**: 设计具有分子内二硫键的环状多肽，具有增强的稳定性和特异性。", icon="💡")
     
     designer_is_running = (
         st.session_state.designer_task_id is not None and 
@@ -821,9 +827,12 @@ def render_designer_page():
                     constraints=st.session_state.designer_constraints
                 )
                 
+                # 映射UI的design_type到实际命令行参数
+                actual_design_type = "linear" if design_type_selector == "peptide" else design_type_selector
+                
                 result = submit_designer_job(
                     template_yaml_content=template_yaml,
-                    design_type=design_type_selector,
+                    design_type=actual_design_type,
                     binder_length=binder_length,
                     target_chain_id=target_chain_id,
                     generations=generations,
@@ -851,6 +860,10 @@ def render_designer_page():
                     st.session_state.designer_task_id = result['task_id']
                     st.session_state.designer_work_dir = result['work_dir']
                     st.session_state.designer_config = result['params']
+                    
+                    # 确保session state中保存的是实际的design_type
+                    if 'design_type' in st.session_state.designer_config:
+                        st.session_state.designer_config['design_type'] = actual_design_type
                     
                     # 更新URL参数以保持设计任务状态和配置
                     URLStateManager.update_url_for_designer_task(
