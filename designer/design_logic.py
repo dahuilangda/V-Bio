@@ -739,10 +739,10 @@ class Designer:
             处理后的约束字典，如果约束无效则返回None
         """
         try:
-            constraint_type = constraint.get('type', 'contact')
+            constraint_type = constraint.get('type')
             
             if constraint_type == 'contact':
-                # 处理contact约束
+                # 处理contact约束 - 使用UI组件的字段名
                 token1_chain = constraint.get('token1_chain', '')
                 token2_chain = constraint.get('token2_chain', '')
                 
@@ -763,7 +763,7 @@ class Designer:
                 return processed_constraint
                 
             elif constraint_type == 'bond':
-                # 处理bond约束
+                # 处理bond约束 - 使用UI组件的字段名
                 atom1_chain = constraint.get('atom1_chain', '')
                 atom2_chain = constraint.get('atom2_chain', '')
                 
@@ -782,26 +782,25 @@ class Designer:
                 return processed_constraint
                 
             elif constraint_type == 'pocket':
-                # 处理pocket约束
-                binder = constraint.get('binder', '')
-                if binder == 'BINDER_CHAIN':
-                    binder = binder_chain_id
+                # 处理pocket约束 - 使用UI组件的字段名
+                binder_chain = constraint.get('binder_chain', '')
+                if binder_chain == 'BINDER_CHAIN':
+                    binder_chain = binder_chain_id
                 
-                contacts = constraint.get('contacts', [])
-                processed_contacts = []
-                for contact in contacts:
-                    if len(contact) >= 2:
-                        contact_chain = contact[0]
-                        if contact_chain == 'BINDER_CHAIN':
-                            contact_chain = binder_chain_id
-                        processed_contacts.append([contact_chain, contact[1]])
+                target_chain = constraint.get('target_chain', 'A')
+                binding_site = constraint.get('binding_site', [])
+                
+                # 构建contacts格式 - [[chain, residue], ...]
+                contacts = []
+                for residue in binding_site:
+                    contacts.append([target_chain, residue])
                 
                 processed_constraint = {
                     'pocket': {
-                        'binder': binder,
-                        'contacts': processed_contacts,
-                        'max_distance': constraint.get('max_distance', 5.0),
-                        'force': constraint.get('force', False)
+                        'binder': binder_chain,
+                        'contacts': contacts,
+                        'max_distance': constraint.get('force', 5.0),  # pocket UI中force字段实际存储距离值
+                        'force': True
                     }
                 }
                 return processed_constraint

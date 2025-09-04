@@ -824,7 +824,7 @@ def render_designer_page():
                 template_yaml = create_designer_complex_yaml(
                     st.session_state.designer_components, 
                     use_msa=any_msa_enabled,
-                    constraints=st.session_state.designer_constraints
+                    constraints=None  # 不在模板中添加约束，让后端处理
                 )
                 
                 # 映射UI的design_type到实际命令行参数
