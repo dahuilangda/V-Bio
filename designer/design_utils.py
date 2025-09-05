@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # --- 核心常量 ---
 
 AMINO_ACIDS = "ARNDCQEGHILKMFPSTWYV"
-AMINO_ACIDS_NO_CYS = "ARNDQEGHILKMFPSTWYV" # 用于双环肽设计，避免生成额外的Cys
+AMINO_ACIDS_NO_CYS = "ARNDQEGHILKMFPSTWYV" # 用于禁用半胱氨酸的设计，避免生成额外的Cys
 
 # --- 双环肽连接子 ---
 BICYCLIC_LINKERS = {

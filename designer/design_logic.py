@@ -275,10 +275,14 @@ class Designer:
         design_type = kwargs.get('design_type', 'linear')
         iterations = kwargs.get('iterations', 20)
         user_constraints = kwargs.get('user_constraints', [])  # 新增：用户约束
+        include_cysteine = kwargs.get('include_cysteine', True)  # 新增：半胱氨酸控制
 
         logger.info(f"--- Starting Design Run (Type: {design_type.capitalize()}) with Adaptive Hyperparameters ---")
         logger.info(f"Scoring weights -> ipTM: {weight_iptm}, pLDDT: {weight_plddt}")
         logger.info(f"Mutation rate: {mutation_rate}")
+        logger.info(f"Cysteine control: {'enabled' if include_cysteine else 'disabled'}")
+        if sequence_mask:
+            logger.info(f"Sequence mask applied: {sequence_mask}")
         if user_constraints:
             logger.info(f"User constraints: {len(user_constraints)} constraint(s) will be applied to binder chain {binder_chain_id}")
         if num_elites >= population_size:
@@ -289,7 +293,8 @@ class Designer:
             'design_type': design_type,
             'binder_chain_id': binder_chain_id,  # 新增：传递结合肽链ID
             'user_constraints': user_constraints,  # 新增：传递用户约束
-            'sequence_mask': sequence_mask  # 新增：传递序列掩码
+            'sequence_mask': sequence_mask,  # 新增：传递序列掩码
+            'include_cysteine': include_cysteine  # 新增：传递半胱氨酸控制
         }
         if design_type == 'glycopeptide':
             design_params.update({

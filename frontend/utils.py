@@ -821,8 +821,13 @@ def validate_inputs(components):
             
     return True, ""
 
-def validate_designer_inputs(designer_components):
-    """验证Designer输入是否完整且有效。"""
+def validate_designer_inputs(designer_components, include_cysteine=None):
+    """验证Designer输入是否完整且有效。
+    
+    Args:
+        designer_components: 设计器组分列表
+        include_cysteine: 可选，是否包含半胱氨酸的设置，用于提供更准确的验证
+    """
     if not designer_components:
         return False, "请至少添加一个组分。"
     
