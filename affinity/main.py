@@ -294,22 +294,44 @@ class Boltzina:
     def _extract_ligand_name_from_error(self, error_message: str) -> Optional[str]:
         """Extract ligand name from CCD error message."""
         import re
-        match = re.search(r"CCD component '([^']+)' not found", error_message)
-        return match.group(1) if match else None
+        # Handle different error message formats
+        patterns = [
+            r"CCD component ([A-Za-z0-9]+) not found!",  # Format: "CCD component Z05 not found!"
+            r"CCD component '([^']+)' not found",        # Format: "CCD component 'Z05' not found"
+            r"CCD component \"([^\"]+)\" not found",     # Format: "CCD component "Z05" not found"
+            r"component ([A-Za-z0-9]+) not found",       # Format: "component Z05 not found"
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, error_message)
+            if match:
+                ligand_name = match.group(1)
+                print(f"Extracted ligand name '{ligand_name}' from error: {error_message}")
+                return ligand_name
+        
+        print(f"Could not extract ligand name from error: {error_message}")
+        return None
 
     def _try_create_custom_ligand(self, complex_file: Path, ligand_name: str, record_id: str) -> bool:
         """Attempt to create a custom ligand definition from the structure file."""
         try:
             print(f"Attempting to create custom ligand definition for '{ligand_name}'...")
             
-            # Try to extract ligand from CIF file using gemmi
+            # Try to extract ligand from structure file using gemmi
             import gemmi
             import tempfile
             
             try:
-                doc = gemmi.cif.read(str(complex_file))
-                block = doc[0]
-                structure = gemmi.make_structure_from_block(block)
+                # Read structure based on file type
+                if complex_file.suffix.lower() == '.cif':
+                    doc = gemmi.cif.read(str(complex_file))
+                    block = doc[0]
+                    structure = gemmi.make_structure_from_block(block)
+                elif complex_file.suffix.lower() == '.pdb':
+                    structure = gemmi.read_structure(str(complex_file))
+                else:
+                    print(f"Unsupported file format for ligand extraction: {complex_file.suffix}")
+                    return False
                 
                 # Find the ligand in the structure
                 ligand_residue = None
@@ -328,12 +350,17 @@ class Boltzina:
                     print(f"Could not find ligand '{ligand_name}' in structure")
                     return False
                 
+                # Validate that the ligand has sufficient atoms
+                if len(ligand_residue) < 1:
+                    print(f"Ligand '{ligand_name}' has no atoms")
+                    return False
+                
                 # Create a temporary SDF file for the ligand
                 temp_sdf = tempfile.NamedTemporaryFile(suffix='.sdf', delete=False, mode='w')
                 try:
                     # Write basic SDF header
                     temp_sdf.write(f"{ligand_name}\n")
-                    temp_sdf.write("  Generated from CIF coordinates\n")
+                    temp_sdf.write("  Generated from structure coordinates\n")
                     temp_sdf.write("\n")
                     
                     # Count atoms
@@ -347,6 +374,11 @@ class Boltzina:
                         element = atom.element.name
                         atom_name = atom.name if hasattr(atom, 'name') else f"{element}{i+1}"
                         atom_names.append(atom_name)
+                        
+                        # Ensure we have valid coordinates
+                        if not (pos.x and pos.y and pos.z):
+                            print(f"Warning: Atom {atom_name} has invalid coordinates")
+                        
                         temp_sdf.write(f"{pos.x:10.4f}{pos.y:10.4f}{pos.z:10.4f} {element:2s}  0  0  0  0  0  0  0  0  0  0  0  0\n")
                     
                     # Write end of molecule
@@ -365,6 +397,7 @@ class Boltzina:
                             # First try with automatic bond determination
                             rdDetermineBonds.DetermineBonds(mol, charge=0)
                             Chem.SanitizeMol(mol, sanitizeOps=Chem.SANITIZE_ALL)
+                            print(f"Successfully sanitized custom ligand '{ligand_name}'")
                             
                         except Exception as e1:
                             print(f"Standard sanitization failed: {e1}")
@@ -377,7 +410,7 @@ class Boltzina:
                                               Chem.SANITIZE_PROPERTIES ^ 
                                               Chem.SANITIZE_KEKULIZE)
                                 Chem.SanitizeMol(mol, sanitizeOps=sanitize_ops)
-                                print("Used permissive sanitization for custom ligand")
+                                print(f"Used permissive sanitization for custom ligand '{ligand_name}'")
                                 
                             except Exception as e2:
                                 print(f"Permissive sanitization also failed: {e2}")
@@ -386,7 +419,7 @@ class Boltzina:
                                     # Create minimal molecule just for structure processing
                                     mol = Chem.MolFromMolFile(temp_sdf.name, sanitize=False)
                                     # Don't sanitize at all, just use raw coordinates
-                                    print("Using unsanitized molecule as last resort")
+                                    print(f"Using unsanitized molecule for '{ligand_name}' as last resort")
                                 except Exception as e3:
                                     print(f"Even raw molecule creation failed: {e3}")
                                     return False
@@ -422,30 +455,45 @@ class Boltzina:
                                 # Also write the alias to local mols directory
                                 self._write_custom_ligand_to_local_mols_dir(ligand_name, mol)
                             
-                            # Retry structure preparation
-                            try:
-                                parsed_structure = parse_mmcif(
-                                    path=str(complex_file),
-                                    mols=self.ccd,
-                                    moldir=self.work_dir / "boltz_out" / "processed" / "mols",
-                                    call_compute_interfaces=False
-                                )
-                                
-                                pose_output_dir = self.work_dir / "boltz_out" / "predictions" / record_id
-                                output_path = pose_output_dir / f"pre_affinity_{record_id}.npz"
-                                structure_v2 = parsed_structure.data
-                                structure_v2.dump(output_path)
-                                
-                                # Write custom ligands for this record to enable inference
-                                self._write_custom_mols_for_record(record_id)
-                                
+                            # Retry structure preparation (only for record_id != "precheck")
+                            if record_id != "precheck":
+                                try:
+                                    # Convert PDB to CIF if needed
+                                    cif_file = complex_file
+                                    if complex_file.suffix.lower() == '.pdb':
+                                        cif_file = self._pdb_to_cif(complex_file)
+                                        if not cif_file:
+                                            print(f"Warning: Could not convert PDB to CIF for structure preparation")
+                                            return False
+                                    
+                                    parsed_structure = parse_mmcif(
+                                        path=str(cif_file),
+                                        mols=self.ccd,
+                                        moldir=self.work_dir / "boltz_out" / "processed" / "mols",
+                                        call_compute_interfaces=False
+                                    )
+                                    
+                                    pose_output_dir = self.work_dir / "boltz_out" / "predictions" / record_id
+                                    pose_output_dir.mkdir(parents=True, exist_ok=True)
+                                    output_path = pose_output_dir / f"pre_affinity_{record_id}.npz"
+                                    structure_v2 = parsed_structure.data
+                                    structure_v2.dump(output_path)
+                                    
+                                    # Write custom ligands for this record to enable inference
+                                    self._write_custom_mols_for_record(record_id)
+                                    
+                                    print(f"✓ Structure preparation succeeded after creating custom ligand '{ligand_name}'")
+                                    return True
+                                except Exception as e:
+                                    print(f"Structure preparation still failed after custom ligand creation: {e}")
+                                    import traceback
+                                    print("Detailed traceback for custom ligand processing:")
+                                    traceback.print_exc()
+                                    return False
+                            else:
+                                # For precheck, just return success if we created the ligand
+                                print(f"✓ Custom ligand '{ligand_name}' pre-created successfully")
                                 return True
-                            except Exception as e:
-                                print(f"Structure preparation still failed after custom ligand creation: {e}")
-                                import traceback
-                                print("Detailed traceback for custom ligand processing:")
-                                traceback.print_exc()
-                                return False
                     else:
                         print(f"Could not create RDKit molecule for ligand '{ligand_name}'")
                         return False
@@ -479,30 +527,40 @@ class Boltzina:
                 doc = gemmi.cif.read(str(complex_file))
                 block = doc[0]
                 structure = gemmi.make_structure_from_block(block)
+            elif complex_file.suffix.lower() == '.pdb':
+                structure = gemmi.read_structure(str(complex_file))
+            else:
+                print(f"Unsupported file format for ligand checking: {complex_file.suffix}")
+                return
                 
-                # Find all unique ligand names
-                ligand_names = set()
-                for model in structure:
-                    for chain in model:
-                        for residue in chain:
-                            # Skip standard amino acids and nucleotides
-                            if residue.name not in {'ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 
-                                                   'HIS', 'ILE', 'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER', 
-                                                   'THR', 'TRP', 'TYR', 'VAL', 'A', 'C', 'G', 'T', 'U', 
-                                                   'DA', 'DC', 'DG', 'DT', 'HOH', 'WAT'}:
-                                ligand_names.add(residue.name)
+            # Find all unique ligand names
+            ligand_names = set()
+            for model in structure:
+                for chain in model:
+                    for residue in chain:
+                        # Skip standard amino acids, nucleotides, and common solvents
+                        if residue.name not in {'ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 
+                                               'HIS', 'ILE', 'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER', 
+                                               'THR', 'TRP', 'TYR', 'VAL', 'A', 'C', 'G', 'T', 'U', 
+                                               'DA', 'DC', 'DG', 'DT', 'HOH', 'WAT', 'H2O', 
+                                               'NA', 'CL', 'MG', 'CA', 'K', 'ZN', 'FE', 'SO4', 'PO4', 'ACE', 'NME'}:
+                            ligand_names.add(residue.name)
                 
-                # Check if each ligand exists in CCD, if not, create it with unique name
-                for ligand_name in ligand_names:
-                    if ligand_name not in self.ccd:
-                        print(f"Pre-creating custom ligand definition for '{ligand_name}'...")
-                        success = self._try_create_custom_ligand(complex_file, ligand_name, "precheck")
-                        if not success:
-                            print(f"Warning: Failed to pre-create ligand '{ligand_name}', will try again during parsing")
-                            
+            # Check if each ligand exists in CCD, if not, create it with unique name
+            for ligand_name in ligand_names:
+                if ligand_name not in self.ccd:
+                    print(f"Pre-creating custom ligand definition for '{ligand_name}'...")
+                    success = self._try_create_custom_ligand(complex_file, ligand_name, "precheck")
+                    if not success:
+                        print(f"Warning: Could not pre-create ligand definition for '{ligand_name}', will attempt during structure parsing")
+                    else:
+                        print(f"Successfully pre-created ligand definition for '{ligand_name}'")
+                        
+        except ImportError:
+            print("Warning: gemmi library not available for ligand pre-checking")
         except Exception as e:
-            print(f"Warning: Could not pre-check ligands: {e}")
-            # This is not critical, parsing will handle it
+            print(f"Warning: Error during ligand pre-checking: {e}")
+            # Don't raise error, let the main parsing handle it
 
     def predict(self, file_paths: List[str]):
         """Main prediction method with proper CCD cleanup."""
@@ -1738,8 +1796,17 @@ class Boltzina:
             # Pre-emptively check for custom ligands in CIF/PDB files and create them if needed
             self._check_and_create_custom_ligands(complex_file)
             
+            # Ensure we have a CIF file for parsing
+            cif_file = complex_file
+            if complex_file.suffix.lower() == '.pdb':
+                print(f"Converting PDB to CIF for structure preparation: {complex_file.name}")
+                cif_file = self._pdb_to_cif(complex_file)
+                if not cif_file:
+                    raise ValueError(f"Could not convert PDB file {complex_file.name} to CIF format")
+                print(f"Successfully converted to CIF: {cif_file.name}")
+            
             parsed_structure = parse_mmcif(
-                path=str(complex_file),
+                path=str(cif_file),
                 mols=self.ccd,
                 moldir=self.work_dir / "boltz_out" / "processed" / "mols",
                 call_compute_interfaces=False
@@ -1749,34 +1816,55 @@ class Boltzina:
             
             # Write custom ligands for this record if any exist
             self._write_custom_mols_for_record(record_id)
+            print(f"✅ Structure preparation completed successfully for {complex_file.name}")
+            
         except ValueError as e:
-            if "CCD component" in str(e) and "not found" in str(e):
+            error_str = str(e)
+            if "CCD component" in error_str and "not found" in error_str:
                 # Try to handle custom ligands automatically
-                missing_ligand = self._extract_ligand_name_from_error(str(e))
+                missing_ligand = self._extract_ligand_name_from_error(error_str)
                 if missing_ligand:
+                    print(f"Attempting to create custom ligand definition for missing component: {missing_ligand}")
                     success = self._try_create_custom_ligand(complex_file, missing_ligand, record_id)
                     if success:
+                        print(f"Successfully created custom ligand '{missing_ligand}', retrying structure preparation...")
                         return  # Structure was successfully prepared with custom ligand
+                    else:
+                        print(f"Failed to create custom ligand definition for '{missing_ligand}'")
                 
-                error_msg = (f"Structure preparation failed for {complex_file.name}: {e}\n"
-                           f"\nThis error typically occurs when:\n"
-                           f"1. The ligand residue name ('{missing_ligand or self.ligand_resname}') is not a standard PDB chemical component\n"
-                           f"2. The structure file uses custom or non-standard ligand names\n"
-                           f"3. The local chemical component dictionary is incomplete\n"
-                           f"\nSuggested solutions:\n"
-                           f"- Use standard PDB ligand names (e.g., ATP, ADP, GTP, NAD, etc.)\n"
-                           f"- Check if the ligand name in your structure file matches common PDB components\n"
-                           f"- Rename the ligand in your structure file to a standard name if possible\n"
-                           f"- For custom ligands, ensure the structure contains valid atomic coordinates\n"
-                           f"- Contact support if you believe this is a valid standard ligand")
+                error_msg = (f"Chemical component error: {e}\n"
+                           f"\nThis error occurs when the structure file contains ligand residue name(s) that are not recognized.\n"
+                           f"Missing component: '{missing_ligand or 'unknown'}'\n"
+                           f"\nCommon causes and solutions:\n"
+                           f"1. Non-standard ligand names: Rename ligands to standard PDB codes (e.g., ATP, ADP, GTP)\n"
+                           f"2. Custom ligands: Ensure the structure file has valid coordinates for all atoms\n"
+                           f"3. Corrupted structure: Check that the PDB/CIF file is properly formatted\n"
+                           f"4. Missing hydrogen atoms: Try adding hydrogens to the ligand structure\n"
+                           f"\nFile: {complex_file.name}\n"
+                           f"Suggested fixes:\n"
+                           f"- Use a structure file with standard PDB ligand names\n"
+                           f"- Edit the ligand residue name in your structure file to a known component\n"
+                           f"- Provide a separate protein and ligand file using 'separate' mode")
                 print(error_msg)
                 raise ValueError(error_msg)
             else:
                 raise e
+        except RecursionError as re:
+            # Handle recursion errors that can occur during structure parsing
+            error_msg = (f"Recursion error during structure processing: {complex_file.name}\n"
+                       f"This typically indicates a problem with the structure file format or content.\n"
+                       f"\nSuggested solutions:\n"
+                       f"1. Check that the input file is a valid PDB or mmCIF structure file\n"
+                       f"2. Ensure the file contains both protein and ligand coordinates\n"
+                       f"3. Try using separate protein and ligand files instead\n"
+                       f"4. Verify the file is not corrupted and follows standard format conventions\n"
+                       f"\nOriginal error: {str(re)}")
+            print(error_msg)
+            raise ValueError(error_msg)
         except Exception as e:
             import traceback
             traceback.print_exc()
-            print(f"Error preparing structure for {complex_file.name}: {e}")
+            print(f"Unexpected error preparing structure for {complex_file.name}: {e}")
             raise e
 
     def _update_manifest(self, record_ids: List[str], files_with_ligands: List[Tuple[Path, Path, float]], ligand_resname: str):

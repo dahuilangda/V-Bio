@@ -13,6 +13,24 @@ import math
 import csv
 from pathlib import Path
 
+def delta_g_to_pIC50(delta_g_kcal_mol):
+    """
+    将 FEP 的 ΔG (kcal/mol) 转换为 pIC50
+    ΔG = -RT * ln(Kd)
+    Kd (M) = exp(-ΔG / (RT))
+    其中 R = 0.001987 kcal/(mol·K), T = 298.15 K
+    RT = 0.5926 kcal/mol
+    pIC50 = -log10(Kd) = -log10(exp(-ΔG / RT)) = ΔG / (RT * ln(10)) = ΔG / (0.5926 * 2.303) = ΔG / 1.364
+    """
+    try:
+        dg = float(delta_g_kcal_mol)
+        RT = 0.5926  # kcal/mol at 298.15 K
+        ln10 = 2.303
+        pIC50 = -dg / (RT * ln10)  # 注意 FEP 的 ΔG 通常是负值（结合有利）
+        return pIC50
+    except (ValueError, TypeError):
+        return None
+
 # =========================
 # SDF 实验值 -> pIC50
 # =========================
@@ -43,9 +61,9 @@ def to_M(val, unit_hint):
 
 def detect_unit_from_fieldname(field):
     f = field.lower()
-    if ('[um]' in f) or ('_um' in f) or (' kd_um' in f) or (' ic50_um' in f):
+    if ('[um]' in f) or ('_um' in f) or (' kd_um' in f) or (' ic50_um' in f) or (' um' in f):
         return 'uM'
-    if ('[nm]' in f) or ('_nm' in f) or (' kd_nm' in f) or (' ic50_nm' in f):
+    if ('[nm]' in f) or ('_nm' in f) or (' kd_nm' in f) or (' ic50_nm' in f) or (' nm' in f):
         return 'nM'
     return None
 
@@ -86,6 +104,7 @@ def parse_sdf_plain(sdf_path):
 PREFERRED_NAME_FIELDS = ['Name','name','MOLNAME','MoleculeName','Compound_Name','Title','ID','MolID']
 CANDIDATE_EXP_FIELDS = [
     'IC50[uM]','IC50[nM]','IC50[uM](SPA)',
+    'IC50 uM', 'IC50 nM',  # 添加对空格的支持
     'Protein/Binding/ITC_Mean_KD_uM_HIF2a_240-350_human;(Num)',
     'KD[uM]','KD[nM]','Ki[uM]','Ki[nM]',
     'IC50','KD','Ki'
@@ -604,6 +623,7 @@ def run_analysis():
         if os.path.exists(fep_results_file):
             try:
                 fep_df = pd.read_csv(fep_results_file)
+                # 处理配体名称，去掉 ".0" 后缀以匹配 SDF 中的名称
                 fep_df['Ligand'] = fep_df['Ligand'].astype(str).str.replace('.0','',regex=False)
                 print(f"  （可选）加载 FEP+ 结果: {len(fep_df)} 行")
             except Exception as e:
@@ -652,13 +672,23 @@ def run_analysis():
                         'Task_ID': task['task_id']
                     }
 
-                    # 若存在 FEP，可附带
+                    # 若存在 FEP，可附带并转换为 pIC50
                     if fep_df is not None and 'Ligand' in fep_df.columns:
                         _row = fep_df[fep_df['Ligand'] == ligand_name]
                         if not _row.empty:
                             for c in ['Pred. Binding (ΔG)','Exp. Binding (ΔG)','Pred. ΔG','Exp. ΔG']:
                                 if c in _row.columns:
-                                    row[f'FEP_{c}'] = _row.iloc[0][c]
+                                    original_dg = _row.iloc[0][c]
+                                    row[f'FEP_{c}'] = original_dg
+                                    # 转换为 pIC50
+                                    if 'Pred' in c:
+                                        pIC50_fep = delta_g_to_pIC50(original_dg)
+                                        if pIC50_fep is not None:
+                                            row['FEP_pIC50_pred'] = pIC50_fep
+                                    elif 'Exp' in c:
+                                        pIC50_fep = delta_g_to_pIC50(original_dg)
+                                        if pIC50_fep is not None:
+                                            row['FEP_pIC50_exp'] = pIC50_fep
 
                     comparison_rows.append(row)
                     # 友好打印
