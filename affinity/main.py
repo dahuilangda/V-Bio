@@ -555,8 +555,11 @@ class Boltzina:
             # Create combined complex structure as standard PDB
             complex_file = self._create_standard_complex_pdb(protein_path, ligand_path, output_prefix)
             
-            # Use standard complex prediction pipeline
-            self.predict([str(complex_file)])
+            # Convert the PDB to CIF for proper processing
+            complex_cif = self._convert_complex_pdb_to_cif(complex_file)
+            
+            # Use standard complex prediction pipeline with CIF file
+            self.predict([str(complex_cif)])
             
         except Exception as e:
             print(f"Error in separate input prediction: {e}")
@@ -593,6 +596,9 @@ class Boltzina:
         else:
             raise ValueError(f"Unsupported protein file format: {protein_path.suffix}")
         
+        # Clean and validate protein content for proper PDB format
+        protein_content = self._clean_protein_content(protein_content)
+        
         # Generate ligand PDB lines preserving original coordinates
         # Note: _generate_ligand_pdb_lines_preserve_coords now uses the already-assigned unique name
         ligand_pdb_lines = self._generate_ligand_pdb_lines_preserve_coords(ligand_mol)
@@ -607,20 +613,172 @@ class Boltzina:
         
         return combined_file
 
+    def _clean_protein_content(self, protein_content: str) -> str:
+        """
+        Clean protein PDB content to ensure proper formatting and remove problematic records.
+        This helps avoid alignment mismatches in downstream processing.
+        """
+        lines = []
+        atom_count = 0
+        seen_residues = set()
+        
+        for line in protein_content.split('\n'):
+            line = line.strip()
+            
+            # Skip empty lines and problematic record types
+            if not line:
+                continue
+                
+            # Keep standard PDB record types
+            if line.startswith(('HEADER', 'TITLE', 'COMPND', 'SOURCE', 'KEYWDS', 'EXPDTA', 
+                              'AUTHOR', 'REVDAT', 'JRNL', 'REMARK')):
+                lines.append(line)
+                continue
+            
+            # Process ATOM and HETATM records
+            if line.startswith(('ATOM', 'HETATM')):
+                # Ensure line is long enough for proper PDB format
+                if len(line) < 54:
+                    continue
+                    
+                try:
+                    # Extract and validate fields
+                    record_type = line[0:6].strip()
+                    atom_serial = line[6:11].strip()
+                    atom_name = line[12:16].strip()
+                    alt_loc = line[16:17].strip()
+                    res_name = line[17:20].strip()
+                    chain_id = line[21:22].strip()
+                    res_seq = line[22:26].strip()
+                    icode = line[26:27].strip()
+                    x = line[30:38].strip()
+                    y = line[38:46].strip()
+                    z = line[46:54].strip()
+                    
+                    # Skip if essential coordinates are missing
+                    if not (x and y and z):
+                        continue
+                        
+                    # Skip alternative locations (keep only the first occurrence)
+                    if alt_loc and alt_loc != 'A' and alt_loc != ' ':
+                        continue
+                    
+                    # Only keep standard protein residues for ATOM records
+                    if record_type == 'ATOM':
+                        standard_aa = {
+                            'ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY',
+                            'HIS', 'ILE', 'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER',
+                            'THR', 'TRP', 'TYR', 'VAL'
+                        }
+                        if res_name not in standard_aa:
+                            # Skip non-standard residues in ATOM records
+                            continue
+                    
+                    # For HETATM, skip if it's water or common ions (we only want ligands)
+                    elif record_type == 'HETATM':
+                        skip_hetatm = {'HOH', 'WAT', 'H2O', 'NA', 'CL', 'MG', 'CA', 'K', 'ZN', 'FE', 'SO4', 'PO4'}
+                        if res_name in skip_hetatm:
+                            continue
+                    
+                    # Renumber atoms sequentially
+                    atom_count += 1
+                    
+                    # Reconstruct the line with proper formatting
+                    formatted_line = f"{record_type:<6}{atom_count:>5} {atom_name:<4}{alt_loc:1}{res_name:>3} {chain_id:1}{res_seq:>4}{icode:1}   {float(x):8.3f}{float(y):8.3f}{float(z):8.3f}"
+                    
+                    # Add occupancy and B-factor if available, otherwise use defaults
+                    if len(line) >= 60:
+                        occ = line[54:60].strip()
+                        b_factor = line[60:66].strip() if len(line) >= 66 else "20.00"
+                        try:
+                            occ_val = float(occ) if occ else 1.00
+                            b_val = float(b_factor) if b_factor else 20.00
+                        except ValueError:
+                            occ_val = 1.00
+                            b_val = 20.00
+                        formatted_line += f"{occ_val:6.2f}{b_val:6.2f}"
+                    else:
+                        formatted_line += "  1.00 20.00"
+                    
+                    # Add element symbol if available
+                    if len(line) >= 78:
+                        element = line[76:78].strip()
+                        if element:
+                            formatted_line += f"          {element:>2}"
+                        else:
+                            # Guess element from atom name
+                            element = atom_name[0] if atom_name else "C"
+                            formatted_line += f"          {element:>2}"
+                    else:
+                        # Guess element from atom name
+                        element = atom_name[0] if atom_name else "C"
+                        formatted_line += f"          {element:>2}"
+                    
+                    lines.append(formatted_line)
+                    
+                except (ValueError, IndexError) as e:
+                    # Skip malformed lines
+                    print(f"Warning: Skipping malformed line: {line[:50]}... Error: {e}")
+                    continue
+                    
+            # Keep other essential records
+            elif line.startswith(('MODEL', 'ENDMDL', 'TER', 'END', 'CONECT')):
+                lines.append(line)
+        
+        # Ensure we have a proper ending
+        if lines and not lines[-1].startswith('END'):
+            lines.append('END')
+        
+        cleaned_content = '\n'.join(lines)
+        
+        # Report cleaning results
+        atom_lines = [l for l in lines if l.startswith(('ATOM', 'HETATM'))]
+        print(f"Protein content cleaned: {len(atom_lines)} atoms kept from original file")
+        
+        return cleaned_content
+
     def _convert_cif_to_pdb_content(self, cif_file: Path) -> str:
-        """Convert CIF file to PDB content using gemmi."""
+        """Convert CIF file to PDB content using gemmi with improved handling."""
         import gemmi
         try:
             structure = gemmi.read_structure(str(cif_file))
-            pdb_content = ""
+            
+            # Remove waters and other unwanted components
+            structure.remove_waters()
+            structure.remove_alternative_conformations() 
+            structure.remove_empty_chains()
+            
+            pdb_lines = []
+            atom_count = 0
+            
+            # Add header
+            pdb_lines.append("HEADER    PROTEIN STRUCTURE")
+            
             for model in structure:
                 for chain in model:
                     for residue in chain:
+                        # Only keep standard amino acids for protein chains
+                        standard_aa = {
+                            'ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY',
+                            'HIS', 'ILE', 'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER',
+                            'THR', 'TRP', 'TYR', 'VAL'
+                        }
+                        
+                        if residue.name not in standard_aa:
+                            continue  # Skip non-standard residues
+                            
                         for atom in residue:
+                            atom_count += 1
                             # Format as PDB ATOM record
-                            line = f"ATOM  {atom.serial:5d} {atom.name:4s} {residue.name:3s} {chain.name:1s}{residue.seqid.num:4d}    {atom.pos.x:8.3f}{atom.pos.y:8.3f}{atom.pos.z:8.3f}{atom.occ:6.2f}{atom.b_iso:6.2f}          {atom.element.name:2s}\n"
-                            pdb_content += line
+                            line = f"ATOM  {atom_count:5d} {atom.name:4s} {residue.name:3s} {chain.name:1s}{residue.seqid.num:4d}    {atom.pos.x:8.3f}{atom.pos.y:8.3f}{atom.pos.z:8.3f}{atom.occ:6.2f}{atom.b_iso:6.2f}          {atom.element.name:2s}"
+                            pdb_lines.append(line)
+            
+            pdb_lines.append("END")
+            pdb_content = '\n'.join(pdb_lines)
+            
+            print(f"Converted CIF to PDB: {atom_count} protein atoms")
             return pdb_content
+            
         except Exception as e:
             raise ValueError(f"Failed to convert CIF to PDB: {e}")
 
@@ -783,6 +941,24 @@ class Boltzina:
         
         print(f"Preserving original ligand coordinates with unique name: {ligand_name}")
         
+        # Generate a safe 3-character residue name for PDB format
+        # Use a reserved prefix "Z" + 2 digits to avoid conflicts with real CCD components
+        if '_' in ligand_name:
+            # Extract numeric part from the unique suffix and use modulo to get 2 digits
+            unique_part = ligand_name.split('_')[-1]  # e.g., "30e887c9"
+            # Convert first 6 hex chars to int and take modulo 100 for 2-digit number
+            try:
+                hex_value = int(unique_part[:6], 16) % 100
+                resname = f"Z{hex_value:02d}"  # e.g., "Z47"
+            except ValueError:
+                # Fallback: use simple hash
+                hash_val = hash(unique_part) % 100
+                resname = f"Z{hash_val:02d}"
+        else:
+            # Fallback for non-unique names
+            hash_val = hash(ligand_name) % 100
+            resname = f"Z{hash_val:02d}"
+        
         # Generate PDB lines using original coordinates (no translation)
         element_counts = {}
         for i, atom in enumerate(ligand_mol.GetAtoms()):
@@ -798,7 +974,7 @@ class Boltzina:
                 element_counts[element] = 0
             element_counts[element] += 1
             
-            # Create atom name
+            # Create atom name following PDB conventions
             if element == 'H':
                 atom_name = f"H{element_counts[element]}"
             elif element_counts[element] == 1:
@@ -809,51 +985,34 @@ class Boltzina:
             # Ensure atom name is properly formatted (left-aligned, max 4 chars)
             atom_name = atom_name[:4].ljust(4)
             
-            # Generate a safe 3-character residue name for PDB format
-            # Use a reserved prefix "Z" + 2 digits to avoid conflicts with real CCD components
-            # Most real CCD components don't start with "Z"
-            if '_' in ligand_name:
-                # Extract numeric part from the unique suffix and use modulo to get 2 digits
-                unique_part = ligand_name.split('_')[-1]  # e.g., "30e887c9"
-                # Convert first 6 hex chars to int and take modulo 100 for 2-digit number
-                try:
-                    hex_value = int(unique_part[:6], 16) % 100
-                    resname = f"Z{hex_value:02d}"  # e.g., "Z47"
-                except ValueError:
-                    # Fallback: use simple hash
-                    hash_val = hash(unique_part) % 100
-                    resname = f"Z{hash_val:02d}"
-            else:
-                # Fallback for non-unique names
-                hash_val = hash(ligand_name) % 100
-                resname = f"Z{hash_val:02d}"
-            
-            # Standard PDB HETATM format with proper spacing
-            line = f"HETATM{atom_serial:5d} {atom_name} {resname} L   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {element:>2s}\n"
-            ligand_lines += line
+            # Standard PDB HETATM format with proper spacing and fixed fields
+            line = f"HETATM{atom_serial:5d} {atom_name} {resname} L   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {element:>2s}"
+            ligand_lines += line + "\n"
             atom_serial += 1
             
             # Print first few coordinates for verification
             if i < 3:
                 print(f"  Atom {i+1} ({element}): ({x:.3f}, {y:.3f}, {z:.3f})")
         
-        return ligand_lines
+        return ligand_lines.rstrip('\n')  # Remove trailing newline
 
     def _combine_to_standard_pdb(self, protein_content: str, ligand_lines: str) -> str:
-        """Combine protein and ligand into a standard PDB format."""
+        """Combine protein and ligand into a standard PDB format with improved formatting."""
         lines = []
         
         # Add proper PDB header with unique identifier
         from datetime import datetime
         timestamp = datetime.now().strftime("%d-%b-%y").upper()
-        lines.append(f"HEADER    PROTEIN-LIGAND COMPLEX                  {timestamp}   COMP\n")
-        lines.append("REMARK   1 COMPLEX GENERATED FROM SEPARATE FILES\n")
-        lines.append("REMARK   2 PROTEIN-LIGAND COMPLEX FOR AFFINITY PREDICTION\n")
-        lines.append("REMARK   3 GENERATED BY BOLTZ-WEBUI\n")
+        lines.append(f"HEADER    PROTEIN-LIGAND COMPLEX                  {timestamp}   COMP")
+        lines.append("REMARK   1 COMPLEX GENERATED FROM SEPARATE FILES")
+        lines.append("REMARK   2 PROTEIN-LIGAND COMPLEX FOR AFFINITY PREDICTION")
+        lines.append("REMARK   3 GENERATED BY BOLTZ-WEBUI")
         
         # Add protein lines (ensure proper formatting)
         protein_lines = protein_content.split('\n')
         atom_count = 0
+        last_chain_id = "A"
+        last_res_seq = None
         
         for line in protein_lines:
             line = line.strip()
@@ -861,47 +1020,94 @@ class Boltzina:
                 # Ensure proper PDB format
                 if len(line) >= 54:
                     atom_count += 1
-                    # Re-number atoms sequentially
-                    formatted_line = f"{line[:6]}{atom_count:5d}{line[11:]}\n"
+                    # Re-number atoms sequentially and ensure consistent chain ID
+                    parts = list(line)
+                    # Set atom number
+                    atom_num_str = f"{atom_count:5d}"
+                    parts[6:11] = list(atom_num_str)
+                    # Ensure chain is A for protein
+                    parts[21] = 'A'
+                    # Extract residue sequence number
+                    try:
+                        res_seq = int(line[22:26].strip())
+                        last_res_seq = res_seq
+                    except ValueError:
+                        if last_res_seq is not None:
+                            last_res_seq += 1
+                        else:
+                            last_res_seq = 1
+                        res_seq_str = f"{last_res_seq:4d}"
+                        parts[22:26] = list(res_seq_str)
+                    
+                    formatted_line = ''.join(parts)
                     lines.append(formatted_line)
             elif line.startswith(('REMARK', 'HEADER')):
                 if 'GENERATED' not in line and 'COMPLEX' not in line:  # Avoid duplicate remarks
-                    lines.append(line + '\n')
+                    lines.append(line)
         
         # Add TER record before ligand if we have protein atoms
         if atom_count > 0:
-            # Find the last protein ATOM/HETATM line to get residue info
-            last_protein_atom_line = None
-            for line in reversed(protein_lines):
-                if line.startswith(('ATOM', 'HETATM')) and len(line) >= 54:
-                    last_protein_atom_line = line
-                    break
-            
-            if last_protein_atom_line:
-                parts = last_protein_atom_line.split()
-                if len(parts) >= 6:
-                    resname = parts[3] if len(parts) > 3 else 'UNK'
-                    resseq = parts[5] if len(parts) > 5 else '1'
-                    lines.append(f"TER   {atom_count + 1:5d}      {resname} A{resseq}\n")
-                else:
-                    lines.append(f"TER   {atom_count + 1:5d}      UNK A   1\n")
-            else:
-                lines.append(f"TER   {atom_count + 1:5d}      UNK A   1\n")
+            lines.append(f"TER   {atom_count + 1:5d}      ALA A{last_res_seq or 1:4d}")
         
-        # Add ligand lines
-        lines.append("REMARK   4 LIGAND COORDINATES\n")
+        # Add ligand lines with proper chain designation
+        lines.append("REMARK   4 LIGAND COORDINATES")
         ligand_lines_list = ligand_lines.strip().split('\n')
         for ligand_line in ligand_lines_list:
             if ligand_line.strip():
                 atom_count += 1
-                # Re-number ligand atoms sequentially
-                formatted_line = f"{ligand_line[:6]}{atom_count:5d}{ligand_line[11:]}\n"
+                # Re-number ligand atoms sequentially and set chain to L
+                parts = list(ligand_line)
+                # Set atom number
+                atom_num_str = f"{atom_count:5d}"
+                parts[6:11] = list(atom_num_str)
+                # Ensure chain is L for ligand
+                parts[21] = 'L'
+                # Set residue number to 1 for ligand
+                parts[22:26] = list("   1")
+                
+                formatted_line = ''.join(parts)
                 lines.append(formatted_line)
         
         # Add proper PDB ending
-        lines.append("END\n")
+        lines.append("END")
         
-        return ''.join(lines)
+        combined_content = '\n'.join(lines)
+        
+        # Validation report
+        total_atoms = atom_count
+        protein_atoms = len([l for l in lines if l.startswith('ATOM')])
+        ligand_atoms = len([l for l in lines if l.startswith('HETATM')])
+        print(f"Combined PDB statistics: {total_atoms} total atoms ({protein_atoms} protein, {ligand_atoms} ligand)")
+        
+        return combined_content
+
+    def _convert_complex_pdb_to_cif(self, pdb_file: Path) -> Path:
+        """Convert the generated complex PDB file to CIF format using maxit."""
+        cif_dir = self.output_dir / "cif_files"
+        cif_dir.mkdir(exist_ok=True)
+        
+        cif_file = cif_dir / f"{pdb_file.stem}.cif"
+        
+        try:
+            # Use maxit to convert PDB to CIF
+            import subprocess
+            cmd = ["maxit", "-input", str(pdb_file), "-output", str(cif_file), "-o", "1"]
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            
+            if cif_file.exists():
+                print(f"Successfully converted complex to CIF: {cif_file}")
+                return cif_file
+            else:
+                print("CIF conversion failed, using original PDB file")
+                return pdb_file
+                
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print(f"Warning: maxit conversion failed: {e}")
+            print("Using original PDB file (may cause alignment issues)")
+            return pdb_file
+        except Exception as e:
+            print(f"Unexpected error in PDB to CIF conversion: {e}")
+            return pdb_file
 
     def _load_ligand_from_file(self, ligand_file: Path):
         """Load ligand molecule from SDF, MOL, or MOL2 file, preserving original coordinates."""
