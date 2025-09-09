@@ -292,6 +292,10 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
             if not params.get('include_cysteine', True):  # 默认为True，只有明确设为False时才添加--no_cysteine
                 cmd.append("--no_cysteine")
             
+            # 添加环状设计参数
+            if params.get('cyclic_binder', False):
+                cmd.append("--cyclic_binder")
+            
             server_url = params.get('server_url', 'http://127.0.0.1:5000')
             cmd.extend(["--server_url", server_url])
             

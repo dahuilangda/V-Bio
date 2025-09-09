@@ -73,8 +73,49 @@ def run_prediction(args_path: str):
 
         logger.info(f"Affinity prediction completed. Results saved to {output_csv_path}")
 
+    except ValueError as ve:
+        # Handle input validation errors with detailed messages
+        error_message = str(ve)
+        if "No ligand molecules (HETATM records) found" in error_message:
+            logger.error(f"Input validation failed: {error_message}")
+            logger.error("SOLUTION: This error occurs when your PDB file contains only protein atoms and no ligand molecules.")
+            logger.error("To fix this issue:")
+            logger.error("  1. Use a protein-ligand complex PDB file that contains both ATOM and HETATM records")
+            logger.error("  2. Or use the 'separate' input mode with separate protein and ligand files")
+            logger.error("  3. Or add ligand coordinates to your PDB file as HETATM records")
+        elif "Ligand residue name" in error_message and "not found" in error_message:
+            logger.error(f"Input validation failed: {error_message}")
+            logger.error("SOLUTION: The specified ligand residue name was not found in your PDB file.")
+            logger.error("Check the HETATM records in your PDB file and use the correct residue name.")
+        else:
+            logger.error(f"Input validation error: {error_message}")
+        sys.exit(1)
+        
+    except RuntimeError as re:
+        # Handle processing errors
+        error_message = str(re)
+        if "zero-size array to reduction operation minimum" in error_message:
+            logger.error("Processing failed: Array dimension error during affinity prediction")
+            logger.error("This error typically occurs when:")
+            logger.error("  1. The input structure lacks proper ligand coordinates")
+            logger.error("  2. The ligand structure is malformed or incomplete")
+            logger.error("  3. There are issues with the protein-ligand complex structure")
+            logger.error("SOLUTION: Please verify that your input contains a valid protein-ligand complex")
+        elif "CCD component" in error_message and "not found" in error_message:
+            logger.error(f"Chemical component error: {error_message}")
+            logger.error("SOLUTION: Use standard PDB ligand names or provide structures with valid chemical components")
+        else:
+            logger.error(f"Processing error: {error_message}")
+        sys.exit(1)
+        
+    except FileNotFoundError as fe:
+        logger.error(f"File error: {fe}")
+        sys.exit(1)
+        
     except Exception as e:
-        logger.exception(f"An error occurred during affinity prediction: {e}")
+        logger.error(f"An unexpected error occurred during affinity prediction: {e}")
+        import traceback
+        logger.error(f"Detailed traceback:\n{traceback.format_exc()}")
         sys.exit(1)
 
 if __name__ == "__main__":

@@ -499,6 +499,9 @@ def render_pocket_constraint_ui(constraint, key_prefix, available_chains, chain_
     
     with binder_cols[0]:
         current_binder = constraint.get('binder', 'BINDER_CHAIN')
+        # 如果binder为空字符串，设置为默认值
+        if not current_binder or current_binder == '':
+            current_binder = 'BINDER_CHAIN'
         if current_binder not in available_chains and available_chains:
             # 对于pocket约束，binder通常是BINDER_CHAIN
             current_binder = 'BINDER_CHAIN' if 'BINDER_CHAIN' in available_chains else available_chains[0]
@@ -545,7 +548,7 @@ def render_pocket_constraint_ui(constraint, key_prefix, available_chains, chain_
     st.caption("定义构成结合口袋的残基/原子")
     
     contacts = constraint.get('contacts', [])
-    if not contacts:
+    if not contacts or len(contacts) == 0:
         contacts = [['A', 1]]  # 默认添加一个接触点
         constraint['contacts'] = contacts
     

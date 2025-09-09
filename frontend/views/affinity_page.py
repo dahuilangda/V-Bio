@@ -69,15 +69,35 @@ def render_affinity_page():
             if uploaded_file is not None and not is_running:
                 file_content = uploaded_file.getvalue().decode("utf-8")
                 if uploaded_file.name.lower().endswith('.pdb'):
+                    # Import the validation function
+                    from utils import validate_pdb_for_affinity
+                    
+                    validation_result = validate_pdb_for_affinity(file_content)
+                    
+                    if validation_result['valid']:
+                        st.success(f"✅ 文件验证通过：检测到 {validation_result['atom_count']} 个蛋白质原子，{validation_result['hetatm_count']} 个配体原子")
+                        st.success(f"✅ 检测到配体: {', '.join(validation_result['ligand_resnames'])}")
+                        st.session_state.affinity_ligand_resnames = validation_result['ligand_resnames']
+                    else:
+                        st.error(f"❌ **文件验证失败**")
+                        st.error(validation_result['error_message'])
+                        
+                        st.markdown("**💡 建议解决方案：**")
+                        for i, suggestion in enumerate(validation_result['suggestions'], 1):
+                            st.markdown(f"{i}. {suggestion}")
+                        
+                        if not validation_result['has_ligands'] and validation_result['has_protein']:
+                            st.info("💡 **提示**：您可以使用下方的'蛋白质 + 小分子'模式，分别上传蛋白质文件和小分子文件。")
+                        
+                        st.session_state.affinity_ligand_resnames = []
+                else:
                     detected_ligands = get_ligand_resnames_from_pdb(file_content)
                     if detected_ligands:
                         st.success(f"✅ 自动检测到配体: {', '.join(detected_ligands)}")
                         st.session_state.affinity_ligand_resnames = detected_ligands
                     else:
-                        st.warning("⚠️ 未在文件中检测到配体分子，请确认文件包含小分子配体")
+                        st.info("ℹ️ CIF文件的配体检测将在预测过程中进行")
                         st.session_state.affinity_ligand_resnames = []
-                else:
-                    st.info("ℹ️ CIF文件的配体检测将在预测过程中进行")
 
             # Ligand residue name input
             col1, col2 = st.columns([2, 1])
@@ -296,7 +316,21 @@ def render_affinity_page():
                             error_message = st.session_state.affinity_error.get('exc_message', '未知错误')
                             
                             # Provide user-friendly error messages
-                            if "No HETATM records found" in error_message:
+                            if "No ligand molecules (HETATM records) found" in error_message:
+                                user_friendly_message = """
+                                ❌ **PDB文件中未找到配体分子**
+                                
+                                您上传的PDB文件只包含蛋白质原子，没有配体分子（HETATM记录）。
+                                亲和力预测需要蛋白质-配体复合物结构。
+                                
+                                **解决方案：**
+                                1. **使用完整复合物文件**：上传包含蛋白质和配体的PDB文件
+                                2. **使用分离输入模式**：分别上传蛋白质PDB文件和配体SDF文件
+                                3. **添加配体坐标**：在PDB文件中添加配体分子的HETATM记录
+                                
+                                💡 **建议**：如果您只有蛋白质结构，请使用"蛋白质 + 小分子"输入模式。
+                                """
+                            elif "No HETATM records found" in error_message:
                                 user_friendly_message = """
                                 ❌ **未找到配体分子**
                                 

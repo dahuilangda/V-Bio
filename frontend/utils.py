@@ -471,6 +471,72 @@ def get_ligand_resnames_from_pdb(file_content: str) -> list[str]:
     return sorted(list(resnames))
 
 
+def validate_pdb_for_affinity(file_content: str) -> dict:
+    """
+    Validate a PDB file for affinity prediction requirements.
+    
+    Returns:
+        dict: {
+            'valid': bool,
+            'has_protein': bool,
+            'has_ligands': bool,
+            'atom_count': int,
+            'hetatm_count': int,
+            'ligand_resnames': list[str],
+            'error_message': str or None,
+            'suggestions': list[str]
+        }
+    """
+    result = {
+        'valid': False,
+        'has_protein': False,
+        'has_ligands': False,
+        'atom_count': 0,
+        'hetatm_count': 0,
+        'ligand_resnames': [],
+        'error_message': None,
+        'suggestions': []
+    }
+    
+    resnames = set()
+    atom_count = 0
+    hetatm_count = 0
+    
+    for line in file_content.split('\n'):
+        line = line.strip()
+        if line.startswith('ATOM') and len(line) > 20:
+            atom_count += 1
+        elif line.startswith('HETATM') and len(line) > 20:
+            hetatm_count += 1
+            resname = line[17:20].strip()
+            if resname:
+                resnames.add(resname)
+    
+    result['atom_count'] = atom_count
+    result['hetatm_count'] = hetatm_count
+    result['has_protein'] = atom_count > 0
+    result['has_ligands'] = hetatm_count > 0
+    result['ligand_resnames'] = sorted(list(resnames))
+    
+    if atom_count == 0 and hetatm_count == 0:
+        result['error_message'] = "文件中未找到任何原子记录（ATOM或HETATM）"
+        result['suggestions'] = ["检查文件格式是否正确", "确认文件未损坏"]
+    elif atom_count == 0:
+        result['error_message'] = "文件中未找到蛋白质原子（ATOM记录）"
+        result['suggestions'] = ["确认文件包含蛋白质结构", "检查文件格式"]
+    elif hetatm_count == 0:
+        result['error_message'] = f"文件包含{atom_count}个蛋白质原子，但未找到配体分子（HETATM记录）"
+        result['suggestions'] = [
+            "使用包含蛋白质和配体的复合物PDB文件",
+            "或使用'蛋白质 + 小分子'分离输入模式",
+            "或在PDB文件中添加配体的HETATM记录"
+        ]
+    else:
+        result['valid'] = True
+    
+    return result
+
+
 def visualize_structure_py3dmol(
     cif_content: str,
     residue_bfactors: dict,

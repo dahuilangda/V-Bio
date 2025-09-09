@@ -7,6 +7,9 @@ import pickle
 import json
 import csv
 import re
+import uuid
+import time
+import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from rdkit import Chem
@@ -15,6 +18,87 @@ Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
 from affinity.boltzina.data.parse.mmcif import parse_mmcif
 from affinity.boltzina.affinity.predict_affinity import load_boltz2_model, predict_affinity
 from boltz.main import get_cache_path
+
+# CCD名称管理器，确保同一批次运行的不要使用相同的CCD名称
+import redis
+import random
+import string
+
+class CCDNameManager:
+    """管理CCD名称分配，确保并发任务不会使用相同的CCD名称"""
+    
+    def __init__(self, redis_client=None):
+        self.redis_client = redis_client or self._get_redis_client()
+        self.reserved_names_key = "ccd_reserved_names"
+        self.name_expiry_seconds = 3600  # 1小时后自动清理
+    
+    def _get_redis_client(self):
+        """获取Redis客户端"""
+        try:
+            from gpu_manager import get_redis_client
+            return get_redis_client()
+        except:
+            # 如果无法获取Redis，使用本地管理（降级方案）
+            return None
+    
+    def reserve_unique_name(self, base_name: str, task_id: str) -> str:
+        """为任务保留一个唯一的CCD名称"""
+        if not self.redis_client:
+            # 降级方案：使用随机后缀
+            suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+            return f"{base_name}_{suffix}"
+        
+        max_attempts = 50  # 最大尝试次数
+        for attempt in range(max_attempts):
+            # 生成候选名称
+            if attempt == 0:
+                # 首次尝试使用task_id作为后缀
+                candidate_name = f"{base_name}_{task_id[:8]}"
+            else:
+                # 后续尝试使用随机后缀
+                suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+                candidate_name = f"{base_name}_{suffix}"
+            
+            # 尝试在Redis中保留这个名称
+            reserve_key = f"{self.reserved_names_key}:{candidate_name}"
+            if self.redis_client.set(reserve_key, task_id, nx=True, ex=self.name_expiry_seconds):
+                print(f"Task {task_id}: Reserved unique CCD name '{candidate_name}'")
+                return candidate_name
+        
+        # 如果所有尝试都失败，使用带时间戳的名称作为最后手段
+        import time
+        timestamp_suffix = str(int(time.time() * 1000))[-8:]  # 使用时间戳的最后8位
+        fallback_name = f"{base_name}_{timestamp_suffix}"
+        reserve_key = f"{self.reserved_names_key}:{fallback_name}"
+        self.redis_client.set(reserve_key, task_id, ex=self.name_expiry_seconds)
+        print(f"Task {task_id}: Using fallback CCD name '{fallback_name}'")
+        return fallback_name
+    
+    def release_name(self, ccd_name: str, task_id: str):
+        """释放CCD名称"""
+        if not self.redis_client:
+            return
+        
+        reserve_key = f"{self.reserved_names_key}:{ccd_name}"
+        # 验证这个名称确实是由当前任务保留的
+        current_holder = self.redis_client.get(reserve_key)
+        if current_holder:
+            # 处理Redis返回值可能是bytes或str的情况
+            if isinstance(current_holder, bytes):
+                current_holder_str = current_holder.decode()
+            else:
+                current_holder_str = current_holder
+                
+            if current_holder_str == task_id:
+                self.redis_client.delete(reserve_key)
+                print(f"Task {task_id}: Released CCD name '{ccd_name}'")
+            else:
+                print(f"Task {task_id}: Warning - tried to release CCD name '{ccd_name}' but it's owned by task '{current_holder_str}'")
+        else:
+            print(f"Task {task_id}: Warning - tried to release CCD name '{ccd_name}' but it's not found in Redis")
+
+# 全局CCD名称管理器实例
+_ccd_name_manager = CCDNameManager()
 
 class Boltzina:
     def __init__(
@@ -67,160 +151,131 @@ class Boltzina:
         self.fname = "prediction_target"
         self.ligand_resname = ligand_resname
         
+        # 获取task_id用于唯一标识，如果无法获取则使用uuid
+        self.task_id = self._get_current_task_id()
+        
+        # 使用CCD名称管理器来获取唯一的配体名称
+        self.unique_ligand_name = _ccd_name_manager.reserve_unique_name(self.ligand_resname, self.task_id)
+        print(f"Task {self.task_id}: Reserved unique CCD name: {self.unique_ligand_name}")
+        
         self.cache_dir = Path(get_cache_path())
         self.ccd_path = self.cache_dir / 'ccd.pkl'
         self.ccd = self._load_ccd()
+        
+        # Track custom ligands added by this instance (使用唯一名称)
+        self.custom_ligands = set()
 
+    def _get_current_task_id(self) -> str:
+        """获取当前Celery任务ID，如果不在Celery环境中则生成UUID"""
+        try:
+            # 尝试获取Celery任务ID
+            from celery import current_task
+            if current_task and current_task.request and current_task.request.id:
+                return current_task.request.id
+        except:
+            pass
+        
+        # 如果无法获取Celery任务ID，生成一个唯一ID
+        return str(uuid.uuid4())[:8]
 
     def _load_ccd(self) -> Dict[str, Any]:
-        """Load CCD cache and ensure clean state for new predictions."""
+        """Load CCD cache safely without global locking."""
         if self.ccd_path.exists():
             with self.ccd_path.open('rb') as file:
                 ccd = pickle.load(file)
-                # Always remove any previous temporary ligands to prevent contamination
-                if self.base_ligand_name in ccd:
-                    ccd.pop(self.base_ligand_name)
-                # Remove any custom ligand entries that might have been left from previous runs
-                custom_ligands_to_remove = [key for key in ccd.keys() if key.startswith('CUSTOM_') or key == self.ligand_resname]
-                for custom_key in custom_ligands_to_remove:
-                    ccd.pop(custom_key, None)
                 return ccd
         else:
             return {}
     
     def _add_temporary_ligand_to_ccd(self, ligand_name: str, ligand_mol):
-        """Temporarily add a custom ligand to CCD for processing.
+        """Temporarily add a custom ligand to CCD for processing with unique naming.
         
         Args:
             ligand_name: Name of the ligand to add
             ligand_mol: RDKit molecule object of the ligand or wrapped molecule
         """
-        # Store the original state for restoration
-        if not hasattr(self, '_original_ccd_state'):
-            self._original_ccd_state = self.ccd.copy()
+        # Use the already reserved unique ligand name
+        unique_ligand_name = self.unique_ligand_name
         
-        # Add temporary ligand (use the molecule as-is, whether raw RDKit or wrapped)
-        self.ccd[ligand_name] = ligand_mol
-        print(f"Temporarily added custom ligand '{ligand_name}' to CCD cache")
+        # Add temporary ligand to local CCD copy only (not global cache)
+        self.ccd[unique_ligand_name] = ligand_mol
+        self.custom_ligands.add(unique_ligand_name)
+        print(f"Task {self.task_id}: Added unique custom ligand '{unique_ligand_name}' to local CCD cache")
         
-        # CRITICAL: Also save custom ligand as individual .pkl file for inference
-        self._write_custom_ligand_to_mols_dir(ligand_name, ligand_mol)
+        # Write custom ligand to local mols directory only
+        self._write_custom_ligand_to_local_mols_dir(unique_ligand_name, ligand_mol)
+        
+        return unique_ligand_name
     
-    def _write_custom_ligand_to_mols_dir(self, ligand_name: str, ligand_mol):
-        """Write a custom ligand as an individual .pkl file to the mols directory."""
+    def _write_custom_ligand_to_local_mols_dir(self, ligand_name: str, ligand_mol):
+        """Write a custom ligand to local mols directory only (not global cache)."""
         try:
-            # Get the cache directory that inference will use
-            from boltz.main import get_cache_path
-            from pathlib import Path
-            cache_dir = Path(get_cache_path())
-            inference_mols_dir = cache_dir / 'mols'
-            
-            # Also write to our local mols directory for backup
+            # Write to local mols directory only
             local_mols_dir = self.work_dir / "boltz_out" / "processed" / "mols"
-            
-            # Ensure both directories exist
-            inference_mols_dir.mkdir(parents=True, exist_ok=True)
             local_mols_dir.mkdir(parents=True, exist_ok=True)
             
-            # Write to both locations
             import pickle
             
-            # Primary location: inference cache directory
-            inference_pkl_path = inference_mols_dir / f"{ligand_name}.pkl"
-            with open(inference_pkl_path, 'wb') as f:
-                pickle.dump(ligand_mol, f)
-            print(f"✓ Wrote custom ligand '{ligand_name}' to inference cache: {inference_pkl_path}")
-            
-            # Backup location: local processed directory  
+            # Write to local directory only
             local_pkl_path = local_mols_dir / f"{ligand_name}.pkl"
             with open(local_pkl_path, 'wb') as f:
                 pickle.dump(ligand_mol, f)
-            print(f"✓ Wrote custom ligand '{ligand_name}' to local backup: {local_pkl_path}")
+            print(f"✓ Wrote custom ligand '{ligand_name}' to local directory: {local_pkl_path}")
             
         except Exception as e:
-            print(f"⚠️  Failed to write custom ligand '{ligand_name}' to mols directory: {e}")
+            print(f"⚠️  Failed to write custom ligand '{ligand_name}' to local mols directory: {e}")
             import traceback
             traceback.print_exc()
     
     def _cleanup_temporary_ligands(self):
-        """Remove temporary ligands from CCD and cache directories to prevent contamination."""
-        # Clean up CCD cache
-        if hasattr(self, '_original_ccd_state'):
-            # Restore original CCD state
-            self.ccd = self._original_ccd_state.copy()
-            delattr(self, '_original_ccd_state')
-            print("Cleaned up temporary ligands from CCD cache")
-        else:
-            # Fallback: remove known temporary entries
-            temp_keys_to_remove = []
-            for key in self.ccd.keys():
-                if (key == self.ligand_resname or 
-                    key == self.base_ligand_name or 
-                    key.startswith('CUSTOM_') or
-                    key.startswith('TEMP_')):
-                    temp_keys_to_remove.append(key)
-            
-            for key in temp_keys_to_remove:
-                self.ccd.pop(key, None)
-                print(f"Removed temporary ligand '{key}' from CCD cache")
+        """Remove temporary ligands added by this instance and release CCD name."""
+        # Clean up only the custom ligands added by this instance
+        for ligand_name in self.custom_ligands:
+            if ligand_name in self.ccd:
+                self.ccd.pop(ligand_name)
+                print(f"Task {self.task_id}: Removed custom ligand '{ligand_name}' from local CCD cache")
         
-        # Clean up custom ligands from inference cache directory
+        # Clean up custom ligand files from local directory only
         try:
-            from boltz.main import get_cache_path
-            from pathlib import Path
-            cache_dir = Path(get_cache_path())
-            inference_mols_dir = cache_dir / 'mols'
-            
-            if inference_mols_dir.exists():
-                # Remove our custom ligand files
-                for pkl_file in inference_mols_dir.glob("*.pkl"):
-                    ligand_name = pkl_file.stem
-                    if (ligand_name == self.ligand_resname or 
-                        ligand_name == self.base_ligand_name or
-                        ligand_name.startswith('CUSTOM_') or
-                        ligand_name.startswith('TEMP_') or
-                        ligand_name == 'LIG1'):  # Specifically target LIG1
+            local_mols_dir = self.work_dir / "boltz_out" / "processed" / "mols"
+            if local_mols_dir.exists():
+                for ligand_name in self.custom_ligands:
+                    pkl_file = local_mols_dir / f"{ligand_name}.pkl"
+                    if pkl_file.exists():
                         try:
                             pkl_file.unlink()
-                            print(f"Removed custom ligand file: {pkl_file}")
+                            print(f"Task {self.task_id}: Removed custom ligand file: {pkl_file}")
                         except Exception as e:
-                            print(f"Failed to remove {pkl_file}: {e}")
+                            print(f"Task {self.task_id}: Failed to remove {pkl_file}: {e}")
                             
         except Exception as e:
-            print(f"Error cleaning up inference cache directory: {e}")
+            print(f"Task {self.task_id}: Error cleaning up local mols directory: {e}")
+        
+        # 释放在CCD名称管理器中保留的名称
+        if hasattr(self, 'unique_ligand_name'):
+            _ccd_name_manager.release_name(self.unique_ligand_name, self.task_id)
+        
+        # Clear the set of custom ligands
+        self.custom_ligands.clear()
+        print(f"Task {self.task_id}: Cleanup completed for this instance")
 
     def _write_custom_mols_for_inference(self):
         """Write any custom ligands to the extra_mols directory for inference."""
-        if not hasattr(self, '_original_ccd_state'):
+        if not self.custom_ligands:
             # No custom ligands were added
             return
             
         extra_mols_dir = self.work_dir / "boltz_out" / "processed" / "mols"
         extra_mols_dir.mkdir(parents=True, exist_ok=True)
         
-        # Find custom ligands (those not in original state)
-        custom_ligands = {}
-        if hasattr(self, '_original_ccd_state'):
-            for ligand_name, ligand_mol in self.ccd.items():
-                if ligand_name not in self._original_ccd_state:
-                    custom_ligands[ligand_name] = ligand_mol
+        print(f"Custom ligands available for inference: {list(self.custom_ligands)}")
         
-        if custom_ligands:
-            print(f"Writing {len(custom_ligands)} custom ligand(s) to extra_mols_dir for inference...")
-            
-            # We need to create a pickle file for each record/structure
-            # Since we don't know the record IDs at this point, we'll create them during structure preparation
-            # For now, store the custom ligands for later use
-            if not hasattr(self, '_custom_ligands_for_inference'):
-                self._custom_ligands_for_inference = custom_ligands
-                
-            print(f"Prepared {len(custom_ligands)} custom ligand(s) for inference export")
-        else:
-            print("No custom ligands to write for inference")
+        # Custom ligands are already written to local directory in _write_custom_ligand_to_local_mols_dir
+        # This method is kept for compatibility but no additional action needed
             
     def _write_custom_mols_for_record(self, record_id: str):
         """Write custom ligands for a specific record."""
-        if not hasattr(self, '_custom_ligands_for_inference'):
+        if not self.custom_ligands:
             return
             
         extra_mols_dir = self.work_dir / "boltz_out" / "processed" / "mols"
@@ -229,22 +284,12 @@ class Boltzina:
         try:
             import pickle
             
-            # Write each custom ligand as a separate .pkl file (CRITICAL for load_molecules)
-            for ligand_name, ligand_mol in self._custom_ligands_for_inference.items():
-                ligand_pkl_path = extra_mols_dir / f"{ligand_name}.pkl"
-                with open(ligand_pkl_path, 'wb') as f:
-                    pickle.dump(ligand_mol, f)
-                print(f"✓ Wrote custom ligand '{ligand_name}' to {ligand_pkl_path}")
-            
-            # Also create the record-specific pickle file
-            record_pkl_path = extra_mols_dir / f"{record_id}.pkl"
-            with open(record_pkl_path, 'wb') as f:
-                pickle.dump(self._custom_ligands_for_inference, f)
-            
-            print(f"✓ Wrote {len(self._custom_ligands_for_inference)} custom ligand(s) for record '{record_id}'")
+            # Custom ligands are already written as individual .pkl files
+            # This method is kept for compatibility
+            print(f"✓ Custom ligands already available for record '{record_id}': {list(self.custom_ligands)}")
             
         except Exception as e:
-            print(f"⚠️  Failed to write custom ligands for record '{record_id}': {e}")
+            print(f"⚠️  Failed to confirm custom ligands for record '{record_id}': {e}")
 
     def _extract_ligand_name_from_error(self, error_message: str) -> Optional[str]:
         """Extract ligand name from CCD error message."""
@@ -364,9 +409,9 @@ class Boltzina:
                             
                             print(f"Set atom names for {mol.GetNumAtoms()} atoms in custom ligand")
                             
-                            # Add to CCD temporarily
-                            self._add_temporary_ligand_to_ccd(ligand_name, mol)
-                            print(f"Successfully created custom ligand definition for '{ligand_name}'")
+                            # Add to CCD temporarily with unique name
+                            unique_ligand_name = self._add_temporary_ligand_to_ccd(ligand_name, mol)
+                            print(f"Successfully created custom ligand definition for '{ligand_name}' as '{unique_ligand_name}'")
                             
                             # Retry structure preparation
                             try:
@@ -415,6 +460,41 @@ class Boltzina:
             print(f"Unexpected error in custom ligand creation: {e}")
             return False
 
+    def _check_and_create_custom_ligands(self, complex_file: Path):
+        """Proactively check for custom ligands and create them before structure parsing."""
+        try:
+            import gemmi
+            
+            # Read structure to identify non-standard ligands
+            if complex_file.suffix.lower() == '.cif':
+                doc = gemmi.cif.read(str(complex_file))
+                block = doc[0]
+                structure = gemmi.make_structure_from_block(block)
+                
+                # Find all unique ligand names
+                ligand_names = set()
+                for model in structure:
+                    for chain in model:
+                        for residue in chain:
+                            # Skip standard amino acids and nucleotides
+                            if residue.name not in {'ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 
+                                                   'HIS', 'ILE', 'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER', 
+                                                   'THR', 'TRP', 'TYR', 'VAL', 'A', 'C', 'G', 'T', 'U', 
+                                                   'DA', 'DC', 'DG', 'DT', 'HOH', 'WAT'}:
+                                ligand_names.add(residue.name)
+                
+                # Check if each ligand exists in CCD, if not, create it with unique name
+                for ligand_name in ligand_names:
+                    if ligand_name not in self.ccd:
+                        print(f"Pre-creating custom ligand definition for '{ligand_name}'...")
+                        success = self._try_create_custom_ligand(complex_file, ligand_name, "precheck")
+                        if not success:
+                            print(f"Warning: Failed to pre-create ligand '{ligand_name}', will try again during parsing")
+                            
+        except Exception as e:
+            print(f"Warning: Could not pre-check ligands: {e}")
+            # This is not critical, parsing will handle it
+
     def predict(self, file_paths: List[str]):
         """Main prediction method with proper CCD cleanup."""
         try:
@@ -439,9 +519,9 @@ class Boltzina:
             self.save_results_csv()
             
         finally:
-            # Always cleanup temporary ligands, even if an error occurred
+            # Always cleanup temporary ligands and release CCD name, even if an error occurred
             self._cleanup_temporary_ligands()
-            print("CCD cache cleanup completed.")
+            print(f"Task {self.task_id}: CCD cache cleanup completed.")
 
     def predict_with_separate_inputs(self, protein_file: str, ligand_file: str, output_prefix: str = "combined_complex"):
         """
@@ -450,8 +530,8 @@ class Boltzina:
         This method combines the separate files into a standard PDB complex and then
         uses the standard complex prediction pipeline.
         
-        Note: For separate inputs, the ligand is automatically assigned the name "LIG"
-        since we're creating a combined complex from scratch.
+        Note: For separate inputs, the ligand is automatically assigned a unique name
+        to avoid conflicts between parallel runs.
         """
         try:
             protein_path = Path(protein_file)
@@ -470,6 +550,7 @@ class Boltzina:
             
             print(f"Processing protein: {protein_path.name}")
             print(f"Processing ligand: {ligand_path.name}")
+            print(f"Using unique ligand identifier: {self.unique_ligand_name}")
             
             # Create combined complex structure as standard PDB
             complex_file = self._create_standard_complex_pdb(protein_path, ligand_path, output_prefix)
@@ -484,7 +565,7 @@ class Boltzina:
     def _create_standard_complex_pdb(self, protein_file: Path, ligand_file: Path, output_prefix: str) -> Path:
         """
         Create a standard PDB complex file from separate protein and ligand files.
-        This method generates a clean PDB file that can be processed by the standard pipeline.
+        This method preserves the original coordinates from both files.
         """
         combined_dir = self.output_dir / "combined_complexes"
         combined_dir.mkdir(exist_ok=True)
@@ -495,7 +576,7 @@ class Boltzina:
         protein_path = Path(protein_file)
         ligand_path = Path(ligand_file)
         
-        # Load ligand from file
+        # Load ligand from file (preserving original coordinates)
         ligand_mol = self._load_ligand_from_file(ligand_path)
         if ligand_mol is None:
             raise ValueError(f"Failed to load ligand from {ligand_file}")
@@ -508,8 +589,8 @@ class Boltzina:
         else:
             raise ValueError(f"Unsupported protein file format: {protein_path.suffix}")
         
-        # Generate ligand PDB lines with standard formatting
-        ligand_pdb_lines = self._generate_standard_ligand_pdb_lines(ligand_mol)
+        # Generate ligand PDB lines preserving original coordinates
+        ligand_pdb_lines = self._generate_ligand_pdb_lines_preserve_coords(ligand_mol)
         
         # Combine protein and ligand into standard PDB format
         combined_content = self._combine_to_standard_pdb(protein_content, ligand_pdb_lines)
@@ -517,6 +598,7 @@ class Boltzina:
         # Write combined file
         combined_file.write_text(combined_content)
         print(f"Created standard complex: {combined_file}")
+        print(f"Coordinates preserved from original files")
         
         return combined_file
 
@@ -537,37 +619,202 @@ class Boltzina:
         except Exception as e:
             raise ValueError(f"Failed to convert CIF to PDB: {e}")
 
-    def _generate_standard_ligand_pdb_lines(self, ligand_mol) -> str:
-        """Generate PDB lines for ligand using standard formatting."""
-        from rdkit.Chem import rdMolTransforms
+    def _analyze_protein_structure(self, protein_content: str) -> Dict[str, Any]:
+        """Analyze protein structure to determine optimal ligand placement."""
+        protein_atoms = []
+        ca_atoms = []
+        
+        for line in protein_content.split('\n'):
+            if line.startswith('ATOM') and len(line) >= 54:
+                try:
+                    # Extract coordinates using PDB format positions
+                    x = float(line[30:38].strip())
+                    y = float(line[38:46].strip()) 
+                    z = float(line[46:54].strip())
+                    atom_name = line[12:16].strip()
+                    
+                    protein_atoms.append([x, y, z])
+                    
+                    # Collect CA atoms for center calculation
+                    if atom_name == 'CA':
+                        ca_atoms.append([x, y, z])
+                        
+                except (ValueError, IndexError):
+                    continue
+        
+        if not protein_atoms:
+            print("Warning: No protein atoms found, using default ligand position")
+            return {
+                'center': np.array([0.0, 0.0, 0.0]),
+                'size': np.array([10.0, 10.0, 10.0]),
+                'ca_center': np.array([0.0, 0.0, 0.0])
+            }
+        
+        protein_coords = np.array(protein_atoms)
+        protein_center = np.mean(protein_coords, axis=0)
+        protein_size = np.max(protein_coords, axis=0) - np.min(protein_coords, axis=0)
+        
+        # Use CA atoms for better center if available
+        if ca_atoms:
+            ca_coords = np.array(ca_atoms)
+            ca_center = np.mean(ca_coords, axis=0)
+        else:
+            ca_center = protein_center
+        
+        print(f"Protein analysis:")
+        print(f"  Center: ({protein_center[0]:.2f}, {protein_center[1]:.2f}, {protein_center[2]:.2f})")
+        print(f"  Size: ({protein_size[0]:.2f}, {protein_size[1]:.2f}, {protein_size[2]:.2f})")
+        print(f"  CA center: ({ca_center[0]:.2f}, {ca_center[1]:.2f}, {ca_center[2]:.2f})")
+        
+        return {
+            'center': protein_center,
+            'size': protein_size,
+            'ca_center': ca_center,
+            'coords': protein_coords
+        }
+
+    def _generate_positioned_ligand_pdb_lines(self, ligand_mol, protein_info: Dict[str, Any]) -> str:
+        """Generate ligand PDB lines with intelligent positioning near the protein."""
+        from rdkit.Chem import AllChem
         import numpy as np
         
         ligand_lines = ""
-        atom_serial = 10000  # Start with high number to avoid conflicts
+        atom_serial = 1  # Will be renumbered later
         
-        # Get conformer
+        # Ensure we have a 3D conformer
         if ligand_mol.GetNumConformers() == 0:
-            from rdkit.Chem import AllChem
+            print("Generating 3D conformer for ligand...")
             AllChem.EmbedMolecule(ligand_mol, randomSeed=42)
-            AllChem.MMFFOptimizeMolecule(ligand_mol)
+            if AllChem.MMFFOptimizeMolecule(ligand_mol) != 0:
+                print("Warning: MMFF optimization failed, using basic coordinates")
         
         conf = ligand_mol.GetConformer()
         
-        # Position ligand at a reasonable location (near origin but not overlapping)
-        # Simple translation to avoid protein-ligand overlap
-        center_x, center_y, center_z = 20.0, 0.0, 0.0
+        # Calculate ligand centroid
+        ligand_positions = []
+        for i in range(ligand_mol.GetNumAtoms()):
+            pos = conf.GetAtomPosition(i)
+            ligand_positions.append([pos.x, pos.y, pos.z])
         
+        ligand_coords = np.array(ligand_positions)
+        ligand_centroid = np.mean(ligand_coords, axis=0)
+        
+        # Intelligent positioning strategy
+        protein_center = protein_info['ca_center']
+        protein_size = protein_info['size']
+        
+        # Place ligand at a reasonable distance from protein surface
+        # Use the largest dimension to determine placement distance
+        max_protein_dimension = np.max(protein_size)
+        placement_distance = max_protein_dimension * 0.6  # 60% of max dimension
+        
+        # Place ligand slightly offset from protein center
+        # This simulates a binding site location
+        offset_direction = np.array([1.0, 0.5, 0.0])  # Slightly to the side
+        offset_direction = offset_direction / np.linalg.norm(offset_direction)
+        
+        target_position = protein_center + offset_direction * placement_distance
+        
+        # Calculate translation needed
+        translation = target_position - ligand_centroid
+        
+        print(f"Ligand positioning:")
+        print(f"  Original centroid: ({ligand_centroid[0]:.2f}, {ligand_centroid[1]:.2f}, {ligand_centroid[2]:.2f})")
+        print(f"  Target position: ({target_position[0]:.2f}, {target_position[1]:.2f}, {target_position[2]:.2f})")
+        print(f"  Translation: ({translation[0]:.2f}, {translation[1]:.2f}, {translation[2]:.2f})")
+        
+        # Generate PDB lines with proper formatting
+        element_counts = {}
         for i, atom in enumerate(ligand_mol.GetAtoms()):
             pos = conf.GetAtomPosition(i)
-            x, y, z = pos.x + center_x, pos.y + center_y, pos.z + center_z
+            x = pos.x + translation[0]
+            y = pos.y + translation[1] 
+            z = pos.z + translation[2]
             
-            # Standard PDB HETATM format
+            # Get element and create meaningful atom name
             element = atom.GetSymbol()
-            atom_name = f"{element}{i+1:d}"[:4]  # Limit to 4 characters
             
-            line = f"HETATM{atom_serial:5d} {atom_name:4s} LIG L   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {element:2s}\n"
+            # Count elements for naming
+            if element not in element_counts:
+                element_counts[element] = 0
+            element_counts[element] += 1
+            
+            # Create atom name
+            if element == 'H':
+                atom_name = f"H{element_counts[element]}"
+            elif element_counts[element] == 1:
+                atom_name = element
+            else:
+                atom_name = f"{element}{element_counts[element]}"
+            
+            # Ensure atom name is properly formatted (left-aligned, max 4 chars)
+            atom_name = atom_name[:4].ljust(4)
+            
+            # Standard PDB HETATM format with proper spacing
+            line = f"HETATM{atom_serial:5d} {atom_name} LIG L   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {element:>2s}\n"
             ligand_lines += line
             atom_serial += 1
+        
+        return ligand_lines
+
+    def _generate_ligand_pdb_lines_preserve_coords(self, ligand_mol) -> str:
+        """Generate ligand PDB lines preserving original coordinates from SDF/MOL file."""
+        from rdkit.Chem import AllChem
+        
+        ligand_lines = ""
+        atom_serial = 1  # Will be renumbered later
+        
+        # Use unique ligand name to avoid conflicts
+        ligand_name = self.unique_ligand_name
+        
+        # Ensure we have a 3D conformer (should already exist from loading)
+        if ligand_mol.GetNumConformers() == 0:
+            print("Warning: No conformer found, generating coordinates...")
+            AllChem.EmbedMolecule(ligand_mol, randomSeed=42)
+            if AllChem.MMFFOptimizeMolecule(ligand_mol) != 0:
+                print("Warning: MMFF optimization failed")
+        
+        conf = ligand_mol.GetConformer()
+        
+        print(f"Preserving original ligand coordinates with unique name: {ligand_name}")
+        
+        # Generate PDB lines using original coordinates (no translation)
+        element_counts = {}
+        for i, atom in enumerate(ligand_mol.GetAtoms()):
+            pos = conf.GetAtomPosition(i)
+            # Use original coordinates directly - NO TRANSLATION
+            x, y, z = pos.x, pos.y, pos.z
+            
+            # Get element and create meaningful atom name
+            element = atom.GetSymbol()
+            
+            # Count elements for naming
+            if element not in element_counts:
+                element_counts[element] = 0
+            element_counts[element] += 1
+            
+            # Create atom name
+            if element == 'H':
+                atom_name = f"H{element_counts[element]}"
+            elif element_counts[element] == 1:
+                atom_name = element
+            else:
+                atom_name = f"{element}{element_counts[element]}"
+            
+            # Ensure atom name is properly formatted (left-aligned, max 4 chars)
+            atom_name = atom_name[:4].ljust(4)
+            
+            # Use the first 3 characters of unique ligand name for residue name in PDB
+            resname = ligand_name[:3].upper()
+            
+            # Standard PDB HETATM format with proper spacing
+            line = f"HETATM{atom_serial:5d} {atom_name} {resname} L   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {element:>2s}\n"
+            ligand_lines += line
+            atom_serial += 1
+            
+            # Print first few coordinates for verification
+            if i < 3:
+                print(f"  Atom {i+1} ({element}): ({x:.3f}, {y:.3f}, {z:.3f})")
         
         return ligand_lines
 
@@ -636,37 +883,86 @@ class Boltzina:
         return ''.join(lines)
 
     def _load_ligand_from_file(self, ligand_file: Path):
-        """Load ligand molecule from SDF, MOL, or MOL2 file."""
+        """Load ligand molecule from SDF, MOL, or MOL2 file, preserving original coordinates."""
         from rdkit import Chem
+        from rdkit.Chem import AllChem
         
         try:
+            # Load molecule based on file format, preserving hydrogens and coordinates
             if ligand_file.suffix.lower() in ['.sdf']:
-                supplier = Chem.SDMolSupplier(str(ligand_file))
+                supplier = Chem.SDMolSupplier(str(ligand_file), removeHs=False)
                 mol = next(supplier)
             elif ligand_file.suffix.lower() in ['.mol']:
-                mol = Chem.MolFromMolFile(str(ligand_file))
+                mol = Chem.MolFromMolFile(str(ligand_file), removeHs=False)
             elif ligand_file.suffix.lower() in ['.mol2']:
-                mol = Chem.MolFromMol2File(str(ligand_file))
+                mol = Chem.MolFromMol2File(str(ligand_file), removeHs=False)
             else:
                 raise ValueError(f"Unsupported ligand file format: {ligand_file.suffix}")
             
             if mol is None:
                 raise ValueError("Failed to parse ligand molecule")
             
-            # Add hydrogens and optimize geometry
-            mol = Chem.AddHs(mol)
+            # Check if we have 3D coordinates
+            has_valid_3d_coords = False
+            if mol.GetNumConformers() > 0:
+                conf = mol.GetConformer()
+                # Check if coordinates are meaningful (not all zero, have variation)
+                coords = []
+                for i in range(mol.GetNumAtoms()):
+                    pos = conf.GetAtomPosition(i)
+                    coords.append([pos.x, pos.y, pos.z])
+                
+                if len(coords) > 1:
+                    coord_array = np.array(coords)
+                    coord_std = np.std(coord_array)
+                    if coord_std > 0.001:  # Some variation in coordinates
+                        has_valid_3d_coords = True
+                        print(f"Using original 3D coordinates from {ligand_file.name}")
+                        print(f"  Coordinate range: X({coord_array[:, 0].min():.3f} to {coord_array[:, 0].max():.3f})")
+                        print(f"                    Y({coord_array[:, 1].min():.3f} to {coord_array[:, 1].max():.3f})")
+                        print(f"                    Z({coord_array[:, 2].min():.3f} to {coord_array[:, 2].max():.3f})")
             
-            # Try to optimize 3D coordinates if they don't exist
+            # Only add hydrogens if we don't have them or don't have valid coordinates
+            if not has_valid_3d_coords:
+                print(f"No valid 3D coordinates found in {ligand_file.name}, generating new ones...")
+                # Add hydrogens and generate coordinates
+                mol = Chem.AddHs(mol)
+                print(f"Added hydrogens: {mol.GetNumAtoms()} total atoms")
+                
+                # Generate 3D coordinates
+                result = AllChem.EmbedMolecule(mol, randomSeed=42, useRandomCoords=True)
+                if result != 0:
+                    print("Warning: Standard embedding failed, trying alternative method")
+                    AllChem.EmbedMolecule(mol, randomSeed=42, useRandomCoords=True, maxAttempts=10)
+                
+                # Optimize geometry
+                try:
+                    optimization_result = AllChem.MMFFOptimizeMolecule(mol, maxIters=500)
+                    if optimization_result == 0:
+                        print("Successfully optimized ligand geometry")
+                    else:
+                        print("MMFF optimization did not converge, using UFF")
+                        AllChem.UFFOptimizeMolecule(mol, maxIters=500)
+                except Exception as e:
+                    print(f"Geometry optimization failed: {e}, using unoptimized coordinates")
+            else:
+                # We have good coordinates, preserve them
+                print("Preserving original coordinates exactly as provided")
+                print(f"Using original molecule with {mol.GetNumAtoms()} atoms (no hydrogen addition)")
+                
+                # Do NOT add hydrogens to preserve exact coordinates
+                # The affinity prediction should work with the original molecule structure
+            
+            # Final validation
             if mol.GetNumConformers() == 0:
-                from rdkit.Chem import AllChem
-                AllChem.EmbedMolecule(mol, randomSeed=42)
-                AllChem.MMFFOptimizeMolecule(mol)
-                print("Generated 3D coordinates for ligand")
+                raise ValueError("Failed to get 3D coordinates for ligand")
             
             return mol
             
         except Exception as e:
             print(f"Error loading ligand from {ligand_file}: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def _cif_to_pdb(self, cif_file: Path) -> Optional[Path]:
@@ -779,23 +1075,37 @@ class Boltzina:
                 pdb_content = original_path.read_text()
                 hetatm_resnames = set()
                 filtered_pdb_lines = []
+                atom_count = 0
+                hetatm_count = 0
                 
                 for line in pdb_content.splitlines():
-                    if line.startswith('HETATM') and len(line) > 20:
+                    if line.startswith('ATOM') and len(line) > 20:
+                        atom_count += 1
+                    elif line.startswith('HETATM') and len(line) > 20:
+                        hetatm_count += 1
                         resname = line[17:20].strip()
                         hetatm_resnames.add(resname)
                         if resname == self.ligand_resname:
                             filtered_pdb_lines.append(line)
 
-                if not hetatm_resnames:
-                    raise ValueError(f"Error: No HETATM records found in {original_path.name}. "
-                                   f"This file appears to contain only protein atoms and no ligands. "
-                                   f"Please provide a protein-ligand complex structure file.")
+                # Detailed error reporting for different scenarios
+                if hetatm_count == 0:
+                    if atom_count > 0:
+                        raise ValueError(f"Error: No ligand molecules (HETATM records) found in {original_path.name}. "
+                                       f"This file contains {atom_count} protein atoms but no ligands. "
+                                       f"For affinity prediction, you need a protein-ligand complex structure file. "
+                                       f"\n\nPossible solutions:\n"
+                                       f"1. Use a different PDB file that contains both protein and ligand\n"
+                                       f"2. Use the 'separate' mode with separate protein and ligand files\n"
+                                       f"3. Add ligand coordinates to your PDB file as HETATM records")
+                    else:
+                        raise ValueError(f"Error: Invalid PDB file {original_path.name}. "
+                                       f"No ATOM or HETATM records found.")
                 
                 if self.ligand_resname not in hetatm_resnames:
                     available_resnames = ", ".join(sorted(hetatm_resnames))
                     raise ValueError(f"Error: Ligand residue name '{self.ligand_resname}' not found in {original_path.name}. "
-                                   f"Available ligand residue names in this file are: {available_resnames}. "
+                                   f"Found {hetatm_count} HETATM records with residue names: {available_resnames}. "
                                    f"Please use one of the available residue names or check your input file.")
 
                 if filtered_pdb_lines:
@@ -968,6 +1278,9 @@ class Boltzina:
             return
 
         try:
+            # Pre-emptively check for custom ligands in CIF/PDB files and create them if needed
+            self._check_and_create_custom_ligands(complex_file)
+            
             parsed_structure = parse_mmcif(
                 path=str(complex_file),
                 mols=self.ccd,

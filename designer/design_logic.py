@@ -276,11 +276,13 @@ class Designer:
         iterations = kwargs.get('iterations', 20)
         user_constraints = kwargs.get('user_constraints', [])  # 新增：用户约束
         include_cysteine = kwargs.get('include_cysteine', True)  # 新增：半胱氨酸控制
+        cyclic_binder = kwargs.get('cyclic_binder', False)  # 新增：环状设计控制
 
         logger.info(f"--- Starting Design Run (Type: {design_type.capitalize()}) with Adaptive Hyperparameters ---")
         logger.info(f"Scoring weights -> ipTM: {weight_iptm}, pLDDT: {weight_plddt}")
         logger.info(f"Mutation rate: {mutation_rate}")
         logger.info(f"Cysteine control: {'enabled' if include_cysteine else 'disabled'}")
+        logger.info(f"Cyclic design: {'enabled' if cyclic_binder else 'disabled'}")
         if sequence_mask:
             logger.info(f"Sequence mask applied: {sequence_mask}")
         if user_constraints:
@@ -294,7 +296,8 @@ class Designer:
             'binder_chain_id': binder_chain_id,  # 新增：传递结合肽链ID
             'user_constraints': user_constraints,  # 新增：传递用户约束
             'sequence_mask': sequence_mask,  # 新增：传递序列掩码
-            'include_cysteine': include_cysteine  # 新增：传递半胱氨酸控制
+            'include_cysteine': include_cysteine,  # 新增：传递半胱氨酸控制
+            'cyclic_binder': cyclic_binder  # 新增：传递环状设计控制
         }
         if design_type == 'glycopeptide':
             design_params.update({
@@ -659,11 +662,17 @@ class Designer:
         for i, seq_block in enumerate(config['sequences']):
             if 'protein' in seq_block and seq_block.get('protein', {}).get('id') == chain_id:
                 config['sequences'][i]['protein']['sequence'] = sequence
+                # 处理环状设计
+                if design_params.get('cyclic_binder', False):
+                    config['sequences'][i]['protein']['cyclic'] = True
                 found_chain = True
                 break
         
         if not found_chain:
             protein_entry = {'protein': {'id': chain_id, 'sequence': sequence, 'msa': 'empty'}}
+            # 处理环状设计
+            if design_params.get('cyclic_binder', False):
+                protein_entry['protein']['cyclic'] = True
             config['sequences'].append(protein_entry)
 
         design_type = design_params.get('design_type', 'linear')
@@ -788,24 +797,31 @@ class Designer:
                 
             elif constraint_type == 'pocket':
                 # 处理pocket约束 - 使用UI组件的字段名
-                binder_chain = constraint.get('binder_chain', '')
+                binder_chain = constraint.get('binder', '') or constraint.get('binder_chain', '')
                 if binder_chain == 'BINDER_CHAIN':
                     binder_chain = binder_chain_id
                 
                 target_chain = constraint.get('target_chain', 'A')
                 binding_site = constraint.get('binding_site', [])
                 
-                # 构建contacts格式 - [[chain, residue], ...]
+                # 处理UI组件中的contacts格式 - [[chain, residue], ...]
+                contacts_from_ui = constraint.get('contacts', [])
                 contacts = []
-                for residue in binding_site:
-                    contacts.append([target_chain, residue])
+                
+                if contacts_from_ui:
+                    # 使用UI中的contacts格式
+                    contacts = contacts_from_ui
+                elif binding_site:
+                    # 兼容旧的binding_site格式
+                    for residue in binding_site:
+                        contacts.append([target_chain, residue])
                 
                 processed_constraint = {
                     'pocket': {
                         'binder': binder_chain,
                         'contacts': contacts,
-                        'max_distance': constraint.get('force', 5.0),  # pocket UI中force字段实际存储距离值
-                        'force': True
+                        'max_distance': constraint.get('max_distance', 5.0),
+                        'force': constraint.get('force', True)
                     }
                 }
                 return processed_constraint

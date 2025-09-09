@@ -81,6 +81,7 @@ def main():
     # --- 氨基酸组成控制 ---
     amino_acid_group = parser.add_argument_group('氨基酸组成控制')
     amino_acid_group.add_argument("--no_cysteine", action="store_true", default=False, help="禁用半胱氨酸(Cys)，避免不必要的二硫键形成。")
+    amino_acid_group.add_argument("--cyclic_binder", action="store_true", default=False, help="设计环状结合肽，通过N端和C端形成闭合环状结构。")
 
     # --- 输出与日志 ---
     output_group = parser.add_argument_group('输出与日志')
@@ -213,7 +214,8 @@ def main():
             'weight_plddt': args.weight_plddt,
             'design_type': args.design_type,
             'include_cysteine': include_cysteine,  # 使用计算后的值
-            'user_constraints': user_constraints  # 新增：用户约束
+            'user_constraints': user_constraints,  # 新增：用户约束
+            'cyclic_binder': args.cyclic_binder  # 新增：环状设计参数
         }
 
         if args.design_type == "glycopeptide":
