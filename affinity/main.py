@@ -1885,97 +1885,6 @@ class Boltzina:
             # If all validation methods fail, raise an error
             raise ValueError(f"Failed to parse CIF file {cif_file.name}: {str(e)}")
 
-    def _validate_structure_for_affinity_prediction(self, structure_v2, filename: str):
-        """
-        Validate that the parsed structure has valid ligands for affinity prediction.
-        This prevents the zero-size array error in the cropping module.
-        """
-        try:
-            # Check if the structure has token data
-            if not hasattr(structure_v2, 'token_data') or structure_v2.token_data is None:
-                raise ValueError(f"No token data found in parsed structure for {filename}")
-            
-            token_data = structure_v2.token_data
-            
-            # Debug information about token data structure
-            print(f"Debug: Token data fields for {filename}: {list(token_data.dtype.names)}")
-            print(f"Debug: Total tokens in structure: {len(token_data)}")
-            
-            # Check for resolved tokens
-            if 'resolved_mask' not in token_data.dtype.names:
-                raise ValueError(f"No resolved mask found in token data for {filename}")
-            
-            resolved_tokens = token_data[token_data['resolved_mask']]
-            print(f"Debug: Resolved tokens: {len(resolved_tokens)}")
-            
-            if len(resolved_tokens) == 0:
-                raise ValueError(f"No resolved tokens found in structure for {filename}")
-            
-            # Check for affinity mask (ligand tokens)
-            if 'affinity_mask' not in token_data.dtype.names:
-                raise ValueError(f"No affinity mask found in token data for {filename}")
-            
-            ligand_tokens = resolved_tokens[resolved_tokens['affinity_mask']]
-            print(f"Debug: Ligand tokens with affinity mask: {len(ligand_tokens)}")
-            
-            # More detailed debugging for mol_type distribution
-            if 'mol_type' in token_data.dtype.names:
-                mol_type_counts = {}
-                for token in resolved_tokens:
-                    mol_type = token['mol_type']
-                    mol_type_counts[mol_type] = mol_type_counts.get(mol_type, 0) + 1
-                print(f"Debug: Mol type distribution for {filename}: {mol_type_counts}")
-            
-            if len(ligand_tokens) == 0:
-                # Additional debugging for ligand detection issues
-                print(f"Debug: No ligand tokens found. Checking affinity mask distribution...")
-                affinity_mask_true = len(resolved_tokens[resolved_tokens['affinity_mask']])
-                affinity_mask_false = len(resolved_tokens[~resolved_tokens['affinity_mask']])
-                print(f"Debug: Affinity mask - True: {affinity_mask_true}, False: {affinity_mask_false}")
-                
-                raise ValueError(f"No ligand tokens found with affinity mask in structure for {filename}. "
-                               f"This typically means:\n"
-                               f"1. The ligand was not properly detected during structure parsing\n"
-                               f"2. The ligand coordinates are invalid or missing\n"
-                               f"3. The ligand residue name doesn't match expected format\n"
-                               f"4. The structure file may be corrupted or improperly formatted\n"
-                               f"\nDebugging info:\n"
-                               f"- Total resolved tokens: {len(resolved_tokens)}\n"
-                               f"- Tokens with affinity_mask=True: {affinity_mask_true}\n"
-                               f"- Mol type distribution: {mol_type_counts if 'mol_type_counts' in locals() else 'N/A'}\n"
-                               f"\nSuggested solutions:\n"
-                               f"- Ensure the ligand is present as HETATM records in PDB files\n"
-                               f"- Check that ligand coordinates are valid (not all zeros)\n"
-                               f"- Verify the ligand residue name matches the expected format\n"
-                               f"- Try using separate protein and ligand files with 'separate' mode")
-            
-            # Check for center coordinates
-            if 'center_coords' not in token_data.dtype.names:
-                raise ValueError(f"No center coordinates found in token data for {filename}")
-            
-            ligand_coords = ligand_tokens['center_coords']
-            if ligand_coords.size == 0:
-                raise ValueError(f"Ligand tokens have no center coordinates in structure for {filename}")
-            
-            # Check that coordinates are not all zeros (invalid)
-            if np.all(ligand_coords == 0):
-                raise ValueError(f"All ligand coordinates are zero in structure for {filename}, indicating invalid coordinates")
-            
-            # Check for valid protein tokens too
-            # mol_type 0 = PROTEIN, mol_type 3 = NONPOLYMER (ligands)
-            protein_tokens = resolved_tokens[resolved_tokens['mol_type'] == 0]
-            if len(protein_tokens) == 0:
-                raise ValueError(f"No protein tokens found in structure for {filename}. "
-                               f"Affinity prediction requires both protein and ligand components.")
-            
-            print(f"✅ Structure validation passed for {filename}: "
-                  f"{len(protein_tokens)} protein tokens, {len(ligand_tokens)} ligand tokens")
-            
-        except KeyError as e:
-            raise ValueError(f"Missing required data field in parsed structure for {filename}: {e}")
-        except Exception as e:
-            raise ValueError(f"Structure validation failed for {filename}: {e}")
-
     def _prepare_structure(self, complex_file: Path, record_id: str):
         pose_output_dir = self.work_dir / "boltz_out" / "predictions" / record_id
         pose_output_dir.mkdir(parents=True, exist_ok=True)
@@ -1997,18 +1906,57 @@ class Boltzina:
                     raise ValueError(f"Could not convert PDB file {complex_file.name} to CIF format")
                 print(f"Successfully converted to CIF: {cif_file.name}")
             
-            parsed_structure = parse_mmcif(
-                path=str(cif_file),
-                mols=self.ccd,
-                moldir=self.work_dir / "boltz_out" / "processed" / "mols",
-                call_compute_interfaces=False
-            )
-            structure_v2 = parsed_structure.data
+            print(f"Parsing structure file: {cif_file.name}")
+            try:
+                parsed_structure = parse_mmcif(
+                    path=str(cif_file),
+                    mols=self.ccd,
+                    moldir=self.work_dir / "boltz_out" / "processed" / "mols",
+                    call_compute_interfaces=False
+                )
+            except Exception as parse_error:
+                print(f"❌ Structure parsing failed for {cif_file.name}: {type(parse_error).__name__}: {parse_error}")
+                import traceback
+                traceback.print_exc()
+                raise ValueError(f"Structure parsing failed for {complex_file.name}: {parse_error}")
             
-            # Validate that the parsed structure has valid ligands for affinity prediction
-            self._validate_structure_for_affinity_prediction(structure_v2, complex_file.name)
+            if parsed_structure is None:
+                raise ValueError(f"Structure parsing returned None for {complex_file.name}")
             
-            structure_v2.dump(output_path)
+            print(f"Extracting structure data from parsed result...")
+            try:
+                structure_v2 = parsed_structure.data
+            except Exception as data_error:
+                print(f"❌ Failed to extract data from parsed structure: {type(data_error).__name__}: {data_error}")
+                import traceback
+                traceback.print_exc()
+                raise ValueError(f"Failed to extract structure data for {complex_file.name}: {data_error}")
+            
+            if structure_v2 is None:
+                raise ValueError(f"Structure data is None after parsing for {complex_file.name}")
+            
+            print(f"Structure parsing completed. Type: {type(structure_v2)}")
+            
+            # Basic validation - check that we have the essential structure components
+            if not hasattr(structure_v2, 'atoms') or not hasattr(structure_v2, 'chains'):
+                raise ValueError(f"Structure missing essential components (atoms/chains) for {complex_file.name}")
+            
+            if len(structure_v2.atoms) == 0:
+                raise ValueError(f"Structure has no atoms for {complex_file.name}")
+            
+            if len(structure_v2.chains) == 0:
+                raise ValueError(f"Structure has no chains for {complex_file.name}")
+            
+            print(f"Structure has {len(structure_v2.atoms)} atoms and {len(structure_v2.chains)} chains")
+            
+            print(f"Saving structure data to: {output_path}")
+            try:
+                structure_v2.dump(output_path)
+            except Exception as dump_error:
+                print(f"❌ Failed to save structure data: {type(dump_error).__name__}: {dump_error}")
+                import traceback
+                traceback.print_exc()
+                raise ValueError(f"Failed to save structure data for {complex_file.name}: {dump_error}")
             
             # Write custom ligands for this record if any exist
             self._write_custom_mols_for_record(record_id)
@@ -2138,12 +2086,14 @@ class Boltzina:
                     "2. Ligand coordinates are invalid or missing\n"
                     "3. The ligand residue name doesn't match the expected format\n"
                     "4. Structure parsing failed to identify ligand atoms correctly\n"
+                    "5. The ligand chain was not properly assigned as NONPOLYMER type\n"
                     "\nSuggested solutions:\n"
                     "- Verify that your structure file contains ligand atoms as HETATM records\n"
                     "- Check that ligand coordinates are valid (not all zeros)\n"
                     "- Ensure the ligand residue name matches standard PDB conventions\n"
                     "- Try using separate protein and ligand files with 'separate' mode\n"
                     "- Check the structure file for formatting issues or corruption\n"
+                    "- Verify that the custom ligand definition was created correctly\n"
                     f"\nOriginal error: {error_str}"
                 )
             elif "All indices have failed" in error_str:
@@ -2155,16 +2105,21 @@ class Boltzina:
                     "2. Missing essential structure components (protein or ligand)\n"
                     "3. Incompatible file format or structure representation\n"
                     "4. Insufficient or invalid molecular coordinates\n"
+                    "5. Problems with custom ligand definitions in CCD cache\n"
                     "\nSuggested solutions:\n"
                     "- Verify the structure file is valid and properly formatted\n"
                     "- Ensure both protein and ligand components are present\n"
                     "- Try a different structure file or format\n"
                     "- Use separate protein and ligand files with 'separate' mode\n"
+                    "- Check that custom ligands were properly added to the system\n"
                     f"\nOriginal error: {error_str}"
                 )
             else:
                 # Re-raise the original error if it's not one we specifically handle
                 raise e
+        except ValueError as e:
+            # Pass through ValueError exceptions from our own validation
+            raise e
         except Exception as e:
             print(f"Unexpected error during affinity prediction: {e}")
             import traceback
