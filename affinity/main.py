@@ -188,25 +188,77 @@ class Boltzina:
             return {}
     
     def _add_temporary_ligand_to_ccd(self, ligand_name: str, ligand_mol):
-        """Temporarily add a custom ligand to CCD for processing with unique naming.
+        """Temporarily add a custom ligand to CCD for processing with original naming.
         
         Args:
-            ligand_name: Name of the ligand to add
+            ligand_name: Original name of the ligand from the structure file (e.g., "Z91")
             ligand_mol: RDKit molecule object of the ligand or wrapped molecule
         """
-        # Use the already reserved unique ligand name
-        unique_ligand_name = self.unique_ligand_name
+        # Store ligand with its original name but add task-specific prefix to avoid conflicts
+        task_specific_name = f"{self.task_id}_{ligand_name}"
+        unique_ligand_name = self.unique_ligand_name  # Still reserve a unique name for tracking
         
-        # Add temporary ligand to local CCD copy only (not global cache)
-        self.ccd[unique_ligand_name] = ligand_mol
-        self.custom_ligands.add(unique_ligand_name)
-        print(f"Task {self.task_id}: Added unique custom ligand '{unique_ligand_name}' to local CCD cache")
+        # Add temporary ligand to local CCD copy with both names
+        # Use original name for structure parsing compatibility
+        self.ccd[ligand_name] = ligand_mol
+        self.ccd[task_specific_name] = ligand_mol  # Backup with task prefix
+        self.custom_ligands.add(ligand_name)
+        self.custom_ligands.add(task_specific_name)
+        print(f"Task {self.task_id}: Added custom ligand '{ligand_name}' (and backup '{task_specific_name}') to local CCD cache")
         
-        # Write custom ligand to local mols directory only
-        self._write_custom_ligand_to_local_mols_dir(unique_ligand_name, ligand_mol)
+        # Write custom ligand to local mols directory with original name
+        self._write_custom_ligand_to_local_mols_dir(ligand_name, ligand_mol)
+        self._write_custom_ligand_to_local_mols_dir(task_specific_name, ligand_mol)  # Backup
         
-        return unique_ligand_name
+        return ligand_name  # Return original name for structure compatibility
     
+    def _setup_local_mols_directory(self):
+        """Set up local mols directory with canonical molecules and any custom ligands."""
+        local_mols_dir = self.work_dir / "boltz_out" / "processed" / "mols"
+        local_mols_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Copy canonical molecules from global cache to local directory
+        try:
+            import shutil
+            global_mols_dir = self.cache_dir / 'mols'
+            if global_mols_dir.exists():
+                print(f"Task {self.task_id}: Copying canonical molecules from {global_mols_dir} to {local_mols_dir}")
+                
+                # Copy all .pkl files from global to local
+                copied_count = 0
+                for pkl_file in global_mols_dir.glob("*.pkl"):
+                    local_pkl_file = local_mols_dir / pkl_file.name
+                    if not local_pkl_file.exists():  # Don't overwrite custom ligands
+                        shutil.copy2(pkl_file, local_pkl_file)
+                        copied_count += 1
+                
+                print(f"✓ Task {self.task_id}: Copied {copied_count} canonical molecules to local directory")
+                
+                # List all molecules now available in local directory
+                local_molecules = list(local_mols_dir.glob("*.pkl"))
+                print(f"Task {self.task_id}: Local molecules directory contains {len(local_molecules)} molecules:")
+                for mol_file in sorted(local_molecules):
+                    print(f"  - {mol_file.stem}")
+                    
+                # Check if our custom ligands are present
+                for custom_ligand in self.custom_ligands:
+                    custom_file = local_mols_dir / f"{custom_ligand}.pkl"
+                    if custom_file.exists():
+                        print(f"✓ Task {self.task_id}: Custom ligand '{custom_ligand}' is available")
+                    else:
+                        print(f"⚠️  Task {self.task_id}: Custom ligand '{custom_ligand}' is missing!")
+                        
+                # Show summary of available ligands
+                available_ligands = [f.stem for f in local_mols_dir.glob("*.pkl")]
+                print(f"Task {self.task_id}: All available ligands: {sorted(available_ligands)}")
+                        
+            else:
+                print(f"⚠️  Task {self.task_id}: Global mols directory not found at {global_mols_dir}")
+        except Exception as e:
+            print(f"⚠️  Task {self.task_id}: Failed to copy canonical molecules: {e}")
+            import traceback
+            traceback.print_exc()
+
     def _write_custom_ligand_to_local_mols_dir(self, ligand_name: str, ligand_mol):
         """Write a custom ligand to local mols directory only (not global cache)."""
         try:
@@ -230,7 +282,7 @@ class Boltzina:
     def _cleanup_temporary_ligands(self):
         """Remove temporary ligands added by this instance and release CCD name."""
         # Clean up only the custom ligands added by this instance
-        for ligand_name in self.custom_ligands:
+        for ligand_name in list(self.custom_ligands):  # Create a copy to avoid modification during iteration
             if ligand_name in self.ccd:
                 self.ccd.pop(ligand_name)
                 print(f"Task {self.task_id}: Removed custom ligand '{ligand_name}' from local CCD cache")
@@ -1904,6 +1956,9 @@ class Boltzina:
     def _score_poses(self):
         print(f"DEBUG: msa_args = {self.msa_args}")
         
+        # Set up local mols directory with canonical molecules and custom ligands
+        self._setup_local_mols_directory()
+        
         boltz_model = load_boltz2_model(
             skip_run_structure=self.skip_run_structure,
             use_kernels=self.use_kernels,
@@ -1922,6 +1977,7 @@ class Boltzina:
             constraints_dir=str(self.work_dir / "boltz_out" / "processed" / "constraints"),
             extra_mols_dir=str(self.work_dir / "boltz_out" / "processed" / "mols"),
             manifest_path=self.work_dir / "boltz_out" / "processed" / "manifest.json",
+            mol_dir=str(self.work_dir / "boltz_out" / "processed" / "mols"),  # Use local mols directory
             num_workers=1, 
             batch_size=1, 
         )

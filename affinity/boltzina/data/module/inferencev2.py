@@ -202,6 +202,9 @@ class PredictionDataset(torch.utils.data.Dataset):
         self.affinity = affinity
         if self.affinity:
             self.cropper = AffinityCropper()
+        
+        # Track failed indices to avoid infinite recursion
+        self._failed_indices = set()
 
     def __getitem__(self, idx: int) -> dict:
         """Get an item from the dataset.
@@ -212,95 +215,113 @@ class PredictionDataset(torch.utils.data.Dataset):
             The sampled data features.
 
         """
+        # Check if this index has already failed to avoid infinite recursion
+        if idx in self._failed_indices:
+            raise RuntimeError(f"Index {idx} has already failed and cannot be retried to avoid infinite recursion")
+        
         # Get record
         record = self.manifest.records[idx]
 
-        # Finalize input data
-        input_data = load_input(
-            record=record,
-            target_dir=self.target_dir,
-            msa_dir=self.msa_dir,
-            constraints_dir=self.constraints_dir,
-            template_dir=self.template_dir,
-            extra_mols_dir=self.extra_mols_dir,
-            affinity=self.affinity,
-        )
-
-        # Tokenize structure
         try:
-            tokenized = self.tokenizer.tokenize(input_data)
-        except Exception as e:  # noqa: BLE001
-            print(  # noqa: T201
-                f"Tokenizer failed on {record.id} with error {e}. Skipping."
+            # Finalize input data
+            input_data = load_input(
+                record=record,
+                target_dir=self.target_dir,
+                msa_dir=self.msa_dir,
+                constraints_dir=self.constraints_dir,
+                template_dir=self.template_dir,
+                extra_mols_dir=self.extra_mols_dir,
+                affinity=self.affinity,
             )
-            return self.__getitem__(0)
 
-        if self.affinity:
+            # Tokenize structure
             try:
-                tokenized = self.cropper.crop(
+                tokenized = self.tokenizer.tokenize(input_data)
+            except Exception as e:  # noqa: BLE001
+                print(  # noqa: T201
+                    f"Tokenizer failed on {record.id} with error {e}. Skipping."
+                )
+                raise
+
+            if self.affinity:
+                try:
+                    tokenized = self.cropper.crop(
+                        tokenized,
+                        max_tokens=256,
+                        max_atoms=2048,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    print(f"Cropper failed on {record.id} with error {e}. Skipping.")  # noqa: T201
+                    raise
+
+            # Load conformers
+            try:
+                molecules = {}
+                molecules.update(self.canonicals)
+                molecules.update(input_data.extra_mols)
+                mol_names = set(tokenized.tokens["res_name"].tolist())
+                mol_names = mol_names - set(molecules.keys())
+                molecules.update(load_molecules(self.mol_dir, mol_names))
+            except Exception as e:  # noqa: BLE001
+                print(f"Molecule loading failed for {record.id} with error {e}. Skipping.")
+                raise
+
+            # Inference specific options
+            options = record.inference_options
+            if options is None:
+                pocket_constraints, contact_constraints = None, None
+            else:
+                pocket_constraints, contact_constraints = (
+                    options.pocket_constraints,
+                    options.contact_constraints,
+                )
+
+            # Get random seed
+            seed = 42
+            random = np.random.default_rng(seed)
+
+            # Compute features
+            try:
+                features = self.featurizer.process(
                     tokenized,
-                    max_tokens=256,
-                    max_atoms=2048,
+                    molecules=molecules,
+                    random=random,
+                    training=False,
+                    max_atoms=None,
+                    max_tokens=None,
+                    max_seqs=const.max_msa_seqs,
+                    pad_to_max_seqs=False,
+                    single_sequence_prop=0.0,
+                    compute_frames=True,
+                    inference_pocket_constraints=pocket_constraints,
+                    inference_contact_constraints=contact_constraints,
+                    compute_constraint_features=True,
+                    override_method=self.override_method,
+                    compute_affinity=self.affinity,
                 )
             except Exception as e:  # noqa: BLE001
-                print(f"Cropper failed on {record.id} with error {e}. Skipping.")  # noqa: T201
-                return self.__getitem__(0)
+                import traceback
 
-        # Load conformers
-        try:
-            molecules = {}
-            molecules.update(self.canonicals)
-            molecules.update(input_data.extra_mols)
-            mol_names = set(tokenized.tokens["res_name"].tolist())
-            mol_names = mol_names - set(molecules.keys())
-            molecules.update(load_molecules(self.mol_dir, mol_names))
-        except Exception as e:  # noqa: BLE001
-            print(f"Molecule loading failed for {record.id} with error {e}. Skipping.")
-            return self.__getitem__(0)
+                traceback.print_exc()
+                print(f"Featurizer failed on {record.id} with error {e}. Skipping.")  # noqa: T201
+                raise
 
-        # Inference specific options
-        options = record.inference_options
-        if options is None:
-            pocket_constraints, contact_constraints = None, None
-        else:
-            pocket_constraints, contact_constraints = (
-                options.pocket_constraints,
-                options.contact_constraints,
-            )
-
-        # Get random seed
-        seed = 42
-        random = np.random.default_rng(seed)
-
-        # Compute features
-        try:
-            features = self.featurizer.process(
-                tokenized,
-                molecules=molecules,
-                random=random,
-                training=False,
-                max_atoms=None,
-                max_tokens=None,
-                max_seqs=const.max_msa_seqs,
-                pad_to_max_seqs=False,
-                single_sequence_prop=0.0,
-                compute_frames=True,
-                inference_pocket_constraints=pocket_constraints,
-                inference_contact_constraints=contact_constraints,
-                compute_constraint_features=True,
-                override_method=self.override_method,
-                compute_affinity=self.affinity,
-            )
-        except Exception as e:  # noqa: BLE001
-            import traceback
-
-            traceback.print_exc()
-            print(f"Featurizer failed on {record.id} with error {e}. Skipping.")  # noqa: T201
-            return self.__getitem__(0)
-
-        # Add record
-        features["record"] = record
-        return features
+            # Add record
+            features["record"] = record
+            return features
+            
+        except Exception as e:
+            # Mark this index as failed
+            self._failed_indices.add(idx)
+            
+            # Try to find an alternative index that hasn't failed
+            for alt_idx in range(len(self.manifest.records)):
+                if alt_idx != idx and alt_idx not in self._failed_indices:
+                    print(f"Falling back from failed index {idx} to index {alt_idx}")
+                    return self.__getitem__(alt_idx)
+            
+            # If all indices have failed, raise the original error
+            raise RuntimeError(f"All indices have failed. Last error from index {idx}: {e}") from e
 
     def __len__(self) -> int:
         """Get the length of the dataset.

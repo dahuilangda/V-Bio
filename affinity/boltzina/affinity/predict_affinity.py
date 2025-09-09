@@ -76,13 +76,17 @@ def load_boltz2_model(affinity_checkpoint=None, sampling_steps_affinity=200, dif
 
     return model_module
 
-def predict_affinity(out_dir, model_module=None, output_dir = None, structures_dir = None, msa_dir = None, constraints_dir = None, template_dir = None, extra_mols_dir = None, manifest_path = None, affinity_checkpoint = None, sampling_steps_affinity=200, diffusion_samples_affinity=5, subsample_msa=True, num_subsampled_msa=1024, model="boltz2", step_scale=None, override=False, num_workers=1, strategy="auto", accelerator="gpu", devices=1, affinity_mw_correction=False, seed=None, batch_size=1):
+def predict_affinity(out_dir, model_module=None, output_dir = None, structures_dir = None, msa_dir = None, constraints_dir = None, template_dir = None, extra_mols_dir = None, manifest_path = None, affinity_checkpoint = None, sampling_steps_affinity=200, diffusion_samples_affinity=5, subsample_msa=True, num_subsampled_msa=1024, model="boltz2", step_scale=None, override=False, num_workers=1, strategy="auto", accelerator="gpu", devices=1, affinity_mw_correction=False, seed=None, batch_size=1, mol_dir=None):
 
     out_dir = Path(out_dir)
 
-    cache_dir = get_cache_path()
-    cache_dir = Path(cache_dir)
-    mol_dir = cache_dir/'mols'
+    # Use custom mol_dir if provided, otherwise fall back to global cache
+    if mol_dir is not None:
+        mol_dir = Path(mol_dir)
+    else:
+        cache_dir = get_cache_path()
+        cache_dir = Path(cache_dir)
+        mol_dir = cache_dir/'mols'
 
     if seed is not None:
         seed_everything(seed)
