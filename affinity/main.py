@@ -413,6 +413,15 @@ class Boltzina:
                             unique_ligand_name = self._add_temporary_ligand_to_ccd(ligand_name, mol)
                             print(f"Successfully created custom ligand definition for '{ligand_name}' as '{unique_ligand_name}'")
                             
+                            # Also add the original ligand name as an alias to ensure parsing works
+                            if ligand_name not in self.ccd:
+                                self.ccd[ligand_name] = mol
+                                self.custom_ligands.add(ligand_name)
+                                print(f"Added original ligand name '{ligand_name}' as alias in CCD")
+                                
+                                # Also write the alias to local mols directory
+                                self._write_custom_ligand_to_local_mols_dir(ligand_name, mol)
+                            
                             # Retry structure preparation
                             try:
                                 parsed_structure = parse_mmcif(
@@ -1505,6 +1514,13 @@ class Boltzina:
                                         hash_val = hash(unique_name) % 100
                                         safe_resname = f"Z{hash_val:02d}"
                                     
+                                    # Ensure the safe residue name is different from the original
+                                    attempt = 0
+                                    while safe_resname == residue.name and attempt < 100:
+                                        attempt += 1
+                                        hash_val = (hash(unique_name + str(attempt)) % 100)
+                                        safe_resname = f"Z{hash_val:02d}"
+                                    
                                     ligand_residues[residue.name] = (unique_name, safe_resname)
                                     ligand_name_mapping[residue.name] = safe_resname
                                     
@@ -1521,6 +1537,17 @@ class Boltzina:
                     for residue in chain:
                         if residue.name in ligand_name_mapping:
                             residue.name = ligand_name_mapping[residue.name]
+            
+            # Ensure the new residue names are also registered in CCD
+            for original_name, (unique_ccd_name, safe_resname) in ligand_residues.items():
+                if safe_resname not in self.ccd and unique_ccd_name in self.ccd:
+                    # Add the safe residue name as an alias to the unique CCD name
+                    self.ccd[safe_resname] = self.ccd[unique_ccd_name]
+                    self.custom_ligands.add(safe_resname)
+                    print(f"Added alias '{safe_resname}' for CCD entry '{unique_ccd_name}'")
+                    
+                    # Also write the alias to local mols directory
+                    self._write_custom_ligand_to_local_mols_dir(safe_resname, self.ccd[safe_resname])
             
             # Write the modified structure to a new file
             rewritten_dir = self.work_dir / "rewritten_complexes"
