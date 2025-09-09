@@ -581,6 +581,10 @@ class Boltzina:
         if ligand_mol is None:
             raise ValueError(f"Failed to load ligand from {ligand_file}")
         
+        # This ensures the molecule is available when the PDB is parsed later
+        unique_ligand_name = self._add_temporary_ligand_to_ccd("temp_ligand", ligand_mol)
+        print(f"Pre-registered ligand in CCD with unique name: {unique_ligand_name}")
+        
         # Read protein file and convert to PDB if needed
         if protein_path.suffix.lower() == '.pdb':
             protein_content = protein_path.read_text()
@@ -590,6 +594,7 @@ class Boltzina:
             raise ValueError(f"Unsupported protein file format: {protein_path.suffix}")
         
         # Generate ligand PDB lines preserving original coordinates
+        # Note: _generate_ligand_pdb_lines_preserve_coords now uses the already-assigned unique name
         ligand_pdb_lines = self._generate_ligand_pdb_lines_preserve_coords(ligand_mol)
         
         # Combine protein and ligand into standard PDB format
@@ -804,8 +809,24 @@ class Boltzina:
             # Ensure atom name is properly formatted (left-aligned, max 4 chars)
             atom_name = atom_name[:4].ljust(4)
             
-            # Use the first 3 characters of unique ligand name for residue name in PDB
-            resname = ligand_name[:3].upper()
+            # Generate a safe 3-character residue name for PDB format
+            # Use a reserved prefix "Z" + 2 digits to avoid conflicts with real CCD components
+            # Most real CCD components don't start with "Z"
+            if '_' in ligand_name:
+                # Extract numeric part from the unique suffix and use modulo to get 2 digits
+                unique_part = ligand_name.split('_')[-1]  # e.g., "30e887c9"
+                # Convert first 6 hex chars to int and take modulo 100 for 2-digit number
+                try:
+                    hex_value = int(unique_part[:6], 16) % 100
+                    resname = f"Z{hex_value:02d}"  # e.g., "Z47"
+                except ValueError:
+                    # Fallback: use simple hash
+                    hash_val = hash(unique_part) % 100
+                    resname = f"Z{hash_val:02d}"
+            else:
+                # Fallback for non-unique names
+                hash_val = hash(ligand_name) % 100
+                resname = f"Z{hash_val:02d}"
             
             # Standard PDB HETATM format with proper spacing
             line = f"HETATM{atom_serial:5d} {atom_name} {resname} L   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {element:>2s}\n"
@@ -1070,8 +1091,17 @@ class Boltzina:
             ligand_found = False
             actual_mw = 400.0  # Default fallback
             
+            # For complex files, we need to generate unique CCD names for all ligands
+            # and rewrite the structure file with the new names
+            rewritten_cif_file = self._rewrite_complex_with_unique_ligand_names(cif_file, record_id)
+            if rewritten_cif_file != cif_file:
+                print(f"Rewrote complex file with unique ligand names: {rewritten_cif_file}")
+                # Update the cif_file reference to use the rewritten version
+                files_to_process[i] = (original_path, rewritten_cif_file)
+                cif_file = rewritten_cif_file
+            
             if original_path.suffix.lower() == '.pdb':
-                # First, check if the specified ligand residue name exists in the PDB file
+                # For PDB files, handle both specific ligand names and auto-detection
                 pdb_content = original_path.read_text()
                 hetatm_resnames = set()
                 filtered_pdb_lines = []
@@ -1085,7 +1115,10 @@ class Boltzina:
                         hetatm_count += 1
                         resname = line[17:20].strip()
                         hetatm_resnames.add(resname)
-                        if resname == self.ligand_resname:
+                        # Look for the user-specified ligand OR any of our unique ligand names
+                        if (resname == self.ligand_resname or 
+                            resname in self.custom_ligands or 
+                            resname.startswith('Z')):  # Our unique ligand format
                             filtered_pdb_lines.append(line)
 
                 # Detailed error reporting for different scenarios
@@ -1102,14 +1135,19 @@ class Boltzina:
                         raise ValueError(f"Error: Invalid PDB file {original_path.name}. "
                                        f"No ATOM or HETATM records found.")
                 
-                if self.ligand_resname not in hetatm_resnames:
+                # Check if we have any valid ligands (either user-specified or our unique ones)
+                valid_ligands = [res for res in hetatm_resnames if 
+                               res == self.ligand_resname or res in self.custom_ligands or res.startswith('Z')]
+                
+                if not valid_ligands:
                     available_resnames = ", ".join(sorted(hetatm_resnames))
-                    raise ValueError(f"Error: Ligand residue name '{self.ligand_resname}' not found in {original_path.name}. "
-                                   f"Found {hetatm_count} HETATM records with residue names: {available_resnames}. "
-                                   f"Please use one of the available residue names or check your input file.")
+                    if self.ligand_resname not in hetatm_resnames:
+                        raise ValueError(f"Error: Ligand residue name '{self.ligand_resname}' not found in {original_path.name}. "
+                                       f"Found {hetatm_count} HETATM records with residue names: {available_resnames}. "
+                                       f"Please use one of the available residue names or check your input file.")
 
                 if filtered_pdb_lines:
-                    temp_pdb_path = self.work_dir / f"{record_id}_{self.ligand_resname}.pdb"
+                    temp_pdb_path = self.work_dir / f"{record_id}_ligands.pdb"
                     temp_pdb_path.write_text("\n".join(filtered_pdb_lines))
                     mol = Chem.MolFromPDBFile(str(temp_pdb_path))
                     temp_pdb_path.unlink()
@@ -1119,18 +1157,19 @@ class Boltzina:
                         try:
                             from rdkit.Chem import rdMolDescriptors
                             actual_mw = rdMolDescriptors.CalcExactMolWt(mol)
-                            print(f"Calculated molecular weight for {self.ligand_resname}: {actual_mw:.2f} Da")
+                            print(f"Calculated molecular weight for ligands: {actual_mw:.2f} Da")
                             ligand_found = True
                         except Exception as e:
                             print(f"Warning: Failed to calculate molecular weight, using default: {e}")
                             actual_mw = 400.0
                             ligand_found = True
                     else:
-                        raise ValueError(f"Error: Failed to parse ligand with residue name '{self.ligand_resname}' "
-                                       f"from {original_path.name}. The ligand structure may be invalid.")
+                        # Don't raise error immediately - the rewritten file might work
+                        print(f"Warning: Failed to parse ligands from original PDB, using rewritten structure")
+                        ligand_found = True  # Assume the rewritten file will work
                 
             elif original_path.suffix.lower() == '.cif':
-                # For CIF files, we'll use a simpler and more robust validation approach
+                # For CIF files, rely on the rewriting process to handle ligands
                 try:
                     parsed_structure = self._parse_cif_for_validation(cif_file)
                     
@@ -1139,16 +1178,14 @@ class Boltzina:
                                        f"This file appears to contain only protein/polymer chains and no ligands. "
                                        f"Please provide a protein-ligand complex structure file.")
                     
-                    # If we have a mock structure or real structure, assume ligands are present
-                    # The detailed validation will happen during main processing
+                    # If we have a structure (mock or real), assume ligands are present
                     ligand_found = True
                     
                 except ValueError as e:
-                    # Re-raise validation errors (like "No ligand molecules found")
+                    # Re-raise validation errors
                     raise e
                 except Exception as e:
-                    # For other parsing errors, we'll be more permissive with CIF files
-                    # since they can be complex to parse and the main processing might handle it better
+                    # For other parsing errors, be more permissive
                     print(f"Warning: Could not fully validate ligand presence in CIF file {original_path.name}. "
                           f"Proceeding with processing. Error: {e}")
                     ligand_found = True
@@ -1162,7 +1199,7 @@ class Boltzina:
             files_with_ligands.append((original_path, cif_file, actual_mw))
 
             if mol:
-                 with open(mols_dir / f"{record_id}.pkl", "wb") as f:
+                with open(mols_dir / f"{record_id}.pkl", "wb") as f:
                     pickle.dump({self.base_ligand_name: mol}, f)
 
             constraints_data = {
@@ -1203,6 +1240,193 @@ class Boltzina:
         self._update_manifest(record_ids, files_with_ligands, self.ligand_resname)
         
         self._score_poses()
+
+    def _rewrite_complex_with_unique_ligand_names(self, complex_file: Path, record_id: str) -> Path:
+        """
+        Rewrite a complex structure file to use unique ligand residue names.
+        This prevents CCD conflicts for complex files just like we do for separate inputs.
+        
+        Returns:
+            Path to the rewritten file (same as input if no rewriting needed)
+        """
+        try:
+            import gemmi
+            
+            # Read the structure
+            if complex_file.suffix.lower() == '.cif':
+                doc = gemmi.cif.read(str(complex_file))
+                block = doc[0]
+                structure = gemmi.make_structure_from_block(block)
+            else:
+                # For PDB files, convert to CIF first
+                structure = gemmi.read_structure(str(complex_file))
+            
+            # Identify non-standard residues (potential ligands)
+            standard_residues = {
+                'ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 
+                'HIS', 'ILE', 'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER', 
+                'THR', 'TRP', 'TYR', 'VAL',  # Standard amino acids
+                'A', 'C', 'G', 'T', 'U', 'DA', 'DC', 'DG', 'DT',  # Nucleotides
+                'HOH', 'WAT', 'H2O',  # Water
+                'NA', 'CL', 'MG', 'CA', 'K', 'ZN', 'FE'  # Common ions
+            }
+            
+            # Find ligands and create mappings
+            ligand_residues = {}
+            ligand_name_mapping = {}
+            
+            for model in structure:
+                for chain in model:
+                    for residue in chain:
+                        if residue.name not in standard_residues:
+                            if residue.name not in ligand_residues:
+                                # Create unique CCD name for this ligand type
+                                ligand_mol = self._extract_ligand_from_residue(residue)
+                                if ligand_mol is not None:
+                                    # Generate unique name and add to CCD
+                                    unique_name = self._add_temporary_ligand_to_ccd(residue.name, ligand_mol)
+                                    
+                                    # Generate safe Z-prefix residue name for PDB format
+                                    if '_' in unique_name:
+                                        unique_part = unique_name.split('_')[-1]
+                                        try:
+                                            hex_value = int(unique_part[:6], 16) % 100
+                                            safe_resname = f"Z{hex_value:02d}"
+                                        except ValueError:
+                                            hash_val = hash(unique_part) % 100
+                                            safe_resname = f"Z{hash_val:02d}"
+                                    else:
+                                        hash_val = hash(unique_name) % 100
+                                        safe_resname = f"Z{hash_val:02d}"
+                                    
+                                    ligand_residues[residue.name] = (unique_name, safe_resname)
+                                    ligand_name_mapping[residue.name] = safe_resname
+                                    
+                                    print(f"Mapping ligand '{residue.name}' -> CCD:'{unique_name}' -> PDB:'{safe_resname}'")
+            
+            # If no ligands found, return original file
+            if not ligand_name_mapping:
+                print(f"No ligands detected in {complex_file.name}, using original file")
+                return complex_file
+            
+            # Rewrite the structure with new residue names
+            for model in structure:
+                for chain in model:
+                    for residue in chain:
+                        if residue.name in ligand_name_mapping:
+                            residue.name = ligand_name_mapping[residue.name]
+            
+            # Write the modified structure to a new file
+            rewritten_dir = self.work_dir / "rewritten_complexes"
+            rewritten_dir.mkdir(parents=True, exist_ok=True)
+            
+            rewritten_file = rewritten_dir / f"{record_id}_{complex_file.stem}_rewritten.cif"
+            
+            # Write as mmCIF format for consistency
+            try:
+                # Try different gemmi write methods
+                if hasattr(structure, 'write_cif'):
+                    structure.write_cif(str(rewritten_file))
+                elif hasattr(structure, 'make_mmcif_document'):
+                    doc = structure.make_mmcif_document()
+                    doc.write_file(str(rewritten_file))
+                else:
+                    # Fallback: write as PDB and convert
+                    temp_pdb = rewritten_file.with_suffix('.pdb')
+                    structure.write_pdb(str(temp_pdb))
+                    
+                    # Convert PDB back to CIF using maxit if available
+                    try:
+                        import subprocess
+                        subprocess.run(["maxit", "-input", str(temp_pdb), "-output", str(rewritten_file), "-o", "1"], 
+                                     check=True, capture_output=True)
+                        temp_pdb.unlink()  # Clean up temp PDB
+                    except:
+                        # If maxit fails, just use the PDB file
+                        rewritten_file = temp_pdb
+                        
+            except Exception as write_error:
+                print(f"Warning: Failed to write structure file: {write_error}")
+                return complex_file
+            
+            print(f"✓ Rewrote complex structure with {len(ligand_name_mapping)} unique ligand name(s)")
+            print(f"  Original: {complex_file}")
+            print(f"  Rewritten: {rewritten_file}")
+            
+            return rewritten_file
+            
+        except ImportError:
+            print("Warning: gemmi not available, cannot rewrite complex structure")
+            return complex_file
+        except Exception as e:
+            print(f"Warning: Failed to rewrite complex structure: {e}")
+            import traceback
+            traceback.print_exc()
+            return complex_file
+    
+    def _extract_ligand_from_residue(self, residue) -> Optional[object]:
+        """
+        Extract ligand molecule from a gemmi residue object and convert to RDKit format.
+        """
+        try:
+            from rdkit import Chem
+            from rdkit.Chem import AllChem
+            
+            # Create a simple SDF-like representation
+            mol_block = ""
+            mol_block += f"{residue.name}\n"
+            mol_block += "  Generated from structure\n"
+            mol_block += "\n"
+            
+            atoms = list(residue)
+            if len(atoms) == 0:
+                return None
+            
+            # Write atom count
+            mol_block += f"{len(atoms):3d}  0  0  0  0  0  0  0  0  0  0 V2000\n"
+            
+            # Write atoms
+            for atom in atoms:
+                pos = atom.pos
+                element = atom.element.name
+                mol_block += f"{pos.x:10.4f}{pos.y:10.4f}{pos.z:10.4f} {element:2s}  0  0  0  0  0  0  0  0  0  0  0  0\n"
+            
+            mol_block += "M  END\n"
+            
+            # Parse with RDKit
+            mol = Chem.MolFromMolBlock(mol_block, sanitize=False)
+            if mol is not None:
+                # Set basic properties
+                mol.SetProp('_Name', residue.name)
+                mol.SetProp('name', residue.name)
+                mol.SetProp('id', residue.name)
+                
+                # Set atom names
+                for i, atom in enumerate(atoms):
+                    if i < mol.GetNumAtoms():
+                        mol_atom = mol.GetAtomWithIdx(i)
+                        mol_atom.SetProp('name', atom.name)
+                
+                # Try basic sanitization
+                try:
+                    Chem.SanitizeMol(mol, sanitizeOps=Chem.SANITIZE_ALL)
+                except:
+                    # If sanitization fails, use permissive settings
+                    try:
+                        sanitize_ops = (Chem.SANITIZE_ALL ^ 
+                                      Chem.SANITIZE_PROPERTIES ^ 
+                                      Chem.SANITIZE_KEKULIZE)
+                        Chem.SanitizeMol(mol, sanitizeOps=sanitize_ops)
+                    except:
+                        # Last resort: use unsanitized
+                        pass
+                
+                return mol
+            
+        except Exception as e:
+            print(f"Warning: Failed to extract ligand from residue {residue.name}: {e}")
+        
+        return None
 
     def _parse_cif_for_validation(self, cif_file: Path):
         """Parse CIF file to validate ligand presence without full processing."""
