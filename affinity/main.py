@@ -734,9 +734,33 @@ class Boltzina:
         if ligand_mol is None:
             raise ValueError(f"Failed to load ligand from {ligand_file}")
         
-        # This ensures the molecule is available when the PDB is parsed later
-        unique_ligand_name = self._add_temporary_ligand_to_ccd("temp_ligand", ligand_mol)
-        print(f"Pre-registered ligand in CCD with unique name: {unique_ligand_name}")
+        # Use unified naming strategy: always try "LIG" first for separate inputs
+        # Check if "LIG" is already in use in this task - if so, generate unique name
+        preferred_name = "LIG"
+        
+        # Check if "LIG" conflicts with any existing ligands in this task
+        conflict_detected = False
+        if "LIG" in self.ccd and "LIG" in self.custom_ligands:
+            # "LIG" is already registered by this task, check if it's the same molecule
+            try:
+                existing_mol = self.ccd["LIG"]
+                # For simplicity, assume different separate input calls use different molecules
+                # This ensures each separate input gets its own unique identifier if needed
+                conflict_detected = True
+            except:
+                pass
+        
+        if conflict_detected:
+            # Use unique naming for this ligand
+            unique_ligand_name = self._add_temporary_ligand_to_ccd(f"SEP_{self.task_id}", ligand_mol)
+            print(f"Conflict detected: Using unique ligand name for separate input: {unique_ligand_name}")
+            # Still use "LIG" as residue name in PDB, but track with unique CCD name
+            target_resname = "LIG"
+        else:
+            # Use "LIG" as both CCD name and residue name
+            unique_ligand_name = self._add_temporary_ligand_to_ccd("LIG", ligand_mol)
+            target_resname = "LIG"
+            print(f"Using unified ligand name for separate input: LIG (CCD: {unique_ligand_name})")
         
         # Read protein file and convert to PDB if needed
         if protein_path.suffix.lower() == '.pdb':
@@ -932,144 +956,6 @@ class Boltzina:
         except Exception as e:
             raise ValueError(f"Failed to convert CIF to PDB: {e}")
 
-    def _analyze_protein_structure(self, protein_content: str) -> Dict[str, Any]:
-        """Analyze protein structure to determine optimal ligand placement."""
-        protein_atoms = []
-        ca_atoms = []
-        
-        for line in protein_content.split('\n'):
-            if line.startswith('ATOM') and len(line) >= 54:
-                try:
-                    # Extract coordinates using PDB format positions
-                    x = float(line[30:38].strip())
-                    y = float(line[38:46].strip()) 
-                    z = float(line[46:54].strip())
-                    atom_name = line[12:16].strip()
-                    
-                    protein_atoms.append([x, y, z])
-                    
-                    # Collect CA atoms for center calculation
-                    if atom_name == 'CA':
-                        ca_atoms.append([x, y, z])
-                        
-                except (ValueError, IndexError):
-                    continue
-        
-        if not protein_atoms:
-            print("Warning: No protein atoms found, using default ligand position")
-            return {
-                'center': np.array([0.0, 0.0, 0.0]),
-                'size': np.array([10.0, 10.0, 10.0]),
-                'ca_center': np.array([0.0, 0.0, 0.0])
-            }
-        
-        protein_coords = np.array(protein_atoms)
-        protein_center = np.mean(protein_coords, axis=0)
-        protein_size = np.max(protein_coords, axis=0) - np.min(protein_coords, axis=0)
-        
-        # Use CA atoms for better center if available
-        if ca_atoms:
-            ca_coords = np.array(ca_atoms)
-            ca_center = np.mean(ca_coords, axis=0)
-        else:
-            ca_center = protein_center
-        
-        print(f"Protein analysis:")
-        print(f"  Center: ({protein_center[0]:.2f}, {protein_center[1]:.2f}, {protein_center[2]:.2f})")
-        print(f"  Size: ({protein_size[0]:.2f}, {protein_size[1]:.2f}, {protein_size[2]:.2f})")
-        print(f"  CA center: ({ca_center[0]:.2f}, {ca_center[1]:.2f}, {ca_center[2]:.2f})")
-        
-        return {
-            'center': protein_center,
-            'size': protein_size,
-            'ca_center': ca_center,
-            'coords': protein_coords
-        }
-
-    def _generate_positioned_ligand_pdb_lines(self, ligand_mol, protein_info: Dict[str, Any]) -> str:
-        """Generate ligand PDB lines with intelligent positioning near the protein."""
-        from rdkit.Chem import AllChem
-        import numpy as np
-        
-        ligand_lines = ""
-        atom_serial = 1  # Will be renumbered later
-        
-        # Ensure we have a 3D conformer
-        if ligand_mol.GetNumConformers() == 0:
-            print("Generating 3D conformer for ligand...")
-            AllChem.EmbedMolecule(ligand_mol, randomSeed=42)
-            if AllChem.MMFFOptimizeMolecule(ligand_mol) != 0:
-                print("Warning: MMFF optimization failed, using basic coordinates")
-        
-        conf = ligand_mol.GetConformer()
-        
-        # Calculate ligand centroid
-        ligand_positions = []
-        for i in range(ligand_mol.GetNumAtoms()):
-            pos = conf.GetAtomPosition(i)
-            ligand_positions.append([pos.x, pos.y, pos.z])
-        
-        ligand_coords = np.array(ligand_positions)
-        ligand_centroid = np.mean(ligand_coords, axis=0)
-        
-        # Intelligent positioning strategy
-        protein_center = protein_info['ca_center']
-        protein_size = protein_info['size']
-        
-        # Place ligand at a reasonable distance from protein surface
-        # Use the largest dimension to determine placement distance
-        max_protein_dimension = np.max(protein_size)
-        placement_distance = max_protein_dimension * 0.6  # 60% of max dimension
-        
-        # Place ligand slightly offset from protein center
-        # This simulates a binding site location
-        offset_direction = np.array([1.0, 0.5, 0.0])  # Slightly to the side
-        offset_direction = offset_direction / np.linalg.norm(offset_direction)
-        
-        target_position = protein_center + offset_direction * placement_distance
-        
-        # Calculate translation needed
-        translation = target_position - ligand_centroid
-        
-        print(f"Ligand positioning:")
-        print(f"  Original centroid: ({ligand_centroid[0]:.2f}, {ligand_centroid[1]:.2f}, {ligand_centroid[2]:.2f})")
-        print(f"  Target position: ({target_position[0]:.2f}, {target_position[1]:.2f}, {target_position[2]:.2f})")
-        print(f"  Translation: ({translation[0]:.2f}, {translation[1]:.2f}, {translation[2]:.2f})")
-        
-        # Generate PDB lines with proper formatting
-        element_counts = {}
-        for i, atom in enumerate(ligand_mol.GetAtoms()):
-            pos = conf.GetAtomPosition(i)
-            x = pos.x + translation[0]
-            y = pos.y + translation[1] 
-            z = pos.z + translation[2]
-            
-            # Get element and create meaningful atom name
-            element = atom.GetSymbol()
-            
-            # Count elements for naming
-            if element not in element_counts:
-                element_counts[element] = 0
-            element_counts[element] += 1
-            
-            # Create atom name
-            if element == 'H':
-                atom_name = f"H{element_counts[element]}"
-            elif element_counts[element] == 1:
-                atom_name = element
-            else:
-                atom_name = f"{element}{element_counts[element]}"
-            
-            # Ensure atom name is properly formatted (left-aligned, max 4 chars)
-            atom_name = atom_name[:4].ljust(4)
-            
-            # Standard PDB HETATM format with proper spacing
-            line = f"HETATM{atom_serial:5d} {atom_name} LIG L   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {element:>2s}\n"
-            ligand_lines += line
-            atom_serial += 1
-        
-        return ligand_lines
-
     def _generate_ligand_pdb_lines_preserve_coords(self, ligand_mol) -> str:
         """Generate ligand PDB lines preserving original coordinates from SDF/MOL file."""
         from rdkit.Chem import AllChem
@@ -1077,8 +963,8 @@ class Boltzina:
         ligand_lines = ""
         atom_serial = 1  # Will be renumbered later
         
-        # Use unique ligand name to avoid conflicts
-        ligand_name = self.unique_ligand_name
+        # Use unified naming strategy: prefer "LIG", fall back to unique name if conflicts
+        resname = "LIG"
         
         # Ensure we have a 3D conformer (should already exist from loading)
         if ligand_mol.GetNumConformers() == 0:
@@ -1089,25 +975,7 @@ class Boltzina:
         
         conf = ligand_mol.GetConformer()
         
-        print(f"Preserving original ligand coordinates with unique name: {ligand_name}")
-        
-        # Generate a safe 3-character residue name for PDB format
-        # Use a reserved prefix "Z" + 2 digits to avoid conflicts with real CCD components
-        if '_' in ligand_name:
-            # Extract numeric part from the unique suffix and use modulo to get 2 digits
-            unique_part = ligand_name.split('_')[-1]  # e.g., "30e887c9"
-            # Convert first 6 hex chars to int and take modulo 100 for 2-digit number
-            try:
-                hex_value = int(unique_part[:6], 16) % 100
-                resname = f"Z{hex_value:02d}"  # e.g., "Z47"
-            except ValueError:
-                # Fallback: use simple hash
-                hash_val = hash(unique_part) % 100
-                resname = f"Z{hash_val:02d}"
-        else:
-            # Fallback for non-unique names
-            hash_val = hash(ligand_name) % 100
-            resname = f"Z{hash_val:02d}"
+        print(f"Generating ligand PDB with unified residue name: {resname}")
         
         # Generate PDB lines using original coordinates (no translation)
         element_counts = {}
@@ -1357,58 +1225,6 @@ class Boltzina:
             print(f"Error converting CIF to PDB: {e.stderr}")
             return None
 
-    def _generate_ligand_pdb_lines(self, mol, resname: str, chain_id: str = "L") -> List[str]:
-        """Generate PDB HETATM lines for a ligand molecule."""
-        from rdkit import Chem
-        
-        pdb_lines = []
-        atom_idx = 1
-        
-        # Get conformer (3D coordinates)
-        if mol.GetNumConformers() == 0:
-            print("Warning: No 3D coordinates found for ligand")
-            return []
-        
-        conf = mol.GetConformer()
-        
-        for atom in mol.GetAtoms():
-            pos = conf.GetAtomPosition(atom.GetIdx())
-            element = atom.GetSymbol()
-            
-            # Get atom name, try to use a reasonable naming scheme
-            atom_name = f"{element}{atom.GetIdx() + 1}"
-            if len(atom_name) > 4:
-                atom_name = atom_name[:4]
-            
-            # Format PDB HETATM line
-            pdb_line = f"HETATM{atom_idx:5d} {atom_name:4s} {resname:3s} {chain_id:1s}   1    " \
-                      f"{pos.x:8.3f}{pos.y:8.3f}{pos.z:8.3f}  1.00 20.00           {element:2s}"
-            
-            pdb_lines.append(pdb_line)
-            atom_idx += 1
-        
-        return pdb_lines
-
-    def _combine_protein_ligand(self, protein_content: str, ligand_lines: List[str]) -> str:
-        """Combine protein PDB content with ligand lines."""
-        lines = protein_content.splitlines()
-        
-        # Find insertion point (before END or at the end)
-        insert_idx = len(lines)
-        for i, line in enumerate(lines):
-            if line.startswith('END'):
-                insert_idx = i
-                break
-        
-        # Insert ligand lines
-        combined_lines = lines[:insert_idx] + ligand_lines + lines[insert_idx:]
-        
-        # Add TER record after ligand if END exists
-        if insert_idx < len(lines) and lines[insert_idx].startswith('END'):
-            combined_lines.insert(-1, "TER")
-        
-        return '\n'.join(combined_lines)
-
     def _pdb_to_cif(self, pdb_file: Path) -> Optional[Path]:
         cif_dir = self.output_dir / "cif_files"
         cif_dir.mkdir(exist_ok=True)
@@ -1447,11 +1263,11 @@ class Boltzina:
             ligand_found = False
             actual_mw = 400.0  # Default fallback
             
-            # For complex files, we need to generate unique CCD names for all ligands
+            # For complex files, we need to generate unified ligand names
             # and rewrite the structure file with the new names
-            rewritten_cif_file = self._rewrite_complex_with_unique_ligand_names(cif_file, record_id)
+            rewritten_cif_file = self._rewrite_complex_with_unified_ligand_names(cif_file, record_id)
             if rewritten_cif_file != cif_file:
-                print(f"Rewrote complex file with unique ligand names: {rewritten_cif_file}")
+                print(f"Rewrote complex file with unified ligand names: {rewritten_cif_file}")
                 # Update the cif_file reference to use the rewritten version
                 files_to_process[i] = (original_path, rewritten_cif_file)
                 cif_file = rewritten_cif_file
@@ -1471,10 +1287,11 @@ class Boltzina:
                         hetatm_count += 1
                         resname = line[17:20].strip()
                         hetatm_resnames.add(resname)
-                        # Look for the user-specified ligand OR any of our unique ligand names
-                        if (resname == self.ligand_resname or 
+                        # Use unified detection: look for "LIG", user-specified ligand, or our unique ligand names
+                        if (resname == "LIG" or  # Unified standard name
+                            resname == self.ligand_resname or 
                             resname in self.custom_ligands or 
-                            resname.startswith('Z')):  # Our unique ligand format
+                            resname.startswith('Z')):  # Fallback unique ligand format
                             filtered_pdb_lines.append(line)
 
                 # Detailed error reporting for different scenarios
@@ -1491,16 +1308,22 @@ class Boltzina:
                         raise ValueError(f"Error: Invalid PDB file {original_path.name}. "
                                        f"No ATOM or HETATM records found.")
                 
-                # Check if we have any valid ligands (either user-specified or our unique ones)
+                # Check if we have any valid ligands (using unified strategy)
                 valid_ligands = [res for res in hetatm_resnames if 
+                               res == "LIG" or  # Unified standard name
                                res == self.ligand_resname or res in self.custom_ligands or res.startswith('Z')]
                 
                 if not valid_ligands:
                     available_resnames = ", ".join(sorted(hetatm_resnames))
-                    if self.ligand_resname not in hetatm_resnames:
-                        raise ValueError(f"Error: Ligand residue name '{self.ligand_resname}' not found in {original_path.name}. "
+                    # Provide more helpful error message for unified naming
+                    if "LIG" in hetatm_resnames:
+                        # "LIG" is available, this should work
+                        pass
+                    elif self.ligand_resname not in hetatm_resnames:
+                        raise ValueError(f"Error: No standard ligand residue names found in {original_path.name}. "
                                        f"Found {hetatm_count} HETATM records with residue names: {available_resnames}. "
-                                       f"Please use one of the available residue names or check your input file.")
+                                       f"Expected 'LIG' (unified standard) or '{self.ligand_resname}'. "
+                                       f"Please ensure your PDB file uses standard ligand naming or check your input file.")
 
                 if filtered_pdb_lines:
                     temp_pdb_path = self.work_dir / f"{record_id}_ligands.pdb"
@@ -1615,10 +1438,10 @@ class Boltzina:
             print(f"❌ Error during affinity prediction: {e}")
             raise e
 
-    def _rewrite_complex_with_unique_ligand_names(self, complex_file: Path, record_id: str) -> Path:
+    def _rewrite_complex_with_unified_ligand_names(self, complex_file: Path, record_id: str) -> Path:
         """
-        Rewrite a complex structure file to use unique ligand residue names.
-        This prevents CCD conflicts for complex files just like we do for separate inputs.
+        Rewrite a complex structure file to use unified ligand residue names.
+        Uses "LIG" by default, only falls back to Z-prefix unique names if conflicts occur.
         
         Returns:
             Path to the rewritten file (same as input if no rewriting needed)
@@ -1645,45 +1468,83 @@ class Boltzina:
                 'NA', 'CL', 'MG', 'CA', 'K', 'ZN', 'FE'  # Common ions
             }
             
-            # Find ligands and create mappings
+            # Find ligands and create unified naming strategy
             ligand_residues = {}
             ligand_name_mapping = {}
+            ligand_types = {}  # Track different ligand types
+            lig_counter = 0
             
+            # First pass: identify all unique ligand types
             for model in structure:
                 for chain in model:
                     for residue in chain:
                         if residue.name not in standard_residues:
-                            if residue.name not in ligand_residues:
-                                # Create unique CCD name for this ligand type
+                            if residue.name not in ligand_types:
+                                # Extract ligand molecule for comparison
                                 ligand_mol = self._extract_ligand_from_residue(residue)
                                 if ligand_mol is not None:
-                                    # Generate unique name and add to CCD
-                                    unique_name = self._add_temporary_ligand_to_ccd(residue.name, ligand_mol)
-                                    
-                                    # Generate safe Z-prefix residue name for PDB format
-                                    if '_' in unique_name:
-                                        unique_part = unique_name.split('_')[-1]
-                                        try:
-                                            hex_value = int(unique_part[:6], 16) % 100
-                                            safe_resname = f"Z{hex_value:02d}"
-                                        except ValueError:
-                                            hash_val = hash(unique_part) % 100
-                                            safe_resname = f"Z{hash_val:02d}"
-                                    else:
-                                        hash_val = hash(unique_name) % 100
-                                        safe_resname = f"Z{hash_val:02d}"
-                                    
-                                    # Ensure the safe residue name is different from the original
-                                    attempt = 0
-                                    while safe_resname == residue.name and attempt < 100:
-                                        attempt += 1
-                                        hash_val = (hash(unique_name + str(attempt)) % 100)
-                                        safe_resname = f"Z{hash_val:02d}"
-                                    
-                                    ligand_residues[residue.name] = (unique_name, safe_resname)
-                                    ligand_name_mapping[residue.name] = safe_resname
-                                    
-                                    print(f"Mapping ligand '{residue.name}' -> CCD:'{unique_name}' -> PDB:'{safe_resname}'")
+                                    ligand_types[residue.name] = ligand_mol
+            
+            # Second pass: create unified naming strategy
+            for original_name, ligand_mol in ligand_types.items():
+                # Try to use "LIG" as the preferred residue name
+                target_resname = "LIG"
+                
+                # Check if "LIG" is already in use by another ligand type or conflicts
+                conflict_detected = False
+                
+                # Check if "LIG" already exists in the structure
+                for model in structure:
+                    for chain in model:
+                        for residue in chain:
+                            if residue.name == "LIG" and residue.name != original_name:
+                                conflict_detected = True
+                                break
+                        if conflict_detected:
+                            break
+                    if conflict_detected:
+                        break
+                
+                # Also check if "LIG" is already mapped to a different ligand type
+                for mapped_orig, mapped_target in ligand_name_mapping.items():
+                    if mapped_target == "LIG" and mapped_orig != original_name:
+                        conflict_detected = True
+                        break
+                
+                # If conflict detected, use Z-prefix unique name
+                if conflict_detected:
+                    # Generate unique CCD name and add to CCD
+                    unique_ccd_name = self._add_temporary_ligand_to_ccd(original_name, ligand_mol)
+                    
+                    # Generate Z-prefix residue name
+                    if '_' in unique_ccd_name:
+                        unique_part = unique_ccd_name.split('_')[-1]
+                        try:
+                            hex_value = int(unique_part[:6], 16) % 100
+                            target_resname = f"Z{hex_value:02d}"
+                        except ValueError:
+                            hash_val = hash(unique_part) % 100
+                            target_resname = f"Z{hash_val:02d}"
+                    else:
+                        hash_val = hash(unique_ccd_name) % 100
+                        target_resname = f"Z{hash_val:02d}"
+                    
+                    # Ensure the safe residue name is different from the original
+                    attempt = 0
+                    while target_resname == original_name and attempt < 100:
+                        attempt += 1
+                        hash_val = (hash(unique_ccd_name + str(attempt)) % 100)
+                        target_resname = f"Z{hash_val:02d}"
+                    
+                    ligand_residues[original_name] = (unique_ccd_name, target_resname)
+                    print(f"Conflict detected: Mapping ligand '{original_name}' -> CCD:'{unique_ccd_name}' -> PDB:'{target_resname}'")
+                else:
+                    # No conflict, use "LIG" as residue name
+                    unique_ccd_name = self._add_temporary_ligand_to_ccd("LIG", ligand_mol)
+                    ligand_residues[original_name] = (unique_ccd_name, "LIG")
+                    print(f"Unified naming: Mapping ligand '{original_name}' -> CCD:'{unique_ccd_name}' -> PDB:'LIG'")
+                
+                ligand_name_mapping[original_name] = target_resname
             
             # If no ligands found, return original file
             if not ligand_name_mapping:
@@ -1698,21 +1559,21 @@ class Boltzina:
                             residue.name = ligand_name_mapping[residue.name]
             
             # Ensure the new residue names are also registered in CCD
-            for original_name, (unique_ccd_name, safe_resname) in ligand_residues.items():
-                if safe_resname not in self.ccd and unique_ccd_name in self.ccd:
-                    # Add the safe residue name as an alias to the unique CCD name
-                    self.ccd[safe_resname] = self.ccd[unique_ccd_name]
-                    self.custom_ligands.add(safe_resname)
-                    print(f"Added alias '{safe_resname}' for CCD entry '{unique_ccd_name}'")
+            for original_name, (unique_ccd_name, target_resname) in ligand_residues.items():
+                if target_resname not in self.ccd and unique_ccd_name in self.ccd:
+                    # Add the target residue name as an alias to the unique CCD name
+                    self.ccd[target_resname] = self.ccd[unique_ccd_name]
+                    self.custom_ligands.add(target_resname)
+                    print(f"Added alias '{target_resname}' for CCD entry '{unique_ccd_name}'")
                     
                     # Also write the alias to local mols directory
-                    self._write_custom_ligand_to_local_mols_dir(safe_resname, self.ccd[safe_resname])
+                    self._write_custom_ligand_to_local_mols_dir(target_resname, self.ccd[target_resname])
             
             # Write the modified structure to a new file
             rewritten_dir = self.work_dir / "rewritten_complexes"
             rewritten_dir.mkdir(parents=True, exist_ok=True)
             
-            rewritten_file = rewritten_dir / f"{record_id}_{complex_file.stem}_rewritten.cif"
+            rewritten_file = rewritten_dir / f"{record_id}_{complex_file.stem}_unified.cif"
             
             # Write as mmCIF format for consistency
             try:
@@ -1741,9 +1602,15 @@ class Boltzina:
                 print(f"Warning: Failed to write structure file: {write_error}")
                 return complex_file
             
-            print(f"✓ Rewrote complex structure with {len(ligand_name_mapping)} unique ligand name(s)")
+            print(f"✓ Rewrote complex structure with unified ligand naming strategy")
             print(f"  Original: {complex_file}")
             print(f"  Rewritten: {rewritten_file}")
+            print(f"  Ligand mappings: {len(ligand_name_mapping)} ligand type(s)")
+            for orig, target in ligand_name_mapping.items():
+                if target == "LIG":
+                    print(f"    '{orig}' -> 'LIG' (unified naming)")
+                else:
+                    print(f"    '{orig}' -> '{target}' (conflict resolution)")
             
             return rewritten_file
             
