@@ -1086,7 +1086,7 @@ def render_bicyclic_designer_page():
                 max_display = st.slider(
                     "最大显示数量",
                     min_value=5,
-                    max_value=50,  # Increased from 10 to 50 to match the molecular designer
+                    max_value=150,  # Increased from 10 to 50 to match the molecular designer
                     value=10,
                     step=1,
                     help="最多显示多少个符合条件的设计"
