@@ -1388,7 +1388,7 @@ def render_designer_page():
                 max_display = st.slider(
                     "最大显示数量",
                     min_value=5,
-                    max_value=20,
+                    max_value=50,  # Increased from 20 to 50
                     value=10,
                     step=1,
                     help="最多显示多少个符合条件的设计"

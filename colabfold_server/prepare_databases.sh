@@ -5,7 +5,7 @@ set -e # 如果任何命令失败，立即退出
 # --- 配置 ---
 # !!! 重要: 请确保这个路径是你希望存放数据库的真实路径 !!!
 # 所有数据将下载到这里。
-DB_DIR="/data/boltz_webui/colabfold_server/databases"
+DB_DIR="/home/dahuilangda/DATABASE"
 # ----------------------------------------------------
 
 # 临时工作区，用于存放下载的压缩包和解压文件

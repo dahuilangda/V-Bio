@@ -1067,19 +1067,44 @@ def render_bicyclic_designer_page():
         best_sequences = results['best_sequences']
         evolution_history = results['evolution_history']
         
+        # Add slider for controlling display count in bicyclic designer
+        with st.expander("LayoutPanel **结果过滤设置**", expanded=False):  # The actual emoji is "🎛️"
+            st.markdown("调整以下参数来筛选和显示设计结果：")
+            col_filter1, col_filter2 = st.columns(2)
+            
+            with col_filter1:
+                custom_threshold = st.slider(
+                    "评分阈值",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=0.6,
+                    step=0.05,
+                    help="只显示评分高于此阈值的设计"
+                )
+                
+            with col_filter2:
+                max_display = st.slider(
+                    "最大显示数量",
+                    min_value=5,
+                    max_value=50,  # Increased from 10 to 50 to match the molecular designer
+                    value=10,
+                    step=1,
+                    help="最多显示多少个符合条件的设计"
+                )
+        
         st.subheader("📊 设计统计摘要", anchor=False)
         
         col_stats = st.columns(4)
         col_stats[0].metric("总设计数", len(best_sequences))
-        high_quality_sequences = [seq for seq in best_sequences if seq.get('score', 0) >= 0.6]
-        col_stats[1].metric("高质量设计", len(high_quality_sequences))
-        col_stats[2].metric("Top 10 展示", min(10, len(high_quality_sequences)))
+        high_quality_sequences = [seq for seq in best_sequences if seq.get('score', 0) >= custom_threshold]
+        col_stats[1].metric("高质量设计", len(high_quality_sequences), help=f"评分 ≥ {custom_threshold}")
+        col_stats[2].metric(f"Top {max_display} 展示", min(max_display, len(high_quality_sequences)))
         if best_sequences:
             col_stats[3].metric("最高评分", f"{max(seq.get('score', 0) for seq in best_sequences):.3f}")
         
         st.subheader("🥇 最佳双环肽序列", anchor=False)
         
-        top_sequences = high_quality_sequences[:10]
+        top_sequences = high_quality_sequences[:max_display]
         
         if not top_sequences:
             st.warning("😔 没有找到高质量的双环肽设计。请尝试调整参数重新设计。")
