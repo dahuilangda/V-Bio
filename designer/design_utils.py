@@ -38,6 +38,18 @@ BICYCLIC_LINKERS = {
         'eng_name': '1,3,5-trimethylbenzene',
         'attachment_atoms': ['CD', 'C1', 'C2']  # 连接到Cys的SG原子的配体原子
     },
+    '29N': {
+        'ccd': '29N',
+        'name': '1-[3,5-di(propanoyl)-1,3,5-triazinan-1-yl]propan-1-one',
+        'eng_name': '1-[3,5-di(propanoyl)-1,3,5-triazinan-1-yl]propan-1-one',
+        'attachment_atoms': ['C16', 'C19', 'C25']  # 连接到Cys的SG原子的配体原子
+    },
+    'BS3': {
+        'ccd': 'BS3',
+        'name': '铋(III)三硫醇配合物',
+        'eng_name': 'Bismuth(III) tris(thiolate) complex',
+        'attachment_atoms': ['BI', 'BI', 'BI']  # 连接到Cys的SG原子的配体原子
+    },
 }
 
 # --- 糖化学常量 ---

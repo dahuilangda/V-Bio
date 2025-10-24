@@ -51,6 +51,7 @@ def render_bicyclic_designer_page():
         **连接体类型：**
         - **SEZ** 1,3,5-trimethylbenzene
         - **29N** 1-[3,5-di(propanoyl)-1,3,5-triazinan-1-yl]propan-1-one
+        - **BS3** 铋(III)三硫醇配合物
         """)
     
     designer_is_running = (
@@ -327,9 +328,9 @@ def render_bicyclic_designer_page():
                 # 连接体选择
                 linker_ccd = st.selectbox(
                     "连接体类型",
-                    ["SEZ", "29N"],
-                    format_func=lambda x: f"🔗 {x} - {'TRIS连接体' if x == 'SEZ' else '大环连接体'}",
-                    help="选择用于形成双环结构的连接体分子。SEZ是传统的TRIS连接体，29N是新型大环连接体。",
+                    ["SEZ", "29N", "BS3"],
+                    format_func=lambda x: f"🔗 {x} - {'TRIS连接体' if x == 'SEZ' else '大环连接体' if x == '29N' else '铋金属连接体'}",
+                    help="选择用于形成双环结构的连接体分子。SEZ是传统的TRIS连接体，29N是新型大环连接体，BS3是铋(III)金属连接体。",
                     disabled=designer_is_running,
                     key="bicyclic_linker_ccd"
                 )            
@@ -1139,7 +1140,8 @@ def render_bicyclic_designer_page():
                     linker_type = bicyclic_config.get('linker_ccd', 'SEZ')
                     linker_descriptions = {
                         'SEZ': '1,3,5-trimethylbenzene (TRIS连接体)',
-                        '29N': '1-[3,5-di(propanoyl)-1,3,5-triazinan-1-yl]propan-1-one (大环连接体)'
+                        '29N': '1-[3,5-di(propanoyl)-1,3,5-triazinan-1-yl]propan-1-one (大环连接体)',
+                        'BS3': '铋(III)三硫醇配合物 (铋金属连接体)'
                     }
                     linker_desc = linker_descriptions.get(linker_type, f'{linker_type} 连接体')
                     st.info(f"🔗 **连接体类型**: {linker_type} - {linker_desc}", icon="⚡")

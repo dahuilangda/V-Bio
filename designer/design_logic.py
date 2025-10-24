@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 LINKER_ATOM_MAP = {
     'SEZ': ['CD', 'C1', 'C2'],
     '29N': ['C16', 'C19', 'C25'],
+    'BS3': ['BI', 'BI', 'BI'],
     # 可以添加其他连接体, 例如: 'XYZ': ['A1', 'A2', 'A3']
 }
 

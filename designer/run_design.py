@@ -75,7 +75,7 @@ def main():
 
     # --- 双环肽设计 (可选) ---
     bicyclic_group = parser.add_argument_group('双环肽设计')
-    bicyclic_group.add_argument("--linker_ccd", type=str, default="SEZ", choices=["SEZ", "29N"], help="用于形成双环的连接体配体的CCD代码。仅在 --design_type=bicyclic 时使用。")
+    bicyclic_group.add_argument("--linker_ccd", type=str, default="SEZ", choices=["SEZ", "29N", "BS3"], help="用于形成双环的连接体配体的CCD代码。仅在 --design_type=bicyclic 时使用。")
     bicyclic_group.add_argument("--cys_positions", type=int, nargs=2, default=None, help="除末端外，另外两个半胱氨酸的初始位置(1-based索引)，例如 --cys_positions 4 10。如果未提供，将随机选择。仅在 --design_type=bicyclic 时使用。")
 
     # --- 氨基酸组成控制 ---
