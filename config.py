@@ -61,7 +61,7 @@ CENTRAL_API_URL = os.environ.get("CENTRAL_API_URL", "http://localhost:5000")
 # -- MSA 服务器地址 --
 # ColabFold MSA 服务器的 URL，用于生成多序列比对
 # 默认使用 ColabFold 官方服务器，也可以使用本地服务器
-MSA_SERVER_URL = os.environ.get("MSA_SERVER_URL", "https://api.colabfold.com")
+MSA_SERVER_URL = os.environ.get("MSA_SERVER_URL", "http://172.17.1.248:8080")
 
 
 # ==============================================================================

@@ -1,21 +1,14 @@
 import streamlit as st
 import os
-import string
-import yaml
-import pandas as pd
 import time
 import uuid
 import json
-import psutil
 
 from frontend.utils import (
-    get_available_chain_ids, 
     get_available_chain_ids_for_designer,
-    get_smart_msa_default, 
-    validate_designer_inputs, 
-    has_cached_msa,
-    read_cif_from_string,
-    extract_protein_residue_bfactors
+    get_smart_msa_default,
+    validate_designer_inputs,
+    has_cached_msa
 )
 from frontend.designer_client import (
     create_designer_complex_yaml, 
@@ -30,10 +23,57 @@ from frontend.url_state import URLStateManager
 def render_bicyclic_designer_page():
     # 尝试从URL恢复状态
     URLStateManager.restore_state_from_url()
-    
+
     st.markdown("### 🔗 双环肽设计")
     st.markdown("设计具有两个环状结构的双环肽，通过三个半胱氨酸残基的二硫键形成稳定的环状结构。")
-    
+
+    # 恢复表单状态
+    query_params = URLStateManager.get_query_params()
+    form_data_str = query_params.get('bicyclic_form')
+    if form_data_str and not st.session_state.get('bicyclic_task_id'):
+        try:
+            form_config = json.loads(form_data_str)
+            for key, value in form_config.items():
+                session_key = f'bicyclic_{key}' if not key.startswith('bicyclic_') else key
+                if session_key not in st.session_state:
+                    st.session_state[session_key] = value
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # 自动保存表单状态
+    def auto_save_form():
+        # 只在没有任务运行且不是首次加载时保存
+        if not st.session_state.get('bicyclic_task_id') and st.session_state.get('url_state_initialized'):
+            form_config = {k: st.session_state.get(k, v) for k, v in {
+                'bicyclic_binder_length': 15,
+                'bicyclic_linker_ccd': 'SEZ',
+                'bicyclic_cys_position_mode': 'auto',
+                'bicyclic_fix_terminal_cys': True,
+                'bicyclic_include_extra_cys': False,
+                'bicyclic_use_initial_sequence': False,
+                'bicyclic_initial_sequence': '',
+                'bicyclic_sequence_mask': '',
+                'bicyclic_optimization_mode': 'balanced',
+                'bicyclic_generations': 12,
+                'bicyclic_population_size': 16,
+                'bicyclic_elite_size': 6,
+                'bicyclic_mutation_rate': 0.25,
+                'bicyclic_cys1_pos': 3,
+                'bicyclic_cys2_pos': 8,
+                'bicyclic_cys3_pos': 15
+            }.items()}
+
+            current_params = URLStateManager.get_query_params()
+            new_params = current_params.copy()
+            new_params['bicyclic_form'] = json.dumps(form_config)
+
+            # 保留任务参数
+            for param in ['task_id', 'task_type', 'work_dir', 'designer_config']:
+                if param in current_params:
+                    new_params[param] = current_params[param]
+
+            URLStateManager.set_query_params(**new_params)
+
     # 显示双环肽结构说明
     with st.expander("💡 双环肽设计说明", expanded=False):
         st.markdown("""
@@ -312,7 +352,7 @@ def render_bicyclic_designer_page():
         # 基本设置 - 默认展开
         with st.expander("📝 **基本设置**", expanded=True):
             col1, col2, col3, col4 = st.columns(4)
-            
+
             with col1:
                 binder_length = st.number_input(
                     "双环肽长度",
@@ -321,7 +361,8 @@ def render_bicyclic_designer_page():
                     value=15,
                     step=1,
                     help="双环肽的氨基酸残基数量。建议8-30个残基以确保形成稳定的双环结构。",
-                    disabled=designer_is_running
+                    disabled=designer_is_running,
+                    key="bicyclic_binder_length"
                 )
             
             with col2:
@@ -356,7 +397,8 @@ def render_bicyclic_designer_page():
                     ["auto", "manual"],
                     format_func=lambda x: "🎲 自动优化" if x == "auto" else "✋ 手动指定",
                     help="选择半胱氨酸位置的设定方式。自动模式将通过演化算法优化位置。",
-                    disabled=designer_is_running
+                    disabled=designer_is_running,
+                    key="bicyclic_cys_position_mode"
                 )
             
             with col4:
@@ -446,7 +488,6 @@ def render_bicyclic_designer_page():
             if use_initial_sequence:
                 initial_sequence = st.text_input(
                     "初始双环肽序列",
-                    value="",
                     placeholder=f"例如: {'C'*3 + 'A'*(binder_length-3)}",
                     help=f"输入包含3个半胱氨酸的初始序列，长度应为{binder_length}。",
                     disabled=designer_is_running,
@@ -505,10 +546,9 @@ def render_bicyclic_designer_page():
                 format_func=lambda x: {
                     "balanced": "⚖️ 平衡模式 (推荐)",
                     "stable": "🎯 平稳优化",
-                    "aggressive": "🔥 激进探索", 
+                    "aggressive": "🔥 激进探索",
                     "conservative": "🛡️ 保守设计"
                 }[x],
-                index=0,
                 help="选择预设的优化策略。双环肽设计推荐平衡模式以确保结构稳定性。",
                 disabled=designer_is_running,
                 key="bicyclic_optimization_mode"
@@ -1331,7 +1371,18 @@ def render_bicyclic_designer_page():
         with col_reset[0]:
             if st.button("🔄 重置设计器", key="reset_bicyclic_designer", type="secondary", use_container_width=True):
                 URLStateManager.clear_url_params()
-                for key in ['bicyclic_task_id', 'bicyclic_results', 'bicyclic_error', 'bicyclic_config', 'bicyclic_components', 'bicyclic_constraints']:
+                # 清除所有双环肽相关的状态
+                bicyclic_keys = [
+                    'bicyclic_task_id', 'bicyclic_results', 'bicyclic_error', 'bicyclic_config',
+                    'bicyclic_components', 'bicyclic_constraints',
+                    # 表单状态键
+                    'bicyclic_binder_length', 'bicyclic_linker_ccd', 'bicyclic_cys_position_mode',
+                    'bicyclic_fix_terminal_cys', 'bicyclic_include_extra_cys', 'bicyclic_use_initial_sequence',
+                    'bicyclic_initial_sequence', 'bicyclic_sequence_mask', 'bicyclic_optimization_mode',
+                    'bicyclic_generations', 'bicyclic_population_size', 'bicyclic_elite_size',
+                    'bicyclic_mutation_rate', 'bicyclic_cys1_pos', 'bicyclic_cys2_pos', 'bicyclic_cys3_pos'
+                ]
+                for key in bicyclic_keys:
                     if key in st.session_state:
                         del st.session_state[key]
                 st.rerun()
@@ -1343,3 +1394,7 @@ def render_bicyclic_designer_page():
                     if key in st.session_state:
                         del st.session_state[key]
                 st.rerun()
+
+    # 自动保存表单状态（在没有任务运行时）
+    if not designer_is_running and not st.session_state.get('bicyclic_task_id'):
+        auto_save_form()
