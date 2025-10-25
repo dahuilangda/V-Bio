@@ -8,7 +8,9 @@ from frontend.utils import (
     get_available_chain_ids_for_designer,
     get_smart_msa_default,
     validate_designer_inputs,
-    has_cached_msa
+    has_cached_msa,
+    read_cif_from_string,
+    extract_protein_residue_bfactors
 )
 from frontend.designer_client import (
     create_designer_complex_yaml, 
