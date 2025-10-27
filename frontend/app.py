@@ -2,11 +2,32 @@
 import streamlit as st
 import sys
 import os
+from pathlib import Path
 
 # Add the project root to the Python path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
+
+# Load .env file if it exists
+def load_env_file():
+    """Load environment variables from .env file"""
+    env_file = Path(PROJECT_ROOT) / ".env"
+    if env_file.exists():
+        try:
+            with open(env_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        key, value = line.split('=', 1)
+                        if key not in os.environ:
+                            os.environ[key.strip()] = value.strip()
+            print(f"✅ Loaded .env file from {env_file}")
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to load .env file: {e}")
+
+# Load environment variables
+load_env_file()
 
 from frontend.state import initialize_session_state
 from frontend.views.prediction_page import render_prediction_page

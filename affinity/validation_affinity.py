@@ -186,7 +186,7 @@ def check_server_status():
         server_healthy = response.status_code == 200
         monitor_status = None
         try:
-            api_token = os.environ.get('API_SECRET_TOKEN')
+            api_token = os.environ.get('BOLTZ_API_TOKEN')
             headers = {"X-API-Token": api_token} if api_token else {}
             monitor_url = "http://127.0.0.1:5000/monitor/status"
             monitor_response = requests.get(monitor_url, headers=headers, timeout=5)
@@ -554,14 +554,14 @@ def find_files(target_dir):
 def run_analysis():
     # --- API Configuration ---
     API_URL = "http://127.0.0.1:5000/api/affinity_separate"
-    API_TOKEN = os.environ.get('API_SECRET_TOKEN')
+    API_TOKEN = os.environ.get('BOLTZ_API_TOKEN')
     BATCH_SIZE = 4
     # -------------------------
     data_dir = '/data/Boltz-WebUI/affinity/data'
     output_base_dir = os.path.join(data_dir, 'output')
     results_output_dir = os.path.join(output_base_dir, 'api_results')
     if not API_TOKEN:
-        print("错误: 请设置 API_SECRET_TOKEN 环境变量")
+        print("错误: 请设置 BOLTZ_API_TOKEN 环境变量")
         return
     print("🔍 检查服务器状态...")
     server_status = check_server_status()

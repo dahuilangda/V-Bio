@@ -5,7 +5,7 @@ import json
 import os
 
 from .constants import API_URL
-API_TOKEN = os.getenv('API_SECRET_TOKEN', 'your_default_api_token')
+API_TOKEN = os.getenv('BOLTZ_API_TOKEN', 'development-api-token')
 
 def submit_job(yaml_content: str, use_msa: bool, model_name: str = None):
     """

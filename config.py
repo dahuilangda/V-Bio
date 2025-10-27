@@ -6,6 +6,47 @@
 动态逻辑（如基于硬件检测的配置调整）应在相应组件的启动脚本中执行。
 """
 import os
+from pathlib import Path
+
+# 尝试加载 .env 文件
+def load_env_file():
+    """加载 .env 文件中的环境变量"""
+    env_file = Path(__file__).parent / ".env"
+    if env_file.exists():
+        try:
+            with open(env_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    # 跳过注释和空行
+                    if line and not line.startswith('#') and '=' in line:
+                        key, value = line.split('=', 1)
+                        # 只设置未被系统环境变量覆盖的变量
+                        if key not in os.environ:
+                            os.environ[key.strip()] = value.strip()
+        except Exception as e:
+            print(f"警告: 无法加载 .env 文件: {e}")
+
+# 加载 .env 文件
+load_env_file()
+
+def print_config_debug_info():
+    """打印当前配置调试信息"""
+    print("\n" + "="*60)
+    print("Boltz-WebUI 配置信息")
+    print("="*60)
+
+    config_vars = [
+        'REDIS_URL', 'MAX_CONCURRENT_TASKS', 'CENTRAL_API_URL',
+        'MSA_SERVER_URL', 'RESULTS_BASE_DIR', 'BOLTZ_API_TOKEN'
+    ]
+
+    for var in config_vars:
+        value = os.environ.get(var, '未设置')
+        if var == 'BOLTZ_API_TOKEN':
+            value = '***已设置***' if value and value != '未设置' else '未设置'
+        print(f"{var:25}: {value}")
+
+    print("="*60 + "\n")
 
 # ==============================================================================
 # 1. 基础设施配置 (Core Infrastructure)
@@ -68,8 +109,8 @@ MSA_SERVER_URL = os.environ.get("MSA_SERVER_URL", "http://172.17.1.248:8080")
 # 4. 安全性配置 (Security)
 # ==============================================================================
 
-# -- API 令牌 --
-# 用于外部客户端访问受保护的 API 端点
+# -- Boltz API 令牌 --
+# 用于外部客户端访问受保护的 API 端点和连接到外部 Boltz 服务
 # 在生产环境中，必须通过环境变量设置此值。
-# 例如: export API_SECRET_TOKEN='your-super-secret-token'
-API_SECRET_TOKEN = os.environ.get("API_SECRET_TOKEN", "development-api-token")
+# 例如: export BOLTZ_API_TOKEN='your-super-secret-token'
+BOLTZ_API_TOKEN = os.environ.get("BOLTZ_API_TOKEN", "development-api-token")

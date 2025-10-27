@@ -8,7 +8,7 @@
 
 ```bash
 # 设置API密钥
-export API_SECRET_TOKEN='your-token'
+export BOLTZ_API_TOKEN='your-token'
 
 # 运行基础肽设计
 python run_design.py \
@@ -170,10 +170,10 @@ sequences:
 
 ```bash
 # Linux / macOS
-export API_SECRET_TOKEN='your-super-secret-and-long-token'
+export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
 
 # Windows (Command Prompt)
-set API_SECRET_TOKEN="your-super-secret-and-long-token"
+set BOLTZ_API_TOKEN="your-super-secret-and-long-token"
 ```
 
 也可以通过 `--api_token` 参数直接提供。
@@ -441,7 +441,7 @@ python designer/glycopeptide_generator.py --list-only
 #### API 连接
 
   - `--server_url`: 运行中的Boltz-WebUI预测API的URL。 (默认: `http://127.0.0.1:5000`)
-  - `--api_token`: API密钥。建议通过 `API_SECRET_TOKEN` 环境变量设置。
+  - `--api_token`: API密钥。建议通过 `BOLTZ_API_TOKEN` 环境变量设置。
   - `--no_msa_server`: 禁用MSA服务器。**默认情况下MSA服务器已启用**，当序列找不到MSA缓存时会自动生成MSA以提高预测精度。使用此参数可禁用MSA生成以加快预测速度（但可能降低精度）。 (默认: `False`)
 
 ## 📊 输出解读
@@ -505,7 +505,7 @@ python designer/glycopeptide_generator.py --generate-all
 curl http://127.0.0.1:5000/health
 
 # 检查API密钥是否正确设置
-echo $API_SECRET_TOKEN
+echo $BOLTZ_API_TOKEN
 ```
 
 ### 最佳实践

@@ -100,7 +100,7 @@ docker run -d -p 6379:6379 --name boltz-webui-redis redis:latest
 
 1.  `RESULTS_BASE_DIR`: 确认结果存储路径存在且有写入权限。
 2.  `MAX_CONCURRENT_TASKS`: 根据您的 GPU 数量和显存大小设置最大并发任务数。
-3.  `API_SECRET_TOKEN`: 设置一个复杂的安全令牌。**强烈建议**通过环境变量进行配置以提高安全性。
+3.  `BOLTZ_API_TOKEN`: 设置一个复杂的安全令牌。**强烈建议**通过环境变量进行配置以提高安全性。
 
 ## 使用指南 (Usage)
 
@@ -112,7 +112,7 @@ docker run -d -p 6379:6379 --name boltz-webui-redis redis:latest
 
 ```bash
 # 设置环境变量
-export API_SECRET_TOKEN='your-super-secret-and-long-token'
+export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
 
 # 开发模式：后端后台运行，前端前台运行（推荐）
 bash run.sh dev
@@ -129,12 +129,12 @@ bash run.sh all
 
 #### **方式二：分组件启动 (开发调试)**
 
-您需要打开 **6 个**独立的终端窗口来分别运行平台的不同组件。在**每一个**窗口中都必须能访问到 `API_SECRET_TOKEN` 环境变量。
+您需要打开 **6 个**独立的终端窗口来分别运行平台的不同组件。在**每一个**窗口中都必须能访问到 `BOLTZ_API_TOKEN` 环境变量。
 
 **首先，设置环境变量 (在每个终端中或在 `.bashrc`/`.zshrc` 中设置):**
 
 ```bash
-export API_SECRET_TOKEN='your-super-secret-and-long-token'
+export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
 ```
 
 1.  **终端 1 - 初始化 GPU 池** (每次冷启动服务前执行一次):

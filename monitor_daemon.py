@@ -20,8 +20,8 @@ API_TOKEN = None
 # 尝试读取API密钥
 try:
     import config
-    if hasattr(config, 'API_SECRET_TOKEN'):
-        API_TOKEN = config.API_SECRET_TOKEN
+    if hasattr(config, 'BOLTZ_API_TOKEN'):
+        API_TOKEN = config.BOLTZ_API_TOKEN
 except ImportError:
     logger.warning("无法导入config模块，将使用无认证模式")
 

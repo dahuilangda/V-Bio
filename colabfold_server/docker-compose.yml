@@ -6,7 +6,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./databases:/app/databases
+      - ${DB_DIR:-./databases}:/app/databases
       - ./jobs:/app/jobs
       - ./config.json:/app/config.json:ro
     shm_size: '16gb'

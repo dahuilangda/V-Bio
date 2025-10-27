@@ -91,7 +91,7 @@ def main():
     # --- API 连接 ---
     api_group = parser.add_argument_group('API 连接')
     api_group.add_argument("--server_url", default="http://127.0.0.1:5000", help="Boltz-WebUI 预测 API 服务器的URL。")
-    api_group.add_argument("--api_token", help="您的API密钥。也可以通过 'API_SECRET_TOKEN' 环境变量设置。")
+    api_group.add_argument("--api_token", help="您的API密钥。也可以通过 'BOLTZ_API_TOKEN' 环境变量设置。")
     api_group.add_argument("--no_msa_server", action="store_true", default=False, help="禁用MSA服务器。默认情况下，当序列找不到MSA缓存时，会使用MSA服务器自动生成MSA以提高预测精度。")
 
     args = parser.parse_args()
@@ -145,10 +145,10 @@ def main():
     if not np.isclose(args.weight_iptm + args.weight_plddt, 1.0):
         logger.warning(f"Weights for ipTM ({args.weight_iptm}) and pLDDT ({args.weight_plddt}) do not sum to 1.0. This is recommended but not strictly required.")
 
-    api_token = args.api_token or os.environ.get('API_SECRET_TOKEN')
+    api_token = args.api_token or os.environ.get('BOLTZ_API_TOKEN')
     if not api_token:
-        logger.critical("API token is missing. Provide it via --api_token or the 'API_SECRET_TOKEN' environment variable.")
-        raise ValueError("必须通过 --api_token 或 'API_SECRET_TOKEN' 环境变量提供API密钥。")
+        logger.critical("API token is missing. Provide it via --api_token or the 'BOLTZ_API_TOKEN' environment variable.")
+        raise ValueError("必须通过 --api_token 或 'BOLTZ_API_TOKEN' 环境变量提供API密钥。")
     
     logger.info("Arguments validated successfully.")
 

@@ -10,6 +10,28 @@ from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
+# 加载 .env 文件
+def load_env_file():
+    """加载 .env 文件中的环境变量"""
+    # 尝试从项目根目录加载 .env 文件
+    env_file = Path(__file__).parent.parent / ".env"
+    if env_file.exists():
+        try:
+            with open(env_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    # 跳过注释和空行
+                    if line and not line.startswith('#') and '=' in line:
+                        key, value = line.split('=', 1)
+                        # 只设置未被系统环境变量覆盖的变量
+                        if key not in os.environ:
+                            os.environ[key.strip()] = value.strip()
+        except Exception as e:
+            print(f"警告: 无法加载 .env 文件: {e}")
+
+# 加载 .env 文件
+load_env_file()
+
 @dataclass
 class BoltzAPIConfig:
     """Boltz-WebUI API configuration"""
@@ -24,7 +46,7 @@ class BoltzAPIConfig:
     def __post_init__(self):
         # 尝试从环境变量获取API token
         if not self.api_token:
-            self.api_token = os.getenv('API_SECRET_TOKEN', '')
+            self.api_token = os.getenv('BOLTZ_API_TOKEN', '')
     
 @dataclass
 class MMPDatabaseConfig:

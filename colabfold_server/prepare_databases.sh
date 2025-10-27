@@ -2,10 +2,35 @@
 # 该脚本用于在服务器上手动下载、解压和索引所有 ColabFold 数据库。
 set -e # 如果任何命令失败，立即退出
 
-# --- 配置 ---
-# !!! 重要: 请确保这个路径是你希望存放数据库的真实路径 !!!
+# --- 使用说明 ---
+# 用法: ./prepare_databases.sh [数据库目录]
+# 示例: ./prepare_databases.sh /path/to/databases
+# 如果不指定目录，将使用默认路径
+
+# 检查命令行参数
+if [ $# -eq 1 ]; then
+    DB_DIR="$1"
+    echo "使用命令行指定的数据库目录: $DB_DIR"
+# 检查当前目录的 .env 文件
+elif [ -f ".env" ] && grep -q "^DB_DIR=" .env; then
+    DB_DIR=$(grep "^DB_DIR=" .env | cut -d'=' -f2)
+    echo "从 .env 文件读取 DB_DIR: $DB_DIR"
+# 检查环境变量
+elif [ -n "$DB_DIR" ]; then
+    echo "使用环境变量 DB_DIR: $DB_DIR"
+else
+    DB_DIR="/home/dahuilangda/DATABASE"
+    echo "使用默认数据库目录: $DB_DIR"
+    echo "提示: 可以通过命令行参数、.env 文件或环境变量 DB_DIR 自定义数据库目录"
+fi
+
+# 确保路径是绝对路径
+if [[ ! "$DB_DIR" = /* ]]; then
+    DB_DIR="$(pwd)/$DB_DIR"
+    echo "转换为绝对路径: $DB_DIR"
+fi
+
 # 所有数据将下载到这里。
-DB_DIR="/home/dahuilangda/DATABASE"
 # ----------------------------------------------------
 
 # 临时工作区，用于存放下载的压缩包和解压文件

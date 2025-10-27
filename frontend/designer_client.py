@@ -299,7 +299,7 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
             server_url = params.get('server_url', 'http://127.0.0.1:5000')
             cmd.extend(["--server_url", server_url])
             
-            api_token = os.environ.get('API_SECRET_TOKEN')
+            api_token = os.environ.get('BOLTZ_API_TOKEN')
             if api_token:
                 cmd.extend(["--api_token", api_token])
             

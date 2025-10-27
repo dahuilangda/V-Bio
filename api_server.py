@@ -260,7 +260,7 @@ def require_api_token(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         token = request.headers.get('X-API-Token')
-        if not token or not hasattr(config, 'API_SECRET_TOKEN') or token != config.API_SECRET_TOKEN:
+        if not token or not hasattr(config, 'BOLTZ_API_TOKEN') or token != config.BOLTZ_API_TOKEN:
             logger.warning(f"Unauthorized API access attempt from {request.remote_addr} to {request.path}")
             return jsonify({'error': 'Unauthorized. Invalid or missing API token.'}), 403
         logger.debug(f"API token validated for {request.path} from {request.remote_addr}")

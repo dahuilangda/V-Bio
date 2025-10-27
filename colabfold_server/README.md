@@ -40,18 +40,33 @@ cd Boltz-WebUI/colabfold_server
 **注意**: 首次运行需要下载约 200-300GB 的数据库文件，请确保有足够的存储空间和时间。
 
 ```bash
-# 设置数据库存储路径（可选，默认为当前目录下的 databases）
-export DB_DIR="/path/to/your/databases"
+# 运行数据库准备脚本（两种方式指定路径）：
 
-# 运行数据库准备脚本
+# 方式1: 通过命令行参数指定数据库目录
 chmod +x prepare_databases.sh
+./prepare_databases.sh /path/to/your/databases
+
+# 方式2: 通过环境变量指定（可选）
+export DB_DIR="/path/to/your/databases"
+./prepare_databases.sh
+
+# 方式3: 使用默认路径 /home/dahuilangda/DATABASE
 ./prepare_databases.sh
 ```
 
 #### 第 3 步：构建和启动服务
 
 ```bash
-# 使用 Docker Compose 构建并启动服务
+# 方式1: 使用默认数据库路径 ./databases
+docker compose up -d --build
+
+# 方式2: 指定自定义数据库路径（环境变量）
+export DB_DIR="/path/to/your/databases"
+docker compose up -d --build
+
+# 方式3: 使用 .env 配置文件（推荐）
+cp .env.docker .env
+# 编辑 .env 文件，设置 DB_DIR=/path/to/your/databases
 docker compose up -d --build
 
 # 查看服务状态
@@ -224,21 +239,35 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./databases:/app/databases
+      - ${DB_DIR:-./databases}:/app/databases  # 支持通过 DB_DIR 环境变量自定义数据库路径
       - ./jobs:/app/jobs
       - ./config.json:/app/config.json:ro
     shm_size: '16gb'
     mem_limit: '32g'
 ```
 
-### 环境变量
+### 环境变量配置
 
-| 变量名 | 描述 | 默认值 |
-|--------|------|---------|
-| `DB_DIR` | 数据库存储目录 | `/app/databases` |
-| `PDB_SERVER` | PDB 同步服务器 | `rsync.wwpdb.org::ftp` |
-| `PDB_PORT` | PDB 服务器端口 | `33444` |
-| `GPU` | 启用 GPU 支持 | 空（禁用） |
+Docker Compose 支持通过环境变量或 `.env` 文件配置以下参数：
+
+#### Docker Compose 环境变量
+
+| 变量名 | 描述 | 默认值 | 用途 |
+|--------|------|---------|------|
+| `DB_DIR` | 宿主机数据库存储路径 | `./databases` | 卷挂载宿主机数据库目录到容器内 |
+
+#### 容器内环境变量
+
+| 变量名 | 描述 | 默认值 | 用途 |
+|--------|------|---------|------|
+| `PDB_SERVER` | PDB 同步服务器 | `rsync.wwpdb.org::ftp` | 容器内数据库同步 |
+| `PDB_PORT` | PDB 服务器端口 | `33444` | 容器内数据库同步 |
+| `GPU` | 启用 GPU 支持 | 空（禁用） | 容器内 MMseqs2 加速 |
+
+**重要说明**:
+- `DB_DIR` 是 **Docker Compose** 级别的环境变量，用于卷挂载配置
+- 其他变量是容器内的环境变量，用于容器运行时配置
+- **强烈建议**在生产环境中，先在容器外准备好数据库，然后通过 `DB_DIR` 挂载到容器中
 
 ## 故障排除 (Troubleshooting)
 

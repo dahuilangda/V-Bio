@@ -28,7 +28,7 @@ TYPE_SPECIFIC_INFO = {
 # Designer 相关配置
 DESIGNER_CONFIG = {
     'work_dir': '/tmp/boltz_designer',
-    'api_token': os.getenv('API_SECRET_TOKEN', 'your_default_api_token'),
+    'api_token': os.getenv('BOLTZ_API_TOKEN', 'your_default_api_token'),
     'server_url': API_URL
 }
 

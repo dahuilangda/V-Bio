@@ -89,8 +89,8 @@ def render_designer_page():
                     options=comp_type_options,
                     format_func=lambda x: {
                         "protein": "🧬 蛋白质/肽链",
-                        "dna": "🧬 DNA",
-                        "rna": "🧬 RNA", 
+                        "dna": "🔗 DNA",
+                        "rna": "📜 RNA", 
                         "ligand": "💊 辅酶/小分子"
                     }[x],
                     key=f"designer_type_{component['id']}",

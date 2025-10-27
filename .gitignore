@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment files
+.env
+.env.local
+.env.production
+*.env.bak
+
+# Application directories
+boltz_central_results/
+colabfold_server/databases
+colabfold_server/jobs/
+designer/temp_design_run_*
+
+# Logs
+streamlit.log
+monitor.log
+monitor.pid
+celery.log
+flask.log
+*.log
+
+# Virtual environment
+venv/
+env/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
