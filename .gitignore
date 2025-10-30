@@ -37,3 +37,6 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+test.txt
+colabfold_server/colabfold/
+.gitignore

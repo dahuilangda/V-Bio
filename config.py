@@ -114,3 +114,12 @@ MSA_SERVER_URL = os.environ.get("MSA_SERVER_URL", "http://172.17.1.248:8080")
 # 在生产环境中，必须通过环境变量设置此值。
 # 例如: export BOLTZ_API_TOKEN='your-super-secret-token'
 BOLTZ_API_TOKEN = os.environ.get("BOLTZ_API_TOKEN", "development-api-token")
+
+# ==============================================================================
+# 5. AlphaFold3 Docker 集成
+# ==============================================================================
+
+ALPHAFOLD3_DOCKER_IMAGE = os.environ.get("ALPHAFOLD3_DOCKER_IMAGE", "alphafold3")
+ALPHAFOLD3_MODEL_DIR = os.environ.get("ALPHAFOLD3_MODEL_DIR")
+ALPHAFOLD3_DATABASE_DIR = os.environ.get("ALPHAFOLD3_DATABASE_DIR")
+ALPHAFOLD3_DOCKER_EXTRA_ARGS = os.environ.get("ALPHAFOLD3_DOCKER_EXTRA_ARGS", "")

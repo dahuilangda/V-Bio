@@ -142,8 +142,8 @@ docker-compose exec colabfold-api mmseqs databases
 **提交 MSA 搜索任务**:
 ```bash
 curl -X POST \
-     -H "Content-Type: application/json" \
-     -d '{"q": ">query\nMKFLILLFNILCLF...", "mode": "colabfold"}' \
+     -d 'q=>query\nMKFLILLFNILCLF...' \
+     -d 'mode=colabfold' \
      http://localhost:8080/ticket/msa
 ```
 

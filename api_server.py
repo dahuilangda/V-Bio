@@ -298,14 +298,21 @@ def handle_predict():
         logger.exception(f"Failed to read yaml_file from request: {e}. Client IP: {request.remote_addr}")
         return jsonify({'error': f"Failed to read yaml_file: {e}"}), 400
 
-    use_msa_server_str = request.form.get('use_msa_server', 'false').lower()
-    use_msa_server = use_msa_server_str == 'true'
+    use_msa_server_str = request.form.get('use_msa_server', 'false')
+    use_msa_server = str(use_msa_server_str).strip().lower() == 'true'
     logger.info(f"use_msa_server parameter received: {use_msa_server} for client {request.remote_addr}.")
     
     # 处理模型参数
     model_name = request.form.get('model', None)
     if model_name:
         logger.info(f"model parameter received: {model_name} for client {request.remote_addr}.")
+
+    backend_raw = request.form.get('backend', 'boltz')
+    backend = str(backend_raw).strip().lower()
+    if backend not in ['boltz', 'alphafold3']:
+        logger.warning(f"Invalid backend '{backend}' provided by client {request.remote_addr}. Defaulting to 'boltz'.")
+        backend = 'boltz'
+    logger.info(f"backend parameter received: {backend} for client {request.remote_addr}.")
     
     priority = request.form.get('priority', 'default').lower()
     if priority not in ['high', 'default']:
@@ -318,12 +325,15 @@ def handle_predict():
     predict_args = {
         'yaml_content': yaml_content,
         'use_msa_server': use_msa_server,
-        'model_name': model_name
+        'model_name': model_name,
+        'backend': backend
     }
 
     try:
         task = predict_task.apply_async(args=[predict_args], queue=target_queue)
-        logger.info(f"Task {task.id} dispatched to queue: '{target_queue}' with use_msa_server={use_msa_server}.")
+        logger.info(
+            f"Task {task.id} dispatched to queue: '{target_queue}' with use_msa_server={use_msa_server}, backend={backend}."
+        )
     except Exception as e:
         logger.exception(f"Failed to dispatch Celery task for prediction request from {request.remote_addr}: {e}")
         return jsonify({'error': 'Failed to dispatch prediction task.', 'details': str(e)}), 500

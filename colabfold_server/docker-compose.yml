@@ -10,4 +10,4 @@ services:
       - ./jobs:/app/jobs
       - ./config.json:/app/config.json:ro
     shm_size: '16gb'
-    mem_limit: '32g'
+    mem_limit: '64g'

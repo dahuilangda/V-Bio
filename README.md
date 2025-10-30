@@ -54,6 +54,10 @@
 
       * 预测结果自动打包为zip文件，包含结构预测文件和对应的MSA缓存文件，提供完整的分析数据包。
 
+  * **🧪 AlphaFold3 输入导出**
+
+      * 支持将同一份 YAML 输入转换为 AlphaFold3 兼容的 FASTA/JSON 文件以及对应的 MSA 归档，方便在外部 AlphaFold3 推理环境中继续使用。（当前版本仅生成输入文件，不在平台内执行 AF3 推理。如 YAML 同时请求亲和力指标，会自动追加一次 Boltz 亲和力流程并将结果一并打包。）
+
 ## 视频演示 (Video Demo)
 [https://www.bilibili.com/video/BV1tcYWz1E7f/](https://www.bilibili.com/video/BV1tcYWz1E7f/)
 
@@ -80,7 +84,7 @@ python3 -m venv venv
 source venv/bin/activate
 
 # 安装所有必需的 Python 包
-pip install -r requirements.txt
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 赋予启动脚本执行权限
 chmod +x run.sh
@@ -185,14 +189,55 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
 
   * **端点**: `POST /predict`
   * **认证**: 需要 API 令牌
+  * **常用字段**:
+    * `yaml_file`: 预测所需的 YAML 配置文件（必填）
+    * `use_msa_server`: 是否调用外部 MSA 服务 (`true`/`false`)
+    * `backend`（可选）:
+      * `boltz`（默认）: 运行原有的 Boltz 结构预测流程
+      * `alphafold3`: 生成 AlphaFold3 兼容的 FASTA/JSON/MSA 输入文件，结果 zip 中将包含这些导出文件（当前不会在平台内运行 AF3 推理）
   * **示例**:
     ```bash
     curl -X POST \
          -H "X-API-Token: your-secret-token" \
          -F "yaml_file=@/path/to/your/input.yaml" \
          -F "use_msa_server=true" \
+         -F "backend=alphafold3" \
          http://127.0.0.1:5000/predict
     ```
+  * **说明**:
+    * 前端页面的「选择预测后端」选项会自动填充同名字段；若选择 `AlphaFold3`，下载到的结果 zip 会包含 `*.fasta`、`*.json` 以及 `*.a3m` 文件，可直接交给官方 AF3 流程使用。
+    * 当 `alphafold3` 后端的 YAML 同时声明 `affinity` 属性时，系统会额外运行一遍 Boltz 的亲和力流程，产出的结构/亲和力分析将被复制到 AF3 结果目录中并随 zip 一并返回。
+
+### **AlphaFold3 Docker 推理集成**
+
+平台内置对官方 AlphaFold3 Docker 镜像的调用能力；只要事先配置好相关环境变量，就会在提交 `backend=alphafold3` 任务时自动执行容器推理。步骤如下：
+
+1. **准备 AlphaFold3 资源**
+   - 安装/拉取镜像（默认镜像名称 `alphafold3`）。
+   - 准备模型参数与公共数据库目录（官方安装指南中下载的 `models/` 与 `public_databases/`）。
+
+2. **配置环境变量（在启动 Celery Worker 前设置）**
+
+   ```bash
+   export ALPHAFOLD3_MODEL_DIR=/path/to/models            # 路径前后不要加引号
+   export ALPHAFOLD3_DATABASE_DIR=/path/to/public_databases
+   # 可选：如下变量若不设置则使用默认值
+   export ALPHAFOLD3_DOCKER_IMAGE=alphafold3
+   export ALPHAFOLD3_DOCKER_EXTRA_ARGS="--env TF_FORCE_UNIFIED_MEMORY=1"
+   ```
+
+   说明：
+   - `ALPHAFOLD3_MODEL_DIR` 与 `ALPHAFOLD3_DATABASE_DIR` **必须** 指向宿主机实际存在的目录；缺失或路径错误时任务会直接报错中止。
+   - 若需要为 Docker 传递额外参数（如代理、环境变量等），可通过 `ALPHAFOLD3_DOCKER_EXTRA_ARGS` 传入。
+   - Worker 启动时会为任务设置 `CUDA_VISIBLE_DEVICES`，容器将继承该 GPU 绑定。
+
+3. **提交任务**
+   - 在前端选择 “AlphaFold3（导出AF3输入）” 后端或在 API 请求中设置 `backend=alphafold3`。
+   - 任务执行流程：
+     1. 生成 AlphaFold3 兼容的 FASTA/JSON/MSA 输入文件。
+     2. 根据上述环境变量启动 Docker 容器执行 `python run_alphafold.py`。
+     3. 将容器输出复制到结果目录 `alphafold3_predictions/<jobname>/`，最终随 zip 返回。
+     4. 若 YAML 请求了亲和力指标，额外运行一次 Boltz 亲和力流程并一并打包。
 
 #### **提交亲和力预测任务**
 
@@ -557,7 +602,7 @@ python3 task_monitor.py kill-all --force  # 强制清理
 
 1. **Redis未启动**:
    ```bash
-   docker run -d -p 6379:6379 --name boltz-webui-redis redis:latest
+   docker run -d -p 6379:6379 --restart unless-stopped --name boltz-webui-redis redis:latest
    ```
 
 2. **GPU池未初始化**:
