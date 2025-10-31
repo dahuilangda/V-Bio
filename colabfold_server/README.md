@@ -255,6 +255,11 @@ Docker Compose 支持通过环境变量或 `.env` 文件配置以下参数：
 | 变量名 | 描述 | 默认值 | 用途 |
 |--------|------|---------|------|
 | `DB_DIR` | 宿主机数据库存储路径 | `./databases` | 卷挂载宿主机数据库目录到容器内 |
+| `MMSEQS_LOAD_MODE` | MMseqs2 数据库加载模式（`0`=流式、`2`=内存加载） | `2` | 控制 GPU/CPU 内存占用与性能权衡 |
+| `HTTP_PROXY` | Docker 构建及运行时 HTTP 代理 | 空 | 通过代理访问外部资源 |
+| `HTTPS_PROXY` | Docker 构建及运行时 HTTPS 代理 | 空 | 同上 |
+| `NO_PROXY` | 代理豁免列表 | 空 | 指定无需代理的主机/网段 |
+| `UID` / `GID` | 容器运行时使用的宿主机用户/用户组 ID | `1000` | 以非 root 身份运行，避免生成 root 拥有的文件 |
 
 #### 容器内环境变量
 
@@ -263,11 +268,17 @@ Docker Compose 支持通过环境变量或 `.env` 文件配置以下参数：
 | `PDB_SERVER` | PDB 同步服务器 | `rsync.wwpdb.org::ftp` | 容器内数据库同步 |
 | `PDB_PORT` | PDB 服务器端口 | `33444` | 容器内数据库同步 |
 | `GPU` | 启用 GPU 支持 | 空（禁用） | 容器内 MMseqs2 加速 |
+| `MMSEQS_LOAD_MODE` | 同上 | 继承自 `.env` | 传递给 MMseqs2 控制加载模式 |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | 构建时传入的代理设置 | 继承自 `.env` | 支撑容器内外一致的网络代理 |
+| `UID` / `GID` | 运行时传入的 UID/GID | 继承自 `.env` 或宿主机环境 | 控制容器进程的权限 |
+
+> 提示：Dockerfile 会在构建阶段自动读取 `.env` 中的 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`，若留空则不会启用代理。
 
 **重要说明**:
 - `DB_DIR` 是 **Docker Compose** 级别的环境变量，用于卷挂载配置
 - 其他变量是容器内的环境变量，用于容器运行时配置
 - **强烈建议**在生产环境中，先在容器外准备好数据库，然后通过 `DB_DIR` 挂载到容器中
+- 若使用 `UID/GID` 让容器以当前用户运行，确保宿主机上的 `jobs/`、`databases/` 目录对该用户有写权限；必要时执行 `sudo chown -R $(id -u):$(id -g) jobs databases`
 
 ## 故障排除 (Troubleshooting)
 

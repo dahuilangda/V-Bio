@@ -211,6 +211,10 @@ echo "Starting ColabFold API server with debug mode..."
 # Add debug environment variables
 export MMSEQS_THREADS=4
 export MMSEQS_NUM_ITERATIONS=3
+if [ -n "${MMSEQS_LOAD_MODE}" ]; then
+    export MMSEQS_LOAD_MODE
+    echo "MMSEQS_LOAD_MODE=${MMSEQS_LOAD_MODE}"
+fi
 
 # Start with more verbose output and error handling
 echo "Configuration file content:"

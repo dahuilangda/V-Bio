@@ -3,6 +3,14 @@
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
+# Load environment variables from .env if present
+if [ -f ".env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ".env"
+    set +a
+fi
+
 # --- Environment Setup ---
 # Activate virtual environment if it exists. This is a good practice.
 if [ -d "venv" ]; then
@@ -20,11 +28,24 @@ initialize_pool() {
     python -m gpu_manager init
 }
 
+resolve_gunicorn_workers() {
+    local workers
+    workers="${GUNICORN_WORKERS:-${MAX_CONCURRENT_TASKS:-4}}"
+
+    if ! [[ "$workers" =~ ^[0-9]+$ ]] || [ "$workers" -le 0 ]; then
+        workers=1
+    fi
+    echo "$workers"
+}
+
 # Function to start the Flask API server
 start_flask() {
     echo "Starting Flask API server with Gunicorn..."
-    # The default is 30s, which might be too short for some requests.
-    gunicorn --workers 4 --bind 0.0.0.0:5000 --timeout 120 "api_server:app"
+    local workers
+    workers="$(resolve_gunicorn_workers)"
+    echo "Using ${workers} Gunicorn worker(s)."
+    # The default Gunicorn timeout is 30s, which might be too short for some requests.
+    gunicorn --workers "${workers}" --bind 0.0.0.0:5000 --timeout 120 "api_server:app"
 }
 
 # Function to start the Celery workers
@@ -184,7 +205,9 @@ case "$1" in
         
         # 2. Start Flask in the background
         echo "Starting Flask API server in background..."
-        nohup gunicorn --workers 4 --bind 0.0.0.0:5000 --timeout 120 "api_server:app" > flask.log 2>&1 &
+        WORKERS="$(resolve_gunicorn_workers)"
+        echo "Using ${WORKERS} Gunicorn worker(s) for background API server."
+        nohup gunicorn --workers "${WORKERS}" --bind 0.0.0.0:5000 --timeout 120 "api_server:app" > flask.log 2>&1 &
         
         # 3. Start Celery in the background
         echo "Starting Celery worker in background..."
@@ -213,7 +236,9 @@ case "$1" in
         
         # 2. Start Flask in the background
         echo "Starting Flask API server in background..."
-        nohup gunicorn --workers 4 --bind 0.0.0.0:5000 --timeout 120 "api_server:app" > flask.log 2>&1 &
+        WORKERS="$(resolve_gunicorn_workers)"
+        echo "Using ${WORKERS} Gunicorn worker(s) for background API server."
+        nohup gunicorn --workers "${WORKERS}" --bind 0.0.0.0:5000 --timeout 120 "api_server:app" > flask.log 2>&1 &
         
         # 3. Start Celery in the background
         echo "Starting Celery worker in background..."

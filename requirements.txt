@@ -11,3 +11,4 @@ biopython
 py3dmol
 numpy
 psutil>=5.9.0
+python-dotenv

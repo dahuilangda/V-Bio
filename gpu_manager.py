@@ -131,24 +131,57 @@ if __name__ == '__main__':
     
     if command == 'init':
         # 动态检测逻辑现在位于此处，仅在作为脚本运行时执行
-        import torch
-        
-        max_concurrent = config.MAX_CONCURRENT_TASKS
-        available_gpus = []
         try:
-            if torch.cuda.is_available():
-                available_gpus = list(range(torch.cuda.device_count()))
-            logger.info(f"检测到 {len(available_gpus)} 个可用 GPU: {available_gpus}")
-        except Exception as e:
-            logger.warning(f"无法初始化 torch.cuda: {e}")
+            import torch  # type: ignore
+        except Exception as exc:  # pragma: no cover - 安装环境相关
+            torch = None  # type: ignore[assignment]
+            logger.warning(f"无法导入 torch，用于 GPU 自动探测: {exc}")
+
+        max_concurrent = config.MAX_CONCURRENT_TASKS
+        configured_gpus = config.GPU_DEVICE_IDS or []
+        detected_gpus: list[int] = []
+        torch_detected_count: int | None = None
+
+        if 'torch' in locals() and torch is not None:
+            try:
+                if torch.cuda.is_available():
+                    torch_detected_count = torch.cuda.device_count()
+                    detected_gpus = list(range(torch_detected_count))
+                    logger.info(f"检测到 {len(detected_gpus)} 个可用 GPU: {detected_gpus}")
+                else:
+                    logger.info("torch.cuda 未检测到可用 GPU。")
+            except Exception as e:
+                logger.warning(f"无法初始化 torch.cuda: {e}")
+
+        available_gpus = []
+
+        if configured_gpus:
+            available_gpus = configured_gpus.copy()
+            logger.info(f"使用环境变量 GPU_DEVICE_IDS 指定的 GPU 列表: {available_gpus}")
+
+            if torch_detected_count is not None:
+                invalid_gpus = [gpu for gpu in available_gpus if not (0 <= gpu < torch_detected_count)]
+                if invalid_gpus:
+                    logger.warning(f"GPU_DEVICE_IDS 包含无效的 GPU ID，将忽略: {invalid_gpus}")
+                available_gpus = [gpu for gpu in available_gpus if 0 <= gpu < torch_detected_count]
+                if not available_gpus and detected_gpus:
+                    logger.warning("GPU_DEVICE_IDS 中无有效 GPU，将回退到自动检测结果。")
+                    available_gpus = detected_gpus.copy()
+        else:
+            available_gpus = detected_gpus.copy()
 
         if not available_gpus:
+            logger.warning("未检测到可用 GPU，初始化空 GPU 池。")
             final_concurrency = 0
             devices_to_use = []
         else:
             final_concurrency = min(max_concurrent, len(available_gpus))
+            if final_concurrency < len(available_gpus):
+                logger.info(
+                    f"MAX_CONCURRENT_TASKS={max_concurrent} 限制并发，实际使用 {final_concurrency} 块 GPU"
+                )
             devices_to_use = available_gpus[:final_concurrency]
-        
+
         logger.info(f"将使用以下设备初始化 GPU 池: {devices_to_use}")
         initialize_gpu_pool(devices_to_use)
 

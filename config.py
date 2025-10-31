@@ -6,28 +6,40 @@
 动态逻辑（如基于硬件检测的配置调整）应在相应组件的启动脚本中执行。
 """
 import os
+import re
 from pathlib import Path
+from dotenv import load_dotenv
 
 # 尝试加载 .env 文件
-def load_env_file():
-    """加载 .env 文件中的环境变量"""
-    env_file = Path(__file__).parent / ".env"
-    if env_file.exists():
-        try:
-            with open(env_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    # 跳过注释和空行
-                    if line and not line.startswith('#') and '=' in line:
-                        key, value = line.split('=', 1)
-                        # 只设置未被系统环境变量覆盖的变量
-                        if key not in os.environ:
-                            os.environ[key.strip()] = value.strip()
-        except Exception as e:
-            print(f"警告: 无法加载 .env 文件: {e}")
+env_file = Path(__file__).parent / ".env"
+if env_file.exists():
+    load_dotenv(dotenv_path=env_file, override=False)
 
-# 加载 .env 文件
-load_env_file()
+
+def _parse_gpu_device_ids(raw_value: str | None) -> list[int] | None:
+    """Parse a comma/space separated GPU list from environment variables."""
+    if not raw_value:
+        return None
+
+    # Support comma/space separated values and ignore empty fragments
+    tokens = [token.strip() for token in re.split(r"[\s,]+", raw_value) if token.strip()]
+    if not tokens:
+        return None
+
+    devices: list[int] = []
+    seen: set[int] = set()
+    for token in tokens:
+        try:
+            device = int(token)
+        except ValueError:
+            # Ignore invalid entries but keep parsing the rest
+            continue
+
+        if device not in seen:
+            seen.add(device)
+            devices.append(device)
+
+    return devices or None
 
 def print_config_debug_info():
     """打印当前配置调试信息"""
@@ -74,7 +86,12 @@ DEFAULT_QUEUE = 'default'
 # -- Worker 并发设置 --
 # Worker 可以同时运行的最大并发任务数。
 # 这是一个“期望值”，实际的并发数应在 Worker 启动时根据可用 GPU 动态调整。
-MAX_CONCURRENT_TASKS = int(os.environ.get("MAX_CONCURRENT_TASKS", 4))
+MAX_CONCURRENT_TASKS = int(os.environ.get("MAX_CONCURRENT_TASKS", 2))
+
+# -- GPU 设备选择 --
+# 通过环境变量 GPU_DEVICE_IDS 指定可用的 GPU ID 列表（例如："0,1,3"）。
+# 如果未设置，则在初始化时自动探测所有可用 GPU。
+GPU_DEVICE_IDS = _parse_gpu_device_ids(os.environ.get("GPU_DEVICE_IDS"))
 
 
 # -- GPU 资源池 Redis 键 --
@@ -103,6 +120,13 @@ CENTRAL_API_URL = os.environ.get("CENTRAL_API_URL", "http://localhost:5000")
 # ColabFold MSA 服务器的 URL，用于生成多序列比对
 # 默认使用 ColabFold 官方服务器，也可以使用本地服务器
 MSA_SERVER_URL = os.environ.get("MSA_SERVER_URL", "http://172.17.1.248:8080")
+MSA_SERVER_MODE = os.environ.get("MSA_SERVER_MODE", "colabfold")
+
+# ColabFold 服务器缓存目录（用于清理历史任务）
+COLABFOLD_JOBS_DIR = os.environ.get(
+    "COLABFOLD_JOBS_DIR",
+    str(Path(__file__).parent / "colabfold_server" / "jobs")
+)
 
 
 # ==============================================================================

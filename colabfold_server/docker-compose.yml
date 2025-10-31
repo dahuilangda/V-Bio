@@ -1,6 +1,14 @@
 services:
   colabfold-api:
     build: .
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      UID: "${UID:-1000}"
+      GID: "${GID:-1000}"
+      MMSEQS_LOAD_MODE: "${MMSEQS_LOAD_MODE:-0}"
+      HTTP_PROXY: "${HTTP_PROXY:-}"
+      HTTPS_PROXY: "${HTTPS_PROXY:-}"
+      NO_PROXY: "${NO_PROXY:-}"
     container_name: colabfold_api_server
     restart: on-failure:5
     ports:
@@ -9,5 +17,5 @@ services:
       - ${DB_DIR:-./databases}:/app/databases
       - ./jobs:/app/jobs
       - ./config.json:/app/config.json:ro
-    shm_size: '16gb'
-    mem_limit: '64g'
+    shm_size: '64gb'
+    mem_limit: '96g'

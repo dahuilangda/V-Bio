@@ -21,6 +21,7 @@ sys.path.append(os.getcwd())
 from boltz_wrapper import predict
 from config import (
     MSA_SERVER_URL,
+    MSA_SERVER_MODE,
     ALPHAFOLD3_DOCKER_IMAGE,
     ALPHAFOLD3_MODEL_DIR,
     ALPHAFOLD3_DATABASE_DIR,
@@ -69,8 +70,9 @@ def request_msa_from_server(sequence: str, timeout: int = 600) -> dict:
         # ColabFold MSA 服务器使用 form data 格式
         payload = {
             "q": sequence,
-            "mode": "colabfold"
+            "mode": MSA_SERVER_MODE
         }
+        print(f"📦 MSA 请求参数: mode={MSA_SERVER_MODE}", file=sys.stderr)
         
         # 提交搜索任务
         submit_url = f"{MSA_SERVER_URL}/ticket/msa"
@@ -105,6 +107,10 @@ def request_msa_from_server(sequence: str, timeout: int = 600) -> dict:
                         return result_data
                     elif result_data.get("status") == "ERROR":
                         print(f"❌ MSA 搜索失败: {result_data.get('error', '未知错误')}", file=sys.stderr)
+                        print(
+                            f"   ↳ 服务器返回: {json.dumps(result_data, ensure_ascii=False)}",
+                            file=sys.stderr,
+                        )
                         return None
                     else:
                         print(f"⏳ MSA 任务状态: {result_data.get('status', 'PENDING')}", file=sys.stderr)

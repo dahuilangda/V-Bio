@@ -38,5 +38,7 @@ env/
 .DS_Store
 Thumbs.db
 test.txt
-colabfold_server/colabfold/
+
+# Others
 .gitignore
+data/affinity2.yaml

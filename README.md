@@ -104,7 +104,10 @@ docker run -d -p 6379:6379 --name boltz-webui-redis redis:latest
 
 1.  `RESULTS_BASE_DIR`: 确认结果存储路径存在且有写入权限。
 2.  `MAX_CONCURRENT_TASKS`: 根据您的 GPU 数量和显存大小设置最大并发任务数。
-3.  `BOLTZ_API_TOKEN`: 设置一个复杂的安全令牌。**强烈建议**通过环境变量进行配置以提高安全性。
+3.  `GPU_DEVICE_IDS`: （可选）通过逗号或空格指定允许被调度的 GPU ID，如 `GPU_DEVICE_IDS="0,2,3"`。不设置时默认自动探测全部 GPU。
+4.  `MSA_SERVER_MODE`: （可选）根据 MSA 服务配置选择模式，如 `colabfold`、`mmseqs2-uniref` 等。
+5.  `COLABFOLD_JOBS_DIR`: （可选）ColabFold 服务器在宿主机上的任务缓存目录，用于新提供的清理接口。
+6.  `BOLTZ_API_TOKEN`: 设置一个复杂的安全令牌。**强烈建议**通过环境变量进行配置以提高安全性。
 
 ## 使用指南 (Usage)
 
@@ -394,6 +397,26 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
         ```bash
         curl -X POST -H "X-API-Token: your-secret-token" http://127.0.0.1:5000/api/msa/cache/clear
         ```
+
+  * **清理 ColabFold 服务器缓存**: `POST /api/colabfold/cache/clear`
+
+      * **认证**: 需要 API 令牌
+      * **描述**: 删除本地 ColabFold 服务器在 `COLABFOLD_JOBS_DIR` 中积累的历史任务（包括子目录及临时文件）。
+      * **返回值**: 成功删除的条目数、释放空间、以及清理失败的条目（包含错误原因）。当全部条目可写且删除完成时 `success=true`，若存在权限问题等导致部分失败，HTTP 状态码为 `207` 且 `failed_items` 会给出详细说明。
+      * **示例**:
+        ```bash
+        curl -X POST -H "X-API-Token: your-secret-token" http://127.0.0.1:5000/api/colabfold/cache/clear
+        ```
+
+#### **ColabFold 服务器缓存**
+
+若在本地部署了 ColabFold MSA 服务器，长期运行会在 `colabfold_server/jobs`（或你在 `.env` 中通过 `COLABFOLD_JOBS_DIR` 指定的路径）累积大量历史任务文件。可以通过以下方式管理：
+
+1. **查看目录占用**：`du -sh $COLABFOLD_JOBS_DIR`
+2. **一键清理**：使用上文的 `POST /api/colabfold/cache/clear` 接口，API 会统计释放空间并返回失败的条目。如果目录内文件属于 root（Docker 默认），需要先对目录赋权：`sudo chown -R $(whoami) $COLABFOLD_JOBS_DIR`。
+3. **自定义路径**：通过 `.env` 中的 `COLABFOLD_JOBS_DIR` 指向宿主机的实际 jobs 目录，确保 API 能正确定位 ColabFold 数据。
+
+建议在清理前确认没有正在运行的 ColabFold 任务；该接口会直接删除目录下的全部内容。
 
 #### **任务监控与系统管理**
 

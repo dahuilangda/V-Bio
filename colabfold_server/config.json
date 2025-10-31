@@ -22,7 +22,7 @@
         "mmseqs"       : "/app/mmseqs/bin/mmseqs"
     },
     "local" : {
-        "workers"  : 4
+        "workers"  : 1
     },
     "redis" : {
         "network"  : "tcp",

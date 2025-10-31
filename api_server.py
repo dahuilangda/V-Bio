@@ -3,9 +3,11 @@ import logging
 import glob
 import time
 import hashlib
+import shutil
 import psutil
 import signal
 from datetime import datetime, timedelta
+from pathlib import Path
 from functools import wraps
 from typing import Dict, List, Optional
 from flask import Flask, request, jsonify, send_from_directory
@@ -863,30 +865,43 @@ def clear_all_msa_cache_api():
         if not os.path.exists(cache_dir):
             return jsonify({
                 'success': True,
-                'data': {'removed_files': 0, 'freed_space_mb': 0}
+                'data': {'removed_files': 0, 'freed_space_mb': 0.0}
             }), 200
-        
-        msa_files = glob.glob(os.path.join(cache_dir, "msa_*.a3m"))
-        removed_files = 0
-        freed_space = 0
-        
-        for file_path in msa_files:
-            try:
-                file_size = os.path.getsize(file_path)
-                os.remove(file_path)
-                removed_files += 1
-                freed_space += file_size
-                logger.info(f"清空MSA缓存文件: {os.path.basename(file_path)}")
-            except Exception as e:
-                logger.error(f"清空缓存文件失败 {file_path}: {e}")
-        
+
+        total_size = 0
+        total_items = 0
+
+        for root, _, files in os.walk(cache_dir):
+            for file_name in files:
+                file_path = os.path.join(root, file_name)
+                try:
+                    total_size += os.path.getsize(file_path)
+                    total_items += 1
+                except OSError as exc:
+                    logger.warning(f"计算缓存文件大小失败 {file_path}: {exc}")
+
+        try:
+            shutil.rmtree(cache_dir)
+            logger.info(f"已删除整个MSA缓存目录: {cache_dir}")
+        except Exception as exc:
+            logger.exception(f"清空MSA缓存目录失败: {exc}")
+            return jsonify({
+                'error': 'Failed to clear MSA cache',
+                'details': str(exc)
+            }), 500
+
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+        except OSError as exc:
+            logger.error(f"重建MSA缓存目录失败: {exc}")
+
         result = {
-            'removed_files': removed_files,
-            'freed_space_mb': round(freed_space / (1024 * 1024), 2)
+            'removed_files': total_items,
+            'freed_space_mb': round(total_size / (1024 * 1024), 2)
         }
-        
+
         logger.info(f"MSA缓存清空完成: 删除 {result['removed_files']} 个文件，释放 {result['freed_space_mb']} MB空间")
-        
+
         return jsonify({
             'success': True,
             'data': result
@@ -898,6 +913,80 @@ def clear_all_msa_cache_api():
             'error': 'Failed to clear MSA cache',
             'details': str(e)
         }), 500
+
+
+def _calculate_directory_metrics(target: Path) -> tuple[int, int]:
+    total_size = 0
+    total_files = 0
+
+    if not target.exists():
+        return total_size, total_files
+
+    for root, _, files in os.walk(target):
+        for file_name in files:
+            file_path = Path(root) / file_name
+            try:
+                total_size += file_path.stat().st_size
+                total_files += 1
+            except OSError as exc:
+                logger.warning(f"计算路径大小时忽略 {file_path}: {exc}")
+
+    return total_size, total_files
+
+
+@app.route('/api/colabfold/cache/clear', methods=['POST'])
+@require_api_token
+def clear_colabfold_cache_api():
+    """清理 ColabFold 服务器生成的历史任务缓存。"""
+
+    jobs_dir = Path(config.COLABFOLD_JOBS_DIR).expanduser()
+    if not jobs_dir.exists():
+        logger.info(f"ColabFold jobs 目录不存在: {jobs_dir}")
+        return jsonify({
+            'success': True,
+            'data': {
+                'removed_items': 0,
+                'freed_space_mb': 0.0
+            }
+        }), 200
+
+    total_size, total_files = _calculate_directory_metrics(jobs_dir)
+
+    removed_items = 0
+    failures: list[dict[str, str]] = []
+
+    for entry in jobs_dir.iterdir():
+        try:
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+            removed_items += 1
+        except Exception as exc:
+            logger.error(f"清理 ColabFold 缓存条目失败 {entry}: {exc}")
+            failures.append({
+                'path': str(entry),
+                'error': str(exc)
+            })
+
+    result = {
+        'removed_items': removed_items,
+        'freed_space_mb': round(total_size / (1024 * 1024), 2),
+        'failed_items': failures
+    }
+
+    logger.info(
+        "ColabFold 缓存清理完成: 删除 %s 个条目，释放 %.2f MB 空间",
+        removed_items,
+        result['freed_space_mb']
+    )
+
+    status_code = 200 if not failures else 207  # Multi-Status style: 部分失败
+
+    return jsonify({
+        'success': not failures,
+        'data': result
+    }), status_code
 
 # --- Task Monitoring API Endpoints ---
 
