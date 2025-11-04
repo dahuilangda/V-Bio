@@ -13,6 +13,8 @@ import zipfile
 import shlex
 import requests
 import time
+import tarfile
+import io
 from pathlib import Path
 from typing import Optional
 import subprocess
@@ -104,7 +106,48 @@ def request_msa_from_server(sequence: str, timeout: int = 600) -> dict:
                     result_data = response.json()
                     if result_data.get("status") == "COMPLETE":
                         print(f"✅ MSA 搜索完成，获取到结果", file=sys.stderr)
-                        return result_data
+                        download_url = result_data.get("result_url") or f"{MSA_SERVER_URL}/result/download/{ticket_id}"
+                        print(f"📥 下载 MSA 结果: {download_url}", file=sys.stderr)
+                        try:
+                            download_response = requests.get(download_url, timeout=60)
+                        except requests.exceptions.RequestException as download_error:
+                            print(f"❌ 下载 MSA 结果请求失败: {download_error}", file=sys.stderr)
+                            return None
+                        if download_response.status_code != 200:
+                            print(
+                                f"❌ 下载 MSA 结果失败: {download_response.status_code} - {download_response.text}",
+                                file=sys.stderr,
+                            )
+                            return None
+
+                        try:
+                            tar_bytes = io.BytesIO(download_response.content)
+                            with tarfile.open(fileobj=tar_bytes, mode="r:gz") as tar:
+                                a3m_content = None
+                                extracted_filename = None
+                                for member in tar.getmembers():
+                                    if member.name.lower().endswith(".a3m"):
+                                        file_obj = tar.extractfile(member)
+                                        if file_obj:
+                                            a3m_content = file_obj.read().decode("utf-8")
+                                            extracted_filename = member.name
+                                            break
+
+                            if not a3m_content:
+                                print("❌ 未在下载的结果中找到 A3M 文件", file=sys.stderr)
+                                return None
+
+                            print(f"✅ 成功提取 A3M 文件: {extracted_filename}", file=sys.stderr)
+                            entries = parse_a3m_content(a3m_content)
+                            return {
+                                "entries": entries,
+                                "a3m_content": a3m_content,
+                                "source": extracted_filename,
+                                "ticket_id": ticket_id,
+                            }
+                        except tarfile.TarError as tar_error:
+                            print(f"❌ 解析 MSA 压缩包失败: {tar_error}", file=sys.stderr)
+                            return None
                     elif result_data.get("status") == "ERROR":
                         print(f"❌ MSA 搜索失败: {result_data.get('error', '未知错误')}", file=sys.stderr)
                         print(
@@ -145,7 +188,11 @@ def save_msa_result_to_file(msa_result: dict, output_path: str) -> bool:
     """
     try:
         # 根据结果格式保存为 A3M 文件
-        if 'entries' in msa_result:
+        if msa_result.get('a3m_content'):
+            with open(output_path, 'w') as f:
+                f.write(msa_result['a3m_content'])
+            return True
+        elif 'entries' in msa_result:
             with open(output_path, 'w') as f:
                 for entry in msa_result['entries']:
                     name = entry.get('name', 'unknown')
@@ -160,6 +207,35 @@ def save_msa_result_to_file(msa_result: dict, output_path: str) -> bool:
     except Exception as e:
         print(f"❌ 保存 MSA 结果失败: {e}", file=sys.stderr)
         return False
+
+
+def parse_a3m_content(a3m_content: str) -> list:
+    """
+    解析 A3M 文件内容为序列条目列表
+    """
+    entries = []
+    current_name = None
+    current_sequence_lines = []
+
+    for line in a3m_content.splitlines():
+        if line.startswith('>'):
+            if current_name is not None:
+                entries.append({
+                    'name': current_name or 'unknown',
+                    'sequence': ''.join(current_sequence_lines),
+                })
+            current_name = line[1:].strip()
+            current_sequence_lines = []
+        else:
+            current_sequence_lines.append(line.strip())
+
+    if current_name is not None:
+        entries.append({
+            'name': current_name or 'unknown',
+            'sequence': ''.join(current_sequence_lines),
+        })
+
+    return entries
 
 def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
     """
