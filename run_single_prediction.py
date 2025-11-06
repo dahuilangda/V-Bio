@@ -16,7 +16,7 @@ import time
 import tarfile
 import io
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Tuple, Dict, Any
 import subprocess
 
 sys.path.append(os.getcwd())
@@ -111,6 +111,144 @@ def sanitize_a3m_file(path: str, context: str = "") -> None:
                 f.write(sanitized)
         except OSError as e:
             print(f"⚠️ 无法写入清理后的 A3M 文件: {path}, {e}", file=sys.stderr)
+
+
+def extract_affinity_config_from_yaml(yaml_data: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """
+    从 YAML 数据中提取亲和力配置。
+    """
+    properties = yaml_data.get("properties")
+    if not isinstance(properties, list):
+        return None
+
+    for entry in properties:
+        if not isinstance(entry, dict):
+            continue
+        affinity_info = entry.get("affinity")
+        if isinstance(affinity_info, dict):
+            binder = affinity_info.get("binder")
+            if binder:
+                return {"binder": str(binder)}
+    return None
+
+
+def find_ligand_resname_in_cif(cif_path: Path, binder_chain: str) -> Optional[str]:
+    """
+    在 mmCIF 文件中查找指定链的配体残基名称。
+    """
+    try:
+        with cif_path.open("r") as cif_file:
+            for line in cif_file:
+                if not line.startswith("HETATM"):
+                    continue
+                parts = line.split()
+                if len(parts) < 7:
+                    continue
+                comp_id = parts[5]
+                chain_id = parts[6]
+                if chain_id == binder_chain:
+                    return comp_id
+    except OSError as err:
+        print(f"⚠️ 无法读取 CIF 文件 {cif_path}: {err}", file=sys.stderr)
+    return None
+
+
+def run_af3_affinity_pipeline(
+    temp_dir: str,
+    yaml_data: Dict[str, Any],
+    prep: AF3Preparation,
+    af3_output_dir: str,
+) -> List[Tuple[Path, str]]:
+    """
+    若 YAML 配置请求亲和力预测，则在 AlphaFold3 结果上运行 Boltz-2 亲和力流程。
+    返回需要附加到归档中的额外文件列表 (Path, arcname)。
+    """
+    affinity_config = extract_affinity_config_from_yaml(yaml_data)
+    if not affinity_config:
+        return []
+
+    binder_chain = affinity_config.get("binder")
+    if not binder_chain:
+        print("ℹ️ 亲和力配置未提供有效的 binder，跳过亲和力预测。", file=sys.stderr)
+        return []
+
+    binder_chain = str(binder_chain).strip()
+    if not binder_chain:
+        print("ℹ️ 亲和力配置 binder 为空，跳过亲和力预测。", file=sys.stderr)
+        return []
+
+    ligand_entries = [
+        entry for entry in yaml_data.get("sequences", [])
+        if isinstance(entry, dict) and "ligand" in entry
+    ]
+    if not ligand_entries:
+        print("ℹ️ 未检测到配体条目，跳过亲和力预测。", file=sys.stderr)
+        return []
+
+    model_path = Path(af3_output_dir) / prep.jobname / f"{prep.jobname}_model.cif"
+    if not model_path.exists():
+        fallback = next(Path(af3_output_dir).glob("**/*model.cif"), None)
+        if fallback:
+            model_path = fallback
+        else:
+            print("⚠️ 未找到 AlphaFold3 预测的结构文件，无法进行亲和力预测。", file=sys.stderr)
+            return []
+
+    ligand_resname = find_ligand_resname_in_cif(model_path, binder_chain)
+    if not ligand_resname:
+        print(
+            f"⚠️ 未能在结构中找到链 {binder_chain} 的配体残基，跳过亲和力预测。",
+            file=sys.stderr,
+        )
+        return []
+
+    try:
+        from affinity.main import Boltzina
+    except ImportError as err:
+        print(f"⚠️ 无法导入 Boltz-2 亲和力模块：{err}，跳过亲和力预测。", file=sys.stderr)
+        return []
+
+    affinity_base = Path(temp_dir) / "af3_affinity"
+    output_dir = affinity_base / "boltzina_output"
+    work_dir = affinity_base / "boltzina_work"
+
+    affinity_entries: List[Tuple[Path, str]] = []
+    try:
+        print(
+            f"⚙️ 开始运行 Boltz-2 亲和力评估，配体链: {binder_chain}, 残基名: {ligand_resname}",
+            file=sys.stderr,
+        )
+        boltzina = Boltzina(
+            output_dir=str(output_dir),
+            work_dir=str(work_dir),
+            ligand_resname=ligand_resname,
+        )
+        boltzina.predict([str(model_path)])
+
+        if not boltzina.results:
+            print("⚠️ 亲和力预测未产生结果，跳过生成 affinity_data.json。", file=sys.stderr)
+            return []
+
+        affinity_result = dict(boltzina.results[0])
+        affinity_result["ligand_resname"] = ligand_resname
+        affinity_result["binder_chain"] = binder_chain
+        affinity_result["source"] = "alphafold3"
+
+        affinity_base.mkdir(parents=True, exist_ok=True)
+        affinity_json_path = affinity_base / "affinity_data.json"
+        with affinity_json_path.open("w") as json_file:
+            json.dump(affinity_result, json_file, indent=2)
+        affinity_entries.append((affinity_json_path, "affinity_data.json"))
+
+        affinity_csv_path = output_dir / "affinity_results.csv"
+        if affinity_csv_path.exists():
+            affinity_entries.append((affinity_csv_path, "af3/affinity_results.csv"))
+
+        print("✅ 亲和力预测完成，结果已写入 affinity_data.json。", file=sys.stderr)
+    except Exception as err:
+        print(f"⚠️ 运行 Boltz-2 亲和力预测失败: {err}", file=sys.stderr)
+
+    return affinity_entries
 
 
 def get_sequence_hash(sequence: str) -> str:
@@ -716,6 +854,7 @@ def create_af3_archive(
     yaml_content: str,
     prep: AF3Preparation,
     af3_output_dir: Optional[str] = None,
+    extra_files: Optional[List[Tuple[Path, str]]] = None,
 ) -> None:
     """
     Create an archive containing AF3-compatible assets (FASTA, JSON, and MSAs).
@@ -768,6 +907,14 @@ def create_af3_archive(
                 "Upload the JSON file to AlphaFold3 alongside the FASTA sequence.\n"
             )
             zipf.writestr("af3/README.txt", instructions)
+
+            if extra_files:
+                for file_path, arcname in extra_files:
+                    if not file_path or not Path(file_path).exists():
+                        print(f"⚠️ 额外文件不存在，跳过添加: {file_path}", file=sys.stderr)
+                        continue
+                    zipf.write(str(file_path), arcname)
+                    print(f"添加额外文件: {arcname}", file=sys.stderr)
 
         print(f"✅ AF3 归档创建完成: {output_archive_path}", file=sys.stderr)
     except Exception as e:
@@ -843,6 +990,12 @@ def run_alphafold3_backend(
     use_msa_server: bool,
 ) -> None:
     print("🚀 Using AlphaFold3 backend (AF3 input preparation)", file=sys.stderr)
+
+    try:
+        yaml_data = yaml.safe_load(yaml_content) or {}
+    except yaml.YAMLError as err:
+        print(f"⚠️ 无法解析 YAML，亲和力后处理将被跳过: {err}", file=sys.stderr)
+        yaml_data = {}
 
     if use_msa_server and MSA_SERVER_URL and MSA_SERVER_URL != "":
         print(f"🧬 开始使用 MSA 服务器生成多序列比对: {MSA_SERVER_URL}", file=sys.stderr)
@@ -959,6 +1112,13 @@ def run_alphafold3_backend(
     if not any(p.is_file() for p in af3_output_contents):
         print("⚠️ AlphaFold3 输出目录为空，可能推理未产生结果。", file=sys.stderr)
 
+    extra_archive_files = run_af3_affinity_pipeline(
+        temp_dir=temp_dir,
+        yaml_data=yaml_data,
+        prep=prep,
+        af3_output_dir=af3_output_dir,
+    )
+
     create_af3_archive(
         output_archive_path,
         fasta_content,
@@ -967,6 +1127,7 @@ def run_alphafold3_backend(
         yaml_content,
         prep,
         af3_output_dir=af3_output_dir,
+        extra_files=extra_archive_files,
     )
 
 def main():
