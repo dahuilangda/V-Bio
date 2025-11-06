@@ -33,7 +33,7 @@ class BoltzApiClient:
                 # 添加参数
                 data = {
                     'use_msa_server': str(use_msa_server).lower(),
-                    'priority': 'high',
+                    'priority': 'default',
                     'backend': backend
                 }
                 # 如果指定了模型，添加模型参数

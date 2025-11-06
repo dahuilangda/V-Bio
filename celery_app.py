@@ -36,5 +36,9 @@ celery_app.conf.update(
     task_create_missing_queues=True,
 )
 
+# Ensure workers request tasks one at a time to avoid queue starvation and
+# provide fair interleaving when multiple jobs are waiting.
+celery_app.conf.worker_prefetch_multiplier = 1
+
 if __name__ == '__main__':
     celery_app.start()

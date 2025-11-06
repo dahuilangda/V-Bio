@@ -16,7 +16,7 @@ def submit_job(yaml_content: str, use_msa: bool, model_name: str = None, backend
     files = {'yaml_file': ('config.yaml', yaml_content, 'application/x-yaml')}
     data = {
         'use_msa_server': str(use_msa).lower(),
-        'priority': 'default', # Hardcoding priority for now
+        'priority': 'high',
         'backend': backend
     }
     if model_name:
