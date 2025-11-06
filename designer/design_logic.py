@@ -55,7 +55,14 @@ class Designer:
     管理蛋白质和糖肽的多谱系、梯度自由设计优化循环。
     集成了自适应机制以动态调整探索强度，防止过早收敛。
     """
-    def __init__(self, base_yaml_path: str, client: BoltzApiClient, use_msa_server: bool = False, model_name: str = None):
+    def __init__(
+        self,
+        base_yaml_path: str,
+        client: BoltzApiClient,
+        use_msa_server: bool = False,
+        model_name: str = None,
+        backend: str = "boltz",
+    ):
         """初始化Designer实例。
         
         Args:
@@ -63,11 +70,13 @@ class Designer:
             client: BoltzApiClient实例
             use_msa_server: 当序列找不到MSA缓存时是否使用MSA服务器
             model_name: 指定使用的模型名称（如boltz1），糖肽设计时会自动使用
+            backend: 预测后端（'boltz' 或 'alphafold3'）
         """
         self.base_yaml_path = base_yaml_path
         self.client = client
         self.use_msa_server = use_msa_server
         self.model_name = model_name  # 存储模型名称
+        self.backend = backend
         with open(base_yaml_path, 'r') as f:
             self.base_config = yaml.safe_load(f)
         
@@ -126,11 +135,19 @@ class Designer:
 
         # 动态确定模型名称
         design_type = design_params.get('design_type', 'linear')
-        model_name = "boltz1" if design_type in ['glycopeptide'] else self.model_name
-        if model_name == "boltz1":
-            logger.debug(f"Using boltz1 model for {design_type} design")
+        if self.backend == 'boltz':
+            model_name = "boltz1" if design_type in ['glycopeptide'] else self.model_name
+            if model_name == "boltz1":
+                logger.debug(f"Using boltz1 model for {design_type} design")
+        else:
+            model_name = None
         
-        task_id = self.client.submit_job(candidate_yaml_path, use_msa_server=self.use_msa_server, model_name=model_name)
+        task_id = self.client.submit_job(
+            candidate_yaml_path,
+            use_msa_server=self.use_msa_server,
+            model_name=model_name,
+            backend=self.backend,
+        )
         if not task_id:
             return (sequence, None, None)
 
@@ -144,6 +161,7 @@ class Designer:
             return (sequence, None, None)
 
         metrics = parse_confidence_metrics(results_path, binder_chain_id)
+        metrics['backend'] = self.backend
         metrics['mutation_strategy'] = strategy_used  # 添加策略信息
         iptm_score = metrics.get('iptm', 0.0)
         plddt_score = metrics.get('binder_avg_plddt', 0.0)
@@ -278,12 +296,14 @@ class Designer:
         user_constraints = kwargs.get('user_constraints', [])  # 新增：用户约束
         include_cysteine = kwargs.get('include_cysteine', True)  # 新增：半胱氨酸控制
         cyclic_binder = kwargs.get('cyclic_binder', False)  # 新增：环状设计控制
+        self.backend = kwargs.get('backend', self.backend) or self.backend
 
         logger.info(f"--- Starting Design Run (Type: {design_type.capitalize()}) with Adaptive Hyperparameters ---")
         logger.info(f"Scoring weights -> ipTM: {weight_iptm}, pLDDT: {weight_plddt}")
         logger.info(f"Mutation rate: {mutation_rate}")
         logger.info(f"Cysteine control: {'enabled' if include_cysteine else 'disabled'}")
         logger.info(f"Cyclic design: {'enabled' if cyclic_binder else 'disabled'}")
+        logger.info(f"Prediction backend: {self.backend}")
         if sequence_mask:
             logger.info(f"Sequence mask applied: {sequence_mask}")
         if user_constraints:
@@ -298,7 +318,8 @@ class Designer:
             'user_constraints': user_constraints,  # 新增：传递用户约束
             'sequence_mask': sequence_mask,  # 新增：传递序列掩码
             'include_cysteine': include_cysteine,  # 新增：传递半胱氨酸控制
-            'cyclic_binder': cyclic_binder  # 新增：传递环状设计控制
+            'cyclic_binder': cyclic_binder,  # 新增：传递环状设计控制
+            'backend': self.backend
         }
         if design_type == 'glycopeptide':
             design_params.update({

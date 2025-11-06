@@ -10,6 +10,11 @@ TYPE_TO_DISPLAY = {
     'rna': '📜 RNA'
 }
 
+BACKEND_LABELS = {
+    'boltz': 'Boltz 引擎',
+    'alphafold3': 'AlphaFold3 引擎'
+}
+
 TYPE_SPECIFIC_INFO = {
     'protein': {
         'placeholder': "例如: MVSKGEELFTGVVPILVELDGDVNGHKFSVSGEGEGDATYGKLTLKFICTTGKLPVPWPTLV...",

@@ -17,20 +17,25 @@ class BoltzApiClient:
         self.headers = {"X-API-Token": api_token}
         print(f"API Client initialized for server: {self.server_url}")
 
-    def submit_job(self, yaml_path: str, use_msa_server: bool = False, model_name: str = None) -> Optional[str]:
+    def submit_job(self, yaml_path: str, use_msa_server: bool = False, model_name: str = None, backend: str = 'boltz') -> Optional[str]:
         """Submits a prediction job using a YAML file.
         
         Args:
             yaml_path: Path to the YAML configuration file
             use_msa_server: Whether to use MSA server when sequences don't have cached MSAs
             model_name: Specific model to use (e.g., 'boltz1' for glycopeptide design)
+            backend: Prediction backend to use ('boltz' or 'alphafold3')
         """
         predict_url = f"{self.server_url}/predict"
         try:
             with open(yaml_path, 'rb') as f:
                 files = {'yaml_file': (os.path.basename(yaml_path), f)}
                 # 添加参数
-                data = {'use_msa_server': str(use_msa_server).lower(), 'priority': 'high'}
+                data = {
+                    'use_msa_server': str(use_msa_server).lower(),
+                    'priority': 'high',
+                    'backend': backend
+                }
                 # 如果指定了模型，添加模型参数
                 if model_name:
                     data['model'] = model_name

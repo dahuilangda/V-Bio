@@ -8,6 +8,7 @@ import uuid
 import json
 import psutil
 
+from frontend.constants import BACKEND_LABELS
 from frontend.utils import (
     get_available_chain_ids, 
     get_available_chain_ids_for_designer,  # 新增：设计器专用函数
@@ -316,6 +317,24 @@ def render_designer_page():
         else:
             target_chain_id = 'A'
             binder_chain_id = 'B'
+
+        backend_options = list(BACKEND_LABELS.keys())
+        current_backend = st.session_state.get('designer_backend', 'boltz')
+        if current_backend not in backend_options:
+            current_backend = 'boltz'
+        backend_index = backend_options.index(current_backend)
+        selected_backend = st.selectbox(
+            "选择预测后端",
+            backend_options,
+            index=backend_index,
+            format_func=lambda key: BACKEND_LABELS.get(key, key),
+            disabled=designer_is_running,
+            help="Boltz 引擎直接完成结构预测；AlphaFold3 引擎生成 AF3 归档并附带 AlphaFold3 预测指标。",
+            key="designer_backend_select"
+        )
+        if selected_backend != current_backend:
+            st.session_state.designer_backend = selected_backend
+            st.rerun()
         
         st.subheader("🔗 分子约束 (可选)", anchor=False)
         st.markdown("设置分子结构约束，包括键约束、口袋约束和接触约束。")
@@ -905,13 +924,16 @@ def render_designer_page():
                     cyclic_binder=cyclic_binder,
                     include_cysteine=include_cysteine,
                     use_msa=any_msa_enabled,
-                    user_constraints=st.session_state.designer_constraints  # 新增：传递用户约束
+                    user_constraints=st.session_state.designer_constraints,  # 新增：传递用户约束
+                    backend=st.session_state.designer_backend
                 )
                 
                 if result['success']:
                     st.session_state.designer_task_id = result['task_id']
                     st.session_state.designer_work_dir = result['work_dir']
                     st.session_state.designer_config = result['params']
+                    st.session_state.designer_backend = result['params'].get('backend', st.session_state.designer_backend)
+                    st.session_state.designer_config['backend'] = st.session_state.designer_backend
                     
                     # 确保session state中保存的是实际的design_type
                     if 'design_type' in st.session_state.designer_config:
@@ -923,7 +945,8 @@ def render_designer_page():
                         work_dir=result['work_dir'],
                         components=st.session_state.designer_components,
                         constraints=st.session_state.designer_constraints,
-                        config=st.session_state.designer_config
+                        config=st.session_state.designer_config,
+                        backend=st.session_state.designer_backend
                     )
                     
                     st.toast(f"🎉 设计任务已成功启动！任务ID: {result['task_id']}", icon="✅")

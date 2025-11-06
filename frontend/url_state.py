@@ -65,7 +65,7 @@ class URLStateManager:
         URLStateManager.set_query_params(**params)
     
     @staticmethod
-    def update_url_for_designer_task(task_id: str, work_dir: str = None, components=None, constraints=None, config=None, task_type: str = 'designer'):
+    def update_url_for_designer_task(task_id: str, work_dir: str = None, components=None, constraints=None, config=None, task_type: str = 'designer', backend: str = None):
         """为设计任务更新URL参数"""
         import json
         params = {
@@ -99,7 +99,9 @@ class URLStateManager:
                             simplified_components.append(simplified_comp)
                     designer_config['components'] = simplified_components
                 
-                if designer_config['components'] or designer_config['constraints'] or designer_config['config']:
+                if backend:
+                    designer_config['backend'] = backend
+                if designer_config['components'] or designer_config['constraints'] or designer_config['config'] or backend:
                     params['designer_config'] = json.dumps(designer_config)
             except Exception as e:
                 # 如果序列化失败，不保存配置
@@ -157,6 +159,7 @@ class URLStateManager:
                     if config_str:
                         try:
                             config_data = json.loads(config_str)
+                            backend = config_data.get('backend')
                             components = config_data.get('components', [])
                             constraints = config_data.get('constraints', [])
                             properties = config_data.get('properties', {})
@@ -208,6 +211,9 @@ class URLStateManager:
                     if designer_config_str:
                         try:
                             designer_config_data = json.loads(designer_config_str)
+                            backend = designer_config_data.get('backend')
+                            if backend in ('boltz', 'alphafold3'):
+                                st.session_state.designer_backend = backend
                             components = designer_config_data.get('components', [])
                             constraints = designer_config_data.get('constraints', [])
                             config = designer_config_data.get('config', {})
@@ -253,6 +259,9 @@ class URLStateManager:
                     if designer_config_str:
                         try:
                             designer_config_data = json.loads(designer_config_str)
+                            backend = designer_config_data.get('backend')
+                            if backend in ('boltz', 'alphafold3'):
+                                st.session_state.bicyclic_backend = backend
                             components = designer_config_data.get('components', [])
                             constraints = designer_config_data.get('constraints', [])
                             config = designer_config_data.get('config', {})

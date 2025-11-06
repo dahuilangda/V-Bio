@@ -229,6 +229,8 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
                 "--keep_temp_files"
             ]
             
+            cmd.extend(["--backend", params.get('backend', 'boltz')])
+            
             # 添加用户约束文件路径（如果存在）
             if params.get('constraints_path'):
                 cmd.extend(["--user_constraints", params.get('constraints_path')])
@@ -434,7 +436,8 @@ def submit_designer_job(
     include_cysteine: bool = True,
     use_msa: bool = False,
     user_constraints: list = None,  # 用户约束
-    bicyclic_params: dict = None  # 双环肽参数
+    bicyclic_params: dict = None,  # 双环肽参数
+    backend: str = 'boltz'
 ) -> dict:
     """提交 Designer 任务"""
     try:
@@ -500,7 +503,8 @@ def submit_designer_job(
             'cyclic_binder': cyclic_binder,
             'include_cysteine': include_cysteine,
             'use_msa': use_msa,
-            'user_constraints': user_constraints or []  # 新增：用户约束
+            'user_constraints': user_constraints or [],
+            'backend': backend  # 后端选择
         }
         
         if design_type == 'glycopeptide' and glycan_type:

@@ -93,6 +93,7 @@ def main():
     api_group.add_argument("--server_url", default="http://127.0.0.1:5000", help="Boltz-WebUI 预测 API 服务器的URL。")
     api_group.add_argument("--api_token", help="您的API密钥。也可以通过 'BOLTZ_API_TOKEN' 环境变量设置。")
     api_group.add_argument("--no_msa_server", action="store_true", default=False, help="禁用MSA服务器。默认情况下，当序列找不到MSA缓存时，会使用MSA服务器自动生成MSA以提高预测精度。")
+    api_group.add_argument("--backend", choices=["boltz", "alphafold3"], default="boltz", help="选择用于结构评估的预测后端。")
 
     args = parser.parse_args()
 
@@ -174,12 +175,20 @@ def main():
         else:
             logger.info("MSA server disabled: will use empty MSA for sequences without cache")
         
+        logger.info(f"Using prediction backend: {args.backend}")
+
         # 根据是否有糖肽或双环肽修饰选择合适的模型
-        model_name = "boltz1" if args.design_type in ["glycopeptide"] else None
+        model_name = "boltz1" if args.backend == "boltz" and args.design_type in ["glycopeptide"] else None
         if model_name:
             logger.info(f"{args.design_type.capitalize()} design detected - using model: {model_name}")
         
-        designer = Designer(base_yaml_path=args.yaml_template, client=client, use_msa_server=use_msa_server, model_name=model_name)
+        designer = Designer(
+            base_yaml_path=args.yaml_template,
+            client=client,
+            use_msa_server=use_msa_server,
+            model_name=model_name,
+            backend=args.backend
+        )
         
         # 配置增强功能
         if hasattr(args, 'disable_enhanced') and args.disable_enhanced:
@@ -215,6 +224,7 @@ def main():
             'design_type': args.design_type,
             'include_cysteine': include_cysteine,  # 使用计算后的值
             'user_constraints': user_constraints,  # 新增：用户约束
+            'backend': args.backend,
             'cyclic_binder': args.cyclic_binder  # 新增：环状设计参数
         }
 

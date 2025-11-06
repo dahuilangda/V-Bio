@@ -8,7 +8,7 @@ import uuid
 import time
 import math
 
-from frontend.constants import TYPE_TO_DISPLAY, TYPE_SPECIFIC_INFO
+from frontend.constants import TYPE_TO_DISPLAY, TYPE_SPECIFIC_INFO, BACKEND_LABELS
 from frontend.utils import (
     get_available_chain_ids, 
     get_smart_msa_default, 
@@ -21,12 +21,6 @@ from frontend.utils import (
 from frontend.prediction_client import submit_job, get_status, download_and_process_results
 from frontend.ui_components import render_contact_constraint_ui, render_bond_constraint_ui, render_pocket_constraint_ui
 from frontend.url_state import URLStateManager
-
-BACKEND_LABELS = {
-    'boltz': 'Boltz 引擎',
-    'alphafold3': 'AlphaFold3 引擎'
-}
-
 
 def format_metric_value(value, precision: int = 2) -> str:
     """
@@ -380,9 +374,6 @@ def render_prediction_page():
         if selected_backend != current_backend:
             st.session_state.prediction_backend = selected_backend
             st.rerun()
-
-        if st.session_state.prediction_backend == 'alphafold3':
-            st.caption("AlphaFold3 归档包含 `af3_input.json`、MSA 和 `af3/output/` 目录下的原始推理文件。")
         
         has_ligand_component = any(comp['type'] == 'ligand' for comp in st.session_state.components)
         if has_ligand_component:
@@ -686,7 +677,6 @@ def render_prediction_page():
                     st.toast(f"🧬 检测到糖肽修饰，使用 {model_name} 模型进行预测", icon="🍬")
                 
                 backend_label = BACKEND_LABELS.get(st.session_state.prediction_backend, st.session_state.prediction_backend)
-                st.toast(f"⚙️ 当前后端：{backend_label}", icon="🛠️")
                 
                 st.rerun()
             except requests.exceptions.RequestException as e:

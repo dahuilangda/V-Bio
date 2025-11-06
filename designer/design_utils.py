@@ -18,8 +18,9 @@ import json
 import logging
 import numpy as np
 import math
+from pathlib import Path
 from collections import defaultdict, Counter
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 # --- 初始化日志记录器 ---
 # 该模块的日志记录器将继承主入口点的配置
@@ -597,84 +598,203 @@ def mutate_sequence(
 
 
 def parse_confidence_metrics(results_path: str, binder_chain_id: str) -> dict:
-    """从Boltz预测输出文件中解析关键的置信度指标（如ipTM, pLDDT）。"""
+    """从预测输出目录中解析关键置信度指标，并兼容 Boltz 与 AlphaFold3 后端。"""
     metrics = {
-        'iptm': 0.0, 'ptm': 0.0, 'complex_plddt': 0.0,
-        'binder_avg_plddt': 0.0, 'plddts': []
+        'iptm': 0.0,
+        'ptm': 0.0,
+        'complex_plddt': 0.0,
+        'binder_avg_plddt': 0.0,
+        'plddts': [],
+        'backend': 'boltz'
     }
-    # --- Parse confidence.json file ---
+
+    root_path = Path(results_path)
+
+    # 读取亲和力数据（若存在）
+    affinity_path = root_path / "affinity_data.json"
+    if affinity_path.exists():
+        try:
+            with affinity_path.open('r') as f:
+                metrics['affinity'] = json.load(f)
+        except Exception as exc:
+            logger.warning(f"Failed to load affinity data from {affinity_path}: {exc}")
+
+    def _extract_plddts_from_cif(cif_path: Path, chain_id: str) -> List[float]:
+        """解析指定链的pLDDT值。"""
+        try:
+            lines = cif_path.read_text().splitlines()
+        except Exception as exc:
+            logger.warning(f"Unable to read CIF file {cif_path}: {exc}")
+            return []
+
+        header, atom_lines, in_loop = [], [], False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('_atom_site.'):
+                header.append(stripped)
+                in_loop = True
+            elif in_loop and (stripped.startswith('ATOM') or stripped.startswith('HETATM')):
+                atom_lines.append(stripped)
+            elif in_loop and not stripped:
+                in_loop = False
+
+        if not header or not atom_lines:
+            return []
+
+        header_map = {name: idx for idx, name in enumerate(header)}
+        chain_col = header_map.get('_atom_site.label_asym_id') or header_map.get('_atom_site.auth_asym_id')
+        res_col = header_map.get('_atom_site.label_seq_id')
+        bfactor_col = header_map.get('_atom_site.B_iso_or_equiv')
+
+        if None in (chain_col, res_col, bfactor_col):
+            return []
+
+        plddts = []
+        last_res_id = None
+        for atom_line in atom_lines:
+            fields = atom_line.split()
+            if len(fields) <= max(chain_col, res_col, bfactor_col):
+                continue
+            chain_value = fields[chain_col]
+            res_value = fields[res_col]
+            if chain_value == chain_id and res_value != last_res_id:
+                try:
+                    plddts.append(float(fields[bfactor_col]))
+                    last_res_id = res_value
+                except (ValueError, IndexError):
+                    continue
+        return plddts
+
+    def _prefer_aggregate_file(candidates: List[Path]) -> Optional[Path]:
+        """优先选择不包含 seed- 的聚合文件。"""
+        for candidate in sorted(candidates):
+            if "seed-" not in candidate.as_posix():
+                return candidate
+        return sorted(candidates)[0] if candidates else None
+
+    af3_dir = root_path / "af3"
+    if af3_dir.is_dir():
+        metrics['backend'] = 'alphafold3'
+        output_root = af3_dir / "output"
+
+        summary_file = None
+        confidences_file = None
+        model_cif_path = None
+
+        if output_root.is_dir():
+            summary_candidates = list(output_root.glob("**/*summary_confidences.json"))
+            summary_file = _prefer_aggregate_file(summary_candidates)
+
+            confidences_candidates = list(output_root.glob("**/confidences.json"))
+            confidences_file = _prefer_aggregate_file(confidences_candidates)
+
+            model_candidates = list(output_root.glob("**/*model.cif"))
+            model_cif_path = _prefer_aggregate_file(model_candidates)
+
+        # 解析 summary_confidences.json
+        if summary_file and summary_file.exists():
+            try:
+                with summary_file.open('r') as f:
+                    summary_data = json.load(f)
+                ptm = summary_data.get("ptm")
+                if isinstance(ptm, (int, float)):
+                    metrics['ptm'] = ptm
+
+                iptm = summary_data.get("iptm")
+                if not isinstance(iptm, (int, float)) or iptm == 0.0:
+                    chain_pair_iptm = summary_data.get("chain_pair_iptm")
+                    if (
+                        isinstance(chain_pair_iptm, list)
+                        and chain_pair_iptm
+                        and isinstance(chain_pair_iptm[0], list)
+                        and chain_pair_iptm[0]
+                        and isinstance(chain_pair_iptm[0][0], (int, float))
+                    ):
+                        iptm = chain_pair_iptm[0][0]
+                if isinstance(iptm, (int, float)):
+                    metrics['iptm'] = iptm
+
+                ranking_score = summary_data.get("ranking_score")
+                if isinstance(ranking_score, (int, float)):
+                    metrics['ranking_score'] = ranking_score
+
+                fraction_disordered = summary_data.get("fraction_disordered")
+                if isinstance(fraction_disordered, (int, float)):
+                    metrics['fraction_disordered'] = fraction_disordered
+            except Exception as exc:
+                logger.warning(f"Failed to parse AF3 summary confidences from {summary_file}: {exc}")
+
+        # 解析 confidences.json
+        if confidences_file and confidences_file.exists():
+            try:
+                with confidences_file.open('r') as f:
+                    conf_data = json.load(f)
+
+                atom_plddts = conf_data.get("atom_plddts") or []
+                if atom_plddts:
+                    metrics['complex_plddt'] = float(sum(atom_plddts) / len(atom_plddts))
+
+                pae_matrix = conf_data.get("pae") or []
+                flattened_pae = [
+                    value
+                    for row in pae_matrix
+                    if isinstance(row, list)
+                    for value in row
+                    if isinstance(value, (int, float))
+                ]
+                if flattened_pae:
+                    metrics['complex_pde'] = float(sum(flattened_pae) / len(flattened_pae))
+            except Exception as exc:
+                logger.warning(f"Failed to parse AF3 confidences from {confidences_file}: {exc}")
+
+        # 解析 CIF 获取 binder pLDDT
+        if model_cif_path and model_cif_path.exists():
+            binder_plddts = _extract_plddts_from_cif(model_cif_path, binder_chain_id)
+            if binder_plddts:
+                metrics['plddts'] = binder_plddts
+                metrics['binder_avg_plddt'] = float(np.mean(binder_plddts))
+
+        return metrics
+
+    # --- Boltz 默认结果解析 ---
     try:
-        json_path = next((os.path.join(results_path, f) for f in os.listdir(results_path) if f.startswith('confidence_') and f.endswith('.json')), None)
-        if json_path:
-            with open(json_path, 'r') as f: data = json.load(f)
+        json_path = next(
+            (
+                root_path / f
+                for f in os.listdir(results_path)
+                if f.startswith('confidence_') and f.endswith('.json')
+            ),
+            None,
+        )
+        if json_path and json_path.exists():
+            with json_path.open('r') as f:
+                data = json.load(f)
             metrics.update({
                 'ptm': data.get('ptm', 0.0),
                 'complex_plddt': data.get('complex_plddt', 0.0)
             })
-            # 优先使用整体的 iptm 值，它更好地反映了整个复合体的相互作用质量
             metrics['iptm'] = data.get('iptm', 0.0)
-            
-            # 如果没有整体 iptm，则尝试从链间矩阵计算
+
             if metrics['iptm'] == 0.0:
                 pair_iptm = data.get('pair_chains_iptm', {})
-                chain_ids = list(pair_iptm.keys())
-                if len(chain_ids) > 1:
-                    # 对于糖肽，计算所有链间相互作用的平均值
-                    inter_chain_iptms = []
-                    for c1 in chain_ids:
-                        for c2 in chain_ids:
-                            if c1 != c2:  # 只考虑不同链之间的相互作用
-                                iptm_val = pair_iptm.get(c1, {}).get(c2, 0.0)
-                                if iptm_val > 0:
-                                    inter_chain_iptms.append(iptm_val)
-                    
-                    if inter_chain_iptms:
-                        metrics['iptm'] = sum(inter_chain_iptms) / len(inter_chain_iptms)
-    except Exception as e:
-        logger.warning(f"Could not parse confidence metrics from JSON in {results_path}. Error: {e}")
+                for c1, c2_dict in pair_iptm.items():
+                    for c2, iptm_val in (c2_dict or {}).items():
+                        if c1 != c2 and isinstance(iptm_val, (int, float)) and iptm_val > 0:
+                            metrics['iptm'] = max(metrics['iptm'], iptm_val)
+    except Exception as exc:
+        logger.warning(f"Could not parse confidence metrics from JSON in {results_path}. Error: {exc}")
 
-    # --- Parse pLDDT scores from CIF file ---
     try:
         cif_files = [f for f in os.listdir(results_path) if f.endswith('.cif')]
         if cif_files:
             rank_1_cif = next((f for f in cif_files if 'rank_1' in f), cif_files[0])
-            cif_path = os.path.join(results_path, rank_1_cif)
-            with open(cif_path, 'r') as f: lines = f.readlines()
-
-            header, atom_lines, in_loop = [], [], False
-            for line in lines:
-                s_line = line.strip()
-                if s_line.startswith('_atom_site.'):
-                    header.append(s_line)
-                    in_loop = True
-                elif in_loop and (s_line.startswith('ATOM') or s_line.startswith('HETATM')):
-                    atom_lines.append(s_line)
-                elif in_loop and not s_line:
-                    in_loop = False
-
-            if header and atom_lines:
-                h_map = {name: i for i, name in enumerate(header)}
-                chain_col = h_map.get('_atom_site.label_asym_id') or h_map.get('_atom_site.auth_asym_id')
-                res_col, bfactor_col = h_map.get('_atom_site.label_seq_id'), h_map.get('_atom_site.B_iso_or_equiv')
-
-                if all(c is not None for c in [chain_col, res_col, bfactor_col]):
-                    plddts, last_res_id = [], None
-                    for atom_line in atom_lines:
-                        fields = atom_line.split()
-                        if len(fields) > max(chain_col, res_col, bfactor_col):
-                            chain_id = fields[chain_col]
-                            res_id = fields[res_col]
-                            if chain_id == binder_chain_id and res_id != last_res_id:
-                                try:
-                                    plddts.append(float(fields[bfactor_col]))
-                                    last_res_id = res_id
-                                except (ValueError, IndexError):
-                                    continue
-                    if plddts:
-                        metrics['plddts'] = plddts
-                        metrics['binder_avg_plddt'] = np.mean(plddts)
-    except Exception as e:
-        logger.warning(f"Error parsing pLDDTs from CIF file in {results_path}. Error: {e}")
+            cif_path = root_path / rank_1_cif
+            binder_plddts = _extract_plddts_from_cif(cif_path, binder_chain_id)
+            if binder_plddts:
+                metrics['plddts'] = binder_plddts
+                metrics['binder_avg_plddt'] = float(np.mean(binder_plddts))
+    except Exception as exc:
+        logger.warning(f"Error parsing pLDDTs from CIF file in {results_path}. Error: {exc}")
 
     return metrics
 

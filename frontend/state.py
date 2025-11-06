@@ -13,6 +13,7 @@ def initialize_session_state():
     if 'properties' not in st.session_state: st.session_state.properties = {'affinity': False, 'binder': None}
     if 'use_msa_server' not in st.session_state: st.session_state.use_msa_server = False
     if 'prediction_backend' not in st.session_state: st.session_state.prediction_backend = 'boltz'
+    if 'designer_backend' not in st.session_state: st.session_state.designer_backend = 'boltz'
 
     # Designer-related session state
     if 'designer_task_id' not in st.session_state: st.session_state.designer_task_id = None
@@ -27,6 +28,7 @@ def initialize_session_state():
     if 'bicyclic_results' not in st.session_state: st.session_state.bicyclic_results = None
     if 'bicyclic_error' not in st.session_state: st.session_state.bicyclic_error = None
     if 'bicyclic_config' not in st.session_state: st.session_state.bicyclic_config = {}
+    if 'bicyclic_backend' not in st.session_state: st.session_state.bicyclic_backend = 'boltz'
     if 'bicyclic_components' not in st.session_state: st.session_state.bicyclic_components = [
         {'id': str(uuid.uuid4()), 'type': 'protein', 'sequence': '', 'num_copies': 1, 'use_msa': False}
     ]

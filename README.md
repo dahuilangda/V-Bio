@@ -8,9 +8,12 @@
 
 - [核心特性 (Features)](#核心特性-features)
 - [安装部署 (Installation)](#安装部署-installation)
+  - [第 5 步：AlphaFold3 推理环境配置（可选）](#第-5-步alphafold3-推理环境配置可选)
 - [使用指南 (Usage)](#使用指南-usage)
   - [启动平台服务](#启动平台服务)
   - [通过 API 使用 (高级)](#通过-api-使用-高级)
+  - [AlphaFold3 Docker 推理集成](#alphafold3-docker-推理集成)
+  - [AlphaFold3 后端使用示例](#alphafold3-后端使用示例)
   - [任务监控与系统管理](#任务监控与系统管理)
   - [系统服务管理](#系统服务管理)
   - [自动化监控特性](#自动化监控特性)
@@ -54,9 +57,9 @@
 
       * 预测结果自动打包为zip文件，包含结构预测文件和对应的MSA缓存文件，提供完整的分析数据包。
 
-  * **🧪 AlphaFold3 输入导出**
+  * **🧪 AlphaFold3 支持**
 
-      * 支持将同一份 YAML 输入转换为 AlphaFold3 兼容的 FASTA/JSON 文件以及对应的 MSA 归档，方便在外部 AlphaFold3 推理环境中继续使用。（当前版本仅生成输入文件，不在平台内执行 AF3 推理。如 YAML 同时请求亲和力指标，会自动追加一次 Boltz 亲和力流程并将结果一并打包。）
+      * 支持将同一份 YAML 输入转换为 AlphaFold3 兼容的 FASTA/JSON/MSA 数据，并在配置好 Docker 环境后直接调用官方 AlphaFold3 推理；最终返回的 ZIP 同时包含模型输出与（可选）Boltz 亲和力分析结果。
 
 ## 视频演示 (Video Demo)
 [https://www.bilibili.com/video/BV1tcYWz1E7f/](https://www.bilibili.com/video/BV1tcYWz1E7f/)
@@ -108,6 +111,28 @@ docker run -d -p 6379:6379 --name boltz-webui-redis redis:latest
 4.  `MSA_SERVER_MODE`: （可选）根据 MSA 服务配置选择模式，如 `colabfold`、`mmseqs2-uniref` 等。
 5.  `COLABFOLD_JOBS_DIR`: （可选）ColabFold 服务器在宿主机上的任务缓存目录，用于新提供的清理接口。
 6.  `BOLTZ_API_TOKEN`: 设置一个复杂的安全令牌。**强烈建议**通过环境变量进行配置以提高安全性。
+
+#### **第 5 步：AlphaFold3 推理环境配置（可选）**
+
+若希望在平台内直接运行 AlphaFold3 推理，请在启动 Celery Worker 之前准备好模型/数据库资源并设置以下环境变量：
+
+```bash
+# 示例：拉取官方发布镜像
+docker pull cford38/alphafold3:latest
+
+export ALPHAFOLD3_MODEL_DIR=/data/alphafold3/models
+export ALPHAFOLD3_DATABASE_DIR=/data/alphafold3/public_databases
+# 推荐显式指定镜像名称
+export ALPHAFOLD3_DOCKER_IMAGE=cford38/alphafold3
+export ALPHAFOLD3_DOCKER_EXTRA_ARGS="--env TF_FORCE_UNIFIED_MEMORY=1 --shm-size=16g"
+```
+
+- `ALPHAFOLD3_MODEL_DIR` 与 `ALPHAFOLD3_DATABASE_DIR` 必须指向宿主机存在且可读的目录，否则任务会立即失败。
+- 未显式设置 `ALPHAFOLD3_DOCKER_IMAGE` 时默认使用 `alphafold3` 镜像；建议设置为 `cford38/alphafold3` 或您自己的镜像名称。
+- `ALPHAFOLD3_DOCKER_EXTRA_ARGS` 可传递代理、共享内存、调试标志等附加参数。
+- 建议将上述导出语句写入 `~/.bashrc` 或 supervisor/systemd 环境配置，确保 `run.sh`、Celery worker 与监控进程都能读取。
+- 若只需要导出 AlphaFold3 输入文件而不运行容器，可跳过此步骤。
+- 更多细节请参考下文 [AlphaFold3 Docker 推理集成](#alphafold3-docker-推理集成)。
 
 ## 使用指南 (Usage)
 
@@ -197,7 +222,7 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
     * `use_msa_server`: 是否调用外部 MSA 服务 (`true`/`false`)
     * `backend`（可选）:
       * `boltz`（默认）: 运行原有的 Boltz 结构预测流程
-      * `alphafold3`: 生成 AlphaFold3 兼容的 FASTA/JSON/MSA 输入文件，结果 zip 中将包含这些导出文件（当前不会在平台内运行 AF3 推理）
+      * `alphafold3`: 在配置好 AlphaFold3 环境后自动生成 FASTA/JSON/MSA 并触发 Docker 推理；若未配置相关环境变量，则仅导出输入文件
   * **示例**:
     ```bash
     curl -X POST \
@@ -208,15 +233,15 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
          http://127.0.0.1:5000/predict
     ```
   * **说明**:
-    * 前端页面的「选择预测后端」选项会自动填充同名字段；若选择 `AlphaFold3`，下载到的结果 zip 会包含 `*.fasta`、`*.json` 以及 `*.a3m` 文件，可直接交给官方 AF3 流程使用。
+    * 前端页面的「选择预测后端」选项会自动填充同名字段；在环境配置完整时，下载的结果 zip 会包含 `af3/` 目录（含 `af3_input.fasta`、`fold_input.json`、`msa/` 与 Docker 输出），可直接交给官方 AF3 流程使用。
     * 当 `alphafold3` 后端的 YAML 同时声明 `affinity` 属性时，系统会额外运行一遍 Boltz 的亲和力流程，产出的结构/亲和力分析将被复制到 AF3 结果目录中并随 zip 一并返回。
 
 ### **AlphaFold3 Docker 推理集成**
 
-平台内置对官方 AlphaFold3 Docker 镜像的调用能力；只要事先配置好相关环境变量，就会在提交 `backend=alphafold3` 任务时自动执行容器推理。步骤如下：
+完成 [第 5 步](#第-5-步alphafold3-推理环境配置可选) 的环境准备后，平台会在提交 `backend=alphafold3` 任务时自动调用官方 AlphaFold3 Docker 镜像执行推理。步骤如下：
 
 1. **准备 AlphaFold3 资源**
-   - 安装/拉取镜像（默认镜像名称 `alphafold3`）。
+   - 安装/拉取镜像（推荐使用 `cford38/alphafold3`，如需使用其他镜像请同步更新环境变量）。
    - 准备模型参数与公共数据库目录（官方安装指南中下载的 `models/` 与 `public_databases/`）。
 
 2. **配置环境变量（在启动 Celery Worker 前设置）**
@@ -241,6 +266,14 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
      2. 根据上述环境变量启动 Docker 容器执行 `python run_alphafold.py`。
      3. 将容器输出复制到结果目录 `alphafold3_predictions/<jobname>/`，最终随 zip 返回。
      4. 若 YAML 请求了亲和力指标，额外运行一次 Boltz 亲和力流程并一并打包。
+   - Celery 日志会打印 `🐳 运行 AlphaFold3 Docker`，可据此确认容器是否成功拉起。
+
+### **AlphaFold3 后端使用示例**
+
+- **前端界面**：在预测页面的「选择预测后端」中选择 `AlphaFold3 引擎`，其余表单与 Boltz 模式一致；任务完成后，下载的 ZIP 会在根目录附带 `af3/` 文件夹，包含输入文件、容器输出与（如请求）亲和力分析。
+- **API 请求**：参考上节 `backend=alphafold3` 的 curl 示例；若环境变量配置正确，可在 `celery.log` 中看到 Docker 启动信息，并在 `alphafold3_predictions/<jobname>/` 下找到中间结果。
+- **命令行设计器**：支持在设计流程中直接切换后端，例如 `python designer/run_design.py --yaml_template ./examples/design.yaml --backend alphafold3 --server_url http://127.0.0.1:5000 --api_token <your-token>`；其余参数与 Boltz 引擎一致。
+- **结果说明**：ZIP 文件中 `af3/` 目录含 `af3_input.fasta`、`fold_input.json`、`msa/`、`output/` 以及原始 `input.yaml`，便于在外部 AlphaFold3 环境复现或继续分析。
 
 #### **提交亲和力预测任务**
 

@@ -6,6 +6,7 @@ import json
 import pandas as pd
 import string
 
+from frontend.constants import BACKEND_LABELS
 from frontend.utils import (
     get_available_chain_ids_for_designer,
     get_smart_msa_default,
@@ -48,7 +49,7 @@ def render_bicyclic_designer_page():
     def auto_save_form():
         # 只在没有任务运行且不是首次加载时保存
         if not st.session_state.get('bicyclic_task_id') and st.session_state.get('url_state_initialized'):
-            form_config = {k: st.session_state.get(k, v) for k, v in {
+            defaults = {
                 'bicyclic_binder_length': 15,
                 'bicyclic_linker_ccd': 'SEZ',
                 'bicyclic_cys_position_mode': 'auto',
@@ -60,16 +61,28 @@ def render_bicyclic_designer_page():
                 'bicyclic_optimization_mode': 'balanced',
                 'bicyclic_generations': 12,
                 'bicyclic_population_size': 16,
-                'bicyclic_elite_size': 6,
+                'bicyclic_elite_size': 5,
                 'bicyclic_mutation_rate': 0.25,
                 'bicyclic_cys1_pos': 3,
                 'bicyclic_cys2_pos': 8,
                 'bicyclic_cys3_pos': 15
-            }.items()}
+            }
+            form_config = {k: st.session_state.get(k, v) for k, v in defaults.items()}
+
+            has_changes = any(form_config.get(k) != v for k, v in defaults.items())
 
             current_params = URLStateManager.get_query_params()
             new_params = current_params.copy()
-            new_params['bicyclic_form'] = json.dumps(form_config)
+
+            if has_changes:
+                serialized_form = json.dumps(form_config)
+                if current_params.get('bicyclic_form') == serialized_form:
+                    return
+                new_params['bicyclic_form'] = serialized_form
+            else:
+                if 'bicyclic_form' not in current_params:
+                    return
+                new_params['bicyclic_form'] = None
 
             # 保留任务参数
             for param in ['task_id', 'task_type', 'work_dir', 'designer_config']:
@@ -760,7 +773,25 @@ def render_bicyclic_designer_page():
                     'force': False
                 })
                 st.rerun()
-    
+
+    backend_options = list(BACKEND_LABELS.keys())
+    current_backend = st.session_state.get('bicyclic_backend', 'boltz')
+    if current_backend not in backend_options:
+        current_backend = 'boltz'
+    backend_index = backend_options.index(current_backend)
+    selected_backend = st.selectbox(
+        "选择预测后端",
+        backend_options,
+        index=backend_index,
+        format_func=lambda key: BACKEND_LABELS.get(key, key),
+        disabled=designer_is_running,
+        help="Boltz 引擎直接完成结构预测；AlphaFold3 引擎生成 AF3 归档并附带 AlphaFold3 预测指标。",
+        key="bicyclic_backend_select"
+    )
+    if selected_backend != current_backend:
+        st.session_state.bicyclic_backend = selected_backend
+        st.rerun()
+
     # 输入验证
     bicyclic_is_valid, validation_message = validate_designer_inputs(st.session_state.bicyclic_components)
     
@@ -830,13 +861,16 @@ def render_bicyclic_designer_page():
                     include_cysteine=include_cysteine_for_design,  # 控制是否允许额外半胱氨酸
                     use_msa=any_msa_enabled,
                     user_constraints=st.session_state.bicyclic_constraints,
-                    bicyclic_params=bicyclic_params  # 传递双环肽参数
+                    bicyclic_params=bicyclic_params,  # 传递双环肽参数
+                    backend=st.session_state.bicyclic_backend
                 )
                 
                 if result['success']:
                     st.session_state.bicyclic_task_id = result['task_id']
                     st.session_state.bicyclic_work_dir = result['work_dir']
                     st.session_state.bicyclic_config = result['params']
+                    st.session_state.bicyclic_backend = result['params'].get('backend', st.session_state.bicyclic_backend)
+                    st.session_state.bicyclic_config['backend'] = st.session_state.bicyclic_backend
                     
                     # 更新URL参数
                     URLStateManager.update_url_for_designer_task(
@@ -845,7 +879,8 @@ def render_bicyclic_designer_page():
                         components=st.session_state.bicyclic_components,
                         constraints=st.session_state.bicyclic_constraints,
                         config=st.session_state.bicyclic_config,
-                        task_type='bicyclic_designer'  # 指定为双环肽设计任务类型
+                        task_type='bicyclic_designer',  # 指定为双环肽设计任务类型
+                        backend=st.session_state.bicyclic_backend
                     )
                     
                     st.toast(f"🎉 双环肽设计任务已启动！任务ID: {result['task_id']}", icon="✅")
