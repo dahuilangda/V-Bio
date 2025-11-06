@@ -46,6 +46,73 @@ MSA_CACHE_CONFIG = {
     'enable_cache': True
 }
 
+
+def sanitize_docker_extra_args(raw_args: list) -> list:
+    """
+    清理 Docker 额外参数，忽略不完整的 --env/-e 标志以免吞掉镜像名称。
+    """
+    sanitized = []
+    i = 0
+
+    while i < len(raw_args):
+        token = raw_args[i]
+
+        if token in ("--env", "-e"):
+            if i + 1 >= len(raw_args):
+                print(f"⚠️ 忽略无效的 Docker 参数: {token} (缺少值)", file=sys.stderr)
+                i += 1
+                continue
+
+            value = raw_args[i + 1]
+            if "=" not in value:
+                print(f"⚠️ 忽略无效的 Docker 参数: {token} {value} (缺少 KEY=VALUE 形式)", file=sys.stderr)
+                i += 2
+                continue
+
+            sanitized.extend([token, value])
+            i += 2
+            continue
+
+        sanitized.append(token)
+        i += 1
+
+    return sanitized
+
+
+def sanitize_a3m_content(content: str, context: str = "") -> str:
+    """
+    移除 A3M 内容中的非法控制字符（例如 \\x00）。
+    """
+    sanitized = content.replace("\x00", "")
+    if sanitized != content:
+        msg_context = f" ({context})" if context else ""
+        print(f"⚠️ 检测到并移除非法字符\\x00{msg_context}", file=sys.stderr)
+    return sanitized
+
+
+def sanitize_a3m_file(path: str, context: str = "") -> None:
+    """
+    对 A3M 文件进行清理，移除非法控制字符。
+    """
+    if not os.path.exists(path):
+        return
+
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"⚠️ 无法读取 A3M 文件进行清理: {path}, {e}", file=sys.stderr)
+        return
+
+    sanitized = sanitize_a3m_content(content, context=context or path)
+    if sanitized != content:
+        try:
+            with open(path, "w") as f:
+                f.write(sanitized)
+        except OSError as e:
+            print(f"⚠️ 无法写入清理后的 A3M 文件: {path}, {e}", file=sys.stderr)
+
+
 def get_sequence_hash(sequence: str) -> str:
     """计算序列的MD5哈希值作为缓存键"""
     return hashlib.md5(sequence.encode('utf-8')).hexdigest()
@@ -138,6 +205,7 @@ def request_msa_from_server(sequence: str, timeout: int = 600) -> dict:
                                 return None
 
                             print(f"✅ 成功提取 A3M 文件: {extracted_filename}", file=sys.stderr)
+                            a3m_content = sanitize_a3m_content(a3m_content, context=extracted_filename)
                             entries = parse_a3m_content(a3m_content)
                             return {
                                 "entries": entries,
@@ -189,16 +257,21 @@ def save_msa_result_to_file(msa_result: dict, output_path: str) -> bool:
     try:
         # 根据结果格式保存为 A3M 文件
         if msa_result.get('a3m_content'):
+            sanitized_content = sanitize_a3m_content(msa_result['a3m_content'], context=output_path)
             with open(output_path, 'w') as f:
-                f.write(msa_result['a3m_content'])
+                f.write(sanitized_content)
             return True
         elif 'entries' in msa_result:
+            buffer = []
+            for entry in msa_result['entries']:
+                name = entry.get('name', 'unknown')
+                sequence = entry.get('sequence', '')
+                if sequence:
+                    buffer.append(f">{name}\n{sequence}\n")
+
+            sanitized_content = sanitize_a3m_content(''.join(buffer), context=output_path)
             with open(output_path, 'w') as f:
-                for entry in msa_result['entries']:
-                    name = entry.get('name', 'unknown')
-                    sequence = entry.get('sequence', '')
-                    if sequence:
-                        f.write(f">{name}\n{sequence}\n")
+                f.write(sanitized_content)
             return True
         else:
             print(f"❌ MSA 结果格式不支持: {msa_result.keys()}", file=sys.stderr)
@@ -213,11 +286,12 @@ def parse_a3m_content(a3m_content: str) -> list:
     """
     解析 A3M 文件内容为序列条目列表
     """
+    sanitized_content = sanitize_a3m_content(a3m_content)
     entries = []
     current_name = None
     current_sequence_lines = []
 
-    for line in a3m_content.splitlines():
+    for line in sanitized_content.splitlines():
         if line.startswith('>'):
             if current_name is not None:
                 entries.append({
@@ -236,7 +310,6 @@ def parse_a3m_content(a3m_content: str) -> list:
         })
 
     return entries
-
 def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
     """
     为 YAML 中的蛋白质序列生成 MSA
@@ -277,6 +350,7 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
             output_path = os.path.join(temp_dir, f"{protein_id}_msa.a3m")
             if os.path.exists(output_path):
                 print(f"✅ 临时目录中已存在 MSA 文件: {output_path}", file=sys.stderr)
+                sanitize_a3m_file(output_path, context=f"{protein_id} 临时文件")
                 success_count += 1
                 continue
             
@@ -287,8 +361,10 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
             
             if MSA_CACHE_CONFIG['enable_cache'] and os.path.exists(cached_msa_path):
                 print(f"✅ 找到缓存的 MSA 文件: {cached_msa_path}", file=sys.stderr)
+                sanitize_a3m_file(cached_msa_path, context=f"{protein_id} 缓存原文件")
                 # 复制到临时目录
                 shutil.copy2(cached_msa_path, output_path)
+                sanitize_a3m_file(output_path, context=f"{protein_id} 缓存复制")
                 success_count += 1
                 continue
             
@@ -297,12 +373,14 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
             if msa_result:
                 # 保存到临时目录
                 if save_msa_result_to_file(msa_result, output_path):
+                    sanitize_a3m_file(output_path, context=f"{protein_id} 下载写入")
                     success_count += 1
                     
                     # 缓存结果（统一使用 msa_ 前缀）
                     if MSA_CACHE_CONFIG['enable_cache']:
                         os.makedirs(cache_dir, exist_ok=True)
                         shutil.copy2(output_path, cached_msa_path)
+                        sanitize_a3m_file(cached_msa_path, context=f"{protein_id} 缓存写入")
                         print(f"💾 MSA 结果已缓存: {cached_msa_path}", file=sys.stderr)
                 else:
                     print(f"❌ 保存 MSA 文件失败: {protein_id}", file=sys.stderr)
@@ -449,7 +527,7 @@ def cache_single_protein_msa(protein_id: str, protein_sequence: str, msa_file: s
                             seq_hash = get_sequence_hash(protein_sequence)
                             cache_path = os.path.join(cache_dir, f"msa_{seq_hash}.a3m")
                             with open(cache_path, 'w') as cache_file:
-                                cache_file.write(a3m_content)
+                                cache_file.write(sanitize_a3m_content(a3m_content, context=f"{protein_id} CSV 转换"))
                             print(f"    ✅ 成功缓存蛋白质组分 {protein_id} 的MSA (从CSV转换): {cache_path}", file=sys.stderr)
                             print(f"       序列哈希: {seq_hash}", file=sys.stderr)
                             print(f"       MSA序列数: {len(sequences)}", file=sys.stderr)
@@ -460,8 +538,9 @@ def cache_single_protein_msa(protein_id: str, protein_sequence: str, msa_file: s
         
         elif file_ext == '.a3m':
             # 处理A3M格式的MSA文件
+            sanitize_a3m_file(msa_file, context=f"{protein_id} 源MSA")
             with open(msa_file, 'r') as f:
-                msa_content = f.read()
+                msa_content = sanitize_a3m_content(f.read(), context=msa_file)
             
             # 从MSA内容中提取查询序列（第一个序列）
             lines = msa_content.strip().split('\n')
@@ -473,7 +552,8 @@ def cache_single_protein_msa(protein_id: str, protein_sequence: str, msa_file: s
                     # 缓存MSA文件
                     seq_hash = get_sequence_hash(protein_sequence)
                     cache_path = os.path.join(cache_dir, f"msa_{seq_hash}.a3m")
-                    shutil.copy2(msa_file, cache_path)
+                    with open(cache_path, 'w') as cache_file:
+                        cache_file.write(msa_content)
                     print(f"    ✅ 成功缓存蛋白质组分 {protein_id} 的MSA: {cache_path}", file=sys.stderr)
                     print(f"       序列哈希: {seq_hash}", file=sys.stderr)
                     return True
@@ -799,7 +879,13 @@ def run_alphafold3_backend(
     model_dir = ALPHAFOLD3_MODEL_DIR
     database_dir = ALPHAFOLD3_DATABASE_DIR
     image = ALPHAFOLD3_DOCKER_IMAGE or "alphafold3"
-    extra_args = shlex.split(ALPHAFOLD3_DOCKER_EXTRA_ARGS) if ALPHAFOLD3_DOCKER_EXTRA_ARGS else []
+    raw_extra_args = shlex.split(ALPHAFOLD3_DOCKER_EXTRA_ARGS) if ALPHAFOLD3_DOCKER_EXTRA_ARGS else []
+    extra_args = sanitize_docker_extra_args(raw_extra_args)
+    if raw_extra_args and len(extra_args) != len(raw_extra_args):
+        print(
+            f"⚠️ 已忽略部分 ALPHAFOLD3_DOCKER_EXTRA_ARGS 参数，原始值: {raw_extra_args}",
+            file=sys.stderr,
+        )
 
     if not model_dir or not os.path.isdir(model_dir):
         raise FileNotFoundError("ALPHAFOLD3_MODEL_DIR 未配置或目录不存在，无法运行 AlphaFold3 容器。")
@@ -837,14 +923,19 @@ def run_alphafold3_backend(
         f"{host_uid}:{host_gid}",
     ]
 
-    docker_command += extra_args + [
-        image,
-        "python",
-        "run_alphafold.py",
-        f"--json_path={container_input_dir}/fold_input.json",
-        f"--model_dir={container_model_dir}",
-        f"--output_dir={container_output_dir}",
-    ]
+    docker_command.extend(extra_args)
+
+    docker_command.append(image)
+    docker_command.extend(
+        [
+            "python",
+            "run_alphafold.py",
+            f"--json_path={container_input_dir}/fold_input.json",
+            f"--model_dir={container_model_dir}",
+            f"--output_dir={container_output_dir}",
+            f"--db_dir={container_database_dir}",
+        ]
+    )
 
     display_command = " ".join(shlex.quote(part) for part in docker_command)
     print(f"🐳 运行 AlphaFold3 Docker: {display_command}", file=sys.stderr)

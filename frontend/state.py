@@ -12,6 +12,7 @@ def initialize_session_state():
     if 'error' not in st.session_state: st.session_state.error = None
     if 'properties' not in st.session_state: st.session_state.properties = {'affinity': False, 'binder': None}
     if 'use_msa_server' not in st.session_state: st.session_state.use_msa_server = False
+    if 'prediction_backend' not in st.session_state: st.session_state.prediction_backend = 'boltz'
 
     # Designer-related session state
     if 'designer_task_id' not in st.session_state: st.session_state.designer_task_id = None

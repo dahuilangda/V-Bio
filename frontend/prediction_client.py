@@ -7,7 +7,7 @@ import os
 from .constants import API_URL
 API_TOKEN = os.getenv('BOLTZ_API_TOKEN', 'development-api-token')
 
-def submit_job(yaml_content: str, use_msa: bool, model_name: str = None):
+def submit_job(yaml_content: str, use_msa: bool, model_name: str = None, backend: str = 'boltz'):
     """
     Sends a prediction request to the backend API.
     """
@@ -16,7 +16,8 @@ def submit_job(yaml_content: str, use_msa: bool, model_name: str = None):
     files = {'yaml_file': ('config.yaml', yaml_content, 'application/x-yaml')}
     data = {
         'use_msa_server': str(use_msa).lower(),
-        'priority': 'default' # Hardcoding priority for now
+        'priority': 'default', # Hardcoding priority for now
+        'backend': backend
     }
     if model_name:
         data['model'] = model_name
@@ -91,20 +92,102 @@ def download_and_process_results(task_id: str):
     cif_content = ""
     confidence_data = {}
     affinity_data = {}
+    backend = "boltz"
+    af3_summary_conf = None
+    af3_confidences = None
+    af3_primary_cif = None
 
     with zipfile.ZipFile(io.BytesIO(raw_zip_bytes), 'r') as zip_ref:
         for filename in zip_ref.namelist():
             if filename.endswith('.cif'):
-                cif_content = zip_ref.read(filename).decode('utf-8')
+                file_bytes = zip_ref.read(filename).decode('utf-8')
+                if "af3/output/" in filename:
+                    backend = "alphafold3"
+                    # Prefer aggregated model (without seed-specific directories)
+                    if af3_primary_cif is None or ("seed-" not in filename and "model.cif" in filename):
+                        af3_primary_cif = file_bytes
+                else:
+                    # Use the first non-AF3 CIF as the default structure
+                    if not cif_content:
+                        cif_content = file_bytes
             elif 'confidence' in filename and filename.endswith('.json'):
-                confidence_data = json.loads(zip_ref.read(filename))
+                json_bytes = zip_ref.read(filename)
+                data = json.loads(json_bytes)
+                if "af3/output/" in filename:
+                    backend = "alphafold3"
+                    if "summary_confidences" in filename:
+                        # Prefer top-level summary (without seed-specific directory)
+                        if af3_summary_conf is None or "seed-" not in filename:
+                            af3_summary_conf = data
+                    elif "confidences.json" in filename:
+                        if af3_confidences is None or "seed-" not in filename:
+                            af3_confidences = data
+                else:
+                    confidence_data = data
             elif 'affinity' in filename and filename.endswith('.json'):
                 affinity_data = json.loads(zip_ref.read(filename))
+
+    # Finalize CIF content for AF3 runs if present
+    if backend == "alphafold3" and af3_primary_cif:
+        cif_content = af3_primary_cif
+
+    # Construct AF3 confidence metrics if available
+    if backend == "alphafold3":
+        af3_metrics = {}
+
+        if af3_confidences:
+            atom_plddts = af3_confidences.get("atom_plddts") or []
+            if atom_plddts:
+                af3_metrics["complex_plddt"] = sum(atom_plddts) / len(atom_plddts)
+
+            pae_matrix = af3_confidences.get("pae") or []
+            flattened_pae = [
+                value
+                for row in pae_matrix if isinstance(row, list)
+                for value in row
+                if isinstance(value, (int, float))
+            ]
+            if flattened_pae:
+                af3_metrics["complex_pde"] = sum(flattened_pae) / len(flattened_pae)
+
+        if af3_summary_conf:
+            ptm = af3_summary_conf.get("ptm")
+            if isinstance(ptm, (int, float)):
+                af3_metrics["ptm"] = ptm
+
+            iptm = af3_summary_conf.get("iptm")
+            if iptm is None:
+                chain_pair_iptm = af3_summary_conf.get("chain_pair_iptm")
+                if (
+                    isinstance(chain_pair_iptm, list)
+                    and chain_pair_iptm
+                    and isinstance(chain_pair_iptm[0], list)
+                    and chain_pair_iptm[0]
+                    and isinstance(chain_pair_iptm[0][0], (int, float))
+                ):
+                    iptm = chain_pair_iptm[0][0]
+            if isinstance(iptm, (int, float)):
+                af3_metrics["iptm"] = iptm
+
+            ranking_score = af3_summary_conf.get("ranking_score")
+            if isinstance(ranking_score, (int, float)):
+                af3_metrics["ranking_score"] = ranking_score
+
+            fraction_disordered = af3_summary_conf.get("fraction_disordered")
+            if isinstance(fraction_disordered, (int, float)):
+                af3_metrics["fraction_disordered"] = fraction_disordered
+
+        # Merge AF3 metrics into confidence data and tag backend
+        confidence_data.update(af3_metrics)
+        confidence_data["backend"] = "alphafold3"
+    elif confidence_data:
+        confidence_data["backend"] = "boltz"
 
     processed_results = {
         "cif": cif_content,
         "confidence": confidence_data,
-        "affinity": affinity_data
+        "affinity": affinity_data,
+        "backend": backend
     }
     
     return processed_results, raw_zip_bytes

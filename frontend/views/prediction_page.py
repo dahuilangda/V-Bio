@@ -22,6 +22,24 @@ from frontend.prediction_client import submit_job, get_status, download_and_proc
 from frontend.ui_components import render_contact_constraint_ui, render_bond_constraint_ui, render_pocket_constraint_ui
 from frontend.url_state import URLStateManager
 
+BACKEND_LABELS = {
+    'boltz': 'Boltz 引擎',
+    'alphafold3': 'AlphaFold3 引擎'
+}
+
+
+def format_metric_value(value, precision: int = 2) -> str:
+    """
+    Format numeric metrics for display, returning 'N/A' for missing values.
+    """
+    if value is None:
+        return "N/A"
+    try:
+        return f"{float(value):.{precision}f}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
 def get_smart_constraint_recommendations(components):
     """根据组分类型智能推荐约束类型"""
     has_ligand = any(comp.get('type') == 'ligand' for comp in components)
@@ -345,6 +363,26 @@ def render_prediction_page():
                             st.info(f"ℹ️ {comp_id}: 未缓存", icon="💾")
             else:
                 st.caption("暂无MSA缓存")
+
+        backend_options = list(BACKEND_LABELS.keys())
+        current_backend = st.session_state.get('prediction_backend', 'boltz')
+        if current_backend not in backend_options:
+            current_backend = 'boltz'
+        backend_index = backend_options.index(current_backend)
+        selected_backend = st.selectbox(
+            "选择预测后端",
+            backend_options,
+            index=backend_index,
+            format_func=lambda key: BACKEND_LABELS.get(key, key),
+            disabled=is_running,
+            help="Boltz 直接完成结构预测并返回复合物结果；AlphaFold3 生成含 af3/ 目录的输入与输出归档，可用于独立运行 AlphaFold3。"
+        )
+        if selected_backend != current_backend:
+            st.session_state.prediction_backend = selected_backend
+            st.rerun()
+
+        if st.session_state.prediction_backend == 'alphafold3':
+            st.caption("AlphaFold3 归档包含 `af3_input.json`、MSA 和 `af3/output/` 目录下的原始推理文件。")
         
         has_ligand_component = any(comp['type'] == 'ligand' for comp in st.session_state.components)
         if has_ligand_component:
@@ -615,14 +653,15 @@ def render_prediction_page():
             if not has_msa_in_yaml:
                 use_msa_for_job = any(comp.get('use_msa', True) for comp in protein_components)
         
-        model_name = "boltz1" if has_glycopeptide_modifications else None
+        model_name = "boltz1" if (has_glycopeptide_modifications and st.session_state.prediction_backend == 'boltz') else None
         
         with st.spinner("⏳ 正在提交任务，请稍候..."):
             try:
                 task_id = submit_job(
                     yaml_content=yaml_preview,
                     use_msa=use_msa_for_job,
-                    model_name=model_name
+                    model_name=model_name,
+                    backend=st.session_state.prediction_backend
                 )
                 st.session_state.task_id = task_id
                 
@@ -631,7 +670,8 @@ def render_prediction_page():
                     task_id=task_id, 
                     components=st.session_state.components,
                     constraints=st.session_state.constraints, 
-                    properties=st.session_state.properties
+                    properties=st.session_state.properties,
+                    backend=st.session_state.prediction_backend
                 )
                 
                 if use_msa_for_job:
@@ -644,6 +684,9 @@ def render_prediction_page():
                 
                 if model_name:
                     st.toast(f"🧬 检测到糖肽修饰，使用 {model_name} 模型进行预测", icon="🍬")
+                
+                backend_label = BACKEND_LABELS.get(st.session_state.prediction_backend, st.session_state.prediction_backend)
+                st.toast(f"⚙️ 当前后端：{backend_label}", icon="🛠️")
                 
                 st.rerun()
             except requests.exceptions.RequestException as e:
@@ -831,24 +874,37 @@ def render_prediction_page():
             cols_metrics = st.columns(2)
             cols_metrics[0].metric(
                 "平均 pLDDT",
-                f"{confidence_data.get('complex_plddt', 0):.2f}",
+                format_metric_value(confidence_data.get('complex_plddt')),
                 help="预测的局部距离差异检验 (pLDDT) 是一个 0-100 范围内的单残基置信度得分，代表模型对局部结构预测的信心。这是整个复合物所有残基的平均 pLDDT 分数。值越高越好。"
             )
             cols_metrics[1].metric(
                 "pTM",
-                f"{confidence_data.get('ptm', 0):.4f}",
+                format_metric_value(confidence_data.get('ptm'), precision=4),
                 help="预测的模板建模评分 (pTM) 是一个 0-1 范围内的分数，用于衡量预测结构与真实结构在全局拓扑结构上的相似性。pTM > 0.5 通常表示预测了正确的折叠方式。值越高越好。"
             )
             cols_metrics[0].metric(
                 "ipTM",
-                f"{confidence_data.get('iptm', 0):.4f}",
+                format_metric_value(confidence_data.get('iptm'), precision=4),
                 help="界面预测模板建模评分 (ipTM) 是专门用于评估链间相互作用界面准确性的指标 (0-1)。ipTM > 0.85 通常表明对复合物的相互作用方式有很高的置信度。值越高越好。"
             )
             cols_metrics[1].metric(
                 "PAE (Å)",
-                f"{confidence_data.get('complex_pde', 0):.2f}",
+                format_metric_value(confidence_data.get('complex_pde')),
                 help="预测的对齐误差 (PAE) 表示残基对之间的预期位置误差（单位为埃 Å）。较低的值表示对不同结构域和链的相对位置和方向有更高的信心。这里显示的是整个复合物的平均误差。值越低越好。"
             )
+
+            if confidence_data.get('backend') == 'alphafold3':
+                extra_cols = st.columns(2)
+                extra_cols[0].metric(
+                    "Ranking Score",
+                    format_metric_value(confidence_data.get('ranking_score')),
+                    help="AlphaFold3 排名得分，越高代表该样本在模型集合中的排名越靠前。"
+                )
+                extra_cols[1].metric(
+                    "Fraction Disordered",
+                    format_metric_value(confidence_data.get('fraction_disordered')),
+                    help="AlphaFold3 预测的无序区域比例（0-1）。数值越高，结构中无序残基比例越大。"
+                )
             
             if affinity_data and st.session_state.properties.get('affinity'):
                 st.markdown("<br><b>亲和力预测指标</b>", unsafe_allow_html=True)
