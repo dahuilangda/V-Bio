@@ -24,6 +24,7 @@ from boltz_wrapper import predict
 from config import (
     MSA_SERVER_URL,
     MSA_SERVER_MODE,
+    COLABFOLD_JOBS_DIR,
     ALPHAFOLD3_DOCKER_IMAGE,
     ALPHAFOLD3_MODEL_DIR,
     ALPHAFOLD3_DATABASE_DIR,
@@ -45,6 +46,94 @@ MSA_CACHE_CONFIG = {
     'cache_dir': '/tmp/boltz_msa_cache',
     'enable_cache': True
 }
+
+
+def discover_cuda_devices() -> List[str]:
+    """Return detected CUDA device indices present on the host."""
+    devices: List[str] = []
+
+    try:
+        smi_proc = subprocess.run(
+            ["nvidia-smi", "-L"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        smi_proc = None
+
+    if smi_proc and smi_proc.returncode == 0:
+        for line in smi_proc.stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("GPU "):
+                continue
+            prefix = line.split(':', 1)[0]
+            parts = prefix.split()
+            if len(parts) >= 2 and parts[1].isdigit():
+                devices.append(parts[1])
+
+    if devices:
+        return sorted(set(devices), key=int)
+
+    node_paths = Path('/dev').glob('nvidia[0-9]*')
+    for node in node_paths:
+        suffix = node.name.replace('nvidia', '', 1)
+        if suffix.isdigit():
+            devices.append(suffix)
+
+    return sorted(set(devices), key=int)
+
+
+def determine_docker_gpu_arg(visible_devices: Optional[str]) -> str:
+    """Validate CUDA availability and build docker --gpus argument."""
+    available = discover_cuda_devices()
+    if not available:
+        raise RuntimeError(
+            "AlphaFold3 backend 需要 NVIDIA GPU，但当前环境未检测到可用的 CUDA 设备。"
+        )
+
+    if not visible_devices:
+        return "all"
+
+    tokens = [token.strip() for token in visible_devices.split(',') if token.strip()]
+    if not tokens:
+        raise RuntimeError("检测到 CUDA_VISIBLE_DEVICES 已设置，但未包含有效设备索引。")
+
+    numeric_tokens = [token for token in tokens if token.isdigit()]
+    invalid = [token for token in numeric_tokens if token not in available]
+    if invalid:
+        raise RuntimeError(
+            "请求使用的 GPU 索引在当前机器上不可用: "
+            f"{', '.join(invalid)}。可用索引: {', '.join(available)}"
+        )
+
+    return f"device={','.join(tokens)}"
+
+
+def collect_gpu_device_group_ids() -> List[int]:
+    """Capture host group IDs owning GPU device files to re-add inside the container."""
+    candidate_nodes = [
+        Path("/dev/nvidiactl"),
+        Path("/dev/nvidia-uvm"),
+        Path("/dev/nvidia-uvm-tools"),
+    ]
+
+    candidate_nodes.extend(sorted(Path("/dev").glob("nvidia[0-9]*")))
+    candidate_nodes.extend(sorted(Path("/dev/dri").glob("renderD*") if Path("/dev/dri").exists() else []))
+
+    group_ids: List[int] = []
+    for node in candidate_nodes:
+        try:
+            stat_result = node.stat()
+        except FileNotFoundError:
+            continue
+        gid = stat_result.st_gid
+        if gid not in group_ids:
+            group_ids.append(gid)
+
+    return group_ids
 
 
 def sanitize_docker_extra_args(raw_args: list) -> list:
@@ -1046,28 +1135,54 @@ def run_alphafold3_backend(
         raise FileNotFoundError("ALPHAFOLD3_DATABASE_DIR 未配置或目录不存在，无法运行 AlphaFold3 容器。")
 
     visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
-    gpu_arg = f"device={visible_devices}" if visible_devices else "all"
+    try:
+        gpu_arg = determine_docker_gpu_arg(visible_devices)
+    except RuntimeError as gpu_err:
+        print(f"❌ 无法准备 AlphaFold3 GPU 环境: {gpu_err}", file=sys.stderr)
+        print("   ↳ 请确认此主机安装了 NVIDIA 驱动并正确设置 CUDA_VISIBLE_DEVICES。", file=sys.stderr)
+        raise
 
     container_input_dir = "/workspace/af_input"
     container_output_dir = "/workspace/af_output"
     container_model_dir = "/workspace/models"
     container_database_dir = "/workspace/public_databases"
+    container_colabfold_jobs_dir = "/app/jobs"
+
+    runtime_overridden = any(token == "--runtime" for token in extra_args)
 
     docker_command = [
         "docker",
         "run",
         "--rm",
-        "--gpus",
-        gpu_arg,
-        "--volume",
-        f"{af3_input_dir}:{container_input_dir}",
-        "--volume",
-        f"{af3_output_dir}:{container_output_dir}",
-        "--volume",
-        f"{model_dir}:{container_model_dir}",
-        "--volume",
-        f"{database_dir}:{container_database_dir}",
     ]
+
+    if not runtime_overridden:
+        docker_command.extend(["--runtime", "nvidia"])
+
+    docker_command.extend(
+        [
+            "--gpus",
+            gpu_arg,
+            "--volume",
+            f"{af3_input_dir}:{container_input_dir}",
+            "--volume",
+            f"{af3_output_dir}:{container_output_dir}",
+            "--volume",
+            f"{model_dir}:{container_model_dir}",
+            "--volume",
+            f"{database_dir}:{container_database_dir}",
+        ]
+    )
+
+    # 添加 ColabFold jobs 目录挂载（如果配置了 MSA 服务器）
+    if MSA_SERVER_URL and COLABFOLD_JOBS_DIR and os.path.exists(COLABFOLD_JOBS_DIR):
+        docker_command.extend([
+            "--volume",
+            f"{COLABFOLD_JOBS_DIR}:{container_colabfold_jobs_dir}",
+        ])
+        print(f"🔗 挂载 ColabFold jobs 目录: {COLABFOLD_JOBS_DIR} -> {container_colabfold_jobs_dir}", file=sys.stderr)
+    else:
+        print("⚠️ 未找到 ColabFold jobs 目录或未配置 MSA 服务器", file=sys.stderr)
 
     host_uid = os.getuid()
     host_gid = os.getgid()
@@ -1075,6 +1190,17 @@ def run_alphafold3_backend(
         "--user",
         f"{host_uid}:{host_gid}",
     ]
+
+    gpu_device_groups = collect_gpu_device_group_ids()
+    if not gpu_device_groups:
+        print("⚠️ 未能检测到 GPU 设备的所属用户组，容器可能无法访问 GPU。", file=sys.stderr)
+    else:
+        for gid in gpu_device_groups:
+            docker_command.extend(["--group-add", str(gid)])
+        print(
+            f"🔐 为容器添加 GPU 相关用户组: {', '.join(str(g) for g in gpu_device_groups)}",
+            file=sys.stderr,
+        )
 
     docker_command.extend(extra_args)
 

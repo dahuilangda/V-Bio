@@ -443,13 +443,43 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
 
 #### **ColabFold 服务器缓存**
 
-若在本地部署了 ColabFold MSA 服务器，长期运行会在 `colabfold_server/jobs`（或你在 `.env` 中通过 `COLABFOLD_JOBS_DIR` 指定的路径）累积大量历史任务文件。可以通过以下方式管理：
+若在本地部署了 ColabFold MSA 服务器，系统会在 `colabfold_server/jobs` 目录（或通过环境变量 `COLABFOLD_JOBS_DIR` 指定的自定义路径）中存储任务数据。每个任务都会创建一个以唯一标识符命名的子目录，包含：
 
-1. **查看目录占用**：`du -sh $COLABFOLD_JOBS_DIR`
-2. **一键清理**：使用上文的 `POST /api/colabfold/cache/clear` 接口，API 会统计释放空间并返回失败的条目。如果目录内文件属于 root（Docker 默认），需要先对目录赋权：`sudo chown -R $(whoami) $COLABFOLD_JOBS_DIR`。
-3. **自定义路径**：通过 `.env` 中的 `COLABFOLD_JOBS_DIR` 指向宿主机的实际 jobs 目录，确保 API 能正确定位 ColabFold 数据。
+- **job.fasta**: 输入的蛋白质序列文件
+- **uniref.a3m**: MSA（多序列比对）结果文件
+- **pdb70.m8**: PDB数据库搜索结果
+- **mmseqs_results_*.tar.gz**: MMseqs2压缩结果包
+- **job.json**: 任务元数据和配置信息
 
-建议在清理前确认没有正在运行的 ColabFold 任务；该接口会直接删除目录下的全部内容。
+**缓存管理方式**：
+
+1. **查看目录占用**：
+   ```bash
+   du -sh $COLABFOLD_JOBS_DIR  # 查看总体积占用
+   ls -la $COLABFOLD_JOBS_DIR  # 查看任务数量和详情
+   ```
+
+2. **API清理接口**：使用 `POST /api/colabfold/cache/clear` 接口进行安全清理
+   - 自动统计释放空间和删除的条目数
+   - 返回清理失败的条目及错误原因
+   - 支持权限问题的诊断和处理建议
+
+3. **权限设置**：如果Docker容器以root用户运行，可能需要调整权限：
+   ```bash
+   sudo chown -R $(whoami):$(whoami) $COLABFOLD_JOBS_DIR
+   ```
+
+4. **Docker配置**：在 `colabfold_server/docker-compose.yml` 中确保正确的卷映射：
+   ```yaml
+   volumes:
+     - ${JOBS_DIR:-./jobs}:/app/jobs
+   ```
+
+**注意事项**：
+- 清理操作会删除所有历史任务数据，包括MSA缓存和计算结果
+- 建议在清理前确认没有正在运行的ColabFold任务
+- 任务目录中的 `.a3m` 文件可用于加速后续的相同或相似序列的预测
+- 可以通过环境变量 `COLABFOLD_JOBS_DIR` 自定义存储路径，便于集中管理和备份
 
 #### **任务监控与系统管理**
 
