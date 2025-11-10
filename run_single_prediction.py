@@ -222,13 +222,32 @@ def _iter_affinity_entries(properties: Any) -> Iterable[Dict[str, Any]]:
 def extract_affinity_config_from_yaml(yaml_data: Dict[str, Any]) -> Optional[Dict[str, str]]:
     """
     从 YAML 数据中提取亲和力配置，兼容 list / dict 等写法。
+    支持两种格式：
+    1. affinity: true
+    2. affinity: {binder: "B"}
     """
     for entry in _iter_affinity_entries(yaml_data.get("properties")):
         affinity_info = entry.get("affinity")
+
+        # 格式1: affinity: {binder: "B"} 或 affinity: {chain: "B"}
         if isinstance(affinity_info, dict):
             binder = affinity_info.get("binder") or affinity_info.get("chain")
             if binder:
                 return {"binder": str(binder).strip()}
+
+        # 格式2: affinity: true (需要单独查找binder)
+        elif affinity_info is True:
+            # 在同一层级或properties层级查找binder字段
+            binder = entry.get("binder") or entry.get("chain")
+            if binder:
+                return {"binder": str(binder).strip()}
+
+            # 如果entry中没有binder，尝试从properties的其他条目中查找
+            for other_entry in _iter_affinity_entries(yaml_data.get("properties")):
+                binder = other_entry.get("binder") or other_entry.get("chain")
+                if binder:
+                    return {"binder": str(binder).strip()}
+
     return None
 
 
@@ -278,6 +297,229 @@ def find_ligand_resname_in_cif(cif_path: Path, binder_chain: str) -> Optional[st
     return None
 
 
+def _sanitize_atom_name_for_affinity(name: str) -> str:
+    """Normalize atom names to avoid unsupported characters in Boltz featurizer."""
+    cleaned = name.strip()
+    if not cleaned:
+        return name
+
+    sanitized_chars: List[str] = []
+    for ch in cleaned:
+        if ch.isalpha():
+            sanitized_chars.append(ch.upper())
+        elif ch.isdigit():
+            sanitized_chars.append(ch)
+        else:
+            sanitized_chars.append('X')
+
+    sanitized = ''.join(sanitized_chars)
+    return sanitized or name
+
+
+def prepare_structure_for_affinity(source_path: Path, work_dir: Path) -> Path:
+    """Create a sanitized copy of the structure with normalized atom names."""
+    try:
+        import gemmi  # type: ignore
+    except ImportError:
+        print(
+            "⚠️ 未安装 gemmi，无法清理结构原子名，直接使用原始结构。",
+            file=sys.stderr,
+        )
+        return source_path
+
+    try:
+        structure = gemmi.read_structure(str(source_path))
+    except Exception as err:
+        print(f"⚠️ 无法读取结构 {source_path} 进行清理: {err}", file=sys.stderr)
+        return source_path
+
+    changed = False
+    for model in structure:
+        for chain in model:
+            for residue in chain:
+                for atom in residue:
+                    sanitized = _sanitize_atom_name_for_affinity(atom.name)
+                    if sanitized != atom.name:
+                        atom.name = sanitized
+                        changed = True
+
+    if not changed:
+        return source_path
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    sanitized_path = work_dir / f"{source_path.stem}_sanitized{source_path.suffix}"
+
+    try:
+        if source_path.suffix.lower() == '.cif':
+            doc = structure.make_mmcif_document()
+            doc.write_file(str(sanitized_path))
+        else:
+            structure.write_minimal_pdb(str(sanitized_path))
+    except Exception as err:
+        print(f"⚠️ 写入清理后的结构失败，回退到原始结构: {err}", file=sys.stderr)
+        return source_path
+
+    print(
+        f"🧼 已生成用于亲和力预测的清理结构: {sanitized_path}",
+        file=sys.stderr,
+    )
+    return sanitized_path
+
+
+def _structure_candidate_priority(name: str, base_priority: int, jobname: str) -> int:
+    priority = base_priority
+    suffix = Path(name).suffix.lower()
+    if suffix == ".cif":
+        priority -= 10
+    elif suffix == ".pdb":
+        priority -= 5
+
+    lowered = name.lower()
+    job_lower = jobname.lower()
+    if job_lower and job_lower in lowered:
+        priority -= 4
+    if "ranked_0" in lowered:
+        priority -= 2
+    if "predicted" in lowered:
+        priority -= 1
+    if "model" in lowered:
+        priority -= 1
+    return priority
+
+
+def locate_af3_structure_file(af3_output_dir: Path, jobname: str) -> Optional[Path]:
+    """Locate the primary AlphaFold3 structure file (.cif or .pdb) for affinity post-processing."""
+    base_dir = Path(af3_output_dir)
+    if not base_dir.exists():
+        return None
+
+    candidates: List[Tuple[int, Path]] = []
+
+    def register_candidate(path: Path, base_priority: int) -> None:
+        if not path.is_file():
+            return
+        priority = _structure_candidate_priority(path.name, base_priority, jobname)
+        candidates.append((priority, path))
+
+    job_dir = base_dir / jobname
+    search_roots: List[Tuple[int, Path]] = []
+    if job_dir.exists():
+        search_roots.append((0, job_dir))
+    search_roots.append((10, base_dir))
+
+    for base_priority, root in search_roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*.cif"):
+            register_candidate(path, base_priority)
+        for path in root.rglob("*.pdb"):
+            register_candidate(path, base_priority + 2)
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (item[0], len(str(item[1]))))
+    return candidates[0][1]
+
+
+def extract_af3_structure_from_archives(
+    af3_output_dir: Path,
+    scratch_dir: Path,
+    jobname: str,
+) -> Optional[Path]:
+    archive_candidates: List[Tuple[int, Path, str, str]] = []
+
+    job_dir = af3_output_dir / jobname
+    archive_patterns = ["*.zip", "*.tar", "*.tar.gz", "*.tgz", "*.tar.xz", "*.tar.bz2"]
+
+    for pattern in archive_patterns:
+        for archive_path in af3_output_dir.rglob(pattern):
+            base_priority = 60
+            try:
+                if job_dir.exists() and archive_path.is_relative_to(job_dir):  # type: ignore[attr-defined]
+                    base_priority = 40
+            except AttributeError:
+                try:
+                    archive_path.relative_to(job_dir)
+                    base_priority = 40
+                except ValueError:
+                    base_priority = 60
+
+            suffix = archive_path.suffix.lower()
+            if archive_path.name.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2")):
+                archive_type = "tar"
+            elif suffix in {".tar"}:
+                archive_type = "tar"
+            else:
+                archive_type = "zip"
+
+            if archive_type == "zip":
+                try:
+                    with zipfile.ZipFile(archive_path) as zf:
+                        for info in zf.infolist():
+                            if info.is_dir():
+                                continue
+                            entry_suffix = Path(info.filename).suffix.lower()
+                            if entry_suffix not in {".cif", ".pdb"}:
+                                continue
+                            priority = _structure_candidate_priority(info.filename, base_priority + 10, jobname)
+                            archive_candidates.append((priority, archive_path, info.filename, archive_type))
+                except (zipfile.BadZipFile, OSError):
+                    continue
+            else:
+                try:
+                    with tarfile.open(archive_path, "r:*") as tf:
+                        for member in tf.getmembers():
+                            if not member.isreg():
+                                continue
+                            entry_suffix = Path(member.name).suffix.lower()
+                            if entry_suffix not in {".cif", ".pdb"}:
+                                continue
+                            priority = _structure_candidate_priority(member.name, base_priority + 10, jobname)
+                            archive_candidates.append((priority, archive_path, member.name, archive_type))
+                except (tarfile.TarError, OSError):
+                    continue
+
+    if not archive_candidates:
+        return None
+
+    archive_candidates.sort(key=lambda item: (item[0], len(item[2])))
+    _, selected_archive, selected_member, selected_type = archive_candidates[0]
+
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    member_path = Path(selected_member)
+    stem = safe_filename(member_path.stem) or "structure"
+    dest_name = stem + member_path.suffix.lower()
+    dest_path = scratch_dir / dest_name
+
+    counter = 1
+    while dest_path.exists():
+        dest_path = scratch_dir / f"{stem}_{counter}{member_path.suffix.lower()}"
+        counter += 1
+
+    try:
+        if selected_type == "zip":
+            with zipfile.ZipFile(selected_archive) as zf:
+                with zf.open(selected_member) as source, open(dest_path, "wb") as target:
+                    shutil.copyfileobj(source, target)
+        else:
+            with tarfile.open(selected_archive, "r:*") as tf:
+                member = tf.getmember(selected_member)
+                extracted = tf.extractfile(member)
+                if extracted is None:
+                    return None
+                with extracted, open(dest_path, "wb") as target:
+                    shutil.copyfileobj(extracted, target)
+    except (OSError, zipfile.BadZipFile, tarfile.TarError):
+        return None
+
+    print(
+        f"🔍 从归档文件提取 AlphaFold3 结构: {selected_archive} -> {dest_path}",
+        file=sys.stderr,
+    )
+    return dest_path
+
+
 def run_af3_affinity_pipeline(
     temp_dir: str,
     yaml_data: Dict[str, Any],
@@ -310,14 +552,30 @@ def run_af3_affinity_pipeline(
         print("ℹ️ 未检测到配体条目，跳过亲和力预测。", file=sys.stderr)
         return []
 
-    model_path = Path(af3_output_dir) / prep.jobname / f"{prep.jobname}_model.cif"
-    if not model_path.exists():
-        fallback = next(Path(af3_output_dir).glob("**/*model.cif"), None)
-        if fallback:
-            model_path = fallback
-        else:
-            print("⚠️ 未找到 AlphaFold3 预测的结构文件，无法进行亲和力预测。", file=sys.stderr)
-            return []
+    binder_chain = prep.chain_id_label_map.get(binder_chain, safe_filename(binder_chain))
+
+    af3_output_path = Path(af3_output_dir)
+    model_path = locate_af3_structure_file(af3_output_path, prep.jobname)
+
+    if not model_path or not model_path.exists():
+        extracted_path = extract_af3_structure_from_archives(
+            af3_output_path,
+            Path(temp_dir) / "af3_extracted_structures",
+            prep.jobname,
+        )
+        model_path = extracted_path
+
+    if not model_path or not model_path.exists():
+        print(
+            "⚠️ 未找到 AlphaFold3 预测的结构文件，无法进行亲和力预测。",
+            file=sys.stderr,
+        )
+        return []
+
+    print(
+        f"🔍 使用 AlphaFold3 结构进行亲和力评估: {model_path}",
+        file=sys.stderr,
+    )
 
     ligand_resname = find_ligand_resname_in_cif(model_path, binder_chain)
     if not ligand_resname:
@@ -336,6 +594,9 @@ def run_af3_affinity_pipeline(
     affinity_base = Path(temp_dir) / "af3_affinity"
     output_dir = affinity_base / "boltzina_output"
     work_dir = affinity_base / "boltzina_work"
+    sanitized_struct_dir = affinity_base / "sanitized_structures"
+
+    model_for_affinity = prepare_structure_for_affinity(model_path, sanitized_struct_dir)
 
     affinity_entries: List[Tuple[Path, str]] = []
     try:
@@ -348,7 +609,7 @@ def run_af3_affinity_pipeline(
             work_dir=str(work_dir),
             ligand_resname=ligand_resname,
         )
-        boltzina.predict([str(model_path)])
+        boltzina.predict([str(model_for_affinity)])
 
         if not boltzina.results:
             print("⚠️ 亲和力预测未产生结果，跳过生成 affinity_data.json。", file=sys.stderr)
