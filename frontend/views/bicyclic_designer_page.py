@@ -5,6 +5,7 @@ import uuid
 import json
 import pandas as pd
 import string
+from typing import Optional
 
 from frontend.constants import BACKEND_LABELS
 from frontend.utils import (
@@ -24,6 +25,45 @@ from frontend.designer_client import (
 from frontend.ui_components import render_contact_constraint_ui, render_bond_constraint_ui, render_pocket_constraint_ui
 from frontend.utils import visualize_structure_py3dmol
 from frontend.url_state import URLStateManager
+
+
+def _find_structure_file(results_path: str) -> Optional[str]:
+    """Locate the preferred structure file within a prediction results directory."""
+    if not results_path or not os.path.isdir(results_path):
+        return None
+
+    candidates = []
+
+    for root, _, files in os.walk(results_path):
+        for name in files:
+            lower = name.lower()
+            if not lower.endswith(('.cif', '.pdb')):
+                continue
+
+            full_path = os.path.join(root, name)
+            rel_path = os.path.relpath(full_path, results_path)
+
+            priority = 100
+            if lower.endswith('.cif'):
+                priority -= 5
+            if 'af3' in rel_path:
+                priority -= 10
+            if 'af3/output' in rel_path:
+                priority -= 10
+            if 'model.cif' in lower:
+                priority -= 10
+            if 'ranked_0' in lower or 'ranked_1' in lower:
+                priority -= 6
+            if 'seed-' in rel_path:
+                priority += 4
+
+            candidates.append((priority, full_path))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (item[0], len(item[1])))
+    return candidates[0][1]
 
 def render_bicyclic_designer_page():
     # 尝试从URL恢复状态
@@ -256,9 +296,9 @@ def render_bicyclic_designer_page():
                     if msa_value != component.get('use_msa', True):
                         component['use_msa'] = msa_value
                         if msa_value:
-                            st.toast("✅ 已启用 MSA 生成", icon="🧬")
+                            st.toast("已启用 MSA 生成", icon="🧬")
                         else:
-                            st.toast("❌ 已禁用 MSA 生成", icon="⚡")
+                            st.toast("已禁用 MSA 生成", icon="⚡")
                         st.rerun()
                 else:
                     component['use_msa'] = component.get('use_msa', True)
@@ -335,7 +375,7 @@ def render_bicyclic_designer_page():
                     if smiles_from_ketcher is not None and smiles_from_ketcher != current_smiles:
                         st.session_state.bicyclic_components[i]['sequence'] = smiles_from_ketcher
                         if smiles_from_ketcher:
-                            st.toast("✅ SMILES 字符串已成功更新！", icon="🧪")
+                            st.toast("SMILES 字符串已成功更新！", icon="🧪")
                         st.rerun()
                     
                     current_smiles_display = st.session_state.bicyclic_components[i].get('sequence', '')
@@ -883,7 +923,7 @@ def render_bicyclic_designer_page():
                         backend=st.session_state.bicyclic_backend
                     )
                     
-                    st.toast(f"🎉 双环肽设计任务已启动！任务ID: {result['task_id']}", icon="✅")
+                    st.toast(f"双环肽设计任务已启动！任务ID: {result['task_id']}", icon="🎉")
                     st.rerun()
                 else:
                     st.error(f"❌ **任务启动失败**：{result['error']}")
@@ -1223,7 +1263,7 @@ def render_bicyclic_designer_page():
                         'BS3': '铋(III)三硫醇配合物 (铋金属连接体)'
                     }
                     linker_desc = linker_descriptions.get(linker_type, f'{linker_type} 连接体')
-                    st.info(f"🔗 **连接体类型**: {linker_type} - {linker_desc}", icon="⚡")
+                    st.info(f"**连接体类型**: {linker_type} - {linker_desc}", icon="⚡")
                     
                     # 显示预测的环结构
                     if len(cys_positions) == 3:
@@ -1241,41 +1281,45 @@ def render_bicyclic_designer_page():
                     # 结构文件下载
                     results_path = seq_data.get('results_path', '')
                     if results_path and os.path.exists(results_path):
-                        cif_files = [f for f in os.listdir(results_path) if f.endswith('.cif')]
-                        if cif_files:
-                            cif_file = next((f for f in cif_files if 'rank_1' in f), cif_files[0])
-                            cif_path = os.path.join(results_path, cif_file)
-                            
+                        structure_path = _find_structure_file(results_path)
+                        if structure_path and os.path.exists(structure_path):
                             try:
-                                with open(cif_path, 'r') as f:
+                                with open(structure_path, 'r') as f:
                                     cif_data = f.read()
-                                
+
+                                _, ext = os.path.splitext(structure_path)
+                                safe_ext = ext or '.cif'
+                                download_name = f"bicyclic_peptide_rank_{rank}{safe_ext}"
+
+                                mime_type = "chemical/x-pdb" if safe_ext.lower() == '.pdb' else "chemical/x-cif"
+                                ext_label = safe_ext.upper().lstrip('.')
+
                                 col_download = st.columns(2)
                                 with col_download[0]:
                                     st.download_button(
-                                        label="📄 下载双环肽结构 (CIF)",
+                                        label=f"📄 下载双环肽结构 ({ext_label})",
                                         data=cif_data,
-                                        file_name=f"bicyclic_peptide_rank_{rank}.cif",
-                                        mime="chemical/x-cif",
+                                        file_name=download_name,
+                                        mime=mime_type,
                                         use_container_width=True,
                                         key=f"download_bicyclic_cif_{i}"
                                     )
-                                
+
                                 with col_download[1]:
                                     if st.button("🔬 查看双环结构", use_container_width=True, key=f"view_bicyclic_{i}"):
                                         if f"show_bicyclic_3d_{i}" not in st.session_state:
                                             st.session_state[f"show_bicyclic_3d_{i}"] = False
                                         st.session_state[f"show_bicyclic_3d_{i}"] = not st.session_state.get(f"show_bicyclic_3d_{i}", False)
                                         st.rerun()
-                                
+
                                 if st.session_state.get(f"show_bicyclic_3d_{i}", False):
                                     st.markdown("---")
                                     st.markdown("**🔬 双环肽3D结构**")
-                                    
+
                                     try:
                                         structure = read_cif_from_string(cif_data)
                                         protein_bfactors = extract_protein_residue_bfactors(structure)
-                                        
+
                                         view_html = visualize_structure_py3dmol(
                                             cif_content=cif_data,
                                             residue_bfactors=protein_bfactors,
@@ -1285,7 +1329,7 @@ def render_bicyclic_designer_page():
                                             color_scheme='pLDDT'
                                         )
                                         st.components.v1.html(view_html, height=500, scrolling=False)
-                                        
+
                                         st.markdown("**🎨 颜色编码:**")
                                         st.markdown("""
                                         - 🔵 **蓝色**: 高置信度区域 (pLDDT > 90)
@@ -1293,11 +1337,13 @@ def render_bicyclic_designer_page():
                                         - 🟠 **橙/红色**: 低置信度区域 (pLDDT < 50)
                                         - ⚡ **亮显**: 半胱氨酸残基及二硫键
                                         """)
-                                        
+
                                     except Exception as e:
                                         st.error(f"❌ 3D结构显示失败: {str(e)}")
                             except Exception as e:
                                 st.caption(f"⚠️ 结构文件读取失败: {str(e)}")
+                        else:
+                            st.caption("⚠️ 未找到可用的结构文件。")
         
         # 演化历史图表
         st.subheader("📈 双环肽演化历史", anchor=False)
