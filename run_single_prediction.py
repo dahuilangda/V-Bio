@@ -16,7 +16,7 @@ import time
 import tarfile
 import io
 from pathlib import Path
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, List, Tuple, Dict, Any, Iterable
 import subprocess
 
 sys.path.append(os.getcwd())
@@ -202,29 +202,38 @@ def sanitize_a3m_file(path: str, context: str = "") -> None:
             print(f"⚠️ 无法写入清理后的 A3M 文件: {path}, {e}", file=sys.stderr)
 
 
+def _iter_affinity_entries(properties: Any) -> Iterable[Dict[str, Any]]:
+    """标准化 properties 字段，支持 list / dict 等多种写法。"""
+    if properties is None:
+        return []
+
+    if isinstance(properties, dict):
+        # 单个字典，直接作为候选
+        return [properties]
+
+    if isinstance(properties, list):
+        # 已经是列表，过滤出字典条目
+        return [entry for entry in properties if isinstance(entry, dict)]
+
+    # 其他类型不支持
+    return []
+
+
 def extract_affinity_config_from_yaml(yaml_data: Dict[str, Any]) -> Optional[Dict[str, str]]:
     """
-    从 YAML 数据中提取亲和力配置。
+    从 YAML 数据中提取亲和力配置，兼容 list / dict 等写法。
     """
-    properties = yaml_data.get("properties")
-    if not isinstance(properties, list):
-        return None
-
-    for entry in properties:
-        if not isinstance(entry, dict):
-            continue
+    for entry in _iter_affinity_entries(yaml_data.get("properties")):
         affinity_info = entry.get("affinity")
         if isinstance(affinity_info, dict):
-            binder = affinity_info.get("binder")
+            binder = affinity_info.get("binder") or affinity_info.get("chain")
             if binder:
-                return {"binder": str(binder)}
+                return {"binder": str(binder).strip()}
     return None
 
 
-def find_ligand_resname_in_cif(cif_path: Path, binder_chain: str) -> Optional[str]:
-    """
-    在 mmCIF 文件中查找指定链的配体残基名称。
-    """
+def _legacy_parse_ligand_from_text(cif_path: Path, binder_chain: str) -> Optional[str]:
+    """在缺少 gemmi 时回退到文本解析。"""
     try:
         with cif_path.open("r") as cif_file:
             for line in cif_file:
@@ -239,6 +248,33 @@ def find_ligand_resname_in_cif(cif_path: Path, binder_chain: str) -> Optional[st
                     return comp_id
     except OSError as err:
         print(f"⚠️ 无法读取 CIF 文件 {cif_path}: {err}", file=sys.stderr)
+    return None
+
+
+def find_ligand_resname_in_cif(cif_path: Path, binder_chain: str) -> Optional[str]:
+    """
+    在结构文件中查找指定链的配体残基名称。
+    优先使用 gemmi 解析 mmCIF / PDB，若不可用则退回文本解析。
+    """
+    try:
+        import gemmi  # type: ignore
+    except ImportError:
+        return _legacy_parse_ligand_from_text(cif_path, binder_chain)
+
+    try:
+        structure = gemmi.read_structure(str(cif_path))
+    except Exception as err:
+        print(f"⚠️ 无法使用 gemmi 解析 {cif_path}: {err}", file=sys.stderr)
+        return _legacy_parse_ligand_from_text(cif_path, binder_chain)
+
+    for model in structure:
+        chain = next((ch for ch in model if ch.name == binder_chain), None)
+        if chain is None:
+            continue
+        for residue in chain:
+            resname = residue.name.strip()
+            if resname:
+                return resname
     return None
 
 
