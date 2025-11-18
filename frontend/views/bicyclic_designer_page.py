@@ -5,7 +5,6 @@ import uuid
 import json
 import pandas as pd
 import string
-from typing import Optional
 
 from frontend.constants import BACKEND_LABELS
 from frontend.utils import (
@@ -14,7 +13,8 @@ from frontend.utils import (
     validate_designer_inputs,
     has_cached_msa,
     read_cif_from_string,
-    extract_protein_residue_bfactors
+    extract_protein_residue_bfactors,
+    find_best_structure_file
 )
 from frontend.designer_client import (
     create_designer_complex_yaml, 
@@ -26,44 +26,6 @@ from frontend.ui_components import render_contact_constraint_ui, render_bond_con
 from frontend.utils import visualize_structure_py3dmol
 from frontend.url_state import URLStateManager
 
-
-def _find_structure_file(results_path: str) -> Optional[str]:
-    """Locate the preferred structure file within a prediction results directory."""
-    if not results_path or not os.path.isdir(results_path):
-        return None
-
-    candidates = []
-
-    for root, _, files in os.walk(results_path):
-        for name in files:
-            lower = name.lower()
-            if not lower.endswith(('.cif', '.pdb')):
-                continue
-
-            full_path = os.path.join(root, name)
-            rel_path = os.path.relpath(full_path, results_path)
-
-            priority = 100
-            if lower.endswith('.cif'):
-                priority -= 5
-            if 'af3' in rel_path:
-                priority -= 10
-            if 'af3/output' in rel_path:
-                priority -= 10
-            if 'model.cif' in lower:
-                priority -= 10
-            if 'ranked_0' in lower or 'ranked_1' in lower:
-                priority -= 6
-            if 'seed-' in rel_path:
-                priority += 4
-
-            candidates.append((priority, full_path))
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda item: (item[0], len(item[1])))
-    return candidates[0][1]
 
 def render_bicyclic_designer_page():
     # 尝试从URL恢复状态
@@ -1281,7 +1243,7 @@ def render_bicyclic_designer_page():
                     # 结构文件下载
                     results_path = seq_data.get('results_path', '')
                     if results_path and os.path.exists(results_path):
-                        structure_path = _find_structure_file(results_path)
+                        structure_path = find_best_structure_file(results_path)
                         if structure_path and os.path.exists(structure_path):
                             try:
                                 with open(structure_path, 'r') as f:

@@ -8,6 +8,7 @@ import time
 import hashlib
 import yaml
 import py3Dmol
+from typing import Optional
 from datetime import datetime
 from Bio.PDB import MMCIFParser, PDBIO
 from Bio.PDB.Structure import Structure
@@ -344,6 +345,44 @@ def extract_protein_residue_bfactors(structure: Structure):
                         avg_bfactor = sum(atom_bfactors) / len(atom_bfactors)
                         residue_bfactors[(chain_id, resseq)] = avg_bfactor
     return residue_bfactors
+
+def find_best_structure_file(results_path: str) -> Optional[str]:
+    """Return the most relevant CIF/PDB file within a results directory."""
+    if not results_path or not os.path.isdir(results_path):
+        return None
+
+    candidates = []
+    for root, _, files in os.walk(results_path):
+        for name in files:
+            lower = name.lower()
+            if not lower.endswith(('.cif', '.pdb')):
+                continue
+
+            full_path = os.path.join(root, name)
+            rel_path = os.path.relpath(full_path, results_path)
+            rel_lower = rel_path.lower()
+
+            priority = 100
+            if lower.endswith('.cif'):
+                priority -= 5
+            if 'af3' in rel_lower:
+                priority -= 10
+            if 'af3/output' in rel_lower:
+                priority -= 10
+            if 'model.cif' in lower:
+                priority -= 10
+            if 'ranked_0' in lower or 'ranked_1' in lower:
+                priority -= 6
+            if 'seed-' in rel_lower:
+                priority += 4
+
+            candidates.append((priority, full_path))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (item[0], len(item[1])))
+    return candidates[0][1]
 
 def get_color_from_bfactor(bfactor: float) -> str:
     """Maps a b-factor (pLDDT score) to a specific color."""

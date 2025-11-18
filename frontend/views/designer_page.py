@@ -16,7 +16,8 @@ from frontend.utils import (
     validate_designer_inputs, 
     has_cached_msa,
     read_cif_from_string,
-    extract_protein_residue_bfactors
+    extract_protein_residue_bfactors,
+    find_best_structure_file
 )
 from frontend.designer_client import (
     create_designer_complex_yaml, 
@@ -814,71 +815,6 @@ def render_designer_page():
                 designer_is_valid = False
                 validation_message = f"初始序列包含无效字符: {', '.join(invalid_chars)}。请只使用标准的20种氨基酸字母。"
     
-    # 设置默认参数值 (来自高级设置中定义的参数)
-    # 在高级设置展开时会被覆盖
-    default_generations = 8
-    default_population_size = 12
-    default_elite_size = max(1, min(5, max(1, default_population_size//3)))
-    default_mutation_rate = 0.3
-    default_optimization_mode = "balanced"
-    default_use_initial_sequence = False
-    default_initial_sequence = None
-    default_sequence_mask = ""
-    
-    # 从高级设置中获取参数，如果没有设置则使用默认值
-    generations = st.session_state.get('designer_generations', default_generations)
-    population_size = st.session_state.get('designer_population_size', default_population_size)
-    elite_size = st.session_state.get('designer_elite_size', default_elite_size)
-    mutation_rate = st.session_state.get('designer_mutation_rate', default_mutation_rate)
-    optimization_mode = st.session_state.get('designer_optimization_mode', default_optimization_mode)
-    use_initial_sequence = st.session_state.get('designer_use_initial_sequence', default_use_initial_sequence)
-    initial_sequence = st.session_state.get('designer_initial_sequence', default_initial_sequence)
-    sequence_mask = st.session_state.get('designer_sequence_mask', default_sequence_mask)
-    
-    # 设置优化参数
-    preset_params = {
-        "balanced": {
-            "convergence_window": 5,
-            "convergence_threshold": 0.001,
-            "max_stagnation": 3,
-            "initial_temperature": 1.0,
-            "min_temperature": 0.1,
-            "enable_enhanced": True
-        },
-        "stable": {
-            "convergence_window": 5,
-            "convergence_threshold": 0.001,
-            "max_stagnation": 3,
-            "initial_temperature": 1.0,
-            "min_temperature": 0.1,
-            "enable_enhanced": True
-        },
-        "aggressive": {
-            "convergence_window": 3,
-            "convergence_threshold": 0.002,
-            "max_stagnation": 2,
-            "initial_temperature": 2.0,
-            "min_temperature": 0.2,
-            "enable_enhanced": True
-        },
-        "conservative": {
-            "convergence_window": 6,
-            "convergence_threshold": 0.0005,
-            "max_stagnation": 5,
-            "initial_temperature": 0.5,
-            "min_temperature": 0.05,
-            "enable_enhanced": True
-        }
-    }
-    
-    params = preset_params.get(optimization_mode, preset_params["balanced"])
-    convergence_window = params["convergence_window"]
-    convergence_threshold = params["convergence_threshold"]
-    max_stagnation = params["max_stagnation"]
-    initial_temperature = params["initial_temperature"]
-    min_temperature = params["min_temperature"]
-    enable_enhanced = params["enable_enhanced"]
-    
     # 设置目标链ID
     target_chain_id = 'A'
     
@@ -1519,78 +1455,80 @@ def render_designer_page():
                     col_metrics[3].metric("发现代数", seq_data.get('generation', 'N/A'))
                     
                     results_path = seq_data.get('results_path', '')
-                    if results_path and os.path.exists(results_path):
-                        cif_files = [f for f in os.listdir(results_path) if f.endswith('.cif')]
-                        if cif_files:
-                            cif_file = next((f for f in cif_files if 'rank_1' in f), cif_files[0])
-                            cif_path = os.path.join(results_path, cif_file)
-                            
-                            try:
-                                with open(cif_path, 'r') as f:
-                                    cif_data = f.read()
-                                
-                                col_download = st.columns(2)
-                                with col_download[0]:
-                                    st.download_button(
-                                        label="📄 下载 CIF",
-                                        data=cif_data,
-                                        file_name=f"rank_{rank}_designed_structure.cif",
-                                        mime="chemical/x-cif",
-                                        use_container_width=True,
-                                        key=f"download_cif_{i}",
-                                        help="下载该设计序列的3D结构文件 (CIF格式)"
+                    structure_path = find_best_structure_file(results_path) if results_path else None
+                    if structure_path and os.path.exists(structure_path):
+                        try:
+                            with open(structure_path, 'r') as f:
+                                structure_data = f.read()
+
+                            _, ext = os.path.splitext(structure_path)
+                            safe_ext = ext or '.cif'
+                            mime_type = "chemical/x-pdb" if safe_ext.lower() == '.pdb' else "chemical/x-cif"
+                            download_name = f"rank_{rank}_designed_structure{safe_ext}"
+                            ext_label = safe_ext.upper().lstrip('.')
+
+                            col_download = st.columns(2)
+                            with col_download[0]:
+                                st.download_button(
+                                    label=f"📄 下载结构 ({ext_label})",
+                                    data=structure_data,
+                                    file_name=download_name,
+                                    mime=mime_type,
+                                    use_container_width=True,
+                                    key=f"download_structure_{i}",
+                                    help="下载该设计序列的3D结构文件"
+                                )
+
+                            with col_download[1]:
+                                if st.button(
+                                    "🔬 查看相互作用",
+                                    use_container_width=True,
+                                    key=f"view_interaction_{i}",
+                                    help="在3D视图中查看该设计序列与目标的相互作用"
+                                ):
+                                    if f"show_3d_{i}" not in st.session_state:
+                                        st.session_state[f"show_3d_{i}"] = False
+                                    st.session_state[f"show_3d_{i}"] = not st.session_state.get(f"show_3d_{i}", False)
+                                    st.rerun()
+
+                            if st.session_state.get(f"show_3d_{i}", False):
+                                st.markdown("---")
+                                st.markdown("**🔬 3D结构与相互作用**")
+
+                                try:
+                                    structure = read_cif_from_string(structure_data)
+                                    protein_bfactors = extract_protein_residue_bfactors(structure)
+
+                                    view_html = visualize_structure_py3dmol(
+                                        cif_content=structure_data,
+                                        residue_bfactors=protein_bfactors,
+                                        protein_style='cartoon',
+                                        ligand_style='ball-and-stick',
+                                        spin=False,
+                                        color_scheme='pLDDT'
                                     )
-                                
-                                with col_download[1]:
-                                    if st.button(
-                                        "🔬 查看相互作用",
-                                        use_container_width=True,
-                                        key=f"view_interaction_{i}",
-                                        help="在3D视图中查看该设计序列与目标的相互作用"
-                                    ):
-                                        if f"show_3d_{i}" not in st.session_state:
-                                            st.session_state[f"show_3d_{i}"] = False
-                                        st.session_state[f"show_3d_{i}"] = not st.session_state.get(f"show_3d_{i}", False)
+                                    st.components.v1.html(view_html, height=500, scrolling=False)
+
+                                    st.markdown("**颜色说明：**")
+                                    st.markdown("""
+                                    - 🔵 **蓝色**：高置信度区域 (pLDDT > 90)
+                                    - 🟦 **浅蓝色**：较高置信度 (pLDDT 70-90)  
+                                    - 🟡 **黄色**：中等置信度 (pLDDT 50-70)
+                                    - 🟠 **橙色**：低置信度区域 (pLDDT < 50)
+                                    """)
+
+                                    if st.button("❌ 关闭3D视图", key=f"close_3d_{i}", help="隐藏3D结构显示"):
+                                        st.session_state[f"show_3d_{i}"] = False
                                         st.rerun()
-                                
-                                if st.session_state.get(f"show_3d_{i}", False):
-                                    st.markdown("---")
-                                    st.markdown("**🔬 3D结构与相互作用**")
-                                    
-                                    try:
-                                        structure = read_cif_from_string(cif_data)
-                                        protein_bfactors = extract_protein_residue_bfactors(structure)
-                                        
-                                        view_html = visualize_structure_py3dmol(
-                                            cif_content=cif_data,
-                                            residue_bfactors=protein_bfactors,
-                                            protein_style='cartoon',
-                                            ligand_style='ball-and-stick',
-                                            spin=False,
-                                            color_scheme='pLDDT'
-                                        )
-                                        st.components.v1.html(view_html, height=500, scrolling=False)
-                                        
-                                        st.markdown("**颜色说明：**")
-                                        st.markdown("""
-                                        - 🔵 **蓝色**：高置信度区域 (pLDDT > 90)
-                                        - 🟦 **浅蓝色**：较高置信度 (pLDDT 70-90)  
-                                        - 🟡 **黄色**：中等置信度 (pLDDT 50-70)
-                                        - 🟠 **橙色**：低置信度区域 (pLDDT < 50)
-                                        """)
-                                        
-                                        if st.button("❌ 关闭3D视图", key=f"close_3d_{i}", help="隐藏3D结构显示"):
-                                            st.session_state[f"show_3d_{i}"] = False
-                                            st.rerun()
-                                        
-                                    except Exception as e:
-                                        st.error(f"❌ 3D结构显示失败: {str(e)}")
-                                        st.exception(e)
-                                        
-                            except Exception as e:
-                                st.caption(f"⚠️ 结构文件读取失败: {str(e)}")
-                        else:
-                            st.caption("⚠️ 未找到结构文件")
+
+                                except Exception as e:
+                                    st.error(f"❌ 3D结构显示失败: {str(e)}")
+                                    st.exception(e)
+
+                        except Exception as e:
+                            st.caption(f"⚠️ 结构文件读取失败: {str(e)}")
+                    elif results_path:
+                        st.caption("⚠️ 未找到结构文件")
                     else:
                         st.caption("⚠️ 结构文件路径不可用")
         
