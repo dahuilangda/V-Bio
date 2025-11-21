@@ -22,10 +22,71 @@ import shutil
 import json
 from pathlib import Path
 
+import yaml
+
 # 本地模块导入
 from api_client import BoltzApiClient
 from screening_engine import SimpleScreeningEngine, ScreeningConfig
 from molecule_library import LibraryProcessor
+
+
+def target_requires_msa_server(target_yaml: str) -> bool:
+    """
+    检查目标配置是否缺少可用的MSA数据，如果缺失则需要启用MSA服务器
+    """
+    logger = logging.getLogger(__name__)
+    try:
+        with open(target_yaml, 'r') as f:
+            config = yaml.safe_load(f) or {}
+    except Exception as e:
+        logger.warning(f"无法解析目标配置 {target_yaml}: {e}，默认启用MSA服务器")
+        return True
+
+    sequences = config.get('sequences')
+    if not isinstance(sequences, list) or not sequences:
+        logger.warning("目标配置缺少有效的sequences列表，默认启用MSA服务器")
+        return True
+
+    target_dir = Path(target_yaml).resolve().parent
+
+    def _msa_missing(msa_value):
+        """内部辅助函数，判断单条序列的MSA是否缺失"""
+        if not msa_value:
+            return True
+
+        if isinstance(msa_value, str):
+            normalized = msa_value.strip().lower()
+            if normalized in {"", "none", "null", "auto", "empty"}:
+                return True
+
+            msa_path = Path(msa_value)
+            if not msa_path.is_absolute():
+                msa_path = (target_dir / msa_path).resolve()
+            return not msa_path.exists()
+
+        if isinstance(msa_value, dict):
+            # 支持 {'path': 'msa.a3m'} 这样的结构
+            path_value = msa_value.get('path')
+            if not path_value:
+                return True
+            msa_path = Path(path_value)
+            if not msa_path.is_absolute():
+                msa_path = (target_dir / msa_path).resolve()
+            return not msa_path.exists()
+
+        # 其他未知类型一律视为缺失
+        return True
+
+    for entry in sequences:
+        if not isinstance(entry, dict):
+            continue
+        protein = entry.get('protein')
+        if not isinstance(protein, dict):
+            continue
+        if _msa_missing(protein.get('msa')):
+            return True
+
+    return False
 
 def setup_logging(log_level: str = "INFO"):
     """配置全局日志记录"""
@@ -428,6 +489,15 @@ def main():
         
         # 创建配置
         config = create_config_from_args(args)
+
+        # 如果用户未显式开启MSA服务器，并且目标配置缺少MSA数据则自动开启
+        if not config.use_msa_server and target_requires_msa_server(config.target_yaml):
+            logger.info("目标配置缺少MSA数据，自动启用 --use_msa_server 以避免任务失败")
+            config.use_msa_server = True
+        elif config.use_msa_server:
+            logger.info("MSA服务器模式已开启")
+        else:
+            logger.info("检测到目标配置包含有效MSA，将跳过MSA服务器")
         print_config_summary(config)
         
         # 干运行模式
