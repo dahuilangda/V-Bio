@@ -36,11 +36,20 @@ def render_designer_page():
     # 添加设计类型选择器
     st.markdown("---")
     col_design_type, col_design_info = st.columns([1, 2])
-    
+
+    current_backend = st.session_state.get('designer_backend', 'boltz')
+    if current_backend not in BACKEND_LABELS:
+        current_backend = 'boltz'
+        st.session_state.designer_backend = current_backend
+    is_af3_backend = current_backend == 'alphafold3'
+
+    design_type_options = ["peptide", "glycopeptide"]
+    if is_af3_backend:
+        design_type_options = ["peptide"]
     with col_design_type:
         design_type_selector = st.selectbox(
             "选择设计类型",
-            options=["peptide", "glycopeptide"],
+            options=design_type_options,
             format_func=lambda x: {
                 "peptide": "🧬 多肽设计",
                 "glycopeptide": "🍯 糖肽设计"
@@ -50,7 +59,9 @@ def render_designer_page():
         )
     
     with col_design_info:
-        if design_type_selector == "peptide":
+        if is_af3_backend:
+            st.warning("AlphaFold3 后端暂不支持糖肽设计，已自动切换为多肽模式。", icon="⚠️")
+        elif design_type_selector == "peptide":
             st.info("🧬 **多肽设计**: 设计天然或修饰的氨基酸序列，具有优化的结合亲和力和特异性。", icon="💡")
         else:  # glycopeptide
             st.info("🍯 **糖肽设计**: 设计含有糖基修饰的多肽，增强稳定性和生物活性，常用于免疫调节和细胞识别。", icon="💡")
@@ -60,6 +71,16 @@ def render_designer_page():
         st.session_state.designer_results is None and 
         st.session_state.designer_error is None
     )
+
+    if is_af3_backend:
+        for comp in st.session_state.get('designer_components', []):
+            if comp.get('type') == 'protein':
+                comp['use_msa'] = True
+                msa_key = f"designer_msa_{comp.get('id')}"
+                if msa_key in st.session_state and st.session_state[msa_key] is not True:
+                    st.session_state[msa_key] = True
+        if st.session_state.get('designer_cyclic_binder'):
+            st.session_state.designer_cyclic_binder = False
     
     with st.expander("🎯 **步骤 1: 设置设计目标**", expanded=not designer_is_running and not st.session_state.designer_results):
         st.markdown("配置您的分子设计任务参数。")
@@ -116,7 +137,8 @@ def render_designer_page():
                         del component['input_method']
                     
                     if new_type == 'protein':
-                        component['use_msa'] = get_smart_msa_default(st.session_state.designer_components)
+                        smart_default = get_smart_msa_default(st.session_state.designer_components)
+                        component['use_msa'] = True if is_af3_backend else smart_default
                     elif new_type == 'ligand':
                         component['input_method'] = 'smiles'
                     
@@ -169,28 +191,35 @@ def render_designer_page():
                 component['sequence'] = new_sequence
                 
                 if sequence_changed:
-                    protein_components = [comp for comp in st.session_state.designer_components if comp.get('type') == 'protein']
-                    if len(protein_components) == 1:
-                        if new_sequence.strip():
-                            if has_cached_msa(new_sequence.strip()):
-                                component['use_msa'] = True
+                    if is_af3_backend:
+                        component['use_msa'] = True
+                    else:
+                        protein_components = [comp for comp in st.session_state.designer_components if comp.get('type') == 'protein']
+                        if len(protein_components) == 1:
+                            if new_sequence.strip():
+                                if has_cached_msa(new_sequence.strip()):
+                                    component['use_msa'] = True
+                                else:
+                                    component['use_msa'] = False
                             else:
                                 component['use_msa'] = False
-                        else:
-                            component['use_msa'] = False
                     
                     st.rerun()
                 
                 designer_sequence = component.get('sequence', '').strip()
                 if designer_sequence:
+                    msa_disabled = designer_is_running or is_af3_backend
+                    msa_help = "AlphaFold3 引擎要求为所有蛋白质生成 MSA，已自动启用并锁定。" if is_af3_backend else "为此蛋白质组分生成多序列比对以提高预测精度。取消勾选可以跳过MSA生成，节省时间。"
                     msa_value = st.checkbox(
                         "启用 MSA",
-                        value=component.get('use_msa', True),
+                        value=True if is_af3_backend else component.get('use_msa', True),
                         key=f"designer_msa_{component['id']}",
-                        help="为此蛋白质组分生成多序列比对以提高预测精度。取消勾选可以跳过MSA生成，节省时间。",
-                        disabled=designer_is_running
+                        help=msa_help,
+                        disabled=msa_disabled
                     )
-                    if msa_value != component.get('use_msa', True):
+                    if is_af3_backend:
+                        st.caption("AlphaFold3 后端必须启用 MSA。")
+                    elif msa_value != component.get('use_msa', True):
                         component['use_msa'] = msa_value
                         if msa_value:
                             st.toast("✅ 已启用 MSA 生成", icon="🧬")
@@ -198,7 +227,7 @@ def render_designer_page():
                             st.toast("❌ 已禁用 MSA 生成", icon="⚡")
                         st.rerun()
                 else:
-                    component['use_msa'] = component.get('use_msa', True)
+                    component['use_msa'] = True if is_af3_backend else component.get('use_msa', True)
                     
                 if 'cyclic' in component:
                     del component['cyclic']
@@ -296,12 +325,13 @@ def render_designer_page():
         
         def add_new_designer_component():
             smart_msa_default = get_smart_msa_default(st.session_state.designer_components)
+            default_use_msa = True if is_af3_backend else smart_msa_default
             st.session_state.designer_components.append({
                 'id': str(uuid.uuid4()),
                 'type': 'protein',
                 'sequence': '',
                 'num_copies': 1,
-                'use_msa': smart_msa_default
+                'use_msa': default_use_msa
             })
         
         if st.button("➕ 添加新组分", key="add_new_component", disabled=designer_is_running, help="添加新的蛋白质、DNA/RNA或小分子组分"):
@@ -320,7 +350,6 @@ def render_designer_page():
             binder_chain_id = 'B'
 
         backend_options = list(BACKEND_LABELS.keys())
-        current_backend = st.session_state.get('designer_backend', 'boltz')
         if current_backend not in backend_options:
             current_backend = 'boltz'
         backend_index = backend_options.index(current_backend)
@@ -335,7 +364,13 @@ def render_designer_page():
         )
         if selected_backend != current_backend:
             st.session_state.designer_backend = selected_backend
+            if selected_backend == 'alphafold3':
+                for comp in st.session_state.designer_components:
+                    if comp.get('type') == 'protein':
+                        comp['use_msa'] = True
             st.rerun()
+        if selected_backend == 'alphafold3':
+            st.info("AlphaFold3 后端要求对所有蛋白质启用 MSA，并已为您自动勾选。", icon="ℹ️")
         
         st.subheader("🔗 分子约束 (可选)", anchor=False)
         st.markdown("设置分子结构约束，包括键约束、口袋约束和接触约束。")
@@ -506,12 +541,17 @@ def render_designer_page():
                 )
             
             with col2:
-                cyclic_binder = st.checkbox(
+                cyclic_disabled = designer_is_running or is_af3_backend
+                cyclic_checkbox_value = st.checkbox(
                     "环状结构",
                     value=False,
                     help="勾选此项将设计的结合肽设计为环状肽，具有闭合的环状结构。",
-                    disabled=designer_is_running
+                    disabled=cyclic_disabled,
+                    key="designer_cyclic_binder"
                 )
+                if is_af3_backend:
+                    st.caption("AlphaFold3 后端暂不支持环肽设计，此选项已禁用。")
+                cyclic_binder = False if is_af3_backend else cyclic_checkbox_value
             
             with col3:
                 if design_type_selector == "glycopeptide":

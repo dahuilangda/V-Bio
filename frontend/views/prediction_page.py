@@ -53,6 +53,17 @@ def render_prediction_page():
     is_running = (
         st.session_state.task_id is not None and st.session_state.results is None and st.session_state.error is None
     )
+    current_backend = st.session_state.get('prediction_backend', 'boltz')
+    is_af3_backend = current_backend == 'alphafold3'
+
+    if is_af3_backend:
+        for comp in st.session_state.get('components', []):
+            if comp.get('type') == 'protein':
+                comp['use_msa'] = True
+                comp['cyclic'] = False
+                msa_key = f"msa_{comp.get('id')}"
+                if msa_key in st.session_state and st.session_state[msa_key] is not True:
+                    st.session_state[msa_key] = True
 
     with st.expander("🔧 **步骤 1: 配置您的预测任务**", expanded=not is_running and not st.session_state.results):
         st.markdown("填写以下信息，定义您希望预测的生物大分子和小分子组分。")
@@ -85,6 +96,9 @@ def render_prediction_page():
                 value=component.get('num_copies', 1), disabled=is_running,
                 help="此组分的拷贝数。可设置为2（二聚体）、3（三聚体）等。每个拷贝将分配独立的链ID。"
             )
+
+            if selected_type == 'protein' and is_af3_backend:
+                st.session_state.components[i]['use_msa'] = True
 
             if selected_type == 'ligand':
                 method_options = ["smiles", "ccd", "ketcher"]
@@ -207,45 +221,59 @@ def render_prediction_page():
                 
                 if sequence_changed:
                     if selected_type == 'protein':
-                        protein_components = [comp for comp in st.session_state.components if comp.get('type') == 'protein']
-                        if len(protein_components) == 1:
-                            if new_sequence.strip():
-                                if has_cached_msa(new_sequence.strip()):
-                                    st.session_state.components[i]['use_msa'] = True
+                        if is_af3_backend:
+                            st.session_state.components[i]['use_msa'] = True
+                        else:
+                            protein_components = [comp for comp in st.session_state.components if comp.get('type') == 'protein']
+                            if len(protein_components) == 1:
+                                if new_sequence.strip():
+                                    if has_cached_msa(new_sequence.strip()):
+                                        st.session_state.components[i]['use_msa'] = True
+                                    else:
+                                        st.session_state.components[i]['use_msa'] = False
                                 else:
                                     st.session_state.components[i]['use_msa'] = False
-                            else:
-                                st.session_state.components[i]['use_msa'] = False
                     
                     st.rerun()
                 
                 if selected_type == 'protein':
                     protein_sequence = st.session_state.components[i].get('sequence', '').strip()
+
+                    if is_af3_backend:
+                        st.session_state.components[i]['use_msa'] = True
                     
                     if protein_sequence:
                         protein_opts_cols = st.columns([1.5, 1.5, 1, 1])
                         
                         with protein_opts_cols[0]:
+                            cyclic_disabled = is_running or is_af3_backend
+                            cyclic_help = "AlphaFold3 后端暂不支持环肽预测，已自动禁用此选项。" if is_af3_backend else "勾选此项表示该蛋白质序列是一个环状肽。对于环肽，模型将尝试生成闭合的环状结构。"
                             cyclic_value = st.checkbox(
                                 "环肽 (Cyclic)",
-                                value=st.session_state.components[i].get('cyclic', False),
+                                value=False if is_af3_backend else st.session_state.components[i].get('cyclic', False),
                                 key=f"cyclic_{component['id']}",
-                                help="勾选此项表示该蛋白质序列是一个环状肽。对于环肽，模型将尝试生成闭合的环状结构。",
-                                disabled=is_running
+                                help=cyclic_help,
+                                disabled=cyclic_disabled
                             )
-                            if cyclic_value != st.session_state.components[i].get('cyclic', False):
+                            if is_af3_backend:
+                                st.caption("AlphaFold3 后端暂不支持环肽。")
+                            elif cyclic_value != st.session_state.components[i].get('cyclic', False):
                                 st.session_state.components[i]['cyclic'] = cyclic_value
                                 st.rerun()
                         
                         with protein_opts_cols[1]:
+                            msa_disabled = is_running or is_af3_backend
+                            msa_help_text = "AlphaFold3 引擎要求为所有蛋白质生成 MSA，已自动启用并锁定。" if is_af3_backend else "为此蛋白质组分生成多序列比对以提高预测精度。取消勾选可以跳过MSA生成，节省时间。"
                             msa_value = st.checkbox(
                                 "启用 MSA",
-                                value=st.session_state.components[i].get('use_msa', True),
+                                value=True if is_af3_backend else st.session_state.components[i].get('use_msa', True),
                                 key=f"msa_{component['id']}",
-                                help="为此蛋白质组分生成多序列比对以提高预测精度。取消勾选可以跳过MSA生成，节省时间。",
-                                disabled=is_running
+                                help=msa_help_text,
+                                disabled=msa_disabled
                             )
-                            if msa_value != st.session_state.components[i].get('use_msa', True):
+                            if is_af3_backend:
+                                st.caption("AlphaFold3 后端必须启用 MSA。")
+                            elif msa_value != st.session_state.components[i].get('use_msa', True):
                                 st.session_state.components[i]['use_msa'] = msa_value
                                 st.rerun()
                         
@@ -261,17 +289,21 @@ def render_prediction_page():
                             else:
                                 st.markdown("🔄&nbsp;需要生成", unsafe_allow_html=True)
                     else:
+                        cyclic_disabled = is_running or is_af3_backend
+                        cyclic_help = "AlphaFold3 后端暂不支持环肽预测，已自动禁用此选项。" if is_af3_backend else "勾选此项表示该蛋白质序列是一个环状肽。对于环肽，模型将尝试生成闭合的环状结构。"
                         cyclic_value = st.checkbox(
                             "环肽 (Cyclic Peptide)",
-                            value=st.session_state.components[i].get('cyclic', False),
+                            value=False if is_af3_backend else st.session_state.components[i].get('cyclic', False),
                             key=f"cyclic_{component['id']}",
-                            help="勾选此项表示该蛋白质序列是一个环状肽。对于环肽，模型将尝试生成闭合的环状结构。",
-                            disabled=is_running
+                            help=cyclic_help,
+                            disabled=cyclic_disabled
                         )
-                        if cyclic_value != st.session_state.components[i].get('cyclic', False):
+                        if is_af3_backend:
+                            st.caption("AlphaFold3 后端暂不支持环肽。")
+                        elif cyclic_value != st.session_state.components[i].get('cyclic', False):
                             st.session_state.components[i]['cyclic'] = cyclic_value
                             st.rerun()
-                        st.session_state.components[i]['use_msa'] = st.session_state.components[i].get('use_msa', True)
+                        st.session_state.components[i]['use_msa'] = True if is_af3_backend else st.session_state.components[i].get('use_msa', True)
             
             delete_col, _ = st.columns([10, 1])
             with delete_col:
@@ -287,6 +319,7 @@ def render_prediction_page():
         
         def add_new_component():
             smart_msa_default = get_smart_msa_default(st.session_state.components)
+            default_use_msa = True if is_af3_backend else smart_msa_default
             st.session_state.components.append({
                 'id': str(uuid.uuid4()), 
                 'type': 'protein', 
@@ -294,7 +327,7 @@ def render_prediction_page():
                 'sequence': '', 
                 'input_method': 'smiles', 
                 'cyclic': False,
-                'use_msa': smart_msa_default
+                'use_msa': default_use_msa
             })
         
         st.button("➕ 添加新组分", on_click=add_new_component, disabled=is_running, use_container_width=True)
@@ -359,7 +392,6 @@ def render_prediction_page():
                 st.caption("暂无MSA缓存")
 
         backend_options = list(BACKEND_LABELS.keys())
-        current_backend = st.session_state.get('prediction_backend', 'boltz')
         if current_backend not in backend_options:
             current_backend = 'boltz'
         backend_index = backend_options.index(current_backend)
@@ -373,7 +405,14 @@ def render_prediction_page():
         )
         if selected_backend != current_backend:
             st.session_state.prediction_backend = selected_backend
+            if selected_backend == 'alphafold3':
+                for comp in st.session_state.components:
+                    if comp.get('type') == 'protein':
+                        comp['use_msa'] = True
+                        comp['cyclic'] = False
             st.rerun()
+        if selected_backend == 'alphafold3':
+            st.info("AlphaFold3 后端要求对所有蛋白质启用 MSA，并已为您自动勾选。", icon="ℹ️")
         
         has_ligand_component = any(comp['type'] == 'ligand' for comp in st.session_state.components)
         if has_ligand_component:

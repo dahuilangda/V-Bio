@@ -118,6 +118,24 @@ def render_bicyclic_designer_page():
         st.session_state.bicyclic_results is None and 
         st.session_state.bicyclic_error is None
     )
+    current_backend = st.session_state.get('bicyclic_backend', 'boltz')
+    if current_backend not in BACKEND_LABELS:
+        current_backend = 'boltz'
+        st.session_state.bicyclic_backend = current_backend
+    is_af3_backend = current_backend == 'alphafold3'
+    if is_af3_backend:
+        st.warning("AlphaFold3 后端暂不支持双环肽设计，已自动切换为 Boltz 引擎。", icon="⚠️")
+        current_backend = 'boltz'
+        st.session_state.bicyclic_backend = current_backend
+        is_af3_backend = False
+
+    if is_af3_backend:
+        for comp in st.session_state.get('bicyclic_components', []):
+            if comp.get('type') == 'protein':
+                comp['use_msa'] = True
+                msa_key = f"bicyclic_msa_{comp.get('id')}"
+                if msa_key in st.session_state and st.session_state[msa_key] is not True:
+                    st.session_state[msa_key] = True
     
     with st.expander("🎯 **步骤 1: 设置设计目标**", expanded=not designer_is_running and not st.session_state.bicyclic_results):
         st.markdown("配置您的双环肽设计任务参数。")
@@ -180,7 +198,8 @@ def render_bicyclic_designer_page():
                     
                     # 根据新类型设置默认字段
                     if new_type == 'protein':
-                        component['use_msa'] = get_smart_msa_default(st.session_state.bicyclic_components)
+                        smart_default = get_smart_msa_default(st.session_state.bicyclic_components)
+                        component['use_msa'] = True if is_af3_backend else smart_default
                     elif new_type == 'ligand':
                         component['input_method'] = 'smiles'
                     
@@ -234,28 +253,35 @@ def render_bicyclic_designer_page():
                 component['sequence'] = new_sequence
                 
                 if sequence_changed:
-                    protein_components = [comp for comp in st.session_state.bicyclic_components if comp.get('type') == 'protein']
-                    if len(protein_components) == 1:
-                        if new_sequence.strip():
-                            if has_cached_msa(new_sequence.strip()):
-                                component['use_msa'] = True
+                    if is_af3_backend:
+                        component['use_msa'] = True
+                    else:
+                        protein_components = [comp for comp in st.session_state.bicyclic_components if comp.get('type') == 'protein']
+                        if len(protein_components) == 1:
+                            if new_sequence.strip():
+                                if has_cached_msa(new_sequence.strip()):
+                                    component['use_msa'] = True
+                                else:
+                                    component['use_msa'] = False
                             else:
                                 component['use_msa'] = False
-                        else:
-                            component['use_msa'] = False
                     
                     st.rerun()
                 
                 bicyclic_sequence = component.get('sequence', '').strip()
                 if bicyclic_sequence:
+                    msa_disabled = designer_is_running or is_af3_backend
+                    msa_help = "AlphaFold3 引擎要求为所有蛋白质生成 MSA，已自动启用并锁定。" if is_af3_backend else "为此蛋白质组分生成多序列比对以提高预测精度。取消勾选可以跳过MSA生成，节省时间。"
                     msa_value = st.checkbox(
                         "启用 MSA",
-                        value=component.get('use_msa', True),
+                        value=True if is_af3_backend else component.get('use_msa', True),
                         key=f"bicyclic_msa_{component['id']}",
-                        help="为此蛋白质组分生成多序列比对以提高预测精度。取消勾选可以跳过MSA生成，节省时间。",
-                        disabled=designer_is_running
+                        help=msa_help,
+                        disabled=msa_disabled
                     )
-                    if msa_value != component.get('use_msa', True):
+                    if is_af3_backend:
+                        st.caption("AlphaFold3 后端必须启用 MSA。")
+                    elif msa_value != component.get('use_msa', True):
                         component['use_msa'] = msa_value
                         if msa_value:
                             st.toast("已启用 MSA 生成", icon="🧬")
@@ -263,7 +289,7 @@ def render_bicyclic_designer_page():
                             st.toast("已禁用 MSA 生成", icon="⚡")
                         st.rerun()
                 else:
-                    component['use_msa'] = component.get('use_msa', True)
+                    component['use_msa'] = True if is_af3_backend else component.get('use_msa', True)
             
             elif component['type'] in ['dna', 'rna']:
                 seq_type = "DNA" if component['type'] == 'dna' else "RNA"
@@ -353,12 +379,13 @@ def render_bicyclic_designer_page():
         
         def add_new_bicyclic_component():
             smart_msa_default = get_smart_msa_default(st.session_state.bicyclic_components)
+            default_use_msa = True if is_af3_backend else smart_msa_default
             st.session_state.bicyclic_components.append({
                 'id': str(uuid.uuid4()),
                 'type': 'protein',
                 'sequence': '',
                 'num_copies': 1,
-                'use_msa': smart_msa_default
+                'use_msa': default_use_msa
             })
         
         if st.button("➕ 添加新组分", key="add_bicyclic_component", disabled=designer_is_running, help="添加新的蛋白质、DNA/RNA或小分子组分"):
@@ -776,8 +803,7 @@ def render_bicyclic_designer_page():
                 })
                 st.rerun()
 
-    backend_options = list(BACKEND_LABELS.keys())
-    current_backend = st.session_state.get('bicyclic_backend', 'boltz')
+    backend_options = [key for key in BACKEND_LABELS.keys() if key != 'alphafold3']
     if current_backend not in backend_options:
         current_backend = 'boltz'
     backend_index = backend_options.index(current_backend)
@@ -792,7 +818,13 @@ def render_bicyclic_designer_page():
     )
     if selected_backend != current_backend:
         st.session_state.bicyclic_backend = selected_backend
+        if selected_backend == 'alphafold3':
+            for comp in st.session_state.bicyclic_components:
+                if comp.get('type') == 'protein':
+                    comp['use_msa'] = True
         st.rerun()
+    if selected_backend == 'alphafold3':
+        st.info("AlphaFold3 后端要求对所有蛋白质启用 MSA，并已为您自动勾选。", icon="ℹ️")
 
     # 输入验证
     bicyclic_is_valid, validation_message = validate_designer_inputs(st.session_state.bicyclic_components)

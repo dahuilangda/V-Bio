@@ -67,6 +67,26 @@ class HTMLReporter:
     
     def _setup_professional_style(self):
         """设置图表参数"""
+        # 定义AlphaFold风格的置信度颜色方案
+        self.color_scheme = {
+            # AlphaFold置信度颜色：从红色(低置信度)到蓝色(高置信度)
+            'very_high_confidence': '#0053D6',   # 深蓝色 (>90)
+            'high_confidence': '#65CBF3',        # 浅蓝色 (70-90) 
+            'medium_confidence': '#FFDB13',      # 黄色 (50-70)
+            'low_confidence': '#FF7D45',         # 橙色 (0-50)
+            'very_low_confidence': '#FF0000',    # 红色 (<30)
+            
+            # 传统配色作为备用
+            'primary': '#0053D6',      # AlphaFold深蓝色
+            'secondary': '#FF7D45',    # AlphaFold橙色
+            'success': '#2ecc71',      # 绿色
+            'warning': '#FFDB13',      # AlphaFold黄色
+            'purple': '#9b59b6',       # 紫色
+            'teal': '#65CBF3',         # AlphaFold浅蓝色
+            'dark': '#34495e',         # 深色
+            'gradient': ['#FF0000', '#FF7D45', '#FFDB13', '#65CBF3', '#0053D6']  # AlphaFold渐变
+        }
+
         if not MATPLOTLIB_AVAILABLE:
             return
             
@@ -126,26 +146,6 @@ class HTMLReporter:
                 '#95a5a6', '#8e44ad'
             ])
         })
-        
-        # 定义AlphaFold风格的置信度颜色方案
-        self.color_scheme = {
-            # AlphaFold置信度颜色：从红色(低置信度)到蓝色(高置信度)
-            'very_high_confidence': '#0053D6',   # 深蓝色 (>90)
-            'high_confidence': '#65CBF3',        # 浅蓝色 (70-90) 
-            'medium_confidence': '#FFDB13',      # 黄色 (50-70)
-            'low_confidence': '#FF7D45',         # 橙色 (0-50)
-            'very_low_confidence': '#FF0000',    # 红色 (<30)
-            
-            # 传统配色作为备用
-            'primary': '#0053D6',      # AlphaFold深蓝色
-            'secondary': '#FF7D45',    # AlphaFold橙色
-            'success': '#2ecc71',      # 绿色
-            'warning': '#FFDB13',      # AlphaFold黄色
-            'purple': '#9b59b6',       # 紫色
-            'teal': '#65CBF3',         # AlphaFold浅蓝色
-            'dark': '#34495e',         # 深色
-            'gradient': ['#FF0000', '#FF7D45', '#FFDB13', '#65CBF3', '#0053D6']  # AlphaFold渐变
-        }
     
     def _get_alphafold_color(self, score: float, score_type: str = "confidence") -> str:
         """根据AlphaFold置信度分数获取对应颜色"""
