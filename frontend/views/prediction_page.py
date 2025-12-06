@@ -59,11 +59,11 @@ def render_prediction_page():
     if is_af3_backend:
         for comp in st.session_state.get('components', []):
             if comp.get('type') == 'protein':
-                comp['use_msa'] = True
+                comp.setdefault('use_msa', True)
                 comp['cyclic'] = False
                 msa_key = f"msa_{comp.get('id')}"
-                if msa_key in st.session_state and st.session_state[msa_key] is not True:
-                    st.session_state[msa_key] = True
+                if msa_key not in st.session_state:
+                    st.session_state[msa_key] = comp.get('use_msa', True)
 
     with st.expander("🔧 **步骤 1: 配置您的预测任务**", expanded=not is_running and not st.session_state.results):
         st.markdown("填写以下信息，定义您希望预测的生物大分子和小分子组分。")
@@ -98,7 +98,7 @@ def render_prediction_page():
             )
 
             if selected_type == 'protein' and is_af3_backend:
-                st.session_state.components[i]['use_msa'] = True
+                st.session_state.components[i].setdefault('use_msa', True)
 
             if selected_type == 'ligand':
                 method_options = ["smiles", "ccd", "ketcher"]
@@ -220,28 +220,22 @@ def render_prediction_page():
                 st.session_state.components[i]['sequence'] = new_sequence
                 
                 if sequence_changed:
-                    if selected_type == 'protein':
-                        if is_af3_backend:
-                            st.session_state.components[i]['use_msa'] = True
-                        else:
-                            protein_components = [comp for comp in st.session_state.components if comp.get('type') == 'protein']
-                            if len(protein_components) == 1:
-                                if new_sequence.strip():
-                                    if has_cached_msa(new_sequence.strip()):
-                                        st.session_state.components[i]['use_msa'] = True
-                                    else:
-                                        st.session_state.components[i]['use_msa'] = False
+                    if selected_type == 'protein' and not is_af3_backend:
+                        protein_components = [comp for comp in st.session_state.components if comp.get('type') == 'protein']
+                        if len(protein_components) == 1:
+                            if new_sequence.strip():
+                                if has_cached_msa(new_sequence.strip()):
+                                    st.session_state.components[i]['use_msa'] = True
                                 else:
                                     st.session_state.components[i]['use_msa'] = False
+                            else:
+                                st.session_state.components[i]['use_msa'] = False
                     
                     st.rerun()
                 
                 if selected_type == 'protein':
                     protein_sequence = st.session_state.components[i].get('sequence', '').strip()
 
-                    if is_af3_backend:
-                        st.session_state.components[i]['use_msa'] = True
-                    
                     if protein_sequence:
                         protein_opts_cols = st.columns([1.5, 1.5, 1, 1])
                         
@@ -262,20 +256,23 @@ def render_prediction_page():
                                 st.rerun()
                         
                         with protein_opts_cols[1]:
-                            msa_disabled = is_running or is_af3_backend
-                            msa_help_text = "AlphaFold3 引擎要求为所有蛋白质生成 MSA，已自动启用并锁定。" if is_af3_backend else "为此蛋白质组分生成多序列比对以提高预测精度。取消勾选可以跳过MSA生成，节省时间。"
+                            msa_disabled = is_running
+                            if is_af3_backend:
+                                msa_help_text = "勾选时调用外部 MSA（MMseqs 缓存/服务器），不勾选时让 AlphaFold3 使用内置流程（不使用外部 MSA 缓存）。"
+                            else:
+                                msa_help_text = "为此蛋白质组分生成多序列比对以提高预测精度。取消勾选可以跳过MSA生成，节省时间。"
                             msa_value = st.checkbox(
                                 "启用 MSA",
-                                value=True if is_af3_backend else st.session_state.components[i].get('use_msa', True),
+                                value=st.session_state.components[i].get('use_msa', True),
                                 key=f"msa_{component['id']}",
                                 help=msa_help_text,
                                 disabled=msa_disabled
                             )
-                            if is_af3_backend:
-                                st.caption("AlphaFold3 后端必须启用 MSA。")
-                            elif msa_value != st.session_state.components[i].get('use_msa', True):
+                            if msa_value != st.session_state.components[i].get('use_msa', True):
                                 st.session_state.components[i]['use_msa'] = msa_value
                                 st.rerun()
+                            if is_af3_backend:
+                                st.caption("未勾选时将跳过外部 MSA，使用 AlphaFold3 自带的推理流程。")
                         
                         with protein_opts_cols[2]:
                             if has_cached_msa(protein_sequence):
@@ -303,7 +300,6 @@ def render_prediction_page():
                         elif cyclic_value != st.session_state.components[i].get('cyclic', False):
                             st.session_state.components[i]['cyclic'] = cyclic_value
                             st.rerun()
-                        st.session_state.components[i]['use_msa'] = True if is_af3_backend else st.session_state.components[i].get('use_msa', True)
             
             delete_col, _ = st.columns([10, 1])
             with delete_col:
@@ -412,7 +408,7 @@ def render_prediction_page():
                         comp['cyclic'] = False
             st.rerun()
         if selected_backend == 'alphafold3':
-            st.info("AlphaFold3 后端要求对所有蛋白质启用 MSA，并已为您自动勾选。", icon="ℹ️")
+            st.info("AlphaFold3 后端：勾选 MSA 使用外部 MMseqs 结果，不勾选则跳过外部 MSA，直接使用 AlphaFold3 自带流程。", icon="ℹ️")
         
         has_ligand_component = any(comp['type'] == 'ligand' for comp in st.session_state.components)
         if has_ligand_component:
@@ -680,7 +676,9 @@ def render_prediction_page():
                         has_glycopeptide_modifications = True
                         break
             
-            if not has_msa_in_yaml:
+            if st.session_state.prediction_backend == 'alphafold3':
+                use_msa_for_job = any(comp.get('use_msa', True) for comp in protein_components)
+            elif not has_msa_in_yaml:
                 use_msa_for_job = any(comp.get('use_msa', True) for comp in protein_components)
         
         model_name = "boltz1" if (has_glycopeptide_modifications and st.session_state.prediction_backend == 'boltz') else None

@@ -81,6 +81,7 @@ class AF3Utils:
         pairedmsa: Optional[List[str]],
         sequence_id_map: Optional[Dict[str, List[str]]] = None,
         extra_molecules: Optional[List[MoleculeComponent]] = None,
+        skip_msa_fields: bool = False,
     ) -> None:
         self._id_counter = 1
         sequence_id_map = sequence_id_map or {}
@@ -91,6 +92,7 @@ class AF3Utils:
             unpairedmsa,
             pairedmsa,
             sequence_id_map,
+            skip_msa_fields,
         )
         if extra_molecules:
             content = self.add_extra_molecules(content, extra_molecules)
@@ -114,6 +116,7 @@ class AF3Utils:
         unpairedmsa: Optional[List[str]],
         pairedmsa: Optional[List[str]],
         sequence_id_map: Dict[str, List[str]],
+        skip_msa_fields: bool,
     ) -> Dict[str, object]:
         sequences: List[Dict[str, object]] = []
         used_ids: Set[str] = set()
@@ -140,14 +143,15 @@ class AF3Utils:
                     "templates": [],
                 }
             }
-            if unpairedmsa and unpairedmsa[i]:
-                protein_entry["protein"]["unpairedMsa"] = unpairedmsa[i]
-            else:
-                protein_entry["protein"]["unpairedMsa"] = ""
-            if pairedmsa and pairedmsa[i]:
-                protein_entry["protein"]["pairedMsa"] = pairedmsa[i]
-            else:
-                protein_entry["protein"]["pairedMsa"] = ""
+            if not skip_msa_fields:
+                if unpairedmsa and unpairedmsa[i]:
+                    protein_entry["protein"]["unpairedMsa"] = unpairedmsa[i]
+                else:
+                    protein_entry["protein"]["unpairedMsa"] = ""
+                if pairedmsa and pairedmsa[i]:
+                    protein_entry["protein"]["pairedMsa"] = pairedmsa[i]
+                else:
+                    protein_entry["protein"]["pairedMsa"] = ""
             sequences.append(protein_entry)
         self._used_ids = set().union(*(entry["protein"]["id"] for entry in sequences if "protein" in entry))
         content: Dict[str, object] = {
@@ -499,15 +503,20 @@ def load_unpaired_msa(
     return unpaired
 
 
-def build_af3_json(prep: AF3Preparation, unpaired_msa: List[str]) -> Dict[str, object]:
+def build_af3_json(
+    prep: AF3Preparation,
+    unpaired_msa: Optional[List[str]],
+    use_external_msa: bool = True,
+) -> Dict[str, object]:
     af3 = AF3Utils(
         prep.jobname,
         prep.query_sequences_unique,
         prep.query_sequences_cardinality,
-        unpaired_msa,
+        unpaired_msa if use_external_msa else None,
         None,
         prep.sequence_to_chain_ids,
         prep.other_molecules,
+        skip_msa_fields=not use_external_msa,
     )
     content = af3.content
     if prep.bond_constraints:

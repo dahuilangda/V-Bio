@@ -15,6 +15,8 @@ import requests
 import time
 import tarfile
 import io
+import itertools
+import re
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any, Iterable
 import subprocess
@@ -46,6 +48,74 @@ MSA_CACHE_CONFIG = {
     'cache_dir': '/tmp/boltz_msa_cache',
     'enable_cache': True
 }
+
+# How many lines of each AF3 FASTA to scan for corruption. Set env ALPHAFOLD3_VALIDATE_MAX_LINES=0
+# to scan the whole file (may take time but catches deep corruption).
+AF3_VALIDATE_MAX_LINES = os.environ.get("ALPHAFOLD3_VALIDATE_MAX_LINES")
+AF3_VALIDATE_MAX_LINES = int(AF3_VALIDATE_MAX_LINES) if AF3_VALIDATE_MAX_LINES else 200000
+
+
+def validate_af3_database_files(database_dir: str) -> None:
+    """
+    Perform lightweight sanity checks on key AF3 database FASTA files to fail fast
+    when files are missing or corrupted (common cause of jackhmmer 'Parse failed').
+    """
+    required_files = [
+        "uniref90_2022_05.fa",
+        "uniprot_all_2021_04.fa",
+        "mgy_clusters_2022_05.fa",
+        "bfd-first_non_consensus_sequences.fasta",
+    ]
+
+    # Allow common amino-acid symbols plus gap/stop placeholders; digits are not valid.
+    allowed_seq_pattern = re.compile(r"^[A-Za-z\-\.*?]+$")
+    max_lines_scan = AF3_VALIDATE_MAX_LINES  # scan early part; set to 0 to scan full file
+
+    for filename in required_files:
+        path = Path(database_dir) / filename
+        if not path.exists() or not path.is_file():
+            raise RuntimeError(
+                f"AlphaFold3 数据库缺少必需文件: {path}. 请重新下载/解压 AF3 数据库。"
+            )
+        try:
+            with open(path, "rb") as f:
+                head = f.read(4096)
+                if b"\x00" in head:
+                    raise RuntimeError(
+                        f"检测到文件包含非法空字节，可能已损坏: {path}. 请重新下载/解压该文件。"
+                    )
+                # 第一条非空行应为 FASTA 标题
+                first_line = head.splitlines()[0] if head else b""
+                if not first_line.startswith(b">"):
+                    raise RuntimeError(
+                        f"文件不是有效的 FASTA 格式（首行未以 '>' 开头）: {path}. "
+                        "请重新下载/解压 AF3 数据库。"
+                    )
+
+            # Streaming scan of the early portion of the file to catch corruption quickly.
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                header_seen = False
+                for lineno, line in enumerate(f, start=1):
+                    if max_lines_scan > 0 and lineno > max_lines_scan:
+                        break
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    if stripped.startswith(">"):  # header line
+                        header_seen = True
+                        continue
+                    if not header_seen:
+                        raise RuntimeError(
+                            f"文件开头缺少 FASTA 标题: {path} (行 {lineno})。"
+                        )
+                    if not allowed_seq_pattern.match(stripped):
+                        preview = stripped[:80]
+                        raise RuntimeError(
+                            f"检测到无效的 FASTA 序列字符 (行 {lineno}): '{preview}'. "
+                            f"请重新下载/解压 {path.name}，当前文件可能已损坏。"
+                        )
+        except OSError as e:
+            raise RuntimeError(f"无法读取 AF3 数据库文件 {path}: {e}") from e
 
 
 def discover_cuda_devices() -> List[str]:
@@ -1390,17 +1460,23 @@ def run_alphafold3_backend(
             print(f"✅ MSA 生成成功，将用于AF3输入", file=sys.stderr)
         else:
             print(f"⚠️ 未能获取MSA，AF3 JSON将含空MSA字段", file=sys.stderr)
+        if MSA_CACHE_CONFIG['enable_cache']:
+            # 尽早缓存，方便按序列哈希回查
+            cache_msa_files_from_temp_dir(temp_dir, yaml_content)
     else:
-        print("ℹ️ 未配置 MSA 服务器或未请求使用，将尝试使用缓存的MSA", file=sys.stderr)
+        print("ℹ️ 未请求外部 MSA，将跳过 MSA 生成与缓存，AlphaFold3 将使用内置流程。", file=sys.stderr)
 
     prep = parse_yaml_for_af3(yaml_content)
-    cache_dir = MSA_CACHE_CONFIG['cache_dir'] if MSA_CACHE_CONFIG['enable_cache'] else None
-    chain_msa_paths = collect_chain_msa_paths(prep, temp_dir, cache_dir)
-    unpaired_msa = load_unpaired_msa(prep, chain_msa_paths)
-    fasta_content = build_af3_fasta(prep)
-    af3_json = build_af3_json(prep, unpaired_msa)
+    cache_dir = MSA_CACHE_CONFIG['cache_dir'] if (MSA_CACHE_CONFIG['enable_cache'] and use_msa_server) else None
+    if use_msa_server:
+        chain_msa_paths = collect_chain_msa_paths(prep, temp_dir, cache_dir)
+        unpaired_msa = load_unpaired_msa(prep, chain_msa_paths)
+    else:
+        chain_msa_paths = {}
+        unpaired_msa = None
 
-    cache_msa_files_from_temp_dir(temp_dir, yaml_content)
+    fasta_content = build_af3_fasta(prep)
+    af3_json = build_af3_json(prep, unpaired_msa, use_external_msa=use_msa_server)
 
     af3_input_dir = os.path.join(temp_dir, "af3_input")
     af3_output_dir = os.path.join(temp_dir, "af3_output")
@@ -1409,11 +1485,51 @@ def run_alphafold3_backend(
 
     fasta_path = os.path.join(af3_input_dir, f"{prep.jobname}_input.fasta")
     json_path = os.path.join(af3_input_dir, "fold_input.json")
+    sitecustomize_path = os.path.join(af3_input_dir, "sitecustomize.py")
 
     with open(fasta_path, "w") as fasta_file:
         fasta_file.write(fasta_content)
     with open(json_path, "w") as json_file:
         json.dump(af3_json, json_file, indent=2, ensure_ascii=False)
+
+    # Patch alphafold3 inside the container to avoid StopIteration when hmmsearch returns
+    # an empty Stockholm (no template hits). sitecustomize is auto-imported when present on sys.path.
+    sitecustomize_code = """
+import logging
+try:
+    from alphafold3.data import parsers as _af3_parsers
+except Exception:
+    _af3_parsers = None
+
+if _af3_parsers is not None:
+    _orig_convert = getattr(_af3_parsers, "convert_stockholm_to_a3m", None)
+    _orig_lazy = getattr(_af3_parsers, "lazy_parse_fasta_string", None)
+
+    if callable(_orig_convert):
+        def _safe_convert_stockholm_to_a3m(stockholm_format, max_sequences=None, remove_first_row_gaps=True, linewidth=None):
+            try:
+                return _orig_convert(stockholm_format, max_sequences=max_sequences, remove_first_row_gaps=remove_first_row_gaps, linewidth=linewidth)
+            except StopIteration:
+                logging.warning("alphafold3.parsers.convert_stockholm_to_a3m: no sequences found; returning empty A3M.")
+                return ""
+
+        _af3_parsers.convert_stockholm_to_a3m = _safe_convert_stockholm_to_a3m
+
+    if callable(_orig_lazy):
+        def _safe_lazy_parse_fasta_string(fasta_string: str):
+            if not fasta_string or not str(fasta_string).strip():
+                logging.warning("alphafold3.parsers.lazy_parse_fasta_string: empty FASTA input; returning no sequences.")
+                return iter(())
+            try:
+                return _orig_lazy(fasta_string)
+            except Exception as exc:  # noqa: BLE001
+                logging.warning(f"alphafold3.parsers.lazy_parse_fasta_string: failed to parse FASTA ({exc}); returning no sequences.")
+                return iter(())
+
+        _af3_parsers.lazy_parse_fasta_string = _safe_lazy_parse_fasta_string
+"""
+    with open(sitecustomize_path, "w", encoding="utf-8") as sc_file:
+        sc_file.write(sitecustomize_code)
 
     model_dir = ALPHAFOLD3_MODEL_DIR
     database_dir = ALPHAFOLD3_DATABASE_DIR
@@ -1430,6 +1546,7 @@ def run_alphafold3_backend(
         raise FileNotFoundError("ALPHAFOLD3_MODEL_DIR 未配置或目录不存在，无法运行 AlphaFold3 容器。")
     if not database_dir or not os.path.isdir(database_dir):
         raise FileNotFoundError("ALPHAFOLD3_DATABASE_DIR 未配置或目录不存在，无法运行 AlphaFold3 容器。")
+    validate_af3_database_files(database_dir)
 
     visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
     try:
@@ -1460,6 +1577,8 @@ def run_alphafold3_backend(
         [
             "--gpus",
             gpu_arg,
+            "--env",
+            "PYTHONPATH=/workspace/af_input",
             "--volume",
             f"{af3_input_dir}:{container_input_dir}",
             "--volume",
@@ -1472,14 +1591,16 @@ def run_alphafold3_backend(
     )
 
     # 添加 ColabFold jobs 目录挂载（如果配置了 MSA 服务器）
-    if MSA_SERVER_URL and COLABFOLD_JOBS_DIR and os.path.exists(COLABFOLD_JOBS_DIR):
+    if use_msa_server and MSA_SERVER_URL and COLABFOLD_JOBS_DIR and os.path.exists(COLABFOLD_JOBS_DIR):
         docker_command.extend([
             "--volume",
             f"{COLABFOLD_JOBS_DIR}:{container_colabfold_jobs_dir}",
         ])
         print(f"🔗 挂载 ColabFold jobs 目录: {COLABFOLD_JOBS_DIR} -> {container_colabfold_jobs_dir}", file=sys.stderr)
-    else:
+    elif use_msa_server:
         print("⚠️ 未找到 ColabFold jobs 目录或未配置 MSA 服务器", file=sys.stderr)
+    else:
+        print("ℹ️ 未启用外部 MSA，跳过 ColabFold jobs 目录挂载", file=sys.stderr)
 
     host_uid = os.getuid()
     host_gid = os.getgid()
@@ -1546,7 +1667,7 @@ def run_alphafold3_backend(
         output_archive_path,
         fasta_content,
         af3_json,
-        chain_msa_paths,
+        chain_msa_paths if use_msa_server else {},
         yaml_content,
         prep,
         af3_output_dir=af3_output_dir,

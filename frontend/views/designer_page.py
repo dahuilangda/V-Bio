@@ -75,10 +75,10 @@ def render_designer_page():
     if is_af3_backend:
         for comp in st.session_state.get('designer_components', []):
             if comp.get('type') == 'protein':
-                comp['use_msa'] = True
+                comp.setdefault('use_msa', True)
                 msa_key = f"designer_msa_{comp.get('id')}"
-                if msa_key in st.session_state and st.session_state[msa_key] is not True:
-                    st.session_state[msa_key] = True
+                if msa_key not in st.session_state:
+                    st.session_state[msa_key] = comp.get('use_msa', True)
         if st.session_state.get('designer_cyclic_binder'):
             st.session_state.designer_cyclic_binder = False
     
@@ -191,9 +191,7 @@ def render_designer_page():
                 component['sequence'] = new_sequence
                 
                 if sequence_changed:
-                    if is_af3_backend:
-                        component['use_msa'] = True
-                    else:
+                    if not is_af3_backend:
                         protein_components = [comp for comp in st.session_state.designer_components if comp.get('type') == 'protein']
                         if len(protein_components) == 1:
                             if new_sequence.strip():
@@ -208,26 +206,28 @@ def render_designer_page():
                 
                 designer_sequence = component.get('sequence', '').strip()
                 if designer_sequence:
-                    msa_disabled = designer_is_running or is_af3_backend
-                    msa_help = "AlphaFold3 引擎要求为所有蛋白质生成 MSA，已自动启用并锁定。" if is_af3_backend else "为此蛋白质组分生成多序列比对以提高预测精度。取消勾选可以跳过MSA生成，节省时间。"
+                    msa_disabled = designer_is_running
+                    msa_help = (
+                        "勾选时调用外部 MSA（MMseqs 缓存/服务器），不勾选时让 AlphaFold3 使用内置流程（不使用外部 MSA 缓存）。"
+                        if is_af3_backend
+                        else "为此蛋白质组分生成多序列比对以提高预测精度。取消勾选可以跳过MSA生成，节省时间。"
+                    )
                     msa_value = st.checkbox(
                         "启用 MSA",
-                        value=True if is_af3_backend else component.get('use_msa', True),
+                        value=component.get('use_msa', True),
                         key=f"designer_msa_{component['id']}",
                         help=msa_help,
                         disabled=msa_disabled
                     )
-                    if is_af3_backend:
-                        st.caption("AlphaFold3 后端必须启用 MSA。")
-                    elif msa_value != component.get('use_msa', True):
+                    if msa_value != component.get('use_msa', True):
                         component['use_msa'] = msa_value
                         if msa_value:
                             st.toast("✅ 已启用 MSA 生成", icon="🧬")
                         else:
                             st.toast("❌ 已禁用 MSA 生成", icon="⚡")
                         st.rerun()
-                else:
-                    component['use_msa'] = True if is_af3_backend else component.get('use_msa', True)
+                    if is_af3_backend:
+                        st.caption("未勾选时将跳过外部 MSA，使用 AlphaFold3 自带的推理流程。")
                     
                 if 'cyclic' in component:
                     del component['cyclic']
@@ -370,7 +370,7 @@ def render_designer_page():
                         comp['use_msa'] = True
             st.rerun()
         if selected_backend == 'alphafold3':
-            st.info("AlphaFold3 后端要求对所有蛋白质启用 MSA，并已为您自动勾选。", icon="ℹ️")
+            st.info("AlphaFold3 后端：勾选 MSA 使用外部 MMseqs 结果，不勾选则跳过外部 MSA，直接使用 AlphaFold3 自带流程。", icon="ℹ️")
         
         st.subheader("🔗 分子约束 (可选)", anchor=False)
         st.markdown("设置分子结构约束，包括键约束、口袋约束和接触约束。")
