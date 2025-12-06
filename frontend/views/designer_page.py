@@ -608,6 +608,8 @@ def render_designer_page():
             initial_sequence = None
             if use_initial_sequence:
                 # Keep user input across binder-length changes instead of clearing it.
+                if "designer_initial_sequence" not in st.session_state:
+                    st.session_state.designer_initial_sequence = ""
                 stored_init = st.session_state.get("designer_initial_sequence", "")
                 initial_sequence = st.text_input(
                     "初始序列",
@@ -617,9 +619,6 @@ def render_designer_page():
                     disabled=designer_is_running,
                     key="designer_initial_sequence",
                 )
-
-                if initial_sequence != stored_init:
-                    st.session_state.designer_initial_sequence = initial_sequence
 
                 if initial_sequence:
                     seq_len = len(initial_sequence)
