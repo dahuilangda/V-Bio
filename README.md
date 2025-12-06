@@ -9,6 +9,7 @@
 - [核心特性 (Features)](#核心特性-features)
 - [安装部署 (Installation)](#安装部署-installation)
   - [第 5 步：AlphaFold3 推理环境配置（可选）](#第-5-步alphafold3-推理环境配置可选)
+    - [AlphaFold3 数据库/模型获取](#alphafold3-数据库模型获取)
 - [使用指南 (Usage)](#使用指南-usage)
   - [启动平台服务](#启动平台服务)
   - [通过 API 使用 (高级)](#通过-api-使用-高级)
@@ -133,6 +134,71 @@ export ALPHAFOLD3_DOCKER_EXTRA_ARGS="--env TF_FORCE_UNIFIED_MEMORY=1 --shm-size=
 - 建议将上述导出语句写入 `~/.bashrc` 或 supervisor/systemd 环境配置，确保 `run.sh`、Celery worker 与监控进程都能读取。
 - 若只需要导出 AlphaFold3 输入文件而不运行容器，可跳过此步骤。
 - 更多细节请参考下文 [AlphaFold3 Docker 推理集成](#alphafold3-docker-推理集成)。
+
+### AlphaFold3 数据库/模型获取
+
+> **重要**：AlphaFold3 官方模型参数需按 DeepMind 提供的流程申请；本节仅说明公开数据库的下载位置。模型权重请按官方条款获取并放入 `ALPHAFOLD3_MODEL_DIR`。
+
+**目录结构期望**（与容器默认路径一致）：
+
+```
+<ALPHAFOLD3_MODEL_DIR>/params/...
+<ALPHAFOLD3_DATABASE_DIR>/uniref90_2022_05.fa
+<ALPHAFOLD3_DATABASE_DIR>/uniprot_all_2021_04.fa
+<ALPHAFOLD3_DATABASE_DIR>/mgy_clusters_2022_05.fa
+<ALPHAFOLD3_DATABASE_DIR>/bfd-first_non_consensus_sequences.fasta
+<ALPHAFOLD3_DATABASE_DIR>/pdb_seqres_2022_09_28.fasta
+<ALPHAFOLD3_DATABASE_DIR>/pdb_2022_09_28_mmcif_files.tar
+```
+
+**快速下载示例（公开库）**
+
+> 请预留 ~3TB 磁盘空间；以下链接来自 AF3 官方文档/AF2 常用镜像站。下载完成后校验大小/哈希，确保文件未损坏。
+
+```bash
+# 创建目标目录
+export ALPHAFOLD3_DATABASE_DIR=/data/AF3_DATABASE
+mkdir -p "$ALPHAFOLD3_DATABASE_DIR"
+
+cd "$ALPHAFOLD3_DATABASE_DIR"
+
+# UniRef90 2022_05
+wget https://storage.googleapis.com/alphafold3/UniRef90/uniref90_2022_05.fa.gz
+gunzip uniref90_2022_05.fa.gz
+
+# UniProt 2021_04
+wget https://storage.googleapis.com/alphafold3/UniProt/uniprot_all_2021_04.fa.gz
+gunzip uniprot_all_2021_04.fa.gz
+
+# Mgnify clusters 2022_05
+wget https://storage.googleapis.com/alphafold3/Mgnify/mgy_clusters_2022_05.fa.gz
+gunzip mgy_clusters_2022_05.fa.gz
+
+# BFD (first non-consensus)
+wget https://storage.googleapis.com/alphafold3/BFD/bfd-first_non_consensus_sequences.fasta.gz
+gunzip bfd-first_non_consensus_sequences.fasta.gz
+
+# PDB seqres and mmCIF tar (2022-09-28 snapshot)
+wget https://storage.googleapis.com/alphafold3/PDB/pdb_seqres_2022_09_28.fasta.gz
+gunzip pdb_seqres_2022_09_28.fasta.gz
+wget https://storage.googleapis.com/alphafold3/PDB/pdb_2022_09_28_mmcif_files.tar
+
+# 可选：RNA/Rfam 数据库（若使用 RNA 序列）
+wget https://storage.googleapis.com/alphafold3/RNA/nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta.gz
+gunzip nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta.gz
+wget https://storage.googleapis.com/alphafold3/RNA/rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta.gz
+gunzip rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta.gz
+wget https://storage.googleapis.com/alphafold3/RNA/rnacentral_active_seq_id_90_cov_80_linclust.fasta.gz
+gunzip rnacentral_active_seq_id_90_cov_80_linclust.fasta.gz
+```
+
+下载完成后：
+
+```bash
+ls -lh $ALPHAFOLD3_DATABASE_DIR
+```
+
+确保上述关键文件存在且非零大小；缺失会导致 AF3 数据管线在 jackhmmer/hmmsearch 阶段直接失败。建议为数据库目录设置只读权限，避免误删。
 
 ## 使用指南 (Usage)
 

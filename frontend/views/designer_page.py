@@ -530,14 +530,17 @@ def render_designer_page():
             col1, col2, col3 = st.columns(3)
             
             with col1:
+                # Persist binder length to avoid resetting dependent fields on rerun.
+                default_binder_length = st.session_state.get("designer_binder_length", 20)
                 binder_length = st.number_input(
                     "结合肽长度",
                     min_value=5,
                     max_value=50,
-                    value=20,
+                    value=default_binder_length,
                     step=1,
                     help="设计的结合肽的氨基酸残基数量。",
-                    disabled=designer_is_running
+                    disabled=designer_is_running,
+                    key="designer_binder_length",
                 )
             
             with col2:
@@ -604,14 +607,20 @@ def render_designer_page():
             
             initial_sequence = None
             if use_initial_sequence:
+                # Keep user input across binder-length changes instead of clearing it.
+                stored_init = st.session_state.get("designer_initial_sequence", "")
                 initial_sequence = st.text_input(
                     "初始序列",
-                    value="",
+                    value=stored_init,
                     placeholder="例如: MVSKGEELFTGVVPILVELD...",
                     help=f"输入初始氨基酸序列。长度应该等于结合肽长度({binder_length})。",
-                    disabled=designer_is_running
+                    disabled=designer_is_running,
+                    key="designer_initial_sequence",
                 )
-                
+
+                if initial_sequence != stored_init:
+                    st.session_state.designer_initial_sequence = initial_sequence
+
                 if initial_sequence:
                     seq_len = len(initial_sequence)
                     if seq_len != binder_length:
