@@ -688,7 +688,7 @@ def render_designer_page():
                     "演化代数",
                     min_value=2,
                     max_value=20,
-                    value=8,
+                    value=12,
                     step=1,
                     help="演化算法的迭代次数。",
                     disabled=designer_is_running
@@ -699,7 +699,7 @@ def render_designer_page():
                     "种群大小",
                     min_value=2,
                     max_value=50,
-                    value=12,
+                    value=16,
                     step=1,
                     help="每一代中的候选序列数量。",
                     disabled=designer_is_running
@@ -1395,7 +1395,7 @@ def render_designer_page():
                 max_display = st.slider(
                     "最大显示数量",
                     min_value=5,
-                    max_value=50,  # Increased from 20 to 50
+                    max_value=250,  # Increased from 20 to 250
                     value=10,
                     step=1,
                     help="最多显示多少个符合条件的设计"
