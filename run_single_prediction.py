@@ -1501,19 +1501,67 @@ try:
 except Exception:
     _af3_parsers = None
 
+def _count_non_lowercase(seq: str) -> int:
+    return sum(1 for ch in seq if not ch.islower())
+
+def _normalize_a3m(a3m_text: str):
+    # Pad sequences so non-lowercase lengths match, avoiding featurizer shape errors.
+    header = None
+    seq_chunks = []
+    entries = []
+    changed = False
+    for line in (a3m_text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith(">"):
+            if header is not None:
+                entries.append((header, "".join(seq_chunks)))
+            header = line
+            seq_chunks = []
+        else:
+            seq_chunks.append(line)
+    if header is not None:
+        entries.append((header, "".join(seq_chunks)))
+    if not entries:
+        return a3m_text, changed
+    target = max(_count_non_lowercase(seq) for _, seq in entries)
+    fixed = []
+    for hdr, seq in entries:
+        count = _count_non_lowercase(seq)
+        if count < target:
+            seq = seq + ("-" * (target - count))
+            changed = True
+        fixed.append(f"{hdr}\n{seq}")
+    return "\n".join(fixed) + "\n", changed
+
 if _af3_parsers is not None:
     _orig_convert = getattr(_af3_parsers, "convert_stockholm_to_a3m", None)
     _orig_lazy = getattr(_af3_parsers, "lazy_parse_fasta_string", None)
+    _orig_parse_a3m = getattr(_af3_parsers, "parse_a3m", None)
 
     if callable(_orig_convert):
         def _safe_convert_stockholm_to_a3m(stockholm_format, max_sequences=None, remove_first_row_gaps=True, linewidth=None):
             try:
-                return _orig_convert(stockholm_format, max_sequences=max_sequences, remove_first_row_gaps=remove_first_row_gaps, linewidth=linewidth)
+                result = _orig_convert(stockholm_format, max_sequences=max_sequences, remove_first_row_gaps=remove_first_row_gaps, linewidth=linewidth)
             except StopIteration:
                 logging.warning("alphafold3.parsers.convert_stockholm_to_a3m: no sequences found; returning empty A3M.")
                 return ""
+            fixed, changed = _normalize_a3m(result)
+            if changed:
+                logging.warning("alphafold3.parsers.convert_stockholm_to_a3m: normalized ragged A3M by right-padding gaps.")
+            return fixed
 
         _af3_parsers.convert_stockholm_to_a3m = _safe_convert_stockholm_to_a3m
+
+    if callable(_orig_parse_a3m):
+        def _safe_parse_a3m(a3m_string: str):
+            fixed, changed = _normalize_a3m(a3m_string)
+            if changed:
+                logging.warning("alphafold3.parsers.parse_a3m: normalized ragged A3M by right-padding gaps.")
+            return _orig_parse_a3m(fixed)
+
+        _af3_parsers.parse_a3m = _safe_parse_a3m
 
     if callable(_orig_lazy):
         def _safe_lazy_parse_fasta_string(fasta_string: str):

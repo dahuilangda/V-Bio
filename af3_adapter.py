@@ -488,6 +488,42 @@ def _sequence_hash(sequence: str) -> str:
     return hashlib.md5(sequence.encode("utf-8")).hexdigest()
 
 
+def _count_non_lowercase(seq: str) -> int:
+    return sum(1 for ch in seq if not ch.islower())
+
+
+def _normalize_a3m_content(a3m_text: str) -> str:
+    """Pad ragged A3M rows so non-lowercase lengths match the longest row."""
+    header = None
+    seq_chunks = []
+    entries = []
+    changed = False
+    for line in (a3m_text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith(">"):  # header line
+            if header is not None:
+                entries.append((header, "".join(seq_chunks)))
+            header = line
+            seq_chunks = []
+        else:
+            seq_chunks.append(line)
+    if header is not None:
+        entries.append((header, "".join(seq_chunks)))
+    if not entries:
+        return a3m_text
+    target = max(_count_non_lowercase(seq) for _, seq in entries)
+    fixed = []
+    for hdr, seq in entries:
+        count = _count_non_lowercase(seq)
+        if count < target:
+            seq = seq + ("-" * (target - count))
+            changed = True
+        fixed.append(f"{hdr}\n{seq}")
+    return ("\n".join(fixed) + "\n") if changed else a3m_text
+
+
 def load_unpaired_msa(
     prep: AF3Preparation, chain_msa_paths: Dict[str, Path]
 ) -> List[str]:
@@ -497,7 +533,7 @@ def load_unpaired_msa(
         for chain_id in prep.sequence_to_chain_ids.get(sequence, []):
             path = chain_msa_paths.get(chain_id)
             if path and path.exists():
-                msa_content = path.read_text()
+                msa_content = _normalize_a3m_content(path.read_text())
                 break
         unpaired.append(msa_content or "")
     return unpaired
