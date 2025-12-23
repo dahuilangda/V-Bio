@@ -155,13 +155,18 @@ def download_and_process_results(task_id: str):
             if isinstance(ptm, (int, float)):
                 af3_metrics["ptm"] = ptm
 
+            chain_pair_iptm = af3_summary_conf.get("chain_pair_iptm")
+            if (
+                isinstance(chain_pair_iptm, list)
+                and chain_pair_iptm
+                and isinstance(chain_pair_iptm[0], list)
+            ):
+                af3_metrics["chain_pair_iptm"] = chain_pair_iptm
+
             iptm = af3_summary_conf.get("iptm")
-            if iptm is None:
-                chain_pair_iptm = af3_summary_conf.get("chain_pair_iptm")
+            if iptm is None and chain_pair_iptm:
                 if (
-                    isinstance(chain_pair_iptm, list)
-                    and chain_pair_iptm
-                    and isinstance(chain_pair_iptm[0], list)
+                    isinstance(chain_pair_iptm[0], list)
                     and chain_pair_iptm[0]
                     and isinstance(chain_pair_iptm[0][0], (int, float))
                 ):

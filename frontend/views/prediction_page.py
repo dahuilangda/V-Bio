@@ -909,11 +909,89 @@ def render_prediction_page():
                 format_metric_value(confidence_data.get('ptm'), precision=4),
                 help="预测的模板建模评分 (pTM) 是一个 0-1 范围内的分数，用于衡量预测结构与真实结构在全局拓扑结构上的相似性。pTM > 0.5 通常表示预测了正确的折叠方式。值越高越好。"
             )
-            cols_metrics[0].metric(
-                "ipTM",
-                format_metric_value(confidence_data.get('iptm'), precision=4),
-                help="界面预测模板建模评分 (ipTM) 是专门用于评估链间相互作用界面准确性的指标 (0-1)。ipTM > 0.85 通常表明对复合物的相互作用方式有很高的置信度。值越高越好。"
+
+            components_with_sequence = [
+                comp for comp in st.session_state.get('components', [])
+                if comp.get('sequence', '').strip()
+            ]
+            chain_ids_for_pair, _ = (
+                get_available_chain_ids(components_with_sequence)
+                if components_with_sequence else ([], {})
             )
+            has_pair_iptm = bool(confidence_data.get("pair_chains_iptm") or confidence_data.get("chain_pair_iptm"))
+
+            iptm_value = confidence_data.get('iptm')
+            iptm_label = "ipTM"
+            iptm_help = (
+                "界面预测模板建模评分 (ipTM) 是专门用于评估链间相互作用界面准确性的指标 (0-1)。"
+                "ipTM > 0.85 通常表明对复合物的相互作用方式有很高的置信度。值越高越好。"
+            )
+            cols_metrics[0].metric(
+                iptm_label,
+                format_metric_value(iptm_value, precision=4),
+                help=iptm_help
+            )
+
+            if has_pair_iptm and len(chain_ids_for_pair) >= 2:
+                pair_rows = []
+                pair_map = confidence_data.get("pair_chains_iptm")
+                if isinstance(pair_map, dict):
+                    seen_pairs = set()
+                    for chain_a, chain_b_map in (pair_map or {}).items():
+                        if not isinstance(chain_b_map, dict):
+                            continue
+                        for chain_b, value in chain_b_map.items():
+                            if chain_a == chain_b or not isinstance(value, (int, float)):
+                                continue
+                            pair_key = tuple(sorted((chain_a, chain_b)))
+                            if pair_key in seen_pairs:
+                                continue
+                            seen_pairs.add(pair_key)
+                            pair_rows.append({
+                                "chain_a": chain_a,
+                                "chain_b": chain_b,
+                                "pair_ipTM": float(value)
+                            })
+                else:
+                    pair_matrix = confidence_data.get("chain_pair_iptm")
+                    if isinstance(pair_matrix, list) and chain_ids_for_pair:
+                        for i, chain_a in enumerate(chain_ids_for_pair):
+                            for j, chain_b in enumerate(chain_ids_for_pair):
+                                if j <= i:
+                                    continue
+                                try:
+                                    value = pair_matrix[i][j]
+                                except (IndexError, TypeError):
+                                    value = None
+                                if isinstance(value, (int, float)):
+                                    pair_rows.append({
+                                        "chain_a": chain_a,
+                                        "chain_b": chain_b,
+                                        "pair_ipTM": float(value)
+                                    })
+
+                if pair_rows:
+                    st.markdown("<b>所有链对的 pair ipTM</b>", unsafe_allow_html=True)
+                    pair_rows = sorted(pair_rows, key=lambda row: row["pair_ipTM"], reverse=True)
+                    st.dataframe(
+                        pair_rows,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "chain_a": st.column_config.TextColumn(
+                                "链 A",
+                                help="界面链对的第一个链"
+                            ),
+                            "chain_b": st.column_config.TextColumn(
+                                "链 B",
+                                help="界面链对的第二个链"
+                            ),
+                            "pair_ipTM": st.column_config.NumberColumn(
+                                "pair ipTM",
+                                format="%.4f"
+                            )
+                        }
+                    )
             cols_metrics[1].metric(
                 "PAE (Å)",
                 format_metric_value(confidence_data.get('complex_pde')),

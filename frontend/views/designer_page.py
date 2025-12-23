@@ -17,7 +17,9 @@ from frontend.utils import (
     has_cached_msa,
     read_cif_from_string,
     extract_protein_residue_bfactors,
-    find_best_structure_file
+    find_best_structure_file,
+    load_pair_iptm_data,
+    get_pair_iptm_from_confidence
 )
 from frontend.designer_client import (
     create_designer_complex_yaml, 
@@ -338,16 +340,58 @@ def render_designer_page():
             add_new_designer_component()
             st.rerun()
         
-        target_bio_chains = [comp for comp in st.session_state.designer_components if comp['type'] in ['protein', 'dna', 'rna'] and comp.get('sequence', '').strip()]
-        target_ligand_chains = [comp for comp in st.session_state.designer_components if comp['type'] == 'ligand' and comp.get('sequence', '').strip()]
-        
-        if target_bio_chains or target_ligand_chains:
-            total_chains = sum(comp.get('num_copies', 1) for comp in st.session_state.designer_components if comp.get('sequence', '').strip())
+        components_with_sequence = [
+            comp for comp in st.session_state.designer_components
+            if comp.get('sequence', '').strip()
+        ]
+        target_chain_ids, target_chain_descriptions = (
+            get_available_chain_ids(components_with_sequence)
+            if components_with_sequence else ([], {})
+        )
+        total_chains = len(target_chain_ids)
+
+        if total_chains > 0:
             binder_chain_id = string.ascii_uppercase[total_chains] if total_chains < 26 else f"Z{total_chains-25}"
-            target_chain_id = 'A'
+            target_chain_id = target_chain_ids[0] if target_chain_ids else 'A'
         else:
             target_chain_id = 'A'
             binder_chain_id = 'B'
+
+        if total_chains > 0:
+            st.subheader("🧭 界面链对选择", anchor=False)
+            st.caption("用于运行前定义设计链与被结合链，并用于 pair ipTM 展示和默认约束目标。")
+
+            chain_a_key = "designer_pair_chain_a"
+            chain_b_key = "designer_pair_chain_b"
+            cols_pair = st.columns(2)
+            with cols_pair[0]:
+                design_chain = st.selectbox(
+                    "设计链",
+                    options=[binder_chain_id],
+                    key=chain_a_key,
+                    format_func=lambda c: f"🎯 设计链 {c}",
+                    disabled=True
+                )
+
+            chain_b_options = target_chain_ids
+            if chain_b_options:
+                if st.session_state.get(chain_b_key) not in chain_b_options:
+                    st.session_state[chain_b_key] = chain_b_options[0]
+                with cols_pair[1]:
+                    target_chain_id = st.selectbox(
+                        "被结合链",
+                        options=chain_b_options,
+                        key=chain_b_key,
+                        format_func=lambda c: target_chain_descriptions.get(c, c),
+                        disabled=designer_is_running
+                    )
+            st.session_state.designer_target_chain_id = target_chain_id
+        else:
+            if st.session_state.get("designer_pair_chain_a") not in [binder_chain_id]:
+                st.session_state.designer_pair_chain_a = binder_chain_id
+            if st.session_state.get("designer_pair_chain_b") not in [target_chain_id]:
+                st.session_state.designer_pair_chain_b = target_chain_id
+            st.session_state.designer_target_chain_id = target_chain_id
 
         backend_options = list(BACKEND_LABELS.keys())
         if current_backend not in backend_options:
@@ -863,8 +907,8 @@ def render_designer_page():
                 designer_is_valid = False
                 validation_message = f"初始序列包含无效字符: {', '.join(invalid_chars)}。请只使用标准的20种氨基酸字母。"
     
-    # 设置目标链ID
-    target_chain_id = 'A'
+    # 设置目标链ID（用于约束默认值和结果展示）
+    target_chain_id = st.session_state.get('designer_target_chain_id', target_chain_id)
     
     if st.button("🚀 开始分子设计", key="start_designer", type="primary", disabled=(not designer_is_valid or designer_is_running), use_container_width=True):
         st.session_state.designer_task_id = None
@@ -1409,7 +1453,18 @@ def render_designer_page():
                 col_stats[2].metric(f"Top {max_display} 选中", len(top_sequences))
         
         st.subheader("🥇 最佳设计序列", anchor=False)
-        
+
+        results_components = [
+            comp for comp in st.session_state.get('designer_components', [])
+            if comp.get('sequence', '').strip()
+        ]
+        result_chain_ids, _ = get_available_chain_ids(results_components) if results_components else ([], {})
+        result_total_chains = len(result_chain_ids)
+        result_binder_chain_id = string.ascii_uppercase[result_total_chains] if result_total_chains < 26 else f"Z{result_total_chains-25}"
+        result_chain_order = result_chain_ids + [result_binder_chain_id] if result_chain_ids else []
+        pair_chain_a = st.session_state.get("designer_pair_chain_a", result_binder_chain_id)
+        pair_chain_b = st.session_state.get("designer_pair_chain_b", result_chain_ids[0] if result_chain_ids else 'A')
+
         if not top_sequences:
             st.warning(f"😔 没有找到评分高于 {custom_threshold} 的设计序列。请尝试降低阈值或检查设计参数。")
         else:
@@ -1498,11 +1553,23 @@ def render_designer_page():
                     
                     col_metrics = st.columns(4)
                     col_metrics[0].metric("综合评分", f"{score:.3f}")
-                    col_metrics[1].metric("ipTM", f"{seq_data.get('iptm', 0):.3f}")
+                    iptm_label = "ipTM"
+                    iptm_value = seq_data.get('iptm', 0)
+                    results_path = seq_data.get('results_path', '')
+                    pair_data = load_pair_iptm_data(results_path) if results_path else {}
+                    pair_iptm_value = get_pair_iptm_from_confidence(
+                        pair_data,
+                        pair_chain_a,
+                        pair_chain_b,
+                        chain_order=result_chain_order
+                    )
+                    if pair_iptm_value is not None:
+                        iptm_label = "pair ipTM"
+                        iptm_value = pair_iptm_value
+                    col_metrics[1].metric(iptm_label, f"{iptm_value:.3f}")
                     col_metrics[2].metric("pLDDT", f"{seq_data.get('plddt', 0):.3f}")
                     col_metrics[3].metric("发现代数", seq_data.get('generation', 'N/A'))
                     
-                    results_path = seq_data.get('results_path', '')
                     structure_path = find_best_structure_file(results_path) if results_path else None
                     if structure_path and os.path.exists(structure_path):
                         try:

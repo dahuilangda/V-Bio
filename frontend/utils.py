@@ -6,6 +6,8 @@ import io
 import os
 import time
 import hashlib
+import json
+from pathlib import Path
 import yaml
 import py3Dmol
 from typing import Optional
@@ -682,6 +684,115 @@ def get_smart_msa_default(components: list) -> bool:
             return first_protein.get('use_msa', True)
     
     return False
+
+def _extract_chain_ids_from_summary(summary_data: dict) -> list:
+    if not isinstance(summary_data, dict):
+        return []
+    chain_ids = summary_data.get("chain_ids")
+    if isinstance(chain_ids, list) and all(isinstance(c, str) for c in chain_ids):
+        return chain_ids
+    chains = summary_data.get("chains")
+    if isinstance(chains, list):
+        extracted = []
+        for chain in chains:
+            if isinstance(chain, dict):
+                chain_id = chain.get("chain_id") or chain.get("id") or chain.get("name")
+                if isinstance(chain_id, str):
+                    extracted.append(chain_id)
+        if extracted:
+            return extracted
+    return []
+
+def get_pair_iptm_from_confidence(
+    confidence_data: dict,
+    chain_a: str,
+    chain_b: str,
+    chain_order: list = None
+) -> Optional[float]:
+    if not confidence_data or not chain_a or not chain_b or chain_a == chain_b:
+        return None
+
+    pair_map = confidence_data.get("pair_chains_iptm")
+    if isinstance(pair_map, dict):
+        direct = pair_map.get(chain_a, {}).get(chain_b)
+        if isinstance(direct, (int, float)):
+            return float(direct)
+        reverse = pair_map.get(chain_b, {}).get(chain_a)
+        if isinstance(reverse, (int, float)):
+            return float(reverse)
+
+    pair_matrix = confidence_data.get("chain_pair_iptm")
+    if isinstance(pair_matrix, list) and pair_matrix:
+        order = chain_order or _extract_chain_ids_from_summary(confidence_data)
+        if order and chain_a in order and chain_b in order:
+            idx_a = order.index(chain_a)
+            idx_b = order.index(chain_b)
+            try:
+                value = pair_matrix[idx_a][idx_b]
+            except (IndexError, TypeError):
+                value = None
+            if isinstance(value, (int, float)):
+                return float(value)
+            try:
+                value = pair_matrix[idx_b][idx_a]
+            except (IndexError, TypeError):
+                value = None
+            if isinstance(value, (int, float)):
+                return float(value)
+
+    return None
+
+@st.cache_data(show_spinner=False)
+def load_pair_iptm_data(results_path: str) -> dict:
+    if not results_path:
+        return {}
+
+    base_path = Path(results_path)
+    if base_path.is_file():
+        base_path = base_path.parent
+
+    af3_output = base_path / "af3" / "output"
+    if af3_output.is_dir():
+        summary_candidates = sorted(af3_output.glob("**/*summary_confidences.json"))
+        summary_file = None
+        for candidate in summary_candidates:
+            if "seed-" not in candidate.as_posix():
+                summary_file = candidate
+                break
+        if summary_file is None and summary_candidates:
+            summary_file = summary_candidates[0]
+
+        if summary_file and summary_file.exists():
+            try:
+                with summary_file.open("r") as handle:
+                    summary_data = json.load(handle)
+                pair_matrix = summary_data.get("chain_pair_iptm")
+                chain_ids = _extract_chain_ids_from_summary(summary_data)
+                if pair_matrix:
+                    return {
+                        "chain_pair_iptm": pair_matrix,
+                        "chain_ids": chain_ids
+                    }
+            except Exception:
+                pass
+
+    confidence_files = list(base_path.glob("confidence_*.json"))
+    if not confidence_files:
+        confidence_files = list(base_path.glob("**/confidence_*.json"))
+
+    for confidence_file in sorted(confidence_files):
+        try:
+            with confidence_file.open("r") as handle:
+                confidence_data = json.load(handle)
+            pair_map = confidence_data.get("pair_chains_iptm")
+            if isinstance(pair_map, dict) and pair_map:
+                return {
+                    "pair_chains_iptm": pair_map
+                }
+        except Exception:
+            continue
+
+    return {}
 
 def generate_yaml_from_state():
     """
