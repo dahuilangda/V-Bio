@@ -43,6 +43,7 @@ def main():
     input_group = parser.add_argument_group('输入与目标定义')
     input_group.add_argument("--yaml_template", required=True, help="定义受体/骨架的模板YAML文件路径。")
     input_group.add_argument("--binder_chain", required=True, help="要设计的肽链的链ID (例如, 'B')。")
+    input_group.add_argument("--target_chain", default="A", help="与设计肽链形成界面的目标链ID (例如, 'A')。")
     input_group.add_argument("--binder_length", required=True, type=int, help="要设计的肽链的长度。")
     input_group.add_argument("--initial_binder_sequence", type=str, default=None, help="可选的初始肽链序列。如果提供，将以此为起点生成第一代，而不是完全随机。")
     input_group.add_argument("--sequence_mask", type=str, default=None, help="序列掩码，用于指定固定位置的氨基酸。格式：'X-A-X-L-X'，其中X表示可变位置，字母表示固定氨基酸。长度必须与binder_length匹配。")
@@ -213,6 +214,7 @@ def main():
             'population_size': args.population_size,
             'num_elites': args.num_elites,
             'binder_chain_id': args.binder_chain,
+            'target_chain_id': args.target_chain,
             'binder_length': args.binder_length,
             'initial_binder_sequence': args.initial_binder_sequence,
             'sequence_mask': args.sequence_mask,

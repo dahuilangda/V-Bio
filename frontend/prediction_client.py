@@ -149,6 +149,8 @@ def download_and_process_results(task_id: str):
             ]
             if flattened_pae:
                 af3_metrics["complex_pde"] = sum(flattened_pae) / len(flattened_pae)
+            if isinstance(pae_matrix, list) and pae_matrix:
+                af3_metrics["pae"] = pae_matrix
 
         if af3_summary_conf:
             ptm = af3_summary_conf.get("ptm")

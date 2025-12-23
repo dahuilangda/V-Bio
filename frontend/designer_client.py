@@ -220,6 +220,7 @@ def run_designer_workflow(params: dict, work_dir: str) -> str:
                 "python", "run_design.py",
                 "--yaml_template", params.get('template_path', ''),
                 "--binder_chain", binder_chain_id,
+                "--target_chain", params.get('target_chain_id', 'A'),
                 "--binder_length", str(params.get('binder_length', 20)),
                 "--iterations", str(params.get('generations', 5)),
                 "--population_size", str(params.get('population_size', 10)),

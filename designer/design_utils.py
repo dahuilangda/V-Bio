@@ -597,7 +597,50 @@ def mutate_sequence(
     return "".join(new_sequence)
 
 
-def parse_confidence_metrics(results_path: str, binder_chain_id: str) -> dict:
+def _extract_chain_ids_from_summary(summary_data: dict) -> List[str]:
+    if not isinstance(summary_data, dict):
+        return []
+    chain_ids = summary_data.get("chain_ids")
+    if isinstance(chain_ids, list) and all(isinstance(c, str) for c in chain_ids):
+        return chain_ids
+    chains = summary_data.get("chains")
+    if isinstance(chains, list):
+        extracted = []
+        for chain in chains:
+            if isinstance(chain, dict):
+                chain_id = chain.get("chain_id") or chain.get("id") or chain.get("name")
+                if isinstance(chain_id, str):
+                    extracted.append(chain_id)
+        if extracted:
+            return extracted
+    return []
+
+def _get_pair_iptm(
+    chain_pair_iptm: Optional[List[List[float]]],
+    chain_ids: List[str],
+    chain_a: Optional[str],
+    chain_b: Optional[str]
+) -> Optional[float]:
+    if not chain_pair_iptm or not chain_a or not chain_b or chain_a == chain_b:
+        return None
+    if chain_a in chain_ids and chain_b in chain_ids:
+        idx_a = chain_ids.index(chain_a)
+        idx_b = chain_ids.index(chain_b)
+        try:
+            value = chain_pair_iptm[idx_a][idx_b]
+        except (IndexError, TypeError):
+            value = None
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            value = chain_pair_iptm[idx_b][idx_a]
+        except (IndexError, TypeError):
+            value = None
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+def parse_confidence_metrics(results_path: str, binder_chain_id: str, target_chain_id: Optional[str] = None) -> dict:
     """从预测输出目录中解析关键置信度指标，并兼容 Boltz 与 AlphaFold3 后端。"""
     metrics = {
         'iptm': 0.0,
@@ -701,8 +744,18 @@ def parse_confidence_metrics(results_path: str, binder_chain_id: str) -> dict:
                     metrics['ptm'] = ptm
 
                 iptm = summary_data.get("iptm")
+                chain_pair_iptm = summary_data.get("chain_pair_iptm")
+                if isinstance(chain_pair_iptm, list):
+                    chain_ids = _extract_chain_ids_from_summary(summary_data)
+                    pair_value = _get_pair_iptm(
+                        chain_pair_iptm,
+                        chain_ids,
+                        binder_chain_id,
+                        target_chain_id
+                    )
+                    if pair_value is not None:
+                        iptm = pair_value
                 if not isinstance(iptm, (int, float)) or iptm == 0.0:
-                    chain_pair_iptm = summary_data.get("chain_pair_iptm")
                     if (
                         isinstance(chain_pair_iptm, list)
                         and chain_pair_iptm
@@ -774,9 +827,20 @@ def parse_confidence_metrics(results_path: str, binder_chain_id: str) -> dict:
                 'complex_plddt': data.get('complex_plddt', 0.0)
             })
             metrics['iptm'] = data.get('iptm', 0.0)
+            pair_iptm = data.get('pair_chains_iptm', {})
+            pair_value = None
+            if target_chain_id and isinstance(pair_iptm, dict):
+                direct = pair_iptm.get(binder_chain_id, {}).get(target_chain_id)
+                if isinstance(direct, (int, float)):
+                    pair_value = float(direct)
+                else:
+                    reverse = pair_iptm.get(target_chain_id, {}).get(binder_chain_id)
+                    if isinstance(reverse, (int, float)):
+                        pair_value = float(reverse)
 
-            if metrics['iptm'] == 0.0:
-                pair_iptm = data.get('pair_chains_iptm', {})
+            if pair_value is not None:
+                metrics['iptm'] = pair_value
+            elif metrics['iptm'] == 0.0 and isinstance(pair_iptm, dict):
                 for c1, c2_dict in pair_iptm.items():
                     for c2, iptm_val in (c2_dict or {}).items():
                         if c1 != c2 and isinstance(iptm_val, (int, float)) and iptm_val > 0:

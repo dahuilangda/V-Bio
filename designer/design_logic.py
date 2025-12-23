@@ -160,7 +160,11 @@ class Designer:
         if not results_path:
             return (sequence, None, None)
 
-        metrics = parse_confidence_metrics(results_path, binder_chain_id)
+        metrics = parse_confidence_metrics(
+            results_path,
+            binder_chain_id,
+            target_chain_id=design_params.get('target_chain_id')
+        )
         metrics['backend'] = self.backend
         metrics['mutation_strategy'] = strategy_used  # 添加策略信息
         iptm_score = metrics.get('iptm', 0.0)
@@ -315,6 +319,7 @@ class Designer:
         design_params = {
             'design_type': design_type,
             'binder_chain_id': binder_chain_id,  # 新增：传递结合肽链ID
+            'target_chain_id': kwargs.get('target_chain_id'),
             'user_constraints': user_constraints,  # 新增：传递用户约束
             'sequence_mask': sequence_mask,  # 新增：传递序列掩码
             'include_cysteine': include_cysteine,  # 新增：传递半胱氨酸控制

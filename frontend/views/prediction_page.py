@@ -992,6 +992,75 @@ def render_prediction_page():
                             )
                         }
                     )
+
+            pae_matrix = confidence_data.get("pae")
+            if isinstance(pae_matrix, list) and pae_matrix and len(chain_ids_for_pair) >= 2:
+                chain_lengths = []
+                for comp in components_with_sequence:
+                    comp_type = comp.get('type')
+                    if comp_type in ['protein', 'dna', 'rna']:
+                        chain_lengths.extend([len(comp.get('sequence', ''))] * comp.get('num_copies', 1))
+
+                total_length = sum(chain_lengths)
+                matrix_size = len(pae_matrix)
+                if total_length > 0 and matrix_size == total_length:
+                    pae_pairs = []
+                    offsets = []
+                    start = 0
+                    for length in chain_lengths:
+                        offsets.append((start, start + length))
+                        start += length
+
+                    for i, chain_a in enumerate(chain_ids_for_pair):
+                        for j, chain_b in enumerate(chain_ids_for_pair):
+                            if j <= i:
+                                continue
+                            start_a, end_a = offsets[i]
+                            start_b, end_b = offsets[j]
+                            total = 0.0
+                            count = 0
+                            for row_idx in range(start_a, end_a):
+                                row = pae_matrix[row_idx] if row_idx < matrix_size else None
+                                if not isinstance(row, list):
+                                    continue
+                                for col_idx in range(start_b, end_b):
+                                    if col_idx >= len(row):
+                                        continue
+                                    value = row[col_idx]
+                                    if isinstance(value, (int, float)):
+                                        total += value
+                                        count += 1
+                            for row_idx in range(start_b, end_b):
+                                row = pae_matrix[row_idx] if row_idx < matrix_size else None
+                                if not isinstance(row, list):
+                                    continue
+                                for col_idx in range(start_a, end_a):
+                                    if col_idx >= len(row):
+                                        continue
+                                    value = row[col_idx]
+                                    if isinstance(value, (int, float)):
+                                        total += value
+                                        count += 1
+                            if count > 0:
+                                pae_pairs.append({
+                                    "chain_a": chain_a,
+                                    "chain_b": chain_b,
+                                    "pair_pae": total / count
+                                })
+
+                    if pae_pairs:
+                        st.markdown("<b>所有链对的 pair PAE (Å)</b>", unsafe_allow_html=True)
+                        pae_pairs = sorted(pae_pairs, key=lambda row: row["pair_pae"])
+                        st.dataframe(
+                            pae_pairs,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "chain_a": st.column_config.TextColumn("链 A"),
+                                "chain_b": st.column_config.TextColumn("链 B"),
+                                "pair_pae": st.column_config.NumberColumn("pair PAE (Å)", format="%.2f")
+                            }
+                        )
             cols_metrics[1].metric(
                 "PAE (Å)",
                 format_metric_value(confidence_data.get('complex_pde')),
