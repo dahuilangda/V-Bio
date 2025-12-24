@@ -160,17 +160,24 @@ class Designer:
         if not results_path:
             return (sequence, None, None)
 
+        target_chain_id = design_params.get('target_chain_id')
         metrics = parse_confidence_metrics(
             results_path,
             binder_chain_id,
-            target_chain_id=design_params.get('target_chain_id'),
+            target_chain_id=target_chain_id,
             chain_order=design_params.get('chain_order')
         )
         metrics['backend'] = self.backend
         metrics['mutation_strategy'] = strategy_used  # 添加策略信息
         iptm_score = metrics.get('iptm', 0.0)
         plddt_score = metrics.get('binder_avg_plddt', 0.0)
-        logger.info(f"Candidate '{sequence[:20]}...' evaluated. ipTM: {iptm_score:.4f}, pLDDT: {plddt_score:.2f}")
+        iptm_label = "ipTM"
+        if target_chain_id:
+            iptm_label = f"ipTM({binder_chain_id}-{target_chain_id})"
+        logger.info(
+            f"Candidate '{sequence[:20]}...' evaluated. "
+            f"{iptm_label}: {iptm_score:.4f}, pLDDT: {plddt_score:.2f}"
+        )
         return (sequence, metrics, results_path)
     
     def _write_summary_csv(self, all_results: list, output_csv_path: str, keep_temp_files: bool):
