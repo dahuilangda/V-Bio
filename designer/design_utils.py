@@ -640,7 +640,12 @@ def _get_pair_iptm(
             return float(value)
     return None
 
-def parse_confidence_metrics(results_path: str, binder_chain_id: str, target_chain_id: Optional[str] = None) -> dict:
+def parse_confidence_metrics(
+    results_path: str,
+    binder_chain_id: str,
+    target_chain_id: Optional[str] = None,
+    chain_order: Optional[List[str]] = None
+) -> dict:
     """从预测输出目录中解析关键置信度指标，并兼容 Boltz 与 AlphaFold3 后端。"""
     metrics = {
         'iptm': 0.0,
@@ -747,6 +752,8 @@ def parse_confidence_metrics(results_path: str, binder_chain_id: str, target_cha
                 chain_pair_iptm = summary_data.get("chain_pair_iptm")
                 if isinstance(chain_pair_iptm, list):
                     chain_ids = _extract_chain_ids_from_summary(summary_data)
+                    if not chain_ids and chain_order:
+                        chain_ids = chain_order
                     pair_value = _get_pair_iptm(
                         chain_pair_iptm,
                         chain_ids,

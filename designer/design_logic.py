@@ -163,7 +163,8 @@ class Designer:
         metrics = parse_confidence_metrics(
             results_path,
             binder_chain_id,
-            target_chain_id=design_params.get('target_chain_id')
+            target_chain_id=design_params.get('target_chain_id'),
+            chain_order=design_params.get('chain_order')
         )
         metrics['backend'] = self.backend
         metrics['mutation_strategy'] = strategy_used  # 添加策略信息
@@ -315,11 +316,29 @@ class Designer:
         if num_elites >= population_size:
             raise ValueError("`num_elites` must be less than `population_size`.")
         
+        chain_order = []
+        for seq_block in self.base_config.get('sequences', []) or []:
+            seq_data = None
+            for key in ('protein', 'dna', 'rna', 'ligand'):
+                if key in seq_block:
+                    seq_data = seq_block.get(key, {})
+                    break
+            if not seq_data:
+                continue
+            seq_id = seq_data.get('id')
+            if isinstance(seq_id, list):
+                chain_order.extend(seq_id)
+            elif isinstance(seq_id, str):
+                chain_order.append(seq_id)
+        if binder_chain_id and binder_chain_id not in chain_order:
+            chain_order.append(binder_chain_id)
+
         # 初始化设计参数字典
         design_params = {
             'design_type': design_type,
             'binder_chain_id': binder_chain_id,  # 新增：传递结合肽链ID
             'target_chain_id': kwargs.get('target_chain_id'),
+            'chain_order': chain_order,
             'user_constraints': user_constraints,  # 新增：传递用户约束
             'sequence_mask': sequence_mask,  # 新增：传递序列掩码
             'include_cysteine': include_cysteine,  # 新增：传递半胱氨酸控制
