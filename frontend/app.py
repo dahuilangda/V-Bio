@@ -33,6 +33,7 @@ from frontend.state import initialize_session_state
 from frontend.views.prediction_page import render_prediction_page
 from frontend.views.designer_page import render_designer_page
 from frontend.views.bicyclic_designer_page import render_bicyclic_designer_page
+from frontend.views.lead_optimization_page import render_lead_optimization_page
 from frontend.views.affinity_page import render_affinity_page
 from frontend.url_state import URLStateManager
 
@@ -151,8 +152,8 @@ st.markdown(f"""
         box-shadow: none;
         border-bottom: 2px solid #f1f5f9;
         justify-content: flex-start;
-        width: auto;
-        max-width: 400px;
+        width: 500px;
+        max-width: none;
     }}
     
     .stTabs [data-baseweb="tab"] {{
@@ -204,8 +205,10 @@ if task_type == 'designer':
     target_tab_index = 1
 elif task_type == 'bicyclic_designer':
     target_tab_index = 2
-elif task_type == 'affinity':
+elif task_type == 'lead_optimization':
     target_tab_index = 3
+elif task_type == 'affinity':
+    target_tab_index = 4
 else:
     target_tab_index = 0
 
@@ -213,7 +216,7 @@ else:
 should_switch = task_id is not None and target_tab_index > 0
 
 # 创建选项卡
-tab1, tab2, tab3, tab4 = st.tabs(["结构预测", "分子设计", "双环肽设计", "亲和力预测"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["结构预测", "分子设计", "双环肽设计", "先导优化", "亲和力预测"])
 
 # 自动切换选项卡逻辑
 if should_switch:
@@ -317,4 +320,7 @@ with tab3:
     render_bicyclic_designer_page()
 
 with tab4:
+    render_lead_optimization_page()
+
+with tab5:
     render_affinity_page()

@@ -40,6 +40,16 @@ def initialize_session_state():
     if 'affinity_error' not in st.session_state: st.session_state.affinity_error = None
     if 'ligand_resnames' not in st.session_state: st.session_state.ligand_resnames = []
     if 'affinity_cif' not in st.session_state: st.session_state.affinity_cif = None
+
+    # Lead optimization-related session state
+    if 'lead_optimization_task_id' not in st.session_state: st.session_state.lead_optimization_task_id = None
+    if 'lead_optimization_results' not in st.session_state: st.session_state.lead_optimization_results = None
+    if 'lead_optimization_error' not in st.session_state: st.session_state.lead_optimization_error = None
+    if 'lead_optimization_raw_zip' not in st.session_state: st.session_state.lead_optimization_raw_zip = None
+    if 'lead_optimization_constraints' not in st.session_state: st.session_state.lead_optimization_constraints = []
+    if 'lead_optimization_backend' not in st.session_state: st.session_state.lead_optimization_backend = 'boltz'
+    if 'lead_opt_pair_chain_a' not in st.session_state: st.session_state.lead_opt_pair_chain_a = 'B'
+    if 'lead_opt_pair_chain_b' not in st.session_state: st.session_state.lead_opt_pair_chain_b = 'A'
     
     # URL state management
     if 'url_state_initialized' not in st.session_state: st.session_state.url_state_initialized = False

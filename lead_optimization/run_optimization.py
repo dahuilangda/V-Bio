@@ -191,6 +191,8 @@ def main():
     parser.add_argument("--input_compound", type=str, help="Input compound SMILES")
     parser.add_argument("--input_file", type=str, help="Input file (CSV or text) with compounds")
     parser.add_argument("--target_config", type=str, required=True, help="Target protein YAML config")
+    parser.add_argument("--backend", type=str, choices=["boltz", "alphafold3"],
+                       help="Backend engine for prediction")
     
     # Optimization parameters
     parser.add_argument("--optimization_strategy", type=str, default="scaffold_hopping",
@@ -253,6 +255,9 @@ def main():
         logger.info(f"输出目录: {args.output_dir}")
         
         # Initialize engine
+        if args.backend:
+            config.boltz_api.backend = args.backend
+
         engine = OptimizationEngine(config)
         
         # Run optimization

@@ -518,8 +518,12 @@ def submit_lead_optimization():
         'max_chiral_centers': _parse_int(request.form.get('max_chiral_centers')),
         'generate_report': _parse_bool(request.form.get('generate_report'), False),
         'verbosity': _parse_int(request.form.get('verbosity')),
-        'task_timeout': _parse_int(request.form.get('task_timeout'))
+        'task_timeout': _parse_int(request.form.get('task_timeout')),
+        'backend': request.form.get('backend')
     }
+
+    if options.get('backend') and options['backend'] not in ['boltz', 'alphafold3']:
+        options['backend'] = None
 
     optimization_args = {
         'target_filename': secure_filename(target_file.filename),

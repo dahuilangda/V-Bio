@@ -116,6 +116,48 @@ class URLStateManager:
             task_id=task_id,
             task_type='affinity'
         )
+
+    @staticmethod
+    def update_url_for_lead_optimization_task(task_id: str):
+        """为先导优化任务更新URL参数"""
+        URLStateManager.set_query_params(
+            task_id=task_id,
+            task_type='lead_optimization'
+        )
+
+    @staticmethod
+    def update_url_for_lead_optimization_config(task_id: str, components=None, constraints=None, backend: str = None,
+                                                pair_chain_a: str = None, pair_chain_b: str = None):
+        """为先导优化任务更新URL参数（含配置信息）"""
+        import json
+        params = {
+            'task_id': task_id,
+            'task_type': 'lead_optimization'
+        }
+
+        try:
+            simplified_components = []
+            for comp in components or []:
+                simplified_components.append({
+                    'id': comp.get('id'),
+                    'type': comp.get('type', 'protein'),
+                    'sequence': comp.get('sequence', ''),
+                    'num_copies': comp.get('num_copies', 1),
+                    'use_msa': comp.get('use_msa', True)
+                })
+
+            payload = {
+                'components': simplified_components,
+                'constraints': constraints or [],
+                'backend': backend,
+                'pair_chain_a': pair_chain_a,
+                'pair_chain_b': pair_chain_b
+            }
+            params['lead_opt_config'] = json.dumps(payload)
+        except Exception as e:
+            print(f"Failed to serialize lead optimization config: {e}")
+
+        URLStateManager.set_query_params(**params)
     
     @staticmethod
     def clear_url_params():
@@ -139,6 +181,7 @@ class URLStateManager:
         work_dir = query_params.get('work_dir')
         config_str = query_params.get('config')
         designer_config_str = query_params.get('designer_config')
+        lead_opt_config_str = query_params.get('lead_opt_config')
         
         if not task_id:
             return False
@@ -197,6 +240,36 @@ class URLStateManager:
                             # 配置恢复失败，但任务ID仍然有效
                     
                     st.toast(f"🔗 从URL恢复预测任务: {task_id[:8]}...", icon="🔄")
+            elif task_type == 'lead_optimization':
+                if st.session_state.lead_optimization_task_id != task_id:
+                    st.session_state.lead_optimization_task_id = task_id
+                    st.session_state.lead_optimization_results = None
+                    st.session_state.lead_optimization_error = None
+                    st.session_state.lead_optimization_raw_zip = None
+                    restored = True
+                    st.toast(f"🔗 从URL恢复先导优化任务: {task_id[:8]}...", icon="🔄")
+                
+                if lead_opt_config_str:
+                    try:
+                        lead_opt_config = json.loads(lead_opt_config_str)
+                        components = lead_opt_config.get('components', [])
+                        constraints = lead_opt_config.get('constraints', [])
+                        backend = lead_opt_config.get('backend')
+                        pair_chain_a = lead_opt_config.get('pair_chain_a')
+                        pair_chain_b = lead_opt_config.get('pair_chain_b')
+
+                        if components:
+                            st.session_state.lead_optimization_components = components
+                        if constraints:
+                            st.session_state.lead_optimization_constraints = constraints
+                        if backend in ('boltz', 'alphafold3'):
+                            st.session_state.lead_optimization_backend = backend
+                        if pair_chain_a:
+                            st.session_state.lead_opt_pair_chain_a = pair_chain_a
+                        if pair_chain_b:
+                            st.session_state.lead_opt_pair_chain_b = pair_chain_b
+                    except Exception as e:
+                        print(f"Failed to restore lead optimization config from URL: {e}")
             
             elif task_type == 'designer':
                 # 恢复分子设计任务状态

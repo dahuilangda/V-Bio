@@ -37,6 +37,7 @@ class BoltzAPIConfig:
     """Boltz-WebUI API configuration"""
     server_url: str = "http://localhost:5000"
     api_token: str = ""
+    backend: str = "boltz"
     timeout: int = 1800  # 30 minutes
     retry_attempts: int = 3
     retry_delay: int = 10  # seconds

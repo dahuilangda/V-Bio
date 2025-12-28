@@ -117,7 +117,8 @@ class BatchEvaluator:
                 task_id = self.boltz_client.submit_optimization_job(
                     yaml_content=config_yaml,
                     job_name=f"opt_{candidate.compound_id}",
-                    compound_smiles=candidate.smiles
+                    compound_smiles=candidate.smiles,
+                    backend=self.boltz_client.config.backend
                 )
                 
                 if not task_id:
@@ -211,9 +212,32 @@ class BatchEvaluator:
         try:
             import copy
             config = copy.deepcopy(target_config)
+
+            def _get_chain_id_by_index(index: int) -> str:
+                import string
+                if index < 26:
+                    return string.ascii_uppercase[index]
+                return f"Z{index-25}"
+
+            def _get_next_chain_id(used_ids: set) -> str:
+                idx = 0
+                while True:
+                    chain_id = _get_chain_id_by_index(idx)
+                    if chain_id not in used_ids:
+                        return chain_id
+                    idx += 1
             
             # 添加候选化合物作为配体
-            ligand_id = "B"  # 使用Boltz要求的简单字母ID
+            used_ids = set()
+            for entry in config.get('sequences', []):
+                if isinstance(entry, dict):
+                    key = next(iter(entry.keys()), None)
+                    if key and isinstance(entry.get(key), dict):
+                        seq_id = entry[key].get('id')
+                        if seq_id:
+                            used_ids.add(seq_id)
+
+            ligand_id = _get_next_chain_id(used_ids)
             ligand_entry = {
                 "ligand": {
                     "id": ligand_id,

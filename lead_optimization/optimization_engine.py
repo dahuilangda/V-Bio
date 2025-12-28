@@ -8,6 +8,7 @@ Uses MMPDB and Boltz-WebUI to optimize lead compounds
 import os
 import json
 import time
+import string
 import logging
 import yaml
 from typing import List, Dict, Any, Optional, Tuple
@@ -517,7 +518,8 @@ class OptimizationEngine:
                 task_id = self.boltz_client.submit_optimization_job(
                     yaml_content=config_yaml,
                     job_name=f"opt_{candidate.compound_id}",
-                    compound_smiles=candidate.smiles
+                    compound_smiles=candidate.smiles,
+                    backend=self.config.boltz_api.backend
                 )
                 
                 if not task_id:
@@ -589,9 +591,31 @@ class OptimizationEngine:
         try:
             import copy
             config = copy.deepcopy(target_config)
+
+            def _get_chain_id_by_index(index: int) -> str:
+                if index < 26:
+                    return string.ascii_uppercase[index]
+                return f"Z{index-25}"
+
+            def _get_next_chain_id(used_ids: set) -> str:
+                idx = 0
+                while True:
+                    chain_id = _get_chain_id_by_index(idx)
+                    if chain_id not in used_ids:
+                        return chain_id
+                    idx += 1
             
             # Add the candidate compound as a ligand
-            ligand_id = "L"  # Use simple letter ID as required by Boltz
+            used_ids = set()
+            for entry in config.get('sequences', []):
+                if isinstance(entry, dict):
+                    key = next(iter(entry.keys()), None)
+                    if key and isinstance(entry.get(key), dict):
+                        seq_id = entry[key].get('id')
+                        if seq_id:
+                            used_ids.add(seq_id)
+
+            ligand_id = _get_next_chain_id(used_ids)
             ligand_entry = {
                 "ligand": {
                     "id": ligand_id,

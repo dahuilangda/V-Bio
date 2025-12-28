@@ -720,6 +720,15 @@ def get_pair_iptm_from_confidence(
         reverse = pair_map.get(chain_b, {}).get(chain_a)
         if isinstance(reverse, (int, float)):
             return float(reverse)
+        if chain_order and chain_a in chain_order and chain_b in chain_order:
+            idx_a = str(chain_order.index(chain_a))
+            idx_b = str(chain_order.index(chain_b))
+            direct = pair_map.get(idx_a, {}).get(idx_b)
+            if isinstance(direct, (int, float)):
+                return float(direct)
+            reverse = pair_map.get(idx_b, {}).get(idx_a)
+            if isinstance(reverse, (int, float)):
+                return float(reverse)
 
     pair_matrix = confidence_data.get("chain_pair_iptm")
     if isinstance(pair_matrix, list) and pair_matrix:

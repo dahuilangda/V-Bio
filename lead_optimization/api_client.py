@@ -68,7 +68,8 @@ class BoltzOptimizationClient:
                                job_name: str,
                                compound_smiles: str,
                                job_type: str = "lead_optimization",
-                               use_msa_server: bool = True) -> str:
+                               use_msa_server: bool = True,
+                               backend: Optional[str] = None) -> str:
         """
         Submit optimization job to Boltz-WebUI
         
@@ -78,6 +79,7 @@ class BoltzOptimizationClient:
             compound_smiles: SMILES string of the compound
             job_type: Type of optimization job
             use_msa_server: Whether to use MSA server
+            backend: Backend engine (boltz or alphafold3)
             
         Returns:
             Task ID string
@@ -98,12 +100,14 @@ class BoltzOptimizationClient:
         try:
             with open(yaml_path, 'rb') as f:
                 files = {'yaml_file': (f'{job_name}.yaml', f)}
+                effective_backend = backend or self.config.backend
                 data = {
                     'use_msa_server': str(use_msa_server).lower(),
                     'job_type': job_type,
                     'job_name': job_name,
                     'compound_smiles': compound_smiles,
-                    'optimization_context': 'true'
+                    'optimization_context': 'true',
+                    'backend': effective_backend
                 }
                 
                 response = self.session.post(

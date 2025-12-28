@@ -1090,6 +1090,8 @@ def lead_optimization_task(self, optimization_args: dict):
             command.append("--generate_report")
         if options.get('verbosity') is not None:
             command.extend(["--verbosity", str(options['verbosity'])])
+        if options.get('backend'):
+            command.extend(["--backend", str(options['backend'])])
 
         env = os.environ.copy()
         env["BOLTZ_API_TOKEN"] = config.BOLTZ_API_TOKEN

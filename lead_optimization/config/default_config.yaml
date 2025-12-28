@@ -5,6 +5,7 @@
 boltz_api:
   server_url: "http://localhost:5000"
   api_token: ""  # Set your API token here
+  backend: "boltz"
   timeout: 1800  # 30 minutes
   retry_attempts: 3
   retry_delay: 10
