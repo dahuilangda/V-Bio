@@ -112,6 +112,17 @@ GPU_IN_USE_HASH_KEY = "boltz_gpu_pool:in_use"
 # 用于主 API 服务器存储从 Worker 上传回来的中心化结果文件的目录
 RESULTS_BASE_DIR = os.environ.get("RESULTS_BASE_DIR", "/data/boltz_central_results")
 
+# -- 虚拟筛选/Lead Optimization 输出目录 --
+# 控制虚拟筛选与 lead optimization 的本地输出落盘位置（任务完成后会打包上传）
+VIRTUAL_SCREENING_OUTPUT_DIR = os.environ.get(
+    "VIRTUAL_SCREENING_OUTPUT_DIR",
+    "/data/boltz_virtual_screening_results"
+)
+LEAD_OPTIMIZATION_OUTPUT_DIR = os.environ.get(
+    "LEAD_OPTIMIZATION_OUTPUT_DIR",
+    "/data/boltz_lead_optimization_results"
+)
+
 # -- 中心 API 地址 --
 # Worker 将使用此 URL 来上传结果和更新状态
 CENTRAL_API_URL = os.environ.get("CENTRAL_API_URL", "http://localhost:5000")

@@ -111,7 +111,9 @@ docker run -d -p 6379:6379 --name boltz-webui-redis redis:latest
 3.  `GPU_DEVICE_IDS`: （可选）通过逗号或空格指定允许被调度的 GPU ID，如 `GPU_DEVICE_IDS="0,2,3"`。不设置时默认自动探测全部 GPU。
 4.  `MSA_SERVER_MODE`: （可选）根据 MSA 服务配置选择模式，如 `colabfold`、`mmseqs2-uniref` 等。
 5.  `COLABFOLD_JOBS_DIR`: （可选）ColabFold 服务器在宿主机上的任务缓存目录，用于新提供的清理接口。
-6.  `BOLTZ_API_TOKEN`: 设置一个复杂的安全令牌。**强烈建议**通过环境变量进行配置以提高安全性。
+6.  `VIRTUAL_SCREENING_OUTPUT_DIR`: （可选）虚拟筛选任务的本地输出目录（默认 `/data/boltz_virtual_screening_results`）。
+7.  `LEAD_OPTIMIZATION_OUTPUT_DIR`: （可选）Lead optimization 任务的本地输出目录（默认 `/data/boltz_lead_optimization_results`）。
+8.  `BOLTZ_API_TOKEN`: 设置一个复杂的安全令牌。**强烈建议**通过环境变量进行配置以提高安全性。
 
 #### **第 5 步：AlphaFold3 推理环境配置（可选）**
 
@@ -301,6 +303,112 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
   * **说明**:
     * 前端页面的「选择预测后端」选项会自动填充同名字段；在环境配置完整时，下载的结果 zip 会包含 `af3/` 目录（含 `af3_input.fasta`、`fold_input.json`、`msa/` 与 Docker 输出），可直接交给官方 AF3 流程使用。
     * 当 `alphafold3` 后端的 YAML 同时声明 `affinity` 属性时，系统会额外运行一遍 Boltz 的亲和力流程，产出的结构/亲和力分析将被复制到 AF3 结果目录中并随 zip 一并返回。
+
+#### **虚拟筛选 API**
+
+  * **提交任务**: `POST /api/virtual_screening/submit`
+  * **状态查询**: `GET /api/virtual_screening/status/<task_id>`
+  * **结果下载**: `GET /api/virtual_screening/results/<task_id>`
+  * **认证**: 需要 API 令牌
+  * **必填字段**:
+    * `target_file`: 目标蛋白 YAML 配置文件
+    * `library_file`: 分子库文件（FASTA/SDF/CSV/SMILES 等）
+  * **常用可选字段**:
+    * `library_type`: `peptide` / `small_molecule` / `auto`
+    * `max_molecules`, `batch_size`, `max_workers`, `timeout`, `retry_attempts`
+    * `use_msa_server`: `true` / `false`
+    * `binding_affinity_weight`, `structural_stability_weight`, `confidence_weight`
+    * `min_binding_score`, `top_n`
+    * `report_only`, `enable_affinity`, `auto_enable_affinity`, `force`, `dry_run`
+    * `log_level`: `DEBUG` / `INFO` / `WARNING` / `ERROR`
+    * `priority`: `high` / `default`
+    * `task_timeout`: 任务总超时时间（秒）
+  * **提交示例**:
+    ```bash
+    curl -X POST \
+         -H "X-API-Token: your-secret-token" \
+         -F "target_file=@/path/to/target.yaml" \
+         -F "library_file=@/path/to/library.sdf" \
+         -F "library_type=small_molecule" \
+         -F "batch_size=32" \
+         -F "use_msa_server=true" \
+         http://127.0.0.1:5000/api/virtual_screening/submit
+    ```
+  * **状态示例**:
+    ```bash
+    curl -H "X-API-Token: your-secret-token" \
+         http://127.0.0.1:5000/api/virtual_screening/status/<task_id>
+    ```
+  * **返回示例（节选）**:
+    ```json
+    {
+      "task_id": "xxxx",
+      "state": "PROGRESS",
+      "progress": {
+        "completed_molecules": 120,
+        "total_molecules": 500,
+        "progress_percent": 24.0,
+        "estimated_remaining_seconds": 3600,
+        "estimated_completion_time": "2025-01-01T12:30:00"
+      }
+    }
+    ```
+
+#### **Lead Optimization API**
+
+  * **提交任务**: `POST /api/lead_optimization/submit`
+  * **状态查询**: `GET /api/lead_optimization/status/<task_id>`
+  * **结果下载**: `GET /api/lead_optimization/results/<task_id>`
+  * **认证**: 需要 API 令牌
+  * **必填字段**:
+    * `target_config`: 目标蛋白 YAML 配置文件
+    * `input_compound` 或 `input_file` 二选一
+  * **常用可选字段**:
+    * `optimization_strategy`: `scaffold_hopping` / `fragment_replacement` / `multi_objective`
+    * `max_candidates`, `iterations`, `batch_size`, `top_k_per_iteration`
+    * `diversity_weight`, `similarity_threshold`, `max_similarity_threshold`
+    * `diversity_selection_strategy`, `max_chiral_centers`
+    * `generate_report`, `verbosity`
+    * `priority`, `task_timeout`
+  * **提交示例（单化合物）**:
+    ```bash
+    curl -X POST \
+         -H "X-API-Token: your-secret-token" \
+         -F "target_config=@/path/to/target.yaml" \
+         -F "input_compound=CC(=O)Oc1ccccc1C(=O)O" \
+         -F "optimization_strategy=scaffold_hopping" \
+         -F "max_candidates=50" \
+         -F "iterations=2" \
+         http://127.0.0.1:5000/api/lead_optimization/submit
+    ```
+  * **提交示例（批量文件）**:
+    ```bash
+    curl -X POST \
+         -H "X-API-Token: your-secret-token" \
+         -F "target_config=@/path/to/target.yaml" \
+         -F "input_file=@/path/to/compounds.csv" \
+         -F "max_candidates=30" \
+         http://127.0.0.1:5000/api/lead_optimization/submit
+    ```
+  * **状态示例**:
+    ```bash
+    curl -H "X-API-Token: your-secret-token" \
+         http://127.0.0.1:5000/api/lead_optimization/status/<task_id>
+    ```
+  * **返回示例（节选）**:
+    ```json
+    {
+      "task_id": "xxxx",
+      "state": "PROGRESS",
+      "progress": {
+        "processed_candidates": 40,
+        "expected_candidates": 100,
+        "progress_percent": 40.0,
+        "estimated_remaining_seconds": 1800,
+        "estimated_completion_time": "2025-01-01T12:10:00"
+      }
+    }
+    ```
 
 ### **AlphaFold3 Docker 推理集成**
 

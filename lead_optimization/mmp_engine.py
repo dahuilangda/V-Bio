@@ -10,6 +10,9 @@ import logging
 import subprocess
 import tempfile
 from typing import List, Dict, Any, Tuple, Optional, Set
+import sys
+import shutil
+import importlib.util
 from pathlib import Path
 import warnings
 
@@ -20,11 +23,18 @@ warnings.filterwarnings('ignore', message='.*please use MorganGenerator.*')
 
 logger = logging.getLogger(__name__)
 
+def _resolve_mmpdb_cmd() -> Optional[List[str]]:
+    """Resolve mmpdb CLI command with a module fallback."""
+    if shutil.which('mmpdb'):
+        return ['mmpdb']
+    if importlib.util.find_spec('mmpdb') is not None:
+        return [sys.executable, '-m', 'mmpdb']
+    return None
+
 try:
     # 检查mmpdb命令行工具
-    import subprocess
-    import shutil
-    HAS_MMPDB = shutil.which('mmpdb') is not None
+    MMPDB_CMD = _resolve_mmpdb_cmd()
+    HAS_MMPDB = MMPDB_CMD is not None
     if HAS_MMPDB:
         logger.info("已找到 mmpdb 命令行工具")
     else:
@@ -117,15 +127,16 @@ def query_mmpdb_command_line(target_smiles: str,
     candidates = []
     
     try:
-        if not HAS_MMPDB:
+        cmd_base = _resolve_mmpdb_cmd()
+        if not cmd_base:
             logger.warning("mmpdb命令行工具不可用")
             return []
         
         logger.info(f"使用mmpdb命令行查询 {target_smiles}")
         
         # 运行mmpdb transform命令
-        cmd = [
-            'mmpdb', 'transform',
+        cmd = cmd_base + [
+            'transform',
             database_path,
             '--smiles', target_smiles,
             '--min-pairs', '1'

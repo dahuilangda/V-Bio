@@ -4,6 +4,7 @@ celery
 redis
 gunicorn
 requests
+mmpdb
 streamlit
 streamlit-ketcher
 pyyaml

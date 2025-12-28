@@ -51,8 +51,8 @@ class BoltzAPIConfig:
 @dataclass
 class MMPDatabaseConfig:
     """MMP database configuration"""
-    database_path: str = "data/chembl_32.mmpdb"  # 默认路径
-    reference_data_path: str = "data/reference_compounds.smi"
+    database_path: str = str(Path(__file__).parent / "data" / "chembl_32.mmpdb")
+    reference_data_path: str = str(Path(__file__).parent / "data" / "reference_compounds.smi")
     max_heavy_atoms: int = 50
     min_heavy_atoms: int = 5
     max_pairs_per_transform: int = 1000

@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import glob
 import time
@@ -6,6 +7,7 @@ import hashlib
 import shutil
 import psutil
 import signal
+import base64
 from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
@@ -15,7 +17,7 @@ from werkzeug.utils import secure_filename
 from celery.result import AsyncResult
 import config
 from celery_app import celery_app
-from tasks import predict_task, affinity_task
+from tasks import predict_task, affinity_task, virtual_screening_task, lead_optimization_task
 from gpu_manager import get_redis_client, release_gpu, get_gpu_status
 
 # --- Configure Logging ---
@@ -269,6 +271,38 @@ def require_api_token(f):
         return f(*args, **kwargs)
     return decorated_function
 
+def _parse_bool(value: Optional[str], default: bool = False) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+def _parse_int(value: Optional[str], default: Optional[int] = None) -> Optional[int]:
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+def _parse_float(value: Optional[str], default: Optional[float] = None) -> Optional[float]:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+def _load_progress(redis_key: str) -> Optional[Dict]:
+    try:
+        redis_client = get_redis_client()
+        raw = redis_client.get(redis_key)
+        if not raw:
+            return None
+        return json.loads(raw)
+    except Exception as e:
+        logger.warning(f"Failed to read progress from redis: {e}")
+        return None
+
 # --- API Endpoints ---
 
 @app.route('/predict', methods=['POST'])
@@ -341,6 +375,200 @@ def handle_predict():
         return jsonify({'error': 'Failed to dispatch prediction task.', 'details': str(e)}), 500
     
     return jsonify({'task_id': task.id}), 202
+
+
+@app.route('/api/virtual_screening/submit', methods=['POST'])
+@require_api_token
+def submit_virtual_screening():
+    """Submit a virtual screening job."""
+    logger.info("Received virtual screening submission request.")
+
+    if 'target_file' not in request.files or 'library_file' not in request.files:
+        return jsonify({'error': "Request must include 'target_file' and 'library_file'."}), 400
+
+    target_file = request.files['target_file']
+    library_file = request.files['library_file']
+
+    if target_file.filename == '' or library_file.filename == '':
+        return jsonify({'error': 'Target file or library file is empty.'}), 400
+
+    try:
+        target_content = target_file.read().decode('utf-8')
+    except UnicodeDecodeError:
+        return jsonify({'error': 'Failed to decode target_file as UTF-8.'}), 400
+
+    library_bytes = library_file.read()
+    library_base64 = base64.b64encode(library_bytes).decode('ascii')
+
+    options = {
+        'library_type': request.form.get('library_type'),
+        'max_molecules': _parse_int(request.form.get('max_molecules')),
+        'batch_size': _parse_int(request.form.get('batch_size')),
+        'max_workers': _parse_int(request.form.get('max_workers')),
+        'timeout': _parse_int(request.form.get('timeout')),
+        'retry_attempts': _parse_int(request.form.get('retry_attempts')),
+        'use_msa_server': _parse_bool(request.form.get('use_msa_server'), False),
+        'binding_affinity_weight': _parse_float(request.form.get('binding_affinity_weight')),
+        'structural_stability_weight': _parse_float(request.form.get('structural_stability_weight')),
+        'confidence_weight': _parse_float(request.form.get('confidence_weight')),
+        'min_binding_score': _parse_float(request.form.get('min_binding_score')),
+        'top_n': _parse_int(request.form.get('top_n')),
+        'report_only': _parse_bool(request.form.get('report_only'), False),
+        'auto_enable_affinity': _parse_bool(request.form.get('auto_enable_affinity'), False),
+        'enable_affinity': _parse_bool(request.form.get('enable_affinity'), False),
+        'log_level': request.form.get('log_level'),
+        'force': _parse_bool(request.form.get('force'), False),
+        'dry_run': _parse_bool(request.form.get('dry_run'), False),
+        'task_timeout': _parse_int(request.form.get('task_timeout'))
+    }
+
+    screening_args = {
+        'target_filename': secure_filename(target_file.filename),
+        'target_content': target_content,
+        'library_filename': secure_filename(library_file.filename),
+        'library_base64': library_base64,
+        'options': options
+    }
+
+    priority = request.form.get('priority', 'default').lower()
+    if priority not in ['high', 'default']:
+        priority = 'default'
+    target_queue = config.HIGH_PRIORITY_QUEUE if priority == 'high' else config.DEFAULT_QUEUE
+
+    try:
+        task = virtual_screening_task.apply_async(args=[screening_args], queue=target_queue)
+    except Exception as e:
+        logger.exception("Failed to dispatch virtual screening task: %s", e)
+        return jsonify({'error': 'Failed to dispatch virtual screening task.', 'details': str(e)}), 500
+
+    return jsonify({'task_id': task.id}), 202
+
+
+@app.route('/api/virtual_screening/status/<task_id>', methods=['GET'])
+@require_api_token
+def get_virtual_screening_status(task_id):
+    """Get virtual screening task status with progress info."""
+    task_result = AsyncResult(task_id, app=celery_app)
+    progress = _load_progress(f"virtual_screening:progress:{task_id}")
+
+    response = {
+        'task_id': task_id,
+        'state': task_result.state,
+        'progress': progress or {}
+    }
+
+    if task_result.state == 'FAILURE':
+        info = task_result.info
+        response['error'] = str(info)
+
+    return jsonify(response)
+
+
+@app.route('/api/virtual_screening/results/<task_id>', methods=['GET'])
+@require_api_token
+def download_virtual_screening_results(task_id):
+    """Download virtual screening results."""
+    return download_results(task_id)
+
+
+@app.route('/api/lead_optimization/submit', methods=['POST'])
+@require_api_token
+def submit_lead_optimization():
+    """Submit a lead optimization job."""
+    logger.info("Received lead optimization submission request.")
+
+    if 'target_config' not in request.files:
+        return jsonify({'error': "Request must include 'target_config'."}), 400
+
+    target_file = request.files['target_config']
+    if target_file.filename == '':
+        return jsonify({'error': 'Target config file is empty.'}), 400
+
+    try:
+        target_content = target_file.read().decode('utf-8')
+    except UnicodeDecodeError:
+        return jsonify({'error': 'Failed to decode target_config as UTF-8.'}), 400
+
+    input_compound = request.form.get('input_compound')
+    input_file = request.files.get('input_file')
+
+    if not input_compound and not input_file:
+        return jsonify({'error': "Either 'input_compound' or 'input_file' is required."}), 400
+    if input_compound and input_file:
+        return jsonify({'error': "Provide only one of 'input_compound' or 'input_file'."}), 400
+
+    input_file_base64 = None
+    input_filename = None
+    if input_file:
+        if input_file.filename == '':
+            return jsonify({'error': 'Input file is empty.'}), 400
+        input_file_base64 = base64.b64encode(input_file.read()).decode('ascii')
+        input_filename = secure_filename(input_file.filename)
+
+    options = {
+        'optimization_strategy': request.form.get('optimization_strategy'),
+        'max_candidates': _parse_int(request.form.get('max_candidates')),
+        'iterations': _parse_int(request.form.get('iterations')),
+        'batch_size': _parse_int(request.form.get('batch_size')),
+        'top_k_per_iteration': _parse_int(request.form.get('top_k_per_iteration')),
+        'diversity_weight': _parse_float(request.form.get('diversity_weight')),
+        'similarity_threshold': _parse_float(request.form.get('similarity_threshold')),
+        'max_similarity_threshold': _parse_float(request.form.get('max_similarity_threshold')),
+        'diversity_selection_strategy': request.form.get('diversity_selection_strategy'),
+        'max_chiral_centers': _parse_int(request.form.get('max_chiral_centers')),
+        'generate_report': _parse_bool(request.form.get('generate_report'), False),
+        'verbosity': _parse_int(request.form.get('verbosity')),
+        'task_timeout': _parse_int(request.form.get('task_timeout'))
+    }
+
+    optimization_args = {
+        'target_filename': secure_filename(target_file.filename),
+        'target_content': target_content,
+        'input_compound': input_compound,
+        'input_filename': input_filename,
+        'input_file_base64': input_file_base64,
+        'options': options
+    }
+
+    priority = request.form.get('priority', 'default').lower()
+    if priority not in ['high', 'default']:
+        priority = 'default'
+    target_queue = config.HIGH_PRIORITY_QUEUE if priority == 'high' else config.DEFAULT_QUEUE
+
+    try:
+        task = lead_optimization_task.apply_async(args=[optimization_args], queue=target_queue)
+    except Exception as e:
+        logger.exception("Failed to dispatch lead optimization task: %s", e)
+        return jsonify({'error': 'Failed to dispatch lead optimization task.', 'details': str(e)}), 500
+
+    return jsonify({'task_id': task.id}), 202
+
+
+@app.route('/api/lead_optimization/status/<task_id>', methods=['GET'])
+@require_api_token
+def get_lead_optimization_status(task_id):
+    """Get lead optimization task status with progress info."""
+    task_result = AsyncResult(task_id, app=celery_app)
+    progress = _load_progress(f"lead_optimization:progress:{task_id}")
+
+    response = {
+        'task_id': task_id,
+        'state': task_result.state,
+        'progress': progress or {}
+    }
+
+    if task_result.state == 'FAILURE':
+        info = task_result.info
+        response['error'] = str(info)
+
+    return jsonify(response)
+
+
+@app.route('/api/lead_optimization/results/<task_id>', methods=['GET'])
+@require_api_token
+def download_lead_optimization_results(task_id):
+    """Download lead optimization results."""
+    return download_results(task_id)
 
 
 @app.route('/api/affinity', methods=['POST'])

@@ -1,4 +1,6 @@
 import os
+import sys
+import glob
 import traceback
 import tempfile
 import json
@@ -9,12 +11,21 @@ import logging
 import signal
 import threading
 import time
-from datetime import datetime
+import base64
+import zipfile
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
+import importlib.util
 
 import requests
 from celery_app import celery_app
 from gpu_manager import acquire_gpu, release_gpu, get_redis_client
 import config
+
+BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 try:
     import psutil
@@ -28,6 +39,10 @@ logger = logging.getLogger(__name__)
 # Subprocess timeout in seconds (e.g., 3 hours)
 SUBPROCESS_TIMEOUT = 10800  # 增加到3小时
 HEARTBEAT_INTERVAL = 60  # 心跳间隔（秒）
+PROGRESS_TTL_SECONDS = 3600
+PROGRESS_UPDATE_INTERVAL = 20
+SCREENING_TASK_TIMEOUT = 12 * 3600
+OPTIMIZATION_TASK_TIMEOUT = 12 * 3600
 
 
 class TaskProgressTracker:
@@ -97,6 +112,161 @@ class TaskProgressTracker:
             logger.info(f"Task {self.task_id}: Registered process {pid}")
         except Exception as e:
             logger.error(f"Failed to register process for task {self.task_id}: {e}")
+
+def _store_progress(redis_client, key: str, payload: dict, ttl: int = PROGRESS_TTL_SECONDS) -> None:
+    """Persist task progress payload to Redis."""
+    try:
+        redis_client.setex(key, ttl, json.dumps(payload))
+    except Exception as e:
+        logger.warning(f"Failed to store progress for {key}: {e}")
+
+def _write_base64_file(encoded_content: str, path: str, text_mode: bool = False) -> None:
+    """Write base64 encoded content to disk."""
+    raw = base64.b64decode(encoded_content)
+    if text_mode:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(raw.decode('utf-8'))
+    else:
+        with open(path, 'wb') as f:
+            f.write(raw)
+
+def _read_virtual_screening_progress(output_dir: str) -> dict:
+    """Read virtual screening checkpoint progress from output directory."""
+    checkpoint_dir = os.path.join(output_dir, "checkpoints")
+    if not os.path.isdir(checkpoint_dir):
+        return {}
+
+    checkpoint_files = sorted(
+        glob.glob(os.path.join(checkpoint_dir, "*.json")),
+        key=os.path.getmtime,
+        reverse=True
+    )
+    if not checkpoint_files:
+        return {}
+
+    try:
+        with open(checkpoint_files[0], 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to read virtual screening checkpoint: {e}")
+        return {}
+
+    start_time = data.get('start_time') or time.time()
+    elapsed = max(0.0, time.time() - float(start_time))
+    completed = len(data.get('completed_tasks', []))
+    total = int(data.get('total_molecules') or 0)
+    failed = len(data.get('failed_tasks', []))
+    progress_percent = (completed / total * 100) if total > 0 else 0.0
+    estimated_remaining = 0.0
+
+    if completed > 0 and total > completed:
+        avg_time = elapsed / completed
+        estimated_remaining = avg_time * (total - completed)
+
+    eta_time = None
+    if estimated_remaining:
+        eta_time = (datetime.now() + timedelta(seconds=estimated_remaining)).isoformat()
+
+    return {
+        "session_id": data.get('session_id'),
+        "completed_molecules": completed,
+        "total_molecules": total,
+        "failed_molecules": failed,
+        "results_count": data.get('results_count', 0),
+        "best_score": data.get('best_score', 0.0),
+        "elapsed_seconds": elapsed,
+        "progress_percent": progress_percent,
+        "estimated_remaining_seconds": estimated_remaining,
+        "estimated_completion_time": eta_time,
+        "checkpoint_updated": data.get('last_update')
+    }
+
+def _read_lead_optimization_progress(output_dir: str,
+                                     elapsed: float,
+                                     expected_candidates: Optional[int] = None,
+                                     expected_compounds: Optional[int] = None) -> dict:
+    """Read lead optimization progress based on output files."""
+    progress = {}
+
+    if expected_compounds:
+        summary_paths = glob.glob(os.path.join(output_dir, "compound_*", "optimization_summary.json"))
+        completed = len(summary_paths)
+        progress_percent = (completed / expected_compounds * 100) if expected_compounds > 0 else 0.0
+        estimated_remaining = 0.0
+        if completed > 0 and expected_compounds > completed:
+            avg_time = elapsed / completed
+            estimated_remaining = avg_time * (expected_compounds - completed)
+        eta_time = None
+        if estimated_remaining:
+            eta_time = (datetime.now() + timedelta(seconds=estimated_remaining)).isoformat()
+
+        progress.update({
+            "completed_compounds": completed,
+            "total_compounds": expected_compounds,
+            "progress_percent": progress_percent,
+            "estimated_remaining_seconds": estimated_remaining,
+            "estimated_completion_time": eta_time
+        })
+        return progress
+
+    csv_path = os.path.join(output_dir, "optimization_results.csv")
+    if not os.path.exists(csv_path):
+        return progress
+
+    try:
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            rows = f.readlines()
+    except Exception as e:
+        logger.warning(f"Failed to read optimization progress CSV: {e}")
+        return progress
+
+    processed = max(0, len(rows) - 1)
+    progress_percent = 0.0
+    estimated_remaining = 0.0
+
+    if expected_candidates:
+        progress_percent = (processed / expected_candidates * 100) if expected_candidates > 0 else 0.0
+        if processed > 0 and expected_candidates > processed:
+            avg_time = elapsed / processed
+            estimated_remaining = avg_time * (expected_candidates - processed)
+
+    eta_time = None
+    if estimated_remaining:
+        eta_time = (datetime.now() + timedelta(seconds=estimated_remaining)).isoformat()
+
+    progress.update({
+        "processed_candidates": processed,
+        "expected_candidates": expected_candidates,
+        "progress_percent": progress_percent,
+        "estimated_remaining_seconds": estimated_remaining,
+        "estimated_completion_time": eta_time
+    })
+    return progress
+
+def _mmpdb_available() -> bool:
+    """Check if mmpdb CLI is available in current environment."""
+    if shutil.which('mmpdb'):
+        return True
+    try:
+        result = subprocess.run(
+            [sys.executable, '-m', 'mmpdb', '--help'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+def _load_lead_optimization_config():
+    """Load lead_optimization config without relying on package import."""
+    config_path = BASE_DIR / "lead_optimization" / "config.py"
+    spec = importlib.util.spec_from_file_location("lead_optimization.config", config_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load lead_optimization config from {config_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.load_config()
 
 def upload_result_to_central_api(task_id: str, local_file_path: str, filename: str) -> dict:
     """
@@ -632,6 +802,400 @@ def affinity_task(self, affinity_args: dict):
             release_gpu(gpu_id=gpu_id, task_id=task_id)
             logger.info(f"Task {task_id}: Released GPU {gpu_id}.")
 
+        if task_temp_dir and os.path.exists(task_temp_dir):
+            shutil.rmtree(task_temp_dir)
+            logger.info(f"Task {task_id}: Cleaned up temporary directory '{task_temp_dir}'.")
+
+        if tracker:
+            tracker.stop_heartbeat()
+            logger.info(f"Task {task_id}: Cleanup completed")
+
+
+@celery_app.task(bind=True)
+def virtual_screening_task(self, screening_args: dict):
+    """
+    Celery task for running virtual screening pipeline.
+    """
+    task_id = self.request.id
+    task_temp_dir = None
+    tracker = None
+    redis_client = get_redis_client()
+    progress_key = f"virtual_screening:progress:{task_id}"
+    start_time = time.time()
+
+    try:
+        tracker = TaskProgressTracker(task_id, redis_client)
+        tracker.start_heartbeat()
+        tracker.update_status("starting", "Initializing virtual screening task")
+
+        task_temp_dir = tempfile.mkdtemp(prefix=f"boltz_screening_{task_id}_")
+        input_dir = os.path.join(task_temp_dir, "inputs")
+        output_dir = os.path.join(config.VIRTUAL_SCREENING_OUTPUT_DIR, task_id)
+        os.makedirs(input_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
+
+        target_filename = screening_args['target_filename']
+        target_path = os.path.join(input_dir, target_filename)
+        with open(target_path, 'w', encoding='utf-8') as f:
+            f.write(screening_args['target_content'])
+
+        library_filename = screening_args['library_filename']
+        library_path = os.path.join(input_dir, library_filename)
+        _write_base64_file(screening_args['library_base64'], library_path, text_mode=False)
+
+        options = screening_args.get('options', {})
+        command = [
+            sys.executable,
+            str(BASE_DIR / "virtual_screening" / "run_screening.py"),
+            "--target", target_path,
+            "--library", library_path,
+            "--output_dir", output_dir,
+            "--server_url", config.CENTRAL_API_URL,
+            "--api_token", config.BOLTZ_API_TOKEN
+        ]
+
+        if options.get('library_type'):
+            command.extend(["--library_type", str(options['library_type'])])
+        if options.get('max_molecules') is not None:
+            command.extend(["--max_molecules", str(options['max_molecules'])])
+        if options.get('batch_size') is not None:
+            command.extend(["--batch_size", str(options['batch_size'])])
+        if options.get('max_workers') is not None:
+            command.extend(["--max_workers", str(options['max_workers'])])
+        if options.get('timeout') is not None:
+            command.extend(["--timeout", str(options['timeout'])])
+        if options.get('retry_attempts') is not None:
+            command.extend(["--retry_attempts", str(options['retry_attempts'])])
+        if options.get('use_msa_server'):
+            command.append("--use_msa_server")
+        if options.get('binding_affinity_weight') is not None:
+            command.extend(["--binding_affinity_weight", str(options['binding_affinity_weight'])])
+        if options.get('structural_stability_weight') is not None:
+            command.extend(["--structural_stability_weight", str(options['structural_stability_weight'])])
+        if options.get('confidence_weight') is not None:
+            command.extend(["--confidence_weight", str(options['confidence_weight'])])
+        if options.get('min_binding_score') is not None:
+            command.extend(["--min_binding_score", str(options['min_binding_score'])])
+        if options.get('top_n') is not None:
+            command.extend(["--top_n", str(options['top_n'])])
+        if options.get('report_only'):
+            command.append("--report_only")
+        if options.get('auto_enable_affinity'):
+            command.append("--auto_enable_affinity")
+        if options.get('enable_affinity'):
+            command.append("--enable_affinity")
+        if options.get('log_level'):
+            command.extend(["--log_level", str(options['log_level'])])
+        if options.get('force'):
+            command.append("--force")
+        if options.get('dry_run'):
+            command.append("--dry_run")
+
+        log_path = os.path.join(task_temp_dir, "virtual_screening.log")
+        logger.info(f"Task {task_id}: Running virtual screening. Command: {' '.join(command)}")
+        tracker.update_status("running", "Virtual screening subprocess started")
+
+        with open(log_path, 'w', encoding='utf-8') as log_file:
+            process = subprocess.Popen(
+                command,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=str(BASE_DIR)
+            )
+
+            tracker.register_process(process.pid)
+
+            last_progress_update = 0.0
+            task_timeout = options.get('task_timeout') or SCREENING_TASK_TIMEOUT
+
+            while True:
+                now = time.time()
+                if now - last_progress_update >= PROGRESS_UPDATE_INTERVAL:
+                    progress_payload = _read_virtual_screening_progress(output_dir)
+                    progress_payload.update({
+                        "task_id": task_id,
+                        "status": "running",
+                        "start_time": datetime.fromtimestamp(start_time).isoformat(),
+                        "elapsed_seconds": now - start_time
+                    })
+                    _store_progress(redis_client, progress_key, progress_payload)
+                    self.update_state(state='PROGRESS', meta=progress_payload)
+                    last_progress_update = now
+
+                if now - start_time > task_timeout:
+                    process.kill()
+                    raise TimeoutError(f"Virtual screening task {task_id} timed out after {task_timeout} seconds.")
+
+                if process.poll() is not None:
+                    break
+
+                time.sleep(5)
+
+        if process.returncode != 0:
+            raise RuntimeError(f"Virtual screening task {task_id} failed. See log: {log_path}")
+
+        tracker.update_status("packaging", "Packaging screening results")
+        output_archive_path = os.path.join(task_temp_dir, f"{task_id}_virtual_screening_results.zip")
+        shutil.make_archive(output_archive_path[:-4], 'zip', output_dir)
+
+        upload_response = upload_result_to_central_api(
+            task_id,
+            output_archive_path,
+            os.path.basename(output_archive_path)
+        )
+
+        final_meta = {
+            'status': 'Complete',
+            'upload_info': upload_response,
+            'result_file': os.path.basename(output_archive_path)
+        }
+        self.update_state(state='SUCCESS', meta=final_meta)
+        tracker.update_status("completed", "Virtual screening completed successfully")
+
+        completed_payload = {
+            "task_id": task_id,
+            "status": "completed",
+            "completed_at": datetime.now().isoformat()
+        }
+        _store_progress(redis_client, progress_key, completed_payload)
+        return final_meta
+
+    except Exception as e:
+        logger.error(f"Task {task_id} failed: {e}", exc_info=True)
+        if tracker:
+            tracker.update_status("failed", str(e))
+        self.update_state(state='FAILURE', meta={
+            'exc_type': type(e).__name__,
+            'exc_message': str(e),
+            'traceback': traceback.format_exc(),
+        })
+        failed_payload = {
+            "task_id": task_id,
+            "status": "failed",
+            "error": str(e),
+            "failed_at": datetime.now().isoformat()
+        }
+        _store_progress(redis_client, progress_key, failed_payload)
+        raise e
+
+    finally:
+        if task_temp_dir and os.path.exists(task_temp_dir):
+            shutil.rmtree(task_temp_dir)
+            logger.info(f"Task {task_id}: Cleaned up temporary directory '{task_temp_dir}'.")
+
+        if tracker:
+            tracker.stop_heartbeat()
+            logger.info(f"Task {task_id}: Cleanup completed")
+
+
+@celery_app.task(bind=True)
+def lead_optimization_task(self, optimization_args: dict):
+    """
+    Celery task for running lead optimization pipeline.
+    """
+    task_id = self.request.id
+    task_temp_dir = None
+    tracker = None
+    redis_client = get_redis_client()
+    progress_key = f"lead_optimization:progress:{task_id}"
+    start_time = time.time()
+
+    def _count_compounds(path: str) -> int:
+        if not path or not os.path.exists(path):
+            return 0
+        if path.endswith('.csv'):
+            import csv
+            with open(path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                return sum(1 for _ in reader)
+        count = 0
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    count += 1
+        return count
+
+    try:
+        tracker = TaskProgressTracker(task_id, redis_client)
+        tracker.start_heartbeat()
+        tracker.update_status("starting", "Initializing lead optimization task")
+
+        task_temp_dir = tempfile.mkdtemp(prefix=f"boltz_optimization_{task_id}_")
+        input_dir = os.path.join(task_temp_dir, "inputs")
+        output_dir = os.path.join(config.LEAD_OPTIMIZATION_OUTPUT_DIR, task_id)
+        os.makedirs(input_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
+
+        opt_config = _load_lead_optimization_config()
+        db_path = opt_config.mmp_database.database_path
+        if not db_path or not os.path.exists(db_path):
+            raise RuntimeError(f"MMP database not found: {db_path}")
+        if not _mmpdb_available():
+            raise RuntimeError("mmpdb CLI not available. Install mmpdb or ensure it is in PATH.")
+
+        target_filename = optimization_args['target_filename']
+        target_path = os.path.join(input_dir, target_filename)
+        with open(target_path, 'w', encoding='utf-8') as f:
+            f.write(optimization_args['target_content'])
+
+        input_compound = optimization_args.get('input_compound')
+        input_file_path = None
+        expected_compounds = None
+
+        if optimization_args.get('input_file_base64'):
+            input_filename = optimization_args.get('input_filename', 'input_compounds.csv')
+            input_file_path = os.path.join(input_dir, input_filename)
+            _write_base64_file(optimization_args['input_file_base64'], input_file_path, text_mode=False)
+            expected_compounds = _count_compounds(input_file_path)
+
+        options = optimization_args.get('options', {})
+
+        command = [
+            sys.executable,
+            str(BASE_DIR / "lead_optimization" / "run_optimization.py"),
+            "--target_config", target_path,
+            "--output_dir", output_dir
+        ]
+
+        if input_compound:
+            command.extend(["--input_compound", input_compound])
+        elif input_file_path:
+            command.extend(["--input_file", input_file_path])
+        else:
+            raise ValueError("Either input_compound or input_file must be provided for lead optimization.")
+
+        if options.get('optimization_strategy'):
+            command.extend(["--optimization_strategy", str(options['optimization_strategy'])])
+        if options.get('max_candidates') is not None:
+            command.extend(["--max_candidates", str(options['max_candidates'])])
+        if options.get('iterations') is not None:
+            command.extend(["--iterations", str(options['iterations'])])
+        if options.get('batch_size') is not None:
+            command.extend(["--batch_size", str(options['batch_size'])])
+        if options.get('top_k_per_iteration') is not None:
+            command.extend(["--top_k_per_iteration", str(options['top_k_per_iteration'])])
+        if options.get('diversity_weight') is not None:
+            command.extend(["--diversity_weight", str(options['diversity_weight'])])
+        if options.get('similarity_threshold') is not None:
+            command.extend(["--similarity_threshold", str(options['similarity_threshold'])])
+        if options.get('max_similarity_threshold') is not None:
+            command.extend(["--max_similarity_threshold", str(options['max_similarity_threshold'])])
+        if options.get('diversity_selection_strategy'):
+            command.extend(["--diversity_selection_strategy", str(options['diversity_selection_strategy'])])
+        if options.get('max_chiral_centers') is not None:
+            command.extend(["--max_chiral_centers", str(options['max_chiral_centers'])])
+        if options.get('generate_report'):
+            command.append("--generate_report")
+        if options.get('verbosity') is not None:
+            command.extend(["--verbosity", str(options['verbosity'])])
+
+        env = os.environ.copy()
+        env["BOLTZ_API_TOKEN"] = config.BOLTZ_API_TOKEN
+        env["PYTHONPATH"] = f"{BASE_DIR}{os.pathsep}{env.get('PYTHONPATH', '')}"
+
+        log_path = os.path.join(output_dir, "lead_optimization.log")
+        logger.info(f"Task {task_id}: Running lead optimization. Command: {' '.join(command)}")
+        tracker.update_status("running", "Lead optimization subprocess started")
+
+        expected_candidates = None
+        if input_compound and options.get('max_candidates') is not None and options.get('iterations') is not None:
+            expected_candidates = int(options['max_candidates']) * int(options['iterations'])
+
+        with open(log_path, 'w', encoding='utf-8') as log_file:
+            process = subprocess.Popen(
+                command,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+                cwd=str(BASE_DIR)
+            )
+
+            tracker.register_process(process.pid)
+
+            last_progress_update = 0.0
+            task_timeout = options.get('task_timeout') or OPTIMIZATION_TASK_TIMEOUT
+
+            while True:
+                now = time.time()
+                if now - last_progress_update >= PROGRESS_UPDATE_INTERVAL:
+                    elapsed = now - start_time
+                    progress_payload = _read_lead_optimization_progress(
+                        output_dir,
+                        elapsed,
+                        expected_candidates=expected_candidates,
+                        expected_compounds=expected_compounds
+                    )
+                    progress_payload.update({
+                        "task_id": task_id,
+                        "status": "running",
+                        "start_time": datetime.fromtimestamp(start_time).isoformat(),
+                        "elapsed_seconds": elapsed,
+                        "expected_compounds": expected_compounds
+                    })
+                    _store_progress(redis_client, progress_key, progress_payload)
+                    self.update_state(state='PROGRESS', meta=progress_payload)
+                    last_progress_update = now
+
+                if now - start_time > task_timeout:
+                    process.kill()
+                    raise TimeoutError(f"Lead optimization task {task_id} timed out after {task_timeout} seconds.")
+
+                if process.poll() is not None:
+                    break
+
+                time.sleep(5)
+
+        if process.returncode != 0:
+            raise RuntimeError(f"Lead optimization task {task_id} failed. See log: {log_path}")
+
+        tracker.update_status("packaging", "Packaging optimization results")
+        output_archive_path = os.path.join(task_temp_dir, f"{task_id}_lead_optimization_results.zip")
+        shutil.make_archive(output_archive_path[:-4], 'zip', output_dir)
+
+        upload_response = upload_result_to_central_api(
+            task_id,
+            output_archive_path,
+            os.path.basename(output_archive_path)
+        )
+
+        final_meta = {
+            'status': 'Complete',
+            'upload_info': upload_response,
+            'result_file': os.path.basename(output_archive_path)
+        }
+        self.update_state(state='SUCCESS', meta=final_meta)
+        tracker.update_status("completed", "Lead optimization completed successfully")
+
+        completed_payload = {
+            "task_id": task_id,
+            "status": "completed",
+            "completed_at": datetime.now().isoformat()
+        }
+        _store_progress(redis_client, progress_key, completed_payload)
+        return final_meta
+
+    except Exception as e:
+        logger.error(f"Task {task_id} failed: {e}", exc_info=True)
+        if tracker:
+            tracker.update_status("failed", str(e))
+        self.update_state(state='FAILURE', meta={
+            'exc_type': type(e).__name__,
+            'exc_message': str(e),
+            'traceback': traceback.format_exc(),
+        })
+        failed_payload = {
+            "task_id": task_id,
+            "status": "failed",
+            "error": str(e),
+            "failed_at": datetime.now().isoformat()
+        }
+        _store_progress(redis_client, progress_key, failed_payload)
+        raise e
+
+    finally:
         if task_temp_dir and os.path.exists(task_temp_dir):
             shutil.rmtree(task_temp_dir)
             logger.info(f"Task {task_id}: Cleaned up temporary directory '{task_temp_dir}'.")
