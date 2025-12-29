@@ -1488,7 +1488,8 @@ def render_lead_optimization_page():
                 optimization_strategy = st.selectbox(
                     "优化策略",
                     ["scaffold_hopping", "fragment_replacement", "multi_objective"],
-                    disabled=is_running
+                    disabled=is_running,
+                    help="选择候选生成的策略：骨架跃迁/片段替换/多目标优化。"
                 )
                 max_candidates = st.number_input(
                     "每轮最大候选数",
@@ -1496,7 +1497,8 @@ def render_lead_optimization_page():
                     max_value=500,
                     value=30,
                     step=1,
-                    disabled=is_running
+                    disabled=is_running,
+                    help="每一轮最多生成并评估的候选数量。"
                 )
                 iterations = st.number_input(
                     "迭代轮数",
@@ -1504,7 +1506,8 @@ def render_lead_optimization_page():
                     max_value=20,
                     value=1,
                     step=1,
-                    disabled=is_running
+                    disabled=is_running,
+                    help="遗传/进化的总轮数，轮数越多探索越充分。"
                 )
                 batch_size = st.number_input(
                     "批次大小",
@@ -1512,7 +1515,8 @@ def render_lead_optimization_page():
                     max_value=32,
                     value=4,
                     step=1,
-                    disabled=is_running
+                    disabled=is_running,
+                    help="每批同时提交到预测引擎的候选数量。"
                 )
 
             with col2:
@@ -1522,7 +1526,8 @@ def render_lead_optimization_page():
                     max_value=50,
                     value=5,
                     step=1,
-                    disabled=is_running
+                    disabled=is_running,
+                    help="每轮保留的最优候选数，作为下一轮种子。"
                 )
                 diversity_weight = st.slider(
                     "多样性权重",
@@ -1530,7 +1535,8 @@ def render_lead_optimization_page():
                     max_value=1.0,
                     value=0.3,
                     step=0.05,
-                    disabled=is_running
+                    disabled=is_running,
+                    help="多样性与相似性的权衡系数。"
                 )
                 similarity_threshold = st.slider(
                     "最小相似性",
@@ -1538,7 +1544,8 @@ def render_lead_optimization_page():
                     max_value=1.0,
                     value=0.5,
                     step=0.05,
-                    disabled=is_running
+                    disabled=is_running,
+                    help="候选与原始化合物的最小相似性阈值。"
                 )
                 max_similarity_threshold = st.slider(
                     "最大相似性",
@@ -1546,19 +1553,22 @@ def render_lead_optimization_page():
                     max_value=1.0,
                     value=0.9,
                     step=0.05,
-                    disabled=is_running
+                    disabled=is_running,
+                    help="避免候选过于相似的上限阈值。"
                 )
 
             diversity_selection_strategy = st.selectbox(
                 "多样性选择策略",
                 ["tanimoto_diverse", "scaffold_diverse", "property_diverse", "hybrid"],
-                disabled=is_running
+                disabled=is_running,
+                help="候选筛选的多样性策略：相似度/骨架/性质/混合。"
             )
 
             limit_chiral = st.checkbox(
                 "限制最大手性中心数",
                 value=False,
-                disabled=is_running
+                disabled=is_running,
+                help="限制候选中的手性中心数量。"
             )
             max_chiral_centers = None
             if limit_chiral:
@@ -1568,13 +1578,15 @@ def render_lead_optimization_page():
                     max_value=20,
                     value=4,
                     step=1,
-                    disabled=is_running
+                    disabled=is_running,
+                    help="候选化合物允许的最大手性中心数量。"
                 )
 
             generate_report = st.checkbox(
                 "生成HTML报告",
                 value=False,
-                disabled=is_running
+                disabled=is_running,
+                help="输出包含统计图表的HTML报告。"
             )
 
         auto_required = ";;".join([s for s in required_smarts_from_auto if s])
