@@ -90,7 +90,10 @@ def run_single_optimization(engine: OptimizationEngine,
                           max_similarity_threshold: float = 0.9,
                           diversity_selection_strategy: str = "tanimoto_diverse",
                           max_chiral_centers: int = None,
-                          core_smarts: str = None) -> OptimizationResult:
+                          core_smarts: str = None,
+                          exclude_smarts: str = None,
+                          rgroup_smarts: str = None,
+                          variable_smarts: str = None) -> OptimizationResult:
     """Run optimization for a single compound with iterative evolution"""
     logger = logging.getLogger(__name__)
     
@@ -106,6 +109,12 @@ def run_single_optimization(engine: OptimizationEngine,
     logger.info(f"多样性选择策略: {diversity_selection_strategy}")
     if core_smarts:
         logger.info(f"核心片段限制: {core_smarts}")
+    if exclude_smarts:
+        logger.info(f"排除片段限制: {exclude_smarts}")
+    if rgroup_smarts:
+        logger.info(f"R-group 片段限制: {rgroup_smarts}")
+    if variable_smarts:
+        logger.info(f"严格可变片段: {variable_smarts}")
     
     try:
         result = engine.optimize_compound(
@@ -122,7 +131,10 @@ def run_single_optimization(engine: OptimizationEngine,
             max_similarity_threshold=max_similarity_threshold,
             diversity_selection_strategy=diversity_selection_strategy,
             max_chiral_centers=max_chiral_centers,
-            core_smarts=core_smarts
+            core_smarts=core_smarts,
+            exclude_smarts=exclude_smarts,
+            rgroup_smarts=rgroup_smarts,
+            variable_smarts=variable_smarts
         )
         
         logger.info("=== 优化完成 ===")
@@ -146,7 +158,10 @@ def run_batch_optimization(engine: OptimizationEngine,
                          strategy: str,
                          max_candidates: int,
                          output_dir: str,
-                         core_smarts: str = None) -> Dict[str, OptimizationResult]:
+                         core_smarts: str = None,
+                         exclude_smarts: str = None,
+                         rgroup_smarts: str = None,
+                         variable_smarts: str = None) -> Dict[str, OptimizationResult]:
     """Run optimization for multiple compounds"""
     logger = logging.getLogger(__name__)
     
@@ -162,7 +177,10 @@ def run_batch_optimization(engine: OptimizationEngine,
             strategy=strategy,
             max_candidates=max_candidates,
             output_dir=output_dir,
-            core_smarts=core_smarts
+            core_smarts=core_smarts,
+            exclude_smarts=exclude_smarts,
+            rgroup_smarts=rgroup_smarts,
+            variable_smarts=variable_smarts
         )
         
         logger.info("=== 批量优化完成 ===")
@@ -233,6 +251,12 @@ def main():
     parser.add_argument("--generate_report", action="store_true", help="Generate HTML report")
     parser.add_argument("--core_smarts", type=str, default=None,
                        help="Core substructure (SMILES/SMARTS) to keep unchanged")
+    parser.add_argument("--exclude_smarts", type=str, default=None,
+                       help="Substructure (SMILES/SMARTS) to exclude from candidates")
+    parser.add_argument("--rgroup_smarts", type=str, default=None,
+                       help="R-group style scaffold (SMILES/SMARTS) with [*] for editable positions")
+    parser.add_argument("--variable_smarts", type=str, default=None,
+                       help="Strict variable fragments (SMILES/SMARTS) from auto split")
     
     # System options
     parser.add_argument("--parallel_workers", type=int, default=1, 
@@ -288,7 +312,10 @@ def main():
                 max_similarity_threshold=args.max_similarity_threshold,
                 diversity_selection_strategy=args.diversity_selection_strategy,
                 max_chiral_centers=args.max_chiral_centers,
-                core_smarts=args.core_smarts
+                core_smarts=args.core_smarts,
+                exclude_smarts=args.exclude_smarts,
+                rgroup_smarts=args.rgroup_smarts,
+                variable_smarts=args.variable_smarts
             )
             results["single_compound"] = result
             
@@ -301,7 +328,10 @@ def main():
                 strategy=args.optimization_strategy,
                 max_candidates=args.max_candidates,
                 output_dir=args.output_dir,
-                core_smarts=args.core_smarts
+                core_smarts=args.core_smarts,
+                exclude_smarts=args.exclude_smarts,
+                rgroup_smarts=args.rgroup_smarts,
+                variable_smarts=args.variable_smarts
             )
         
         # Save results

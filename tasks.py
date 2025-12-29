@@ -1090,6 +1090,12 @@ def lead_optimization_task(self, optimization_args: dict):
             command.append("--generate_report")
         if options.get('core_smarts'):
             command.extend(["--core_smarts", str(options['core_smarts'])])
+        if options.get('exclude_smarts'):
+            command.extend(["--exclude_smarts", str(options['exclude_smarts'])])
+        if options.get('rgroup_smarts'):
+            command.extend(["--rgroup_smarts", str(options['rgroup_smarts'])])
+        if options.get('variable_smarts'):
+            command.extend(["--variable_smarts", str(options['variable_smarts'])])
         if options.get('verbosity') is not None:
             command.extend(["--verbosity", str(options['verbosity'])])
         if options.get('backend'):

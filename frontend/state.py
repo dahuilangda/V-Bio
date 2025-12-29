@@ -54,6 +54,21 @@ def initialize_session_state():
     if 'lead_opt_core_input_method' not in st.session_state: st.session_state.lead_opt_core_input_method = 'SMILES/SMARTS'
     if 'lead_opt_core_smarts' not in st.session_state: st.session_state.lead_opt_core_smarts = ''
     if 'lead_opt_core_ketcher_smiles' not in st.session_state: st.session_state.lead_opt_core_ketcher_smiles = ''
+    if 'lead_opt_core_enabled' not in st.session_state: st.session_state.lead_opt_core_enabled = False
+    if 'lead_opt_exclude_enabled' not in st.session_state: st.session_state.lead_opt_exclude_enabled = False
+    if 'lead_opt_rgroup_enabled' not in st.session_state: st.session_state.lead_opt_rgroup_enabled = False
+    if 'lead_opt_exclude_input_method' not in st.session_state: st.session_state.lead_opt_exclude_input_method = 'SMILES/SMARTS'
+    if 'lead_opt_exclude_smarts' not in st.session_state: st.session_state.lead_opt_exclude_smarts = ''
+    if 'lead_opt_exclude_ketcher_smiles' not in st.session_state: st.session_state.lead_opt_exclude_ketcher_smiles = ''
+    if 'lead_opt_rgroup_input_method' not in st.session_state: st.session_state.lead_opt_rgroup_input_method = 'SMILES/SMARTS'
+    if 'lead_opt_rgroup_smarts' not in st.session_state: st.session_state.lead_opt_rgroup_smarts = ''
+    if 'lead_opt_rgroup_ketcher_smiles' not in st.session_state: st.session_state.lead_opt_rgroup_ketcher_smiles = ''
+    if 'lead_opt_fragment_selections' not in st.session_state: st.session_state.lead_opt_fragment_selections = {}
+    if 'lead_opt_fragment_smiles' not in st.session_state: st.session_state.lead_opt_fragment_smiles = []
+    if 'lead_opt_fragment_source' not in st.session_state: st.session_state.lead_opt_fragment_source = ''
+    if 'lead_opt_fragment_note' not in st.session_state: st.session_state.lead_opt_fragment_note = ''
+    if 'lead_opt_fragment_selected' not in st.session_state: st.session_state.lead_opt_fragment_selected = ''
+    if 'lead_opt_fragment_action' not in st.session_state: st.session_state.lead_opt_fragment_action = '不限制'
     
     # URL state management
     if 'url_state_initialized' not in st.session_state: st.session_state.url_state_initialized = False

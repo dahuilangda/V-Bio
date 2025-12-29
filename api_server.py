@@ -518,6 +518,9 @@ def submit_lead_optimization():
         'max_chiral_centers': _parse_int(request.form.get('max_chiral_centers')),
         'generate_report': _parse_bool(request.form.get('generate_report'), False),
         'core_smarts': request.form.get('core_smarts'),
+        'exclude_smarts': request.form.get('exclude_smarts'),
+        'rgroup_smarts': request.form.get('rgroup_smarts'),
+        'variable_smarts': request.form.get('variable_smarts'),
         'verbosity': _parse_int(request.form.get('verbosity')),
         'task_timeout': _parse_int(request.form.get('task_timeout')),
         'backend': request.form.get('backend')

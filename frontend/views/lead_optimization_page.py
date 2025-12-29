@@ -441,6 +441,36 @@ def render_lead_optimization_page():
         st.session_state.lead_opt_core_smarts = ''
     if 'lead_opt_core_ketcher_smiles' not in st.session_state:
         st.session_state.lead_opt_core_ketcher_smiles = ''
+    if 'lead_opt_core_enabled' not in st.session_state:
+        st.session_state.lead_opt_core_enabled = False
+    if 'lead_opt_exclude_enabled' not in st.session_state:
+        st.session_state.lead_opt_exclude_enabled = False
+    if 'lead_opt_rgroup_enabled' not in st.session_state:
+        st.session_state.lead_opt_rgroup_enabled = False
+    if 'lead_opt_exclude_input_method' not in st.session_state:
+        st.session_state.lead_opt_exclude_input_method = 'SMILES/SMARTS'
+    if 'lead_opt_exclude_smarts' not in st.session_state:
+        st.session_state.lead_opt_exclude_smarts = ''
+    if 'lead_opt_exclude_ketcher_smiles' not in st.session_state:
+        st.session_state.lead_opt_exclude_ketcher_smiles = ''
+    if 'lead_opt_rgroup_input_method' not in st.session_state:
+        st.session_state.lead_opt_rgroup_input_method = 'SMILES/SMARTS'
+    if 'lead_opt_rgroup_smarts' not in st.session_state:
+        st.session_state.lead_opt_rgroup_smarts = ''
+    if 'lead_opt_rgroup_ketcher_smiles' not in st.session_state:
+        st.session_state.lead_opt_rgroup_ketcher_smiles = ''
+    if 'lead_opt_fragment_selections' not in st.session_state:
+        st.session_state.lead_opt_fragment_selections = {}
+    if 'lead_opt_fragment_smiles' not in st.session_state:
+        st.session_state.lead_opt_fragment_smiles = []
+    if 'lead_opt_fragment_source' not in st.session_state:
+        st.session_state.lead_opt_fragment_source = ''
+    if 'lead_opt_fragment_note' not in st.session_state:
+        st.session_state.lead_opt_fragment_note = ''
+    if 'lead_opt_fragment_selected' not in st.session_state:
+        st.session_state.lead_opt_fragment_selected = ''
+    if 'lead_opt_fragment_action' not in st.session_state:
+        st.session_state.lead_opt_fragment_action = '不限制'
 
     is_running = (
         st.session_state.lead_optimization_task_id is not None
@@ -776,22 +806,368 @@ def render_lead_optimization_page():
                 disabled=is_running
             )
 
+        def _validate_smarts_input(text_value: str):
+            if not text_value:
+                return True, ""
+            try:
+                from rdkit import Chem
+                parts = [p.strip() for p in text_value.split(";;") if p.strip()]
+                for part in parts:
+                    mol = Chem.MolFromSmarts(part)
+                    if mol is None:
+                        mol = Chem.MolFromSmiles(part)
+                    if mol is None:
+                        return False, f"无法解析: {part}"
+            except ImportError:
+                return True, "当前环境无法校验格式"
+            except Exception as exc:
+                return False, f"解析失败: {exc}"
+            return True, ""
+
+        def _strip_dummy_atoms(smiles_value: str):
+            try:
+                from rdkit import Chem
+                mol = Chem.MolFromSmiles(smiles_value)
+                if mol is None:
+                    return smiles_value
+                editable = Chem.EditableMol(mol)
+                dummy_indices = [atom.GetIdx() for atom in mol.GetAtoms() if atom.GetAtomicNum() == 0]
+                for idx in sorted(dummy_indices, reverse=True):
+                    editable.RemoveAtom(idx)
+                cleaned = editable.GetMol()
+                Chem.SanitizeMol(cleaned)
+                return Chem.MolToSmiles(cleaned, canonical=True)
+            except Exception:
+                return smiles_value
+
+        def _compute_mmpdb_fragments(smiles_value: str):
+            try:
+                from rdkit import Chem
+                from mmpdblib import config as mmp_config
+                from mmpdblib import fragment_algorithm, fragment_types
+                if not hasattr(fragment_algorithm, "count_num_heavies"):
+                    def _count_num_heavies(mol):
+                        try:
+                            return fragment_algorithm.get_num_heavies_from_smiles(
+                                Chem.MolToSmiles(mol, canonical=True)
+                            )
+                        except Exception:
+                            return mol.GetNumHeavyAtoms()
+                    fragment_algorithm.count_num_heavies = _count_num_heavies
+                mol = Chem.MolFromSmiles(smiles_value)
+                if mol is None:
+                    return [], "SMILES 解析失败"
+                fragment_filter = fragment_types.get_fragment_filter(mmp_config.DEFAULT_FRAGMENT_OPTIONS)
+                fragments = []
+                for frag in fragment_algorithm.fragment_mol(mol, fragment_filter):
+                    if frag.variable_smiles:
+                        fragments.append(frag.variable_smiles)
+                unique = sorted(set(fragments))
+                if not unique:
+                    return [], "mmpdb 规则未生成片段"
+                return unique, ""
+            except Exception as exc:
+                return [], f"mmpdb 拆分失败: {exc}"
+
+        def _compute_fallback_fragments(smiles_value: str):
+            try:
+                from rdkit import Chem
+                from rdkit.Chem import BRICS
+                from rdkit.Chem import Recap
+                from rdkit.Chem import rdMolFragmenter
+                mol = Chem.MolFromSmiles(smiles_value)
+                if mol is None:
+                    return []
+                fragments = sorted(BRICS.BRICSDecompose(mol))
+                if len(fragments) >= 2:
+                    return fragments
+                recap = Recap.RecapDecompose(mol)
+                if recap and recap.children:
+                    recap_frags = sorted({node.smiles for node in recap.GetLeaves().values()})
+                    if len(recap_frags) >= 2:
+                        return recap_frags
+                bond_indices = []
+                for bond in mol.GetBonds():
+                    if bond.GetBondType() == Chem.BondType.SINGLE and not bond.IsInRing():
+                        bond_indices.append(bond.GetIdx())
+                if bond_indices:
+                    fragmented = rdMolFragmenter.FragmentOnBonds(mol, bond_indices, addDummies=True)
+                    frag_mols = Chem.GetMolFrags(fragmented, asMols=True, sanitizeFrags=True)
+                    rot_frags = sorted({Chem.MolToSmiles(frag, canonical=True) for frag in frag_mols})
+                    if len(rot_frags) >= 2:
+                        return rot_frags
+                ring_smiles = set()
+                for ring_atoms in Chem.GetSymmSSSR(mol):
+                    ring_list = list(ring_atoms)
+                    if len(ring_list) < 3:
+                        continue
+                    ring_smiles.add(
+                        Chem.MolFragmentToSmiles(
+                            mol,
+                            atomsToUse=ring_list,
+                            canonical=True
+                        )
+                    )
+                ring_frags = sorted(ring_smiles)
+                if len(ring_frags) >= 2:
+                    return ring_frags
+                return fragments
+            except Exception:
+                return []
+
+        def _compute_murcko_scaffold(smiles_value: str):
+            try:
+                from rdkit import Chem
+                from rdkit.Chem.Scaffolds import MurckoScaffold
+                mol = Chem.MolFromSmiles(smiles_value)
+                if mol is None:
+                    return ""
+                scaffold = MurckoScaffold.GetScaffoldForMol(mol)
+                if scaffold is None:
+                    return ""
+                return Chem.MolToSmiles(scaffold, canonical=True)
+            except Exception:
+                return ""
+
+        def _render_fragment_image(smiles_value: str):
+            try:
+                from rdkit import Chem
+                from rdkit.Chem import Draw
+                mol = Chem.MolFromSmiles(smiles_value)
+                if mol is None:
+                    return None
+                return Draw.MolToImage(mol, size=(180, 120))
+            except Exception:
+                return None
+
+        def _render_parent_with_highlight(parent_smiles: str, fragment_smiles: str, highlight_color=None, size=(480, 320)):
+            try:
+                from rdkit import Chem
+                from rdkit.Chem import Draw
+                parent = Chem.MolFromSmiles(parent_smiles)
+                if parent is None:
+                    return None
+                if not fragment_smiles:
+                    return Draw.MolToImage(parent, size=size)
+                query = Chem.MolFromSmarts(fragment_smiles)
+                if query is None:
+                    query = Chem.MolFromSmiles(fragment_smiles)
+                if query is None:
+                    return Draw.MolToImage(parent, size=size)
+                matches = parent.GetSubstructMatches(query)
+                highlight_atoms = set()
+                for match in matches:
+                    highlight_atoms.update(match)
+                highlight_colors = None
+                if highlight_atoms and highlight_color is not None:
+                    highlight_colors = {idx: highlight_color for idx in highlight_atoms}
+                return Draw.MolToImage(
+                    parent,
+                    size=size,
+                    highlightAtoms=list(highlight_atoms) if highlight_atoms else None,
+                    highlightAtomColors=highlight_colors
+                )
+            except Exception:
+                return None
+
+        def _action_color(action_value: str):
+            if action_value == "保留":
+                return (0.2, 0.7, 0.3)
+            if action_value == "排除":
+                return (0.9, 0.3, 0.3)
+            if action_value == "可变":
+                return (0.95, 0.6, 0.1)
+            return (0.25, 0.5, 0.85)
+
+        def _rank_fragments(fragments):
+            try:
+                from rdkit import Chem
+                ranked = []
+                for frag in fragments:
+                    mol = Chem.MolFromSmiles(frag)
+                    heavy = mol.GetNumHeavyAtoms() if mol else 0
+                    ranked.append((frag, heavy))
+                ranked.sort(key=lambda x: (-x[1], x[0]))
+                return ranked
+            except Exception:
+                return [(frag, 0) for frag in fragments]
+
+        def _dedupe_fragments(fragments):
+            try:
+                from rdkit import Chem
+                seen = {}
+
+                def _normalize_mol(mol):
+                    if mol is None:
+                        return ""
+                    for atom in mol.GetAtoms():
+                        atom.SetIsotope(0)
+                        atom.SetAtomMapNum(0)
+                    try:
+                        Chem.SanitizeMol(mol)
+                    except Exception:
+                        pass
+                    return Chem.MolToSmiles(mol, canonical=True, isomericSmiles=False)
+
+                for frag in fragments:
+                    mol = Chem.MolFromSmiles(frag)
+                    if mol is None:
+                        continue
+                    keep_key = _normalize_mol(Chem.Mol(mol))
+                    stripped = _strip_dummy_atoms(frag)
+                    stripped_mol = Chem.MolFromSmiles(stripped)
+                    stripped_key = _normalize_mol(stripped_mol)
+                    key = (keep_key, stripped_key)
+                    if key not in seen:
+                        seen[key] = frag
+                return list(seen.values())
+            except Exception:
+                return fragments
+
         core_smarts = ""
+        exclude_smarts = ""
+        rgroup_smarts = ""
+        required_smarts_from_auto = []
+        exclude_smarts_from_auto = []
+        variable_smarts_from_auto = []
+        has_invalid_filters = False
+
         with st.expander("🧩 修改位点 (可选)", expanded=False):
             st.caption("通过指定需要保留的核心片段，让优化只在其余部分发生。")
-            core_mode = st.radio(
-                "限制方式",
-                ["不限制", "锁定核心片段"],
-                horizontal=True,
-                disabled=is_running,
-                key="lead_opt_core_mode"
-            )
-            if core_mode == "锁定核心片段":
+            tab_auto, tab_core, tab_exclude, tab_rgroup = st.tabs(["自动拆分", "锁定核心", "排除片段", "R-group 模式"])
+
+            with tab_auto:
+                st.caption("基于输入化合物自动拆分片段，点击选择保留/排除/可变。")
+                if input_mode != "单个" or not input_compound.strip():
+                    st.info("请输入单个化合物后，将自动显示拆分片段。")
+                else:
+                    source_smiles = input_compound.strip()
+                    refresh_fragments = False
+                    if st.button("🔄 重新拆分", disabled=is_running, use_container_width=True):
+                        refresh_fragments = True
+
+                    if refresh_fragments or st.session_state.lead_opt_fragment_source != source_smiles:
+                        fragments, fragment_note = _compute_mmpdb_fragments(source_smiles)
+                        if len(fragments) < 2:
+                            fallback = _compute_fallback_fragments(source_smiles)
+                            if len(fallback) >= 2:
+                                fragments = fallback
+                                fragment_note = "已回退到非 mmpdb 拆分策略。" if not fragment_note else f"{fragment_note} 已回退到非 mmpdb 拆分策略。"
+                        st.session_state.lead_opt_fragment_smiles = fragments
+                        st.session_state.lead_opt_fragment_source = source_smiles
+                        st.session_state.lead_opt_fragment_selections = {}
+                        st.session_state.lead_opt_fragment_selected = ''
+                        st.session_state.lead_opt_fragment_action = '不限制'
+                        if fragment_note:
+                            st.session_state.lead_opt_fragment_note = fragment_note
+                        else:
+                            st.session_state.lead_opt_fragment_note = ""
+
+                    fragments = st.session_state.get('lead_opt_fragment_smiles', [])
+                    fragments = _dedupe_fragments(fragments)
+                    fragment_note = st.session_state.get('lead_opt_fragment_note', '')
+                    if not fragments:
+                        st.info("未能拆分出片段，可能是结构较小或解析失败。")
+                    else:
+                        st.caption(f"已拆分 {len(fragments)} 个片段")
+                        if fragment_note:
+                            st.info(fragment_note)
+                        selection_labels = ["不限制", "保留", "排除", "可变"]
+                        ranked = _rank_fragments(fragments)
+                        display_limit = len(ranked)
+                        if len(ranked) > 30:
+                            display_limit = st.slider(
+                                "显示前 N 个片段",
+                                min_value=10,
+                                max_value=min(120, len(ranked)),
+                                value=30,
+                                step=5,
+                                disabled=is_running
+                            )
+                        ranked = ranked[:display_limit]
+                        heavy_map = {frag: heavy for frag, heavy in ranked}
+                        label_map = {frag: f"片段 {idx + 1:02d} · 重原子 {heavy_map.get(frag, 0)}" for idx, (frag, _) in enumerate(ranked)}
+
+                        options = [frag for frag, _ in ranked]
+                        none_key = "__none__"
+                        if st.session_state.lead_opt_fragment_selected not in options:
+                            st.session_state.lead_opt_fragment_selected = none_key
+
+                        st.markdown("**片段缩略图**")
+                        cols_per_row = 4
+                        rows = (len(options) + cols_per_row - 1) // cols_per_row
+                        index = 0
+                        for _ in range(rows):
+                            cols = st.columns(cols_per_row)
+                            for col in cols:
+                                if index >= len(options):
+                                    break
+                                frag = options[index]
+                                with col:
+                                    img = _render_parent_with_highlight(
+                                        source_smiles,
+                                        frag,
+                                        highlight_color=_action_color("不限制"),
+                                        size=(220, 160)
+                                    )
+                                    if img is not None:
+                                        st.image(img, use_container_width=True)
+                                    st.caption(label_map.get(frag, frag))
+                                    if st.button("选择", key=f"lead_opt_fragment_pick_{index}", disabled=is_running):
+                                        st.session_state.lead_opt_fragment_selected = frag
+                                        st.rerun()
+                                index += 1
+
+                        selected_fragment = st.session_state.lead_opt_fragment_selected
+
+                        action_disabled = is_running or selected_fragment == none_key
+                        action = st.radio(
+                            "操作",
+                            selection_labels,
+                            horizontal=True,
+                            disabled=action_disabled,
+                            key="lead_opt_fragment_action"
+                        )
+
+                        if selected_fragment == none_key:
+                            st.caption("已选择: 无")
+
+                        parent_img = _render_parent_with_highlight(
+                            source_smiles,
+                            "" if selected_fragment == none_key else selected_fragment,
+                            highlight_color=_action_color(action)
+                        )
+                        if parent_img is not None:
+                            st.image(parent_img, use_container_width=True)
+                        else:
+                            st.caption("无法渲染结构")
+
+                        if selected_fragment != none_key:
+                            st.caption(f"当前片段: {selected_fragment}")
+                            stripped = _strip_dummy_atoms(selected_fragment)
+                            if action == "保留":
+                                required_smarts_from_auto.append(stripped)
+                            elif action == "排除":
+                                exclude_smarts_from_auto.append(stripped)
+                            elif action == "可变":
+                                variable_smarts_from_auto.append(selected_fragment)
+                                st.caption("可变片段将以严格模式处理，结果需匹配替换位点骨架。")
+
+                        if required_smarts_from_auto or exclude_smarts_from_auto or variable_smarts_from_auto:
+                            st.caption("自动拆分结果会与下方手动输入规则合并生效。")
+
+            with tab_core:
+                st.checkbox(
+                    "启用核心锁定",
+                    value=st.session_state.get('lead_opt_core_enabled', False),
+                    disabled=is_running,
+                    key="lead_opt_core_enabled"
+                )
                 core_input_method = st.radio(
                     "核心片段输入方式",
                     ["SMILES/SMARTS", "Ketcher 绘制"],
                     horizontal=True,
-                    disabled=is_running,
+                    disabled=is_running or not st.session_state.lead_opt_core_enabled,
                     key="lead_opt_core_input_method"
                 )
                 if core_input_method == "SMILES/SMARTS":
@@ -799,7 +1175,7 @@ def render_lead_optimization_page():
                         "核心片段 (SMILES/SMARTS)",
                         value=st.session_state.get('lead_opt_core_smarts', ''),
                         placeholder="例如: c1ccc(cc1)N",
-                        disabled=is_running,
+                        disabled=is_running or not st.session_state.lead_opt_core_enabled,
                         help="输入希望保留的骨架/片段。优化结果必须包含该子结构。"
                     )
                     st.session_state.lead_opt_core_smarts = core_smarts
@@ -817,6 +1193,105 @@ def render_lead_optimization_page():
                     st.session_state.lead_opt_core_ketcher_smiles = core_draw
                     core_smarts = core_draw or ""
                     st.caption("将以子结构匹配的方式保留该核心片段。")
+
+                if st.session_state.lead_opt_core_enabled:
+                    valid, message = _validate_smarts_input(core_smarts)
+                    if not valid:
+                        st.error(f"核心片段无效: {message}")
+                        has_invalid_filters = True
+                    elif message:
+                        st.info(f"核心片段提示: {message}")
+
+            with tab_exclude:
+                st.checkbox(
+                    "启用排除片段",
+                    value=st.session_state.get('lead_opt_exclude_enabled', False),
+                    disabled=is_running,
+                    key="lead_opt_exclude_enabled"
+                )
+                exclude_input_method = st.radio(
+                    "排除片段输入方式",
+                    ["SMILES/SMARTS", "Ketcher 绘制"],
+                    horizontal=True,
+                    disabled=is_running or not st.session_state.lead_opt_exclude_enabled,
+                    key="lead_opt_exclude_input_method"
+                )
+                if exclude_input_method == "SMILES/SMARTS":
+                    exclude_smarts = st.text_input(
+                        "排除片段 (SMILES/SMARTS)",
+                        value=st.session_state.get('lead_opt_exclude_smarts', ''),
+                        placeholder="例如: c1ccc(cc1)Cl",
+                        disabled=is_running or not st.session_state.lead_opt_exclude_enabled,
+                        help="输入希望避免出现的子结构，结果中将剔除包含该片段的候选。"
+                    )
+                    st.session_state.lead_opt_exclude_smarts = exclude_smarts
+                else:
+                    from streamlit_ketcher import st_ketcher
+
+                    st.info("在 Ketcher 中绘制需要排除的片段，完成后点击 Apply。", icon="💡")
+                    exclude_draw = st_ketcher(
+                        value=st.session_state.get('lead_opt_exclude_ketcher_smiles', ''),
+                        key="lead_opt_exclude_ketcher",
+                        height=300
+                    )
+                    if exclude_draw is not None:
+                        exclude_draw = exclude_draw.strip()
+                    st.session_state.lead_opt_exclude_ketcher_smiles = exclude_draw
+                    exclude_smarts = exclude_draw or ""
+
+                if st.session_state.lead_opt_exclude_enabled:
+                    valid, message = _validate_smarts_input(exclude_smarts)
+                    if not valid:
+                        st.error(f"排除片段无效: {message}")
+                        has_invalid_filters = True
+                    elif message:
+                        st.info(f"排除片段提示: {message}")
+
+            with tab_rgroup:
+                st.checkbox(
+                    "启用 R-group 模式",
+                    value=st.session_state.get('lead_opt_rgroup_enabled', False),
+                    disabled=is_running,
+                    key="lead_opt_rgroup_enabled"
+                )
+                st.caption("绘制完整分子并用 [*] 标记可替换位置，结果需要匹配该骨架。")
+                rgroup_input_method = st.radio(
+                    "R-group 输入方式",
+                    ["SMILES/SMARTS", "Ketcher 绘制"],
+                    horizontal=True,
+                    disabled=is_running or not st.session_state.lead_opt_rgroup_enabled,
+                    key="lead_opt_rgroup_input_method"
+                )
+                if rgroup_input_method == "SMILES/SMARTS":
+                    rgroup_smarts = st.text_input(
+                        "R-group 模式 (SMILES/SMARTS)",
+                        value=st.session_state.get('lead_opt_rgroup_smarts', ''),
+                        placeholder="例如: c1ccc([*])cc1",
+                        disabled=is_running or not st.session_state.lead_opt_rgroup_enabled,
+                        help="使用 [*] 或通配符标记可替换的位置。"
+                    )
+                    st.session_state.lead_opt_rgroup_smarts = rgroup_smarts
+                else:
+                    from streamlit_ketcher import st_ketcher
+
+                    st.info("在 Ketcher 中绘制完整分子，用 [*] 标记可变位点，完成后点击 Apply。", icon="💡")
+                    rgroup_draw = st_ketcher(
+                        value=st.session_state.get('lead_opt_rgroup_ketcher_smiles', ''),
+                        key="lead_opt_rgroup_ketcher",
+                        height=300
+                    )
+                    if rgroup_draw is not None:
+                        rgroup_draw = rgroup_draw.strip()
+                    st.session_state.lead_opt_rgroup_ketcher_smiles = rgroup_draw
+                    rgroup_smarts = rgroup_draw or ""
+
+                if st.session_state.lead_opt_rgroup_enabled:
+                    valid, message = _validate_smarts_input(rgroup_smarts)
+                    if not valid:
+                        st.error(f"R-group 片段无效: {message}")
+                        has_invalid_filters = True
+                    elif message:
+                        st.info(f"R-group 提示: {message}")
 
         with st.expander("⚙️ **点击设置：优化参数**", expanded=False):
             col1, col2 = st.columns(2)
@@ -914,7 +1389,11 @@ def render_lead_optimization_page():
                 disabled=is_running
             )
 
-        can_submit = bool(target_yaml.strip()) and (
+        auto_required = ";;".join([s for s in required_smarts_from_auto if s])
+        auto_exclude = ";;".join([s for s in exclude_smarts_from_auto if s])
+        auto_variable = ";;".join([s for s in variable_smarts_from_auto if s])
+
+        can_submit = bool(target_yaml.strip()) and not has_invalid_filters and (
             (input_mode == "单个" and input_compound.strip()) or
             (input_mode == "批量文件" and input_file is not None)
         )
@@ -930,6 +1409,13 @@ def render_lead_optimization_page():
             st.session_state.lead_optimization_error = None
             st.session_state.lead_optimization_raw_zip = None
 
+            core_value = ";;".join(
+                [s for s in [auto_required, core_smarts.strip() if core_smarts else ""] if s]
+            )
+            exclude_value = ";;".join(
+                [s for s in [auto_exclude, exclude_smarts.strip() if exclude_smarts else ""] if s]
+            )
+
             options = {
                 'optimization_strategy': optimization_strategy,
                 'max_candidates': int(max_candidates),
@@ -942,7 +1428,10 @@ def render_lead_optimization_page():
                 'diversity_selection_strategy': diversity_selection_strategy,
                 'max_chiral_centers': int(max_chiral_centers) if max_chiral_centers else None,
                 'generate_report': generate_report,
-                'core_smarts': core_smarts.strip() if core_smarts else None,
+                'core_smarts': core_value if (st.session_state.lead_opt_core_enabled or auto_required) and core_value else None,
+                'exclude_smarts': exclude_value if (st.session_state.lead_opt_exclude_enabled or auto_exclude) and exclude_value else None,
+                'rgroup_smarts': rgroup_smarts.strip() if st.session_state.lead_opt_rgroup_enabled and rgroup_smarts else None,
+                'variable_smarts': auto_variable if auto_variable else None,
                 'backend': st.session_state.lead_optimization_backend
             }
 
