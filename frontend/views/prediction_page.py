@@ -154,7 +154,7 @@ def render_prediction_page():
                     from streamlit_ketcher import st_ketcher
                     initial_smiles = st.session_state.components[i].get('sequence', '')
                     
-                    st.info("🎨 在下方 **Ketcher 编辑器** 中绘制分子，或直接粘贴 SMILES 字符串。**编辑完成后，请点击编辑器内部的 'Apply' 按钮，SMILES 字符串将自动更新。**", icon="💡")
+                    st.info("在下方 **Ketcher 编辑器** 中绘制分子，或直接粘贴 SMILES 字符串。**编辑完成后，请点击编辑器内部的 'Apply' 按钮，SMILES 字符串将自动更新。**", icon="💡")
                     
                     ketcher_current_smiles = st_ketcher(
                         value=initial_smiles,
@@ -786,7 +786,7 @@ def render_prediction_page():
                         elif current_state == 'STARTED' or current_state == 'PROGRESS':
                             info_message = status_data.get('info', {}).get('message', f"当前状态: **{current_state}**")
                             st.markdown('<div class="loader"></div>', unsafe_allow_html=True)
-                            st.info(f"🔬 **任务正在运行**：{info_message} (页面将每 10 秒自动刷新)", icon="⏳")
+                            st.info(f"**任务正在运行**：{info_message} (页面将每 10 秒自动刷新)", icon="⏳")
                         else:
                             st.markdown('<div class="loader"></div>', unsafe_allow_html=True)
                             st.warning(f"❓ 任务状态未知或正在初始化... (当前状态: **{current_state}**)")
@@ -1139,7 +1139,7 @@ def render_prediction_page():
                     if binder_prob is not None:
                         st.metric("结合概率", f"{binder_prob:.2%}", help="模型预测结合体与其余组分形成稳定复合物的概率。百分比越高，表明模型对这是一个真实的结合事件越有信心。" )
             else:
-                st.info("💡 如需亲和力预测结果，请在步骤1中勾选 **计算结合亲和力 (Affinity)** 选项。", icon="ℹ️")
+                st.info("如需亲和力预测结果，请在步骤1中勾选 **计算结合亲和力 (Affinity)** 选项。", icon="ℹ️")
 
             st.markdown("---")
             st.markdown("<b>📥 下载结果文件</b>", unsafe_allow_html=True)

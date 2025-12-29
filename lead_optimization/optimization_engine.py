@@ -96,7 +96,8 @@ class OptimizationEngine:
                          similarity_threshold: float = 0.5,
                          max_similarity_threshold: float = 0.9,
                          diversity_selection_strategy: str = "tanimoto_diverse",
-                         max_chiral_centers: int = None) -> OptimizationResult:
+                         max_chiral_centers: int = None,
+                         core_smarts: Optional[str] = None) -> OptimizationResult:
         """
         Optimize a single compound using MMPDB + Boltz-WebUI with iterative evolution
         
@@ -132,6 +133,8 @@ class OptimizationEngine:
             logger.info(f"Max candidates per iteration: {max_candidates}")
             logger.info(f"Batch size: {batch_size}")
             logger.info(f"Top-K per iteration: {top_k_per_iteration}")
+            if core_smarts:
+                logger.info(f"核心片段限制: {core_smarts}")
             
             # Initialize batch evaluator and evolution engine
             from .batch_evaluation import BatchEvaluator
@@ -139,6 +142,10 @@ class OptimizationEngine:
             
             batch_evaluator = BatchEvaluator(self.boltz_client, self.scoring_system, batch_size)
             evolution_engine = MolecularEvolutionEngine()
+
+            core_query = self._parse_core_smarts(core_smarts)
+            if core_smarts and core_query is None:
+                raise InvalidCompoundError(f"Invalid core SMARTS/SMILES: {core_smarts}")
             
             # Track all evaluated candidates across iterations
             all_evaluated_candidates = []
@@ -241,6 +248,11 @@ class OptimizationEngine:
                         logger.warning(f"处理 SMILES {c.smiles} 时出错: {e}")
                 
                 logger.info(f"第 {iteration + 1} 代总共生成 {len(iteration_candidates)} 个候选，去重后剩余 {len(unique_candidates)} 个")
+
+                if core_query:
+                    before_filter = len(unique_candidates)
+                    unique_candidates = self._filter_candidates_by_core(unique_candidates, core_query)
+                    logger.info(f"核心片段过滤后剩余 {len(unique_candidates)}/{before_filter} 个候选")
                 
                 if not unique_candidates:
                     logger.warning(f"第 {iteration + 1} 代没有新的候选化合物，停止进化")
@@ -891,12 +903,32 @@ class OptimizationEngine:
         except:
             return False
 
+    def _parse_core_smarts(self, core_smarts: Optional[str]) -> Optional[Chem.Mol]:
+        if not core_smarts:
+            return None
+        core_smarts = core_smarts.strip()
+        if not core_smarts:
+            return None
+        core_mol = Chem.MolFromSmarts(core_smarts)
+        if core_mol is None:
+            core_mol = Chem.MolFromSmiles(core_smarts)
+        return core_mol
+
+    def _filter_candidates_by_core(self, candidates: List[OptimizationCandidate], core_query: Chem.Mol) -> List[OptimizationCandidate]:
+        filtered = []
+        for candidate in candidates:
+            mol = Chem.MolFromSmiles(candidate.smiles)
+            if mol and mol.HasSubstructMatch(core_query):
+                filtered.append(candidate)
+        return filtered
+
     def batch_optimize(self, 
                       compounds_file: str,
                       target_protein_yaml: str,
                       strategy: str = "scaffold_hopping",
                       max_candidates: int = 50,
-                      output_dir: Optional[str] = None) -> Dict[str, OptimizationResult]:
+                      output_dir: Optional[str] = None,
+                      core_smarts: Optional[str] = None) -> Dict[str, OptimizationResult]:
         """
         Batch optimization of multiple compounds
         """
@@ -922,7 +954,8 @@ class OptimizationEngine:
                     target_protein_yaml=target_protein_yaml,
                     strategy=strategy,
                     max_candidates=max_candidates,
-                    output_dir=compound_output_dir
+                    output_dir=compound_output_dir,
+                    core_smarts=core_smarts
                 )
                 results[compound_id] = result
                 logger.info(f"Compound {compound_id} optimization completed")

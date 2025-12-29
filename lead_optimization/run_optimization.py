@@ -89,7 +89,8 @@ def run_single_optimization(engine: OptimizationEngine,
                           similarity_threshold: float = 0.5,
                           max_similarity_threshold: float = 0.9,
                           diversity_selection_strategy: str = "tanimoto_diverse",
-                          max_chiral_centers: int = None) -> OptimizationResult:
+                          max_chiral_centers: int = None,
+                          core_smarts: str = None) -> OptimizationResult:
     """Run optimization for a single compound with iterative evolution"""
     logger = logging.getLogger(__name__)
     
@@ -103,6 +104,8 @@ def run_single_optimization(engine: OptimizationEngine,
     logger.info(f"多样性权重: {diversity_weight}")
     logger.info(f"相似性范围: {similarity_threshold} - {max_similarity_threshold}")
     logger.info(f"多样性选择策略: {diversity_selection_strategy}")
+    if core_smarts:
+        logger.info(f"核心片段限制: {core_smarts}")
     
     try:
         result = engine.optimize_compound(
@@ -118,7 +121,8 @@ def run_single_optimization(engine: OptimizationEngine,
             similarity_threshold=similarity_threshold,
             max_similarity_threshold=max_similarity_threshold,
             diversity_selection_strategy=diversity_selection_strategy,
-            max_chiral_centers=max_chiral_centers
+            max_chiral_centers=max_chiral_centers,
+            core_smarts=core_smarts
         )
         
         logger.info("=== 优化完成 ===")
@@ -141,7 +145,8 @@ def run_batch_optimization(engine: OptimizationEngine,
                          target_config: str,
                          strategy: str,
                          max_candidates: int,
-                         output_dir: str) -> Dict[str, OptimizationResult]:
+                         output_dir: str,
+                         core_smarts: str = None) -> Dict[str, OptimizationResult]:
     """Run optimization for multiple compounds"""
     logger = logging.getLogger(__name__)
     
@@ -156,7 +161,8 @@ def run_batch_optimization(engine: OptimizationEngine,
             target_protein_yaml=target_config,
             strategy=strategy,
             max_candidates=max_candidates,
-            output_dir=output_dir
+            output_dir=output_dir,
+            core_smarts=core_smarts
         )
         
         logger.info("=== 批量优化完成 ===")
@@ -225,6 +231,8 @@ def main():
     # Output options
     parser.add_argument("--output_dir", type=str, help="Output directory")
     parser.add_argument("--generate_report", action="store_true", help="Generate HTML report")
+    parser.add_argument("--core_smarts", type=str, default=None,
+                       help="Core substructure (SMILES/SMARTS) to keep unchanged")
     
     # System options
     parser.add_argument("--parallel_workers", type=int, default=1, 
@@ -279,7 +287,8 @@ def main():
                 similarity_threshold=args.similarity_threshold,
                 max_similarity_threshold=args.max_similarity_threshold,
                 diversity_selection_strategy=args.diversity_selection_strategy,
-                max_chiral_centers=args.max_chiral_centers
+                max_chiral_centers=args.max_chiral_centers,
+                core_smarts=args.core_smarts
             )
             results["single_compound"] = result
             
@@ -291,7 +300,8 @@ def main():
                 target_config=args.target_config,
                 strategy=args.optimization_strategy,
                 max_candidates=args.max_candidates,
-                output_dir=args.output_dir
+                output_dir=args.output_dir,
+                core_smarts=args.core_smarts
             )
         
         # Save results

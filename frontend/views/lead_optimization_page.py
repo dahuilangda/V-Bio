@@ -433,6 +433,14 @@ def render_lead_optimization_page():
         st.session_state.lead_opt_pair_chain_a = 'B'
     if 'lead_opt_pair_chain_b' not in st.session_state:
         st.session_state.lead_opt_pair_chain_b = 'A'
+    if 'lead_opt_core_mode' not in st.session_state:
+        st.session_state.lead_opt_core_mode = '不限制'
+    if 'lead_opt_core_input_method' not in st.session_state:
+        st.session_state.lead_opt_core_input_method = 'SMILES/SMARTS'
+    if 'lead_opt_core_smarts' not in st.session_state:
+        st.session_state.lead_opt_core_smarts = ''
+    if 'lead_opt_core_ketcher_smiles' not in st.session_state:
+        st.session_state.lead_opt_core_ketcher_smiles = ''
 
     is_running = (
         st.session_state.lead_optimization_task_id is not None
@@ -768,6 +776,48 @@ def render_lead_optimization_page():
                 disabled=is_running
             )
 
+        core_smarts = ""
+        with st.expander("🧩 修改位点 (可选)", expanded=False):
+            st.caption("通过指定需要保留的核心片段，让优化只在其余部分发生。")
+            core_mode = st.radio(
+                "限制方式",
+                ["不限制", "锁定核心片段"],
+                horizontal=True,
+                disabled=is_running,
+                key="lead_opt_core_mode"
+            )
+            if core_mode == "锁定核心片段":
+                core_input_method = st.radio(
+                    "核心片段输入方式",
+                    ["SMILES/SMARTS", "Ketcher 绘制"],
+                    horizontal=True,
+                    disabled=is_running,
+                    key="lead_opt_core_input_method"
+                )
+                if core_input_method == "SMILES/SMARTS":
+                    core_smarts = st.text_input(
+                        "核心片段 (SMILES/SMARTS)",
+                        value=st.session_state.get('lead_opt_core_smarts', ''),
+                        placeholder="例如: c1ccc(cc1)N",
+                        disabled=is_running,
+                        help="输入希望保留的骨架/片段。优化结果必须包含该子结构。"
+                    )
+                    st.session_state.lead_opt_core_smarts = core_smarts
+                else:
+                    from streamlit_ketcher import st_ketcher
+
+                    st.info("在 Ketcher 中绘制需要保留的核心片段，完成后点击 Apply。", icon="💡")
+                    core_draw = st_ketcher(
+                        value=st.session_state.get('lead_opt_core_ketcher_smiles', ''),
+                        key="lead_opt_core_ketcher",
+                        height=300
+                    )
+                    if core_draw is not None:
+                        core_draw = core_draw.strip()
+                    st.session_state.lead_opt_core_ketcher_smiles = core_draw
+                    core_smarts = core_draw or ""
+                    st.caption("将以子结构匹配的方式保留该核心片段。")
+
         with st.expander("⚙️ **点击设置：优化参数**", expanded=False):
             col1, col2 = st.columns(2)
 
@@ -892,6 +942,7 @@ def render_lead_optimization_page():
                 'diversity_selection_strategy': diversity_selection_strategy,
                 'max_chiral_centers': int(max_chiral_centers) if max_chiral_centers else None,
                 'generate_report': generate_report,
+                'core_smarts': core_smarts.strip() if core_smarts else None,
                 'backend': st.session_state.lead_optimization_backend
             }
 

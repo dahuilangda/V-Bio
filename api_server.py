@@ -517,6 +517,7 @@ def submit_lead_optimization():
         'diversity_selection_strategy': request.form.get('diversity_selection_strategy'),
         'max_chiral_centers': _parse_int(request.form.get('max_chiral_centers')),
         'generate_report': _parse_bool(request.form.get('generate_report'), False),
+        'core_smarts': request.form.get('core_smarts'),
         'verbosity': _parse_int(request.form.get('verbosity')),
         'task_timeout': _parse_int(request.form.get('task_timeout')),
         'backend': request.form.get('backend')

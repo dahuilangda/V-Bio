@@ -1088,6 +1088,8 @@ def lead_optimization_task(self, optimization_args: dict):
             command.extend(["--max_chiral_centers", str(options['max_chiral_centers'])])
         if options.get('generate_report'):
             command.append("--generate_report")
+        if options.get('core_smarts'):
+            command.extend(["--core_smarts", str(options['core_smarts'])])
         if options.get('verbosity') is not None:
             command.extend(["--verbosity", str(options['verbosity'])])
         if options.get('backend'):

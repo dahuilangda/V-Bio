@@ -50,6 +50,10 @@ def initialize_session_state():
     if 'lead_optimization_backend' not in st.session_state: st.session_state.lead_optimization_backend = 'boltz'
     if 'lead_opt_pair_chain_a' not in st.session_state: st.session_state.lead_opt_pair_chain_a = 'B'
     if 'lead_opt_pair_chain_b' not in st.session_state: st.session_state.lead_opt_pair_chain_b = 'A'
+    if 'lead_opt_core_mode' not in st.session_state: st.session_state.lead_opt_core_mode = '不限制'
+    if 'lead_opt_core_input_method' not in st.session_state: st.session_state.lead_opt_core_input_method = 'SMILES/SMARTS'
+    if 'lead_opt_core_smarts' not in st.session_state: st.session_state.lead_opt_core_smarts = ''
+    if 'lead_opt_core_ketcher_smiles' not in st.session_state: st.session_state.lead_opt_core_ketcher_smiles = ''
     
     # URL state management
     if 'url_state_initialized' not in st.session_state: st.session_state.url_state_initialized = False

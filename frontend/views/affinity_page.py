@@ -227,7 +227,7 @@ def render_affinity_page():
                     # 更新URL参数以保持亲和力任务状态
                     URLStateManager.update_url_for_affinity_task(task_id)
                     
-                    st.toast("🎉 任务已成功提交！", icon="✅")
+                    st.toast("任务已成功提交！", icon="🎉")
                     st.rerun()
                 except requests.exceptions.RequestException as e:
                     st.error(f"⚠️ **提交失败：无法连接到服务器**\n\n请检查后端服务是否正常运行。\n\n详细错误: {e}")
@@ -304,7 +304,7 @@ def render_affinity_page():
                                             st.session_state.affinity_cif = pdb_content
                                             print(f"Warning: Could not convert PDB to CIF: {conv_error}")
 
-                                st.toast("✅ 结果已成功加载！", icon="🎊")
+                                st.toast("结果已成功加载！", icon="🎊")
                                 st.rerun()
                                 break
                             except Exception as e:
@@ -400,10 +400,10 @@ def render_affinity_page():
                                 if "Running affinity prediction on GPU" in status_msg:
                                     status_msg = "正在分析分子间相互作用..."
                                 st.markdown('<div class="loader"></div>', unsafe_allow_html=True)
-                                st.info(f"🔬 **任务正在运行**：{status_msg} (页面将每 10 秒自动刷新)", icon="⏳")
+                                st.info(f"**任务正在运行**：{status_msg} (页面将每 10 秒自动刷新)", icon="⏳")
                             else:
                                 st.markdown('<div class="loader"></div>', unsafe_allow_html=True)
-                                st.info("🔬 **任务正在运行**：正在分析分子间相互作用... (页面将每 10 秒自动刷新)", icon="⏳")
+                                st.info("**任务正在运行**：正在分析分子间相互作用... (页面将每 10 秒自动刷新)", icon="⏳")
                         else:
                             st.markdown('<div class="loader"></div>', unsafe_allow_html=True)
                             st.warning(f"❓ 任务状态未知或正在初始化... (当前状态: **{current_state}**)")

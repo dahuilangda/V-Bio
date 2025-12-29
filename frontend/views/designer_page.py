@@ -64,9 +64,9 @@ def render_designer_page():
         if is_af3_backend:
             st.warning("AlphaFold3 后端暂不支持糖肽设计，已自动切换为多肽模式。", icon="⚠️")
         elif design_type_selector == "peptide":
-            st.info("🧬 **多肽设计**: 设计天然或修饰的氨基酸序列，具有优化的结合亲和力和特异性。", icon="💡")
+            st.info("**多肽设计**: 设计天然或修饰的氨基酸序列，具有优化的结合亲和力和特异性。", icon="🧬")
         else:  # glycopeptide
-            st.info("🍯 **糖肽设计**: 设计含有糖基修饰的多肽，增强稳定性和生物活性，常用于免疫调节和细胞识别。", icon="💡")
+            st.info("**糖肽设计**: 设计含有糖基修饰的多肽，增强稳定性和生物活性，常用于免疫调节和细胞识别。", icon="🍯")
     
     designer_is_running = (
         st.session_state.designer_task_id is not None and 
@@ -224,9 +224,9 @@ def render_designer_page():
                     if msa_value != component.get('use_msa', True):
                         component['use_msa'] = msa_value
                         if msa_value:
-                            st.toast("✅ 已启用 MSA 生成", icon="🧬")
+                            st.toast("已启用 MSA 生成", icon="✅")
                         else:
-                            st.toast("❌ 已禁用 MSA 生成", icon="⚡")
+                            st.toast("已禁用 MSA 生成", icon="❌")
                         st.rerun()
                     if is_af3_backend:
                         st.caption("未勾选时将跳过外部 MSA，使用 AlphaFold3 自带的推理流程。")
@@ -311,7 +311,7 @@ def render_designer_page():
                     if smiles_from_ketcher is not None and smiles_from_ketcher != current_smiles:
                         st.session_state.designer_components[i]['sequence'] = smiles_from_ketcher
                         if smiles_from_ketcher:
-                            st.toast("✅ SMILES 字符串已成功更新！", icon="🧪")
+                            st.toast("SMILES 字符串已成功更新！", icon="✅")
                         st.rerun()
                     
                     current_smiles_display = st.session_state.designer_components[i].get('sequence', '')
@@ -977,7 +977,7 @@ def render_designer_page():
                         backend=st.session_state.designer_backend
                     )
                     
-                    st.toast(f"🎉 设计任务已成功启动！任务ID: {result['task_id']}", icon="✅")
+                    st.toast(f"🎉 设计任务已成功启动！任务ID: {result['task_id']}", icon="🎉")
                     st.rerun()
                 else:
                     st.error(f"❌ **任务启动失败**：{result['error']}")
@@ -1087,7 +1087,7 @@ def render_designer_page():
                             work_dir = st.session_state.get('designer_work_dir', '/tmp')
                             results = load_designer_results(st.session_state.designer_task_id, work_dir)
                             st.session_state.designer_results = results
-                            st.toast("✅ 设计任务已完成！", icon="🎊")
+                            st.toast("设计任务已完成！", icon="🎊")
                             st.rerun()
                         except Exception as e:
                             st.error(f"❌ 加载结果时发生错误: {e}")
@@ -1202,7 +1202,7 @@ def render_designer_page():
                                     work_dir = st.session_state.get('designer_work_dir', '/tmp')
                                     results = load_designer_results(st.session_state.designer_task_id, work_dir)
                                     st.session_state.designer_results = results
-                                    st.toast("✅ 设计任务已完成！", icon="🎊")
+                                    st.toast("设计任务已完成！", icon="🎊")
                                     st.rerun()
                                 except Exception as e:
                                     st.error(f"❌ 加载结果时发生错误: {e}")
@@ -1382,7 +1382,7 @@ def render_designer_page():
                                 work_dir = st.session_state.get('designer_work_dir', '/tmp')
                                 results = load_designer_results(st.session_state.designer_task_id, work_dir)
                                 st.session_state.designer_results = results
-                                st.toast("✅ 设计任务已完成！", icon="🎊")
+                                st.toast("设计任务已完成！", icon="🎊")
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"❌ 加载结果时发生错误: {e}")
