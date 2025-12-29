@@ -119,6 +119,28 @@ class MMPEngine:
         # 片段替换和骨架跃迁使用相同的mmpdb功能，但使用更保守的相似性阈值
         return self.scaffold_hopping(target_smiles, max_candidates, similarity_threshold)
 
+    def generate_with_rule_queries(self,
+                                  target_smiles: str,
+                                  query_smiles_list: List[str],
+                                  max_candidates: int = 100) -> List[Dict[str, Any]]:
+        if not HAS_MMPDB or not self.db_path:
+            logger.warning("mmpdb不可用或无数据库，无法进行规则级生成")
+            return []
+        all_candidates = []
+        per_query_limit = max(1, max_candidates // max(1, len(query_smiles_list))) if max_candidates else 0
+        for query_smiles in query_smiles_list:
+            query_smiles = query_smiles.strip()
+            if not query_smiles:
+                continue
+            query_candidates = query_mmpdb_generate_command_line(
+                target_smiles,
+                self.db_path,
+                query_smiles,
+                per_query_limit
+            )
+            all_candidates.extend(query_candidates)
+        return all_candidates
+
 
 def query_mmpdb_command_line(target_smiles: str, 
                             database_path: str, 
@@ -195,6 +217,86 @@ def query_mmpdb_command_line(target_smiles: str,
         logger.error(f"mmpdb命令行查询失败: {e}")
     
     logger.info(f"mmpdb生成了 {len(candidates)} 个候选化合物")
+    return candidates
+
+
+def query_mmpdb_generate_command_line(target_smiles: str,
+                                     database_path: str,
+                                     query_smiles: str,
+                                     max_results: int = 50) -> List[Dict[str, Any]]:
+    """使用mmpdb generate获取指定query的规则级候选"""
+    candidates = []
+    
+    try:
+        cmd_base = _resolve_mmpdb_cmd()
+        if not cmd_base:
+            logger.warning("mmpdb命令行工具不可用")
+            return []
+        
+        logger.info(f"使用mmpdb generate 查询 {target_smiles} | query={query_smiles}")
+        
+        cmd = cmd_base + [
+            'generate',
+            database_path,
+            '--smiles', target_smiles,
+            '--query', query_smiles,
+            '--min-pairs', '1',
+            '--columns', 'final,from_smiles,to_smiles,constant',
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        
+        if result.returncode == 0 and result.stdout:
+            lines = result.stdout.strip().split('\n')
+            if not lines:
+                return []
+            headers = lines[0].split('\t')
+            try:
+                idx_final = headers.index('final')
+                idx_from = headers.index('from_smiles')
+                idx_to = headers.index('to_smiles')
+                idx_const = headers.index('constant')
+            except ValueError:
+                return []
+            
+            for line in lines[1:]:
+                if not line.strip():
+                    continue
+                parts = line.split('\t')
+                if len(parts) <= idx_final:
+                    continue
+                final_smiles = parts[idx_final].strip()
+                from_smiles = parts[idx_from].strip() if len(parts) > idx_from else ""
+                to_smiles = parts[idx_to].strip() if len(parts) > idx_to else ""
+                constant_smiles = parts[idx_const].strip() if len(parts) > idx_const else ""
+                
+                if not final_smiles or final_smiles == target_smiles:
+                    continue
+                if _contains_isotopes(final_smiles):
+                    continue
+                
+                similarity = calculate_tanimoto_similarity(target_smiles, final_smiles)
+                
+                candidates.append({
+                    'smiles': final_smiles,
+                    'generation_method': 'mmpdb_generate',
+                    'parent_smiles': target_smiles,
+                    'transformation_description': f"mmpdb_rule {from_smiles}>>{to_smiles}",
+                    'transformation_rule': f"{from_smiles}>>{to_smiles}",
+                    'constant_smiles': constant_smiles,
+                    'similarity': similarity,
+                    'properties': calculate_basic_properties(final_smiles)
+                })
+                
+                if max_results and len(candidates) >= max_results:
+                    break
+        else:
+            logger.warning(f"mmpdb generate 命令失败: {result.stderr}")
+    except subprocess.TimeoutExpired:
+        logger.warning("mmpdb generate 命令超时")
+    except Exception as e:
+        logger.error(f"mmpdb generate 命令失败: {e}")
+    
     return candidates
 
 

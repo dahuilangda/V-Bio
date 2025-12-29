@@ -171,18 +171,20 @@ class OptimizationEngine:
             if variable_const_smarts and not variable_const_queries:
                 raise InvalidCompoundError(f"Invalid variable const SMARTS/SMILES: {variable_const_smarts}")
 
+            rule_level_queries = variable_fragments if variable_fragments else []
             variable_queries = []
             variable_excludes = []
-            if variable_fragments:
-                for fragment in variable_fragments:
-                    required_query, exclude_query = self._build_variable_query(compound_smiles, fragment)
-                    if required_query is None:
-                        raise InvalidCompoundError(f"Invalid variable fragment: {fragment}")
-                    variable_queries.append(required_query)
-                    if exclude_query is not None:
-                        variable_excludes.append(exclude_query)
-            if variable_const_queries:
-                variable_queries.extend(variable_const_queries)
+            if not rule_level_queries:
+                if variable_fragments:
+                    for fragment in variable_fragments:
+                        required_query, exclude_query = self._build_variable_query(compound_smiles, fragment)
+                        if required_query is None:
+                            raise InvalidCompoundError(f"Invalid variable fragment: {fragment}")
+                        variable_queries.append(required_query)
+                        if exclude_query is not None:
+                            variable_excludes.append(exclude_query)
+                if variable_const_queries:
+                    variable_queries.extend(variable_const_queries)
             
             # Track all evaluated candidates across iterations
             all_evaluated_candidates = []
@@ -206,7 +208,8 @@ class OptimizationEngine:
                     candidates = self._generate_candidates_with_mmpdb(
                         compound_smiles, strategy, max_candidates, iteration, iterations,
                         diversity_weight=diversity_weight, similarity_threshold=similarity_threshold,
-                        max_chiral_centers=max_chiral_centers, reference_smiles=compound_smiles
+                        max_chiral_centers=max_chiral_centers, reference_smiles=compound_smiles,
+                        rule_query_smarts=rule_level_queries
                     )
                     if candidates:
                         iteration_candidates.extend(candidates)
@@ -233,7 +236,8 @@ class OptimizationEngine:
                                 parent_smiles, evo_strategy, max(1, int(max_candidates * weight)), 
                                 iteration, iterations, diversity_weight=diversity_weight, 
                                 similarity_threshold=similarity_threshold,
-                                max_chiral_centers=max_chiral_centers, reference_smiles=compound_smiles
+                                max_chiral_centers=max_chiral_centers, reference_smiles=compound_smiles,
+                                rule_query_smarts=rule_level_queries
                             )
                             if candidates:
                                 iteration_candidates.extend(candidates[:int(max_candidates * weight)])
@@ -244,7 +248,8 @@ class OptimizationEngine:
                                 seed_compound, strategy, max_candidates // len(current_seeds), 
                                 iteration, iterations, diversity_weight=diversity_weight, 
                                 similarity_threshold=similarity_threshold,
-                                max_chiral_centers=max_chiral_centers, reference_smiles=compound_smiles
+                                max_chiral_centers=max_chiral_centers, reference_smiles=compound_smiles,
+                                rule_query_smarts=rule_level_queries
                             )
                             if candidates:
                                 iteration_candidates.extend(candidates)
@@ -397,7 +402,8 @@ class OptimizationEngine:
                                        diversity_weight: float = 0.3,
                                        similarity_threshold: float = 0.4,
                                        max_chiral_centers: int = None,
-                                       reference_smiles: str = None) -> List[OptimizationCandidate]:
+                                       reference_smiles: str = None,
+                                       rule_query_smarts: Optional[List[str]] = None) -> List[OptimizationCandidate]:
         """Generate candidate compounds using MMPDB with intelligent diversity selection"""
         try:
             # Calculate reference chiral centers if not provided
@@ -422,7 +428,14 @@ class OptimizationEngine:
             # Generate raw candidates (more than needed for selection)
             raw_candidate_count = max_candidates * 4  # Generate 4x more for better diversity selection
             
-            if strategy == "scaffold_hopping":
+            if rule_query_smarts:
+                source_smiles = reference_smiles or compound_smiles
+                mmp_results = self.mmp_engine.generate_with_rule_queries(
+                    source_smiles,
+                    rule_query_smarts,
+                    raw_candidate_count
+                )
+            elif strategy == "scaffold_hopping":
                 mmp_results = self.mmp_engine.scaffold_hopping(compound_smiles, raw_candidate_count, adaptive_similarity_threshold)
             elif strategy == "fragment_replacement":
                 mmp_results = self.mmp_engine.fragment_replacement(compound_smiles, raw_candidate_count, adaptive_similarity_threshold)
