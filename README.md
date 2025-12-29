@@ -369,6 +369,11 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
     * `diversity_weight`, `similarity_threshold`, `max_similarity_threshold`
     * `diversity_selection_strategy`, `max_chiral_centers`
     * `generate_report`, `verbosity`
+    * `core_smarts`: 必须包含的子结构（SMARTS/SMILES）
+    * `exclude_smarts`: 必须排除的子结构（SMARTS/SMILES）
+    * `rgroup_smarts`: R-group 骨架约束（SMARTS/SMILES，含 `[*]`）
+    * `variable_smarts`: mmpdb 规则可变片段（用于 mmpdb 规则生成）
+    * `variable_const_smarts`: 可变片段对应的常量约束（mmpdb constant_smiles）
     * `priority`, `task_timeout`
   * **提交示例（单化合物）**:
     ```bash
@@ -379,6 +384,18 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
          -F "optimization_strategy=scaffold_hopping" \
          -F "max_candidates=50" \
          -F "iterations=2" \
+         http://127.0.0.1:5000/api/lead_optimization/submit
+    ```
+  * **提交示例（mmpdb 规则可变片段）**:
+    ```bash
+    curl -X POST \
+         -H "X-API-Token: your-secret-token" \
+         -F "target_config=@/path/to/target.yaml" \
+         -F "input_compound=CC(C[C@@H](C(N[C@H](C(NCC1C=CC=NC=1)=O)CC1C=CC=CC=1)=O)CC(NO)=O)C" \
+         -F "optimization_strategy=fragment_replacement" \
+         -F "max_candidates=30" \
+         -F "variable_smarts=*C" \
+         -F "variable_const_smarts=*C(C)C[C@H](CC(=O)NO)C(=O)N[C@@H](Cc1ccccc1)C(=O)NCc1cccnc1" \
          http://127.0.0.1:5000/api/lead_optimization/submit
     ```
   * **提交示例（批量文件）**:
