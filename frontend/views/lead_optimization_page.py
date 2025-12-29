@@ -397,6 +397,78 @@ def _render_smiles_2d(smiles: str):
     st.image(img, use_container_width=False)
 
 
+def _prepare_reference_mol(smiles: str):
+    if not smiles:
+        return None
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import rdDepictor
+    except Exception:
+        return None
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    rdDepictor.Compute2DCoords(mol)
+    return mol
+
+
+def _render_smiles_diff(original_smiles: str, candidate_smiles: str, reference_mol=None):
+    if not candidate_smiles:
+        st.caption("⚠️ SMILES 为空，无法生成2D结构。")
+        return
+
+    if not original_smiles:
+        _render_smiles_2d(candidate_smiles)
+        return
+
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import Draw, rdFMCS, rdDepictor
+    except Exception:
+        _render_smiles_2d(candidate_smiles)
+        return
+
+    orig = reference_mol or Chem.MolFromSmiles(original_smiles)
+    cand = Chem.MolFromSmiles(candidate_smiles)
+    if orig is None or cand is None:
+        _render_smiles_2d(candidate_smiles)
+        return
+
+    try:
+        rdDepictor.GenerateDepictionMatching2DStructure(cand, orig, acceptFailure=True)
+    except Exception:
+        rdDepictor.Compute2DCoords(cand)
+
+    try:
+        mcs = rdFMCS.FindMCS(
+            [orig, cand],
+            ringMatchesRingOnly=True,
+            completeRingsOnly=True,
+            matchValences=True,
+            matchChiralTag=True
+        )
+        if not mcs.smartsString:
+            _render_smiles_2d(candidate_smiles)
+            return
+        mcs_mol = Chem.MolFromSmarts(mcs.smartsString)
+        match = cand.GetSubstructMatch(mcs_mol)
+        if not match:
+            _render_smiles_2d(candidate_smiles)
+            return
+        unchanged = set(match)
+        highlight_atoms = [idx for idx in range(cand.GetNumAtoms()) if idx not in unchanged]
+        highlight_colors = {idx: (0.95, 0.6, 0.1) for idx in highlight_atoms}
+        img = Draw.MolToImage(
+            cand,
+            size=(360, 240),
+            highlightAtoms=highlight_atoms,
+            highlightAtomColors=highlight_colors
+        )
+        st.image(img, use_container_width=False)
+    except Exception:
+        _render_smiles_2d(candidate_smiles)
+
+
 def render_lead_optimization_page():
     URLStateManager.restore_state_from_url()
 
@@ -1709,6 +1781,7 @@ def render_lead_optimization_page():
                 use_container_width=True
             )
 
+        original_compound = None
         if summary:
             st.subheader("📊 结果摘要", anchor=False)
             col1, col2 = st.columns(2)
@@ -1721,6 +1794,10 @@ def render_lead_optimization_page():
                     success_rate = None
             success_rate_display = f"{success_rate:.2%}" if isinstance(success_rate, float) else "N/A"
             col2.metric("成功率", success_rate_display)
+            original_compound = summary.get("original_compound")
+        if not original_compound:
+            metadata = _load_log_metadata(st.session_state.lead_optimization_task_id)
+            original_compound = metadata.get("original_compound")
         elif results_df is not None and not results_df.empty:
             st.subheader("📊 结果摘要", anchor=False)
             total_candidates = len(results_df)
@@ -1760,6 +1837,8 @@ def render_lead_optimization_page():
             st.warning("未找到满足条件的候选化合物。")
             return
 
+        reference_mol = _prepare_reference_mol(original_compound)
+
         for idx, row in top_df.reset_index(drop=True).iterrows():
             rank = idx + 1
             compound_id = str(row.get('compound_id', f"candidate_{rank}"))
@@ -1775,7 +1854,7 @@ def render_lead_optimization_page():
                     st.code(smiles, language="smiles")
                 with col_structure:
                     st.markdown("**2D 结构**")
-                    _render_smiles_2d(smiles)
+                    _render_smiles_diff(original_compound, smiles, reference_mol=reference_mol)
 
                 col_metrics = st.columns(4)
                 col_metrics[0].metric("综合评分", f"{score:.3f}")
