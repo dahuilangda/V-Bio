@@ -159,7 +159,7 @@ class OptimizationEngine:
             exclude_queries = self._parse_smarts_queries(exclude_smarts)
             rgroup_queries = self._parse_smarts_queries(rgroup_smarts)
             variable_fragments = [p.strip() for p in (variable_smarts or "").split(";;") if p.strip()]
-            variable_const_queries = self._parse_smarts_queries(variable_const_smarts)
+            variable_const_queries = self._parse_rgroup_smarts_queries(variable_const_smarts)
             if core_smarts and not core_queries:
                 raise InvalidCompoundError(f"Invalid core SMARTS/SMILES: {core_smarts}")
             if exclude_smarts and not exclude_queries:
@@ -294,6 +294,9 @@ class OptimizationEngine:
                         exclude_queries=[q for q in (exclude_queries + variable_excludes) if q is not None]
                     )
                     logger.info(f"子结构过滤后剩余 {len(unique_candidates)}/{before_filter} 个候选")
+                
+                # Update progress hint so UI doesn't overestimate expected candidates
+                self._write_progress_hint(output_dir, len(all_evaluated_candidates), len(unique_candidates))
                 
                 if not unique_candidates:
                     logger.warning(f"第 {iteration + 1} 代没有新的候选化合物，停止进化")
@@ -967,6 +970,31 @@ class OptimizationEngine:
             queries.append(query)
         return queries
 
+    def _parse_rgroup_smarts_queries(self, query_text: Optional[str]) -> List[Chem.Mol]:
+        queries = []
+        if not query_text:
+            return queries
+        parts = [p.strip() for p in str(query_text).split(";;") if p.strip()]
+        for part in parts:
+            subparts = [s for s in part.split(".") if s]
+            for sub in subparts:
+                query = None
+                if "*" in sub:
+                    try:
+                        from mmpdblib import rgroup2smarts
+                        mol = Chem.MolFromSmiles(sub)
+                        if mol:
+                            smarts = rgroup2smarts.rgroup_mol_to_smarts(mol)
+                            query = Chem.MolFromSmarts(smarts)
+                    except Exception:
+                        query = None
+                if query is None:
+                    query = self._parse_smarts_query(sub)
+                if query is None:
+                    return []
+                queries.append(query)
+        return queries
+
     def _strip_dummy_atoms(self, mol: Chem.Mol) -> Chem.Mol:
         editable = Chem.EditableMol(mol)
         dummy_indices = [atom.GetIdx() for atom in mol.GetAtoms() if atom.GetAtomicNum() == 0]
@@ -1028,6 +1056,21 @@ class OptimizationEngine:
                 continue
             filtered.append(candidate)
         return filtered
+
+    def _write_progress_hint(self, output_dir: Optional[str], processed: int, upcoming: int) -> None:
+        if not output_dir:
+            return
+        try:
+            path = os.path.join(output_dir, "optimization_progress.json")
+            payload = {
+                "processed_candidates": int(processed),
+                "expected_candidates": int(processed + max(0, upcoming)),
+                "updated_at": time.time()
+            }
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(payload, f)
+        except Exception:
+            pass
 
     def batch_optimize(self, 
                       compounds_file: str,

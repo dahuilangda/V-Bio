@@ -861,12 +861,8 @@ def render_lead_optimization_page():
                 mol = Chem.MolFromSmiles(smiles_value)
                 if mol is None:
                     return [], "SMILES 解析失败"
-                fragment_filter = fragment_types.get_fragment_filter(mmp_config.DEFAULT_FRAGMENT_OPTIONS)
                 atom_ranks = Chem.CanonicalRankAtoms(mol, breakTies=False)
                 chiral_flags = fragment_algorithm.get_chiral_flags(mol, atom_ranks)
-                fragments = []
-                match_map = {}
-                const_map = {}
 
                 def _fragment_indices(fragmented_mol, frag_indices):
                     return [idx for idx in frag_indices if fragmented_mol.GetAtomWithIdx(idx).GetAtomicNum() != 0]
@@ -874,56 +870,83 @@ def render_lead_optimization_page():
                 def _fragment_smiles(fragmented_mol, frag_indices):
                     return Chem.MolFragmentToSmiles(fragmented_mol, frag_indices, isomericSmiles=True)
 
-                for cut_list in fragment_filter.get_cut_lists(mol):
-                    if len(cut_list) == 1:
-                        fragmentations = fragment_algorithm.make_single_cut(mol, cut_list[0], chiral_flags, fragment_filter)
-                        if fragmentations is None:
-                            continue
-                        fragmented_mol, _ = fragment_algorithm.fragment_on_atom_pairs(mol, [cut_list[0]])
-                        frag_indices = Chem.GetMolFrags(fragmented_mol)
-                        if len(frag_indices) != 2:
-                            continue
-                        frag1_smiles = _fragment_smiles(fragmented_mol, frag_indices[0])
-                        frag2_smiles = _fragment_smiles(fragmented_mol, frag_indices[1])
-                        frag1_key = _strip_dummy_atoms(frag1_smiles)
-                        frag2_key = _strip_dummy_atoms(frag2_smiles)
-                        frag1_atoms = _fragment_indices(fragmented_mol, frag_indices[0])
-                        frag2_atoms = _fragment_indices(fragmented_mol, frag_indices[1])
-                        for frag in fragmentations:
-                            if not frag.variable_smiles:
+                def _run_fragmentation(fragment_options, min_variable_heavies):
+                    fragment_filter = fragment_types.get_fragment_filter(fragment_options)
+                    fragments = []
+                    match_map = {}
+                    const_map = {}
+
+                    for cut_list in fragment_filter.get_cut_lists(mol):
+                        if len(cut_list) == 1:
+                            fragmentations = fragment_algorithm.make_single_cut(mol, cut_list[0], chiral_flags, fragment_filter)
+                            if fragmentations is None:
                                 continue
-                            fragments.append(frag.variable_smiles)
-                            const_map[frag.variable_smiles] = frag.constant_smiles
-                            var_key = _strip_dummy_atoms(frag.variable_smiles)
-                            if var_key == frag1_key:
-                                match_map[frag.variable_smiles] = frag1_atoms
-                            elif var_key == frag2_key:
-                                match_map[frag.variable_smiles] = frag2_atoms
-                    else:
-                        fragmentations = fragment_algorithm.make_multiple_cuts(mol, cut_list, chiral_flags, fragment_filter)
-                        if fragmentations is None:
-                            continue
-                        fragmented_mol, _ = fragment_algorithm.fragment_on_atom_pairs(mol, cut_list)
-                        num_cuts = len(cut_list)
-                        var_atoms = []
-                        for atom_indices in Chem.GetMolFrags(fragmented_mol):
-                            non_wildcard = _fragment_indices(fragmented_mol, atom_indices)
-                            num_wildcards = len(atom_indices) - len(non_wildcard)
-                            if num_wildcards == num_cuts:
-                                var_atoms = non_wildcard
-                                break
-                        for frag in fragmentations:
-                            if not frag.variable_smiles:
+                            fragmented_mol, _ = fragment_algorithm.fragment_on_atom_pairs(mol, [cut_list[0]])
+                            frag_indices = Chem.GetMolFrags(fragmented_mol)
+                            if len(frag_indices) != 2:
                                 continue
-                            fragments.append(frag.variable_smiles)
-                            const_map[frag.variable_smiles] = frag.constant_smiles
-                            if var_atoms:
-                                match_map[frag.variable_smiles] = var_atoms
+                            frag1_smiles = _fragment_smiles(fragmented_mol, frag_indices[0])
+                            frag2_smiles = _fragment_smiles(fragmented_mol, frag_indices[1])
+                            frag1_key = _strip_dummy_atoms(frag1_smiles)
+                            frag2_key = _strip_dummy_atoms(frag2_smiles)
+                            frag1_atoms = _fragment_indices(fragmented_mol, frag_indices[0])
+                            frag2_atoms = _fragment_indices(fragmented_mol, frag_indices[1])
+                            for frag in fragmentations:
+                                if not frag.variable_smiles or frag.variable_num_heavies < min_variable_heavies:
+                                    continue
+                                fragments.append(frag.variable_smiles)
+                                const_map[frag.variable_smiles] = frag.constant_smiles
+                                var_key = _strip_dummy_atoms(frag.variable_smiles)
+                                if var_key == frag1_key:
+                                    match_map[frag.variable_smiles] = frag1_atoms
+                                elif var_key == frag2_key:
+                                    match_map[frag.variable_smiles] = frag2_atoms
+                        else:
+                            fragmentations = fragment_algorithm.make_multiple_cuts(mol, cut_list, chiral_flags, fragment_filter)
+                            if fragmentations is None:
+                                continue
+                            fragmented_mol, _ = fragment_algorithm.fragment_on_atom_pairs(mol, cut_list)
+                            num_cuts = len(cut_list)
+                            var_atoms = []
+                            for atom_indices in Chem.GetMolFrags(fragmented_mol):
+                                non_wildcard = _fragment_indices(fragmented_mol, atom_indices)
+                                num_wildcards = len(atom_indices) - len(non_wildcard)
+                                if num_wildcards == num_cuts:
+                                    var_atoms = non_wildcard
+                                    break
+                            for frag in fragmentations:
+                                if not frag.variable_smiles or frag.variable_num_heavies < min_variable_heavies:
+                                    continue
+                                fragments.append(frag.variable_smiles)
+                                const_map[frag.variable_smiles] = frag.constant_smiles
+                                if var_atoms:
+                                    match_map[frag.variable_smiles] = var_atoms
+                    return fragments, match_map, const_map
+
+                default_opts = mmp_config.DEFAULT_FRAGMENT_OPTIONS
+                ui_opts = fragment_types.FragmentOptions(
+                    max_heavies=default_opts.max_heavies,
+                    max_rotatable_bonds=default_opts.max_rotatable_bonds,
+                    rotatable_smarts=default_opts.rotatable_smarts,
+                    cut_smarts=default_opts.cut_smarts,
+                    num_cuts=1,
+                    method=default_opts.method,
+                    salt_remover=default_opts.salt_remover,
+                    min_heavies_per_const_frag=max(2, default_opts.min_heavies_per_const_frag),
+                    min_heavies_total_const_frag=max(4, default_opts.min_heavies_total_const_frag),
+                    max_up_enumerations=default_opts.max_up_enumerations
+                )
+
+                fragments, match_map, const_map = _run_fragmentation(ui_opts, min_variable_heavies=2)
+                note = "已使用 mmpdb 单切策略拆分可变位置。"
+                if len(set(fragments)) < 2:
+                    fragments, match_map, const_map = _run_fragmentation(default_opts, min_variable_heavies=1)
+                    note = ""
 
                 unique = sorted(set(fragments))
                 if not unique:
                     return [], "mmpdb 规则未生成片段", {}, {}
-                return unique, "", match_map, const_map
+                return unique, note, match_map, const_map
             except Exception as exc:
                 return [], f"mmpdb 拆分失败: {exc}", {}, {}
 
@@ -1243,7 +1266,7 @@ def render_lead_optimization_page():
                                 variable_smarts_from_auto.append(selected_fragment)
                                 const_smiles = st.session_state.lead_opt_fragment_const_map.get(selected_fragment)
                                 if const_smiles:
-                                    variable_const_smarts_from_auto.append(_strip_dummy_atoms(const_smiles))
+                                    variable_const_smarts_from_auto.append(const_smiles.strip())
                                 st.caption("可变片段将以严格模式处理，结果需匹配替换位点骨架。")
 
                         if required_smarts_from_auto or exclude_smarts_from_auto or variable_smarts_from_auto:

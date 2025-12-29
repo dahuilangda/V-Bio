@@ -209,6 +209,17 @@ def _read_lead_optimization_progress(output_dir: str,
         })
         return progress
 
+    hint_path = os.path.join(output_dir, "optimization_progress.json")
+    if os.path.exists(hint_path):
+        try:
+            with open(hint_path, 'r', encoding='utf-8') as f:
+                hint = json.load(f)
+            hint_expected = hint.get("expected_candidates")
+            if isinstance(hint_expected, int) and hint_expected > 0:
+                expected_candidates = hint_expected
+        except Exception:
+            pass
+
     csv_path = os.path.join(output_dir, "optimization_results.csv")
     if not os.path.exists(csv_path):
         return progress

@@ -14,7 +14,7 @@ boltz_api:
 
 # MMP database configuration
 mmp_database:
-  database_path: "data/chembl_32.mmpdb"
+  database_path: "data/chembl_mmp.mmpdb"
   reference_data_path: "data/chembl_compounds.smi"
   max_heavy_atoms: 50
   min_heavy_atoms: 5
