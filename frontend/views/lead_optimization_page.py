@@ -987,7 +987,7 @@ def render_lead_optimization_page():
                     mol = Chem.MolFromSmiles(frag)
                     heavy = mol.GetNumHeavyAtoms() if mol else 0
                     ranked.append((frag, heavy))
-                ranked.sort(key=lambda x: (-x[1], x[0]))
+                ranked.sort(key=lambda x: (x[1], x[0]))
                 return ranked
             except Exception:
                 return [(frag, 0) for frag in fragments]
