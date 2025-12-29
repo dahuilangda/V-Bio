@@ -992,10 +992,12 @@ def render_lead_optimization_page():
             except Exception:
                 return [(frag, 0) for frag in fragments]
 
-        def _dedupe_fragments(fragments):
+        def _dedupe_fragments(fragments, parent_smiles: str):
             try:
                 from rdkit import Chem
                 seen = {}
+                seen_matches = set()
+                parent = Chem.MolFromSmiles(parent_smiles) if parent_smiles else None
 
                 def _normalize_mol(mol):
                     if mol is None:
@@ -1013,6 +1015,21 @@ def render_lead_optimization_page():
                     mol = Chem.MolFromSmiles(frag)
                     if mol is None:
                         continue
+                    if parent is not None:
+                        query = Chem.MolFromSmarts(frag)
+                        if query is None:
+                            query = mol
+                        matches = parent.GetSubstructMatches(query)
+                        matched = False
+                        for match in matches:
+                            signature = tuple(sorted(match))
+                            if signature in seen_matches:
+                                matched = True
+                                break
+                        if matched:
+                            continue
+                        if matches:
+                            seen_matches.add(tuple(sorted(matches[0])))
                     keep_key = _normalize_mol(Chem.Mol(mol))
                     stripped = _strip_dummy_atoms(frag)
                     stripped_mol = Chem.MolFromSmiles(stripped)
@@ -1064,7 +1081,7 @@ def render_lead_optimization_page():
                             st.session_state.lead_opt_fragment_note = ""
 
                     fragments = st.session_state.get('lead_opt_fragment_smiles', [])
-                    fragments = _dedupe_fragments(fragments)
+                    fragments = _dedupe_fragments(fragments, source_smiles)
                     fragment_note = st.session_state.get('lead_opt_fragment_note', '')
                     if not fragments:
                         st.info("未能拆分出片段，可能是结构较小或解析失败。")
