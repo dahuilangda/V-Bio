@@ -521,6 +521,7 @@ def submit_lead_optimization():
         'exclude_smarts': request.form.get('exclude_smarts'),
         'rgroup_smarts': request.form.get('rgroup_smarts'),
         'variable_smarts': request.form.get('variable_smarts'),
+        'variable_const_smarts': request.form.get('variable_const_smarts'),
         'verbosity': _parse_int(request.form.get('verbosity')),
         'task_timeout': _parse_int(request.form.get('task_timeout')),
         'backend': request.form.get('backend')

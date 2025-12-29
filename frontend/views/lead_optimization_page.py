@@ -473,6 +473,8 @@ def render_lead_optimization_page():
         st.session_state.lead_opt_fragment_action = '不限制'
     if 'lead_opt_fragment_match_map' not in st.session_state:
         st.session_state.lead_opt_fragment_match_map = {}
+    if 'lead_opt_fragment_const_map' not in st.session_state:
+        st.session_state.lead_opt_fragment_const_map = {}
 
     is_running = (
         st.session_state.lead_optimization_task_id is not None
@@ -860,16 +862,70 @@ def render_lead_optimization_page():
                 if mol is None:
                     return [], "SMILES 解析失败"
                 fragment_filter = fragment_types.get_fragment_filter(mmp_config.DEFAULT_FRAGMENT_OPTIONS)
+                atom_ranks = Chem.CanonicalRankAtoms(mol, breakTies=False)
+                chiral_flags = fragment_algorithm.get_chiral_flags(mol, atom_ranks)
                 fragments = []
-                for frag in fragment_algorithm.fragment_mol(mol, fragment_filter):
-                    if frag.variable_smiles:
-                        fragments.append(frag.variable_smiles)
+                match_map = {}
+                const_map = {}
+
+                def _fragment_indices(fragmented_mol, frag_indices):
+                    return [idx for idx in frag_indices if fragmented_mol.GetAtomWithIdx(idx).GetAtomicNum() != 0]
+
+                def _fragment_smiles(fragmented_mol, frag_indices):
+                    return Chem.MolFragmentToSmiles(fragmented_mol, frag_indices, isomericSmiles=True)
+
+                for cut_list in fragment_filter.get_cut_lists(mol):
+                    if len(cut_list) == 1:
+                        fragmentations = fragment_algorithm.make_single_cut(mol, cut_list[0], chiral_flags, fragment_filter)
+                        if fragmentations is None:
+                            continue
+                        fragmented_mol, _ = fragment_algorithm.fragment_on_atom_pairs(mol, [cut_list[0]])
+                        frag_indices = Chem.GetMolFrags(fragmented_mol)
+                        if len(frag_indices) != 2:
+                            continue
+                        frag1_smiles = _fragment_smiles(fragmented_mol, frag_indices[0])
+                        frag2_smiles = _fragment_smiles(fragmented_mol, frag_indices[1])
+                        frag1_key = _strip_dummy_atoms(frag1_smiles)
+                        frag2_key = _strip_dummy_atoms(frag2_smiles)
+                        frag1_atoms = _fragment_indices(fragmented_mol, frag_indices[0])
+                        frag2_atoms = _fragment_indices(fragmented_mol, frag_indices[1])
+                        for frag in fragmentations:
+                            if not frag.variable_smiles:
+                                continue
+                            fragments.append(frag.variable_smiles)
+                            const_map[frag.variable_smiles] = frag.constant_smiles
+                            var_key = _strip_dummy_atoms(frag.variable_smiles)
+                            if var_key == frag1_key:
+                                match_map[frag.variable_smiles] = frag1_atoms
+                            elif var_key == frag2_key:
+                                match_map[frag.variable_smiles] = frag2_atoms
+                    else:
+                        fragmentations = fragment_algorithm.make_multiple_cuts(mol, cut_list, chiral_flags, fragment_filter)
+                        if fragmentations is None:
+                            continue
+                        fragmented_mol, _ = fragment_algorithm.fragment_on_atom_pairs(mol, cut_list)
+                        num_cuts = len(cut_list)
+                        var_atoms = []
+                        for atom_indices in Chem.GetMolFrags(fragmented_mol):
+                            non_wildcard = _fragment_indices(fragmented_mol, atom_indices)
+                            num_wildcards = len(atom_indices) - len(non_wildcard)
+                            if num_wildcards == num_cuts:
+                                var_atoms = non_wildcard
+                                break
+                        for frag in fragmentations:
+                            if not frag.variable_smiles:
+                                continue
+                            fragments.append(frag.variable_smiles)
+                            const_map[frag.variable_smiles] = frag.constant_smiles
+                            if var_atoms:
+                                match_map[frag.variable_smiles] = var_atoms
+
                 unique = sorted(set(fragments))
                 if not unique:
-                    return [], "mmpdb 规则未生成片段"
-                return unique, ""
+                    return [], "mmpdb 规则未生成片段", {}, {}
+                return unique, "", match_map, const_map
             except Exception as exc:
-                return [], f"mmpdb 拆分失败: {exc}"
+                return [], f"mmpdb 拆分失败: {exc}", {}, {}
 
         def _compute_fallback_fragments(smiles_value: str):
             try:
@@ -942,46 +998,37 @@ def render_lead_optimization_page():
             except Exception:
                 return None
 
-        def _render_parent_with_highlight(parent_smiles: str, fragment_smiles: str, highlight_color=None, size=(480, 320), match_atoms=None):
+        def _prepare_parent_mol(parent_smiles: str):
             try:
                 from rdkit import Chem
-                from rdkit.Chem import Draw
+                from rdkit.Chem import rdDepictor
                 parent = Chem.MolFromSmiles(parent_smiles)
                 if parent is None:
                     return None
+                rdDepictor.Compute2DCoords(parent)
+                return parent
+            except Exception:
+                return None
+
+        def _fallback_match_atoms(parent_mol, fragment_smiles: str):
+            return None
+
+        def _render_parent_with_highlight(parent_mol, fragment_smiles: str, highlight_color=None, size=(480, 320), match_atoms=None):
+            try:
+                from rdkit.Chem import Draw
+                if parent_mol is None:
+                    return None
                 if not fragment_smiles:
-                    return Draw.MolToImage(parent, size=size)
-                query_smiles = _strip_dummy_atoms(fragment_smiles)
-                query = Chem.MolFromSmiles(query_smiles)
-                if query is None:
-                    return Draw.MolToImage(parent, size=size)
+                    return Draw.MolToImage(parent_mol, size=size)
                 if match_atoms:
                     highlight_atoms = set(match_atoms)
                 else:
-                    fragment_canonical = Chem.MolToSmiles(query, canonical=True, isomericSmiles=True)
-                    matches = parent.GetSubstructMatches(query, useChirality=True)
-                    highlight_atoms = set()
-                    for match in matches:
-                        try:
-                            sub_smiles = Chem.MolFragmentToSmiles(
-                                parent,
-                                atomsToUse=list(match),
-                                canonical=True,
-                                isomericSmiles=True
-                            )
-                        except Exception:
-                            continue
-                        if sub_smiles == fragment_canonical:
-                            highlight_atoms.update(match)
-                    if not highlight_atoms:
-                        fallback_matches = parent.GetSubstructMatches(query, useChirality=False)
-                        if fallback_matches:
-                            highlight_atoms.update(max(fallback_matches, key=len))
+                    return Draw.MolToImage(parent_mol, size=size)
                 highlight_colors = None
                 if highlight_atoms and highlight_color is not None:
                     highlight_colors = {idx: highlight_color for idx in highlight_atoms}
                 return Draw.MolToImage(
-                    parent,
+                    parent_mol,
                     size=size,
                     highlightAtoms=list(highlight_atoms) if highlight_atoms else None,
                     highlightAtomColors=highlight_colors
@@ -1015,13 +1062,10 @@ def render_lead_optimization_page():
             except Exception:
                 return [(frag, 0) for frag in fragments]
 
-        def _dedupe_fragments(fragments, parent_smiles: str):
+        def _dedupe_fragments(fragments, match_map, const_map):
             try:
                 from rdkit import Chem
                 seen = {}
-                seen_matches = set()
-                parent = Chem.MolFromSmiles(parent_smiles) if parent_smiles else None
-                match_map = {}
 
                 def _normalize_mol(mol):
                     if mol is None:
@@ -1035,30 +1079,10 @@ def render_lead_optimization_page():
                         pass
                     return Chem.MolToSmiles(mol, canonical=True, isomericSmiles=False)
 
-                def _best_match(query_mol):
-                    if parent is None or query_mol is None:
-                        return None
-                    matches = parent.GetSubstructMatches(query_mol, useChirality=True)
-                    if not matches:
-                        return None
-                    return list(max(matches, key=len))
-
                 for frag in fragments:
                     mol = Chem.MolFromSmiles(frag)
                     if mol is None:
                         continue
-                    if parent is not None:
-                        query_smiles = _strip_dummy_atoms(frag)
-                        query = Chem.MolFromSmiles(query_smiles)
-                        best = _best_match(query)
-                        if best is None:
-                            best = _best_match(Chem.MolFromSmarts(frag))
-                        if best is not None:
-                            signature = tuple(sorted(best))
-                            if signature in seen_matches:
-                                continue
-                            seen_matches.add(signature)
-                            match_map[frag] = list(signature)
                     keep_key = _normalize_mol(Chem.Mol(mol))
                     stripped = _strip_dummy_atoms(frag)
                     stripped_mol = Chem.MolFromSmiles(stripped)
@@ -1066,11 +1090,12 @@ def render_lead_optimization_page():
                     key = (keep_key, stripped_key)
                     if key not in seen:
                         seen[key] = frag
-                    elif frag in match_map and seen[key] not in match_map:
-                        match_map[seen[key]] = match_map[frag]
-                return list(seen.values()), match_map
+                deduped = list(seen.values())
+                deduped_map = {frag: match_map.get(frag) for frag in deduped}
+                deduped_const = {frag: const_map.get(frag) for frag in deduped}
+                return deduped, deduped_map, deduped_const
             except Exception:
-                return fragments, {}
+                return fragments, match_map, const_map
 
         core_smarts = ""
         exclude_smarts = ""
@@ -1078,6 +1103,7 @@ def render_lead_optimization_page():
         required_smarts_from_auto = []
         exclude_smarts_from_auto = []
         variable_smarts_from_auto = []
+        variable_const_smarts_from_auto = []
         has_invalid_filters = False
 
         with st.expander("🧩 修改位点 (可选)", expanded=False):
@@ -1095,7 +1121,7 @@ def render_lead_optimization_page():
                         refresh_fragments = True
 
                     if refresh_fragments or st.session_state.lead_opt_fragment_source != source_smiles:
-                        fragments, fragment_note = _compute_mmpdb_fragments(source_smiles)
+                        fragments, fragment_note, match_map, const_map = _compute_mmpdb_fragments(source_smiles)
                         if len(fragments) < 2:
                             fallback = _compute_fallback_fragments(source_smiles)
                             if len(fallback) >= 2:
@@ -1106,19 +1132,26 @@ def render_lead_optimization_page():
                         st.session_state.lead_opt_fragment_selections = {}
                         st.session_state.lead_opt_fragment_selected = ''
                         st.session_state.lead_opt_fragment_action = '不限制'
-                        st.session_state.lead_opt_fragment_match_map = {}
+                        st.session_state.lead_opt_fragment_match_map = match_map or {}
+                        st.session_state.lead_opt_fragment_const_map = const_map or {}
                         if fragment_note:
                             st.session_state.lead_opt_fragment_note = fragment_note
                         else:
                             st.session_state.lead_opt_fragment_note = ""
 
                     fragments = st.session_state.get('lead_opt_fragment_smiles', [])
-                    fragments, match_map = _dedupe_fragments(fragments, source_smiles)
+                    fragments, match_map, const_map = _dedupe_fragments(
+                        fragments,
+                        st.session_state.get('lead_opt_fragment_match_map', {}),
+                        st.session_state.get('lead_opt_fragment_const_map', {})
+                    )
                     st.session_state.lead_opt_fragment_match_map = match_map
+                    st.session_state.lead_opt_fragment_const_map = const_map
                     fragment_note = st.session_state.get('lead_opt_fragment_note', '')
                     if not fragments:
                         st.info("未能拆分出片段，可能是结构较小或解析失败。")
                     else:
+                        parent_mol_2d = _prepare_parent_mol(source_smiles)
                         st.caption(f"已拆分 {len(fragments)} 个片段")
                         if fragment_note:
                             st.info(fragment_note)
@@ -1156,7 +1189,7 @@ def render_lead_optimization_page():
                                 with col:
                                     match_atoms = st.session_state.lead_opt_fragment_match_map.get(frag)
                                     img = _render_parent_with_highlight(
-                                        source_smiles,
+                                        parent_mol_2d,
                                         frag,
                                         highlight_color=_action_color("不限制"),
                                         size=(220, 160),
@@ -1186,7 +1219,7 @@ def render_lead_optimization_page():
 
                         selected_match = st.session_state.lead_opt_fragment_match_map.get(selected_fragment)
                         parent_img = _render_parent_with_highlight(
-                            source_smiles,
+                            parent_mol_2d,
                             "" if selected_fragment == none_key else selected_fragment,
                             highlight_color=_action_color(action),
                             match_atoms=selected_match
@@ -1198,6 +1231,9 @@ def render_lead_optimization_page():
 
                         if selected_fragment != none_key:
                             st.caption(f"当前片段: {selected_fragment}")
+                            st.caption("高亮含义：🟩 保留 · 🟥 排除 · 🟧 可变")
+                            if selected_match is None:
+                                st.info("未找到片段在母体中的匹配位点，已仅用于规则过滤。")
                             stripped = _strip_dummy_atoms(selected_fragment)
                             if action == "保留":
                                 required_smarts_from_auto.append(stripped)
@@ -1205,6 +1241,9 @@ def render_lead_optimization_page():
                                 exclude_smarts_from_auto.append(stripped)
                             elif action == "可变":
                                 variable_smarts_from_auto.append(selected_fragment)
+                                const_smiles = st.session_state.lead_opt_fragment_const_map.get(selected_fragment)
+                                if const_smiles:
+                                    variable_const_smarts_from_auto.append(_strip_dummy_atoms(const_smiles))
                                 st.caption("可变片段将以严格模式处理，结果需匹配替换位点骨架。")
 
                         if required_smarts_from_auto or exclude_smarts_from_auto or variable_smarts_from_auto:
@@ -1446,6 +1485,7 @@ def render_lead_optimization_page():
         auto_required = ";;".join([s for s in required_smarts_from_auto if s])
         auto_exclude = ";;".join([s for s in exclude_smarts_from_auto if s])
         auto_variable = ";;".join([s for s in variable_smarts_from_auto if s])
+        auto_variable_const = ";;".join([s for s in variable_const_smarts_from_auto if s])
 
         can_submit = bool(target_yaml.strip()) and not has_invalid_filters and (
             (input_mode == "单个" and input_compound.strip()) or
@@ -1486,6 +1526,7 @@ def render_lead_optimization_page():
                 'exclude_smarts': exclude_value if (st.session_state.lead_opt_exclude_enabled or auto_exclude) and exclude_value else None,
                 'rgroup_smarts': rgroup_smarts.strip() if st.session_state.lead_opt_rgroup_enabled and rgroup_smarts else None,
                 'variable_smarts': auto_variable if auto_variable else None,
+                'variable_const_smarts': auto_variable_const if auto_variable_const else None,
                 'backend': st.session_state.lead_optimization_backend
             }
 

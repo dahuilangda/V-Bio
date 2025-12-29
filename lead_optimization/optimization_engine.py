@@ -100,7 +100,8 @@ class OptimizationEngine:
                          core_smarts: Optional[str] = None,
                          exclude_smarts: Optional[str] = None,
                          rgroup_smarts: Optional[str] = None,
-                         variable_smarts: Optional[str] = None) -> OptimizationResult:
+                         variable_smarts: Optional[str] = None,
+                         variable_const_smarts: Optional[str] = None) -> OptimizationResult:
         """
         Optimize a single compound using MMPDB + Boltz-WebUI with iterative evolution
         
@@ -144,6 +145,8 @@ class OptimizationEngine:
                 logger.info(f"R-group 片段限制: {rgroup_smarts}")
             if variable_smarts:
                 logger.info(f"严格可变片段: {variable_smarts}")
+            if variable_const_smarts:
+                logger.info(f"可变片段常量约束: {variable_const_smarts}")
             
             # Initialize batch evaluator and evolution engine
             from .batch_evaluation import BatchEvaluator
@@ -156,6 +159,7 @@ class OptimizationEngine:
             exclude_queries = self._parse_smarts_queries(exclude_smarts)
             rgroup_queries = self._parse_smarts_queries(rgroup_smarts)
             variable_fragments = [p.strip() for p in (variable_smarts or "").split(";;") if p.strip()]
+            variable_const_queries = self._parse_smarts_queries(variable_const_smarts)
             if core_smarts and not core_queries:
                 raise InvalidCompoundError(f"Invalid core SMARTS/SMILES: {core_smarts}")
             if exclude_smarts and not exclude_queries:
@@ -164,6 +168,8 @@ class OptimizationEngine:
                 raise InvalidCompoundError(f"Invalid R-group SMARTS/SMILES: {rgroup_smarts}")
             if variable_smarts and not variable_fragments:
                 raise InvalidCompoundError(f"Invalid variable fragments: {variable_smarts}")
+            if variable_const_smarts and not variable_const_queries:
+                raise InvalidCompoundError(f"Invalid variable const SMARTS/SMILES: {variable_const_smarts}")
 
             variable_queries = []
             variable_excludes = []
@@ -175,6 +181,8 @@ class OptimizationEngine:
                     variable_queries.append(required_query)
                     if exclude_query is not None:
                         variable_excludes.append(exclude_query)
+            if variable_const_queries:
+                variable_queries.extend(variable_const_queries)
             
             # Track all evaluated candidates across iterations
             all_evaluated_candidates = []
@@ -1030,7 +1038,8 @@ class OptimizationEngine:
                       core_smarts: Optional[str] = None,
                       exclude_smarts: Optional[str] = None,
                       rgroup_smarts: Optional[str] = None,
-                      variable_smarts: Optional[str] = None) -> Dict[str, OptimizationResult]:
+                      variable_smarts: Optional[str] = None,
+                      variable_const_smarts: Optional[str] = None) -> Dict[str, OptimizationResult]:
         """
         Batch optimization of multiple compounds
         """
@@ -1060,7 +1069,8 @@ class OptimizationEngine:
                     core_smarts=core_smarts,
                     exclude_smarts=exclude_smarts,
                     rgroup_smarts=rgroup_smarts,
-                    variable_smarts=variable_smarts
+                    variable_smarts=variable_smarts,
+                    variable_const_smarts=variable_const_smarts
                 )
                 results[compound_id] = result
                 logger.info(f"Compound {compound_id} optimization completed")

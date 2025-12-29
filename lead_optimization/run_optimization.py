@@ -93,7 +93,8 @@ def run_single_optimization(engine: OptimizationEngine,
                           core_smarts: str = None,
                           exclude_smarts: str = None,
                           rgroup_smarts: str = None,
-                          variable_smarts: str = None) -> OptimizationResult:
+                          variable_smarts: str = None,
+                          variable_const_smarts: str = None) -> OptimizationResult:
     """Run optimization for a single compound with iterative evolution"""
     logger = logging.getLogger(__name__)
     
@@ -115,6 +116,8 @@ def run_single_optimization(engine: OptimizationEngine,
         logger.info(f"R-group 片段限制: {rgroup_smarts}")
     if variable_smarts:
         logger.info(f"严格可变片段: {variable_smarts}")
+    if variable_const_smarts:
+        logger.info(f"可变片段常量约束: {variable_const_smarts}")
     
     try:
         result = engine.optimize_compound(
@@ -134,7 +137,8 @@ def run_single_optimization(engine: OptimizationEngine,
             core_smarts=core_smarts,
             exclude_smarts=exclude_smarts,
             rgroup_smarts=rgroup_smarts,
-            variable_smarts=variable_smarts
+            variable_smarts=variable_smarts,
+            variable_const_smarts=variable_const_smarts
         )
         
         logger.info("=== 优化完成 ===")
@@ -161,7 +165,8 @@ def run_batch_optimization(engine: OptimizationEngine,
                          core_smarts: str = None,
                          exclude_smarts: str = None,
                          rgroup_smarts: str = None,
-                         variable_smarts: str = None) -> Dict[str, OptimizationResult]:
+                         variable_smarts: str = None,
+                         variable_const_smarts: str = None) -> Dict[str, OptimizationResult]:
     """Run optimization for multiple compounds"""
     logger = logging.getLogger(__name__)
     
@@ -180,7 +185,8 @@ def run_batch_optimization(engine: OptimizationEngine,
             core_smarts=core_smarts,
             exclude_smarts=exclude_smarts,
             rgroup_smarts=rgroup_smarts,
-            variable_smarts=variable_smarts
+            variable_smarts=variable_smarts,
+            variable_const_smarts=variable_const_smarts
         )
         
         logger.info("=== 批量优化完成 ===")
@@ -257,6 +263,8 @@ def main():
                        help="R-group style scaffold (SMILES/SMARTS) with [*] for editable positions")
     parser.add_argument("--variable_smarts", type=str, default=None,
                        help="Strict variable fragments (SMILES/SMARTS) from auto split")
+    parser.add_argument("--variable_const_smarts", type=str, default=None,
+                       help="Constant fragments for strict variable mode")
     
     # System options
     parser.add_argument("--parallel_workers", type=int, default=1, 
@@ -315,7 +323,8 @@ def main():
                 core_smarts=args.core_smarts,
                 exclude_smarts=args.exclude_smarts,
                 rgroup_smarts=args.rgroup_smarts,
-                variable_smarts=args.variable_smarts
+                variable_smarts=args.variable_smarts,
+                variable_const_smarts=args.variable_const_smarts
             )
             results["single_compound"] = result
             
@@ -331,7 +340,8 @@ def main():
                 core_smarts=args.core_smarts,
                 exclude_smarts=args.exclude_smarts,
                 rgroup_smarts=args.rgroup_smarts,
-                variable_smarts=args.variable_smarts
+                variable_smarts=args.variable_smarts,
+                variable_const_smarts=args.variable_const_smarts
             )
         
         # Save results

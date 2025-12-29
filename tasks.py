@@ -1096,6 +1096,8 @@ def lead_optimization_task(self, optimization_args: dict):
             command.extend(["--rgroup_smarts", str(options['rgroup_smarts'])])
         if options.get('variable_smarts'):
             command.extend(["--variable_smarts", str(options['variable_smarts'])])
+        if options.get('variable_const_smarts'):
+            command.extend(["--variable_const_smarts", str(options['variable_const_smarts'])])
         if options.get('verbosity') is not None:
             command.extend(["--verbosity", str(options['verbosity'])])
         if options.get('backend'):

@@ -70,6 +70,7 @@ def initialize_session_state():
     if 'lead_opt_fragment_selected' not in st.session_state: st.session_state.lead_opt_fragment_selected = ''
     if 'lead_opt_fragment_action' not in st.session_state: st.session_state.lead_opt_fragment_action = '不限制'
     if 'lead_opt_fragment_match_map' not in st.session_state: st.session_state.lead_opt_fragment_match_map = {}
+    if 'lead_opt_fragment_const_map' not in st.session_state: st.session_state.lead_opt_fragment_const_map = {}
     
     # URL state management
     if 'url_state_initialized' not in st.session_state: st.session_state.url_state_initialized = False
