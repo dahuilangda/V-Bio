@@ -1795,22 +1795,11 @@ def render_lead_optimization_page():
 
         original_compound = None
         if summary:
-            st.subheader("📊 结果摘要", anchor=False)
-            col1, col2 = st.columns(2)
-            col1.metric("总候选数", summary.get('total_candidates', summary.get('total_compounds', 'N/A')))
-            success_rate = summary.get('success_rate')
-            if isinstance(success_rate, str):
-                try:
-                    success_rate = float(success_rate)
-                except ValueError:
-                    success_rate = None
-            success_rate_display = f"{success_rate:.2%}" if isinstance(success_rate, float) else "N/A"
-            col2.metric("成功率", success_rate_display)
             original_compound = summary.get("original_compound")
         if not original_compound:
             metadata = _load_log_metadata(st.session_state.lead_optimization_task_id)
             original_compound = metadata.get("original_compound")
-        elif results_df is not None and not results_df.empty:
+        if results_df is not None and not results_df.empty:
             st.subheader("📊 结果摘要", anchor=False)
             total_candidates = len(results_df)
             completed = 0
@@ -1825,7 +1814,6 @@ def render_lead_optimization_page():
                 completed_df['combined_score'] = pd.to_numeric(completed_df['combined_score'], errors='coerce')
             best_row = None
             best_score = None
-            average_score = None
             if 'combined_score' in completed_df.columns and not completed_df['combined_score'].dropna().empty:
                 best_idx = completed_df['combined_score'].idxmax()
                 best_row = completed_df.loc[best_idx]
@@ -1865,6 +1853,18 @@ def render_lead_optimization_page():
                 col2.metric("最佳综合评分", score_display)
             col3.metric("总候选数", total_candidates)
             col4.metric("成功率", f"{success_rate:.2%}")
+        elif summary:
+            st.subheader("📊 结果摘要", anchor=False)
+            col1, col2 = st.columns(2)
+            col1.metric("总候选数", summary.get('total_candidates', summary.get('total_compounds', 'N/A')))
+            success_rate = summary.get('success_rate')
+            if isinstance(success_rate, str):
+                try:
+                    success_rate = float(success_rate)
+                except ValueError:
+                    success_rate = None
+            success_rate_display = f"{success_rate:.2%}" if isinstance(success_rate, float) else "N/A"
+            col2.metric("成功率", success_rate_display)
 
         if results_df is None or results_df.empty:
             st.info("暂无可用结果数据。请检查输出文件是否完整。")
