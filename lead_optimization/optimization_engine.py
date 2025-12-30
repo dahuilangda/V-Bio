@@ -445,6 +445,21 @@ class OptimizationEngine:
                 else:
                     # Default to scaffold hopping with adaptive threshold
                     mmp_results = self.mmp_engine.scaffold_hopping(compound_smiles, raw_candidate_count, adaptive_similarity_threshold)
+            if not rule_query_smarts and adaptive_similarity_threshold > 0 and len(mmp_results) < max_candidates:
+                logger.info(
+                    "候选不足，放宽相似性阈值到 0.0 以扩大搜索范围"
+                )
+                if strategy == "fragment_replacement":
+                    relaxed_results = self.mmp_engine.fragment_replacement(compound_smiles, raw_candidate_count, 0.0)
+                else:
+                    relaxed_results = self.mmp_engine.scaffold_hopping(compound_smiles, raw_candidate_count, 0.0)
+                if relaxed_results:
+                    existing = {c.get('smiles') for c in mmp_results if c.get('smiles')}
+                    for candidate in relaxed_results:
+                        smiles = candidate.get('smiles')
+                        if smiles and smiles not in existing:
+                            mmp_results.append(candidate)
+                            existing.add(smiles)
             
             logger.info(f"MMPDB generated {len(mmp_results)} raw candidates")
             
