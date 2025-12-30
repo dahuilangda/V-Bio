@@ -1817,9 +1817,52 @@ def render_lead_optimization_page():
             if 'status' in results_df.columns:
                 completed = int((results_df['status'] == 'completed').sum())
             success_rate = (completed / total_candidates) if total_candidates else 0
+            completed_df = results_df
+            if 'status' in results_df.columns:
+                completed_df = results_df[results_df['status'] == 'completed']
+            if 'combined_score' in completed_df.columns:
+                completed_df = completed_df.copy()
+                completed_df['combined_score'] = pd.to_numeric(completed_df['combined_score'], errors='coerce')
+            best_row = None
+            best_score = None
+            average_score = None
+            if 'combined_score' in completed_df.columns and not completed_df['combined_score'].dropna().empty:
+                best_idx = completed_df['combined_score'].idxmax()
+                best_row = completed_df.loc[best_idx]
+                best_score = float(best_row.get('combined_score'))
+                if not pd.notna(best_score):
+                    best_score = None
+            elif not completed_df.empty:
+                best_row = completed_df.iloc[0]
+            best_compound_display = "N/A"
+            if best_row is not None:
+                best_compound_value = best_row.get('compound_id')
+                if not pd.notna(best_compound_value):
+                    best_compound_value = best_row.get('optimized_smiles')
+                best_compound_display = str(best_compound_value) if pd.notna(best_compound_value) else "N/A"
+                if len(best_compound_display) > 24:
+                    best_compound_display = f"{best_compound_display[:21]}..."
+            score_display = f"{best_score:.3f}" if isinstance(best_score, float) else "N/A"
+            reference_score = None
+            if original_compound and 'combined_score' in completed_df.columns:
+                reference_matches = completed_df[
+                    (completed_df.get('optimized_smiles') == original_compound) |
+                    (completed_df.get('original_smiles') == original_compound)
+                ]
+                if not reference_matches.empty:
+                    reference_value = pd.to_numeric(reference_matches['combined_score'], errors='coerce').dropna()
+                    if not reference_value.empty:
+                        reference_score = float(reference_value.iloc[0])
+            improvement_delta = None
+            if isinstance(best_score, float) and isinstance(reference_score, float):
+                improvement_value = best_score - reference_score
+                improvement_delta = f"{improvement_value:+.3f} vs 参考化合物"
             col1, col2, col3, col4 = st.columns(4)
-            col1.metric("原始化合物", "N/A")
-            col2.metric("策略", "N/A")
+            col1.metric("最佳化合物", best_compound_display)
+            if improvement_delta:
+                col2.metric("最佳综合评分", score_display, delta=improvement_delta)
+            else:
+                col2.metric("最佳综合评分", score_display)
             col3.metric("总候选数", total_candidates)
             col4.metric("成功率", f"{success_rate:.2%}")
 
@@ -1856,12 +1899,22 @@ def render_lead_optimization_page():
             compound_id = str(row.get('compound_id', f"candidate_{rank}"))
             smiles = row.get('optimized_smiles', '')
             score = row.get('combined_score', 0.0) if pd.notna(row.get('combined_score', None)) else 0.0
+            compound_name = row.get('compound_name')
+            if not pd.notna(compound_name):
+                compound_name = row.get('name')
+            if not pd.notna(compound_name):
+                compound_name = compound_id
+            display_name = str(compound_name)
+            if len(display_name) > 40:
+                display_name = f"{display_name[:37]}..."
 
             score_color = "🟢" if score >= 0.8 else "🟡" if score >= 0.7 else "🟠"
 
-            with st.expander(f"**第 {rank} 名** {score_color} 评分: {score:.3f}", expanded=(idx < 3)):
+            with st.expander(f"**第 {rank} 名** {display_name} {score_color} 评分: {score:.3f}", expanded=(idx < 3)):
                 col_smiles, col_structure = st.columns([1.4, 1])
                 with col_smiles:
+                    st.markdown("**名称**")
+                    st.code(display_name)
                     st.markdown("**SMILES**")
                     st.code(smiles, language="smiles")
                 with col_structure:
