@@ -109,6 +109,44 @@ class OptimizationAnalyzer:
         self.df = self._results_to_dataframe()
         
         logger.info(f"优化结果分析器初始化完成，共 {len(self.results)} 个候选化合物")
+
+    def _safe_float(self, value) -> Optional[float]:
+        try:
+            if value is None:
+                return None
+            if isinstance(value, float) and np.isnan(value):
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _get_reference_values(self) -> Dict[str, Optional[float]]:
+        reference_row = None
+        if self.original_compound and not self.df.empty:
+            matches = self.df[self.df["smiles"] == self.original_compound]
+            if not matches.empty:
+                reference_row = matches.iloc[0]
+
+        reference_score = None
+        reference_mw = None
+        reference_logp = None
+        if reference_row is not None:
+            reference_score = self._safe_float(reference_row.get("combined_score"))
+            reference_mw = self._safe_float(reference_row.get("molecular_weight"))
+            reference_logp = self._safe_float(reference_row.get("logp"))
+
+        if self.original_compound and (reference_mw is None or reference_logp is None) and RDKIT_AVAILABLE:
+            computed_props = self._calculate_molecular_properties(self.original_compound)
+            if reference_mw is None:
+                reference_mw = self._safe_float(computed_props.get("molecular_weight"))
+            if reference_logp is None:
+                reference_logp = self._safe_float(computed_props.get("logp"))
+
+        return {
+            "combined_score": reference_score,
+            "molecular_weight": reference_mw,
+            "logp": reference_logp
+        }
     
     def _json_serializer(self, obj):
         """自定义JSON序列化器，处理numpy类型"""
@@ -196,7 +234,24 @@ class OptimizationAnalyzer:
         try:
             # 保存Top结果
             top_n = min(10, len(self.df))
-            top_results = self.df.head(top_n)
+            top_results = self.df.head(top_n).copy()
+            if "combined_score" in top_results.columns:
+                top_results["combined_score"] = pd.to_numeric(top_results["combined_score"], errors="coerce")
+            if "molecular_weight" in top_results.columns:
+                top_results["molecular_weight"] = pd.to_numeric(top_results["molecular_weight"], errors="coerce")
+            if "logp" in top_results.columns:
+                top_results["logp"] = pd.to_numeric(top_results["logp"], errors="coerce")
+            reference_values = self._get_reference_values()
+            reference_score = reference_values.get("combined_score")
+            reference_mw = reference_values.get("molecular_weight")
+            reference_logp = reference_values.get("logp")
+
+            if reference_score is not None:
+                top_results["delta_score_vs_reference"] = top_results["combined_score"] - reference_score
+            if reference_mw is not None:
+                top_results["delta_mw_vs_reference"] = top_results["molecular_weight"] - reference_mw
+            if reference_logp is not None:
+                top_results["delta_logp_vs_reference"] = top_results["logp"] - reference_logp
             top_results_path = os.path.join(self.output_dir, "top_candidates.csv")
             top_results.to_csv(top_results_path, index=False, encoding='utf-8')
             logger.info(f"Top {top_n} 结果已保存: {top_results_path}")
@@ -848,7 +903,8 @@ class OptimizationAnalyzer:
                     })
             
             # 生成HTML内容
-            compounds_html = self._generate_compounds_html(report_data['top_candidates'])
+            reference_values = self._get_reference_values()
+            compounds_html = self._generate_compounds_html(report_data['top_candidates'], reference_values)
             plots_html = self._generate_plots_html(report_data['plots'])
             
             # 生成原始化合物结构图
@@ -880,9 +936,13 @@ class OptimizationAnalyzer:
             logger.error(f"生成HTML报告失败: {e}")
             raise
     
-    def _generate_compounds_html(self, compounds: List) -> str:
+    def _generate_compounds_html(self, compounds: List, reference_values: Optional[Dict[str, Optional[float]]] = None) -> str:
         """生成候选化合物的HTML"""
         html_parts = []
+        reference_values = reference_values or {}
+        reference_score = reference_values.get("combined_score")
+        reference_mw = reference_values.get("molecular_weight")
+        reference_logp = reference_values.get("logp")
         
         for i, compound in enumerate(compounds[:10]):  # Top 10
             is_best = i == 0
@@ -890,6 +950,16 @@ class OptimizationAnalyzer:
             
             # 尝试生成分子结构图
             structure_html = self._generate_molecule_structure(compound.smiles, f"compound_{i+1}")
+
+            score_delta = "N/A"
+            if reference_score is not None:
+                score_delta = f"{compound.combined_score - reference_score:+.4f}"
+            mw_delta = "N/A"
+            if reference_mw is not None:
+                mw_delta = f"{compound.molecular_weight - reference_mw:+.2f}"
+            logp_delta = "N/A"
+            if reference_logp is not None:
+                logp_delta = f"{compound.logp - reference_logp:+.2f}"
             
             compound_html = f'''
             <div class="compound {rank_class}">
@@ -915,6 +985,15 @@ class OptimizationAnalyzer:
                         </div>
                         <div class="property-item">
                             <strong>LogP:</strong> {getattr(compound, 'logp', 'N/A')}
+                        </div>
+                        <div class="property-item">
+                            <strong>Score Δ vs Reference:</strong> {score_delta}
+                        </div>
+                        <div class="property-item">
+                            <strong>MW Δ vs Reference:</strong> {mw_delta}
+                        </div>
+                        <div class="property-item">
+                            <strong>LogP Δ vs Reference:</strong> {logp_delta}
                         </div>
                         <div class="property-item">
                             <strong>Transformation Rule:</strong> {getattr(compound, 'transformation_rule', 'N/A')}

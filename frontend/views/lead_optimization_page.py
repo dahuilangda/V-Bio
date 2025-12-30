@@ -412,6 +412,79 @@ def _prepare_reference_mol(smiles: str):
     return mol
 
 
+def _safe_float(value):
+    try:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _get_first_numeric(row, columns):
+    for col in columns:
+        if col in row:
+            value = _safe_float(row.get(col))
+            if value is not None:
+                return value
+    return None
+
+
+def _compute_smiles_properties(smiles: str):
+    if not smiles:
+        return None, None
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import Descriptors, Crippen
+    except Exception:
+        return None, None
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None, None
+    return Descriptors.MolWt(mol), Crippen.MolLogP(mol)
+
+
+def _get_reference_values(results_df: pd.DataFrame | None, original_compound: str | None):
+    if results_df is None or results_df.empty:
+        results_df = None
+    reference_row = None
+    reference_compound_id = None
+    if original_compound:
+        if results_df is not None:
+            if "optimized_smiles" in results_df.columns:
+                matches = results_df[results_df["optimized_smiles"] == original_compound]
+                if not matches.empty:
+                    reference_row = matches.iloc[0]
+            if reference_row is None and "original_smiles" in results_df.columns:
+                matches = results_df[results_df["original_smiles"] == original_compound]
+                if not matches.empty:
+                    reference_row = matches.iloc[0]
+            if reference_row is not None and "compound_id" in reference_row:
+                compound_id_value = reference_row.get("compound_id")
+                if pd.notna(compound_id_value):
+                    reference_compound_id = str(compound_id_value)
+
+    reference_score = _get_first_numeric(reference_row, ["combined_score"]) if reference_row is not None else None
+    reference_mw = _get_first_numeric(reference_row, ["molecular_weight", "properties_mw", "mw"]) if reference_row is not None else None
+    reference_logp = _get_first_numeric(reference_row, ["logp", "properties_logp"]) if reference_row is not None else None
+    reference_binding = _get_first_numeric(reference_row, ["binding_probability"]) if reference_row is not None else None
+    reference_plddt = _get_first_numeric(reference_row, ["plddt", "pLDDT"]) if reference_row is not None else None
+    if original_compound and (reference_mw is None or reference_logp is None):
+        computed_mw, computed_logp = _compute_smiles_properties(original_compound)
+        if reference_mw is None:
+            reference_mw = _safe_float(computed_mw)
+        if reference_logp is None:
+            reference_logp = _safe_float(computed_logp)
+    return {
+        "combined_score": reference_score,
+        "molecular_weight": reference_mw,
+        "logp": reference_logp,
+        "binding_probability": reference_binding,
+        "plddt": reference_plddt,
+        "compound_id": reference_compound_id
+    }
+
+
 def _render_smiles_diff(original_smiles: str, candidate_smiles: str, reference_mol=None):
     if not candidate_smiles:
         st.caption("⚠️ SMILES 为空，无法生成2D结构。")
@@ -1287,13 +1360,21 @@ def render_lead_optimization_page():
                                         parent_mol_2d,
                                         frag,
                                         highlight_color=_action_color("不限制"),
-                                        size=(220, 160),
+                                        size=(160, 120),
                                         match_atoms=match_atoms
                                     )
                                     if img is not None:
-                                        st.image(img, use_container_width=True)
+                                        st.image(img, width=160)
                                     st.caption(label_map.get(frag, frag))
-                                    if st.button("选择", key=f"lead_opt_fragment_pick_{index}", disabled=is_running):
+                                    is_selected = st.session_state.lead_opt_fragment_selected == frag
+                                    button_label = "已选择" if is_selected else "选择"
+                                    button_type = "primary" if is_selected else "secondary"
+                                    if st.button(
+                                        button_label,
+                                        key=f"lead_opt_fragment_pick_{index}",
+                                        disabled=is_running,
+                                        type=button_type
+                                    ):
                                         st.session_state.lead_opt_fragment_selected = frag
                                         st.rerun()
                                 index += 1
@@ -1831,20 +1912,24 @@ def render_lead_optimization_page():
                 if len(best_compound_display) > 24:
                     best_compound_display = f"{best_compound_display[:21]}..."
             score_display = f"{best_score:.3f}" if isinstance(best_score, float) else "N/A"
-            reference_score = None
-            if original_compound and 'combined_score' in completed_df.columns:
-                reference_matches = completed_df[
-                    (completed_df.get('optimized_smiles') == original_compound) |
-                    (completed_df.get('original_smiles') == original_compound)
-                ]
-                if not reference_matches.empty:
-                    reference_value = pd.to_numeric(reference_matches['combined_score'], errors='coerce').dropna()
-                    if not reference_value.empty:
-                        reference_score = float(reference_value.iloc[0])
+            reference_values = _get_reference_values(completed_df, original_compound)
+            reference_score = reference_values.get("combined_score")
+            reference_mw = reference_values.get("molecular_weight")
+            reference_logp = reference_values.get("logp")
+
+            best_mw = _get_first_numeric(best_row, ["molecular_weight", "properties_mw", "mw"]) if best_row is not None else None
+            best_logp = _get_first_numeric(best_row, ["logp", "properties_logp"]) if best_row is not None else None
             improvement_delta = None
             if isinstance(best_score, float) and isinstance(reference_score, float):
                 improvement_value = best_score - reference_score
-                improvement_delta = f"{improvement_value:+.3f} vs 参考化合物"
+                improvement_delta = f"{improvement_value:+.3f}"
+            mw_delta = None
+            if isinstance(best_mw, float) and isinstance(reference_mw, float):
+                mw_delta = f"{best_mw - reference_mw:+.2f}"
+            logp_delta = None
+            if isinstance(best_logp, float) and isinstance(reference_logp, float):
+                logp_delta = f"{best_logp - reference_logp:+.2f}"
+
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("最佳化合物", best_compound_display)
             if improvement_delta:
@@ -1853,6 +1938,18 @@ def render_lead_optimization_page():
                 col2.metric("最佳综合评分", score_display)
             col3.metric("总候选数", total_candidates)
             col4.metric("成功率", f"{success_rate:.2%}")
+
+            col5, col6 = st.columns(2)
+            col5.metric(
+                "分子量",
+                f"{best_mw:.2f}" if isinstance(best_mw, float) else "N/A",
+                delta=mw_delta if mw_delta else None
+            )
+            col6.metric(
+                "logP",
+                f"{best_logp:.2f}" if isinstance(best_logp, float) else "N/A",
+                delta=logp_delta if logp_delta else None
+            )
         elif summary:
             st.subheader("📊 结果摘要", anchor=False)
             col1, col2 = st.columns(2)
@@ -1893,6 +1990,7 @@ def render_lead_optimization_page():
             return
 
         reference_mol = _prepare_reference_mol(original_compound)
+        reference_values = _get_reference_values(results_df, original_compound)
 
         for idx, row in top_df.reset_index(drop=True).iterrows():
             rank = idx + 1
@@ -1921,12 +2019,31 @@ def render_lead_optimization_page():
                     st.markdown("**2D 结构**")
                     _render_smiles_diff(original_compound, smiles, reference_mol=reference_mol)
 
-                col_metrics = st.columns(4)
-                col_metrics[0].metric("综合评分", f"{score:.3f}")
-                col_metrics[1].metric("binding_probability", row.get('binding_probability', 'N/A'))
-                col_metrics[2].metric("pLDDT", row.get('plddt', 'N/A'))
+                candidate_mw = _get_first_numeric(row, ["molecular_weight", "properties_mw", "mw"])
+                candidate_logp = _get_first_numeric(row, ["logp", "properties_logp"])
+                candidate_binding = _get_first_numeric(row, ["binding_probability"])
+                candidate_plddt = _get_first_numeric(row, ["plddt", "pLDDT"])
+                score_delta = None
+                if isinstance(reference_values.get("combined_score"), float) and isinstance(score, float):
+                    score_delta = f"{score - reference_values['combined_score']:+.3f}"
+                mw_delta = None
+                if isinstance(reference_values.get("molecular_weight"), float) and isinstance(candidate_mw, float):
+                    mw_delta = f"{candidate_mw - reference_values['molecular_weight']:+.2f}"
+                logp_delta = None
+                if isinstance(reference_values.get("logp"), float) and isinstance(candidate_logp, float):
+                    logp_delta = f"{candidate_logp - reference_values['logp']:+.2f}"
+                binding_delta = None
+                if isinstance(reference_values.get("binding_probability"), float) and isinstance(candidate_binding, float):
+                    binding_delta = f"{candidate_binding - reference_values['binding_probability']:+.3f}"
+                plddt_delta = None
+                if isinstance(reference_values.get("plddt"), float) and isinstance(candidate_plddt, float):
+                    plddt_delta = f"{candidate_plddt - reference_values['plddt']:+.2f}"
+
 
                 pair_iptm_value = None
+                inferred_chain_order = chain_order
+                display_ligand_chain = ligand_chain
+                display_target_chain = target_chain
                 pair_data = pair_iptm_map.get(compound_id, {})
                 if not pair_data:
                     pair_data = _load_pair_iptm_from_local(
@@ -1935,15 +2052,11 @@ def render_lead_optimization_page():
                     )
 
                 if pair_data:
-                    inferred_chain_order = chain_order
                     if not inferred_chain_order and isinstance(pair_data.get("pair_chains_iptm"), dict):
                         size = len(pair_data["pair_chains_iptm"])
                         inferred_chain_order = [
                             _get_chain_id_by_index(i) for i in range(size)
                         ]
-
-                    display_ligand_chain = ligand_chain
-                    display_target_chain = target_chain
                     if inferred_chain_order:
                         if display_ligand_chain not in inferred_chain_order:
                             display_ligand_chain = inferred_chain_order[-1]
@@ -1958,7 +2071,50 @@ def render_lead_optimization_page():
                     )
 
                 pair_iptm_display = f"{pair_iptm_value:.3f}" if isinstance(pair_iptm_value, (int, float)) else "N/A"
-                col_metrics[3].metric("pair ipTM", pair_iptm_display)
+                reference_pair_iptm_value = None
+                reference_compound_id = reference_values.get("compound_id")
+                if reference_compound_id:
+                    reference_pair_data = pair_iptm_map.get(reference_compound_id, {})
+                    if not reference_pair_data:
+                        reference_pair_data = _load_pair_iptm_from_local(
+                            st.session_state.lead_optimization_task_id,
+                            reference_compound_id
+                        )
+                    if reference_pair_data:
+                        reference_pair_iptm_value = get_pair_iptm_from_confidence(
+                            reference_pair_data,
+                            display_ligand_chain,
+                            display_target_chain,
+                            chain_order=inferred_chain_order or None
+                        )
+                pair_iptm_delta = None
+                if isinstance(pair_iptm_value, (int, float)) and isinstance(reference_pair_iptm_value, (int, float)):
+                    pair_iptm_delta = f"{pair_iptm_value - reference_pair_iptm_value:+.3f}"
+                row1 = st.columns(4)
+                row1[0].metric("综合评分", f"{score:.3f}", delta=score_delta if score_delta else None)
+                row1[1].metric(
+                    "结合概率",
+                    f"{candidate_binding:.3f}" if isinstance(candidate_binding, float) else "N/A",
+                    delta=binding_delta if binding_delta else None
+                )
+                row1[2].metric(
+                    "pLDDT",
+                    f"{candidate_plddt:.2f}" if isinstance(candidate_plddt, float) else "N/A",
+                    delta=plddt_delta if plddt_delta else None
+                )
+                row1[3].metric("pair ipTM", pair_iptm_display, delta=pair_iptm_delta if pair_iptm_delta else None)
+
+                row2 = st.columns(2)
+                row2[0].metric(
+                    "分子量",
+                    f"{candidate_mw:.2f}" if isinstance(candidate_mw, float) else "N/A",
+                    delta=mw_delta if mw_delta else None
+                )
+                row2[1].metric(
+                    "logP",
+                    f"{candidate_logp:.2f}" if isinstance(candidate_logp, float) else "N/A",
+                    delta=logp_delta if logp_delta else None
+                )
 
                 if compound_id in structure_map:
                     structure = structure_map[compound_id]
