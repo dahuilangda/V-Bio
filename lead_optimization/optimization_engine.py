@@ -174,17 +174,16 @@ class OptimizationEngine:
             rule_level_queries = variable_fragments if variable_fragments else []
             variable_queries = []
             variable_excludes = []
-            if not rule_level_queries:
-                if variable_fragments:
-                    for fragment in variable_fragments:
-                        required_query, exclude_query = self._build_variable_query(compound_smiles, fragment)
-                        if required_query is None:
-                            raise InvalidCompoundError(f"Invalid variable fragment: {fragment}")
-                        variable_queries.append(required_query)
-                        if exclude_query is not None:
-                            variable_excludes.append(exclude_query)
-                if variable_const_queries:
-                    variable_queries.extend(variable_const_queries)
+            if variable_fragments:
+                for fragment in variable_fragments:
+                    required_query, exclude_query = self._build_variable_query(compound_smiles, fragment)
+                    if required_query is None:
+                        raise InvalidCompoundError(f"Invalid variable fragment: {fragment}")
+                    variable_queries.append(required_query)
+                    if exclude_query is not None:
+                        variable_excludes.append(exclude_query)
+            if variable_const_queries:
+                variable_queries.extend(variable_const_queries)
             
             # Track all evaluated candidates across iterations
             all_evaluated_candidates = []
@@ -428,6 +427,7 @@ class OptimizationEngine:
             # Generate raw candidates (more than needed for selection)
             raw_candidate_count = max_candidates * 4  # Generate 4x more for better diversity selection
             
+            mmp_results = []
             if rule_query_smarts:
                 source_smiles = reference_smiles or compound_smiles
                 mmp_results = self.mmp_engine.generate_with_rule_queries(
@@ -435,13 +435,16 @@ class OptimizationEngine:
                     rule_query_smarts,
                     raw_candidate_count
                 )
-            elif strategy == "scaffold_hopping":
-                mmp_results = self.mmp_engine.scaffold_hopping(compound_smiles, raw_candidate_count, adaptive_similarity_threshold)
-            elif strategy == "fragment_replacement":
-                mmp_results = self.mmp_engine.fragment_replacement(compound_smiles, raw_candidate_count, adaptive_similarity_threshold)
-            else:
-                # Default to scaffold hopping with adaptive threshold
-                mmp_results = self.mmp_engine.scaffold_hopping(compound_smiles, raw_candidate_count, adaptive_similarity_threshold)
+                if not mmp_results:
+                    logger.warning("规则级查询未生成候选，回退到常规策略生成")
+            if not mmp_results:
+                if strategy == "scaffold_hopping":
+                    mmp_results = self.mmp_engine.scaffold_hopping(compound_smiles, raw_candidate_count, adaptive_similarity_threshold)
+                elif strategy == "fragment_replacement":
+                    mmp_results = self.mmp_engine.fragment_replacement(compound_smiles, raw_candidate_count, adaptive_similarity_threshold)
+                else:
+                    # Default to scaffold hopping with adaptive threshold
+                    mmp_results = self.mmp_engine.scaffold_hopping(compound_smiles, raw_candidate_count, adaptive_similarity_threshold)
             
             logger.info(f"MMPDB generated {len(mmp_results)} raw candidates")
             

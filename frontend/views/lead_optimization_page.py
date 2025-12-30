@@ -1290,11 +1290,8 @@ def render_lead_optimization_page():
 
                     if refresh_fragments or st.session_state.lead_opt_fragment_source != source_smiles:
                         fragments, fragment_note, match_map, const_map = _compute_mmpdb_fragments(source_smiles)
-                        if len(fragments) < 2:
-                            fallback = _compute_fallback_fragments(source_smiles)
-                            if len(fallback) >= 2:
-                                fragments = fallback
-                                fragment_note = "已回退到非 mmpdb 拆分策略。" if not fragment_note else f"{fragment_note} 已回退到非 mmpdb 拆分策略。"
+                        if len(fragments) < 2 and not fragment_note:
+                            fragment_note = "mmpdb 规则生成片段较少，未进行非 mmpdb 回退。"
                         st.session_state.lead_opt_fragment_smiles = fragments
                         st.session_state.lead_opt_fragment_source = source_smiles
                         st.session_state.lead_opt_fragment_selections = {}

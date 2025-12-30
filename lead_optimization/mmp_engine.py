@@ -23,12 +23,35 @@ warnings.filterwarnings('ignore', message='.*please use MorganGenerator.*')
 
 logger = logging.getLogger(__name__)
 
+def _normalize_rule_query(query_smiles: str) -> str:
+    """Normalize variable fragments for mmpdb generate queries."""
+    query_smiles = (query_smiles or "").strip()
+    if not query_smiles:
+        return query_smiles
+    if "*" not in query_smiles:
+        return query_smiles
+    try:
+        from rdkit import Chem
+        mol = Chem.MolFromSmiles(query_smiles)
+        if not mol:
+            return query_smiles
+        try:
+            from mmpdblib import rgroup2smarts
+        except Exception:
+            return query_smiles
+        smarts = rgroup2smarts.rgroup_mol_to_smarts(mol)
+        return smarts or query_smiles
+    except Exception:
+        return query_smiles
+
 def _resolve_mmpdb_cmd() -> Optional[List[str]]:
     """Resolve mmpdb CLI command with a module fallback."""
     if shutil.which('mmpdb'):
         return ['mmpdb']
     if importlib.util.find_spec('mmpdb') is not None:
         return [sys.executable, '-m', 'mmpdb']
+    if importlib.util.find_spec('mmpdblib') is not None:
+        return [sys.executable, '-m', 'mmpdblib']
     return None
 
 try:
@@ -129,7 +152,7 @@ class MMPEngine:
         all_candidates = []
         per_query_limit = max(1, max_candidates // max(1, len(query_smiles_list))) if max_candidates else 0
         for query_smiles in query_smiles_list:
-            query_smiles = query_smiles.strip()
+            query_smiles = _normalize_rule_query(query_smiles.strip())
             if not query_smiles:
                 continue
             query_candidates = query_mmpdb_generate_command_line(
