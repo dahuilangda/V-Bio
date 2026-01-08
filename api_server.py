@@ -255,6 +255,45 @@ try:
 except OSError as e:
     logger.critical(f"Failed to create results directory {config.RESULTS_BASE_DIR}: {e}")
 
+def _find_result_archive(task_id: str) -> Optional[str]:
+    """Best-effort lookup for a task's result archive on disk."""
+    base_dir = app.config.get('UPLOAD_FOLDER')
+    if not base_dir or not os.path.isdir(base_dir):
+        return None
+
+    candidates = [
+        f"{task_id}_results.zip",
+        f"{task_id}_affinity_results.zip",
+        f"{task_id}_virtual_screening_results.zip",
+        f"{task_id}_lead_optimization_results.zip",
+    ]
+    for name in candidates:
+        candidate_path = os.path.join(base_dir, name)
+        if os.path.exists(candidate_path):
+            return name
+
+    try:
+        matches = glob.glob(os.path.join(base_dir, f"{task_id}_*.zip"))
+        if matches:
+            newest = max(matches, key=os.path.getmtime)
+            return os.path.basename(newest)
+    except Exception as exc:
+        logger.warning(f"Failed to scan results directory for task {task_id}: {exc}")
+
+    return None
+
+def _get_tracker_status(task_id: str) -> tuple[Optional[Dict], Optional[str]]:
+    """Fetch status/heartbeat from Redis when Celery state is unavailable."""
+    try:
+        redis_client = get_redis_client()
+        status_raw = redis_client.get(f"task_status:{task_id}")
+        heartbeat = redis_client.get(f"task_heartbeat:{task_id}")
+        status_data = json.loads(status_raw) if status_raw else None
+        return status_data, heartbeat
+    except Exception as exc:
+        logger.warning(f"Failed to fetch tracker status for task {task_id}: {exc}")
+        return None, None
+
 # --- Authentication Decorator ---
 def require_api_token(f):
     """
@@ -728,8 +767,29 @@ def get_task_status(task_id):
     info = task_result.info
 
     if task_result.state == 'PENDING':
-        response['info']['status'] = 'Task is waiting in the queue or the task ID does not exist.'
-        logger.info(f"Task {task_id} is PENDING or non-existent.")
+        archive_name = _find_result_archive(task_id)
+        if archive_name:
+            response['state'] = 'SUCCESS'
+            response['info'] = {
+                'status': 'Task completed (result file found on server).',
+                'result_file': archive_name
+            }
+            logger.info(f"Task {task_id} marked SUCCESS via result archive '{archive_name}'.")
+        else:
+            tracker_status, heartbeat = _get_tracker_status(task_id)
+            if tracker_status or heartbeat:
+                response['state'] = 'PROGRESS'
+                status_message = (tracker_status or {}).get('details') or (tracker_status or {}).get('status') or 'Task is running'
+                response['info'] = {
+                    'status': status_message,
+                    'message': status_message,
+                    'tracker': tracker_status or {},
+                    'heartbeat': heartbeat
+                }
+                logger.info(f"Task {task_id} is running per tracker; Celery state PENDING.")
+            else:
+                response['info']['status'] = 'Task is waiting in the queue or the task ID does not exist.'
+                logger.info(f"Task {task_id} is PENDING or non-existent.")
     elif task_result.state == 'SUCCESS':
         response['info'] = info if isinstance(info, dict) else {'result': str(info)}
         response['info']['status'] = 'Task completed successfully.'
@@ -757,14 +817,23 @@ def download_results(task_id):
     logger.info(f"Received download request for task ID: {task_id}")
     task_result = AsyncResult(task_id, app=celery_app)
     
+    result_info = None
     if not task_result.ready():
-        logger.warning(f"Attempted to download results for task {task_id} which is not ready. State: {task_result.state}")
-        return jsonify({'error': 'Task has not completed yet.', 'state': task_result.state}), 404
-            
-    result_info = task_result.info
-    if not isinstance(result_info, dict) or 'result_file' not in result_info or not result_info['result_file']:
-        logger.error(f"Result file information missing or invalid for task {task_id}. Info: {result_info}")
-        return jsonify({'error': 'Result file information not found in task metadata or is invalid.'}), 404
+        archive_name = _find_result_archive(task_id)
+        if not archive_name:
+            logger.warning(f"Attempted to download results for task {task_id} which is not ready. State: {task_result.state}")
+            return jsonify({'error': 'Task has not completed yet.', 'state': task_result.state}), 404
+        logger.info(f"Serving result archive for task {task_id} without Celery readiness: {archive_name}")
+        result_info = {'result_file': archive_name}
+    else:
+        result_info = task_result.info
+        if not isinstance(result_info, dict) or 'result_file' not in result_info or not result_info['result_file']:
+            archive_name = _find_result_archive(task_id)
+            if not archive_name:
+                logger.error(f"Result file information missing or invalid for task {task_id}. Info: {result_info}")
+                return jsonify({'error': 'Result file information not found in task metadata or is invalid.'}), 404
+            logger.info(f"Recovered result archive for task {task_id} from disk: {archive_name}")
+            result_info = {'result_file': archive_name}
 
     filename = secure_filename(result_info['result_file'])
     directory = app.config['UPLOAD_FOLDER']
