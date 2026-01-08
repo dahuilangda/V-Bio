@@ -1098,6 +1098,60 @@ def render_designer_page():
                         st.error(f"❌ 设计任务失败: {error_msg}")
                         st.session_state.designer_error = {"error_message": error_msg, "type": "Task Error"}
                     
+                    elif "STOP" in current_state:
+                        work_dir = st.session_state.get('designer_work_dir', '/tmp')
+                        results_hint = False
+                        try:
+                            search_dirs = [work_dir, os.path.join(work_dir, 'results')]
+                            for search_dir in search_dirs:
+                                if not search_dir or not os.path.isdir(search_dir):
+                                    continue
+                                for filename in os.listdir(search_dir):
+                                    if (
+                                        (filename.startswith('design_summary_') and filename.endswith('.csv'))
+                                        or (filename.startswith('design_run_summary') and filename.endswith('.csv'))
+                                        or ('best_sequences' in filename and filename.endswith('.json'))
+                                    ):
+                                        results_hint = True
+                                        break
+                                if results_hint:
+                                    break
+                        except Exception:
+                            results_hint = False
+
+                        if results_hint:
+                            st.success("🎉 检测到已生成的结果，正在加载...")
+                            try:
+                                results = load_designer_results(st.session_state.designer_task_id, work_dir)
+                                st.session_state.designer_results = results
+                                st.toast("已加载停止前的结果", icon="📦")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ 加载结果时发生错误: {e}")
+                                st.session_state.designer_error = {"error_message": str(e), "type": "Result Loading Error"}
+                        else:
+                            st.warning("⏹️ 设计任务已停止，未检测到可加载的结果。")
+                            log_file = os.path.join(work_dir, 'design.log')
+                            if os.path.exists(log_file):
+                                try:
+                                    with open(log_file, 'r') as f:
+                                        log_lines = f.read().strip().split('\n')
+                                    if log_lines:
+                                        st.caption(f"日志最后几行: {' | '.join(log_lines[-3:])}")
+                                except Exception:
+                                    pass
+                            col_action = st.columns(2)
+                            with col_action[0]:
+                                if st.button("🔄 重新检查结果", key="designer_recheck_stopped", use_container_width=True):
+                                    st.rerun()
+                            with col_action[1]:
+                                if st.button("🧹 清理任务状态", key="designer_clear_stopped", use_container_width=True):
+                                    URLStateManager.clear_url_params()
+                                    for key in ['designer_task_id', 'designer_results', 'designer_error']:
+                                        if key in st.session_state:
+                                            del st.session_state[key]
+                                    st.rerun()
+
                     elif current_state == 'RUNNING':
                         progress = status_data.get('progress', {})
                         progress_value = min(1.0, max(0.0, progress.get('estimated_progress', 0.0)))
