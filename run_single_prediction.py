@@ -1494,7 +1494,8 @@ def run_alphafold3_backend(
 
     # Patch alphafold3 inside the container to avoid StopIteration when hmmsearch returns
     # an empty Stockholm (no template hits). sitecustomize is auto-imported when present on sys.path.
-    sitecustomize_code = """
+    # Use a raw string to preserve backslashes in the embedded Python source.
+    sitecustomize_code = r"""
 import logging
 try:
     from alphafold3.data import parsers as _af3_parsers
