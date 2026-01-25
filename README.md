@@ -291,6 +291,7 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
     * `backend`（可选）:
       * `boltz`（默认）: 运行原有的 Boltz 结构预测流程
       * `alphafold3`: 在配置好 AlphaFold3 环境后自动生成 FASTA/JSON/MSA 并触发 Docker 推理；若未配置相关环境变量，则仅导出输入文件
+    * `seed`（可选）: 固定随机种子（整数）。用于复现实验；不填则使用随机种子。
   * **示例**:
     ```bash
     curl -X POST \
@@ -298,11 +299,14 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
          -F "yaml_file=@/path/to/your/input.yaml" \
          -F "use_msa_server=true" \
          -F "backend=alphafold3" \
+         -F "seed=42" \
          http://127.0.0.1:5000/predict
     ```
   * **说明**:
     * 前端页面的「选择预测后端」选项会自动填充同名字段；在环境配置完整时，下载的结果 zip 会包含 `af3/` 目录（含 `af3_input.fasta`、`fold_input.json`、`msa/` 与 Docker 输出），可直接交给官方 AF3 流程使用。
     * 当 `alphafold3` 后端的 YAML 同时声明 `affinity` 属性时，系统会额外运行一遍 Boltz 的亲和力流程，产出的结构/亲和力分析将被复制到 AF3 结果目录中并随 zip 一并返回。
+    * Boltz2 结构预测默认生成 5 个候选结构，前端/结果解析会优先展示 `model_0`（最高置信的模型）。所有候选均保留在 ZIP 内。
+    * AlphaFold3 在设置 `seed` 时会生成 5 个 `modelSeeds`（`seed` ~ `seed+4`）；未设置 `seed` 时使用默认单种子。
 
 #### **虚拟筛选 API**
 

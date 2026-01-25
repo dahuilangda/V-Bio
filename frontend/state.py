@@ -13,6 +13,9 @@ def initialize_session_state():
     if 'properties' not in st.session_state: st.session_state.properties = {'affinity': False, 'binder': None}
     if 'use_msa_server' not in st.session_state: st.session_state.use_msa_server = False
     if 'prediction_backend' not in st.session_state: st.session_state.prediction_backend = 'boltz'
+    if 'prediction_seed' not in st.session_state: st.session_state.prediction_seed = None
+    if 'prediction_seed_enabled' not in st.session_state: st.session_state.prediction_seed_enabled = False
+    if 'prediction_seed_value' not in st.session_state: st.session_state.prediction_seed_value = 42
     if 'designer_backend' not in st.session_state: st.session_state.designer_backend = 'boltz'
 
     # Designer-related session state

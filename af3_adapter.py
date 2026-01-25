@@ -82,6 +82,7 @@ class AF3Utils:
         sequence_id_map: Optional[Dict[str, List[str]]] = None,
         extra_molecules: Optional[List[MoleculeComponent]] = None,
         skip_msa_fields: bool = False,
+        model_seeds: Optional[List[int]] = None,
     ) -> None:
         self._id_counter = 1
         sequence_id_map = sequence_id_map or {}
@@ -93,6 +94,7 @@ class AF3Utils:
             pairedmsa,
             sequence_id_map,
             skip_msa_fields,
+            model_seeds,
         )
         if extra_molecules:
             content = self.add_extra_molecules(content, extra_molecules)
@@ -117,6 +119,7 @@ class AF3Utils:
         pairedmsa: Optional[List[str]],
         sequence_id_map: Dict[str, List[str]],
         skip_msa_fields: bool,
+        model_seeds: Optional[List[int]] = None,
     ) -> Dict[str, object]:
         sequences: List[Dict[str, object]] = []
         used_ids: Set[str] = set()
@@ -154,12 +157,16 @@ class AF3Utils:
                     protein_entry["protein"]["pairedMsa"] = ""
             sequences.append(protein_entry)
         self._used_ids = set().union(*(entry["protein"]["id"] for entry in sequences if "protein" in entry))
+        if model_seeds and all(isinstance(seed, int) for seed in model_seeds):
+            resolved_seeds = model_seeds
+        else:
+            resolved_seeds = [1]
         content: Dict[str, object] = {
             "dialect": "alphafold3",
             "version": 1,
             "name": f"{name}",
             "sequences": sequences,
-            "modelSeeds": [1],
+            "modelSeeds": resolved_seeds,
             "bondedAtomPairs": None,
             "userCCD": None,
         }
@@ -543,6 +550,7 @@ def build_af3_json(
     prep: AF3Preparation,
     unpaired_msa: Optional[List[str]],
     use_external_msa: bool = True,
+    model_seeds: Optional[List[int]] = None,
 ) -> Dict[str, object]:
     af3 = AF3Utils(
         prep.jobname,
@@ -553,6 +561,7 @@ def build_af3_json(
         prep.sequence_to_chain_ids,
         prep.other_molecules,
         skip_msa_fields=not use_external_msa,
+        model_seeds=model_seeds,
     )
     content = af3.content
     if prep.bond_constraints:

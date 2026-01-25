@@ -7,7 +7,13 @@ import os
 from .constants import API_URL
 API_TOKEN = os.getenv('BOLTZ_API_TOKEN', 'development-api-token')
 
-def submit_job(yaml_content: str, use_msa: bool, model_name: str = None, backend: str = 'boltz'):
+def submit_job(
+    yaml_content: str,
+    use_msa: bool,
+    model_name: str = None,
+    backend: str = 'boltz',
+    seed: int | None = None,
+):
     """
     Sends a prediction request to the backend API.
     """
@@ -21,6 +27,8 @@ def submit_job(yaml_content: str, use_msa: bool, model_name: str = None, backend
     }
     if model_name:
         data['model'] = model_name
+    if seed is not None:
+        data['seed'] = str(seed)
 
     response = requests.post(endpoint, headers=headers, files=files, data=data)
     response.raise_for_status() 
@@ -98,23 +106,19 @@ def download_and_process_results(task_id: str):
     af3_primary_cif = None
 
     with zipfile.ZipFile(io.BytesIO(raw_zip_bytes), 'r') as zip_ref:
-        for filename in zip_ref.namelist():
-            if filename.endswith('.cif'):
-                file_bytes = zip_ref.read(filename).decode('utf-8')
-                if "af3/output/" in filename:
-                    backend = "alphafold3"
+        names = zip_ref.namelist()
+        is_af3 = any("af3/output/" in name for name in names)
+
+        if is_af3:
+            backend = "alphafold3"
+            for filename in names:
+                if filename.endswith('.cif') and "af3/output/" in filename:
+                    file_bytes = zip_ref.read(filename).decode('utf-8')
                     # Prefer aggregated model (without seed-specific directories)
                     if af3_primary_cif is None or ("seed-" not in filename and "model.cif" in filename):
                         af3_primary_cif = file_bytes
-                else:
-                    # Use the first non-AF3 CIF as the default structure
-                    if not cif_content:
-                        cif_content = file_bytes
-            elif 'confidence' in filename and filename.endswith('.json'):
-                json_bytes = zip_ref.read(filename)
-                data = json.loads(json_bytes)
-                if "af3/output/" in filename:
-                    backend = "alphafold3"
+                elif 'confidence' in filename and filename.endswith('.json') and "af3/output/" in filename:
+                    data = json.loads(zip_ref.read(filename))
                     if "summary_confidences" in filename:
                         # Prefer top-level summary (without seed-specific directory)
                         if af3_summary_conf is None or "seed-" not in filename:
@@ -122,10 +126,79 @@ def download_and_process_results(task_id: str):
                     elif "confidences.json" in filename:
                         if af3_confidences is None or "seed-" not in filename:
                             af3_confidences = data
-                else:
-                    confidence_data = data
-            elif 'affinity' in filename and filename.endswith('.json'):
+        else:
+            def _score_boltz_structure(name: str) -> int:
+                lower = name.lower()
+                score = 100
+                if lower.endswith('.cif'):
+                    score -= 5
+                if 'model_0' in lower or 'ranked_0' in lower:
+                    score -= 20
+                elif 'model_' in lower or 'ranked_' in lower:
+                    score -= 5
+                return score
+
+            def _score_boltz_confidence(name: str) -> int:
+                lower = name.lower()
+                score = 100
+                if 'confidence_' in lower:
+                    score -= 5
+                if 'model_0' in lower or 'ranked_0' in lower:
+                    score -= 20
+                elif 'model_' in lower or 'ranked_' in lower:
+                    score -= 5
+                return score
+
+            def _extract_record_id(name: str) -> str | None:
+                base = os.path.basename(name)
+                if "_model_" in base:
+                    return base.split("_model_")[0]
+                return None
+
+            cif_candidates = [
+                name for name in names
+                if name.lower().endswith(('.cif', '.pdb')) and "af3/output/" not in name
+            ]
+            best_cif_name = None
+            best_cif_score = None
+            for name in cif_candidates:
+                score = _score_boltz_structure(name)
+                if best_cif_score is None or score < best_cif_score:
+                    best_cif_score = score
+                    best_cif_name = name
+
+            selected_record_id = _extract_record_id(best_cif_name) if best_cif_name else None
+            if best_cif_name:
+                cif_content = zip_ref.read(best_cif_name).decode('utf-8')
+
+            confidence_candidates = [
+                name for name in names
+                if 'confidence' in name and name.endswith('.json') and "af3/output/" not in name
+            ]
+            best_conf_name = None
+            best_conf_score = None
+
+            if selected_record_id:
+                preferred_suffix = f"confidence_{selected_record_id}_model_0.json"
+                for name in confidence_candidates:
+                    if name.endswith(preferred_suffix):
+                        best_conf_name = name
+                        break
+
+            if best_conf_name is None:
+                for name in confidence_candidates:
+                    score = _score_boltz_confidence(name)
+                    if best_conf_score is None or score < best_conf_score:
+                        best_conf_score = score
+                        best_conf_name = name
+
+            if best_conf_name:
+                confidence_data = json.loads(zip_ref.read(best_conf_name))
+
+        for filename in names:
+            if 'affinity' in filename and filename.endswith('.json'):
                 affinity_data = json.loads(zip_ref.read(filename))
+                break
 
     # Finalize CIF content for AF3 runs if present
     if backend == "alphafold3" and af3_primary_cif:

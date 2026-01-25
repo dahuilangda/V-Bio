@@ -46,3 +46,4 @@ virtual_screening/LM
 virtual_screening/small_molecule_results/
 method.md
 lead_optimization/data/chembl_*
+docs/

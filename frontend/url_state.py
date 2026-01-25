@@ -26,7 +26,15 @@ class URLStateManager:
                 del st.query_params[key]
     
     @staticmethod
-    def update_url_for_prediction_task(task_id: str, task_type: str = "prediction", components=None, constraints=None, properties=None, backend: str = None):
+    def update_url_for_prediction_task(
+        task_id: str,
+        task_type: str = "prediction",
+        components=None,
+        constraints=None,
+        properties=None,
+        backend: str = None,
+        seed: int | None = None,
+    ):
         """为预测任务更新URL参数，包括配置信息"""
         import json
         params = {
@@ -51,12 +59,13 @@ class URLStateManager:
                         }
                         simplified_components.append(simplified_comp)
                 
-                if simplified_components or constraints or properties or backend:
+                if simplified_components or constraints or properties or backend or seed is not None:
                     params['config'] = json.dumps({
                         'components': simplified_components,
                         'constraints': constraints or [],
                         'properties': properties or {},
-                        'backend': backend or 'boltz'
+                        'backend': backend or 'boltz',
+                        'seed': seed,
                     })
             except Exception as e:
                 # 如果序列化失败，不保存配置
@@ -206,6 +215,7 @@ class URLStateManager:
                             components = config_data.get('components', [])
                             constraints = config_data.get('constraints', [])
                             properties = config_data.get('properties', {})
+                            seed = config_data.get('seed')
                             backend = config_data.get('backend')
                             
                             # 恢复组件配置
@@ -234,6 +244,15 @@ class URLStateManager:
                             
                             if backend in ('boltz', 'alphafold3'):
                                 st.session_state.prediction_backend = backend
+                            if seed is not None:
+                                try:
+                                    seed_value = int(seed)
+                                except (TypeError, ValueError):
+                                    seed_value = None
+                                if seed_value is not None:
+                                    st.session_state.prediction_seed = seed_value
+                                    st.session_state.prediction_seed_value = seed_value
+                                    st.session_state.prediction_seed_enabled = True
                         
                         except (json.JSONDecodeError, KeyError) as e:
                             print(f"Failed to restore config from URL: {e}")

@@ -53,6 +53,19 @@ MSA_CACHE_CONFIG = {
 # to scan the whole file (may take time but catches deep corruption).
 AF3_VALIDATE_MAX_LINES = os.environ.get("ALPHAFOLD3_VALIDATE_MAX_LINES")
 AF3_VALIDATE_MAX_LINES = int(AF3_VALIDATE_MAX_LINES) if AF3_VALIDATE_MAX_LINES else 200000
+AF3_DEFAULT_MODEL_SEED_COUNT = 5
+
+
+def build_af3_model_seeds(seed: Optional[int], count: int = AF3_DEFAULT_MODEL_SEED_COUNT) -> Optional[List[int]]:
+    if seed is None:
+        return None
+    try:
+        base_seed = int(seed)
+    except (TypeError, ValueError):
+        return None
+    if count <= 1:
+        return [base_seed]
+    return [base_seed + offset for offset in range(count)]
 
 
 def validate_af3_database_files(database_dir: str) -> None:
@@ -1396,6 +1409,11 @@ def run_boltz_backend(
     cli_args['data'] = tmp_yaml_path
     cli_args['out_dir'] = temp_dir
 
+    if 'diffusion_samples' not in cli_args or cli_args['diffusion_samples'] is None:
+        effective_model = str(cli_args.get('model') or model_name or 'boltz2').lower()
+        if effective_model == 'boltz2':
+            cli_args['diffusion_samples'] = 5
+
     if MSA_SERVER_URL and MSA_SERVER_URL != "":
         print(f"🧬 开始使用 MSA 服务器生成多序列比对: {MSA_SERVER_URL}", file=sys.stderr)
         msa_generated = generate_msa_for_sequences(yaml_content, temp_dir)
@@ -1444,6 +1462,7 @@ def run_alphafold3_backend(
     yaml_content: str,
     output_archive_path: str,
     use_msa_server: bool,
+    seed: Optional[int] = None,
 ) -> None:
     print("🚀 Using AlphaFold3 backend (AF3 input preparation)", file=sys.stderr)
 
@@ -1476,7 +1495,13 @@ def run_alphafold3_backend(
         unpaired_msa = None
 
     fasta_content = build_af3_fasta(prep)
-    af3_json = build_af3_json(prep, unpaired_msa, use_external_msa=use_msa_server)
+    model_seeds = build_af3_model_seeds(seed)
+    af3_json = build_af3_json(
+        prep,
+        unpaired_msa,
+        use_external_msa=use_msa_server,
+        model_seeds=model_seeds,
+    )
 
     af3_input_dir = os.path.join(temp_dir, "af3_input")
     af3_output_dir = os.path.join(temp_dir, "af3_output")
@@ -1748,13 +1773,22 @@ def main():
             raise ValueError(f"Unsupported backend '{backend}'.")
 
         model_name = predict_args.pop("model_name", None)
+        seed = predict_args.pop("seed", None)
 
         use_msa_server = predict_args.get("use_msa_server", False)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             if backend == "alphafold3":
-                run_alphafold3_backend(temp_dir, yaml_content, output_archive_path, use_msa_server)
+                run_alphafold3_backend(
+                    temp_dir,
+                    yaml_content,
+                    output_archive_path,
+                    use_msa_server,
+                    seed=seed,
+                )
             else:
+                if seed is not None:
+                    predict_args["seed"] = seed
                 run_boltz_backend(temp_dir, yaml_content, output_archive_path, predict_args, model_name)
 
             if not os.path.exists(output_archive_path):

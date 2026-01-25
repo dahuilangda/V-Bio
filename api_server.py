@@ -397,11 +397,13 @@ def handle_predict():
     target_queue = config.HIGH_PRIORITY_QUEUE if priority == 'high' else config.DEFAULT_QUEUE
     logger.info(f"Prediction priority: {priority}, targeting queue: '{target_queue}' for client {request.remote_addr}.")
 
+    seed_value = _parse_int(request.form.get('seed'))
     predict_args = {
         'yaml_content': yaml_content,
         'use_msa_server': use_msa_server,
         'model_name': model_name,
-        'backend': backend
+        'backend': backend,
+        'seed': seed_value,
     }
 
     try:

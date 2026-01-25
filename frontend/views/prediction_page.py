@@ -409,7 +409,29 @@ def render_prediction_page():
             st.rerun()
         if selected_backend == 'alphafold3':
             st.info("AlphaFold3 后端：勾选 MSA 使用外部 MMseqs 结果，不勾选则跳过外部 MSA，直接使用 AlphaFold3 自带流程。", icon="ℹ️")
-        
+
+        seed_enabled = st.checkbox(
+            "🎲 固定随机种子 (可选)",
+            value=st.session_state.get('prediction_seed_enabled', False),
+            key="prediction_seed_enabled",
+            disabled=is_running,
+            help="启用后将使用固定随机种子，便于重复得到相同候选结构。"
+        )
+        if seed_enabled:
+            seed_value = st.number_input(
+                "随机种子值",
+                min_value=0,
+                max_value=2**31 - 1,
+                step=1,
+                value=int(st.session_state.get('prediction_seed_value', 42)),
+                key="prediction_seed_value",
+                disabled=is_running,
+                help="建议使用非负整数，例如 42。"
+            )
+            st.session_state.prediction_seed = int(seed_value)
+        else:
+            st.session_state.prediction_seed = None
+
         has_ligand_component = any(comp['type'] == 'ligand' for comp in st.session_state.components)
         if has_ligand_component:
             affinity_value = st.checkbox(
@@ -689,7 +711,8 @@ def render_prediction_page():
                     yaml_content=yaml_preview,
                     use_msa=use_msa_for_job,
                     model_name=model_name,
-                    backend=st.session_state.prediction_backend
+                    backend=st.session_state.prediction_backend,
+                    seed=st.session_state.get('prediction_seed')
                 )
                 st.session_state.task_id = task_id
                 
@@ -699,7 +722,8 @@ def render_prediction_page():
                     components=st.session_state.components,
                     constraints=st.session_state.constraints, 
                     properties=st.session_state.properties,
-                    backend=st.session_state.prediction_backend
+                    backend=st.session_state.prediction_backend,
+                    seed=st.session_state.get('prediction_seed')
                 )
                 
                 if use_msa_for_job:

@@ -373,8 +373,10 @@ def find_best_structure_file(results_path: str) -> Optional[str]:
                 priority -= 10
             if 'model.cif' in lower:
                 priority -= 10
-            if 'ranked_0' in lower or 'ranked_1' in lower:
-                priority -= 6
+            if 'model_0' in lower or 'ranked_0' in lower:
+                priority -= 12
+            elif 'model_' in lower or 'ranked_' in lower:
+                priority -= 4
             if 'seed-' in rel_lower:
                 priority += 4
 
