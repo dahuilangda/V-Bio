@@ -281,6 +281,24 @@ def _mmpdb_available() -> bool:
     except Exception:
         return False
 
+
+def _extract_protein_chain_ids_from_pdb(pdb_path: str) -> list[str]:
+    """Extract unique protein chain IDs from ATOM records in a PDB file."""
+    chain_ids: set[str] = set()
+    try:
+        with open(pdb_path, "r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if not line.startswith("ATOM"):
+                    continue
+                if len(line) <= 21:
+                    continue
+                chain_id = line[21].strip()
+                if chain_id:
+                    chain_ids.add(chain_id)
+    except Exception:
+        return []
+    return sorted(chain_ids)
+
 def _load_lead_optimization_config():
     """Load lead_optimization config without relying on package import."""
     config_path = BASE_DIR / "lead_optimization" / "config.py"
@@ -922,13 +940,20 @@ def boltz2score_task(self, score_args: dict):
             shutil.copyfile(str(combined_pdb_path), combined_pdb_copy)
             extra_archive_files.append(combined_pdb_copy)
 
+            detected_target_chain = None
+            if not score_args.get('target_chain'):
+                detected_chain_ids = _extract_protein_chain_ids_from_pdb(combined_pdb_copy)
+                if detected_chain_ids:
+                    detected_target_chain = ",".join(detected_chain_ids)
+
             combined_cif_copy = None
             if combined_cif_path and Path(combined_cif_path).suffix.lower() == ".cif" and os.path.exists(combined_cif_path):
                 combined_cif_copy = os.path.join(task_temp_dir, "combined_complex.cif")
                 shutil.copyfile(str(combined_cif_path), combined_cif_copy)
                 extra_archive_files.append(combined_cif_copy)
 
-            input_file_path = combined_cif_copy if combined_cif_copy else combined_pdb_copy
+            # Prefer PDB for scoring to avoid mmCIF conversion edge cases with external tools
+            input_file_path = combined_pdb_copy
             input_filename = os.path.basename(input_file_path)
 
             inputs_dir = os.path.join(task_temp_dir, "inputs")
@@ -962,7 +987,7 @@ def boltz2score_task(self, score_args: dict):
             "--num_workers", "0",
         ]
 
-        target_chain = score_args.get('target_chain')
+        target_chain = score_args.get('target_chain') or (detected_target_chain if using_separate_inputs else None)
         ligand_chain = score_args.get('ligand_chain')
         if using_separate_inputs:
             target_chain = target_chain or "A"

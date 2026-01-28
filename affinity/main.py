@@ -781,12 +781,16 @@ class Boltzina:
         # Clean and validate protein content for proper PDB format
         protein_content = self._clean_protein_content(protein_content)
         
-        # Generate ligand PDB lines preserving original coordinates
-        # Note: _generate_ligand_pdb_lines_preserve_coords now uses the already-assigned unique name
-        ligand_pdb_lines = self._generate_ligand_pdb_lines_preserve_coords(ligand_mol)
+        # Generate ligand PDB lines and CONECT bonds preserving original coordinates
+        # Note: _generate_ligand_pdb_lines_preserve_coords now returns (lines, bonds)
+        ligand_pdb_lines, ligand_bonds = self._generate_ligand_pdb_lines_preserve_coords(ligand_mol)
         
         # Combine protein and ligand into standard PDB format
-        combined_content = self._combine_to_standard_pdb(protein_content, ligand_pdb_lines)
+        combined_content = self._combine_to_standard_pdb(
+            protein_content,
+            ligand_pdb_lines,
+            ligand_bonds=ligand_bonds,
+        )
         
         # Write combined file
         combined_file.write_text(combined_content)
@@ -801,11 +805,10 @@ class Boltzina:
         This helps avoid alignment mismatches in downstream processing.
         """
         lines = []
-        atom_count = 0
-        seen_residues = set()
         
         for line in protein_content.split('\n'):
-            line = line.strip()
+            # Preserve fixed-width columns; only trim trailing whitespace/newlines.
+            line = line.rstrip()
             
             # Skip empty lines and problematic record types
             if not line:
@@ -824,9 +827,7 @@ class Boltzina:
                     continue
                     
                 try:
-                    # Extract and validate fields
                     record_type = line[0:6].strip()
-                    atom_serial = line[6:11].strip()
                     atom_name = line[12:16].strip()
                     alt_loc = line[16:17].strip()
                     res_name = line[17:20].strip()
@@ -844,72 +845,27 @@ class Boltzina:
                     # Skip alternative locations (keep only the first occurrence)
                     if alt_loc and alt_loc != 'A' and alt_loc != ' ':
                         continue
-                    
-                    # Only keep standard protein residues for ATOM records
-                    if record_type == 'ATOM':
-                        standard_aa = {
-                            'ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY',
-                            'HIS', 'ILE', 'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER',
-                            'THR', 'TRP', 'TYR', 'VAL'
-                        }
-                        if res_name not in standard_aa:
-                            # Skip non-standard residues in ATOM records
-                            continue
+
+                    # Ensure a chain ID exists for downstream parsing
+                    if len(line) > 21 and line[21] == ' ':
+                        line = f"{line[:21]}A{line[22:]}"
                     
                     # For HETATM, skip if it's water or common ions (we only want ligands)
                     elif record_type == 'HETATM':
                         skip_hetatm = {'HOH', 'WAT', 'H2O', 'NA', 'CL', 'MG', 'CA', 'K', 'ZN', 'FE', 'SO4', 'PO4'}
                         if res_name in skip_hetatm:
                             continue
-                    
-                    # Renumber atoms sequentially
-                    atom_count += 1
-                    
-                    # Reconstruct the line with proper formatting
-                    formatted_line = f"{record_type:<6}{atom_count:>5} {atom_name:<4}{alt_loc:1}{res_name:>3} {chain_id:1}{res_seq:>4}{icode:1}   {float(x):8.3f}{float(y):8.3f}{float(z):8.3f}"
-                    
-                    # Add occupancy and B-factor if available, otherwise use defaults
-                    if len(line) >= 60:
-                        occ = line[54:60].strip()
-                        b_factor = line[60:66].strip() if len(line) >= 66 else "20.00"
-                        try:
-                            occ_val = float(occ) if occ else 1.00
-                            b_val = float(b_factor) if b_factor else 20.00
-                        except ValueError:
-                            occ_val = 1.00
-                            b_val = 20.00
-                        formatted_line += f"{occ_val:6.2f}{b_val:6.2f}"
-                    else:
-                        formatted_line += "  1.00 20.00"
-                    
-                    # Add element symbol if available
-                    if len(line) >= 78:
-                        element = line[76:78].strip()
-                        if element:
-                            formatted_line += f"          {element:>2}"
-                        else:
-                            # Guess element from atom name
-                            element = atom_name[0] if atom_name else "C"
-                            formatted_line += f"          {element:>2}"
-                    else:
-                        # Guess element from atom name
-                        element = atom_name[0] if atom_name else "C"
-                        formatted_line += f"          {element:>2}"
-                    
-                    lines.append(formatted_line)
+                    # Preserve original ATOM/HETATM line to avoid column shifts
+                    lines.append(line)
                     
                 except (ValueError, IndexError) as e:
                     # Skip malformed lines
                     print(f"Warning: Skipping malformed line: {line[:50]}... Error: {e}")
                     continue
                     
-            # Keep other essential records
-            elif line.startswith(('MODEL', 'ENDMDL', 'TER', 'END', 'CONECT')):
+            # Keep other essential records (skip END/ENDMDL to append ligand later)
+            elif line.startswith(('MODEL', 'TER', 'CONECT')):
                 lines.append(line)
-        
-        # Ensure we have a proper ending
-        if lines and not lines[-1].startswith('END'):
-            lines.append('END')
         
         cleaned_content = '\n'.join(lines)
         
@@ -964,12 +920,13 @@ class Boltzina:
         except Exception as e:
             raise ValueError(f"Failed to convert CIF to PDB: {e}")
 
-    def _generate_ligand_pdb_lines_preserve_coords(self, ligand_mol) -> str:
-        """Generate ligand PDB lines preserving original coordinates from SDF/MOL/MOL2/PDB inputs."""
+    def _generate_ligand_pdb_lines_preserve_coords(self, ligand_mol) -> tuple[str, list[tuple[int, int]]]:
+        """Generate ligand PDB lines and bond pairs preserving original coordinates."""
         from rdkit.Chem import AllChem
         
         ligand_lines = ""
         atom_serial = 1  # Will be renumbered later
+        bond_pairs: list[tuple[int, int]] = []
         
         # Use unified naming strategy: prefer "LIG", fall back to unique name if conflicts
         resname = "LIG"
@@ -991,23 +948,33 @@ class Boltzina:
             pos = conf.GetAtomPosition(i)
             # Use original coordinates directly - NO TRANSLATION
             x, y, z = pos.x, pos.y, pos.z
-            
+
             # Get element and create meaningful atom name
             element = atom.GetSymbol()
-            
-            # Count elements for naming
-            if element not in element_counts:
-                element_counts[element] = 0
-            element_counts[element] += 1
-            
-            # Create atom name following PDB conventions
-            if element == 'H':
-                atom_name = f"H{element_counts[element]}"
-            elif element_counts[element] == 1:
-                atom_name = element
-            else:
-                atom_name = f"{element}{element_counts[element]}"
-            
+
+            atom_name = None
+            # Prefer original atom names from the ligand file when available
+            for prop in ("name", "_TriposAtomName", "_atomName"):
+                if atom.HasProp(prop):
+                    raw_name = atom.GetProp(prop).strip()
+                    if raw_name:
+                        atom_name = raw_name
+                        break
+
+            if not atom_name:
+                # Count elements for naming
+                if element not in element_counts:
+                    element_counts[element] = 0
+                element_counts[element] += 1
+
+                # Create atom name following PDB conventions
+                if element == 'H':
+                    atom_name = f"H{element_counts[element]}"
+                elif element_counts[element] == 1:
+                    atom_name = element
+                else:
+                    atom_name = f"{element}{element_counts[element]}"
+
             # Ensure atom name is properly formatted (left-aligned, max 4 chars)
             atom_name = atom_name[:4].ljust(4)
             
@@ -1020,9 +987,25 @@ class Boltzina:
             if i < 3:
                 print(f"  Atom {i+1} ({element}): ({x:.3f}, {y:.3f}, {z:.3f})")
         
-        return ligand_lines.rstrip('\n')  # Remove trailing newline
+        # Collect bond pairs using ligand-local 1-based indices
+        for bond in ligand_mol.GetBonds():
+            a = bond.GetBeginAtomIdx() + 1
+            b = bond.GetEndAtomIdx() + 1
+            bond_pairs.append((a, b))
 
-    def _combine_to_standard_pdb(self, protein_content: str, ligand_lines: str) -> str:
+        if bond_pairs:
+            print(f"Generated {len(bond_pairs)} ligand bonds for CONECT records")
+        else:
+            print("Warning: No ligand bonds detected; CONECT records will be empty")
+
+        return ligand_lines.rstrip('\n'), bond_pairs  # Remove trailing newline
+
+    def _combine_to_standard_pdb(
+        self,
+        protein_content: str,
+        ligand_lines: str,
+        ligand_bonds: Optional[list[tuple[int, int]]] = None,
+    ) -> str:
         """Combine protein and ligand into a standard PDB format with improved formatting."""
         lines = []
         
@@ -1034,57 +1017,64 @@ class Boltzina:
         lines.append("REMARK   2 PROTEIN-LIGAND COMPLEX FOR AFFINITY PREDICTION")
         lines.append("REMARK   3 GENERATED BY BOLTZ-WEBUI")
         
-        # Add protein lines (ensure proper formatting)
+        # Add protein lines (preserve original formatting)
         protein_lines = protein_content.split('\n')
+        non_blank_chain_ids = set()
+        max_serial = 0
         atom_count = 0
-        last_chain_id = "A"
+        last_chain_id = None
         last_res_seq = None
-        
+        last_res_name = None
+
         for line in protein_lines:
-            line = line.strip()
+            # Preserve fixed-width columns for PDB parsing.
+            line = line.rstrip()
             if line.startswith(('ATOM', 'HETATM')):
-                # Ensure proper PDB format
                 if len(line) >= 54:
                     atom_count += 1
-                    # Re-number atoms sequentially and ensure consistent chain ID
-                    parts = list(line)
-                    # Set atom number
-                    atom_num_str = f"{atom_count:5d}"
-                    parts[6:11] = list(atom_num_str)
-                    # Ensure chain is A for protein
-                    parts[21] = 'A'
-                    # Extract residue sequence number
+                    if len(line) > 21 and line[21].strip():
+                        non_blank_chain_ids.add(line[21])
+                    # Track last residue info for TER
+                    last_res_name = line[17:20].strip() if len(line) >= 20 else last_res_name
                     try:
-                        res_seq = int(line[22:26].strip())
-                        last_res_seq = res_seq
+                        last_res_seq = int(line[22:26].strip())
                     except ValueError:
-                        if last_res_seq is not None:
-                            last_res_seq += 1
-                        else:
-                            last_res_seq = 1
-                        res_seq_str = f"{last_res_seq:4d}"
-                        parts[22:26] = list(res_seq_str)
-                    
-                    formatted_line = ''.join(parts)
-                    lines.append(formatted_line)
+                        pass
+                    if len(line) > 21 and line[21].strip():
+                        last_chain_id = line[21]
+                    # Track max atom serial to offset ligand atoms
+                    try:
+                        serial = int(line[6:11].strip())
+                        if serial > max_serial:
+                            max_serial = serial
+                    except ValueError:
+                        pass
+                    lines.append(line)
             elif line.startswith(('REMARK', 'HEADER')):
                 if 'GENERATED' not in line and 'COMPLEX' not in line:  # Avoid duplicate remarks
                     lines.append(line)
+            elif line.startswith('TER'):
+                lines.append(line)
         
-        # Add TER record before ligand if we have protein atoms
+        # Add TER record before ligand if we have protein atoms and no trailing TER
         if atom_count > 0:
-            lines.append(f"TER   {atom_count + 1:5d}      ALA A{last_res_seq or 1:4d}")
+            if not lines or not lines[-1].startswith("TER"):
+                ter_chain = last_chain_id or (next(iter(sorted(non_blank_chain_ids))) if non_blank_chain_ids else "A")
+                ter_res_name = (last_res_name or "ALA").strip()[:3].upper() or "ALA"
+                lines.append(f"TER   {max_serial + 1:5d}      {ter_res_name:>3s} {ter_chain:1s}{(last_res_seq or 1):4d}")
         
         # Add ligand lines with proper chain designation
         lines.append("REMARK   4 LIGAND COORDINATES")
         ligand_lines_list = ligand_lines.strip().split('\n')
+        ligand_serial_offset = max_serial
+        ligand_atom_count = 0
         for ligand_line in ligand_lines_list:
             if ligand_line.strip():
-                atom_count += 1
+                ligand_atom_count += 1
                 # Re-number ligand atoms sequentially and set chain to L
                 parts = list(ligand_line)
                 # Set atom number
-                atom_num_str = f"{atom_count:5d}"
+                atom_num_str = f"{ligand_serial_offset + ligand_atom_count:5d}"
                 parts[6:11] = list(atom_num_str)
                 # Ensure chain is L for ligand
                 parts[21] = 'L'
@@ -1093,6 +1083,23 @@ class Boltzina:
                 
                 formatted_line = ''.join(parts)
                 lines.append(formatted_line)
+
+        # Add CONECT records for ligand bonds to preserve topology
+        if ligand_bonds:
+            conect_map: dict[int, set[int]] = {}
+            for a, b in ligand_bonds:
+                a_serial = a + ligand_serial_offset
+                b_serial = b + ligand_serial_offset
+                conect_map.setdefault(a_serial, set()).add(b_serial)
+                conect_map.setdefault(b_serial, set()).add(a_serial)
+
+            for atom_serial in sorted(conect_map.keys()):
+                partners = sorted(conect_map[atom_serial])
+                # PDB CONECT supports up to 4 partners per line; split if needed
+                for i in range(0, len(partners), 4):
+                    chunk = partners[i:i + 4]
+                    conect_line = f"CONECT{atom_serial:5d}" + "".join(f"{p:5d}" for p in chunk)
+                    lines.append(conect_line)
         
         # Add proper PDB ending
         lines.append("END")
@@ -1100,7 +1107,7 @@ class Boltzina:
         combined_content = '\n'.join(lines)
         
         # Validation report
-        total_atoms = atom_count
+        total_atoms = len([l for l in lines if l.startswith(('ATOM', 'HETATM'))])
         protein_atoms = len([l for l in lines if l.startswith('ATOM')])
         ligand_atoms = len([l for l in lines if l.startswith('HETATM')])
         print(f"Combined PDB statistics: {total_atoms} total atoms ({protein_atoms} protein, {ligand_atoms} ligand)")
@@ -1135,10 +1142,46 @@ class Boltzina:
             print(f"Unexpected error in PDB to CIF conversion: {e}")
             return pdb_file
 
+    def _parse_mol2_coords(self, mol2_text: str) -> tuple[list[tuple[float, float, float]], list[str]]:
+        """Parse mol2 ATOM block to extract coordinates and atom names."""
+        coords: list[tuple[float, float, float]] = []
+        names: list[str] = []
+        in_atoms = False
+
+        for raw in mol2_text.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("@<TRIPOS>ATOM"):
+                in_atoms = True
+                continue
+            if line.startswith("@<TRIPOS>") and in_atoms:
+                in_atoms = False
+                continue
+            if not in_atoms:
+                continue
+
+            parts = line.split()
+            if len(parts) < 6:
+                continue
+            # parts: atom_id, atom_name, x, y, z, atom_type, ...
+            try:
+                name = parts[1]
+                x = float(parts[2])
+                y = float(parts[3])
+                z = float(parts[4])
+            except (ValueError, IndexError):
+                continue
+            names.append(name)
+            coords.append((x, y, z))
+
+        return coords, names
+
     def _load_ligand_from_file(self, ligand_file: Path):
         """Load ligand molecule from SDF, MOL, MOL2, or PDB file, preserving original coordinates."""
         from rdkit import Chem
         from rdkit.Chem import AllChem
+        from rdkit.Geometry import Point3D
         
         try:
             # Load molecule based on file format, preserving hydrogens and coordinates
@@ -1148,7 +1191,10 @@ class Boltzina:
             elif ligand_file.suffix.lower() in ['.mol']:
                 mol = Chem.MolFromMolFile(str(ligand_file), removeHs=False)
             elif ligand_file.suffix.lower() in ['.mol2']:
-                mol = Chem.MolFromMol2File(str(ligand_file), removeHs=False)
+                mol2_text = ligand_file.read_text(errors="ignore")
+                mol = Chem.MolFromMol2Block(mol2_text, removeHs=False, sanitize=False)
+                if mol is None:
+                    mol = Chem.MolFromMol2File(str(ligand_file), removeHs=False)
             elif ligand_file.suffix.lower() in ['.pdb', '.ent']:
                 mol = Chem.MolFromPDBFile(str(ligand_file), removeHs=False, sanitize=False)
                 if mol is not None:
@@ -1161,7 +1207,7 @@ class Boltzina:
             
             if mol is None:
                 raise ValueError("Failed to parse ligand molecule")
-            
+
             # Check if we have 3D coordinates
             has_valid_3d_coords = False
             if mol.GetNumConformers() > 0:
@@ -1181,7 +1227,24 @@ class Boltzina:
                         print(f"  Coordinate range: X({coord_array[:, 0].min():.3f} to {coord_array[:, 0].max():.3f})")
                         print(f"                    Y({coord_array[:, 1].min():.3f} to {coord_array[:, 1].max():.3f})")
                         print(f"                    Z({coord_array[:, 2].min():.3f} to {coord_array[:, 2].max():.3f})")
-            
+
+            # For MOL2 inputs, explicitly restore coordinates if RDKit dropped them
+            if ligand_file.suffix.lower() == ".mol2" and not has_valid_3d_coords:
+                coords, atom_names = self._parse_mol2_coords(mol2_text)
+                if coords and len(coords) == mol.GetNumAtoms():
+                    conf = Chem.Conformer(mol.GetNumAtoms())
+                    for idx, (x, y, z) in enumerate(coords):
+                        conf.SetAtomPosition(idx, Point3D(x, y, z))
+                    mol.RemoveAllConformers()
+                    mol.AddConformer(conf, assignId=True)
+                    if atom_names and len(atom_names) == mol.GetNumAtoms():
+                        for atom, name in zip(mol.GetAtoms(), atom_names):
+                            if name:
+                                atom.SetProp("_TriposAtomName", name)
+                                atom.SetProp("name", name)
+                    has_valid_3d_coords = True
+                    print(f"Restored MOL2 coordinates from {ligand_file.name}")
+
             # Only add hydrogens if we don't have them or don't have valid coordinates
             if not has_valid_3d_coords:
                 print(f"No valid 3D coordinates found in {ligand_file.name}, generating new ones...")

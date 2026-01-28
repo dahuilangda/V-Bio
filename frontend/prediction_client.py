@@ -222,12 +222,15 @@ def download_and_process_results(task_id: str):
                 if not candidates:
                     return None
                 lowered = [(name, os.path.basename(name).lower()) for name in candidates]
-                preferred_tokens = ["combined_complex", "generated_complex", "complex_"]
-                for token in preferred_tokens:
-                    for ext in (".cif", ".pdb"):
-                        for name, base in lowered:
-                            if token in base and base.endswith(ext):
-                                return name
+                # Prefer scored model outputs over raw input complexes
+                for ext in (".cif", ".pdb"):
+                    for name, base in lowered:
+                        if base.endswith(ext) and ("model_0" in base or "ranked_0" in base):
+                            return name
+                for ext in (".cif", ".pdb"):
+                    for name, base in lowered:
+                        if base.endswith(ext) and ("model_" in base or "ranked_" in base):
+                            return name
                 return None
 
             best_cif_name = None

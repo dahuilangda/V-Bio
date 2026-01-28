@@ -173,7 +173,8 @@ def render_affinity_page():
                 help="用于生成复合物文件名，例如 my_dock",
                 key="affinity_output_prefix",
             )
-            st.caption("系统会保留原始坐标并生成复合物，蛋白链统一为 A，配体链为 L。")
+            st.caption("系统会保留原始坐标并生成复合物，蛋白链默认保留原链名（缺失则设为 A）；配体链为 L。")
+            st.caption("建议使用 SDF/MOL2 以保留键连接信息；若使用 PDB，请确保包含 CONECT，否则可能导致置信度偏低。")
 
         files_ready = False
         if input_mode.startswith("复合物文件"):

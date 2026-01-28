@@ -50,3 +50,7 @@ docs/
 data/fold_input.json
 .gitignore
 .af3_jax_cache/
+Boltz2Score/data/Cmp2.pdb
+Boltz2Score/data/Cmp4.pdb
+Boltz2Score/data/ligand.mol2
+Boltz2Score/data/protein.pdb
