@@ -46,6 +46,14 @@ class Boltz2ScoreModel(Boltz2):
         pred_dict["s"] = out["s"]
         pred_dict["z"] = out["z"]
 
+        # Debug: check if sample_atom_coords is in output
+        print(f"DEBUG: sample_atom_coords in out: {'sample_atom_coords' in out}")
+        print(f"DEBUG: skip_run_structure: {self.skip_run_structure}")
+        if "sample_atom_coords" in out:
+            print(f"DEBUG: sample_atom_coords shape: {out['sample_atom_coords'].shape}")
+
+        # Always use input coordinates for scoring-only mode
+        # When skip_run_structure=True, diffusion doesn't run so we use input coords
         coords = batch["coords"]
         if coords.dim() == 4:
             coords = coords[:, 0]  # (B, L, 3)
@@ -146,6 +154,10 @@ def run_scoring(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     cache_dir = Path(cache_dir or get_cache_path()).expanduser().resolve()
+
+    # Set BOLTZ_CACHE environment variable to ensure consistent cache directory usage
+    os.environ["BOLTZ_CACHE"] = str(cache_dir)
+
     mol_dir = cache_dir / "mols"
     if not mol_dir.exists():
         raise FileNotFoundError(

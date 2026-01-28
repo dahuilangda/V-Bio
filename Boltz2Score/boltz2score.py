@@ -13,6 +13,9 @@ from typing import Optional, Sequence
 
 import torch
 import gemmi
+from rdkit import Chem
+
+Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
 
 from boltz.main import get_cache_path
 from boltz.data.types import StructureV2
@@ -24,6 +27,93 @@ def _parse_chain_list(value: Optional[str]) -> list[str]:
     if not value:
         return []
     return [v.strip() for v in value.split(",") if v.strip()]
+
+
+def _load_ligand_from_file(ligand_path: Path):
+    """Load ligand from various file formats, preserving original atom names and coordinates."""
+    ligand_path = Path(ligand_path)
+
+    if ligand_path.suffix.lower() == '.mol2':
+        # Read MOL2 file
+        with open(ligand_path) as f:
+            mol2_content = f.read()
+
+        mol = Chem.MolFromMol2Block(mol2_content, sanitize=False, removeHs=False)
+        if mol is None:
+            raise ValueError(f"Failed to read MOL2 file: {ligand_path}")
+
+        # Parse and store original atom names from MOL2
+        atom_section_started = False
+        atom_data = []
+        for line in mol2_content.split('\n'):
+            if line.startswith('@<TRIPOS>ATOM'):
+                atom_section_started = True
+                continue
+            if atom_section_started:
+                if line.startswith('@<TRIPOS>') or not line.strip():
+                    break
+                parts = line.split()
+                if len(parts) >= 7:
+                    atom_idx = int(parts[0])  # 1-indexed
+                    atom_name = parts[1]
+                    atom_data.append((atom_idx, atom_name))
+
+        # Store original atom names
+        for atom_idx_mol2, atom_name in atom_data:
+            rdkit_idx = atom_idx_mol2 - 1  # Convert to 0-indexed
+            if rdkit_idx < mol.GetNumAtoms():
+                atom = mol.GetAtomWithIdx(rdkit_idx)
+                atom.SetProp("_original_atom_name", atom_name)
+                atom.SetProp("name", atom_name)
+
+        print(f"Loaded ligand from MOL2: {mol.GetNumAtoms()} atoms")
+        return mol
+
+    elif ligand_path.suffix.lower() in {'.sdf', '.sd'}:
+        # Read SDF file
+        mol = Chem.MolFromMolFile(str(ligand_path), sanitize=False, removeHs=False)
+        if mol is None:
+            raise ValueError(f"Failed to read SDF file: {ligand_path}")
+        print(f"Loaded ligand from SDF: {mol.GetNumAtoms()} atoms")
+        return mol
+
+    elif ligand_path.suffix.lower() in {'.pdb', '.ent'}:
+        # Read PDB file
+        mol = Chem.MolFromPDBFile(str(ligand_path), removeHs=False)
+        if mol is None:
+            raise ValueError(f"Failed to read PDB file: {ligand_path}")
+        print(f"Loaded ligand from PDB: {mol.GetNumAtoms()} atoms")
+        return mol
+
+    else:
+        raise ValueError(f"Unsupported ligand file format: {ligand_path.suffix}")
+
+
+def _fix_cif_entity_ids(cif_file: Path) -> None:
+    """Fix entity IDs in CIF file to remove special characters like '!'.
+
+    gemmi's make_mmcif_document() sometimes adds special characters to entity IDs
+    to differentiate them, which causes parsing errors in Boltz.
+    """
+    import re
+
+    with open(cif_file, 'r') as f:
+        content = f.read()
+
+    # Fix entity IDs in _entity.id section (format: "ID type" at start of line)
+    content = re.sub(r'^([A-Z][A-Z0-9]*)!\s+', r'\1 ', content, flags=re.MULTILINE)
+
+    # Fix entity IDs in _struct_asym.entity_id column (format: "asym_id entity_id!")
+    content = re.sub(r'([A-Za-z0-9]+)\s+([A-Z][A-Z0-9]*)(!)\s*$', r'\1 \2', content, flags=re.MULTILINE)
+
+    # Fix entity IDs in atom records (format: "... LIG! ...")
+    # This handles label_entity_id column in ATOM/HETATM records
+    content = re.sub(r'([A-Z][A-Z0-9]*)(!)\s+\.', r'\1 .', content)  # Before a period
+    content = re.sub(r'([A-Z][A-Z0-9]*)(!)\s+\?', r'\1 ?', content)  # Before a question mark
+    content = re.sub(r'([A-Z][A-Z0-9]*)(!)(\s+)', r'\1\3', content)  # Before whitespace
+
+    with open(cif_file, 'w') as f:
+        f.write(content)
 
 
 def _filter_structure_by_chains(
@@ -250,7 +340,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--input",
-        required=True,
+        required=False,
         type=str,
         help="Input structure file (.pdb/.cif/.mmcif)",
     )
@@ -325,18 +415,40 @@ def main() -> None:
         action="store_true",
         help="Run diffusion refinement before affinity (higher quality, slower).",
     )
+    parser.add_argument(
+        "--protein_file",
+        type=str,
+        default=None,
+        help="Protein structure file (.pdb/.cif/.mmcif) for separate input mode",
+    )
+    parser.add_argument(
+        "--ligand_file",
+        type=str,
+        default=None,
+        help="Ligand structure file (.sdf/.mol/.mol2/.pdb) for separate input mode",
+    )
 
     args = parser.parse_args()
 
-    input_path = Path(args.input).expanduser().resolve()
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input not found: {input_path}")
+    # Validate input arguments
+    has_input = args.input is not None
+    has_separate = args.protein_file is not None and args.ligand_file is not None
+
+    if not has_input and not has_separate:
+        parser.error("Either --input or both --protein_file and --ligand_file must be provided")
+    if has_input and has_separate:
+        parser.error("Cannot use both --input and separate --protein_file/--ligand_file options")
+    if args.protein_file and not args.ligand_file:
+        parser.error("--ligand_file is required when using --protein_file")
+    if args.ligand_file and not args.protein_file:
+        parser.error("--protein_file is required when using --ligand_file")
 
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     cache_dir = Path(args.cache or get_cache_path()).expanduser().resolve()
 
+    # Initialize work_dir early (needed for separate file mode)
     if args.work_dir:
         work_dir = Path(args.work_dir).expanduser().resolve()
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -346,6 +458,107 @@ def main() -> None:
             tempfile.mkdtemp(prefix="boltz2score_", dir=output_dir)
         )
         cleanup = not args.keep_work
+
+    # Check for separate protein and ligand file mode
+    if args.protein_file and args.ligand_file:
+        # Separate input mode: combine protein and ligand files
+        protein_path = Path(args.protein_file).expanduser().resolve()
+        ligand_path = Path(args.ligand_file).expanduser().resolve()
+
+        if not protein_path.exists():
+            raise FileNotFoundError(f"Protein file not found: {protein_path}")
+        if not ligand_path.exists():
+            raise FileNotFoundError(f"Ligand file not found: {ligand_path}")
+
+        # Combine protein and ligand files into a single structure
+        from pathlib import Path as PathLib
+        import gemmi
+        from rdkit import Chem
+
+        Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
+
+        # Load ligand from file
+        ligand_mol = _load_ligand_from_file(ligand_path)
+        if ligand_mol is None:
+            raise ValueError(f"Failed to load ligand from {ligand_path}")
+
+        # Read protein structure
+        if protein_path.suffix.lower() in {'.pdb', '.ent'}:
+            structure = gemmi.read_structure(str(protein_path))
+        elif protein_path.suffix.lower() in {'.cif', '.mmcif'}:
+            structure = gemmi.read_structure(str(protein_path))
+        else:
+            raise ValueError(f"Unsupported protein file format: {protein_path.suffix}")
+
+        # Setup entities for protein first
+        structure.setup_entities()
+
+        # Add ligand as a separate chain
+        ligand_chain = gemmi.Chain("L")
+        residue = gemmi.Residue()
+        residue.name = "LIG"
+        residue.seqid = gemmi.SeqId(1, " ")
+
+        # Add atoms from ligand molecule
+        conf = ligand_mol.GetConformer()
+        for i in range(ligand_mol.GetNumAtoms()):
+            atom = ligand_mol.GetAtomWithIdx(i)
+            pos = conf.GetAtomPosition(i)
+            gemmi_atom = gemmi.Atom()
+            # Get atom name - prefer original atom name
+            if atom.HasProp("_original_atom_name"):
+                gemmi_atom.name = atom.GetProp("_original_atom_name")
+            elif atom.HasProp("name"):
+                gemmi_atom.name = atom.GetProp("name")
+            else:
+                gemmi_atom.name = atom.GetSymbol()
+            gemmi_atom.element = gemmi.Element(atom.GetSymbol())
+            gemmi_atom.pos = gemmi.Position(pos.x, pos.y, pos.z)
+            residue.add_atom(gemmi_atom)
+
+        ligand_chain.add_residue(residue)
+        structure[0].add_chain(ligand_chain)
+
+        # Re-setup entities to properly classify ligand as NonPolymer
+        structure.setup_entities()
+
+        # Ensure polymer sequences are defined for mmCIF parsing
+        # This is needed when PDB files lack SEQRES records
+        for entity in structure.entities:
+            if entity.entity_type.name != "Polymer":
+                continue
+            if not entity.subchains:
+                continue
+            seq = []
+            for chain in structure[0]:
+                for res in chain:
+                    if res.subchain in entity.subchains:
+                        seq.append(res.name)
+            if seq:
+                entity.full_sequence = seq
+
+        # Write combined structure as CIF
+        combined_dir = work_dir / "combined"
+        combined_dir.mkdir(parents=True, exist_ok=True)
+        combined_file = combined_dir / "combined_complex.cif"
+
+        doc = structure.make_mmcif_document()
+        doc.write_file(str(combined_file))
+
+        print(f"Created combined structure: {combined_file}")
+        print(f"  Protein: {protein_path.name}")
+        print(f"  Ligand: {ligand_path.name}")
+
+        # Fix entity IDs in CIF to remove special characters
+        _fix_cif_entity_ids(combined_file)
+
+        # Use the combined file for further processing
+        input_path = combined_file
+    else:
+        # Standard single file mode
+        input_path = Path(args.input).expanduser().resolve()
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input not found: {input_path}")
 
     # Create isolated input dir with the single structure
     input_dir = work_dir / "input"

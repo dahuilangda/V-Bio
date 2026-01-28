@@ -755,9 +755,11 @@ class Boltzina:
             print(f"Processing ligand: {ligand_path.name}")
             print(f"Using unique ligand identifier: {self.unique_ligand_name}")
 
-            # Create combined complex structure directly as CIF using gemmi
-            # This ensures proper entity type classification (ligand as NonPolymer)
-            complex_cif = self._create_standard_complex_cif_with_gemmi(protein_path, ligand_path, output_prefix)
+            # Create combined complex structure as standard PDB
+            complex_file = self._create_standard_complex_pdb(protein_path, ligand_path, output_prefix)
+
+            # Convert the PDB to CIF for proper processing
+            complex_cif = self._convert_complex_pdb_to_cif(complex_file)
 
             # Use standard complex prediction pipeline with CIF file
             self.predict([str(complex_cif)])
@@ -890,14 +892,14 @@ class Boltzina:
         else:
             raise ValueError(f"Unsupported protein file format: {protein_path.suffix}")
 
-        # Setup entities for protein first
-        protein_structure.setup_entities()
-
-        # Add ligand as a separate chain
-        ligand_chain = gemmi.Chain("L")
+        # Add ligand as a separate chain BEFORE setting up entities
+        # Use a chain ID that won't conflict with protein chains
+        ligand_chain = gemmi.Chain("B")
         residue = gemmi.Residue()
         residue.name = target_resname
         residue.seqid = gemmi.SeqId(1, " ")
+        # Explicitly set subchain to avoid gemmi's auto-generated IDs
+        residue.subchain = "L1"
 
         # Add atoms from ligand molecule
         conf = ligand_mol.GetConformer()
@@ -919,12 +921,17 @@ class Boltzina:
         ligand_chain.add_residue(residue)
         protein_structure[0].add_chain(ligand_chain)
 
-        # Re-setup entities to properly classify ligand as NonPolymer
+        # Setup entities once after adding both protein and ligand
+        # This ensures gemmi correctly classifies all entities
         protein_structure.setup_entities()
 
         # Write as CIF
         doc = protein_structure.make_mmcif_document()
         doc.write_file(str(combined_file))
+
+        # Post-process CIF to fix entity IDs with special characters
+        # gemmi sometimes adds '!' to entity IDs to differentiate them
+        self._fix_cif_entity_ids(combined_file)
 
         print(f"Created CIF complex: {combined_file}")
         print(f"Coordinates preserved from original files")
@@ -935,6 +942,33 @@ class Boltzina:
             print(f"  {entity.entity_type.name}: {entity.subchains}")
 
         return combined_file
+
+    def _fix_cif_entity_ids(self, cif_file: Path) -> None:
+        """Fix entity IDs in CIF file to remove special characters like '!'.
+
+        gemmi's make_mmcif_document() sometimes adds special characters to entity IDs
+        to differentiate them, which causes parsing errors in Boltz.
+        """
+        # Read the CIF file
+        with open(cif_file, 'r') as f:
+            content = f.read()
+
+        # Simple string replacement for entity IDs with '!'
+        # Pattern: fix "LIG!" in entity sections
+        import re
+
+        # Fix entity IDs in _entity.id section (format: "ID type")
+        content = re.sub(r'^([A-Z][A-Z0-9]*)!\s+', r'\1 ', content, flags=re.MULTILINE)
+
+        # Fix entity IDs in _entity_poly.entity_id section
+        content = re.sub(r'^([A-Z][A-Z0-9]*)!$', r'\1', content, flags=re.MULTILINE)
+
+        # Fix entity IDs in _struct_asym.entity_id section
+        content = re.sub(r'^([A-Z][A-Z0-9]*)!$', r'\1', content, flags=re.MULTILINE)
+
+        # Write back the fixed content
+        with open(cif_file, 'w') as f:
+            f.write(content)
 
     def _clean_protein_content(self, protein_content: str) -> str:
         """

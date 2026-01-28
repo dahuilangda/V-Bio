@@ -37,10 +37,10 @@ ION_RESNAMES = {
 def _ccd_matches_residue(residue: gemmi.Residue, ccd_mol: Chem.Mol) -> bool:
     """Return True if CCD atom names can map to residue atom names.
 
-    For MOL2-derived ligands, we use a more flexible matching strategy:
-    1. First try exact atom name matching
-    2. If that fails, try matching by atom count and element composition
-    3. This handles cases where atom names were sanitized differently
+    Boltz2 maps ligand coordinates by atom *name*. If names do not match,
+    coordinates will be dropped (atoms marked not present), which degrades
+    confidence on small molecules. We therefore require name-level agreement
+    (with light normalization) rather than element-only matching.
     """
     if ccd_mol is None:
         return False
@@ -71,9 +71,18 @@ def _ccd_matches_residue(residue: gemmi.Residue, ccd_mol: Chem.Mol) -> bool:
             ccd_elements.append(atom.GetSymbol())
 
     from collections import Counter
+    import re
+
+    def _norm(name: str) -> str:
+        # Normalize common PDB/CCD naming differences without losing identity.
+        norm = re.sub(r"[^A-Za-z0-9]", "", name.strip().upper())
+        norm = norm.lstrip("0123456789")
+        return norm
 
     res_counter = Counter(res_names)
     ccd_counter = Counter(ccd_names)
+    res_norm_counter = Counter(_norm(n) for n in res_names)
+    ccd_norm_counter = Counter(_norm(n) for n in ccd_names)
 
     # Try exact atom name matching first
     exact_match = True
@@ -85,35 +94,14 @@ def _ccd_matches_residue(residue: gemmi.Residue, ccd_mol: Chem.Mol) -> bool:
     if exact_match:
         return True
 
-    # If exact matching fails, try more flexible matching based on:
-    # 1. Same number of atoms
-    # 2. Same element composition
-    # This handles MOL2 files where atom names may have been sanitized differently
-    if len(res_names) == len(ccd_names):
-        # Count elements in residue (from gemmi)
-        res_elements = []
-        for atom in residue:
-            element = atom.element.name if atom.element.name else atom.name[:1]
-            if element and element != 'H':  # Skip hydrogens
-                res_elements.append(element.upper())
+    # Try normalized name matching (handles simple formatting differences).
+    norm_match = True
+    for name, count in res_norm_counter.items():
+        if ccd_norm_counter.get(name, 0) < count:
+            norm_match = False
+            break
 
-        # Compare element composition
-        if len(res_elements) == len(ccd_elements):
-            res_elem_counter = Counter(res_elements)
-            ccd_elem_counter = Counter(ccd_elements)
-
-            elem_match = True
-            for elem, count in res_elem_counter.items():
-                if ccd_elem_counter.get(elem, 0) < count:
-                    elem_match = False
-                    break
-
-            if elem_match:
-                # Element composition matches, consider it a match
-                # This allows for cases where atom names differ but the molecule is the same
-                return True
-
-    return False
+    return norm_match
 
 
 def _has_non_single_bonds(mol: Chem.Mol) -> bool:
