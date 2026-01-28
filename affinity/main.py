@@ -20,6 +20,8 @@ from affinity.boltzina.data.parse.mmcif import parse_mmcif
 from affinity.boltzina.affinity.predict_affinity import load_boltz2_model, predict_affinity
 from boltz.main import get_cache_path, MSAModuleArgs
 
+import gemmi
+
 # CCD名称管理器，确保同一批次运行的不要使用相同的CCD名称
 import redis
 import random
@@ -213,15 +215,58 @@ class Boltzina:
     
     def _add_temporary_ligand_to_ccd(self, ligand_name: str, ligand_mol):
         """Temporarily add a custom ligand to CCD for processing with original naming.
-        
+
         Args:
             ligand_name: Original name of the ligand from the structure file (e.g., "Z91")
             ligand_mol: RDKit molecule object of the ligand or wrapped molecule
         """
+        # Ensure all atoms have proper "name" property for CCD compatibility
+        # This is critical for prepare_boltz2score_inputs.py's _ccd_matches_residue function
+        atom_names = []
+        for atom in ligand_mol.GetAtoms():
+            # Check for original atom name first (from MOL2)
+            if atom.HasProp("_original_atom_name"):
+                original_name = atom.GetProp("_original_atom_name").strip()
+                if original_name:
+                    # Use the sanitized version of original name
+                    sanitized_name = self._sanitize_atom_name(original_name)
+                    atom.SetProp("name", sanitized_name)
+                    atom_names.append(sanitized_name)
+                    continue
+
+            # Fallback to existing properties
+            found_name = None
+            for prop in ("name", "_TriposAtomName", "_atomName"):
+                if atom.HasProp(prop):
+                    value = atom.GetProp(prop).strip()
+                    if value:
+                        found_name = value
+                        break
+
+            if found_name:
+                atom.SetProp("name", found_name)
+                atom_names.append(found_name)
+            else:
+                # Last resort: generate name based on element and index
+                element = atom.GetSymbol()
+                idx = atom.GetIdx()
+                generated_name = f"{element}{idx + 1}"
+                atom.SetProp("name", generated_name)
+                atom_names.append(generated_name)
+
+        # Ensure molecule has required properties
+        ligand_mol.SetProp("_Name", ligand_name)
+        ligand_mol.SetProp("name", ligand_name)
+        ligand_mol.SetProp("id", ligand_name)
+
+        print(f"Set 'name' property for {len(atom_names)} atoms in ligand '{ligand_name}'")
+        if len(atom_names) <= 5:
+            print(f"  Atom names: {atom_names}")
+
         # Store ligand with its original name but add task-specific prefix to avoid conflicts
         task_specific_name = f"{self.task_id}_{ligand_name}"
         unique_ligand_name = self.unique_ligand_name  # Still reserve a unique name for tracking
-        
+
         # Add temporary ligand to local CCD copy with both names
         # Use original name for structure parsing compatibility
         self.ccd[ligand_name] = ligand_mol
@@ -229,11 +274,11 @@ class Boltzina:
         self.custom_ligands.add(ligand_name)
         self.custom_ligands.add(task_specific_name)
         print(f"Task {self.task_id}: Added custom ligand '{ligand_name}' (and backup '{task_specific_name}') to local CCD cache")
-        
+
         # Write custom ligand to local mols directory with original name
         self._write_custom_ligand_to_local_mols_dir(ligand_name, ligand_mol)
         self._write_custom_ligand_to_local_mols_dir(task_specific_name, ligand_mol)  # Backup
-        
+
         return ligand_name  # Return original name for structure compatibility
     
     def _setup_local_mols_directory(self):
@@ -709,13 +754,11 @@ class Boltzina:
             print(f"Processing protein: {protein_path.name}")
             print(f"Processing ligand: {ligand_path.name}")
             print(f"Using unique ligand identifier: {self.unique_ligand_name}")
-            
-            # Create combined complex structure as standard PDB
-            complex_file = self._create_standard_complex_pdb(protein_path, ligand_path, output_prefix)
-            
-            # Convert the PDB to CIF for proper processing
-            complex_cif = self._convert_complex_pdb_to_cif(complex_file)
-            
+
+            # Create combined complex structure directly as CIF using gemmi
+            # This ensures proper entity type classification (ligand as NonPolymer)
+            complex_cif = self._create_standard_complex_cif_with_gemmi(protein_path, ligand_path, output_prefix)
+
             # Use standard complex prediction pipeline with CIF file
             self.predict([str(complex_cif)])
             
@@ -796,11 +839,11 @@ class Boltzina:
         
         # Clean and validate protein content for proper PDB format
         protein_content = self._clean_protein_content(protein_content)
-        
+
         # Generate ligand PDB lines and CONECT bonds preserving original coordinates
         # Note: _generate_ligand_pdb_lines_preserve_coords now returns (lines, bonds)
         ligand_pdb_lines, ligand_bonds = self._generate_ligand_pdb_lines_preserve_coords(ligand_mol)
-        
+
         # Combine protein and ligand into standard PDB format
         combined_content = self._combine_to_standard_pdb(
             protein_content,
@@ -813,6 +856,84 @@ class Boltzina:
         print(f"Created standard complex: {combined_file}")
         print(f"Coordinates preserved from original files")
         
+        return combined_file
+
+    def _create_standard_complex_cif_with_gemmi(self, protein_file: Path, ligand_file: Path, output_prefix: str) -> Path:
+        """
+        Create a combined CIF complex file using gemmi to properly preserve entity types.
+        This method ensures that ligands are correctly classified as NonPolymer entities.
+        """
+        combined_dir = self.output_dir / "combined_complexes"
+        combined_dir.mkdir(exist_ok=True)
+
+        combined_file = combined_dir / f"{output_prefix}_complex.cif"
+
+        # Convert paths to Path objects if they are strings
+        protein_path = Path(protein_file)
+        ligand_path = Path(ligand_file)
+
+        # Load ligand from file (preserving original coordinates)
+        ligand_mol = self._load_ligand_from_file(ligand_path)
+        if ligand_mol is None:
+            raise ValueError(f"Failed to load ligand from {ligand_file}")
+
+        # Add ligand to CCD
+        unique_ligand_name = self._add_temporary_ligand_to_ccd("LIG", ligand_mol)
+        target_resname = "LIG"
+        print(f"Using ligand name: LIG (CCD: {unique_ligand_name})")
+
+        # Read protein structure
+        if protein_path.suffix.lower() in {'.pdb', '.ent'}:
+            protein_structure = gemmi.read_structure(str(protein_path))
+        elif protein_path.suffix.lower() in {'.cif', '.mmcif'}:
+            protein_structure = gemmi.read_structure(str(protein_path))
+        else:
+            raise ValueError(f"Unsupported protein file format: {protein_path.suffix}")
+
+        # Setup entities for protein first
+        protein_structure.setup_entities()
+
+        # Add ligand as a separate chain
+        ligand_chain = gemmi.Chain("L")
+        residue = gemmi.Residue()
+        residue.name = target_resname
+        residue.seqid = gemmi.SeqId(1, " ")
+
+        # Add atoms from ligand molecule
+        conf = ligand_mol.GetConformer()
+        for i in range(ligand_mol.GetNumAtoms()):
+            atom = ligand_mol.GetAtomWithIdx(i)
+            pos = conf.GetAtomPosition(i)
+            gemmi_atom = gemmi.Atom()
+            # Get atom name - prefer original atom name
+            if atom.HasProp("_original_atom_name"):
+                gemmi_atom.name = atom.GetProp("_original_atom_name")
+            elif atom.HasProp("name"):
+                gemmi_atom.name = atom.GetProp("name")
+            else:
+                gemmi_atom.name = atom.GetSymbol()
+            gemmi_atom.element = gemmi.Element(atom.GetSymbol())
+            gemmi_atom.pos = gemmi.Position(pos.x, pos.y, pos.z)
+            residue.add_atom(gemmi_atom)
+
+        ligand_chain.add_residue(residue)
+        protein_structure[0].add_chain(ligand_chain)
+
+        # Re-setup entities to properly classify ligand as NonPolymer
+        protein_structure.setup_entities()
+
+        # Write as CIF
+        doc = protein_structure.make_mmcif_document()
+        doc.write_file(str(combined_file))
+
+        print(f"Created CIF complex: {combined_file}")
+        print(f"Coordinates preserved from original files")
+
+        # Verify entity types
+        print(f"Entity types in combined structure:")
+        for entity in protein_structure.entities:
+            print(f"  {entity.entity_type.name}: {entity.subchains}")
+
         return combined_file
 
     def _clean_protein_content(self, protein_content: str) -> str:
@@ -937,27 +1058,32 @@ class Boltzina:
             raise ValueError(f"Failed to convert CIF to PDB: {e}")
 
     def _generate_ligand_pdb_lines_preserve_coords(self, ligand_mol) -> tuple[str, list[tuple[int, int]]]:
-        """Generate ligand PDB lines and bond pairs preserving original coordinates."""
+        """Generate ligand PDB lines and bond pairs preserving original coordinates and atom names."""
         from rdkit.Chem import AllChem
-        
+
         ligand_lines = ""
         atom_serial = 1  # Will be renumbered later
         bond_pairs: list[tuple[int, int]] = []
-        
+
         # Use unified naming strategy: prefer "LIG", fall back to unique name if conflicts
         resname = "LIG"
-        
+
         # Ensure we have a 3D conformer (should already exist from loading)
         if ligand_mol.GetNumConformers() == 0:
             print("Warning: No conformer found, generating coordinates...")
             AllChem.EmbedMolecule(ligand_mol, randomSeed=42)
             if AllChem.MMFFOptimizeMolecule(ligand_mol) != 0:
                 print("Warning: MMFF optimization failed")
-        
+
         conf = ligand_mol.GetConformer()
-        
+
         print(f"Generating ligand PDB with unified residue name: {resname}")
-        
+
+        # Check if we have original atom names from MOL2 file
+        has_original_names = any(atom.HasProp("_original_atom_name") for atom in ligand_mol.GetAtoms())
+        if has_original_names:
+            print("Using original atom names from MOL2 file for better compatibility")
+
         # Generate PDB lines using original coordinates (no translation)
         element_counts = {}
         for i, atom in enumerate(ligand_mol.GetAtoms()):
@@ -969,14 +1095,32 @@ class Boltzina:
             element = atom.GetSymbol()
 
             atom_name = None
-            # Prefer original atom names from the ligand file when available
-            for prop in ("name", "_TriposAtomName", "_atomName"):
-                if atom.HasProp(prop):
-                    raw_name = atom.GetProp(prop).strip()
-                    if raw_name:
-                        atom_name = raw_name
-                        break
+            # CRITICAL: Prefer original atom names from MOL2 file for compatibility
+            # with prepare_boltz2score_inputs.py's _ccd_matches_residue function
+            if atom.HasProp("_original_atom_name"):
+                # Get the original atom name from MOL2 file
+                original_name = atom.GetProp("_original_atom_name").strip()
+                if original_name:
+                    # Store sanitized version but use a format that preserves uniqueness
+                    atom_name = self._sanitize_atom_name(original_name)
+                    # For better compatibility, also try to preserve the numeric suffix
+                    # e.g., "CL16" -> "CL16" (if possible), "C02" -> "C02"
+                    if any(c.isdigit() for c in original_name):
+                        # Preserve numeric part for unique identification
+                        atom_name = self._sanitize_atom_name(original_name)
+                    else:
+                        atom_name = self._sanitize_atom_name(original_name)
 
+            # Fallback to other properties if original name not available
+            if not atom_name:
+                for prop in ("name", "_TriposAtomName", "_atomName"):
+                    if atom.HasProp(prop):
+                        raw_name = atom.GetProp(prop).strip()
+                        if raw_name:
+                            atom_name = raw_name
+                            break
+
+            # Last resort: generate atom name based on element and count
             if not atom_name:
                 # Count elements for naming
                 if element not in element_counts:
@@ -991,24 +1135,41 @@ class Boltzina:
                 else:
                     atom_name = f"{element}{element_counts[element]}"
 
+            # Sanitize atom name and ensure proper formatting
             atom_name = self._sanitize_atom_name(atom_name)
             # Ensure atom name is properly formatted (left-aligned, max 4 chars)
             atom_name = atom_name[:4].ljust(4)
-            
+
             # Standard PDB HETATM format with proper spacing and fixed fields
             line = f"HETATM{atom_serial:5d} {atom_name} {resname} L   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {element:>2s}"
             ligand_lines += line + "\n"
             atom_serial += 1
-            
+
             # Print first few coordinates for verification
             if i < 3:
-                print(f"  Atom {i+1} ({element}): ({x:.3f}, {y:.3f}, {z:.3f})")
-        
+                print(f"  Atom {i+1} ({element}, {atom_name.strip()}): ({x:.3f}, {y:.3f}, {z:.3f})")
+
         # Collect bond pairs using ligand-local 1-based indices
-        for bond in ligand_mol.GetBonds():
-            a = bond.GetBeginAtomIdx() + 1
-            b = bond.GetEndAtomIdx() + 1
-            bond_pairs.append((a, b))
+        # If we have MOL2 bond info, use it; otherwise use RDKit's bond detection
+        if ligand_mol.HasProp("_bond_info"):
+            try:
+                import ast
+                bond_info_str = ligand_mol.GetProp("_bond_info")
+                bond_info = ast.literal_eval(bond_info_str)
+                if isinstance(bond_info, list):
+                    for origin_id, target_id, bond_type in bond_info:
+                        # MOL2 uses 1-based atom indices
+                        bond_pairs.append((origin_id, target_id))
+                    print(f"Using {len(bond_pairs)} bonds from MOL2 file")
+            except Exception as e:
+                print(f"Warning: Failed to parse MOL2 bond info: {e}, using RDKit bonds")
+
+        # Fallback to RDKit bonds if no MOL2 bond info available
+        if not bond_pairs:
+            for bond in ligand_mol.GetBonds():
+                a = bond.GetBeginAtomIdx() + 1
+                b = bond.GetEndAtomIdx() + 1
+                bond_pairs.append((a, b))
 
         if bond_pairs:
             print(f"Generated {len(bond_pairs)} ligand bonds for CONECT records")
@@ -1159,6 +1320,55 @@ class Boltzina:
             print(f"Unexpected error in PDB to CIF conversion: {e}")
             return pdb_file
 
+    def _parse_mol2_atom_names_and_bonds(self, mol2_text: str) -> tuple[list[str], list[tuple[int, int, int]]]:
+        """Parse MOL2 ATOM and BOND blocks to extract atom names and bond information.
+
+        Returns:
+            Tuple of (atom_names list, bond_info list)
+            bond_info contains tuples of (atom1_id, atom2_id, bond_type) where bond_type is
+            1=single, 2=double, 3=triple, 4=aromatic, etc.
+        """
+        atom_names: list[str] = []
+        bond_info: list[tuple[int, int, int]] = []
+        in_atoms = False
+        in_bonds = False
+
+        for raw in mol2_text.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("@<TRIPOS>ATOM"):
+                in_atoms = True
+                in_bonds = False
+                continue
+            if line.startswith("@<TRIPOS>BOND"):
+                in_bonds = True
+                in_atoms = False
+                continue
+            if line.startswith("@<TRIPOS>") and (in_atoms or in_bonds):
+                in_atoms = False
+                in_bonds = False
+                continue
+
+            if in_atoms:
+                parts = line.split()
+                if len(parts) >= 2:
+                    atom_names.append(parts[1])
+            elif in_bonds:
+                parts = line.split()
+                # BOND format: bond_id origin_atom_id target_atom_id bond_type ...
+                if len(parts) >= 4:
+                    try:
+                        bond_id = int(parts[0])
+                        origin_id = int(parts[1])
+                        target_id = int(parts[2])
+                        bond_type = int(parts[3])
+                        bond_info.append((origin_id, target_id, bond_type))
+                    except (ValueError, IndexError):
+                        continue
+
+        return atom_names, bond_info
+
     def _parse_mol2_coords(self, mol2_text: str) -> tuple[list[tuple[float, float, float]], list[str]]:
         """Parse mol2 ATOM block to extract coordinates and atom names."""
         coords: list[tuple[float, float, float]] = []
@@ -1195,11 +1405,15 @@ class Boltzina:
         return coords, names
 
     def _load_ligand_from_file(self, ligand_file: Path):
-        """Load ligand molecule from SDF, MOL, MOL2, or PDB file, preserving original coordinates."""
+        """Load ligand molecule from SDF, MOL, MOL2, or PDB file, preserving original coordinates and atom names."""
         from rdkit import Chem
         from rdkit.Chem import AllChem
         from rdkit.Geometry import Point3D
-        
+
+        mol2_text = None
+        original_atom_names = []
+        bond_info = []
+
         try:
             # Load molecule based on file format, preserving hydrogens and coordinates
             if ligand_file.suffix.lower() in ['.sdf']:
@@ -1208,7 +1422,11 @@ class Boltzina:
             elif ligand_file.suffix.lower() in ['.mol']:
                 mol = Chem.MolFromMolFile(str(ligand_file), removeHs=False)
             elif ligand_file.suffix.lower() in ['.mol2']:
+                # Read MOL2 file and preserve atom names and bond info
                 mol2_text = ligand_file.read_text(errors="ignore")
+                # Parse atom names and bond info from MOL2 before RDKit processing
+                original_atom_names, bond_info = self._parse_mol2_atom_names_and_bonds(mol2_text)
+
                 mol = Chem.MolFromMol2Block(mol2_text, removeHs=False, sanitize=False)
                 if mol is None:
                     mol = Chem.MolFromMol2File(str(ligand_file), removeHs=False)
@@ -1221,7 +1439,7 @@ class Boltzina:
                         print(f"Warning: PDB ligand sanitization failed: {sanitize_error}")
             else:
                 raise ValueError(f"Unsupported ligand file format: {ligand_file.suffix}")
-            
+
             if mol is None:
                 raise ValueError("Failed to parse ligand molecule")
 
@@ -1234,7 +1452,7 @@ class Boltzina:
                 for i in range(mol.GetNumAtoms()):
                     pos = conf.GetAtomPosition(i)
                     coords.append([pos.x, pos.y, pos.z])
-                
+
                 if len(coords) > 1:
                     coord_array = np.array(coords)
                     coord_std = np.std(coord_array)
@@ -1245,8 +1463,8 @@ class Boltzina:
                         print(f"                    Y({coord_array[:, 1].min():.3f} to {coord_array[:, 1].max():.3f})")
                         print(f"                    Z({coord_array[:, 2].min():.3f} to {coord_array[:, 2].max():.3f})")
 
-            # For MOL2 inputs, explicitly restore coordinates if RDKit dropped them
-            if ligand_file.suffix.lower() == ".mol2" and not has_valid_3d_coords:
+            # For MOL2 inputs, always restore coordinates and atom names to ensure consistency
+            if ligand_file.suffix.lower() == ".mol2":
                 coords, atom_names = self._parse_mol2_coords(mol2_text)
                 if coords and len(coords) == mol.GetNumAtoms():
                     conf = Chem.Conformer(mol.GetNumAtoms())
@@ -1254,17 +1472,37 @@ class Boltzina:
                         conf.SetAtomPosition(idx, Point3D(x, y, z))
                     mol.RemoveAllConformers()
                     mol.AddConformer(conf, assignId=True)
+
+                    # Set atom names - use sanitized name but store original as well
                     if atom_names and len(atom_names) == mol.GetNumAtoms():
                         for atom, name in zip(mol.GetAtoms(), atom_names):
                             if name:
+                                # Store original atom name for reference
+                                atom.SetProp("_original_atom_name", name)
+                                # Also store sanitized name for compatibility
                                 safe_name = self._sanitize_atom_name(name)
                                 atom.SetProp("_TriposAtomName", safe_name)
                                 atom.SetProp("name", safe_name)
-                    has_valid_3d_coords = True
-                    print(f"Restored MOL2 coordinates from {ligand_file.name}")
 
-            # Ensure atom names are sanitized for featurizer compatibility
+                    has_valid_3d_coords = True
+                    print(f"Restored MOL2 coordinates and atom names from {ligand_file.name}")
+
+                    # Store bond information for later use
+                    if bond_info:
+                        mol.SetProp("_bond_info", str(bond_info))
+                        print(f"Preserved {len(bond_info)} bond records from MOL2 file")
+
+            # Ensure atom names are set (use original names from MOL2 if available)
             for idx, atom in enumerate(mol.GetAtoms()):
+                # Check for original atom name first (from MOL2)
+                if atom.HasProp("_original_atom_name"):
+                    # Use the sanitized version of original name
+                    original = atom.GetProp("_original_atom_name")
+                    safe_name = self._sanitize_atom_name(original)
+                    atom.SetProp("name", safe_name)
+                    continue
+
+                # Otherwise, try other properties
                 preferred = None
                 for prop in ("name", "_TriposAtomName", "_atomName"):
                     if atom.HasProp(prop):
