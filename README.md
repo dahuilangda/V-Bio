@@ -338,6 +338,7 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
   * **可选字段**:
     * `target_chain`: 目标蛋白链 ID（逗号分隔）
     * `ligand_chain`: 配体链 ID（逗号分隔）
+    * `affinity_refine`: `true` 时先做扩散精修再做亲和力（更慢但更接近完整预测）
     * `priority`: `high` / `default`
   * **示例**:
     ```bash
@@ -351,6 +352,7 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
   * **输出说明**:
     * 结果 ZIP 内包含结构文件、`confidence_*.json`、`chain_map.json`；
     * 若提供 `target_chain + ligand_chain`，额外返回 `affinity_*.json`。
+    * 默认亲和力使用 Boltz2 原版裁剪策略与 MW 修正设置。
 
   * **方式二：分开输入蛋白质和小分子文件**
     * **端点**: `POST /api/boltz2score`（同端点）
@@ -359,6 +361,7 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
       * `ligand_file`: 小分子结构文件（SDF/MOL/MOL2/PDB）
       * `output_prefix`: 输出复合物前缀（默认: `complex`）
       * `target_chain` / `ligand_chain`: 可选；若不提供，系统默认使用 `A` / `L`
+      * `affinity_refine`: `true` 时先做扩散精修再做亲和力（更慢但更接近完整预测）
       * `priority`: `high` / `default`
     * **示例**:
       ```bash

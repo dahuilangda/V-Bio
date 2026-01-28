@@ -8,7 +8,7 @@ from affinity.boltzina.model.models.boltz2 import Boltz2
 from affinity.boltzina.data.module.inferencev2 import Boltz2InferenceDataModule
 from affinity.boltzina.data.write.writer import BoltzAffinityWriter
 
-def load_boltz2_model(affinity_checkpoint=None, sampling_steps_affinity=200, diffusion_samples_affinity=5, subsample_msa=True, num_subsampled_msa=1024, model="boltz2", step_scale=None, affinity_mw_correction=False, skip_run_structure=True, confidence_prediction=False, use_kernels=False, run_trunk_and_structure=True, predict_affinity_args = None, pairformer_args = None, msa_args = None, steering_args = None, diffusion_process_args = None):
+def load_boltz2_model(affinity_checkpoint=None, sampling_steps_affinity=200, diffusion_samples_affinity=3, subsample_msa=True, num_subsampled_msa=1024, model="boltz2", step_scale=None, affinity_mw_correction=False, skip_run_structure=True, confidence_prediction=False, use_kernels=False, run_trunk_and_structure=True, predict_affinity_args = None, pairformer_args = None, msa_args = None, steering_args = None, diffusion_process_args = None):
     """Load and return a Boltz2 model for affinity prediction.
 
     Args:
@@ -76,7 +76,7 @@ def load_boltz2_model(affinity_checkpoint=None, sampling_steps_affinity=200, dif
 
     return model_module
 
-def predict_affinity(out_dir, model_module=None, output_dir = None, structures_dir = None, msa_dir = None, constraints_dir = None, template_dir = None, extra_mols_dir = None, manifest_path = None, affinity_checkpoint = None, sampling_steps_affinity=200, diffusion_samples_affinity=5, subsample_msa=True, num_subsampled_msa=1024, model="boltz2", step_scale=None, override=False, num_workers=1, strategy="auto", accelerator="gpu", devices=1, affinity_mw_correction=False, seed=None, batch_size=1, mol_dir=None):
+def predict_affinity(out_dir, model_module=None, output_dir = None, structures_dir = None, msa_dir = None, constraints_dir = None, template_dir = None, extra_mols_dir = None, manifest_path = None, affinity_checkpoint = None, sampling_steps_affinity=200, diffusion_samples_affinity=3, subsample_msa=True, num_subsampled_msa=1024, model="boltz2", step_scale=None, override=False, num_workers=1, strategy="auto", accelerator="gpu", devices=1, affinity_mw_correction=False, seed=None, batch_size=1, mol_dir=None):
 
     out_dir = Path(out_dir)
 

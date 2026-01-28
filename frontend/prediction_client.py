@@ -65,6 +65,7 @@ def predict_boltz2score(
     input_filename: str,
     target_chain: str | None = None,
     ligand_chain: str | None = None,
+    affinity_refine: bool | None = None,
 ):
     """
     Sends a Boltz2Score request (structure confidence; optional affinity).
@@ -77,6 +78,8 @@ def predict_boltz2score(
         data['target_chain'] = target_chain
     if ligand_chain:
         data['ligand_chain'] = ligand_chain
+    if affinity_refine is not None:
+        data['affinity_refine'] = str(bool(affinity_refine)).lower()
 
     response = requests.post(endpoint, headers=headers, files=files, data=data)
     response.raise_for_status()
@@ -89,6 +92,7 @@ def predict_boltz2score_separate(
     ligand_content: bytes | str,
     ligand_filename: str,
     output_prefix: str = "complex",
+    affinity_refine: bool | None = None,
 ):
     """
     Sends a Boltz2Score request with separate protein and ligand files.
@@ -103,6 +107,8 @@ def predict_boltz2score_separate(
         'priority': 'default',
         'output_prefix': output_prefix,
     }
+    if affinity_refine is not None:
+        data['affinity_refine'] = str(bool(affinity_refine)).lower()
 
     response = requests.post(endpoint, headers=headers, files=files, data=data)
     response.raise_for_status()

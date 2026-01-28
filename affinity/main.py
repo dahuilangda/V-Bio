@@ -5,6 +5,7 @@ import subprocess
 import argparse
 import pickle
 import json
+from dataclasses import asdict
 import csv
 import re
 import uuid
@@ -17,7 +18,7 @@ Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
 
 from affinity.boltzina.data.parse.mmcif import parse_mmcif
 from affinity.boltzina.affinity.predict_affinity import load_boltz2_model, predict_affinity
-from boltz.main import get_cache_path
+from boltz.main import get_cache_path, MSAModuleArgs
 
 # CCD名称管理器，确保同一批次运行的不要使用相同的CCD名称
 import redis
@@ -138,15 +139,14 @@ class Boltzina:
         self.pairformer_args = pairformer_args
         
         if msa_args is None:
-            self.msa_args = {
-                "subsample_msa": False,
-                "use_paired_feature": True,
-                "msa_s": 64,
-                "msa_transition_n": 256,
-                "msa_blocks": 4,
-                "msa_dropout": 0.15,
-                "z_dropout": 0.15,
-            }
+            # Match upstream Boltz2 defaults for affinity (subsample + no dropout)
+            self.msa_args = asdict(
+                MSAModuleArgs(
+                    subsample_msa=True,
+                    num_subsampled_msa=1024,
+                    use_paired_feature=True,
+                )
+            )
         else:
             self.msa_args = msa_args
 
@@ -194,6 +194,22 @@ class Boltzina:
                 return ccd
         else:
             return {}
+
+    def _sanitize_atom_name(self, name: str) -> str:
+        """Sanitize atom names to ASCII 32..95 and uppercase for featurizer compatibility."""
+        if name is None:
+            return "X"
+        cleaned = str(name).strip().upper()
+        if not cleaned:
+            return "X"
+        safe_chars = []
+        for ch in cleaned:
+            code = ord(ch)
+            if 32 <= code <= 95:
+                safe_chars.append(ch)
+            else:
+                safe_chars.append("X")
+        return "".join(safe_chars)[:4] or "X"
     
     def _add_temporary_ligand_to_ccd(self, ligand_name: str, ligand_mol):
         """Temporarily add a custom ligand to CCD for processing with original naming.
@@ -494,11 +510,11 @@ class Boltzina:
                             # CRITICAL: Set atom names for each atom in the molecule
                             for i, atom in enumerate(mol.GetAtoms()):
                                 if i < len(atom_names):
-                                    atom.SetProp('name', atom_names[i])
+                                    atom.SetProp('name', self._sanitize_atom_name(atom_names[i]))
                                 else:
                                     # Fallback naming
                                     element = atom.GetSymbol()
-                                    atom.SetProp('name', f"{element}{i+1}")
+                                    atom.SetProp('name', self._sanitize_atom_name(f"{element}{i+1}"))
                             
                             print(f"Set atom names for {mol.GetNumAtoms()} atoms in custom ligand")
                             
@@ -975,6 +991,7 @@ class Boltzina:
                 else:
                     atom_name = f"{element}{element_counts[element]}"
 
+            atom_name = self._sanitize_atom_name(atom_name)
             # Ensure atom name is properly formatted (left-aligned, max 4 chars)
             atom_name = atom_name[:4].ljust(4)
             
@@ -1240,10 +1257,27 @@ class Boltzina:
                     if atom_names and len(atom_names) == mol.GetNumAtoms():
                         for atom, name in zip(mol.GetAtoms(), atom_names):
                             if name:
-                                atom.SetProp("_TriposAtomName", name)
-                                atom.SetProp("name", name)
+                                safe_name = self._sanitize_atom_name(name)
+                                atom.SetProp("_TriposAtomName", safe_name)
+                                atom.SetProp("name", safe_name)
                     has_valid_3d_coords = True
                     print(f"Restored MOL2 coordinates from {ligand_file.name}")
+
+            # Ensure atom names are sanitized for featurizer compatibility
+            for idx, atom in enumerate(mol.GetAtoms()):
+                preferred = None
+                for prop in ("name", "_TriposAtomName", "_atomName"):
+                    if atom.HasProp(prop):
+                        value = atom.GetProp(prop).strip()
+                        if value:
+                            preferred = value
+                            break
+                if not preferred:
+                    preferred = f"{atom.GetSymbol()}{idx + 1}"
+                safe_name = self._sanitize_atom_name(preferred)
+                atom.SetProp("name", safe_name)
+                if atom.HasProp("_TriposAtomName"):
+                    atom.SetProp("_TriposAtomName", safe_name)
 
             # Only add hydrogens if we don't have them or don't have valid coordinates
             if not has_valid_3d_coords:
@@ -2000,6 +2034,7 @@ class Boltzina:
             skip_run_structure=self.skip_run_structure,
             use_kernels=self.use_kernels,
             run_trunk_and_structure=self.run_trunk_and_structure,
+            confidence_prediction=not self.skip_run_structure,
             predict_affinity_args=self.predict_affinity_args,
             pairformer_args=self.pairformer_args,
             msa_args=self.msa_args,

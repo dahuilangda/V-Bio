@@ -176,6 +176,13 @@ def render_affinity_page():
             st.caption("系统会保留原始坐标并生成复合物，蛋白链默认保留原链名（缺失则设为 A）；配体链为 L。")
             st.caption("建议使用 SDF/MOL2 以保留键连接信息；若使用 PDB，请确保包含 CONECT，否则可能导致置信度偏低。")
 
+        affinity_refine = st.checkbox(
+            "高质量亲和力（运行扩散精修，较慢）",
+            value=True,
+            disabled=is_running,
+            key="affinity_refine",
+        )
+
         files_ready = False
         if input_mode.startswith("复合物文件"):
             files_ready = uploaded_file is not None
@@ -201,6 +208,7 @@ def render_affinity_page():
                             uploaded_file.name,
                             target_chain=target_chain_str or None,
                             ligand_chain=ligand_chain_str or None,
+                            affinity_refine=affinity_refine,
                         )
                     else:
                         protein_file.seek(0)
@@ -211,6 +219,7 @@ def render_affinity_page():
                             ligand_file.getvalue(),
                             ligand_file.name,
                             output_prefix=output_prefix or "complex",
+                            affinity_refine=affinity_refine,
                         )
                     st.session_state.affinity_task_id = task_id
                     URLStateManager.update_url_for_affinity_task(task_id)

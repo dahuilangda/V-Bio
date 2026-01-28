@@ -175,6 +175,7 @@ def _run_affinity(
     result_id: str,
     accelerator: str,
     devices: int,
+    affinity_refine: bool = False,
 ) -> Optional[dict]:
     try:
         import sys
@@ -205,7 +206,8 @@ def _run_affinity(
     boltzina = Boltzina(
         output_dir=str(affinity_out),
         work_dir=str(affinity_work),
-        skip_run_structure=True,
+        # Enable diffusion refinement for affinity if requested
+        skip_run_structure=not affinity_refine,
         use_kernels=False,
         run_trunk_and_structure=True,
         accelerator=accelerator,
@@ -318,6 +320,11 @@ def main() -> None:
         default=None,
         help="Ligand chain ID(s), comma-separated (enables affinity if set with --target_chain)",
     )
+    parser.add_argument(
+        "--affinity_refine",
+        action="store_true",
+        help="Run diffusion refinement before affinity (higher quality, slower).",
+    )
 
     args = parser.parse_args()
 
@@ -406,6 +413,7 @@ def main() -> None:
             result_id=input_path.stem,
             accelerator=args.accelerator,
             devices=args.devices,
+            affinity_refine=args.affinity_refine,
         )
 
     if cleanup:
