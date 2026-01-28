@@ -68,6 +68,38 @@ def _ccd_matches_residue(residue: gemmi.Residue, ccd_mol: Chem.Mol) -> bool:
     return True
 
 
+def _has_non_single_bonds(mol: Chem.Mol) -> bool:
+    return any(
+        bond.GetBondType() not in (Chem.rdchem.BondType.SINGLE,)
+        for bond in mol.GetBonds()
+    )
+
+
+def _assign_bond_orders(mol: Chem.Mol) -> Chem.Mol:
+    """Try to assign bond orders; fall back gracefully if not possible."""
+    base = Chem.Mol(mol)
+
+    try:
+        candidate = Chem.Mol(base)
+        rdDetermineBonds.DetermineBonds(candidate)
+        if _has_non_single_bonds(candidate):
+            return candidate
+    except Exception:
+        pass
+
+    # If all bonds are single, try a small charge sweep to recover bond orders.
+    for charge in (-8, -6, -4, -2, 0, 2, 4, 6, 8):
+        try:
+            candidate = Chem.Mol(base)
+            rdDetermineBonds.DetermineBonds(candidate, charge=charge)
+        except Exception:
+            continue
+        if _has_non_single_bonds(candidate):
+            return candidate
+
+    return base
+
+
 def _build_custom_ligand_mol(residue: gemmi.Residue) -> Chem.Mol:
     """Create a minimal RDKit molecule from a gemmi residue."""
     rw_mol = Chem.RWMol()
@@ -91,11 +123,100 @@ def _build_custom_ligand_mol(residue: gemmi.Residue) -> Chem.Mol:
     mol.SetProp("id", residue.name)
 
     # Try to infer bonds from coordinates; fall back to no bonds on failure.
+    mol = _assign_bond_orders(mol)
+
+    return mol
+
+
+def _extract_pdb_ligand_block(
+    pdb_lines: list[str],
+    resname: str,
+    chain_id: str,
+    resseq: int,
+    icode: str,
+) -> tuple[str, list[str]] | None:
+    """Extract a PDB block (HETATM + CONECT) for a specific ligand residue."""
+    het_lines = []
+    serials: set[int] = set()
+    icode_val = icode.strip() if icode else ""
+
+    for line in pdb_lines:
+        if not line.startswith(("HETATM", "ATOM")):
+            continue
+        if line[17:20].strip() != resname:
+            continue
+        if line[21].strip() != chain_id:
+            continue
+        try:
+            line_resseq = int(line[22:26].strip())
+        except ValueError:
+            continue
+        if line_resseq != resseq:
+            continue
+        line_icode = line[26].strip() if len(line) > 26 else ""
+        if icode_val and line_icode != icode_val:
+            continue
+
+        het_lines.append(line)
+        try:
+            serial = int(line[6:11].strip())
+        except ValueError:
+            continue
+        serials.add(serial)
+
+    if not het_lines:
+        return None
+
+    conect_lines = []
+    for line in pdb_lines:
+        if not line.startswith("CONECT"):
+            continue
+        raw_numbers = [line[6:11], line[11:16], line[16:21], line[21:26], line[26:31]]
+        numbers: list[int] = []
+        for raw in raw_numbers:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                numbers.append(int(raw))
+            except ValueError:
+                continue
+        if not numbers:
+            continue
+        if numbers[0] not in serials:
+            continue
+        if any(num in serials for num in numbers[1:]):
+            conect_lines.append(line)
+
+    block_lines = het_lines + conect_lines + ["END"]
+    return "\n".join(block_lines), het_lines
+
+
+def _build_custom_ligand_mol_from_pdb(
+    pdb_block: str,
+    het_lines: list[str],
+    resname: str,
+) -> Chem.Mol | None:
+    """Build an RDKit molecule from a PDB ligand block (uses CONECT if present)."""
+    mol = Chem.MolFromPDBBlock(pdb_block, removeHs=False, sanitize=False)
+    if mol is None:
+        return None
+
+    mol = _assign_bond_orders(mol)
     try:
-        rdDetermineBonds.DetermineBonds(mol)
+        Chem.SanitizeMol(mol)
     except Exception:
         pass
 
+    atom_names = [line[12:16].strip() for line in het_lines]
+    if atom_names and len(atom_names) == mol.GetNumAtoms():
+        for atom, name in zip(mol.GetAtoms(), atom_names):
+            if name:
+                atom.SetProp("name", name)
+
+    mol.SetProp("_Name", resname)
+    mol.SetProp("name", resname)
+    mol.SetProp("id", resname)
     return mol
 
 
@@ -109,6 +230,13 @@ def _collect_custom_ligands(path: Path, mols: dict) -> dict:
         for ent in structure.entities
         for sub in ent.subchains
     }
+
+    pdb_lines = None
+    if path.suffix.lower() in {".pdb", ".ent"}:
+        try:
+            pdb_lines = path.read_text().splitlines()
+        except Exception:
+            pdb_lines = None
 
     custom_mols: dict = {}
     for chain in structure[0]:
@@ -129,7 +257,25 @@ def _collect_custom_ligands(path: Path, mols: dict) -> dict:
                 or not ccd_matches
             ):
                 if resname not in custom_mols:
-                    custom_mols[resname] = _build_custom_ligand_mol(residue)
+                    custom_mol = None
+                    if pdb_lines:
+                        extracted = _extract_pdb_ligand_block(
+                            pdb_lines=pdb_lines,
+                            resname=resname,
+                            chain_id=chain.name,
+                            resseq=residue.seqid.num,
+                            icode=residue.seqid.icode,
+                        )
+                        if extracted:
+                            pdb_block, het_lines = extracted
+                            custom_mol = _build_custom_ligand_mol_from_pdb(
+                                pdb_block=pdb_block,
+                                het_lines=het_lines,
+                                resname=resname,
+                            )
+                    if custom_mol is None:
+                        custom_mol = _build_custom_ligand_mol(residue)
+                    custom_mols[resname] = custom_mol
 
     return custom_mols
 
