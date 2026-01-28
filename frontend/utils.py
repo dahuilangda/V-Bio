@@ -10,9 +10,10 @@ import json
 from pathlib import Path
 import yaml
 import py3Dmol
-from typing import Optional
+from typing import Optional, Dict, List
 from datetime import datetime
-from Bio.PDB import MMCIFParser, PDBIO
+from Bio.PDB import MMCIFParser, PDBIO, PDBParser
+from Bio.PDB.Polypeptide import is_aa
 from Bio.PDB.Structure import Structure
 
 from frontend.constants import (
@@ -74,6 +75,55 @@ def get_available_chain_ids(components):
             chain_counter += 1
     
     return chain_ids, chain_descriptions
+
+def assign_chain_ids_for_components(components: List[dict]) -> List[List[str]]:
+    """
+    Assign chain IDs to components in the same order as YAML generation.
+    Returns a list of chain-id lists aligned to components.
+    """
+    chain_letters = string.ascii_uppercase + string.ascii_lowercase + string.digits
+    next_letter_idx = 0
+    assignments: List[List[str]] = []
+
+    for comp in components:
+        num_copies = comp.get('num_copies', 1)
+        current_ids: List[str] = []
+        for j in range(num_copies):
+            if next_letter_idx + j < len(chain_letters):
+                current_ids.append(chain_letters[next_letter_idx + j])
+            else:
+                current_ids.append(f"UNK_{j}")
+        next_letter_idx += num_copies
+        assignments.append(current_ids)
+
+    return assignments
+
+def extract_chain_sequences_from_structure(content: str, fmt: str) -> Dict[str, str]:
+    """
+    Parse a PDB/mmCIF string and return chain sequences (single-letter, X for unknowns).
+    Only the first model is used.
+    """
+    fmt = (fmt or "").lower()
+    parser = PDBParser(QUIET=True) if fmt == "pdb" else MMCIFParser(QUIET=True)
+
+    structure = parser.get_structure("uploaded", io.StringIO(content))
+    sequences: Dict[str, str] = {}
+    first_model = next(iter(structure), None)
+    if first_model is None:
+        return sequences
+
+    for chain in first_model:
+        seq_chars: List[str] = []
+        for residue in chain:
+            if not is_aa(residue, standard=False):
+                continue
+            resname = residue.get_resname()
+            aa = AMINO_ACID_MAPPING.get(resname.upper(), "X")
+            seq_chars.append(aa)
+        if seq_chars:
+            sequences[chain.id] = "".join(seq_chars)
+
+    return sequences
 
 def get_available_chain_ids_for_designer(components, binder_chain_id=None):
     """
@@ -514,6 +564,98 @@ def get_ligand_resnames_from_pdb(file_content: str) -> list[str]:
     return sorted(list(resnames))
 
 
+def get_chain_ids_from_structure(file_content: str, filename: str) -> dict:
+    """
+    Extract chain IDs from a PDB or CIF structure.
+
+    Returns:
+        dict: {
+            'all_chains': list[str],
+            'polymer_chains': list[str],
+            'ligand_chains': list[str]
+        }
+    """
+    result = {"all_chains": [], "polymer_chains": [], "ligand_chains": []}
+    suffix = os.path.splitext(filename)[-1].lower()
+
+    # Fast PDB parsing fallback
+    def _parse_pdb_lines() -> dict:
+        all_chains = set()
+        polymer_chains = set()
+        ligand_chains = set()
+        for line in file_content.splitlines():
+            if len(line) < 22:
+                continue
+            record = line[:6].strip()
+            chain_id = line[21].strip()
+            if not chain_id:
+                continue
+            all_chains.add(chain_id)
+            if record == "ATOM":
+                polymer_chains.add(chain_id)
+            elif record == "HETATM":
+                ligand_chains.add(chain_id)
+        return {
+            "all_chains": sorted(all_chains),
+            "polymer_chains": sorted(polymer_chains),
+            "ligand_chains": sorted(ligand_chains),
+        }
+
+    if suffix in {".pdb", ".ent"}:
+        return _parse_pdb_lines()
+
+    # Try gemmi for CIF or unknown formats
+    try:
+        import gemmi
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=suffix or ".cif", delete=False) as tmp:
+            tmp.write(file_content)
+            tmp_path = tmp.name
+
+        structure = gemmi.read_structure(tmp_path)
+        structure.setup_entities()
+        entity_types = {
+            sub: ent.entity_type.name
+            for ent in structure.entities
+            for sub in ent.subchains
+        }
+
+        all_chains = []
+        polymer_chains = set()
+        ligand_chains = set()
+        for chain in structure[0]:
+            all_chains.append(chain.name)
+            has_polymer = False
+            has_ligand = False
+            for residue in chain:
+                ent_type = entity_types.get(residue.subchain)
+                if ent_type == "Polymer":
+                    has_polymer = True
+                elif ent_type in {"NonPolymer", "Branched"}:
+                    has_ligand = True
+            if has_polymer:
+                polymer_chains.add(chain.name)
+            if has_ligand:
+                ligand_chains.add(chain.name)
+
+        result["all_chains"] = all_chains
+        result["polymer_chains"] = sorted(polymer_chains)
+        result["ligand_chains"] = sorted(ligand_chains)
+        return result
+    except Exception:
+        # Fallback to PDB parsing if possible
+        if suffix in {".pdb", ".ent"}:
+            return _parse_pdb_lines()
+        return result
+    finally:
+        try:
+            if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
 def validate_pdb_for_affinity(file_content: str) -> dict:
     """
     Validate a PDB file for affinity prediction requirements.
@@ -813,8 +955,7 @@ def generate_yaml_from_state():
         return None
         
     sequences_list = []
-    chain_letters = string.ascii_uppercase + string.ascii_lowercase + string.digits
-    next_letter_idx = 0
+    chain_assignments = assign_chain_ids_for_components(st.session_state.components)
     
     protein_components = [comp for comp in st.session_state.components if comp['type'] == 'protein']
     
@@ -833,16 +974,10 @@ def generate_yaml_from_state():
         else:
             msa_strategy = "mixed"
     
-    for comp in st.session_state.components:
-        num_copies = comp.get('num_copies', 1)
-        current_ids = []
-        for j in range(num_copies):
-            if next_letter_idx + j < len(chain_letters):
-                current_ids.append(chain_letters[next_letter_idx + j])
-            else:
-                st.warning(f"警告: 拷贝数过多，链ID可能重复或不足。请减少拷贝数或调整代码。")
-                current_ids.append(f"UNK_{j}")
-        next_letter_idx += num_copies
+    for comp_index, comp in enumerate(st.session_state.components):
+        current_ids = chain_assignments[comp_index] if comp_index < len(chain_assignments) else []
+        if any(cid.startswith("UNK_") for cid in current_ids):
+            st.warning("警告: 拷贝数过多，链ID可能重复或不足。请减少拷贝数或调整代码。")
         
         component_dict = {'id': current_ids if len(current_ids) > 1 else current_ids[0]}
 
@@ -894,6 +1029,25 @@ def generate_yaml_from_state():
         return None
         
     final_yaml_dict = {'version': 1, 'sequences': sequences_list}
+
+    template_entries = []
+    for comp_index, comp in enumerate(st.session_state.components):
+        if comp.get('type') != 'protein':
+            continue
+        upload_info = comp.get('template_upload')
+        if not upload_info:
+            continue
+        upload_id = comp.get('id', comp_index)
+        entry = {'cif': f"template_{upload_id}.cif"}
+        target_chain_ids = chain_assignments[comp_index] if comp_index < len(chain_assignments) else []
+        if target_chain_ids:
+            entry['chain_id'] = target_chain_ids if len(target_chain_ids) > 1 else target_chain_ids[0]
+        template_chain_id = upload_info.get('chain_id')
+        if template_chain_id:
+            entry['template_id'] = template_chain_id
+        template_entries.append(entry)
+    if template_entries:
+        final_yaml_dict['templates'] = template_entries
     
     if st.session_state.properties.get('affinity') and st.session_state.properties.get('binder'):
         final_yaml_dict['properties'] = [{'affinity': {'binder': st.session_state.properties['binder']}}]

@@ -16,7 +16,9 @@ from frontend.utils import (
     generate_yaml_from_state, 
     get_cache_stats,
     has_cached_msa,
-    visualize_structure_py3dmol
+    visualize_structure_py3dmol,
+    extract_chain_sequences_from_structure,
+    assign_chain_ids_for_components,
 )
 from frontend.prediction_client import submit_job, get_status, download_and_process_results
 from frontend.ui_components import render_contact_constraint_ui, render_bond_constraint_ui, render_pocket_constraint_ui
@@ -203,13 +205,74 @@ def render_prediction_page():
                     label = f"RNA序列 ({'单链' if num_copies == 1 else f'{num_copies}链'})"
                 else:
                     label = f"输入 {selected_type.capitalize()} 序列"
-                
-                old_sequence = component.get('sequence', '')
+
+                if selected_type == 'protein':
+                    uploaded_template = st.file_uploader(
+                        "上传 PDB/CIF 模板（可选）",
+                        type=["pdb", "cif", "mmcif"],
+                        key=f"template_upload_{component['id']}",
+                        disabled=is_running,
+                        help="上传蛋白质结构文件，系统将自动提取序列并生成模板用于预测。"
+                    )
+
+                    seq_key = f"seq_{component['id']}"
+                    if uploaded_template is None:
+                        if st.session_state.components[i].get('template_upload'):
+                            st.session_state.components[i].pop('template_upload', None)
+                        if st.session_state.components[i].get('template_last_applied_signature'):
+                            st.session_state.components[i].pop('template_last_applied_signature', None)
+                    else:
+                        file_bytes = uploaded_template.getvalue()
+                        file_name = uploaded_template.name
+                        file_lower = file_name.lower()
+                        fmt = "pdb" if file_lower.endswith(".pdb") else "cif"
+                        try:
+                            file_text = file_bytes.decode("utf-8", errors="replace")
+                            chain_sequences = extract_chain_sequences_from_structure(file_text, fmt)
+                        except Exception as exc:
+                            chain_sequences = {}
+                            st.error(f"无法解析上传的结构文件: {exc}")
+
+                        if not chain_sequences:
+                            st.error("未能从结构文件中提取任何蛋白质链序列，请确认文件有效且包含蛋白质链。")
+                        else:
+                            chain_ids = list(chain_sequences.keys())
+                            previous_chain = st.session_state.components[i].get('template_upload', {}).get('chain_id')
+                            default_index = chain_ids.index(previous_chain) if previous_chain in chain_ids else 0
+                            selected_chain = st.selectbox(
+                                "选择模板链",
+                                options=chain_ids,
+                                index=default_index,
+                                key=f"template_chain_{component['id']}",
+                                disabled=is_running,
+                                help="如果结构包含多条链，请选择用于模板的链。"
+                            )
+
+                            derived_sequence = chain_sequences.get(selected_chain, "")
+                            signature = f"{file_name}:{selected_chain}:{len(derived_sequence)}"
+                            last_signature = st.session_state.components[i].get('template_last_applied_signature')
+
+                            st.session_state.components[i]['template_upload'] = {
+                                'filename': file_name,
+                                'format': fmt,
+                                'content': file_bytes,
+                                'chain_id': selected_chain,
+                                'sequences': chain_sequences,
+                            }
+
+                            if derived_sequence:
+                                if signature != last_signature:
+                                    st.session_state.components[i]['sequence'] = derived_sequence
+                                    st.session_state[seq_key] = derived_sequence
+                                    st.session_state.components[i]['template_last_applied_signature'] = signature
+                                st.caption(f"已从模板链 {selected_chain} 自动提取序列（长度 {len(derived_sequence)}）。")
+
+                old_sequence = st.session_state.components[i].get('sequence', '')
                 
                 new_sequence = st.text_area(
                     label, 
                     height=120, key=f"seq_{component['id']}",
-                    value=component.get('sequence', ''),
+                    value=st.session_state.components[i].get('sequence', ''),
                     placeholder=placeholder_text,
                     help=help_text,
                     disabled=is_running
@@ -707,12 +770,40 @@ def render_prediction_page():
         
         with st.spinner("⏳ 正在提交任务，请稍候..."):
             try:
+                template_files = []
+                template_meta = []
+                chain_assignments = assign_chain_ids_for_components(st.session_state.components)
+
+                for comp_index, comp in enumerate(st.session_state.components):
+                    if comp.get('type') != 'protein':
+                        continue
+                    upload_info = comp.get('template_upload')
+                    if not upload_info:
+                        continue
+                    upload_id = comp.get('id')
+                    fmt = upload_info.get('format', 'pdb')
+                    ext = '.pdb' if fmt == 'pdb' else '.cif'
+                    file_name = f"template_{upload_id}{ext}"
+                    template_files.append({
+                        'filename': file_name,
+                        'content': upload_info.get('content', b'')
+                    })
+                    target_chain_ids = chain_assignments[comp_index] if comp_index < len(chain_assignments) else []
+                    template_meta.append({
+                        'file_name': file_name,
+                        'format': fmt,
+                        'template_chain_id': upload_info.get('chain_id'),
+                        'target_chain_ids': target_chain_ids,
+                    })
+
                 task_id = submit_job(
                     yaml_content=yaml_preview,
                     use_msa=use_msa_for_job,
                     model_name=model_name,
                     backend=st.session_state.prediction_backend,
-                    seed=st.session_state.get('prediction_seed')
+                    seed=st.session_state.get('prediction_seed'),
+                    template_files=template_files,
+                    template_meta=template_meta
                 )
                 st.session_state.task_id = task_id
                 

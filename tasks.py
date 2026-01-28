@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Optional
 import importlib.util
 
+from werkzeug.utils import secure_filename
+
 import requests
 from celery_app import celery_app
 from gpu_manager import acquire_gpu, release_gpu, get_redis_client
@@ -795,6 +797,146 @@ def affinity_task(self, affinity_args: dict):
         self.update_state(state='SUCCESS', meta=final_meta)
         logger.info(f"Task {task_id}: Affinity prediction completed and results uploaded successfully. Final status: SUCCESS.")
         tracker.update_status("completed", "Task completed successfully")
+        return final_meta
+
+    except Exception as e:
+        logger.error(f"Task {task_id} failed: {e}", exc_info=True)
+        if tracker:
+            tracker.update_status("failed", str(e))
+        self.update_state(state='FAILURE', meta={
+            'exc_type': type(e).__name__,
+            'exc_message': str(e),
+            'traceback': traceback.format_exc(),
+        })
+        raise e
+
+    finally:
+        if gpu_id != -1:
+            release_gpu(gpu_id=gpu_id, task_id=task_id)
+            logger.info(f"Task {task_id}: Released GPU {gpu_id}.")
+
+        if task_temp_dir and os.path.exists(task_temp_dir):
+            shutil.rmtree(task_temp_dir)
+            logger.info(f"Task {task_id}: Cleaned up temporary directory '{task_temp_dir}'.")
+
+        if tracker:
+            tracker.stop_heartbeat()
+            logger.info(f"Task {task_id}: Cleanup completed")
+
+
+@celery_app.task(bind=True)
+def boltz2score_task(self, score_args: dict):
+    """
+    Celery task for running Boltz2Score (confidence; optional affinity).
+    """
+    gpu_id = -1
+    task_id = self.request.id
+    task_temp_dir = None
+    tracker = None
+
+    try:
+        redis_client = get_redis_client()
+        tracker = TaskProgressTracker(task_id, redis_client)
+        tracker.start_heartbeat()
+        tracker.update_status("starting", "Initializing Boltz2Score task")
+
+        logger.info(f"Task {task_id}: Attempting to acquire GPU for Boltz2Score.")
+        tracker.update_status("acquiring_gpu", "Waiting for GPU allocation")
+
+        gpu_id = acquire_gpu(task_id=task_id, timeout=3600)
+        self.update_state(state='PROGRESS', meta={'status': f'Acquired GPU {gpu_id}. Starting Boltz2Score.'})
+        logger.info(f"Task {task_id}: Acquired GPU {gpu_id}. Creating temporary directory.")
+        tracker.update_status("gpu_acquired", f"Using GPU {gpu_id}")
+
+        task_temp_dir = tempfile.mkdtemp(prefix=f"boltz2score_task_{task_id}_")
+        input_filename = secure_filename(score_args['input_filename'])
+        input_file_path = os.path.join(task_temp_dir, input_filename)
+        with open(input_file_path, 'w') as f:
+            f.write(score_args['input_file_content'])
+
+        output_dir = os.path.join(task_temp_dir, "output")
+        work_dir = os.path.join(task_temp_dir, "work")
+        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(work_dir, exist_ok=True)
+
+        command = [
+            sys.executable,
+            str(BASE_DIR / "Boltz2Score" / "boltz2score.py"),
+            "--input", input_file_path,
+            "--output_dir", output_dir,
+            "--work_dir", work_dir,
+            "--accelerator", "gpu",
+            "--devices", "1",
+            "--num_workers", "0",
+        ]
+
+        target_chain = score_args.get('target_chain')
+        ligand_chain = score_args.get('ligand_chain')
+        if target_chain:
+            command.extend(["--target_chain", target_chain])
+        if ligand_chain:
+            command.extend(["--ligand_chain", ligand_chain])
+
+        tracker.update_status("running", "Executing Boltz2Score subprocess")
+        logger.info(f"Task {task_id}: Running Boltz2Score. Command: {' '.join(command)}")
+
+        proc_env = os.environ.copy()
+        proc_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=proc_env,
+            cwd=str(BASE_DIR),
+        )
+
+        tracker.register_process(process.pid)
+
+        try:
+            stdout, stderr = process.communicate(timeout=SUBPROCESS_TIMEOUT)
+        except subprocess.TimeoutExpired as e:
+            process.kill()
+            stdout, stderr = process.communicate()
+            error_message = (
+                f"Subprocess for Boltz2Score task {task_id} timed out after {SUBPROCESS_TIMEOUT} seconds.\n"
+                f"Stderr:\n{stderr}\nStdout:\n{stdout}"
+            )
+            logger.error(error_message)
+            tracker.update_status("timeout", f"Process timeout after {SUBPROCESS_TIMEOUT}s")
+            raise TimeoutError(error_message) from e
+
+        if process.returncode != 0:
+            error_message = f"Subprocess for Boltz2Score task {task_id} failed with exit code {process.returncode}.\nStderr:\n{stderr}\nStdout:\n{stdout}"
+            logger.error(error_message)
+            tracker.update_status("failed", f"Process failed with exit code {process.returncode}")
+            raise RuntimeError(error_message)
+
+        tracker.update_status("processing_output", "Packaging Boltz2Score results")
+
+        output_archive_path = os.path.join(task_temp_dir, f"{task_id}_results.zip")
+        with zipfile.ZipFile(output_archive_path, 'w') as zipf:
+            for root, _, files in os.walk(output_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, output_dir)
+                    zipf.write(file_path, arcname)
+
+            if os.path.exists(input_file_path):
+                zipf.write(input_file_path, os.path.basename(input_file_path))
+
+        upload_response = upload_result_to_central_api(task_id, output_archive_path, os.path.basename(output_archive_path))
+
+        final_meta = {
+            'status': 'Complete',
+            'gpu_id': gpu_id,
+            'upload_info': upload_response,
+            'result_file': os.path.basename(output_archive_path)
+        }
+        self.update_state(state='SUCCESS', meta=final_meta)
+        tracker.update_status("completed", "Task completed successfully")
+        logger.info(f"Task {task_id}: Boltz2Score completed and results uploaded successfully.")
         return final_meta
 
     except Exception as e:

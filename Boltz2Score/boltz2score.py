@@ -1,0 +1,416 @@
+#!/usr/bin/env python3
+"""Single-step Boltz2Score: input a PDB/mmCIF, output scores."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import tempfile
+from pathlib import Path
+from typing import Optional, Sequence
+
+import torch
+import gemmi
+
+from boltz.main import get_cache_path
+from boltz.data.types import StructureV2
+from prepare_boltz2score_inputs import prepare_inputs
+from run_boltz2score import run_scoring
+
+
+def _parse_chain_list(value: Optional[str]) -> list[str]:
+    if not value:
+        return []
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+
+def _filter_structure_by_chains(
+    input_path: Path,
+    target_chains: Sequence[str],
+    ligand_chains: Sequence[str],
+    output_path: Path,
+) -> None:
+    structure = gemmi.read_structure(str(input_path))
+    keep = {c.strip() for c in (list(target_chains) + list(ligand_chains)) if c.strip()}
+    if not keep:
+        raise ValueError("No chains specified for affinity filtering.")
+
+    model = structure[0]
+    existing = {chain.name for chain in model}
+
+    # Resolve auth_asym_id -> label_asym_id for CIF inputs if needed.
+    resolved_keep = set()
+    missing = []
+    auth_to_label = {}
+    if input_path.suffix.lower() in {".cif", ".mmcif"}:
+        try:
+            doc = gemmi.cif.read(str(input_path))
+            block = doc[0]
+            # struct_asym mapping
+            label_col = block.find_values("_struct_asym.id")
+            auth_col = block.find_values("_struct_asym.pdbx_auth_asym_id")
+            if label_col and auth_col and len(label_col) == len(auth_col):
+                for i in range(len(label_col)):
+                    label = label_col[i]
+                    auth = auth_col[i]
+                    if auth and label:
+                        auth_to_label.setdefault(auth, set()).add(label)
+            # atom_site mapping fallback
+            label_col = block.find_values("_atom_site.label_asym_id")
+            auth_col = block.find_values("_atom_site.auth_asym_id")
+            if label_col and auth_col and len(label_col) == len(auth_col):
+                for i in range(len(label_col)):
+                    label = label_col[i]
+                    auth = auth_col[i]
+                    if auth and label:
+                        auth_to_label.setdefault(auth, set()).add(label)
+        except Exception:
+            auth_to_label = {}
+
+    def _chain_variants(value: str) -> set[str]:
+        v = value.strip()
+        if not v:
+            return set()
+        variants = {v, v.lower()}
+        lead = v.lstrip("0123456789")
+        if lead:
+            variants.add(lead)
+            variants.add(lead.lower())
+        trail = v.rstrip("0123456789")
+        if trail:
+            variants.add(trail)
+            variants.add(trail.lower())
+        no_digits = "".join(c for c in v if not c.isdigit())
+        if no_digits:
+            variants.add(no_digits)
+            variants.add(no_digits.lower())
+        alnum = "".join(c for c in v if c.isalnum())
+        if alnum:
+            variants.add(alnum)
+            variants.add(alnum.lower())
+        return variants
+
+    existing_lower = {c.lower(): c for c in existing}
+    suggestion_map: dict[str, list[str]] = {}
+    variant_map: dict[str, set[str]] = {}
+    for chain_name in existing:
+        for key in _chain_variants(chain_name):
+            variant_map.setdefault(key, set()).add(chain_name)
+    for auth_key, labels in auth_to_label.items():
+        for key in _chain_variants(auth_key):
+            variant_map.setdefault(key, set()).update(labels)
+
+    for chain_id in keep:
+        if chain_id in existing:
+            resolved_keep.add(chain_id)
+            continue
+        if chain_id in auth_to_label:
+            mapped = [c for c in auth_to_label[chain_id] if c in existing]
+            if mapped:
+                resolved_keep.update(mapped)
+                continue
+        if chain_id.lower() in existing_lower:
+            resolved_keep.add(existing_lower[chain_id.lower()])
+            continue
+
+        variant_candidates: set[str] = set()
+        for key in _chain_variants(chain_id):
+            variant_candidates.update(variant_map.get(key, set()))
+        variant_candidates = {c for c in variant_candidates if c in existing}
+        if len(variant_candidates) == 1:
+            resolved_keep.add(next(iter(variant_candidates)))
+            continue
+        if variant_candidates:
+            suggestion_map[chain_id] = sorted(variant_candidates)
+
+        missing.append(chain_id)
+
+    if missing:
+        auth_keys = ", ".join(sorted(auth_to_label.keys()))
+        available = ", ".join(sorted(existing))
+        suggestions = ""
+        if suggestion_map:
+            parts = [
+                f"{key}→{','.join(values)}" for key, values in suggestion_map.items()
+            ]
+            suggestions = f" Suggestions: {'; '.join(parts)}."
+        raise ValueError(
+            f"Chains not found in structure: {', '.join(missing)}. "
+            f"Available chains: {available or 'none'}. "
+            f"Auth chain IDs: {auth_keys or 'none'}."
+            f"{suggestions}"
+        )
+
+    for chain in list(model):
+        if chain.name not in resolved_keep:
+            model.remove_chain(chain.name)
+
+    structure.remove_empty_chains()
+    structure.setup_entities()
+
+    # Ensure polymer sequences are defined for mmCIF parsing
+    for entity in structure.entities:
+        if entity.entity_type.name != "Polymer":
+            continue
+        if not entity.subchains:
+            continue
+        seq = []
+        for chain in structure[0]:
+            for res in chain:
+                if res.subchain in entity.subchains:
+                    seq.append(res.name)
+        if seq:
+            entity.full_sequence = seq
+
+    doc = structure.make_mmcif_document()
+    doc.write_file(str(output_path))
+
+
+def _run_affinity(
+    complex_file: Path,
+    output_dir: Path,
+    cache_dir: Path,
+    result_id: str,
+    accelerator: str,
+    devices: int,
+) -> Optional[dict]:
+    try:
+        import sys
+        repo_root = Path(__file__).resolve().parents[1]
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+        import affinity.main as affinity_main
+        if getattr(affinity_main, "_ccd_name_manager", None) is not None:
+            affinity_main._ccd_name_manager.redis_client = None
+        Boltzina = affinity_main.Boltzina
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Warning] Failed to import affinity module: {exc}")
+        return None
+
+    affinity_ckpt = cache_dir / "boltz2_aff.ckpt"
+    if not affinity_ckpt.exists():
+        print(
+            f"[Warning] Affinity checkpoint not found: {affinity_ckpt}. Skipping affinity."
+        )
+        return None
+
+    os.environ["BOLTZ_CACHE"] = str(cache_dir)
+
+    affinity_out = output_dir / "affinity"
+    affinity_work = affinity_out / "work"
+    affinity_out.mkdir(parents=True, exist_ok=True)
+
+    boltzina = Boltzina(
+        output_dir=str(affinity_out),
+        work_dir=str(affinity_work),
+        skip_run_structure=True,
+        use_kernels=False,
+        run_trunk_and_structure=True,
+        accelerator=accelerator,
+        devices=devices,
+        num_workers=0,
+    )
+
+    boltzina.predict([str(complex_file)])
+    if not boltzina.results:
+        return None
+
+    result = dict(boltzina.results[0])
+    result["input_file"] = str(complex_file)
+    affinity_json = output_dir / result_id / f"affinity_{result_id}.json"
+    affinity_json.parent.mkdir(parents=True, exist_ok=True)
+    affinity_json.write_text(json.dumps(result, indent=2))
+    return result
+
+
+def _write_chain_map(processed_dir: Path, output_dir: Path, record_id: str) -> None:
+    try:
+        structure = StructureV2.load(
+            processed_dir / "structures" / f"{record_id}.npz"
+        )
+        structure = structure.remove_invalid_chains()
+        chain_map = {
+            str(idx): str(chain["name"])
+            for idx, chain in enumerate(structure.chains)
+        }
+        chain_map_path = output_dir / record_id / "chain_map.json"
+        chain_map_path.parent.mkdir(parents=True, exist_ok=True)
+        chain_map_path.write_text(json.dumps(chain_map, indent=2))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Warning] Failed to write chain map: {exc}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Run Boltz2Score on a single PDB/mmCIF (one step)."
+    )
+    parser.add_argument(
+        "--input",
+        required=True,
+        type=str,
+        help="Input structure file (.pdb/.cif/.mmcif)",
+    )
+    parser.add_argument(
+        "--output_dir",
+        required=True,
+        type=str,
+        help="Output directory for score results",
+    )
+    parser.add_argument(
+        "--cache",
+        type=str,
+        default=None,
+        help="Boltz cache directory (default: BOLTZ_CACHE or ~/.boltz)",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Path to boltz2_conf.ckpt (default: <cache>/boltz2_conf.ckpt)",
+    )
+    parser.add_argument("--devices", type=int, default=1)
+    parser.add_argument(
+        "--accelerator",
+        type=str,
+        default="gpu" if torch.cuda.is_available() else "cpu",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=0,
+        help="DataLoader workers (default: 0 for compatibility)",
+    )
+    parser.add_argument(
+        "--output_format",
+        type=str,
+        default="mmcif",
+        choices=["pdb", "mmcif"],
+    )
+    parser.add_argument("--recycling_steps", type=int, default=3)
+    parser.add_argument("--sampling_steps", type=int, default=1)
+    parser.add_argument("--diffusion_samples", type=int, default=1)
+    parser.add_argument("--max_parallel_samples", type=int, default=1)
+    parser.add_argument("--step_scale", type=float, default=1.5)
+    parser.add_argument("--no_kernels", action="store_true")
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--work_dir",
+        type=str,
+        default=None,
+        help="Optional work dir to keep processed intermediates",
+    )
+    parser.add_argument(
+        "--keep_work",
+        action="store_true",
+        help="Keep temporary work directory (default: delete)",
+    )
+    parser.add_argument(
+        "--target_chain",
+        type=str,
+        default=None,
+        help="Target protein chain ID(s), comma-separated (enables affinity if set with --ligand_chain)",
+    )
+    parser.add_argument(
+        "--ligand_chain",
+        type=str,
+        default=None,
+        help="Ligand chain ID(s), comma-separated (enables affinity if set with --target_chain)",
+    )
+
+    args = parser.parse_args()
+
+    input_path = Path(args.input).expanduser().resolve()
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input not found: {input_path}")
+
+    output_dir = Path(args.output_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    cache_dir = Path(args.cache or get_cache_path()).expanduser().resolve()
+
+    if args.work_dir:
+        work_dir = Path(args.work_dir).expanduser().resolve()
+        work_dir.mkdir(parents=True, exist_ok=True)
+        cleanup = False
+    else:
+        work_dir = Path(
+            tempfile.mkdtemp(prefix="boltz2score_", dir=output_dir)
+        )
+        cleanup = not args.keep_work
+
+    # Create isolated input dir with the single structure
+    input_dir = work_dir / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    staged_input = input_dir / input_path.name
+    if staged_input.exists():
+        staged_input.unlink()
+    shutil.copy2(input_path, staged_input)
+
+    # Prepare processed inputs (structure scoring)
+    prepare_inputs(
+        input_dir=input_dir,
+        out_dir=work_dir,
+        cache_dir=cache_dir,
+        recursive=False,
+    )
+
+    # Run scoring
+    run_scoring(
+        processed_dir=work_dir / "processed",
+        output_dir=output_dir,
+        cache_dir=cache_dir,
+        checkpoint=Path(args.checkpoint) if args.checkpoint else None,
+        devices=args.devices,
+        accelerator=args.accelerator,
+        num_workers=args.num_workers,
+        output_format=args.output_format,
+        recycling_steps=args.recycling_steps,
+        sampling_steps=args.sampling_steps,
+        diffusion_samples=args.diffusion_samples,
+        max_parallel_samples=args.max_parallel_samples,
+        step_scale=args.step_scale,
+        no_kernels=args.no_kernels,
+        seed=args.seed,
+    )
+
+    _write_chain_map(
+        processed_dir=work_dir / "processed",
+        output_dir=output_dir,
+        record_id=input_path.stem,
+    )
+
+    # Optional affinity prediction (requires target + ligand chains)
+    target_chains = _parse_chain_list(args.target_chain)
+    ligand_chains = _parse_chain_list(args.ligand_chain)
+    if target_chains or ligand_chains:
+        if not target_chains or not ligand_chains:
+            raise ValueError(
+                "Affinity requires both --target_chain and --ligand_chain."
+            )
+        if set(target_chains) & set(ligand_chains):
+            raise ValueError("Target and ligand chains must be different.")
+
+        affinity_input = work_dir / f"{input_path.stem}_affinity.cif"
+        _filter_structure_by_chains(
+            input_path=input_path,
+            target_chains=target_chains,
+            ligand_chains=ligand_chains,
+            output_path=affinity_input,
+        )
+        _run_affinity(
+            complex_file=affinity_input,
+            output_dir=output_dir,
+            cache_dir=cache_dir,
+            result_id=input_path.stem,
+            accelerator=args.accelerator,
+            devices=args.devices,
+        )
+
+    if cleanup:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()

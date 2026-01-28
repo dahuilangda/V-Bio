@@ -47,3 +47,6 @@ virtual_screening/small_molecule_results/
 method.md
 lead_optimization/data/chembl_*
 docs/
+data/fold_input.json
+.gitignore
+.af3_jax_cache/

@@ -13,13 +13,15 @@ def submit_job(
     model_name: str = None,
     backend: str = 'boltz',
     seed: int | None = None,
+    template_files: list | None = None,
+    template_meta: list | None = None,
 ):
     """
     Sends a prediction request to the backend API.
     """
     endpoint = f"{API_URL}/predict"
     headers = {'X-API-Token': API_TOKEN}
-    files = {'yaml_file': ('config.yaml', yaml_content, 'application/x-yaml')}
+    files = [('yaml_file', ('config.yaml', yaml_content, 'application/x-yaml'))]
     data = {
         'use_msa_server': str(use_msa).lower(),
         'priority': 'high',
@@ -29,6 +31,13 @@ def submit_job(
         data['model'] = model_name
     if seed is not None:
         data['seed'] = str(seed)
+    if template_meta:
+        data['template_meta'] = json.dumps(template_meta)
+    if template_files:
+        for tpl in template_files:
+            content = tpl.get('content', b'')
+            filename = tpl.get('filename', 'template.pdb')
+            files.append(('template_files', (filename, content, 'application/octet-stream')))
 
     response = requests.post(endpoint, headers=headers, files=files, data=data)
     response.raise_for_status() 
@@ -45,6 +54,29 @@ def predict_affinity(input_file_content: str, input_filename: str, ligand_resnam
         'ligand_resname': ligand_resname,
         'priority': 'default'
     }
+
+    response = requests.post(endpoint, headers=headers, files=files, data=data)
+    response.raise_for_status()
+    return response.json().get('task_id')
+
+
+def predict_boltz2score(
+    input_file_content: str,
+    input_filename: str,
+    target_chain: str | None = None,
+    ligand_chain: str | None = None,
+):
+    """
+    Sends a Boltz2Score request (structure confidence; optional affinity).
+    """
+    endpoint = f"{API_URL}/api/boltz2score"
+    headers = {'X-API-Token': API_TOKEN}
+    files = {'input_file': (input_filename, input_file_content, 'application/octet-stream')}
+    data = {'priority': 'default'}
+    if target_chain:
+        data['target_chain'] = target_chain
+    if ligand_chain:
+        data['ligand_chain'] = ligand_chain
 
     response = requests.post(endpoint, headers=headers, files=files, data=data)
     response.raise_for_status()
@@ -100,6 +132,7 @@ def download_and_process_results(task_id: str):
     cif_content = ""
     confidence_data = {}
     affinity_data = {}
+    chain_map = {}
     backend = "boltz"
     af3_summary_conf = None
     af3_confidences = None
@@ -200,6 +233,14 @@ def download_and_process_results(task_id: str):
                 affinity_data = json.loads(zip_ref.read(filename))
                 break
 
+        for filename in names:
+            if filename.endswith('chain_map.json'):
+                try:
+                    chain_map = json.loads(zip_ref.read(filename))
+                except Exception:
+                    chain_map = {}
+                break
+
     # Finalize CIF content for AF3 runs if present
     if backend == "alphafold3" and af3_primary_cif:
         cif_content = af3_primary_cif
@@ -267,7 +308,8 @@ def download_and_process_results(task_id: str):
         "cif": cif_content,
         "confidence": confidence_data,
         "affinity": affinity_data,
-        "backend": backend
+        "backend": backend,
+        "chain_map": chain_map,
     }
     
     return processed_results, raw_zip_bytes

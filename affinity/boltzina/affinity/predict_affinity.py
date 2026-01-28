@@ -131,17 +131,20 @@ def predict_affinity(out_dir, model_module=None, output_dir = None, structures_d
         batch_size=batch_size,
     )
 
+    precision = 32 if model == "boltz1" else "bf16-mixed"
+    if accelerator == "cpu":
+        precision = 32
+
     trainer = Trainer(
         default_root_dir=out_dir,
         strategy=strategy,
         callbacks=[pred_writer],
         accelerator=accelerator,
         devices=devices,
-        precision=32 if model == "boltz1" else "bf16-mixed",
+        precision=precision,
     )
     return trainer.predict(
         model_module,
         datamodule=data_module,
         return_predictions=True,
     )
-

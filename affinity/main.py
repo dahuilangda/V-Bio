@@ -109,6 +109,10 @@ class Boltzina:
         skip_run_structure: bool = True,
         use_kernels: bool = False,
         clean_intermediate_files: bool = True,
+        accelerator: str = "gpu",
+        devices: int = 1,
+        strategy: str = "auto",
+        num_workers: int = 1,
         predict_affinity_args: Optional[dict] = None,
         pairformer_args: Optional[dict] = None,
         msa_args: Optional[dict] = None,
@@ -126,6 +130,10 @@ class Boltzina:
         self.skip_run_structure = skip_run_structure
         self.use_kernels = use_kernels
         self.clean_intermediate_files = clean_intermediate_files
+        self.accelerator = accelerator
+        self.devices = devices
+        self.strategy = strategy
+        self.num_workers = num_workers
         self.predict_affinity_args = predict_affinity_args
         self.pairformer_args = pairformer_args
         
@@ -1939,8 +1947,11 @@ class Boltzina:
                 extra_mols_dir=str(self.work_dir / "boltz_out" / "processed" / "mols"),
                 manifest_path=self.work_dir / "boltz_out" / "processed" / "manifest.json",
                 mol_dir=str(self.work_dir / "boltz_out" / "processed" / "mols"),  # Use local mols directory
-                num_workers=1, 
+                num_workers=self.num_workers,
                 batch_size=1, 
+                accelerator=self.accelerator,
+                devices=self.devices,
+                strategy=self.strategy,
             )
         except RuntimeError as e:
             error_str = str(e)

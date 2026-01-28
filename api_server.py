@@ -17,7 +17,13 @@ from werkzeug.utils import secure_filename
 from celery.result import AsyncResult
 import config
 from celery_app import celery_app
-from tasks import predict_task, affinity_task, virtual_screening_task, lead_optimization_task
+from tasks import (
+    predict_task,
+    affinity_task,
+    boltz2score_task,
+    virtual_screening_task,
+    lead_optimization_task,
+)
 from gpu_manager import get_redis_client, release_gpu, get_gpu_status
 
 # --- Configure Logging ---
@@ -398,6 +404,40 @@ def handle_predict():
     logger.info(f"Prediction priority: {priority}, targeting queue: '{target_queue}' for client {request.remote_addr}.")
 
     seed_value = _parse_int(request.form.get('seed'))
+    template_inputs = []
+    template_meta_raw = request.form.get('template_meta')
+    template_meta = []
+    if template_meta_raw:
+        try:
+            template_meta = json.loads(template_meta_raw)
+        except json.JSONDecodeError:
+            logger.warning("Invalid template_meta JSON provided; ignoring template metadata.")
+
+    meta_map = {
+        entry.get("file_name"): entry
+        for entry in template_meta
+        if isinstance(entry, dict) and entry.get("file_name")
+    }
+
+    template_files = request.files.getlist("template_files")
+    for uploaded in template_files:
+        if not uploaded or not uploaded.filename:
+            continue
+        filename = uploaded.filename
+        content_bytes = uploaded.read()
+        meta = meta_map.get(filename, {})
+        fmt = meta.get("format")
+        if not fmt:
+            lower_name = filename.lower()
+            fmt = "pdb" if lower_name.endswith(".pdb") else "cif"
+        template_inputs.append({
+            "file_name": filename,
+            "format": fmt,
+            "template_chain_id": meta.get("template_chain_id"),
+            "target_chain_ids": meta.get("target_chain_ids", []),
+            "content_base64": base64.b64encode(content_bytes).decode("utf-8"),
+        })
+
     predict_args = {
         'yaml_content': yaml_content,
         'use_msa_server': use_msa_server,
@@ -405,6 +445,8 @@ def handle_predict():
         'backend': backend,
         'seed': seed_value,
     }
+    if template_inputs:
+        predict_args['template_inputs'] = template_inputs
 
     try:
         task = predict_task.apply_async(args=[predict_args], queue=target_queue)
@@ -747,6 +789,61 @@ def handle_affinity_separate():
         logger.exception(f"Failed to dispatch Celery task for separate affinity prediction request from {request.remote_addr}: {e}")
         return jsonify({'error': 'Failed to dispatch separate affinity prediction task.', 'details': str(e)}), 500
     
+    return jsonify({'task_id': task.id}), 202
+
+
+@app.route('/api/boltz2score', methods=['POST'])
+@require_api_token
+def handle_boltz2score():
+    """
+    Receives Boltz2Score requests (confidence; optional affinity) and dispatches Celery tasks.
+    """
+    logger.info("Received Boltz2Score request.")
+
+    if 'input_file' not in request.files:
+        logger.error("Missing 'input_file' in Boltz2Score request. Client IP: %s", request.remote_addr)
+        return jsonify({'error': "Request form must contain an 'input_file' part"}), 400
+
+    input_file = request.files['input_file']
+    if input_file.filename == '':
+        logger.error("No selected file for 'input_file' in Boltz2Score request.")
+        return jsonify({'error': 'No selected file for input_file'}), 400
+
+    try:
+        input_file_content = input_file.read().decode('utf-8')
+        logger.debug("Boltz2Score input file successfully read and decoded.")
+    except UnicodeDecodeError:
+        logger.error(f"Failed to decode input_file as UTF-8. Client IP: {request.remote_addr}")
+        return jsonify({'error': "Failed to decode input_file. Ensure it's a valid UTF-8 text file."}), 400
+    except IOError as e:
+        logger.exception(f"Failed to read input_file from request: {e}. Client IP: {request.remote_addr}")
+        return jsonify({'error': f"Failed to read input_file: {e}"}), 400
+
+    target_chain = request.form.get('target_chain')
+    ligand_chain = request.form.get('ligand_chain')
+
+    priority = request.form.get('priority', 'default').lower()
+    if priority not in ['high', 'default']:
+        logger.warning(f"Invalid priority '{priority}' provided by client {request.remote_addr}. Defaulting to 'default'.")
+        priority = 'default'
+
+    target_queue = config.HIGH_PRIORITY_QUEUE if priority == 'high' else config.DEFAULT_QUEUE
+    logger.info(f"Boltz2Score priority: {priority}, targeting queue: '{target_queue}' for client {request.remote_addr}.")
+
+    score_args = {
+        'input_file_content': input_file_content,
+        'input_filename': secure_filename(input_file.filename),
+        'target_chain': target_chain,
+        'ligand_chain': ligand_chain,
+    }
+
+    try:
+        task = boltz2score_task.apply_async(args=[score_args], queue=target_queue)
+        logger.info(f"Boltz2Score task {task.id} dispatched to queue: '{target_queue}'.")
+    except Exception as e:
+        logger.exception(f"Failed to dispatch Boltz2Score task from {request.remote_addr}: {e}")
+        return jsonify({'error': 'Failed to dispatch Boltz2Score task.', 'details': str(e)}), 500
+
     return jsonify({'task_id': task.id}), 202
 
 

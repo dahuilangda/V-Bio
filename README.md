@@ -42,6 +42,10 @@
 
       * 用户无需关心复杂的命令行参数，只需在网页上填写序列、选择目标，即可一键提交预测任务。
 
+  * **🧩 模板辅助预测（PDB/CIF）**
+
+      * 前端支持为蛋白质上传 PDB/CIF，自动提取序列并生成模板；后端会为 Boltz2 生成 `templates` 列表，并为 AlphaFold3 生成符合其 `templates` 结构的模板映射。
+
   * **🔍 智能监控系统**
 
       * 内置自动化任务监控，实时检测卡死任务和异常状态，自动释放被占用的GPU资源，确保系统高可用性和资源利用效率。
@@ -292,6 +296,19 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
       * `boltz`（默认）: 运行原有的 Boltz 结构预测流程
       * `alphafold3`: 在配置好 AlphaFold3 环境后自动生成 FASTA/JSON/MSA 并触发 Docker 推理；若未配置相关环境变量，则仅导出输入文件
     * `seed`（可选）: 固定随机种子（整数）。用于复现实验；不填则使用随机种子。
+    * `template_files`（可选）: 一个或多个 PDB/CIF 模板文件（multipart 文件字段）。
+    * `template_meta`（可选）: 模板元数据 JSON（字符串），用于描述模板链与目标链的映射。
+      示例结构：
+      ```json
+      [
+        {
+          "file_name": "template_<id>.pdb",
+          "format": "pdb",
+          "template_chain_id": "A",
+          "target_chain_ids": ["A", "B"]
+        }
+      ]
+      ```
   * **示例**:
     ```bash
     curl -X POST \
@@ -300,6 +317,8 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
          -F "use_msa_server=true" \
          -F "backend=alphafold3" \
          -F "seed=42" \
+         -F "template_files=@/path/to/template_A.pdb" \
+         -F "template_meta=[{\"file_name\":\"template_A.pdb\",\"format\":\"pdb\",\"template_chain_id\":\"A\",\"target_chain_ids\":[\"A\"]}]" \
          http://127.0.0.1:5000/predict
     ```
   * **说明**:
@@ -307,6 +326,31 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
     * 当 `alphafold3` 后端的 YAML 同时声明 `affinity` 属性时，系统会额外运行一遍 Boltz 的亲和力流程，产出的结构/亲和力分析将被复制到 AF3 结果目录中并随 zip 一并返回。
     * Boltz2 结构预测默认生成 5 个候选结构，前端/结果解析会优先展示 `model_0`（最高置信的模型）。所有候选均保留在 ZIP 内。
     * AlphaFold3 在设置 `seed` 时会生成 5 个 `modelSeeds`（`seed` ~ `seed+4`）；未设置 `seed` 时使用默认单种子。
+    * 模板上传后，系统会按目标链裁剪为单链模板并生成 mmCIF，并按后端要求生成模板映射（Boltz2 的 `templates` 列表，AlphaFold3 的 `templates` + `queryIndices/templateIndices`），同时自动补齐 AF3 所需的 release date 元数据。
+
+#### **Boltz2Score API（结构打分/亲和力）**
+
+  * **端点**: `POST /api/boltz2score`
+  * **认证**: 需要 API 令牌
+  * **用途**: 直接对输入 PDB/CIF 做置信度打分；若指定配体链，则额外预测亲和力。
+  * **必填字段**:
+    * `input_file`: 结构文件（PDB/CIF）
+  * **可选字段**:
+    * `target_chain`: 目标蛋白链 ID（逗号分隔）
+    * `ligand_chain`: 配体链 ID（逗号分隔）
+    * `priority`: `high` / `default`
+  * **示例**:
+    ```bash
+    curl -X POST \
+         -H "X-API-Token: your-secret-token" \
+         -F "input_file=@/path/to/complex.cif" \
+         -F "target_chain=A" \
+         -F "ligand_chain=B" \
+         http://127.0.0.1:5000/api/boltz2score
+    ```
+  * **输出说明**:
+    * 结果 ZIP 内包含结构文件、`confidence_*.json`、`chain_map.json`；
+    * 若提供 `target_chain + ligand_chain`，额外返回 `affinity_*.json`。
 
 #### **虚拟筛选 API**
 

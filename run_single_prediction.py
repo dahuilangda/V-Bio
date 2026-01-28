@@ -17,6 +17,7 @@ import tarfile
 import io
 import itertools
 import re
+import base64
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any, Iterable
 import subprocess
@@ -42,6 +43,10 @@ from af3_adapter import (
     safe_filename,
     serialize_af3_json,
 )
+from Bio import Align
+from Bio.PDB import PDBParser, MMCIFParser, Select
+from Bio.PDB.Polypeptide import is_aa
+import gemmi
 
 # MSA 缓存配置
 MSA_CACHE_CONFIG = {
@@ -54,6 +59,292 @@ MSA_CACHE_CONFIG = {
 AF3_VALIDATE_MAX_LINES = os.environ.get("ALPHAFOLD3_VALIDATE_MAX_LINES")
 AF3_VALIDATE_MAX_LINES = int(AF3_VALIDATE_MAX_LINES) if AF3_VALIDATE_MAX_LINES else 200000
 AF3_DEFAULT_MODEL_SEED_COUNT = 5
+AMINO_ACID_MAPPING = {
+    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
+    "GLU": "E", "GLN": "Q", "GLY": "G", "HIS": "H", "ILE": "I",
+    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
+    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
+}
+DEFAULT_TEMPLATE_RELEASE_DATE = "1987-11-16"
+_RELEASE_DATE_PAIR_TAGS = (
+    "_pdbx_database_status.recvd_initial_deposition_date",
+    "_pdbx_database_status.date_of_initial_deposition",
+    "_pdbx_database_status.date_of_release",
+)
+_REVISION_DATE_TAG = "_pdbx_audit_revision_history.revision_date"
+_CIF_RELEASE_DATE_TAGS = _RELEASE_DATE_PAIR_TAGS + (
+    "_pdbx_audit_revision_history.revision_date",
+    "_database_PDB_rev.date_original",
+    "_database_PDB_rev.date",
+)
+_RELEASE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _is_valid_release_date(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    return _RELEASE_DATE_RE.match(str(value).strip()) is not None
+
+
+def _sanitize_date_tags(block: gemmi.cif.Block, date_value: str) -> None:
+    date_value = date_value if _is_valid_release_date(date_value) else DEFAULT_TEMPLATE_RELEASE_DATE
+    for item in block:
+        try:
+            tag, val = item.pair
+        except Exception:
+            tag = None
+            val = None
+        if tag and "date" in str(tag).lower():
+            if not _is_valid_release_date(val):
+                block.set_pair(tag, date_value)
+        loop = getattr(item, "loop", None)
+        if not loop:
+            continue
+        date_cols = [idx for idx, tag_name in enumerate(loop.tags) if "date" in tag_name.lower()]
+        if not date_cols:
+            continue
+        for row_idx in range(loop.length()):
+            for col_idx in date_cols:
+                current = loop[row_idx, col_idx]
+                if not _is_valid_release_date(current):
+                    loop[row_idx, col_idx] = date_value
+
+
+def _remove_loops_with_prefix(block: gemmi.cif.Block, prefixes: Tuple[str, ...]) -> None:
+    items = list(block)
+    for item in items:
+        loop = getattr(item, "loop", None)
+        if not loop:
+            continue
+        tags = [tag.lower() for tag in loop.tags]
+        for prefix in prefixes:
+            if any(tag.startswith(prefix.lower()) for tag in tags):
+                try:
+                    item.erase()
+                except Exception:
+                    pass
+                break
+
+
+def _extract_release_date_from_cif(path: Path) -> Optional[str]:
+    try:
+        doc = gemmi.cif.read(str(path))
+    except Exception:
+        return None
+    if len(doc) == 0:
+        return None
+    block = doc.sole_block()
+    for tag in _CIF_RELEASE_DATE_TAGS:
+        try:
+            value = block.find_value(tag)
+        except Exception:
+            value = ""
+        if value and value not in (".", "?"):
+            text = str(value).strip()
+            if _is_valid_release_date(text):
+                return text
+    return None
+
+
+def _ensure_release_date(
+    block: gemmi.cif.Block,
+    release_date: Optional[str],
+    include_loops: bool = False,
+) -> None:
+    date_value = release_date if _is_valid_release_date(release_date) else DEFAULT_TEMPLATE_RELEASE_DATE
+
+    # Always set pair tags to a valid ISO date to avoid "0"/"?" placeholders.
+    for tag in _RELEASE_DATE_PAIR_TAGS:
+        block.set_pair(tag, date_value)
+
+    if include_loops:
+        _remove_loops_with_prefix(block, ("_pdbx_audit_revision_history.", "_database_PDB_rev."))
+        audit_loop = block.init_loop(
+            "_pdbx_audit_revision_history.",
+            [
+                "revision_ordinal",
+                "data_content_type",
+                "major_revision",
+                "minor_revision",
+                "revision_date",
+            ],
+        )
+        audit_loop.add_row(["1", "Structure model", "1", "0", date_value])
+
+        db_loop = block.init_loop(
+            "_database_PDB_rev.",
+            [
+                "num",
+                "date",
+                "date_original",
+            ],
+        )
+        db_loop.add_row(["1", date_value, date_value])
+    else:
+        # Drop audit/history loops to avoid malformed loop rows; rely on pair tags instead.
+        _remove_loops_with_prefix(block, ("_pdbx_audit_revision_history.", "_database_PDB_rev."))
+        block.set_pair(_REVISION_DATE_TAG, date_value)
+
+
+def _inject_release_date_text(
+    cif_text: str,
+    release_date: Optional[str],
+    include_loops: bool = False,
+) -> str:
+    date_value = release_date if _is_valid_release_date(release_date) else DEFAULT_TEMPLATE_RELEASE_DATE
+    lines = cif_text.splitlines()
+    updated_lines: List[str] = []
+    saw_valid_pair = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            updated_lines.append(line)
+            continue
+        replaced = False
+        for tag in _RELEASE_DATE_PAIR_TAGS:
+            if stripped.startswith(tag):
+                parts = stripped.split()
+                if len(parts) >= 2 and _is_valid_release_date(parts[1]):
+                    saw_valid_pair = True
+                else:
+                    line = f"{tag} {date_value}"
+                    replaced = True
+                break
+        updated_lines.append(line)
+    if saw_valid_pair:
+        return "\n".join(updated_lines) + ("\n" if updated_lines else "")
+
+    out_lines = updated_lines
+    insert_at = 1 if out_lines and out_lines[0].lower().startswith("data_") else 0
+    injection = [
+        f"_pdbx_database_status.recvd_initial_deposition_date {date_value}",
+        f"_pdbx_database_status.date_of_initial_deposition {date_value}",
+        f"_pdbx_database_status.date_of_release {date_value}",
+        f"{_REVISION_DATE_TAG} {date_value}",
+        "",
+    ]
+    if include_loops:
+        injection = [
+            f"_pdbx_database_status.recvd_initial_deposition_date {date_value}",
+            f"_pdbx_database_status.date_of_initial_deposition {date_value}",
+            f"_pdbx_database_status.date_of_release {date_value}",
+            "loop_",
+            "_pdbx_audit_revision_history.revision_ordinal",
+            "_pdbx_audit_revision_history.data_content_type",
+            "_pdbx_audit_revision_history.major_revision",
+            "_pdbx_audit_revision_history.minor_revision",
+            "_pdbx_audit_revision_history.revision_date",
+            f"1 'Structure model' 1 0 {date_value}",
+            "loop_",
+            "_database_PDB_rev.num",
+            "_database_PDB_rev.date",
+            "_database_PDB_rev.date_original",
+            f"1 {date_value} {date_value}",
+            "",
+        ]
+    merged = out_lines[:insert_at] + injection + out_lines[insert_at:]
+    return "\n".join(merged) + ("\n" if merged and not merged[-1].endswith("\n") else "")
+
+
+def _force_af3_release_date_text(cif_text: str, release_date: Optional[str] = None) -> str:
+    """Ensure AF3 can read a release date by injecting a proper audit loop + db status pairs."""
+    date_value = release_date if _is_valid_release_date(release_date) else DEFAULT_TEMPLATE_RELEASE_DATE
+    stripped = _strip_problem_loops_text(
+        cif_text,
+        ("_pdbx_audit_revision_history.", "_database_PDB_rev."),
+    )
+    lines = stripped.splitlines()
+    cleaned: List[str] = []
+    for line in lines:
+        stripped_line = line.strip()
+        if stripped_line.startswith(_REVISION_DATE_TAG):
+            continue
+        cleaned.append(line)
+
+    # Replace or insert database_status pairs
+    for tag in _RELEASE_DATE_PAIR_TAGS:
+        replaced = False
+        for idx, line in enumerate(cleaned):
+            if line.strip().startswith(tag):
+                cleaned[idx] = f"{tag} {date_value}"
+                replaced = True
+                break
+        if not replaced:
+            insert_at = 1 if cleaned and cleaned[0].lower().startswith("data_") else 0
+            cleaned.insert(insert_at, f"{tag} {date_value}")
+
+    insert_at = 1 if cleaned and cleaned[0].lower().startswith("data_") else 0
+    audit_loop = [
+        "loop_",
+        "_pdbx_audit_revision_history.revision_ordinal",
+        "_pdbx_audit_revision_history.data_content_type",
+        "_pdbx_audit_revision_history.major_revision",
+        "_pdbx_audit_revision_history.minor_revision",
+        "_pdbx_audit_revision_history.revision_date",
+        f"1 'Structure model' 1 0 {date_value}",
+        "",
+    ]
+    merged = cleaned[:insert_at] + audit_loop + cleaned[insert_at:]
+    return "\n".join(merged) + ("\n" if merged else "")
+
+
+def _strip_problem_loops_text(cif_text: str, prefixes: Tuple[str, ...]) -> str:
+    lines = cif_text.splitlines()
+    out_lines: List[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if stripped.lower() == "loop_":
+            tag_lines = []
+            j = i + 1
+            while j < len(lines) and lines[j].strip().startswith("_"):
+                tag_lines.append(lines[j].strip())
+                j += 1
+            if tag_lines and any(
+                any(tag.lower().startswith(prefix.lower()) for tag in tag_lines)
+                for prefix in prefixes
+            ):
+                # Skip loop data rows until next item/loop/data block
+                k = j
+                while k < len(lines):
+                    row_stripped = lines[k].strip()
+                    if not row_stripped:
+                        k += 1
+                        continue
+                    if row_stripped.startswith("_") or row_stripped.lower() == "loop_" or row_stripped.lower().startswith("data_"):
+                        break
+                    k += 1
+                i = k
+                continue
+            out_lines.append(line)
+            i += 1
+            continue
+        out_lines.append(line)
+        i += 1
+    return "\n".join(out_lines) + ("\n" if out_lines else "")
+
+
+def _sanitize_release_date_text_with_gemmi(
+    cif_text: str,
+    release_date: Optional[str],
+    include_loops: bool = False,
+) -> str:
+    try:
+        doc = gemmi.cif.read_string(cif_text)
+        if len(doc) == 0:
+            return _inject_release_date_text(cif_text, release_date, include_loops=include_loops)
+        block = doc.sole_block()
+        _ensure_release_date(block, release_date, include_loops=include_loops)
+        date_value = release_date if _is_valid_release_date(release_date) else DEFAULT_TEMPLATE_RELEASE_DATE
+        _sanitize_date_tags(block, date_value)
+        return doc.as_string()
+    except Exception:
+        stripped = _strip_problem_loops_text(
+            cif_text,
+            ("_pdbx_audit_revision_history.", "_database_PDB_rev."),
+        )
+        return _inject_release_date_text(stripped, release_date, include_loops=include_loops)
 
 
 def build_af3_model_seeds(seed: Optional[int], count: int = AF3_DEFAULT_MODEL_SEED_COUNT) -> Optional[List[int]]:
@@ -66,6 +357,641 @@ def build_af3_model_seeds(seed: Optional[int], count: int = AF3_DEFAULT_MODEL_SE
     if count <= 1:
         return [base_seed]
     return [base_seed + offset for offset in range(count)]
+
+
+def extract_chain_sequences_from_structure(content: str, fmt: str) -> Dict[str, str]:
+    fmt = (fmt or "").lower()
+    parser = PDBParser(QUIET=True) if fmt == "pdb" else MMCIFParser(QUIET=True)
+    structure = parser.get_structure("template", io.StringIO(content))
+    sequences: Dict[str, str] = {}
+    first_model = next(iter(structure), None)
+    if first_model is None:
+        return sequences
+
+    for chain in first_model:
+        seq_chars: List[str] = []
+        for residue in chain:
+            if not is_aa(residue, standard=False):
+                continue
+            resname = residue.get_resname()
+            aa = AMINO_ACID_MAPPING.get(resname.upper(), "X")
+            seq_chars.append(aa)
+        if seq_chars:
+            sequences[chain.id] = "".join(seq_chars)
+    return sequences
+
+
+def _pdb_resname_to_one_letter(resname: str) -> Optional[str]:
+    resname = resname.strip().upper()
+    if not resname:
+        return None
+    if resname in AMINO_ACID_MAPPING:
+        return AMINO_ACID_MAPPING[resname]
+    info = gemmi.find_tabulated_residue(resname)
+    if getattr(info, "found", False) and getattr(info, "is_amino_acid", False):
+        code = getattr(info, "one_letter_code", "") or getattr(info, "fasta_code", "")
+        if not code or code == "?" or len(code) != 1:
+            code = "X"
+        return code
+    return None
+
+
+def _extract_chain_sequences_from_pdb_text(pdb_text: str) -> Tuple[Dict[str, str], Optional[str]]:
+    sequences: Dict[str, List[str]] = {}
+    last_res_id: Dict[str, Tuple[str, str]] = {}
+    first_chain: Optional[str] = None
+    for line in pdb_text.splitlines():
+        if not (line.startswith("ATOM  ") or line.startswith("HETATM")):
+            continue
+        if len(line) < 26:
+            continue
+        chain_id = line[21].strip() or "_"
+        if first_chain is None:
+            first_chain = chain_id
+        resname = line[17:20].strip().upper()
+        resseq = line[22:26].strip()
+        icode = line[26].strip() if len(line) > 26 else ""
+        res_id = (resseq, icode)
+        if last_res_id.get(chain_id) == res_id:
+            continue
+        last_res_id[chain_id] = res_id
+        aa = _pdb_resname_to_one_letter(resname)
+        if aa is None:
+            continue
+        sequences.setdefault(chain_id, []).append(aa)
+    seq_map = {cid: "".join(seq) for cid, seq in sequences.items() if seq}
+    return seq_map, first_chain
+
+
+def _write_filtered_pdb_by_chain(pdb_text: str, chain_id: str, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    selected = chain_id or "_"
+    out_lines: List[str] = []
+    in_model = False
+    saw_model = False
+    for line in pdb_text.splitlines():
+        if line.startswith("MODEL"):
+            if saw_model:
+                break
+            in_model = True
+            saw_model = True
+            out_lines.append(line)
+            continue
+        if line.startswith("ENDMDL"):
+            if in_model:
+                out_lines.append(line)
+            break
+        if line.startswith(("ATOM  ", "HETATM", "TER")):
+            if len(line) < 22:
+                continue
+            line_chain = line[21].strip() or "_"
+            if line_chain != selected:
+                continue
+            if line.startswith("HETATM"):
+                resname = line[17:20].strip().upper() if len(line) >= 20 else ""
+                if _pdb_resname_to_one_letter(resname) is None:
+                    continue
+            out_lines.append(line)
+            continue
+        if not saw_model and line.startswith((
+            "HEADER", "TITLE ", "COMPND", "SOURCE", "KEYWDS", "EXPDTA",
+            "AUTHOR", "REVDAT", "JRNL  ", "REMARK", "DBREF ", "SEQRES",
+        )):
+            out_lines.append(line)
+    if not out_lines:
+        out_lines = pdb_text.splitlines()
+    output_path.write_text("\n".join(out_lines) + "\n")
+
+
+class _ChainSelect(Select):
+    def __init__(self, chain_id: str):
+        self.chain_id = chain_id
+
+    def accept_model(self, model):
+        return model.id == 0
+
+    def accept_chain(self, chain):
+        return chain.id == self.chain_id
+
+
+def _build_single_chain_structure(
+    source_path: Path,
+    chain_id: str,
+) -> Tuple[gemmi.Structure, str]:
+    structure = gemmi.read_structure(str(source_path))
+    if len(structure) == 0:
+        raise ValueError("No model found in template structure.")
+
+    # keep only first model
+    while len(structure) > 1:
+        del structure[1]
+
+    model = structure[0]
+    chain_ids = [c.name for c in model]
+    selected_chain = chain_id if chain_id in chain_ids else (chain_ids[0] if chain_ids else None)
+    if not selected_chain:
+        raise ValueError("No chain found in template structure.")
+
+    for chain in list(model):
+        if chain.name != selected_chain:
+            model.remove_chain(chain.name)
+
+    structure.remove_waters()
+    structure.remove_hydrogens()
+    structure.remove_alternative_conformations()
+    structure.remove_empty_chains()
+    # Drop any pre-existing sequence tables that may not match the selected chain
+    structure.clear_sequences()
+    structure.setup_entities()
+
+    chain = model[selected_chain]
+    residue_names = [gemmi.Entity.first_mon(res.name) for res in chain]
+    subchains = {res.subchain for res in chain}
+    for entity in structure.entities:
+        if any(sc in entity.subchains for sc in subchains):
+            if not entity.full_sequence or len(entity.full_sequence) < len(residue_names):
+                entity.full_sequence = residue_names
+
+    # Ensure label_seq_id and related tables are consistent with the sequence
+    try:
+        structure.assign_label_seq_id()
+    except Exception:
+        # If label assignment fails, AF3 parsing will likely fail too; keep original
+        pass
+
+    return structure, selected_chain
+
+
+def _extract_sequence_from_mmcif_text(cif_text: str, chain_id: Optional[str]) -> str:
+    try:
+        sequences = extract_chain_sequences_from_structure(cif_text, "cif")
+    except Exception:
+        return ""
+    if not sequences:
+        return ""
+    if chain_id and chain_id in sequences:
+        return sequences[chain_id]
+    return next(iter(sequences.values()))
+
+
+def _ensure_af3_required_fields(cif_text: str) -> str:
+    """
+    Ensure mmCIF contains all fields required by AlphaFold3 for template parsing.
+
+    AF3 requires _atom_site.pdbx_PDB_model_num field which may be missing
+    when converting from PDB or generating mmCIF with gemmi.
+    """
+    try:
+        doc = gemmi.cif.read_string(cif_text)
+        if len(doc) == 0:
+            return cif_text
+        block = doc.sole_block()
+
+        # Check if _atom_site table exists
+        atom_site_loop = block.find_loop("_atom_site")
+        if not atom_site_loop:
+            return cif_text
+
+        tags = atom_site_loop.tags
+        has_model_num = "_atom_site.pdbx_PDB_model_num" in tags
+
+        if not has_model_num:
+            # We need to reconstruct the atom_site loop with the required field
+            # This is complex, so let's use a different approach:
+            # Parse the text and add the missing field
+            lines = cif_text.splitlines()
+            result_lines = []
+            in_atom_site_loop = False
+            atom_site_tags_found = False
+            model_num_idx = -1
+
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+
+                if stripped.startswith("loop_"):
+                    # Check if next lines contain _atom_site tags
+                    j = i + 1
+                    atom_site_tags = []
+                    while j < len(lines) and lines[j].strip().startswith("_"):
+                        atom_site_tags.append(lines[j].strip())
+                        j += 1
+
+                    if atom_site_tags and any(t.startswith("_atom_site.") for t in atom_site_tags):
+                        in_atom_site_loop = True
+                        atom_site_tags_found = True
+
+                        # Find where to insert pdbx_PDB_model_num
+                        # It should be after group_PDB and before id
+                        insert_idx = -1
+                        for idx, tag in enumerate(atom_site_tags):
+                            if tag == "_atom_site.group_PDB":
+                                # Insert after group_PDB
+                                insert_idx = idx + 1
+                                break
+                            elif tag == "_atom_site.id" and insert_idx == -1:
+                                # Insert before id if group_PDB not found
+                                insert_idx = idx
+                                break
+
+                        # Write loop_ and modified tags
+                        result_lines.append(line)
+                        for k, tag in enumerate(atom_site_tags):
+                            if k == insert_idx:
+                                result_lines.append("_atom_site.pdbx_PDB_model_num")
+                                model_num_idx = insert_idx
+                            result_lines.append(lines[i + 1 + k])
+
+                        # If we didn't find a place to insert, add at the end
+                        if insert_idx == -1:
+                            result_lines.append("_atom_site.pdbx_model_num")
+                            model_num_idx = len(atom_site_tags)
+
+                        continue
+
+                if in_atom_site_loop and atom_site_tags_found:
+                    # Check if we've reached the data rows
+                    if not stripped.startswith("_") and stripped and not stripped.startswith("loop_") and not stripped.startswith("data_"):
+                        # This is a data row - add model_num value
+                        parts = stripped.split()
+                        if model_num_idx >= 0 and model_num_idx < len(parts) + 1:
+                            # Insert "1" at the model_num position
+                            parts.insert(model_num_idx, "1")
+                            result_lines.append(" ".join(parts))
+                        else:
+                            result_lines.append(line)
+                        continue
+                    elif stripped.startswith("_") or stripped.startswith("loop_") or stripped.startswith("data_"):
+                        # End of atom_site data
+                        in_atom_site_loop = False
+                        atom_site_tags_found = False
+                        model_num_idx = -1
+
+                result_lines.append(line)
+
+            return "\n".join(result_lines) + ("\n" if result_lines else "")
+
+        return cif_text
+    except Exception:
+        return cif_text
+
+
+def convert_structure_to_single_chain_mmcif(
+    source_path: Path,
+    chain_id: str,
+    output_path: Path,
+) -> Tuple[Path, str, str, str]:
+    structure, selected_chain = _build_single_chain_structure(source_path, chain_id)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    release_date: Optional[str] = None
+    if source_path.suffix.lower() in {".cif", ".mmcif"}:
+        release_date = _extract_release_date_from_cif(source_path)
+    doc = structure.make_mmcif_document()
+    try:
+        block = doc.sole_block()
+        _ensure_release_date(block, release_date)
+    except Exception:
+        pass
+    cif_text = doc.as_string()
+    # Ensure AF3-required fields are present
+    cif_text = _ensure_af3_required_fields(cif_text)
+    cif_text = _sanitize_release_date_text_with_gemmi(
+        cif_text,
+        release_date,
+        include_loops=False,
+    )
+    output_path.write_text(cif_text)
+    template_seq = _extract_sequence_from_mmcif_text(cif_text, selected_chain)
+    return output_path, cif_text, selected_chain, template_seq
+
+
+def build_alignment_indices(query_seq: str, template_seq: str) -> Tuple[List[int], List[int]]:
+    if not query_seq or not template_seq:
+        return [], []
+
+    aligner = Align.PairwiseAligner()
+    aligner.mode = "global"
+    alignment = aligner.align(query_seq, template_seq)[0]
+    query_indices: List[int] = []
+    template_indices: List[int] = []
+
+    for query_block, template_block in zip(alignment.aligned[0], alignment.aligned[1]):
+        q_start, q_end = query_block
+        t_start, t_end = template_block
+        length = min(q_end - q_start, t_end - t_start)
+        for offset in range(length):
+            query_indices.append(int(q_start + offset))
+            template_indices.append(int(t_start + offset))
+
+    return query_indices, template_indices
+
+
+def build_chain_sequence_map(yaml_data: dict) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    for item in yaml_data.get("sequences", []):
+        if not isinstance(item, dict) or "protein" not in item:
+            continue
+        protein = item.get("protein", {})
+        seq = protein.get("sequence", "")
+        ids = protein.get("id")
+        if isinstance(ids, list):
+            chain_ids = ids
+        else:
+            chain_ids = [ids] if ids is not None else []
+        for chain_id in chain_ids:
+            mapping[chain_id] = seq
+    return mapping
+
+
+def prepare_template_payloads(
+    yaml_content: str,
+    template_inputs: Optional[List[dict]],
+    temp_dir: str,
+) -> Tuple[str, List[dict]]:
+    if not template_inputs:
+        return yaml_content, []
+
+    yaml_data = yaml.safe_load(yaml_content) or {}
+    had_templates = bool(yaml_data.get("templates"))
+    chain_seq_map = build_chain_sequence_map(yaml_data)
+    boltz_templates = list(yaml_data.get("templates", []) or [])
+    if boltz_templates:
+        normalized = []
+        for entry in boltz_templates:
+            if not isinstance(entry, dict):
+                continue
+            path_ref = entry.get("cif") or entry.get("mmcif") or entry.get("pdb")
+            if not path_ref:
+                continue
+            path = Path(str(path_ref))
+            resolved: Optional[Path] = None
+            if path.is_absolute():
+                if path.exists():
+                    resolved = path
+            else:
+                if path.exists():
+                    resolved = path.resolve()
+                else:
+                    candidate = Path(temp_dir) / path
+                    if candidate.exists():
+                        resolved = candidate
+            if not resolved:
+                continue
+            updated = dict(entry)
+            if "pdb" in updated:
+                updated["pdb"] = str(resolved)
+            else:
+                updated.pop("pdb", None)
+                if "cif" in updated:
+                    updated["cif"] = str(resolved)
+                    updated.pop("mmcif", None)
+                elif "mmcif" in updated:
+                    updated["mmcif"] = str(resolved)
+            normalized.append(updated)
+        boltz_templates = normalized
+    af3_templates: List[dict] = []
+
+    templates_dir = Path(temp_dir) / "templates"
+    for idx, template in enumerate(template_inputs):
+        content_b64 = template.get("content_base64")
+        if not content_b64:
+            print("⚠️ 模板内容为空，跳过。", file=sys.stderr)
+            continue
+        try:
+            raw_bytes = base64.b64decode(content_b64)
+        except Exception:
+            print("⚠️ 模板内容解码失败，跳过。", file=sys.stderr)
+            continue
+        text = raw_bytes.decode("utf-8", errors="replace")
+        fmt = (template.get("format") or "pdb").lower()
+        file_name = template.get("file_name") or template.get("filename") or f"template_{idx}.{fmt}"
+        template_chain_id = template.get("template_chain_id")
+
+        if fmt == "pdb":
+            chain_sequences, first_chain = _extract_chain_sequences_from_pdb_text(text)
+        else:
+            chain_sequences = extract_chain_sequences_from_structure(text, fmt)
+            first_chain = next(iter(chain_sequences.keys()), None)
+        if not chain_sequences:
+            print("⚠️ 模板未解析出蛋白质链，跳过。", file=sys.stderr)
+            continue
+        if template_chain_id not in chain_sequences:
+            template_chain_id = first_chain or next(iter(chain_sequences.keys()))
+        template_seq = chain_sequences.get(template_chain_id, "")
+
+        templates_dir.mkdir(parents=True, exist_ok=True)
+        raw_path = templates_dir / file_name
+        try:
+            raw_path.write_bytes(raw_bytes)
+        except Exception as exc:
+            print(f"⚠️ 保存模板文件失败 {raw_path}: {exc}", file=sys.stderr)
+            continue
+
+        if fmt == "pdb":
+            filtered_path = templates_dir / f"{Path(file_name).stem}_chain{template_chain_id}.pdb"
+            try:
+                _write_filtered_pdb_by_chain(text, str(template_chain_id or ""), filtered_path)
+                raw_path = filtered_path
+            except Exception as exc:
+                print(f"⚠️ 过滤 PDB 模板失败 {raw_path}: {exc}", file=sys.stderr)
+
+        cif_stem = Path(file_name).stem or f"template_{idx}"
+        cif_path = templates_dir / f"{cif_stem}.cif"
+        cif_path, cif_text, resolved_chain_id, cif_template_seq = convert_structure_to_single_chain_mmcif(
+            raw_path, str(template_chain_id or ""), cif_path
+        )
+        if cif_template_seq:
+            template_seq = cif_template_seq
+            template_chain_id = resolved_chain_id
+
+        target_chain_ids = template.get("target_chain_ids") or []
+        if target_chain_ids and template_seq:
+            for item in yaml_data.get("sequences", []):
+                if "protein" not in item:
+                    continue
+                protein = item.get("protein", {})
+                ids = protein.get("id")
+                if isinstance(ids, list):
+                    ids_list = ids
+                else:
+                    ids_list = [ids] if ids is not None else []
+                if not set(ids_list).intersection(target_chain_ids):
+                    continue
+                if not protein.get("sequence"):
+                    protein["sequence"] = template_seq
+            chain_seq_map = build_chain_sequence_map(yaml_data)
+        if target_chain_ids:
+            query_seq = chain_seq_map.get(target_chain_ids[0], "")
+        else:
+            query_seq = ""
+
+        query_indices, template_indices = build_alignment_indices(query_seq, template_seq)
+
+        # Boltz template entry
+        boltz_entry: Dict[str, Any] = {"cif": str(cif_path)}
+        if target_chain_ids:
+            boltz_entry["chain_id"] = target_chain_ids if len(target_chain_ids) > 1 else target_chain_ids[0]
+        boltz_templates.append(boltz_entry)
+
+        # AF3 template payload
+        if query_indices and template_indices:
+            af3_source_text = cif_text
+            af3_mmcif = _sanitize_release_date_text_with_gemmi(
+                af3_source_text,
+                release_date=None,
+                include_loops=True,
+            )
+            af3_mmcif = _force_af3_release_date_text(af3_mmcif, None)
+            af3_templates.append({
+                "target_chain_ids": target_chain_ids,
+                "mmcif": af3_mmcif,
+                "queryIndices": query_indices,
+                "templateIndices": template_indices,
+            })
+
+    if boltz_templates or had_templates:
+        yaml_data["templates"] = boltz_templates
+    elif "templates" in yaml_data:
+        yaml_data.pop("templates", None)
+    yaml_content = yaml.safe_dump(
+        yaml_data,
+        sort_keys=False,
+        default_flow_style=False,
+    )
+
+    return yaml_content, af3_templates
+
+
+def _normalize_chain_id_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if item is not None and str(item).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def prepare_yaml_template_payloads(yaml_content: str, temp_dir: str) -> List[dict]:
+    yaml_data = yaml.safe_load(yaml_content) or {}
+    template_entries = yaml_data.get("templates") or []
+    if not isinstance(template_entries, list) or not template_entries:
+        return []
+
+    chain_seq_map = build_chain_sequence_map(yaml_data)
+    if not chain_seq_map:
+        return []
+
+    af3_templates: List[dict] = []
+    templates_dir = Path(temp_dir) / "templates_from_yaml"
+
+    for idx, entry in enumerate(template_entries):
+        if not isinstance(entry, dict):
+            continue
+        cif_ref = entry.get("cif") or entry.get("mmcif") or entry.get("pdb")
+        if not cif_ref:
+            continue
+        cif_path = Path(str(cif_ref))
+        if not cif_path.is_absolute():
+            candidate = Path(temp_dir) / cif_path
+            if candidate.exists():
+                cif_path = candidate
+        if not cif_path.exists():
+            print(f"⚠️ 模板 CIF 文件不存在，跳过: {cif_path}", file=sys.stderr)
+            continue
+        suffix = cif_path.suffix.lower()
+        fmt = "cif" if suffix in (".cif", ".mmcif") else "pdb"
+        try:
+            text = cif_path.read_text()
+        except Exception as exc:
+            print(f"⚠️ 读取模板文件失败 {cif_path}: {exc}", file=sys.stderr)
+            continue
+
+        template_chain_id = entry.get("template_id") or entry.get("template_chain_id")
+        if isinstance(template_chain_id, (list, tuple)):
+            template_chain_id = template_chain_id[0] if template_chain_id else None
+        target_chain_ids = _normalize_chain_id_list(
+            entry.get("chain_id") or entry.get("target_chain_ids") or entry.get("chain_ids")
+        )
+        if not target_chain_ids and chain_seq_map:
+            target_chain_ids = [next(iter(chain_seq_map.keys()))]
+
+        if fmt == "pdb":
+            chain_sequences, first_chain = _extract_chain_sequences_from_pdb_text(text)
+        else:
+            chain_sequences = extract_chain_sequences_from_structure(text, fmt)
+            first_chain = next(iter(chain_sequences.keys()), None)
+        if not chain_sequences:
+            continue
+        if template_chain_id not in chain_sequences:
+            template_chain_id = first_chain or next(iter(chain_sequences.keys()))
+        template_seq = chain_sequences.get(template_chain_id, "")
+
+        cif_text: Optional[str] = None
+        cif_out = templates_dir / f"template_yaml_{idx}.cif"
+        try:
+            if fmt == "pdb":
+                filtered_path = templates_dir / f"template_yaml_{idx}_chain{template_chain_id}.pdb"
+                _write_filtered_pdb_by_chain(text, str(template_chain_id or ""), filtered_path)
+                source_path = filtered_path
+            else:
+                source_path = cif_path
+            _, cif_text, resolved_chain_id, cif_template_seq = convert_structure_to_single_chain_mmcif(
+                source_path, str(template_chain_id or ""), cif_out
+            )
+            if cif_template_seq:
+                template_seq = cif_template_seq
+                template_chain_id = resolved_chain_id
+        except Exception as exc:
+            if fmt in ("cif", "mmcif") and text:
+                print(f"⚠️ 转换模板失败，改用原始 mmCIF: {cif_path} ({exc})", file=sys.stderr)
+                cif_text = text
+            else:
+                print(f"⚠️ 转换模板为单链 mmCIF 失败 {cif_path}: {exc}", file=sys.stderr)
+                continue
+
+        query_seq = chain_seq_map.get(target_chain_ids[0], "") if target_chain_ids else ""
+        query_indices, template_indices = build_alignment_indices(query_seq, template_seq)
+        if not query_indices or not template_indices:
+            continue
+
+        af3_mmcif = _sanitize_release_date_text_with_gemmi(
+            cif_text or "",
+            release_date=None,
+            include_loops=True,
+        )
+        af3_mmcif = _force_af3_release_date_text(af3_mmcif, None)
+        af3_templates.append({
+            "target_chain_ids": target_chain_ids,
+            "mmcif": af3_mmcif,
+            "queryIndices": query_indices,
+            "templateIndices": template_indices,
+        })
+
+    return af3_templates
+
+
+def validate_template_paths(yaml_content: str) -> None:
+    yaml_data = yaml.safe_load(yaml_content) or {}
+    template_entries = yaml_data.get("templates") or []
+    if not isinstance(template_entries, list) or not template_entries:
+        return
+
+    missing: List[str] = []
+    for entry in template_entries:
+        if not isinstance(entry, dict):
+            continue
+        path_ref = entry.get("cif") or entry.get("mmcif") or entry.get("pdb")
+        if not path_ref:
+            continue
+        path = Path(str(path_ref))
+        if not path.exists():
+            missing.append(str(path))
+
+    if missing:
+        missing_list = "\n".join(f"- {p}" for p in missing)
+        raise FileNotFoundError(
+            "模板文件不存在，已中止任务。请重新上传模板文件或移除 YAML 中的 templates 条目。\n"
+            f"缺失文件列表:\n{missing_list}"
+        )
 
 
 def validate_af3_database_files(database_dir: str) -> None:
@@ -1199,20 +2125,42 @@ def is_sequence_match(protein_sequence: str, query_sequence: str) -> bool:
     return False
 
 def find_results_dir(base_dir: str) -> str:
+    def _find_deepest_result(root_dir: str, exclude_tokens: List[str]) -> Optional[str]:
+        result_path = None
+        max_depth = -1
+        for root, _, files in os.walk(root_dir):
+            if any(token in root for token in exclude_tokens):
+                continue
+            if any(f.endswith((".cif", ".pdb")) for f in files):
+                depth = root.count(os.sep)
+                if depth > max_depth:
+                    max_depth = depth
+                    result_path = root
+        return result_path
+
+    exclude_tokens = [
+        f"{os.sep}templates",
+        f"{os.sep}templates_from_yaml",
+        f"{os.sep}af3_input",
+        f"{os.sep}af3_output",
+        f"{os.sep}msa",
+    ]
+
+    predictions_root = os.path.join(base_dir, "predictions")
     result_path = None
-    max_depth = -1
-    for root, dirs, files in os.walk(base_dir):
-        if any(f.endswith((".cif")) for f in files):
-            depth = root.count(os.sep)
-            if depth > max_depth:
-                max_depth = depth
-                result_path = root
+    if os.path.isdir(predictions_root):
+        result_path = _find_deepest_result(predictions_root, exclude_tokens)
+
+    if not result_path:
+        result_path = _find_deepest_result(base_dir, exclude_tokens)
 
     if result_path:
         print(f"Found results in directory: {result_path}", file=sys.stderr)
         return result_path
 
-    raise FileNotFoundError(f"Could not find any directory containing result files within the base directory {base_dir}")
+    raise FileNotFoundError(
+        f"Could not find any directory containing result files within the base directory {base_dir}"
+    )
 
 def get_cached_a3m_files(yaml_content: str) -> list:
     """
@@ -1463,6 +2411,7 @@ def run_alphafold3_backend(
     output_archive_path: str,
     use_msa_server: bool,
     seed: Optional[int] = None,
+    template_payloads: Optional[List[dict]] = None,
 ) -> None:
     print("🚀 Using AlphaFold3 backend (AF3 input preparation)", file=sys.stderr)
 
@@ -1502,6 +2451,43 @@ def run_alphafold3_backend(
         use_external_msa=use_msa_server,
         model_seeds=model_seeds,
     )
+
+    if template_payloads:
+        for tpl in template_payloads:
+            mmcif_text = tpl.get("mmcif")
+            if mmcif_text:
+                tpl["mmcif"] = _sanitize_release_date_text_with_gemmi(
+                    mmcif_text,
+                    None,
+                    include_loops=True,
+                )
+                tpl["mmcif"] = _force_af3_release_date_text(tpl["mmcif"], None)
+        for entry in af3_json.get("sequences", []):
+            protein = entry.get("protein")
+            if not isinstance(protein, dict):
+                continue
+            ids = protein.get("id", [])
+            if isinstance(ids, str):
+                ids = [ids]
+            for tpl in template_payloads:
+                target_ids = tpl.get("target_chain_ids") or []
+                if not target_ids:
+                    continue
+                if not set(ids).intersection(target_ids):
+                    continue
+                if not tpl.get("queryIndices") or not tpl.get("templateIndices"):
+                    continue
+                protein.setdefault("templates", []).append({
+                    "mmcif": tpl["mmcif"],
+                    "queryIndices": tpl["queryIndices"],
+                    "templateIndices": tpl["templateIndices"],
+                })
+                # AF3 requires MSA fields to be set when templates are provided
+                # Set them to empty strings if they don't exist
+                if "unpairedMsa" not in protein:
+                    protein["unpairedMsa"] = ""
+                if "pairedMsa" not in protein:
+                    protein["pairedMsa"] = ""
 
     af3_input_dir = os.path.join(temp_dir, "af3_input")
     af3_output_dir = os.path.join(temp_dir, "af3_output")
@@ -1601,6 +2587,64 @@ if _af3_parsers is not None:
                 return iter(())
 
         _af3_parsers.lazy_parse_fasta_string = _safe_lazy_parse_fasta_string
+
+# Patch AF3 mmCIF header parsing to tolerate invalid release dates (e.g. "0").
+try:
+    from alphafold3.structure import parsing as _af3_parsing
+    import datetime as _dt
+
+    class _SafeDate(_dt.date):
+        @classmethod
+        def fromisoformat(cls, date_string):
+            try:
+                return _dt.date.fromisoformat(str(date_string))
+            except Exception:
+                return _dt.date.fromisoformat("1970-01-01")
+
+    try:
+        _af3_parsing.datetime.date = _SafeDate
+    except Exception:
+        pass
+except Exception:
+    pass
+
+# Ensure AF3 mmCIF strings always include a valid release date field.
+try:
+    from alphafold3 import structure as _af3_structure
+    _orig_from_mmcif = getattr(_af3_structure, "from_mmcif", None)
+
+    if callable(_orig_from_mmcif):
+        def _ensure_release_date_in_mmcif_text(text: str) -> str:
+            if "_pdbx_audit_revision_history.revision_date" in text:
+                return text
+            lines = text.splitlines()
+            insert_at = 1 if lines and lines[0].lower().startswith("data_") else 0
+            injection = [
+                "_pdbx_database_status.recvd_initial_deposition_date 1970-01-01",
+                "_pdbx_database_status.date_of_initial_deposition 1970-01-01",
+                "_pdbx_database_status.date_of_release 1970-01-01",
+                "loop_",
+                "_pdbx_audit_revision_history.revision_ordinal",
+                "_pdbx_audit_revision_history.data_content_type",
+                "_pdbx_audit_revision_history.major_revision",
+                "_pdbx_audit_revision_history.minor_revision",
+                "_pdbx_audit_revision_history.revision_date",
+                "1 'Structure model' 1 0 1970-01-01",
+            ]
+            merged = lines[:insert_at] + injection + lines[insert_at:]
+            return "\n".join(merged) + ("\n" if merged else "")
+
+        def _safe_from_mmcif(mmcif, *args, **kwargs):
+            try:
+                if isinstance(mmcif, str):
+                    mmcif = _ensure_release_date_in_mmcif_text(mmcif)
+            except Exception:
+                pass
+            return _orig_from_mmcif(mmcif, *args, **kwargs)
+
+        _af3_structure.from_mmcif = _safe_from_mmcif
+except Exception:
+    pass
 """
     with open(sitecustomize_path, "w", encoding="utf-8") as sc_file:
         sc_file.write(sitecustomize_code)
@@ -1634,6 +2678,7 @@ if _af3_parsers is not None:
     container_output_dir = "/workspace/af_output"
     container_model_dir = "/workspace/models"
     container_database_dir = "/workspace/public_databases"
+    container_cache_dir = "/workspace/af_cache"
     container_colabfold_jobs_dir = "/app/jobs"
 
     runtime_overridden = any(token == "--runtime" for token in extra_args)
@@ -1663,6 +2708,21 @@ if _af3_parsers is not None:
             f"{database_dir}:{container_database_dir}",
         ]
     )
+
+    # Enable persistent JAX compilation cache to avoid repeated long compiles.
+    jax_cache_host_dir = os.environ.get("ALPHAFOLD3_JAX_CACHE_DIR")
+    if not jax_cache_host_dir:
+        jax_cache_host_dir = os.path.join(os.getcwd(), ".af3_jax_cache")
+    try:
+        os.makedirs(jax_cache_host_dir, exist_ok=True)
+        docker_command.extend([
+            "--env",
+            f"JAX_COMPILATION_CACHE_DIR={container_cache_dir}",
+            "--volume",
+            f"{jax_cache_host_dir}:{container_cache_dir}",
+        ])
+    except Exception as exc:
+        print(f"⚠️ 无法创建 JAX 编译缓存目录 {jax_cache_host_dir}: {exc}", file=sys.stderr)
 
     # 添加 ColabFold jobs 目录挂载（如果配置了 MSA 服务器）
     if use_msa_server and MSA_SERVER_URL and COLABFOLD_JOBS_DIR and os.path.exists(COLABFOLD_JOBS_DIR):
@@ -1710,21 +2770,38 @@ if _af3_parsers is not None:
 
     display_command = " ".join(shlex.quote(part) for part in docker_command)
     print(f"🐳 运行 AlphaFold3 Docker: {display_command}", file=sys.stderr)
-    docker_proc = subprocess.run(
-        docker_command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-    if docker_proc.returncode != 0:
-        print(f"❌ AlphaFold3 Docker 运行失败: {docker_proc.stderr}", file=sys.stderr)
-        raise RuntimeError(
-            f"AlphaFold3 Docker run failed with exit code {docker_proc.returncode}. "
-            f"Stdout: {docker_proc.stdout}\nStderr: {docker_proc.stderr}"
+    af3_log_path = os.path.join(temp_dir, "af3_docker.log")
+    with open(af3_log_path, "w", encoding="utf-8") as log_file:
+        docker_proc = subprocess.Popen(
+            docker_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
         )
 
-    print(f"✅ AlphaFold3 Docker 运行完成: {docker_proc.stdout}", file=sys.stderr)
+        output_tail: List[str] = []
+        if docker_proc.stdout:
+            for line in docker_proc.stdout:
+                log_file.write(line)
+                log_file.flush()
+                print(line, end="", file=sys.stderr)
+                output_tail.append(line)
+                if len(output_tail) > 200:
+                    output_tail.pop(0)
+
+        return_code = docker_proc.wait()
+
+    if return_code != 0:
+        tail_text = "".join(output_tail[-200:])
+        print(f"❌ AlphaFold3 Docker 运行失败: {tail_text}", file=sys.stderr)
+        raise RuntimeError(
+            f"AlphaFold3 Docker run failed with exit code {return_code}. "
+            f"Last output:\n{tail_text}\n"
+            f"Full log: {af3_log_path}"
+        )
+
+    print(f"✅ AlphaFold3 Docker 运行完成，日志已保存: {af3_log_path}", file=sys.stderr)
 
     af3_output_contents = list(Path(af3_output_dir).rglob("*"))
     if not any(p.is_file() for p in af3_output_contents):
@@ -1774,22 +2851,41 @@ def main():
 
         model_name = predict_args.pop("model_name", None)
         seed = predict_args.pop("seed", None)
+        template_inputs = predict_args.pop("template_inputs", None)
 
         use_msa_server = predict_args.get("use_msa_server", False)
 
         with tempfile.TemporaryDirectory() as temp_dir:
+            processed_yaml = yaml_content
+            af3_template_payloads: List[dict] = []
+            if template_inputs:
+                processed_yaml, af3_template_payloads = prepare_template_payloads(
+                    yaml_content,
+                    template_inputs,
+                    temp_dir,
+                )
             if backend == "alphafold3":
+                if not af3_template_payloads:
+                    af3_template_payloads = prepare_yaml_template_payloads(processed_yaml, temp_dir)
                 run_alphafold3_backend(
                     temp_dir,
-                    yaml_content,
+                    processed_yaml,
                     output_archive_path,
                     use_msa_server,
                     seed=seed,
+                    template_payloads=af3_template_payloads,
                 )
             else:
                 if seed is not None:
                     predict_args["seed"] = seed
-                run_boltz_backend(temp_dir, yaml_content, output_archive_path, predict_args, model_name)
+                validate_template_paths(processed_yaml)
+                run_boltz_backend(
+                    temp_dir,
+                    processed_yaml,
+                    output_archive_path,
+                    predict_args,
+                    model_name,
+                )
 
             if not os.path.exists(output_archive_path):
                 raise FileNotFoundError(
