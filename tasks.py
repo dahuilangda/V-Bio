@@ -26,8 +26,18 @@ from gpu_manager import acquire_gpu, release_gpu, get_redis_client
 import config
 
 BASE_DIR = Path(__file__).resolve().parent
-if str(BASE_DIR) not in sys.path:
-    sys.path.insert(0, str(BASE_DIR))
+
+def _ensure_repo_root_on_path() -> Path | None:
+    """Ensure the repo root (containing affinity/) is on sys.path."""
+    candidates = [BASE_DIR, BASE_DIR.parent]
+    for candidate in candidates:
+        if (candidate / "affinity").is_dir():
+            if str(candidate) not in sys.path:
+                sys.path.insert(0, str(candidate))
+            return candidate
+    return None
+
+_ensure_repo_root_on_path()
 
 try:
     import psutil
@@ -849,10 +859,92 @@ def boltz2score_task(self, score_args: dict):
         tracker.update_status("gpu_acquired", f"Using GPU {gpu_id}")
 
         task_temp_dir = tempfile.mkdtemp(prefix=f"boltz2score_task_{task_id}_")
-        input_filename = secure_filename(score_args['input_filename'])
-        input_file_path = os.path.join(task_temp_dir, input_filename)
-        with open(input_file_path, 'w') as f:
-            f.write(score_args['input_file_content'])
+        input_filename = None
+        input_file_path = None
+        extra_archive_files = []
+        inputs_dir = None
+        using_separate_inputs = False
+
+        if 'protein_file_content' in score_args and 'ligand_file_content' in score_args:
+            using_separate_inputs = True
+            protein_filename = secure_filename(score_args['protein_filename'])
+            ligand_filename = secure_filename(score_args['ligand_filename'])
+
+            protein_file_path = os.path.join(task_temp_dir, protein_filename)
+            with open(protein_file_path, 'w', encoding='utf-8') as f:
+                f.write(score_args['protein_file_content'])
+
+            ligand_file_path = os.path.join(task_temp_dir, ligand_filename)
+            with open(ligand_file_path, 'w', encoding='utf-8') as f:
+                f.write(score_args['ligand_file_content'])
+
+            raw_prefix = score_args.get('output_prefix', 'complex')
+            output_prefix = secure_filename(raw_prefix) or "complex"
+            combined_pdb_path = None
+            combined_cif_path = None
+
+            try:
+                _ensure_repo_root_on_path()
+                from affinity.main import Boltzina
+            except Exception as exc:
+                logger.exception(
+                    "Task %s: Failed to import affinity module for separate-input Boltz2Score.",
+                    task_id,
+                )
+                raise RuntimeError(
+                    "Failed to import affinity module for separate-input Boltz2Score. "
+                    f"Details: {type(exc).__name__}: {exc}"
+                ) from exc
+
+            boltz_output_dir = os.path.join(task_temp_dir, "boltz2score_pre")
+            boltz_work_dir = os.path.join(task_temp_dir, "boltz2score_pre_work")
+            boltzina = Boltzina(
+                output_dir=boltz_output_dir,
+                work_dir=boltz_work_dir,
+                ligand_resname="LIG",
+            )
+            try:
+                combined_pdb = boltzina._create_standard_complex_pdb(
+                    Path(protein_file_path),
+                    Path(ligand_file_path),
+                    output_prefix
+                )
+                combined_cif = boltzina._convert_complex_pdb_to_cif(combined_pdb)
+                combined_pdb_path = combined_pdb
+                combined_cif_path = combined_cif
+            finally:
+                try:
+                    boltzina._cleanup_temporary_ligands()
+                except Exception as cleanup_error:
+                    logger.warning(f"Task {task_id}: Failed to cleanup temporary ligands: {cleanup_error}")
+
+            combined_pdb_copy = os.path.join(task_temp_dir, "combined_complex.pdb")
+            shutil.copyfile(str(combined_pdb_path), combined_pdb_copy)
+            extra_archive_files.append(combined_pdb_copy)
+
+            combined_cif_copy = None
+            if combined_cif_path and Path(combined_cif_path).suffix.lower() == ".cif" and os.path.exists(combined_cif_path):
+                combined_cif_copy = os.path.join(task_temp_dir, "combined_complex.cif")
+                shutil.copyfile(str(combined_cif_path), combined_cif_copy)
+                extra_archive_files.append(combined_cif_copy)
+
+            input_file_path = combined_cif_copy if combined_cif_copy else combined_pdb_copy
+            input_filename = os.path.basename(input_file_path)
+
+            inputs_dir = os.path.join(task_temp_dir, "inputs")
+            os.makedirs(inputs_dir, exist_ok=True)
+            shutil.copyfile(protein_file_path, os.path.join(inputs_dir, protein_filename))
+            shutil.copyfile(ligand_file_path, os.path.join(inputs_dir, ligand_filename))
+            extra_archive_files.extend([
+                os.path.join(inputs_dir, protein_filename),
+                os.path.join(inputs_dir, ligand_filename),
+            ])
+
+        else:
+            input_filename = secure_filename(score_args['input_filename'])
+            input_file_path = os.path.join(task_temp_dir, input_filename)
+            with open(input_file_path, 'w', encoding='utf-8') as f:
+                f.write(score_args['input_file_content'])
 
         output_dir = os.path.join(task_temp_dir, "output")
         work_dir = os.path.join(task_temp_dir, "work")
@@ -872,6 +964,9 @@ def boltz2score_task(self, score_args: dict):
 
         target_chain = score_args.get('target_chain')
         ligand_chain = score_args.get('ligand_chain')
+        if using_separate_inputs:
+            target_chain = target_chain or "A"
+            ligand_chain = ligand_chain or "L"
         if target_chain:
             command.extend(["--target_chain", target_chain])
         if ligand_chain:
@@ -923,8 +1018,18 @@ def boltz2score_task(self, score_args: dict):
                     arcname = os.path.relpath(file_path, output_dir)
                     zipf.write(file_path, arcname)
 
-            if os.path.exists(input_file_path):
-                zipf.write(input_file_path, os.path.basename(input_file_path))
+            archive_candidates = set(extra_archive_files)
+            if input_file_path and os.path.exists(input_file_path):
+                archive_candidates.add(input_file_path)
+
+            for file_path in sorted(archive_candidates):
+                if not os.path.exists(file_path):
+                    continue
+                if inputs_dir and os.path.commonpath([inputs_dir, file_path]) == inputs_dir:
+                    arcname = os.path.relpath(file_path, task_temp_dir)
+                else:
+                    arcname = os.path.basename(file_path)
+                zipf.write(file_path, arcname)
 
         upload_response = upload_result_to_central_api(task_id, output_archive_path, os.path.basename(output_archive_path))
 

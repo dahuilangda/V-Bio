@@ -82,6 +82,32 @@ def predict_boltz2score(
     response.raise_for_status()
     return response.json().get('task_id')
 
+
+def predict_boltz2score_separate(
+    protein_content: bytes | str,
+    protein_filename: str,
+    ligand_content: bytes | str,
+    ligand_filename: str,
+    output_prefix: str = "complex",
+):
+    """
+    Sends a Boltz2Score request with separate protein and ligand files.
+    """
+    endpoint = f"{API_URL}/api/boltz2score"
+    headers = {'X-API-Token': API_TOKEN}
+    files = {
+        'protein_file': (protein_filename, protein_content, 'application/octet-stream'),
+        'ligand_file': (ligand_filename, ligand_content, 'application/octet-stream'),
+    }
+    data = {
+        'priority': 'default',
+        'output_prefix': output_prefix,
+    }
+
+    response = requests.post(endpoint, headers=headers, files=files, data=data)
+    response.raise_for_status()
+    return response.json().get('task_id')
+
 def predict_affinity_separate(protein_content: str, protein_filename: str, 
                              ligand_content: bytes, ligand_filename: str, 
                              ligand_resname: str = "LIG", output_prefix: str = "complex"):
@@ -192,13 +218,30 @@ def download_and_process_results(task_id: str):
                 name for name in names
                 if name.lower().endswith(('.cif', '.pdb')) and "af3/output/" not in name
             ]
+            def _pick_preferred_structure(candidates: list[str]) -> str | None:
+                if not candidates:
+                    return None
+                lowered = [(name, os.path.basename(name).lower()) for name in candidates]
+                preferred_tokens = ["combined_complex", "generated_complex", "complex_"]
+                for token in preferred_tokens:
+                    for ext in (".cif", ".pdb"):
+                        for name, base in lowered:
+                            if token in base and base.endswith(ext):
+                                return name
+                return None
+
             best_cif_name = None
             best_cif_score = None
-            for name in cif_candidates:
-                score = _score_boltz_structure(name)
-                if best_cif_score is None or score < best_cif_score:
-                    best_cif_score = score
-                    best_cif_name = name
+            preferred_name = _pick_preferred_structure(cif_candidates)
+            if preferred_name:
+                best_cif_name = preferred_name
+
+            if best_cif_name is None:
+                for name in cif_candidates:
+                    score = _score_boltz_structure(name)
+                    if best_cif_score is None or score < best_cif_score:
+                        best_cif_score = score
+                        best_cif_name = name
 
             selected_record_id = _extract_record_id(best_cif_name) if best_cif_name else None
             if best_cif_name:

@@ -667,7 +667,7 @@ class Boltzina:
 
     def predict_with_separate_inputs(self, protein_file: str, ligand_file: str, output_prefix: str = "combined_complex"):
         """
-        Predict binding affinity using separate protein PDB and ligand SDF files.
+        Predict binding affinity using separate protein PDB and ligand structure files.
         
         This method combines the separate files into a standard PDB complex and then
         uses the standard complex prediction pipeline.
@@ -687,8 +687,8 @@ class Boltzina:
             
             if protein_path.suffix.lower() not in ['.pdb', '.cif']:
                 raise ValueError("Protein file must be PDB or CIF format")
-            if ligand_path.suffix.lower() not in ['.sdf', '.mol', '.mol2']:
-                raise ValueError("Ligand file must be SDF, MOL, or MOL2 format")
+            if ligand_path.suffix.lower() not in ['.sdf', '.mol', '.mol2', '.pdb', '.ent']:
+                raise ValueError("Ligand file must be SDF, MOL, MOL2, or PDB format")
             
             print(f"Processing protein: {protein_path.name}")
             print(f"Processing ligand: {ligand_path.name}")
@@ -715,7 +715,7 @@ class Boltzina:
                 print(f"4. The protein-ligand complex lacks proper molecular connectivity")
                 print(f"\nSuggested solutions:")
                 print(f"- Verify that both protein and ligand files have valid 3D coordinates")
-                print(f"- Check that the ligand file is in the correct format (SDF, MOL, MOL2)")
+                print(f"- Check that the ligand file is in the correct format (SDF, MOL, MOL2, PDB)")
                 print(f"- Ensure the protein file contains a complete protein structure")
                 print(f"- Try using a different ligand format or protein structure")
                 raise ValueError(f"Separate input prediction failed: {error_str}")
@@ -965,7 +965,7 @@ class Boltzina:
             raise ValueError(f"Failed to convert CIF to PDB: {e}")
 
     def _generate_ligand_pdb_lines_preserve_coords(self, ligand_mol) -> str:
-        """Generate ligand PDB lines preserving original coordinates from SDF/MOL file."""
+        """Generate ligand PDB lines preserving original coordinates from SDF/MOL/MOL2/PDB inputs."""
         from rdkit.Chem import AllChem
         
         ligand_lines = ""
@@ -1136,7 +1136,7 @@ class Boltzina:
             return pdb_file
 
     def _load_ligand_from_file(self, ligand_file: Path):
-        """Load ligand molecule from SDF, MOL, or MOL2 file, preserving original coordinates."""
+        """Load ligand molecule from SDF, MOL, MOL2, or PDB file, preserving original coordinates."""
         from rdkit import Chem
         from rdkit.Chem import AllChem
         
@@ -1149,6 +1149,13 @@ class Boltzina:
                 mol = Chem.MolFromMolFile(str(ligand_file), removeHs=False)
             elif ligand_file.suffix.lower() in ['.mol2']:
                 mol = Chem.MolFromMol2File(str(ligand_file), removeHs=False)
+            elif ligand_file.suffix.lower() in ['.pdb', '.ent']:
+                mol = Chem.MolFromPDBFile(str(ligand_file), removeHs=False, sanitize=False)
+                if mol is not None:
+                    try:
+                        Chem.SanitizeMol(mol)
+                    except Exception as sanitize_error:
+                        print(f"Warning: PDB ligand sanitization failed: {sanitize_error}")
             else:
                 raise ValueError(f"Unsupported ligand file format: {ligand_file.suffix}")
             
@@ -2050,7 +2057,7 @@ def main():
     # Mode 2: Separate files
     separate_parser = subparsers.add_parser('separate', help='Predict from separate protein and ligand files')
     separate_parser.add_argument("--protein", required=True, help="Protein structure file (PDB or CIF format).")
-    separate_parser.add_argument("--ligand", required=True, help="Ligand structure file (SDF, MOL, or MOL2 format).")
+    separate_parser.add_argument("--ligand", required=True, help="Ligand structure file (SDF, MOL, MOL2, or PDB format).")
     separate_parser.add_argument("--output_dir", default="boltzina_output", help="Directory to save results.")
     separate_parser.add_argument("--output_prefix", default="complex", help="Prefix for output files.")
     # Note: ligand_resname is automatically set to "LIG" for separate inputs

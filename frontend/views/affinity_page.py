@@ -8,6 +8,7 @@ import streamlit as st
 
 from frontend.prediction_client import (
     predict_boltz2score,
+    predict_boltz2score_separate,
     get_status,
     download_and_process_results,
 )
@@ -61,7 +62,7 @@ def render_affinity_page():
     URLStateManager.restore_state_from_url()
 
     st.markdown("### 🔬 结构置信度 & 亲和力预测")
-    st.markdown("上传 PDB/CIF 结构文件，直接输出置信度；若指定配体链，则额外预测亲和力。")
+    st.markdown("支持上传复合物文件，或单独上传蛋白 + 小分子进行打分。")
 
     if 'affinity_task_id' not in st.session_state:
         st.session_state.affinity_task_id = None
@@ -79,69 +80,109 @@ def render_affinity_page():
     )
 
     with st.expander("📤 上传结构文件", expanded=not is_running and st.session_state.affinity_results is None):
-        uploaded_file = st.file_uploader(
-            "选择结构文件 (PDB/CIF)",
-            type=['pdb', 'cif'],
-            disabled=is_running
+        input_mode = st.radio(
+            "输入方式",
+            ["复合物文件 (PDB/CIF)", "蛋白 + 小分子 (PDB/CIF + SDF/MOL2/PDB)"],
+            horizontal=True,
+            disabled=is_running,
+            key="affinity_input_mode",
         )
 
+        uploaded_file = None
+        protein_file = None
+        ligand_file = None
+        output_prefix = "complex"
         target_chain_str = ""
         ligand_chain_str = ""
-        chain_info = {"all_chains": [], "polymer_chains": [], "ligand_chains": []}
 
-        if uploaded_file is not None and not is_running:
-            file_content = uploaded_file.getvalue().decode("utf-8")
-            chain_info = get_chain_ids_from_structure(file_content, uploaded_file.name)
-
-            all_chains = chain_info.get("all_chains", [])
-            protein_chains = chain_info.get("polymer_chains", [])
-            ligand_chains = chain_info.get("ligand_chains", [])
-
-            st.caption(
-                f"检测到链：{', '.join(all_chains) if all_chains else '未检测到'}"
+        if input_mode.startswith("复合物文件"):
+            uploaded_file = st.file_uploader(
+                "选择结构文件 (PDB/CIF)",
+                type=['pdb', 'cif'],
+                disabled=is_running,
+                key="affinity_complex_file",
             )
 
-            col1, col2 = st.columns(2)
-            with col1:
-                target_selected = st.multiselect(
-                    "Target 链 (蛋白质)",
-                    options=protein_chains or all_chains,
-                    default=protein_chains,
-                    disabled=is_running,
-                )
-            with col2:
-                ligand_selected = st.multiselect(
-                    "Ligand 链 (可选)",
-                    options=ligand_chains or all_chains,
-                    default=ligand_chains,
-                    disabled=is_running,
+            chain_info = {"all_chains": [], "polymer_chains": [], "ligand_chains": []}
+
+            if uploaded_file is not None and not is_running:
+                file_content = uploaded_file.getvalue().decode("utf-8")
+                chain_info = get_chain_ids_from_structure(file_content, uploaded_file.name)
+
+                all_chains = chain_info.get("all_chains", [])
+                protein_chains = chain_info.get("polymer_chains", [])
+                ligand_chains = chain_info.get("ligand_chains", [])
+
+                st.caption(
+                    f"检测到链：{', '.join(all_chains) if all_chains else '未检测到'}"
                 )
 
-            target_chain_str = ",".join(target_selected)
-            ligand_chain_str = ",".join(ligand_selected)
+                col1, col2 = st.columns(2)
+                with col1:
+                    target_selected = st.multiselect(
+                        "Target 链 (蛋白质)",
+                        options=protein_chains or all_chains,
+                        default=protein_chains,
+                        disabled=is_running,
+                    )
+                with col2:
+                    ligand_selected = st.multiselect(
+                        "Ligand 链 (可选)",
+                        options=ligand_chains or all_chains,
+                        default=ligand_chains,
+                        disabled=is_running,
+                    )
 
-            with st.expander("手动输入链 (可选)", expanded=False):
-                manual_target = st.text_input(
-                    "Target 链 (逗号分隔)",
-                    value=target_chain_str,
-                    disabled=is_running,
-                    help="当自动检测不准确时，可手动输入链 ID，如 A,B"
-                )
-                manual_ligand = st.text_input(
-                    "Ligand 链 (逗号分隔)",
-                    value=ligand_chain_str,
-                    disabled=is_running,
-                    help="如需亲和力预测，请填写配体链 ID"
-                )
-                if manual_target.strip():
-                    target_chain_str = manual_target.strip()
-                if manual_ligand.strip():
-                    ligand_chain_str = manual_ligand.strip()
+                target_chain_str = ",".join(target_selected)
+                ligand_chain_str = ",".join(ligand_selected)
 
-        files_ready = uploaded_file is not None
-        if files_ready and ligand_chain_str and not target_chain_str:
-            st.warning("已指定配体链，但未指定 target 链；请补充 target 链或清空配体链。")
-            files_ready = False
+                with st.expander("手动输入链 (可选)", expanded=False):
+                    manual_target = st.text_input(
+                        "Target 链 (逗号分隔)",
+                        value=target_chain_str,
+                        disabled=is_running,
+                        help="当自动检测不准确时，可手动输入链 ID，如 A,B"
+                    )
+                    manual_ligand = st.text_input(
+                        "Ligand 链 (逗号分隔)",
+                        value=ligand_chain_str,
+                        disabled=is_running,
+                        help="如需亲和力预测，请填写配体链 ID"
+                    )
+                    if manual_target.strip():
+                        target_chain_str = manual_target.strip()
+                    if manual_ligand.strip():
+                        ligand_chain_str = manual_ligand.strip()
+        else:
+            protein_file = st.file_uploader(
+                "蛋白结构文件 (PDB/CIF)",
+                type=['pdb', 'cif'],
+                disabled=is_running,
+                key="affinity_protein_file",
+            )
+            ligand_file = st.file_uploader(
+                "小分子结构文件 (SDF/MOL2/PDB)",
+                type=['sdf', 'mol', 'mol2', 'pdb'],
+                disabled=is_running,
+                key="affinity_ligand_file",
+            )
+            output_prefix = st.text_input(
+                "输出前缀 (可选)",
+                value="complex",
+                disabled=is_running,
+                help="用于生成复合物文件名，例如 my_dock",
+                key="affinity_output_prefix",
+            )
+            st.caption("系统会保留原始坐标并生成复合物，蛋白链统一为 A，配体链为 L。")
+
+        files_ready = False
+        if input_mode.startswith("复合物文件"):
+            files_ready = uploaded_file is not None
+            if files_ready and ligand_chain_str and not target_chain_str:
+                st.warning("已指定配体链，但未指定 target 链；请补充 target 链或清空配体链。")
+                files_ready = False
+        else:
+            files_ready = protein_file is not None and ligand_file is not None
 
         if st.button("🚀 开始预测", key="start_affinity", type="primary", disabled=is_running or not files_ready, use_container_width=True):
             st.session_state.affinity_task_id = None
@@ -151,14 +192,25 @@ def render_affinity_page():
 
             with st.spinner("⏳ 正在提交任务..."):
                 try:
-                    uploaded_file.seek(0)
-                    file_content = uploaded_file.getvalue().decode("utf-8")
-                    task_id = predict_boltz2score(
-                        file_content,
-                        uploaded_file.name,
-                        target_chain=target_chain_str or None,
-                        ligand_chain=ligand_chain_str or None,
-                    )
+                    if input_mode.startswith("复合物文件"):
+                        uploaded_file.seek(0)
+                        file_content = uploaded_file.getvalue().decode("utf-8")
+                        task_id = predict_boltz2score(
+                            file_content,
+                            uploaded_file.name,
+                            target_chain=target_chain_str or None,
+                            ligand_chain=ligand_chain_str or None,
+                        )
+                    else:
+                        protein_file.seek(0)
+                        ligand_file.seek(0)
+                        task_id = predict_boltz2score_separate(
+                            protein_file.getvalue(),
+                            protein_file.name,
+                            ligand_file.getvalue(),
+                            ligand_file.name,
+                            output_prefix=output_prefix or "complex",
+                        )
                     st.session_state.affinity_task_id = task_id
                     URLStateManager.update_url_for_affinity_task(task_id)
                     st.toast("任务已成功提交！", icon="🎉")

@@ -797,30 +797,81 @@ def handle_affinity_separate():
 def handle_boltz2score():
     """
     Receives Boltz2Score requests (confidence; optional affinity) and dispatches Celery tasks.
+    Supports complex input or separate protein/ligand inputs.
     """
     logger.info("Received Boltz2Score request.")
 
-    if 'input_file' not in request.files:
-        logger.error("Missing 'input_file' in Boltz2Score request. Client IP: %s", request.remote_addr)
-        return jsonify({'error': "Request form must contain an 'input_file' part"}), 400
-
-    input_file = request.files['input_file']
-    if input_file.filename == '':
-        logger.error("No selected file for 'input_file' in Boltz2Score request.")
-        return jsonify({'error': 'No selected file for input_file'}), 400
-
-    try:
-        input_file_content = input_file.read().decode('utf-8')
-        logger.debug("Boltz2Score input file successfully read and decoded.")
-    except UnicodeDecodeError:
-        logger.error(f"Failed to decode input_file as UTF-8. Client IP: {request.remote_addr}")
-        return jsonify({'error': "Failed to decode input_file. Ensure it's a valid UTF-8 text file."}), 400
-    except IOError as e:
-        logger.exception(f"Failed to read input_file from request: {e}. Client IP: {request.remote_addr}")
-        return jsonify({'error': f"Failed to read input_file: {e}"}), 400
-
     target_chain = request.form.get('target_chain')
     ligand_chain = request.form.get('ligand_chain')
+    score_args = {}
+
+    if 'input_file' in request.files:
+        input_file = request.files['input_file']
+        if input_file.filename == '':
+            logger.error("No selected file for 'input_file' in Boltz2Score request.")
+            return jsonify({'error': 'No selected file for input_file'}), 400
+
+        try:
+            input_file_content = input_file.read().decode('utf-8')
+            logger.debug("Boltz2Score input file successfully read and decoded.")
+        except UnicodeDecodeError:
+            logger.error(f"Failed to decode input_file as UTF-8. Client IP: {request.remote_addr}")
+            return jsonify({'error': "Failed to decode input_file. Ensure it's a valid UTF-8 text file."}), 400
+        except IOError as e:
+            logger.exception(f"Failed to read input_file from request: {e}. Client IP: {request.remote_addr}")
+            return jsonify({'error': f"Failed to read input_file: {e}"}), 400
+
+        score_args = {
+            'input_file_content': input_file_content,
+            'input_filename': secure_filename(input_file.filename),
+            'target_chain': target_chain,
+            'ligand_chain': ligand_chain,
+        }
+    elif 'protein_file' in request.files or 'ligand_file' in request.files:
+        if 'protein_file' not in request.files or 'ligand_file' not in request.files:
+            logger.error("Missing required files in Boltz2Score separate-input request. Client IP: %s", request.remote_addr)
+            return jsonify({'error': "Request form must contain both 'protein_file' and 'ligand_file' parts"}), 400
+
+        protein_file = request.files['protein_file']
+        ligand_file = request.files['ligand_file']
+
+        if protein_file.filename == '' or ligand_file.filename == '':
+            logger.error("No selected files for Boltz2Score separate-input request.")
+            return jsonify({'error': 'Both protein_file and ligand_file must be selected'}), 400
+
+        try:
+            protein_file_content = protein_file.read().decode('utf-8')
+            ligand_file.seek(0)
+            try:
+                ligand_file_content = ligand_file.read().decode('utf-8')
+            except UnicodeDecodeError:
+                ligand_file.seek(0)
+                ligand_file_content = ligand_file.read().decode('utf-8', errors='replace')
+            logger.debug("Boltz2Score separate inputs successfully read and decoded.")
+        except UnicodeDecodeError:
+            logger.error(f"Failed to decode files as UTF-8. Client IP: {request.remote_addr}")
+            return jsonify({'error': "Failed to decode files. Ensure they are valid text files."}), 400
+        except IOError as e:
+            logger.exception(f"Failed to read files from request: {e}. Client IP: {request.remote_addr}")
+            return jsonify({'error': f"Failed to read files: {e}"}), 400
+
+        output_prefix = request.form.get('output_prefix', 'complex')
+        score_args = {
+            'protein_file_content': protein_file_content,
+            'ligand_file_content': ligand_file_content,
+            'protein_filename': secure_filename(protein_file.filename),
+            'ligand_filename': secure_filename(ligand_file.filename),
+            'output_prefix': output_prefix,
+        }
+        if target_chain:
+            score_args['target_chain'] = target_chain
+        if ligand_chain:
+            score_args['ligand_chain'] = ligand_chain
+    else:
+        logger.error("Missing input for Boltz2Score request. Client IP: %s", request.remote_addr)
+        return jsonify({
+            'error': "Request form must contain 'input_file' or both 'protein_file' and 'ligand_file'."
+        }), 400
 
     priority = request.form.get('priority', 'default').lower()
     if priority not in ['high', 'default']:
@@ -829,13 +880,6 @@ def handle_boltz2score():
 
     target_queue = config.HIGH_PRIORITY_QUEUE if priority == 'high' else config.DEFAULT_QUEUE
     logger.info(f"Boltz2Score priority: {priority}, targeting queue: '{target_queue}' for client {request.remote_addr}.")
-
-    score_args = {
-        'input_file_content': input_file_content,
-        'input_filename': secure_filename(input_file.filename),
-        'target_chain': target_chain,
-        'ligand_chain': ligand_chain,
-    }
 
     try:
         task = boltz2score_task.apply_async(args=[score_args], queue=target_queue)

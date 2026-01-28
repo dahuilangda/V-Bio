@@ -352,6 +352,27 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
     * 结果 ZIP 内包含结构文件、`confidence_*.json`、`chain_map.json`；
     * 若提供 `target_chain + ligand_chain`，额外返回 `affinity_*.json`。
 
+  * **方式二：分开输入蛋白质和小分子文件**
+    * **端点**: `POST /api/boltz2score`（同端点）
+    * **参数**:
+      * `protein_file`: 蛋白质结构文件（PDB 或 CIF）
+      * `ligand_file`: 小分子结构文件（SDF/MOL/MOL2/PDB）
+      * `output_prefix`: 输出复合物前缀（默认: `complex`）
+      * `target_chain` / `ligand_chain`: 可选；若不提供，系统默认使用 `A` / `L`
+      * `priority`: `high` / `default`
+    * **示例**:
+      ```bash
+      curl -X POST \
+           -H "X-API-Token: your-secret-token" \
+           -F "protein_file=@/path/to/protein.pdb" \
+           -F "ligand_file=@/path/to/ligand.sdf" \
+           -F "output_prefix=my_complex" \
+           http://127.0.0.1:5000/api/boltz2score
+      ```
+    * **输出说明**:
+      * 结果 ZIP 内会包含合并后的复合物文件（`combined_complex.pdb`/`combined_complex.cif`）；
+      * 若提供或默认链信息，Boltz2Score 将自动计算亲和力相关指标。
+
 #### **虚拟筛选 API**
 
   * **提交任务**: `POST /api/virtual_screening/submit`
@@ -557,7 +578,7 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
     ```
   * **支持的文件格式**:
     * 蛋白质文件: `.pdb`, `.cif`
-    * 小分子文件: `.sdf`, `.mol`, `.mol2`
+    * 小分子文件: `.sdf`, `.mol`, `.mol2`, `.pdb`
   * **工作流程**:
     1. 系统自动加载小分子文件并生成3D坐标（如需要）
     2. 将蛋白质和小分子合并成完整的复合物结构
