@@ -666,14 +666,25 @@ def parse_polymer(  # noqa: C901, PLR0915, PLR0912
                 # Fallback to element symbol + index if name property is missing
                 name = f"{a.GetSymbol()}{a.GetIdx()}"
             ref_name_to_atom[name] = a
-        ref_atoms = [ref_name_to_atom[a] for a in const.ref_atoms[res_name]]
+        ref_atoms = []
+        missing_ref = []
+        for ref_name in const.ref_atoms[res_name]:
+            if ref_name in ref_name_to_atom:
+                ref_atoms.append(ref_name_to_atom[ref_name])
+            else:
+                missing_ref.append(ref_name)
+        use_ref_atom_names = bool(missing_ref)
+        if use_ref_atom_names:
+            ref_atoms = list(const.ref_atoms[res_name])
 
         # Iterate, always in the same order
         atoms: list[ParsedAtom] = []
 
         for ref_atom in ref_atoms:
             # Get atom name
-            if ref_atom.HasProp("name"):
+            if use_ref_atom_names:
+                atom_name = ref_atom
+            elif ref_atom.HasProp("name"):
                 atom_name = ref_atom.GetProp("name")
             else:
                 # Fallback to element symbol + index if name property is missing

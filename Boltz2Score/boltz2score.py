@@ -126,6 +126,29 @@ def _compute_ipsae(
     )
 
 
+def _infer_target_and_ligand_chains(chains) -> tuple[str | None, str | None]:
+    target_chains = []
+    ligand_chains = []
+    for chain in chains:
+        try:
+            chain_name = str(chain["name"]).strip()
+        except Exception:
+            chain_name = str(getattr(chain, "name", "")).strip()
+        if not chain_name:
+            continue
+        try:
+            mol_type = int(chain["mol_type"])
+        except Exception:
+            mol_type = int(getattr(chain, "mol_type", const.chain_type_ids["NONPOLYMER"]))
+        if mol_type == const.chain_type_ids["NONPOLYMER"]:
+            ligand_chains.append(chain_name)
+        else:
+            target_chains.append(chain_name)
+    target = ",".join(sorted(set(target_chains))) if target_chains else None
+    ligand = ",".join(sorted(set(ligand_chains))) if ligand_chains else None
+    return target, ligand
+
+
 def run_boltz2score(
     input_path: Path,
     output_dir: Path,
@@ -135,6 +158,8 @@ def run_boltz2score(
     target_chain: str | None,
     ligand_chain: str | None,
     affinity_refine: bool,
+    enable_affinity: bool,
+    auto_enable_affinity: bool,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -142,6 +167,12 @@ def run_boltz2score(
     parsed, extra_mols, structure = prepare_structure_inputs(input_path)
     record_id = input_path.stem
     record = _build_record(record_id, parsed)
+
+    inferred_target, inferred_ligand = _infer_target_and_ligand_chains(parsed.data.chains)
+    if not target_chain:
+        target_chain = inferred_target
+    if not ligand_chain:
+        ligand_chain = inferred_ligand
 
     tokenizer = Boltz2Tokenizer()
     featurizer = Boltz2Featurizer()
@@ -293,15 +324,25 @@ def run_boltz2score(
     }
     (output_dir / "chain_map.json").write_text(json.dumps(chain_map, indent=2))
 
-    if target_chain and ligand_chain:
+    should_run_affinity = False
+    if enable_affinity:
+        should_run_affinity = True
+    elif auto_enable_affinity:
+        should_run_affinity = bool(ligand_chain or inferred_ligand)
+    else:
+        should_run_affinity = bool(target_chain and ligand_chain)
+
+    if should_run_affinity:
         try:
             from affinity.main import Boltzina
 
             ligand_resname = None
-            ligand_chain_ids = {c.strip() for c in ligand_chain.split(",") if c.strip()}
+            ligand_chain_ids = None
+            if ligand_chain:
+                ligand_chain_ids = {c.strip() for c in ligand_chain.split(",") if c.strip()}
             for model in structure:
                 for chain in model:
-                    if chain.name not in ligand_chain_ids:
+                    if ligand_chain_ids is not None and chain.name not in ligand_chain_ids:
                         continue
                     for residue in chain:
                         ligand_resname = residue.name.strip()
@@ -313,9 +354,10 @@ def run_boltz2score(
                     break
 
             affinity_output_dir = work_dir / "boltz2score_affinity"
+            affinity_work_dir = work_dir / "boltz2score_affinity_work"
             boltzina = Boltzina(
                 output_dir=str(affinity_output_dir),
-                work_dir=str(work_dir / "boltz2score_affinity_work"),
+                work_dir=str(affinity_work_dir),
                 skip_run_structure=not affinity_refine,
                 ligand_resname=ligand_resname or "LIG",
             )
@@ -325,6 +367,20 @@ def run_boltz2score(
                 affinity_data["source"] = "boltz2score"
                 affinity_path = record_dir / f"affinity_{record_id}.json"
                 affinity_path.write_text(json.dumps(affinity_data, indent=2))
+            else:
+                predictions_dir = affinity_work_dir / "boltz_out" / "predictions"
+                affinity_files = sorted(predictions_dir.glob("*/affinity_*.json"))
+                if affinity_files:
+                    affinity_data = json.loads(affinity_files[0].read_text())
+                    affinity_data["source"] = "boltz2score_fallback"
+                    affinity_data["raw_path"] = str(affinity_files[0])
+                    affinity_path = record_dir / f"affinity_{record_id}.json"
+                    affinity_path.write_text(json.dumps(affinity_data, indent=2))
+                else:
+                    raise RuntimeError(
+                        "Affinity prediction completed without producing output files. "
+                        "Check ligand detection and Boltzina logs."
+                    )
         except Exception as exc:
             raise RuntimeError(f"Affinity prediction failed: {exc}") from exc
 
@@ -340,6 +396,8 @@ def main() -> None:
     parser.add_argument("--target_chain")
     parser.add_argument("--ligand_chain")
     parser.add_argument("--affinity_refine", action="store_true")
+    parser.add_argument("--enable_affinity", action="store_true")
+    parser.add_argument("--auto_enable_affinity", action="store_true")
 
     args = parser.parse_args()
 
@@ -352,6 +410,8 @@ def main() -> None:
         target_chain=args.target_chain,
         ligand_chain=args.ligand_chain,
         affinity_refine=args.affinity_refine,
+        enable_affinity=args.enable_affinity,
+        auto_enable_affinity=args.auto_enable_affinity,
     )
 
 
