@@ -828,6 +828,8 @@ def handle_boltz2score():
             'ligand_chain': ligand_chain,
         }
         score_args['affinity_refine'] = _parse_bool(request.form.get('affinity_refine'), False)
+        score_args['enable_affinity'] = _parse_bool(request.form.get('enable_affinity'), False)
+        score_args['auto_enable_affinity'] = _parse_bool(request.form.get('auto_enable_affinity'), False)
     elif 'protein_file' in request.files or 'ligand_file' in request.files:
         if 'protein_file' not in request.files or 'ligand_file' not in request.files:
             logger.error("Missing required files in Boltz2Score separate-input request. Client IP: %s", request.remote_addr)
@@ -865,6 +867,8 @@ def handle_boltz2score():
             'output_prefix': output_prefix,
         }
         score_args['affinity_refine'] = _parse_bool(request.form.get('affinity_refine'), False)
+        score_args['enable_affinity'] = _parse_bool(request.form.get('enable_affinity'), False)
+        score_args['auto_enable_affinity'] = _parse_bool(request.form.get('auto_enable_affinity'), False)
         if target_chain:
             score_args['target_chain'] = target_chain
         if ligand_chain:

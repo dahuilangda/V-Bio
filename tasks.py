@@ -998,6 +998,10 @@ def boltz2score_task(self, score_args: dict):
             command.extend(["--ligand_chain", ligand_chain])
         if score_args.get('affinity_refine'):
             command.append("--affinity_refine")
+        if score_args.get('enable_affinity'):
+            command.append("--enable_affinity")
+        if score_args.get('auto_enable_affinity'):
+            command.append("--auto_enable_affinity")
 
         tracker.update_status("running", "Executing Boltz2Score subprocess")
         logger.info(f"Task {task_id}: Running Boltz2Score. Command: {' '.join(command)}")

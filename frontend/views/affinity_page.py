@@ -350,9 +350,12 @@ def render_affinity_page():
         with col2:
             st.markdown("**📈 结构置信度指标**")
             col_metrics = st.columns(2)
+            plddt_value = confidence_data.get('complex_plddt_protein')
+            if plddt_value is None:
+                plddt_value = confidence_data.get('complex_plddt')
             col_metrics[0].metric(
                 "平均 pLDDT",
-                _format_metric_value(confidence_data.get('complex_plddt')),
+                _format_metric_value(plddt_value),
             )
             col_metrics[1].metric(
                 "pTM",

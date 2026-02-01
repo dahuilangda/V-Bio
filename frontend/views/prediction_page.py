@@ -1014,10 +1014,13 @@ def render_prediction_page():
             
             st.markdown("<b>全局结构质量指标</b>", unsafe_allow_html=True)
             cols_metrics = st.columns(2)
+            plddt_value = confidence_data.get('complex_plddt_protein')
+            if plddt_value is None:
+                plddt_value = confidence_data.get('complex_plddt')
             cols_metrics[0].metric(
                 "平均 pLDDT",
-                format_metric_value(confidence_data.get('complex_plddt')),
-                help="预测的局部距离差异检验 (pLDDT) 是一个 0-100 范围内的单残基置信度得分，代表模型对局部结构预测的信心。这是整个复合物所有残基的平均 pLDDT 分数。值越高越好。"
+                format_metric_value(plddt_value),
+                help="预测的局部距离差异检验 (pLDDT) 是一个 0-100 范围内的单残基置信度得分，代表模型对局部结构预测的信心。若存在配体，优先展示蛋白部分的平均 pLDDT。"
             )
             cols_metrics[1].metric(
                 "pTM",

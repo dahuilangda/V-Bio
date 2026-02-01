@@ -279,6 +279,81 @@ def run_boltz2score(
     pair_chains_iptm = _pair_chains_to_dict(out["pair_chains_iptm"])
     chains_ptm = {k: v.get(k, 0.0) for k, v in pair_chains_iptm.items()}
 
+    raw_complex_plddt = _as_float(out["complex_plddt"])
+    raw_complex_iplddt = _as_float(out["complex_iplddt"])
+    scaled_complex_plddt = raw_complex_plddt * 100.0 if raw_complex_plddt <= 1.0 else raw_complex_plddt
+    scaled_complex_iplddt = raw_complex_iplddt * 100.0 if raw_complex_iplddt <= 1.0 else raw_complex_iplddt
+
+    token_chain_ids = tokenized.tokens["asym_id"].astype(int)
+    token_chain_names = np.array([str(parsed.data.chains[idx]["name"]) for idx in token_chain_ids])
+    token_mol_types = tokenized.tokens["mol_type"].astype(int)
+
+    plddt_raw = out["plddt"][0].detach().cpu().numpy()
+    plddt_scaled = plddt_raw * 100.0 if float(np.max(plddt_raw)) <= 1.0 else plddt_raw
+
+    plddt_by_chain: Dict[str, float] = {}
+    for chain_name in np.unique(token_chain_names):
+        mask = token_chain_names == chain_name
+        if mask.any():
+            plddt_by_chain[str(chain_name)] = float(plddt_scaled[mask].mean())
+
+    plddt_by_mol_type: Dict[str, float] = {}
+    for mol_name, mol_id in const.chain_type_ids.items():
+        mask = token_mol_types == mol_id
+        if mask.any():
+            plddt_by_mol_type[mol_name.lower()] = float(plddt_scaled[mask].mean())
+
+    protein_plddt = plddt_by_mol_type.get("protein")
+    ligand_plddt = plddt_by_mol_type.get("nonpolymer")
+
+    plddt_by_residue = []
+    plddt_by_ligand_atom = []
+    token_res_idx = tokenized.tokens["res_idx"].astype(int)
+    token_res_name = tokenized.tokens["res_name"].astype(str)
+    token_atom_idx = tokenized.tokens["atom_idx"].astype(int)
+
+    residue_key_to_vals: Dict[tuple[str, int, str], list[float]] = {}
+    for idx in range(len(plddt_scaled)):
+        chain_name = str(token_chain_names[idx])
+        res_idx = int(token_res_idx[idx])
+        res_name = str(token_res_name[idx])
+        mol_type = int(token_mol_types[idx])
+        if mol_type == const.chain_type_ids["NONPOLYMER"]:
+            atom_name = None
+            ligand_mol = molecules.get(res_name)
+            if ligand_mol is not None and token_atom_idx[idx] < ligand_mol.GetNumAtoms():
+                atom = ligand_mol.GetAtomWithIdx(int(token_atom_idx[idx]))
+                if atom.HasProp("name"):
+                    atom_name = atom.GetProp("name")
+                else:
+                    atom_name = f"{atom.GetSymbol()}{atom.GetIdx()}"
+            if not atom_name:
+                atom_name = f"ATOM{int(token_atom_idx[idx])}"
+            plddt_by_ligand_atom.append(
+                {
+                    "chain": chain_name,
+                    "res_idx": res_idx,
+                    "res_name": res_name,
+                    "atom_idx": int(token_atom_idx[idx]),
+                    "atom_name": atom_name,
+                    "plddt": float(plddt_scaled[idx]),
+                }
+            )
+        else:
+            key = (chain_name, res_idx, res_name)
+            residue_key_to_vals.setdefault(key, []).append(float(plddt_scaled[idx]))
+
+    for (chain_name, res_idx, res_name), vals in residue_key_to_vals.items():
+        plddt_by_residue.append(
+            {
+                "chain": chain_name,
+                "res_idx": int(res_idx),
+                "res_name": res_name,
+                "plddt": float(np.mean(vals)),
+                "count": int(len(vals)),
+            }
+        )
+
     confidence_summary = {
         "confidence_score": _as_float(
             (4 * out["complex_plddt"] + torch.where(out["iptm"] > 0, out["iptm"], out["ptm"])) / 5
@@ -287,10 +362,18 @@ def run_boltz2score(
         "iptm": _as_float(out["iptm"]),
         "ligand_iptm": _as_float(out["ligand_iptm"]),
         "protein_iptm": _as_float(out["protein_iptm"]),
-        "complex_plddt": _as_float(out["complex_plddt"]),
-        "complex_iplddt": _as_float(out["complex_iplddt"]),
+        "complex_plddt": scaled_complex_plddt,
+        "complex_plddt_raw": raw_complex_plddt,
+        "complex_plddt_protein": protein_plddt,
+        "complex_plddt_ligand": ligand_plddt,
+        "complex_iplddt": scaled_complex_iplddt,
+        "complex_iplddt_raw": raw_complex_iplddt,
         "complex_pde": _as_float(out["complex_pde"]),
         "complex_ipde": _as_float(out["complex_ipde"]),
+        "plddt_by_chain": plddt_by_chain,
+        "plddt_by_mol_type": plddt_by_mol_type,
+        "plddt_by_residue": plddt_by_residue,
+        "plddt_by_ligand_atom": plddt_by_ligand_atom,
         "chains_ptm": chains_ptm,
         "pair_chains_iptm": pair_chains_iptm,
         "ipsae": ipsae,
@@ -313,8 +396,12 @@ def run_boltz2score(
     confidence_path = record_dir / f"confidence_{record_id}_model_0.json"
     confidence_path.write_text(json.dumps(confidence_summary, indent=2))
 
+
     plddt_path = record_dir / f"plddt_{record_id}_model_0.npz"
-    np.savez_compressed(plddt_path, plddt=out["plddt"][0].detach().cpu().numpy())
+    np.savez_compressed(plddt_path, plddt=plddt_scaled)
+
+    plddt_raw_path = record_dir / f"plddt_raw_{record_id}_model_0.npz"
+    np.savez_compressed(plddt_raw_path, plddt=plddt_raw)
 
     pae_path = record_dir / f"pae_{record_id}_model_0.npz"
     np.savez_compressed(pae_path, pae=pae)
