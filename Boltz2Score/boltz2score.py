@@ -1,505 +1,636 @@
+#!/usr/bin/env python3
+"""Single-step Boltz2Score: input a PDB/mmCIF, output scores."""
+
+from __future__ import annotations
+
 import argparse
 import json
+import os
 import shutil
-import sys
+import tempfile
 from pathlib import Path
-from typing import Any, Dict
+from typing import Optional, Sequence
 
-import numpy as np
 import torch
 import gemmi
-from dataclasses import asdict
+from rdkit import Chem
 
-from boltz.data import const
-from boltz.data.feature.featurizerv2 import Boltz2Featurizer
-from boltz.data.mol import load_canonicals, load_molecules
-from boltz.data.tokenize.boltz2 import Boltz2Tokenizer
-from boltz.data.types import ChainInfo, InferenceOptions, Input, Record
-from boltz.data.module.inferencev2 import collate
-from boltz.main import (
-    Boltz2DiffusionParams,
-    BoltzSteeringParams,
-    MSAModuleArgs,
-    PairformerArgsV2,
-    get_cache_path,
-)
-from boltz.model.models.boltz2 import Boltz2
+Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
 
-if __package__ is None or __package__ == "":
-    sys.path.append(str(Path(__file__).resolve().parent.parent))
-
-from Boltz2Score.ipsae import calculate_ipsae
-from Boltz2Score.prepare_boltz2score_inputs import prepare_structure_inputs
+from boltz.main import get_cache_path
+from boltz.data.types import StructureV2
+from prepare_boltz2score_inputs import prepare_inputs
+from run_boltz2score import run_scoring
 
 
-def _as_float(value: Any) -> float:
-    if torch.is_tensor(value):
-        return float(value.detach().cpu().item())
-    return float(value)
+def _parse_chain_list(value: Optional[str]) -> list[str]:
+    if not value:
+        return []
+    return [v.strip() for v in value.split(",") if v.strip()]
 
 
-def _move_to_device(batch: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
-    moved = {}
-    for key, value in batch.items():
-        if torch.is_tensor(value):
-            moved[key] = value.to(device)
-        else:
-            moved[key] = value
-    return moved
+def _load_ligand_from_file(ligand_path: Path):
+    """Load ligand from various file formats, preserving original atom names and coordinates."""
+    ligand_path = Path(ligand_path)
+
+    if ligand_path.suffix.lower() == '.mol2':
+        # Read MOL2 file
+        with open(ligand_path) as f:
+            mol2_content = f.read()
+
+        mol = Chem.MolFromMol2Block(mol2_content, sanitize=False, removeHs=False)
+        if mol is None:
+            raise ValueError(f"Failed to read MOL2 file: {ligand_path}")
+
+        # Parse and store original atom names from MOL2
+        atom_section_started = False
+        atom_data = []
+        for line in mol2_content.split('\n'):
+            if line.startswith('@<TRIPOS>ATOM'):
+                atom_section_started = True
+                continue
+            if atom_section_started:
+                if line.startswith('@<TRIPOS>') or not line.strip():
+                    break
+                parts = line.split()
+                if len(parts) >= 7:
+                    atom_idx = int(parts[0])  # 1-indexed
+                    atom_name = parts[1]
+                    atom_data.append((atom_idx, atom_name))
+
+        # Store original atom names
+        for atom_idx_mol2, atom_name in atom_data:
+            rdkit_idx = atom_idx_mol2 - 1  # Convert to 0-indexed
+            if rdkit_idx < mol.GetNumAtoms():
+                atom = mol.GetAtomWithIdx(rdkit_idx)
+                atom.SetProp("_original_atom_name", atom_name)
+                atom.SetProp("name", atom_name)
+
+        print(f"Loaded ligand from MOL2: {mol.GetNumAtoms()} atoms")
+        return mol
+
+    elif ligand_path.suffix.lower() in {'.sdf', '.sd'}:
+        # Read SDF file
+        mol = Chem.MolFromMolFile(str(ligand_path), sanitize=False, removeHs=False)
+        if mol is None:
+            raise ValueError(f"Failed to read SDF file: {ligand_path}")
+        print(f"Loaded ligand from SDF: {mol.GetNumAtoms()} atoms")
+        return mol
+
+    elif ligand_path.suffix.lower() in {'.pdb', '.ent'}:
+        # Read PDB file
+        mol = Chem.MolFromPDBFile(str(ligand_path), removeHs=False)
+        if mol is None:
+            raise ValueError(f"Failed to read PDB file: {ligand_path}")
+        print(f"Loaded ligand from PDB: {mol.GetNumAtoms()} atoms")
+        return mol
+
+    else:
+        raise ValueError(f"Unsupported ligand file format: {ligand_path.suffix}")
 
 
-def _pair_chains_to_dict(pair_chains_iptm: Dict[int, Dict[int, torch.Tensor]]) -> Dict[str, Dict[str, float]]:
-    output: Dict[str, Dict[str, float]] = {}
-    for idx1, inner in pair_chains_iptm.items():
-        inner_map: Dict[str, float] = {}
-        for idx2, value in inner.items():
-            if torch.is_tensor(value):
-                inner_map[str(idx2)] = float(value.detach().cpu().item())
-            else:
-                inner_map[str(idx2)] = float(value)
-        output[str(idx1)] = inner_map
-    return output
+def _fix_cif_entity_ids(cif_file: Path) -> None:
+    """Fix entity IDs in CIF file to remove special characters like '!'.
+
+    gemmi's make_mmcif_document() sometimes adds special characters to entity IDs
+    to differentiate them, which causes parsing errors in Boltz.
+    """
+    import re
+
+    with open(cif_file, 'r') as f:
+        content = f.read()
+
+    # Fix entity IDs in _entity.id section (format: "ID type" at start of line)
+    content = re.sub(r'^([A-Z][A-Z0-9]*)!\s+', r'\1 ', content, flags=re.MULTILINE)
+
+    # Fix entity IDs in _struct_asym.entity_id column (format: "asym_id entity_id!")
+    content = re.sub(r'([A-Za-z0-9]+)\s+([A-Z][A-Z0-9]*)(!)\s*$', r'\1 \2', content, flags=re.MULTILINE)
+
+    # Fix entity IDs in atom records (format: "... LIG! ...")
+    # This handles label_entity_id column in ATOM/HETATM records
+    content = re.sub(r'([A-Z][A-Z0-9]*)(!)\s+\.', r'\1 .', content)  # Before a period
+    content = re.sub(r'([A-Z][A-Z0-9]*)(!)\s+\?', r'\1 ?', content)  # Before a question mark
+    content = re.sub(r'([A-Z][A-Z0-9]*)(!)(\s+)', r'\1\3', content)  # Before whitespace
+
+    with open(cif_file, 'w') as f:
+        f.write(content)
 
 
-def _build_record(record_id: str, parsed) -> Record:
-    chain_infos = []
-    for chain in parsed.data.chains:
-        chain_infos.append(
-            ChainInfo(
-                chain_id=int(chain["asym_id"]),
-                chain_name=str(chain["name"]),
-                mol_type=int(chain["mol_type"]),
-                cluster_id=-1,
-                msa_id=-1,
-                num_residues=int(chain["res_num"]),
-                valid=True,
-                entity_id=int(chain["entity_id"]),
-            )
+def _filter_structure_by_chains(
+    input_path: Path,
+    target_chains: Sequence[str],
+    ligand_chains: Sequence[str],
+    output_path: Path,
+) -> None:
+    structure = gemmi.read_structure(str(input_path))
+    keep = {c.strip() for c in (list(target_chains) + list(ligand_chains)) if c.strip()}
+    if not keep:
+        raise ValueError("No chains specified for affinity filtering.")
+
+    model = structure[0]
+    existing = {chain.name for chain in model}
+
+    # Resolve auth_asym_id -> label_asym_id for CIF inputs if needed.
+    resolved_keep = set()
+    missing = []
+    auth_to_label = {}
+    if input_path.suffix.lower() in {".cif", ".mmcif"}:
+        try:
+            doc = gemmi.cif.read(str(input_path))
+            block = doc[0]
+            # struct_asym mapping
+            label_col = block.find_values("_struct_asym.id")
+            auth_col = block.find_values("_struct_asym.pdbx_auth_asym_id")
+            if label_col and auth_col and len(label_col) == len(auth_col):
+                for i in range(len(label_col)):
+                    label = label_col[i]
+                    auth = auth_col[i]
+                    if auth and label:
+                        auth_to_label.setdefault(auth, set()).add(label)
+            # atom_site mapping fallback
+            label_col = block.find_values("_atom_site.label_asym_id")
+            auth_col = block.find_values("_atom_site.auth_asym_id")
+            if label_col and auth_col and len(label_col) == len(auth_col):
+                for i in range(len(label_col)):
+                    label = label_col[i]
+                    auth = auth_col[i]
+                    if auth and label:
+                        auth_to_label.setdefault(auth, set()).add(label)
+        except Exception:
+            auth_to_label = {}
+
+    def _chain_variants(value: str) -> set[str]:
+        v = value.strip()
+        if not v:
+            return set()
+        variants = {v, v.lower()}
+        lead = v.lstrip("0123456789")
+        if lead:
+            variants.add(lead)
+            variants.add(lead.lower())
+        trail = v.rstrip("0123456789")
+        if trail:
+            variants.add(trail)
+            variants.add(trail.lower())
+        no_digits = "".join(c for c in v if not c.isdigit())
+        if no_digits:
+            variants.add(no_digits)
+            variants.add(no_digits.lower())
+        alnum = "".join(c for c in v if c.isalnum())
+        if alnum:
+            variants.add(alnum)
+            variants.add(alnum.lower())
+        return variants
+
+    existing_lower = {c.lower(): c for c in existing}
+    suggestion_map: dict[str, list[str]] = {}
+    variant_map: dict[str, set[str]] = {}
+    for chain_name in existing:
+        for key in _chain_variants(chain_name):
+            variant_map.setdefault(key, set()).add(chain_name)
+    for auth_key, labels in auth_to_label.items():
+        for key in _chain_variants(auth_key):
+            variant_map.setdefault(key, set()).update(labels)
+
+    for chain_id in keep:
+        if chain_id in existing:
+            resolved_keep.add(chain_id)
+            continue
+        if chain_id in auth_to_label:
+            mapped = [c for c in auth_to_label[chain_id] if c in existing]
+            if mapped:
+                resolved_keep.update(mapped)
+                continue
+        if chain_id.lower() in existing_lower:
+            resolved_keep.add(existing_lower[chain_id.lower()])
+            continue
+
+        variant_candidates: set[str] = set()
+        for key in _chain_variants(chain_id):
+            variant_candidates.update(variant_map.get(key, set()))
+        variant_candidates = {c for c in variant_candidates if c in existing}
+        if len(variant_candidates) == 1:
+            resolved_keep.add(next(iter(variant_candidates)))
+            continue
+        if variant_candidates:
+            suggestion_map[chain_id] = sorted(variant_candidates)
+
+        missing.append(chain_id)
+
+    if missing:
+        auth_keys = ", ".join(sorted(auth_to_label.keys()))
+        available = ", ".join(sorted(existing))
+        suggestions = ""
+        if suggestion_map:
+            parts = [
+                f"{key}→{','.join(values)}" for key, values in suggestion_map.items()
+            ]
+            suggestions = f" Suggestions: {'; '.join(parts)}."
+        raise ValueError(
+            f"Chains not found in structure: {', '.join(missing)}. "
+            f"Available chains: {available or 'none'}. "
+            f"Auth chain IDs: {auth_keys or 'none'}."
+            f"{suggestions}"
         )
 
-    return Record(
-        id=record_id,
-        structure=parsed.info,
-        chains=chain_infos,
-        interfaces=[],
-        inference_options=InferenceOptions(pocket_constraints=None, contact_constraints=None),
-        templates=None,
-        affinity=None,
-    )
+    for chain in list(model):
+        if chain.name not in resolved_keep:
+            model.remove_chain(chain.name)
 
+    structure.remove_empty_chains()
+    structure.setup_entities()
 
-def _compute_ipsae(
-    pae: np.ndarray,
-    tokens: np.ndarray,
-    chains,
-) -> Dict[str, float]:
-    chain_ids = tokens["asym_id"].astype(int)
-    chain_names = np.array([str(chains[idx]["name"]) for idx in chain_ids])
-    residue_types = tokens["res_name"].astype(str)
-    mol_types = np.array([int(chains[idx]["mol_type"]) for idx in chain_ids])
-    polymer_mask = mol_types != const.chain_type_ids["NONPOLYMER"]
-
-    if not polymer_mask.any():
-        return {}
-
-    filtered_pae = pae[np.ix_(polymer_mask, polymer_mask)]
-    filtered_chain_ids = chain_names[polymer_mask]
-    filtered_res_types = residue_types[polymer_mask]
-
-    chain_name_to_type = {
-        str(chain["name"]): int(chain["mol_type"]) for chain in chains
-    }
-    chain_type_map: Dict[str, str] = {}
-    for idx in np.unique(filtered_chain_ids):
-        mol_type = chain_name_to_type.get(str(idx))
-        if mol_type in (const.chain_type_ids["DNA"], const.chain_type_ids["RNA"]):
-            chain_type_map[str(idx)] = "nucleic_acid"
-        else:
-            chain_type_map[str(idx)] = "protein"
-
-    return calculate_ipsae(
-        filtered_pae,
-        filtered_chain_ids,
-        residue_types=filtered_res_types,
-        chain_type_map=chain_type_map,
-        pae_cutoff=10.0,
-    )
-
-
-def _infer_target_and_ligand_chains(chains) -> tuple[str | None, str | None]:
-    target_chains = []
-    ligand_chains = []
-    for chain in chains:
-        try:
-            chain_name = str(chain["name"]).strip()
-        except Exception:
-            chain_name = str(getattr(chain, "name", "")).strip()
-        if not chain_name:
+    # Ensure polymer sequences are defined for mmCIF parsing
+    for entity in structure.entities:
+        if entity.entity_type.name != "Polymer":
             continue
-        try:
-            mol_type = int(chain["mol_type"])
-        except Exception:
-            mol_type = int(getattr(chain, "mol_type", const.chain_type_ids["NONPOLYMER"]))
-        if mol_type == const.chain_type_ids["NONPOLYMER"]:
-            ligand_chains.append(chain_name)
-        else:
-            target_chains.append(chain_name)
-    target = ",".join(sorted(set(target_chains))) if target_chains else None
-    ligand = ",".join(sorted(set(ligand_chains))) if ligand_chains else None
-    return target, ligand
+        if not entity.subchains:
+            continue
+        seq = []
+        for chain in structure[0]:
+            for res in chain:
+                if res.subchain in entity.subchains:
+                    seq.append(res.name)
+        if seq:
+            entity.full_sequence = seq
+
+    doc = structure.make_mmcif_document()
+    doc.write_file(str(output_path))
 
 
-def run_boltz2score(
-    input_path: Path,
+def _run_affinity(
+    complex_file: Path,
     output_dir: Path,
-    work_dir: Path,
+    cache_dir: Path,
+    result_id: str,
     accelerator: str,
     devices: int,
-    target_chain: str | None,
-    ligand_chain: str | None,
-    affinity_refine: bool,
-    enable_affinity: bool,
-    auto_enable_affinity: bool,
-) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    work_dir.mkdir(parents=True, exist_ok=True)
+    affinity_refine: bool = False,
+) -> Optional[dict]:
+    try:
+        import sys
+        repo_root = Path(__file__).resolve().parents[1]
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+        import affinity.main as affinity_main
+        if getattr(affinity_main, "_ccd_name_manager", None) is not None:
+            affinity_main._ccd_name_manager.redis_client = None
+        Boltzina = affinity_main.Boltzina
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Warning] Failed to import affinity module: {exc}")
+        return None
 
-    parsed, extra_mols, structure = prepare_structure_inputs(input_path)
-    record_id = input_path.stem
-    record = _build_record(record_id, parsed)
-
-    inferred_target, inferred_ligand = _infer_target_and_ligand_chains(parsed.data.chains)
-    if not target_chain:
-        target_chain = inferred_target
-    if not ligand_chain:
-        ligand_chain = inferred_ligand
-
-    tokenizer = Boltz2Tokenizer()
-    featurizer = Boltz2Featurizer()
-
-    input_data = Input(
-        structure=parsed.data,
-        msa={},
-        record=record,
-        residue_constraints=None,
-        templates=None,
-        extra_mols=extra_mols,
-    )
-    tokenized = tokenizer.tokenize(input_data)
-
-    cache_dir = Path(get_cache_path())
-    mol_dir = cache_dir / "mols"
-    molecules = load_canonicals(mol_dir)
-    molecules.update(extra_mols)
-    missing = set(tokenized.tokens["res_name"].tolist()) - set(molecules.keys())
-    if missing:
-        molecules.update(load_molecules(mol_dir, missing))
-
-    rng = np.random.default_rng(42)
-    features = featurizer.process(
-        tokenized,
-        molecules=molecules,
-        random=rng,
-        training=False,
-        max_atoms=None,
-        max_tokens=None,
-        max_seqs=const.max_msa_seqs,
-        pad_to_max_seqs=False,
-        single_sequence_prop=0.0,
-        compute_frames=True,
-        compute_constraint_features=True,
-        override_method=None,
-        compute_affinity=False,
-    )
-    features["record"] = record
-
-    batch = collate([features])
-
-    device = torch.device("cpu" if accelerator == "cpu" else "cuda")
-    batch = _move_to_device(batch, device)
-
-    cache_dir = Path(get_cache_path())
-    ckpt_path = cache_dir / "boltz2_conf.ckpt"
-    if not ckpt_path.exists():
-        raise FileNotFoundError(f"Boltz2 checkpoint not found: {ckpt_path}")
-
-    predict_args = {
-        "recycling_steps": 0,
-        "sampling_steps": 1,
-        "diffusion_samples": 1,
-        "max_parallel_samples": 1,
-        "write_confidence_summary": True,
-        "write_full_pae": True,
-        "write_full_pde": True,
-    }
-    diffusion_params = asdict(Boltz2DiffusionParams())
-    pairformer_args = asdict(PairformerArgsV2())
-    msa_args = asdict(
-        MSAModuleArgs(
-            subsample_msa=False,
-            num_subsampled_msa=1024,
-            use_paired_feature=True,
+    affinity_ckpt = cache_dir / "boltz2_aff.ckpt"
+    if not affinity_ckpt.exists():
+        print(
+            f"[Warning] Affinity checkpoint not found: {affinity_ckpt}. Skipping affinity."
         )
-    )
-    steering_args = asdict(BoltzSteeringParams())
+        return None
 
-    model = Boltz2.load_from_checkpoint(
-        ckpt_path,
-        strict=True,
-        map_location="cpu",
-        predict_args=predict_args,
-        diffusion_process_args=diffusion_params,
-        ema=False,
-        pairformer_args=pairformer_args,
-        msa_args=msa_args,
-        steering_args=steering_args,
-        skip_run_structure=True,
+    os.environ["BOLTZ_CACHE"] = str(cache_dir)
+
+    affinity_out = output_dir / "affinity"
+    affinity_work = affinity_out / "work"
+    affinity_out.mkdir(parents=True, exist_ok=True)
+
+    boltzina = Boltzina(
+        output_dir=str(affinity_out),
+        work_dir=str(affinity_work),
+        # Enable diffusion refinement for affinity if requested
+        skip_run_structure=not affinity_refine,
+        use_kernels=False,
         run_trunk_and_structure=True,
-        confidence_prediction=True,
+        accelerator=accelerator,
+        devices=devices,
+        num_workers=0,
     )
-    model.eval()
-    model.to(device)
 
-    recycling_steps = int(predict_args.get("recycling_steps", 0))
-    sampling_steps = int(predict_args.get("sampling_steps", 1)) or 1
+    boltzina.predict([str(complex_file)])
+    if not boltzina.results:
+        return None
 
-    with torch.no_grad():
-        out = model(
-            batch,
-            recycling_steps=recycling_steps,
-            num_sampling_steps=sampling_steps,
-            diffusion_samples=1,
-            max_parallel_samples=1,
-            run_confidence_sequentially=True,
+    result = dict(boltzina.results[0])
+    result["input_file"] = str(complex_file)
+    affinity_json = output_dir / result_id / f"affinity_{result_id}.json"
+    affinity_json.parent.mkdir(parents=True, exist_ok=True)
+    affinity_json.write_text(json.dumps(result, indent=2))
+    return result
+
+
+def _write_chain_map(processed_dir: Path, output_dir: Path, record_id: str) -> None:
+    try:
+        structure = StructureV2.load(
+            processed_dir / "structures" / f"{record_id}.npz"
         )
-
-    pae = out["pae"][0].detach().cpu().numpy()
-    ipsae = _compute_ipsae(pae, tokenized.tokens, parsed.data.chains)
-
-    pair_chains_iptm = _pair_chains_to_dict(out["pair_chains_iptm"])
-    chains_ptm = {k: v.get(k, 0.0) for k, v in pair_chains_iptm.items()}
-
-    raw_complex_plddt = _as_float(out["complex_plddt"])
-    raw_complex_iplddt = _as_float(out["complex_iplddt"])
-    scaled_complex_plddt = raw_complex_plddt * 100.0 if raw_complex_plddt <= 1.0 else raw_complex_plddt
-    scaled_complex_iplddt = raw_complex_iplddt * 100.0 if raw_complex_iplddt <= 1.0 else raw_complex_iplddt
-
-    token_chain_ids = tokenized.tokens["asym_id"].astype(int)
-    token_chain_names = np.array([str(parsed.data.chains[idx]["name"]) for idx in token_chain_ids])
-    token_mol_types = tokenized.tokens["mol_type"].astype(int)
-
-    plddt_raw = out["plddt"][0].detach().cpu().numpy()
-    plddt_scaled = plddt_raw * 100.0 if float(np.max(plddt_raw)) <= 1.0 else plddt_raw
-
-    plddt_by_chain: Dict[str, float] = {}
-    for chain_name in np.unique(token_chain_names):
-        mask = token_chain_names == chain_name
-        if mask.any():
-            plddt_by_chain[str(chain_name)] = float(plddt_scaled[mask].mean())
-
-    plddt_by_mol_type: Dict[str, float] = {}
-    for mol_name, mol_id in const.chain_type_ids.items():
-        mask = token_mol_types == mol_id
-        if mask.any():
-            plddt_by_mol_type[mol_name.lower()] = float(plddt_scaled[mask].mean())
-
-    protein_plddt = plddt_by_mol_type.get("protein")
-    ligand_plddt = plddt_by_mol_type.get("nonpolymer")
-
-    plddt_by_residue = []
-    plddt_by_ligand_atom = []
-    token_res_idx = tokenized.tokens["res_idx"].astype(int)
-    token_res_name = tokenized.tokens["res_name"].astype(str)
-    token_atom_idx = tokenized.tokens["atom_idx"].astype(int)
-
-    residue_key_to_vals: Dict[tuple[str, int, str], list[float]] = {}
-    for idx in range(len(plddt_scaled)):
-        chain_name = str(token_chain_names[idx])
-        res_idx = int(token_res_idx[idx])
-        res_name = str(token_res_name[idx])
-        mol_type = int(token_mol_types[idx])
-        if mol_type == const.chain_type_ids["NONPOLYMER"]:
-            atom_name = None
-            ligand_mol = molecules.get(res_name)
-            if ligand_mol is not None and token_atom_idx[idx] < ligand_mol.GetNumAtoms():
-                atom = ligand_mol.GetAtomWithIdx(int(token_atom_idx[idx]))
-                if atom.HasProp("name"):
-                    atom_name = atom.GetProp("name")
-                else:
-                    atom_name = f"{atom.GetSymbol()}{atom.GetIdx()}"
-            if not atom_name:
-                atom_name = f"ATOM{int(token_atom_idx[idx])}"
-            plddt_by_ligand_atom.append(
-                {
-                    "chain": chain_name,
-                    "res_idx": res_idx,
-                    "res_name": res_name,
-                    "atom_idx": int(token_atom_idx[idx]),
-                    "atom_name": atom_name,
-                    "plddt": float(plddt_scaled[idx]),
-                }
-            )
-        else:
-            key = (chain_name, res_idx, res_name)
-            residue_key_to_vals.setdefault(key, []).append(float(plddt_scaled[idx]))
-
-    for (chain_name, res_idx, res_name), vals in residue_key_to_vals.items():
-        plddt_by_residue.append(
-            {
-                "chain": chain_name,
-                "res_idx": int(res_idx),
-                "res_name": res_name,
-                "plddt": float(np.mean(vals)),
-                "count": int(len(vals)),
-            }
-        )
-
-    confidence_summary = {
-        "confidence_score": _as_float(
-            (4 * out["complex_plddt"] + torch.where(out["iptm"] > 0, out["iptm"], out["ptm"])) / 5
-        ),
-        "ptm": _as_float(out["ptm"]),
-        "iptm": _as_float(out["iptm"]),
-        "ligand_iptm": _as_float(out["ligand_iptm"]),
-        "protein_iptm": _as_float(out["protein_iptm"]),
-        "complex_plddt": scaled_complex_plddt,
-        "complex_plddt_raw": raw_complex_plddt,
-        "complex_plddt_protein": protein_plddt,
-        "complex_plddt_ligand": ligand_plddt,
-        "complex_iplddt": scaled_complex_iplddt,
-        "complex_iplddt_raw": raw_complex_iplddt,
-        "complex_pde": _as_float(out["complex_pde"]),
-        "complex_ipde": _as_float(out["complex_ipde"]),
-        "plddt_by_chain": plddt_by_chain,
-        "plddt_by_mol_type": plddt_by_mol_type,
-        "plddt_by_residue": plddt_by_residue,
-        "plddt_by_ligand_atom": plddt_by_ligand_atom,
-        "chains_ptm": chains_ptm,
-        "pair_chains_iptm": pair_chains_iptm,
-        "ipsae": ipsae,
-    }
-    for key, value in ipsae.items():
-        confidence_summary[f"ipsae_{key}"] = value
-
-    record_dir = output_dir / record_id
-    record_dir.mkdir(parents=True, exist_ok=True)
-
-    structure_output = record_dir / f"{record_id}_model_0.cif"
-    if input_path.suffix.lower() == ".cif":
-        shutil.copyfile(input_path, structure_output)
-    else:
-        struct = gemmi.read_structure(str(input_path))
-        struct.setup_entities()
-        doc = struct.make_mmcif_document()
-        doc.write_file(str(structure_output))
-
-    confidence_path = record_dir / f"confidence_{record_id}_model_0.json"
-    confidence_path.write_text(json.dumps(confidence_summary, indent=2))
-
-
-    plddt_path = record_dir / f"plddt_{record_id}_model_0.npz"
-    np.savez_compressed(plddt_path, plddt=plddt_scaled)
-
-    plddt_raw_path = record_dir / f"plddt_raw_{record_id}_model_0.npz"
-    np.savez_compressed(plddt_raw_path, plddt=plddt_raw)
-
-    pae_path = record_dir / f"pae_{record_id}_model_0.npz"
-    np.savez_compressed(pae_path, pae=pae)
-
-    chain_map = {
-        str(chain["asym_id"]): str(chain["name"]) for chain in parsed.data.chains
-    }
-    (output_dir / "chain_map.json").write_text(json.dumps(chain_map, indent=2))
-
-    should_run_affinity = False
-    if enable_affinity:
-        should_run_affinity = True
-    elif auto_enable_affinity:
-        should_run_affinity = bool(ligand_chain or inferred_ligand)
-    else:
-        should_run_affinity = bool(target_chain and ligand_chain)
-
-    if should_run_affinity:
-        try:
-            from affinity.main import Boltzina
-
-            ligand_resname = None
-            ligand_chain_ids = None
-            if ligand_chain:
-                ligand_chain_ids = {c.strip() for c in ligand_chain.split(",") if c.strip()}
-            for model in structure:
-                for chain in model:
-                    if ligand_chain_ids is not None and chain.name not in ligand_chain_ids:
-                        continue
-                    for residue in chain:
-                        ligand_resname = residue.name.strip()
-                        if ligand_resname:
-                            break
-                    if ligand_resname:
-                        break
-                if ligand_resname:
-                    break
-
-            affinity_output_dir = work_dir / "boltz2score_affinity"
-            affinity_work_dir = work_dir / "boltz2score_affinity_work"
-            boltzina = Boltzina(
-                output_dir=str(affinity_output_dir),
-                work_dir=str(affinity_work_dir),
-                skip_run_structure=not affinity_refine,
-                ligand_resname=ligand_resname or "LIG",
-            )
-            boltzina.predict([str(input_path)])
-            if boltzina.results:
-                affinity_data = dict(boltzina.results[0])
-                affinity_data["source"] = "boltz2score"
-                affinity_path = record_dir / f"affinity_{record_id}.json"
-                affinity_path.write_text(json.dumps(affinity_data, indent=2))
-            else:
-                predictions_dir = affinity_work_dir / "boltz_out" / "predictions"
-                affinity_files = sorted(predictions_dir.glob("*/affinity_*.json"))
-                if affinity_files:
-                    affinity_data = json.loads(affinity_files[0].read_text())
-                    affinity_data["source"] = "boltz2score_fallback"
-                    affinity_data["raw_path"] = str(affinity_files[0])
-                    affinity_path = record_dir / f"affinity_{record_id}.json"
-                    affinity_path.write_text(json.dumps(affinity_data, indent=2))
-                else:
-                    raise RuntimeError(
-                        "Affinity prediction completed without producing output files. "
-                        "Check ligand detection and Boltzina logs."
-                    )
-        except Exception as exc:
-            raise RuntimeError(f"Affinity prediction failed: {exc}") from exc
+        structure = structure.remove_invalid_chains()
+        chain_map = {
+            str(idx): str(chain["name"])
+            for idx, chain in enumerate(structure.chains)
+        }
+        chain_map_path = output_dir / record_id / "chain_map.json"
+        chain_map_path.parent.mkdir(parents=True, exist_ok=True)
+        chain_map_path.write_text(json.dumps(chain_map, indent=2))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Warning] Failed to write chain map: {exc}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Boltz2Score: confidence-only scoring")
-    parser.add_argument("--input", required=True, help="Input PDB/CIF structure")
-    parser.add_argument("--output_dir", required=True, help="Output directory")
-    parser.add_argument("--work_dir", required=True, help="Working directory")
-    parser.add_argument("--accelerator", default="gpu")
-    parser.add_argument("--devices", default="1")
-    parser.add_argument("--num_workers", default="0")
-    parser.add_argument("--target_chain")
-    parser.add_argument("--ligand_chain")
-    parser.add_argument("--affinity_refine", action="store_true")
-    parser.add_argument("--enable_affinity", action="store_true")
-    parser.add_argument("--auto_enable_affinity", action="store_true")
+    parser = argparse.ArgumentParser(
+        description="Run Boltz2Score on a single PDB/mmCIF (one step)."
+    )
+    parser.add_argument(
+        "--input",
+        required=False,
+        type=str,
+        help="Input structure file (.pdb/.cif/.mmcif)",
+    )
+    parser.add_argument(
+        "--output_dir",
+        required=True,
+        type=str,
+        help="Output directory for score results",
+    )
+    parser.add_argument(
+        "--cache",
+        type=str,
+        default=None,
+        help="Boltz cache directory (default: BOLTZ_CACHE or ~/.boltz)",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Path to boltz2_conf.ckpt (default: <cache>/boltz2_conf.ckpt)",
+    )
+    parser.add_argument("--devices", type=int, default=1)
+    parser.add_argument(
+        "--accelerator",
+        type=str,
+        default="gpu" if torch.cuda.is_available() else "cpu",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=0,
+        help="DataLoader workers (default: 0 for compatibility)",
+    )
+    parser.add_argument(
+        "--output_format",
+        type=str,
+        default="mmcif",
+        choices=["pdb", "mmcif"],
+    )
+    parser.add_argument("--recycling_steps", type=int, default=3)
+    parser.add_argument("--sampling_steps", type=int, default=1)
+    parser.add_argument("--diffusion_samples", type=int, default=1)
+    parser.add_argument("--max_parallel_samples", type=int, default=1)
+    parser.add_argument("--step_scale", type=float, default=1.5)
+    parser.add_argument("--no_kernels", action="store_true")
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--work_dir",
+        type=str,
+        default=None,
+        help="Optional work dir to keep processed intermediates",
+    )
+    parser.add_argument(
+        "--keep_work",
+        action="store_true",
+        help="Keep temporary work directory (default: delete)",
+    )
+    parser.add_argument(
+        "--target_chain",
+        type=str,
+        default=None,
+        help="Target protein chain ID(s), comma-separated (enables affinity if set with --ligand_chain)",
+    )
+    parser.add_argument(
+        "--ligand_chain",
+        type=str,
+        default=None,
+        help="Ligand chain ID(s), comma-separated (enables affinity if set with --target_chain)",
+    )
+    parser.add_argument(
+        "--affinity_refine",
+        action="store_true",
+        help="Run diffusion refinement before affinity (higher quality, slower).",
+    )
+    parser.add_argument(
+        "--protein_file",
+        type=str,
+        default=None,
+        help="Protein structure file (.pdb/.cif/.mmcif) for separate input mode",
+    )
+    parser.add_argument(
+        "--ligand_file",
+        type=str,
+        default=None,
+        help="Ligand structure file (.sdf/.mol/.mol2/.pdb) for separate input mode",
+    )
 
     args = parser.parse_args()
 
-    run_boltz2score(
-        input_path=Path(args.input).resolve(),
-        output_dir=Path(args.output_dir).resolve(),
-        work_dir=Path(args.work_dir).resolve(),
-        accelerator=args.accelerator,
-        devices=int(args.devices),
-        target_chain=args.target_chain,
-        ligand_chain=args.ligand_chain,
-        affinity_refine=args.affinity_refine,
-        enable_affinity=args.enable_affinity,
-        auto_enable_affinity=args.auto_enable_affinity,
+    # Validate input arguments
+    has_input = args.input is not None
+    has_separate = args.protein_file is not None and args.ligand_file is not None
+
+    if not has_input and not has_separate:
+        parser.error("Either --input or both --protein_file and --ligand_file must be provided")
+    if has_input and has_separate:
+        parser.error("Cannot use both --input and separate --protein_file/--ligand_file options")
+    if args.protein_file and not args.ligand_file:
+        parser.error("--ligand_file is required when using --protein_file")
+    if args.ligand_file and not args.protein_file:
+        parser.error("--protein_file is required when using --ligand_file")
+
+    output_dir = Path(args.output_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    cache_dir = Path(args.cache or get_cache_path()).expanduser().resolve()
+
+    # Initialize work_dir early (needed for separate file mode)
+    if args.work_dir:
+        work_dir = Path(args.work_dir).expanduser().resolve()
+        work_dir.mkdir(parents=True, exist_ok=True)
+        cleanup = False
+    else:
+        work_dir = Path(
+            tempfile.mkdtemp(prefix="boltz2score_", dir=output_dir)
+        )
+        cleanup = not args.keep_work
+
+    # Check for separate protein and ligand file mode
+    if args.protein_file and args.ligand_file:
+        # Separate input mode: combine protein and ligand files
+        protein_path = Path(args.protein_file).expanduser().resolve()
+        ligand_path = Path(args.ligand_file).expanduser().resolve()
+
+        if not protein_path.exists():
+            raise FileNotFoundError(f"Protein file not found: {protein_path}")
+        if not ligand_path.exists():
+            raise FileNotFoundError(f"Ligand file not found: {ligand_path}")
+
+        # Combine protein and ligand files into a single structure
+        from pathlib import Path as PathLib
+        import gemmi
+        from rdkit import Chem
+
+        Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
+
+        # Load ligand from file
+        ligand_mol = _load_ligand_from_file(ligand_path)
+        if ligand_mol is None:
+            raise ValueError(f"Failed to load ligand from {ligand_path}")
+
+        # Read protein structure
+        if protein_path.suffix.lower() in {'.pdb', '.ent'}:
+            structure = gemmi.read_structure(str(protein_path))
+        elif protein_path.suffix.lower() in {'.cif', '.mmcif'}:
+            structure = gemmi.read_structure(str(protein_path))
+        else:
+            raise ValueError(f"Unsupported protein file format: {protein_path.suffix}")
+
+        # Setup entities for protein first
+        structure.setup_entities()
+
+        # Add ligand as a separate chain
+        ligand_chain = gemmi.Chain("L")
+        residue = gemmi.Residue()
+        residue.name = "LIG"
+        residue.seqid = gemmi.SeqId(1, " ")
+
+        # Add atoms from ligand molecule
+        conf = ligand_mol.GetConformer()
+        for i in range(ligand_mol.GetNumAtoms()):
+            atom = ligand_mol.GetAtomWithIdx(i)
+            pos = conf.GetAtomPosition(i)
+            gemmi_atom = gemmi.Atom()
+            # Get atom name - prefer original atom name
+            if atom.HasProp("_original_atom_name"):
+                gemmi_atom.name = atom.GetProp("_original_atom_name")
+            elif atom.HasProp("name"):
+                gemmi_atom.name = atom.GetProp("name")
+            else:
+                gemmi_atom.name = atom.GetSymbol()
+            gemmi_atom.element = gemmi.Element(atom.GetSymbol())
+            gemmi_atom.pos = gemmi.Position(pos.x, pos.y, pos.z)
+            residue.add_atom(gemmi_atom)
+
+        ligand_chain.add_residue(residue)
+        structure[0].add_chain(ligand_chain)
+
+        # Re-setup entities to properly classify ligand as NonPolymer
+        structure.setup_entities()
+
+        # Ensure polymer sequences are defined for mmCIF parsing
+        # This is needed when PDB files lack SEQRES records
+        for entity in structure.entities:
+            if entity.entity_type.name != "Polymer":
+                continue
+            if not entity.subchains:
+                continue
+            seq = []
+            for chain in structure[0]:
+                for res in chain:
+                    if res.subchain in entity.subchains:
+                        seq.append(res.name)
+            if seq:
+                entity.full_sequence = seq
+
+        # Write combined structure as CIF
+        combined_dir = work_dir / "combined"
+        combined_dir.mkdir(parents=True, exist_ok=True)
+        combined_file = combined_dir / "combined_complex.cif"
+
+        doc = structure.make_mmcif_document()
+        doc.write_file(str(combined_file))
+
+        print(f"Created combined structure: {combined_file}")
+        print(f"  Protein: {protein_path.name}")
+        print(f"  Ligand: {ligand_path.name}")
+
+        # Fix entity IDs in CIF to remove special characters
+        _fix_cif_entity_ids(combined_file)
+
+        # Use the combined file for further processing
+        input_path = combined_file
+    else:
+        # Standard single file mode
+        input_path = Path(args.input).expanduser().resolve()
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input not found: {input_path}")
+
+    # Create isolated input dir with the single structure
+    input_dir = work_dir / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    staged_input = input_dir / input_path.name
+    if staged_input.exists():
+        staged_input.unlink()
+    shutil.copy2(input_path, staged_input)
+
+    # Prepare processed inputs (structure scoring)
+    prepare_inputs(
+        input_dir=input_dir,
+        out_dir=work_dir,
+        cache_dir=cache_dir,
+        recursive=False,
     )
+
+    # Run scoring
+    run_scoring(
+        processed_dir=work_dir / "processed",
+        output_dir=output_dir,
+        cache_dir=cache_dir,
+        checkpoint=Path(args.checkpoint) if args.checkpoint else None,
+        devices=args.devices,
+        accelerator=args.accelerator,
+        num_workers=args.num_workers,
+        output_format=args.output_format,
+        recycling_steps=args.recycling_steps,
+        sampling_steps=args.sampling_steps,
+        diffusion_samples=args.diffusion_samples,
+        max_parallel_samples=args.max_parallel_samples,
+        step_scale=args.step_scale,
+        no_kernels=args.no_kernels,
+        seed=args.seed,
+    )
+
+    _write_chain_map(
+        processed_dir=work_dir / "processed",
+        output_dir=output_dir,
+        record_id=input_path.stem,
+    )
+
+    # Optional affinity prediction (requires target + ligand chains)
+    target_chains = _parse_chain_list(args.target_chain)
+    ligand_chains = _parse_chain_list(args.ligand_chain)
+    if target_chains or ligand_chains:
+        if not target_chains or not ligand_chains:
+            raise ValueError(
+                "Affinity requires both --target_chain and --ligand_chain."
+            )
+        if set(target_chains) & set(ligand_chains):
+            raise ValueError("Target and ligand chains must be different.")
+
+        affinity_input = work_dir / f"{input_path.stem}_affinity.cif"
+        _filter_structure_by_chains(
+            input_path=input_path,
+            target_chains=target_chains,
+            ligand_chains=ligand_chains,
+            output_path=affinity_input,
+        )
+        _run_affinity(
+            complex_file=affinity_input,
+            output_dir=output_dir,
+            cache_dir=cache_dir,
+            result_id=input_path.stem,
+            accelerator=args.accelerator,
+            devices=args.devices,
+            affinity_refine=args.affinity_refine,
+        )
+
+    if cleanup:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

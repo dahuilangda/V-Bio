@@ -65,6 +65,7 @@ AMINO_ACID_MAPPING = {
     "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
     "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
 }
+ONE_TO_THREE_AMINO_ACID = {one: three for three, one in AMINO_ACID_MAPPING.items()}
 DEFAULT_TEMPLATE_RELEASE_DATE = "1987-11-16"
 _RELEASE_DATE_PAIR_TAGS = (
     "_pdbx_database_status.recvd_initial_deposition_date",
@@ -463,6 +464,39 @@ def _write_filtered_pdb_by_chain(pdb_text: str, chain_id: str, output_path: Path
     output_path.write_text("\n".join(out_lines) + "\n")
 
 
+def _canonicalize_template_residue_name(resname: str) -> Optional[str]:
+    name = (resname or "").strip().upper()
+    if not name:
+        return None
+    if name in AMINO_ACID_MAPPING:
+        return name
+    if name == "MSE":
+        return "MET"
+    info = gemmi.find_tabulated_residue(name)
+    if getattr(info, "found", False) and getattr(info, "is_amino_acid", False):
+        code = (getattr(info, "one_letter_code", "") or getattr(info, "fasta_code", "") or "").strip().upper()
+        if len(code) == 1 and code in ONE_TO_THREE_AMINO_ACID:
+            return ONE_TO_THREE_AMINO_ACID[code]
+        return None
+    return None
+
+
+def _sanitize_template_chain_residues(chain: gemmi.Chain) -> Tuple[int, int]:
+    removed = 0
+    renamed = 0
+    for idx in range(len(chain) - 1, -1, -1):
+        residue = chain[idx]
+        normalized_name = _canonicalize_template_residue_name(residue.name)
+        if normalized_name is None:
+            del chain[idx]
+            removed += 1
+            continue
+        if residue.name != normalized_name:
+            chain[idx].name = normalized_name
+            renamed += 1
+    return removed, renamed
+
+
 class _ChainSelect(Select):
     def __init__(self, chain_id: str):
         self.chain_id = chain_id
@@ -505,6 +539,16 @@ def _build_single_chain_structure(
     structure.setup_entities()
 
     chain = model[selected_chain]
+    removed_count, renamed_count = _sanitize_template_chain_residues(chain)
+    if removed_count or renamed_count:
+        print(
+            f"⚠️ 模板链 {selected_chain} 已清理残基：移除 {removed_count} 个，标准化 {renamed_count} 个。",
+            file=sys.stderr,
+        )
+    if len(chain) == 0:
+        raise ValueError(
+            f"Template chain '{selected_chain}' has no supported amino-acid residues after cleanup."
+        )
     residue_names = [gemmi.Entity.first_mon(res.name) for res in chain]
     subchains = {res.subchain for res in chain}
     for entity in structure.entities:
@@ -796,9 +840,13 @@ def prepare_template_payloads(
 
         cif_stem = Path(file_name).stem or f"template_{idx}"
         cif_path = templates_dir / f"{cif_stem}.cif"
-        cif_path, cif_text, resolved_chain_id, cif_template_seq = convert_structure_to_single_chain_mmcif(
-            raw_path, str(template_chain_id or ""), cif_path
-        )
+        try:
+            cif_path, cif_text, resolved_chain_id, cif_template_seq = convert_structure_to_single_chain_mmcif(
+                raw_path, str(template_chain_id or ""), cif_path
+            )
+        except Exception as exc:
+            print(f"⚠️ 模板转换失败，已跳过 {file_name}: {exc}", file=sys.stderr)
+            continue
         if cif_template_seq:
             template_seq = cif_template_seq
             template_chain_id = resolved_chain_id
@@ -2162,6 +2210,38 @@ def find_results_dir(base_dir: str) -> str:
         f"Could not find any directory containing result files within the base directory {base_dir}"
     )
 
+
+def assert_boltz_preprocessing_succeeded(base_dir: str, yaml_content: str) -> None:
+    manifest_path = Path(base_dir) / "processed" / "manifest.json"
+    if not manifest_path.exists():
+        return
+
+    try:
+        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    records = manifest_data.get("records") if isinstance(manifest_data, dict) else None
+    if isinstance(records, list) and records:
+        return
+
+    template_hint = ""
+    try:
+        yaml_data = yaml.safe_load(yaml_content) or {}
+        if yaml_data.get("templates"):
+            template_hint = (
+                " 检测到 templates 输入，模板可能包含不受支持的 CCD 组分。"
+                "请移除该模板，或替换为标准氨基酸残基模板后重试。"
+            )
+    except Exception:
+        pass
+
+    raise RuntimeError(
+        "Boltz 输入预处理失败：没有生成任何有效记录，任务无法继续。"
+        + template_hint
+    )
+
+
 def get_cached_a3m_files(yaml_content: str) -> list:
     """
     获取与当前预测任务相关的a3m缓存文件
@@ -2395,6 +2475,7 @@ def run_boltz_backend(
     predict.main(args=cmd_args, standalone_mode=False)
 
     cache_msa_files_from_temp_dir(temp_dir, yaml_content)
+    assert_boltz_preprocessing_succeeded(temp_dir, yaml_content)
 
     output_directory_path = find_results_dir(temp_dir)
     if not os.listdir(output_directory_path):

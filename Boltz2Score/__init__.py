@@ -1,1 +1,0 @@
-"""Boltz2Score utilities."""
