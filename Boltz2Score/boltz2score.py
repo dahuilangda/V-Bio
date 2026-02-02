@@ -416,6 +416,16 @@ def main() -> None:
         help="Run diffusion refinement before affinity (higher quality, slower).",
     )
     parser.add_argument(
+        "--enable_affinity",
+        action="store_true",
+        help="Force affinity prediction (requires both --target_chain and --ligand_chain).",
+    )
+    parser.add_argument(
+        "--auto_enable_affinity",
+        action="store_true",
+        help="Compatibility flag for API clients; affinity runs only when both chains are provided.",
+    )
+    parser.add_argument(
         "--protein_file",
         type=str,
         default=None,
@@ -604,11 +614,26 @@ def main() -> None:
     # Optional affinity prediction (requires target + ligand chains)
     target_chains = _parse_chain_list(args.target_chain)
     ligand_chains = _parse_chain_list(args.ligand_chain)
-    if target_chains or ligand_chains:
-        if not target_chains or not ligand_chains:
-            raise ValueError(
-                "Affinity requires both --target_chain and --ligand_chain."
-            )
+    run_affinity = bool(target_chains) and bool(ligand_chains)
+
+    if (target_chains or ligand_chains) and not run_affinity:
+        msg = (
+            "Affinity needs both --target_chain and --ligand_chain. "
+            "Skipping affinity and keeping scoring results only."
+        )
+        if args.enable_affinity:
+            raise ValueError(msg)
+        print(
+            "[Warning] "
+            f"{msg} Got target={target_chains or 'none'}, ligand={ligand_chains or 'none'}."
+        )
+    elif args.enable_affinity and not run_affinity:
+        raise ValueError(
+            "Affinity needs both --target_chain and --ligand_chain. "
+            "Use both flags or omit --enable_affinity."
+        )
+
+    if run_affinity:
         if set(target_chains) & set(ligand_chains):
             raise ValueError("Target and ligand chains must be different.")
 
