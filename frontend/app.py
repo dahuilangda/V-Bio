@@ -197,118 +197,79 @@ st.title("🧬 Boltz-WebUI")
 st.markdown("蛋白质-分子复合物结构预测与设计平台")
 
 query_params = st.query_params
-task_type = query_params.get('task_type', 'prediction')
-task_id = query_params.get('task_id')
+task_type_param = query_params.get("task_type", "prediction")
+if isinstance(task_type_param, list):
+    task_type_param = task_type_param[0] if task_type_param else "prediction"
+task_type = str(task_type_param)
 
-# 根据任务类型确定目标选项卡索引
-if task_type == 'designer':
-    target_tab_index = 1
-elif task_type == 'bicyclic_designer':
-    target_tab_index = 2
-elif task_type == 'lead_optimization':
-    target_tab_index = 3
-elif task_type == 'affinity':
-    target_tab_index = 4
-else:
-    target_tab_index = 0
+task_type_to_tab_index = {
+    "prediction": 0,
+    "designer": 1,
+    "bicyclic_designer": 2,
+    "lead_optimization": 3,
+    "affinity": 4,
+}
+target_tab_index = task_type_to_tab_index.get(task_type, 0)
 
-# 只有当有有效的task_id且不是默认选项卡时才切换
-should_switch = task_id is not None and target_tab_index > 0
-
-# 创建选项卡
+# 创建选项卡（保持原有样式）
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["结构预测", "分子设计", "双环肽设计", "先导优化", "亲和力预测"])
 
-# 自动切换选项卡逻辑
-if should_switch:
-    current_url_key = f"{task_type}_{task_id}"
-    
-    # 防止重复切换同一URL
-    if st.session_state.get('last_switched_url', '') != current_url_key:
-        st.session_state.last_switched_url = current_url_key
+# URL 驱动选项卡：根据 task_type 自动切换；点击时同步更新 task_type 到地址栏
+st.components.v1.html(f"""
+<script>
+(() => {{
+    const parentWin = window.parent || window;
+    const root = parentWin.document;
+    const targetIndex = {target_tab_index};
+    const indexToTaskType = {{
+        0: "prediction",
+        1: "designer",
+        2: "bicyclic_designer",
+        3: "lead_optimization",
+        4: "affinity",
+    }};
 
-        st.components.v1.html(f"""
-        <div id="tab-switcher"></div>
-        <script>
-        console.log("=== 开始选项卡切换 ===");
-        console.log("URL indicates task_type: {task_type}, task_id: {task_id}, switching to tab {target_tab_index}");
-        
-        function findAndClickTab() {{
-            console.log("尝试查找选项卡...");
-            
-            // 多种选择器策略
-            let tabs = document.querySelectorAll('[data-baseweb="tab"]');
-            console.log("策略1 - [data-baseweb='tab']:", tabs.length);
-            
-            if (tabs.length === 0) {{
-                tabs = document.querySelectorAll('button[role="tab"]');
-                console.log("策略2 - button[role='tab']:", tabs.length);
-            }}
-            
-            if (tabs.length === 0) {{
-                tabs = document.querySelectorAll('.stTabs button');
-                console.log("策略3 - .stTabs button:", tabs.length);
-            }}
-            
-            if (tabs.length === 0) {{
-                tabs = document.querySelectorAll('div[data-testid="stTabs"] button');
-                console.log("策略4 - div[data-testid='stTabs'] button:", tabs.length);
-            }}
-            
-            console.log("最终找到选项卡数量:", tabs.length);
-            console.log("目标索引:", {target_tab_index});
-            
-            if (tabs.length > {target_tab_index}) {{
-                const targetTab = tabs[{target_tab_index}];
-                console.log("找到目标选项卡:", targetTab);
-                console.log("选项卡文本:", targetTab.textContent);
-                
-                // 检查是否已经是活动选项卡
-                if (targetTab.getAttribute('aria-selected') === 'true') {{
-                    console.log("选项卡已经是活动状态，跳过切换");
-                    return true;
-                }}
-                
-                // 点击选项卡
+    const getTabs = () => {{
+        let tabs = root.querySelectorAll('[data-baseweb="tab"]');
+        if (!tabs.length) tabs = root.querySelectorAll('button[role="tab"]');
+        if (!tabs.length) tabs = root.querySelectorAll('.stTabs button');
+        return tabs;
+    }};
+
+    const bindAndSwitch = () => {{
+        const tabs = getTabs();
+        if (!tabs.length) return false;
+
+        tabs.forEach((tab, idx) => {{
+            if (tab.dataset.boltzTaskTypeBound === "1") return;
+            tab.dataset.boltzTaskTypeBound = "1";
+            tab.addEventListener("click", () => {{
+                const url = new URL(parentWin.location.href);
+                url.searchParams.set("task_type", indexToTaskType[idx] || "prediction");
+                parentWin.history.replaceState({{}}, "", url.toString());
+            }});
+        }});
+
+        if (tabs.length > targetIndex) {{
+            const targetTab = tabs[targetIndex];
+            if (targetTab && targetTab.getAttribute("aria-selected") !== "true") {{
                 targetTab.click();
-                console.log("已点击选项卡");
-                
-                // 添加明显的视觉反馈
-                targetTab.style.backgroundColor = '#4CAF50';
-                targetTab.style.color = 'white';
-                setTimeout(() => {{
-                    targetTab.style.backgroundColor = '';
-                    targetTab.style.color = '';
-                }}, 2000);
-                
-                return true;
-            }} else {{
-                console.log("ERROR: 未找到目标选项卡，索引超出范围");
-                return false;
             }}
         }}
-        
-        // 多次尝试，增加延迟时间
-        let attempts = 0;
-        const maxAttempts = 15;
-        
-        function attemptSwitch() {{
-            attempts++;
-            console.log(`尝试 ${{attempts}}/${{maxAttempts}}`);
-            
-            if (findAndClickTab()) {{
-                console.log("选项卡切换成功！");
-            }} else if (attempts < maxAttempts) {{
-                console.log("切换失败，将重试...");
-                setTimeout(attemptSwitch, 200);
-            }} else {{
-                console.log("达到最大重试次数，切换失败");
-            }}
+        return true;
+    }};
+
+    let attempts = 0;
+    const maxAttempts = 20;
+    const timer = parentWin.setInterval(() => {{
+        attempts += 1;
+        if (bindAndSwitch() || attempts >= maxAttempts) {{
+            parentWin.clearInterval(timer);
         }}
-        
-        // 开始尝试
-        setTimeout(attemptSwitch, 100);
-        </script>
-        """, height=50)
+    }}, 120);
+}})();
+</script>
+""", height=0)
 
 with tab1:
     render_prediction_page()
