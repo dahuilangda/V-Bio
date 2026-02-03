@@ -287,6 +287,46 @@ def _normalize_pdb_duplicate_atom_ids_for_writer(pdb_path: Path) -> int:
     return renamed
 
 
+def _normalize_cif_duplicate_atom_ids_for_writer(cif_path: Path) -> int:
+    """Canonicalize duplicate CIF atom IDs within a residue for writer compatibility."""
+    structure = gemmi.read_structure(str(cif_path))
+    renamed = 0
+
+    for model in structure:
+        for chain in model:
+            for residue in chain:
+                used: set[tuple[str, str | None]] = set()
+                serial_counters: dict[str | None, int] = {}
+                for atom in residue:
+                    atom_name = atom.name.strip() or atom.element.name.strip() or "X"
+                    raw_alt = str(getattr(atom, "altloc", "") or "").strip()
+                    alt_id = None if raw_alt in {"", "\x00", ".", "?"} else raw_alt
+                    key = (atom_name, alt_id)
+                    if key not in used:
+                        used.add(key)
+                        continue
+
+                    prefix = "".join(ch for ch in atom_name.upper() if ch.isalnum())[:1]
+                    if not prefix:
+                        prefix = "".join(ch for ch in atom.element.name.upper() if ch.isalnum())[:1] or "X"
+                    idx = serial_counters.get(alt_id, 1)
+                    while True:
+                        candidate = f"{prefix}{idx:03d}"[-4:]
+                        idx += 1
+                        if (candidate, alt_id) not in used:
+                            break
+                    serial_counters[alt_id] = idx
+                    atom.name = candidate
+                    used.add((candidate, alt_id))
+                    renamed += 1
+
+    if renamed:
+        doc = structure.make_mmcif_document()
+        doc.write_file(str(cif_path))
+        _fix_cif_entity_ids(cif_path)
+    return renamed
+
+
 def _filter_structure_by_chains(
     input_path: Path,
     target_chains: Sequence[str],
@@ -863,13 +903,16 @@ def main() -> None:
     if staged_input.exists():
         staged_input.unlink()
     shutil.copy2(input_path, staged_input)
+    renamed = 0
     if staged_input.suffix.lower() in {".pdb", ".ent"}:
         renamed = _normalize_pdb_duplicate_atom_ids_for_writer(staged_input)
-        if renamed:
-            print(
-                f"[Info] Normalized {renamed} duplicate atom IDs in "
-                f"{staged_input.name} for mmCIF writer compatibility."
-            )
+    elif staged_input.suffix.lower() in {".cif", ".mmcif"}:
+        renamed = _normalize_cif_duplicate_atom_ids_for_writer(staged_input)
+    if renamed:
+        print(
+            f"[Info] Normalized {renamed} duplicate atom IDs in "
+            f"{staged_input.name} for mmCIF writer compatibility."
+        )
     _validate_unique_atom_ids_for_writer(staged_input)
 
     # Prepare processed inputs (structure scoring)
