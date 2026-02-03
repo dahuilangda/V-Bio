@@ -72,6 +72,8 @@ def render_affinity_page():
         st.session_state.affinity_error = None
     if 'affinity_cif' not in st.session_state:
         st.session_state.affinity_cif = None
+    if 'affinity_raw_zip' not in st.session_state:
+        st.session_state.affinity_raw_zip = None
 
     is_running = (
         st.session_state.affinity_task_id is not None
@@ -197,6 +199,7 @@ def render_affinity_page():
             st.session_state.affinity_results = None
             st.session_state.affinity_error = None
             st.session_state.affinity_cif = None
+            st.session_state.affinity_raw_zip = None
 
             with st.spinner("⏳ 正在提交任务..."):
                 try:
@@ -247,11 +250,12 @@ def render_affinity_page():
                         if current_state == 'SUCCESS':
                             st.success("🎉 预测完成，正在加载结果...")
                             try:
-                                processed_results, _ = download_and_process_results(
+                                processed_results, raw_zip_bytes = download_and_process_results(
                                     st.session_state.affinity_task_id
                                 )
                                 st.session_state.affinity_results = processed_results
                                 st.session_state.affinity_cif = processed_results.get("cif")
+                                st.session_state.affinity_raw_zip = raw_zip_bytes
                                 st.toast("结果已成功加载！", icon="🎊")
                                 st.rerun()
                                 break
@@ -298,6 +302,7 @@ def render_affinity_page():
             st.session_state.affinity_results = None
             st.session_state.affinity_error = None
             st.session_state.affinity_cif = None
+            st.session_state.affinity_raw_zip = None
             st.rerun()
 
     if st.session_state.affinity_results is not None:
@@ -306,6 +311,8 @@ def render_affinity_page():
 
         results = st.session_state.affinity_results or {}
         cif_content = results.get("cif") or ""
+        structure_filename = results.get("structure_filename") or "predicted_structure.cif"
+        structure_format = (results.get("structure_format") or "").lower()
         confidence_data = results.get("confidence") or {}
         affinity_data = results.get("affinity") or {}
         chain_map = results.get("chain_map") or {}
@@ -406,6 +413,19 @@ def render_affinity_page():
                     st.metric("结合概率", f"{np.mean(binding_probs) * 100:.1f}%")
 
             if confidence_data or affinity_data:
+                if cif_content:
+                    if structure_format == "pdb":
+                        structure_mime = "chemical/x-pdb"
+                    else:
+                        structure_mime = "chemical/x-cif"
+                    st.download_button(
+                        label="📄 下载结构文件（B-factor 含置信度）",
+                        data=cif_content,
+                        file_name=structure_filename,
+                        mime=structure_mime,
+                        use_container_width=True,
+                    )
+
                 all_json_data = {"confidence": confidence_data, "affinity": affinity_data}
                 st.download_button(
                     label="📥 下载预测指标 JSON",
@@ -414,3 +434,12 @@ def render_affinity_page():
                     mime="application/json",
                     use_container_width=True,
                 )
+
+                if st.session_state.get("affinity_raw_zip"):
+                    st.download_button(
+                        label="📦 下载全部结果 ZIP",
+                        data=st.session_state.affinity_raw_zip,
+                        file_name=f"boltz2score_affinity_{st.session_state.affinity_task_id}.zip",
+                        mime="application/zip",
+                        use_container_width=True,
+                    )

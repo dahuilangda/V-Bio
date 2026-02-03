@@ -18,6 +18,7 @@ from rdkit import Chem
 Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
 
 from boltz.main import get_cache_path
+from boltz.data import const
 from boltz.data.types import StructureV2
 from prepare_boltz2score_inputs import prepare_inputs
 from run_boltz2score import run_scoring
@@ -27,6 +28,68 @@ def _parse_chain_list(value: Optional[str]) -> list[str]:
     if not value:
         return []
     return [v.strip() for v in value.split(",") if v.strip()]
+
+
+def _to_base36(value: int) -> str:
+    digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if value <= 0:
+        return "0"
+    out = []
+    num = value
+    while num:
+        num, rem = divmod(num, 36)
+        out.append(digits[rem])
+    return "".join(reversed(out))
+
+
+def _normalize_atom_name(name: str) -> str:
+    return "".join(ch for ch in name.strip().upper() if ch.isalnum())
+
+
+def _extract_atom_preferred_name(atom: Chem.Atom) -> str:
+    if atom.HasProp("_original_atom_name"):
+        return atom.GetProp("_original_atom_name")
+    if atom.HasProp("name"):
+        return atom.GetProp("name")
+    monomer_info = atom.GetMonomerInfo()
+    if monomer_info is not None and hasattr(monomer_info, "GetName"):
+        try:
+            name = monomer_info.GetName()
+            if name:
+                return str(name)
+        except Exception:
+            pass
+    return ""
+
+
+def _ensure_unique_ligand_atom_names(mol: Chem.Mol) -> tuple[Chem.Mol, int]:
+    """Normalize ligand atom names and enforce uniqueness within 4 characters."""
+    used: set[str] = set()
+    fallback_serial = 1
+    renamed = 0
+
+    for atom in mol.GetAtoms():
+        preferred_raw = _extract_atom_preferred_name(atom)
+        preferred = _normalize_atom_name(preferred_raw)
+        candidate = preferred[:4] if preferred else ""
+
+        if not candidate or candidate in used:
+            prefix = _normalize_atom_name(atom.GetSymbol())[:1] or "X"
+            while True:
+                suffix = _to_base36(fallback_serial).rjust(3, "0")[-3:]
+                fallback_serial += 1
+                candidate = f"{prefix}{suffix}"
+                if candidate not in used:
+                    break
+            renamed += 1
+
+        used.add(candidate)
+        if preferred_raw:
+            atom.SetProp("_source_atom_name", preferred_raw)
+        atom.SetProp("_original_atom_name", candidate)
+        atom.SetProp("name", candidate)
+
+    return mol, renamed
 
 
 def _load_ligand_from_file(ligand_path: Path):
@@ -66,7 +129,8 @@ def _load_ligand_from_file(ligand_path: Path):
                 atom.SetProp("_original_atom_name", atom_name)
                 atom.SetProp("name", atom_name)
 
-        print(f"Loaded ligand from MOL2: {mol.GetNumAtoms()} atoms")
+        mol, renamed = _ensure_unique_ligand_atom_names(mol)
+        print(f"Loaded ligand from MOL2: {mol.GetNumAtoms()} atoms (renamed: {renamed})")
         return mol
 
     elif ligand_path.suffix.lower() in {'.sdf', '.sd'}:
@@ -74,7 +138,8 @@ def _load_ligand_from_file(ligand_path: Path):
         mol = Chem.MolFromMolFile(str(ligand_path), sanitize=False, removeHs=False)
         if mol is None:
             raise ValueError(f"Failed to read SDF file: {ligand_path}")
-        print(f"Loaded ligand from SDF: {mol.GetNumAtoms()} atoms")
+        mol, renamed = _ensure_unique_ligand_atom_names(mol)
+        print(f"Loaded ligand from SDF: {mol.GetNumAtoms()} atoms (renamed: {renamed})")
         return mol
 
     elif ligand_path.suffix.lower() in {'.pdb', '.ent'}:
@@ -82,7 +147,8 @@ def _load_ligand_from_file(ligand_path: Path):
         mol = Chem.MolFromPDBFile(str(ligand_path), removeHs=False)
         if mol is None:
             raise ValueError(f"Failed to read PDB file: {ligand_path}")
-        print(f"Loaded ligand from PDB: {mol.GetNumAtoms()} atoms")
+        mol, renamed = _ensure_unique_ligand_atom_names(mol)
+        print(f"Loaded ligand from PDB: {mol.GetNumAtoms()} atoms (renamed: {renamed})")
         return mol
 
     else:
@@ -332,6 +398,73 @@ def _write_chain_map(processed_dir: Path, output_dir: Path, record_id: str) -> N
         chain_map_path.write_text(json.dumps(chain_map, indent=2))
     except Exception as exc:  # noqa: BLE001
         print(f"[Warning] Failed to write chain map: {exc}")
+
+
+def _collect_atom_coverage(processed_dir: Path, record_id: str) -> dict:
+    """Collect per-chain atom presence diagnostics from processed inputs."""
+    structure = StructureV2.load(processed_dir / "structures" / f"{record_id}.npz")
+    structure = structure.remove_invalid_chains()
+
+    chain_type_labels = {value: key.lower() for key, value in const.chain_type_ids.items()}
+    ligand_type = const.chain_type_ids["NONPOLYMER"]
+
+    chain_stats = []
+    ligand_stats = []
+    for chain in structure.chains:
+        chain_name = str(chain["name"])
+        mol_type = int(chain["mol_type"])
+        atom_start = int(chain["atom_idx"])
+        atom_end = atom_start + int(chain["atom_num"])
+        atoms = structure.atoms[atom_start:atom_end]
+
+        total_atoms = int(len(atoms))
+        present_atoms = int(atoms["is_present"].sum()) if total_atoms else 0
+        present_fraction = (present_atoms / total_atoms) if total_atoms else 0.0
+
+        res_start = int(chain["res_idx"])
+        res_end = res_start + int(chain["res_num"])
+        residues = structure.residues[res_start:res_end]
+        residue_names = sorted({str(res["name"]) for res in residues})
+
+        item = {
+            "chain": chain_name,
+            "mol_type": chain_type_labels.get(mol_type, str(mol_type)),
+            "total_atoms": total_atoms,
+            "present_atoms": present_atoms,
+            "present_fraction": present_fraction,
+            "residue_names": residue_names,
+        }
+        chain_stats.append(item)
+        if mol_type == ligand_type:
+            ligand_stats.append(item)
+
+    return {
+        "record_id": record_id,
+        "chain_atom_coverage": chain_stats,
+        "ligand_atom_coverage": ligand_stats,
+    }
+
+
+def _write_atom_coverage(processed_dir: Path, output_dir: Path, record_id: str) -> None:
+    """Write atom coverage diagnostics and attach summary to confidence JSON."""
+    try:
+        coverage = _collect_atom_coverage(processed_dir, record_id)
+        struct_dir = output_dir / record_id
+        struct_dir.mkdir(parents=True, exist_ok=True)
+
+        diag_path = struct_dir / f"ligand_atom_coverage_{record_id}.json"
+        diag_path.write_text(json.dumps(coverage, indent=2))
+
+        for conf_path in sorted(struct_dir.glob(f"confidence_{record_id}_model_*.json")):
+            try:
+                data = json.loads(conf_path.read_text())
+            except Exception:
+                continue
+            data["ligand_atom_coverage"] = coverage["ligand_atom_coverage"]
+            data["chain_atom_coverage"] = coverage["chain_atom_coverage"]
+            conf_path.write_text(json.dumps(data, indent=2))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Warning] Failed to write atom coverage diagnostics: {exc}")
 
 
 def main() -> None:
@@ -606,6 +739,11 @@ def main() -> None:
     )
 
     _write_chain_map(
+        processed_dir=work_dir / "processed",
+        output_dir=output_dir,
+        record_id=input_path.stem,
+    )
+    _write_atom_coverage(
         processed_dir=work_dir / "processed",
         output_dir=output_dir,
         record_id=input_path.stem,

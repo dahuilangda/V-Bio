@@ -162,6 +162,8 @@ def download_and_process_results(task_id: str):
     raw_zip_bytes = response.content
     
     cif_content = ""
+    structure_filename = ""
+    structure_format = ""
     confidence_data = {}
     affinity_data = {}
     chain_map = {}
@@ -169,6 +171,7 @@ def download_and_process_results(task_id: str):
     af3_summary_conf = None
     af3_confidences = None
     af3_primary_cif = None
+    af3_primary_name = None
 
     with zipfile.ZipFile(io.BytesIO(raw_zip_bytes), 'r') as zip_ref:
         names = zip_ref.namelist()
@@ -182,6 +185,7 @@ def download_and_process_results(task_id: str):
                     # Prefer aggregated model (without seed-specific directories)
                     if af3_primary_cif is None or ("seed-" not in filename and "model.cif" in filename):
                         af3_primary_cif = file_bytes
+                        af3_primary_name = os.path.basename(filename)
                 elif 'confidence' in filename and filename.endswith('.json') and "af3/output/" in filename:
                     data = json.loads(zip_ref.read(filename))
                     if "summary_confidences" in filename:
@@ -255,6 +259,7 @@ def download_and_process_results(task_id: str):
             selected_record_id = _extract_record_id(best_cif_name) if best_cif_name else None
             if best_cif_name:
                 cif_content = zip_ref.read(best_cif_name).decode('utf-8')
+                structure_filename = os.path.basename(best_cif_name)
 
             confidence_candidates = [
                 name for name in names
@@ -296,6 +301,17 @@ def download_and_process_results(task_id: str):
     # Finalize CIF content for AF3 runs if present
     if backend == "alphafold3" and af3_primary_cif:
         cif_content = af3_primary_cif
+        if af3_primary_name:
+            structure_filename = af3_primary_name
+
+    if structure_filename:
+        lower_name = structure_filename.lower()
+        if lower_name.endswith(".pdb"):
+            structure_format = "pdb"
+        elif lower_name.endswith(".cif") or lower_name.endswith(".mmcif"):
+            structure_format = "cif"
+        else:
+            structure_format = ""
 
     # Construct AF3 confidence metrics if available
     if backend == "alphafold3":
@@ -358,6 +374,8 @@ def download_and_process_results(task_id: str):
 
     processed_results = {
         "cif": cif_content,
+        "structure_filename": structure_filename,
+        "structure_format": structure_format,
         "confidence": confidence_data,
         "affinity": affinity_data,
         "backend": backend,
