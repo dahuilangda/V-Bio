@@ -169,10 +169,21 @@ class URLStateManager:
         URLStateManager.set_query_params(**params)
     
     @staticmethod
-    def clear_url_params():
-        """清除所有URL参数"""
+    def clear_url_params(keep_task_type: bool = True):
+        """清除URL参数；默认保留当前 task_type 以避免页面跳到其它选项卡。"""
+        preserved_task_type = None
+        if keep_task_type:
+            current_task_type = st.query_params.get("task_type")
+            if isinstance(current_task_type, list):
+                preserved_task_type = current_task_type[0] if current_task_type else None
+            else:
+                preserved_task_type = current_task_type
+
         for key in list(st.query_params.keys()):
             del st.query_params[key]
+
+        if keep_task_type and preserved_task_type:
+            st.query_params["task_type"] = str(preserved_task_type)
         # 重置自动切换标志，允许下次URL状态恢复时重新切换
         if 'last_switched_url' in st.session_state:
             st.session_state.last_switched_url = ''

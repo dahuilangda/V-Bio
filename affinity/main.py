@@ -46,7 +46,7 @@ class CCDNameManager:
         candidate_name = f"{base_name}_{task_id[:8]}"
 
         if not self.redis_client:
-            # Deterministic local mode: no random fallback.
+            # Deterministic local mode: no random suffixing.
             print(f"Task {task_id}: Redis unavailable, using deterministic CCD name '{candidate_name}'")
             return candidate_name
 
@@ -105,6 +105,7 @@ class Boltzina:
         diffusion_process_args: Optional[dict] = None,
         run_trunk_and_structure: bool = True,
         ligand_resname: str = "LIG",
+        seed: Optional[int] = None,
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -137,6 +138,7 @@ class Boltzina:
         self.steering_args = steering_args
         self.diffusion_process_args = diffusion_process_args
         self.run_trunk_and_structure = run_trunk_and_structure
+        self.seed = seed
         
         self.results = []
         self.base_ligand_name = "MOL"
@@ -1126,16 +1128,10 @@ class Boltzina:
             ligand_plddt.append(plddt_val)
 
         if missing_plddt_atoms:
-            source_ext = ligand_mol.GetProp("_source_ext") if ligand_mol.HasProp("_source_ext") else ""
-            hint = ""
-            if source_ext == ".mol2":
-                hint = (
-                    " MOL2 standard does not include pLDDT/B-factor; "
-                    "please provide pLDDT explicitly (e.g. atom extra field plddt=xx or ligand PDB with B-factor)."
-                )
-            raise ValueError(
-                "Ligand is missing per-atom pLDDT/B-factor; strict mode disallows fallback values. "
-                f"Missing atoms: {missing_plddt_atoms[:20]}{'...' if len(missing_plddt_atoms) > 20 else ''}.{hint}"
+            print(
+                "Input ligand has no per-atom pLDDT/B-factor on "
+                f"{len(missing_plddt_atoms)} atom(s). "
+                "Will use confidence from the scored complex in downstream steps."
             )
 
         # Generate PDB lines using original coordinates (no translation)
@@ -1145,7 +1141,7 @@ class Boltzina:
             pos = conf.GetAtomPosition(i)
             # Use original coordinates directly - NO TRANSLATION
             x, y, z = pos.x, pos.y, pos.z
-            plddt = ligand_plddt[i]
+            plddt = ligand_plddt[i] if ligand_plddt[i] is not None else 0.0
 
             # Get element and create meaningful atom name
             element = atom.GetSymbol()
@@ -1198,7 +1194,8 @@ class Boltzina:
 
         if ligand_mol.GetNumAtoms() > 1 and not bond_pairs:
             raise ValueError(
-                "No ligand bonds detected for a multi-atom ligand; strict mode disallows topology fallback."
+                "No ligand bonds detected for a multi-atom ligand. "
+                "Please provide explicit bond topology in the ligand file."
             )
         print(f"Generated {len(bond_pairs)} ligand bonds for CONECT records")
 
@@ -2504,6 +2501,7 @@ class Boltzina:
                 accelerator=self.accelerator,
                 devices=self.devices,
                 strategy=self.strategy,
+                seed=self.seed,
             )
         except RuntimeError as e:
             error_str = str(e)

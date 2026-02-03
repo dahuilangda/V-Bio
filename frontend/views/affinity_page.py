@@ -180,9 +180,10 @@ def render_affinity_page():
 
         affinity_refine = st.checkbox(
             "高质量亲和力（运行扩散精修，较慢）",
-            value=True,
+            value=False,
             disabled=is_running,
             key="affinity_refine",
+            help="默认关闭以保持与 Boltzina 常规亲和力路径一致；开启后会先做扩散精修，分数可能显著变化。",
         )
 
         files_ready = False

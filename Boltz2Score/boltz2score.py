@@ -437,6 +437,7 @@ def _run_affinity(
     accelerator: str,
     devices: int,
     affinity_refine: bool = False,
+    seed: int | None = None,
 ) -> Optional[dict]:
     try:
         import sys
@@ -474,6 +475,12 @@ def _run_affinity(
         accelerator=accelerator,
         devices=devices,
         num_workers=0,
+        seed=seed,
+    )
+    print(
+        f"[Info] Running affinity with "
+        f"{'diffusion refinement' if affinity_refine else 'input-structure scoring'} "
+        f"(seed={seed if seed is not None else 'none'})."
     )
 
     boltzina.predict([str(complex_file)])
@@ -808,10 +815,51 @@ def main() -> None:
         if not input_path.exists():
             raise FileNotFoundError(f"Input not found: {input_path}")
 
+    record_id = input_path.stem
+
+    # Optional affinity prediction (requires target + ligand chains)
+    target_chains = _parse_chain_list(args.target_chain)
+    ligand_chains = _parse_chain_list(args.ligand_chain)
+    run_affinity = bool(target_chains) and bool(ligand_chains)
+
+    if (target_chains or ligand_chains) and not run_affinity:
+        msg = (
+            "Affinity needs both --target_chain and --ligand_chain. "
+            "Skipping affinity and keeping scoring results only."
+        )
+        if args.enable_affinity:
+            raise ValueError(msg)
+        print(
+            "[Warning] "
+            f"{msg} Got target={target_chains or 'none'}, ligand={ligand_chains or 'none'}."
+        )
+    elif args.enable_affinity and not run_affinity:
+        raise ValueError(
+            "Affinity needs both --target_chain and --ligand_chain. "
+            "Use both flags or omit --enable_affinity."
+        )
+
+    if run_affinity:
+        if set(target_chains) & set(ligand_chains):
+            raise ValueError("Target and ligand chains must be different.")
+        shared_subset_input = work_dir / f"{record_id}_shared_subset.cif"
+        _filter_structure_by_chains(
+            input_path=input_path,
+            target_chains=target_chains,
+            ligand_chains=ligand_chains,
+            output_path=shared_subset_input,
+        )
+        input_path = shared_subset_input
+        print(
+            f"[Info] Locked shared chain subset for Boltz2Score + Boltzina: "
+            f"target={target_chains}, ligand={ligand_chains}, file={input_path}"
+        )
+
     # Create isolated input dir with the single structure
     input_dir = work_dir / "input"
     input_dir.mkdir(parents=True, exist_ok=True)
-    staged_input = input_dir / input_path.name
+    staged_suffix = input_path.suffix if input_path.suffix else ".cif"
+    staged_input = input_dir / f"{record_id}{staged_suffix.lower()}"
     if staged_input.exists():
         staged_input.unlink()
     shutil.copy2(input_path, staged_input)
@@ -854,55 +902,25 @@ def main() -> None:
     _write_chain_map(
         processed_dir=work_dir / "processed",
         output_dir=output_dir,
-        record_id=input_path.stem,
+        record_id=record_id,
     )
     _write_atom_coverage(
         processed_dir=work_dir / "processed",
         output_dir=output_dir,
-        record_id=input_path.stem,
+        record_id=record_id,
     )
 
-    # Optional affinity prediction (requires target + ligand chains)
-    target_chains = _parse_chain_list(args.target_chain)
-    ligand_chains = _parse_chain_list(args.ligand_chain)
-    run_affinity = bool(target_chains) and bool(ligand_chains)
-
-    if (target_chains or ligand_chains) and not run_affinity:
-        msg = (
-            "Affinity needs both --target_chain and --ligand_chain. "
-            "Skipping affinity and keeping scoring results only."
-        )
-        if args.enable_affinity:
-            raise ValueError(msg)
-        print(
-            "[Warning] "
-            f"{msg} Got target={target_chains or 'none'}, ligand={ligand_chains or 'none'}."
-        )
-    elif args.enable_affinity and not run_affinity:
-        raise ValueError(
-            "Affinity needs both --target_chain and --ligand_chain. "
-            "Use both flags or omit --enable_affinity."
-        )
-
     if run_affinity:
-        if set(target_chains) & set(ligand_chains):
-            raise ValueError("Target and ligand chains must be different.")
-
-        affinity_input = work_dir / f"{input_path.stem}_affinity.cif"
-        _filter_structure_by_chains(
-            input_path=input_path,
-            target_chains=target_chains,
-            ligand_chains=ligand_chains,
-            output_path=affinity_input,
-        )
+        print(f"[Info] Affinity input source locked to scoring input path: {staged_input}")
         _run_affinity(
-            complex_file=affinity_input,
+            complex_file=staged_input,
             output_dir=output_dir,
             cache_dir=cache_dir,
-            result_id=input_path.stem,
+            result_id=record_id,
             accelerator=args.accelerator,
             devices=args.devices,
             affinity_refine=args.affinity_refine,
+            seed=args.seed,
         )
 
     if cleanup:
