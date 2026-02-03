@@ -977,6 +977,8 @@ class Boltzina:
         """
         lines = []
         
+        seen_atom_keys: set[tuple[str, str, str, str, str, str]] = set()
+
         for line in protein_content.split('\n'):
             # Preserve fixed-width columns; only trim trailing whitespace/newlines.
             line = line.rstrip()
@@ -1020,9 +1022,18 @@ class Boltzina:
                     # Ensure a chain ID exists for downstream parsing
                     if len(line) > 21 and line[21] == ' ':
                         line = f"{line[:21]}A{line[22:]}"
+                        chain_id = "A"
+                    else:
+                        chain_id = line[21:22].strip()
+
+                    # Deduplicate atom identity within residue (handles altloc A/blank duplicates).
+                    atom_key = (record_type, chain_id, res_seq, icode, res_name, atom_name)
+                    if atom_key in seen_atom_keys:
+                        continue
+                    seen_atom_keys.add(atom_key)
                     
                     # For HETATM, skip if it's water or common ions (we only want ligands)
-                    elif record_type == 'HETATM':
+                    if record_type == 'HETATM':
                         skip_hetatm = {'HOH', 'WAT', 'H2O', 'NA', 'CL', 'MG', 'CA', 'K', 'ZN', 'FE', 'SO4', 'PO4'}
                         if res_name in skip_hetatm:
                             continue
@@ -1118,12 +1129,45 @@ class Boltzina:
         if has_original_names:
             print("Using original atom names from MOL2 file for better compatibility")
 
+        ligand_plddt: list[float | None] = []
+        missing_plddt_atoms: list[int] = []
+        for idx, atom in enumerate(ligand_mol.GetAtoms()):
+            plddt_val = None
+            for prop in ("_plddt", "plddt", "bfactor", "temp_factor"):
+                if atom.HasProp(prop):
+                    try:
+                        plddt_val = float(atom.GetProp(prop))
+                        break
+                    except Exception:
+                        pass
+            if plddt_val is None:
+                missing_plddt_atoms.append(idx + 1)
+                ligand_plddt.append(None)
+                continue
+            ligand_plddt.append(plddt_val)
+
+        if missing_plddt_atoms:
+            source_ext = ligand_mol.GetProp("_source_ext") if ligand_mol.HasProp("_source_ext") else ""
+            hint = ""
+            if source_ext == ".mol2":
+                hint = (
+                    "（MOL2 标准通常不含 pLDDT/B-factor；建议后续以 Boltz2Score 输出复合物中的 pLDDT 为准）"
+                )
+            print(
+                f"Warning: ligand missing per-atom pLDDT for {len(missing_plddt_atoms)} atoms "
+                f"{missing_plddt_atoms[:8]}{'...' if len(missing_plddt_atoms) > 8 else ''}. "
+                f"Using 0.00 sentinel in intermediate PDB. {hint}"
+            )
+
         # Generate PDB lines using original coordinates (no translation)
         element_counts = {}
+        used_atom_names: set[str] = set()
+        auto_name_index = 1
         for i, atom in enumerate(ligand_mol.GetAtoms()):
             pos = conf.GetAtomPosition(i)
             # Use original coordinates directly - NO TRANSLATION
             x, y, z = pos.x, pos.y, pos.z
+            plddt = ligand_plddt[i]
 
             # Get element and create meaningful atom name
             element = atom.GetSymbol()
@@ -1171,11 +1215,23 @@ class Boltzina:
 
             # Sanitize atom name and ensure proper formatting
             atom_name = self._sanitize_atom_name(atom_name)
-            # Ensure atom name is properly formatted (left-aligned, max 4 chars)
-            atom_name = atom_name[:4].ljust(4)
+            atom_name = atom_name[:4].upper()
+
+            # Enforce per-residue atom name uniqueness (required by mmCIF writer).
+            if atom_name in used_atom_names or not atom_name:
+                prefix = (atom_name[:1] if atom_name else element[:1]).upper() or "X"
+                while True:
+                    candidate = f"{prefix}{auto_name_index:03d}"[-4:]
+                    auto_name_index += 1
+                    if candidate not in used_atom_names:
+                        atom_name = candidate
+                        break
+            used_atom_names.add(atom_name)
+            atom_name = atom_name.ljust(4)
 
             # Standard PDB HETATM format with proper spacing and fixed fields
-            line = f"HETATM{atom_serial:5d} {atom_name} {resname} L   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00 20.00          {element:>2s}"
+            bfactor_field = f"{plddt:6.2f}" if plddt is not None else "  0.00"
+            line = f"HETATM{atom_serial:5d} {atom_name} {resname} L   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00{bfactor_field}          {element:>2s}"
             ligand_lines += line + "\n"
             atom_serial += 1
 
@@ -1284,6 +1340,8 @@ class Boltzina:
             if ligand_line.strip():
                 ligand_atom_count += 1
                 # Re-number ligand atoms sequentially and set chain to L
+                if len(ligand_line) < 80:
+                    ligand_line = ligand_line.ljust(80)
                 parts = list(ligand_line)
                 # Set atom number
                 atom_num_str = f"{ligand_serial_offset + ligand_atom_count:5d}"
@@ -1438,6 +1496,190 @@ class Boltzina:
 
         return coords, names
 
+    def _parse_mol2_plddt(self, mol2_text: str, expected_atoms: int | None = None) -> list[float] | None:
+        """Parse per-atom pLDDT values from non-standard MOL2 encodings.
+
+        Supported sources:
+        1) ATOM extra columns:
+           - `plddt=87.5`, `plddt:87.5`, `bfactor=87.5`, ...
+           - one unambiguous numeric extra token in [0, 100]
+        2) `@<TRIPOS>UNITY_ATOM_ATTR` / `@<TRIPOS>ATOM_ATTR` blocks with atom-indexed key/value
+        3) ATOM charge column used as pLDDT when all values look like confidences:
+           all in [0, 100] and max > 15
+        """
+        key_names = {"plddt", "bfactor", "tempfactor", "temp_factor", "b"}
+        values: list[float | None] = []
+        charge_values: list[float | None] = []
+        in_atoms = False
+
+        def _parse_keyval_token(token: str) -> tuple[str, float] | None:
+            for sep in ("=", ":"):
+                if sep not in token:
+                    continue
+                k, v = token.split(sep, 1)
+                k = k.strip().lower()
+                if k not in key_names:
+                    continue
+                try:
+                    return k, float(v.strip())
+                except ValueError:
+                    return None
+            return None
+
+        for raw in mol2_text.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("@<TRIPOS>ATOM"):
+                in_atoms = True
+                continue
+            if line.startswith("@<TRIPOS>") and in_atoms:
+                in_atoms = False
+                break
+            if not in_atoms:
+                continue
+
+            parts = line.split()
+            if len(parts) < 9:
+                return None
+
+            # Standard MOL2 charge column
+            try:
+                charge_values.append(float(parts[8]))
+            except ValueError:
+                charge_values.append(None)
+
+            extras = parts[9:] if len(parts) > 9 else []
+            parsed_val = None
+
+            for token in extras:
+                kv = _parse_keyval_token(token)
+                if kv is not None:
+                    parsed_val = kv[1]
+                    break
+
+            if parsed_val is None and extras:
+                numeric_extras = []
+                for token in extras:
+                    try:
+                        numeric_extras.append(float(token))
+                    except ValueError:
+                        continue
+                if len(numeric_extras) == 1 and 0.0 <= numeric_extras[0] <= 100.0:
+                    parsed_val = numeric_extras[0]
+
+            values.append(parsed_val)
+
+        atom_count = len(values)
+        if expected_atoms is not None and atom_count and atom_count != expected_atoms:
+            return None
+        if atom_count == 0:
+            return None
+
+        # Try filling from UNITY_ATOM_ATTR / ATOM_ATTR blocks
+        attr_values: dict[int, float] = {}
+        in_attr = False
+        for raw in mol2_text.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("@<TRIPOS>UNITY_ATOM_ATTR") or line.startswith("@<TRIPOS>ATOM_ATTR"):
+                in_attr = True
+                continue
+            if line.startswith("@<TRIPOS>") and in_attr:
+                in_attr = False
+                continue
+            if not in_attr:
+                continue
+
+            parts = line.split()
+            if not parts:
+                continue
+
+            atom_idx = None
+            rest = parts
+            try:
+                atom_idx = int(parts[0])
+                rest = parts[1:]
+            except ValueError:
+                if len(parts) > 1:
+                    try:
+                        atom_idx = int(parts[1])
+                        rest = parts[2:]
+                    except ValueError:
+                        continue
+                else:
+                    continue
+            if atom_idx is None or atom_idx < 1:
+                continue
+
+            parsed = None
+            for tok in rest:
+                kv = _parse_keyval_token(tok)
+                if kv is not None:
+                    parsed = kv[1]
+                    break
+
+            if parsed is None and len(rest) >= 2:
+                if rest[0].lower() in key_names:
+                    try:
+                        parsed = float(rest[1])
+                    except ValueError:
+                        parsed = None
+
+            if parsed is not None and 0.0 <= parsed <= 100.0:
+                attr_values[atom_idx - 1] = parsed
+
+        for idx in range(atom_count):
+            if values[idx] is None and idx in attr_values:
+                values[idx] = attr_values[idx]
+
+        # If still missing and charge column looks like confidence values, use it.
+        if any(v is None for v in values):
+            if (
+                len(charge_values) == atom_count
+                and all(v is not None for v in charge_values)
+                and all(0.0 <= float(v) <= 100.0 for v in charge_values)
+                and max(float(v) for v in charge_values) > 15.0
+            ):
+                return [float(v) for v in charge_values]  # type: ignore[arg-type]
+
+        if any(v is None for v in values):
+            return None
+        return [float(v) for v in values]  # type: ignore[arg-type]
+
+    def _try_assign_ligand_plddt_from_sdf_props(self, mol) -> bool:
+        """Try loading per-atom ligand pLDDT/B-factor from SDF properties."""
+        candidate_props = (
+            "PLDDT_PER_ATOM",
+            "plddt_per_atom",
+            "ATOM_PLDDT",
+            "atom_plddt",
+            "BFACTOR_PER_ATOM",
+            "bfactor_per_atom",
+            "atom.dprop._plddt",
+            "atom.dprop.plddt",
+            "atom.dprop.bfactor",
+        )
+
+        for prop in candidate_props:
+            if not mol.HasProp(prop):
+                continue
+            raw = mol.GetProp(prop)
+            values = [
+                token for token in re.split(r"[\s,;]+", str(raw).strip()) if token
+            ]
+            if len(values) != mol.GetNumAtoms():
+                continue
+            try:
+                parsed = [float(v) for v in values]
+            except ValueError:
+                continue
+            for atom, val in zip(mol.GetAtoms(), parsed):
+                atom.SetDoubleProp("_plddt", float(val))
+            return True
+        return False
+
     def _load_ligand_from_file(self, ligand_file: Path):
         """Load ligand molecule from SDF, MOL, MOL2, or PDB file, preserving original coordinates and atom names."""
         from rdkit import Chem
@@ -1453,6 +1695,8 @@ class Boltzina:
             if ligand_file.suffix.lower() in ['.sdf']:
                 supplier = Chem.SDMolSupplier(str(ligand_file), removeHs=False)
                 mol = next(supplier)
+                if mol is not None and self._try_assign_ligand_plddt_from_sdf_props(mol):
+                    print(f"Loaded per-atom ligand pLDDT from SDF properties: {ligand_file.name}")
             elif ligand_file.suffix.lower() in ['.mol']:
                 mol = Chem.MolFromMolFile(str(ligand_file), removeHs=False)
             elif ligand_file.suffix.lower() in ['.mol2']:
@@ -1464,9 +1708,30 @@ class Boltzina:
                 mol = Chem.MolFromMol2Block(mol2_text, removeHs=False, sanitize=False)
                 if mol is None:
                     mol = Chem.MolFromMol2File(str(ligand_file), removeHs=False)
+                if mol is not None:
+                    mol2_plddt = self._parse_mol2_plddt(mol2_text, expected_atoms=mol.GetNumAtoms())
+                    if mol2_plddt and len(mol2_plddt) == mol.GetNumAtoms():
+                        for atom, plddt in zip(mol.GetAtoms(), mol2_plddt):
+                            atom.SetDoubleProp("_plddt", float(plddt))
+                        print(f"Loaded per-atom ligand pLDDT from MOL2 extra columns: {ligand_file.name}")
             elif ligand_file.suffix.lower() in ['.pdb', '.ent']:
                 mol = Chem.MolFromPDBFile(str(ligand_file), removeHs=False, sanitize=False)
                 if mol is not None:
+                    plddt_values: list[float] = []
+                    for atom in mol.GetAtoms():
+                        monomer_info = atom.GetPDBResidueInfo()
+                        if monomer_info is None:
+                            plddt_values = []
+                            break
+                        try:
+                            plddt_values.append(float(monomer_info.GetTempFactor()))
+                        except Exception:
+                            plddt_values = []
+                            break
+                    if len(plddt_values) == mol.GetNumAtoms():
+                        for atom, plddt in zip(mol.GetAtoms(), plddt_values):
+                            atom.SetDoubleProp("_plddt", plddt)
+                        print(f"Loaded per-atom ligand pLDDT from PDB B-factor: {ligand_file.name}")
                     try:
                         Chem.SanitizeMol(mol)
                     except Exception as sanitize_error:
@@ -1476,6 +1741,8 @@ class Boltzina:
 
             if mol is None:
                 raise ValueError("Failed to parse ligand molecule")
+
+            mol.SetProp("_source_ext", ligand_file.suffix.lower())
 
             # Check if we have 3D coordinates
             has_valid_3d_coords = False
