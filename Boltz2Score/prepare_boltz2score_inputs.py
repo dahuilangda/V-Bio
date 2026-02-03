@@ -16,7 +16,6 @@ from rdkit.Chem import rdDetermineBonds
 from boltz.main import get_cache_path
 import gemmi
 from boltz.data import const
-from boltz.data.parse.pdb import parse_pdb
 from boltz.data.parse.mmcif import parse_mmcif
 from boltz.data.types import ChainInfo, Manifest, Record
 
@@ -365,20 +364,13 @@ def _load_ccd(ccd_path: Path) -> dict:
 def _parse_structure(path: Path, mols: dict, mol_dir: Path):
     suffix = path.suffix.lower()
     if suffix in {".pdb", ".ent"}:
-        try:
-            return parse_pdb(
-                str(path),
-                mols=mols,
-                moldir=str(mol_dir),
-                use_assembly=False,
-                compute_interfaces=False,
-            )
-        except Exception:
-            return _parse_pdb_with_sequence(
-                path=path,
-                mols=mols,
-                mol_dir=mol_dir,
-            )
+        # Use a single deterministic path for PDB parsing:
+        # convert/inject sequence via gemmi then parse as mmCIF.
+        return _parse_pdb_with_sequence(
+            path=path,
+            mols=mols,
+            mol_dir=mol_dir,
+        )
     if suffix in {".cif", ".mmcif"}:
         return parse_mmcif(
             str(path),
@@ -487,8 +479,6 @@ def prepare_inputs(
     mols_dir.mkdir(parents=True, exist_ok=True)
 
     mol_dir = cache_dir / "mols"
-    ccd_path = cache_dir / "ccd.pkl"
-
     if not mol_dir.exists():
         raise FileNotFoundError(
             f"Molecule directory not found: {mol_dir}. Please download Boltz2 assets."
@@ -496,16 +486,9 @@ def prepare_inputs(
 
     # Ensure RDKit pickle properties are available
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
-
-    mols = _load_ccd(ccd_path)
-    if not _mol_has_atom_names(mols.get("ALA")):
-        # Some cache builds ship ccd.pkl without atom name properties.
-        # Fall back to per-residue cache files that retain atom names.
-        print(
-            "[Warning] CCD cache is missing atom names; falling back to "
-            "per-residue molecule files."
-        )
-        mols = {}
+    # Authoritative source for CCD molecules is cache/mols/*.pkl.
+    # Avoids dependence on ccd.pkl serialization variants.
+    mols = {}
 
     struct_files = _iter_struct_files(input_dir, recursive)
     if not struct_files:
@@ -541,8 +524,7 @@ def prepare_inputs(
 
             records.append(record)
         except Exception as exc:  # noqa: BLE001
-            print(f"[Warning] Failed to process {path}: {exc}")
-            failed.append(path)
+            raise RuntimeError(f"Failed to process {path}: {exc}") from exc
         finally:
             # Always restore CCD entries if we overrode them for this structure
             if custom_mols:

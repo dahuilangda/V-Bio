@@ -24,8 +24,6 @@ import gemmi
 
 # CCD名称管理器，确保同一批次运行的不要使用相同的CCD名称
 import redis
-import random
-import string
 
 class CCDNameManager:
     """管理CCD名称分配，确保并发任务不会使用相同的CCD名称"""
@@ -40,42 +38,26 @@ class CCDNameManager:
         try:
             from gpu_manager import get_redis_client
             return get_redis_client()
-        except:
-            # 如果无法获取Redis，使用本地管理（降级方案）
+        except Exception:
             return None
     
     def reserve_unique_name(self, base_name: str, task_id: str) -> str:
         """为任务保留一个唯一的CCD名称"""
+        candidate_name = f"{base_name}_{task_id[:8]}"
+
         if not self.redis_client:
-            # 降级方案：使用随机后缀
-            suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-            return f"{base_name}_{suffix}"
-        
-        max_attempts = 50  # 最大尝试次数
-        for attempt in range(max_attempts):
-            # 生成候选名称
-            if attempt == 0:
-                # 首次尝试使用task_id作为后缀
-                candidate_name = f"{base_name}_{task_id[:8]}"
-            else:
-                # 后续尝试使用随机后缀
-                suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-                candidate_name = f"{base_name}_{suffix}"
-            
-            # 尝试在Redis中保留这个名称
-            reserve_key = f"{self.reserved_names_key}:{candidate_name}"
-            if self.redis_client.set(reserve_key, task_id, nx=True, ex=self.name_expiry_seconds):
-                print(f"Task {task_id}: Reserved unique CCD name '{candidate_name}'")
-                return candidate_name
-        
-        # 如果所有尝试都失败，使用带时间戳的名称作为最后手段
-        import time
-        timestamp_suffix = str(int(time.time() * 1000))[-8:]  # 使用时间戳的最后8位
-        fallback_name = f"{base_name}_{timestamp_suffix}"
-        reserve_key = f"{self.reserved_names_key}:{fallback_name}"
-        self.redis_client.set(reserve_key, task_id, ex=self.name_expiry_seconds)
-        print(f"Task {task_id}: Using fallback CCD name '{fallback_name}'")
-        return fallback_name
+            # Deterministic local mode: no random fallback.
+            print(f"Task {task_id}: Redis unavailable, using deterministic CCD name '{candidate_name}'")
+            return candidate_name
+
+        reserve_key = f"{self.reserved_names_key}:{candidate_name}"
+        if self.redis_client.set(reserve_key, task_id, nx=True, ex=self.name_expiry_seconds):
+            print(f"Task {task_id}: Reserved unique CCD name '{candidate_name}'")
+            return candidate_name
+
+        raise RuntimeError(
+            f"CCD name collision for task {task_id}: '{candidate_name}' is already reserved."
+        )
     
     def release_name(self, ccd_name: str, task_id: str):
         """释放CCD名称"""
@@ -1103,31 +1085,28 @@ class Boltzina:
             raise ValueError(f"Failed to convert CIF to PDB: {e}")
 
     def _generate_ligand_pdb_lines_preserve_coords(self, ligand_mol) -> tuple[str, list[tuple[int, int]]]:
-        """Generate ligand PDB lines and bond pairs preserving original coordinates and atom names."""
-        from rdkit.Chem import AllChem
-
+        """Generate ligand PDB lines and bond pairs preserving original coordinates."""
         ligand_lines = ""
         atom_serial = 1  # Will be renumbered later
         bond_pairs: list[tuple[int, int]] = []
 
-        # Use unified naming strategy: prefer "LIG", fall back to unique name if conflicts
+        # Use unified residue name for separate-input merged complexes.
         resname = "LIG"
 
-        # Ensure we have a 3D conformer (should already exist from loading)
+        # Strict mode: ligand must already carry valid 3D coordinates.
         if ligand_mol.GetNumConformers() == 0:
-            print("Warning: No conformer found, generating coordinates...")
-            AllChem.EmbedMolecule(ligand_mol, randomSeed=42)
-            if AllChem.MMFFOptimizeMolecule(ligand_mol) != 0:
-                print("Warning: MMFF optimization failed")
+            raise ValueError(
+                "Ligand has no 3D conformer. Please provide ligand with explicit 3D coordinates."
+            )
 
         conf = ligand_mol.GetConformer()
 
         print(f"Generating ligand PDB with unified residue name: {resname}")
 
-        # Check if we have original atom names from MOL2 file
-        has_original_names = any(atom.HasProp("_original_atom_name") for atom in ligand_mol.GetAtoms())
-        if has_original_names:
-            print("Using original atom names from MOL2 file for better compatibility")
+        # Build deterministic atom names from atom index only (format-agnostic).
+        # This avoids SDF/MOL2 parser differences (e.g. aromatic typing) changing
+        # canonical ranks and then changing ligand confidence features.
+        ordinal_by_idx = {idx: idx + 1 for idx in range(ligand_mol.GetNumAtoms())}
 
         ligand_plddt: list[float | None] = []
         missing_plddt_atoms: list[int] = []
@@ -1151,16 +1130,15 @@ class Boltzina:
             hint = ""
             if source_ext == ".mol2":
                 hint = (
-                    "（MOL2 标准通常不含 pLDDT/B-factor；建议后续以 Boltz2Score 输出复合物中的 pLDDT 为准）"
+                    " MOL2 standard does not include pLDDT/B-factor; "
+                    "please provide pLDDT explicitly (e.g. atom extra field plddt=xx or ligand PDB with B-factor)."
                 )
-            print(
-                f"Warning: ligand missing per-atom pLDDT for {len(missing_plddt_atoms)} atoms "
-                f"{missing_plddt_atoms[:8]}{'...' if len(missing_plddt_atoms) > 8 else ''}. "
-                f"Using 0.00 sentinel in intermediate PDB. {hint}"
+            raise ValueError(
+                "Ligand is missing per-atom pLDDT/B-factor; strict mode disallows fallback values. "
+                f"Missing atoms: {missing_plddt_atoms[:20]}{'...' if len(missing_plddt_atoms) > 20 else ''}.{hint}"
             )
 
         # Generate PDB lines using original coordinates (no translation)
-        element_counts = {}
         used_atom_names: set[str] = set()
         auto_name_index = 1
         for i, atom in enumerate(ligand_mol.GetAtoms()):
@@ -1171,51 +1149,8 @@ class Boltzina:
 
             # Get element and create meaningful atom name
             element = atom.GetSymbol()
-
-            atom_name = None
-            # CRITICAL: Prefer original atom names from MOL2 file for compatibility
-            # with prepare_boltz2score_inputs.py's _ccd_matches_residue function
-            if atom.HasProp("_original_atom_name"):
-                # Get the original atom name from MOL2 file
-                original_name = atom.GetProp("_original_atom_name").strip()
-                if original_name:
-                    # Store sanitized version but use a format that preserves uniqueness
-                    atom_name = self._sanitize_atom_name(original_name)
-                    # For better compatibility, also try to preserve the numeric suffix
-                    # e.g., "CL16" -> "CL16" (if possible), "C02" -> "C02"
-                    if any(c.isdigit() for c in original_name):
-                        # Preserve numeric part for unique identification
-                        atom_name = self._sanitize_atom_name(original_name)
-                    else:
-                        atom_name = self._sanitize_atom_name(original_name)
-
-            # Fallback to other properties if original name not available
-            if not atom_name:
-                for prop in ("name", "_TriposAtomName", "_atomName"):
-                    if atom.HasProp(prop):
-                        raw_name = atom.GetProp(prop).strip()
-                        if raw_name:
-                            atom_name = raw_name
-                            break
-
-            # Last resort: generate atom name based on element and count
-            if not atom_name:
-                # Count elements for naming
-                if element not in element_counts:
-                    element_counts[element] = 0
-                element_counts[element] += 1
-
-                # Create atom name following PDB conventions
-                if element == 'H':
-                    atom_name = f"H{element_counts[element]}"
-                elif element_counts[element] == 1:
-                    atom_name = element
-                else:
-                    atom_name = f"{element}{element_counts[element]}"
-
-            # Sanitize atom name and ensure proper formatting
-            atom_name = self._sanitize_atom_name(atom_name)
-            atom_name = atom_name[:4].upper()
+            prefix = "".join(ch for ch in element.upper() if ch.isalnum())[:1] or "X"
+            atom_name = f"{prefix}{ordinal_by_idx.get(i, i + 1):03d}"[-4:]
 
             # Enforce per-residue atom name uniqueness (required by mmCIF writer).
             if atom_name in used_atom_names or not atom_name:
@@ -1230,7 +1165,7 @@ class Boltzina:
             atom_name = atom_name.ljust(4)
 
             # Standard PDB HETATM format with proper spacing and fixed fields
-            bfactor_field = f"{plddt:6.2f}" if plddt is not None else "  0.00"
+            bfactor_field = f"{plddt:6.2f}"
             line = f"HETATM{atom_serial:5d} {atom_name} {resname} L   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00{bfactor_field}          {element:>2s}"
             ligand_lines += line + "\n"
             atom_serial += 1
@@ -1252,19 +1187,20 @@ class Boltzina:
                         bond_pairs.append((origin_id, target_id))
                     print(f"Using {len(bond_pairs)} bonds from MOL2 file")
             except Exception as e:
-                print(f"Warning: Failed to parse MOL2 bond info: {e}, using RDKit bonds")
+                raise ValueError(f"Failed to parse ligand bond info from MOL2 metadata: {e}") from e
 
-        # Fallback to RDKit bonds if no MOL2 bond info available
+        # Use RDKit bonds only when explicit MOL2 bond metadata is unavailable.
         if not bond_pairs:
             for bond in ligand_mol.GetBonds():
                 a = bond.GetBeginAtomIdx() + 1
                 b = bond.GetEndAtomIdx() + 1
                 bond_pairs.append((a, b))
 
-        if bond_pairs:
-            print(f"Generated {len(bond_pairs)} ligand bonds for CONECT records")
-        else:
-            print("Warning: No ligand bonds detected; CONECT records will be empty")
+        if ligand_mol.GetNumAtoms() > 1 and not bond_pairs:
+            raise ValueError(
+                "No ligand bonds detected for a multi-atom ligand; strict mode disallows topology fallback."
+            )
+        print(f"Generated {len(bond_pairs)} ligand bonds for CONECT records")
 
         return ligand_lines.rstrip('\n'), bond_pairs  # Remove trailing newline
 
@@ -1449,15 +1385,22 @@ class Boltzina:
             elif in_bonds:
                 parts = line.split()
                 # BOND format: bond_id origin_atom_id target_atom_id bond_type ...
-                if len(parts) >= 4:
-                    try:
-                        bond_id = int(parts[0])
-                        origin_id = int(parts[1])
-                        target_id = int(parts[2])
-                        bond_type = int(parts[3])
-                        bond_info.append((origin_id, target_id, bond_type))
-                    except (ValueError, IndexError):
-                        continue
+                if len(parts) < 4:
+                    raise ValueError(f"Malformed MOL2 bond line: {raw}")
+                origin_id = int(parts[1])
+                target_id = int(parts[2])
+                bond_raw = parts[3].strip().lower()
+                if bond_raw in {"1", "1.0", "un", "du"}:
+                    bond_type = 1
+                elif bond_raw in {"2", "2.0"}:
+                    bond_type = 2
+                elif bond_raw in {"3", "3.0"}:
+                    bond_type = 3
+                elif bond_raw in {"ar", "am", "4", "4.0"}:
+                    bond_type = 4
+                else:
+                    raise ValueError(f"Unsupported MOL2 bond type '{parts[3]}' in line: {raw}")
+                bond_info.append((origin_id, target_id, bond_type))
 
         return atom_names, bond_info
 
@@ -1504,12 +1447,9 @@ class Boltzina:
            - `plddt=87.5`, `plddt:87.5`, `bfactor=87.5`, ...
            - one unambiguous numeric extra token in [0, 100]
         2) `@<TRIPOS>UNITY_ATOM_ATTR` / `@<TRIPOS>ATOM_ATTR` blocks with atom-indexed key/value
-        3) ATOM charge column used as pLDDT when all values look like confidences:
-           all in [0, 100] and max > 15
         """
         key_names = {"plddt", "bfactor", "tempfactor", "temp_factor", "b"}
         values: list[float | None] = []
-        charge_values: list[float | None] = []
         in_atoms = False
 
         def _parse_keyval_token(token: str) -> tuple[str, float] | None:
@@ -1542,12 +1482,6 @@ class Boltzina:
             parts = line.split()
             if len(parts) < 9:
                 return None
-
-            # Standard MOL2 charge column
-            try:
-                charge_values.append(float(parts[8]))
-            except ValueError:
-                charge_values.append(None)
 
             extras = parts[9:] if len(parts) > 9 else []
             parsed_val = None
@@ -1634,16 +1568,6 @@ class Boltzina:
             if values[idx] is None and idx in attr_values:
                 values[idx] = attr_values[idx]
 
-        # If still missing and charge column looks like confidence values, use it.
-        if any(v is None for v in values):
-            if (
-                len(charge_values) == atom_count
-                and all(v is not None for v in charge_values)
-                and all(0.0 <= float(v) <= 100.0 for v in charge_values)
-                and max(float(v) for v in charge_values) > 15.0
-            ):
-                return [float(v) for v in charge_values]  # type: ignore[arg-type]
-
         if any(v is None for v in values):
             return None
         return [float(v) for v in values]  # type: ignore[arg-type]
@@ -1683,7 +1607,6 @@ class Boltzina:
     def _load_ligand_from_file(self, ligand_file: Path):
         """Load ligand molecule from SDF, MOL, MOL2, or PDB file, preserving original coordinates and atom names."""
         from rdkit import Chem
-        from rdkit.Chem import AllChem
         from rdkit.Geometry import Point3D
 
         mol2_text = None
@@ -1708,6 +1631,8 @@ class Boltzina:
                 mol = Chem.MolFromMol2Block(mol2_text, removeHs=False, sanitize=False)
                 if mol is None:
                     mol = Chem.MolFromMol2File(str(ligand_file), removeHs=False)
+                if mol is None:
+                    raise ValueError(f"Failed to parse MOL2 ligand: {ligand_file.name}")
                 if mol is not None:
                     mol2_plddt = self._parse_mol2_plddt(mol2_text, expected_atoms=mol.GetNumAtoms())
                     if mol2_plddt and len(mol2_plddt) == mol.GetNumAtoms():
@@ -1735,7 +1660,7 @@ class Boltzina:
                     try:
                         Chem.SanitizeMol(mol)
                     except Exception as sanitize_error:
-                        print(f"Warning: PDB ligand sanitization failed: {sanitize_error}")
+                        raise ValueError(f"PDB ligand sanitization failed: {sanitize_error}") from sanitize_error
             else:
                 raise ValueError(f"Unsupported ligand file format: {ligand_file.suffix}")
 
@@ -1754,7 +1679,9 @@ class Boltzina:
                     pos = conf.GetAtomPosition(i)
                     coords.append([pos.x, pos.y, pos.z])
 
-                if len(coords) > 1:
+                if len(coords) == 1:
+                    has_valid_3d_coords = True
+                elif len(coords) > 1:
                     coord_array = np.array(coords)
                     coord_std = np.std(coord_array)
                     if coord_std > 0.001:  # Some variation in coordinates
@@ -1767,31 +1694,37 @@ class Boltzina:
             # For MOL2 inputs, always restore coordinates and atom names to ensure consistency
             if ligand_file.suffix.lower() == ".mol2":
                 coords, atom_names = self._parse_mol2_coords(mol2_text)
-                if coords and len(coords) == mol.GetNumAtoms():
-                    conf = Chem.Conformer(mol.GetNumAtoms())
-                    for idx, (x, y, z) in enumerate(coords):
-                        conf.SetAtomPosition(idx, Point3D(x, y, z))
-                    mol.RemoveAllConformers()
-                    mol.AddConformer(conf, assignId=True)
+                if not coords or len(coords) != mol.GetNumAtoms():
+                    raise ValueError(
+                        f"MOL2 coordinate block is missing or atom count mismatched for {ligand_file.name}."
+                    )
+                conf = Chem.Conformer(mol.GetNumAtoms())
+                for idx, (x, y, z) in enumerate(coords):
+                    conf.SetAtomPosition(idx, Point3D(x, y, z))
+                mol.RemoveAllConformers()
+                mol.AddConformer(conf, assignId=True)
 
-                    # Set atom names - use sanitized name but store original as well
-                    if atom_names and len(atom_names) == mol.GetNumAtoms():
-                        for atom, name in zip(mol.GetAtoms(), atom_names):
-                            if name:
-                                # Store original atom name for reference
-                                atom.SetProp("_original_atom_name", name)
-                                # Also store sanitized name for compatibility
-                                safe_name = self._sanitize_atom_name(name)
-                                atom.SetProp("_TriposAtomName", safe_name)
-                                atom.SetProp("name", safe_name)
+                if not atom_names or len(atom_names) != mol.GetNumAtoms():
+                    raise ValueError(
+                        f"MOL2 atom names are missing or atom count mismatched for {ligand_file.name}."
+                    )
+                # Set atom names - use sanitized name but store original as well
+                for atom, name in zip(mol.GetAtoms(), atom_names):
+                    if name:
+                        # Store original atom name for reference
+                        atom.SetProp("_original_atom_name", name)
+                        # Also store sanitized name for compatibility
+                        safe_name = self._sanitize_atom_name(name)
+                        atom.SetProp("_TriposAtomName", safe_name)
+                        atom.SetProp("name", safe_name)
 
-                    has_valid_3d_coords = True
-                    print(f"Restored MOL2 coordinates and atom names from {ligand_file.name}")
+                has_valid_3d_coords = True
+                print(f"Restored MOL2 coordinates and atom names from {ligand_file.name}")
 
-                    # Store bond information for later use
-                    if bond_info:
-                        mol.SetProp("_bond_info", str(bond_info))
-                        print(f"Preserved {len(bond_info)} bond records from MOL2 file")
+                # Store bond information for later use
+                if bond_info:
+                    mol.SetProp("_bond_info", str(bond_info))
+                    print(f"Preserved {len(bond_info)} bond records from MOL2 file")
 
             # Ensure atom names are set (use original names from MOL2 if available)
             for idx, atom in enumerate(mol.GetAtoms()):
@@ -1818,36 +1751,14 @@ class Boltzina:
                 if atom.HasProp("_TriposAtomName"):
                     atom.SetProp("_TriposAtomName", safe_name)
 
-            # Only add hydrogens if we don't have them or don't have valid coordinates
             if not has_valid_3d_coords:
-                print(f"No valid 3D coordinates found in {ligand_file.name}, generating new ones...")
-                # Add hydrogens and generate coordinates
-                mol = Chem.AddHs(mol)
-                print(f"Added hydrogens: {mol.GetNumAtoms()} total atoms")
-                
-                # Generate 3D coordinates
-                result = AllChem.EmbedMolecule(mol, randomSeed=42, useRandomCoords=True)
-                if result != 0:
-                    print("Warning: Standard embedding failed, trying alternative method")
-                    AllChem.EmbedMolecule(mol, randomSeed=42, useRandomCoords=True, maxAttempts=10)
-                
-                # Optimize geometry
-                try:
-                    optimization_result = AllChem.MMFFOptimizeMolecule(mol, maxIters=500)
-                    if optimization_result == 0:
-                        print("Successfully optimized ligand geometry")
-                    else:
-                        print("MMFF optimization did not converge, using UFF")
-                        AllChem.UFFOptimizeMolecule(mol, maxIters=500)
-                except Exception as e:
-                    print(f"Geometry optimization failed: {e}, using unoptimized coordinates")
-            else:
-                # We have good coordinates, preserve them
-                print("Preserving original coordinates exactly as provided")
-                print(f"Using original molecule with {mol.GetNumAtoms()} atoms (no hydrogen addition)")
-                
-                # Do NOT add hydrogens to preserve exact coordinates
-                # The affinity prediction should work with the original molecule structure
+                raise ValueError(
+                    f"Ligand file {ligand_file.name} does not contain valid 3D coordinates; strict mode disallows auto-generation."
+                )
+
+            # We have good coordinates, preserve them exactly.
+            print("Preserving original coordinates exactly as provided")
+            print(f"Using original molecule with {mol.GetNumAtoms()} atoms (no hydrogen addition)")
             
             # Final validation
             if mol.GetNumConformers() == 0:
@@ -1856,10 +1767,7 @@ class Boltzina:
             return mol
             
         except Exception as e:
-            print(f"Error loading ligand from {ligand_file}: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
+            raise ValueError(f"Error loading ligand from {ligand_file}: {e}") from e
 
     def _cif_to_pdb(self, cif_file: Path) -> Optional[Path]:
         """Convert CIF file to PDB format using maxit."""
