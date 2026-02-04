@@ -46,14 +46,30 @@ def _normalize_atom_name(name: str) -> str:
     return "".join(ch for ch in name.strip().upper() if ch.isalnum())
 
 
-def _fit_atom_name_4chars(name: str) -> str:
-    """Normalize atom name to <=4 chars to match gemmi/PDB atom-name constraints."""
-    normalized = _normalize_atom_name(name)
-    if len(normalized) <= 4:
-        return normalized
-    # Keep element-ish prefix and the right-most chars for uniqueness.
-    prefix = normalized[:1]
-    return f"{prefix}{normalized[-3:]}"
+def _element_prefix_for_atom(atom: Chem.Atom) -> str:
+    """Return a compact element-aware prefix for generated atom names."""
+    symbol = _normalize_atom_name(atom.GetSymbol() or "")
+    if not symbol:
+        return "X"
+    # Keep two-letter element symbols (CL, BR, NA...) when available.
+    if len(symbol) >= 2 and symbol[0].isalpha() and symbol[1].isalpha():
+        return symbol[:2]
+    return symbol[:1]
+
+
+def _generate_atom_name(prefix: str, serial: int) -> str:
+    """Generate deterministic <=4-char atom names compatible with mmCIF writer."""
+    prefix = _normalize_atom_name(prefix or "X")
+    if len(prefix) >= 2:
+        # 2-letter element prefix + 2 base36 digits
+        if serial > 36 * 36:
+            raise ValueError(f"Too many atoms for prefix {prefix[:2]!r}.")
+        return f"{prefix[:2]}{_to_base36(serial).rjust(2, '0')[-2:]}"
+
+    # 1-letter prefix + 3 base36 digits
+    if serial > 36 * 36 * 36:
+        raise ValueError(f"Too many atoms for prefix {prefix[:1]!r}.")
+    return f"{prefix[:1] or 'X'}{_to_base36(serial).rjust(3, '0')[-3:]}"
 
 
 def _extract_atom_preferred_name(atom: Chem.Atom) -> str:
@@ -73,25 +89,28 @@ def _extract_atom_preferred_name(atom: Chem.Atom) -> str:
 
 
 def _ensure_unique_ligand_atom_names(mol: Chem.Mol) -> tuple[Chem.Mol, int]:
-    """Normalize ligand atom names while preserving source naming as much as possible."""
+    """Normalize ligand atom names for stable atom mapping and mmCIF compatibility."""
     used: set[str] = set()
-    fallback_serial = 1
+    serial_by_prefix: dict[str, int] = {}
     renamed = 0
 
     for atom in mol.GetAtoms():
         preferred_raw = _extract_atom_preferred_name(atom)
-        preferred = _fit_atom_name_4chars(preferred_raw)
-        candidate = preferred
+        normalized = _normalize_atom_name(preferred_raw or "")
 
-        if not candidate or candidate in used:
-            prefix = _normalize_atom_name(atom.GetSymbol())[:1] or "X"
+        candidate = None
+        if normalized and len(normalized) <= 4 and normalized not in used:
+            candidate = normalized
+        else:
+            prefix = _element_prefix_for_atom(atom)
+            serial = serial_by_prefix.get(prefix, 1)
             while True:
-                # Atom names must fit 4 chars: 1-char prefix + 3-char serial.
-                suffix = _to_base36(fallback_serial).rjust(3, "0")[-3:]
-                fallback_serial += 1
-                candidate = f"{prefix}{suffix}"
-                if candidate not in used:
+                generated = _generate_atom_name(prefix, serial)
+                serial += 1
+                if generated not in used:
+                    candidate = generated
                     break
+            serial_by_prefix[prefix] = serial
             renamed += 1
 
         used.add(candidate)
