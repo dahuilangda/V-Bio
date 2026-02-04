@@ -96,26 +96,6 @@ def render_bicyclic_designer_page():
 
             URLStateManager.set_query_params(**new_params)
 
-    # 显示双环肽结构说明
-    with st.expander("💡 双环肽设计说明", expanded=False):
-        st.markdown("""
-        **双环肽特点：**
-        - 包含3个半胱氨酸(Cys)残基
-        - 末端必须是半胱氨酸
-        - 形成两个环状结构，增强结构稳定性
-        - 具有更高的生物活性和抗酶解能力
-        
-        **二硫键连接模式：**
-        - Cys1-Cys3: 形成第一个环
-        - Cys2-Cys_terminal: 形成第二个环
-        - 两个环共享部分序列，创造独特的结构特征
-        
-        **连接体类型：**
-        - **SEZ** 1,3,5-trimethylbenzene
-        - **29N** 1-[3,5-di(propanoyl)-1,3,5-triazinan-1-yl]propan-1-one
-        - **BS3** 铋(III)三硫醇配合物
-        """)
-    
     designer_is_running = (
         st.session_state.bicyclic_task_id is not None and 
         st.session_state.bicyclic_results is None and 
