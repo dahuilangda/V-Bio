@@ -286,7 +286,12 @@ def _get_cached_mol(mols: dict, mol_dir: Path, code: str) -> Chem.Mol | None:
     return None
 
 
-def _collect_custom_ligands(path: Path, mols: dict, mol_dir: Path) -> dict:
+def _collect_custom_ligands(
+    path: Path,
+    mols: dict,
+    mol_dir: Path,
+    preloaded_custom_mols: dict[str, Chem.Mol] | None = None,
+) -> dict:
     """Collect custom ligand definitions that should override CCD entries."""
     structure = gemmi.read_structure(str(path))
     structure.setup_entities()
@@ -324,6 +329,10 @@ def _collect_custom_ligands(path: Path, mols: dict, mol_dir: Path) -> dict:
             ):
                 if resname not in custom_mols:
                     custom_mol = None
+                    if preloaded_custom_mols and resname in preloaded_custom_mols:
+                        # Reuse preloaded ligand definition (e.g., separate-input mode)
+                        # to avoid reconstructing topology from coordinates.
+                        custom_mol = Chem.Mol(preloaded_custom_mols[resname])
                     if pdb_lines:
                         extracted = _extract_pdb_ligand_block(
                             pdb_lines=pdb_lines,
@@ -467,6 +476,7 @@ def prepare_inputs(
     out_dir: Path,
     cache_dir: Path,
     recursive: bool,
+    preloaded_custom_mols: dict[str, Chem.Mol] | None = None,
 ) -> Tuple[Manifest, List[Path]]:
     struct_dir = out_dir / "processed" / "structures"
     records_dir = out_dir / "processed" / "records"
@@ -501,7 +511,12 @@ def prepare_inputs(
         custom_mols = {}
         overridden = {}
         try:
-            custom_mols = _collect_custom_ligands(path, mols, mol_dir)
+            custom_mols = _collect_custom_ligands(
+                path,
+                mols,
+                mol_dir,
+                preloaded_custom_mols=preloaded_custom_mols,
+            )
             if custom_mols:
                 for name, mol in custom_mols.items():
                     if name in mols:

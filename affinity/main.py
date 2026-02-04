@@ -266,51 +266,13 @@ class Boltzina:
         return ligand_name  # Return original name for structure compatibility
     
     def _setup_local_mols_directory(self):
-        """Set up local mols directory with canonical molecules and any custom ligands."""
+        """Prepare local extra-molecule directory for record-specific custom ligands."""
         local_mols_dir = self.work_dir / "boltz_out" / "processed" / "mols"
         local_mols_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Copy canonical molecules from global cache to local directory
-        try:
-            import shutil
-            global_mols_dir = self.cache_dir / 'mols'
-            if global_mols_dir.exists():
-                print(f"Task {self.task_id}: Copying canonical molecules from {global_mols_dir} to {local_mols_dir}")
-                
-                # Copy all .pkl files from global to local
-                copied_count = 0
-                for pkl_file in global_mols_dir.glob("*.pkl"):
-                    local_pkl_file = local_mols_dir / pkl_file.name
-                    if not local_pkl_file.exists():  # Don't overwrite custom ligands
-                        shutil.copy2(pkl_file, local_pkl_file)
-                        copied_count += 1
-                
-                print(f"✓ Task {self.task_id}: Copied {copied_count} canonical molecules to local directory")
-                
-                # List all molecules now available in local directory
-                local_molecules = list(local_mols_dir.glob("*.pkl"))
-                print(f"Task {self.task_id}: Local molecules directory contains {len(local_molecules)} molecules:")
-                for mol_file in sorted(local_molecules):
-                    print(f"  - {mol_file.stem}")
-                    
-                # Check if our custom ligands are present
-                for custom_ligand in self.custom_ligands:
-                    custom_file = local_mols_dir / f"{custom_ligand}.pkl"
-                    if custom_file.exists():
-                        print(f"✓ Task {self.task_id}: Custom ligand '{custom_ligand}' is available")
-                    else:
-                        print(f"⚠️  Task {self.task_id}: Custom ligand '{custom_ligand}' is missing!")
-                        
-                # Show summary of available ligands
-                available_ligands = [f.stem for f in local_mols_dir.glob("*.pkl")]
-                print(f"Task {self.task_id}: All available ligands: {sorted(available_ligands)}")
-                        
-            else:
-                print(f"⚠️  Task {self.task_id}: Global mols directory not found at {global_mols_dir}")
-        except Exception as e:
-            print(f"⚠️  Task {self.task_id}: Failed to copy canonical molecules: {e}")
-            import traceback
-            traceback.print_exc()
+        print(
+            f"Task {self.task_id}: Prepared local extra mols directory: {local_mols_dir} "
+            "(canonical molecules are read from global cache on demand)"
+        )
 
     def _write_custom_ligand_to_local_mols_dir(self, ligand_name: str, ligand_mol):
         """Write a custom ligand to local mols directory only (not global cache)."""
@@ -382,19 +344,44 @@ class Boltzina:
         """Write custom ligands for a specific record."""
         if not self.custom_ligands:
             return
-            
+
         extra_mols_dir = self.work_dir / "boltz_out" / "processed" / "mols"
         extra_mols_dir.mkdir(parents=True, exist_ok=True)
-        
+        record_mols_path = extra_mols_dir / f"{record_id}.pkl"
+
         try:
             import pickle
-            
-            # Custom ligands are already written as individual .pkl files
-            # This method is kept for compatibility
-            print(f"✓ Custom ligands already available for record '{record_id}': {list(self.custom_ligands)}")
-            
+
+            # Merge with any existing record-specific molecules.
+            record_mols = {}
+            if record_mols_path.exists():
+                try:
+                    with record_mols_path.open("rb") as f:
+                        loaded = pickle.load(f)
+                    if isinstance(loaded, dict):
+                        record_mols.update(loaded)
+                except Exception:
+                    pass
+
+            added = 0
+            for ligand_name in sorted(self.custom_ligands):
+                ligand_mol = self.ccd.get(ligand_name)
+                if ligand_mol is None:
+                    continue
+                record_mols[ligand_name] = ligand_mol
+                added += 1
+
+            if not record_mols:
+                return
+
+            with record_mols_path.open("wb") as f:
+                pickle.dump(record_mols, f)
+
+            print(
+                f"✓ Wrote {added} custom ligand(s) to record mols: {record_mols_path}"
+            )
         except Exception as e:
-            print(f"⚠️  Failed to confirm custom ligands for record '{record_id}': {e}")
+            print(f"⚠️  Failed to write record-specific custom ligands for '{record_id}': {e}")
 
     def _extract_ligand_name_from_error(self, error_message: str) -> Optional[str]:
         """Extract ligand name from CCD error message."""
@@ -2471,8 +2458,13 @@ class Boltzina:
     def _score_poses(self):
         print(f"DEBUG: msa_args = {self.msa_args}")
         
-        # Set up local mols directory with canonical molecules and custom ligands
+        # Set up local extra mols directory for record-specific custom ligands.
         self._setup_local_mols_directory()
+        global_mol_dir = self.cache_dir / "mols"
+        if not global_mol_dir.exists():
+            raise FileNotFoundError(
+                f"Global molecule cache directory not found: {global_mol_dir}"
+            )
         
         boltz_model = load_boltz2_model(
             skip_run_structure=self.skip_run_structure,
@@ -2495,7 +2487,8 @@ class Boltzina:
                 constraints_dir=str(self.work_dir / "boltz_out" / "processed" / "constraints"),
                 extra_mols_dir=str(self.work_dir / "boltz_out" / "processed" / "mols"),
                 manifest_path=self.work_dir / "boltz_out" / "processed" / "manifest.json",
-                mol_dir=str(self.work_dir / "boltz_out" / "processed" / "mols"),  # Use local mols directory
+                # Canonicals from global cache, custom ligands from extra_mols_dir.
+                mol_dir=str(global_mol_dir),
                 num_workers=self.num_workers,
                 batch_size=1, 
                 accelerator=self.accelerator,

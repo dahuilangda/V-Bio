@@ -299,6 +299,34 @@ def _extract_protein_chain_ids_from_pdb(pdb_path: str) -> list[str]:
         return []
     return sorted(chain_ids)
 
+
+def _extract_protein_chain_ids_from_structure(structure_path: str) -> list[str]:
+    """Extract protein chain IDs from PDB/mmCIF without modifying coordinates."""
+    path = Path(structure_path)
+    suffix = path.suffix.lower()
+    if suffix in {".pdb", ".ent"}:
+        return _extract_protein_chain_ids_from_pdb(str(path))
+
+    if suffix not in {".cif", ".mmcif"}:
+        return []
+
+    try:
+        import gemmi
+
+        structure = gemmi.read_structure(str(path))
+        chain_ids: set[str] = set()
+        for model in structure:
+            for chain in model:
+                for residue in chain:
+                    if residue.het_flag == "A":
+                        chain_id = (chain.name or "").strip()
+                        if chain_id:
+                            chain_ids.add(chain_id)
+                        break
+        return sorted(chain_ids)
+    except Exception:
+        return []
+
 def _load_lead_optimization_config():
     """Load lead_optimization config without relying on package import."""
     config_path = BASE_DIR / "lead_optimization" / "config.py"
@@ -896,65 +924,14 @@ def boltz2score_task(self, score_args: dict):
             with open(ligand_file_path, 'w', encoding='utf-8') as f:
                 f.write(score_args['ligand_file_content'])
 
-            raw_prefix = score_args.get('output_prefix', 'complex')
-            output_prefix = secure_filename(raw_prefix) or "complex"
-            combined_pdb_path = None
-            combined_cif_path = None
-
-            try:
-                _ensure_repo_root_on_path()
-                from affinity.main import Boltzina
-            except Exception as exc:
-                logger.exception(
-                    "Task %s: Failed to import affinity module for separate-input Boltz2Score.",
-                    task_id,
-                )
-                raise RuntimeError(
-                    "Failed to import affinity module for separate-input Boltz2Score. "
-                    f"Details: {type(exc).__name__}: {exc}"
-                ) from exc
-
-            boltz_output_dir = os.path.join(task_temp_dir, "boltz2score_pre")
-            boltz_work_dir = os.path.join(task_temp_dir, "boltz2score_pre_work")
-            boltzina = Boltzina(
-                output_dir=boltz_output_dir,
-                work_dir=boltz_work_dir,
-                ligand_resname="LIG",
-            )
-            try:
-                combined_pdb = boltzina._create_standard_complex_pdb(
-                    Path(protein_file_path),
-                    Path(ligand_file_path),
-                    output_prefix
-                )
-                combined_cif = boltzina._convert_complex_pdb_to_cif(combined_pdb)
-                combined_pdb_path = combined_pdb
-                combined_cif_path = combined_cif
-            finally:
-                try:
-                    boltzina._cleanup_temporary_ligands()
-                except Exception as cleanup_error:
-                    logger.warning(f"Task {task_id}: Failed to cleanup temporary ligands: {cleanup_error}")
-
-            combined_pdb_copy = os.path.join(task_temp_dir, "combined_complex.pdb")
-            shutil.copyfile(str(combined_pdb_path), combined_pdb_copy)
-            extra_archive_files.append(combined_pdb_copy)
-
             detected_target_chain = None
             if not score_args.get('target_chain'):
-                detected_chain_ids = _extract_protein_chain_ids_from_pdb(combined_pdb_copy)
+                detected_chain_ids = _extract_protein_chain_ids_from_structure(protein_file_path)
                 if detected_chain_ids:
                     detected_target_chain = ",".join(detected_chain_ids)
 
-            combined_cif_copy = None
-            if combined_cif_path and Path(combined_cif_path).suffix.lower() == ".cif" and os.path.exists(combined_cif_path):
-                combined_cif_copy = os.path.join(task_temp_dir, "combined_complex.cif")
-                shutil.copyfile(str(combined_cif_path), combined_cif_copy)
-                extra_archive_files.append(combined_cif_copy)
-
-            # Prefer PDB for scoring to avoid mmCIF conversion edge cases with external tools
-            input_file_path = combined_pdb_copy
-            input_filename = os.path.basename(input_file_path)
+            input_file_path = None
+            input_filename = None
 
             inputs_dir = os.path.join(task_temp_dir, "inputs")
             os.makedirs(inputs_dir, exist_ok=True)
@@ -979,13 +956,19 @@ def boltz2score_task(self, score_args: dict):
         command = [
             sys.executable,
             str(BASE_DIR / "Boltz2Score" / "boltz2score.py"),
-            "--input", input_file_path,
             "--output_dir", output_dir,
             "--work_dir", work_dir,
             "--accelerator", "gpu",
             "--devices", "1",
             "--num_workers", "0",
         ]
+        if using_separate_inputs:
+            command.extend([
+                "--protein_file", protein_file_path,
+                "--ligand_file", ligand_file_path,
+            ])
+        else:
+            command.extend(["--input", input_file_path])
 
         target_chain = score_args.get('target_chain') or (detected_target_chain if using_separate_inputs else None)
         ligand_chain = score_args.get('ligand_chain')
@@ -1044,6 +1027,11 @@ def boltz2score_task(self, score_args: dict):
         output_archive_path = os.path.join(task_temp_dir, f"{task_id}_results.zip")
         with zipfile.ZipFile(output_archive_path, 'w') as zipf:
             for root, _, files in os.walk(output_dir):
+                rel_root = os.path.relpath(root, output_dir)
+                if rel_root == os.path.join("affinity", "work") or rel_root.startswith(
+                    os.path.join("affinity", "work") + os.sep
+                ):
+                    continue
                 for file in files:
                     file_path = os.path.join(root, file)
                     arcname = os.path.relpath(file_path, output_dir)

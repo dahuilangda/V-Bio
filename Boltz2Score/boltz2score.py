@@ -63,7 +63,7 @@ def _extract_atom_preferred_name(atom: Chem.Atom) -> str:
 
 
 def _ensure_unique_ligand_atom_names(mol: Chem.Mol) -> tuple[Chem.Mol, int]:
-    """Normalize ligand atom names and enforce uniqueness within 4 characters."""
+    """Normalize ligand atom names while preserving source naming as much as possible."""
     used: set[str] = set()
     fallback_serial = 1
     renamed = 0
@@ -71,12 +71,12 @@ def _ensure_unique_ligand_atom_names(mol: Chem.Mol) -> tuple[Chem.Mol, int]:
     for atom in mol.GetAtoms():
         preferred_raw = _extract_atom_preferred_name(atom)
         preferred = _normalize_atom_name(preferred_raw)
-        candidate = preferred[:4] if preferred else ""
+        candidate = preferred
 
         if not candidate or candidate in used:
             prefix = _normalize_atom_name(atom.GetSymbol())[:1] or "X"
             while True:
-                suffix = _to_base36(fallback_serial).rjust(3, "0")[-3:]
+                suffix = _to_base36(fallback_serial).rjust(4, "0")
                 fallback_serial += 1
                 candidate = f"{prefix}{suffix}"
                 if candidate not in used:
@@ -92,6 +92,24 @@ def _ensure_unique_ligand_atom_names(mol: Chem.Mol) -> tuple[Chem.Mol, int]:
     return mol, renamed
 
 
+def _snapshot_conformer_positions(mol: Chem.Mol) -> list[tuple[float, float, float]]:
+    if mol.GetNumConformers() == 0:
+        return []
+    conf = mol.GetConformer()
+    return [
+        (float(conf.GetAtomPosition(i).x), float(conf.GetAtomPosition(i).y), float(conf.GetAtomPosition(i).z))
+        for i in range(mol.GetNumAtoms())
+    ]
+
+
+def _restore_conformer_positions(mol: Chem.Mol, positions: list[tuple[float, float, float]]) -> None:
+    if not positions or mol.GetNumConformers() == 0 or len(positions) != mol.GetNumAtoms():
+        return
+    conf = mol.GetConformer()
+    for idx, (x, y, z) in enumerate(positions):
+        conf.SetAtomPosition(idx, (x, y, z))
+
+
 def _load_ligand_from_file(ligand_path: Path):
     """Load ligand from various file formats, preserving original atom names and coordinates."""
     ligand_path = Path(ligand_path)
@@ -101,7 +119,15 @@ def _load_ligand_from_file(ligand_path: Path):
         with open(ligand_path) as f:
             mol2_content = f.read()
 
-        mol = Chem.MolFromMol2Block(mol2_content, sanitize=False, removeHs=False)
+        try:
+            mol = Chem.MolFromMol2Block(
+                mol2_content,
+                sanitize=False,
+                removeHs=False,
+                cleanupSubstructures=False,
+            )
+        except TypeError:
+            mol = Chem.MolFromMol2Block(mol2_content, sanitize=False, removeHs=False)
         if mol is None:
             raise ValueError(f"Failed to read MOL2 file: {ligand_path}")
 
@@ -129,25 +155,67 @@ def _load_ligand_from_file(ligand_path: Path):
                 atom.SetProp("_original_atom_name", atom_name)
                 atom.SetProp("name", atom_name)
 
+        original_positions = _snapshot_conformer_positions(mol)
+        if not original_positions:
+            raise ValueError(f"MOL2 ligand has no 3D conformer: {ligand_path}")
         mol, renamed = _ensure_unique_ligand_atom_names(mol)
+        _restore_conformer_positions(mol, original_positions)
         print(f"Loaded ligand from MOL2: {mol.GetNumAtoms()} atoms (renamed: {renamed})")
         return mol
 
     elif ligand_path.suffix.lower() in {'.sdf', '.sd'}:
         # Read SDF file
-        mol = Chem.MolFromMolFile(str(ligand_path), sanitize=False, removeHs=False)
+        supplier = Chem.SDMolSupplier(
+            str(ligand_path),
+            sanitize=False,
+            removeHs=False,
+            strictParsing=False,
+        )
+        mol = next((m for m in supplier if m is not None), None)
         if mol is None:
             raise ValueError(f"Failed to read SDF file: {ligand_path}")
+        original_positions = _snapshot_conformer_positions(mol)
+        if not original_positions:
+            raise ValueError(f"SDF ligand has no 3D conformer: {ligand_path}")
         mol, renamed = _ensure_unique_ligand_atom_names(mol)
+        _restore_conformer_positions(mol, original_positions)
         print(f"Loaded ligand from SDF: {mol.GetNumAtoms()} atoms (renamed: {renamed})")
+        return mol
+
+    elif ligand_path.suffix.lower() == '.mol':
+        mol = Chem.MolFromMolFile(str(ligand_path), sanitize=False, removeHs=False)
+        if mol is None:
+            raise ValueError(f"Failed to read MOL file: {ligand_path}")
+        original_positions = _snapshot_conformer_positions(mol)
+        if not original_positions:
+            raise ValueError(f"MOL ligand has no 3D conformer: {ligand_path}")
+        mol, renamed = _ensure_unique_ligand_atom_names(mol)
+        _restore_conformer_positions(mol, original_positions)
+        print(f"Loaded ligand from MOL: {mol.GetNumAtoms()} atoms (renamed: {renamed})")
         return mol
 
     elif ligand_path.suffix.lower() in {'.pdb', '.ent'}:
         # Read PDB file
-        mol = Chem.MolFromPDBFile(str(ligand_path), removeHs=False)
+        try:
+            mol = Chem.MolFromPDBFile(
+                str(ligand_path),
+                removeHs=False,
+                sanitize=False,
+                proximityBonding=False,
+            )
+        except TypeError:
+            mol = Chem.MolFromPDBFile(
+                str(ligand_path),
+                removeHs=False,
+                sanitize=False,
+            )
         if mol is None:
             raise ValueError(f"Failed to read PDB file: {ligand_path}")
+        original_positions = _snapshot_conformer_positions(mol)
+        if not original_positions:
+            raise ValueError(f"PDB ligand has no 3D conformer: {ligand_path}")
         mol, renamed = _ensure_unique_ligand_atom_names(mol)
+        _restore_conformer_positions(mol, original_positions)
         print(f"Loaded ligand from PDB: {mol.GetNumAtoms()} atoms (renamed: {renamed})")
         return mol
 
@@ -478,6 +546,7 @@ def _run_affinity(
     devices: int,
     affinity_refine: bool = False,
     seed: int | None = None,
+    work_dir: Path | None = None,
 ) -> Optional[dict]:
     try:
         import sys
@@ -502,8 +571,9 @@ def _run_affinity(
     os.environ["BOLTZ_CACHE"] = str(cache_dir)
 
     affinity_out = output_dir / "affinity"
-    affinity_work = affinity_out / "work"
+    affinity_work = (work_dir / "affinity_work") if work_dir else (affinity_out / "work")
     affinity_out.mkdir(parents=True, exist_ok=True)
+    affinity_work.mkdir(parents=True, exist_ok=True)
 
     boltzina = Boltzina(
         output_dir=str(affinity_out),
@@ -754,6 +824,8 @@ def main() -> None:
         )
         cleanup = not args.keep_work
 
+    preloaded_custom_mols: dict[str, Chem.Mol] | None = None
+
     # Check for separate protein and ligand file mode
     if args.protein_file and args.ligand_file:
         # Separate input mode: combine protein and ligand files
@@ -776,6 +848,7 @@ def main() -> None:
         ligand_mol = _load_ligand_from_file(ligand_path)
         if ligand_mol is None:
             raise ValueError(f"Failed to load ligand from {ligand_path}")
+        preloaded_custom_mols = {"LIG": Chem.Mol(ligand_mol)}
 
         # Read protein structure
         if protein_path.suffix.lower() in {'.pdb', '.ent'}:
@@ -921,6 +994,7 @@ def main() -> None:
         out_dir=work_dir,
         cache_dir=cache_dir,
         recursive=False,
+        preloaded_custom_mols=preloaded_custom_mols,
     )
 
     # Run scoring
@@ -964,6 +1038,7 @@ def main() -> None:
             devices=args.devices,
             affinity_refine=args.affinity_refine,
             seed=args.seed,
+            work_dir=work_dir,
         )
 
     if cleanup:
