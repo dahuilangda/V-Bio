@@ -70,8 +70,17 @@ start_celery() {
 # Function to start the Streamlit frontend
 start_frontend() {
     echo "Starting Streamlit frontend..."
+    local streamlit_addr="0.0.0.0"
+    local streamlit_port="8501"
+    local host_ip
+    host_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
     cd frontend
-    streamlit run app.py --server.port=8501 --server.address=0.0.0.0
+    echo "Streamlit bind address: ${streamlit_addr}:${streamlit_port}"
+    if [ -n "$host_ip" ]; then
+        echo "Access URL: http://${host_ip}:${streamlit_port}"
+    fi
+    echo "Local URL: http://localhost:${streamlit_port}"
+    streamlit run app.py --server.port="${streamlit_port}" --server.address="${streamlit_addr}"
 }
 
 # Function to start automatic task monitoring and cleanup
@@ -219,12 +228,16 @@ case "$1" in
         
         # 5. Start frontend in the background
         echo "Starting Streamlit frontend in background..."
+        STREAMLIT_BIND_ADDRESS="0.0.0.0"
+        STREAMLIT_PORT="8501"
         cd frontend
-        nohup streamlit run app.py --server.port=8501 --server.address=0.0.0.0 > ../streamlit.log 2>&1 &
+        nohup streamlit run app.py --server.port="${STREAMLIT_PORT}" --server.address="${STREAMLIT_BIND_ADDRESS}" > ../streamlit.log 2>&1 &
         cd ..
-        
+
         echo "All services started. Check flask.log, celery.log, monitor.log, and streamlit.log for output."
-        echo "Access the web interface at: http://localhost:8501"
+        HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+        [ -n "$HOST_IP" ] && echo "Access the web interface at: http://${HOST_IP}:${STREAMLIT_PORT}"
+        echo "Access the web interface at: http://localhost:${STREAMLIT_PORT}"
         echo "Run 'tail -f monitor.log' to monitor task cleanup activities."
         ;;
     dev)
@@ -253,8 +266,11 @@ case "$1" in
         sleep 3
         
         # 5. Start frontend in foreground
+        STREAMLIT_PORT="8501"
+        HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
         echo "Starting Streamlit frontend..."
-        echo "Access the web interface at: http://localhost:8501"
+        [ -n "$HOST_IP" ] && echo "Access the web interface at: http://${HOST_IP}:${STREAMLIT_PORT}"
+        echo "Access the web interface at: http://localhost:${STREAMLIT_PORT}"
         start_frontend
         ;;
     status)
