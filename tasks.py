@@ -55,6 +55,46 @@ PROGRESS_TTL_SECONDS = 3600
 PROGRESS_UPDATE_INTERVAL = 20
 SCREENING_TASK_TIMEOUT = 12 * 3600
 OPTIMIZATION_TASK_TIMEOUT = 12 * 3600
+MAX_STATUS_DETAILS_CHARS = 4_000
+MAX_EXCEPTION_MESSAGE_CHARS = 20_000
+MAX_TRACEBACK_CHARS = 40_000
+MAX_STDIO_TAIL_CHARS = 12_000
+
+
+def _truncate_text(value, limit: int, *, prefer_tail: bool = False) -> str:
+    """Return a bounded-length string representation for Redis/Celery metadata."""
+    text = "" if value is None else str(value)
+    if limit <= 0 or len(text) <= limit:
+        return text
+
+    marker = f"\n...[truncated {len(text) - limit} chars]...\n"
+    if len(marker) >= limit:
+        return text[-limit:] if prefer_tail else text[:limit]
+
+    keep = limit - len(marker)
+    if prefer_tail:
+        return marker + text[-keep:]
+    return text[:keep] + marker
+
+
+def _format_subprocess_failure(task_label: str, task_id: str, returncode: int, stderr: str, stdout: str) -> str:
+    """Build bounded subprocess failure message to avoid oversized backend payloads."""
+    stderr_tail = _truncate_text(stderr, MAX_STDIO_TAIL_CHARS, prefer_tail=True)
+    stdout_tail = _truncate_text(stdout, MAX_STDIO_TAIL_CHARS, prefer_tail=True)
+    return (
+        f"Subprocess for {task_label} {task_id} failed with exit code {returncode}.\n"
+        f"Stderr (tail):\n{stderr_tail}\n"
+        f"Stdout (tail):\n{stdout_tail}"
+    )
+
+
+def _build_failure_meta(error: Exception) -> dict:
+    """Create bounded Celery FAILURE meta payload."""
+    return {
+        'exc_type': type(error).__name__,
+        'exc_message': _truncate_text(error, MAX_EXCEPTION_MESSAGE_CHARS),
+        'traceback': _truncate_text(traceback.format_exc(), MAX_TRACEBACK_CHARS),
+    }
 
 
 class TaskProgressTracker:
@@ -106,7 +146,7 @@ class TaskProgressTracker:
             status_data = {
                 "status": status,
                 "timestamp": datetime.now().isoformat(),
-                "details": details
+                "details": _truncate_text(details, MAX_STATUS_DETAILS_CHARS)
             }
             self.redis_client.setex(self.status_key, 3600, json.dumps(status_data))
             logger.info(f"Task {self.task_id}: Status updated to {status}")
@@ -462,14 +502,15 @@ def predict_task(self, predict_args: dict):
             stdout, stderr = process.communicate()
             error_message = (
                 f"Subprocess for task {task_id} timed out after {SUBPROCESS_TIMEOUT} seconds.\n"
-                f"Stderr:\n{stderr}\nStdout:\n{stdout}"
+                f"Stderr (tail):\n{_truncate_text(stderr, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}\n"
+                f"Stdout (tail):\n{_truncate_text(stdout, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}"
             )
             logger.error(error_message)
             tracker.update_status("timeout", f"Process timeout after {SUBPROCESS_TIMEOUT}s")
             raise TimeoutError(error_message) from e
 
         if process.returncode != 0:
-            error_message = f"Subprocess for task {task_id} failed with exit code {process.returncode}.\nStderr:\n{stderr}\nStdout:\n{stdout}"
+            error_message = _format_subprocess_failure("task", task_id, process.returncode, stderr, stdout)
             logger.error(error_message)
             tracker.update_status("failed", f"Process failed with exit code {process.returncode}")
             raise RuntimeError(error_message)
@@ -503,12 +544,8 @@ def predict_task(self, predict_args: dict):
     except Exception as e:
         logger.error(f"Task {task_id} failed: {e}", exc_info=True)
         if tracker:
-            tracker.update_status("failed", str(e))
-        self.update_state(state='FAILURE', meta={
-            'exc_type': type(e).__name__,
-            'exc_message': str(e),
-            'traceback': traceback.format_exc(),
-        })
+            tracker.update_status("failed", _truncate_text(e, MAX_STATUS_DETAILS_CHARS))
+        self.update_state(state='FAILURE', meta=_build_failure_meta(e))
         raise e
 
     finally:
@@ -801,14 +838,15 @@ def affinity_task(self, affinity_args: dict):
             stdout, stderr = process.communicate()
             error_message = (
                 f"Subprocess for affinity task {task_id} timed out after {SUBPROCESS_TIMEOUT} seconds.\n"
-                f"Stderr:\n{stderr}\nStdout:\n{stdout}"
+                f"Stderr (tail):\n{_truncate_text(stderr, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}\n"
+                f"Stdout (tail):\n{_truncate_text(stdout, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}"
             )
             logger.error(error_message)
             tracker.update_status("timeout", f"Process timeout after {SUBPROCESS_TIMEOUT}s")
             raise TimeoutError(error_message) from e
 
         if process.returncode != 0:
-            error_message = f"Subprocess for affinity task {task_id} failed with exit code {process.returncode}.\nStderr:\n{stderr}\nStdout:\n{stdout}"
+            error_message = _format_subprocess_failure("affinity task", task_id, process.returncode, stderr, stdout)
             logger.error(error_message)
             tracker.update_status("failed", f"Process failed with exit code {process.returncode}")
             raise RuntimeError(error_message)
@@ -896,12 +934,8 @@ def affinity_task(self, affinity_args: dict):
     except Exception as e:
         logger.error(f"Task {task_id} failed: {e}", exc_info=True)
         if tracker:
-            tracker.update_status("failed", str(e))
-        self.update_state(state='FAILURE', meta={
-            'exc_type': type(e).__name__,
-            'exc_message': str(e),
-            'traceback': traceback.format_exc(),
-        })
+            tracker.update_status("failed", _truncate_text(e, MAX_STATUS_DETAILS_CHARS))
+        self.update_state(state='FAILURE', meta=_build_failure_meta(e))
         raise e
 
     finally:
@@ -1070,14 +1104,15 @@ def boltz2score_task(self, score_args: dict):
             stdout, stderr = process.communicate()
             error_message = (
                 f"Subprocess for Boltz2Score task {task_id} timed out after {SUBPROCESS_TIMEOUT} seconds.\n"
-                f"Stderr:\n{stderr}\nStdout:\n{stdout}"
+                f"Stderr (tail):\n{_truncate_text(stderr, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}\n"
+                f"Stdout (tail):\n{_truncate_text(stdout, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}"
             )
             logger.error(error_message)
             tracker.update_status("timeout", f"Process timeout after {SUBPROCESS_TIMEOUT}s")
             raise TimeoutError(error_message) from e
 
         if process.returncode != 0:
-            error_message = f"Subprocess for Boltz2Score task {task_id} failed with exit code {process.returncode}.\nStderr:\n{stderr}\nStdout:\n{stdout}"
+            error_message = _format_subprocess_failure("Boltz2Score task", task_id, process.returncode, stderr, stdout)
             logger.error(error_message)
             tracker.update_status("failed", f"Process failed with exit code {process.returncode}")
             raise RuntimeError(error_message)
@@ -1126,12 +1161,8 @@ def boltz2score_task(self, score_args: dict):
     except Exception as e:
         logger.error(f"Task {task_id} failed: {e}", exc_info=True)
         if tracker:
-            tracker.update_status("failed", str(e))
-        self.update_state(state='FAILURE', meta={
-            'exc_type': type(e).__name__,
-            'exc_message': str(e),
-            'traceback': traceback.format_exc(),
-        })
+            tracker.update_status("failed", _truncate_text(e, MAX_STATUS_DETAILS_CHARS))
+        self.update_state(state='FAILURE', meta=_build_failure_meta(e))
         raise e
 
     finally:
@@ -1301,16 +1332,12 @@ def virtual_screening_task(self, screening_args: dict):
     except Exception as e:
         logger.error(f"Task {task_id} failed: {e}", exc_info=True)
         if tracker:
-            tracker.update_status("failed", str(e))
-        self.update_state(state='FAILURE', meta={
-            'exc_type': type(e).__name__,
-            'exc_message': str(e),
-            'traceback': traceback.format_exc(),
-        })
+            tracker.update_status("failed", _truncate_text(e, MAX_STATUS_DETAILS_CHARS))
+        self.update_state(state='FAILURE', meta=_build_failure_meta(e))
         failed_payload = {
             "task_id": task_id,
             "status": "failed",
-            "error": str(e),
+            "error": _truncate_text(e, MAX_EXCEPTION_MESSAGE_CHARS),
             "failed_at": datetime.now().isoformat()
         }
         _store_progress(redis_client, progress_key, failed_payload)
@@ -1529,16 +1556,12 @@ def lead_optimization_task(self, optimization_args: dict):
     except Exception as e:
         logger.error(f"Task {task_id} failed: {e}", exc_info=True)
         if tracker:
-            tracker.update_status("failed", str(e))
-        self.update_state(state='FAILURE', meta={
-            'exc_type': type(e).__name__,
-            'exc_message': str(e),
-            'traceback': traceback.format_exc(),
-        })
+            tracker.update_status("failed", _truncate_text(e, MAX_STATUS_DETAILS_CHARS))
+        self.update_state(state='FAILURE', meta=_build_failure_meta(e))
         failed_payload = {
             "task_id": task_id,
             "status": "failed",
-            "error": str(e),
+            "error": _truncate_text(e, MAX_EXCEPTION_MESSAGE_CHARS),
             "failed_at": datetime.now().isoformat()
         }
         _store_progress(redis_client, progress_key, failed_payload)

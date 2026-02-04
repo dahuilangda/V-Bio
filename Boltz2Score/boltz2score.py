@@ -46,6 +46,16 @@ def _normalize_atom_name(name: str) -> str:
     return "".join(ch for ch in name.strip().upper() if ch.isalnum())
 
 
+def _fit_atom_name_4chars(name: str) -> str:
+    """Normalize atom name to <=4 chars to match gemmi/PDB atom-name constraints."""
+    normalized = _normalize_atom_name(name)
+    if len(normalized) <= 4:
+        return normalized
+    # Keep element-ish prefix and the right-most chars for uniqueness.
+    prefix = normalized[:1]
+    return f"{prefix}{normalized[-3:]}"
+
+
 def _extract_atom_preferred_name(atom: Chem.Atom) -> str:
     if atom.HasProp("_original_atom_name"):
         return atom.GetProp("_original_atom_name")
@@ -70,13 +80,14 @@ def _ensure_unique_ligand_atom_names(mol: Chem.Mol) -> tuple[Chem.Mol, int]:
 
     for atom in mol.GetAtoms():
         preferred_raw = _extract_atom_preferred_name(atom)
-        preferred = _normalize_atom_name(preferred_raw)
+        preferred = _fit_atom_name_4chars(preferred_raw)
         candidate = preferred
 
         if not candidate or candidate in used:
             prefix = _normalize_atom_name(atom.GetSymbol())[:1] or "X"
             while True:
-                suffix = _to_base36(fallback_serial).rjust(4, "0")
+                # Atom names must fit 4 chars: 1-char prefix + 3-char serial.
+                suffix = _to_base36(fallback_serial).rjust(3, "0")[-3:]
                 fallback_serial += 1
                 candidate = f"{prefix}{suffix}"
                 if candidate not in used:
