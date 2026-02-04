@@ -9,6 +9,7 @@ import streamlit as st
 from frontend.prediction_client import (
     predict_boltz2score,
     predict_boltz2score_separate,
+    predict_boltz2score_smiles,
     get_status,
     download_and_process_results,
 )
@@ -30,12 +31,11 @@ def _format_metric_value(value, precision: int = 2) -> str:
 
 
 def _pair_iptm_rows(confidence_data: dict, chain_map: dict) -> list[dict]:
-    pair_rows = []
     pair_map = confidence_data.get("pair_chains_iptm")
     if not isinstance(pair_map, dict):
-        return pair_rows
+        return []
 
-    seen_pairs = set()
+    pair_scores: dict[tuple[str, str], float] = {}
     for chain_a, chain_b_map in pair_map.items():
         if not isinstance(chain_b_map, dict):
             continue
@@ -43,17 +43,17 @@ def _pair_iptm_rows(confidence_data: dict, chain_map: dict) -> list[dict]:
             if chain_a == chain_b or not isinstance(value, (int, float)):
                 continue
             pair_key = tuple(sorted((str(chain_a), str(chain_b))))
-            if pair_key in seen_pairs:
-                continue
-            seen_pairs.add(pair_key)
+            pair_scores[pair_key] = max(pair_scores.get(pair_key, float("-inf")), float(value))
 
-            label_a = chain_map.get(str(chain_a), str(chain_a))
-            label_b = chain_map.get(str(chain_b), str(chain_b))
-            pair_rows.append({
-                "chain_a": label_a,
-                "chain_b": label_b,
-                "pair_ipTM": float(value),
-            })
+    pair_rows = []
+    for chain_a, chain_b in sorted(pair_scores.keys()):
+        label_a = chain_map.get(str(chain_a), str(chain_a))
+        label_b = chain_map.get(str(chain_b), str(chain_b))
+        pair_rows.append({
+            "chain_a": label_a,
+            "chain_b": label_b,
+            "pair_ipTM": pair_scores[(chain_a, chain_b)],
+        })
 
     return sorted(pair_rows, key=lambda row: row["pair_ipTM"], reverse=True)
 
@@ -84,7 +84,10 @@ def render_affinity_page():
     with st.expander("📤 上传结构文件", expanded=not is_running and st.session_state.affinity_results is None):
         input_mode = st.radio(
             "输入方式",
-            ["复合物文件 (PDB/CIF)", "蛋白 + 小分子 (PDB/CIF + SDF/MOL2/PDB)"],
+            [
+                "复合物文件 (PDB/CIF)",
+                "蛋白 + 小分子 (PDB/CIF + SDF/MOL2/PDB)",
+            ],
             horizontal=True,
             disabled=is_running,
             key="affinity_input_mode",
@@ -93,9 +96,12 @@ def render_affinity_page():
         uploaded_file = None
         protein_file = None
         ligand_file = None
+        ligand_smiles = ""
+        ligand_smiles_map_submit: dict[str, str] = {}
         output_prefix = "complex"
         target_chain_str = ""
         ligand_chain_str = ""
+        complex_has_ligand = False
 
         if input_mode.startswith("复合物文件"):
             uploaded_file = st.file_uploader(
@@ -114,6 +120,7 @@ def render_affinity_page():
                 all_chains = chain_info.get("all_chains", [])
                 protein_chains = chain_info.get("polymer_chains", [])
                 ligand_chains = chain_info.get("ligand_chains", [])
+                complex_has_ligand = bool(ligand_chains)
 
                 st.caption(
                     f"检测到链：{', '.join(all_chains) if all_chains else '未检测到'}"
@@ -155,7 +162,25 @@ def render_affinity_page():
                         target_chain_str = manual_target.strip()
                     if manual_ligand.strip():
                         ligand_chain_str = manual_ligand.strip()
-        else:
+                if complex_has_ligand:
+                    for cid in ligand_chains:
+                        smi = st.text_input(
+                            f"配体链 {cid} 的 SMILES（可选）",
+                            value="",
+                            disabled=is_running,
+                            key=f"affinity_optional_ligand_smiles_complex_{cid}",
+                        ).strip()
+                        if smi:
+                            ligand_smiles_map_submit[str(cid)] = smi
+                else:
+                    ligand_smiles = st.text_area(
+                        "配体 SMILES（可选）",
+                        value="",
+                        disabled=is_running,
+                        key="affinity_optional_ligand_smiles_complex",
+                        help="例如：N#CC1CCCC1OC(=O)Nc1cc2cc(c3cnc4OCCNc4c3C)c(F)c(N)c2cn1",
+                    ).strip()
+        elif input_mode.startswith("蛋白 + 小分子"):
             protein_file = st.file_uploader(
                 "蛋白结构文件 (PDB/CIF)",
                 type=['pdb', 'cif'],
@@ -175,6 +200,15 @@ def render_affinity_page():
                 help="用于生成复合物文件名，例如 my_dock",
                 key="affinity_output_prefix",
             )
+            ligand_smiles = st.text_area(
+                "配体链 L 的 SMILES（可选）",
+                value="",
+                disabled=is_running,
+                key="affinity_optional_ligand_smiles_separate",
+                help="可选。用于按链校正拓扑信息，不会替代上传的配体坐标。",
+            ).strip()
+            if ligand_smiles:
+                ligand_smiles_map_submit["L"] = ligand_smiles
             st.caption("系统会保留原始坐标并生成复合物，蛋白链默认保留原链名（缺失则设为 A）；配体链为 L。")
             st.caption("建议使用 SDF/MOL2 以保留键连接信息；若使用 PDB，请确保包含 CONECT，否则可能导致置信度偏低。")
 
@@ -192,7 +226,7 @@ def render_affinity_page():
             if files_ready and ligand_chain_str and not target_chain_str:
                 st.warning("已指定配体链，但未指定 target 链；请补充 target 链或清空配体链。")
                 files_ready = False
-        else:
+        elif input_mode.startswith("蛋白 + 小分子"):
             files_ready = protein_file is not None and ligand_file is not None
 
         if st.button("🚀 开始预测", key="start_affinity", type="primary", disabled=is_running or not files_ready, use_container_width=True):
@@ -207,14 +241,27 @@ def render_affinity_page():
                     if input_mode.startswith("复合物文件"):
                         uploaded_file.seek(0)
                         file_content = uploaded_file.getvalue().decode("utf-8")
-                        task_id = predict_boltz2score(
-                            file_content,
-                            uploaded_file.name,
-                            target_chain=target_chain_str or None,
-                            ligand_chain=ligand_chain_str or None,
-                            affinity_refine=affinity_refine,
-                        )
-                    else:
+                        if ligand_smiles and not complex_has_ligand:
+                            task_id = predict_boltz2score_smiles(
+                                uploaded_file.getvalue(),
+                                uploaded_file.name,
+                                ligand_smiles,
+                                output_prefix=output_prefix or "complex",
+                                affinity_refine=affinity_refine,
+                                target_chain=target_chain_str or None,
+                                ligand_chain="L",
+                                ligand_smiles_map={"L": ligand_smiles},
+                            )
+                        else:
+                            task_id = predict_boltz2score(
+                                file_content,
+                                uploaded_file.name,
+                                target_chain=target_chain_str or None,
+                                ligand_chain=ligand_chain_str or None,
+                                affinity_refine=affinity_refine,
+                                ligand_smiles_map=ligand_smiles_map_submit or None,
+                            )
+                    elif input_mode.startswith("蛋白 + 小分子"):
                         protein_file.seek(0)
                         ligand_file.seek(0)
                         task_id = predict_boltz2score_separate(
@@ -224,6 +271,7 @@ def render_affinity_page():
                             ligand_file.name,
                             output_prefix=output_prefix or "complex",
                             affinity_refine=affinity_refine,
+                            ligand_smiles_map=ligand_smiles_map_submit or None,
                         )
                     st.session_state.affinity_task_id = task_id
                     URLStateManager.update_url_for_affinity_task(task_id)
@@ -427,7 +475,10 @@ def render_affinity_page():
                         use_container_width=True,
                     )
 
-                all_json_data = {"confidence": confidence_data, "affinity": affinity_data}
+                all_json_data = {
+                    "confidence": confidence_data,
+                    "affinity": affinity_data,
+                }
                 st.download_button(
                     label="📥 下载预测指标 JSON",
                     data=json.dumps(all_json_data, indent=2, ensure_ascii=False),

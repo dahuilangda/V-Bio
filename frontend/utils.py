@@ -753,7 +753,9 @@ def visualize_structure_py3dmol(
                     serial = atom.get_serial_number()
                     bfactor = atom.get_bfactor()
                     color = get_color_from_bfactor(bfactor)
-                    ligand_color_map[serial-1] = color
+                    if isinstance(serial, int) and serial > 0:
+                        # py3Dmol 'serial' property is 0-based index.
+                        ligand_color_map[serial - 1] = color
         except Exception as e:
             print(f"Error parsing CIF for ligand coloring: {e}")
         
@@ -856,23 +858,23 @@ def get_pair_iptm_from_confidence(
     if not confidence_data or not chain_a or not chain_b or chain_a == chain_b:
         return None
 
+    candidate_values: list[float] = []
+
+    def _collect(value) -> None:
+        if isinstance(value, (int, float)):
+            candidate_values.append(float(value))
+
     pair_map = confidence_data.get("pair_chains_iptm")
     if isinstance(pair_map, dict):
-        direct = pair_map.get(chain_a, {}).get(chain_b)
-        if isinstance(direct, (int, float)):
-            return float(direct)
-        reverse = pair_map.get(chain_b, {}).get(chain_a)
-        if isinstance(reverse, (int, float)):
-            return float(reverse)
+        _collect(pair_map.get(chain_a, {}).get(chain_b))
+        _collect(pair_map.get(chain_b, {}).get(chain_a))
         if chain_order and chain_a in chain_order and chain_b in chain_order:
             idx_a = str(chain_order.index(chain_a))
             idx_b = str(chain_order.index(chain_b))
-            direct = pair_map.get(idx_a, {}).get(idx_b)
-            if isinstance(direct, (int, float)):
-                return float(direct)
-            reverse = pair_map.get(idx_b, {}).get(idx_a)
-            if isinstance(reverse, (int, float)):
-                return float(reverse)
+            _collect(pair_map.get(idx_a, {}).get(idx_b))
+            _collect(pair_map.get(idx_b, {}).get(idx_a))
+        if candidate_values:
+            return max(candidate_values)
 
     pair_matrix = confidence_data.get("chain_pair_iptm")
     if isinstance(pair_matrix, list) and pair_matrix:
@@ -881,17 +883,15 @@ def get_pair_iptm_from_confidence(
             idx_a = order.index(chain_a)
             idx_b = order.index(chain_b)
             try:
-                value = pair_matrix[idx_a][idx_b]
+                _collect(pair_matrix[idx_a][idx_b])
             except (IndexError, TypeError):
-                value = None
-            if isinstance(value, (int, float)):
-                return float(value)
+                pass
             try:
-                value = pair_matrix[idx_b][idx_a]
+                _collect(pair_matrix[idx_b][idx_a])
             except (IndexError, TypeError):
-                value = None
-            if isinstance(value, (int, float)):
-                return float(value)
+                pass
+            if candidate_values:
+                return max(candidate_values)
 
     return None
 

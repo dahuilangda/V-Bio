@@ -11,6 +11,7 @@ import tempfile
 from typing import Iterable, List, Tuple
 
 from rdkit import Chem
+from rdkit.Chem import AllChem
 from rdkit.Chem import rdDetermineBonds
 
 from boltz.main import get_cache_path
@@ -113,26 +114,76 @@ def _has_non_single_bonds(mol: Chem.Mol) -> bool:
 def _assign_bond_orders(mol: Chem.Mol) -> Chem.Mol:
     """Try to assign bond orders; fall back gracefully if not possible."""
     base = Chem.Mol(mol)
+    charge_sweep = (-8, -6, -4, -2, 0, 2, 4, 6, 8)
 
-    try:
-        candidate = Chem.Mol(base)
-        rdDetermineBonds.DetermineBonds(candidate)
-        if _has_non_single_bonds(candidate):
-            return candidate
-    except Exception:
-        pass
+    def _score(candidate: Chem.Mol) -> tuple[int, int]:
+        non_single = sum(
+            1
+            for bond in candidate.GetBonds()
+            if bond.GetBondType() not in (Chem.rdchem.BondType.SINGLE,)
+        )
+        return non_single, candidate.GetNumBonds()
 
-    # If all bonds are single, try a small charge sweep to recover bond orders.
-    for charge in (-8, -6, -4, -2, 0, 2, 4, 6, 8):
+    def _try_determine_bonds(candidate: Chem.Mol, **kwargs) -> Chem.Mol:
+        """Run DetermineBonds but keep partially assigned bonds on recoverable failures."""
         try:
-            candidate = Chem.Mol(base)
-            rdDetermineBonds.DetermineBonds(candidate, charge=charge)
+            rdDetermineBonds.DetermineBonds(candidate, **kwargs)
         except Exception:
-            continue
+            # RDKit may raise after assigning useful connectivity/bond orders
+            # (e.g. charge mismatch). Keep the candidate for scoring.
+            pass
+        return candidate
+
+    candidate = Chem.Mol(base)
+    candidate = _try_determine_bonds(candidate)
+    if _has_non_single_bonds(candidate):
+        return candidate
+    if candidate.GetNumBonds() > 0:
+        base = candidate
+
+    # If all bonds are single (or assignment failed), try a small charge sweep.
+    best = Chem.Mol(base)
+    best_score = _score(best)
+    for charge in charge_sweep:
+        candidate = Chem.Mol(base)
+        candidate = _try_determine_bonds(candidate, charge=charge)
+        cand_score = _score(candidate)
+        if cand_score > best_score:
+            best = candidate
+            best_score = cand_score
         if _has_non_single_bonds(candidate):
             return candidate
 
-    return base
+    if best.GetNumBonds() > 0:
+        return best
+
+    # Final fallback for coordinate-only ligands:
+    # determine at least bond connectivity, then try to upgrade bond orders.
+    try:
+        connected = Chem.Mol(base)
+        rdDetermineBonds.DetermineConnectivity(connected)
+        if connected.GetNumBonds() == 0:
+            return base
+
+        best_conn = Chem.Mol(connected)
+        best_conn_score = _score(best_conn)
+        for charge in charge_sweep:
+            candidate = Chem.Mol(connected)
+            try:
+                rdDetermineBonds.DetermineBondOrders(candidate, charge=charge)
+            except Exception:
+                # Keep candidate; DetermineBondOrders can partially assign before error.
+                pass
+            cand_score = _score(candidate)
+            if cand_score > best_conn_score:
+                best_conn = candidate
+                best_conn_score = cand_score
+            if _has_non_single_bonds(candidate):
+                return candidate
+
+        return best_conn
+    except Exception:
+        return base
 
 
 def _build_custom_ligand_mol(residue: gemmi.Residue) -> Chem.Mol:
@@ -161,6 +212,51 @@ def _build_custom_ligand_mol(residue: gemmi.Residue) -> Chem.Mol:
     mol = _assign_bond_orders(mol)
 
     return mol
+
+
+def _build_custom_ligand_mol_from_smiles(
+    residue: gemmi.Residue,
+    smiles: str,
+    resname: str,
+) -> Chem.Mol | None:
+    """Build ligand topology from SMILES while preserving residue coordinates."""
+    template = Chem.MolFromSmiles((smiles or "").strip())
+    if template is None:
+        return None
+    template = Chem.RemoveHs(template)
+
+    rw_mol = Chem.RWMol()
+    atom_names = []
+    for atom in residue:
+        element = atom.element.name if atom.element.name else atom.name[:1]
+        idx = rw_mol.AddAtom(Chem.Atom(element))
+        atom_name = atom.name.strip()
+        rw_mol.GetAtomWithIdx(idx).SetProp("name", atom_name)
+        atom_names.append(atom_name)
+
+    coord_mol = rw_mol.GetMol()
+    conf = Chem.Conformer(coord_mol.GetNumAtoms())
+    for i, atom in enumerate(residue):
+        pos = atom.pos
+        conf.SetAtomPosition(i, (pos.x, pos.y, pos.z))
+    coord_mol.AddConformer(conf, assignId=True)
+
+    try:
+        candidate = Chem.Mol(coord_mol)
+        rdDetermineBonds.DetermineConnectivity(candidate)
+        assigned = AllChem.AssignBondOrdersFromTemplate(template, candidate)
+    except Exception:
+        return None
+
+    # Ensure atom name props are preserved for downstream coordinate mapping.
+    for idx, atom in enumerate(assigned.GetAtoms()):
+        if idx < len(atom_names):
+            atom.SetProp("name", atom_names[idx])
+
+    assigned.SetProp("_Name", resname)
+    assigned.SetProp("name", resname)
+    assigned.SetProp("id", resname)
+    return assigned
 
 
 def _extract_pdb_ligand_block(
@@ -291,6 +387,7 @@ def _collect_custom_ligands(
     mols: dict,
     mol_dir: Path,
     preloaded_custom_mols: dict[str, Chem.Mol] | None = None,
+    ligand_smiles_map: dict[str, str] | None = None,
 ) -> dict:
     """Collect custom ligand definitions that should override CCD entries."""
     structure = gemmi.read_structure(str(path))
@@ -329,10 +426,28 @@ def _collect_custom_ligands(
             ):
                 if resname not in custom_mols:
                     custom_mol = None
+                    chain_smiles = None
+                    if ligand_smiles_map:
+                        chain_smiles = (
+                            ligand_smiles_map.get(f"{chain.name}:{resname}")
+                            or ligand_smiles_map.get(chain.name)
+                        )
+                    if chain_smiles:
+                        custom_mol = _build_custom_ligand_mol_from_smiles(
+                            residue=residue,
+                            smiles=chain_smiles,
+                            resname=resname,
+                        )
+                        if custom_mol is not None:
+                            print(
+                                f"[Info] Applied SMILES topology override for chain {chain.name} "
+                                f"({resname})."
+                            )
                     if preloaded_custom_mols and resname in preloaded_custom_mols:
                         # Reuse preloaded ligand definition (e.g., separate-input mode)
                         # to avoid reconstructing topology from coordinates.
-                        custom_mol = Chem.Mol(preloaded_custom_mols[resname])
+                        if custom_mol is None:
+                            custom_mol = Chem.Mol(preloaded_custom_mols[resname])
                     if pdb_lines:
                         extracted = _extract_pdb_ligand_block(
                             pdb_lines=pdb_lines,
@@ -343,13 +458,25 @@ def _collect_custom_ligands(
                         )
                         if extracted:
                             pdb_block, het_lines = extracted
-                            custom_mol = _build_custom_ligand_mol_from_pdb(
-                                pdb_block=pdb_block,
-                                het_lines=het_lines,
-                                resname=resname,
-                            )
+                            if custom_mol is None:
+                                custom_mol = _build_custom_ligand_mol_from_pdb(
+                                    pdb_block=pdb_block,
+                                    het_lines=het_lines,
+                                    resname=resname,
+                                )
                     if custom_mol is None:
                         custom_mol = _build_custom_ligand_mol(residue)
+                    bond_count = custom_mol.GetNumBonds()
+                    non_single = sum(
+                        1
+                        for bond in custom_mol.GetBonds()
+                        if bond.GetBondType() not in (Chem.rdchem.BondType.SINGLE,)
+                    )
+                    print(
+                        f"[Info] Built custom ligand {resname} "
+                        f"(atoms={custom_mol.GetNumAtoms()}, bonds={bond_count}, "
+                        f"non_single_bonds={non_single})."
+                    )
                     custom_mols[resname] = custom_mol
 
     return custom_mols
@@ -477,6 +604,7 @@ def prepare_inputs(
     cache_dir: Path,
     recursive: bool,
     preloaded_custom_mols: dict[str, Chem.Mol] | None = None,
+    ligand_smiles_map: dict[str, str] | None = None,
 ) -> Tuple[Manifest, List[Path]]:
     struct_dir = out_dir / "processed" / "structures"
     records_dir = out_dir / "processed" / "records"
@@ -516,6 +644,7 @@ def prepare_inputs(
                 mols,
                 mol_dir,
                 preloaded_custom_mols=preloaded_custom_mols,
+                ligand_smiles_map=ligand_smiles_map,
             )
             if custom_mols:
                 for name, mol in custom_mols.items():

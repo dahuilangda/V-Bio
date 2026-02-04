@@ -66,6 +66,7 @@ def predict_boltz2score(
     target_chain: str | None = None,
     ligand_chain: str | None = None,
     affinity_refine: bool | None = None,
+    ligand_smiles_map: dict | None = None,
 ):
     """
     Sends a Boltz2Score request (structure confidence; optional affinity).
@@ -80,6 +81,8 @@ def predict_boltz2score(
         data['ligand_chain'] = ligand_chain
     if affinity_refine is not None:
         data['affinity_refine'] = str(bool(affinity_refine)).lower()
+    if ligand_smiles_map:
+        data['ligand_smiles_map'] = json.dumps(ligand_smiles_map, ensure_ascii=False)
 
     response = requests.post(endpoint, headers=headers, files=files, data=data)
     response.raise_for_status()
@@ -93,6 +96,7 @@ def predict_boltz2score_separate(
     ligand_filename: str,
     output_prefix: str = "complex",
     affinity_refine: bool | None = None,
+    ligand_smiles_map: dict | None = None,
 ):
     """
     Sends a Boltz2Score request with separate protein and ligand files.
@@ -109,6 +113,47 @@ def predict_boltz2score_separate(
     }
     if affinity_refine is not None:
         data['affinity_refine'] = str(bool(affinity_refine)).lower()
+    if ligand_smiles_map:
+        data['ligand_smiles_map'] = json.dumps(ligand_smiles_map, ensure_ascii=False)
+
+    response = requests.post(endpoint, headers=headers, files=files, data=data)
+    response.raise_for_status()
+    return response.json().get('task_id')
+
+
+def predict_boltz2score_smiles(
+    protein_content: bytes | str,
+    protein_filename: str,
+    ligand_smiles: str,
+    output_prefix: str = "complex",
+    affinity_refine: bool | None = None,
+    target_chain: str | None = None,
+    ligand_chain: str | None = None,
+    ligand_smiles_map: dict | None = None,
+):
+    """
+    Sends a Boltz2Score request with protein structure + ligand SMILES.
+    Backend generates a 3D ligand and merges it as separate-input mode.
+    """
+    endpoint = f"{API_URL}/api/boltz2score"
+    headers = {'X-API-Token': API_TOKEN}
+    files = {
+        'protein_file': (protein_filename, protein_content, 'application/octet-stream'),
+    }
+    data = {
+        'priority': 'default',
+        'output_prefix': output_prefix,
+        'ligand_smiles': ligand_smiles,
+        'ligand_filename': 'ligand_from_smiles.sdf',
+    }
+    if affinity_refine is not None:
+        data['affinity_refine'] = str(bool(affinity_refine)).lower()
+    if target_chain:
+        data['target_chain'] = target_chain
+    if ligand_chain:
+        data['ligand_chain'] = ligand_chain
+    if ligand_smiles_map:
+        data['ligand_smiles_map'] = json.dumps(ligand_smiles_map, ensure_ascii=False)
 
     response = requests.post(endpoint, headers=headers, files=files, data=data)
     response.raise_for_status()

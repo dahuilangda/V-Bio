@@ -409,15 +409,16 @@ def _filter_structure_by_chains(
     model = structure[0]
     existing = {chain.name for chain in model}
 
-    # Resolve auth_asym_id -> label_asym_id for CIF inputs if needed.
     resolved_keep = set()
     missing = []
-    auth_to_label = {}
-    if input_path.suffix.lower() in {".cif", ".mmcif"}:
+
+    def _load_auth_to_label_map() -> dict[str, set[str]]:
+        mapping: dict[str, set[str]] = {}
+        if input_path.suffix.lower() not in {".cif", ".mmcif"}:
+            return mapping
         try:
             doc = gemmi.cif.read(str(input_path))
             block = doc[0]
-            # struct_asym mapping
             label_col = block.find_values("_struct_asym.id")
             auth_col = block.find_values("_struct_asym.pdbx_auth_asym_id")
             if label_col and auth_col and len(label_col) == len(auth_col):
@@ -425,18 +426,10 @@ def _filter_structure_by_chains(
                     label = label_col[i]
                     auth = auth_col[i]
                     if auth and label:
-                        auth_to_label.setdefault(auth, set()).add(label)
-            # atom_site mapping fallback
-            label_col = block.find_values("_atom_site.label_asym_id")
-            auth_col = block.find_values("_atom_site.auth_asym_id")
-            if label_col and auth_col and len(label_col) == len(auth_col):
-                for i in range(len(label_col)):
-                    label = label_col[i]
-                    auth = auth_col[i]
-                    if auth and label:
-                        auth_to_label.setdefault(auth, set()).add(label)
+                        mapping.setdefault(auth, set()).add(label)
         except Exception:
-            auth_to_label = {}
+            return {}
+        return mapping
 
     def _chain_variants(value: str) -> set[str]:
         v = value.strip()
@@ -462,39 +455,46 @@ def _filter_structure_by_chains(
         return variants
 
     existing_lower = {c.lower(): c for c in existing}
-    suggestion_map: dict[str, list[str]] = {}
-    variant_map: dict[str, set[str]] = {}
-    for chain_name in existing:
-        for key in _chain_variants(chain_name):
-            variant_map.setdefault(key, set()).add(chain_name)
-    for auth_key, labels in auth_to_label.items():
-        for key in _chain_variants(auth_key):
-            variant_map.setdefault(key, set()).update(labels)
-
     for chain_id in keep:
         if chain_id in existing:
             resolved_keep.add(chain_id)
             continue
-        if chain_id in auth_to_label:
-            mapped = [c for c in auth_to_label[chain_id] if c in existing]
-            if mapped:
-                resolved_keep.update(mapped)
-                continue
         if chain_id.lower() in existing_lower:
             resolved_keep.add(existing_lower[chain_id.lower()])
             continue
-
-        variant_candidates: set[str] = set()
-        for key in _chain_variants(chain_id):
-            variant_candidates.update(variant_map.get(key, set()))
-        variant_candidates = {c for c in variant_candidates if c in existing}
-        if len(variant_candidates) == 1:
-            resolved_keep.add(next(iter(variant_candidates)))
-            continue
-        if variant_candidates:
-            suggestion_map[chain_id] = sorted(variant_candidates)
-
         missing.append(chain_id)
+
+    suggestion_map: dict[str, list[str]] = {}
+    auth_to_label: dict[str, set[str]] = {}
+    if missing:
+        auth_to_label = _load_auth_to_label_map()
+        variant_map: dict[str, set[str]] = {}
+        for chain_name in existing:
+            for key in _chain_variants(chain_name):
+                variant_map.setdefault(key, set()).add(chain_name)
+        for auth_key, labels in auth_to_label.items():
+            for key in _chain_variants(auth_key):
+                variant_map.setdefault(key, set()).update(labels)
+
+        unresolved = []
+        for chain_id in missing:
+            if chain_id in auth_to_label:
+                mapped = [c for c in auth_to_label[chain_id] if c in existing]
+                if mapped:
+                    resolved_keep.update(mapped)
+                    continue
+
+            variant_candidates: set[str] = set()
+            for key in _chain_variants(chain_id):
+                variant_candidates.update(variant_map.get(key, set()))
+            variant_candidates = {c for c in variant_candidates if c in existing}
+            if len(variant_candidates) == 1:
+                resolved_keep.add(next(iter(variant_candidates)))
+                continue
+            if variant_candidates:
+                suggestion_map[chain_id] = sorted(variant_candidates)
+            unresolved.append(chain_id)
+        missing = unresolved
 
     if missing:
         auth_keys = ", ".join(sorted(auth_to_label.keys()))
@@ -512,9 +512,9 @@ def _filter_structure_by_chains(
             f"{suggestions}"
         )
 
-    for chain in list(model):
-        if chain.name not in resolved_keep:
-            model.remove_chain(chain.name)
+    remove_names = [chain.name for chain in model if chain.name not in resolved_keep]
+    for chain_name in remove_names:
+        model.remove_chain(chain_name)
 
     structure.remove_empty_chains()
     structure.setup_entities()
@@ -792,6 +792,12 @@ def main() -> None:
         default=None,
         help="Ligand structure file (.sdf/.mol/.mol2/.pdb) for separate input mode",
     )
+    parser.add_argument(
+        "--ligand_smiles_map",
+        type=str,
+        default=None,
+        help="Optional JSON map of ligand chain (or 'chain:resname') to SMILES for topology override.",
+    )
 
     args = parser.parse_args()
 
@@ -825,6 +831,20 @@ def main() -> None:
         cleanup = not args.keep_work
 
     preloaded_custom_mols: dict[str, Chem.Mol] | None = None
+    ligand_smiles_map: dict[str, str] = {}
+    if args.ligand_smiles_map:
+        try:
+            parsed_map = json.loads(args.ligand_smiles_map)
+            if isinstance(parsed_map, dict):
+                for key, value in parsed_map.items():
+                    if not isinstance(key, str) or not isinstance(value, str):
+                        continue
+                    key = key.strip()
+                    value = value.strip()
+                    if key and value:
+                        ligand_smiles_map[key] = value
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"Invalid --ligand_smiles_map JSON: {exc}") from exc
 
     # Check for separate protein and ligand file mode
     if args.protein_file and args.ligand_file:
@@ -995,6 +1015,7 @@ def main() -> None:
         cache_dir=cache_dir,
         recursive=False,
         preloaded_custom_mols=preloaded_custom_mols,
+        ligand_smiles_map=ligand_smiles_map if ligand_smiles_map else None,
     )
 
     # Run scoring

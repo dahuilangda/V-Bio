@@ -1054,7 +1054,7 @@ def render_prediction_page():
                 pair_rows = []
                 pair_map = confidence_data.get("pair_chains_iptm")
                 if isinstance(pair_map, dict):
-                    seen_pairs = set()
+                    pair_scores = {}
                     for chain_a, chain_b_map in (pair_map or {}).items():
                         if not isinstance(chain_b_map, dict):
                             continue
@@ -1062,14 +1062,16 @@ def render_prediction_page():
                             if chain_a == chain_b or not isinstance(value, (int, float)):
                                 continue
                             pair_key = tuple(sorted((chain_a, chain_b)))
-                            if pair_key in seen_pairs:
-                                continue
-                            seen_pairs.add(pair_key)
-                            pair_rows.append({
-                                "chain_a": chain_a,
-                                "chain_b": chain_b,
-                                "pair_ipTM": float(value)
-                            })
+                            pair_scores[pair_key] = max(
+                                pair_scores.get(pair_key, float("-inf")),
+                                float(value),
+                            )
+                    for (chain_a, chain_b), value in sorted(pair_scores.items()):
+                        pair_rows.append({
+                            "chain_a": chain_a,
+                            "chain_b": chain_b,
+                            "pair_ipTM": value
+                        })
                 else:
                     pair_matrix = confidence_data.get("chain_pair_iptm")
                     if isinstance(pair_matrix, list) and chain_ids_for_pair:

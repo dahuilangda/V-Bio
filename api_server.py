@@ -803,6 +803,22 @@ def handle_boltz2score():
 
     target_chain = request.form.get('target_chain')
     ligand_chain = request.form.get('ligand_chain')
+    ligand_smiles_map = {}
+    ligand_smiles_map_raw = request.form.get('ligand_smiles_map')
+    if ligand_smiles_map_raw:
+        try:
+            parsed = json.loads(ligand_smiles_map_raw)
+            if isinstance(parsed, dict):
+                for key, value in parsed.items():
+                    if not isinstance(key, str) or not isinstance(value, str):
+                        continue
+                    key = key.strip()
+                    value = value.strip()
+                    if key and value:
+                        ligand_smiles_map[key] = value
+        except Exception as e:
+            logger.error("Invalid ligand_smiles_map JSON from %s: %s", request.remote_addr, e)
+            return jsonify({'error': "Invalid 'ligand_smiles_map' JSON format."}), 400
     score_args = {}
 
     if 'input_file' in request.files:
@@ -827,45 +843,76 @@ def handle_boltz2score():
             'target_chain': target_chain,
             'ligand_chain': ligand_chain,
         }
+        if ligand_smiles_map:
+            score_args['ligand_smiles_map'] = ligand_smiles_map
         score_args['affinity_refine'] = _parse_bool(request.form.get('affinity_refine'), False)
         score_args['enable_affinity'] = _parse_bool(request.form.get('enable_affinity'), False)
         score_args['auto_enable_affinity'] = _parse_bool(request.form.get('auto_enable_affinity'), False)
-    elif 'protein_file' in request.files or 'ligand_file' in request.files:
-        if 'protein_file' not in request.files or 'ligand_file' not in request.files:
-            logger.error("Missing required files in Boltz2Score separate-input request. Client IP: %s", request.remote_addr)
-            return jsonify({'error': "Request form must contain both 'protein_file' and 'ligand_file' parts"}), 400
+    elif (
+        'protein_file' in request.files
+        or 'ligand_file' in request.files
+        or request.form.get('ligand_smiles')
+    ):
+        if 'protein_file' not in request.files:
+            logger.error("Missing protein_file in Boltz2Score separate-input request. Client IP: %s", request.remote_addr)
+            return jsonify({'error': "Request form must contain 'protein_file'."}), 400
 
         protein_file = request.files['protein_file']
-        ligand_file = request.files['ligand_file']
+        ligand_smiles = (request.form.get('ligand_smiles') or '').strip()
+        ligand_file = request.files.get('ligand_file')
+        has_ligand_file = ligand_file is not None and ligand_file.filename != ''
+        has_ligand_smiles = bool(ligand_smiles)
 
-        if protein_file.filename == '' or ligand_file.filename == '':
-            logger.error("No selected files for Boltz2Score separate-input request.")
-            return jsonify({'error': 'Both protein_file and ligand_file must be selected'}), 400
+        if protein_file.filename == '':
+            logger.error("No selected protein file for Boltz2Score separate-input request.")
+            return jsonify({'error': 'protein_file must be selected'}), 400
+
+        if not has_ligand_file and not has_ligand_smiles:
+            logger.error("Missing ligand input in Boltz2Score separate-input request.")
+            return jsonify({'error': "Provide either 'ligand_file' or non-empty 'ligand_smiles'."}), 400
 
         try:
             protein_file_content = protein_file.read().decode('utf-8')
-            ligand_file.seek(0)
-            try:
-                ligand_file_content = ligand_file.read().decode('utf-8')
-            except UnicodeDecodeError:
-                ligand_file.seek(0)
-                ligand_file_content = ligand_file.read().decode('utf-8', errors='replace')
-            logger.debug("Boltz2Score separate inputs successfully read and decoded.")
+            logger.debug("Boltz2Score protein input successfully read and decoded.")
         except UnicodeDecodeError:
-            logger.error(f"Failed to decode files as UTF-8. Client IP: {request.remote_addr}")
-            return jsonify({'error': "Failed to decode files. Ensure they are valid text files."}), 400
+            logger.error(f"Failed to decode protein_file as UTF-8. Client IP: {request.remote_addr}")
+            return jsonify({'error': "Failed to decode protein_file. Ensure it's a valid text file."}), 400
         except IOError as e:
-            logger.exception(f"Failed to read files from request: {e}. Client IP: {request.remote_addr}")
-            return jsonify({'error': f"Failed to read files: {e}"}), 400
+            logger.exception(f"Failed to read protein_file from request: {e}. Client IP: {request.remote_addr}")
+            return jsonify({'error': f"Failed to read protein_file: {e}"}), 400
 
         output_prefix = request.form.get('output_prefix', 'complex')
         score_args = {
             'protein_file_content': protein_file_content,
-            'ligand_file_content': ligand_file_content,
             'protein_filename': secure_filename(protein_file.filename),
-            'ligand_filename': secure_filename(ligand_file.filename),
             'output_prefix': output_prefix,
         }
+
+        if has_ligand_file:
+            try:
+                ligand_file.seek(0)
+                try:
+                    ligand_file_content = ligand_file.read().decode('utf-8')
+                except UnicodeDecodeError:
+                    ligand_file.seek(0)
+                    ligand_file_content = ligand_file.read().decode('utf-8', errors='replace')
+                logger.debug("Boltz2Score ligand file successfully read and decoded.")
+            except IOError as e:
+                logger.exception(f"Failed to read ligand_file from request: {e}. Client IP: {request.remote_addr}")
+                return jsonify({'error': f"Failed to read ligand_file: {e}"}), 400
+
+            score_args.update({
+                'ligand_file_content': ligand_file_content,
+                'ligand_filename': secure_filename(ligand_file.filename),
+            })
+        else:
+            score_args.update({
+                'ligand_smiles': ligand_smiles,
+                'ligand_filename': secure_filename(request.form.get('ligand_filename', 'ligand_from_smiles.sdf')),
+            })
+        if ligand_smiles_map:
+            score_args['ligand_smiles_map'] = ligand_smiles_map
+
         score_args['affinity_refine'] = _parse_bool(request.form.get('affinity_refine'), False)
         score_args['enable_affinity'] = _parse_bool(request.form.get('enable_affinity'), False)
         score_args['auto_enable_affinity'] = _parse_bool(request.form.get('auto_enable_affinity'), False)
@@ -876,7 +923,7 @@ def handle_boltz2score():
     else:
         logger.error("Missing input for Boltz2Score request. Client IP: %s", request.remote_addr)
         return jsonify({
-            'error': "Request form must contain 'input_file' or both 'protein_file' and 'ligand_file'."
+            'error': "Request form must contain 'input_file' or 'protein_file' with ('ligand_file' or 'ligand_smiles')."
         }), 400
 
     priority = request.form.get('priority', 'default').lower()
@@ -890,6 +937,12 @@ def handle_boltz2score():
     try:
         task = boltz2score_task.apply_async(args=[score_args], queue=target_queue)
         logger.info(f"Boltz2Score task {task.id} dispatched to queue: '{target_queue}'.")
+        if isinstance(score_args.get('ligand_smiles_map'), dict) and score_args['ligand_smiles_map']:
+            logger.info(
+                "Boltz2Score task %s received ligand_smiles_map keys: %s",
+                task.id,
+                sorted(score_args['ligand_smiles_map'].keys()),
+            )
     except Exception as e:
         logger.exception(f"Failed to dispatch Boltz2Score task from {request.remote_addr}: {e}")
         return jsonify({'error': 'Failed to dispatch Boltz2Score task.', 'details': str(e)}), 500

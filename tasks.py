@@ -142,6 +142,44 @@ def _write_base64_file(encoded_content: str, path: str, text_mode: bool = False)
         with open(path, 'wb') as f:
             f.write(raw)
 
+
+def _write_smiles_to_sdf(smiles: str, out_path: str) -> None:
+    """Build a 3D ligand from SMILES and write SDF for Boltz2Score separate mode."""
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+
+    smiles = (smiles or "").strip()
+    if not smiles:
+        raise ValueError("ligand_smiles is empty.")
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError("Invalid ligand_smiles; RDKit failed to parse.")
+
+    mol = Chem.AddHs(mol)
+    params = AllChem.ETKDGv3()
+    params.randomSeed = 0xB07A
+    status = AllChem.EmbedMolecule(mol, params)
+    if status != 0:
+        status = AllChem.EmbedMolecule(mol, randomSeed=0xB07A, useRandomCoords=True)
+    if status != 0:
+        raise ValueError("Failed to generate 3D conformer from ligand_smiles.")
+
+    try:
+        AllChem.MMFFOptimizeMolecule(mol, maxIters=500)
+    except Exception:
+        try:
+            AllChem.UFFOptimizeMolecule(mol, maxIters=500)
+        except Exception:
+            pass
+
+    mol.SetProp("_Name", "LIG")
+    writer = Chem.SDWriter(out_path)
+    try:
+        writer.write(mol)
+    finally:
+        writer.close()
+
 def _read_virtual_screening_progress(output_dir: str) -> dict:
     """Read virtual screening checkpoint progress from output directory."""
     checkpoint_dir = os.path.join(output_dir, "checkpoints")
@@ -911,18 +949,32 @@ def boltz2score_task(self, score_args: dict):
         inputs_dir = None
         using_separate_inputs = False
 
-        if 'protein_file_content' in score_args and 'ligand_file_content' in score_args:
+        has_protein_input = 'protein_file_content' in score_args
+        has_ligand_file_input = 'ligand_file_content' in score_args
+        has_ligand_smiles_input = bool((score_args.get('ligand_smiles') or '').strip())
+
+        if has_protein_input and (has_ligand_file_input or has_ligand_smiles_input):
             using_separate_inputs = True
             protein_filename = secure_filename(score_args['protein_filename'])
-            ligand_filename = secure_filename(score_args['ligand_filename'])
+            ligand_filename = secure_filename(score_args.get('ligand_filename') or "ligand.sdf")
 
             protein_file_path = os.path.join(task_temp_dir, protein_filename)
             with open(protein_file_path, 'w', encoding='utf-8') as f:
                 f.write(score_args['protein_file_content'])
 
             ligand_file_path = os.path.join(task_temp_dir, ligand_filename)
-            with open(ligand_file_path, 'w', encoding='utf-8') as f:
-                f.write(score_args['ligand_file_content'])
+            if has_ligand_file_input:
+                with open(ligand_file_path, 'w', encoding='utf-8') as f:
+                    f.write(score_args['ligand_file_content'])
+            else:
+                if not ligand_filename.lower().endswith('.sdf'):
+                    ligand_filename = f"{Path(ligand_filename).stem or 'ligand'}.sdf"
+                    ligand_file_path = os.path.join(task_temp_dir, ligand_filename)
+                _write_smiles_to_sdf(score_args['ligand_smiles'], ligand_file_path)
+                logger.info(
+                    "Task %s: Generated ligand SDF from SMILES for Boltz2Score separate mode.",
+                    task_id,
+                )
 
             detected_target_chain = None
             if not score_args.get('target_chain'):
@@ -985,6 +1037,14 @@ def boltz2score_task(self, score_args: dict):
             command.append("--enable_affinity")
         if score_args.get('auto_enable_affinity'):
             command.append("--auto_enable_affinity")
+        ligand_smiles_map = score_args.get('ligand_smiles_map')
+        if isinstance(ligand_smiles_map, dict) and ligand_smiles_map:
+            command.extend(["--ligand_smiles_map", json.dumps(ligand_smiles_map, ensure_ascii=False)])
+            logger.info(
+                "Task %s: applying ligand_smiles_map keys: %s",
+                task_id,
+                sorted(ligand_smiles_map.keys()),
+            )
 
         tracker.update_status("running", "Executing Boltz2Score subprocess")
         logger.info(f"Task {task_id}: Running Boltz2Score. Command: {' '.join(command)}")

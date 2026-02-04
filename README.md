@@ -338,6 +338,8 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
   * **可选字段**:
     * `target_chain`: 目标蛋白链 ID（逗号分隔）
     * `ligand_chain`: 配体链 ID（逗号分隔）
+    * `ligand_smiles_map`: 可选，JSON 字符串，用于按链提供配体 SMILES（示例：`{"B":"<SMILES>"}` 或 `{"B:LIG1":"<SMILES>"}`）。
+      该字段仅用于修正配体拓扑/化学信息，不会改变输入结构坐标。
     * `affinity_refine`: `true` 时先做扩散精修再做亲和力（更慢但更接近完整预测）
     * `enable_affinity`: `true` 时强制计算亲和力
     * `auto_enable_affinity`: `true` 时检测到配体链自动计算亲和力
@@ -349,12 +351,14 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
          -F "input_file=@/path/to/complex.cif" \
          -F "target_chain=A" \
          -F "ligand_chain=B" \
+         -F "ligand_smiles_map={\"B\":\"N#CC1CCCC1OC(=O)Nc1cc2cc(c3cnc4OCCNc4c3C)c(F)c(N)c2cn1\"}" \
          http://127.0.0.1:5000/api/boltz2score
     ```
   * **输出说明**:
     * 结果 ZIP 内包含结构文件、`confidence_*.json`、`chain_map.json`；
     * 若提供 `target_chain + ligand_chain` 或显式启用亲和力，额外返回 `affinity_*.json`。
     * 默认亲和力使用 Boltz2 原版裁剪策略与 MW 修正设置。
+    * 前端 Affinity 页保持两种输入模式（复合物文件 / 蛋白+小分子文件）；可按配体链选填 SMILES 并透传为 `ligand_smiles_map`。
 
   * **方式二：分开输入蛋白质和小分子文件**
     * **端点**: `POST /api/boltz2score`（同端点）
@@ -363,6 +367,8 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
       * `ligand_file`: 小分子结构文件（SDF/MOL/MOL2/PDB）
       * `output_prefix`: 输出复合物前缀（默认: `complex`）
       * `target_chain` / `ligand_chain`: 可选；若不提供，系统默认使用 `A` / `L`
+      * `ligand_smiles_map`: 可选，JSON 字符串。可按链提供 SMILES（分离输入通常使用 `{"L":"<SMILES>"}`）。
+        仅用于修正配体拓扑/化学信息，不会改变上传结构的坐标。
       * `affinity_refine`: `true` 时先做扩散精修再做亲和力（更慢但更接近完整预测）
       * `enable_affinity`: `true` 时强制计算亲和力
       * `auto_enable_affinity`: `true` 时检测到配体链自动计算亲和力
@@ -374,6 +380,7 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
            -F "protein_file=@/path/to/protein.pdb" \
            -F "ligand_file=@/path/to/ligand.sdf" \
            -F "output_prefix=my_complex" \
+           -F "ligand_smiles_map={\"L\":\"N#CC1CCCC1OC(=O)Nc1cc2cc(c3cnc4OCCNc4c3C)c(F)c(N)c2cn1\"}" \
            http://127.0.0.1:5000/api/boltz2score
       ```
     * **输出说明**:
