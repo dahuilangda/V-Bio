@@ -31,8 +31,7 @@ export function useProjects(session: Session | null) {
     setError(null);
     try {
       const rows = await listProjects({
-        userId: session.userId,
-        search
+        userId: session.userId
       });
       setProjects(rows);
     } catch (e) {
@@ -40,7 +39,7 @@ export function useProjects(session: Session | null) {
     } finally {
       setLoading(false);
     }
-  }, [session, search]);
+  }, [session]);
 
   useEffect(() => {
     void load();

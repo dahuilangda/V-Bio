@@ -1,4 +1,4 @@
-import { FormEvent, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   Atom,
@@ -15,6 +15,7 @@ import { useProjects } from '../hooks/useProjects';
 import { formatDateTime } from '../utils/date';
 import { buildDefaultInputConfig, saveProjectInputConfig } from '../utils/projectInputs';
 import { getWorkflowDefinition, type WorkflowKey, WORKFLOWS } from '../utils/workflows';
+import type { TaskState } from '../types/models';
 
 const workflowIconMap: Record<WorkflowKey, JSX.Element> = {
   prediction: <Dna size={16} />,
@@ -34,8 +35,67 @@ export function ProjectsPage() {
   const [createError, setCreateError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [workflow, setWorkflow] = useState<WorkflowKey>('prediction');
+  const [typeFilter, setTypeFilter] = useState<'all' | WorkflowKey>('all');
+  const [stateFilter, setStateFilter] = useState<'all' | TaskState>('all');
+  const [sortBy, setSortBy] = useState<
+    'updated_desc' | 'updated_asc' | 'created_desc' | 'created_asc' | 'name_asc' | 'name_desc'
+  >('updated_desc');
+  const [pageSize, setPageSize] = useState<number>(12);
+  const [page, setPage] = useState<number>(1);
 
   const countText = useMemo(() => `${projects.length} projects`, [projects.length]);
+  const filteredProjects = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    const filtered = projects.filter((project) => {
+      const workflowDef = getWorkflowDefinition(project.task_type);
+      if (typeFilter !== 'all' && workflowDef.key !== typeFilter) return false;
+      if (stateFilter !== 'all' && project.task_state !== stateFilter) return false;
+      if (!query) return true;
+      const haystack = [
+        project.name,
+        project.summary,
+        workflowDef.title,
+        workflowDef.shortTitle,
+        project.task_state,
+        project.task_id,
+        project.status_text
+      ]
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(query);
+    });
+
+    const sortByDate = (a: string, b: string, desc: boolean) => {
+      const delta = new Date(a).getTime() - new Date(b).getTime();
+      return desc ? -delta : delta;
+    };
+
+    filtered.sort((a, b) => {
+      if (sortBy === 'updated_desc') return sortByDate(a.updated_at, b.updated_at, true);
+      if (sortBy === 'updated_asc') return sortByDate(a.updated_at, b.updated_at, false);
+      if (sortBy === 'created_desc') return sortByDate(a.created_at, b.created_at, true);
+      if (sortBy === 'created_asc') return sortByDate(a.created_at, b.created_at, false);
+      if (sortBy === 'name_asc') return a.name.localeCompare(b.name);
+      return b.name.localeCompare(a.name);
+    });
+
+    return filtered;
+  }, [projects, search, typeFilter, stateFilter, sortBy]);
+
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(filteredProjects.length / pageSize)), [filteredProjects.length, pageSize]);
+  const currentPage = Math.min(page, totalPages);
+  const pagedProjects = useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return filteredProjects.slice(start, start + pageSize);
+  }, [filteredProjects, currentPage, pageSize]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [search, typeFilter, stateFilter, sortBy, pageSize]);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
 
   const openCreateModal = () => {
     setWorkflow('prediction');
@@ -106,14 +166,69 @@ export function ProjectsPage() {
       </section>
 
       <section className="panel">
-        <div className="toolbar">
-          <div className="input-wrap search-input">
-            <Search size={16} />
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search projects..."
-            />
+        <div className="toolbar project-toolbar">
+          <div className="project-toolbar-filters">
+            <div className="input-wrap search-input">
+              <Search size={16} />
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search name/summary/type/status..."
+              />
+            </div>
+            <select
+              className="project-filter-select"
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value as 'all' | WorkflowKey)}
+              aria-label="Filter by workflow type"
+            >
+              <option value="all">All Types</option>
+              {WORKFLOWS.map((item) => (
+                <option key={`filter-type-${item.key}`} value={item.key}>
+                  {item.shortTitle}
+                </option>
+              ))}
+            </select>
+            <select
+              className="project-filter-select"
+              value={stateFilter}
+              onChange={(e) => setStateFilter(e.target.value as 'all' | TaskState)}
+              aria-label="Filter by task state"
+            >
+              <option value="all">All States</option>
+              <option value="DRAFT">Draft</option>
+              <option value="QUEUED">Queued</option>
+              <option value="RUNNING">Running</option>
+              <option value="SUCCESS">Success</option>
+              <option value="FAILURE">Failure</option>
+              <option value="REVOKED">Revoked</option>
+            </select>
+            <select
+              className="project-filter-select"
+              value={sortBy}
+              onChange={(e) =>
+                setSortBy(
+                  e.target.value as
+                    | 'updated_desc'
+                    | 'updated_asc'
+                    | 'created_desc'
+                    | 'created_asc'
+                    | 'name_asc'
+                    | 'name_desc'
+                )
+              }
+              aria-label="Sort projects"
+            >
+              <option value="updated_desc">Updated: Newest</option>
+              <option value="updated_asc">Updated: Oldest</option>
+              <option value="created_desc">Created: Newest</option>
+              <option value="created_asc">Created: Oldest</option>
+              <option value="name_asc">Name: A-Z</option>
+              <option value="name_desc">Name: Z-A</option>
+            </select>
+          </div>
+          <div className="project-toolbar-meta muted small">
+            {filteredProjects.length} matched
           </div>
         </div>
 
@@ -122,17 +237,19 @@ export function ProjectsPage() {
         <div className="project-list">
           {loading ? (
             <div className="muted">Loading projects...</div>
-          ) : projects.length === 0 ? (
-            <div className="empty-state">No projects yet. Create your first one.</div>
+          ) : filteredProjects.length === 0 ? (
+            <div className="empty-state">
+              {projects.length === 0 ? 'No projects yet. Create your first one.' : 'No projects match current filters.'}
+            </div>
           ) : (
-            projects.map((project) => (
+            pagedProjects.map((project) => (
               <article key={project.id} className="project-card">
                 <div className="project-card-main">
-                  <div>
+                  <div className="project-title-block">
                     <h3>
                       <Link to={`/projects/${project.id}`}>{project.name}</Link>
                     </h3>
-                    <p className="muted clamp-2">{project.summary || 'No summary'}</p>
+                    {project.summary ? <p className="muted project-summary clamp-1">{project.summary}</p> : null}
                   </div>
                   <div className="project-badges">
                     <span className="badge workflow-badge">
@@ -161,6 +278,39 @@ export function ProjectsPage() {
             ))
           )}
         </div>
+
+        {!loading && filteredProjects.length > 0 && (
+          <div className="project-pagination">
+            <div className="project-pagination-info muted small">
+              Page {currentPage} / {totalPages}
+            </div>
+            <div className="project-pagination-controls">
+              <label className="project-page-size">
+                <span className="muted small">Per page</span>
+                <select
+                  value={String(pageSize)}
+                  onChange={(e) => setPageSize(Math.max(1, Number(e.target.value) || 12))}
+                  aria-label="Projects per page"
+                >
+                  <option value="8">8</option>
+                  <option value="12">12</option>
+                  <option value="20">20</option>
+                  <option value="50">50</option>
+                </select>
+              </label>
+              <button className="btn btn-ghost btn-compact" disabled={currentPage <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>
+                Prev
+              </button>
+              <button
+                className="btn btn-ghost btn-compact"
+                disabled={currentPage >= totalPages}
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
       </section>
 
       {showCreate && (
