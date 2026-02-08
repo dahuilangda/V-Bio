@@ -50,6 +50,8 @@ docs/
 data/fold_input.json
 .gitignore
 .af3_jax_cache/
+
+# Boltz2Score
 Boltz2Score/data/Cmp2.pdb
 Boltz2Score/data/Cmp4.pdb
 Boltz2Score/data/ligand.mol2
@@ -59,3 +61,23 @@ Boltz2Score/data/prot2.pdb
 AF3Score/
 Boltz2Score/data/Cmp7.pdb
 .streamlit/
+
+# VBio
+VBio/node_modules/
+VBio/demo/
+VBio/dist/
+VBio/.vite/
+VBio/*.tsbuildinfo
+VBio/vite.config.js
+VBio/vite.config.d.ts
+VBio/.env
+VBio/.env.local
+VBio/.env.*.local
+!VBio/.env.example
+VBio/npm-debug.log*
+VBio/yarn-debug.log*
+VBio/yarn-error.log*
+VBio/pnpm-debug.log*
+VBio/supabase-lite/.env
+!VBio/supabase-lite/.env.example
+VBio/supabase-lite/data/

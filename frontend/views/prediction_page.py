@@ -732,6 +732,10 @@ def render_prediction_page():
                 st.info("💡 **注意**: Ketcher 绘制的分子已自动转换为 `smiles` 字段，这是 Boltz 模型要求的格式。", icon="🔄")
 
     if st.button("🚀 提交预测任务", key="submit_prediction", type="primary", disabled=(not is_valid or is_running), use_container_width=True):
+        if not yaml_preview:
+            st.error("生成 YAML 配置失败，请检查输入后重试。")
+            return
+
         st.session_state.task_id = None
         st.session_state.results = None
         st.session_state.raw_zip = None
@@ -744,7 +748,16 @@ def render_prediction_page():
         has_glycopeptide_modifications = False
         
         if protein_components:
-            yaml_data = yaml.safe_load(yaml_preview)
+            try:
+                yaml_data = yaml.safe_load(yaml_preview) or {}
+            except yaml.YAMLError as exc:
+                st.error(f"YAML 配置解析失败：{exc}")
+                return
+
+            if not isinstance(yaml_data, dict):
+                st.error("生成的 YAML 配置格式无效，请检查输入后重试。")
+                return
+
             has_msa_in_yaml = False
             
             for sequence_item in yaml_data.get('sequences', []):

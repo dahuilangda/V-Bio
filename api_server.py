@@ -247,6 +247,45 @@ task_monitor = TaskMonitor()
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = config.RESULTS_BASE_DIR
 
+# Browser clients (VBio) call this API directly, while legacy frontend uses server-side requests.
+# Enable permissive CORS by default so both localhost and remote host:port frontends can submit tasks.
+_cors_origins_raw = os.environ.get("BOLTZ_CORS_ALLOW_ORIGINS", "*").strip()
+if _cors_origins_raw == "*":
+    _cors_origin_allowlist = None
+else:
+    _cors_origin_allowlist = {item.strip() for item in _cors_origins_raw.split(",") if item.strip()}
+
+def _resolve_cors_origin() -> str:
+    origin = request.headers.get("Origin")
+    if _cors_origin_allowlist is None:
+        return origin or "*"
+    if origin and origin in _cors_origin_allowlist:
+        return origin
+    # Fall back to first configured origin to keep browser behavior deterministic.
+    return next(iter(_cors_origin_allowlist), "")
+
+def _apply_cors_headers(response):
+    origin = _resolve_cors_origin()
+    if origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Accept, X-API-Token, Authorization"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    response.headers["Access-Control-Max-Age"] = "86400"
+    vary = response.headers.get("Vary")
+    response.headers["Vary"] = f"{vary}, Origin" if vary else "Origin"
+    return response
+
+@app.before_request
+def handle_cors_preflight():
+    if request.method == "OPTIONS":
+        return _apply_cors_headers(app.make_response(("", 204)))
+    return None
+
+@app.after_request
+def add_cors_headers(response):
+    return _apply_cors_headers(response)
+
 # MSA 缓存配置
 MSA_CACHE_CONFIG = {
     'cache_dir': '/tmp/boltz_msa_cache',
