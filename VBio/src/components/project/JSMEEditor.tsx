@@ -29,11 +29,16 @@ async function waitForJSMEReady(timeoutMs = 12000, intervalMs = 120): Promise<an
 }
 
 export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorProps) {
-  const hostRef = useRef<HTMLDivElement | null>(null);
+  const mountRef = useRef<HTMLDivElement | null>(null);
   const appletRef = useRef<any>(null);
+  const onSmilesChangeRef = useRef(onSmilesChange);
   const [error, setError] = useState<string | null>(null);
 
   const editorId = useMemo(() => `jsme-${Math.random().toString(36).slice(2)}`, []);
+
+  useEffect(() => {
+    onSmilesChangeRef.current = onSmilesChange;
+  }, [onSmilesChange]);
 
   useEffect(() => {
     let cancelled = false;
@@ -47,15 +52,16 @@ export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorP
         }
         await loadScript(ENV.jsmeScriptUrl);
 
-        if (cancelled || !hostRef.current) return;
+        if (cancelled || !mountRef.current) return;
 
         // JSME script may still bootstrap after script onload (GWT nocache flow).
         const JSApplet = await waitForJSMEReady();
-        if (cancelled || !hostRef.current) return;
+        if (cancelled || !mountRef.current) return;
 
-        hostRef.current.id = editorId;
+        mountRef.current.innerHTML = '';
+        mountRef.current.id = editorId;
         const applet = new JSApplet.JSME(editorId, '100%', `${height}px`, {
-          options: 'oldlook,star'
+          options: 'star'
         });
 
         appletRef.current = applet;
@@ -67,7 +73,7 @@ export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorP
         const sync = () => {
           try {
             const next = applet.smiles();
-            onSmilesChange(next || '');
+            onSmilesChangeRef.current(next || '');
           } catch {
             // ignore callback parse errors
           }
@@ -84,8 +90,12 @@ export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorP
 
     return () => {
       cancelled = true;
+      appletRef.current = null;
+      if (mountRef.current) {
+        mountRef.current.innerHTML = '';
+      }
     };
-  }, [editorId, height, onSmilesChange]);
+  }, [editorId, height]);
 
   useEffect(() => {
     if (!appletRef.current) return;
@@ -104,5 +114,9 @@ export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorP
     return <div className="alert error">{error}</div>;
   }
 
-  return <div ref={hostRef} className="jsme-host" style={{ height: `${height}px` }} />;
+  return (
+    <div className="jsme-host" style={{ height: `${height}px` }}>
+      <div ref={mountRef} className="jsme-mount" />
+    </div>
+  );
 }

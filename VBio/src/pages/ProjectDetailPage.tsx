@@ -254,6 +254,7 @@ export function ProjectDetailPage() {
   const [proteinTemplates, setProteinTemplates] = useState<Record<string, ProteinTemplateUpload>>({});
   const [pickedResidue, setPickedResidue] = useState<ConstraintResiduePick | null>(null);
   const [activeConstraintId, setActiveConstraintId] = useState<string | null>(null);
+  const [selectedConstraintTemplateComponentId, setSelectedConstraintTemplateComponentId] = useState<string | null>(null);
   const [constraintPickModeEnabled, setConstraintPickModeEnabled] = useState(false);
   const constraintPickSlotRef = useRef<Record<string, 'first' | 'second'>>({});
   const prevTaskStateRef = useRef<TaskState | null>(null);
@@ -430,23 +431,56 @@ export function ProjectDetailPage() {
     return draft.inputConfig.constraints.findIndex((item) => item.id === activeConstraintId);
   }, [draft, activeConstraintId]);
 
-  const selectedTemplatePreview = useMemo(() => {
+  const constraintTemplateOptions = useMemo(() => {
     if (!draft) return null;
+    let proteinOrder = 0;
+    const options: Array<{
+      componentId: string;
+      label: string;
+      fileName: string;
+      format: 'cif' | 'pdb';
+      chainId: string;
+      content: string;
+    }> = [];
     for (const component of draft.inputConfig.components) {
       if (component.type !== 'protein') continue;
+      proteinOrder += 1;
       const upload = proteinTemplates[component.id];
       if (upload) {
-        return {
+        options.push({
           componentId: component.id,
+          label: `Protein ${proteinOrder}`,
           fileName: upload.fileName,
           format: upload.format,
           chainId: upload.chainId,
           content: upload.content
-        };
+        });
       }
     }
-    return null;
+    return options;
   }, [draft, proteinTemplates]);
+
+  const selectedTemplatePreview = useMemo(() => {
+    if (!constraintTemplateOptions || constraintTemplateOptions.length === 0) return null;
+    if (selectedConstraintTemplateComponentId) {
+      const selected = constraintTemplateOptions.find((item) => item.componentId === selectedConstraintTemplateComponentId);
+      if (selected) return selected;
+    }
+    return constraintTemplateOptions[0];
+  }, [constraintTemplateOptions, selectedConstraintTemplateComponentId]);
+
+  useEffect(() => {
+    const ids = (constraintTemplateOptions || []).map((item) => item.componentId);
+    if (ids.length === 0) {
+      if (selectedConstraintTemplateComponentId !== null) {
+        setSelectedConstraintTemplateComponentId(null);
+      }
+      return;
+    }
+    if (!selectedConstraintTemplateComponentId || !ids.includes(selectedConstraintTemplateComponentId)) {
+      setSelectedConstraintTemplateComponentId(ids[0]);
+    }
+  }, [constraintTemplateOptions, selectedConstraintTemplateComponentId]);
 
   useEffect(() => {
     if (!draft) return;
@@ -546,17 +580,18 @@ export function ProjectDetailPage() {
   const constraintViewerHighlightResidues = useMemo<MolstarResidueHighlight[]>(() => {
     if (!selectedTemplatePreview) return constraintHighlightResidues;
     const ownerChain = activeChainInfos.find((info) => info.componentId === selectedTemplatePreview.componentId)?.id;
-    if (!ownerChain || ownerChain === selectedTemplatePreview.chainId) return constraintHighlightResidues;
-    return constraintHighlightResidues.map((item) =>
-      item.chainId === ownerChain ? { ...item, chainId: selectedTemplatePreview.chainId } : item
-    );
+    if (!ownerChain) return [];
+    const filtered = constraintHighlightResidues.filter((item) => item.chainId === ownerChain);
+    if (ownerChain === selectedTemplatePreview.chainId) return filtered;
+    return filtered.map((item) => ({ ...item, chainId: selectedTemplatePreview.chainId }));
   }, [selectedTemplatePreview, activeChainInfos, constraintHighlightResidues]);
 
   const constraintViewerActiveResidue = useMemo<MolstarResidueHighlight | null>(() => {
     if (!activeConstraintResidue || !selectedTemplatePreview) return activeConstraintResidue;
     const ownerChain = activeChainInfos.find((info) => info.componentId === selectedTemplatePreview.componentId)?.id;
-    if (!ownerChain || ownerChain === selectedTemplatePreview.chainId) return activeConstraintResidue;
-    if (activeConstraintResidue.chainId !== ownerChain) return activeConstraintResidue;
+    if (!ownerChain) return null;
+    if (activeConstraintResidue.chainId !== ownerChain) return null;
+    if (ownerChain === selectedTemplatePreview.chainId) return activeConstraintResidue;
     return { ...activeConstraintResidue, chainId: selectedTemplatePreview.chainId };
   }, [activeConstraintResidue, selectedTemplatePreview, activeChainInfos]);
 
@@ -663,6 +698,7 @@ export function ProjectDetailPage() {
       });
       setProteinTemplates(savedUiState?.proteinTemplates || {});
       setActiveConstraintId(savedUiState?.activeConstraintId || null);
+      setSelectedConstraintTemplateComponentId(savedUiState?.selectedConstraintTemplateComponentId || null);
       setPickedResidue(null);
       setProject(next);
     } catch (err) {
@@ -691,9 +727,10 @@ export function ProjectDetailPage() {
     if (!project) return;
     saveProjectUiState(project.id, {
       proteinTemplates,
-      activeConstraintId
+      activeConstraintId,
+      selectedConstraintTemplateComponentId
     });
-  }, [project, proteinTemplates, activeConstraintId]);
+  }, [project, proteinTemplates, activeConstraintId, selectedConstraintTemplateComponentId]);
 
   const patch = async (payload: Partial<Project>) => {
     if (!project) return null;
@@ -1139,17 +1176,18 @@ export function ProjectDetailPage() {
   };
   const applyPickToSelectedConstraint = (pick: MolstarResiduePick) => {
     const chainExists = activeChainInfos.some((item) => item.id === pick.chainId);
-    const previewChain =
-      selectedTemplatePreview && activeChainInfos.some((item) => item.id === selectedTemplatePreview.chainId)
-        ? selectedTemplatePreview.chainId
-        : null;
+    const selectedTemplateOwnerChain = selectedTemplatePreview
+      ? activeChainInfos.find((item) => item.componentId === selectedTemplatePreview.componentId)?.id || null
+      : null;
     const fallbackProteinChain =
-      previewChain ||
+      selectedTemplateOwnerChain ||
       activeChainInfos.find((item) => item.type === 'protein')?.id ||
       activeChainInfos[0]?.id ||
       pick.chainId ||
       'A';
-    const resolvedChainId = chainExists ? pick.chainId : fallbackProteinChain;
+    // In constraint template viewer, picked chain IDs come from the template file (often "A").
+    // Always map them back to the selected protein component chain to avoid cross-protein jumps.
+    const resolvedChainId = selectedTemplateOwnerChain || (chainExists ? pick.chainId : fallbackProteinChain);
     const residueLimit = activeChainInfos.find((item) => item.id === resolvedChainId)?.residueCount || 0;
     let normalizedResidue = Math.max(1, Math.floor(Number(pick.residue) || 1));
     if (residueLimit > 0 && normalizedResidue > residueLimit) {
@@ -1651,14 +1689,31 @@ export function ProjectDetailPage() {
                         <section className="panel subtle constraint-viewer-panel">
                           <div className="constraint-nav-bar">
                             <div className="constraint-nav-head">
-                              <h3>Constraint Picker</h3>
-                              <span className="muted small">
-                                {constraintCount === 0
-                                  ? 'No constraints'
-                                  : `${activeConstraintIndex >= 0 ? activeConstraintIndex + 1 : 1}/${constraintCount}`}
-                              </span>
+                              <div className="constraint-nav-title-row">
+                                <h3>Constraint Picker</h3>
+                                <span className="muted small constraint-nav-counter">
+                                  {constraintCount === 0
+                                    ? 'No constraints'
+                                    : `${activeConstraintIndex >= 0 ? activeConstraintIndex + 1 : 1}/${constraintCount}`}
+                                </span>
+                              </div>
+                              {constraintTemplateOptions && constraintTemplateOptions.length > 0 && (
+                                <label className="field constraint-template-switch">
+                                  <select
+                                    aria-label="Select protein template for constraint viewer"
+                                    value={selectedTemplatePreview?.componentId || ''}
+                                    onChange={(e) => setSelectedConstraintTemplateComponentId(e.target.value || null)}
+                                  >
+                                    {constraintTemplateOptions.map((item) => (
+                                      <option key={`constraint-template-${item.componentId}`} value={item.componentId}>
+                                        {item.label} - {item.fileName} (chain {item.chainId})
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                              )}
                             </div>
-                            <div className="row gap-8">
+                            <div className="constraint-nav-actions">
                               <button
                                 type="button"
                                 className={`btn btn-compact ${constraintPickModeEnabled ? 'btn-primary' : 'btn-ghost'}`}
@@ -1703,6 +1758,7 @@ export function ProjectDetailPage() {
                           </div>
                           {hasConstraintStructure ? (
                             <MolstarViewer
+                              key={`constraint-viewer-${selectedTemplatePreview?.componentId || 'none'}-${selectedTemplatePreview?.chainId || 'none'}`}
                               structureText={constraintStructureText}
                               format={constraintStructureFormat}
                               colorMode="white"

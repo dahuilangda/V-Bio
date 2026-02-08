@@ -1229,12 +1229,15 @@ export function MolstarViewer({
   const onResiduePickRef = useRef<typeof onResiduePick>(onResiduePick);
   const suppressPickEventsRef = useRef(false);
   const hadExternalHighlightsRef = useRef(false);
+  const structureApplyQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const structureRequestIdRef = useRef(0);
   const altPressedRef = useRef(false);
   const shiftPressedRef = useRef(false);
   const ctrlPressedRef = useRef(false);
   const recentModifiedPrimaryDownRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  const [structureReadyVersion, setStructureReadyVersion] = useState(0);
   const hasResiduePickHandler = Boolean(onResiduePick);
 
   useEffect(() => {
@@ -1416,9 +1419,11 @@ export function MolstarViewer({
 
   useEffect(() => {
     if (!ready || !viewerRef.current) return;
-    let cancelled = false;
+    const requestId = structureRequestIdRef.current + 1;
+    structureRequestIdRef.current = requestId;
 
-    const apply = async () => {
+    const run = async () => {
+      if (requestId !== structureRequestIdRef.current) return;
       try {
         setError(null);
         const viewer = viewerRef.current;
@@ -1428,26 +1433,37 @@ export function MolstarViewer({
           if (typeof viewer.clear === 'function') {
             await viewer.clear();
           }
+          if (requestId === structureRequestIdRef.current) {
+            setStructureReadyVersion((prev) => prev + 1);
+          }
           return;
         }
 
         await loadStructure(viewer, structureText, format);
+        if (requestId !== structureRequestIdRef.current) return;
         await tryApplyCartoonPreset(viewer);
+        if (requestId !== structureRequestIdRef.current) return;
 
         if (colorMode === 'alphafold') {
           await tryApplyAlphaFoldTheme(viewer);
         } else {
           await tryApplyWhiteTheme(viewer);
         }
+        if (requestId === structureRequestIdRef.current) {
+          setStructureReadyVersion((prev) => prev + 1);
+        }
       } catch (e) {
-        if (cancelled) return;
+        if (requestId !== structureRequestIdRef.current) return;
         setError(e instanceof Error ? e.message : 'Unable to update Mol* viewer.');
       }
     };
 
-    void apply();
+    structureApplyQueueRef.current = structureApplyQueueRef.current.then(run);
+
     return () => {
-      cancelled = true;
+      if (structureRequestIdRef.current === requestId) {
+        structureRequestIdRef.current += 1;
+      }
     };
   }, [ready, structureText, format, colorMode]);
 
@@ -1515,7 +1531,7 @@ export function MolstarViewer({
         suppressPickEventsRef.current = false;
       }, 0);
     }
-  }, [ready, structureText, highlightResidues, activeResidue, suppressAutoFocus]);
+  }, [ready, structureText, structureReadyVersion, highlightResidues, activeResidue, suppressAutoFocus]);
 
   if (error) {
     return <div className="alert error">{error}</div>;

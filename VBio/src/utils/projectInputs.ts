@@ -14,6 +14,7 @@ const UI_STATE_KEY = 'vbio_project_ui_state_v1';
 export interface ProjectUiState {
   proteinTemplates: Record<string, ProteinTemplateUpload>;
   activeConstraintId: string | null;
+  selectedConstraintTemplateComponentId: string | null;
 }
 
 export function randomId() {
@@ -219,6 +220,11 @@ export function loadProjectUiState(projectId: string): ProjectUiState | null {
 
   const activeConstraintId =
     typeof found.activeConstraintId === 'string' && found.activeConstraintId.trim() ? found.activeConstraintId : null;
+  const selectedConstraintTemplateComponentId =
+    typeof (found as any).selectedConstraintTemplateComponentId === 'string' &&
+    (found as any).selectedConstraintTemplateComponentId.trim()
+      ? (found as any).selectedConstraintTemplateComponentId
+      : null;
 
   const rawTemplates = found.proteinTemplates;
   const proteinTemplates: Record<string, ProteinTemplateUpload> = {};
@@ -245,7 +251,8 @@ export function loadProjectUiState(projectId: string): ProjectUiState | null {
 
   return {
     proteinTemplates,
-    activeConstraintId
+    activeConstraintId,
+    selectedConstraintTemplateComponentId
   };
 }
 

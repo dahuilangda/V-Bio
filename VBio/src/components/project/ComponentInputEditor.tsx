@@ -265,23 +265,6 @@ export function ComponentInputEditor({
                 )}
               </div>
 
-              {isLigand && (
-                <label className="field">
-                  <span>Ligand Input Mode</span>
-                  <select
-                    value={method}
-                    disabled={disabled}
-                    onChange={(e) => patchOne(comp.id, { inputMethod: e.target.value as LigandInputMethod, sequence: '' })}
-                  >
-                    {LIGAND_INPUT_OPTIONS.map((item) => (
-                      <option key={item} value={item}>
-                        {item.toUpperCase()}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-
               {comp.type === 'protein' && (
                 <>
                 <div className="component-content-split">
@@ -381,20 +364,51 @@ export function ComponentInputEditor({
               )}
 
               {comp.type === 'ligand' && method === 'ccd' && (
-                <label className="field">
-                  <span>CCD Code</span>
-                  <input
-                    placeholder="Example: ATP, NAD, HEM"
-                    value={comp.sequence}
-                    disabled={disabled}
-                    onChange={(e) => patchOne(comp.id, { sequence: e.target.value })}
-                  />
-                </label>
+                <div className="component-content-main ligand-input-left">
+                  <label className="field">
+                    <span>Ligand Input Mode</span>
+                    <select
+                      value={method}
+                      disabled={disabled}
+                      onChange={(e) => patchOne(comp.id, { inputMethod: e.target.value as LigandInputMethod, sequence: '' })}
+                    >
+                      {LIGAND_INPUT_OPTIONS.map((item) => (
+                        <option key={item} value={item}>
+                          {item.toUpperCase()}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="field">
+                    <span>CCD Code</span>
+                    <input
+                      placeholder="Example: ATP, NAD, HEM"
+                      value={comp.sequence}
+                      disabled={disabled}
+                      onChange={(e) => patchOne(comp.id, { sequence: e.target.value })}
+                    />
+                  </label>
+                </div>
               )}
 
               {comp.type === 'ligand' && method !== 'ccd' && (
                 <div className={`component-content-split component-content-split-ligand ${hasLigandJsmeViewer ? 'has-side' : ''}`}>
-                  <div className="component-content-main">
+                  <div className="component-content-main ligand-input-left">
+                    <label className="field">
+                      <span>Ligand Input Mode</span>
+                      <select
+                        value={method}
+                        disabled={disabled}
+                        onChange={(e) => patchOne(comp.id, { inputMethod: e.target.value as LigandInputMethod, sequence: '' })}
+                      >
+                        {LIGAND_INPUT_OPTIONS.map((item) => (
+                          <option key={item} value={item}>
+                            {item.toUpperCase()}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                     <label className="field">
                       <span>SMILES</span>
                       <input
@@ -406,13 +420,13 @@ export function ComponentInputEditor({
                     </label>
                   </div>
                   {method === 'jsme' && (
-                    <aside className="component-content-side">
+                    <aside className="component-content-side ligand-input-right">
                       <div className="field component-side-field">
                         <span>JSME Molecule Editor</span>
-                        <div className="jsme-editor-container">
+                        <div className="jsme-editor-container component-jsme-shell">
                           <JSMEEditor
                             smiles={comp.sequence}
-                            height={compact ? 260 : 300}
+                            height={compact ? 320 : 380}
                             onSmilesChange={(value) => patchOne(comp.id, { sequence: value })}
                           />
                         </div>
