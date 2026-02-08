@@ -61,8 +61,7 @@ interface DraftFields {
   inputConfig: ProjectInputConfig;
 }
 
-type DetailTab = 'results' | 'inputs';
-type InputsTab = 'basics' | 'components' | 'constraints';
+type WorkspaceTab = 'results' | 'basics' | 'components' | 'constraints';
 type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
 
 function mapTaskState(raw: string): TaskState {
@@ -251,13 +250,13 @@ export function ProjectDetailPage() {
   const [structureFormat, setStructureFormat] = useState<'cif' | 'pdb'>('cif');
   const [statusInfo, setStatusInfo] = useState<Record<string, unknown> | null>(null);
   const [nowTs, setNowTs] = useState(Date.now());
-  const [activeTab, setActiveTab] = useState<DetailTab>('results');
-  const [inputsTab, setInputsTab] = useState<InputsTab>('basics');
+  const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('results');
   const [proteinTemplates, setProteinTemplates] = useState<Record<string, ProteinTemplateUpload>>({});
   const [pickedResidue, setPickedResidue] = useState<ConstraintResiduePick | null>(null);
   const [activeConstraintId, setActiveConstraintId] = useState<string | null>(null);
   const [constraintPickModeEnabled, setConstraintPickModeEnabled] = useState(false);
   const constraintPickSlotRef = useRef<Record<string, 'first' | 'second'>>({});
+  const prevTaskStateRef = useRef<TaskState | null>(null);
   const [activeComponentId, setActiveComponentId] = useState<string | null>(null);
   const [sidebarTypeOpen, setSidebarTypeOpen] = useState<Record<InputComponent['type'], boolean>>({
     protein: true,
@@ -269,8 +268,12 @@ export function ProjectDetailPage() {
 
   useEffect(() => {
     const tab = new URLSearchParams(location.search).get('tab');
-    if (tab === 'results' || tab === 'inputs') {
-      setActiveTab(tab);
+    if (tab === 'inputs') {
+      setWorkspaceTab('basics');
+      return;
+    }
+    if (tab === 'results' || tab === 'basics' || tab === 'components' || tab === 'constraints') {
+      setWorkspaceTab(tab);
     }
   }, [location.search, projectId]);
 
@@ -540,6 +543,23 @@ export function ProjectDetailPage() {
     };
   }, [draft, activeConstraintId, activeChainInfos]);
 
+  const constraintViewerHighlightResidues = useMemo<MolstarResidueHighlight[]>(() => {
+    if (!selectedTemplatePreview) return constraintHighlightResidues;
+    const ownerChain = activeChainInfos.find((info) => info.componentId === selectedTemplatePreview.componentId)?.id;
+    if (!ownerChain || ownerChain === selectedTemplatePreview.chainId) return constraintHighlightResidues;
+    return constraintHighlightResidues.map((item) =>
+      item.chainId === ownerChain ? { ...item, chainId: selectedTemplatePreview.chainId } : item
+    );
+  }, [selectedTemplatePreview, activeChainInfos, constraintHighlightResidues]);
+
+  const constraintViewerActiveResidue = useMemo<MolstarResidueHighlight | null>(() => {
+    if (!activeConstraintResidue || !selectedTemplatePreview) return activeConstraintResidue;
+    const ownerChain = activeChainInfos.find((info) => info.componentId === selectedTemplatePreview.componentId)?.id;
+    if (!ownerChain || ownerChain === selectedTemplatePreview.chainId) return activeConstraintResidue;
+    if (activeConstraintResidue.chainId !== ownerChain) return activeConstraintResidue;
+    return { ...activeConstraintResidue, chainId: selectedTemplatePreview.chainId };
+  }, [activeConstraintResidue, selectedTemplatePreview, activeChainInfos]);
+
   useEffect(() => {
     if (!draft) return;
     const props = draft.inputConfig.properties;
@@ -586,10 +606,20 @@ export function ProjectDetailPage() {
   useEffect(() => {
     if (!project) return;
     const workflowDef = getWorkflowDefinition(project.task_type);
-    if (workflowDef.key !== 'prediction' && inputsTab !== 'basics') {
-      setInputsTab('basics');
+    if (workflowDef.key !== 'prediction' && (workspaceTab === 'components' || workspaceTab === 'constraints')) {
+      setWorkspaceTab('basics');
     }
-  }, [project, inputsTab]);
+  }, [project, workspaceTab]);
+
+  useEffect(() => {
+    if (!project) return;
+    const prev = prevTaskStateRef.current;
+    const next = project.task_state;
+    if (prev && prev !== next && next === 'SUCCESS') {
+      setWorkspaceTab('results');
+    }
+    prevTaskStateRef.current = next;
+  }, [project?.id, project?.task_state]);
 
   const isActiveRuntime = useMemo(() => {
     if (!project) return false;
@@ -1003,7 +1033,7 @@ export function ProjectDetailPage() {
   };
   const addComponentToDraft = (type: InputComponent['type']) => {
     const nextComponent = createInputComponent(type);
-    setInputsTab('components');
+    setWorkspaceTab('components');
     setActiveComponentId(nextComponent.id);
     setSidebarTypeOpen((prev) => ({ ...prev, [type]: true }));
     setDraft((d) =>
@@ -1022,7 +1052,7 @@ export function ProjectDetailPage() {
   const addConstraintFromSidebar = () => {
     if (!draft) return;
     const next = buildDefaultConstraint();
-    setInputsTab('constraints');
+    setWorkspaceTab('constraints');
     setSidebarConstraintsOpen(true);
     setActiveConstraintId(next.id);
     setDraft((prev) =>
@@ -1085,7 +1115,7 @@ export function ProjectDetailPage() {
     }, 40);
   };
   const jumpToComponent = (componentId: string) => {
-    setInputsTab('components');
+    setWorkspaceTab('components');
     setActiveComponentId(componentId);
     const targetType = normalizedDraftComponents.find((item) => item.id === componentId)?.type;
     if (targetType) {
@@ -1094,7 +1124,7 @@ export function ProjectDetailPage() {
     scrollToEditorBlock(`component-card-${componentId}`);
   };
   const jumpToConstraint = (constraintId: string) => {
-    setInputsTab('constraints');
+    setWorkspaceTab('constraints');
     setActiveConstraintId(constraintId);
     setSidebarConstraintsOpen(true);
     scrollToEditorBlock(`constraint-card-${constraintId}`);
@@ -1243,11 +1273,9 @@ export function ProjectDetailPage() {
       };
     });
   };
-  const displayStructureText = structureText || selectedTemplatePreview?.content || '';
-  const displayStructureFormat: 'cif' | 'pdb' = structureText
-    ? structureFormat
-    : selectedTemplatePreview?.format || structureFormat;
-  const displayStructureName = project.structure_name || selectedTemplatePreview?.fileName || '-';
+  const displayStructureText = structureText;
+  const displayStructureFormat: 'cif' | 'pdb' = structureFormat;
+  const displayStructureName = project.structure_name || '-';
   const constraintStructureText = selectedTemplatePreview?.content || '';
   const constraintStructureFormat: 'cif' | 'pdb' = selectedTemplatePreview?.format || 'pdb';
   const hasConstraintStructure = Boolean(constraintStructureText.trim());
@@ -1296,21 +1324,43 @@ export function ProjectDetailPage() {
           <div className="detail-tabs detail-tabs-inline">
             <button
               type="button"
-              className={`detail-tab ${activeTab === 'results' ? 'active' : ''}`}
-              onClick={() => setActiveTab('results')}
+              className={`detail-tab ${workspaceTab === 'basics' ? 'active' : ''}`}
+              onClick={() => setWorkspaceTab('basics')}
+              aria-label="Edit basics"
+            >
+              <SlidersHorizontal size={13} />
+              Basics
+            </button>
+            {isPredictionWorkflow && (
+              <>
+                <button
+                  type="button"
+                  className={`detail-tab ${workspaceTab === 'components' ? 'active' : ''}`}
+                  onClick={() => setWorkspaceTab('components')}
+                  aria-label="Edit components"
+                >
+                  <Dna size={13} />
+                  Components
+                </button>
+                <button
+                  type="button"
+                  className={`detail-tab ${workspaceTab === 'constraints' ? 'active' : ''}`}
+                  onClick={() => setWorkspaceTab('constraints')}
+                  aria-label="Edit constraints"
+                >
+                  <Target size={13} />
+                  Constraints
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              className={`detail-tab ${workspaceTab === 'results' ? 'active' : ''}`}
+              onClick={() => setWorkspaceTab('results')}
               aria-label="View results"
             >
               <Eye size={13} />
               Results
-            </button>
-            <button
-              type="button"
-              className={`detail-tab ${activeTab === 'inputs' ? 'active' : ''}`}
-              onClick={() => setActiveTab('inputs')}
-              aria-label="Edit inputs"
-            >
-              <SlidersHorizontal size={13} />
-              Inputs
             </button>
           </div>
           <div className="toolbar-divider" />
@@ -1359,22 +1409,11 @@ export function ProjectDetailPage() {
 
       {(error || resultError) && <div className="alert error">{error || resultError}</div>}
 
-      {activeTab === 'results' && isPredictionWorkflow && (
+      {workspaceTab === 'results' && isPredictionWorkflow && (
         <>
           <div className="results-grid">
             <section className="panel structure-panel">
-              <div className="row between">
-                <div>
-                  <h2>Structure Viewer</h2>
-                </div>
-                <button
-                  className="btn btn-ghost btn-compact"
-                  onClick={() => project.task_id && void pullResultForViewer(project.task_id)}
-                  disabled={!project.task_id || project.task_state !== 'SUCCESS'}
-                >
-                  Load
-                </button>
-              </div>
+              <h2>Structure Viewer</h2>
 
               <MolstarViewer structureText={displayStructureText} format={displayStructureFormat} colorMode="white" />
 
@@ -1446,11 +1485,11 @@ export function ProjectDetailPage() {
         </>
       )}
 
-      {activeTab === 'results' && !isPredictionWorkflow && (
+      {workspaceTab === 'results' && !isPredictionWorkflow && (
         <section className="panel">
           <h2>{workflow.title}</h2>
           <p className="muted">
-            This project is set to <strong>{workflow.shortTitle}</strong>. Configure workflow-specific parameters in the Inputs tab.
+            This project is set to <strong>{workflow.shortTitle}</strong>. Configure workflow-specific parameters in Basics.
           </p>
           <div className="status-stats">
             <div className="status-stat">
@@ -1469,48 +1508,12 @@ export function ProjectDetailPage() {
         </section>
       )}
 
-      {activeTab === 'inputs' && (
+      {workspaceTab !== 'results' && (
         <section className="panel inputs-panel">
-          <h2>Inputs</h2>
-          <p className="muted small">
-            {isPredictionWorkflow
-              ? 'Set basics, edit components, configure constraints, then run.'
-              : 'Edit project metadata and workflow context. Dedicated runner form will be integrated next.'}
-          </p>
+          <h2>{workspaceTab === 'constraints' ? 'Constraints' : workspaceTab === 'components' ? 'Components' : 'Basics'}</h2>
 
           <form className="form-grid" onSubmit={saveDraft}>
-            <section className="inputs-subtabs">
-              <button
-                type="button"
-                className={`detail-tab ${inputsTab === 'basics' ? 'active' : ''}`}
-                onClick={() => setInputsTab('basics')}
-              >
-                <SlidersHorizontal size={13} />
-                Basics
-              </button>
-              {isPredictionWorkflow && (
-                <>
-                  <button
-                    type="button"
-                    className={`detail-tab ${inputsTab === 'components' ? 'active' : ''}`}
-                    onClick={() => setInputsTab('components')}
-                  >
-                    <Dna size={13} />
-                    Components
-                  </button>
-                  <button
-                    type="button"
-                    className={`detail-tab ${inputsTab === 'constraints' ? 'active' : ''}`}
-                    onClick={() => setInputsTab('constraints')}
-                  >
-                    <Target size={13} />
-                    Constraints
-                  </button>
-                </>
-              )}
-            </section>
-
-            {inputsTab === 'basics' && (
+            {workspaceTab === 'basics' && (
               <section className="panel subtle basics-panel">
                 <label className="field">
                   <span>
@@ -1582,10 +1585,10 @@ export function ProjectDetailPage() {
 
             {isPredictionWorkflow ? (
               <>
-                {inputsTab !== 'basics' && (
-                  <div className={`inputs-workspace ${inputsTab === 'constraints' ? 'constraints-focus' : ''}`}>
+                {workspaceTab !== 'basics' && (
+                  <div className={`inputs-workspace ${workspaceTab === 'constraints' ? 'constraints-focus' : ''}`}>
                   <div className="inputs-main">
-                    {inputsTab === 'components' && (
+                    {workspaceTab === 'components' && (
                       <>
                         <ComponentInputEditor
                           components={draft.inputConfig.components}
@@ -1643,7 +1646,7 @@ export function ProjectDetailPage() {
                       </>
                     )}
 
-                    {inputsTab === 'constraints' && (
+                    {workspaceTab === 'constraints' && (
                       <div className="constraint-workspace">
                         <section className="panel subtle constraint-viewer-panel">
                           <div className="constraint-nav-bar">
@@ -1667,7 +1670,7 @@ export function ProjectDetailPage() {
                               <button
                                 type="button"
                                 className="btn btn-ghost btn-compact"
-                                onClick={() => setInputsTab('components')}
+                                onClick={() => setWorkspaceTab('components')}
                               >
                                 <ArrowLeft size={14} />
                                 Components
@@ -1704,8 +1707,8 @@ export function ProjectDetailPage() {
                               format={constraintStructureFormat}
                               colorMode="white"
                               pickMode="click"
-                              highlightResidues={constraintPickModeEnabled ? constraintHighlightResidues : undefined}
-                              activeResidue={constraintPickModeEnabled ? activeConstraintResidue : undefined}
+                              highlightResidues={constraintViewerHighlightResidues}
+                              activeResidue={constraintViewerActiveResidue}
                               lockView={constraintPickModeEnabled}
                               suppressAutoFocus={constraintPickModeEnabled}
                               onResiduePick={
@@ -1765,7 +1768,7 @@ export function ProjectDetailPage() {
                     )}
                   </div>
 
-                  {inputsTab === 'components' && (
+                  {workspaceTab === 'components' && (
                     <aside className="panel subtle component-sidebar">
                       <div className="component-sidebar-head">
                         <h3>Workspace</h3>
@@ -1880,7 +1883,7 @@ export function ProjectDetailPage() {
 
                       <section className="component-sidebar-section">
                         <div className="component-tree-row">
-                          <button type="button" className="component-sidebar-toggle" onClick={() => setInputsTab('constraints')}>
+                          <button type="button" className="component-sidebar-toggle" onClick={() => setWorkspaceTab('constraints')}>
                             <span className="component-tree-label">
                               <Target size={13} />
                               <strong>Binding</strong>

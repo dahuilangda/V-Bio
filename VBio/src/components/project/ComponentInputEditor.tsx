@@ -152,11 +152,8 @@ export function ComponentInputEditor({
 
   return (
     <div className="component-editor">
-      <div className="component-editor-head">
-        <div className="muted small">
-          Legacy-compatible component setup.
-        </div>
-        {showQuickAdd && (
+      {showQuickAdd && (
+        <div className="component-editor-head">
           <div className="component-add-quick">
             {QUICK_ADD_TYPES.map((type) => (
               <button
@@ -173,8 +170,8 @@ export function ComponentInputEditor({
               </button>
             ))}
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       <div className="component-list">
         {components.map((comp, index) => {
@@ -191,7 +188,7 @@ export function ComponentInputEditor({
             <section
               id={`component-card-${comp.id}`}
               key={comp.id}
-              className={`component-card panel subtle ${selectedComponentId === comp.id ? 'active' : ''}`}
+              className={`component-card component-card-${comp.type} panel subtle ${selectedComponentId === comp.id ? 'active' : ''}`}
               onClick={() => onSelectedComponentIdChange?.(comp.id)}
             >
               <div className="component-card-head">
@@ -396,7 +393,7 @@ export function ComponentInputEditor({
               )}
 
               {comp.type === 'ligand' && method !== 'ccd' && (
-                <div className={`component-content-split ${hasLigandJsmeViewer ? 'has-side' : ''}`}>
+                <div className={`component-content-split component-content-split-ligand ${hasLigandJsmeViewer ? 'has-side' : ''}`}>
                   <div className="component-content-main">
                     <label className="field">
                       <span>SMILES</span>
@@ -415,7 +412,7 @@ export function ComponentInputEditor({
                         <div className="jsme-editor-container">
                           <JSMEEditor
                             smiles={comp.sequence}
-                            height={compact ? 320 : 360}
+                            height={compact ? 260 : 300}
                             onSmilesChange={(value) => patchOne(comp.id, { sequence: value })}
                           />
                         </div>

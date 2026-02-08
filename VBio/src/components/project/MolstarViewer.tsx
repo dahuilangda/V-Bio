@@ -1525,7 +1525,7 @@ export function MolstarViewer({
     <div>
       <div ref={ref} className={`molstar-host ${lockView ? 'molstar-host-locked' : ''}`} />
       {!structureText.trim() && (
-        <div className="muted small top-margin">No structure loaded yet. Run prediction or load latest result.</div>
+        <div className="muted small top-margin">No structure loaded yet. Run prediction and refresh status after completion.</div>
       )}
       {structureText.trim() && colorMode === 'alphafold' && (
         <div className="legend-row">

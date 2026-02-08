@@ -203,7 +203,7 @@ h3 {
   background: #f6faf7;
   border: 1px solid var(--line);
   border-radius: 12px;
-  padding: 5px;
+  padding: 4px;
 }
 
 .muted {
@@ -676,8 +676,8 @@ select:focus {
   gap: 6px;
   padding: 2px;
   width: fit-content;
-  background: transparent;
-  border: 0;
+  background: #edf5f0;
+  border: 1px solid #d7e2db;
   border-radius: 9px;
 }
 
@@ -690,7 +690,7 @@ select:focus {
   background: transparent;
   color: var(--muted);
   border-radius: 8px;
-  padding: 7px 10px;
+  padding: 6px 9px;
   font: inherit;
   font-size: var(--text-xs);
   cursor: pointer;
@@ -875,7 +875,7 @@ select:focus {
 }
 
 .inputs-panel {
-  max-width: 1380px;
+  max-width: none;
 }
 
 .inputs-subtabs {
@@ -890,7 +890,7 @@ select:focus {
 
 .inputs-workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1.85fr) minmax(240px, 320px);
+  grid-template-columns: minmax(0, 1.9fr) minmax(250px, 320px);
   gap: 10px;
   align-items: start;
 }
@@ -1208,8 +1208,8 @@ select:focus {
 }
 
 .component-card {
-  gap: 8px;
-  padding: 12px;
+  gap: 7px;
+  padding: 10px;
   scroll-margin-top: 108px;
 }
 
@@ -1227,7 +1227,7 @@ select:focus {
 
 .component-meta {
   display: grid;
-  gap: 6px;
+  gap: 5px;
   grid-template-columns: 1fr 1fr auto auto;
   align-items: end;
 }
@@ -1238,11 +1238,11 @@ select:focus {
 
 .component-content-split {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .component-content-split.has-side {
-  grid-template-columns: minmax(0, 0.92fr) minmax(460px, 1.52fr);
+  grid-template-columns: minmax(0, 0.95fr) minmax(400px, 1.28fr);
   align-items: start;
 }
 
@@ -1271,7 +1271,7 @@ select:focus {
 
 .component-content-side .jsme-editor-container {
   width: 100%;
-  max-width: 640px;
+  max-width: 560px;
 }
 
 .component-card .field,
@@ -1303,6 +1303,22 @@ select:focus {
 .component-card .btn.btn-compact {
   padding: 6px 10px;
   font-size: var(--text-xs);
+}
+
+.component-card-ligand {
+  gap: 6px;
+}
+
+.component-card-ligand .component-meta {
+  grid-template-columns: minmax(0, 1fr) minmax(90px, 120px);
+}
+
+.component-card-ligand .component-content-split-ligand.has-side {
+  grid-template-columns: minmax(0, 0.75fr) minmax(320px, 1.25fr);
+}
+
+.component-card-ligand .component-content-side .jsme-editor-container {
+  max-width: none;
 }
 
 .molstar-host {
