@@ -1,13 +1,22 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
+  Activity,
   Atom,
   Beaker,
+  Calendar,
+  CheckCircle2,
+  Clock3,
   Compass,
   Dna,
+  ExternalLink,
+  Filter,
+  FolderOpen,
   FlaskConical,
+  LoaderCircle,
   Plus,
   Search,
+  SlidersHorizontal,
   Trash2
 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
@@ -23,6 +32,15 @@ const workflowIconMap: Record<WorkflowKey, JSX.Element> = {
   bicyclic_designer: <Atom size={16} />,
   lead_optimization: <FlaskConical size={16} />,
   affinity: <Beaker size={16} />
+};
+
+const stateIconMap: Record<TaskState, JSX.Element> = {
+  DRAFT: <SlidersHorizontal size={13} />,
+  QUEUED: <Clock3 size={13} />,
+  RUNNING: <LoaderCircle size={13} className="spin" />,
+  SUCCESS: <CheckCircle2 size={13} />,
+  FAILURE: <Activity size={13} />,
+  REVOKED: <Activity size={13} />
 };
 
 export function ProjectsPage() {
@@ -42,6 +60,10 @@ export function ProjectsPage() {
   >('updated_desc');
   const [pageSize, setPageSize] = useState<number>(12);
   const [page, setPage] = useState<number>(1);
+  const hasActiveRuntime = useMemo(
+    () => projects.some((item) => item.task_state === 'QUEUED' || item.task_state === 'RUNNING'),
+    [projects]
+  );
 
   const countText = useMemo(() => `${projects.length} projects`, [projects.length]);
   const filteredProjects = useMemo(() => {
@@ -96,6 +118,31 @@ export function ProjectsPage() {
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
   }, [page, totalPages]);
+
+  useEffect(() => {
+    const onFocus = () => {
+      void load();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void load();
+      }
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [load]);
+
+  useEffect(() => {
+    if (!hasActiveRuntime) return;
+    const timer = window.setInterval(() => {
+      void load();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveRuntime, load]);
 
   const openCreateModal = () => {
     setWorkflow('prediction');
@@ -154,78 +201,84 @@ export function ProjectsPage() {
             {session?.name} · {countText}
           </p>
         </div>
-        <div className="row gap-8">
-          <button className="btn btn-ghost" onClick={() => void load()}>
-            Refresh
-          </button>
-          <button className="btn btn-primary" onClick={openCreateModal}>
-            <Plus size={16} />
-            New Project
-          </button>
-        </div>
+        <button className="btn btn-primary" onClick={openCreateModal}>
+          <Plus size={16} />
+          New Project
+        </button>
       </section>
 
       <section className="panel">
         <div className="toolbar project-toolbar">
           <div className="project-toolbar-filters">
-            <div className="input-wrap search-input">
-              <Search size={16} />
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search name/summary/type/status..."
-              />
+            <div className="project-filter-field project-filter-field-search">
+              <div className="input-wrap search-input">
+                <Search size={16} />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search name/summary/type/status..."
+                />
+              </div>
             </div>
-            <select
-              className="project-filter-select"
-              value={typeFilter}
-              onChange={(e) => setTypeFilter(e.target.value as 'all' | WorkflowKey)}
-              aria-label="Filter by workflow type"
-            >
-              <option value="all">All Types</option>
-              {WORKFLOWS.map((item) => (
-                <option key={`filter-type-${item.key}`} value={item.key}>
-                  {item.shortTitle}
-                </option>
-              ))}
-            </select>
-            <select
-              className="project-filter-select"
-              value={stateFilter}
-              onChange={(e) => setStateFilter(e.target.value as 'all' | TaskState)}
-              aria-label="Filter by task state"
-            >
-              <option value="all">All States</option>
-              <option value="DRAFT">Draft</option>
-              <option value="QUEUED">Queued</option>
-              <option value="RUNNING">Running</option>
-              <option value="SUCCESS">Success</option>
-              <option value="FAILURE">Failure</option>
-              <option value="REVOKED">Revoked</option>
-            </select>
-            <select
-              className="project-filter-select"
-              value={sortBy}
-              onChange={(e) =>
-                setSortBy(
-                  e.target.value as
-                    | 'updated_desc'
-                    | 'updated_asc'
-                    | 'created_desc'
-                    | 'created_asc'
-                    | 'name_asc'
-                    | 'name_desc'
-                )
-              }
-              aria-label="Sort projects"
-            >
-              <option value="updated_desc">Updated: Newest</option>
-              <option value="updated_asc">Updated: Oldest</option>
-              <option value="created_desc">Created: Newest</option>
-              <option value="created_asc">Created: Oldest</option>
-              <option value="name_asc">Name: A-Z</option>
-              <option value="name_desc">Name: Z-A</option>
-            </select>
+            <label className="project-filter-field">
+              <Filter size={14} />
+              <select
+                className="project-filter-select"
+                value={typeFilter}
+                onChange={(e) => setTypeFilter(e.target.value as 'all' | WorkflowKey)}
+                aria-label="Filter by workflow type"
+              >
+                <option value="all">All Types</option>
+                {WORKFLOWS.map((item) => (
+                  <option key={`filter-type-${item.key}`} value={item.key}>
+                    {item.shortTitle}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="project-filter-field">
+              <Activity size={14} />
+              <select
+                className="project-filter-select"
+                value={stateFilter}
+                onChange={(e) => setStateFilter(e.target.value as 'all' | TaskState)}
+                aria-label="Filter by task state"
+              >
+                <option value="all">All States</option>
+                <option value="DRAFT">Draft</option>
+                <option value="QUEUED">Queued</option>
+                <option value="RUNNING">Running</option>
+                <option value="SUCCESS">Success</option>
+                <option value="FAILURE">Failure</option>
+                <option value="REVOKED">Revoked</option>
+              </select>
+            </label>
+            <label className="project-filter-field">
+              <SlidersHorizontal size={14} />
+              <select
+                className="project-filter-select"
+                value={sortBy}
+                onChange={(e) =>
+                  setSortBy(
+                    e.target.value as
+                      | 'updated_desc'
+                      | 'updated_asc'
+                      | 'created_desc'
+                      | 'created_asc'
+                      | 'name_asc'
+                      | 'name_desc'
+                  )
+                }
+                aria-label="Sort projects"
+              >
+                <option value="updated_desc">Updated: Newest</option>
+                <option value="updated_asc">Updated: Oldest</option>
+                <option value="created_desc">Created: Newest</option>
+                <option value="created_asc">Created: Oldest</option>
+                <option value="name_asc">Name: A-Z</option>
+                <option value="name_desc">Name: Z-A</option>
+              </select>
+            </label>
           </div>
           <div className="project-toolbar-meta muted small">
             {filteredProjects.length} matched
@@ -234,50 +287,109 @@ export function ProjectsPage() {
 
         {error && <div className="alert error">{error}</div>}
 
-        <div className="project-list">
-          {loading ? (
-            <div className="muted">Loading projects...</div>
-          ) : filteredProjects.length === 0 ? (
-            <div className="empty-state">
-              {projects.length === 0 ? 'No projects yet. Create your first one.' : 'No projects match current filters.'}
-            </div>
-          ) : (
-            pagedProjects.map((project) => (
-              <article key={project.id} className="project-card">
-                <div className="project-card-main">
-                  <div className="project-title-block">
-                    <h3>
-                      <Link to={`/projects/${project.id}`}>{project.name}</Link>
-                    </h3>
-                    {project.summary ? <p className="muted project-summary clamp-1">{project.summary}</p> : null}
-                  </div>
-                  <div className="project-badges">
-                    <span className="badge workflow-badge">
-                      {workflowIconMap[getWorkflowDefinition(project.task_type).key]}
-                      {getWorkflowDefinition(project.task_type).shortTitle}
+        {loading ? (
+          <div className="muted">Loading projects...</div>
+        ) : filteredProjects.length === 0 ? (
+          <div className="empty-state">
+            {projects.length === 0 ? 'No projects yet. Create your first one.' : 'No projects match current filters.'}
+          </div>
+        ) : (
+          <div className="table-wrap project-table-wrap">
+            <table className="table project-table">
+              <thead>
+                <tr>
+                  <th>
+                    <span className="project-th">
+                      <FolderOpen size={13} />
+                      Project
                     </span>
-                    <span className={`badge state-${project.task_state.toLowerCase()}`}>{project.task_state}</span>
-                  </div>
-                </div>
-
-                <div className="project-card-footer">
-                  <span>Updated {formatDateTime(project.updated_at)}</span>
-                  <button
-                    className="icon-btn"
-                    onClick={() => {
-                      if (window.confirm(`Delete project "${project.name}"?`)) {
-                        void softDeleteProject(project.id);
-                      }
-                    }}
-                    title="Delete project"
-                  >
-                    <Trash2 size={15} />
-                  </button>
-                </div>
-              </article>
-            ))
-          )}
-        </div>
+                  </th>
+                  <th>
+                    <span className="project-th">
+                      <Filter size={13} />
+                      Type
+                    </span>
+                  </th>
+                  <th>
+                    <span className="project-th">
+                      <Activity size={13} />
+                      State
+                    </span>
+                  </th>
+                  <th>
+                    <span className="project-th">
+                      <Clock3 size={13} />
+                      Updated
+                    </span>
+                  </th>
+                  <th>
+                    <span className="project-th">
+                      <Calendar size={13} />
+                      Created
+                    </span>
+                  </th>
+                  <th>
+                    <span className="project-th">
+                      <SlidersHorizontal size={13} />
+                      Actions
+                    </span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {pagedProjects.map((project) => {
+                  const workflowDef = getWorkflowDefinition(project.task_type);
+                  return (
+                    <tr key={project.id}>
+                      <td className="project-col-name">
+                        <div className="project-name-row">
+                          <FolderOpen size={14} className="project-name-icon" />
+                          <Link className="project-name-link" to={`/projects/${project.id}`}>
+                            {project.name}
+                          </Link>
+                        </div>
+                        {project.summary ? <div className="muted project-row-summary clamp-1">{project.summary}</div> : null}
+                      </td>
+                      <td>
+                        <span className="badge workflow-badge">
+                          {workflowIconMap[workflowDef.key]}
+                          {workflowDef.shortTitle}
+                        </span>
+                      </td>
+                      <td>
+                        <span className={`badge project-state-badge state-${project.task_state.toLowerCase()}`}>
+                          {stateIconMap[project.task_state]}
+                          {project.task_state}
+                        </span>
+                      </td>
+                      <td className="project-col-time">{formatDateTime(project.updated_at)}</td>
+                      <td className="project-col-time">{formatDateTime(project.created_at)}</td>
+                      <td className="project-col-actions">
+                        <div className="row gap-6 project-action-row">
+                          <Link className="btn btn-ghost btn-compact" to={`/projects/${project.id}`}>
+                            <ExternalLink size={14} />
+                            Open
+                          </Link>
+                          <button
+                            className="icon-btn danger"
+                            onClick={() => {
+                              if (window.confirm(`Delete project "${project.name}"?`)) {
+                                void softDeleteProject(project.id);
+                              }
+                            }}
+                            title="Delete project"
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
 
         {!loading && filteredProjects.length > 0 && (
           <div className="project-pagination">
