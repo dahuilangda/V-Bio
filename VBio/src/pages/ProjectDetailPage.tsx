@@ -1,5 +1,5 @@
-import type { FormEvent } from 'react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, FormEvent, KeyboardEvent, PointerEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -63,6 +63,16 @@ interface DraftFields {
 
 type WorkspaceTab = 'results' | 'basics' | 'components' | 'constraints';
 type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
+type ResultsGridStyle = CSSProperties & { '--results-main-width'?: string };
+
+const RESULTS_MAIN_WIDTH_STORAGE_KEY = 'vbio:results-main-width';
+const DEFAULT_RESULTS_MAIN_WIDTH = 67;
+const MIN_RESULTS_MAIN_WIDTH = 56;
+const MAX_RESULTS_MAIN_WIDTH = 80;
+
+function clampResultsMainWidth(value: number): number {
+  return Math.max(MIN_RESULTS_MAIN_WIDTH, Math.min(MAX_RESULTS_MAIN_WIDTH, value));
+}
 
 function mapTaskState(raw: string): TaskState {
   const normalized = raw.toUpperCase();
@@ -267,6 +277,16 @@ export function ProjectDetailPage() {
     rna: false
   });
   const [sidebarConstraintsOpen, setSidebarConstraintsOpen] = useState(true);
+  const [resultsMainWidth, setResultsMainWidth] = useState<number>(() => {
+    if (typeof window === 'undefined') return DEFAULT_RESULTS_MAIN_WIDTH;
+    const savedRaw = window.localStorage.getItem(RESULTS_MAIN_WIDTH_STORAGE_KEY);
+    const saved = savedRaw ? Number.parseFloat(savedRaw) : Number.NaN;
+    if (!Number.isFinite(saved)) return DEFAULT_RESULTS_MAIN_WIDTH;
+    return clampResultsMainWidth(saved);
+  });
+  const [isResultsResizing, setIsResultsResizing] = useState(false);
+  const resultsGridRef = useRef<HTMLDivElement | null>(null);
+  const resultsResizeRef = useRef<{ startX: number; startWidthPercent: number } | null>(null);
 
   useEffect(() => {
     const tab = new URLSearchParams(location.search).get('tab');
@@ -511,6 +531,98 @@ export function ProjectDetailPage() {
       setActiveComponentId(ids[0]);
     }
   }, [draft, activeComponentId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(RESULTS_MAIN_WIDTH_STORAGE_KEY, resultsMainWidth.toFixed(2));
+  }, [resultsMainWidth]);
+
+  useEffect(() => {
+    if (!isResultsResizing) return;
+
+    const onPointerMove = (event: globalThis.PointerEvent) => {
+      const state = resultsResizeRef.current;
+      const grid = resultsGridRef.current;
+      if (!state || !grid) return;
+
+      const containerWidth = grid.getBoundingClientRect().width;
+      if (!Number.isFinite(containerWidth) || containerWidth <= 0) return;
+
+      const handleWidth = 10;
+      const minAsideWidth = 280;
+      const minMainPx = containerWidth * (MIN_RESULTS_MAIN_WIDTH / 100);
+      const maxMainPxByPct = containerWidth * (MAX_RESULTS_MAIN_WIDTH / 100);
+      const maxMainPxByAside = containerWidth - minAsideWidth - handleWidth;
+      const maxMainPx = Math.min(maxMainPxByPct, maxMainPxByAside);
+      if (maxMainPx <= minMainPx) return;
+
+      const startMainPx = (state.startWidthPercent / 100) * containerWidth;
+      const nextMainPx = startMainPx + (event.clientX - state.startX);
+      const clampedMainPx = Math.min(maxMainPx, Math.max(minMainPx, nextMainPx));
+      const nextPercent = (clampedMainPx / containerWidth) * 100;
+      setResultsMainWidth(clampResultsMainWidth(nextPercent));
+    };
+
+    const stopResizing = () => {
+      setIsResultsResizing(false);
+      resultsResizeRef.current = null;
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', stopResizing);
+    window.addEventListener('pointercancel', stopResizing);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', stopResizing);
+      window.removeEventListener('pointercancel', stopResizing);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [isResultsResizing]);
+
+  const handleResultsResizerPointerDown = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) return;
+      if (window.matchMedia('(max-width: 1100px)').matches) return;
+      const grid = resultsGridRef.current;
+      if (!grid) return;
+
+      resultsResizeRef.current = {
+        startX: event.clientX,
+        startWidthPercent: resultsMainWidth
+      };
+      setIsResultsResizing(true);
+      event.preventDefault();
+    },
+    [resultsMainWidth]
+  );
+
+  const handleResultsResizerKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      setResultsMainWidth((current) => clampResultsMainWidth(current - 1.5));
+      return;
+    }
+    if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      setResultsMainWidth((current) => clampResultsMainWidth(current + 1.5));
+      return;
+    }
+    if (event.key === 'Home') {
+      event.preventDefault();
+      setResultsMainWidth(DEFAULT_RESULTS_MAIN_WIDTH);
+    }
+  }, []);
+
+  const resultsGridStyle = useMemo<ResultsGridStyle>(
+    () => ({
+      '--results-main-width': `${resultsMainWidth.toFixed(2)}%`
+    }),
+    [resultsMainWidth]
+  );
 
   const activeChainInfos = useMemo(() => {
     return buildChainInfos(nonEmptyComponents(normalizedDraftComponents));
@@ -1345,6 +1457,40 @@ export function ProjectDetailPage() {
     draft.inputConfig.properties.affinity && draft.inputConfig.properties.target && draft.inputConfig.properties.ligand
       ? `${affinityTargetLabel} ↔ ${affinityLigandLabel}`
       : 'off';
+  const snapshotCards: Array<{ key: string; label: string; value: string; detail: string; tone: MetricTone }> = [
+    {
+      key: 'plddt',
+      label: 'pLDDT',
+      value: snapshotPlddt === null ? '-' : snapshotPlddt.toFixed(2),
+      detail: 'Complex confidence',
+      tone: snapshotPlddtTone
+    },
+    {
+      key: 'iptm',
+      label: 'ipTM',
+      value: snapshotIptm === null ? '-' : snapshotIptm.toFixed(4),
+      detail: 'Interface confidence',
+      tone: snapshotIptmTone
+    },
+    {
+      key: 'ic50',
+      label: 'IC50 (uM)',
+      value: snapshotIc50Um === null ? '-' : snapshotIc50Um >= 10 ? snapshotIc50Um.toFixed(1) : snapshotIc50Um.toFixed(2),
+      detail: snapshotIc50Error
+        ? `+${snapshotIc50Error.plus >= 1 ? snapshotIc50Error.plus.toFixed(2) : snapshotIc50Error.plus.toFixed(3)} / -${
+            snapshotIc50Error.minus >= 1 ? snapshotIc50Error.minus.toFixed(2) : snapshotIc50Error.minus.toFixed(3)
+          }`
+        : 'uncertainty: -',
+      tone: snapshotIc50Tone
+    },
+    {
+      key: 'binding',
+      label: 'Binding',
+      value: snapshotBindingProbability === null ? '-' : `${(snapshotBindingProbability * 100).toFixed(1)}%`,
+      detail: snapshotBindingStd === null ? 'uncertainty: -' : `± ${(snapshotBindingStd * 100).toFixed(1)}%`,
+      tone: snapshotBindingTone
+    }
+  ];
 
   return (
     <div className="page-grid project-detail">
@@ -1471,7 +1617,7 @@ export function ProjectDetailPage() {
 
       {workspaceTab === 'results' && isPredictionWorkflow && (
         <>
-          <div className="results-grid">
+          <div ref={resultsGridRef} className={`results-grid ${isResultsResizing ? 'is-resizing' : ''}`} style={resultsGridStyle}>
             <section className="panel structure-panel">
               <h2>Structure Viewer</h2>
 
@@ -1479,6 +1625,16 @@ export function ProjectDetailPage() {
 
               <span className="muted small">Current structure file: {displayStructureName}</span>
             </section>
+
+            <div
+              className={`results-resizer ${isResultsResizing ? 'dragging' : ''}`}
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize structure and overview panels"
+              tabIndex={0}
+              onPointerDown={handleResultsResizerPointerDown}
+              onKeyDown={handleResultsResizerKeyDown}
+            />
 
             <aside className="panel info-panel">
               <h2>Overview</h2>
@@ -1499,41 +1655,16 @@ export function ProjectDetailPage() {
 
               <section className="result-aside-block">
                 <div className="result-aside-title">Model Signals</div>
-                <div className="info-list info-list-compact">
-                  <div className="info-item">
-                    <span>pLDDT</span>
-                    <strong className={`snapshot-value metric-value-${snapshotPlddtTone}`}>
-                      {snapshotPlddt === null ? '-' : snapshotPlddt.toFixed(2)}
-                    </strong>
-                  </div>
-                  <div className="info-item">
-                    <span>ipTM</span>
-                    <strong className={`snapshot-value metric-value-${snapshotIptmTone}`}>
-                      {snapshotIptm === null ? '-' : snapshotIptm.toFixed(4)}
-                    </strong>
-                  </div>
-                  <div className="info-item">
-                    <span>IC50 (uM)</span>
-                    <strong className={`snapshot-value metric-value-${snapshotIc50Tone}`}>
-                      {snapshotIc50Um === null ? '-' : snapshotIc50Um >= 10 ? snapshotIc50Um.toFixed(1) : snapshotIc50Um.toFixed(2)}
-                      <span className="snapshot-inline-error">
-                        {snapshotIc50Error
-                          ? `  (+${snapshotIc50Error.plus >= 1 ? snapshotIc50Error.plus.toFixed(2) : snapshotIc50Error.plus.toFixed(3)} / -${
-                              snapshotIc50Error.minus >= 1 ? snapshotIc50Error.minus.toFixed(2) : snapshotIc50Error.minus.toFixed(3)
-                            })`
-                          : '  (± -)'}
-                      </span>
-                    </strong>
-                  </div>
-                  <div className="info-item">
-                    <span>Binding</span>
-                    <strong className={`snapshot-value metric-value-${snapshotBindingTone}`}>
-                      {snapshotBindingProbability === null ? '-' : `${(snapshotBindingProbability * 100).toFixed(1)}%`}
-                      <span className="snapshot-inline-error">
-                        {snapshotBindingStd === null ? '  (± -)' : `  (± ${(snapshotBindingStd * 100).toFixed(1)}%)`}
-                      </span>
-                    </strong>
-                  </div>
+                <div className="overview-signal-list">
+                  {snapshotCards.map((card) => (
+                    <div key={card.key} className={`overview-signal-row tone-${card.tone}`}>
+                      <div className="overview-signal-main">
+                        <span className="overview-signal-label">{card.label}</span>
+                        <span className="overview-signal-detail">{card.detail}</span>
+                      </div>
+                      <strong className={`overview-signal-value metric-value-${card.tone}`}>{card.value}</strong>
+                    </div>
+                  ))}
                 </div>
               </section>
             </aside>

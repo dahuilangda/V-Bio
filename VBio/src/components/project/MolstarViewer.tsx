@@ -183,6 +183,37 @@ function ensureMolstarThemeOverrides() {
   box-shadow: none !important;
 }
 
+.molstar-host .msp-plugin .msp-form-control,
+.molstar-host .msp-plugin input.msp-form-control,
+.molstar-host .msp-plugin select.msp-form-control,
+.molstar-host .msp-plugin textarea.msp-form-control,
+.molstar-host .msp-plugin .msp-form-control input,
+.molstar-host .msp-plugin .msp-form-control select,
+.molstar-host .msp-plugin .msp-form-control textarea {
+  background: #ffffff !important;
+  border-color: #d8e0e7 !important;
+  color: #2f4150 !important;
+  box-shadow: none !important;
+}
+
+.molstar-host .msp-plugin .msp-form-control:focus,
+.molstar-host .msp-plugin input.msp-form-control:focus,
+.molstar-host .msp-plugin select.msp-form-control:focus,
+.molstar-host .msp-plugin textarea.msp-form-control:focus,
+.molstar-host .msp-plugin .msp-form-control input:focus,
+.molstar-host .msp-plugin .msp-form-control select:focus,
+.molstar-host .msp-plugin .msp-form-control textarea:focus {
+  outline: 1px solid #afc0d0 !important;
+  box-shadow: none !important;
+}
+
+.molstar-host .msp-plugin .msp-form-control option,
+.molstar-host .msp-plugin select.msp-form-control option,
+.molstar-host .msp-plugin .msp-form-control select option {
+  background: #ffffff !important;
+  color: #2f4150 !important;
+}
+
 .molstar-host .msp-plugin .msp-section-header {
   background: #ffffff !important;
   border-color: #d8e0e7 !important;

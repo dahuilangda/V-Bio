@@ -334,9 +334,13 @@ function ConfidencePanel({ data, chainIds }: { data: Record<string, unknown>; ch
       <div className="confidence-grid">
         {cards.map((card) => {
           const tone = toneForScale(card.value, card.scale);
+          const toneClass = tone === 'neutral' ? 'confidence-dot-neutral' : `confidence-dot-${tone}`;
           return (
-            <div key={card.label} className="metric-item">
-              <div className="metric-key">{renderHelp(card.label, card.help)}</div>
+            <div key={card.label} className="confidence-kv-row">
+              <div className="confidence-kv-key">
+                <span className={`confidence-dot ${toneClass}`} />
+                {renderHelp(card.label, card.help)}
+              </div>
               <div className={`metric-value metric-value-${tone}`}>{card.display}</div>
             </div>
           );
@@ -344,31 +348,26 @@ function ConfidencePanel({ data, chainIds }: { data: Record<string, unknown>; ch
       </div>
 
       {pairRows.length > 0 && (
-        <div className="metric-table-wrap">
-          <div className="metric-table-head">
+        <div className="confidence-pair-block">
+          <div className="confidence-pair-head">
             {renderHelp('Pair ipTM', 'Interface confidence for each chain pair. Higher is better.')}
+            <span className="muted small">{pairRows.length} pairs</span>
           </div>
-          <table className="metric-table">
-            <thead>
-              <tr>
-                <th>Chain A</th>
-                <th>Chain B</th>
-                <th>pair ipTM</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pairRows.slice(0, 24).map((row) => {
-                const tone = toneForScale(row.value, 'probability');
-                return (
-                  <tr key={`${row.chainA}-${row.chainB}`}>
-                    <td>{row.chainA}</td>
-                    <td>{row.chainB}</td>
-                    <td className={`metric-value-${tone}`}>{row.value.toFixed(4)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <div className="confidence-pair-list">
+            {pairRows.slice(0, 24).map((row) => {
+              const tone = toneForScale(row.value, 'probability');
+              const pct = Math.max(0, Math.min(100, (row.value <= 1 ? row.value : row.value / 100) * 100));
+              return (
+                <div key={`${row.chainA}-${row.chainB}`} className={`confidence-pair-line tone-${tone}`}>
+                  <span className="confidence-pair-label">{`${row.chainA} ↔ ${row.chainB}`}</span>
+                  <div className="confidence-pair-meter">
+                    <span style={{ width: `${pct.toFixed(1)}%` }} />
+                  </div>
+                  <strong className="confidence-pair-value">{row.value.toFixed(4)}</strong>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
     </>
