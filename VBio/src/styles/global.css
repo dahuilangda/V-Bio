@@ -1869,16 +1869,17 @@ select:focus {
 }
 
 .component-jsme-shell {
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--surface);
-  padding: 8px;
-  box-shadow: inset 0 0 0 1px #f2f5f3;
+  border: 1px solid #d8e6de;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #f8fcfa 0%, #f1f7f3 100%);
+  padding: 10px;
+  box-shadow: 0 1px 2px rgba(19, 43, 31, 0.06);
 }
 
 .component-jsme-shell .jsme-host {
-  border-color: var(--line);
-  background: var(--surface);
+  border: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .molstar-host {
@@ -2142,29 +2143,41 @@ select:focus {
 }
 
 .jsme-host {
-  border: 1px solid var(--line);
-  border-radius: 12px;
+  border: 0;
+  border-radius: 11px;
   box-sizing: border-box;
   width: 100%;
-  background: var(--surface);
+  min-width: 0;
+  background: #fff;
   overflow: hidden;
   padding: 0;
   position: relative;
   display: flex;
   align-items: stretch;
+  box-shadow:
+    inset 0 0 0 1px #e0ebe4,
+    0 1px 2px rgba(22, 46, 35, 0.05);
 }
 
 .jsme-editor-container {
   width: 100%;
+  min-width: 0;
   border-radius: 12px;
 }
 
 .jsme-mount {
   width: 100%;
   height: 100%;
+  min-width: 0;
+  min-height: 0;
   max-width: 100%;
   border-radius: 10px;
   overflow: hidden;
+}
+
+.jsme-mount > * {
+  width: 100% !important;
+  height: 100% !important;
 }
 
 .legend-row {

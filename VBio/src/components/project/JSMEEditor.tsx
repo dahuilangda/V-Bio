@@ -49,6 +49,7 @@ async function waitForJSMEReady(timeoutMs = 12000, intervalMs = 120): Promise<an
 }
 
 export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorProps) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
   const mountRef = useRef<HTMLDivElement | null>(null);
   const appletRef = useRef<any>(null);
   const onSmilesChangeRef = useRef(onSmilesChange);
@@ -59,6 +60,55 @@ export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorP
   useEffect(() => {
     onSmilesChangeRef.current = onSmilesChange;
   }, [onSmilesChange]);
+
+  useEffect(() => {
+    const applySize = () => {
+      const host = hostRef.current;
+      const mount = mountRef.current;
+      if (!host || !mount) return;
+
+      const widthPx = Math.max(1, Math.floor(host.clientWidth));
+      const heightPx = Math.max(1, Math.floor(host.clientHeight || height));
+      mount.style.width = '100%';
+      mount.style.height = '100%';
+
+      const applet = appletRef.current;
+      if (applet && typeof applet.setSize === 'function') {
+        try {
+          applet.setSize('100%', '100%');
+        } catch {
+          try {
+            applet.setSize(widthPx, heightPx);
+          } catch {
+            try {
+              applet.setSize(`${widthPx}`, `${heightPx}`);
+            } catch {
+              // Ignore unsupported signatures.
+            }
+          }
+        }
+      }
+    };
+
+    applySize();
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', applySize);
+      return () => {
+        window.removeEventListener('resize', applySize);
+      };
+    }
+
+    const observer = new ResizeObserver(() => {
+      applySize();
+    });
+    if (hostRef.current) {
+      observer.observe(hostRef.current);
+    }
+    return () => {
+      observer.disconnect();
+    };
+  }, [height]);
 
   useEffect(() => {
     let cancelled = false;
@@ -81,7 +131,7 @@ export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorP
         mountRef.current.innerHTML = '';
         mountRef.current.id = editorId;
         const themeOptions = getJsmeThemeOptions();
-        const applet = new JSApplet.JSME(editorId, '100%', `${height}px`, {
+        const applet = new JSApplet.JSME(editorId, '100%', '100%', {
           options: 'star',
           ...themeOptions
         });
@@ -106,6 +156,25 @@ export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorP
         };
 
         applet.setCallBack('AfterStructureModified', sync);
+
+        // Re-apply fit after initial paint to avoid transient overflow.
+        if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+          window.requestAnimationFrame(() => {
+            const host = hostRef.current;
+            if (!host || typeof applet.setSize !== 'function') return;
+            try {
+              applet.setSize('100%', '100%');
+            } catch {
+              const width = Math.max(1, Math.floor(host.clientWidth));
+              const h = Math.max(1, Math.floor(host.clientHeight || height));
+              try {
+                applet.setSize(width, h);
+              } catch {
+                // Ignore unsupported signatures.
+              }
+            }
+          });
+        }
       } catch (e) {
         if (cancelled) return;
         setError(e instanceof Error ? e.message : 'Unable to load JSME editor.');
@@ -141,7 +210,7 @@ export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorP
   }
 
   return (
-    <div className="jsme-host" style={{ height: `${height}px` }}>
+    <div ref={hostRef} className="jsme-host" style={{ height: `${height}px` }}>
       <div ref={mountRef} className="jsme-mount" />
     </div>
   );
