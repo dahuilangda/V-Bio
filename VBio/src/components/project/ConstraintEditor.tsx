@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useMemo } from 'react';
 import type { MouseEvent } from 'react';
 import { Link2, Plus, Radar, Target, Trash2 } from 'lucide-react';
 import type {
@@ -135,15 +135,6 @@ export function ConstraintEditor({
       onSelectedConstraintIdChange?.(fallback);
     }
   };
-
-  useEffect(() => {
-    if (!selectedConstraintId) return;
-    const target = document.getElementById(`constraint-card-${selectedConstraintId}`);
-    if (target) {
-      const targetTop = target.getBoundingClientRect().top + window.scrollY - 132;
-      window.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
-    }
-  }, [selectedConstraintId]);
 
   return (
     <section

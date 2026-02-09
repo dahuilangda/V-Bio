@@ -1170,6 +1170,38 @@ export function ProjectDetailPage() {
     void pullResultForViewer(project.task_id);
   }, [project?.task_id, project?.task_state, structureText]);
 
+  useEffect(() => {
+    if (workspaceTab !== 'constraints') return;
+    if (!activeConstraintId && selectedContactConstraintIds.length === 0) return;
+
+    const onGlobalPointerDown = (event: globalThis.PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        setActiveConstraintId(null);
+        setSelectedContactConstraintIds([]);
+        constraintSelectionAnchorRef.current = null;
+        return;
+      }
+
+      const keepSelection =
+        Boolean(target.closest('.constraint-item')) ||
+        Boolean(target.closest('.component-sidebar-link-constraint')) ||
+        Boolean(target.closest('.molstar-host')) ||
+        Boolean(target.closest('button, a, input, select, textarea, label, [role="button"], [contenteditable="true"]'));
+
+      if (!keepSelection) {
+        setActiveConstraintId(null);
+        setSelectedContactConstraintIds([]);
+        constraintSelectionAnchorRef.current = null;
+      }
+    };
+
+    document.addEventListener('pointerdown', onGlobalPointerDown, true);
+    return () => {
+      document.removeEventListener('pointerdown', onGlobalPointerDown, true);
+    };
+  }, [workspaceTab, activeConstraintId, selectedContactConstraintIds.length]);
+
   if (loading) {
     return <div className="centered-page">Loading project...</div>;
   }
