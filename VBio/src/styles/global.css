@@ -1052,6 +1052,54 @@ select:focus {
   box-shadow: 0 1px 1px rgba(18, 44, 33, 0.12);
 }
 
+.run-action {
+  position: relative;
+  display: inline-flex;
+}
+
+.run-action-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 40;
+  min-width: 160px;
+  border: 1px solid #d9e5dd;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 8px 20px rgba(23, 44, 35, 0.12);
+  padding: 4px;
+  display: grid;
+  gap: 2px;
+}
+
+.run-action-item {
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--lh-tight);
+  cursor: pointer;
+}
+
+.run-action-item:hover {
+  background: #eff5f1;
+}
+
+.run-action-item.primary {
+  color: #1b4f37;
+  font-weight: 600;
+}
+
+.run-action-item:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .status-panel {
   background: linear-gradient(180deg, #ffffff 0%, #f7fbf8 100%);
 }

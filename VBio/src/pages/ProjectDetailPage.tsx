@@ -278,6 +278,30 @@ function filterConstraintsByBackend(constraints: PredictionConstraint[], backend
   return constraints.filter((item) => allowedTypeSet.has(item.type));
 }
 
+function normalizeConfigForBackend(inputConfig: ProjectInputConfig, backend: string): ProjectInputConfig {
+  return {
+    version: 1,
+    components: normalizeComponents(inputConfig.components),
+    constraints: filterConstraintsByBackend(inputConfig.constraints, backend),
+    properties: inputConfig.properties,
+    options: inputConfig.options
+  };
+}
+
+function createDraftFingerprint(draft: DraftFields): string {
+  const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, draft.backend);
+  const activeComponents = nonEmptyComponents(normalizedConfig.components);
+  const hasMsa = activeComponents.some((comp) => comp.type === 'protein' && comp.useMsa !== false);
+  return JSON.stringify({
+    name: draft.name.trim(),
+    summary: draft.summary.trim(),
+    backend: draft.backend,
+    use_msa: hasMsa,
+    color_mode: draft.color_mode || 'white',
+    inputConfig: normalizedConfig
+  });
+}
+
 export function ProjectDetailPage() {
   const { projectId = '' } = useParams();
   const location = useLocation();
@@ -296,6 +320,8 @@ export function ProjectDetailPage() {
   const [statusInfo, setStatusInfo] = useState<Record<string, unknown> | null>(null);
   const [nowTs, setNowTs] = useState(Date.now());
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('results');
+  const [savedDraftFingerprint, setSavedDraftFingerprint] = useState('');
+  const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [proteinTemplates, setProteinTemplates] = useState<Record<string, ProteinTemplateUpload>>({});
   const [pickedResidue, setPickedResidue] = useState<ConstraintResiduePick | null>(null);
   const [activeConstraintId, setActiveConstraintId] = useState<string | null>(null);
@@ -306,6 +332,7 @@ export function ProjectDetailPage() {
   const constraintSelectionAnchorRef = useRef<string | null>(null);
   const prevTaskStateRef = useRef<TaskState | null>(null);
   const statusRefreshInFlightRef = useRef(false);
+  const runActionRef = useRef<HTMLDivElement | null>(null);
   const [activeComponentId, setActiveComponentId] = useState<string | null>(null);
   const [sidebarTypeOpen, setSidebarTypeOpen] = useState<Record<InputComponent['type'], boolean>>({
     protein: true,
@@ -1220,7 +1247,7 @@ export function ProjectDetailPage() {
       const backendConstraints = filterConstraintsByBackend(resolvedConfig.constraints, next.backend);
 
       const savedUiState = loadProjectUiState(next.id);
-      setDraft({
+      const loadedDraft: DraftFields = {
         name: next.name,
         summary: next.summary,
         backend: next.backend,
@@ -1230,7 +1257,10 @@ export function ProjectDetailPage() {
           ...resolvedConfig,
           constraints: backendConstraints
         }
-      });
+      };
+      setDraft(loadedDraft);
+      setSavedDraftFingerprint(createDraftFingerprint(loadedDraft));
+      setRunMenuOpen(false);
       setProteinTemplates(savedUiState?.proteinTemplates || {});
       setActiveConstraintId(savedUiState?.activeConstraintId || null);
       setSelectedContactConstraintIds([]);
@@ -1283,14 +1313,7 @@ export function ProjectDetailPage() {
     setSaving(true);
     setError(null);
     try {
-      const constraintsForBackend = filterConstraintsByBackend(draft.inputConfig.constraints, draft.backend);
-      const normalizedConfig: ProjectInputConfig = {
-        version: 1,
-        components: normalizeComponents(draft.inputConfig.components),
-        constraints: constraintsForBackend,
-        properties: draft.inputConfig.properties,
-        options: draft.inputConfig.options
-      };
+      const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, draft.backend);
       const activeComponents = nonEmptyComponents(normalizedConfig.components);
       const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(normalizedConfig);
       const hasMsa = activeComponents.some((comp) => comp.type === 'protein' && comp.useMsa !== false);
@@ -1308,14 +1331,17 @@ export function ProjectDetailPage() {
 
       if (next) {
         saveProjectInputConfig(next.id, normalizedConfig);
-        setDraft({
+        const nextDraft: DraftFields = {
           name: next.name,
           summary: next.summary,
           backend: next.backend,
           use_msa: next.use_msa,
           color_mode: next.color_mode || 'white',
           inputConfig: normalizedConfig
-        });
+        };
+        setDraft(nextDraft);
+        setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
+        setRunMenuOpen(false);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save draft.');
@@ -1415,13 +1441,7 @@ export function ProjectDetailPage() {
       return;
     }
 
-    const normalizedConfig: ProjectInputConfig = {
-      version: 1,
-      components: normalizeComponents(draft.inputConfig.components),
-      constraints: filterConstraintsByBackend(draft.inputConfig.constraints, draft.backend),
-      properties: draft.inputConfig.properties,
-      options: draft.inputConfig.options
-    };
+    const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, draft.backend);
     const activeComponents = nonEmptyComponents(normalizedConfig.components);
     const validationError = validateComponents(activeComponents);
     if (validationError) {
@@ -1561,6 +1581,37 @@ export function ProjectDetailPage() {
       document.removeEventListener('pointerdown', onGlobalPointerDown, true);
     };
   }, [workspaceTab, activeConstraintId, selectedContactConstraintIds.length]);
+  const currentDraftFingerprint = useMemo(() => (draft ? createDraftFingerprint(draft) : ''), [draft]);
+  const isDraftDirty = useMemo(
+    () => Boolean(draft) && Boolean(savedDraftFingerprint) && currentDraftFingerprint !== savedDraftFingerprint,
+    [draft, savedDraftFingerprint, currentDraftFingerprint]
+  );
+
+  useEffect(() => {
+    if (!runMenuOpen) return;
+    if (isDraftDirty && !submitting && !saving) return;
+    setRunMenuOpen(false);
+  }, [runMenuOpen, isDraftDirty, submitting, saving]);
+
+  useEffect(() => {
+    if (!runMenuOpen) return;
+    const onPointerDown = (event: globalThis.PointerEvent) => {
+      if (!runActionRef.current) return;
+      if (runActionRef.current.contains(event.target as Node)) return;
+      setRunMenuOpen(false);
+    };
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setRunMenuOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [runMenuOpen]);
 
   if (loading) {
     return <div className="centered-page">Loading project...</div>;
@@ -1583,7 +1634,23 @@ export function ProjectDetailPage() {
 
   const workflow = getWorkflowDefinition(project.task_type);
   const isPredictionWorkflow = workflow.key === 'prediction';
-  const runDisabled = submitting || !isPredictionWorkflow;
+  const runDisabled = submitting || saving || !isPredictionWorkflow;
+  const handleRunAction = () => {
+    if (runDisabled) return;
+    if (isDraftDirty) {
+      setRunMenuOpen((prev) => !prev);
+      return;
+    }
+    void submitTask();
+  };
+  const handleRunCurrentDraft = () => {
+    setRunMenuOpen(false);
+    void submitTask();
+  };
+  const handleRestoreSavedDraft = () => {
+    setRunMenuOpen(false);
+    void loadProject();
+  };
   const sidebarTypeOrder: InputComponent['type'][] = ['protein', 'ligand', 'dna', 'rna'];
   const formatComponentChainLabel = (chainId: string) => {
     if (!chainId) return '-';
@@ -2218,27 +2285,63 @@ export function ProjectDetailPage() {
             <Download size={15} />
           </button>
           <button
-            className="btn btn-primary btn-compact btn-square run-btn-primary"
+            className="btn btn-ghost btn-compact btn-square"
             type="button"
-            onClick={() => void submitTask()}
-            disabled={runDisabled}
-            title={
-              submitting
-                ? 'Submitting'
-                : isPredictionWorkflow
-                  ? workflow.runLabel
-                  : 'Runner UI for this workflow is being integrated.'
-            }
-            aria-label={
-              submitting
-                ? 'Submitting'
-                : isPredictionWorkflow
-                  ? workflow.runLabel
-                  : 'Run'
-            }
+            onClick={() => void saveDraft()}
+            disabled={!canEdit || saving || !isDraftDirty}
+            title={saving ? 'Saving draft' : isDraftDirty ? 'Save draft' : 'Draft saved'}
+            aria-label={saving ? 'Saving draft' : isDraftDirty ? 'Save draft' : 'Draft saved'}
           >
-            {submitting ? <LoaderCircle size={15} className="spin" /> : <Play size={15} />}
+            {saving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}
           </button>
+          <div className="run-action" ref={runActionRef}>
+            <button
+              className="btn btn-primary btn-compact btn-square run-btn-primary"
+              type="button"
+              onClick={handleRunAction}
+              disabled={runDisabled}
+              title={
+                submitting
+                  ? 'Submitting'
+                  : isDraftDirty
+                    ? `${workflow.runLabel} (has unsaved changes)`
+                    : isPredictionWorkflow
+                      ? workflow.runLabel
+                      : 'Runner UI for this workflow is being integrated.'
+              }
+              aria-label={
+                submitting
+                  ? 'Submitting'
+                  : isPredictionWorkflow
+                    ? workflow.runLabel
+                    : 'Run'
+              }
+              aria-haspopup={isDraftDirty ? 'menu' : undefined}
+              aria-expanded={isDraftDirty ? runMenuOpen : undefined}
+            >
+              {submitting ? <LoaderCircle size={15} className="spin" /> : <Play size={15} />}
+            </button>
+            {runMenuOpen && isDraftDirty && (
+              <div className="run-action-menu" role="menu" aria-label="Run options">
+                <button
+                  type="button"
+                  className="run-action-item"
+                  onClick={handleRestoreSavedDraft}
+                  disabled={loading || saving || submitting}
+                >
+                  Restore Saved
+                </button>
+                <button
+                  type="button"
+                  className="run-action-item primary"
+                  onClick={handleRunCurrentDraft}
+                  disabled={loading || saving || submitting}
+                >
+                  Run Current
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </section>
 
@@ -2872,16 +2975,6 @@ export function ProjectDetailPage() {
                 {workflow.description}
               </div>
             )}
-
-            <div className="row gap-8 end">
-              <button className="btn btn-ghost" type="button" onClick={() => void loadProject()}>
-                Revert
-              </button>
-              <button className="btn btn-primary" type="submit" disabled={!canEdit || saving}>
-                <Save size={15} />
-                {saving ? 'Saving...' : 'Save Draft'}
-              </button>
-            </div>
           </form>
         </section>
       )}

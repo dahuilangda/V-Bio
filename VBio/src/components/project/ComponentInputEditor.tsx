@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight, Dna, FlaskConical, Plus, Trash2 } from 'lucide-react';
 import type { InputComponent, LigandInputMethod, MoleculeType, ProteinTemplateUpload } from '../../types/models';
 import { componentTypeLabel, createInputComponent, normalizeComponentSequence } from '../../utils/projectInputs';
@@ -50,8 +50,13 @@ export function ComponentInputEditor({
 }: ComponentInputEditorProps) {
   const [templateErrors, setTemplateErrors] = useState<Record<string, string>>({});
   const [collapsedById, setCollapsedById] = useState<Record<string, boolean>>({});
+  const hasMountedSelectionEffectRef = useRef(false);
 
   useEffect(() => {
+    if (!hasMountedSelectionEffectRef.current) {
+      hasMountedSelectionEffectRef.current = true;
+      return;
+    }
     if (!selectedComponentId) return;
     const target = document.getElementById(`component-card-${selectedComponentId}`);
     if (target) {
