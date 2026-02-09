@@ -65,14 +65,32 @@ interface DraftFields {
 type WorkspaceTab = 'results' | 'basics' | 'components' | 'constraints';
 type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
 type ResultsGridStyle = CSSProperties & { '--results-main-width'?: string };
+type InputsGridStyle = CSSProperties & { '--inputs-main-width'?: string };
+type ConstraintsGridStyle = CSSProperties & { '--constraints-main-width'?: string };
 
 const RESULTS_MAIN_WIDTH_STORAGE_KEY = 'vbio:results-main-width';
 const DEFAULT_RESULTS_MAIN_WIDTH = 67;
 const MIN_RESULTS_MAIN_WIDTH = 56;
 const MAX_RESULTS_MAIN_WIDTH = 80;
+const COMPONENTS_MAIN_WIDTH_STORAGE_KEY = 'vbio:components-main-width';
+const DEFAULT_COMPONENTS_MAIN_WIDTH = 74;
+const MIN_COMPONENTS_MAIN_WIDTH = 55;
+const MAX_COMPONENTS_MAIN_WIDTH = 84;
+const CONSTRAINTS_MAIN_WIDTH_STORAGE_KEY = 'vbio:constraints-main-width';
+const DEFAULT_CONSTRAINTS_MAIN_WIDTH = 63;
+const MIN_CONSTRAINTS_MAIN_WIDTH = 52;
+const MAX_CONSTRAINTS_MAIN_WIDTH = 82;
 
 function clampResultsMainWidth(value: number): number {
   return Math.max(MIN_RESULTS_MAIN_WIDTH, Math.min(MAX_RESULTS_MAIN_WIDTH, value));
+}
+
+function clampComponentsMainWidth(value: number): number {
+  return Math.max(MIN_COMPONENTS_MAIN_WIDTH, Math.min(MAX_COMPONENTS_MAIN_WIDTH, value));
+}
+
+function clampConstraintsMainWidth(value: number): number {
+  return Math.max(MIN_CONSTRAINTS_MAIN_WIDTH, Math.min(MAX_CONSTRAINTS_MAIN_WIDTH, value));
 }
 
 function mapTaskState(raw: string): TaskState {
@@ -290,6 +308,26 @@ export function ProjectDetailPage() {
   const [isResultsResizing, setIsResultsResizing] = useState(false);
   const resultsGridRef = useRef<HTMLDivElement | null>(null);
   const resultsResizeRef = useRef<{ startX: number; startWidthPercent: number } | null>(null);
+  const [componentsMainWidth, setComponentsMainWidth] = useState<number>(() => {
+    if (typeof window === 'undefined') return DEFAULT_COMPONENTS_MAIN_WIDTH;
+    const savedRaw = window.localStorage.getItem(COMPONENTS_MAIN_WIDTH_STORAGE_KEY);
+    const saved = savedRaw ? Number.parseFloat(savedRaw) : Number.NaN;
+    if (!Number.isFinite(saved)) return DEFAULT_COMPONENTS_MAIN_WIDTH;
+    return clampComponentsMainWidth(saved);
+  });
+  const [isComponentsResizing, setIsComponentsResizing] = useState(false);
+  const componentsWorkspaceRef = useRef<HTMLDivElement | null>(null);
+  const componentsResizeRef = useRef<{ startX: number; startWidthPercent: number } | null>(null);
+  const [constraintsMainWidth, setConstraintsMainWidth] = useState<number>(() => {
+    if (typeof window === 'undefined') return DEFAULT_CONSTRAINTS_MAIN_WIDTH;
+    const savedRaw = window.localStorage.getItem(CONSTRAINTS_MAIN_WIDTH_STORAGE_KEY);
+    const saved = savedRaw ? Number.parseFloat(savedRaw) : Number.NaN;
+    if (!Number.isFinite(saved)) return DEFAULT_CONSTRAINTS_MAIN_WIDTH;
+    return clampConstraintsMainWidth(saved);
+  });
+  const [isConstraintsResizing, setIsConstraintsResizing] = useState(false);
+  const constraintsWorkspaceRef = useRef<HTMLDivElement | null>(null);
+  const constraintsResizeRef = useRef<{ startX: number; startWidthPercent: number } | null>(null);
 
   useEffect(() => {
     const tab = new URLSearchParams(location.search).get('tab');
@@ -382,13 +420,17 @@ export function ProjectDetailPage() {
   const constraintCount = draft?.inputConfig.constraints.length || 0;
   const snapshotPlddt = useMemo(() => {
     if (!project?.confidence) return null;
-    const raw = readFirstFiniteMetric(project.confidence as Record<string, unknown>, ['complex_plddt_protein', 'complex_plddt']);
+    const raw = readFirstFiniteMetric(project.confidence as Record<string, unknown>, [
+      'complex_plddt_protein',
+      'complex_plddt',
+      'plddt'
+    ]);
     if (raw === null) return null;
     return raw <= 1 ? raw * 100 : raw;
   }, [project]);
   const snapshotIptm = useMemo(() => {
     if (!project?.confidence) return null;
-    return readFirstFiniteMetric(project.confidence as Record<string, unknown>, ['iptm']);
+    return readFirstFiniteMetric(project.confidence as Record<string, unknown>, ['iptm', 'ligand_iptm', 'protein_iptm']);
   }, [project]);
   const primaryLigandValue = useMemo(() => {
     return normalizedDraftComponents.find((comp) => comp.type === 'ligand' && comp.sequence)?.sequence || '';
@@ -587,6 +629,16 @@ export function ProjectDetailPage() {
   }, [resultsMainWidth]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(COMPONENTS_MAIN_WIDTH_STORAGE_KEY, componentsMainWidth.toFixed(2));
+  }, [componentsMainWidth]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(CONSTRAINTS_MAIN_WIDTH_STORAGE_KEY, constraintsMainWidth.toFixed(2));
+  }, [constraintsMainWidth]);
+
+  useEffect(() => {
     if (!isResultsResizing) return;
 
     const onPointerMove = (event: globalThis.PointerEvent) => {
@@ -632,6 +684,98 @@ export function ProjectDetailPage() {
     };
   }, [isResultsResizing]);
 
+  useEffect(() => {
+    if (!isComponentsResizing) return;
+
+    const onPointerMove = (event: globalThis.PointerEvent) => {
+      const state = componentsResizeRef.current;
+      const grid = componentsWorkspaceRef.current;
+      if (!state || !grid) return;
+
+      const containerWidth = grid.getBoundingClientRect().width;
+      if (!Number.isFinite(containerWidth) || containerWidth <= 0) return;
+
+      const handleWidth = 10;
+      const minAsideWidth = 250;
+      const minMainPx = containerWidth * (MIN_COMPONENTS_MAIN_WIDTH / 100);
+      const maxMainPxByPct = containerWidth * (MAX_COMPONENTS_MAIN_WIDTH / 100);
+      const maxMainPxByAside = containerWidth - minAsideWidth - handleWidth;
+      const maxMainPx = Math.min(maxMainPxByPct, maxMainPxByAside);
+      if (maxMainPx <= minMainPx) return;
+
+      const startMainPx = (state.startWidthPercent / 100) * containerWidth;
+      const nextMainPx = startMainPx + (event.clientX - state.startX);
+      const clampedMainPx = Math.min(maxMainPx, Math.max(minMainPx, nextMainPx));
+      const nextPercent = (clampedMainPx / containerWidth) * 100;
+      setComponentsMainWidth(clampComponentsMainWidth(nextPercent));
+    };
+
+    const stopResizing = () => {
+      setIsComponentsResizing(false);
+      componentsResizeRef.current = null;
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', stopResizing);
+    window.addEventListener('pointercancel', stopResizing);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', stopResizing);
+      window.removeEventListener('pointercancel', stopResizing);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [isComponentsResizing]);
+
+  useEffect(() => {
+    if (!isConstraintsResizing) return;
+
+    const onPointerMove = (event: globalThis.PointerEvent) => {
+      const state = constraintsResizeRef.current;
+      const grid = constraintsWorkspaceRef.current;
+      if (!state || !grid) return;
+
+      const containerWidth = grid.getBoundingClientRect().width;
+      if (!Number.isFinite(containerWidth) || containerWidth <= 0) return;
+
+      const handleWidth = 10;
+      const minAsideWidth = 300;
+      const minMainPx = containerWidth * (MIN_CONSTRAINTS_MAIN_WIDTH / 100);
+      const maxMainPxByPct = containerWidth * (MAX_CONSTRAINTS_MAIN_WIDTH / 100);
+      const maxMainPxByAside = containerWidth - minAsideWidth - handleWidth;
+      const maxMainPx = Math.min(maxMainPxByPct, maxMainPxByAside);
+      if (maxMainPx <= minMainPx) return;
+
+      const startMainPx = (state.startWidthPercent / 100) * containerWidth;
+      const nextMainPx = startMainPx + (event.clientX - state.startX);
+      const clampedMainPx = Math.min(maxMainPx, Math.max(minMainPx, nextMainPx));
+      const nextPercent = (clampedMainPx / containerWidth) * 100;
+      setConstraintsMainWidth(clampConstraintsMainWidth(nextPercent));
+    };
+
+    const stopResizing = () => {
+      setIsConstraintsResizing(false);
+      constraintsResizeRef.current = null;
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', stopResizing);
+    window.addEventListener('pointercancel', stopResizing);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', stopResizing);
+      window.removeEventListener('pointercancel', stopResizing);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [isConstraintsResizing]);
+
   const handleResultsResizerPointerDown = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
       if (event.button !== 0) return;
@@ -666,11 +810,93 @@ export function ProjectDetailPage() {
     }
   }, []);
 
+  const handleComponentsResizerPointerDown = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) return;
+      if (window.matchMedia('(max-width: 1100px)').matches) return;
+      const grid = componentsWorkspaceRef.current;
+      if (!grid) return;
+
+      componentsResizeRef.current = {
+        startX: event.clientX,
+        startWidthPercent: componentsMainWidth
+      };
+      setIsComponentsResizing(true);
+      event.preventDefault();
+    },
+    [componentsMainWidth]
+  );
+
+  const handleComponentsResizerKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      setComponentsMainWidth((current) => clampComponentsMainWidth(current - 1.5));
+      return;
+    }
+    if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      setComponentsMainWidth((current) => clampComponentsMainWidth(current + 1.5));
+      return;
+    }
+    if (event.key === 'Home') {
+      event.preventDefault();
+      setComponentsMainWidth(DEFAULT_COMPONENTS_MAIN_WIDTH);
+    }
+  }, []);
+
+  const handleConstraintsResizerPointerDown = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) return;
+      if (window.matchMedia('(max-width: 1100px)').matches) return;
+      const grid = constraintsWorkspaceRef.current;
+      if (!grid) return;
+
+      constraintsResizeRef.current = {
+        startX: event.clientX,
+        startWidthPercent: constraintsMainWidth
+      };
+      setIsConstraintsResizing(true);
+      event.preventDefault();
+    },
+    [constraintsMainWidth]
+  );
+
+  const handleConstraintsResizerKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      setConstraintsMainWidth((current) => clampConstraintsMainWidth(current - 1.5));
+      return;
+    }
+    if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      setConstraintsMainWidth((current) => clampConstraintsMainWidth(current + 1.5));
+      return;
+    }
+    if (event.key === 'Home') {
+      event.preventDefault();
+      setConstraintsMainWidth(DEFAULT_CONSTRAINTS_MAIN_WIDTH);
+    }
+  }, []);
+
   const resultsGridStyle = useMemo<ResultsGridStyle>(
     () => ({
       '--results-main-width': `${resultsMainWidth.toFixed(2)}%`
     }),
     [resultsMainWidth]
+  );
+
+  const componentsGridStyle = useMemo<InputsGridStyle>(
+    () => ({
+      '--inputs-main-width': `${componentsMainWidth.toFixed(2)}%`
+    }),
+    [componentsMainWidth]
+  );
+
+  const constraintsGridStyle = useMemo<ConstraintsGridStyle>(
+    () => ({
+      '--constraints-main-width': `${constraintsMainWidth.toFixed(2)}%`
+    }),
+    [constraintsMainWidth]
   );
 
   const activeChainInfos = useMemo(() => {
@@ -1641,6 +1867,19 @@ export function ProjectDetailPage() {
   const displayStructureText = structureText;
   const displayStructureFormat: 'cif' | 'pdb' = structureFormat;
   const displayStructureName = project.structure_name || '-';
+  const confidenceBackend =
+    project.confidence && typeof project.confidence.backend === 'string' ? String(project.confidence.backend).toLowerCase() : '';
+  const hasAf3ConfidenceSignals = Boolean(
+    readFirstFiniteMetric(project.confidence || {}, ['ranking_score', 'fraction_disordered']) !== null ||
+      readObjectPath(project.confidence || {}, 'chain_pair_iptm') !== undefined
+  );
+  const displayStructureColorMode: 'white' | 'alphafold' =
+    project.backend === 'alphafold3' ||
+    draft.color_mode === 'alphafold' ||
+    confidenceBackend === 'alphafold3' ||
+    hasAf3ConfidenceSignals
+      ? 'alphafold'
+      : 'white';
   const constraintStructureText = selectedTemplatePreview?.content || '';
   const constraintStructureFormat: 'cif' | 'pdb' = selectedTemplatePreview?.format || 'pdb';
   const hasConstraintStructure = Boolean(constraintStructureText.trim());
@@ -1814,7 +2053,7 @@ export function ProjectDetailPage() {
             <section className="panel structure-panel">
               <h2>Structure Viewer</h2>
 
-              <MolstarViewer structureText={displayStructureText} format={displayStructureFormat} colorMode="white" />
+              <MolstarViewer structureText={displayStructureText} format={displayStructureFormat} colorMode={displayStructureColorMode} />
 
               <span className="muted small">Current structure file: {displayStructureName}</span>
             </section>
@@ -1970,7 +2209,13 @@ export function ProjectDetailPage() {
             {isPredictionWorkflow ? (
               <>
                 {workspaceTab !== 'basics' && (
-                  <div className={`inputs-workspace ${workspaceTab === 'constraints' ? 'constraints-focus' : ''}`}>
+                  <div
+                    ref={workspaceTab === 'components' ? componentsWorkspaceRef : null}
+                    className={`inputs-workspace ${workspaceTab === 'constraints' ? 'constraints-focus' : ''} ${
+                      workspaceTab === 'components' ? `components-resizable ${isComponentsResizing ? 'is-resizing' : ''}` : ''
+                    }`}
+                    style={workspaceTab === 'components' ? componentsGridStyle : undefined}
+                  >
                   <div className="inputs-main">
                     {workspaceTab === 'components' && (
                       <>
@@ -2031,7 +2276,11 @@ export function ProjectDetailPage() {
                     )}
 
                     {workspaceTab === 'constraints' && (
-                      <div className="constraint-workspace">
+                      <div
+                        ref={constraintsWorkspaceRef}
+                        className={`constraint-workspace resizable ${isConstraintsResizing ? 'is-resizing' : ''}`}
+                        style={constraintsGridStyle}
+                      >
                         <section className="panel subtle constraint-viewer-panel">
                           <div className="constraint-nav-bar">
                             <div className="constraint-nav-head">
@@ -2128,6 +2377,16 @@ export function ProjectDetailPage() {
                           )}
                         </section>
 
+                        <div
+                          className={`panel-resizer ${isConstraintsResizing ? 'dragging' : ''}`}
+                          role="separator"
+                          aria-orientation="vertical"
+                          aria-label="Resize constraint picker and constraints panels"
+                          tabIndex={0}
+                          onPointerDown={handleConstraintsResizerPointerDown}
+                          onKeyDown={handleConstraintsResizerKeyDown}
+                        />
+
                         <section
                           className="panel subtle constraint-editor-panel"
                           onClick={(event) => {
@@ -2190,6 +2449,18 @@ export function ProjectDetailPage() {
                       </div>
                     )}
                   </div>
+
+                  {workspaceTab === 'components' && (
+                    <div
+                      className={`panel-resizer ${isComponentsResizing ? 'dragging' : ''}`}
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-label="Resize components and workspace panels"
+                      tabIndex={0}
+                      onPointerDown={handleComponentsResizerPointerDown}
+                      onKeyDown={handleComponentsResizerKeyDown}
+                    />
+                  )}
 
                   {workspaceTab === 'components' && (
                     <aside className="panel subtle component-sidebar">

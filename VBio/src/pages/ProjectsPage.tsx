@@ -57,7 +57,7 @@ export function ProjectsPage() {
   const [stateFilter, setStateFilter] = useState<'all' | TaskState>('all');
   const [sortBy, setSortBy] = useState<
     'updated_desc' | 'updated_asc' | 'created_desc' | 'created_asc' | 'name_asc' | 'name_desc'
-  >('updated_desc');
+  >('created_desc');
   const [pageSize, setPageSize] = useState<number>(12);
   const [page, setPage] = useState<number>(1);
   const hasActiveRuntime = useMemo(

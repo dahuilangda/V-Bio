@@ -1117,7 +1117,7 @@ select:focus {
 
 .results-grid {
   display: grid;
-  gap: 12px;
+  gap: 6px;
   grid-template-columns: minmax(0, var(--results-main-width, 67%)) 10px minmax(280px, 1fr);
   align-items: stretch;
 }
@@ -1129,7 +1129,8 @@ select:focus {
   min-width: 0;
 }
 
-.results-resizer {
+.results-resizer,
+.panel-resizer {
   position: relative;
   width: 10px;
   min-width: 10px;
@@ -1139,9 +1140,11 @@ select:focus {
   cursor: col-resize;
   transition: background 0.16s ease, opacity 0.16s ease;
   opacity: 0.7;
+  touch-action: none;
 }
 
-.results-resizer::after {
+.results-resizer::after,
+.panel-resizer::after {
   content: '';
   position: absolute;
   left: 50%;
@@ -1156,18 +1159,27 @@ select:focus {
 
 .results-resizer:hover,
 .results-resizer.dragging,
-.results-grid.is-resizing .results-resizer {
+.results-grid.is-resizing .results-resizer,
+.panel-resizer:hover,
+.panel-resizer.dragging,
+.inputs-workspace.is-resizing .panel-resizer,
+.constraint-workspace.is-resizing .panel-resizer {
   opacity: 1;
 }
 
 .results-resizer:hover::after,
 .results-resizer.dragging::after,
-.results-grid.is-resizing .results-resizer::after {
+.results-grid.is-resizing .results-resizer::after,
+.panel-resizer:hover::after,
+.panel-resizer.dragging::after,
+.inputs-workspace.is-resizing .panel-resizer::after,
+.constraint-workspace.is-resizing .panel-resizer::after {
   background: rgba(123, 147, 133, 0.48);
   width: 2px;
 }
 
-.results-resizer:focus-visible {
+.results-resizer:focus-visible,
+.panel-resizer:focus-visible {
   outline: 1px solid rgba(127, 154, 139, 0.56);
   outline-offset: 1px;
 }
@@ -1325,6 +1337,11 @@ select:focus {
   align-items: start;
 }
 
+.inputs-workspace.components-resizable {
+  grid-template-columns: minmax(0, var(--inputs-main-width, 74%)) 10px minmax(250px, 1fr);
+  gap: 6px;
+}
+
 .inputs-workspace.constraints-focus {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -1332,6 +1349,7 @@ select:focus {
 .inputs-main {
   display: grid;
   gap: 8px;
+  min-width: 0;
 }
 
 .basics-panel {
@@ -2251,6 +2269,11 @@ select:focus {
   align-items: start;
 }
 
+.constraint-workspace.resizable {
+  grid-template-columns: minmax(0, var(--constraints-main-width, 63%)) 10px minmax(300px, 1fr);
+  gap: 6px;
+}
+
 .constraint-viewer-panel {
   position: sticky;
   top: 86px;
@@ -2264,6 +2287,7 @@ select:focus {
 
 .constraint-editor-panel {
   padding: 10px;
+  min-width: 0;
 }
 
 .constraint-viewer-empty {
@@ -2733,6 +2757,10 @@ select:focus {
   }
 
   .results-resizer {
+    display: none;
+  }
+
+  .panel-resizer {
     display: none;
   }
 

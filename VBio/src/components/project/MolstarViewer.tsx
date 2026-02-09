@@ -248,7 +248,7 @@ async function loadStructure(viewer: any, text: string, format: 'cif' | 'pdb') {
   if (typeof viewer?.clear === 'function') {
     await viewer.clear();
   }
-  const formats = format === 'cif' ? ['mmcif', 'pdb'] : ['pdb', 'mmcif'];
+  const formats = format === 'cif' ? ['mmcif', 'cif', 'pdb'] : ['pdb', 'mmcif', 'cif'];
   const errors: string[] = [];
 
   for (const candidate of formats) {
@@ -283,23 +283,44 @@ async function tryApplyAlphaFoldTheme(viewer: any) {
   const plugin = viewer?.plugin;
   const manager = plugin?.managers?.structure?.component;
   const groups = plugin?.managers?.structure?.hierarchy?.current?.componentGroups;
+  const colorRegistry = plugin?.representation?.structure?.themes?.colorThemeRegistry;
+  const registeredColorThemes = new Set<string>();
+  if (Array.isArray(colorRegistry?.list)) {
+    for (const item of colorRegistry.list) {
+      if (item && typeof item.name === 'string') {
+        registeredColorThemes.add(item.name);
+      }
+    }
+  }
 
   const components = Array.isArray(groups) ? groups.flat() : [];
+  // Robust fallback chain:
+  // 1) uncertainty can color from B-factor even when QA annotations are absent.
+  // 2) plddt-confidence gives AlphaFold palette when applicable.
+  // Apply in this order so plddt-confidence can override; if it no-ops, uncertainty stays.
+  const preferredThemes = ['uncertainty', 'plddt-confidence'];
+  const canValidateThemeName = registeredColorThemes.size > 0;
+  const orderedCandidates = canValidateThemeName
+    ? preferredThemes.filter((name) => registeredColorThemes.has(name))
+    : preferredThemes;
 
   if (manager?.updateRepresentationsTheme && components.length > 0) {
-    try {
-      await manager.updateRepresentationsTheme(components, { color: 'plddt-confidence' });
-      return;
-    } catch {
-      // fallback
+    for (const color of orderedCandidates) {
+      try {
+        await manager.updateRepresentationsTheme(components, { color });
+      } catch {
+        // try next candidate
+      }
     }
   }
 
   if (typeof viewer?.setStyle === 'function') {
-    try {
-      viewer.setStyle({ theme: 'plddt-confidence' });
-    } catch {
-      // no-op
+    for (const theme of orderedCandidates) {
+      try {
+        viewer.setStyle({ theme });
+      } catch {
+        // try next candidate
+      }
     }
   }
 }
@@ -1475,12 +1496,13 @@ export function MolstarViewer({
 
         await loadStructure(viewer, structureText, format);
         if (requestId !== structureRequestIdRef.current) return;
-        await tryApplyCartoonPreset(viewer);
-        if (requestId !== structureRequestIdRef.current) return;
-
         if (colorMode === 'alphafold') {
+          await tryApplyCartoonPreset(viewer);
+          if (requestId !== structureRequestIdRef.current) return;
           await tryApplyAlphaFoldTheme(viewer);
         } else {
+          await tryApplyCartoonPreset(viewer);
+          if (requestId !== structureRequestIdRef.current) return;
           await tryApplyWhiteTheme(viewer);
         }
         if (requestId === structureRequestIdRef.current) {
