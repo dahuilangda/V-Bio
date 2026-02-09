@@ -265,9 +265,11 @@ export function ProjectDetailPage() {
   const [proteinTemplates, setProteinTemplates] = useState<Record<string, ProteinTemplateUpload>>({});
   const [pickedResidue, setPickedResidue] = useState<ConstraintResiduePick | null>(null);
   const [activeConstraintId, setActiveConstraintId] = useState<string | null>(null);
+  const [selectedContactConstraintIds, setSelectedContactConstraintIds] = useState<string[]>([]);
   const [selectedConstraintTemplateComponentId, setSelectedConstraintTemplateComponentId] = useState<string | null>(null);
   const [constraintPickModeEnabled, setConstraintPickModeEnabled] = useState(false);
   const constraintPickSlotRef = useRef<Record<string, 'first' | 'second'>>({});
+  const constraintSelectionAnchorRef = useRef<string | null>(null);
   const prevTaskStateRef = useRef<TaskState | null>(null);
   const statusRefreshInFlightRef = useRef(false);
   const [activeComponentId, setActiveComponentId] = useState<string | null>(null);
@@ -452,6 +454,9 @@ export function ProjectDetailPage() {
     if (!draft || !activeConstraintId) return -1;
     return draft.inputConfig.constraints.findIndex((item) => item.id === activeConstraintId);
   }, [draft, activeConstraintId]);
+  const selectedContactConstraintIdSet = useMemo(() => {
+    return new Set(selectedContactConstraintIds);
+  }, [selectedContactConstraintIds]);
 
   const constraintTemplateOptions = useMemo(() => {
     if (!draft) return null;
@@ -499,6 +504,25 @@ export function ProjectDetailPage() {
       return {};
     }
   }, [selectedTemplatePreview]);
+  const selectedTemplateSequenceToStructureResidueMap = useMemo<Record<number, number>>(() => {
+    if (!selectedTemplatePreview) return {};
+    const templateChainId = String(selectedTemplatePreview.chainId || '').trim();
+    if (!templateChainId) return {};
+    const forwardMap = selectedTemplateResidueIndexMap[templateChainId] || {};
+    const inverseMap: Record<number, number> = {};
+
+    for (const [structureResidueRaw, sequenceResidueRaw] of Object.entries(forwardMap)) {
+      const structureResidue = Math.floor(Number(structureResidueRaw));
+      const sequenceResidue = Math.floor(Number(sequenceResidueRaw));
+      if (!Number.isFinite(structureResidue) || structureResidue <= 0) continue;
+      if (!Number.isFinite(sequenceResidue) || sequenceResidue <= 0) continue;
+      if (inverseMap[sequenceResidue] === undefined || structureResidue < inverseMap[sequenceResidue]) {
+        inverseMap[sequenceResidue] = structureResidue;
+      }
+    }
+
+    return inverseMap;
+  }, [selectedTemplatePreview, selectedTemplateResidueIndexMap]);
 
   useEffect(() => {
     const ids = (constraintTemplateOptions || []).map((item) => item.componentId);
@@ -518,10 +542,25 @@ export function ProjectDetailPage() {
     const ids = draft.inputConfig.constraints.map((item) => item.id);
     if (ids.length === 0) {
       if (activeConstraintId !== null) setActiveConstraintId(null);
+      setSelectedContactConstraintIds((prev) => (prev.length > 0 ? [] : prev));
+      constraintSelectionAnchorRef.current = null;
       return;
     }
-    if (!activeConstraintId || !ids.includes(activeConstraintId)) {
+    if (activeConstraintId && !ids.includes(activeConstraintId)) {
       setActiveConstraintId(ids[0]);
+    }
+    const validContactIds = new Set(
+      draft.inputConfig.constraints.filter((item) => item.type === 'contact').map((item) => item.id)
+    );
+    setSelectedContactConstraintIds((prev) => {
+      const filtered = prev.filter((id) => validContactIds.has(id));
+      if (filtered.length === prev.length && filtered.every((id, index) => id === prev[index])) {
+        return prev;
+      }
+      return filtered;
+    });
+    if (constraintSelectionAnchorRef.current && !validContactIds.has(constraintSelectionAnchorRef.current)) {
+      constraintSelectionAnchorRef.current = null;
     }
   }, [draft, activeConstraintId]);
 
@@ -662,8 +701,13 @@ export function ProjectDetailPage() {
     if (!draft) return [];
     const validChains = new Set(activeChainInfos.map((item) => item.id));
     const byKey = new Map<string, MolstarResidueHighlight>();
+    const highlightConstraintIds =
+      selectedContactConstraintIds.length > 0
+        ? new Set<string>(selectedContactConstraintIds)
+        : new Set<string>(activeConstraintId ? [activeConstraintId] : []);
 
     for (const constraint of draft.inputConfig.constraints) {
+      if (!highlightConstraintIds.has(constraint.id)) continue;
       const isActive = constraint.id === activeConstraintId;
       for (const residueRef of listConstraintResidues(constraint)) {
         const chainId = String(residueRef.chainId || '').trim();
@@ -682,7 +726,7 @@ export function ProjectDetailPage() {
     }
 
     return Array.from(byKey.values());
-  }, [draft, activeConstraintId, activeChainInfos]);
+  }, [draft, activeConstraintId, activeChainInfos, selectedContactConstraintIds]);
 
   const activeConstraintResidue = useMemo<MolstarResidueHighlight | null>(() => {
     if (!draft || !activeConstraintId) return null;
@@ -704,19 +748,28 @@ export function ProjectDetailPage() {
     if (!selectedTemplatePreview) return constraintHighlightResidues;
     const ownerChain = activeChainInfos.find((info) => info.componentId === selectedTemplatePreview.componentId)?.id;
     if (!ownerChain) return [];
-    const filtered = constraintHighlightResidues.filter((item) => item.chainId === ownerChain);
-    if (ownerChain === selectedTemplatePreview.chainId) return filtered;
-    return filtered.map((item) => ({ ...item, chainId: selectedTemplatePreview.chainId }));
-  }, [selectedTemplatePreview, activeChainInfos, constraintHighlightResidues]);
+    const viewerChainId = String(selectedTemplatePreview.chainId || '').trim() || ownerChain;
+    return constraintHighlightResidues
+      .filter((item) => item.chainId === ownerChain)
+      .map((item) => ({
+        ...item,
+        chainId: viewerChainId,
+        residue: selectedTemplateSequenceToStructureResidueMap[item.residue] ?? item.residue
+      }));
+  }, [selectedTemplatePreview, activeChainInfos, constraintHighlightResidues, selectedTemplateSequenceToStructureResidueMap]);
 
   const constraintViewerActiveResidue = useMemo<MolstarResidueHighlight | null>(() => {
     if (!activeConstraintResidue || !selectedTemplatePreview) return activeConstraintResidue;
     const ownerChain = activeChainInfos.find((info) => info.componentId === selectedTemplatePreview.componentId)?.id;
     if (!ownerChain) return null;
     if (activeConstraintResidue.chainId !== ownerChain) return null;
-    if (ownerChain === selectedTemplatePreview.chainId) return activeConstraintResidue;
-    return { ...activeConstraintResidue, chainId: selectedTemplatePreview.chainId };
-  }, [activeConstraintResidue, selectedTemplatePreview, activeChainInfos]);
+    const viewerChainId = String(selectedTemplatePreview.chainId || '').trim() || ownerChain;
+    return {
+      ...activeConstraintResidue,
+      chainId: viewerChainId,
+      residue: selectedTemplateSequenceToStructureResidueMap[activeConstraintResidue.residue] ?? activeConstraintResidue.residue
+    };
+  }, [activeConstraintResidue, selectedTemplatePreview, activeChainInfos, selectedTemplateSequenceToStructureResidueMap]);
 
   useEffect(() => {
     if (!draft) return;
@@ -821,6 +874,8 @@ export function ProjectDetailPage() {
       });
       setProteinTemplates(savedUiState?.proteinTemplates || {});
       setActiveConstraintId(savedUiState?.activeConstraintId || null);
+      setSelectedContactConstraintIds([]);
+      constraintSelectionAnchorRef.current = null;
       setSelectedConstraintTemplateComponentId(savedUiState?.selectedConstraintTemplateComponentId || null);
       setPickedResidue(null);
       setProject(next);
@@ -1236,6 +1291,13 @@ export function ProjectDetailPage() {
     setWorkspaceTab('constraints');
     setSidebarConstraintsOpen(true);
     setActiveConstraintId(next.id);
+    if (next.type === 'contact') {
+      setSelectedContactConstraintIds([next.id]);
+      constraintSelectionAnchorRef.current = next.id;
+    } else {
+      setSelectedContactConstraintIds([]);
+      constraintSelectionAnchorRef.current = null;
+    }
     setDraft((prev) =>
       prev
         ? {
@@ -1304,9 +1366,78 @@ export function ProjectDetailPage() {
     }
     scrollToEditorBlock(`component-card-${componentId}`);
   };
-  const jumpToConstraint = (constraintId: string) => {
-    setWorkspaceTab('constraints');
+  const clearConstraintSelection = () => {
+    setActiveConstraintId(null);
+    setSelectedContactConstraintIds([]);
+    constraintSelectionAnchorRef.current = null;
+  };
+  const selectConstraint = (constraintId: string, options?: { toggle?: boolean; range?: boolean }) => {
+    if (!draft) return;
+    const constraints = draft.inputConfig.constraints;
+    const target = constraints.find((item) => item.id === constraintId);
+    if (!target) {
+      setActiveConstraintId(constraintId);
+      return;
+    }
+    if (target.type !== 'contact') {
+      setActiveConstraintId(constraintId);
+      setSelectedContactConstraintIds([]);
+      constraintSelectionAnchorRef.current = null;
+      return;
+    }
+
+    const contactIds = constraints.filter((item) => item.type === 'contact').map((item) => item.id);
+    const targetIndex = contactIds.indexOf(constraintId);
+    if (targetIndex < 0) {
+      setActiveConstraintId(constraintId);
+      setSelectedContactConstraintIds([constraintId]);
+      constraintSelectionAnchorRef.current = constraintId;
+      return;
+    }
+
+    if (options?.range) {
+      const anchorId =
+        constraintSelectionAnchorRef.current && contactIds.includes(constraintSelectionAnchorRef.current)
+          ? constraintSelectionAnchorRef.current
+          : constraintId;
+      const anchorIndex = contactIds.indexOf(anchorId);
+      const start = Math.min(anchorIndex, targetIndex);
+      const end = Math.max(anchorIndex, targetIndex);
+      const rangeIds = contactIds.slice(start, end + 1);
+      if (options.toggle) {
+        setSelectedContactConstraintIds((prev) => Array.from(new Set([...prev, ...rangeIds])));
+      } else {
+        setSelectedContactConstraintIds(rangeIds);
+      }
+      setActiveConstraintId(constraintId);
+      constraintSelectionAnchorRef.current = constraintId;
+      return;
+    }
+
+    if (options?.toggle) {
+      const wasSelected = selectedContactConstraintIds.includes(constraintId);
+      const nextSelected = wasSelected
+        ? selectedContactConstraintIds.filter((id) => id !== constraintId)
+        : [...selectedContactConstraintIds, constraintId];
+      setSelectedContactConstraintIds(nextSelected);
+      if (nextSelected.length === 0) {
+        setActiveConstraintId(null);
+      } else if (!wasSelected) {
+        setActiveConstraintId(constraintId);
+      } else {
+        setActiveConstraintId(nextSelected[nextSelected.length - 1] || null);
+      }
+      constraintSelectionAnchorRef.current = constraintId;
+      return;
+    }
+
     setActiveConstraintId(constraintId);
+    setSelectedContactConstraintIds([constraintId]);
+    constraintSelectionAnchorRef.current = constraintId;
+  };
+  const jumpToConstraint = (constraintId: string, options?: { toggle?: boolean; range?: boolean }) => {
+    setWorkspaceTab('constraints');
+    selectConstraint(constraintId, options);
     setSidebarConstraintsOpen(true);
     scrollToEditorBlock(`constraint-card-${constraintId}`);
   };
@@ -1316,7 +1447,7 @@ export function ProjectDetailPage() {
     const safeIndex = currentIndex >= 0 ? currentIndex : 0;
     const nextIndex =
       (safeIndex + step + draft.inputConfig.constraints.length) % draft.inputConfig.constraints.length;
-    setActiveConstraintId(draft.inputConfig.constraints[nextIndex].id);
+    selectConstraint(draft.inputConfig.constraints[nextIndex].id);
   };
   const applyPickToSelectedConstraint = (pick: MolstarResiduePick) => {
     const chainExists = activeChainInfos.some((item) => item.id === pick.chainId);
@@ -1383,6 +1514,8 @@ export function ProjectDetailPage() {
       const created = buildDefaultConstraint(undefined, { chainId: resolvedChainId, residue: normalizedResidue });
       if (created.type === 'contact') {
         constraintPickSlotRef.current[created.id] = 'second';
+        setSelectedContactConstraintIds([created.id]);
+        constraintSelectionAnchorRef.current = created.id;
       }
       setActiveConstraintId(created.id);
       setDraft((prev) =>
@@ -1404,7 +1537,10 @@ export function ProjectDetailPage() {
       const constraints = prev.inputConfig.constraints;
       if (!constraints.length) return prev;
 
-      const selectedId = activeConstraintId || constraints[0]?.id;
+      const selectedId =
+        activeConstraintId ||
+        selectedContactConstraintIds[selectedContactConstraintIds.length - 1] ||
+        constraints[0]?.id;
       if (!selectedId) return prev;
       const targetIndex = constraints.findIndex((item) => item.id === selectedId);
       if (targetIndex < 0) return prev;
@@ -1425,7 +1561,7 @@ export function ProjectDetailPage() {
           slot === 'first'
             ? { ...current, token1_chain: resolvedChainId, token1_residue: normalizedResidue }
             : { ...current, token2_chain: resolvedChainId, token2_residue: normalizedResidue };
-        constraintPickSlotRef.current[current.id] = slot;
+        constraintPickSlotRef.current[current.id] = slot === 'first' ? 'second' : 'first';
       } else if (current.type === 'bond') {
         const atom1Matches = current.atom1_chain === resolvedChainId;
         const atom2Matches = current.atom2_chain === resolvedChainId;
@@ -1450,7 +1586,7 @@ export function ProjectDetailPage() {
                 atom2_residue: normalizedResidue,
                 atom2_atom: atomName
               };
-        constraintPickSlotRef.current[current.id] = slot;
+        constraintPickSlotRef.current[current.id] = slot === 'first' ? 'second' : 'first';
       } else {
         const exists = current.contacts.some((item) => item[0] === resolvedChainId && item[1] === normalizedResidue);
         if (exists) return prev;
@@ -1872,7 +2008,7 @@ export function ProjectDetailPage() {
                                 <span className="muted small constraint-nav-counter">
                                   {constraintCount === 0
                                     ? 'No constraints'
-                                    : `${activeConstraintIndex >= 0 ? activeConstraintIndex + 1 : 1}/${constraintCount}`}
+                                    : `${activeConstraintIndex >= 0 ? activeConstraintIndex + 1 : 0}/${constraintCount}`}
                                 </span>
                               </div>
                               {constraintTemplateOptions && constraintTemplateOptions.length > 0 && (
@@ -1960,14 +2096,35 @@ export function ProjectDetailPage() {
                           )}
                         </section>
 
-                        <section className="panel subtle constraint-editor-panel">
+                        <section
+                          className="panel subtle constraint-editor-panel"
+                          onClick={(event) => {
+                            if (event.target === event.currentTarget) {
+                              clearConstraintSelection();
+                            }
+                          }}
+                        >
                           <ConstraintEditor
                             components={draft.inputConfig.components}
                             constraints={draft.inputConfig.constraints}
                             properties={draft.inputConfig.properties}
                             pickedResidue={pickedResidue}
                             selectedConstraintId={activeConstraintId}
-                            onSelectedConstraintIdChange={setActiveConstraintId}
+                            selectedConstraintIds={selectedContactConstraintIds}
+                            onSelectedConstraintIdChange={(id) => {
+                              if (id) {
+                                selectConstraint(id);
+                              } else {
+                                clearConstraintSelection();
+                              }
+                            }}
+                            onConstraintClick={(id, options) =>
+                              selectConstraint(id, {
+                                toggle: Boolean(options?.toggle),
+                                range: Boolean(options?.range)
+                              })
+                            }
+                            onClearSelection={clearConstraintSelection}
                             showAffinitySection={false}
                             onConstraintsChange={(constraints) =>
                               setDraft((d) =>
@@ -2102,9 +2259,16 @@ export function ProjectDetailPage() {
                                   key={constraint.id}
                                   type="button"
                                   className={`component-sidebar-link component-sidebar-link-constraint ${
-                                    activeConstraintId === constraint.id ? 'active' : ''
+                                    activeConstraintId === constraint.id || selectedContactConstraintIdSet.has(constraint.id)
+                                      ? 'active'
+                                      : ''
                                   }`}
-                                  onClick={() => jumpToConstraint(constraint.id)}
+                                  onClick={(event) =>
+                                    jumpToConstraint(constraint.id, {
+                                      toggle: event.metaKey,
+                                      range: event.shiftKey
+                                    })
+                                  }
                                 >
                                   <span>{`${index + 1}. ${constraintLabel(constraint.type)} · ${formatConstraintCombo(constraint)}`}</span>
                                   <span className="muted small">{formatConstraintDetail(constraint)}</span>

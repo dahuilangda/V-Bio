@@ -1,4 +1,5 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
+import type { MouseEvent } from 'react';
 import { Link2, Plus, Radar, Target, Trash2 } from 'lucide-react';
 import type {
   BondConstraint,
@@ -18,7 +19,10 @@ interface ConstraintEditorProps {
   properties: PredictionProperties;
   pickedResidue?: ConstraintResiduePick | null;
   selectedConstraintId?: string | null;
+  selectedConstraintIds?: string[];
   onSelectedConstraintIdChange?: (id: string | null) => void;
+  onConstraintClick?: (id: string, options?: { toggle: boolean; range: boolean }) => void;
+  onClearSelection?: () => void;
   showAffinitySection?: boolean;
   onConstraintsChange: (constraints: PredictionConstraint[]) => void;
   onPropertiesChange: (properties: PredictionProperties) => void;
@@ -97,7 +101,10 @@ export function ConstraintEditor({
   properties,
   pickedResidue = null,
   selectedConstraintId = null,
+  selectedConstraintIds = [],
   onSelectedConstraintIdChange,
+  onConstraintClick,
+  onClearSelection,
   showAffinitySection = true,
   onConstraintsChange,
   onPropertiesChange,
@@ -107,6 +114,7 @@ export function ConstraintEditor({
   const chainInfos = buildChainInfos(activeComponents);
   const chainIds = chainInfos.map((item) => item.id);
   const ligandChainIds = chainInfos.filter((item) => item.type === 'ligand').map((item) => item.id);
+  const selectedConstraintIdSet = useMemo(() => new Set(selectedConstraintIds), [selectedConstraintIds]);
 
   const replaceAt = (id: string, next: PredictionConstraint) => {
     onConstraintsChange(constraints.map((item) => (item.id === id ? next : item)));
@@ -138,7 +146,14 @@ export function ConstraintEditor({
   }, [selectedConstraintId]);
 
   return (
-    <section className="constraint-editor">
+    <section
+      className="constraint-editor"
+      onClick={(event: MouseEvent<HTMLElement>) => {
+        if (event.target === event.currentTarget) {
+          onClearSelection?.();
+        }
+      }}
+    >
       <div className="constraint-head">
         <h3>Constraints</h3>
         <span className="muted small">Optional</span>
@@ -200,20 +215,34 @@ export function ConstraintEditor({
         </div>
       )}
 
-      <div className="constraint-list">
+      <div
+        className="constraint-list"
+        onClick={(event: MouseEvent<HTMLDivElement>) => {
+          if (event.target === event.currentTarget) {
+            onClearSelection?.();
+          }
+        }}
+      >
         {constraints.map((item, index) => {
           const setType = (nextType: PredictionConstraintType) => {
             if (item.type === nextType) return;
             const next = defaultConstraint(nextType, chainIds, ligandChainIds);
             replaceAt(item.id, { ...next, id: item.id });
           };
+          const isSelected = selectedConstraintIdSet.has(item.id) || selectedConstraintId === item.id;
 
           return (
             <article
               id={`constraint-card-${item.id}`}
               key={item.id}
-              className={`constraint-item panel subtle ${selectedConstraintId === item.id ? 'active' : ''}`}
-              onClick={() => onSelectedConstraintIdChange?.(item.id)}
+              className={`constraint-item panel subtle ${isSelected ? 'active' : ''}`}
+              onClick={(event: MouseEvent<HTMLElement>) => {
+                if (onConstraintClick) {
+                  onConstraintClick(item.id, { toggle: event.metaKey, range: event.shiftKey });
+                  return;
+                }
+                onSelectedConstraintIdChange?.(item.id);
+              }}
             >
               <div className="constraint-item-head">
                 <strong>
@@ -222,7 +251,10 @@ export function ConstraintEditor({
                 <button
                   type="button"
                   className="icon-btn"
-                  onClick={() => removeConstraint(item.id)}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    removeConstraint(item.id);
+                  }}
                   disabled={disabled}
                   title="Delete constraint"
                 >
