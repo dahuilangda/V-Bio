@@ -914,6 +914,56 @@ export function ProjectDetailPage() {
     }
     return byId;
   }, [activeChainInfos]);
+  const constraintTemplateComponentIdSet = useMemo(() => {
+    return new Set((constraintTemplateOptions || []).map((item) => item.componentId));
+  }, [constraintTemplateOptions]);
+  const resolveTemplateComponentIdForConstraint = useCallback(
+    (constraint: PredictionConstraint | null | undefined): string | null => {
+      if (!constraint) return null;
+      for (const residueRef of listConstraintResidues(constraint)) {
+        const chainId = String(residueRef.chainId || '').trim();
+        if (!chainId) continue;
+        const info = chainInfoById.get(chainId);
+        if (!info || info.type !== 'protein') continue;
+        if (constraintTemplateComponentIdSet.has(info.componentId)) {
+          return info.componentId;
+        }
+      }
+      return null;
+    },
+    [chainInfoById, constraintTemplateComponentIdSet]
+  );
+  useEffect(() => {
+    if (!draft) return;
+    const constraintsById = new Map(draft.inputConfig.constraints.map((item) => [item.id, item] as const));
+    const preferredIds: string[] = [];
+    if (activeConstraintId) preferredIds.push(activeConstraintId);
+    for (let i = selectedContactConstraintIds.length - 1; i >= 0; i -= 1) {
+      const id = selectedContactConstraintIds[i];
+      if (!preferredIds.includes(id)) {
+        preferredIds.push(id);
+      }
+    }
+
+    let suggested: string | null = null;
+    for (const constraintId of preferredIds) {
+      const candidate = resolveTemplateComponentIdForConstraint(constraintsById.get(constraintId));
+      if (candidate) {
+        suggested = candidate;
+        break;
+      }
+    }
+
+    if (suggested && suggested !== selectedConstraintTemplateComponentId) {
+      setSelectedConstraintTemplateComponentId(suggested);
+    }
+  }, [
+    draft,
+    activeConstraintId,
+    selectedContactConstraintIds,
+    resolveTemplateComponentIdForConstraint,
+    selectedConstraintTemplateComponentId
+  ]);
 
   const ligandChainOptions = useMemo(() => {
     return activeChainInfos.filter((item) => item.type === 'ligand');
@@ -925,7 +975,6 @@ export function ProjectDetailPage() {
 
   const constraintHighlightResidues = useMemo<MolstarResidueHighlight[]>(() => {
     if (!draft) return [];
-    const validChains = new Set(activeChainInfos.map((item) => item.id));
     const byKey = new Map<string, MolstarResidueHighlight>();
     const highlightConstraintIds =
       selectedContactConstraintIds.length > 0
@@ -938,7 +987,9 @@ export function ProjectDetailPage() {
       for (const residueRef of listConstraintResidues(constraint)) {
         const chainId = String(residueRef.chainId || '').trim();
         const residue = Math.max(1, Math.floor(Number(residueRef.residue) || 0));
-        if (!chainId || !Number.isFinite(residue) || residue <= 0 || !validChains.has(chainId)) continue;
+        if (!chainId || !Number.isFinite(residue) || residue <= 0) continue;
+        const chainInfo = chainInfoById.get(chainId);
+        if (!chainInfo || chainInfo.type !== 'protein') continue;
         const key = `${chainId}:${residue}`;
         const existing = byKey.get(key);
         if (!existing) {
@@ -952,7 +1003,7 @@ export function ProjectDetailPage() {
     }
 
     return Array.from(byKey.values());
-  }, [draft, activeConstraintId, activeChainInfos, selectedContactConstraintIds]);
+  }, [draft, activeConstraintId, chainInfoById, selectedContactConstraintIds]);
 
   const activeConstraintResidue = useMemo<MolstarResidueHighlight | null>(() => {
     if (!draft || !activeConstraintId) return null;
@@ -972,30 +1023,50 @@ export function ProjectDetailPage() {
 
   const constraintViewerHighlightResidues = useMemo<MolstarResidueHighlight[]>(() => {
     if (!selectedTemplatePreview) return constraintHighlightResidues;
-    const ownerChain = activeChainInfos.find((info) => info.componentId === selectedTemplatePreview.componentId)?.id;
-    if (!ownerChain) return [];
-    const viewerChainId = String(selectedTemplatePreview.chainId || '').trim() || ownerChain;
-    return constraintHighlightResidues
-      .filter((item) => item.chainId === ownerChain)
-      .map((item) => ({
-        ...item,
-        chainId: viewerChainId,
-        residue: selectedTemplateSequenceToStructureResidueMap[item.residue] ?? item.residue
-      }));
+    const ownerProteinChains = activeChainInfos.filter(
+      (info) => info.componentId === selectedTemplatePreview.componentId && info.type === 'protein'
+    );
+    if (ownerProteinChains.length === 0) return [];
+    const ownerChainIds = new Set(ownerProteinChains.map((info) => info.id));
+    const viewerChainId = String(selectedTemplatePreview.chainId || '').trim() || ownerProteinChains[0]?.id || '';
+    if (!viewerChainId) return [];
+
+    const hasSequenceMapping = Object.keys(selectedTemplateSequenceToStructureResidueMap).length > 0;
+    const byMappedResidue = new Map<string, MolstarResidueHighlight>();
+
+    for (const item of constraintHighlightResidues) {
+      if (!ownerChainIds.has(item.chainId)) continue;
+      const mappedResidueRaw = selectedTemplateSequenceToStructureResidueMap[item.residue];
+      const mappedResidue =
+        typeof mappedResidueRaw === 'number' && Number.isFinite(mappedResidueRaw)
+          ? Math.floor(mappedResidueRaw)
+          : hasSequenceMapping
+            ? Number.NaN
+            : item.residue;
+      if (!Number.isFinite(mappedResidue) || mappedResidue <= 0) continue;
+
+      const key = `${viewerChainId}:${mappedResidue}`;
+      const existing = byMappedResidue.get(key);
+      if (!existing) {
+        byMappedResidue.set(key, {
+          chainId: viewerChainId,
+          residue: mappedResidue,
+          emphasis: item.emphasis
+        });
+        continue;
+      }
+      if (item.emphasis === 'active' && existing.emphasis !== 'active') {
+        byMappedResidue.set(key, { ...existing, emphasis: 'active' });
+      }
+    }
+
+    return Array.from(byMappedResidue.values());
   }, [selectedTemplatePreview, activeChainInfos, constraintHighlightResidues, selectedTemplateSequenceToStructureResidueMap]);
 
   const constraintViewerActiveResidue = useMemo<MolstarResidueHighlight | null>(() => {
-    if (!activeConstraintResidue || !selectedTemplatePreview) return activeConstraintResidue;
-    const ownerChain = activeChainInfos.find((info) => info.componentId === selectedTemplatePreview.componentId)?.id;
-    if (!ownerChain) return null;
-    if (activeConstraintResidue.chainId !== ownerChain) return null;
-    const viewerChainId = String(selectedTemplatePreview.chainId || '').trim() || ownerChain;
-    return {
-      ...activeConstraintResidue,
-      chainId: viewerChainId,
-      residue: selectedTemplateSequenceToStructureResidueMap[activeConstraintResidue.residue] ?? activeConstraintResidue.residue
-    };
-  }, [activeConstraintResidue, selectedTemplatePreview, activeChainInfos, selectedTemplateSequenceToStructureResidueMap]);
+    if (!selectedTemplatePreview) return activeConstraintResidue;
+    return constraintViewerHighlightResidues.find((item) => item.emphasis === 'active') || null;
+  }, [selectedTemplatePreview, activeConstraintResidue, constraintViewerHighlightResidues]);
 
   useEffect(() => {
     if (!draft) return;
@@ -1636,6 +1707,10 @@ export function ProjectDetailPage() {
     if (!target) {
       setActiveConstraintId(constraintId);
       return;
+    }
+    const suggestedTemplateComponentId = resolveTemplateComponentIdForConstraint(target);
+    if (suggestedTemplateComponentId && suggestedTemplateComponentId !== selectedConstraintTemplateComponentId) {
+      setSelectedConstraintTemplateComponentId(suggestedTemplateComponentId);
     }
     if (target.type !== 'contact') {
       setActiveConstraintId(constraintId);
@@ -2568,7 +2643,7 @@ export function ProjectDetailPage() {
                                   }`}
                                   onClick={(event) =>
                                     jumpToConstraint(constraint.id, {
-                                      toggle: event.metaKey,
+                                      toggle: event.metaKey || event.ctrlKey,
                                       range: event.shiftKey
                                     })
                                   }

@@ -229,7 +229,7 @@ export function ConstraintEditor({
               className={`constraint-item panel subtle ${isSelected ? 'active' : ''}`}
               onClick={(event: MouseEvent<HTMLElement>) => {
                 if (onConstraintClick) {
-                  onConstraintClick(item.id, { toggle: event.metaKey, range: event.shiftKey });
+                  onConstraintClick(item.id, { toggle: event.metaKey || event.ctrlKey, range: event.shiftKey });
                   return;
                 }
                 onSelectedConstraintIdChange?.(item.id);
@@ -517,7 +517,7 @@ function BondConstraintFields({ value, chainInfos, pickedResidue, disabled, onCh
   );
 }
 
-function PocketConstraintFields({ value, chainInfos, pickedResidue, disabled, onChange }: SharedFieldsProps<PocketConstraint>) {
+function PocketConstraintFields({ value, chainInfos, disabled, onChange }: SharedFieldsProps<PocketConstraint>) {
   return (
     <div className="constraint-grid constraint-grid-pocket">
       <label className="field">
@@ -605,22 +605,6 @@ function PocketConstraintFields({ value, chainInfos, pickedResidue, disabled, on
           <Plus size={13} />
           Add contact
         </button>
-        {pickedResidue && (
-          <button
-            type="button"
-            className="btn btn-ghost top-margin"
-            disabled={disabled}
-            onClick={() => {
-              onChange({
-                ...value,
-                contacts: [...value.contacts, [pickedResidue.chainId, pickedResidue.residue]]
-              });
-            }}
-          >
-            <Target size={13} />
-            Add picked contact
-          </button>
-        )}
       </div>
     </div>
   );

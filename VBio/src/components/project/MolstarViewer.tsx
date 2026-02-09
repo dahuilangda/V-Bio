@@ -393,26 +393,40 @@ async function tryApplyWhiteTheme(viewer: any) {
   }
 }
 
-function readFirstIndex(indices: any): number | null {
-  if (!indices) return null;
+function getOrderedSetApi() {
   const molstarLib = (window as any)?.molstar?.lib;
-  const orderedSet =
+  return (
     molstarLib?.molDataInt?.OrderedSet ??
     molstarLib?.molData?.int?.OrderedSet ??
-    molstarLib?.molDataIntOrderedSet;
+    molstarLib?.molDataIntOrderedSet
+  );
+}
+
+function readIndices(indices: any, maxCount = 256): number[] {
+  if (!indices) return [];
+  const orderedSet = getOrderedSetApi();
+  const collected: number[] = [];
 
   if (orderedSet) {
     try {
       const hasSize = typeof orderedSet.size === 'function';
       const size = hasSize ? Number(orderedSet.size(indices)) : NaN;
       if (Number.isFinite(size) && size > 0) {
+        const safeCount = Math.max(1, Math.min(maxCount, size));
         if (typeof orderedSet.getAt === 'function') {
-          const value = Number(orderedSet.getAt(indices, 0));
-          if (Number.isFinite(value)) return value;
+          for (let i = 0; i < safeCount; i += 1) {
+            const value = Number(orderedSet.getAt(indices, i));
+            if (Number.isFinite(value)) {
+              collected.push(value);
+            }
+          }
+          if (collected.length > 0) return collected;
         }
         if (typeof orderedSet.min === 'function') {
           const value = Number(orderedSet.min(indices));
-          if (Number.isFinite(value)) return value;
+          if (Number.isFinite(value)) {
+            return [value];
+          }
         }
       }
     } catch {
@@ -420,39 +434,63 @@ function readFirstIndex(indices: any): number | null {
     }
   }
 
-  if (Array.isArray(indices) && indices.length > 0 && Number.isFinite(indices[0])) {
-    return Number(indices[0]);
+  if (Array.isArray(indices) && indices.length > 0) {
+    return indices
+      .slice(0, Math.max(1, maxCount))
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value));
   }
   if (typeof indices.getAt === 'function') {
-    try {
-      const value = Number(indices.getAt(0));
-      if (Number.isFinite(value)) return value;
-    } catch {
-      // no-op
+    const fallback: number[] = [];
+    for (let i = 0; i < Math.max(1, maxCount); i += 1) {
+      try {
+        const value = Number(indices.getAt(i));
+        if (Number.isFinite(value)) {
+          fallback.push(value);
+          continue;
+        }
+      } catch {
+        // stop scanning this source
+      }
+      if (fallback.length > 0) break;
+      break;
     }
+    if (fallback.length > 0) return fallback;
   }
   if (typeof indices.value === 'function') {
     try {
       const value = Number(indices.value(0));
-      if (Number.isFinite(value)) return value;
+      if (Number.isFinite(value)) return [value];
     } catch {
       // no-op
     }
   }
   if (typeof indices[Symbol.iterator] === 'function') {
+    const values: number[] = [];
     const iter = indices[Symbol.iterator]();
-    const first = iter.next();
-    if (!first.done && Number.isFinite(first.value)) {
-      return Number(first.value);
+    while (values.length < Math.max(1, maxCount)) {
+      const next = iter.next();
+      if (next.done) break;
+      const value = Number(next.value);
+      if (Number.isFinite(value)) {
+        values.push(value);
+      }
     }
+    if (values.length > 0) return values;
   }
   if (typeof indices.start === 'number' && Number.isFinite(indices.start) && indices.start >= 0) {
-    return Number(indices.start);
+    return [Number(indices.start)];
   }
   if (typeof indices.min === 'number' && Number.isFinite(indices.min) && indices.min >= 0) {
-    return Number(indices.min);
+    return [Number(indices.min)];
   }
-  return null;
+  return [];
+}
+
+function readFirstIndex(indices: any): number | null {
+  const values = readIndices(indices, 1);
+  if (!values.length) return null;
+  return values[0];
 }
 
 function createOrderedSet(indices: number[]): any {
@@ -592,8 +630,26 @@ function getSelectionEntries(viewer: any): any[] {
   return [];
 }
 
-function parsePickFromSelectionEntry(entry: any): MolstarResiduePick | null {
-  if (!entry) return null;
+function dedupeResiduePicks(picks: MolstarResiduePick[]): MolstarResiduePick[] {
+  if (!Array.isArray(picks) || picks.length === 0) return [];
+  const byResidue = new Map<string, MolstarResiduePick>();
+  for (const pick of picks) {
+    if (!pick || !isLikelyChainId(String(pick.chainId || ''))) continue;
+    const residue = Number.parseInt(String(pick.residue), 10);
+    if (!Number.isFinite(residue) || residue <= 0) continue;
+    const key = `${pick.chainId}:${residue}`;
+    if (byResidue.has(key)) continue;
+    byResidue.set(key, {
+      ...pick,
+      residue,
+      label: pick.label || `${pick.chainId}:${residue}${pick.atomName ? `:${pick.atomName}` : ''}`
+    });
+  }
+  return Array.from(byResidue.values());
+}
+
+function parsePicksFromSelectionEntry(entry: any): MolstarResiduePick[] {
+  if (!entry) return [];
 
   const directLoci =
     entry?.loci ??
@@ -601,10 +657,10 @@ function parsePickFromSelectionEntry(entry: any): MolstarResiduePick | null {
     entry?.cell?.obj?.data?.loci ??
     entry?.data?.loci;
   if (directLoci) {
-    const parsed = parsePickFromEvent({ current: { loci: directLoci } });
-    if (parsed) return parsed;
+    const parsed = parsePicksFromEvent({ current: { loci: directLoci } });
+    if (parsed.length > 0) return parsed;
     const parsedWithLib = parsePickUsingMolstarLib(directLoci);
-    if (parsedWithLib) return parsedWithLib;
+    if (parsedWithLib) return [parsedWithLib];
   }
 
   const structureData =
@@ -613,76 +669,77 @@ function parsePickFromSelectionEntry(entry: any): MolstarResiduePick | null {
     entry?.cell?.obj?.data?.structure ??
     entry?.obj?.data?.structure;
   const structurePick = parsePickFromStructureData(structureData);
-  if (structurePick) return structurePick;
+  if (structurePick) return [structurePick];
 
-  return parsePickFromTypedFields(entry);
+  const typedPick = parsePickFromTypedFields(entry);
+  if (typedPick) return [typedPick];
+
+  return [];
 }
 
-function parsePickFromSelectionManager(viewer: any): MolstarResiduePick | null {
+function parsePicksFromSelectionManager(viewer: any): MolstarResiduePick[] {
   const selectionManager = viewer?.plugin?.managers?.structure?.selection;
   const entries = getSelectionEntries(viewer);
+  const collected: MolstarResiduePick[] = [];
+
   for (const entry of entries) {
-    const parsed = parsePickFromSelectionEntry(entry);
-    if (parsed) {
-      return parsed;
-    }
+    collected.push(...parsePicksFromSelectionEntry(entry));
   }
+
   if (selectionManager?.getLoci) {
     try {
       const loci = selectionManager.getLoci();
-      const parsed = parsePickFromEvent({ current: { loci } });
-      if (parsed) return parsed;
+      collected.push(...parsePicksFromEvent({ current: { loci } }));
     } catch {
       // no-op
     }
   }
-  return null;
+
+  return dedupeResiduePicks(collected);
 }
 
-function parsePickFromFocusManager(viewer: any): MolstarResiduePick | null {
+function parsePicksFromFocusManager(viewer: any): MolstarResiduePick[] {
   const current = viewer?.plugin?.managers?.structure?.focus?.current;
-  if (!current) return null;
+  if (!current) return [];
 
   const loci = current?.loci ?? current?.current?.loci ?? current?.focus?.loci;
   if (loci) {
-    const parsed = parsePickFromEvent({ current: { loci } });
-    if (parsed) return parsed;
+    const parsed = parsePicksFromEvent({ current: { loci } });
+    if (parsed.length > 0) return parsed;
   }
 
   const structurePick = parsePickFromStructureData(
     current?.structure ?? current?.current?.structure ?? current?.focus?.structure
   );
-  if (structurePick) return structurePick;
+  if (structurePick) return [structurePick];
 
   const label = String(
     current?.label ?? current?.description ?? current?.current?.label ?? current?.focus?.label ?? ''
   ).trim();
-  if (label) {
-    const parsed = parsePickFromLabelText(label);
-    if (parsed) return parsed;
-  }
-
-  return null;
+  if (!label) return [];
+  const parsed = parsePickFromLabelText(label);
+  return parsed ? [parsed] : [];
 }
 
-function parsePickFromFocusEvent(event: any): MolstarResiduePick | null {
-  if (!event) return null;
-  const parsedDirect = parsePickFromEvent(event);
-  if (parsedDirect) return parsedDirect;
+function parsePicksFromFocusEvent(event: any): MolstarResiduePick[] {
+  if (!event) return [];
+  const parsedDirect = parsePicksFromEvent(event);
+  if (parsedDirect.length > 0) return parsedDirect;
 
-  const parsedCurrent = parsePickFromEvent({ current: event?.current ?? event?.focus ?? event?.data ?? event });
-  if (parsedCurrent) return parsedCurrent;
+  const parsedCurrent = parsePicksFromEvent({ current: event?.current ?? event?.focus ?? event?.data ?? event });
+  if (parsedCurrent.length > 0) return parsedCurrent;
 
   const structurePick = parsePickFromStructureData(
     event?.current?.structure ?? event?.focus?.structure ?? event?.structure ?? event?.data?.structure
   );
-  if (structurePick) return structurePick;
+  if (structurePick) return [structurePick];
 
   const label = String(
     event?.current?.label ?? event?.focus?.label ?? event?.label ?? event?.description ?? ''
   ).trim();
-  if (!label) return null;
-  return parsePickFromLabelText(label);
+  if (!label) return [];
+  const parsed = parsePickFromLabelText(label);
+  return parsed ? [parsed] : [];
 }
 
 function parsePickFromStructureData(structure: any): MolstarResiduePick | null {
@@ -890,89 +947,105 @@ function pickFromChainResidue(
   };
 }
 
-function parseElementLociStrict(loci: any): MolstarResiduePick | null {
-  if (!loci) return null;
+function parsePickFromAtomIndex(hierarchy: any, atomIndex: number): MolstarResiduePick | null {
+  if (!hierarchy || !Number.isFinite(atomIndex) || atomIndex < 0) return null;
+  const residueIndexRaw = readIndexedValue(hierarchy?.residueAtomSegments?.index, atomIndex);
+  const chainIndexRaw = readIndexedValue(hierarchy?.chainAtomSegments?.index, atomIndex);
+  const residueIndex = Number(residueIndexRaw);
+  const chainIndex = Number(chainIndexRaw);
+
+  const chainFromChains =
+    readIndexedValue(hierarchy?.chains?.auth_asym_id, chainIndex) ??
+    readIndexedValue(hierarchy?.chains?.label_asym_id, chainIndex);
+  const residueFromResidues =
+    readIndexedValue(hierarchy?.residues?.auth_seq_id, residueIndex) ??
+    readIndexedValue(hierarchy?.residues?.label_seq_id, residueIndex) ??
+    readIndexedValue(hierarchy?.residues?.seq_id, residueIndex);
+  const atomFromAtoms = readIndexedValue(hierarchy?.atoms?.label_atom_id, atomIndex);
+
+  const chainFromAtoms =
+    readIndexedValue(hierarchy?.atoms?.auth_asym_id, atomIndex) ??
+    readIndexedValue(hierarchy?.atoms?.label_asym_id, atomIndex);
+  const residueFromAtoms =
+    readIndexedValue(hierarchy?.atoms?.auth_seq_id, atomIndex) ??
+    readIndexedValue(hierarchy?.atoms?.label_seq_id, atomIndex);
+
+  return (
+    pickFromChainResidue(chainFromChains, residueFromResidues, atomFromAtoms) ??
+    pickFromChainResidue(chainFromAtoms, residueFromAtoms, atomFromAtoms)
+  );
+}
+
+function parseElementLociStrictMany(loci: any, maxResidues = 256): MolstarResiduePick[] {
+  if (!loci) return [];
   const fromMolstarLib = parsePickUsingMolstarLib(loci);
-  if (fromMolstarLib) return fromMolstarLib;
-  if (loci.kind !== 'element-loci') return null;
-  const elementRef = loci?.elements?.[0];
-  if (!elementRef) {
+  if (loci.kind !== 'element-loci') {
+    return fromMolstarLib ? [fromMolstarLib] : [];
+  }
+
+  const elements = Array.isArray(loci?.elements) ? loci.elements : [];
+  if (!elements.length) {
     pickDebugLog('strict parse failed: no element');
-    return null;
+    return fromMolstarLib ? [fromMolstarLib] : [];
   }
 
-  const unit = elementRef.unit;
-  const model = unit?.model;
-  const hierarchy = model?.atomicHierarchy;
-  const unitElements = unit?.elements;
-  if (!hierarchy || !unitElements) {
-    pickDebugLog('strict parse failed: no hierarchy');
-    return null;
-  }
+  const parsed: MolstarResiduePick[] = [];
 
-  const idxInUnit = readFirstIndex(elementRef.indices);
-  if (idxInUnit === null || idxInUnit < 0) {
-    pickDebugLog('strict parse failed: invalid index', idxInUnit);
-    return null;
-  }
+  for (const elementRef of elements) {
+    if (parsed.length >= maxResidues) break;
+    const unit = elementRef?.unit;
+    const hierarchy = unit?.model?.atomicHierarchy;
+    const unitElements = unit?.elements;
+    if (!hierarchy || !unitElements) continue;
 
-  const modelAtomIndexFromUnit = readIndexedValue(unitElements, idxInUnit);
-  const atomCandidates = [
-    modelAtomIndexFromUnit,
-    idxInUnit,
-    readFirstIndex(unitElements)
-  ].filter((v) => Number.isFinite(Number(v)));
+    const indicesInUnit = readIndices(elementRef?.indices, 4096);
+    if (!indicesInUnit.length) continue;
 
-  for (const atomCandidate of atomCandidates) {
-    const atomIndex = Number(atomCandidate);
-    const residueIndexRaw = readIndexedValue(hierarchy?.residueAtomSegments?.index, atomIndex);
-    const chainIndexRaw = readIndexedValue(hierarchy?.chainAtomSegments?.index, atomIndex);
-    const residueIndex = Number(residueIndexRaw);
-    const chainIndex = Number(chainIndexRaw);
+    for (const idxInUnit of indicesInUnit) {
+      if (parsed.length >= maxResidues) break;
+      if (!Number.isFinite(idxInUnit) || idxInUnit < 0) continue;
 
-    const chainFromChains =
-      readIndexedValue(hierarchy?.chains?.auth_asym_id, chainIndex) ??
-      readIndexedValue(hierarchy?.chains?.label_asym_id, chainIndex);
-    const residueFromResidues =
-      readIndexedValue(hierarchy?.residues?.auth_seq_id, residueIndex) ??
-      readIndexedValue(hierarchy?.residues?.label_seq_id, residueIndex) ??
-      readIndexedValue(hierarchy?.residues?.seq_id, residueIndex);
-    const atomFromAtoms = readIndexedValue(hierarchy?.atoms?.label_atom_id, atomIndex);
+      const modelAtomIndexFromUnit = Number(readIndexedValue(unitElements, idxInUnit) ?? idxInUnit);
+      const atomCandidates = Array.from(
+        new Set(
+          [modelAtomIndexFromUnit, Number(idxInUnit)]
+            .filter((value) => Number.isFinite(value) && value >= 0)
+            .map((value) => Number(value))
+        )
+      );
+      if (atomCandidates.length === 0) continue;
 
-    const chainFromAtoms =
-      readIndexedValue(hierarchy?.atoms?.auth_asym_id, atomIndex) ??
-      readIndexedValue(hierarchy?.atoms?.label_asym_id, atomIndex);
-    const residueFromAtoms =
-      readIndexedValue(hierarchy?.atoms?.auth_seq_id, atomIndex) ??
-      readIndexedValue(hierarchy?.atoms?.label_seq_id, atomIndex);
-
-    const pick =
-      pickFromChainResidue(chainFromChains, residueFromResidues, atomFromAtoms) ??
-      pickFromChainResidue(chainFromAtoms, residueFromAtoms, atomFromAtoms);
-    if (pick) {
-      return pick;
+      for (const atomIndex of atomCandidates) {
+        const pick = parsePickFromAtomIndex(hierarchy, atomIndex);
+        if (!pick) continue;
+        parsed.push(pick);
+        break;
+      }
     }
   }
 
+  const deduped = dedupeResiduePicks(parsed);
+  if (deduped.length > 0) {
+    return deduped.slice(0, maxResidues);
+  }
+  if (fromMolstarLib) return [fromMolstarLib];
   pickDebugLog('strict parse failed: no chain/residue', { kind: loci.kind });
-  return null;
+  return [];
 }
 
-function parsePickFromEvent(event: any): MolstarResiduePick | null {
+function parsePicksFromEvent(event: any): MolstarResiduePick[] {
   const loci = extractLociFromEvent(event);
-  if (!loci) {
-    return null;
-  }
+  if (!loci) return [];
 
-  const strict = parseElementLociStrict(loci);
-  if (strict) return strict;
+  const strict = parseElementLociStrictMany(loci);
+  if (strict.length > 0) return strict;
 
   const typed =
     parsePickFromTypedFields(loci) ??
     parsePickFromTypedFields(event?.current) ??
     parsePickFromTypedFields(event?.data) ??
     parsePickFromTypedFields(event);
-  if (typed) return typed;
+  if (typed) return [typed];
 
   const labelText = String(
     event?.current?.label ??
@@ -981,7 +1054,8 @@ function parsePickFromEvent(event: any): MolstarResiduePick | null {
       loci?.label ??
       (typeof loci?.getLabel === 'function' ? loci.getLabel?.() : '')
   ).trim();
-  return parsePickFromLabelText(labelText);
+  const parsedFromLabel = parsePickFromLabelText(labelText);
+  return parsedFromLabel ? [parsedFromLabel] : [];
 }
 
 function isPickDebugEnabled(): boolean {
@@ -1139,19 +1213,43 @@ function subscribePickEvents(
 ): (() => void) | null {
   if (!onResiduePick) return null;
   const subscriptions: Array<{ unsubscribe: () => void }> = [];
-  let lastEmittedLabel = '';
-  let lastEmittedAt = 0;
+  const recentEmits = new Map<string, number>();
 
   const emitPick = (pick: MolstarResiduePick) => {
     const now = Date.now();
-    if (pick.label === lastEmittedLabel && now - lastEmittedAt < 120) {
-      pickDebugLog('emit skipped (dedupe)', pick.label);
+    const dedupeKey = `${pick.chainId}:${pick.residue}`;
+    const lastEmittedAt = recentEmits.get(dedupeKey) || 0;
+    if (now - lastEmittedAt < 120) {
+      pickDebugLog('emit skipped (dedupe)', dedupeKey);
       return;
     }
-    lastEmittedLabel = pick.label;
-    lastEmittedAt = now;
+    recentEmits.set(dedupeKey, now);
+    if (recentEmits.size > 256) {
+      for (const [key, ts] of recentEmits) {
+        if (now - ts > 1000) {
+          recentEmits.delete(key);
+        }
+      }
+    }
     pickDebugLog('emit', pick);
     onResiduePick(pick);
+  };
+
+  const emitPicks = (picks: MolstarResiduePick[], source: string): number => {
+    const deduped = dedupeResiduePicks(picks);
+    if (deduped.length === 0) return 0;
+    pickDebugLog('pick', source, deduped.map((item) => item.label));
+    for (const pick of deduped) {
+      emitPick(pick);
+    }
+    return deduped.length;
+  };
+
+  const parseFromManagers = () => {
+    return dedupeResiduePicks([
+      ...parsePicksFromFocusManager(viewer),
+      ...parsePicksFromSelectionManager(viewer)
+    ]);
   };
 
   const parseAndEmit = (event: any, source: string): 'handled' | 'skip' | 'retry' => {
@@ -1160,39 +1258,34 @@ function subscribePickEvents(
       pickDebugLog('skip (modifier)', source);
       return 'skip';
     }
-    const parsed = parsePickFromEvent(event);
-    if (parsed) {
-      pickDebugLog('pick', source, parsed.label);
-      emitPick(parsed);
+    const parsedDirect = parsePicksFromEvent(event);
+    const hasMultiIntent =
+      pickMode === 'click' && (readCtrlModifier(event) === true || readShiftModifier(event) === true);
+    const parsed = hasMultiIntent
+      ? dedupeResiduePicks([...parsedDirect, ...parseFromManagers()])
+      : parsedDirect;
+    if (emitPicks(parsed, source) > 0) {
       return 'handled';
     }
 
     const loci = extractLociFromEvent(event);
     if (!loci) return 'skip';
 
-    try {
-      viewer?.plugin?.managers?.structure?.selection?.fromLoci?.('set', loci);
-    } catch {
-      // no-op
-    }
-
-    const parsedFromManagers = parsePickFromFocusManager(viewer) ?? parsePickFromSelectionManager(viewer);
-    if (!parsedFromManagers) return 'retry';
-    pickDebugLog('pick (manager)', source, parsedFromManagers.label);
-    emitPick(parsedFromManagers);
+    const parsedFromManagers = parseFromManagers();
+    if (parsedFromManagers.length === 0) return 'retry';
+    emitPicks(parsedFromManagers, `${source}.manager`);
     return 'handled';
   };
 
   const retryFromSelection = (source: string) => {
     window.setTimeout(() => {
       if (shouldSuppress?.()) return;
-      const parsed = parsePickFromSelectionManager(viewer) ?? parsePickFromFocusManager(viewer);
-      if (!parsed) {
+      const parsed = parseFromManagers();
+      if (parsed.length === 0) {
         pickDebugLog('selection/focus retry none', source);
         return;
       }
-      pickDebugLog('selection/focus retry', source, parsed.label);
-      emitPick(parsed);
+      emitPicks(parsed, `${source}.retry`);
     }, 0);
   };
 
@@ -1230,11 +1323,14 @@ function subscribePickEvents(
       if (shouldSuppress?.()) return;
       if (pickMode !== 'click') return;
       const loci = extractLociFromEvent(event);
-      if (!loci) return;
-      const parsed = parsePickFromEvent({ current: { loci } }) ?? parsePickFromSelectionEntry(event);
-      if (!parsed) return;
-      pickDebugLog('selection.changed', parsed.label);
-      emitPick(parsed);
+      const parsed = loci
+        ? dedupeResiduePicks([
+            ...parsePicksFromEvent({ current: { loci } }),
+            ...parsePicksFromSelectionEntry(event)
+          ])
+        : parsePicksFromSelectionManager(viewer);
+      if (parsed.length === 0) return;
+      emitPicks(parsed, 'selection.changed');
     });
     if (sub && typeof sub.unsubscribe === 'function') {
       subscriptions.push(sub);
@@ -1247,11 +1343,14 @@ function subscribePickEvents(
       if (shouldSuppress?.()) return;
       if (pickMode !== 'click') return;
       const loci = extractLociFromEvent(event);
-      if (!loci) return;
-      const parsed = parsePickFromEvent({ current: { loci } }) ?? parsePickFromFocusEvent(event);
-      if (!parsed) return;
-      pickDebugLog('focus.changed', parsed.label);
-      emitPick(parsed);
+      const parsed = loci
+        ? dedupeResiduePicks([
+            ...parsePicksFromEvent({ current: { loci } }),
+            ...parsePicksFromFocusEvent(event)
+          ])
+        : parsePicksFromFocusManager(viewer);
+      if (parsed.length === 0) return;
+      emitPicks(parsed, 'focus.changed');
     });
     if (sub && typeof sub.unsubscribe === 'function') {
       subscriptions.push(sub);
