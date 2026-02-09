@@ -121,11 +121,11 @@ export function ProjectsPage() {
 
   useEffect(() => {
     const onFocus = () => {
-      void load();
+      void load({ silent: true, preferBackendStatus: true });
     };
     const onVisible = () => {
       if (document.visibilityState === 'visible') {
-        void load();
+        void load({ silent: true, preferBackendStatus: true });
       }
     };
     window.addEventListener('focus', onFocus);
@@ -139,8 +139,8 @@ export function ProjectsPage() {
   useEffect(() => {
     if (!hasActiveRuntime) return;
     const timer = window.setInterval(() => {
-      void load();
-    }, 5000);
+      void load({ silent: true, statusOnly: true, preferBackendStatus: true });
+    }, 2500);
     return () => window.clearInterval(timer);
   }, [hasActiveRuntime, load]);
 

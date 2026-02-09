@@ -1537,6 +1537,17 @@ select:focus {
   gap: 7px;
   padding: 10px;
   scroll-margin-top: 108px;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+}
+
+.component-card.component-tone-green {
+  background: linear-gradient(180deg, #f8fcf9 0%, #f2f8f4 100%);
+  border-color: #d8e5dd;
+}
+
+.component-card.component-tone-slate {
+  background: linear-gradient(180deg, #f8f9fb 0%, #f1f3f6 100%);
+  border-color: #dde2e8;
 }
 
 .component-card.active {
@@ -1549,6 +1560,19 @@ select:focus {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
+}
+
+.component-card-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.component-card-summary {
+  border: 1px dashed rgba(125, 146, 134, 0.34);
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: rgba(255, 255, 255, 0.64);
 }
 
 .component-meta {
@@ -1677,9 +1701,9 @@ select:focus {
 .component-jsme-shell {
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
+  background: var(--surface);
   padding: 8px;
-  box-shadow: inset 0 0 0 1px var(--surface-2);
+  box-shadow: inset 0 0 0 1px #f2f5f3;
 }
 
 .component-jsme-shell .jsme-host {

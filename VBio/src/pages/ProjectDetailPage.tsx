@@ -196,7 +196,7 @@ function defaultConfigFromProject(project: Project): ProjectInputConfig {
     components.push({
       ...createInputComponent('ligand'),
       sequence: ligandSmiles,
-      inputMethod: 'smiles'
+      inputMethod: 'jsme'
     });
   }
   if (components.length === 0) {
@@ -258,6 +258,7 @@ export function ProjectDetailPage() {
   const [constraintPickModeEnabled, setConstraintPickModeEnabled] = useState(false);
   const constraintPickSlotRef = useRef<Record<string, 'first' | 'second'>>({});
   const prevTaskStateRef = useRef<TaskState | null>(null);
+  const statusRefreshInFlightRef = useRef(false);
   const [activeComponentId, setActiveComponentId] = useState<string | null>(null);
   const [sidebarTypeOpen, setSidebarTypeOpen] = useState<Record<InputComponent['type'], boolean>>({
     protein: true,
@@ -808,25 +809,35 @@ export function ProjectDetailPage() {
     }
   };
 
-  const refreshStatus = async () => {
+  const refreshStatus = async (options?: { silent?: boolean }) => {
+    const silent = Boolean(options?.silent);
+
     if (!project?.task_id) {
-      setError('No task ID yet. Submit a prediction first.');
+      if (!silent) {
+        setError('No task ID yet. Submit a prediction first.');
+      }
       return;
     }
 
-    setStatusLoading(true);
-    setError(null);
+    if (statusRefreshInFlightRef.current) return;
+    statusRefreshInFlightRef.current = true;
+
+    if (!silent) {
+      setStatusLoading(true);
+      setError(null);
+    }
 
     try {
       const status = await getTaskStatus(project.task_id);
       const taskState = mapTaskState(status.state);
       const statusText = readStatusText(status);
       setStatusInfo(status.info ?? null);
+      const nextErrorText = taskState === 'FAILURE' ? statusText : '';
 
       const patchData: Partial<Project> = {
         task_state: taskState,
         status_text: statusText,
-        error_text: taskState === 'FAILURE' ? statusText : ''
+        error_text: nextErrorText
       };
 
       if (taskState === 'SUCCESS') {
@@ -837,14 +848,25 @@ export function ProjectDetailPage() {
         }
       }
 
-      const next = await patch(patchData);
+      const shouldPatch =
+        project.task_state !== taskState ||
+        (project.status_text || '') !== statusText ||
+        (project.error_text || '') !== nextErrorText ||
+        (taskState === 'SUCCESS' && (!project.completed_at || project.duration_seconds === null));
+
+      const next = shouldPatch ? await patch(patchData) : project;
       if (taskState === 'SUCCESS' && next?.task_id) {
         await pullResultForViewer(next.task_id);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to refresh task status.');
+      if (!silent) {
+        setError(err instanceof Error ? err.message : 'Failed to refresh task status.');
+      }
     } finally {
-      setStatusLoading(false);
+      statusRefreshInFlightRef.current = false;
+      if (!silent) {
+        setStatusLoading(false);
+      }
     }
   };
 
@@ -958,7 +980,7 @@ export function ProjectDetailPage() {
     if (!['QUEUED', 'RUNNING'].includes(project.task_state)) return;
 
     const timer = setInterval(() => {
-      void refreshStatus();
+      void refreshStatus({ silent: true });
     }, 4000);
 
     return () => clearInterval(timer);

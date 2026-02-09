@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Dna, FlaskConical, Plus, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Dna, FlaskConical, Plus, Trash2 } from 'lucide-react';
 import type { InputComponent, LigandInputMethod, MoleculeType, ProteinTemplateUpload } from '../../types/models';
 import { componentTypeLabel, createInputComponent, normalizeComponentSequence } from '../../utils/projectInputs';
 import { detectStructureFormat, extractProteinChainSequences } from '../../utils/structureParser';
@@ -29,6 +29,13 @@ function clampCopies(value: number): number {
   return Math.floor(value);
 }
 
+function summarizeText(value: string, limit = 42): string {
+  const text = value.trim();
+  if (!text) return 'No sequence/input yet';
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit)}...`;
+}
+
 export function ComponentInputEditor({
   components,
   onChange,
@@ -42,6 +49,7 @@ export function ComponentInputEditor({
   compact = false
 }: ComponentInputEditorProps) {
   const [templateErrors, setTemplateErrors] = useState<Record<string, string>>({});
+  const [collapsedById, setCollapsedById] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     if (!selectedComponentId) return;
@@ -51,6 +59,25 @@ export function ComponentInputEditor({
       window.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
     }
   }, [selectedComponentId]);
+
+  useEffect(() => {
+    setCollapsedById((prev) => {
+      const next: Record<string, boolean> = {};
+      let changed = false;
+      for (const comp of components) {
+        if (Object.prototype.hasOwnProperty.call(prev, comp.id)) {
+          next[comp.id] = prev[comp.id];
+        } else {
+          next[comp.id] = false;
+          changed = true;
+        }
+      }
+      if (Object.keys(prev).length !== components.length) {
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [components]);
 
   const patchOne = (id: string, patch: Partial<InputComponent>) => {
     onChange(
@@ -63,7 +90,7 @@ export function ComponentInputEditor({
           sequence: normalizeComponentSequence(nextType, base.sequence || ''),
           useMsa: nextType === 'protein' ? Boolean(base.useMsa ?? true) : undefined,
           cyclic: nextType === 'protein' ? Boolean(base.cyclic ?? false) : undefined,
-          inputMethod: nextType === 'ligand' ? (base.inputMethod ?? 'smiles') : undefined
+          inputMethod: nextType === 'ligand' ? (base.inputMethod ?? 'jsme') : undefined
         };
       })
     );
@@ -78,6 +105,10 @@ export function ComponentInputEditor({
   };
 
   const addComponent = (type: MoleculeType) => onChange([...components, createInputComponent(type)]);
+
+  const toggleCollapsed = (id: string) => {
+    setCollapsedById((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
 
   const typeBadge = (type: MoleculeType) => {
     if (type === 'protein') {
@@ -176,20 +207,27 @@ export function ComponentInputEditor({
 
       <div className="component-list">
         {components.map((comp, index) => {
-          const method = comp.inputMethod ?? 'smiles';
+          const method = comp.inputMethod ?? 'jsme';
           const componentLabel = componentTypeLabel(comp.type);
           const isLigand = comp.type === 'ligand';
+          const isCollapsed = Boolean(collapsedById[comp.id]);
           const templateUpload = proteinTemplates[comp.id];
           const templateChainIds = Object.keys(templateUpload?.chainSequences || {}).sort((a, b) => a.localeCompare(b));
           const selectedTemplateSequence =
             templateUpload && templateUpload.chainId ? templateUpload.chainSequences[templateUpload.chainId] || '' : '';
           const hasLigandJsmeViewer = isLigand && method === 'jsme';
+          const collapsedSummary =
+            comp.type === 'ligand'
+              ? `${method.toUpperCase()} · ${summarizeText(comp.sequence)}`
+              : `${componentLabel} · ${summarizeText(comp.sequence)}`;
 
           return (
             <section
               id={`component-card-${comp.id}`}
               key={comp.id}
-              className={`component-card component-card-${comp.type} panel subtle ${selectedComponentId === comp.id ? 'active' : ''}`}
+              className={`component-card component-card-${comp.type} component-tone-${index % 2 === 0 ? 'green' : 'slate'} panel subtle ${
+                selectedComponentId === comp.id ? 'active' : ''
+              } ${isCollapsed ? 'collapsed' : ''}`}
               onClick={() => onSelectedComponentIdChange?.(comp.id)}
             >
               <div className="component-card-head">
@@ -197,17 +235,40 @@ export function ComponentInputEditor({
                   <span className={`component-type-pill type-${comp.type}`}>{typeBadge(comp.type)}</span>
                   Component {index + 1}: {componentLabel}
                 </strong>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  onClick={() => removeOne(comp.id)}
-                  disabled={disabled || components.length <= 1}
-                  title="Remove component"
-                >
-                  <Trash2 size={14} />
-                </button>
+                <div className="component-card-actions">
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleCollapsed(comp.id);
+                    }}
+                    disabled={disabled}
+                    title={isCollapsed ? 'Expand component' : 'Collapse component'}
+                    aria-label={isCollapsed ? 'Expand component' : 'Collapse component'}
+                    aria-expanded={!isCollapsed}
+                  >
+                    {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      removeOne(comp.id);
+                    }}
+                    disabled={disabled || components.length <= 1}
+                    title="Remove component"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
               </div>
 
+              {isCollapsed && <div className="component-card-summary muted small">{collapsedSummary}</div>}
+
+              {!isCollapsed && (
+                <>
               <div className={`component-meta ${compact ? 'component-meta-compact' : ''}`}>
                 <label className="field">
                   <span>Type</span>
@@ -218,7 +279,7 @@ export function ComponentInputEditor({
                       patchOne(comp.id, {
                         type: e.target.value as MoleculeType,
                         sequence: '',
-                        inputMethod: e.target.value === 'ligand' ? 'smiles' : undefined
+                        inputMethod: e.target.value === 'ligand' ? 'jsme' : undefined
                       })
                     }
                   >
@@ -439,6 +500,8 @@ export function ComponentInputEditor({
                     </aside>
                   )}
                 </div>
+              )}
+                </>
               )}
             </section>
           );

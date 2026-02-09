@@ -31,7 +31,7 @@ export function createInputComponent(type: MoleculeType): InputComponent {
       type: 'ligand',
       numCopies: 1,
       sequence: '',
-      inputMethod: 'smiles'
+      inputMethod: 'jsme'
     };
   }
 

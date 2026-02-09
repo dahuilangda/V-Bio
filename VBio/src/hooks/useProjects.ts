@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { Project, Session } from '../types/models';
 import { insertProject, listProjects, updateProject } from '../api/supabaseLite';
+import { getTaskStatus } from '../api/backendApi';
 import { removeProjectInputConfig, removeProjectUiState } from '../utils/projectInputs';
 import { normalizeWorkflowKey } from '../utils/workflows';
 
@@ -16,28 +17,144 @@ export interface CreateProjectInput {
   ligandSmiles?: string;
 }
 
+interface LoadProjectsOptions {
+  silent?: boolean;
+  statusOnly?: boolean;
+  preferBackendStatus?: boolean;
+}
+
+function mapTaskState(raw: string): Project['task_state'] {
+  const normalized = raw.toUpperCase();
+  if (normalized === 'SUCCESS') return 'SUCCESS';
+  if (normalized === 'FAILURE') return 'FAILURE';
+  if (normalized === 'REVOKED') return 'REVOKED';
+  if (normalized === 'PENDING') return 'QUEUED';
+  return 'RUNNING';
+}
+
+function readStatusText(status: { info?: Record<string, unknown>; state: string }): string {
+  if (!status.info) return status.state;
+  const s1 = status.info.status;
+  const s2 = status.info.message;
+  if (typeof s1 === 'string' && s1.trim()) return s1;
+  if (typeof s2 === 'string' && s2.trim()) return s2;
+  return status.state;
+}
+
 export function useProjects(session: Session | null) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (options?: LoadProjectsOptions) => {
+    const silent = Boolean(options?.silent);
+    const statusOnly = Boolean(options?.statusOnly);
+    const preferBackendStatus = Boolean(options?.preferBackendStatus);
+
     if (!session) {
       setProjects([]);
       return;
     }
-    setLoading(true);
-    setError(null);
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
-      const rows = await listProjects({
+      let rows = await listProjects({
         userId: session.userId
       });
-      setProjects(rows);
+
+      if (preferBackendStatus) {
+        const runtimeRows = rows.filter((row) => Boolean(row.task_id) && (row.task_state === 'QUEUED' || row.task_state === 'RUNNING'));
+        if (runtimeRows.length > 0) {
+          const checks = await Promise.allSettled(runtimeRows.map((row) => getTaskStatus(row.task_id)));
+          const patchById = new Map<string, Partial<Project>>();
+
+          checks.forEach((result, index) => {
+            if (result.status !== 'fulfilled') return;
+            const source = runtimeRows[index];
+            const taskState = mapTaskState(result.value.state);
+            const statusText = readStatusText(result.value);
+            const errorText = taskState === 'FAILURE' ? statusText : '';
+            const terminal = taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED';
+            const completedAt = terminal ? source.completed_at || new Date().toISOString() : source.completed_at;
+            const durationSeconds =
+              terminal && source.submitted_at
+                ? Math.max(0, (new Date(completedAt || Date.now()).getTime() - new Date(source.submitted_at).getTime()) / 1000)
+                : source.duration_seconds;
+
+            if (
+              source.task_state === taskState &&
+              (source.status_text || '') === statusText &&
+              (source.error_text || '') === errorText &&
+              source.completed_at === completedAt &&
+              source.duration_seconds === durationSeconds
+            ) {
+              return;
+            }
+
+            patchById.set(source.id, {
+              task_state: taskState,
+              status_text: statusText,
+              error_text: errorText,
+              completed_at: completedAt,
+              duration_seconds: Number.isFinite(durationSeconds as number) ? durationSeconds : null
+            });
+          });
+
+          if (patchById.size > 0) {
+            rows = rows.map((row) => (patchById.has(row.id) ? { ...row, ...patchById.get(row.id)! } : row));
+            for (const [projectId, patch] of patchById.entries()) {
+              void updateProject(projectId, patch).catch(() => undefined);
+            }
+          }
+        }
+      }
+
+      if (!statusOnly) {
+        setProjects(rows);
+        return;
+      }
+
+      const rowById = new Map(rows.map((row) => [row.id, row]));
+      setProjects((prev) =>
+        prev.map((project) => {
+          const next = rowById.get(project.id);
+          if (!next) return project;
+
+          if (
+            project.task_state === next.task_state &&
+            project.task_id === next.task_id &&
+            project.status_text === next.status_text &&
+            project.error_text === next.error_text &&
+            project.submitted_at === next.submitted_at &&
+            project.completed_at === next.completed_at &&
+            project.duration_seconds === next.duration_seconds
+          ) {
+            return project;
+          }
+
+          return {
+            ...project,
+            task_state: next.task_state,
+            task_id: next.task_id,
+            status_text: next.status_text,
+            error_text: next.error_text,
+            submitted_at: next.submitted_at,
+            completed_at: next.completed_at,
+            duration_seconds: next.duration_seconds
+          };
+        })
+      );
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load projects.');
+      if (!silent) {
+        setError(e instanceof Error ? e.message : 'Failed to load projects.');
+      }
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   }, [session]);
 

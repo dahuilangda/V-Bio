@@ -28,7 +28,7 @@ function readThemeColor(name: string, fallback: string): string {
 
 function getJsmeThemeOptions(): JsmeThemeOptions {
   return {
-    guicolor: readThemeColor('--surface-2', '#f7fbf8'),
+    guicolor: readThemeColor('--surface', '#ffffff'),
     guiAtomColor: readThemeColor('--primary', '#1f4f3f'),
     markerIconColor: readThemeColor('--primary', '#1f4f3f')
   };
