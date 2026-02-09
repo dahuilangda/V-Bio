@@ -234,6 +234,15 @@ export function ConstraintEditor({
                 }
                 onSelectedConstraintIdChange?.(item.id);
               }}
+              onFocusCapture={(event) => {
+                if (event.target === event.currentTarget) return;
+                if (isSelected) return;
+                if (onConstraintClick) {
+                  onConstraintClick(item.id, { toggle: false, range: false });
+                  return;
+                }
+                onSelectedConstraintIdChange?.(item.id);
+              }}
             >
               <div className="constraint-item-head">
                 <strong>

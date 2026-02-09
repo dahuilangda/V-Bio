@@ -565,7 +565,6 @@ export function ProjectDetailPage() {
 
     return inverseMap;
   }, [selectedTemplatePreview, selectedTemplateResidueIndexMap]);
-
   useEffect(() => {
     const ids = (constraintTemplateOptions || []).map((item) => item.componentId);
     if (ids.length === 0) {
@@ -976,10 +975,11 @@ export function ProjectDetailPage() {
   const constraintHighlightResidues = useMemo<MolstarResidueHighlight[]>(() => {
     if (!draft) return [];
     const byKey = new Map<string, MolstarResidueHighlight>();
-    const highlightConstraintIds =
-      selectedContactConstraintIds.length > 0
-        ? new Set<string>(selectedContactConstraintIds)
-        : new Set<string>(activeConstraintId ? [activeConstraintId] : []);
+    const highlightConstraintIds = new Set<string>(selectedContactConstraintIds);
+    if (activeConstraintId) {
+      highlightConstraintIds.add(activeConstraintId);
+    }
+    if (highlightConstraintIds.size === 0) return [];
 
     for (const constraint of draft.inputConfig.constraints) {
       if (!highlightConstraintIds.has(constraint.id)) continue;
@@ -989,7 +989,7 @@ export function ProjectDetailPage() {
         const residue = Math.max(1, Math.floor(Number(residueRef.residue) || 0));
         if (!chainId || !Number.isFinite(residue) || residue <= 0) continue;
         const chainInfo = chainInfoById.get(chainId);
-        if (!chainInfo || chainInfo.type !== 'protein') continue;
+        if (chainInfo && chainInfo.type !== 'protein') continue;
         const key = `${chainId}:${residue}`;
         const existing = byKey.get(key);
         if (!existing) {
@@ -1035,7 +1035,11 @@ export function ProjectDetailPage() {
     const byMappedResidue = new Map<string, MolstarResidueHighlight>();
 
     for (const item of constraintHighlightResidues) {
-      if (!ownerChainIds.has(item.chainId)) continue;
+      const sourceChainInfo = chainInfoById.get(item.chainId);
+      if (sourceChainInfo) {
+        if (sourceChainInfo.type !== 'protein') continue;
+        if (!ownerChainIds.has(item.chainId)) continue;
+      }
       const mappedResidueRaw = selectedTemplateSequenceToStructureResidueMap[item.residue];
       const mappedResidue =
         typeof mappedResidueRaw === 'number' && Number.isFinite(mappedResidueRaw)
@@ -1061,7 +1065,13 @@ export function ProjectDetailPage() {
     }
 
     return Array.from(byMappedResidue.values());
-  }, [selectedTemplatePreview, activeChainInfos, constraintHighlightResidues, selectedTemplateSequenceToStructureResidueMap]);
+  }, [
+    selectedTemplatePreview,
+    activeChainInfos,
+    chainInfoById,
+    constraintHighlightResidues,
+    selectedTemplateSequenceToStructureResidueMap
+  ]);
 
   const constraintViewerActiveResidue = useMemo<MolstarResidueHighlight | null>(() => {
     if (!selectedTemplatePreview) return activeConstraintResidue;
@@ -1748,18 +1758,18 @@ export function ProjectDetailPage() {
     }
 
     if (options?.toggle) {
-      const wasSelected = selectedContactConstraintIds.includes(constraintId);
-      const nextSelected = wasSelected
-        ? selectedContactConstraintIds.filter((id) => id !== constraintId)
-        : [...selectedContactConstraintIds, constraintId];
-      setSelectedContactConstraintIds(nextSelected);
-      if (nextSelected.length === 0) {
-        setActiveConstraintId(null);
-      } else if (!wasSelected) {
-        setActiveConstraintId(constraintId);
-      } else {
-        setActiveConstraintId(nextSelected[nextSelected.length - 1] || null);
-      }
+      setSelectedContactConstraintIds((prev) => {
+        const wasSelected = prev.includes(constraintId);
+        const nextSelected = wasSelected ? prev.filter((id) => id !== constraintId) : [...prev, constraintId];
+        if (nextSelected.length === 0) {
+          setActiveConstraintId(null);
+        } else if (!wasSelected) {
+          setActiveConstraintId(constraintId);
+        } else {
+          setActiveConstraintId(nextSelected[nextSelected.length - 1] || null);
+        }
+        return nextSelected;
+      });
       constraintSelectionAnchorRef.current = constraintId;
       return;
     }
@@ -1806,10 +1816,15 @@ export function ProjectDetailPage() {
     const selectedTemplateChain = String(selectedTemplatePreview?.chainId || '').trim();
     const pickedTemplateMap = pickedTemplateChain ? selectedTemplateResidueIndexMap[pickedTemplateChain] : undefined;
     const selectedTemplateMap = selectedTemplateChain ? selectedTemplateResidueIndexMap[selectedTemplateChain] : undefined;
-    const templateChainMap =
-      pickedTemplateMap ||
-      (!pickedTemplateChain || pickedTemplateChain === selectedTemplateChain ? selectedTemplateMap : undefined);
-    const mappedResidue = templateChainMap?.[normalizedResidue];
+    const mappedFromPickedChain = pickedTemplateMap?.[normalizedResidue];
+    const mappedFromSelectedChain = selectedTemplateMap?.[normalizedResidue];
+    const mappedResidueCandidate = [mappedFromPickedChain, mappedFromSelectedChain].find(
+      (value) => typeof value === 'number' && Number.isFinite(value) && value > 0
+    );
+    const mappedResidue =
+      typeof mappedResidueCandidate === 'number' && Number.isFinite(mappedResidueCandidate) && mappedResidueCandidate > 0
+        ? mappedResidueCandidate
+        : normalizedResidue;
 
     if (selectedTemplatePreview) {
       // Constraint picking is sequence-based; ignore non-protein picks (e.g. ligand/hetero atoms)
@@ -1821,8 +1836,8 @@ export function ProjectDetailPage() {
     } else if (typeof mappedResidue === 'number' && Number.isFinite(mappedResidue) && mappedResidue > 0) {
       normalizedResidue = Math.floor(mappedResidue);
     }
-    if (residueLimit > 0 && normalizedResidue > residueLimit) {
-      normalizedResidue = residueLimit;
+    if (!selectedTemplatePreview && residueLimit > 0 && normalizedResidue > residueLimit) {
+      return;
     }
     const nextPicked = {
       chainId: resolvedChainId,
@@ -1869,67 +1884,108 @@ export function ProjectDetailPage() {
       if (!prev) return prev;
       const constraints = prev.inputConfig.constraints;
       if (!constraints.length) return prev;
+      const activeIndex = activeConstraintId ? constraints.findIndex((item) => item.id === activeConstraintId) : -1;
+      const activeConstraint = activeIndex >= 0 ? constraints[activeIndex] : null;
+      const selectedContactIdSet = new Set(selectedContactConstraintIds);
+      const selectedContactIndexes = constraints.reduce<number[]>((acc, item, index) => {
+        if (item.type === 'contact' && selectedContactIdSet.has(item.id)) {
+          acc.push(index);
+        }
+        return acc;
+      }, []);
 
-      const selectedId =
-        activeConstraintId ||
-        selectedContactConstraintIds[selectedContactConstraintIds.length - 1] ||
-        constraints[0]?.id;
-      if (!selectedId) return prev;
-      const targetIndex = constraints.findIndex((item) => item.id === selectedId);
-      if (targetIndex < 0) return prev;
-
-      const current = constraints[targetIndex];
-      let updated = current;
-
-      if (current.type === 'contact') {
-        const token1Matches = current.token1_chain === resolvedChainId;
-        const token2Matches = current.token2_chain === resolvedChainId;
-        const slot: 'first' | 'second' =
-          token1Matches && !token2Matches
-            ? 'first'
-            : token2Matches && !token1Matches
-              ? 'second'
-              : constraintPickSlotRef.current[current.id] || 'first';
-        updated =
-          slot === 'first'
-            ? { ...current, token1_chain: resolvedChainId, token1_residue: normalizedResidue }
-            : { ...current, token2_chain: resolvedChainId, token2_residue: normalizedResidue };
-        constraintPickSlotRef.current[current.id] = slot === 'first' ? 'second' : 'first';
-      } else if (current.type === 'bond') {
-        const atom1Matches = current.atom1_chain === resolvedChainId;
-        const atom2Matches = current.atom2_chain === resolvedChainId;
-        const slot: 'first' | 'second' =
-          atom1Matches && !atom2Matches
-            ? 'first'
-            : atom2Matches && !atom1Matches
-              ? 'second'
-              : constraintPickSlotRef.current[current.id] || 'first';
-        const atomName = (pick.atomName || (slot === 'first' ? current.atom1_atom : current.atom2_atom) || 'CA').toUpperCase();
-        updated =
-          slot === 'first'
-            ? {
-                ...current,
-                atom1_chain: resolvedChainId,
-                atom1_residue: normalizedResidue,
-                atom1_atom: atomName
-              }
-            : {
-                ...current,
-                atom2_chain: resolvedChainId,
-                atom2_residue: normalizedResidue,
-                atom2_atom: atomName
-              };
-        constraintPickSlotRef.current[current.id] = slot === 'first' ? 'second' : 'first';
-      } else {
-        const exists = current.contacts.some((item) => item[0] === resolvedChainId && item[1] === normalizedResidue);
-        if (exists) return prev;
-        updated = {
-          ...current,
-          contacts: [...current.contacts, [resolvedChainId, normalizedResidue]]
-        };
+      let targetIndexes: number[] = [];
+      if (activeConstraint?.type === 'contact') {
+        targetIndexes = selectedContactIndexes.length > 0 ? selectedContactIndexes : activeIndex >= 0 ? [activeIndex] : [];
+      } else if (activeIndex >= 0) {
+        targetIndexes = [activeIndex];
+      } else if (selectedContactIndexes.length > 0) {
+        targetIndexes = selectedContactIndexes;
+      } else if (constraints.length > 0) {
+        targetIndexes = [0];
       }
+      if (targetIndexes.length === 0) return prev;
+      const targetIndexSet = new Set(targetIndexes);
 
-      const nextConstraints = constraints.map((item, index) => (index === targetIndex ? updated : item));
+      let hasChanges = false;
+      const nextConstraints = constraints.map((item, index) => {
+        if (!targetIndexSet.has(index)) return item;
+
+        if (item.type === 'contact') {
+          const token1Matches = item.token1_chain === resolvedChainId;
+          const token2Matches = item.token2_chain === resolvedChainId;
+          const slot: 'first' | 'second' =
+            token1Matches && !token2Matches
+              ? 'first'
+              : token2Matches && !token1Matches
+                ? 'second'
+                : constraintPickSlotRef.current[item.id] || 'first';
+          const updated =
+            slot === 'first'
+              ? { ...item, token1_chain: resolvedChainId, token1_residue: normalizedResidue }
+              : { ...item, token2_chain: resolvedChainId, token2_residue: normalizedResidue };
+          constraintPickSlotRef.current[item.id] = slot === 'first' ? 'second' : 'first';
+          if (
+            updated.token1_chain !== item.token1_chain ||
+            updated.token1_residue !== item.token1_residue ||
+            updated.token2_chain !== item.token2_chain ||
+            updated.token2_residue !== item.token2_residue
+          ) {
+            hasChanges = true;
+            return updated;
+          }
+          return item;
+        }
+
+        if (item.type === 'bond') {
+          const atom1Matches = item.atom1_chain === resolvedChainId;
+          const atom2Matches = item.atom2_chain === resolvedChainId;
+          const slot: 'first' | 'second' =
+            atom1Matches && !atom2Matches
+              ? 'first'
+              : atom2Matches && !atom1Matches
+                ? 'second'
+                : constraintPickSlotRef.current[item.id] || 'first';
+          const atomName = (pick.atomName || (slot === 'first' ? item.atom1_atom : item.atom2_atom) || 'CA').toUpperCase();
+          const updated =
+            slot === 'first'
+              ? {
+                  ...item,
+                  atom1_chain: resolvedChainId,
+                  atom1_residue: normalizedResidue,
+                  atom1_atom: atomName
+                }
+              : {
+                  ...item,
+                  atom2_chain: resolvedChainId,
+                  atom2_residue: normalizedResidue,
+                  atom2_atom: atomName
+                };
+          constraintPickSlotRef.current[item.id] = slot === 'first' ? 'second' : 'first';
+          if (
+            updated.atom1_chain !== item.atom1_chain ||
+            updated.atom1_residue !== item.atom1_residue ||
+            updated.atom1_atom !== item.atom1_atom ||
+            updated.atom2_chain !== item.atom2_chain ||
+            updated.atom2_residue !== item.atom2_residue ||
+            updated.atom2_atom !== item.atom2_atom
+          ) {
+            hasChanges = true;
+            return updated;
+          }
+          return item;
+        }
+
+        const exists = item.contacts.some((contact) => contact[0] === resolvedChainId && contact[1] === normalizedResidue);
+        if (exists) return item;
+        hasChanges = true;
+        return {
+          ...item,
+          contacts: [...item.contacts, [resolvedChainId, normalizedResidue] as [string, number]]
+        };
+      });
+
+      if (!hasChanges) return prev;
       return {
         ...prev,
         inputConfig: {
