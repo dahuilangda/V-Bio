@@ -14,6 +14,26 @@ declare global {
   }
 }
 
+interface JsmeThemeOptions {
+  guicolor: string;
+  guiAtomColor: string;
+  markerIconColor: string;
+}
+
+function readThemeColor(name: string, fallback: string): string {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return fallback;
+  const value = window.getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+function getJsmeThemeOptions(): JsmeThemeOptions {
+  return {
+    guicolor: readThemeColor('--surface-2', '#f7fbf8'),
+    guiAtomColor: readThemeColor('--primary', '#1f4f3f'),
+    markerIconColor: readThemeColor('--primary', '#1f4f3f')
+  };
+}
+
 async function waitForJSMEReady(timeoutMs = 12000, intervalMs = 120): Promise<any> {
   const start = Date.now();
 
@@ -60,11 +80,17 @@ export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorP
 
         mountRef.current.innerHTML = '';
         mountRef.current.id = editorId;
+        const themeOptions = getJsmeThemeOptions();
         const applet = new JSApplet.JSME(editorId, '100%', `${height}px`, {
-          options: 'star'
+          options: 'star',
+          ...themeOptions
         });
 
         appletRef.current = applet;
+
+        if (typeof applet.setUserInterfaceBackgroundColor === 'function') {
+          applet.setUserInterfaceBackgroundColor(themeOptions.guicolor);
+        }
 
         if (smiles.trim()) {
           applet.readGenericMolecularInput(smiles.trim());

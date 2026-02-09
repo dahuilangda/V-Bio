@@ -4,6 +4,7 @@ import type { InputComponent, LigandInputMethod, MoleculeType, ProteinTemplateUp
 import { componentTypeLabel, createInputComponent, normalizeComponentSequence } from '../../utils/projectInputs';
 import { detectStructureFormat, extractProteinChainSequences } from '../../utils/structureParser';
 import { JSMEEditor } from './JSMEEditor';
+import { LigandPropertyGrid } from './LigandPropertyGrid';
 
 interface ComponentInputEditorProps {
   components: InputComponent[];
@@ -418,6 +419,10 @@ export function ComponentInputEditor({
                         onChange={(e) => patchOne(comp.id, { sequence: e.target.value })}
                       />
                     </label>
+                    <div className={`ligand-live-props ${hasLigandJsmeViewer ? 'align-bottom' : ''}`}>
+                      <span>Live Ligand Properties</span>
+                      <LigandPropertyGrid smiles={comp.sequence} />
+                    </div>
                   </div>
                   {method === 'jsme' && (
                     <aside className="component-content-side ligand-input-right">
