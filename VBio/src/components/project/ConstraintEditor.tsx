@@ -69,12 +69,11 @@ function defaultConstraint(
 
   if (type === 'pocket') {
     const binder = ligandChainIds[0] || defaultChain(chainIds, 0);
-    const contactTarget = chainIds.find((id) => id !== binder) || defaultChain(chainIds, 1);
     return {
       id: randomId(),
       type: 'pocket',
       binder,
-      contacts: [[contactTarget, 1]],
+      contacts: [],
       max_distance: 6,
       force: true
     };

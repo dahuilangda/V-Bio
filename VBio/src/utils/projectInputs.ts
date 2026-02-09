@@ -135,7 +135,7 @@ function normalizeConstraints(value: unknown): PredictionConstraint[] {
           id,
           type: 'pocket' as const,
           binder: typeof raw.binder === 'string' && raw.binder ? raw.binder : 'A',
-          contacts: contacts.length > 0 ? contacts : [['A', 1]],
+          contacts,
           max_distance: Math.max(1, Number(raw.max_distance || 6)),
           force: raw.force === undefined ? true : Boolean(raw.force)
         };

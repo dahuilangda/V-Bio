@@ -1133,21 +1133,21 @@ function subscribePickEvents(
     onResiduePick(pick);
   };
 
-  const parseAndEmit = (event: any, source: string): boolean => {
-    if (shouldSuppress?.()) return false;
+  const parseAndEmit = (event: any, source: string): 'handled' | 'skip' | 'retry' => {
+    if (shouldSuppress?.()) return 'skip';
     if (pickMode === 'alt-left' && !isAltLeftPick(event, isModifierPressed)) {
       pickDebugLog('skip (modifier)', source);
-      return false;
+      return 'skip';
     }
     const parsed = parsePickFromEvent(event);
     if (parsed) {
       pickDebugLog('pick', source, parsed.label);
       emitPick(parsed);
-      return true;
+      return 'handled';
     }
 
     const loci = extractLociFromEvent(event);
-    if (!loci) return false;
+    if (!loci) return 'skip';
 
     try {
       viewer?.plugin?.managers?.structure?.selection?.fromLoci?.('set', loci);
@@ -1156,10 +1156,10 @@ function subscribePickEvents(
     }
 
     const parsedFromManagers = parsePickFromFocusManager(viewer) ?? parsePickFromSelectionManager(viewer);
-    if (!parsedFromManagers) return false;
+    if (!parsedFromManagers) return 'retry';
     pickDebugLog('pick (manager)', source, parsedFromManagers.label);
     emitPick(parsedFromManagers);
-    return true;
+    return 'handled';
   };
 
   const retryFromSelection = (source: string) => {
@@ -1178,7 +1178,8 @@ function subscribePickEvents(
   const behaviorClick = viewer?.plugin?.behaviors?.interaction?.click;
   if (behaviorClick && typeof behaviorClick.subscribe === 'function') {
     const sub = behaviorClick.subscribe((event: any) => {
-      if (!parseAndEmit(event, 'behavior.click')) {
+      const result = parseAndEmit(event, 'behavior.click');
+      if (result === 'retry') {
         pickDebugLog('event parse failed', 'behavior.click', describeEventForDebug(event));
         retryFromSelection('behavior.click');
       }
@@ -1191,7 +1192,8 @@ function subscribePickEvents(
   const managerClick = viewer?.plugin?.managers?.interactivity?.events?.click;
   if (managerClick && typeof managerClick.subscribe === 'function') {
     const sub = managerClick.subscribe((event: any) => {
-      if (!parseAndEmit(event, 'manager.click')) {
+      const result = parseAndEmit(event, 'manager.click');
+      if (result === 'retry') {
         pickDebugLog('event parse failed', 'manager.click', describeEventForDebug(event));
         retryFromSelection('manager.click');
       }
@@ -1206,10 +1208,9 @@ function subscribePickEvents(
     const sub = selectionChanged.subscribe((event: any) => {
       if (shouldSuppress?.()) return;
       if (pickMode !== 'click') return;
-      const parsed =
-        parsePickFromEvent(event) ??
-        parsePickFromSelectionEntry(event) ??
-        parsePickFromSelectionManager(viewer);
+      const loci = extractLociFromEvent(event);
+      if (!loci) return;
+      const parsed = parsePickFromEvent({ current: { loci } }) ?? parsePickFromSelectionEntry(event);
       if (!parsed) return;
       pickDebugLog('selection.changed', parsed.label);
       emitPick(parsed);
@@ -1224,7 +1225,9 @@ function subscribePickEvents(
     const sub = focusChanged.subscribe((event: any) => {
       if (shouldSuppress?.()) return;
       if (pickMode !== 'click') return;
-      const parsed = parsePickFromFocusEvent(event) ?? parsePickFromFocusManager(viewer);
+      const loci = extractLociFromEvent(event);
+      if (!loci) return;
+      const parsed = parsePickFromEvent({ current: { loci } }) ?? parsePickFromFocusEvent(event);
       if (!parsed) return;
       pickDebugLog('focus.changed', parsed.label);
       emitPick(parsed);

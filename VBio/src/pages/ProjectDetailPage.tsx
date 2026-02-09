@@ -38,6 +38,7 @@ import { ConstraintEditor } from '../components/project/ConstraintEditor';
 import { Ligand2DPreview } from '../components/project/Ligand2DPreview';
 import { LigandPropertyGrid } from '../components/project/LigandPropertyGrid';
 import { assignChainIdsForComponents, buildChainInfos } from '../utils/chainAssignments';
+import { extractProteinChainResidueIndexMap } from '../utils/structureParser';
 import {
   buildDefaultInputConfig,
   componentTypeLabel,
@@ -489,6 +490,15 @@ export function ProjectDetailPage() {
     }
     return constraintTemplateOptions[0];
   }, [constraintTemplateOptions, selectedConstraintTemplateComponentId]);
+
+  const selectedTemplateResidueIndexMap = useMemo(() => {
+    if (!selectedTemplatePreview) return {};
+    try {
+      return extractProteinChainResidueIndexMap(selectedTemplatePreview.content, selectedTemplatePreview.format);
+    } catch {
+      return {};
+    }
+  }, [selectedTemplatePreview]);
 
   useEffect(() => {
     const ids = (constraintTemplateOptions || []).map((item) => item.componentId);
@@ -1174,18 +1184,18 @@ export function ProjectDetailPage() {
     const chainA = activeChainInfos[0]?.id || 'A';
     const chainB = activeChainInfos.find((item) => item.id !== chainA)?.id || chainA;
     const firstLigandChain = ligandChainOptions[0]?.id || null;
-    const firstTargetChain = targetChainOptions[0]?.id || chainA;
     const resolvedType = preferredType || (firstLigandChain ? 'pocket' : 'contact');
 
     if (resolvedType === 'pocket') {
       const binder = firstLigandChain || chainA;
-      const contactChain = picked?.chainId || firstTargetChain || chainB || binder;
-      const contactResidue = Math.max(1, Math.floor(Number(picked?.residue) || 1));
       return {
         id,
         type: 'pocket',
         binder,
-        contacts: [[contactChain, contactResidue]],
+        contacts:
+          picked?.chainId && Number.isFinite(Number(picked?.residue)) && Number(picked?.residue) > 0
+            ? [[picked.chainId, Math.floor(Number(picked.residue))]]
+            : [],
         max_distance: 6,
         force: true
       };
@@ -1323,17 +1333,32 @@ export function ProjectDetailPage() {
     // Always map them back to the selected protein component chain to avoid cross-protein jumps.
     const resolvedChainId = selectedTemplateOwnerChain || (chainExists ? pick.chainId : fallbackProteinChain);
     const residueLimit = activeChainInfos.find((item) => item.id === resolvedChainId)?.residueCount || 0;
-    let normalizedResidue = Math.max(1, Math.floor(Number(pick.residue) || 1));
+    const pickedResidueNumber = Number(pick.residue);
+    if (!Number.isFinite(pickedResidueNumber) || pickedResidueNumber <= 0) {
+      return;
+    }
+    let normalizedResidue = Math.floor(pickedResidueNumber);
+    const pickedTemplateChain = String(pick.chainId || '').trim();
+    const selectedTemplateChain = String(selectedTemplatePreview?.chainId || '').trim();
+    const pickedTemplateMap = pickedTemplateChain ? selectedTemplateResidueIndexMap[pickedTemplateChain] : undefined;
+    const selectedTemplateMap = selectedTemplateChain ? selectedTemplateResidueIndexMap[selectedTemplateChain] : undefined;
+    const templateChainMap =
+      pickedTemplateMap ||
+      (!pickedTemplateChain || pickedTemplateChain === selectedTemplateChain ? selectedTemplateMap : undefined);
+    const mappedResidue = templateChainMap?.[normalizedResidue];
+
+    if (selectedTemplatePreview) {
+      // Constraint picking is sequence-based; ignore non-protein picks (e.g. ligand/hetero atoms)
+      // that cannot be mapped to 1-based sequence indices.
+      if (!(typeof mappedResidue === 'number' && Number.isFinite(mappedResidue) && mappedResidue > 0)) {
+        return;
+      }
+      normalizedResidue = Math.floor(mappedResidue);
+    } else if (typeof mappedResidue === 'number' && Number.isFinite(mappedResidue) && mappedResidue > 0) {
+      normalizedResidue = Math.floor(mappedResidue);
+    }
     if (residueLimit > 0 && normalizedResidue > residueLimit) {
-      let candidate = normalizedResidue;
-      while (candidate > residueLimit && candidate % 10 === 0) {
-        candidate = Math.floor(candidate / 10);
-      }
-      if (candidate >= 1 && candidate <= residueLimit) {
-        normalizedResidue = candidate;
-      } else {
-        normalizedResidue = residueLimit;
-      }
+      normalizedResidue = residueLimit;
     }
     const nextPicked = {
       chainId: resolvedChainId,
