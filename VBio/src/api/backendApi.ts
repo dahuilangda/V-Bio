@@ -72,6 +72,10 @@ async function requestWithFallback(path: string, init: RequestInit): Promise<Res
 }
 
 export async function submitPrediction(input: PredictionSubmitInput): Promise<string> {
+  const backend = String(input.backend || 'boltz').trim().toLowerCase();
+  const constraintsForBackend = (input.constraints || []).filter((constraint) =>
+    backend === 'alphafold3' ? constraint.type === 'bond' : true
+  );
   const normalizedComponents = (input.components || [])
     .map((comp) => ({
       ...comp,
@@ -107,7 +111,7 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
     throw new Error('Please provide at least one non-empty component sequence before submitting.');
   }
   const useMsaServer = componentsForYaml.some((comp) => comp.type === 'protein' && comp.useMsa !== false);
-  const hasConstraints = Boolean(input.constraints && input.constraints.length > 0);
+  const hasConstraints = constraintsForBackend.length > 0;
   const hasAffinityProperty = Boolean(input.properties?.affinity && (input.properties?.ligand || input.properties?.binder));
   const useSimpleYaml =
     !hasConstraints &&
@@ -121,14 +125,14 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
   const yaml = useSimpleYaml
     ? buildPredictionYaml(componentsForYaml[0].sequence, componentsForYaml[1].sequence)
     : buildPredictionYamlFromComponents(componentsForYaml, {
-        constraints: input.constraints,
+        constraints: constraintsForBackend,
         properties: input.properties
       });
 
   const form = new FormData();
   const yamlFile = new File([yaml], 'config.yaml', { type: 'application/x-yaml' });
   form.append('yaml_file', yamlFile);
-  form.append('backend', input.backend || 'boltz');
+  form.append('backend', backend || 'boltz');
   form.append('use_msa_server', String(useMsaServer).toLowerCase());
   if (typeof input.seed === 'number' && Number.isFinite(input.seed)) {
     form.append('seed', String(Math.max(0, Math.floor(input.seed))));

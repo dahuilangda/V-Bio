@@ -1,6 +1,6 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { MouseEvent } from 'react';
-import { Link2, Plus, Radar, Target, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, ChevronsDown, ChevronsUp, Link2, Plus, Radar, Target, Trash2 } from 'lucide-react';
 import type {
   BondConstraint,
   ContactConstraint,
@@ -24,6 +24,8 @@ interface ConstraintEditorProps {
   onConstraintClick?: (id: string, options?: { toggle: boolean; range: boolean }) => void;
   onClearSelection?: () => void;
   showAffinitySection?: boolean;
+  allowedConstraintTypes?: PredictionConstraintType[];
+  compatibilityHint?: string;
   onConstraintsChange: (constraints: PredictionConstraint[]) => void;
   onPropertiesChange: (properties: PredictionProperties) => void;
   disabled?: boolean;
@@ -95,6 +97,29 @@ function defaultConstraint(
   };
 }
 
+const ALL_CONSTRAINT_TYPES: PredictionConstraintType[] = ['contact', 'bond', 'pocket'];
+
+function constraintTypeLabel(type: PredictionConstraintType): string {
+  if (type === 'contact') return 'Contact';
+  if (type === 'bond') return 'Bond';
+  return 'Pocket';
+}
+
+function summarizeConstraint(constraint: PredictionConstraint): string {
+  if (constraint.type === 'contact') {
+    return `${constraint.token1_chain}:${constraint.token1_residue} ↔ ${constraint.token2_chain}:${constraint.token2_residue} · ≤${constraint.max_distance} Å${constraint.force ? ' · force' : ''}`;
+  }
+  if (constraint.type === 'bond') {
+    return `${constraint.atom1_chain}:${constraint.atom1_residue}:${constraint.atom1_atom} ↔ ${constraint.atom2_chain}:${constraint.atom2_residue}:${constraint.atom2_atom}`;
+  }
+  const first = constraint.contacts[0];
+  if (!first) {
+    return `${constraint.binder} · no contacts · ≤${constraint.max_distance} Å${constraint.force ? ' · force' : ''}`;
+  }
+  const more = constraint.contacts.length > 1 ? ` +${constraint.contacts.length - 1}` : '';
+  return `${constraint.binder} ↔ ${first[0]}:${first[1]}${more} · ≤${constraint.max_distance} Å${constraint.force ? ' · force' : ''}`;
+}
+
 export function ConstraintEditor({
   components,
   constraints,
@@ -106,6 +131,8 @@ export function ConstraintEditor({
   onConstraintClick,
   onClearSelection,
   showAffinitySection = true,
+  allowedConstraintTypes = ALL_CONSTRAINT_TYPES,
+  compatibilityHint,
   onConstraintsChange,
   onPropertiesChange,
   disabled = false
@@ -115,12 +142,44 @@ export function ConstraintEditor({
   const chainIds = chainInfos.map((item) => item.id);
   const ligandChainIds = chainInfos.filter((item) => item.type === 'ligand').map((item) => item.id);
   const selectedConstraintIdSet = useMemo(() => new Set(selectedConstraintIds), [selectedConstraintIds]);
+  const [collapsedById, setCollapsedById] = useState<Record<string, boolean>>({});
+  const allowedTypes = useMemo(
+    () => (allowedConstraintTypes.length > 0 ? allowedConstraintTypes : ALL_CONSTRAINT_TYPES),
+    [allowedConstraintTypes]
+  );
+  const allowedTypeSet = useMemo(() => new Set(allowedTypes), [allowedTypes]);
+  const blockedTypes = useMemo(
+    () => ALL_CONSTRAINT_TYPES.filter((type) => !allowedTypeSet.has(type)),
+    [allowedTypeSet]
+  );
+  const collapsedCount = useMemo(() => constraints.filter((item) => collapsedById[item.id]).length, [constraints, collapsedById]);
+  const allCollapsed = constraints.length > 0 && collapsedCount === constraints.length;
+
+  useEffect(() => {
+    setCollapsedById((prev) => {
+      const next: Record<string, boolean> = {};
+      let changed = false;
+      for (const item of constraints) {
+        if (Object.prototype.hasOwnProperty.call(prev, item.id)) {
+          next[item.id] = Boolean(prev[item.id]);
+        } else {
+          next[item.id] = false;
+          changed = true;
+        }
+      }
+      if (Object.keys(prev).length !== constraints.length) {
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [constraints]);
 
   const replaceAt = (id: string, next: PredictionConstraint) => {
     onConstraintsChange(constraints.map((item) => (item.id === id ? next : item)));
   };
 
   const addConstraint = (type: PredictionConstraintType) => {
+    if (!allowedTypeSet.has(type)) return;
     const next = defaultConstraint(type, chainIds, ligandChainIds);
     onConstraintsChange([...constraints, next]);
     onSelectedConstraintIdChange?.(next.id);
@@ -135,6 +194,16 @@ export function ConstraintEditor({
       onSelectedConstraintIdChange?.(fallback);
     }
   };
+  const toggleCollapsed = (id: string) => {
+    setCollapsedById((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+  const setAllCollapsed = (collapsed: boolean) => {
+    const next = constraints.reduce<Record<string, boolean>>((acc, item) => {
+      acc[item.id] = collapsed;
+      return acc;
+    }, {});
+    setCollapsedById(next);
+  };
 
   return (
     <section
@@ -147,8 +216,26 @@ export function ConstraintEditor({
     >
       <div className="constraint-head">
         <h3>Constraints</h3>
-        <span className="muted small">Optional</span>
+        {constraints.length > 1 && (
+          <div className="constraint-head-actions">
+            <button
+              type="button"
+              className="icon-btn constraint-head-icon-btn"
+              onClick={() => setAllCollapsed(!allCollapsed)}
+              disabled={disabled}
+              title={allCollapsed ? 'Expand all constraints' : 'Collapse all constraints'}
+              aria-label={allCollapsed ? 'Expand all constraints' : 'Collapse all constraints'}
+            >
+              {allCollapsed ? <ChevronsDown size={14} /> : <ChevronsUp size={14} />}
+            </button>
+          </div>
+        )}
       </div>
+      {(compatibilityHint || blockedTypes.length > 0) && (
+        <div className="muted small">
+          {compatibilityHint || `Current backend does not support: ${blockedTypes.map((type) => constraintTypeLabel(type)).join(', ')}.`}
+        </div>
+      )}
 
       {showAffinitySection && (
         <div className="constraint-section panel subtle">
@@ -215,8 +302,11 @@ export function ConstraintEditor({
         }}
       >
         {constraints.map((item, index) => {
+          const isCollapsed = Boolean(collapsedById[item.id]);
+          const typeOptions = allowedTypeSet.has(item.type) ? allowedTypes : ([item.type, ...allowedTypes] as PredictionConstraintType[]);
           const setType = (nextType: PredictionConstraintType) => {
             if (item.type === nextType) return;
+            if (!allowedTypeSet.has(nextType)) return;
             const next = defaultConstraint(nextType, chainIds, ligandChainIds);
             replaceAt(item.id, { ...next, id: item.id });
           };
@@ -245,7 +335,21 @@ export function ConstraintEditor({
               }}
             >
               <div className="constraint-item-head">
-                <strong>
+                <button
+                  type="button"
+                  className="icon-btn constraint-item-toggle"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    toggleCollapsed(item.id);
+                  }}
+                  disabled={disabled}
+                  title={isCollapsed ? 'Expand constraint' : 'Collapse constraint'}
+                  aria-label={isCollapsed ? 'Expand constraint' : 'Collapse constraint'}
+                  aria-expanded={!isCollapsed}
+                >
+                  {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                </button>
+                <strong className="constraint-item-title">
                   {index + 1}. {item.type === 'contact' ? 'Contact' : item.type === 'bond' ? 'Bond' : 'Pocket'}
                 </strong>
                 <button
@@ -262,43 +366,51 @@ export function ConstraintEditor({
                 </button>
               </div>
 
-              <label className="field">
-                <span>Constraint Type</span>
-                <select value={item.type} disabled={disabled} onChange={(e) => setType(e.target.value as PredictionConstraintType)}>
-                  <option value="contact">Contact</option>
-                  <option value="bond">Bond</option>
-                  <option value="pocket">Pocket</option>
-                </select>
-              </label>
+              {isCollapsed && <div className="constraint-item-summary muted small">{summarizeConstraint(item)}</div>}
 
-              {item.type === 'contact' && (
-                <ContactConstraintFields
-                  value={item}
-                  chainInfos={chainInfos}
-                  pickedResidue={pickedResidue}
-                  disabled={disabled}
-                  onChange={(next) => replaceAt(item.id, next)}
-                />
-              )}
+              {!isCollapsed && (
+                <>
+                  <label className="field">
+                    <span>Constraint Type</span>
+                    <select value={item.type} disabled={disabled} onChange={(e) => setType(e.target.value as PredictionConstraintType)}>
+                      {typeOptions.map((type) => (
+                        <option key={`constraint-type-${item.id}-${type}`} value={type}>
+                          {constraintTypeLabel(type)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
 
-              {item.type === 'bond' && (
-                <BondConstraintFields
-                  value={item}
-                  chainInfos={chainInfos}
-                  pickedResidue={pickedResidue}
-                  disabled={disabled}
-                  onChange={(next) => replaceAt(item.id, next)}
-                />
-              )}
+                  {item.type === 'contact' && (
+                    <ContactConstraintFields
+                      value={item}
+                      chainInfos={chainInfos}
+                      pickedResidue={pickedResidue}
+                      disabled={disabled}
+                      onChange={(next) => replaceAt(item.id, next)}
+                    />
+                  )}
 
-              {item.type === 'pocket' && (
-                <PocketConstraintFields
-                  value={item}
-                  chainInfos={chainInfos}
-                  pickedResidue={pickedResidue}
-                  disabled={disabled}
-                  onChange={(next) => replaceAt(item.id, next)}
-                />
+                  {item.type === 'bond' && (
+                    <BondConstraintFields
+                      value={item}
+                      chainInfos={chainInfos}
+                      pickedResidue={pickedResidue}
+                      disabled={disabled}
+                      onChange={(next) => replaceAt(item.id, next)}
+                    />
+                  )}
+
+                  {item.type === 'pocket' && (
+                    <PocketConstraintFields
+                      value={item}
+                      chainInfos={chainInfos}
+                      pickedResidue={pickedResidue}
+                      disabled={disabled}
+                      onChange={(next) => replaceAt(item.id, next)}
+                    />
+                  )}
+                </>
               )}
             </article>
           );
@@ -306,18 +418,24 @@ export function ConstraintEditor({
       </div>
 
       <div className="constraint-actions">
-        <button type="button" className="btn btn-ghost" onClick={() => addConstraint('contact')} disabled={disabled}>
-          <Plus size={14} />
-          Contact
-        </button>
-        <button type="button" className="btn btn-ghost" onClick={() => addConstraint('bond')} disabled={disabled}>
-          <Link2 size={14} />
-          Bond
-        </button>
-        <button type="button" className="btn btn-ghost" onClick={() => addConstraint('pocket')} disabled={disabled}>
-          <Target size={14} />
-          Pocket
-        </button>
+        {allowedTypeSet.has('contact') && (
+          <button type="button" className="btn btn-ghost" onClick={() => addConstraint('contact')} disabled={disabled}>
+            <Plus size={14} />
+            Contact
+          </button>
+        )}
+        {allowedTypeSet.has('bond') && (
+          <button type="button" className="btn btn-ghost" onClick={() => addConstraint('bond')} disabled={disabled}>
+            <Link2 size={14} />
+            Bond
+          </button>
+        )}
+        {allowedTypeSet.has('pocket') && (
+          <button type="button" className="btn btn-ghost" onClick={() => addConstraint('pocket')} disabled={disabled}>
+            <Target size={14} />
+            Pocket
+          </button>
+        )}
       </div>
     </section>
   );

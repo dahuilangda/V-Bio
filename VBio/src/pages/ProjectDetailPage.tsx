@@ -20,6 +20,7 @@ import {
 import type {
   InputComponent,
   PredictionConstraint,
+  PredictionConstraintType,
   Project,
   ProjectInputConfig,
   ProteinTemplateUpload,
@@ -262,6 +263,21 @@ function listConstraintResidues(constraint: PredictionConstraint): Array<{ chain
   return constraint.contacts.map((item) => ({ chainId: item[0], residue: item[1] }));
 }
 
+const ALL_CONSTRAINT_TYPES: PredictionConstraintType[] = ['contact', 'bond', 'pocket'];
+const AF3_CONSTRAINT_TYPES: PredictionConstraintType[] = ['bond'];
+
+function allowedConstraintTypesForBackend(backend: string): PredictionConstraintType[] {
+  if (String(backend || '').trim().toLowerCase() === 'alphafold3') {
+    return AF3_CONSTRAINT_TYPES;
+  }
+  return ALL_CONSTRAINT_TYPES;
+}
+
+function filterConstraintsByBackend(constraints: PredictionConstraint[], backend: string): PredictionConstraint[] {
+  const allowedTypeSet = new Set(allowedConstraintTypesForBackend(backend));
+  return constraints.filter((item) => allowedTypeSet.has(item.type));
+}
+
 export function ProjectDetailPage() {
   const { projectId = '' } = useParams();
   const location = useLocation();
@@ -385,6 +401,38 @@ export function ProjectDetailPage() {
     if (!draft) return [];
     return normalizeComponents(draft.inputConfig.components);
   }, [draft]);
+  const allowedConstraintTypes = useMemo(() => {
+    return allowedConstraintTypesForBackend(draft?.backend || project?.backend || 'boltz');
+  }, [draft?.backend, project?.backend]);
+  const isAf3Backend = useMemo(() => {
+    return String(draft?.backend || project?.backend || '').toLowerCase() === 'alphafold3';
+  }, [draft?.backend, project?.backend]);
+
+  useEffect(() => {
+    if (!draft) return;
+    const nextConstraints = filterConstraintsByBackend(draft.inputConfig.constraints, draft.backend);
+    if (nextConstraints.length === draft.inputConfig.constraints.length) return;
+
+    const keptIds = new Set(nextConstraints.map((item) => item.id));
+    setDraft((prev) =>
+      prev
+        ? {
+            ...prev,
+            inputConfig: {
+              ...prev.inputConfig,
+              constraints: nextConstraints
+            }
+          }
+        : prev
+    );
+    setSelectedContactConstraintIds((prev) => prev.filter((id) => keptIds.has(id)));
+    if (activeConstraintId && !keptIds.has(activeConstraintId)) {
+      setActiveConstraintId(null);
+    }
+    if (constraintSelectionAnchorRef.current && !keptIds.has(constraintSelectionAnchorRef.current)) {
+      constraintSelectionAnchorRef.current = null;
+    }
+  }, [draft, activeConstraintId]);
 
   const componentTypeBuckets = useMemo(() => {
     const buckets: Record<
@@ -1169,6 +1217,7 @@ export function ProjectDetailPage() {
 
       const savedConfig = loadProjectInputConfig(next.id);
       const resolvedConfig = savedConfig || defaultConfigFromProject(next);
+      const backendConstraints = filterConstraintsByBackend(resolvedConfig.constraints, next.backend);
 
       const savedUiState = loadProjectUiState(next.id);
       setDraft({
@@ -1177,7 +1226,10 @@ export function ProjectDetailPage() {
         backend: next.backend,
         use_msa: next.use_msa,
         color_mode: next.color_mode || 'white',
-        inputConfig: resolvedConfig
+        inputConfig: {
+          ...resolvedConfig,
+          constraints: backendConstraints
+        }
       });
       setProteinTemplates(savedUiState?.proteinTemplates || {});
       setActiveConstraintId(savedUiState?.activeConstraintId || null);
@@ -1231,10 +1283,11 @@ export function ProjectDetailPage() {
     setSaving(true);
     setError(null);
     try {
+      const constraintsForBackend = filterConstraintsByBackend(draft.inputConfig.constraints, draft.backend);
       const normalizedConfig: ProjectInputConfig = {
         version: 1,
         components: normalizeComponents(draft.inputConfig.components),
-        constraints: draft.inputConfig.constraints,
+        constraints: constraintsForBackend,
         properties: draft.inputConfig.properties,
         options: draft.inputConfig.options
       };
@@ -1365,7 +1418,7 @@ export function ProjectDetailPage() {
     const normalizedConfig: ProjectInputConfig = {
       version: 1,
       components: normalizeComponents(draft.inputConfig.components),
-      constraints: draft.inputConfig.constraints,
+      constraints: filterConstraintsByBackend(draft.inputConfig.constraints, draft.backend),
       properties: draft.inputConfig.properties,
       options: draft.inputConfig.options
     };
@@ -1578,7 +1631,20 @@ export function ProjectDetailPage() {
     const chainA = activeChainInfos[0]?.id || 'A';
     const chainB = activeChainInfos.find((item) => item.id !== chainA)?.id || chainA;
     const firstLigandChain = ligandChainOptions[0]?.id || null;
-    const resolvedType = preferredType || (firstLigandChain ? 'pocket' : 'contact');
+    const resolvedType = preferredType || (isAf3Backend ? 'bond' : firstLigandChain ? 'pocket' : 'contact');
+
+    if (resolvedType === 'bond') {
+      return {
+        id,
+        type: 'bond',
+        atom1_chain: chainA,
+        atom1_residue: Math.max(1, Math.floor(Number(picked?.residue) || 1)),
+        atom1_atom: 'CA',
+        atom2_chain: picked?.chainId || chainB,
+        atom2_residue: Math.max(1, Math.floor(Number(picked?.residue) || 1)),
+        atom2_atom: 'CA'
+      };
+    }
 
     if (resolvedType === 'pocket') {
       const binder = firstLigandChain || chainA;
@@ -1626,7 +1692,7 @@ export function ProjectDetailPage() {
   };
   const addConstraintFromSidebar = () => {
     if (!draft) return;
-    const next = buildDefaultConstraint();
+    const next = buildDefaultConstraint(isAf3Backend ? 'bond' : undefined);
     setWorkspaceTab('constraints');
     setSidebarConstraintsOpen(true);
     setActiveConstraintId(next.id);
@@ -2298,7 +2364,20 @@ export function ProjectDetailPage() {
                   <select
                     required
                     value={draft.backend}
-                    onChange={(e) => setDraft((d) => (d ? { ...d, backend: e.target.value } : d))}
+                    onChange={(e) =>
+                      setDraft((d) =>
+                        d
+                          ? {
+                              ...d,
+                              backend: e.target.value,
+                              inputConfig: {
+                                ...d.inputConfig,
+                                constraints: filterConstraintsByBackend(d.inputConfig.constraints, e.target.value)
+                              }
+                            }
+                          : d
+                      )
+                    }
                     disabled={!canEdit}
                   >
                     <option value="boltz">Boltz-2</option>
@@ -2414,17 +2493,17 @@ export function ProjectDetailPage() {
                       >
                         <section className="panel subtle constraint-viewer-panel">
                           <div className="constraint-nav-bar">
-                            <div className="constraint-nav-head">
-                              <div className="constraint-nav-title-row">
-                                <h3>Constraint Picker</h3>
-                                <span className="muted small constraint-nav-counter">
-                                  {constraintCount === 0
-                                    ? 'No constraints'
-                                    : `${activeConstraintIndex >= 0 ? activeConstraintIndex + 1 : 0}/${constraintCount}`}
-                                </span>
-                              </div>
+                            <div className="constraint-nav-title-row">
+                              <h3>Constraint Picker</h3>
+                              <span className="muted small constraint-nav-counter">
+                                {constraintCount === 0
+                                  ? 'No constraints'
+                                  : `${activeConstraintIndex >= 0 ? activeConstraintIndex + 1 : 0}/${constraintCount}`}
+                              </span>
+                            </div>
+                            <div className="constraint-nav-controls">
                               {constraintTemplateOptions && constraintTemplateOptions.length > 0 && (
-                                <label className="field constraint-template-switch">
+                                <label className="constraint-template-switch">
                                   <select
                                     aria-label="Select protein template for constraint viewer"
                                     value={selectedTemplatePreview?.componentId || ''}
@@ -2438,40 +2517,40 @@ export function ProjectDetailPage() {
                                   </select>
                                 </label>
                               )}
-                            </div>
-                            <div className="constraint-nav-actions">
-                              <button
-                                type="button"
-                                className={`btn btn-compact ${constraintPickModeEnabled ? 'btn-primary' : 'btn-ghost'}`}
-                                onClick={() => setConstraintPickModeEnabled((prev) => !prev)}
-                                disabled={!canEdit}
-                              >
-                                {constraintPickModeEnabled ? 'Pick: On' : 'Pick: Off'}
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn-ghost btn-compact"
-                                onClick={() => setWorkspaceTab('components')}
-                              >
-                                <ArrowLeft size={14} />
-                                Components
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn-ghost btn-compact"
-                                onClick={() => navigateConstraint(-1)}
-                                disabled={constraintCount <= 1}
-                              >
-                                Prev
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn-ghost btn-compact"
-                                onClick={() => navigateConstraint(1)}
-                                disabled={constraintCount <= 1}
-                              >
-                                Next
-                              </button>
+                              <div className="constraint-nav-actions">
+                                <button
+                                  type="button"
+                                  className={`btn btn-compact ${constraintPickModeEnabled ? 'btn-primary' : 'btn-ghost'}`}
+                                  onClick={() => setConstraintPickModeEnabled((prev) => !prev)}
+                                  disabled={!canEdit}
+                                >
+                                  {constraintPickModeEnabled ? 'Pick: On' : 'Pick: Off'}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost btn-compact"
+                                  onClick={() => setWorkspaceTab('components')}
+                                >
+                                  <ArrowLeft size={14} />
+                                  Components
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost btn-compact"
+                                  onClick={() => navigateConstraint(-1)}
+                                  disabled={constraintCount <= 1}
+                                >
+                                  Prev
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost btn-compact"
+                                  onClick={() => navigateConstraint(1)}
+                                  disabled={constraintCount <= 1}
+                                >
+                                  Next
+                                </button>
+                              </div>
                             </div>
                           </div>
                           <div className="row between">
@@ -2548,6 +2627,10 @@ export function ProjectDetailPage() {
                             }
                             onClearSelection={clearConstraintSelection}
                             showAffinitySection={false}
+                            allowedConstraintTypes={allowedConstraintTypes}
+                            compatibilityHint={
+                              isAf3Backend ? 'AlphaFold3 backend currently supports Bond constraints only.' : undefined
+                            }
                             onConstraintsChange={(constraints) =>
                               setDraft((d) =>
                                 d
@@ -2555,7 +2638,7 @@ export function ProjectDetailPage() {
                                       ...d,
                                       inputConfig: {
                                         ...d.inputConfig,
-                                        constraints
+                                        constraints: filterConstraintsByBackend(constraints, d.backend)
                                       }
                                     }
                                   : d
@@ -2677,7 +2760,7 @@ export function ProjectDetailPage() {
                             type="button"
                             className="icon-btn component-tree-add"
                             onClick={addConstraintFromSidebar}
-                            disabled={!canEdit || targetChainOptions.length === 0}
+                            disabled={!canEdit || activeChainInfos.length === 0}
                             title="Add constraint"
                           >
                             <Plus size={14} />
