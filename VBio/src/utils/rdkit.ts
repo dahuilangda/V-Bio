@@ -3,6 +3,7 @@ import { loadScript } from './script';
 
 export interface RDKitMol {
   get_svg: (width: number, height: number) => string;
+  get_svg_with_highlights?: (details: string) => string;
   get_descriptors?: () => string | Record<string, unknown>;
   normalize_depiction?: () => void;
   set_new_coords?: () => void;

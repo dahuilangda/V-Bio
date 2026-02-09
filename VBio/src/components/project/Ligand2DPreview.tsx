@@ -35,7 +35,27 @@ export function Ligand2DPreview({ smiles, width = 340, height = 210 }: Ligand2DP
         try {
           mol.set_new_coords?.();
           mol.normalize_depiction?.();
-          const rawSvg = mol.get_svg(width, height);
+          let rawSvg = '';
+          if (typeof mol.get_svg_with_highlights === 'function') {
+            try {
+              // RDKit official MolDrawOptions via get_svg_with_highlights(details JSON).
+              // Carbon atoms are usually unlabeled, so increasing label font mainly affects hetero atoms.
+              rawSvg = mol.get_svg_with_highlights(
+                JSON.stringify({
+                  width,
+                  height,
+                  minFontSize: 9,
+                  fixedFontSize: 13,
+                  maxFontSize: 32
+                })
+              );
+            } catch {
+              rawSvg = '';
+            }
+          }
+          if (!rawSvg) {
+            rawSvg = mol.get_svg(width, height);
+          }
           if (!rawSvg) {
             throw new Error('RDKit returned empty SVG.');
           }
