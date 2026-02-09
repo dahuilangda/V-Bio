@@ -1737,42 +1737,42 @@ select:focus {
 .molstar-host .msp-layout-expanded,
 .molstar-host .msp-layout-static,
 .molstar-host .msp-viewport {
-  background: #f7fbf8 !important;
+  background: #fff !important;
 }
 
 .molstar-host .msp-sequence-wrapper,
 .molstar-host .msp-sequence-view {
-  background: #f4f9f6 !important;
+  background: #fff !important;
 }
 
 .molstar-host [class*='msp-control'],
 .molstar-host [class*='msp-btn'],
 .molstar-host [class*='msp-collapse'],
 .molstar-host [class*='msp-panel'] {
-  border-color: #d1ddd5 !important;
-  color: #2f4f40 !important;
+  border-color: #d8e0e7 !important;
+  color: #2f4150 !important;
 }
 
 .molstar-host [class*='msp-control'],
 .molstar-host [class*='msp-collapse-header'],
 .molstar-host [class*='msp-btn'] {
-  background: #f5faf7 !important;
+  background: #fff !important;
 }
 
 .molstar-host [class*='msp-btn']:hover,
 .molstar-host [class*='msp-collapse-header']:hover {
-  background: #eaf3ed !important;
+  background: #f3f6f8 !important;
 }
 
 .molstar-host [class*='msp-btn'] svg,
 .molstar-host [class*='msp-icon'] svg {
-  color: #2f4f40 !important;
+  color: #2f4150 !important;
   fill: currentColor !important;
   stroke: currentColor !important;
 }
 
 .molstar-host [class*='msp-sequence'] {
-  border-color: #d6e2da !important;
+  border-color: #d8e0e7 !important;
 }
 
 .molstar-host [class*='msp-layout-left'],
@@ -1786,8 +1786,8 @@ select:focus {
 .molstar-host [class*='msp-control-group-body'],
 .molstar-host [class*='msp-collapse-content'],
 .molstar-host [class*='msp-scroll'] {
-  background: #f4f9f6 !important;
-  border-color: #d3e0d8 !important;
+  background: #fff !important;
+  border-color: #d8e0e7 !important;
 }
 
 .molstar-host [class*='msp-sequence'] [class*='highlight'],
@@ -1798,15 +1798,15 @@ select:focus {
 }
 
 .molstar-host [class*='msp-sequence'] {
-  color: #2f4f40 !important;
+  color: #2f4150 !important;
 }
 
 /* Explicit fix for sequence root block */
 .molstar-host .msp-plugin .msp-sequence,
 .molstar-host .msp-plugin .msp-sequence > div {
-  background: #f4f9f6 !important;
-  border-color: #d3e0d8 !important;
-  color: #2f4f40 !important;
+  background: #fff !important;
+  border-color: #d8e0e7 !important;
+  color: #2f4150 !important;
 }
 
 /* Sequence top strip / overview track: neutralize residual warm tones */
@@ -1814,55 +1814,48 @@ select:focus {
 .molstar-host [class*='msp-sequence'] [class*='overview'],
 .molstar-host [class*='msp-sequence'] [class*='strip'],
 .molstar-host [class*='msp-sequence'] [class*='track'] {
-  background: #eaf3ed !important;
-  border-color: #cddcd3 !important;
-}
-
-.molstar-host [class*='msp-sequence'] [class*='top'] canvas,
-.molstar-host [class*='msp-sequence'] [class*='overview'] canvas,
-.molstar-host [class*='msp-sequence'] [class*='strip'] canvas,
-.molstar-host [class*='msp-sequence'] [class*='track'] canvas {
-  filter: hue-rotate(18deg) saturate(0.7) brightness(1.03);
+  background: #fff !important;
+  border-color: #d8e0e7 !important;
 }
 
 /* Explicit fix for sequence selector remaining warm/brown */
 .molstar-host .msp-plugin .msp-sequence-select,
 .molstar-host .msp-plugin select.msp-sequence-select,
 .molstar-host .msp-plugin .msp-sequence-select select {
-  background: #eaf3ed !important;
-  border-color: #cddcd3 !important;
-  color: #2f4f40 !important;
+  background: #fff !important;
+  border-color: #d8e0e7 !important;
+  color: #2f4150 !important;
 }
 
 .molstar-host .msp-plugin .msp-sequence-select option,
 .molstar-host .msp-plugin .msp-sequence-select select option {
-  background: #f3f9f6 !important;
-  color: #2f4f40 !important;
+  background: #fff !important;
+  color: #2f4150 !important;
 }
 
 .molstar-host .msp-plugin .msp-sequence-select:focus,
 .molstar-host .msp-plugin .msp-sequence-select select:focus {
-  outline: 1px solid #9fbda9 !important;
+  outline: 1px solid #afc0d0 !important;
   box-shadow: none !important;
 }
 
 /* Explicit fix for control-group header still showing warm tone */
 .molstar-host .msp-plugin .msp-control-group-header > button,
 .molstar-host .msp-plugin .msp-control-group-header > div {
-  background: #eaf3ed !important;
-  border-color: #cddcd3 !important;
-  color: #2f4f40 !important;
+  background: #fff !important;
+  border-color: #d8e0e7 !important;
+  color: #2f4150 !important;
 }
 
 .molstar-host .msp-plugin .msp-control-group-header > button:hover,
 .molstar-host .msp-plugin .msp-control-group-header > div:hover {
-  background: #dfece4 !important;
+  background: #f3f6f8 !important;
 }
 
 .molstar-host .msp-plugin .msp-control-group-header > button:active,
 .molstar-host .msp-plugin .msp-control-group-header > button:focus {
-  background: #d6e6dc !important;
-  outline: 1px solid #9fbda9 !important;
+  background: #edf2f6 !important;
+  outline: 1px solid #afc0d0 !important;
   box-shadow: none !important;
 }
 

@@ -166,37 +166,37 @@ function ensureMolstarThemeOverrides() {
   style.textContent = `
 .molstar-host .msp-plugin .msp-control-group-header>button,
 .molstar-host .msp-plugin .msp-control-group-header div {
-  background: #eaf3ed !important;
-  border-color: #cddcd3 !important;
-  color: #2f4f40 !important;
+  background: #ffffff !important;
+  border-color: #d8e0e7 !important;
+  color: #2f4150 !important;
 }
 
 .molstar-host .msp-plugin .msp-control-group-header>button:hover,
 .molstar-host .msp-plugin .msp-control-group-header div:hover {
-  background: #dfece4 !important;
+  background: #f3f6f8 !important;
 }
 
 .molstar-host .msp-plugin .msp-control-group-header>button:focus,
 .molstar-host .msp-plugin .msp-control-group-header>button:active {
-  background: #d6e6dc !important;
-  outline: 1px solid #9fbda9 !important;
+  background: #edf2f6 !important;
+  outline: 1px solid #afc0d0 !important;
   box-shadow: none !important;
 }
 
 .molstar-host .msp-plugin .msp-section-header {
-  background: #eaf3ed !important;
-  border-color: #cddcd3 !important;
-  color: #2f4f40 !important;
+  background: #ffffff !important;
+  border-color: #d8e0e7 !important;
+  color: #2f4150 !important;
 }
 
 .molstar-host .msp-plugin .msp-section-header:hover {
-  background: #dfece4 !important;
+  background: #f3f6f8 !important;
 }
 
 .molstar-host .msp-plugin .msp-section-header:focus,
 .molstar-host .msp-plugin .msp-section-header:active {
-  background: #d6e6dc !important;
-  outline: 1px solid #9fbda9 !important;
+  background: #edf2f6 !important;
+  outline: 1px solid #afc0d0 !important;
   box-shadow: none !important;
 }
 `;
@@ -303,7 +303,7 @@ async function tryApplyWhiteTheme(viewer: any) {
       await manager.updateRepresentationsTheme(components, {
         color: 'uniform',
         colorParams: {
-          value: 0xf0f6f2
+          value: 0xe8edf2
         }
       });
     } catch {
@@ -316,7 +316,7 @@ async function tryApplyWhiteTheme(viewer: any) {
       viewer.setStyle({
         theme: 'uniform',
         themeParams: {
-          value: 0xf0f6f2
+          value: 0xe8edf2
         }
       });
     } catch {
@@ -328,7 +328,7 @@ async function tryApplyWhiteTheme(viewer: any) {
   if (canvas?.setProps) {
     try {
       canvas.setProps({
-        renderer: { backgroundColor: 0xf7fbf8 },
+        renderer: { backgroundColor: 0xffffff },
         marking: {
           highlightColor: 0x6b9b84,
           selectColor: 0x2f6f57,
