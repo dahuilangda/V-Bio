@@ -2669,26 +2669,6 @@ if _af3_parsers is not None:
 
         _af3_parsers.lazy_parse_fasta_string = _safe_lazy_parse_fasta_string
 
-# Patch AF3 mmCIF header parsing to tolerate invalid release dates (e.g. "0").
-try:
-    from alphafold3.structure import parsing as _af3_parsing
-    import datetime as _dt
-
-    class _SafeDate(_dt.date):
-        @classmethod
-        def fromisoformat(cls, date_string):
-            try:
-                return _dt.date.fromisoformat(str(date_string))
-            except Exception:
-                return _dt.date.fromisoformat("1970-01-01")
-
-    try:
-        _af3_parsing.datetime.date = _SafeDate
-    except Exception:
-        pass
-except Exception:
-    pass
-
 # Ensure AF3 mmCIF strings always include a valid release date field.
 try:
     from alphafold3 import structure as _af3_structure
