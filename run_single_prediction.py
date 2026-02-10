@@ -2441,6 +2441,10 @@ def run_boltz_backend(
         effective_model = str(cli_args.get('model') or model_name or 'boltz2').lower()
         if effective_model == 'boltz2':
             cli_args['diffusion_samples'] = 5
+    if 'trainer_precision' not in cli_args or cli_args['trainer_precision'] is None:
+        effective_model = str(cli_args.get('model') or model_name or 'boltz2').lower()
+        if effective_model == 'boltz2':
+            cli_args['trainer_precision'] = '32'
 
     if MSA_SERVER_URL and MSA_SERVER_URL != "":
         print(f"🧬 开始使用 MSA 服务器生成多序列比对: {MSA_SERVER_URL}", file=sys.stderr)

@@ -1039,6 +1039,15 @@ def cli() -> None:
     is_flag=True,
     help=" to dump the s and z embeddings into a npz file. Default is False.",
 )
+@click.option(
+    "--trainer_precision",
+    type=click.Choice(["32", "bf16-mixed"]),
+    help=(
+        "Lightning trainer precision. "
+        "For numerical stability, Boltz-2 now defaults to 32."
+    ),
+    default=None,
+)
 def predict(  # noqa: C901, PLR0915, PLR0912
     data: str,
     out_dir: str,
@@ -1077,6 +1086,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     num_subsampled_msa: int = 1024,
     no_kernels: bool = False,
     write_embeddings: bool = False,
+    trainer_precision: Optional[str] = None,
 ) -> None:
     """Run predictions with Boltz."""
     # If cpu, write a friendly warning
@@ -1252,6 +1262,15 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         write_embeddings=write_embeddings,
     )
 
+    # Set up trainer precision.
+    # Boltz-2 can hit occasional SVD convergence failures under bf16 AMP for
+    # ill-conditioned inputs, so prefer fp32 unless explicitly overridden.
+    resolved_precision: int | str
+    if trainer_precision is not None:
+        resolved_precision = 32 if trainer_precision == "32" else trainer_precision
+    else:
+        resolved_precision = 32 if model == "boltz2" else 32
+
     # Set up trainer
     trainer = Trainer(
         default_root_dir=out_dir,
@@ -1259,7 +1278,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         callbacks=[pred_writer],
         accelerator=accelerator,
         devices=devices,
-        precision=32 if model == "boltz1" else "bf16-mixed",
+        precision=resolved_precision,
     )
 
     if filtered_manifest.records:
