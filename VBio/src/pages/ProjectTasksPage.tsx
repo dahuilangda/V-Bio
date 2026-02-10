@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Clock3, ExternalLink, LoaderCircle, RefreshCcw, Trash2 } from 'lucide-react';
-import { getTaskStatus } from '../api/backendApi';
+import { Activity, ArrowLeft, Clock3, ExternalLink, Filter, LoaderCircle, RefreshCcw, Search, SlidersHorizontal, Trash2 } from 'lucide-react';
+import { downloadResultBlob, getTaskStatus, parseResultBundle } from '../api/backendApi';
 import { deleteProjectTask, getProjectById, listProjectTasks, updateProject, updateProjectTask } from '../api/supabaseLite';
 import { Ligand2DPreview } from '../components/project/Ligand2DPreview';
 import { useAuth } from '../hooks/useAuth';
@@ -62,6 +62,15 @@ function normalizeProbability(value: number | null): number | null {
 type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
 type SortKey = 'plddt' | 'iptm' | 'pae' | 'submitted' | 'backend' | 'seed' | 'duration';
 type SortDirection = 'asc' | 'desc';
+type SubmittedWithinDaysOption = 'all' | '1' | '7' | '30' | '90';
+type SeedFilterOption = 'all' | 'with_seed' | 'without_seed';
+
+const TASKS_PAGE_FILTERS_STORAGE_KEY = 'vbio:tasks-page-filters:v1';
+const TASK_SORT_KEYS: SortKey[] = ['plddt', 'iptm', 'pae', 'submitted', 'backend', 'seed', 'duration'];
+const TASK_SORT_DIRECTIONS: SortDirection[] = ['asc', 'desc'];
+const TASK_SUBMITTED_WINDOW_OPTIONS: SubmittedWithinDaysOption[] = ['all', '1', '7', '30', '90'];
+const TASK_SEED_FILTER_OPTIONS: SeedFilterOption[] = ['all', 'with_seed', 'without_seed'];
+const TASK_PAGE_SIZE_OPTIONS = [8, 12, 20, 50];
 
 interface TaskConfidenceMetrics {
   plddt: number | null;
@@ -112,6 +121,11 @@ function readTaskConfidenceMetrics(task: ProjectTask): TaskConfidenceMetrics {
     iptm: normalizeProbability(iptmRaw),
     pae: paeRaw
   };
+}
+
+function hasTaskSummaryMetrics(task: ProjectTask): boolean {
+  const metrics = readTaskConfidenceMetrics(task);
+  return metrics.plddt !== null || metrics.iptm !== null || metrics.pae !== null;
 }
 
 function formatMetric(value: number | null, fractionDigits: number): string {
@@ -175,6 +189,31 @@ function normalizeStatusToken(value: string): string {
   return value.trim().toLowerCase().replace(/[_\s-]+/g, '');
 }
 
+function backendLabel(value: string): string {
+  if (value === 'alphafold3') return 'AlphaFold3';
+  if (value === 'boltz') return 'Boltz-2';
+  return value ? value.toUpperCase() : 'Unknown';
+}
+
+function parseNumberOrNull(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizePlddtThreshold(value: number | null): number | null {
+  if (value === null) return null;
+  if (value >= 0 && value <= 1) return value * 100;
+  return value;
+}
+
+function normalizeIptmThreshold(value: number | null): number | null {
+  if (value === null) return null;
+  if (value > 1 && value <= 100) return value / 100;
+  return value;
+}
+
 function shouldShowRunNote(state: ProjectTask['task_state'], note: string): boolean {
   const trimmed = note.trim();
   if (!trimmed) return false;
@@ -205,9 +244,23 @@ export function ProjectTasksPage() {
   const [error, setError] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('submitted');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+  const [taskSearch, setTaskSearch] = useState('');
+  const [stateFilter, setStateFilter] = useState<'all' | ProjectTask['task_state']>('all');
+  const [backendFilter, setBackendFilter] = useState<'all' | string>('all');
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+  const [submittedWithinDays, setSubmittedWithinDays] = useState<SubmittedWithinDaysOption>('all');
+  const [seedFilter, setSeedFilter] = useState<SeedFilterOption>('all');
+  const [failureOnly, setFailureOnly] = useState(false);
+  const [minPlddt, setMinPlddt] = useState('');
+  const [minIptm, setMinIptm] = useState('');
+  const [maxPae, setMaxPae] = useState('');
   const [pageSize, setPageSize] = useState<number>(12);
   const [page, setPage] = useState<number>(1);
+  const [filtersHydrated, setFiltersHydrated] = useState(false);
   const loadInFlightRef = useRef(false);
+  const resultHydrationInFlightRef = useRef<Set<string>>(new Set());
+  const resultHydrationDoneRef = useRef<Set<string>>(new Set());
+  const resultHydrationAttemptsRef = useRef<Map<string, number>>(new Map());
 
   const syncRuntimeTasks = useCallback(async (projectRow: Project, taskRows: ProjectTask[]) => {
     const runtimeRows = taskRows.filter((row) => Boolean(row.task_id) && (row.task_state === 'QUEUED' || row.task_state === 'RUNNING'));
@@ -293,6 +346,83 @@ export function ProjectTasksPage() {
     };
   }, []);
 
+  const hydrateTaskMetricsFromResults = useCallback(async (projectRow: Project, taskRows: ProjectTask[]) => {
+    const candidates = taskRows
+      .filter((row) => {
+        const taskId = String(row.task_id || '').trim();
+        if (!taskId || row.task_state !== 'SUCCESS') return false;
+        if (hasTaskSummaryMetrics(row)) {
+          resultHydrationDoneRef.current.add(taskId);
+          return false;
+        }
+        if (resultHydrationDoneRef.current.has(taskId)) return false;
+        if (resultHydrationInFlightRef.current.has(taskId)) return false;
+        const attempts = resultHydrationAttemptsRef.current.get(taskId) || 0;
+        return attempts < 2;
+      })
+      .slice(0, 2);
+
+    if (candidates.length === 0) {
+      return {
+        project: projectRow,
+        taskRows
+      };
+    }
+
+    let nextProject = projectRow;
+    let nextTaskRows = [...taskRows];
+
+    for (const task of candidates) {
+      const taskId = String(task.task_id || '').trim();
+      if (!taskId) continue;
+      const attempts = resultHydrationAttemptsRef.current.get(taskId) || 0;
+      resultHydrationAttemptsRef.current.set(taskId, attempts + 1);
+      resultHydrationInFlightRef.current.add(taskId);
+
+      try {
+        const resultBlob = await downloadResultBlob(taskId);
+        const parsed = await parseResultBundle(resultBlob);
+        if (!parsed) continue;
+
+        const taskPatch: Partial<ProjectTask> = {
+          confidence: parsed.confidence || {},
+          affinity: parsed.affinity || {},
+          structure_name: parsed.structureName || task.structure_name || ''
+        };
+        const patchedTask = await updateProjectTask(task.id, taskPatch).catch(() => ({
+          ...task,
+          ...taskPatch
+        }));
+
+        nextTaskRows = nextTaskRows.map((row) => (row.id === task.id ? patchedTask : row));
+
+        if (nextProject.task_id === taskId) {
+          const projectPatch: Partial<Project> = {
+            confidence: taskPatch.confidence || {},
+            affinity: taskPatch.affinity || {},
+            structure_name: taskPatch.structure_name || ''
+          };
+          const patchedProject = await updateProject(nextProject.id, projectPatch).catch(() => ({
+            ...nextProject,
+            ...projectPatch
+          }));
+          nextProject = patchedProject;
+        }
+
+        resultHydrationDoneRef.current.add(taskId);
+      } catch {
+        // Ignore transient parse/download failures; retry is bounded by attempt count.
+      } finally {
+        resultHydrationInFlightRef.current.delete(taskId);
+      }
+    }
+
+    return {
+      project: nextProject,
+      taskRows: sortProjectTasks(nextTaskRows)
+    };
+  }, []);
+
   const loadData = useCallback(
     async (options?: LoadTaskDataOptions) => {
       if (loadInFlightRef.current) return;
@@ -320,9 +450,13 @@ export function ProjectTasksPage() {
           options?.preferBackendStatus === false
             ? { project: projectRow, taskRows: sortProjectTasks(taskRows) }
             : await syncRuntimeTasks(projectRow, taskRows);
+        const hydrated =
+          options?.preferBackendStatus === false
+            ? synced
+            : await hydrateTaskMetricsFromResults(synced.project, synced.taskRows);
 
-        setProject(synced.project);
-        setTasks(synced.taskRows);
+        setProject(hydrated.project);
+        setTasks(hydrated.taskRows);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load task history.');
       } finally {
@@ -334,7 +468,7 @@ export function ProjectTasksPage() {
         loadInFlightRef.current = false;
       }
     },
-    [projectId, session, syncRuntimeTasks]
+    [projectId, session, syncRuntimeTasks, hydrateTaskMetricsFromResults]
   );
 
   useEffect(() => {
@@ -386,9 +520,161 @@ export function ProjectTasksPage() {
       };
     });
   }, [tasks]);
+  const backendOptions = useMemo(
+    () =>
+      Array.from(new Set(taskRows.map((row) => row.backendValue).filter(Boolean))).sort((a, b) =>
+        a.localeCompare(b)
+      ),
+    [taskRows]
+  );
+  const advancedFilterCount = useMemo(() => {
+    let count = 0;
+    if (submittedWithinDays !== 'all') count += 1;
+    if (seedFilter !== 'all') count += 1;
+    if (failureOnly) count += 1;
+    if (minPlddt.trim()) count += 1;
+    if (minIptm.trim()) count += 1;
+    if (maxPae.trim()) count += 1;
+    return count;
+  }, [submittedWithinDays, seedFilter, failureOnly, minPlddt, minIptm, maxPae]);
+  const clearAdvancedFilters = () => {
+    setSubmittedWithinDays('all');
+    setSeedFilter('all');
+    setFailureOnly(false);
+    setMinPlddt('');
+    setMinIptm('');
+    setMaxPae('');
+  };
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      setFiltersHydrated(true);
+      return;
+    }
+    try {
+      const raw = window.localStorage.getItem(TASKS_PAGE_FILTERS_STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as Record<string, unknown>;
+      if (typeof saved.taskSearch === 'string') setTaskSearch(saved.taskSearch);
+      if (
+        typeof saved.stateFilter === 'string' &&
+        ['all', 'DRAFT', 'QUEUED', 'RUNNING', 'SUCCESS', 'FAILURE', 'REVOKED'].includes(saved.stateFilter)
+      ) {
+        setStateFilter(saved.stateFilter as 'all' | ProjectTask['task_state']);
+      }
+      if (typeof saved.backendFilter === 'string' && saved.backendFilter.trim()) {
+        setBackendFilter(saved.backendFilter.trim().toLowerCase());
+      }
+      if (typeof saved.sortKey === 'string' && TASK_SORT_KEYS.includes(saved.sortKey as SortKey)) {
+        setSortKey(saved.sortKey as SortKey);
+      }
+      if (typeof saved.sortDirection === 'string' && TASK_SORT_DIRECTIONS.includes(saved.sortDirection as SortDirection)) {
+        setSortDirection(saved.sortDirection as SortDirection);
+      }
+      if (typeof saved.showAdvancedFilters === 'boolean') {
+        setShowAdvancedFilters(saved.showAdvancedFilters);
+      }
+      if (
+        typeof saved.submittedWithinDays === 'string' &&
+        TASK_SUBMITTED_WINDOW_OPTIONS.includes(saved.submittedWithinDays as SubmittedWithinDaysOption)
+      ) {
+        setSubmittedWithinDays(saved.submittedWithinDays as SubmittedWithinDaysOption);
+      }
+      if (typeof saved.seedFilter === 'string' && TASK_SEED_FILTER_OPTIONS.includes(saved.seedFilter as SeedFilterOption)) {
+        setSeedFilter(saved.seedFilter as SeedFilterOption);
+      }
+      if (typeof saved.failureOnly === 'boolean') {
+        setFailureOnly(saved.failureOnly);
+      }
+      if (typeof saved.minPlddt === 'string') setMinPlddt(saved.minPlddt);
+      if (typeof saved.minIptm === 'string') setMinIptm(saved.minIptm);
+      if (typeof saved.maxPae === 'string') setMaxPae(saved.maxPae);
+      if (typeof saved.pageSize === 'number' && TASK_PAGE_SIZE_OPTIONS.includes(saved.pageSize)) {
+        setPageSize(saved.pageSize);
+      }
+    } catch {
+      // ignore malformed storage
+    } finally {
+      setFiltersHydrated(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!filtersHydrated || typeof window === 'undefined') return;
+    const snapshot = {
+      taskSearch,
+      stateFilter,
+      backendFilter,
+      sortKey,
+      sortDirection,
+      showAdvancedFilters,
+      submittedWithinDays,
+      seedFilter,
+      failureOnly,
+      minPlddt,
+      minIptm,
+      maxPae,
+      pageSize
+    };
+    try {
+      window.localStorage.setItem(TASKS_PAGE_FILTERS_STORAGE_KEY, JSON.stringify(snapshot));
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [
+    filtersHydrated,
+    taskSearch,
+    stateFilter,
+    backendFilter,
+    sortKey,
+    sortDirection,
+    showAdvancedFilters,
+    submittedWithinDays,
+    seedFilter,
+    failureOnly,
+    minPlddt,
+    minIptm,
+    maxPae,
+    pageSize
+  ]);
 
   const filteredRows = useMemo(() => {
-    const filtered = [...taskRows];
+    const query = taskSearch.trim().toLowerCase();
+    const submittedWindowMs = submittedWithinDays === 'all' ? null : Number(submittedWithinDays) * 24 * 60 * 60 * 1000;
+    const submittedCutoff = submittedWindowMs === null ? null : Date.now() - submittedWindowMs;
+    const minPlddtThreshold = normalizePlddtThreshold(parseNumberOrNull(minPlddt));
+    const minIptmThreshold = normalizeIptmThreshold(parseNumberOrNull(minIptm));
+    const maxPaeThreshold = parseNumberOrNull(maxPae);
+
+    const filtered = taskRows.filter((row) => {
+      const { task, metrics } = row;
+      if (stateFilter !== 'all' && task.task_state !== stateFilter) return false;
+      if (backendFilter !== 'all' && row.backendValue !== backendFilter) return false;
+      if (seedFilter === 'with_seed' && (task.seed === null || task.seed === undefined)) return false;
+      if (seedFilter === 'without_seed' && task.seed !== null && task.seed !== undefined) return false;
+      if (failureOnly && task.task_state !== 'FAILURE' && !(task.error_text || '').trim()) return false;
+      if (submittedCutoff !== null && (!Number.isFinite(row.submittedTs) || row.submittedTs < submittedCutoff)) return false;
+      if (minPlddtThreshold !== null && (metrics.plddt === null || metrics.plddt < minPlddtThreshold)) return false;
+      if (minIptmThreshold !== null && (metrics.iptm === null || metrics.iptm < minIptmThreshold)) return false;
+      if (maxPaeThreshold !== null && (metrics.pae === null || metrics.pae > maxPaeThreshold)) return false;
+      if (!query) return true;
+
+      const haystack = [
+        task.task_id,
+        task.task_state,
+        task.backend,
+        task.status_text,
+        task.error_text,
+        task.structure_name,
+        task.seed ?? '',
+        metrics.plddt ?? '',
+        metrics.iptm ?? '',
+        metrics.pae ?? ''
+      ]
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(query);
+    });
 
     filtered.sort((a, b) => {
       if (sortKey === 'submitted') {
@@ -414,7 +700,20 @@ export function ProjectTasksPage() {
     });
 
     return filtered;
-  }, [taskRows, sortKey, sortDirection]);
+  }, [
+    taskRows,
+    sortKey,
+    sortDirection,
+    taskSearch,
+    stateFilter,
+    backendFilter,
+    submittedWithinDays,
+    seedFilter,
+    failureOnly,
+    minPlddt,
+    minIptm,
+    maxPae
+  ]);
 
   const totalPages = useMemo(() => Math.max(1, Math.ceil(filteredRows.length / pageSize)), [filteredRows.length, pageSize]);
   const currentPage = Math.min(page, totalPages);
@@ -425,7 +724,20 @@ export function ProjectTasksPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [sortKey, sortDirection, pageSize]);
+  }, [
+    sortKey,
+    sortDirection,
+    pageSize,
+    taskSearch,
+    stateFilter,
+    backendFilter,
+    submittedWithinDays,
+    seedFilter,
+    failureOnly,
+    minPlddt,
+    minIptm,
+    maxPae
+  ]);
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
@@ -526,9 +838,161 @@ export function ProjectTasksPage() {
       {error && <div className="alert error">{error}</div>}
 
       <section className="panel">
-        <div className="row between">
-          <span className="muted small">{filteredRows.length} matched</span>
+        <div className="toolbar project-toolbar">
+          <div className="project-toolbar-filters">
+            <div className="project-filter-field project-filter-field-search">
+              <div className="input-wrap search-input">
+                <Search size={16} />
+                <input
+                  value={taskSearch}
+                  onChange={(e) => setTaskSearch(e.target.value)}
+                  placeholder="Search task id/status/backend/metrics..."
+                  aria-label="Search tasks"
+                />
+              </div>
+            </div>
+            <label className="project-filter-field">
+              <Activity size={14} />
+              <select
+                className="project-filter-select"
+                value={stateFilter}
+                onChange={(e) => setStateFilter(e.target.value as 'all' | ProjectTask['task_state'])}
+                aria-label="Filter tasks by state"
+              >
+                <option value="all">All States</option>
+                <option value="DRAFT">Draft</option>
+                <option value="QUEUED">Queued</option>
+                <option value="RUNNING">Running</option>
+                <option value="SUCCESS">Success</option>
+                <option value="FAILURE">Failed</option>
+                <option value="REVOKED">Revoked</option>
+              </select>
+            </label>
+            <label className="project-filter-field">
+              <Filter size={14} />
+              <select
+                className="project-filter-select"
+                value={backendFilter}
+                onChange={(e) => setBackendFilter(e.target.value)}
+                aria-label="Filter tasks by backend"
+              >
+                <option value="all">All Backends</option>
+                {backendOptions.map((value) => (
+                  <option key={`task-backend-filter-${value}`} value={value}>
+                    {backendLabel(value)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="project-toolbar-meta project-toolbar-meta-rich">
+            <span className="muted small">{filteredRows.length} matched</span>
+            <button
+              type="button"
+              className={`btn btn-ghost btn-compact advanced-filter-toggle ${showAdvancedFilters ? 'active' : ''}`}
+              onClick={() => setShowAdvancedFilters((prev) => !prev)}
+              title="Toggle advanced filters"
+              aria-label="Toggle advanced filters"
+            >
+              <SlidersHorizontal size={14} />
+              Advanced
+              {advancedFilterCount > 0 && <span className="advanced-filter-badge">{advancedFilterCount}</span>}
+            </button>
+          </div>
         </div>
+        {showAdvancedFilters && (
+          <div className="advanced-filter-panel">
+            <div className="advanced-filter-grid">
+              <label className="advanced-filter-field">
+                <span>Submitted</span>
+                <select
+                  value={submittedWithinDays}
+                  onChange={(e) => setSubmittedWithinDays(e.target.value as SubmittedWithinDaysOption)}
+                  aria-label="Advanced filter by submitted time"
+                >
+                  <option value="all">Any time</option>
+                  <option value="1">Last 24 hours</option>
+                  <option value="7">Last 7 days</option>
+                  <option value="30">Last 30 days</option>
+                  <option value="90">Last 90 days</option>
+                </select>
+              </label>
+              <label className="advanced-filter-field">
+                <span>Seed</span>
+                <select
+                  value={seedFilter}
+                  onChange={(e) => setSeedFilter(e.target.value as SeedFilterOption)}
+                  aria-label="Advanced filter by seed"
+                >
+                  <option value="all">Any seed</option>
+                  <option value="with_seed">With seed</option>
+                  <option value="without_seed">Without seed</option>
+                </select>
+              </label>
+              <label className="advanced-filter-field">
+                <span>Min pLDDT</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={0.1}
+                  value={minPlddt}
+                  onChange={(e) => setMinPlddt(e.target.value)}
+                  placeholder="e.g. 70"
+                  aria-label="Minimum pLDDT"
+                />
+              </label>
+              <label className="advanced-filter-field">
+                <span>Min iPTM</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.001}
+                  value={minIptm}
+                  onChange={(e) => setMinIptm(e.target.value)}
+                  placeholder="e.g. 0.70"
+                  aria-label="Minimum iPTM"
+                />
+              </label>
+              <label className="advanced-filter-field">
+                <span>Max PAE</span>
+                <input
+                  type="number"
+                  min={0}
+                  step={0.1}
+                  value={maxPae}
+                  onChange={(e) => setMaxPae(e.target.value)}
+                  placeholder="e.g. 12"
+                  aria-label="Maximum PAE"
+                />
+              </label>
+              <div className="advanced-filter-field advanced-filter-check">
+                <span>Failure Scope</span>
+                <label className="advanced-filter-checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={failureOnly}
+                    onChange={(e) => setFailureOnly(e.target.checked)}
+                  />
+                  <span>Failures / errors only</span>
+                </label>
+              </div>
+            </div>
+            <div className="advanced-filter-actions">
+              <span className="advanced-filter-hint">Use threshold filters to focus on high-quality or problematic runs.</span>
+              <button
+                type="button"
+                className="btn btn-ghost btn-compact"
+                onClick={clearAdvancedFilters}
+                disabled={advancedFilterCount === 0}
+              >
+                <RefreshCcw size={14} />
+                Reset Advanced
+              </button>
+            </div>
+          </div>
+        )}
 
         {filteredRows.length === 0 ? (
           <div className="empty-state">No task runs yet.</div>
