@@ -75,13 +75,13 @@ export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorP
       const applet = appletRef.current;
       if (applet && typeof applet.setSize === 'function') {
         try {
-          applet.setSize('100%', '100%');
+          applet.setSize(widthPx, heightPx);
         } catch {
           try {
-            applet.setSize(widthPx, heightPx);
+            applet.setSize(`${widthPx}`, `${heightPx}`);
           } catch {
             try {
-              applet.setSize(`${widthPx}`, `${heightPx}`);
+              applet.setSize('100%', '100%');
             } catch {
               // Ignore unsupported signatures.
             }
@@ -162,15 +162,19 @@ export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorP
           window.requestAnimationFrame(() => {
             const host = hostRef.current;
             if (!host || typeof applet.setSize !== 'function') return;
+            const width = Math.max(1, Math.floor(host.clientWidth));
+            const h = Math.max(1, Math.floor(host.clientHeight || height));
             try {
-              applet.setSize('100%', '100%');
+              applet.setSize(width, h);
             } catch {
-              const width = Math.max(1, Math.floor(host.clientWidth));
-              const h = Math.max(1, Math.floor(host.clientHeight || height));
               try {
-                applet.setSize(width, h);
+                applet.setSize(`${width}`, `${h}`);
               } catch {
-                // Ignore unsupported signatures.
+                try {
+                  applet.setSize('100%', '100%');
+                } catch {
+                  // Ignore unsupported signatures.
+                }
               }
             }
           });

@@ -907,6 +907,10 @@ select:focus {
   padding: 18px;
 }
 
+.modal > h2 {
+  margin-bottom: 12px;
+}
+
 .modal-wide {
   width: min(1100px, 96vw);
 }
@@ -1782,6 +1786,7 @@ select:focus {
   display: grid;
   gap: 6px;
   align-content: start;
+  min-width: 0;
 }
 
 .component-content-side .component-template-inline {
@@ -1791,7 +1796,7 @@ select:focus {
 
 .component-content-side .jsme-editor-container {
   width: 100%;
-  max-width: 560px;
+  max-width: none;
 }
 
 .component-card .field,
@@ -1874,6 +1879,8 @@ select:focus {
   background: linear-gradient(180deg, #f8fcfa 0%, #f1f7f3 100%);
   padding: 10px;
   box-shadow: 0 1px 2px rgba(19, 43, 31, 0.06);
+  width: 100%;
+  min-width: 0;
 }
 
 .component-jsme-shell .jsme-host {
