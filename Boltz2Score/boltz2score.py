@@ -773,6 +773,12 @@ def main() -> None:
     parser.add_argument("--no_kernels", action="store_true")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument(
+        "--trainer_precision",
+        type=str,
+        default="32",
+        help="Lightning trainer precision for scoring (default: 32).",
+    )
+    parser.add_argument(
         "--work_dir",
         type=str,
         default=None,
@@ -1065,6 +1071,7 @@ def main() -> None:
         step_scale=args.step_scale,
         no_kernels=args.no_kernels,
         seed=args.seed,
+        trainer_precision=args.trainer_precision,
     )
 
     _write_chain_map(

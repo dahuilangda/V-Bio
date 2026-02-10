@@ -322,6 +322,22 @@ function createDraftFingerprint(draft: DraftFields): string {
   });
 }
 
+function createProteinTemplatesFingerprint(templates: Record<string, ProteinTemplateUpload>): string {
+  const normalized = Object.entries(templates)
+    .sort(([componentA], [componentB]) => componentA.localeCompare(componentB))
+    .map(([componentId, upload]) => ({
+      componentId,
+      fileName: upload.fileName,
+      format: upload.format,
+      content: upload.content,
+      chainId: upload.chainId,
+      chainSequences: Object.entries(upload.chainSequences || {}).sort(([chainA], [chainB]) =>
+        chainA.localeCompare(chainB)
+      )
+    }));
+  return JSON.stringify(normalized);
+}
+
 export function ProjectDetailPage() {
   const { projectId = '' } = useParams();
   const location = useLocation();
@@ -342,6 +358,7 @@ export function ProjectDetailPage() {
   const [nowTs, setNowTs] = useState(Date.now());
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('results');
   const [savedDraftFingerprint, setSavedDraftFingerprint] = useState('');
+  const [savedTemplateFingerprint, setSavedTemplateFingerprint] = useState('');
   const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [proteinTemplates, setProteinTemplates] = useState<Record<string, ProteinTemplateUpload>>({});
   const [pickedResidue, setPickedResidue] = useState<ConstraintResiduePick | null>(null);
@@ -1308,10 +1325,20 @@ export function ProjectDetailPage() {
           constraints: backendConstraints
         }
       };
+      const validProteinIds = new Set(
+        loadedDraft.inputConfig.components
+          .filter((component) => component.type === 'protein')
+          .map((component) => component.id)
+      );
+      const restoredTemplates = Object.fromEntries(
+        Object.entries(savedUiState?.proteinTemplates || {}).filter(([componentId]) => validProteinIds.has(componentId))
+      ) as Record<string, ProteinTemplateUpload>;
+
       setDraft(loadedDraft);
       setSavedDraftFingerprint(createDraftFingerprint(loadedDraft));
+      setSavedTemplateFingerprint(createProteinTemplatesFingerprint(restoredTemplates));
       setRunMenuOpen(false);
-      setProteinTemplates(savedUiState?.proteinTemplates || {});
+      setProteinTemplates(restoredTemplates);
       setActiveConstraintId(savedUiState?.activeConstraintId || null);
       setSelectedContactConstraintIds([]);
       constraintSelectionAnchorRef.current = null;
@@ -1344,11 +1371,11 @@ export function ProjectDetailPage() {
   useEffect(() => {
     if (!project) return;
     saveProjectUiState(project.id, {
-      proteinTemplates,
+      proteinTemplates: loadProjectUiState(project.id)?.proteinTemplates || {},
       activeConstraintId,
       selectedConstraintTemplateComponentId
     });
-  }, [project, proteinTemplates, activeConstraintId, selectedConstraintTemplateComponentId]);
+  }, [project, activeConstraintId, selectedConstraintTemplateComponentId]);
 
   const patch = async (payload: Partial<Project>) => {
     if (!project) return null;
@@ -1404,6 +1431,11 @@ export function ProjectDetailPage() {
 
       if (next) {
         saveProjectInputConfig(next.id, normalizedConfig);
+        saveProjectUiState(next.id, {
+          proteinTemplates,
+          activeConstraintId,
+          selectedConstraintTemplateComponentId
+        });
         const nextDraft: DraftFields = {
           name: next.name,
           summary: next.summary,
@@ -1414,6 +1446,7 @@ export function ProjectDetailPage() {
         };
         setDraft(nextDraft);
         setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
+        setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
         setRunMenuOpen(false);
       }
     } catch (err) {
@@ -1596,7 +1629,6 @@ export function ProjectDetailPage() {
           targetChainIds
         });
       });
-      saveProjectInputConfig(project.id, normalizedConfig);
 
       const taskId = await submitPrediction({
         projectId: project.id,
@@ -1667,13 +1699,6 @@ export function ProjectDetailPage() {
       }
 
       const dbPayload: Partial<Project> = {
-        name: draft.name.trim(),
-        summary: draft.summary.trim(),
-        backend: draft.backend,
-        use_msa: hasMsa,
-        protein_sequence: proteinSequence,
-        ligand_smiles: ligandSmiles,
-        color_mode: draft.color_mode,
         task_id: taskId,
         task_state: 'QUEUED',
         status_text: 'Task submitted and waiting in queue',
@@ -1766,16 +1791,25 @@ export function ProjectDetailPage() {
     };
   }, [workspaceTab, activeConstraintId, selectedContactConstraintIds.length]);
   const currentDraftFingerprint = useMemo(() => (draft ? createDraftFingerprint(draft) : ''), [draft]);
+  const currentTemplateFingerprint = useMemo(
+    () => createProteinTemplatesFingerprint(proteinTemplates),
+    [proteinTemplates]
+  );
   const isDraftDirty = useMemo(
     () => Boolean(draft) && Boolean(savedDraftFingerprint) && currentDraftFingerprint !== savedDraftFingerprint,
     [draft, savedDraftFingerprint, currentDraftFingerprint]
   );
+  const isTemplateDirty = useMemo(
+    () => Boolean(draft) && Boolean(savedTemplateFingerprint) && currentTemplateFingerprint !== savedTemplateFingerprint,
+    [draft, savedTemplateFingerprint, currentTemplateFingerprint]
+  );
+  const hasUnsavedChanges = isDraftDirty || isTemplateDirty;
 
   useEffect(() => {
     if (!runMenuOpen) return;
-    if (isDraftDirty && !submitting && !saving) return;
+    if (hasUnsavedChanges && !submitting && !saving) return;
     setRunMenuOpen(false);
-  }, [runMenuOpen, isDraftDirty, submitting, saving]);
+  }, [runMenuOpen, hasUnsavedChanges, submitting, saving]);
 
   useEffect(() => {
     if (!runMenuOpen) return;
@@ -1824,13 +1858,9 @@ export function ProjectDetailPage() {
       ? `Complete all components before run (${componentCompletion.filledCount}/${componentCompletion.total} ready).`
       : '';
   const runDisabled = submitting || saving || !isPredictionWorkflow || hasIncompleteComponents;
-  const canOpenRunMenu = isDraftDirty && !runDisabled;
+  const canOpenRunMenu = false;
   const handleRunAction = () => {
     if (runDisabled) return;
-    if (isDraftDirty) {
-      setRunMenuOpen((prev) => !prev);
-      return;
-    }
     void submitTask();
   };
   const handleRunCurrentDraft = () => {
@@ -2482,9 +2512,9 @@ export function ProjectDetailPage() {
             className="btn btn-ghost btn-compact btn-square"
             type="button"
             onClick={() => void saveDraft()}
-            disabled={!canEdit || saving || !isDraftDirty}
-            title={saving ? 'Saving draft' : isDraftDirty ? 'Save draft' : 'Draft saved'}
-            aria-label={saving ? 'Saving draft' : isDraftDirty ? 'Save draft' : 'Draft saved'}
+            disabled={!canEdit || saving || !hasUnsavedChanges}
+            title={saving ? 'Saving draft' : hasUnsavedChanges ? 'Save draft' : 'Draft saved'}
+            aria-label={saving ? 'Saving draft' : hasUnsavedChanges ? 'Save draft' : 'Draft saved'}
           >
             {saving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}
           </button>
@@ -2496,10 +2526,10 @@ export function ProjectDetailPage() {
               disabled={runDisabled}
               title={
                 submitting
-                  ? 'Submitting'
+                    ? 'Submitting'
                   : runBlockedReason
                     ? runBlockedReason
-                    : isDraftDirty
+                    : hasUnsavedChanges
                     ? `${workflow.runLabel} (has unsaved changes)`
                     : workflow.runLabel
               }
@@ -2515,7 +2545,7 @@ export function ProjectDetailPage() {
             >
               {submitting ? <LoaderCircle size={15} className="spin" /> : <Play size={15} />}
             </button>
-            {runMenuOpen && isDraftDirty && (
+            {runMenuOpen && hasUnsavedChanges && (
               <div className="run-action-menu" role="menu" aria-label="Run options">
                 <button
                   type="button"

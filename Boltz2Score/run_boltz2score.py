@@ -138,6 +138,7 @@ def run_scoring(
     step_scale: float = 1.5,
     no_kernels: bool = False,
     seed: Optional[int] = None,
+    trainer_precision: int | str | None = None,
 ) -> None:
     """Run scoring-only inference on a processed directory."""
     warnings.filterwarnings(
@@ -250,13 +251,21 @@ def run_scoring(
         write_embeddings=False,
     )
 
+    # Boltz-2 can hit occasional SVD convergence failures under bf16 AMP for
+    # ill-conditioned inputs, so prefer fp32 unless explicitly overridden.
+    resolved_precision: int | str
+    if trainer_precision is not None:
+        resolved_precision = 32 if str(trainer_precision).strip() == "32" else trainer_precision
+    else:
+        resolved_precision = 32
+
     trainer = Trainer(
         default_root_dir=output_dir,
         strategy=strategy,
         callbacks=[pred_writer],
         accelerator=accelerator,
         devices=devices,
-        precision="bf16-mixed" if accelerator != "cpu" else 32,
+        precision=resolved_precision,
     )
 
     trainer.predict(model_module, datamodule=data_module, return_predictions=False)
@@ -310,6 +319,12 @@ def main() -> None:
     parser.add_argument("--step_scale", type=float, default=1.5)
     parser.add_argument("--no_kernels", action="store_true")
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--trainer_precision",
+        type=str,
+        default="32",
+        help="Lightning trainer precision (default: 32). Use bf16-mixed/16-mixed only if stable.",
+    )
 
     args = parser.parse_args()
 
@@ -329,6 +344,7 @@ def main() -> None:
         step_scale=args.step_scale,
         no_kernels=args.no_kernels,
         seed=args.seed,
+        trainer_precision=args.trainer_precision,
     )
 
 

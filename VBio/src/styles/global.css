@@ -3351,6 +3351,11 @@ select:focus {
     grid-template-columns: 1fr;
   }
 
+  .inputs-workspace.components-resizable {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
   .basics-panel {
     grid-template-columns: 1fr;
   }
@@ -3373,6 +3378,11 @@ select:focus {
 
   .constraint-workspace {
     grid-template-columns: 1fr;
+  }
+
+  .constraint-workspace.resizable {
+    grid-template-columns: 1fr;
+    gap: 8px;
   }
 
   .constraint-viewer-panel {
