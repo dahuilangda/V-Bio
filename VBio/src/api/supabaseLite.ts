@@ -1,4 +1,4 @@
-import type { AppUser, Project } from '../types/models';
+import type { AppUser, Project, ProjectTask, TaskState } from '../types/models';
 import { ENV } from '../utils/env';
 
 const configuredBaseUrl = ENV.supabaseRestUrl.replace(/\/$/, '');
@@ -242,4 +242,76 @@ export async function updateProject(projectId: string, patch: Partial<Project>):
     }
   );
   return rows[0];
+}
+
+export async function listProjectTasks(projectId: string): Promise<ProjectTask[]> {
+  return request<ProjectTask[]>('/project_tasks', undefined, {
+    select: '*',
+    project_id: `eq.${projectId}`,
+    order: 'created_at.desc'
+  });
+}
+
+interface ProjectTaskStateRow {
+  project_id: string;
+  task_state: TaskState;
+}
+
+export async function listProjectTaskStatesByProjects(projectIds: string[]): Promise<ProjectTaskStateRow[]> {
+  const normalizedIds = Array.from(new Set(projectIds.map((id) => id.trim()).filter(Boolean)));
+  if (normalizedIds.length === 0) return [];
+  return request<ProjectTaskStateRow[]>('/project_tasks', undefined, {
+    select: 'project_id,task_state',
+    project_id: `in.(${normalizedIds.join(',')})`
+  });
+}
+
+export async function insertProjectTask(input: Partial<ProjectTask>): Promise<ProjectTask> {
+  const rows = await request<ProjectTask[]>(
+    '/project_tasks',
+    {
+      method: 'POST',
+      headers: {
+        Prefer: 'return=representation'
+      },
+      body: JSON.stringify(input)
+    },
+    {
+      select: '*'
+    }
+  );
+  return rows[0];
+}
+
+export async function updateProjectTask(taskRowId: string, patch: Partial<ProjectTask>): Promise<ProjectTask> {
+  const rows = await request<ProjectTask[]>(
+    '/project_tasks',
+    {
+      method: 'PATCH',
+      headers: {
+        Prefer: 'return=representation'
+      },
+      body: JSON.stringify(patch)
+    },
+    {
+      id: `eq.${taskRowId}`,
+      select: '*'
+    }
+  );
+  return rows[0];
+}
+
+export async function deleteProjectTask(taskRowId: string): Promise<void> {
+  await request<ProjectTask[]>(
+    '/project_tasks',
+    {
+      method: 'DELETE',
+      headers: {
+        Prefer: 'return=minimal'
+      }
+    },
+    {
+      id: `eq.${taskRowId}`
+    }
+  );
 }

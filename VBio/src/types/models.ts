@@ -81,6 +81,15 @@ export interface ProjectInputConfig {
   options: PredictionOptions;
 }
 
+export interface ProjectTaskCounts {
+  total: number;
+  running: number;
+  success: number;
+  failure: number;
+  queued: number;
+  other: number;
+}
+
 export interface AppUser {
   id: string;
   username: string;
@@ -116,9 +125,34 @@ export interface Project {
   completed_at: string | null;
   duration_seconds: number | null;
   structure_name: string;
+  task_counts?: ProjectTaskCounts;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
+}
+
+export interface ProjectTask {
+  id: string;
+  project_id: string;
+  task_id: string;
+  task_state: TaskState;
+  status_text: string;
+  error_text: string;
+  backend: string;
+  seed: number | null;
+  protein_sequence: string;
+  ligand_smiles: string;
+  components: InputComponent[];
+  constraints: PredictionConstraint[];
+  properties: PredictionProperties;
+  confidence: Record<string, unknown>;
+  affinity: Record<string, unknown>;
+  structure_name: string;
+  submitted_at: string | null;
+  completed_at: string | null;
+  duration_seconds: number | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Session {

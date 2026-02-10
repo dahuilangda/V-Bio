@@ -3,6 +3,7 @@ import { AppShell } from './components/layout/AppShell';
 import { AdminRoute, ProtectedRoute } from './components/layout/ProtectedRoute';
 import { LoginPage } from './pages/LoginPage';
 import { ProjectDetailPage } from './pages/ProjectDetailPage';
+import { ProjectTasksPage } from './pages/ProjectTasksPage';
 import { ProjectsPage } from './pages/ProjectsPage';
 import { RegisterPage } from './pages/RegisterPage';
 import { SettingsPage } from './pages/SettingsPage';
@@ -34,6 +35,16 @@ export default function App() {
           <ProtectedRoute>
             <ShellPage>
               <ProjectDetailPage />
+            </ShellPage>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/projects/:projectId/tasks"
+        element={
+          <ProtectedRoute>
+            <ShellPage>
+              <ProjectTasksPage />
             </ShellPage>
           </ProtectedRoute>
         }

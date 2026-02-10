@@ -115,8 +115,100 @@ create table if not exists public.projects (
   deleted_at timestamptz
 );
 
+create table if not exists public.project_tasks (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null,
+  task_id text not null default '',
+  task_state text not null default 'DRAFT',
+  status_text text not null default 'Ready for input',
+  error_text text not null default '',
+  backend text not null default 'boltz',
+  seed integer,
+  protein_sequence text not null default '',
+  ligand_smiles text not null default '',
+  components jsonb not null default '[]'::jsonb,
+  constraints jsonb not null default '[]'::jsonb,
+  properties jsonb not null default '{}'::jsonb,
+  confidence jsonb not null default '{}'::jsonb,
+  affinity jsonb not null default '{}'::jsonb,
+  structure_name text not null default '',
+  submitted_at timestamptz,
+  completed_at timestamptz,
+  duration_seconds double precision,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 alter table public.projects add column if not exists user_id uuid;
 alter table public.projects alter column backend set default 'boltz';
+alter table public.project_tasks add column if not exists project_id uuid;
+alter table public.project_tasks add column if not exists task_id text;
+alter table public.project_tasks add column if not exists task_state text;
+alter table public.project_tasks add column if not exists status_text text;
+alter table public.project_tasks add column if not exists error_text text;
+alter table public.project_tasks add column if not exists backend text;
+alter table public.project_tasks add column if not exists seed integer;
+alter table public.project_tasks add column if not exists protein_sequence text;
+alter table public.project_tasks add column if not exists ligand_smiles text;
+alter table public.project_tasks add column if not exists components jsonb;
+alter table public.project_tasks add column if not exists constraints jsonb;
+alter table public.project_tasks add column if not exists properties jsonb;
+alter table public.project_tasks add column if not exists confidence jsonb;
+alter table public.project_tasks add column if not exists affinity jsonb;
+alter table public.project_tasks add column if not exists structure_name text;
+alter table public.project_tasks add column if not exists submitted_at timestamptz;
+alter table public.project_tasks add column if not exists completed_at timestamptz;
+alter table public.project_tasks add column if not exists duration_seconds double precision;
+alter table public.project_tasks add column if not exists created_at timestamptz;
+alter table public.project_tasks add column if not exists updated_at timestamptz;
+alter table public.project_tasks alter column project_id set not null;
+alter table public.project_tasks alter column task_id set default '';
+alter table public.project_tasks alter column task_state set default 'DRAFT';
+alter table public.project_tasks alter column status_text set default 'Ready for input';
+alter table public.project_tasks alter column error_text set default '';
+alter table public.project_tasks alter column backend set default 'boltz';
+alter table public.project_tasks alter column protein_sequence set default '';
+alter table public.project_tasks alter column ligand_smiles set default '';
+alter table public.project_tasks alter column components set default '[]'::jsonb;
+alter table public.project_tasks alter column constraints set default '[]'::jsonb;
+alter table public.project_tasks alter column properties set default '{}'::jsonb;
+alter table public.project_tasks alter column confidence set default '{}'::jsonb;
+alter table public.project_tasks alter column affinity set default '{}'::jsonb;
+alter table public.project_tasks alter column structure_name set default '';
+alter table public.project_tasks alter column created_at set default now();
+alter table public.project_tasks alter column updated_at set default now();
+
+update public.project_tasks set task_id = '' where task_id is null;
+update public.project_tasks set task_state = 'DRAFT' where task_state is null or task_state = '';
+update public.project_tasks set status_text = 'Ready for input' where status_text is null;
+update public.project_tasks set error_text = '' where error_text is null;
+update public.project_tasks set backend = 'boltz' where backend is null or backend = '';
+update public.project_tasks set protein_sequence = '' where protein_sequence is null;
+update public.project_tasks set ligand_smiles = '' where ligand_smiles is null;
+update public.project_tasks set components = '[]'::jsonb where components is null;
+update public.project_tasks set constraints = '[]'::jsonb where constraints is null;
+update public.project_tasks set properties = '{}'::jsonb where properties is null;
+update public.project_tasks set confidence = '{}'::jsonb where confidence is null;
+update public.project_tasks set affinity = '{}'::jsonb where affinity is null;
+update public.project_tasks set structure_name = '' where structure_name is null;
+update public.project_tasks set created_at = now() where created_at is null;
+update public.project_tasks set updated_at = now() where updated_at is null;
+
+alter table public.project_tasks alter column task_id set not null;
+alter table public.project_tasks alter column task_state set not null;
+alter table public.project_tasks alter column status_text set not null;
+alter table public.project_tasks alter column error_text set not null;
+alter table public.project_tasks alter column backend set not null;
+alter table public.project_tasks alter column protein_sequence set not null;
+alter table public.project_tasks alter column ligand_smiles set not null;
+alter table public.project_tasks alter column components set not null;
+alter table public.project_tasks alter column constraints set not null;
+alter table public.project_tasks alter column properties set not null;
+alter table public.project_tasks alter column confidence set not null;
+alter table public.project_tasks alter column affinity set not null;
+alter table public.project_tasks alter column structure_name set not null;
+alter table public.project_tasks alter column created_at set not null;
+alter table public.project_tasks alter column updated_at set not null;
 
 DO $$
 BEGIN
@@ -135,9 +227,28 @@ BEGIN
 END
 $$;
 
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'project_tasks_project_id_fkey'
+      AND conrelid = 'public.project_tasks'::regclass
+  ) THEN
+    ALTER TABLE public.project_tasks
+      ADD CONSTRAINT project_tasks_project_id_fkey
+      FOREIGN KEY (project_id)
+      REFERENCES public.projects(id)
+      ON DELETE CASCADE;
+  END IF;
+END
+$$;
+
 create index if not exists idx_projects_user_id on public.projects (user_id);
 create index if not exists idx_projects_updated_at on public.projects (updated_at desc);
 create index if not exists idx_projects_deleted_at on public.projects (deleted_at);
+create index if not exists idx_project_tasks_project_id on public.project_tasks (project_id, created_at desc);
+create index if not exists idx_project_tasks_task_id on public.project_tasks (task_id);
 
 create or replace function public.set_updated_at()
 returns trigger as $$
@@ -159,8 +270,15 @@ before update on public.projects
 for each row
 execute procedure public.set_updated_at();
 
+drop trigger if exists trg_project_tasks_updated_at on public.project_tasks;
+create trigger trg_project_tasks_updated_at
+before update on public.project_tasks
+for each row
+execute procedure public.set_updated_at();
+
 alter table public.app_users enable row level security;
 alter table public.projects enable row level security;
+alter table public.project_tasks enable row level security;
 
 drop policy if exists app_users_anon_select on public.app_users;
 drop policy if exists app_users_anon_insert on public.app_users;
@@ -196,6 +314,10 @@ drop policy if exists projects_anon_select on public.projects;
 drop policy if exists projects_anon_insert on public.projects;
 drop policy if exists projects_anon_update on public.projects;
 drop policy if exists projects_anon_delete on public.projects;
+drop policy if exists project_tasks_anon_select on public.project_tasks;
+drop policy if exists project_tasks_anon_insert on public.project_tasks;
+drop policy if exists project_tasks_anon_update on public.project_tasks;
+drop policy if exists project_tasks_anon_delete on public.project_tasks;
 
 create policy projects_anon_select
 on public.projects
@@ -222,6 +344,32 @@ for delete
 to anon
 using (true);
 
+create policy project_tasks_anon_select
+on public.project_tasks
+for select
+to anon
+using (true);
+
+create policy project_tasks_anon_insert
+on public.project_tasks
+for insert
+to anon
+with check (true);
+
+create policy project_tasks_anon_update
+on public.project_tasks
+for update
+to anon
+using (true)
+with check (true);
+
+create policy project_tasks_anon_delete
+on public.project_tasks
+for delete
+to anon
+using (true);
+
 grant usage on schema public to anon, authenticated, service_role;
 grant select, insert, update, delete on public.app_users to anon, authenticated, service_role;
 grant select, insert, update, delete on public.projects to anon, authenticated, service_role;
+grant select, insert, update, delete on public.project_tasks to anon, authenticated, service_role;

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { Project, Session } from '../types/models';
-import { insertProject, listProjects, updateProject } from '../api/supabaseLite';
+import type { Project, ProjectTaskCounts, Session, TaskState } from '../types/models';
+import { insertProject, listProjectTaskStatesByProjects, listProjects, updateProject } from '../api/supabaseLite';
 import { getTaskStatus } from '../api/backendApi';
 import { removeProjectInputConfig, removeProjectUiState } from '../utils/projectInputs';
 import { normalizeWorkflowKey } from '../utils/workflows';
@@ -39,6 +39,45 @@ function readStatusText(status: { info?: Record<string, unknown>; state: string 
   if (typeof s1 === 'string' && s1.trim()) return s1;
   if (typeof s2 === 'string' && s2.trim()) return s2;
   return status.state;
+}
+
+function emptyProjectTaskCounts(): ProjectTaskCounts {
+  return {
+    total: 0,
+    running: 0,
+    success: 0,
+    failure: 0,
+    queued: 0,
+    other: 0
+  };
+}
+
+function fallbackCountsFromState(state: TaskState, hasTaskId: boolean): ProjectTaskCounts {
+  const counts = emptyProjectTaskCounts();
+  if (!hasTaskId && state === 'DRAFT') return counts;
+  counts.total = 1;
+  if (state === 'RUNNING') counts.running = 1;
+  else if (state === 'SUCCESS') counts.success = 1;
+  else if (state === 'FAILURE') counts.failure = 1;
+  else if (state === 'QUEUED') counts.queued = 1;
+  else counts.other = 1;
+  return counts;
+}
+
+function countProjectTaskStates(projectIds: string[], rows: Array<{ project_id: string; task_state: TaskState }>): Map<string, ProjectTaskCounts> {
+  const map = new Map<string, ProjectTaskCounts>();
+  projectIds.forEach((id) => map.set(id, emptyProjectTaskCounts()));
+  rows.forEach((row) => {
+    const counts = map.get(row.project_id);
+    if (!counts) return;
+    counts.total += 1;
+    if (row.task_state === 'RUNNING') counts.running += 1;
+    else if (row.task_state === 'SUCCESS') counts.success += 1;
+    else if (row.task_state === 'FAILURE') counts.failure += 1;
+    else if (row.task_state === 'QUEUED') counts.queued += 1;
+    else counts.other += 1;
+  });
+  return map;
 }
 
 export function useProjects(session: Session | null) {
@@ -112,6 +151,17 @@ export function useProjects(session: Session | null) {
         }
       }
 
+      const projectIds = rows.map((row) => row.id).filter(Boolean);
+      let countsByProject = new Map<string, ProjectTaskCounts>();
+      if (projectIds.length > 0) {
+        const taskStates = await listProjectTaskStatesByProjects(projectIds);
+        countsByProject = countProjectTaskStates(projectIds, taskStates);
+      }
+      rows = rows.map((row) => ({
+        ...row,
+        task_counts: countsByProject.get(row.id) ?? fallbackCountsFromState(row.task_state, Boolean(row.task_id))
+      }));
+
       if (!statusOnly) {
         setProjects(rows);
         return;
@@ -130,7 +180,8 @@ export function useProjects(session: Session | null) {
             project.error_text === next.error_text &&
             project.submitted_at === next.submitted_at &&
             project.completed_at === next.completed_at &&
-            project.duration_seconds === next.duration_seconds
+            project.duration_seconds === next.duration_seconds &&
+            JSON.stringify(project.task_counts || {}) === JSON.stringify(next.task_counts || {})
           ) {
             return project;
           }
@@ -143,7 +194,8 @@ export function useProjects(session: Session | null) {
             error_text: next.error_text,
             submitted_at: next.submitted_at,
             completed_at: next.completed_at,
-            duration_seconds: next.duration_seconds
+            duration_seconds: next.duration_seconds,
+            task_counts: next.task_counts
           };
         })
       );
@@ -184,7 +236,13 @@ export function useProjects(session: Session | null) {
         affinity: {},
         structure_name: ''
       });
-      setProjects((prev) => [created, ...prev]);
+      setProjects((prev) => [
+        {
+          ...created,
+          task_counts: emptyProjectTaskCounts()
+        },
+        ...prev
+      ]);
       return created;
     },
     [session]

@@ -5,7 +5,6 @@ import {
   Atom,
   Beaker,
   Calendar,
-  CheckCircle2,
   Clock3,
   Compass,
   Dna,
@@ -13,7 +12,7 @@ import {
   Filter,
   FolderOpen,
   FlaskConical,
-  LoaderCircle,
+  Hash,
   Plus,
   Search,
   SlidersHorizontal,
@@ -24,7 +23,7 @@ import { useProjects } from '../hooks/useProjects';
 import { formatDateTime } from '../utils/date';
 import { buildDefaultInputConfig, saveProjectInputConfig } from '../utils/projectInputs';
 import { getWorkflowDefinition, type WorkflowKey, WORKFLOWS } from '../utils/workflows';
-import type { TaskState } from '../types/models';
+import type { ProjectTaskCounts, TaskState } from '../types/models';
 
 const workflowIconMap: Record<WorkflowKey, JSX.Element> = {
   prediction: <Dna size={16} />,
@@ -34,14 +33,24 @@ const workflowIconMap: Record<WorkflowKey, JSX.Element> = {
   affinity: <Beaker size={16} />
 };
 
-const stateIconMap: Record<TaskState, JSX.Element> = {
-  DRAFT: <SlidersHorizontal size={13} />,
-  QUEUED: <Clock3 size={13} />,
-  RUNNING: <LoaderCircle size={13} className="spin" />,
-  SUCCESS: <CheckCircle2 size={13} />,
-  FAILURE: <Activity size={13} />,
-  REVOKED: <Activity size={13} />
-};
+function fallbackCounts(taskState: TaskState, hasTaskId: boolean): ProjectTaskCounts {
+  const counts: ProjectTaskCounts = {
+    total: 0,
+    running: 0,
+    success: 0,
+    failure: 0,
+    queued: 0,
+    other: 0
+  };
+  if (!hasTaskId && taskState === 'DRAFT') return counts;
+  counts.total = 1;
+  if (taskState === 'RUNNING') counts.running = 1;
+  else if (taskState === 'SUCCESS') counts.success = 1;
+  else if (taskState === 'FAILURE') counts.failure = 1;
+  else if (taskState === 'QUEUED') counts.queued = 1;
+  else counts.other = 1;
+  return counts;
+}
 
 export function ProjectsPage() {
   const navigate = useNavigate();
@@ -61,7 +70,11 @@ export function ProjectsPage() {
   const [pageSize, setPageSize] = useState<number>(12);
   const [page, setPage] = useState<number>(1);
   const hasActiveRuntime = useMemo(
-    () => projects.some((item) => item.task_state === 'QUEUED' || item.task_state === 'RUNNING'),
+    () =>
+      projects.some((item) => {
+        const counts = item.task_counts || fallbackCounts(item.task_state, Boolean(item.task_id));
+        return counts.queued > 0 || counts.running > 0;
+      }),
     [projects]
   );
 
@@ -70,8 +83,15 @@ export function ProjectsPage() {
     const query = search.trim().toLowerCase();
     const filtered = projects.filter((project) => {
       const workflowDef = getWorkflowDefinition(project.task_type);
+      const counts = project.task_counts || fallbackCounts(project.task_state, Boolean(project.task_id));
       if (typeFilter !== 'all' && workflowDef.key !== typeFilter) return false;
-      if (stateFilter !== 'all' && project.task_state !== stateFilter) return false;
+      if (stateFilter !== 'all') {
+        if (stateFilter === 'RUNNING' && counts.running <= 0) return false;
+        if (stateFilter === 'SUCCESS' && counts.success <= 0) return false;
+        if (stateFilter === 'FAILURE' && counts.failure <= 0) return false;
+        if (stateFilter === 'QUEUED' && counts.queued <= 0) return false;
+        if ((stateFilter === 'DRAFT' || stateFilter === 'REVOKED') && counts.other <= 0) return false;
+      }
       if (!query) return true;
       const haystack = [
         project.name,
@@ -80,7 +100,13 @@ export function ProjectsPage() {
         workflowDef.shortTitle,
         project.task_state,
         project.task_id,
-        project.status_text
+        project.status_text,
+        `run ${counts.running}`,
+        `success ${counts.success}`,
+        `failure ${counts.failure}`,
+        `queued ${counts.queued}`,
+        `other ${counts.other}`,
+        `total ${counts.total}`
       ]
         .join(' ')
         .toLowerCase();
@@ -312,6 +338,12 @@ export function ProjectsPage() {
                   </th>
                   <th>
                     <span className="project-th">
+                      <Hash size={13} />
+                      Tasks
+                    </span>
+                  </th>
+                  <th>
+                    <span className="project-th">
                       <Activity size={13} />
                       State
                     </span>
@@ -339,6 +371,7 @@ export function ProjectsPage() {
               <tbody>
                 {pagedProjects.map((project) => {
                   const workflowDef = getWorkflowDefinition(project.task_type);
+                  const counts = project.task_counts || fallbackCounts(project.task_state, Boolean(project.task_id));
                   return (
                     <tr key={project.id}>
                       <td className="project-col-name">
@@ -356,11 +389,48 @@ export function ProjectsPage() {
                           {workflowDef.shortTitle}
                         </span>
                       </td>
+                      <td className="project-col-total">
+                        <span className={`project-total-pill ${counts.total === 0 ? 'is-empty' : ''}`}>{counts.total}</span>
+                      </td>
                       <td>
-                        <span className={`badge project-state-badge state-${project.task_state.toLowerCase()}`}>
-                          {stateIconMap[project.task_state]}
-                          {project.task_state}
-                        </span>
+                        {counts.total === 0 ? (
+                          <span className="project-state-empty">No tasks</span>
+                        ) : (
+                          <div className="project-state-overview">
+                            <div className="project-state-pills">
+                              {counts.running > 0 ? (
+                                <span className="project-state-pill running" title={`Running ${counts.running}`}>
+                                  <span className="project-state-pill-key">R</span>
+                                  {counts.running}
+                                </span>
+                              ) : null}
+                              {counts.success > 0 ? (
+                                <span className="project-state-pill success" title={`Success ${counts.success}`}>
+                                  <span className="project-state-pill-key">S</span>
+                                  {counts.success}
+                                </span>
+                              ) : null}
+                              {counts.failure > 0 ? (
+                                <span className="project-state-pill failure" title={`Failure ${counts.failure}`}>
+                                  <span className="project-state-pill-key">F</span>
+                                  {counts.failure}
+                                </span>
+                              ) : null}
+                              {counts.queued > 0 ? (
+                                <span className="project-state-pill queued" title={`Queued ${counts.queued}`}>
+                                  <span className="project-state-pill-key">Q</span>
+                                  {counts.queued}
+                                </span>
+                              ) : null}
+                              {counts.other > 0 ? (
+                                <span className="project-state-pill other" title={`Other ${counts.other}`}>
+                                  <span className="project-state-pill-key">O</span>
+                                  {counts.other}
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+                        )}
                       </td>
                       <td className="project-col-time">{formatDateTime(project.updated_at)}</td>
                       <td className="project-col-time">{formatDateTime(project.created_at)}</td>

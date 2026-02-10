@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router-dom';
 import {
   ArrowLeft,
+  Clock3,
   ChevronDown,
   ChevronRight,
   Download,
@@ -22,13 +23,14 @@ import type {
   PredictionConstraint,
   PredictionConstraintType,
   Project,
+  ProjectTask,
   ProjectInputConfig,
   ProteinTemplateUpload,
   TaskState
 } from '../types/models';
 import { useAuth } from '../hooks/useAuth';
 import { downloadResultBlob, downloadResultFile, getTaskStatus, parseResultBundle, submitPrediction } from '../api/backendApi';
-import { getProjectById, updateProject } from '../api/supabaseLite';
+import { getProjectById, insertProjectTask, listProjectTasks, updateProject, updateProjectTask } from '../api/supabaseLite';
 import { formatDuration } from '../utils/date';
 import type { MolstarResidueHighlight, MolstarResiduePick } from '../components/project/MolstarViewer';
 import { MolstarViewer } from '../components/project/MolstarViewer';
@@ -247,6 +249,14 @@ function nonEmptyComponents(components: InputComponent[]): InputComponent[] {
   return components.filter((comp) => Boolean(comp.sequence));
 }
 
+function sortProjectTasks(rows: ProjectTask[]): ProjectTask[] {
+  return [...rows].sort((a, b) => {
+    const at = new Date(a.submitted_at || a.created_at).getTime();
+    const bt = new Date(b.submitted_at || b.created_at).getTime();
+    return bt - at;
+  });
+}
+
 function listConstraintResidues(constraint: PredictionConstraint): Array<{ chainId: string; residue: number }> {
   if (constraint.type === 'contact') {
     return [
@@ -308,6 +318,7 @@ export function ProjectDetailPage() {
   const { session } = useAuth();
 
   const [project, setProject] = useState<Project | null>(null);
+  const [projectTasks, setProjectTasks] = useState<ProjectTask[]>([]);
   const [draft, setDraft] = useState<DraftFields | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -331,7 +342,7 @@ export function ProjectDetailPage() {
   const constraintPickSlotRef = useRef<Record<string, 'first' | 'second'>>({});
   const constraintSelectionAnchorRef = useRef<string | null>(null);
   const prevTaskStateRef = useRef<TaskState | null>(null);
-  const statusRefreshInFlightRef = useRef(false);
+  const statusRefreshInFlightRef = useRef<Set<string>>(new Set());
   const runActionRef = useRef<HTMLDivElement | null>(null);
   const [activeComponentId, setActiveComponentId] = useState<string | null>(null);
   const [sidebarTypeOpen, setSidebarTypeOpen] = useState<Record<InputComponent['type'], boolean>>({
@@ -1230,9 +1241,23 @@ export function ProjectDetailPage() {
     }
     return null;
   }, [project]);
+
+  const loadProjectTasks = useCallback(async (currentProjectId: string, options?: { silent?: boolean }) => {
+    const silent = Boolean(options?.silent);
+    try {
+      const rows = await listProjectTasks(currentProjectId);
+      setProjectTasks(sortProjectTasks(rows));
+    } catch (err) {
+      if (!silent) {
+        setError(err instanceof Error ? err.message : 'Failed to load task history.');
+      }
+    }
+  }, []);
+
   const loadProject = async () => {
     setLoading(true);
     setError(null);
+    setProjectTasks([]);
     try {
       const next = await getProjectById(projectId);
       if (!next || next.deleted_at) {
@@ -1268,6 +1293,7 @@ export function ProjectDetailPage() {
       setSelectedConstraintTemplateComponentId(savedUiState?.selectedConstraintTemplateComponentId || null);
       setPickedResidue(null);
       setProject(next);
+      await loadProjectTasks(next.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load project.');
     } finally {
@@ -1303,6 +1329,28 @@ export function ProjectDetailPage() {
     if (!project) return null;
     const next = await updateProject(project.id, payload);
     setProject(next);
+    return next;
+  };
+
+  const patchTask = async (taskRowId: string, payload: Partial<ProjectTask>) => {
+    if (taskRowId.startsWith('local-')) {
+      setProjectTasks((prev) =>
+        sortProjectTasks(
+          prev.map((row) =>
+            row.id === taskRowId
+              ? {
+                  ...row,
+                  ...payload,
+                  updated_at: new Date().toISOString()
+                }
+              : row
+          )
+        )
+      );
+      return null;
+    }
+    const next = await updateProjectTask(taskRowId, payload);
+    setProjectTasks((prev) => sortProjectTasks(prev.map((row) => (row.id === taskRowId ? next : row))));
     return next;
   };
 
@@ -1350,7 +1398,8 @@ export function ProjectDetailPage() {
     }
   };
 
-  const pullResultForViewer = async (taskId: string) => {
+  const pullResultForViewer = async (taskId: string, options?: { taskRowId?: string; persistProject?: boolean }) => {
+    const shouldPersistProject = options?.persistProject !== false;
     setResultError(null);
     try {
       const blob = await downloadResultBlob(taskId);
@@ -1362,11 +1411,20 @@ export function ProjectDetailPage() {
       setStructureText(parsed.structureText);
       setStructureFormat(parsed.structureFormat);
 
-      await patch({
-        confidence: parsed.confidence,
-        affinity: parsed.affinity,
-        structure_name: parsed.structureName
-      });
+      if (shouldPersistProject) {
+        await patch({
+          confidence: parsed.confidence,
+          affinity: parsed.affinity,
+          structure_name: parsed.structureName
+        });
+      }
+      if (options?.taskRowId) {
+        await patchTask(options.taskRowId, {
+          confidence: parsed.confidence,
+          affinity: parsed.affinity,
+          structure_name: parsed.structureName
+        });
+      }
     } catch (err) {
       setResultError(err instanceof Error ? err.message : 'Failed to parse downloaded result.');
     }
@@ -1382,8 +1440,10 @@ export function ProjectDetailPage() {
       return;
     }
 
-    if (statusRefreshInFlightRef.current) return;
-    statusRefreshInFlightRef.current = true;
+    const activeTaskId = project.task_id.trim();
+    if (!activeTaskId) return;
+    if (statusRefreshInFlightRef.current.has(activeTaskId)) return;
+    statusRefreshInFlightRef.current.add(activeTaskId);
 
     if (!silent) {
       setStatusLoading(true);
@@ -1391,11 +1451,21 @@ export function ProjectDetailPage() {
     }
 
     try {
-      const status = await getTaskStatus(project.task_id);
+      const status = await getTaskStatus(activeTaskId);
       const taskState = mapTaskState(status.state);
       const statusText = readStatusText(status);
       setStatusInfo(status.info ?? null);
       const nextErrorText = taskState === 'FAILURE' ? statusText : '';
+      const runtimeTask = projectTasks.find((item) => item.task_id === activeTaskId) || null;
+      const completedAt = taskState === 'SUCCESS' ? new Date().toISOString() : null;
+      const submittedAt = runtimeTask?.submitted_at || project.submitted_at;
+      const durationSeconds =
+        taskState === 'SUCCESS' && submittedAt
+          ? (() => {
+              const duration = (Date.now() - new Date(submittedAt).getTime()) / 1000;
+              return Number.isFinite(duration) ? duration : null;
+            })()
+          : null;
 
       const patchData: Partial<Project> = {
         task_state: taskState,
@@ -1404,11 +1474,8 @@ export function ProjectDetailPage() {
       };
 
       if (taskState === 'SUCCESS') {
-        patchData.completed_at = new Date().toISOString();
-        if (project.submitted_at) {
-          const duration = (Date.now() - new Date(project.submitted_at).getTime()) / 1000;
-          patchData.duration_seconds = Number.isFinite(duration) ? duration : null;
-        }
+        patchData.completed_at = completedAt;
+        patchData.duration_seconds = durationSeconds;
       }
 
       const shouldPatch =
@@ -1418,15 +1485,39 @@ export function ProjectDetailPage() {
         (taskState === 'SUCCESS' && (!project.completed_at || project.duration_seconds === null));
 
       const next = shouldPatch ? await patch(patchData) : project;
+
+      if (runtimeTask) {
+        const taskPatch: Partial<ProjectTask> = {
+          task_state: taskState,
+          status_text: statusText,
+          error_text: nextErrorText
+        };
+        if (taskState === 'SUCCESS') {
+          taskPatch.completed_at = completedAt;
+          taskPatch.duration_seconds = durationSeconds;
+        }
+        const shouldPatchTask =
+          runtimeTask.task_state !== taskState ||
+          (runtimeTask.status_text || '') !== statusText ||
+          (runtimeTask.error_text || '') !== nextErrorText ||
+          (taskState === 'SUCCESS' && (!runtimeTask.completed_at || runtimeTask.duration_seconds === null));
+        if (shouldPatchTask) {
+          await patchTask(runtimeTask.id, taskPatch);
+        }
+      }
+
       if (taskState === 'SUCCESS' && next?.task_id) {
-        await pullResultForViewer(next.task_id);
+        await pullResultForViewer(next.task_id, {
+          taskRowId: runtimeTask?.id,
+          persistProject: true
+        });
       }
     } catch (err) {
       if (!silent) {
         setError(err instanceof Error ? err.message : 'Failed to refresh task status.');
       }
     } finally {
-      statusRefreshInFlightRef.current = false;
+      statusRefreshInFlightRef.current.delete(activeTaskId);
       if (!silent) {
         setStatusLoading(false);
       }
@@ -1488,6 +1579,59 @@ export function ProjectDetailPage() {
       });
 
       const queuedAt = new Date().toISOString();
+      const queuedTaskDraft: ProjectTask = {
+        id: `local-${taskId}`,
+        project_id: project.id,
+        task_id: taskId,
+        task_state: 'QUEUED',
+        status_text: 'Task submitted and waiting in queue',
+        error_text: '',
+        backend: draft.backend,
+        seed: normalizedConfig.options.seed ?? null,
+        protein_sequence: proteinSequence,
+        ligand_smiles: ligandSmiles,
+        components: activeComponents,
+        constraints: normalizedConfig.constraints,
+        properties: normalizedConfig.properties,
+        confidence: {},
+        affinity: {},
+        structure_name: '',
+        submitted_at: queuedAt,
+        completed_at: null,
+        duration_seconds: null,
+        created_at: queuedAt,
+        updated_at: queuedAt
+      };
+      const persistenceWarnings: string[] = [];
+      try {
+        const taskRow = await insertProjectTask({
+          project_id: project.id,
+          task_id: taskId,
+          task_state: queuedTaskDraft.task_state,
+          status_text: queuedTaskDraft.status_text,
+          error_text: queuedTaskDraft.error_text,
+          backend: queuedTaskDraft.backend,
+          seed: queuedTaskDraft.seed,
+          protein_sequence: queuedTaskDraft.protein_sequence,
+          ligand_smiles: queuedTaskDraft.ligand_smiles,
+          components: queuedTaskDraft.components,
+          constraints: queuedTaskDraft.constraints,
+          properties: queuedTaskDraft.properties,
+          confidence: queuedTaskDraft.confidence,
+          affinity: queuedTaskDraft.affinity,
+          structure_name: queuedTaskDraft.structure_name,
+          submitted_at: queuedTaskDraft.submitted_at,
+          completed_at: queuedTaskDraft.completed_at,
+          duration_seconds: queuedTaskDraft.duration_seconds
+        });
+        setProjectTasks((prev) => sortProjectTasks([taskRow, ...prev.filter((row) => row.id !== taskRow.id)]));
+      } catch (taskPersistError) {
+        setProjectTasks((prev) => sortProjectTasks([queuedTaskDraft, ...prev.filter((row) => row.task_id !== taskId)]));
+        persistenceWarnings.push(
+          `saving task history failed: ${taskPersistError instanceof Error ? taskPersistError.message : 'unknown error'}`
+        );
+      }
+
       const dbPayload: Partial<Project> = {
         name: draft.name.trim(),
         summary: draft.summary.trim(),
@@ -1517,12 +1661,14 @@ export function ProjectDetailPage() {
               }
             : prev
         );
-        setError(
-          `Prediction submitted (task: ${taskId}), but saving project state to database failed: ${
-            dbError instanceof Error ? dbError.message : 'unknown error'
-          }`
+        persistenceWarnings.push(
+          `saving project state failed: ${dbError instanceof Error ? dbError.message : 'unknown error'}`
         );
       }
+      if (persistenceWarnings.length > 0) {
+        setError(`Prediction submitted (task: ${taskId}), but ${persistenceWarnings.join('; ')}.`);
+      }
+      void loadProjectTasks(project.id, { silent: true });
       setStatusInfo(null);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to submit prediction.';
@@ -1541,14 +1687,18 @@ export function ProjectDetailPage() {
     }, 4000);
 
     return () => clearInterval(timer);
-  }, [project?.task_id, project?.task_state]);
+  }, [project?.task_id, project?.task_state, projectTasks]);
 
   useEffect(() => {
     if (!project?.task_id) return;
     if (project.task_state !== 'SUCCESS') return;
     if (structureText) return;
-    void pullResultForViewer(project.task_id);
-  }, [project?.task_id, project?.task_state, structureText]);
+    const runtimeTask = projectTasks.find((item) => item.task_id === project.task_id);
+    void pullResultForViewer(project.task_id, {
+      taskRowId: runtimeTask?.id,
+      persistProject: true
+    });
+  }, [project?.task_id, project?.task_state, projectTasks, structureText]);
 
   useEffect(() => {
     if (workspaceTab !== 'constraints') return;
@@ -2259,13 +2409,17 @@ export function ProjectDetailPage() {
               type="button"
               className={`detail-tab ${workspaceTab === 'results' ? 'active' : ''}`}
               onClick={() => setWorkspaceTab('results')}
-              aria-label="View results"
+              aria-label="View current result"
             >
               <Eye size={13} />
-              Results
+              Current Result
             </button>
           </div>
           <div className="toolbar-divider" />
+          <Link className="btn btn-ghost btn-compact" to={`/projects/${project.id}/tasks`} title="Open task history">
+            <Clock3 size={14} />
+            Tasks
+          </Link>
           <button
             className="btn btn-ghost btn-compact btn-square"
             onClick={() => void refreshStatus()}
