@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, Clock3, ExternalLink, LoaderCircle, RefreshCcw, Trash2 } from 'lucide-react';
-import { deleteProjectTask, getProjectById, listProjectTasks, updateProject } from '../api/supabaseLite';
+import { getTaskStatus } from '../api/backendApi';
+import { deleteProjectTask, getProjectById, listProjectTasks, updateProject, updateProjectTask } from '../api/supabaseLite';
 import { Ligand2DPreview } from '../components/project/Ligand2DPreview';
 import { useAuth } from '../hooks/useAuth';
 import type { Project, ProjectTask } from '../types/models';
@@ -134,6 +135,63 @@ function nextSortDirection(current: SortDirection): SortDirection {
   return current === 'asc' ? 'desc' : 'asc';
 }
 
+function mapTaskState(raw: string): ProjectTask['task_state'] {
+  const normalized = raw.toUpperCase();
+  if (normalized === 'SUCCESS') return 'SUCCESS';
+  if (normalized === 'FAILURE') return 'FAILURE';
+  if (normalized === 'REVOKED') return 'REVOKED';
+  if (normalized === 'PENDING') return 'QUEUED';
+  return 'RUNNING';
+}
+
+function readStatusText(status: { info?: Record<string, unknown>; state: string }): string {
+  if (!status.info) return status.state;
+  const s1 = status.info.status;
+  const s2 = status.info.message;
+  if (typeof s1 === 'string' && s1.trim()) return s1;
+  if (typeof s2 === 'string' && s2.trim()) return s2;
+  return status.state;
+}
+
+function taskStateLabel(state: ProjectTask['task_state']): string {
+  if (state === 'QUEUED') return 'Queued';
+  if (state === 'RUNNING') return 'Running';
+  if (state === 'SUCCESS') return 'Success';
+  if (state === 'FAILURE') return 'Failed';
+  if (state === 'REVOKED') return 'Revoked';
+  return 'Draft';
+}
+
+function taskStateTone(state: ProjectTask['task_state']): 'draft' | 'queued' | 'running' | 'success' | 'failure' | 'revoked' {
+  if (state === 'QUEUED') return 'queued';
+  if (state === 'RUNNING') return 'running';
+  if (state === 'SUCCESS') return 'success';
+  if (state === 'FAILURE') return 'failure';
+  if (state === 'REVOKED') return 'revoked';
+  return 'draft';
+}
+
+function normalizeStatusToken(value: string): string {
+  return value.trim().toLowerCase().replace(/[_\s-]+/g, '');
+}
+
+function shouldShowRunNote(state: ProjectTask['task_state'], note: string): boolean {
+  const trimmed = note.trim();
+  if (!trimmed) return false;
+  const normalizedNote = normalizeStatusToken(trimmed);
+  const normalizedState = normalizeStatusToken(state);
+  if (normalizedNote === normalizedState) return false;
+  const label = taskStateLabel(state);
+  if (normalizedNote === normalizeStatusToken(label)) return false;
+  return true;
+}
+
+interface LoadTaskDataOptions {
+  silent?: boolean;
+  showRefreshing?: boolean;
+  preferBackendStatus?: boolean;
+}
+
 export function ProjectTasksPage() {
   const { projectId = '' } = useParams();
   const navigate = useNavigate();
@@ -149,42 +207,169 @@ export function ProjectTasksPage() {
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [pageSize, setPageSize] = useState<number>(12);
   const [page, setPage] = useState<number>(1);
+  const loadInFlightRef = useRef(false);
+
+  const syncRuntimeTasks = useCallback(async (projectRow: Project, taskRows: ProjectTask[]) => {
+    const runtimeRows = taskRows.filter((row) => Boolean(row.task_id) && (row.task_state === 'QUEUED' || row.task_state === 'RUNNING'));
+    if (runtimeRows.length === 0) {
+      return {
+        project: projectRow,
+        taskRows: sortProjectTasks(taskRows)
+      };
+    }
+
+    const checks = await Promise.allSettled(runtimeRows.map((row) => getTaskStatus(row.task_id)));
+    let nextProject = projectRow;
+    let nextTaskRows = [...taskRows];
+
+    for (let i = 0; i < checks.length; i += 1) {
+      const result = checks[i];
+      if (result.status !== 'fulfilled') continue;
+
+      const runtimeTask = runtimeRows[i];
+      const taskState = mapTaskState(result.value.state);
+      const statusText = readStatusText(result.value);
+      const errorText = taskState === 'FAILURE' ? statusText : '';
+      const terminal = taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED';
+      const completedAt = terminal ? runtimeTask.completed_at || new Date().toISOString() : null;
+      const submittedAt = runtimeTask.submitted_at || (nextProject.task_id === runtimeTask.task_id ? nextProject.submitted_at : null);
+      const durationSeconds =
+        terminal && submittedAt
+          ? (() => {
+              const duration = (new Date(completedAt || Date.now()).getTime() - new Date(submittedAt).getTime()) / 1000;
+              return Number.isFinite(duration) && duration >= 0 ? duration : null;
+            })()
+          : null;
+
+      const taskNeedsPatch =
+        runtimeTask.task_state !== taskState ||
+        (runtimeTask.status_text || '') !== statusText ||
+        (runtimeTask.error_text || '') !== errorText ||
+        runtimeTask.completed_at !== completedAt ||
+        runtimeTask.duration_seconds !== durationSeconds;
+
+      if (taskNeedsPatch) {
+        const taskPatch: Partial<ProjectTask> = {
+          task_state: taskState,
+          status_text: statusText,
+          error_text: errorText,
+          completed_at: completedAt,
+          duration_seconds: durationSeconds
+        };
+        const patchedTask = await updateProjectTask(runtimeTask.id, taskPatch).catch(() => ({
+          ...runtimeTask,
+          ...taskPatch
+        }));
+        nextTaskRows = nextTaskRows.map((row) => (row.id === runtimeTask.id ? patchedTask : row));
+      }
+
+      if (nextProject.task_id === runtimeTask.task_id) {
+        const projectNeedsPatch =
+          nextProject.task_state !== taskState ||
+          (nextProject.status_text || '') !== statusText ||
+          (nextProject.error_text || '') !== errorText ||
+          nextProject.completed_at !== completedAt ||
+          nextProject.duration_seconds !== durationSeconds;
+        if (projectNeedsPatch) {
+          const projectPatch: Partial<Project> = {
+            task_state: taskState,
+            status_text: statusText,
+            error_text: errorText,
+            completed_at: completedAt,
+            duration_seconds: durationSeconds
+          };
+          const patchedProject = await updateProject(nextProject.id, projectPatch).catch(() => ({
+            ...nextProject,
+            ...projectPatch
+          }));
+          nextProject = patchedProject;
+        }
+      }
+    }
+
+    return {
+      project: nextProject,
+      taskRows: sortProjectTasks(nextTaskRows)
+    };
+  }, []);
 
   const loadData = useCallback(
-    async (options?: { silent?: boolean }) => {
+    async (options?: LoadTaskDataOptions) => {
+      if (loadInFlightRef.current) return;
+      loadInFlightRef.current = true;
       const silent = Boolean(options?.silent);
-      if (silent) {
+      const showRefreshing = silent && options?.showRefreshing !== false;
+      if (showRefreshing) {
         setRefreshing(true);
-      } else {
+      } else if (!silent) {
         setLoading(true);
       }
-      setError(null);
+      if (!silent) {
+        setError(null);
+      }
       try {
-        const [nextProject, taskRows] = await Promise.all([getProjectById(projectId), listProjectTasks(projectId)]);
-        if (!nextProject || nextProject.deleted_at) {
+        const [projectRow, taskRows] = await Promise.all([getProjectById(projectId), listProjectTasks(projectId)]);
+        if (!projectRow || projectRow.deleted_at) {
           throw new Error('Project not found or already deleted.');
         }
-        if (session && nextProject.user_id !== session.userId) {
+        if (session && projectRow.user_id !== session.userId) {
           throw new Error('You do not have permission to access this project.');
         }
-        setProject(nextProject);
-        setTasks(sortProjectTasks(taskRows));
+
+        const synced =
+          options?.preferBackendStatus === false
+            ? { project: projectRow, taskRows: sortProjectTasks(taskRows) }
+            : await syncRuntimeTasks(projectRow, taskRows);
+
+        setProject(synced.project);
+        setTasks(synced.taskRows);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load task history.');
       } finally {
-        if (silent) {
+        if (showRefreshing) {
           setRefreshing(false);
-        } else {
+        } else if (!silent) {
           setLoading(false);
         }
+        loadInFlightRef.current = false;
       }
     },
-    [projectId, session]
+    [projectId, session, syncRuntimeTasks]
   );
 
   useEffect(() => {
     void loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    const onFocus = () => {
+      void loadData({ silent: true, showRefreshing: false });
+    };
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void loadData({ silent: true, showRefreshing: false });
+      }
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [loadData]);
+
+  const hasActiveRuntime = useMemo(
+    () => tasks.some((row) => Boolean(row.task_id) && (row.task_state === 'QUEUED' || row.task_state === 'RUNNING')),
+    [tasks]
+  );
+
+  useEffect(() => {
+    if (!hasActiveRuntime) return;
+    const timer = window.setInterval(() => {
+      void loadData({ silent: true, showRefreshing: false });
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveRuntime, loadData]);
 
   const taskCountText = useMemo(() => `${tasks.length} tasks`, [tasks.length]);
 
@@ -400,6 +585,9 @@ export function ProjectTasksPage() {
                   const { task, metrics } = row;
                   const ligand = readTaskPrimaryLigand(task);
                   const runNote = (task.status_text || '').trim();
+                  const showRunNote = shouldShowRunNote(task.task_state, runNote);
+                  const submittedTs = task.submitted_at || task.created_at;
+                  const stateTone = taskStateTone(task.task_state);
                   const plddtTone = toneForPlddt(metrics.plddt);
                   const iptmTone = toneForProbability(metrics.iptm);
                   const paeTone = toneForPae(metrics.pae);
@@ -427,8 +615,11 @@ export function ProjectTasksPage() {
                       </td>
                       <td className="project-col-time task-col-submitted">
                         <div className="task-submitted-cell">
-                          <span>{formatDateTime(task.submitted_at || task.created_at)}</span>
-                          {runNote ? <div className="task-run-note">{runNote}</div> : null}
+                          <div className="task-submitted-main">
+                            <span className={`task-state-chip ${stateTone}`}>{taskStateLabel(task.task_state)}</span>
+                            <span className="task-submitted-time">{formatDateTime(submittedTs)}</span>
+                          </div>
+                          {showRunNote ? <div className={`task-run-note is-${stateTone}`}>{runNote}</div> : null}
                         </div>
                       </td>
                       <td className="task-col-backend">

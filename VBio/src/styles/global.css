@@ -26,6 +26,12 @@
   --lh-normal: 1.45;
 }
 
+html {
+  /* Keep layout width stable when tab content height changes. */
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -1500,13 +1506,76 @@ select:focus {
 }
 
 .task-col-submitted {
-  min-width: 240px;
+  min-width: 272px;
   white-space: normal;
 }
 
 .task-submitted-cell {
   display: grid;
-  gap: 3px;
+  gap: 4px;
+}
+
+.task-submitted-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.task-submitted-time {
+  color: #1c382d;
+  font-weight: 600;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.task-state-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  padding: 2px 8px;
+  font-size: var(--text-2xs);
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.task-state-chip.draft {
+  color: #4b5650;
+  border-color: #c6d0ca;
+  background: #eef2ef;
+}
+
+.task-state-chip.queued {
+  color: #1f4a72;
+  border-color: #99b5d3;
+  background: #e8f1fb;
+}
+
+.task-state-chip.running {
+  color: #6a4a0f;
+  border-color: #d8b474;
+  background: #fff2db;
+}
+
+.task-state-chip.success {
+  color: #1d5b3f;
+  border-color: #8fc2a9;
+  background: #e5f5ec;
+}
+
+.task-state-chip.failure {
+  color: #8a2626;
+  border-color: #e1a7a7;
+  background: #fdeeee;
+}
+
+.task-state-chip.revoked {
+  color: #5d4f66;
+  border-color: #c9bdd0;
+  background: #f3eef6;
 }
 
 .task-col-backend {
@@ -1537,11 +1606,34 @@ select:focus {
 .task-run-note {
   color: var(--muted);
   font-size: var(--text-xs);
-  line-height: 1.25;
+  line-height: 1.3;
   max-width: 340px;
-  white-space: nowrap;
+  white-space: normal;
   overflow: hidden;
-  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.task-run-note.is-running {
+  color: #6a4a0f;
+}
+
+.task-run-note.is-queued {
+  color: #1f4a72;
+}
+
+.task-run-note.is-success {
+  color: #1d5b3f;
+}
+
+.task-run-note.is-failure {
+  color: #8a2626;
+  font-weight: 600;
+}
+
+.task-run-note.is-revoked {
+  color: #5d4f66;
 }
 
 .task-action-open {
@@ -1696,6 +1788,48 @@ select:focus {
 
 .component-sidebar-head h3 {
   font-size: var(--text-lg);
+}
+
+.component-sidebar-head-meta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.component-count-chip,
+.component-readiness-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: var(--text-2xs);
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: 0.15px;
+  white-space: nowrap;
+}
+
+.component-count-chip {
+  color: #4e665a;
+  border-color: #d5e2db;
+  background: #f2f7f4;
+}
+
+.component-readiness-chip.complete {
+  color: #1e5d42;
+  border-color: #9cc7b1;
+  background: #e8f6ee;
+}
+
+.component-readiness-chip.incomplete {
+  color: #8b2f2f;
+  border-color: #e1b3b3;
+  background: #fdeeee;
 }
 
 .component-sidebar-note {
@@ -3227,6 +3361,14 @@ select:focus {
 
   .component-sidebar {
     position: static;
+  }
+
+  .component-sidebar-head {
+    align-items: flex-start;
+  }
+
+  .component-sidebar-head-meta {
+    justify-content: flex-start;
   }
 
   .constraint-workspace {

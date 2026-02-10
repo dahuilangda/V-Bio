@@ -249,6 +249,16 @@ function nonEmptyComponents(components: InputComponent[]): InputComponent[] {
   return components.filter((comp) => Boolean(comp.sequence));
 }
 
+function listIncompleteComponentOrders(components: InputComponent[]): number[] {
+  const missing: number[] = [];
+  components.forEach((component, index) => {
+    if (!component.sequence.trim()) {
+      missing.push(index + 1);
+    }
+  });
+  return missing;
+}
+
 function sortProjectTasks(rows: ProjectTask[]): ProjectTask[] {
   return [...rows].sort((a, b) => {
     const at = new Date(a.submitted_at || a.created_at).getTime();
@@ -439,6 +449,21 @@ export function ProjectDetailPage() {
     if (!draft) return [];
     return normalizeComponents(draft.inputConfig.components);
   }, [draft]);
+  const incompleteComponentOrders = useMemo(
+    () => listIncompleteComponentOrders(normalizedDraftComponents),
+    [normalizedDraftComponents]
+  );
+  const componentCompletion = useMemo(() => {
+    const total = normalizedDraftComponents.length;
+    const incompleteCount = incompleteComponentOrders.length;
+    const filledCount = Math.max(0, total - incompleteCount);
+    return {
+      total,
+      filledCount,
+      incompleteCount
+    };
+  }, [normalizedDraftComponents, incompleteComponentOrders]);
+  const hasIncompleteComponents = componentCompletion.incompleteCount > 0;
   const allowedConstraintTypes = useMemo(() => {
     return allowedConstraintTypesForBackend(draft?.backend || project?.backend || 'boltz');
   }, [draft?.backend, project?.backend]);
@@ -1533,7 +1558,16 @@ export function ProjectDetailPage() {
     }
 
     const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, draft.backend);
-    const activeComponents = nonEmptyComponents(normalizedConfig.components);
+    const missingOrders = listIncompleteComponentOrders(normalizedConfig.components);
+    if (missingOrders.length > 0) {
+      const maxShown = 3;
+      const shown = missingOrders.slice(0, maxShown).map((order) => `#${order}`).join(', ');
+      const suffix = missingOrders.length > maxShown ? ` and ${missingOrders.length - maxShown} more` : '';
+      setWorkspaceTab('components');
+      setError(`Please complete all components before running. Missing input: ${shown}${suffix}.`);
+      return;
+    }
+    const activeComponents = normalizedConfig.components;
     const validationError = validateComponents(activeComponents);
     if (validationError) {
       setError(validationError);
@@ -1784,7 +1818,13 @@ export function ProjectDetailPage() {
 
   const workflow = getWorkflowDefinition(project.task_type);
   const isPredictionWorkflow = workflow.key === 'prediction';
-  const runDisabled = submitting || saving || !isPredictionWorkflow;
+  const runBlockedReason = !isPredictionWorkflow
+    ? 'Runner UI for this workflow is being integrated.'
+    : hasIncompleteComponents
+      ? `Complete all components before run (${componentCompletion.filledCount}/${componentCompletion.total} ready).`
+      : '';
+  const runDisabled = submitting || saving || !isPredictionWorkflow || hasIncompleteComponents;
+  const canOpenRunMenu = isDraftDirty && !runDisabled;
   const handleRunAction = () => {
     if (runDisabled) return;
     if (isDraftDirty) {
@@ -2457,21 +2497,21 @@ export function ProjectDetailPage() {
               title={
                 submitting
                   ? 'Submitting'
-                  : isDraftDirty
+                  : runBlockedReason
+                    ? runBlockedReason
+                    : isDraftDirty
                     ? `${workflow.runLabel} (has unsaved changes)`
-                    : isPredictionWorkflow
-                      ? workflow.runLabel
-                      : 'Runner UI for this workflow is being integrated.'
+                    : workflow.runLabel
               }
               aria-label={
                 submitting
                   ? 'Submitting'
-                  : isPredictionWorkflow
-                    ? workflow.runLabel
-                    : 'Run'
+                  : runBlockedReason
+                    ? runBlockedReason
+                    : workflow.runLabel
               }
-              aria-haspopup={isDraftDirty ? 'menu' : undefined}
-              aria-expanded={isDraftDirty ? runMenuOpen : undefined}
+              aria-haspopup={canOpenRunMenu ? 'menu' : undefined}
+              aria-expanded={canOpenRunMenu ? runMenuOpen : undefined}
             >
               {submitting ? <LoaderCircle size={15} className="spin" /> : <Play size={15} />}
             </button>
@@ -2937,7 +2977,12 @@ export function ProjectDetailPage() {
                     <aside className="panel subtle component-sidebar">
                       <div className="component-sidebar-head">
                         <h3>Workspace</h3>
-                        <span className="muted small">{draft.inputConfig.components.length} items</span>
+                        <div className="component-sidebar-head-meta">
+                          <span className="component-count-chip">{draft.inputConfig.components.length} items</span>
+                          <span className={`component-readiness-chip ${hasIncompleteComponents ? 'incomplete' : 'complete'}`}>
+                            {hasIncompleteComponents ? `${componentCompletion.incompleteCount} missing` : 'All ready'}
+                          </span>
+                        </div>
                       </div>
                       {sidebarTypeOrder.map((type) => {
                         const bucket = componentTypeBuckets[type];
@@ -2982,14 +3027,20 @@ export function ProjectDetailPage() {
                                     <button
                                       key={entry.id}
                                       type="button"
-                                      className={`component-sidebar-link ${activeComponentId === entry.id ? 'active' : ''}`}
+                                      className={`component-sidebar-link ${activeComponentId === entry.id ? 'active' : ''} ${
+                                        entry.filled ? 'is-complete' : 'is-incomplete'
+                                      }`}
                                       onClick={() => jumpToComponent(entry.id)}
                                     >
                                       <span>
                                         {entry.typeLabel} {entry.typeOrder}
                                       </span>
-                                      <span className="muted small component-sidebar-link-meta">
-                                        Comp {entry.globalOrder} {entry.filled ? '' : '· empty'}
+                                      <span
+                                        className={`small component-sidebar-link-meta component-sidebar-link-status ${
+                                          entry.filled ? 'is-complete' : 'is-incomplete'
+                                        }`}
+                                      >
+                                        Comp {entry.globalOrder} · {entry.filled ? 'ready' : 'incomplete'}
                                       </span>
                                     </button>
                                   ))

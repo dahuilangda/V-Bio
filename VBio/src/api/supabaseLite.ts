@@ -254,6 +254,7 @@ export async function listProjectTasks(projectId: string): Promise<ProjectTask[]
 
 interface ProjectTaskStateRow {
   project_id: string;
+  task_id: string;
   task_state: TaskState;
 }
 
@@ -261,7 +262,7 @@ export async function listProjectTaskStatesByProjects(projectIds: string[]): Pro
   const normalizedIds = Array.from(new Set(projectIds.map((id) => id.trim()).filter(Boolean)));
   if (normalizedIds.length === 0) return [];
   return request<ProjectTaskStateRow[]>('/project_tasks', undefined, {
-    select: 'project_id,task_state',
+    select: 'project_id,task_id,task_state',
     project_id: `in.(${normalizedIds.join(',')})`
   });
 }
@@ -299,6 +300,32 @@ export async function updateProjectTask(taskRowId: string, patch: Partial<Projec
     }
   );
   return rows[0];
+}
+
+export async function findProjectTaskByTaskId(taskId: string, projectId?: string): Promise<ProjectTask | null> {
+  const normalizedTaskId = taskId.trim();
+  if (!normalizedTaskId) return null;
+  const query: Record<string, string | undefined> = {
+    select: '*',
+    task_id: `eq.${normalizedTaskId}`,
+    order: 'created_at.desc',
+    limit: '1'
+  };
+  if (projectId?.trim()) {
+    query.project_id = `eq.${projectId.trim()}`;
+  }
+  const rows = await request<ProjectTask[]>('/project_tasks', undefined, query);
+  return rows[0] || null;
+}
+
+export async function updateProjectTaskByTaskId(
+  taskId: string,
+  patch: Partial<ProjectTask>,
+  projectId?: string
+): Promise<ProjectTask | null> {
+  const current = await findProjectTaskByTaskId(taskId, projectId);
+  if (!current) return null;
+  return updateProjectTask(current.id, patch);
 }
 
 export async function deleteProjectTask(taskRowId: string): Promise<void> {

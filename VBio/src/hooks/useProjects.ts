@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { Project, ProjectTaskCounts, Session, TaskState } from '../types/models';
-import { insertProject, listProjectTaskStatesByProjects, listProjects, updateProject } from '../api/supabaseLite';
+import type { Project, ProjectTask, ProjectTaskCounts, Session, TaskState } from '../types/models';
+import {
+  insertProject,
+  listProjectTaskStatesByProjects,
+  listProjects,
+  updateProject,
+  updateProjectTaskByTaskId
+} from '../api/supabaseLite';
 import { getTaskStatus } from '../api/backendApi';
 import { removeProjectInputConfig, removeProjectUiState } from '../utils/projectInputs';
 import { normalizeWorkflowKey } from '../utils/workflows';
@@ -64,7 +70,10 @@ function fallbackCountsFromState(state: TaskState, hasTaskId: boolean): ProjectT
   return counts;
 }
 
-function countProjectTaskStates(projectIds: string[], rows: Array<{ project_id: string; task_state: TaskState }>): Map<string, ProjectTaskCounts> {
+function countProjectTaskStates(
+  projectIds: string[],
+  rows: Array<{ project_id: string; task_id: string; task_state: TaskState }>
+): Map<string, ProjectTaskCounts> {
   const map = new Map<string, ProjectTaskCounts>();
   projectIds.forEach((id) => map.set(id, emptyProjectTaskCounts()));
   rows.forEach((row) => {
@@ -78,6 +87,14 @@ function countProjectTaskStates(projectIds: string[], rows: Array<{ project_id: 
     else counts.other += 1;
   });
   return map;
+}
+
+function stateBucket(state: TaskState): keyof Pick<ProjectTaskCounts, 'running' | 'success' | 'failure' | 'queued' | 'other'> {
+  if (state === 'RUNNING') return 'running';
+  if (state === 'SUCCESS') return 'success';
+  if (state === 'FAILURE') return 'failure';
+  if (state === 'QUEUED') return 'queued';
+  return 'other';
 }
 
 export function useProjects(session: Session | null) {
@@ -109,6 +126,7 @@ export function useProjects(session: Session | null) {
         if (runtimeRows.length > 0) {
           const checks = await Promise.allSettled(runtimeRows.map((row) => getTaskStatus(row.task_id)));
           const patchById = new Map<string, Partial<Project>>();
+          const taskPatches: Array<{ projectId: string; taskId: string; patch: Partial<ProjectTask> }> = [];
 
           checks.forEach((result, index) => {
             if (result.status !== 'fulfilled') return;
@@ -133,12 +151,25 @@ export function useProjects(session: Session | null) {
               return;
             }
 
-            patchById.set(source.id, {
+            const projectPatch: Partial<Project> = {
               task_state: taskState,
               status_text: statusText,
               error_text: errorText,
               completed_at: completedAt,
               duration_seconds: Number.isFinite(durationSeconds as number) ? durationSeconds : null
+            };
+            const taskPatch: Partial<ProjectTask> = {
+              task_state: taskState,
+              status_text: statusText,
+              error_text: errorText,
+              completed_at: completedAt,
+              duration_seconds: Number.isFinite(durationSeconds as number) ? durationSeconds : null
+            };
+            patchById.set(source.id, projectPatch);
+            taskPatches.push({
+              projectId: source.id,
+              taskId: source.task_id,
+              patch: taskPatch
             });
           });
 
@@ -146,6 +177,9 @@ export function useProjects(session: Session | null) {
             rows = rows.map((row) => (patchById.has(row.id) ? { ...row, ...patchById.get(row.id)! } : row));
             for (const [projectId, patch] of patchById.entries()) {
               void updateProject(projectId, patch).catch(() => undefined);
+            }
+            for (const taskPatch of taskPatches) {
+              void updateProjectTaskByTaskId(taskPatch.taskId, taskPatch.patch, taskPatch.projectId).catch(() => undefined);
             }
           }
         }
@@ -156,10 +190,31 @@ export function useProjects(session: Session | null) {
       if (projectIds.length > 0) {
         const taskStates = await listProjectTaskStatesByProjects(projectIds);
         countsByProject = countProjectTaskStates(projectIds, taskStates);
+        const taskStateByProjectAndTaskId = new Map(taskStates.map((item) => [`${item.project_id}:${item.task_id}`, item.task_state]));
+        rows.forEach((projectRow) => {
+          const activeTaskId = String(projectRow.task_id || '').trim();
+          if (!activeTaskId) return;
+          const counts = countsByProject.get(projectRow.id);
+          if (!counts) return;
+          const rowState = taskStateByProjectAndTaskId.get(`${projectRow.id}:${activeTaskId}`);
+          if (!rowState || rowState === projectRow.task_state) return;
+          const sourceBucket = stateBucket(rowState);
+          const targetBucket = stateBucket(projectRow.task_state);
+          if (sourceBucket === targetBucket) return;
+          counts[sourceBucket] = Math.max(0, counts[sourceBucket] - 1);
+          counts[targetBucket] += 1;
+        });
       }
       rows = rows.map((row) => ({
         ...row,
-        task_counts: countsByProject.get(row.id) ?? fallbackCountsFromState(row.task_state, Boolean(row.task_id))
+        task_counts:
+          (() => {
+            const counted = countsByProject.get(row.id);
+            if (!counted || counted.total <= 0) {
+              return fallbackCountsFromState(row.task_state, Boolean(row.task_id));
+            }
+            return counted;
+          })()
       }));
 
       if (!statusOnly) {
