@@ -1,13 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { Activity, ArrowLeft, Clock3, ExternalLink, Filter, LoaderCircle, RefreshCcw, Search, SlidersHorizontal, Trash2 } from 'lucide-react';
+import {
+  Activity,
+  ArrowLeft,
+  Clock3,
+  ExternalLink,
+  Filter,
+  LoaderCircle,
+  RefreshCcw,
+  Search,
+  SlidersHorizontal,
+  Trash2
+} from 'lucide-react';
 import { downloadResultBlob, getTaskStatus, parseResultBundle } from '../api/backendApi';
 import { deleteProjectTask, getProjectById, listProjectTasks, updateProject, updateProjectTask } from '../api/supabaseLite';
+import { JSMEEditor } from '../components/project/JSMEEditor';
 import { Ligand2DPreview } from '../components/project/Ligand2DPreview';
 import { useAuth } from '../hooks/useAuth';
 import type { Project, ProjectTask } from '../types/models';
 import { formatDateTime, formatDuration } from '../utils/date';
 import { normalizeComponentSequence } from '../utils/projectInputs';
+import { loadRDKitModule } from '../utils/rdkit';
 
 function readTaskPrimaryLigand(task: ProjectTask): { smiles: string; isSmiles: boolean } {
   const directLigand = normalizeComponentSequence('ligand', task.ligand_smiles || '');
@@ -64,12 +77,14 @@ type SortKey = 'plddt' | 'iptm' | 'pae' | 'submitted' | 'backend' | 'seed' | 'du
 type SortDirection = 'asc' | 'desc';
 type SubmittedWithinDaysOption = 'all' | '1' | '7' | '30' | '90';
 type SeedFilterOption = 'all' | 'with_seed' | 'without_seed';
+type StructureSearchMode = 'exact' | 'substructure';
 
 const TASKS_PAGE_FILTERS_STORAGE_KEY = 'vbio:tasks-page-filters:v1';
 const TASK_SORT_KEYS: SortKey[] = ['plddt', 'iptm', 'pae', 'submitted', 'backend', 'seed', 'duration'];
 const TASK_SORT_DIRECTIONS: SortDirection[] = ['asc', 'desc'];
 const TASK_SUBMITTED_WINDOW_OPTIONS: SubmittedWithinDaysOption[] = ['all', '1', '7', '30', '90'];
 const TASK_SEED_FILTER_OPTIONS: SeedFilterOption[] = ['all', 'with_seed', 'without_seed'];
+const TASK_STRUCTURE_SEARCH_MODES: StructureSearchMode[] = ['exact', 'substructure'];
 const TASK_PAGE_SIZE_OPTIONS = [8, 12, 20, 50];
 
 interface TaskConfidenceMetrics {
@@ -84,6 +99,8 @@ interface TaskListRow {
   submittedTs: number;
   backendValue: string;
   durationValue: number | null;
+  ligandSmiles: string;
+  ligandIsSmiles: boolean;
 }
 
 function toneForPlddt(value: number | null): MetricTone {
@@ -214,6 +231,28 @@ function normalizeIptmThreshold(value: number | null): number | null {
   return value;
 }
 
+function normalizeSmilesForSearch(value: string): string {
+  return value.trim().replace(/\s+/g, '');
+}
+
+function hasSubstructureMatchPayload(value: unknown): boolean {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed || trimmed === '[]' || trimmed === '{}' || trimmed === 'null') return false;
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (Array.isArray(parsed)) return parsed.length > 0;
+      if (parsed && typeof parsed === 'object') return Object.keys(parsed as Record<string, unknown>).length > 0;
+      return Boolean(parsed);
+    } catch {
+      return trimmed !== '-1';
+    }
+  }
+  if (Array.isArray(value)) return value.length > 0;
+  if (value && typeof value === 'object') return Object.keys(value as Record<string, unknown>).length > 0;
+  return Boolean(value);
+}
+
 function shouldShowRunNote(state: ProjectTask['task_state'], note: string): boolean {
   const trimmed = note.trim();
   if (!trimmed) return false;
@@ -254,6 +293,11 @@ export function ProjectTasksPage() {
   const [minPlddt, setMinPlddt] = useState('');
   const [minIptm, setMinIptm] = useState('');
   const [maxPae, setMaxPae] = useState('');
+  const [structureSearchMode, setStructureSearchMode] = useState<StructureSearchMode>('exact');
+  const [structureSearchQuery, setStructureSearchQuery] = useState('');
+  const [structureSearchMatches, setStructureSearchMatches] = useState<Record<string, boolean>>({});
+  const [structureSearchLoading, setStructureSearchLoading] = useState(false);
+  const [structureSearchError, setStructureSearchError] = useState<string | null>(null);
   const [pageSize, setPageSize] = useState<number>(12);
   const [page, setPage] = useState<number>(1);
   const [filtersHydrated, setFiltersHydrated] = useState(false);
@@ -511,12 +555,15 @@ export function ProjectTasksPage() {
     return tasks.map((task) => {
       const submittedTs = new Date(task.submitted_at || task.created_at).getTime();
       const durationValue = typeof task.duration_seconds === 'number' && Number.isFinite(task.duration_seconds) ? task.duration_seconds : null;
+      const ligand = readTaskPrimaryLigand(task);
       return {
         task,
         metrics: readTaskConfidenceMetrics(task),
         submittedTs,
         backendValue: String(task.backend || '').trim().toLowerCase(),
-        durationValue
+        durationValue,
+        ligandSmiles: ligand.smiles,
+        ligandIsSmiles: ligand.isSmiles
       };
     });
   }, [tasks]);
@@ -535,8 +582,9 @@ export function ProjectTasksPage() {
     if (minPlddt.trim()) count += 1;
     if (minIptm.trim()) count += 1;
     if (maxPae.trim()) count += 1;
+    if (structureSearchQuery.trim()) count += 1;
     return count;
-  }, [submittedWithinDays, seedFilter, failureOnly, minPlddt, minIptm, maxPae]);
+  }, [submittedWithinDays, seedFilter, failureOnly, minPlddt, minIptm, maxPae, structureSearchQuery]);
   const clearAdvancedFilters = () => {
     setSubmittedWithinDays('all');
     setSeedFilter('all');
@@ -544,6 +592,10 @@ export function ProjectTasksPage() {
     setMinPlddt('');
     setMinIptm('');
     setMaxPae('');
+    setStructureSearchMode('exact');
+    setStructureSearchQuery('');
+    setStructureSearchMatches({});
+    setStructureSearchError(null);
   };
 
   useEffect(() => {
@@ -589,6 +641,17 @@ export function ProjectTasksPage() {
       if (typeof saved.minPlddt === 'string') setMinPlddt(saved.minPlddt);
       if (typeof saved.minIptm === 'string') setMinIptm(saved.minIptm);
       if (typeof saved.maxPae === 'string') setMaxPae(saved.maxPae);
+      if (
+        typeof saved.structureSearchMode === 'string' &&
+        TASK_STRUCTURE_SEARCH_MODES.includes(saved.structureSearchMode as StructureSearchMode)
+      ) {
+        setStructureSearchMode(saved.structureSearchMode as StructureSearchMode);
+      } else if (saved.structureSearchMode === 'off') {
+        setStructureSearchMode('exact');
+      }
+      if (typeof saved.structureSearchQuery === 'string') {
+        setStructureSearchQuery(saved.structureSearchQuery);
+      }
       if (typeof saved.pageSize === 'number' && TASK_PAGE_SIZE_OPTIONS.includes(saved.pageSize)) {
         setPageSize(saved.pageSize);
       }
@@ -614,6 +677,8 @@ export function ProjectTasksPage() {
       minPlddt,
       minIptm,
       maxPae,
+      structureSearchMode,
+      structureSearchQuery,
       pageSize
     };
     try {
@@ -635,18 +700,109 @@ export function ProjectTasksPage() {
     minPlddt,
     minIptm,
     maxPae,
+    structureSearchMode,
+    structureSearchQuery,
     pageSize
   ]);
 
+  useEffect(() => {
+    const mode = structureSearchMode;
+    const query = structureSearchQuery.trim();
+    if (!query) {
+      setStructureSearchLoading(false);
+      setStructureSearchError(null);
+      setStructureSearchMatches({});
+      return;
+    }
+
+    let cancelled = false;
+    const run = async () => {
+      setStructureSearchLoading(true);
+      setStructureSearchError(null);
+
+      try {
+        if (mode === 'exact') {
+          const normalizedQuery = normalizeSmilesForSearch(query);
+          const nextMatches: Record<string, boolean> = {};
+          taskRows.forEach((row) => {
+            const candidate = normalizeSmilesForSearch(row.ligandSmiles);
+            nextMatches[row.task.id] = Boolean(row.ligandIsSmiles && candidate && candidate === normalizedQuery);
+          });
+          if (!cancelled) {
+            setStructureSearchMatches(nextMatches);
+          }
+          return;
+        }
+
+        const rdkit = await loadRDKitModule();
+        if (cancelled) return;
+
+        const queryMol = (typeof rdkit.get_qmol === 'function' ? rdkit.get_qmol(query) : null) || rdkit.get_mol(query);
+        if (!queryMol) {
+          throw new Error('Invalid SMARTS/SMILES query.');
+        }
+
+        const nextMatches: Record<string, boolean> = {};
+        try {
+          for (const row of taskRows) {
+            if (!row.ligandIsSmiles || !row.ligandSmiles.trim()) {
+              nextMatches[row.task.id] = false;
+              continue;
+            }
+            const mol = rdkit.get_mol(row.ligandSmiles);
+            if (!mol) {
+              nextMatches[row.task.id] = false;
+              continue;
+            }
+            try {
+              let matched = false;
+              if (typeof mol.get_substruct_match === 'function') {
+                matched = hasSubstructureMatchPayload(mol.get_substruct_match(queryMol));
+              }
+              if (!matched && typeof mol.get_substruct_matches === 'function') {
+                matched = hasSubstructureMatchPayload(mol.get_substruct_matches(queryMol));
+              }
+              nextMatches[row.task.id] = matched;
+            } finally {
+              mol.delete();
+            }
+          }
+        } finally {
+          queryMol.delete();
+        }
+
+        if (!cancelled) {
+          setStructureSearchMatches(nextMatches);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setStructureSearchError(err instanceof Error ? err.message : 'Structure search failed.');
+          setStructureSearchMatches({});
+        }
+      } finally {
+        if (!cancelled) {
+          setStructureSearchLoading(false);
+        }
+      }
+    };
+
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [taskRows, structureSearchMode, structureSearchQuery]);
+
   const filteredRows = useMemo(() => {
     const query = taskSearch.trim().toLowerCase();
+    const structureSearchActive = Boolean(structureSearchQuery.trim());
+    const applyStructureFilter = structureSearchActive && !structureSearchLoading && !structureSearchError;
     const submittedWindowMs = submittedWithinDays === 'all' ? null : Number(submittedWithinDays) * 24 * 60 * 60 * 1000;
     const submittedCutoff = submittedWindowMs === null ? null : Date.now() - submittedWindowMs;
     const minPlddtThreshold = normalizePlddtThreshold(parseNumberOrNull(minPlddt));
     const minIptmThreshold = normalizeIptmThreshold(parseNumberOrNull(minIptm));
     const maxPaeThreshold = parseNumberOrNull(maxPae);
 
-    const filtered = taskRows.filter((row) => {
+  const filtered = taskRows.filter((row) => {
       const { task, metrics } = row;
       if (stateFilter !== 'all' && task.task_state !== stateFilter) return false;
       if (backendFilter !== 'all' && row.backendValue !== backendFilter) return false;
@@ -657,10 +813,10 @@ export function ProjectTasksPage() {
       if (minPlddtThreshold !== null && (metrics.plddt === null || metrics.plddt < minPlddtThreshold)) return false;
       if (minIptmThreshold !== null && (metrics.iptm === null || metrics.iptm < minIptmThreshold)) return false;
       if (maxPaeThreshold !== null && (metrics.pae === null || metrics.pae > maxPaeThreshold)) return false;
+      if (applyStructureFilter && !structureSearchMatches[task.id]) return false;
       if (!query) return true;
 
       const haystack = [
-        task.task_id,
         task.task_state,
         task.backend,
         task.status_text,
@@ -712,7 +868,12 @@ export function ProjectTasksPage() {
     failureOnly,
     minPlddt,
     minIptm,
-    maxPae
+    maxPae,
+    structureSearchMode,
+    structureSearchQuery,
+    structureSearchLoading,
+    structureSearchError,
+    structureSearchMatches
   ]);
 
   const totalPages = useMemo(() => Math.max(1, Math.ceil(filteredRows.length / pageSize)), [filteredRows.length, pageSize]);
@@ -736,7 +897,9 @@ export function ProjectTasksPage() {
     failureOnly,
     minPlddt,
     minIptm,
-    maxPae
+    maxPae,
+    structureSearchMode,
+    structureSearchQuery
   ]);
 
   useEffect(() => {
@@ -846,7 +1009,7 @@ export function ProjectTasksPage() {
                 <input
                   value={taskSearch}
                   onChange={(e) => setTaskSearch(e.target.value)}
-                  placeholder="Search task id/status/backend/metrics..."
+                  placeholder="Search status/backend/metrics..."
                   aria-label="Search tasks"
                 />
               </div>
@@ -978,9 +1141,45 @@ export function ProjectTasksPage() {
                   <span>Failures / errors only</span>
                 </label>
               </div>
+              <div className="advanced-filter-field advanced-filter-field-wide task-structure-query-row">
+                <div className="task-structure-query-head">
+                  <span>Structure Query</span>
+                  <div className="task-structure-mode-switch" role="tablist" aria-label="Structure search mode">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={structureSearchMode === 'exact'}
+                      className={`task-structure-mode-btn ${structureSearchMode === 'exact' ? 'active' : ''}`}
+                      onClick={() => setStructureSearchMode('exact')}
+                    >
+                      Exact
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={structureSearchMode === 'substructure'}
+                      className={`task-structure-mode-btn ${structureSearchMode === 'substructure' ? 'active' : ''}`}
+                      onClick={() => setStructureSearchMode('substructure')}
+                    >
+                      Substructure
+                    </button>
+                  </div>
+                </div>
+                <div className="jsme-editor-container task-structure-jsme-shell">
+                  <JSMEEditor smiles={structureSearchQuery} height={300} onSmilesChange={(value) => setStructureSearchQuery(value)} />
+                </div>
+                <div className={`task-structure-query-status ${structureSearchError ? 'is-error' : ''}`}>
+                  {structureSearchLoading
+                    ? 'Searching...'
+                    : structureSearchError
+                      ? 'Invalid query'
+                      : structureSearchQuery.trim()
+                        ? `Matched ${Object.values(structureSearchMatches).filter(Boolean).length}`
+                        : 'Draw query'}
+                </div>
+              </div>
             </div>
             <div className="advanced-filter-actions">
-              <span className="advanced-filter-hint">Use threshold filters to focus on high-quality or problematic runs.</span>
               <button
                 type="button"
                 className="btn btn-ghost btn-compact"
@@ -1047,7 +1246,6 @@ export function ProjectTasksPage() {
               <tbody>
                 {pagedRows.map((row) => {
                   const { task, metrics } = row;
-                  const ligand = readTaskPrimaryLigand(task);
                   const runNote = (task.status_text || '').trim();
                   const showRunNote = shouldShowRunNote(task.task_state, runNote);
                   const submittedTs = task.submitted_at || task.created_at;
@@ -1058,9 +1256,9 @@ export function ProjectTasksPage() {
                   return (
                     <tr key={task.id}>
                       <td className="task-col-ligand">
-                        {ligand.smiles && ligand.isSmiles ? (
+                        {row.ligandSmiles && row.ligandIsSmiles ? (
                           <div className="task-ligand-thumb">
-                            <Ligand2DPreview smiles={ligand.smiles} width={160} height={102} />
+                            <Ligand2DPreview smiles={row.ligandSmiles} width={160} height={102} />
                           </div>
                         ) : (
                           <div className="task-ligand-thumb task-ligand-thumb-empty">

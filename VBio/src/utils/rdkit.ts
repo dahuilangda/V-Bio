@@ -5,6 +5,8 @@ export interface RDKitMol {
   get_svg: (width: number, height: number) => string;
   get_svg_with_highlights?: (details: string) => string;
   get_descriptors?: () => string | Record<string, unknown>;
+  get_substruct_match?: (query: RDKitMol) => string | unknown;
+  get_substruct_matches?: (query: RDKitMol) => string | unknown;
   normalize_depiction?: () => void;
   set_new_coords?: () => void;
   delete: () => void;
@@ -12,6 +14,7 @@ export interface RDKitMol {
 
 export interface RDKitModule {
   get_mol: (smiles: string) => RDKitMol | null;
+  get_qmol?: (smarts: string) => RDKitMol | null;
 }
 
 declare global {

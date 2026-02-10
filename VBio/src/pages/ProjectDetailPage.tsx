@@ -238,6 +238,84 @@ function defaultConfigFromProject(project: Project): ProjectInputConfig {
   return config;
 }
 
+function readTaskPrimaryLigand(task: ProjectTask | null): { smiles: string; isSmiles: boolean } {
+  if (!task) {
+    return { smiles: '', isSmiles: false };
+  }
+
+  const directLigand = normalizeComponentSequence('ligand', task.ligand_smiles || '');
+  if (directLigand) {
+    return {
+      smiles: directLigand,
+      isSmiles: true
+    };
+  }
+
+  const components = Array.isArray(task.components) ? task.components : [];
+  const ligand = components.find((item) => item.type === 'ligand' && normalizeComponentSequence('ligand', item.sequence));
+  if (!ligand) {
+    return { smiles: '', isSmiles: false };
+  }
+
+  const value = normalizeComponentSequence('ligand', ligand.sequence);
+  return {
+    smiles: value,
+    isSmiles: ligand.inputMethod !== 'ccd'
+  };
+}
+
+function readTaskComponents(task: ProjectTask | null): InputComponent[] {
+  if (!task) return [];
+
+  const components = Array.isArray(task.components) ? normalizeComponents(task.components) : [];
+  if (components.length > 0) return components;
+
+  const fallback: InputComponent[] = [];
+  const proteinSequence = normalizeComponentSequence('protein', task.protein_sequence || '');
+  const ligandValue = normalizeComponentSequence('ligand', task.ligand_smiles || '');
+  if (proteinSequence) {
+    fallback.push({
+      id: 'task-protein-1',
+      type: 'protein',
+      numCopies: 1,
+      sequence: proteinSequence,
+      useMsa: true,
+      cyclic: false
+    });
+  }
+  if (ligandValue) {
+    fallback.push({
+      id: 'task-ligand-1',
+      type: 'ligand',
+      numCopies: 1,
+      sequence: ligandValue,
+      inputMethod: 'jsme'
+    });
+  }
+  return fallback;
+}
+
+function mergeTaskSnapshotIntoConfig(baseConfig: ProjectInputConfig, task: ProjectTask | null): ProjectInputConfig {
+  if (!task) return baseConfig;
+
+  const taskComponents = readTaskComponents(task);
+  const taskConstraints = Array.isArray(task.constraints) ? (task.constraints as PredictionConstraint[]) : null;
+  const taskProperties =
+    task.properties && typeof task.properties === 'object' ? (task.properties as ProjectInputConfig['properties']) : null;
+  const taskSeed = typeof task.seed === 'number' && Number.isFinite(task.seed) ? Math.max(0, Math.floor(task.seed)) : null;
+
+  return {
+    ...baseConfig,
+    components: taskComponents.length > 0 ? taskComponents : baseConfig.components,
+    constraints: taskConstraints ?? baseConfig.constraints,
+    properties: taskProperties ?? baseConfig.properties,
+    options: {
+      ...baseConfig.options,
+      seed: taskSeed ?? baseConfig.options.seed
+    }
+  };
+}
+
 function normalizeComponents(components: InputComponent[]): InputComponent[] {
   return components.map((comp) => ({
     ...comp,
@@ -546,31 +624,66 @@ export function ProjectDetailPage() {
   }, [normalizedDraftComponents]);
 
   const constraintCount = draft?.inputConfig.constraints.length || 0;
+  const activeResultTask = useMemo(() => {
+    const activeTaskId = (project?.task_id || '').trim();
+    if (!activeTaskId) return null;
+    return projectTasks.find((item) => String(item.task_id || '').trim() === activeTaskId) || null;
+  }, [project?.task_id, projectTasks]);
+  const resultOverviewComponents = useMemo(() => {
+    const taskComponents = readTaskComponents(activeResultTask);
+    if (taskComponents.length > 0) return taskComponents;
+    return normalizedDraftComponents;
+  }, [activeResultTask, normalizedDraftComponents]);
+  const resultChainIds = useMemo(() => {
+    return buildChainInfos(nonEmptyComponents(resultOverviewComponents)).map((item) => item.id);
+  }, [resultOverviewComponents]);
+  const overviewPrimaryLigand = useMemo(() => {
+    const taskLigand = readTaskPrimaryLigand(activeResultTask);
+    if (taskLigand.smiles) return taskLigand;
+    const draftLigand = normalizedDraftComponents.find((comp) => comp.type === 'ligand' && comp.sequence);
+    if (!draftLigand) {
+      return { smiles: '', isSmiles: false };
+    }
+    return {
+      smiles: draftLigand.sequence,
+      isSmiles: draftLigand.inputMethod !== 'ccd'
+    };
+  }, [activeResultTask, normalizedDraftComponents]);
+  const snapshotConfidence = useMemo(() => {
+    if (activeResultTask?.confidence && Object.keys(activeResultTask.confidence).length > 0) {
+      return activeResultTask.confidence as Record<string, unknown>;
+    }
+    if (project?.confidence && Object.keys(project.confidence).length > 0) {
+      return project.confidence as Record<string, unknown>;
+    }
+    return null;
+  }, [activeResultTask?.confidence, project?.confidence]);
+  const snapshotAffinity = useMemo(() => {
+    if (activeResultTask?.affinity && Object.keys(activeResultTask.affinity).length > 0) {
+      return activeResultTask.affinity as Record<string, unknown>;
+    }
+    if (project?.affinity && Object.keys(project.affinity).length > 0) {
+      return project.affinity as Record<string, unknown>;
+    }
+    return null;
+  }, [activeResultTask?.affinity, project?.affinity]);
   const snapshotPlddt = useMemo(() => {
-    if (!project?.confidence) return null;
-    const raw = readFirstFiniteMetric(project.confidence as Record<string, unknown>, [
+    if (!snapshotConfidence) return null;
+    const raw = readFirstFiniteMetric(snapshotConfidence, [
       'complex_plddt_protein',
       'complex_plddt',
       'plddt'
     ]);
     if (raw === null) return null;
     return raw <= 1 ? raw * 100 : raw;
-  }, [project]);
+  }, [snapshotConfidence]);
   const snapshotIptm = useMemo(() => {
-    if (!project?.confidence) return null;
-    return readFirstFiniteMetric(project.confidence as Record<string, unknown>, ['iptm', 'ligand_iptm', 'protein_iptm']);
-  }, [project]);
-  const primaryLigandValue = useMemo(() => {
-    return normalizedDraftComponents.find((comp) => comp.type === 'ligand' && comp.sequence)?.sequence || '';
-  }, [normalizedDraftComponents]);
-  const primaryLigandIsSmiles = useMemo(() => {
-    const ligand = normalizedDraftComponents.find((comp) => comp.type === 'ligand' && comp.sequence);
-    if (!ligand) return false;
-    return ligand.inputMethod !== 'ccd';
-  }, [normalizedDraftComponents]);
+    if (!snapshotConfidence) return null;
+    return readFirstFiniteMetric(snapshotConfidence, ['iptm', 'ligand_iptm', 'protein_iptm']);
+  }, [snapshotConfidence]);
   const snapshotBindingValues = useMemo(() => {
-    if (!project?.affinity) return null;
-    const values = readFiniteMetricSeries(project.affinity as Record<string, unknown>, [
+    if (!snapshotAffinity) return null;
+    const values = readFiniteMetricSeries(snapshotAffinity, [
       'affinity_probability_binary',
       'affinity_probability_binary1',
       'affinity_probability_binary2'
@@ -578,7 +691,7 @@ export function ProjectDetailPage() {
     const normalized = values.filter((value) => Number.isFinite(value) && value >= 0 && value <= 1);
     if (normalized.length === 0) return null;
     return normalized;
-  }, [project]);
+  }, [snapshotAffinity]);
   const snapshotBindingProbability = useMemo(() => {
     if (!snapshotBindingValues?.length) return null;
     return Math.max(0, Math.min(1, mean(snapshotBindingValues)));
@@ -588,15 +701,15 @@ export function ProjectDetailPage() {
     return std(snapshotBindingValues);
   }, [snapshotBindingValues]);
   const snapshotLogIc50Values = useMemo(() => {
-    if (!project?.affinity) return null;
-    const logValues = readFiniteMetricSeries(project.affinity as Record<string, unknown>, [
+    if (!snapshotAffinity) return null;
+    const logValues = readFiniteMetricSeries(snapshotAffinity, [
       'affinity_pred_value',
       'affinity_pred_value1',
       'affinity_pred_value2'
     ]);
     if (logValues.length === 0) return null;
     return logValues;
-  }, [project]);
+  }, [snapshotAffinity]);
   const snapshotIc50Um = useMemo(() => {
     if (!snapshotLogIc50Values?.length) return null;
     return 10 ** mean(snapshotLogIc50Values);
@@ -1030,10 +1143,6 @@ export function ProjectDetailPage() {
     return buildChainInfos(nonEmptyComponents(normalizedDraftComponents));
   }, [normalizedDraftComponents]);
 
-  const activeChainIds = useMemo(() => {
-    return activeChainInfos.map((item) => item.id);
-  }, [activeChainInfos]);
-
   const chainInfoById = useMemo(() => {
     const byId = new Map<string, (typeof activeChainInfos)[number]>();
     for (const info of activeChainInfos) {
@@ -1309,9 +1418,15 @@ export function ProjectDetailPage() {
         throw new Error('You do not have permission to access this project.');
       }
 
+      const taskRows = sortProjectTasks(await listProjectTasks(next.id));
+      const activeTaskId = (next.task_id || '').trim();
+      const activeTaskRow =
+        activeTaskId.length > 0 ? taskRows.find((item) => String(item.task_id || '').trim() === activeTaskId) || null : null;
+
       const savedConfig = loadProjectInputConfig(next.id);
-      const resolvedConfig = savedConfig || defaultConfigFromProject(next);
-      const backendConstraints = filterConstraintsByBackend(resolvedConfig.constraints, next.backend);
+      const baseConfig = savedConfig || defaultConfigFromProject(next);
+      const taskAlignedConfig = mergeTaskSnapshotIntoConfig(baseConfig, activeTaskRow);
+      const backendConstraints = filterConstraintsByBackend(taskAlignedConfig.constraints, next.backend);
 
       const savedUiState = loadProjectUiState(next.id);
       const loadedDraft: DraftFields = {
@@ -1321,7 +1436,7 @@ export function ProjectDetailPage() {
         use_msa: next.use_msa,
         color_mode: next.color_mode || 'white',
         inputConfig: {
-          ...resolvedConfig,
+          ...taskAlignedConfig,
           constraints: backendConstraints
         }
       };
@@ -1345,7 +1460,7 @@ export function ProjectDetailPage() {
       setSelectedConstraintTemplateComponentId(savedUiState?.selectedConstraintTemplateComponentId || null);
       setPickedResidue(null);
       setProject(next);
-      await loadProjectTasks(next.id);
+      setProjectTasks(taskRows);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load project.');
     } finally {
@@ -2350,12 +2465,12 @@ export function ProjectDetailPage() {
   };
   const displayStructureText = structureText;
   const displayStructureFormat: 'cif' | 'pdb' = structureFormat;
-  const displayStructureName = project.structure_name || '-';
+  const displayStructureName = activeResultTask?.structure_name || project.structure_name || '-';
   const confidenceBackend =
-    project.confidence && typeof project.confidence.backend === 'string' ? String(project.confidence.backend).toLowerCase() : '';
+    snapshotConfidence && typeof snapshotConfidence.backend === 'string' ? String(snapshotConfidence.backend).toLowerCase() : '';
   const hasAf3ConfidenceSignals = Boolean(
-    readFirstFiniteMetric(project.confidence || {}, ['ranking_score', 'fraction_disordered']) !== null ||
-      readObjectPath(project.confidence || {}, 'chain_pair_iptm') !== undefined
+    readFirstFiniteMetric(snapshotConfidence || {}, ['ranking_score', 'fraction_disordered']) !== null ||
+      readObjectPath(snapshotConfidence || {}, 'chain_pair_iptm') !== undefined
   );
   const displayStructureColorMode: 'white' | 'alphafold' =
     project.backend === 'alphafold3' ||
@@ -2598,15 +2713,15 @@ export function ProjectDetailPage() {
               <section className="result-aside-block result-aside-block-ligand">
                 <div className="result-aside-title">Ligand</div>
                 <div className="ligand-preview-panel">
-                  {primaryLigandValue && primaryLigandIsSmiles ? (
-                    <Ligand2DPreview smiles={primaryLigandValue} />
+                  {overviewPrimaryLigand.smiles && overviewPrimaryLigand.isSmiles ? (
+                    <Ligand2DPreview smiles={overviewPrimaryLigand.smiles} />
                   ) : (
                     <div className="ligand-preview-empty">
-                      {primaryLigandValue ? '2D preview requires SMILES input.' : 'No ligand input.'}
+                      {overviewPrimaryLigand.smiles ? '2D preview requires SMILES input.' : 'No ligand input.'}
                     </div>
                   )}
                 </div>
-                <LigandPropertyGrid smiles={primaryLigandIsSmiles ? primaryLigandValue : ''} />
+                <LigandPropertyGrid smiles={overviewPrimaryLigand.isSmiles ? overviewPrimaryLigand.smiles : ''} />
               </section>
 
               <section className="result-aside-block">
@@ -2627,7 +2742,7 @@ export function ProjectDetailPage() {
           </div>
 
           <div className="results-bottom">
-            <MetricsPanel title="Confidence" data={project.confidence || {}} chainIds={activeChainIds} />
+            <MetricsPanel title="Confidence" data={snapshotConfidence || {}} chainIds={resultChainIds} />
           </div>
         </>
       )}
