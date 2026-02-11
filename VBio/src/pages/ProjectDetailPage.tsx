@@ -376,6 +376,57 @@ function readTaskComponents(task: ProjectTask | null): InputComponent[] {
   return fallback;
 }
 
+function normalizeTaskTemplateUpload(value: unknown): ProteinTemplateUpload | null {
+  if (!value || typeof value !== 'object') return null;
+  const fileName = typeof (value as any).fileName === 'string' ? (value as any).fileName.trim() : '';
+  const format = (value as any).format === 'cif' ? 'cif' : (value as any).format === 'pdb' ? 'pdb' : null;
+  const content = typeof (value as any).content === 'string' ? (value as any).content : '';
+  const chainId = typeof (value as any).chainId === 'string' ? (value as any).chainId.trim() : '';
+  const chainSequencesValue = (value as any).chainSequences;
+  const chainSequences =
+    chainSequencesValue && typeof chainSequencesValue === 'object'
+      ? (chainSequencesValue as Record<string, string>)
+      : {};
+  if (!fileName || !format || !content || !chainId) return null;
+  return {
+    fileName,
+    format,
+    content,
+    chainId,
+    chainSequences
+  };
+}
+
+function readTaskProteinTemplates(task: ProjectTask | null): Record<string, ProteinTemplateUpload> {
+  const templates: Record<string, ProteinTemplateUpload> = {};
+  if (!task || !Array.isArray(task.components)) return templates;
+  const rawComponents = task.components as unknown as Array<Record<string, unknown>>;
+  for (const component of rawComponents) {
+    if (!component || component.type !== 'protein') continue;
+    const componentId = typeof component.id === 'string' ? component.id.trim() : '';
+    if (!componentId) continue;
+    const upload = normalizeTaskTemplateUpload((component as any).templateUpload || (component as any).template_upload);
+    if (!upload) continue;
+    templates[componentId] = upload;
+  }
+  return templates;
+}
+
+function addTemplatesToTaskSnapshotComponents(
+  components: InputComponent[],
+  templates: Record<string, ProteinTemplateUpload>
+): InputComponent[] {
+  return components.map((component) => {
+    if (component.type !== 'protein') return component;
+    const upload = templates[component.id];
+    if (!upload) return component;
+    return ({
+      ...(component as unknown as Record<string, unknown>),
+      templateUpload: upload
+    } as unknown) as InputComponent;
+  });
+}
+
 function mergeTaskSnapshotIntoConfig(baseConfig: ProjectInputConfig, task: ProjectTask | null): ProjectInputConfig {
   if (!task) return baseConfig;
 
@@ -1776,28 +1827,20 @@ export function ProjectDetailPage() {
       );
       const templateSource = (() => {
         if (requestedTaskRow) {
-          if (!isDraftTaskSnapshot(requestedTaskRow)) {
-            return {};
-          }
-          const byTaskRow = savedUiState?.taskProteinTemplates?.[requestedTaskRow.id] || {};
-          if (Object.keys(byTaskRow).length > 0) return byTaskRow;
-          return savedUiState?.proteinTemplates || {};
+          return readTaskProteinTemplates(requestedTaskRow);
         }
 
         if (activeTaskRow) {
           if (!isDraftTaskSnapshot(activeTaskRow)) {
             return {};
           }
-          const byActiveRow = savedUiState?.taskProteinTemplates?.[activeTaskRow.id] || {};
-          if (Object.keys(byActiveRow).length > 0) return byActiveRow;
-          return savedUiState?.proteinTemplates || {};
+          return readTaskProteinTemplates(activeTaskRow);
         }
 
         if (latestDraftTask?.id) {
-          const byScopeRow = savedUiState?.taskProteinTemplates?.[latestDraftTask.id] || {};
-          if (Object.keys(byScopeRow).length > 0) return byScopeRow;
+          return readTaskProteinTemplates(latestDraftTask);
         }
-        return savedUiState?.proteinTemplates || {};
+        return {};
       })();
       const restoredTemplates = Object.fromEntries(
         Object.entries(templateSource).filter(([componentId]) => validProteinIds.has(componentId))
@@ -1839,14 +1882,13 @@ export function ProjectDetailPage() {
 
   useEffect(() => {
     if (!project) return;
-    const previousUiState = loadProjectUiState(project.id);
     saveProjectUiState(project.id, {
-      proteinTemplates,
-      taskProteinTemplates: previousUiState?.taskProteinTemplates || {},
+      proteinTemplates: {},
+      taskProteinTemplates: {},
       activeConstraintId,
       selectedConstraintTemplateComponentId
     });
-  }, [project, proteinTemplates, activeConstraintId, selectedConstraintTemplateComponentId]);
+  }, [project, activeConstraintId, selectedConstraintTemplateComponentId]);
 
   const patch = async (payload: Partial<Project>) => {
     if (!project) return null;
@@ -1896,31 +1938,20 @@ export function ProjectDetailPage() {
     return latestDraft ? latestDraft.id : null;
   };
 
-  const persistTemplatesForTaskRow = (projectIdValue: string, taskRowId: string) => {
-    const previousUiState = loadProjectUiState(projectIdValue);
-    const taskProteinTemplates = {
-      ...(previousUiState?.taskProteinTemplates || {}),
-      [taskRowId]: proteinTemplates
-    };
-    saveProjectUiState(projectIdValue, {
-      proteinTemplates: previousUiState?.proteinTemplates || proteinTemplates,
-      taskProteinTemplates,
-      activeConstraintId,
-      selectedConstraintTemplateComponentId
-    });
-  };
-
   const persistDraftTaskSnapshot = async (
     normalizedConfig: ProjectInputConfig,
-    options?: { statusText?: string; reuseTaskRowId?: string | null }
+    options?: { statusText?: string; reuseTaskRowId?: string | null; snapshotComponents?: InputComponent[] }
   ): Promise<ProjectTask> => {
     if (!project || !draft) {
       throw new Error('Project context is not ready.');
     }
 
-    const now = new Date().toISOString();
     const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(normalizedConfig);
     const statusText = options?.statusText || 'Draft saved (not submitted)';
+    const snapshotComponents =
+      Array.isArray(options?.snapshotComponents) && options?.snapshotComponents.length > 0
+        ? options.snapshotComponents
+        : normalizedConfig.components;
     const basePayload: Partial<ProjectTask> = {
       project_id: project.id,
       task_id: '',
@@ -1931,7 +1962,7 @@ export function ProjectDetailPage() {
       seed: normalizedConfig.options.seed ?? null,
       protein_sequence: proteinSequence,
       ligand_smiles: ligandSmiles,
-      components: normalizedConfig.components,
+      components: snapshotComponents,
       constraints: normalizedConfig.constraints,
       properties: normalizedConfig.properties,
       confidence: {},
@@ -1942,68 +1973,26 @@ export function ProjectDetailPage() {
       duration_seconds: null
     };
 
-    const toLocalTaskRow = (id: string, payload: Partial<ProjectTask>, previous?: ProjectTask | null): ProjectTask => ({
-      task_id: '',
-      task_state: 'DRAFT',
-      status_text: statusText,
-      error_text: '',
-      backend: draft.backend,
-      seed: normalizedConfig.options.seed ?? null,
-      protein_sequence: proteinSequence,
-      ligand_smiles: ligandSmiles,
-      components: normalizedConfig.components,
-      constraints: normalizedConfig.constraints,
-      properties: normalizedConfig.properties,
-      confidence: {},
-      affinity: {},
-      structure_name: '',
-      submitted_at: null,
-      completed_at: null,
-      duration_seconds: null,
-      created_at: previous?.created_at || now,
-      updated_at: now,
-      ...previous,
-      ...payload,
-      id,
-      project_id: project.id
-    });
-
     const reuseTaskRowId = options?.reuseTaskRowId || null;
     if (reuseTaskRowId) {
-      if (reuseTaskRowId.startsWith('local-')) {
-        const previous = projectTasks.find((item) => item.id === reuseTaskRowId) || null;
-        const localRow = toLocalTaskRow(reuseTaskRowId, basePayload, previous);
-        setProjectTasks((prev) => {
-          const exists = prev.some((item) => item.id === reuseTaskRowId);
-          const next = exists ? prev.map((item) => (item.id === reuseTaskRowId ? localRow : item)) : [localRow, ...prev];
-          return sortProjectTasks(next);
-        });
-        return localRow;
-      }
-
-      try {
-        const updated = await updateProjectTask(reuseTaskRowId, basePayload);
-        setProjectTasks((prev) => {
-          const exists = prev.some((item) => item.id === reuseTaskRowId);
-          const next = exists ? prev.map((item) => (item.id === reuseTaskRowId ? updated : item)) : [updated, ...prev];
-          return sortProjectTasks(next);
-        });
-        return updated;
-      } catch {
-        // Fall through to insert path.
+      if (!reuseTaskRowId.startsWith('local-')) {
+        try {
+          const updated = await updateProjectTask(reuseTaskRowId, basePayload);
+          setProjectTasks((prev) => {
+            const exists = prev.some((item) => item.id === reuseTaskRowId);
+            const next = exists ? prev.map((item) => (item.id === reuseTaskRowId ? updated : item)) : [updated, ...prev];
+            return sortProjectTasks(next);
+          });
+          return updated;
+        } catch {
+          // Fall through to insert path.
+        }
       }
     }
 
-    try {
-      const inserted = await insertProjectTask(basePayload);
-      setProjectTasks((prev) => sortProjectTasks([inserted, ...prev.filter((row) => row.id !== inserted.id)]));
-      return inserted;
-    } catch {
-      const localId = `local-draft-${Math.random().toString(36).slice(2)}`;
-      const localRow = toLocalTaskRow(localId, basePayload, null);
-      setProjectTasks((prev) => sortProjectTasks([localRow, ...prev.filter((row) => row.id !== localId)]));
-      return localRow;
-    }
+    const inserted = await insertProjectTask(basePayload);
+    setProjectTasks((prev) => sortProjectTasks([inserted, ...prev.filter((row) => row.id !== inserted.id)]));
+    return inserted;
   };
 
   const saveDraft = async (event?: FormEvent) => {
@@ -2032,11 +2021,12 @@ export function ProjectDetailPage() {
       if (next) {
         saveProjectInputConfig(next.id, normalizedConfig);
         const reusableDraftTaskRowId = resolveEditableDraftTaskRowId();
+        const snapshotComponents = addTemplatesToTaskSnapshotComponents(normalizedConfig.components, proteinTemplates);
         const draftTaskRow = await persistDraftTaskSnapshot(normalizedConfig, {
           statusText: 'Draft saved (not submitted)',
-          reuseTaskRowId: reusableDraftTaskRowId
+          reuseTaskRowId: reusableDraftTaskRowId,
+          snapshotComponents
         });
-        persistTemplatesForTaskRow(next.id, draftTaskRow.id);
         const nextDraft: DraftFields = {
           name: next.name,
           summary: next.summary,
@@ -2056,7 +2046,7 @@ export function ProjectDetailPage() {
         navigate(`/projects/${next.id}?${query}`, { replace: true });
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save draft.');
+      setError(err instanceof Error ? `Failed to save draft: ${err.message}` : 'Failed to save draft.');
     } finally {
       setSaving(false);
     }
@@ -2248,11 +2238,12 @@ export function ProjectDetailPage() {
         );
       }
 
+      const snapshotComponents = addTemplatesToTaskSnapshotComponents(normalizedConfig.components, proteinTemplates);
       const draftTaskRow = await persistDraftTaskSnapshot(normalizedConfig, {
         statusText: 'Draft snapshot prepared for run',
-        reuseTaskRowId: resolveEditableDraftTaskRowId()
+        reuseTaskRowId: resolveEditableDraftTaskRowId(),
+        snapshotComponents
       });
-      persistTemplatesForTaskRow(project.id, draftTaskRow.id);
 
       const activeAssignments = assignChainIdsForComponents(activeComponents);
       const templateUploads: NonNullable<Parameters<typeof submitPrediction>[0]['templateUploads']> = [];
@@ -2295,7 +2286,7 @@ export function ProjectDetailPage() {
         seed: normalizedConfig.options.seed ?? null,
         protein_sequence: proteinSequence,
         ligand_smiles: ligandSmiles,
-        components: activeComponents,
+        components: snapshotComponents,
         constraints: normalizedConfig.constraints,
         properties: normalizedConfig.properties,
         confidence: {},
@@ -2330,7 +2321,7 @@ export function ProjectDetailPage() {
           seed: normalizedConfig.options.seed ?? null,
           protein_sequence: proteinSequence,
           ligand_smiles: ligandSmiles,
-          components: activeComponents,
+          components: snapshotComponents,
           constraints: normalizedConfig.constraints,
           properties: normalizedConfig.properties,
           confidence: {},
