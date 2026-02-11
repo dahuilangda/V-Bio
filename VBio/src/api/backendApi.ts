@@ -652,6 +652,119 @@ function extractLigandAtomPlddtsFromStructure(structureText: string, structureFo
     : extractLigandAtomPlddtsFromCif(structureText);
 }
 
+function extractChainMeanPlddtFromCif(structureText: string): Record<string, number> {
+  if (!structureText) return {};
+  const lines = structureText.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() !== 'loop_') continue;
+
+    let headerIndex = i + 1;
+    const headers: string[] = [];
+    while (headerIndex < lines.length) {
+      const rawHeader = lines[headerIndex].trim();
+      if (!rawHeader.startsWith('_')) break;
+      headers.push(rawHeader);
+      headerIndex += 1;
+    }
+
+    if (!headers.some((header) => header.toLowerCase().startsWith('_atom_site.'))) {
+      i = headerIndex - 1;
+      continue;
+    }
+
+    const chainCol = findHeaderIndex(headers, ['_atom_site.label_asym_id', '_atom_site.auth_asym_id']);
+    const bFactorCol = findHeaderIndex(headers, ['_atom_site.b_iso_or_equiv']);
+    const typeCol = findHeaderIndex(headers, ['_atom_site.type_symbol']);
+    const atomIdCol = findHeaderIndex(headers, ['_atom_site.label_atom_id', '_atom_site.auth_atom_id']);
+    if (chainCol < 0 || bFactorCol < 0) {
+      i = headerIndex - 1;
+      continue;
+    }
+
+    const sums = new Map<string, { sum: number; count: number }>();
+    let rowIndex = headerIndex;
+    while (rowIndex < lines.length) {
+      const rawRow = lines[rowIndex];
+      const row = rawRow.trim();
+      if (!row || row === '#') {
+        rowIndex += 1;
+        continue;
+      }
+      if (row === 'loop_' || row.startsWith('_')) break;
+
+      const tokens = tokenizeCifRow(rawRow);
+      if (tokens.length >= headers.length) {
+        const chainId = stripCifTokenQuotes(tokens[chainCol]).trim();
+        const bFactor = Number(stripCifTokenQuotes(tokens[bFactorCol]));
+        const element = typeCol >= 0 ? stripCifTokenQuotes(tokens[typeCol]) : '';
+        const atomName = atomIdCol >= 0 ? stripCifTokenQuotes(tokens[atomIdCol]) : '';
+        if (!chainId || !Number.isFinite(bFactor) || isHydrogenLikeElement(element || atomName)) {
+          rowIndex += 1;
+          continue;
+        }
+        const current = sums.get(chainId);
+        if (current) {
+          current.sum += bFactor;
+          current.count += 1;
+        } else {
+          sums.set(chainId, { sum: bFactor, count: 1 });
+        }
+      }
+      rowIndex += 1;
+    }
+
+    const output: Record<string, number> = {};
+    for (const [chainId, item] of sums.entries()) {
+      if (item.count > 0) {
+        output[chainId] = normalizePlddt(item.sum / item.count);
+      }
+    }
+    return output;
+  }
+  return {};
+}
+
+function extractChainMeanPlddtFromPdb(structureText: string): Record<string, number> {
+  if (!structureText) return {};
+  const lines = structureText.split(/\r?\n/);
+  const sums = new Map<string, { sum: number; count: number }>();
+
+  for (const line of lines) {
+    if (!(line.startsWith('ATOM') || line.startsWith('HETATM'))) continue;
+    const chainId = line.slice(21, 22).trim();
+    if (!chainId) continue;
+    const atomName = line.slice(12, 16).trim();
+    const rawElement = line.length >= 78 ? line.slice(76, 78).trim() : '';
+    const element = rawElement || atomName;
+    if (isHydrogenLikeElement(element)) continue;
+
+    const bFactor = Number.parseFloat(line.slice(60, 66).trim());
+    if (!Number.isFinite(bFactor)) continue;
+
+    const current = sums.get(chainId);
+    if (current) {
+      current.sum += bFactor;
+      current.count += 1;
+    } else {
+      sums.set(chainId, { sum: bFactor, count: 1 });
+    }
+  }
+
+  const output: Record<string, number> = {};
+  for (const [chainId, item] of sums.entries()) {
+    if (item.count > 0) {
+      output[chainId] = normalizePlddt(item.sum / item.count);
+    }
+  }
+  return output;
+}
+
+function extractChainMeanPlddtFromStructure(structureText: string, structureFormat: 'cif' | 'pdb'): Record<string, number> {
+  return structureFormat === 'pdb'
+    ? extractChainMeanPlddtFromPdb(structureText)
+    : extractChainMeanPlddtFromCif(structureText);
+}
+
 function parseMaQaLocalMetricIdFromCif(structureText: string): string | null {
   const lines = structureText.split(/\r?\n/);
   for (let i = 0; i < lines.length; i += 1) {
@@ -936,10 +1049,17 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
     existingLigandAtomPlddts.length > 0
       ? existingLigandAtomPlddts
       : extractLigandAtomPlddtsFromStructure(structureText, structureFormat);
+  const chainMeanPlddt = extractChainMeanPlddtFromStructure(structureText, structureFormat);
   if (extractedLigandAtomPlddts.length > 0) {
     confidence = {
       ...confidence,
       ligand_atom_plddts: extractedLigandAtomPlddts
+    };
+  }
+  if (Object.keys(chainMeanPlddt).length > 0) {
+    confidence = {
+      ...confidence,
+      chain_mean_plddt: chainMeanPlddt
     };
   }
 

@@ -122,6 +122,22 @@ function pointForRadar(center: number, radius: number, ratio: number, index: num
   return `${x.toFixed(2)},${y.toFixed(2)}`;
 }
 
+function axisLabelPosition(center: number, radius: number, index: number, total: number) {
+  const angle = -Math.PI / 2 + (index * Math.PI * 2) / total;
+  const x = center + Math.cos(angle) * radius * 1.15;
+  const y = center + Math.sin(angle) * radius * 1.15;
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  const textAnchor: 'start' | 'middle' | 'end' = c > 0.25 ? 'start' : c < -0.25 ? 'end' : 'middle';
+  const dominantBaseline: 'alphabetic' | 'middle' | 'hanging' = s > 0.35 ? 'hanging' : s < -0.35 ? 'alphabetic' : 'middle';
+  return {
+    x,
+    y,
+    textAnchor,
+    dominantBaseline
+  };
+}
+
 export function LigandPropertyGrid({ smiles, variant = 'grid' }: LigandPropertyGridProps) {
   const [props, setProps] = useState<LigandPropsState>(EMPTY_PROPS);
   const [loading, setLoading] = useState(false);
@@ -237,6 +253,21 @@ export function LigandPropertyGrid({ smiles, variant = 'grid' }: LigandPropertyG
             const [x, y] = p.split(',').map((v) => Number(v));
             return <line key={`axis-${cards[index].label}`} className="ligand-radar-axis" x1={center} y1={center} x2={x} y2={y} />;
           })}
+          {cards.map((card, index) => {
+            const pos = axisLabelPosition(center, radius, index, radarScores.length);
+            return (
+              <text
+                key={`label-${card.label}`}
+                className="ligand-radar-axis-label"
+                x={pos.x}
+                y={pos.y}
+                textAnchor={pos.textAnchor}
+                dominantBaseline={pos.dominantBaseline}
+              >
+                {card.label}
+              </text>
+            );
+          })}
           <polygon className="ligand-radar-area" points={points} />
           <polyline className="ligand-radar-stroke" points={points} />
           {radarScores.map((score, index) => {
@@ -244,9 +275,9 @@ export function LigandPropertyGrid({ smiles, variant = 'grid' }: LigandPropertyG
             return <circle key={`dot-${cards[index].label}`} className="ligand-radar-dot" cx={x} cy={y} r={3.8} />;
           })}
         </svg>
-        <div className="ligand-radar-legend">
+        <div className="ligand-radar-chips">
           {cards.map((card) => (
-            <div key={card.label} className="ligand-radar-item">
+            <div key={card.label} className="ligand-radar-chip">
               <span>{card.label}</span>
               <strong className={`ligand-prop-value metric-value-${card.tone}`}>{formatValue(card.value, card.digits)}</strong>
             </div>

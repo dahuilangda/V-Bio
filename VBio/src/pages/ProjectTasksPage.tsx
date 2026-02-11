@@ -17,25 +17,82 @@ import { deleteProjectTask, getProjectById, listProjectTasks, updateProject, upd
 import { JSMEEditor } from '../components/project/JSMEEditor';
 import { Ligand2DPreview } from '../components/project/Ligand2DPreview';
 import { useAuth } from '../hooks/useAuth';
-import type { Project, ProjectTask } from '../types/models';
+import type { InputComponent, Project, ProjectTask } from '../types/models';
+import { assignChainIdsForComponents } from '../utils/chainAssignments';
 import { formatDateTime, formatDuration } from '../utils/date';
 import { normalizeComponentSequence } from '../utils/projectInputs';
 import { loadRDKitModule } from '../utils/rdkit';
 
-function readTaskPrimaryLigand(task: ProjectTask): { smiles: string; isSmiles: boolean } {
+function normalizeTaskComponents(components: InputComponent[]): InputComponent[] {
+  return components.map((item) => ({
+    ...item,
+    sequence: normalizeComponentSequence(item.type, item.sequence)
+  }));
+}
+
+function readTaskComponents(task: ProjectTask): InputComponent[] {
+  const components = Array.isArray(task.components) ? normalizeTaskComponents(task.components) : [];
+  if (components.length > 0) return components;
+
+  const fallback: InputComponent[] = [];
+  const proteinSequence = normalizeComponentSequence('protein', task.protein_sequence || '');
+  const ligandSmiles = normalizeComponentSequence('ligand', task.ligand_smiles || '');
+  if (proteinSequence) {
+    fallback.push({
+      id: 'task-protein-1',
+      type: 'protein',
+      numCopies: 1,
+      sequence: proteinSequence,
+      useMsa: true,
+      cyclic: false
+    });
+  }
+  if (ligandSmiles) {
+    fallback.push({
+      id: 'task-ligand-1',
+      type: 'ligand',
+      numCopies: 1,
+      sequence: ligandSmiles,
+      inputMethod: 'jsme'
+    });
+  }
+  return fallback;
+}
+
+function readTaskPrimaryLigand(
+  task: ProjectTask,
+  components: InputComponent[],
+  preferredComponentId: string | null
+): { smiles: string; isSmiles: boolean } {
+  if (preferredComponentId) {
+    const selected = components.find((item) => item.id === preferredComponentId);
+    const selectedValue =
+      selected && selected.type === 'ligand' ? normalizeComponentSequence('ligand', selected.sequence) : '';
+    if (selected && selected.type === 'ligand' && selectedValue) {
+      return {
+        smiles: selectedValue,
+        isSmiles: selected.inputMethod !== 'ccd'
+      };
+    }
+  }
+
+  const ligand = components.find((item) => item.type === 'ligand' && normalizeComponentSequence('ligand', item.sequence));
+  if (ligand) {
+    const value = normalizeComponentSequence('ligand', ligand.sequence);
+    return {
+      smiles: value,
+      isSmiles: ligand.inputMethod !== 'ccd'
+    };
+  }
+
   const directLigand = normalizeComponentSequence('ligand', task.ligand_smiles || '');
   if (directLigand) {
     return { smiles: directLigand, isSmiles: true };
   }
-  const components = Array.isArray(task.components) ? task.components : [];
-  const ligand = components.find((item) => item.type === 'ligand' && normalizeComponentSequence('ligand', item.sequence));
-  if (!ligand) {
-    return { smiles: '', isSmiles: false };
-  }
-  const value = normalizeComponentSequence('ligand', ligand.sequence);
+
   return {
-    smiles: value,
-    isSmiles: ligand.inputMethod !== 'ccd'
+    smiles: '',
+    isSmiles: false
   };
 }
 
@@ -93,6 +150,18 @@ interface TaskConfidenceMetrics {
   pae: number | null;
 }
 
+interface TaskMetricContext {
+  chainIds: string[];
+  targetChainId: string | null;
+  ligandChainId: string | null;
+}
+
+interface TaskSelectionContext extends TaskMetricContext {
+  ligandSmiles: string;
+  ligandIsSmiles: boolean;
+  ligandComponentCount: number;
+}
+
 interface TaskListRow {
   task: ProjectTask;
   metrics: TaskConfidenceMetrics;
@@ -112,12 +181,12 @@ function toneForPlddt(value: number | null): MetricTone {
   return 'low';
 }
 
-function toneForProbability(value: number | null): MetricTone {
+function toneForIptm(value: number | null): MetricTone {
   if (value === null) return 'neutral';
-  const pct = value <= 1 ? value * 100 : value;
-  if (pct >= 90) return 'excellent';
-  if (pct >= 70) return 'good';
-  if (pct >= 50) return 'medium';
+  const normalized = value <= 1 ? value : value / 100;
+  if (normalized >= 0.8) return 'excellent';
+  if (normalized >= 0.6) return 'good';
+  if (normalized >= 0.4) return 'medium';
   return 'low';
 }
 
@@ -129,13 +198,132 @@ function toneForPae(value: number | null): MetricTone {
   return 'low';
 }
 
-function readTaskConfidenceMetrics(task: ProjectTask): TaskConfidenceMetrics {
-  const confidence = task.confidence || {};
-  const plddtRaw = readFirstFiniteMetric(confidence, ['complex_plddt_protein', 'complex_plddt', 'plddt']);
-  const iptmRaw = readFirstFiniteMetric(confidence, ['iptm', 'ligand_iptm', 'protein_iptm']);
-  const paeRaw = readFirstFiniteMetric(confidence, ['complex_pde', 'complex_pae', 'pae']);
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return value;
+}
+
+function readPairIptmForChains(
+  confidence: Record<string, unknown>,
+  chainA: string | null,
+  chainB: string | null,
+  fallbackChainIds: string[]
+): number | null {
+  if (!chainA || !chainB) return null;
+
+  const pairMap = readObjectPath(confidence, 'pair_chains_iptm');
+  if (pairMap && typeof pairMap === 'object' && !Array.isArray(pairMap)) {
+    const byChain = pairMap as Record<string, unknown>;
+    const rowA = byChain[chainA];
+    const rowB = byChain[chainB];
+    const v1 =
+      rowA && typeof rowA === 'object' && !Array.isArray(rowA)
+        ? normalizeProbability(toFiniteNumber((rowA as Record<string, unknown>)[chainB]))
+        : null;
+    const v2 =
+      rowB && typeof rowB === 'object' && !Array.isArray(rowB)
+        ? normalizeProbability(toFiniteNumber((rowB as Record<string, unknown>)[chainA]))
+        : null;
+    if (v1 !== null || v2 !== null) {
+      return Math.max(v1 ?? Number.NEGATIVE_INFINITY, v2 ?? Number.NEGATIVE_INFINITY);
+    }
+  }
+
+  const pairMatrix = readObjectPath(confidence, 'chain_pair_iptm');
+  if (!Array.isArray(pairMatrix)) return null;
+  const chainIdsRaw = readObjectPath(confidence, 'chain_ids');
+  const chainIds =
+    Array.isArray(chainIdsRaw) && chainIdsRaw.every((item) => typeof item === 'string')
+      ? (chainIdsRaw as string[])
+      : fallbackChainIds;
+  const i = chainIds.findIndex((item) => item === chainA);
+  const j = chainIds.findIndex((item) => item === chainB);
+  if (i < 0 || j < 0) return null;
+  const rowI = pairMatrix[i];
+  const rowJ = pairMatrix[j];
+  const m1 = Array.isArray(rowI) ? normalizeProbability(toFiniteNumber(rowI[j])) : null;
+  const m2 = Array.isArray(rowJ) ? normalizeProbability(toFiniteNumber(rowJ[i])) : null;
+  if (m1 !== null || m2 !== null) {
+    return Math.max(m1 ?? Number.NEGATIVE_INFINITY, m2 ?? Number.NEGATIVE_INFINITY);
+  }
+  return null;
+}
+
+function readChainMeanPlddtForChain(confidence: Record<string, unknown>, chainId: string | null): number | null {
+  if (!chainId) return null;
+  const map = readObjectPath(confidence, 'chain_mean_plddt');
+  if (!map || typeof map !== 'object' || Array.isArray(map)) return null;
+  const value = toFiniteNumber((map as Record<string, unknown>)[chainId]);
+  if (value === null) return null;
+  return value >= 0 && value <= 1 ? value * 100 : value;
+}
+
+function resolveTaskSelectionContext(task: ProjectTask): TaskSelectionContext {
+  const activeComponents = readTaskComponents(task).filter((item) => Boolean(item.sequence.trim()));
+  const ligandComponentCount = activeComponents.filter((item) => item.type === 'ligand').length;
+  if (activeComponents.length === 0) {
+    const ligand = readTaskPrimaryLigand(task, [], null);
+    return {
+      chainIds: [],
+      targetChainId: null,
+      ligandChainId: null,
+      ligandSmiles: ligand.smiles,
+      ligandIsSmiles: ligand.isSmiles,
+      ligandComponentCount
+    };
+  }
+
+  const chainAssignments = assignChainIdsForComponents(activeComponents);
+  const chainIds = chainAssignments.flat();
+  const validChainIds = new Set(chainIds);
+  const taskProperties = task.properties && typeof task.properties === 'object' ? task.properties : null;
+  const rawTarget = taskProperties && typeof taskProperties.target === 'string' ? taskProperties.target.trim() : '';
+  const rawLigand = taskProperties && typeof taskProperties.ligand === 'string' ? taskProperties.ligand.trim() : '';
+  const fallbackTargetChainId = chainAssignments[0]?.[0] || null;
+  const fallbackLigandChainId = chainAssignments[chainAssignments.length - 1]?.[0] || null;
+  const targetChainId = rawTarget && validChainIds.has(rawTarget) ? rawTarget : fallbackTargetChainId;
+  const ligandChainId = rawLigand && validChainIds.has(rawLigand) ? rawLigand : fallbackLigandChainId;
+
+  const chainToComponent = new Map<string, InputComponent>();
+  chainAssignments.forEach((chainGroup, index) => {
+    chainGroup.forEach((chainId) => {
+      chainToComponent.set(chainId, activeComponents[index]);
+    });
+  });
+  const selectedLigandComponent = ligandChainId ? chainToComponent.get(ligandChainId) || null : null;
+  const ligand = readTaskPrimaryLigand(task, activeComponents, selectedLigandComponent?.id || null);
+
   return {
-    plddt: plddtRaw === null ? null : plddtRaw <= 1 ? plddtRaw * 100 : plddtRaw,
+    chainIds,
+    targetChainId,
+    ligandChainId,
+    ligandSmiles: ligand.smiles,
+    ligandIsSmiles: ligand.isSmiles,
+    ligandComponentCount
+  };
+}
+
+function readTaskConfidenceMetrics(task: ProjectTask, context?: TaskMetricContext): TaskConfidenceMetrics {
+  const confidence = (task.confidence || {}) as Record<string, unknown>;
+  const selectedLigandPlddt = context
+    ? readChainMeanPlddtForChain(confidence, context.ligandChainId)
+    : null;
+  const selectedPairIptm = context
+    ? readPairIptmForChains(confidence, context.targetChainId, context.ligandChainId, context.chainIds)
+    : null;
+  const plddtRaw = readFirstFiniteMetric(confidence, [
+    'ligand_plddt',
+    'ligand_mean_plddt',
+    'complex_iplddt',
+    'complex_plddt_protein',
+    'complex_plddt',
+    'plddt'
+  ]);
+  const iptmRaw = selectedPairIptm ?? readFirstFiniteMetric(confidence, ['iptm', 'ligand_iptm', 'protein_iptm']);
+  const paeRaw = readFirstFiniteMetric(confidence, ['complex_pde', 'complex_pae', 'pae']);
+  const mergedPlddt = selectedLigandPlddt ?? plddtRaw;
+  return {
+    plddt: mergedPlddt === null ? null : mergedPlddt <= 1 ? mergedPlddt * 100 : mergedPlddt,
     iptm: normalizeProbability(iptmRaw),
     pae: paeRaw
   };
@@ -170,6 +358,11 @@ function normalizeAtomPlddts(values: number[]): number[] {
   return normalized.slice(0, 320);
 }
 
+function mean(values: number[] | null): number | null {
+  if (!values || values.length === 0) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
 function readTaskLigandAtomPlddts(task: ProjectTask): number[] | null {
   const confidence = (task.confidence || {}) as Record<string, unknown>;
   const candidates: unknown[] = [
@@ -193,7 +386,8 @@ function hasTaskLigandAtomPlddts(task: ProjectTask): boolean {
 }
 
 function hasTaskSummaryMetrics(task: ProjectTask): boolean {
-  const metrics = readTaskConfidenceMetrics(task);
+  const context = resolveTaskSelectionContext(task);
+  const metrics = readTaskConfidenceMetrics(task, context);
   return metrics.plddt !== null || metrics.iptm !== null || metrics.pae !== null;
 }
 
@@ -447,9 +641,11 @@ export function ProjectTasksPage() {
       .filter((row) => {
         const taskId = String(row.task_id || '').trim();
         if (!taskId || row.task_state !== 'SUCCESS') return false;
-        const ligand = readTaskPrimaryLigand(row);
+        const selection = resolveTaskSelectionContext(row);
         const needsSummaryHydration = !hasTaskSummaryMetrics(row);
-        const needsLigandAtomHydration = Boolean(ligand.smiles && ligand.isSmiles && !hasTaskLigandAtomPlddts(row));
+        const needsLigandAtomHydration =
+          selection.ligandComponentCount === 1 &&
+          Boolean(selection.ligandSmiles && selection.ligandIsSmiles && !hasTaskLigandAtomPlddts(row));
         if (!needsSummaryHydration && !needsLigandAtomHydration) {
           resultHydrationDoneRef.current.add(taskId);
           return false;
@@ -610,16 +806,23 @@ export function ProjectTasksPage() {
     return tasks.map((task) => {
       const submittedTs = new Date(task.submitted_at || task.created_at).getTime();
       const durationValue = typeof task.duration_seconds === 'number' && Number.isFinite(task.duration_seconds) ? task.duration_seconds : null;
-      const ligand = readTaskPrimaryLigand(task);
-      const ligandAtomPlddts = readTaskLigandAtomPlddts(task);
+      const selection = resolveTaskSelectionContext(task);
+      const ligandAtomPlddtsRaw = readTaskLigandAtomPlddts(task);
+      const ligandAtomPlddts = selection.ligandComponentCount === 1 ? ligandAtomPlddtsRaw : null;
+      const metrics = readTaskConfidenceMetrics(task, selection);
+      const ligandMeanPlddt = mean(ligandAtomPlddts);
+      const plddt = metrics.plddt !== null ? metrics.plddt : ligandMeanPlddt;
       return {
         task,
-        metrics: readTaskConfidenceMetrics(task),
+        metrics: {
+          ...metrics,
+          plddt
+        },
         submittedTs,
         backendValue: String(task.backend || '').trim().toLowerCase(),
         durationValue,
-        ligandSmiles: ligand.smiles,
-        ligandIsSmiles: ligand.isSmiles,
+        ligandSmiles: selection.ligandSmiles,
+        ligandIsSmiles: selection.ligandIsSmiles,
         ligandAtomPlddts
       };
     });
@@ -1308,7 +1511,7 @@ export function ProjectTasksPage() {
                   const submittedTs = task.submitted_at || task.created_at;
                   const stateTone = taskStateTone(task.task_state);
                   const plddtTone = toneForPlddt(metrics.plddt);
-                  const iptmTone = toneForProbability(metrics.iptm);
+                  const iptmTone = toneForIptm(metrics.iptm);
                   const paeTone = toneForPae(metrics.pae);
                   return (
                     <tr key={task.id}>

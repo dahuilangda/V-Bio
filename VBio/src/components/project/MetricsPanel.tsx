@@ -5,6 +5,8 @@ interface MetricsPanelProps {
   title: string;
   data: Record<string, unknown>;
   chainIds?: string[];
+  selectedTargetChainId?: string | null;
+  selectedLigandChainId?: string | null;
 }
 
 function flattenObject(obj: Record<string, unknown>, prefix = ''): Array<{ key: string; value: string }> {
@@ -71,7 +73,7 @@ function normalizePlddt(value: number | null): number | null {
   return value;
 }
 
-function toneForScale(value: number | null, scale: 'plddt' | 'probability' | 'pae' | 'fraction'): Tone {
+function toneForScale(value: number | null, scale: 'plddt' | 'probability' | 'iptm' | 'pae' | 'fraction'): Tone {
   if (value === null) return 'neutral';
 
   if (scale === 'plddt') {
@@ -80,6 +82,14 @@ function toneForScale(value: number | null, scale: 'plddt' | 'probability' | 'pa
     if (normalized >= 90) return 'excellent';
     if (normalized >= 70) return 'good';
     if (normalized >= 50) return 'medium';
+    return 'low';
+  }
+
+  if (scale === 'iptm') {
+    const normalized = value <= 1 ? value : value / 100;
+    if (normalized >= 0.8) return 'excellent';
+    if (normalized >= 0.6) return 'good';
+    if (normalized >= 0.4) return 'medium';
     return 'low';
   }
 
@@ -128,6 +138,78 @@ function collectNumericMetrics(data: Record<string, unknown>, keys: string[]): n
     if (value !== null) values.push(value);
   }
   return values;
+}
+
+function pickNumberArray(data: Record<string, unknown>, keys: string[]): number[] {
+  for (const key of keys) {
+    const value = readByPath(data, key);
+    if (!Array.isArray(value)) continue;
+    const numbers = value.filter((item): item is number => typeof item === 'number' && Number.isFinite(item));
+    if (numbers.length > 0) return numbers;
+  }
+  return [];
+}
+
+function normalizeProbability(value: number | null): number | null {
+  if (value === null) return null;
+  if (value > 1 && value <= 100) return value / 100;
+  return value;
+}
+
+function readPairIptmForChains(
+  data: Record<string, unknown>,
+  chainA: string | null | undefined,
+  chainB: string | null | undefined,
+  fallbackChainIds: string[]
+): number | null {
+  if (!chainA || !chainB) return null;
+
+  const pairMap = readByPath(data, 'pair_chains_iptm');
+  if (pairMap && typeof pairMap === 'object' && !Array.isArray(pairMap)) {
+    const byChain = pairMap as Record<string, unknown>;
+    const rowA = byChain[chainA];
+    const rowB = byChain[chainB];
+    const v1 =
+      rowA && typeof rowA === 'object' && !Array.isArray(rowA)
+        ? normalizeProbability(toNumber((rowA as Record<string, unknown>)[chainB]))
+        : null;
+    const v2 =
+      rowB && typeof rowB === 'object' && !Array.isArray(rowB)
+        ? normalizeProbability(toNumber((rowB as Record<string, unknown>)[chainA]))
+        : null;
+    if (v1 !== null || v2 !== null) {
+      return Math.max(v1 ?? Number.NEGATIVE_INFINITY, v2 ?? Number.NEGATIVE_INFINITY);
+    }
+  }
+
+  const pairMatrix = readByPath(data, 'chain_pair_iptm');
+  if (!Array.isArray(pairMatrix)) return null;
+
+  const chainsFromData = readByPath(data, 'chain_ids');
+  const chainIds =
+    Array.isArray(chainsFromData) && chainsFromData.every((x) => typeof x === 'string')
+      ? (chainsFromData as string[])
+      : fallbackChainIds;
+  const i = chainIds.findIndex((value) => value === chainA);
+  const j = chainIds.findIndex((value) => value === chainB);
+  if (i < 0 || j < 0) return null;
+  const rowI = pairMatrix[i];
+  const rowJ = pairMatrix[j];
+  const m1 = Array.isArray(rowI) ? normalizeProbability(toNumber(rowI[j])) : null;
+  const m2 = Array.isArray(rowJ) ? normalizeProbability(toNumber(rowJ[i])) : null;
+  if (m1 !== null || m2 !== null) {
+    return Math.max(m1 ?? Number.NEGATIVE_INFINITY, m2 ?? Number.NEGATIVE_INFINITY);
+  }
+  return null;
+}
+
+function readChainMeanPlddtForChain(data: Record<string, unknown>, chainId: string | null | undefined): number | null {
+  if (!chainId) return null;
+  const map = readByPath(data, 'chain_mean_plddt');
+  if (!map || typeof map !== 'object' || Array.isArray(map)) return null;
+  const value = toNumber((map as Record<string, unknown>)[chainId]);
+  if (value === null) return null;
+  return value >= 0 && value <= 1 ? value * 100 : value;
 }
 
 function toneForIc50(value: number | null): Tone {
@@ -255,9 +337,34 @@ function renderHelp(label: string, description: string) {
   );
 }
 
-function ConfidencePanel({ data, chainIds }: { data: Record<string, unknown>; chainIds: string[] }) {
-  const meanPlddt = normalizePlddt(pickNumber(data, ['complex_plddt_protein', 'complex_plddt']));
-  const iptm = pickNumber(data, ['iptm']);
+function ConfidencePanel({
+  data,
+  chainIds,
+  selectedTargetChainId,
+  selectedLigandChainId
+}: {
+  data: Record<string, unknown>;
+  chainIds: string[];
+  selectedTargetChainId?: string | null;
+  selectedLigandChainId?: string | null;
+}) {
+  const ligandAtomPlddts = pickNumberArray(data, [
+    'ligand_atom_plddts',
+    'ligand_atom_plddt',
+    'ligand.atom_plddts',
+    'ligand.atom_plddt',
+    'ligand_confidence.atom_plddts'
+  ]).map((value) => (value >= 0 && value <= 1 ? value * 100 : value));
+  const ligandMeanPlddt = ligandAtomPlddts.length > 0 ? mean(ligandAtomPlddts) : null;
+  const selectedLigandChainPlddt = readChainMeanPlddtForChain(data, selectedLigandChainId);
+  const meanPlddt =
+    selectedLigandChainPlddt ??
+    ligandMeanPlddt ??
+    normalizePlddt(
+      pickNumber(data, ['ligand_mean_plddt', 'ligand_plddt', 'complex_iplddt', 'complex_plddt_protein', 'complex_plddt'])
+    );
+  const selectedPairIptm = readPairIptmForChains(data, selectedTargetChainId, selectedLigandChainId, chainIds);
+  const iptm = selectedPairIptm ?? pickNumber(data, ['iptm']);
   const ptm = pickNumber(data, ['ptm']);
   const pae = pickNumber(data, ['complex_pde', 'complex_pae']);
   const rankingScore = pickNumber(data, ['ranking_score']);
@@ -268,17 +375,25 @@ function ConfidencePanel({ data, chainIds }: { data: Record<string, unknown>; ch
   const cards = [
     {
       label: 'Mean pLDDT',
-      help: 'Per-residue confidence from 0 to 100. Blue is higher confidence.',
+      help:
+        selectedLigandChainPlddt !== null
+          ? 'Selected ligand component confidence from 0 to 100. Blue is higher confidence.'
+          : ligandMeanPlddt !== null
+            ? 'Ligand atom confidence from 0 to 100. Blue is higher confidence.'
+            : 'Per-residue confidence from 0 to 100. Blue is higher confidence.',
       value: meanPlddt,
       display: meanPlddt === null ? '-' : `${meanPlddt.toFixed(2)}`,
       scale: 'plddt' as const
     },
     {
       label: 'ipTM',
-      help: 'Interface confidence between chains (0 to 1). Higher is better.',
+      help:
+        selectedPairIptm !== null
+          ? 'Selected target-ligand component pair interface confidence (0 to 1). Higher is better.'
+          : 'Interface confidence between chains (0 to 1). Higher is better.',
       value: iptm,
       display: formatMetricValue(iptm, 4),
-      scale: 'probability' as const
+      scale: 'iptm' as const
     },
     {
       label: 'pTM',
@@ -355,10 +470,10 @@ function ConfidencePanel({ data, chainIds }: { data: Record<string, unknown>; ch
           </div>
           <div className="confidence-pair-list">
             {pairRows.slice(0, 24).map((row) => {
-              const tone = toneForScale(row.value, 'probability');
+              const toneForPair = toneForScale(row.value, 'iptm');
               const pct = Math.max(0, Math.min(100, (row.value <= 1 ? row.value : row.value / 100) * 100));
               return (
-                <div key={`${row.chainA}-${row.chainB}`} className={`confidence-pair-line tone-${tone}`}>
+                <div key={`${row.chainA}-${row.chainB}`} className={`confidence-pair-line tone-${toneForPair}`}>
                   <span className="confidence-pair-label">{`${row.chainA} ↔ ${row.chainB}`}</span>
                   <div className="confidence-pair-meter">
                     <span style={{ width: `${pct.toFixed(1)}%` }} />
@@ -374,7 +489,13 @@ function ConfidencePanel({ data, chainIds }: { data: Record<string, unknown>; ch
   );
 }
 
-export function MetricsPanel({ title, data, chainIds = [] }: MetricsPanelProps) {
+export function MetricsPanel({
+  title,
+  data,
+  chainIds = [],
+  selectedTargetChainId = null,
+  selectedLigandChainId = null
+}: MetricsPanelProps) {
   const rows = useMemo(() => flattenObject(data).slice(0, 16), [data]);
 
   if (title === 'Confidence') {
@@ -384,7 +505,12 @@ export function MetricsPanel({ title, data, chainIds = [] }: MetricsPanelProps) 
         {Object.keys(data || {}).length === 0 ? (
           <div className="muted">No metrics available yet.</div>
         ) : (
-          <ConfidencePanel data={data} chainIds={chainIds} />
+          <ConfidencePanel
+            data={data}
+            chainIds={chainIds}
+            selectedTargetChainId={selectedTargetChainId}
+            selectedLigandChainId={selectedLigandChainId}
+          />
         )}
       </section>
     );

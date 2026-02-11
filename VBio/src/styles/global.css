@@ -1899,6 +1899,33 @@ select:focus {
   gap: 0;
 }
 
+.overview-component-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.overview-component-pair-field {
+  display: grid;
+  gap: 4px;
+}
+
+.overview-component-pair-field > span {
+  font-size: var(--text-2xs);
+  color: #61786c;
+  font-weight: 600;
+}
+
+.overview-component-pair-field select {
+  min-height: 30px;
+  border-radius: 8px;
+  border: 1px solid #d7e4dc;
+  background: #fdfefe;
+  padding: 4px 8px;
+  font-size: var(--text-xs);
+}
+
 .overview-signal-row {
   display: grid;
   grid-template-columns: minmax(132px, 160px) auto;
@@ -2080,6 +2107,10 @@ select:focus {
   text-align: left;
 }
 
+.component-sidebar-toggle-static {
+  cursor: default;
+}
+
 .component-tree-label {
   display: inline-flex;
   align-items: center;
@@ -2126,8 +2157,21 @@ select:focus {
 }
 
 .affinity-sidebar-list {
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
+}
+
+.affinity-enable-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: #365748;
+}
+
+.affinity-enable-toggle input[type='checkbox'] {
+  width: 14px;
+  height: 14px;
 }
 
 .affinity-field {
@@ -2471,6 +2515,21 @@ select:focus {
   height: 100%;
 }
 
+.component-card-ligand .ligand-input-right {
+  height: 100%;
+}
+
+.component-card-ligand .ligand-input-right .component-side-field {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.component-card-ligand .ligand-input-right .component-jsme-shell {
+  margin-top: auto;
+}
+
 .ligand-live-props {
   display: grid;
   gap: 6px;
@@ -2754,6 +2813,14 @@ select:focus {
   stroke-width: 1;
 }
 
+.ligand-radar-axis-label {
+  font-size: 10px;
+  font-weight: 600;
+  fill: #4f6459;
+  letter-spacing: 0.15px;
+  pointer-events: none;
+}
+
 .ligand-radar-area {
   fill: url(#ligand-radar-fill);
   stroke: none;
@@ -2772,29 +2839,32 @@ select:focus {
   stroke-width: 1.6;
 }
 
-.ligand-radar-legend {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+.ligand-radar-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: 6px;
 }
 
-.ligand-radar-item {
+.ligand-radar-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   border: 1px solid #dbe7e0;
-  border-radius: 8px;
-  padding: 5px 6px;
+  border-radius: 999px;
   background: #fff;
-  display: grid;
-  gap: 1px;
+  padding: 4px 10px;
+  font-variant-numeric: tabular-nums;
 }
 
-.ligand-radar-item span {
-  color: #5f7468;
+.ligand-radar-chip span {
   font-size: var(--text-2xs);
+  color: #5f7468;
 }
 
-.ligand-radar-item strong {
-  font-size: var(--text-sm);
-  line-height: 1.1;
+.ligand-radar-chip strong {
+  font-size: var(--text-xs);
+  line-height: 1;
 }
 
 .ligand-preview-svg-wrap {
@@ -3582,9 +3652,6 @@ select:focus {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .ligand-radar-legend {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 
   .users-create {
     grid-template-columns: 1fr 1fr;
@@ -3628,6 +3695,10 @@ select:focus {
 
   .advanced-filter-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .affinity-sidebar-list {
+    grid-template-columns: 1fr;
   }
 
   .component-content-split.has-side {
@@ -3757,9 +3828,10 @@ select:focus {
     grid-template-columns: 1fr;
   }
 
-  .ligand-radar-legend {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .overview-component-pair {
+    grid-template-columns: 1fr;
   }
+
 
   .task-structure-query-head {
     flex-wrap: wrap;

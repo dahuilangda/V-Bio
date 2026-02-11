@@ -140,6 +140,8 @@ export function ComponentInputEditor({
     }
   };
 
+  const ligandJsmeHeight = compact ? 400 : 460;
+
   const handleProteinTemplateUpload = async (componentId: string, file: File | null) => {
     if (!file) {
       setTemplateErrors((prev) => ({ ...prev, [componentId]: '' }));
@@ -487,7 +489,7 @@ export function ComponentInputEditor({
                     </label>
                     <div className={`ligand-live-props ${hasLigandJsmeViewer ? 'align-bottom' : ''}`}>
                       <span>Live Ligand Properties</span>
-                      <LigandPropertyGrid smiles={comp.sequence} />
+                      <LigandPropertyGrid smiles={comp.sequence} variant="radar" />
                     </div>
                   </div>
                   {method === 'jsme' && (
@@ -497,7 +499,7 @@ export function ComponentInputEditor({
                         <div className="jsme-editor-container component-jsme-shell">
                           <JSMEEditor
                             smiles={comp.sequence}
-                            height={compact ? 320 : 380}
+                            height={ligandJsmeHeight}
                             onSmilesChange={(value) => patchOne(comp.id, { sequence: value })}
                           />
                         </div>

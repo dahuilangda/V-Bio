@@ -13,10 +13,10 @@ import {
   LoaderCircle,
   Play,
   Plus,
-  RefreshCcw,
   Save,
   SlidersHorizontal,
-  Target
+  Target,
+  Undo2
 } from 'lucide-react';
 import type {
   InputComponent,
@@ -164,6 +164,71 @@ function readFirstFiniteMetric(data: Record<string, unknown>, paths: string[]): 
   return null;
 }
 
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return value;
+}
+
+function normalizeProbability(value: number | null): number | null {
+  if (value === null) return null;
+  if (value > 1 && value <= 100) return value / 100;
+  return value;
+}
+
+function readPairIptmForChains(
+  confidence: Record<string, unknown> | null,
+  chainA: string | null,
+  chainB: string | null,
+  fallbackChainIds: string[]
+): number | null {
+  if (!confidence || !chainA || !chainB) return null;
+
+  const pairMap = readObjectPath(confidence, 'pair_chains_iptm');
+  if (pairMap && typeof pairMap === 'object' && !Array.isArray(pairMap)) {
+    const byChain = pairMap as Record<string, unknown>;
+    const directA = byChain[chainA];
+    const directB = byChain[chainB];
+    const v1 =
+      directA && typeof directA === 'object' && !Array.isArray(directA)
+        ? normalizeProbability(toFiniteNumber((directA as Record<string, unknown>)[chainB]))
+        : null;
+    const v2 =
+      directB && typeof directB === 'object' && !Array.isArray(directB)
+        ? normalizeProbability(toFiniteNumber((directB as Record<string, unknown>)[chainA]))
+        : null;
+    if (v1 !== null || v2 !== null) return Math.max(v1 ?? Number.NEGATIVE_INFINITY, v2 ?? Number.NEGATIVE_INFINITY);
+  }
+
+  const matrix = readObjectPath(confidence, 'chain_pair_iptm');
+  if (Array.isArray(matrix)) {
+    const chainIdsRaw = readObjectPath(confidence, 'chain_ids');
+    const chainIds =
+      Array.isArray(chainIdsRaw) && chainIdsRaw.every((value) => typeof value === 'string')
+        ? (chainIdsRaw as string[])
+        : fallbackChainIds;
+    const i = chainIds.findIndex((value) => value === chainA);
+    const j = chainIds.findIndex((value) => value === chainB);
+    if (i >= 0 && j >= 0) {
+      const rowI = matrix[i];
+      const rowJ = matrix[j];
+      const m1 = Array.isArray(rowI) ? normalizeProbability(toFiniteNumber(rowI[j])) : null;
+      const m2 = Array.isArray(rowJ) ? normalizeProbability(toFiniteNumber(rowJ[i])) : null;
+      if (m1 !== null || m2 !== null) return Math.max(m1 ?? Number.NEGATIVE_INFINITY, m2 ?? Number.NEGATIVE_INFINITY);
+    }
+  }
+
+  return null;
+}
+
+function readChainMeanPlddtForChain(confidence: Record<string, unknown> | null, chainId: string | null): number | null {
+  if (!confidence || !chainId) return null;
+  const map = readObjectPath(confidence, 'chain_mean_plddt');
+  if (!map || typeof map !== 'object' || Array.isArray(map)) return null;
+  const value = toFiniteNumber((map as Record<string, unknown>)[chainId]);
+  if (value === null) return null;
+  return value >= 0 && value <= 1 ? value * 100 : value;
+}
+
 function readFiniteMetricSeries(data: Record<string, unknown>, paths: string[]): number[] {
   const values: number[] = [];
   for (const path of paths) {
@@ -191,6 +256,15 @@ function toneForProbability(value: number | null): MetricTone {
   return 'low';
 }
 
+function toneForIptm(value: number | null): MetricTone {
+  if (value === null) return 'neutral';
+  const normalized = value <= 1 ? value : value / 100;
+  if (normalized >= 0.8) return 'excellent';
+  if (normalized >= 0.6) return 'good';
+  if (normalized >= 0.4) return 'medium';
+  return 'low';
+}
+
 function toneForIc50(value: number | null): MetricTone {
   if (value === null) return 'neutral';
   if (value <= 0.1) return 'excellent';
@@ -202,6 +276,12 @@ function toneForIc50(value: number | null): MetricTone {
 function mean(values: number[]): number {
   if (values.length === 0) return Number.NaN;
   return values.reduce((acc, value) => acc + value, 0) / values.length;
+}
+
+function normalizePlddtValue(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  const normalized = value >= 0 && value <= 1 ? value * 100 : value;
+  return Math.max(0, Math.min(100, normalized));
 }
 
 function std(values: number[]): number {
@@ -316,6 +396,25 @@ function mergeTaskSnapshotIntoConfig(baseConfig: ProjectInputConfig, task: Proje
   };
 }
 
+function readLigandAtomPlddtsFromConfidence(confidence: Record<string, unknown> | null): number[] {
+  if (!confidence) return [];
+  const candidates: unknown[] = [
+    confidence.ligand_atom_plddts,
+    confidence.ligand_atom_plddt,
+    readObjectPath(confidence, 'ligand.atom_plddts'),
+    readObjectPath(confidence, 'ligand.atom_plddt'),
+    readObjectPath(confidence, 'ligand_confidence.atom_plddts')
+  ];
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue;
+    const values = candidate
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+      .map((value) => normalizePlddtValue(value));
+    if (values.length > 0) return values;
+  }
+  return [];
+}
+
 function normalizeComponents(components: InputComponent[]): InputComponent[] {
   return components.map((comp) => ({
     ...comp,
@@ -427,7 +526,6 @@ export function ProjectDetailPage() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [statusLoading, setStatusLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resultError, setResultError] = useState<string | null>(null);
   const [structureText, setStructureText] = useState('');
@@ -634,10 +732,98 @@ export function ProjectDetailPage() {
     if (taskComponents.length > 0) return taskComponents;
     return normalizedDraftComponents;
   }, [activeResultTask, normalizedDraftComponents]);
-  const resultChainIds = useMemo(() => {
-    return buildChainInfos(nonEmptyComponents(resultOverviewComponents)).map((item) => item.id);
+  const resultOverviewActiveComponents = useMemo(() => {
+    return nonEmptyComponents(resultOverviewComponents);
   }, [resultOverviewComponents]);
+  const resultChainInfos = useMemo(() => {
+    return buildChainInfos(resultOverviewActiveComponents);
+  }, [resultOverviewActiveComponents]);
+  const resultChainIds = useMemo(() => {
+    return resultChainInfos.map((item) => item.id);
+  }, [resultChainInfos]);
+  const resultComponentOptions = useMemo(() => {
+    const chainByComponentId = new Map<string, string>();
+    for (const info of resultChainInfos) {
+      if (!chainByComponentId.has(info.componentId)) {
+        chainByComponentId.set(info.componentId, info.id);
+      }
+    }
+    return resultOverviewActiveComponents.map((component, index) => ({
+      id: component.id,
+      type: component.type,
+      sequence: component.sequence,
+      chainId: chainByComponentId.get(component.id) || null,
+      isSmiles: component.type === 'ligand' && component.inputMethod !== 'ccd',
+      label: `Component ${index + 1} · ${componentTypeLabel(component.type)}`
+    }));
+  }, [resultOverviewActiveComponents, resultChainInfos]);
+  const resultChainInfoById = useMemo(() => {
+    const byId = new Map<string, (typeof resultChainInfos)[number]>();
+    for (const info of resultChainInfos) {
+      byId.set(info.id, info);
+    }
+    return byId;
+  }, [resultChainInfos]);
+  const resultComponentById = useMemo(() => {
+    const byId = new Map<string, InputComponent>();
+    for (const component of resultOverviewActiveComponents) {
+      byId.set(component.id, component);
+    }
+    return byId;
+  }, [resultOverviewActiveComponents]);
+  const resultChainShortLabelById = useMemo(() => {
+    const byId = new Map<string, string>();
+    const typeShort = (type: InputComponent['type']) => {
+      if (type === 'protein') return 'Prot';
+      if (type === 'ligand') return 'Lig';
+      if (type === 'dna') return 'DNA';
+      return 'RNA';
+    };
+    for (const info of resultChainInfos) {
+      const compToken = `Comp ${info.componentIndex + 1}`;
+      const copySuffix = info.copyIndex > 0 ? `.${info.copyIndex + 1}` : '';
+      byId.set(info.id, `${compToken}${copySuffix} ${typeShort(info.type)}`);
+    }
+    return byId;
+  }, [resultChainInfos]);
+  const resultPairPreference = useMemo(() => {
+    if (draft?.inputConfig.properties && typeof draft.inputConfig.properties === 'object') {
+      return draft.inputConfig.properties;
+    }
+    if (activeResultTask?.properties && typeof activeResultTask.properties === 'object') {
+      return activeResultTask.properties;
+    }
+    return null;
+  }, [draft?.inputConfig.properties, activeResultTask?.properties]);
+  const selectedResultTargetChainId = useMemo(() => {
+    const preferred = typeof resultPairPreference?.target === 'string' ? resultPairPreference.target.trim() : '';
+    if (preferred && resultChainInfoById.has(preferred)) {
+      return preferred;
+    }
+    return resultComponentOptions[0]?.chainId || null;
+  }, [resultPairPreference, resultChainInfoById, resultComponentOptions]);
+  const selectedResultLigandChainId = useMemo(() => {
+    const preferred = typeof resultPairPreference?.ligand === 'string' ? resultPairPreference.ligand.trim() : '';
+    if (preferred && resultChainInfoById.has(preferred)) {
+      return preferred;
+    }
+    return resultComponentOptions[resultComponentOptions.length - 1]?.chainId || null;
+  }, [resultPairPreference, resultChainInfoById, resultComponentOptions]);
+  const selectedResultLigandComponent = useMemo(() => {
+    if (!selectedResultLigandChainId) return null;
+    const info = resultChainInfoById.get(selectedResultLigandChainId);
+    if (!info) return null;
+    return resultComponentById.get(info.componentId) || null;
+  }, [selectedResultLigandChainId, resultChainInfoById, resultComponentById]);
   const overviewPrimaryLigand = useMemo(() => {
+    if (
+      selectedResultLigandComponent &&
+      selectedResultLigandComponent.type === 'ligand' &&
+      selectedResultLigandComponent.inputMethod !== 'ccd' &&
+      selectedResultLigandComponent.sequence.trim()
+    ) {
+      return { smiles: selectedResultLigandComponent.sequence.trim(), isSmiles: true };
+    }
     const taskLigand = readTaskPrimaryLigand(activeResultTask);
     if (taskLigand.smiles) return taskLigand;
     const draftLigand = normalizedDraftComponents.find((comp) => comp.type === 'ligand' && comp.sequence);
@@ -648,7 +834,7 @@ export function ProjectDetailPage() {
       smiles: draftLigand.sequence,
       isSmiles: draftLigand.inputMethod !== 'ccd'
     };
-  }, [activeResultTask, normalizedDraftComponents]);
+  }, [selectedResultLigandComponent, activeResultTask, normalizedDraftComponents]);
   const snapshotConfidence = useMemo(() => {
     if (activeResultTask?.confidence && Object.keys(activeResultTask.confidence).length > 0) {
       return activeResultTask.confidence as Record<string, unknown>;
@@ -667,20 +853,50 @@ export function ProjectDetailPage() {
     }
     return null;
   }, [activeResultTask?.affinity, project?.affinity]);
+  const snapshotLigandAtomPlddts = useMemo(() => {
+    return readLigandAtomPlddtsFromConfidence(snapshotConfidence);
+  }, [snapshotConfidence]);
+  const snapshotLigandMeanPlddt = useMemo(() => {
+    if (!snapshotLigandAtomPlddts.length) return null;
+    return mean(snapshotLigandAtomPlddts);
+  }, [snapshotLigandAtomPlddts]);
+  const snapshotSelectedLigandChainPlddt = useMemo(() => {
+    return readChainMeanPlddtForChain(snapshotConfidence, selectedResultLigandChainId);
+  }, [snapshotConfidence, selectedResultLigandChainId]);
   const snapshotPlddt = useMemo(() => {
+    if (snapshotSelectedLigandChainPlddt !== null) {
+      return snapshotSelectedLigandChainPlddt;
+    }
+    if (snapshotLigandMeanPlddt !== null) {
+      return snapshotLigandMeanPlddt;
+    }
     if (!snapshotConfidence) return null;
     const raw = readFirstFiniteMetric(snapshotConfidence, [
+      'ligand_plddt',
+      'ligand_mean_plddt',
+      'complex_iplddt',
       'complex_plddt_protein',
       'complex_plddt',
       'plddt'
     ]);
     if (raw === null) return null;
     return raw <= 1 ? raw * 100 : raw;
-  }, [snapshotConfidence]);
+  }, [snapshotConfidence, snapshotLigandMeanPlddt, snapshotSelectedLigandChainPlddt]);
+  const snapshotSelectedPairIptm = useMemo(() => {
+    return readPairIptmForChains(
+      snapshotConfidence,
+      selectedResultTargetChainId,
+      selectedResultLigandChainId,
+      resultChainIds
+    );
+  }, [snapshotConfidence, selectedResultTargetChainId, selectedResultLigandChainId, resultChainIds]);
   const snapshotIptm = useMemo(() => {
+    if (snapshotSelectedPairIptm !== null) {
+      return snapshotSelectedPairIptm;
+    }
     if (!snapshotConfidence) return null;
     return readFirstFiniteMetric(snapshotConfidence, ['iptm', 'ligand_iptm', 'protein_iptm']);
-  }, [snapshotConfidence]);
+  }, [snapshotConfidence, snapshotSelectedPairIptm]);
   const snapshotBindingValues = useMemo(() => {
     if (!snapshotAffinity) return null;
     const values = readFiniteMetricSeries(snapshotAffinity, [
@@ -727,7 +943,7 @@ export function ProjectDetailPage() {
     };
   }, [snapshotLogIc50Values]);
   const snapshotPlddtTone = useMemo(() => toneForPlddt(snapshotPlddt), [snapshotPlddt]);
-  const snapshotIptmTone = useMemo(() => toneForProbability(snapshotIptm), [snapshotIptm]);
+  const snapshotIptmTone = useMemo(() => toneForIptm(snapshotIptm), [snapshotIptm]);
   const snapshotIc50Tone = useMemo(() => toneForIc50(snapshotIc50Um), [snapshotIc50Um]);
   const snapshotBindingTone = useMemo(
     () => toneForProbability(snapshotBindingProbability),
@@ -1204,10 +1420,100 @@ export function ProjectDetailPage() {
   const ligandChainOptions = useMemo(() => {
     return activeChainInfos.filter((item) => item.type === 'ligand');
   }, [activeChainInfos]);
-
-  const targetChainOptions = useMemo(() => {
-    return activeChainInfos.filter((item) => item.type !== 'ligand');
+  const chainToComponentIdMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const info of activeChainInfos) {
+      map.set(info.id, info.componentId);
+    }
+    return map;
   }, [activeChainInfos]);
+  const workspaceAffinityOptions = useMemo(() => {
+    const firstChainByComponentId = new Map<string, string>();
+    for (const info of activeChainInfos) {
+      if (!firstChainByComponentId.has(info.componentId)) {
+        firstChainByComponentId.set(info.componentId, info.id);
+      }
+    }
+    return normalizedDraftComponents
+      .map((component, index) => {
+        const chainId = firstChainByComponentId.get(component.id) || null;
+        if (!chainId) return null;
+        const isSmallMolecule = component.type === 'ligand' && component.inputMethod !== 'ccd';
+        return {
+          componentId: component.id,
+          componentIndex: index + 1,
+          chainId,
+          type: component.type,
+          label: `Comp ${index + 1}`,
+          isSmallMolecule
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item));
+  }, [activeChainInfos, normalizedDraftComponents]);
+  const workspaceTargetOptions = useMemo(() => {
+    return workspaceAffinityOptions.filter((item) => item.type !== 'ligand');
+  }, [workspaceAffinityOptions]);
+  const workspaceLigandOptions = useMemo(() => {
+    return workspaceAffinityOptions.filter((item) => item.type === 'ligand');
+  }, [workspaceAffinityOptions]);
+  const resolveChainFromProperty = useCallback(
+    (
+      rawChainId: string | null | undefined,
+      options: Array<{ componentId: string; chainId: string }>
+    ): { chainId: string | null; componentId: string | null } => {
+      const chainId = String(rawChainId || '').trim();
+      if (!chainId) {
+        const first = options[0];
+        return {
+          chainId: first?.chainId || null,
+          componentId: first?.componentId || null
+        };
+      }
+      const byChain = options.find((item) => item.chainId === chainId);
+      if (byChain) {
+        return { chainId: byChain.chainId, componentId: byChain.componentId };
+      }
+      const componentId = chainToComponentIdMap.get(chainId) || null;
+      if (componentId) {
+        const byComponent = options.find((item) => item.componentId === componentId);
+        if (byComponent) {
+          return { chainId: byComponent.chainId, componentId: byComponent.componentId };
+        }
+      }
+      const first = options[0];
+      return {
+        chainId: first?.chainId || null,
+        componentId: first?.componentId || null
+      };
+    },
+    [chainToComponentIdMap]
+  );
+  const selectedWorkspaceTarget = useMemo(() => {
+    if (!draft) return { chainId: null as string | null, componentId: null as string | null };
+    return resolveChainFromProperty(draft.inputConfig.properties.target, workspaceTargetOptions);
+  }, [draft, resolveChainFromProperty, workspaceTargetOptions]);
+  const selectedWorkspaceLigand = useMemo(() => {
+    if (!draft) return { chainId: null as string | null, componentId: null as string | null };
+    return resolveChainFromProperty(draft.inputConfig.properties.ligand, workspaceLigandOptions);
+  }, [draft, resolveChainFromProperty, workspaceLigandOptions]);
+  const selectedWorkspaceLigandOption = useMemo(() => {
+    if (!selectedWorkspaceLigand.componentId) return null;
+    return workspaceLigandOptions.find((item) => item.componentId === selectedWorkspaceLigand.componentId) || null;
+  }, [selectedWorkspaceLigand.componentId, workspaceLigandOptions]);
+  const canEnableAffinityFromWorkspace = useMemo(() => {
+    return Boolean(
+      selectedWorkspaceTarget.chainId &&
+        selectedWorkspaceLigand.chainId &&
+        selectedWorkspaceLigandOption &&
+        selectedWorkspaceLigandOption.isSmallMolecule
+    );
+  }, [selectedWorkspaceLigand.chainId, selectedWorkspaceLigandOption, selectedWorkspaceTarget.chainId]);
+  const affinityEnableDisabledReason = useMemo(() => {
+    if (!selectedWorkspaceTarget.chainId) return 'Choose a target component first.';
+    if (!selectedWorkspaceLigand.chainId) return 'Choose a ligand component first.';
+    if (!selectedWorkspaceLigandOption?.isSmallMolecule) return 'Binding score requires a small-molecule ligand (SMILES/JSME).';
+    return '';
+  }, [selectedWorkspaceLigand.chainId, selectedWorkspaceLigandOption?.isSmallMolecule, selectedWorkspaceTarget.chainId]);
 
   const constraintHighlightResidues = useMemo<MolstarResidueHighlight[]>(() => {
     if (!draft) return [];
@@ -1318,24 +1624,15 @@ export function ProjectDetailPage() {
   useEffect(() => {
     if (!draft) return;
     const props = draft.inputConfig.properties;
-    const hasLigand = ligandChainOptions.length > 0;
-    const hasTarget = targetChainOptions.length > 0;
-    const nextLigand =
-      props.ligand && ligandChainOptions.some((item) => item.id === props.ligand)
-        ? props.ligand
-        : ligandChainOptions[0]?.id || null;
-    const nextTarget =
-      props.target && targetChainOptions.some((item) => item.id === props.target)
-        ? props.target
-        : targetChainOptions[0]?.id || null;
-
-    const nextAffinity = hasLigand && hasTarget ? props.affinity : false;
+    const nextLigand = selectedWorkspaceLigand.chainId;
+    const nextTarget = selectedWorkspaceTarget.chainId;
+    const nextAffinity = canEnableAffinityFromWorkspace ? props.affinity : false;
     const nextProps = {
       ...props,
       affinity: nextAffinity,
-      target: nextAffinity ? nextTarget : null,
-      ligand: nextAffinity ? nextLigand : null,
-      binder: nextAffinity ? nextLigand : null
+      target: nextTarget,
+      ligand: nextLigand,
+      binder: nextLigand
     };
 
     if (
@@ -1356,7 +1653,7 @@ export function ProjectDetailPage() {
           : prev
       );
     }
-  }, [draft, ligandChainOptions, targetChainOptions]);
+  }, [draft, selectedWorkspaceLigand.chainId, selectedWorkspaceTarget.chainId, canEnableAffinityFromWorkspace]);
 
   useEffect(() => {
     if (!project) return;
@@ -1619,7 +1916,6 @@ export function ProjectDetailPage() {
     statusRefreshInFlightRef.current.add(activeTaskId);
 
     if (!silent) {
-      setStatusLoading(true);
       setError(null);
     }
 
@@ -1691,9 +1987,6 @@ export function ProjectDetailPage() {
       }
     } finally {
       statusRefreshInFlightRef.current.delete(activeTaskId);
-      if (!silent) {
-        setStatusLoading(false);
-      }
     }
   };
 
@@ -1986,6 +2279,13 @@ export function ProjectDetailPage() {
     setRunMenuOpen(false);
     void loadProject();
   };
+  const handleResetFromHeader = () => {
+    if (saving || submitting || loading || !hasUnsavedChanges) return;
+    if (!window.confirm('Discard unsaved changes and reset to the last saved version?')) {
+      return;
+    }
+    handleRestoreSavedDraft();
+  };
   const sidebarTypeOrder: InputComponent['type'][] = ['protein', 'ligand', 'dna', 'rna'];
   const formatComponentChainLabel = (chainId: string) => {
     if (!chainId) return '-';
@@ -2117,10 +2417,8 @@ export function ProjectDetailPage() {
         : prev
     );
   };
-  const setAffinityFromSidebar = (enabled: boolean) => {
-    const ligand = ligandChainOptions[0]?.id || null;
-    const target = targetChainOptions[0]?.id || null;
-    if (enabled && (!ligand || !target)) return;
+  const setAffinityEnabledFromWorkspace = (enabled: boolean) => {
+    if (enabled && !canEnableAffinityFromWorkspace) return;
     setDraft((prev) =>
       prev
         ? {
@@ -2129,17 +2427,17 @@ export function ProjectDetailPage() {
               ...prev.inputConfig,
               properties: {
                 ...prev.inputConfig.properties,
-                affinity: enabled,
-                target: enabled ? prev.inputConfig.properties.target || target : null,
-                ligand: enabled ? prev.inputConfig.properties.ligand || ligand : null,
-                binder: enabled ? prev.inputConfig.properties.ligand || ligand : null
+                affinity: enabled
               }
             }
           }
         : prev
     );
   };
-  const setAffinityChainFromSidebar = (field: 'target' | 'ligand', value: string | null) => {
+  const setAffinityComponentFromWorkspace = (field: 'target' | 'ligand', componentId: string | null) => {
+    const optionSource = field === 'target' ? workspaceTargetOptions : workspaceLigandOptions;
+    const nextOption = optionSource.find((item) => item.componentId === componentId) || null;
+    const nextChain = nextOption?.chainId || null;
     setDraft((prev) =>
       prev
         ? {
@@ -2148,8 +2446,8 @@ export function ProjectDetailPage() {
               ...prev.inputConfig,
               properties: {
                 ...prev.inputConfig.properties,
-                [field]: value,
-                binder: field === 'ligand' ? value : prev.inputConfig.properties.ligand
+                [field]: nextChain,
+                binder: field === 'ligand' ? nextChain : prev.inputConfig.properties.binder
               }
             }
           }
@@ -2482,25 +2780,31 @@ export function ProjectDetailPage() {
   const constraintStructureText = selectedTemplatePreview?.content || '';
   const constraintStructureFormat: 'cif' | 'pdb' = selectedTemplatePreview?.format || 'pdb';
   const hasConstraintStructure = Boolean(constraintStructureText.trim());
-  const affinityTargetLabel = formatComponentChainLabel(draft.inputConfig.properties.target || '');
-  const affinityLigandLabel = formatComponentChainLabel(draft.inputConfig.properties.ligand || '');
-  const affinitySummary =
-    draft.inputConfig.properties.affinity && draft.inputConfig.properties.target && draft.inputConfig.properties.ligand
-      ? `${affinityTargetLabel} ↔ ${affinityLigandLabel}`
-      : 'off';
+  const selectedResultTargetLabel = selectedResultTargetChainId
+    ? resultChainShortLabelById.get(selectedResultTargetChainId) || selectedResultTargetChainId
+    : 'Comp 1';
+  const selectedResultLigandLabel = selectedResultLigandChainId
+    ? resultChainShortLabelById.get(selectedResultLigandChainId) || selectedResultLigandChainId
+    : 'Comp 1';
+  const selectedResultPairLabel = `${selectedResultTargetLabel} ↔ ${selectedResultLigandLabel}`;
   const snapshotCards: Array<{ key: string; label: string; value: string; detail: string; tone: MetricTone }> = [
     {
       key: 'plddt',
       label: 'pLDDT',
       value: snapshotPlddt === null ? '-' : snapshotPlddt.toFixed(2),
-      detail: 'Complex confidence',
+      detail:
+        snapshotSelectedLigandChainPlddt !== null
+          ? `${selectedResultLigandLabel} conf`
+          : snapshotLigandMeanPlddt !== null
+            ? 'Ligand atom conf'
+            : 'Complex conf',
       tone: snapshotPlddtTone
     },
     {
       key: 'iptm',
       label: 'ipTM',
       value: snapshotIptm === null ? '-' : snapshotIptm.toFixed(4),
-      detail: 'Interface confidence',
+      detail: snapshotSelectedPairIptm !== null ? selectedResultPairLabel : 'Interface conf',
       tone: snapshotIptmTone
     },
     {
@@ -2606,13 +2910,14 @@ export function ProjectDetailPage() {
             Tasks
           </Link>
           <button
+            type="button"
             className="btn btn-ghost btn-compact btn-square"
-            onClick={() => void refreshStatus()}
-            disabled={statusLoading}
-            title="Refresh status"
-            aria-label="Refresh status"
+            onClick={handleResetFromHeader}
+            disabled={loading || saving || submitting || !hasUnsavedChanges}
+            title={hasUnsavedChanges ? 'Reset to last saved draft' : 'No unsaved changes'}
+            aria-label="Reset to last saved draft"
           >
-            <RefreshCcw size={15} className={statusLoading ? 'spin' : undefined} />
+            <Undo2 size={14} />
           </button>
           <button
             className="btn btn-ghost btn-compact btn-square"
@@ -2742,7 +3047,13 @@ export function ProjectDetailPage() {
           </div>
 
           <div className="results-bottom">
-            <MetricsPanel title="Confidence" data={snapshotConfidence || {}} chainIds={resultChainIds} />
+            <MetricsPanel
+              title="Confidence"
+              data={snapshotConfidence || {}}
+              chainIds={resultChainIds}
+              selectedTargetChainId={selectedResultTargetChainId}
+              selectedLigandChainId={selectedResultLigandChainId}
+            />
           </div>
         </>
       )}
@@ -3250,67 +3561,53 @@ export function ProjectDetailPage() {
                       </section>
 
                       <section className="component-sidebar-section">
-                        <div className="component-tree-row">
-                          <button type="button" className="component-sidebar-toggle" onClick={() => setWorkspaceTab('constraints')}>
-                            <span className="component-tree-label">
-                              <Target size={13} />
-                              <strong>Binding</strong>
-                            </span>
-                            <span className="muted small">{affinitySummary}</span>
-                          </button>
-                          <button
-                            type="button"
-                            className="icon-btn component-tree-add"
-                            onClick={() => setAffinityFromSidebar(!draft.inputConfig.properties.affinity)}
-                            disabled={!canEdit || ligandChainOptions.length === 0 || targetChainOptions.length === 0}
-                            title={
-                              ligandChainOptions.length === 0
-                                ? 'Need at least one ligand component'
-                                : draft.inputConfig.properties.affinity
-                                  ? 'Disable binding objective'
-                                  : 'Enable binding objective'
-                            }
-                          >
-                            {draft.inputConfig.properties.affinity ? <ChevronDown size={14} /> : <Plus size={14} />}
-                          </button>
+                        <div className="component-sidebar-toggle component-sidebar-toggle-static">
+                          <span className="component-tree-label">
+                            <Target size={13} />
+                            <strong>Binding</strong>
+                          </span>
+                          <label className="affinity-enable-toggle">
+                            <input
+                              type="checkbox"
+                              checked={draft.inputConfig.properties.affinity}
+                              disabled={!canEdit || !canEnableAffinityFromWorkspace}
+                              onChange={(event) => setAffinityEnabledFromWorkspace(event.target.checked)}
+                            />
+                            <span>Compute</span>
+                          </label>
                         </div>
-                        {draft.inputConfig.properties.affinity ? (
-                          <div className="component-sidebar-list component-sidebar-list-nested affinity-sidebar-list">
-                            <label className="field affinity-field">
-                              <span className="affinity-key">Target</span>
-                              <select
-                                value={draft.inputConfig.properties.target || ''}
-                                disabled={!canEdit}
-                                onChange={(e) => setAffinityChainFromSidebar('target', e.target.value || null)}
-                              >
-                                {targetChainOptions.map((item) => (
-                                  <option key={`affinity-target-${item.id}`} value={item.id}>
-                                    {item.id} · {componentTypeLabel(item.type)}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                            <label className="field affinity-field">
-                              <span className="affinity-key">Ligand</span>
-                              <select
-                                value={draft.inputConfig.properties.ligand || ''}
-                                disabled={!canEdit || ligandChainOptions.length === 0}
-                                onChange={(e) => setAffinityChainFromSidebar('ligand', e.target.value || null)}
-                              >
-                                {ligandChainOptions.map((item) => (
-                                  <option key={`affinity-ligand-${item.id}`} value={item.id}>
-                                    {item.id} · Ligand
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                          </div>
-                        ) : (
-                          <div className="component-sidebar-empty muted small">
-                            {ligandChainOptions.length === 0
-                              ? 'Add at least one ligand component to enable binding objective.'
-                              : 'Click + to enable binding objective.'}
-                          </div>
+                        <div className="component-sidebar-list component-sidebar-list-nested affinity-sidebar-list">
+                          <label className="field affinity-field">
+                            <span className="affinity-key">Target</span>
+                            <select
+                              value={selectedWorkspaceTarget.componentId || ''}
+                              disabled={!canEdit || workspaceTargetOptions.length === 0}
+                              onChange={(e) => setAffinityComponentFromWorkspace('target', e.target.value || null)}
+                            >
+                              {workspaceTargetOptions.map((item) => (
+                                <option key={`workspace-affinity-target-${item.componentId}`} value={item.componentId}>
+                                  {item.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="field affinity-field">
+                            <span className="affinity-key">Ligand</span>
+                            <select
+                              value={selectedWorkspaceLigand.componentId || ''}
+                              disabled={!canEdit || workspaceLigandOptions.length === 0}
+                              onChange={(e) => setAffinityComponentFromWorkspace('ligand', e.target.value || null)}
+                            >
+                              {workspaceLigandOptions.map((item) => (
+                                <option key={`workspace-affinity-ligand-${item.componentId}`} value={item.componentId}>
+                                  {item.isSmallMolecule ? item.label : `${item.label} (non-small)`}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
+                        {!canEnableAffinityFromWorkspace && (
+                          <div className="component-sidebar-empty muted small">{affinityEnableDisabledReason}</div>
                         )}
                       </section>
 
