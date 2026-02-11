@@ -10,9 +10,13 @@ import type {
 
 const COMPONENT_KEY = 'vbio_project_input_config_v1';
 const UI_STATE_KEY = 'vbio_project_ui_state_v1';
+const VALID_MOLECULE_TYPES: MoleculeType[] = ['protein', 'ligand', 'dna', 'rna'];
+const VALID_LIGAND_INPUT_METHODS = new Set(['smiles', 'ccd', 'jsme']);
+const INVALID_COMPONENT_ID_TOKENS = new Set(['undefined', 'null', 'nan']);
 
 export interface ProjectUiState {
   proteinTemplates: Record<string, ProteinTemplateUpload>;
+  taskProteinTemplates?: Record<string, Record<string, ProteinTemplateUpload>>;
   activeConstraintId: string | null;
   selectedConstraintTemplateComponentId: string | null;
 }
@@ -43,6 +47,73 @@ export function createInputComponent(type: MoleculeType): InputComponent {
     useMsa: type === 'protein',
     cyclic: false
   };
+}
+
+function normalizeComponentType(type: unknown): MoleculeType {
+  if (typeof type === 'string' && (VALID_MOLECULE_TYPES as string[]).includes(type)) {
+    return type as MoleculeType;
+  }
+  return 'protein';
+}
+
+function normalizeComponentId(rawId: unknown, type: MoleculeType, index: number): string {
+  if (typeof rawId === 'string') {
+    const trimmed = rawId.trim();
+    if (trimmed && !INVALID_COMPONENT_ID_TOKENS.has(trimmed.toLowerCase())) {
+      return trimmed;
+    }
+  }
+  return `legacy-${type}-${index + 1}`;
+}
+
+function normalizeNumCopies(value: unknown): number {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num < 1) return 1;
+  return Math.floor(num);
+}
+
+function normalizeLigandInputMethod(value: unknown): 'smiles' | 'ccd' | 'jsme' {
+  if (typeof value === 'string' && VALID_LIGAND_INPUT_METHODS.has(value)) {
+    return value as 'smiles' | 'ccd' | 'jsme';
+  }
+  return 'jsme';
+}
+
+export function normalizeInputComponents(components: InputComponent[]): InputComponent[] {
+  return components.map((component, index) => {
+    const type = normalizeComponentType(component?.type);
+    const id = normalizeComponentId(component?.id, type, index);
+    const sequence = normalizeComponentSequence(type, typeof component?.sequence === 'string' ? component.sequence : '');
+    const numCopies = normalizeNumCopies(component?.numCopies);
+
+    if (type === 'protein') {
+      return {
+        id,
+        type,
+        numCopies,
+        sequence,
+        useMsa: component?.useMsa !== false,
+        cyclic: Boolean(component?.cyclic)
+      };
+    }
+
+    if (type === 'ligand') {
+      return {
+        id,
+        type,
+        numCopies,
+        sequence,
+        inputMethod: normalizeLigandInputMethod(component?.inputMethod)
+      };
+    }
+
+    return {
+      id,
+      type,
+      numCopies,
+      sequence
+    };
+  });
 }
 
 export function buildDefaultInputConfig(): ProjectInputConfig {
@@ -148,7 +219,8 @@ function normalizeConstraints(value: unknown): PredictionConstraint[] {
 
 function normalizeConfig(value: ProjectInputConfig): ProjectInputConfig {
   const base = buildDefaultInputConfig();
-  const components = Array.isArray(value.components) && value.components.length > 0 ? value.components : base.components;
+  const components =
+    Array.isArray(value.components) && value.components.length > 0 ? normalizeInputComponents(value.components) : base.components;
   return {
     version: 1,
     components,
@@ -194,6 +266,32 @@ function writeUiStore(data: Record<string, ProjectUiState>): void {
   localStorage.setItem(UI_STATE_KEY, JSON.stringify(data));
 }
 
+function normalizeStoredProteinTemplates(value: unknown): Record<string, ProteinTemplateUpload> {
+  const proteinTemplates: Record<string, ProteinTemplateUpload> = {};
+  if (!value || typeof value !== 'object') return proteinTemplates;
+
+  for (const [componentId, upload] of Object.entries(value as Record<string, unknown>)) {
+    if (!upload || typeof upload !== 'object') continue;
+    const fileName = typeof (upload as any).fileName === 'string' ? (upload as any).fileName : '';
+    const format = (upload as any).format === 'cif' ? 'cif' : (upload as any).format === 'pdb' ? 'pdb' : null;
+    const content = typeof (upload as any).content === 'string' ? (upload as any).content : '';
+    const chainId = typeof (upload as any).chainId === 'string' ? (upload as any).chainId : '';
+    if (!fileName || !format || !content) continue;
+    const chainSequencesValue = (upload as any).chainSequences;
+    const chainSequences =
+      chainSequencesValue && typeof chainSequencesValue === 'object' ? (chainSequencesValue as Record<string, string>) : {};
+    proteinTemplates[componentId] = {
+      fileName,
+      format,
+      content,
+      chainId,
+      chainSequences
+    };
+  }
+
+  return proteinTemplates;
+}
+
 export function loadProjectInputConfig(projectId: string): ProjectInputConfig | null {
   const store = readStore();
   const found = store[projectId];
@@ -226,31 +324,20 @@ export function loadProjectUiState(projectId: string): ProjectUiState | null {
       ? (found as any).selectedConstraintTemplateComponentId
       : null;
 
-  const rawTemplates = found.proteinTemplates;
-  const proteinTemplates: Record<string, ProteinTemplateUpload> = {};
-  if (rawTemplates && typeof rawTemplates === 'object') {
-    for (const [componentId, upload] of Object.entries(rawTemplates)) {
-      if (!upload || typeof upload !== 'object') continue;
-      const fileName = typeof (upload as any).fileName === 'string' ? (upload as any).fileName : '';
-      const format = (upload as any).format === 'cif' ? 'cif' : (upload as any).format === 'pdb' ? 'pdb' : null;
-      const content = typeof (upload as any).content === 'string' ? (upload as any).content : '';
-      const chainId = typeof (upload as any).chainId === 'string' ? (upload as any).chainId : '';
-      if (!fileName || !format || !content) continue;
-      const chainSequencesValue = (upload as any).chainSequences;
-      const chainSequences =
-        chainSequencesValue && typeof chainSequencesValue === 'object' ? (chainSequencesValue as Record<string, string>) : {};
-      proteinTemplates[componentId] = {
-        fileName,
-        format,
-        content,
-        chainId,
-        chainSequences
-      };
+  const proteinTemplates = normalizeStoredProteinTemplates((found as any).proteinTemplates);
+  const taskProteinTemplates: Record<string, Record<string, ProteinTemplateUpload>> = {};
+  const rawTaskTemplates = (found as any).taskProteinTemplates;
+  if (rawTaskTemplates && typeof rawTaskTemplates === 'object') {
+    for (const [taskRowId, taskTemplates] of Object.entries(rawTaskTemplates as Record<string, unknown>)) {
+      const normalized = normalizeStoredProteinTemplates(taskTemplates);
+      if (Object.keys(normalized).length === 0) continue;
+      taskProteinTemplates[taskRowId] = normalized;
     }
   }
 
   return {
     proteinTemplates,
+    taskProteinTemplates,
     activeConstraintId,
     selectedConstraintTemplateComponentId
   };

@@ -20,14 +20,11 @@ import { useAuth } from '../hooks/useAuth';
 import type { InputComponent, Project, ProjectTask } from '../types/models';
 import { assignChainIdsForComponents } from '../utils/chainAssignments';
 import { formatDateTime, formatDuration } from '../utils/date';
-import { normalizeComponentSequence } from '../utils/projectInputs';
+import { normalizeComponentSequence, normalizeInputComponents } from '../utils/projectInputs';
 import { loadRDKitModule } from '../utils/rdkit';
 
 function normalizeTaskComponents(components: InputComponent[]): InputComponent[] {
-  return components.map((item) => ({
-    ...item,
-    sequence: normalizeComponentSequence(item.type, item.sequence)
-  }));
+  return normalizeInputComponents(components);
 }
 
 function readTaskComponents(task: ProjectTask): InputComponent[] {
@@ -1167,10 +1164,18 @@ export function ProjectTasksPage() {
   }, [page, totalPages]);
 
   const openTask = async (task: ProjectTask) => {
-    if (!project || !task.task_id) return;
+    if (!project) return;
     setOpeningTaskId(task.id);
     setError(null);
     try {
+      if (!String(task.task_id || '').trim()) {
+        const query = new URLSearchParams({
+          tab: 'components',
+          task_row_id: task.id
+        }).toString();
+        navigate(`/projects/${project.id}?${query}`);
+        return;
+      }
       await updateProject(project.id, {
         task_id: task.task_id,
         task_state: task.task_state,
@@ -1509,6 +1514,8 @@ export function ProjectTasksPage() {
                   const runNote = (task.status_text || '').trim();
                   const showRunNote = shouldShowRunNote(task.task_state, runNote);
                   const submittedTs = task.submitted_at || task.created_at;
+                  const hasRuntimeTaskId = Boolean(String(task.task_id || '').trim());
+                  const actionTitle = hasRuntimeTaskId ? 'Open this task result' : 'Open this draft snapshot for editing';
                   const stateTone = taskStateTone(task.task_state);
                   const plddtTone = toneForPlddt(metrics.plddt);
                   const iptmTone = toneForIptm(metrics.iptm);
@@ -1559,8 +1566,8 @@ export function ProjectTasksPage() {
                           <button
                             className="btn btn-ghost btn-compact task-action-open"
                             onClick={() => void openTask(task)}
-                            disabled={!task.task_id || openingTaskId === task.id}
-                            title="Open this task result"
+                            disabled={openingTaskId === task.id}
+                            title={actionTitle}
                           >
                             {openingTaskId === task.id ? <LoaderCircle size={13} className="spin" /> : <ExternalLink size={13} />}
                             Current

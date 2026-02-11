@@ -1,6 +1,6 @@
 import type { CSSProperties, FormEvent, KeyboardEvent, PointerEvent } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useLocation, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   ArrowLeft,
   Clock3,
@@ -49,6 +49,7 @@ import {
   extractPrimaryProteinAndLigand,
   loadProjectInputConfig,
   loadProjectUiState,
+  normalizeInputComponents,
   normalizeComponentSequence,
   saveProjectUiState,
   saveProjectInputConfig
@@ -396,6 +397,11 @@ function mergeTaskSnapshotIntoConfig(baseConfig: ProjectInputConfig, task: Proje
   };
 }
 
+function isDraftTaskSnapshot(task: ProjectTask | null): boolean {
+  if (!task) return false;
+  return task.task_state === 'DRAFT' && !String(task.task_id || '').trim();
+}
+
 function readLigandAtomPlddtsFromConfidence(confidence: Record<string, unknown> | null): number[] {
   if (!confidence) return [];
   const candidates: unknown[] = [
@@ -416,10 +422,7 @@ function readLigandAtomPlddtsFromConfidence(confidence: Record<string, unknown> 
 }
 
 function normalizeComponents(components: InputComponent[]): InputComponent[] {
-  return components.map((comp) => ({
-    ...comp,
-    sequence: normalizeComponentSequence(comp.type, comp.sequence)
-  }));
+  return normalizeInputComponents(components);
 }
 
 function nonEmptyComponents(components: InputComponent[]): InputComponent[] {
@@ -518,6 +521,7 @@ function createProteinTemplatesFingerprint(templates: Record<string, ProteinTemp
 export function ProjectDetailPage() {
   const { projectId = '' } = useParams();
   const location = useLocation();
+  const navigate = useNavigate();
   const { session } = useAuth();
 
   const [project, setProject] = useState<Project | null>(null);
@@ -621,22 +625,40 @@ export function ProjectDetailPage() {
     return project.user_id === session.userId;
   }, [project, session]);
 
+  const requestedStatusTaskRow = useMemo(() => {
+    const requestedTaskRowId = new URLSearchParams(location.search).get('task_row_id');
+    if (!requestedTaskRowId || !requestedTaskRowId.trim()) return null;
+    return projectTasks.find((item) => String(item.id || '').trim() === requestedTaskRowId.trim()) || null;
+  }, [location.search, projectTasks]);
+
+  const activeStatusTaskRow = useMemo(() => {
+    const activeTaskId = (project?.task_id || '').trim();
+    if (!activeTaskId) return null;
+    return projectTasks.find((item) => String(item.task_id || '').trim() === activeTaskId) || null;
+  }, [project?.task_id, projectTasks]);
+
+  const statusContextTaskRow = requestedStatusTaskRow || activeStatusTaskRow;
+  const displayTaskState: TaskState = statusContextTaskRow?.task_state || project?.task_state || 'DRAFT';
+  const displaySubmittedAt = statusContextTaskRow?.submitted_at ?? project?.submitted_at ?? null;
+  const displayCompletedAt = statusContextTaskRow?.completed_at ?? project?.completed_at ?? null;
+  const displayDurationSeconds = statusContextTaskRow?.duration_seconds ?? project?.duration_seconds ?? null;
+
   const progressPercent = useMemo(() => {
-    if (!project) return 0;
-    if (['SUCCESS', 'FAILURE', 'REVOKED'].includes(project.task_state)) return 100;
+    if (['SUCCESS', 'FAILURE', 'REVOKED'].includes(displayTaskState)) return 100;
+    if (!['QUEUED', 'RUNNING'].includes(displayTaskState)) return 0;
     const explicit = findProgressPercent(statusInfo);
     if (explicit !== null) return Math.max(0, Math.min(100, explicit));
-    if (project.task_state === 'RUNNING') return 62;
-    if (project.task_state === 'QUEUED') return 18;
+    if (displayTaskState === 'RUNNING') return 62;
+    if (displayTaskState === 'QUEUED') return 18;
     return 0;
-  }, [project, statusInfo]);
+  }, [displayTaskState, statusInfo]);
 
   const waitingSeconds = useMemo(() => {
-    if (!project?.submitted_at) return null;
-    if (!['QUEUED', 'RUNNING'].includes(project.task_state)) return null;
-    const duration = Math.floor((nowTs - new Date(project.submitted_at).getTime()) / 1000);
+    if (!displaySubmittedAt) return null;
+    if (!['QUEUED', 'RUNNING'].includes(displayTaskState)) return null;
+    const duration = Math.floor((nowTs - new Date(displaySubmittedAt).getTime()) / 1000);
     return Math.max(0, duration);
-  }, [project, nowTs]);
+  }, [displayTaskState, displaySubmittedAt, nowTs]);
 
   const normalizedDraftComponents = useMemo(() => {
     if (!draft) return [];
@@ -1674,21 +1696,19 @@ export function ProjectDetailPage() {
   }, [project?.id, project?.task_state]);
 
   const isActiveRuntime = useMemo(() => {
-    if (!project) return false;
-    return project.task_state === 'QUEUED' || project.task_state === 'RUNNING';
-  }, [project]);
+    return displayTaskState === 'QUEUED' || displayTaskState === 'RUNNING';
+  }, [displayTaskState]);
 
   const totalRuntimeSeconds = useMemo(() => {
-    if (!project) return null;
-    if (project.duration_seconds !== null && project.duration_seconds !== undefined) {
-      return project.duration_seconds;
+    if (displayDurationSeconds !== null && displayDurationSeconds !== undefined) {
+      return displayDurationSeconds;
     }
-    if (project.submitted_at && project.completed_at) {
-      const duration = (new Date(project.completed_at).getTime() - new Date(project.submitted_at).getTime()) / 1000;
+    if (displaySubmittedAt && displayCompletedAt) {
+      const duration = (new Date(displayCompletedAt).getTime() - new Date(displaySubmittedAt).getTime()) / 1000;
       return Number.isFinite(duration) && duration >= 0 ? duration : null;
     }
     return null;
-  }, [project]);
+  }, [displayDurationSeconds, displaySubmittedAt, displayCompletedAt]);
 
   const loadProjectTasks = useCallback(async (currentProjectId: string, options?: { silent?: boolean }) => {
     const silent = Boolean(options?.silent);
@@ -1719,10 +1739,22 @@ export function ProjectDetailPage() {
       const activeTaskId = (next.task_id || '').trim();
       const activeTaskRow =
         activeTaskId.length > 0 ? taskRows.find((item) => String(item.task_id || '').trim() === activeTaskId) || null : null;
+      const requestedTaskRowId = new URLSearchParams(location.search).get('task_row_id');
+      const requestedTaskRow =
+        requestedTaskRowId && requestedTaskRowId.trim()
+          ? taskRows.find((item) => String(item.id || '').trim() === requestedTaskRowId.trim()) || null
+          : null;
+      const snapshotSourceTaskRow = requestedTaskRow || activeTaskRow;
+      const latestDraftTask = (() => {
+        if (requestedTaskRow && requestedTaskRow.task_state === 'DRAFT' && !String(requestedTaskRow.task_id || '').trim()) {
+          return requestedTaskRow;
+        }
+        return taskRows.find((item) => item.task_state === 'DRAFT' && !String(item.task_id || '').trim()) || null;
+      })();
 
       const savedConfig = loadProjectInputConfig(next.id);
       const baseConfig = savedConfig || defaultConfigFromProject(next);
-      const taskAlignedConfig = mergeTaskSnapshotIntoConfig(baseConfig, activeTaskRow);
+      const taskAlignedConfig = mergeTaskSnapshotIntoConfig(baseConfig, snapshotSourceTaskRow);
       const backendConstraints = filterConstraintsByBackend(taskAlignedConfig.constraints, next.backend);
 
       const savedUiState = loadProjectUiState(next.id);
@@ -1742,8 +1774,33 @@ export function ProjectDetailPage() {
           .filter((component) => component.type === 'protein')
           .map((component) => component.id)
       );
+      const templateSource = (() => {
+        if (requestedTaskRow) {
+          if (!isDraftTaskSnapshot(requestedTaskRow)) {
+            return {};
+          }
+          const byTaskRow = savedUiState?.taskProteinTemplates?.[requestedTaskRow.id] || {};
+          if (Object.keys(byTaskRow).length > 0) return byTaskRow;
+          return savedUiState?.proteinTemplates || {};
+        }
+
+        if (activeTaskRow) {
+          if (!isDraftTaskSnapshot(activeTaskRow)) {
+            return {};
+          }
+          const byActiveRow = savedUiState?.taskProteinTemplates?.[activeTaskRow.id] || {};
+          if (Object.keys(byActiveRow).length > 0) return byActiveRow;
+          return savedUiState?.proteinTemplates || {};
+        }
+
+        if (latestDraftTask?.id) {
+          const byScopeRow = savedUiState?.taskProteinTemplates?.[latestDraftTask.id] || {};
+          if (Object.keys(byScopeRow).length > 0) return byScopeRow;
+        }
+        return savedUiState?.proteinTemplates || {};
+      })();
       const restoredTemplates = Object.fromEntries(
-        Object.entries(savedUiState?.proteinTemplates || {}).filter(([componentId]) => validProteinIds.has(componentId))
+        Object.entries(templateSource).filter(([componentId]) => validProteinIds.has(componentId))
       ) as Record<string, ProteinTemplateUpload>;
 
       setDraft(loadedDraft);
@@ -1767,7 +1824,7 @@ export function ProjectDetailPage() {
 
   useEffect(() => {
     void loadProject();
-  }, [projectId]);
+  }, [projectId, location.search]);
 
   useEffect(() => {
     if (!project) return;
@@ -1782,12 +1839,14 @@ export function ProjectDetailPage() {
 
   useEffect(() => {
     if (!project) return;
+    const previousUiState = loadProjectUiState(project.id);
     saveProjectUiState(project.id, {
-      proteinTemplates: loadProjectUiState(project.id)?.proteinTemplates || {},
+      proteinTemplates,
+      taskProteinTemplates: previousUiState?.taskProteinTemplates || {},
       activeConstraintId,
       selectedConstraintTemplateComponentId
     });
-  }, [project, activeConstraintId, selectedConstraintTemplateComponentId]);
+  }, [project, proteinTemplates, activeConstraintId, selectedConstraintTemplateComponentId]);
 
   const patch = async (payload: Partial<Project>) => {
     if (!project) return null;
@@ -1818,6 +1877,135 @@ export function ProjectDetailPage() {
     return next;
   };
 
+  const resolveEditableDraftTaskRowId = (): string | null => {
+    const requestedTaskRowId = new URLSearchParams(location.search).get('task_row_id');
+    if (requestedTaskRowId && requestedTaskRowId.trim()) {
+      const requested = projectTasks.find((item) => String(item.id || '').trim() === requestedTaskRowId.trim()) || null;
+      if (requested) {
+        return isDraftTaskSnapshot(requested) ? requested.id : null;
+      }
+    }
+    const activeTaskId = String(project?.task_id || '').trim();
+    if (activeTaskId) {
+      const activeRow = projectTasks.find((item) => String(item.task_id || '').trim() === activeTaskId) || null;
+      if (activeRow) {
+        return isDraftTaskSnapshot(activeRow) ? activeRow.id : null;
+      }
+    }
+    const latestDraft = projectTasks.find((item) => isDraftTaskSnapshot(item)) || null;
+    return latestDraft ? latestDraft.id : null;
+  };
+
+  const persistTemplatesForTaskRow = (projectIdValue: string, taskRowId: string) => {
+    const previousUiState = loadProjectUiState(projectIdValue);
+    const taskProteinTemplates = {
+      ...(previousUiState?.taskProteinTemplates || {}),
+      [taskRowId]: proteinTemplates
+    };
+    saveProjectUiState(projectIdValue, {
+      proteinTemplates: previousUiState?.proteinTemplates || proteinTemplates,
+      taskProteinTemplates,
+      activeConstraintId,
+      selectedConstraintTemplateComponentId
+    });
+  };
+
+  const persistDraftTaskSnapshot = async (
+    normalizedConfig: ProjectInputConfig,
+    options?: { statusText?: string; reuseTaskRowId?: string | null }
+  ): Promise<ProjectTask> => {
+    if (!project || !draft) {
+      throw new Error('Project context is not ready.');
+    }
+
+    const now = new Date().toISOString();
+    const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(normalizedConfig);
+    const statusText = options?.statusText || 'Draft saved (not submitted)';
+    const basePayload: Partial<ProjectTask> = {
+      project_id: project.id,
+      task_id: '',
+      task_state: 'DRAFT',
+      status_text: statusText,
+      error_text: '',
+      backend: draft.backend,
+      seed: normalizedConfig.options.seed ?? null,
+      protein_sequence: proteinSequence,
+      ligand_smiles: ligandSmiles,
+      components: normalizedConfig.components,
+      constraints: normalizedConfig.constraints,
+      properties: normalizedConfig.properties,
+      confidence: {},
+      affinity: {},
+      structure_name: '',
+      submitted_at: null,
+      completed_at: null,
+      duration_seconds: null
+    };
+
+    const toLocalTaskRow = (id: string, payload: Partial<ProjectTask>, previous?: ProjectTask | null): ProjectTask => ({
+      task_id: '',
+      task_state: 'DRAFT',
+      status_text: statusText,
+      error_text: '',
+      backend: draft.backend,
+      seed: normalizedConfig.options.seed ?? null,
+      protein_sequence: proteinSequence,
+      ligand_smiles: ligandSmiles,
+      components: normalizedConfig.components,
+      constraints: normalizedConfig.constraints,
+      properties: normalizedConfig.properties,
+      confidence: {},
+      affinity: {},
+      structure_name: '',
+      submitted_at: null,
+      completed_at: null,
+      duration_seconds: null,
+      created_at: previous?.created_at || now,
+      updated_at: now,
+      ...previous,
+      ...payload,
+      id,
+      project_id: project.id
+    });
+
+    const reuseTaskRowId = options?.reuseTaskRowId || null;
+    if (reuseTaskRowId) {
+      if (reuseTaskRowId.startsWith('local-')) {
+        const previous = projectTasks.find((item) => item.id === reuseTaskRowId) || null;
+        const localRow = toLocalTaskRow(reuseTaskRowId, basePayload, previous);
+        setProjectTasks((prev) => {
+          const exists = prev.some((item) => item.id === reuseTaskRowId);
+          const next = exists ? prev.map((item) => (item.id === reuseTaskRowId ? localRow : item)) : [localRow, ...prev];
+          return sortProjectTasks(next);
+        });
+        return localRow;
+      }
+
+      try {
+        const updated = await updateProjectTask(reuseTaskRowId, basePayload);
+        setProjectTasks((prev) => {
+          const exists = prev.some((item) => item.id === reuseTaskRowId);
+          const next = exists ? prev.map((item) => (item.id === reuseTaskRowId ? updated : item)) : [updated, ...prev];
+          return sortProjectTasks(next);
+        });
+        return updated;
+      } catch {
+        // Fall through to insert path.
+      }
+    }
+
+    try {
+      const inserted = await insertProjectTask(basePayload);
+      setProjectTasks((prev) => sortProjectTasks([inserted, ...prev.filter((row) => row.id !== inserted.id)]));
+      return inserted;
+    } catch {
+      const localId = `local-draft-${Math.random().toString(36).slice(2)}`;
+      const localRow = toLocalTaskRow(localId, basePayload, null);
+      setProjectTasks((prev) => sortProjectTasks([localRow, ...prev.filter((row) => row.id !== localId)]));
+      return localRow;
+    }
+  };
+
   const saveDraft = async (event?: FormEvent) => {
     event?.preventDefault();
     if (!project || !draft) return;
@@ -1843,11 +2031,12 @@ export function ProjectDetailPage() {
 
       if (next) {
         saveProjectInputConfig(next.id, normalizedConfig);
-        saveProjectUiState(next.id, {
-          proteinTemplates,
-          activeConstraintId,
-          selectedConstraintTemplateComponentId
+        const reusableDraftTaskRowId = resolveEditableDraftTaskRowId();
+        const draftTaskRow = await persistDraftTaskSnapshot(normalizedConfig, {
+          statusText: 'Draft saved (not submitted)',
+          reuseTaskRowId: reusableDraftTaskRowId
         });
+        persistTemplatesForTaskRow(next.id, draftTaskRow.id);
         const nextDraft: DraftFields = {
           name: next.name,
           summary: next.summary,
@@ -1860,6 +2049,11 @@ export function ProjectDetailPage() {
         setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
         setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
         setRunMenuOpen(false);
+        const query = new URLSearchParams({
+          tab: 'components',
+          task_row_id: draftTaskRow.id
+        }).toString();
+        navigate(`/projects/${next.id}?${query}`, { replace: true });
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save draft.');
@@ -2021,6 +2215,45 @@ export function ProjectDetailPage() {
     try {
       const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(normalizedConfig);
       const hasMsa = activeComponents.some((comp) => comp.type === 'protein' && comp.useMsa !== false);
+      const persistenceWarnings: string[] = [];
+
+      saveProjectInputConfig(project.id, normalizedConfig);
+      const nextDraft: DraftFields = {
+        name: draft.name.trim(),
+        summary: draft.summary.trim(),
+        backend: draft.backend,
+        use_msa: hasMsa,
+        color_mode: draft.color_mode || 'white',
+        inputConfig: normalizedConfig
+      };
+      setDraft(nextDraft);
+      setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
+      setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
+      setRunMenuOpen(false);
+
+      try {
+        await patch({
+          name: nextDraft.name,
+          summary: nextDraft.summary,
+          backend: nextDraft.backend,
+          use_msa: nextDraft.use_msa,
+          protein_sequence: proteinSequence,
+          ligand_smiles: ligandSmiles,
+          color_mode: nextDraft.color_mode,
+          status_text: 'Draft saved'
+        });
+      } catch (draftPersistError) {
+        persistenceWarnings.push(
+          `saving draft failed: ${draftPersistError instanceof Error ? draftPersistError.message : 'unknown error'}`
+        );
+      }
+
+      const draftTaskRow = await persistDraftTaskSnapshot(normalizedConfig, {
+        statusText: 'Draft snapshot prepared for run',
+        reuseTaskRowId: resolveEditableDraftTaskRowId()
+      });
+      persistTemplatesForTaskRow(project.id, draftTaskRow.id);
+
       const activeAssignments = assignChainIdsForComponents(activeComponents);
       const templateUploads: NonNullable<Parameters<typeof submitPrediction>[0]['templateUploads']> = [];
       activeComponents.forEach((comp, index) => {
@@ -2053,9 +2286,7 @@ export function ProjectDetailPage() {
       });
 
       const queuedAt = new Date().toISOString();
-      const queuedTaskDraft: ProjectTask = {
-        id: `local-${taskId}`,
-        project_id: project.id,
+      const queuedTaskPatch: Partial<ProjectTask> = {
         task_id: taskId,
         task_state: 'QUEUED',
         status_text: 'Task submitted and waiting in queue',
@@ -2072,35 +2303,52 @@ export function ProjectDetailPage() {
         structure_name: '',
         submitted_at: queuedAt,
         completed_at: null,
-        duration_seconds: null,
-        created_at: queuedAt,
-        updated_at: queuedAt
+        duration_seconds: null
       };
-      const persistenceWarnings: string[] = [];
+
       try {
-        const taskRow = await insertProjectTask({
+        if (draftTaskRow.id.startsWith('local-')) {
+          await patchTask(draftTaskRow.id, queuedTaskPatch);
+        } else {
+          const queuedTaskRow = await updateProjectTask(draftTaskRow.id, queuedTaskPatch);
+          setProjectTasks((prev) =>
+            sortProjectTasks(prev.map((row) => (row.id === queuedTaskRow.id ? queuedTaskRow : row)))
+          );
+        }
+      } catch (taskPersistError) {
+        const fallbackId = draftTaskRow.id.startsWith('local-') ? draftTaskRow.id : `local-${taskId}`;
+        const localQueuedTask: ProjectTask = {
+          ...draftTaskRow,
+          ...queuedTaskPatch,
+          id: fallbackId,
           project_id: project.id,
           task_id: taskId,
-          task_state: queuedTaskDraft.task_state,
-          status_text: queuedTaskDraft.status_text,
-          error_text: queuedTaskDraft.error_text,
-          backend: queuedTaskDraft.backend,
-          seed: queuedTaskDraft.seed,
-          protein_sequence: queuedTaskDraft.protein_sequence,
-          ligand_smiles: queuedTaskDraft.ligand_smiles,
-          components: queuedTaskDraft.components,
-          constraints: queuedTaskDraft.constraints,
-          properties: queuedTaskDraft.properties,
-          confidence: queuedTaskDraft.confidence,
-          affinity: queuedTaskDraft.affinity,
-          structure_name: queuedTaskDraft.structure_name,
-          submitted_at: queuedTaskDraft.submitted_at,
-          completed_at: queuedTaskDraft.completed_at,
-          duration_seconds: queuedTaskDraft.duration_seconds
+          task_state: 'QUEUED',
+          status_text: 'Task submitted and waiting in queue',
+          error_text: '',
+          backend: draft.backend,
+          seed: normalizedConfig.options.seed ?? null,
+          protein_sequence: proteinSequence,
+          ligand_smiles: ligandSmiles,
+          components: activeComponents,
+          constraints: normalizedConfig.constraints,
+          properties: normalizedConfig.properties,
+          confidence: {},
+          affinity: {},
+          structure_name: '',
+          submitted_at: queuedAt,
+          completed_at: null,
+          duration_seconds: null,
+          created_at: draftTaskRow.created_at || queuedAt,
+          updated_at: queuedAt
+        };
+        setProjectTasks((prev) => {
+          const exists = prev.some((row) => row.id === draftTaskRow.id);
+          if (exists) {
+            return sortProjectTasks(prev.map((row) => (row.id === draftTaskRow.id ? localQueuedTask : row)));
+          }
+          return sortProjectTasks([localQueuedTask, ...prev.filter((row) => row.task_id !== taskId)]);
         });
-        setProjectTasks((prev) => sortProjectTasks([taskRow, ...prev.filter((row) => row.id !== taskRow.id)]));
-      } catch (taskPersistError) {
-        setProjectTasks((prev) => sortProjectTasks([queuedTaskDraft, ...prev.filter((row) => row.task_id !== taskId)]));
         persistenceWarnings.push(
           `saving task history failed: ${taskPersistError instanceof Error ? taskPersistError.message : 'unknown error'}`
         );
@@ -2833,13 +3081,13 @@ export function ProjectDetailPage() {
         <div className="page-header-left">
           <h1>{project.name}</h1>
           <div className="project-compact-meta">
-            <span className={`badge state-${project.task_state.toLowerCase()}`}>{project.task_state}</span>
+            <span className={`badge state-${displayTaskState.toLowerCase()}`}>{displayTaskState}</span>
             <span className="meta-chip">{workflow.shortTitle}</span>
             {isActiveRuntime ? (
               <>
                 <span
                   className={`meta-chip meta-chip-live meta-chip-live-progress ${
-                    project.task_state === 'RUNNING' ? 'meta-chip-live-running' : 'meta-chip-live-queued'
+                    displayTaskState === 'RUNNING' ? 'meta-chip-live-running' : 'meta-chip-live-queued'
                   }`}
                 >
                   {Math.round(progressPercent)}%
@@ -2847,7 +3095,7 @@ export function ProjectDetailPage() {
                 {waitingSeconds !== null && (
                   <span
                     className={`meta-chip meta-chip-live meta-chip-live-elapsed ${
-                      project.task_state === 'RUNNING' ? 'meta-chip-live-running' : 'meta-chip-live-queued'
+                      displayTaskState === 'RUNNING' ? 'meta-chip-live-running' : 'meta-chip-live-queued'
                     }`}
                   >
                     {formatDuration(waitingSeconds)} elapsed
@@ -2855,7 +3103,7 @@ export function ProjectDetailPage() {
                 )}
               </>
             ) : (
-              project.task_state === 'SUCCESS' &&
+              displayTaskState === 'SUCCESS' &&
               totalRuntimeSeconds !== null && <span className="meta-chip">Completed in {formatDuration(totalRuntimeSeconds)}</span>
             )}
           </div>
