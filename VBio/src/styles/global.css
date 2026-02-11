@@ -2740,10 +2740,8 @@ select:focus {
 }
 
 .ligand-preview-panel {
-  border: 1px solid #e5eee8;
-  border-radius: 10px;
-  background: #fff;
-  padding: 8px;
+  background: transparent;
+  padding: 0;
 }
 
 .ligand-prop-grid {

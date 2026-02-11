@@ -1831,9 +1831,6 @@ export function ProjectDetailPage() {
         }
 
         if (activeTaskRow) {
-          if (!isDraftTaskSnapshot(activeTaskRow)) {
-            return {};
-          }
           return readTaskProteinTemplates(activeTaskRow);
         }
 
@@ -2307,41 +2304,10 @@ export function ProjectDetailPage() {
           );
         }
       } catch (taskPersistError) {
-        const fallbackId = draftTaskRow.id.startsWith('local-') ? draftTaskRow.id : `local-${taskId}`;
-        const localQueuedTask: ProjectTask = {
-          ...draftTaskRow,
-          ...queuedTaskPatch,
-          id: fallbackId,
-          project_id: project.id,
-          task_id: taskId,
-          task_state: 'QUEUED',
-          status_text: 'Task submitted and waiting in queue',
-          error_text: '',
-          backend: draft.backend,
-          seed: normalizedConfig.options.seed ?? null,
-          protein_sequence: proteinSequence,
-          ligand_smiles: ligandSmiles,
-          components: snapshotComponents,
-          constraints: normalizedConfig.constraints,
-          properties: normalizedConfig.properties,
-          confidence: {},
-          affinity: {},
-          structure_name: '',
-          submitted_at: queuedAt,
-          completed_at: null,
-          duration_seconds: null,
-          created_at: draftTaskRow.created_at || queuedAt,
-          updated_at: queuedAt
-        };
-        setProjectTasks((prev) => {
-          const exists = prev.some((row) => row.id === draftTaskRow.id);
-          if (exists) {
-            return sortProjectTasks(prev.map((row) => (row.id === draftTaskRow.id ? localQueuedTask : row)));
-          }
-          return sortProjectTasks([localQueuedTask, ...prev.filter((row) => row.task_id !== taskId)]);
-        });
-        persistenceWarnings.push(
-          `saving task history failed: ${taskPersistError instanceof Error ? taskPersistError.message : 'unknown error'}`
+        throw new Error(
+          `Task submitted (${taskId}) but failed to persist queued task row: ${
+            taskPersistError instanceof Error ? taskPersistError.message : 'unknown error'
+          }`
         );
       }
 
