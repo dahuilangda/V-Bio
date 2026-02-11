@@ -2721,7 +2721,7 @@ export function ProjectDetailPage() {
                     </div>
                   )}
                 </div>
-                <LigandPropertyGrid smiles={overviewPrimaryLigand.isSmiles ? overviewPrimaryLigand.smiles : ''} />
+                <LigandPropertyGrid smiles={overviewPrimaryLigand.isSmiles ? overviewPrimaryLigand.smiles : ''} variant="radar" />
               </section>
 
               <section className="result-aside-block">

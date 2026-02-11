@@ -101,6 +101,7 @@ interface TaskListRow {
   durationValue: number | null;
   ligandSmiles: string;
   ligandIsSmiles: boolean;
+  ligandAtomPlddts: number[] | null;
 }
 
 function toneForPlddt(value: number | null): MetricTone {
@@ -138,6 +139,57 @@ function readTaskConfidenceMetrics(task: ProjectTask): TaskConfidenceMetrics {
     iptm: normalizeProbability(iptmRaw),
     pae: paeRaw
   };
+}
+
+function toFiniteNumberArray(value: unknown): number[] {
+  if (Array.isArray(value)) {
+    return value.filter((item): item is number => typeof item === 'number' && Number.isFinite(item));
+  }
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed.filter((item): item is number => typeof item === 'number' && Number.isFinite(item));
+      }
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function normalizeAtomPlddts(values: number[]): number[] {
+  const normalized = values
+    .filter((value) => Number.isFinite(value))
+    .map((value) => {
+      if (value >= 0 && value <= 1) return value * 100;
+      return value;
+    })
+    .map((value) => Math.max(0, Math.min(100, value)));
+  if (normalized.length === 0) return [];
+  return normalized.slice(0, 320);
+}
+
+function readTaskLigandAtomPlddts(task: ProjectTask): number[] | null {
+  const confidence = (task.confidence || {}) as Record<string, unknown>;
+  const candidates: unknown[] = [
+    confidence.ligand_atom_plddts,
+    confidence.ligand_atom_plddt,
+    readObjectPath(confidence, 'ligand.atom_plddts'),
+    readObjectPath(confidence, 'ligand.atom_plddt'),
+    readObjectPath(confidence, 'ligand_confidence.atom_plddts')
+  ];
+  for (const candidate of candidates) {
+    const parsed = normalizeAtomPlddts(toFiniteNumberArray(candidate));
+    if (parsed.length > 0) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function hasTaskLigandAtomPlddts(task: ProjectTask): boolean {
+  return Boolean(readTaskLigandAtomPlddts(task)?.length);
 }
 
 function hasTaskSummaryMetrics(task: ProjectTask): boolean {
@@ -395,7 +447,10 @@ export function ProjectTasksPage() {
       .filter((row) => {
         const taskId = String(row.task_id || '').trim();
         if (!taskId || row.task_state !== 'SUCCESS') return false;
-        if (hasTaskSummaryMetrics(row)) {
+        const ligand = readTaskPrimaryLigand(row);
+        const needsSummaryHydration = !hasTaskSummaryMetrics(row);
+        const needsLigandAtomHydration = Boolean(ligand.smiles && ligand.isSmiles && !hasTaskLigandAtomPlddts(row));
+        if (!needsSummaryHydration && !needsLigandAtomHydration) {
           resultHydrationDoneRef.current.add(taskId);
           return false;
         }
@@ -556,6 +611,7 @@ export function ProjectTasksPage() {
       const submittedTs = new Date(task.submitted_at || task.created_at).getTime();
       const durationValue = typeof task.duration_seconds === 'number' && Number.isFinite(task.duration_seconds) ? task.duration_seconds : null;
       const ligand = readTaskPrimaryLigand(task);
+      const ligandAtomPlddts = readTaskLigandAtomPlddts(task);
       return {
         task,
         metrics: readTaskConfidenceMetrics(task),
@@ -563,7 +619,8 @@ export function ProjectTasksPage() {
         backendValue: String(task.backend || '').trim().toLowerCase(),
         durationValue,
         ligandSmiles: ligand.smiles,
-        ligandIsSmiles: ligand.isSmiles
+        ligandIsSmiles: ligand.isSmiles,
+        ligandAtomPlddts
       };
     });
   }, [tasks]);
@@ -1258,7 +1315,12 @@ export function ProjectTasksPage() {
                       <td className="task-col-ligand">
                         {row.ligandSmiles && row.ligandIsSmiles ? (
                           <div className="task-ligand-thumb">
-                            <Ligand2DPreview smiles={row.ligandSmiles} width={160} height={102} />
+                            <Ligand2DPreview
+                              smiles={row.ligandSmiles}
+                              width={160}
+                              height={102}
+                              atomConfidences={row.ligandAtomPlddts}
+                            />
                           </div>
                         ) : (
                           <div className="task-ligand-thumb task-ligand-thumb-empty">

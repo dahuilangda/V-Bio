@@ -3,6 +3,7 @@ import { loadRDKitModule } from '../../utils/rdkit';
 
 interface LigandPropertyGridProps {
   smiles: string;
+  variant?: 'grid' | 'radar';
 }
 
 interface LigandPropsState {
@@ -90,7 +91,38 @@ function toneForRotB(value: number | null): Tone {
   return 'low';
 }
 
-export function LigandPropertyGrid({ smiles }: LigandPropertyGridProps) {
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(1, value));
+}
+
+function scoreBand(value: number | null, excellent: [number, number], good: [number, number], medium: [number, number]): number {
+  if (value === null || !Number.isFinite(value)) return 0.18;
+  const [eMin, eMax] = excellent;
+  const [gMin, gMax] = good;
+  const [mMin, mMax] = medium;
+  if (value >= eMin && value <= eMax) return 1;
+  if (value >= gMin && value <= gMax) return 0.78;
+  if (value >= mMin && value <= mMax) return 0.55;
+  return 0.28;
+}
+
+function scoreUpperBound(value: number | null, excellentMax: number, goodMax: number, mediumMax: number): number {
+  if (value === null || !Number.isFinite(value)) return 0.18;
+  if (value <= excellentMax) return 1;
+  if (value <= goodMax) return 0.78;
+  if (value <= mediumMax) return 0.55;
+  return 0.28;
+}
+
+function pointForRadar(center: number, radius: number, ratio: number, index: number, total: number) {
+  const angle = -Math.PI / 2 + (index * Math.PI * 2) / total;
+  const x = center + Math.cos(angle) * radius * clamp01(ratio);
+  const y = center + Math.sin(angle) * radius * clamp01(ratio);
+  return `${x.toFixed(2)},${y.toFixed(2)}`;
+}
+
+export function LigandPropertyGrid({ smiles, variant = 'grid' }: LigandPropertyGridProps) {
   const [props, setProps] = useState<LigandPropsState>(EMPTY_PROPS);
   const [loading, setLoading] = useState(false);
 
@@ -166,6 +198,63 @@ export function LigandPropertyGrid({ smiles }: LigandPropertyGridProps) {
     { label: 'HBD', value: props.hbd, digits: 0, tone: toneForHbd(props.hbd) },
     { label: 'RotB', value: props.rotB, digits: 0, tone: toneForRotB(props.rotB) }
   ];
+
+  if (variant === 'radar') {
+    const size = 236;
+    const center = size / 2;
+    const radius = 82;
+    const radarScores = [
+      scoreBand(props.mw, [200, 500], [150, 550], [100, 650]),
+      scoreBand(props.logP, [1, 3.5], [0, 5], [-1, 6]),
+      scoreBand(props.tpsa, [20, 120], [10, 140], [0, 160]),
+      scoreUpperBound(props.hba, 8, 10, 12),
+      scoreUpperBound(props.hbd, 3, 5, 7),
+      scoreUpperBound(props.rotB, 6, 10, 14)
+    ];
+    const points = radarScores.map((score, index) => pointForRadar(center, radius, score, index, radarScores.length)).join(' ');
+    const axisPoints = radarScores.map((_, index) => pointForRadar(center, radius, 1, index, radarScores.length));
+    const ringScales = [1, 0.75, 0.5, 0.25];
+
+    return (
+      <div className="ligand-radar-shell">
+        <svg className="ligand-radar" viewBox={`0 0 ${size} ${size}`} role="img" aria-label="Ligand property radar chart">
+          <defs>
+            <linearGradient id="ligand-radar-fill" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stopColor="rgba(0, 83, 214, 0.35)" />
+              <stop offset="100%" stopColor="rgba(101, 203, 243, 0.2)" />
+            </linearGradient>
+          </defs>
+          {ringScales.map((scale) => (
+            <polygon
+              key={`ring-${scale}`}
+              className="ligand-radar-ring"
+              points={axisPoints
+                .map((_, index) => pointForRadar(center, radius, scale, index, radarScores.length))
+                .join(' ')}
+            />
+          ))}
+          {axisPoints.map((p, index) => {
+            const [x, y] = p.split(',').map((v) => Number(v));
+            return <line key={`axis-${cards[index].label}`} className="ligand-radar-axis" x1={center} y1={center} x2={x} y2={y} />;
+          })}
+          <polygon className="ligand-radar-area" points={points} />
+          <polyline className="ligand-radar-stroke" points={points} />
+          {radarScores.map((score, index) => {
+            const [x, y] = pointForRadar(center, radius, score, index, radarScores.length).split(',').map((v) => Number(v));
+            return <circle key={`dot-${cards[index].label}`} className="ligand-radar-dot" cx={x} cy={y} r={3.8} />;
+          })}
+        </svg>
+        <div className="ligand-radar-legend">
+          {cards.map((card) => (
+            <div key={card.label} className="ligand-radar-item">
+              <span>{card.label}</span>
+              <strong className={`ligand-prop-value metric-value-${card.tone}`}>{formatValue(card.value, card.digits)}</strong>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="ligand-prop-grid">

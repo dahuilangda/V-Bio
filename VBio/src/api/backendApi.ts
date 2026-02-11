@@ -447,6 +447,211 @@ function applyAtomPlddtToStructure(
   return applyAtomPlddtToCifStructure(structureText, atomPlddts);
 }
 
+const WATER_COMP_IDS = new Set(['HOH', 'WAT', 'DOD', 'SOL']);
+const POLYMER_COMP_IDS = new Set([
+  'ALA',
+  'ARG',
+  'ASN',
+  'ASP',
+  'CYS',
+  'GLN',
+  'GLU',
+  'GLY',
+  'HIS',
+  'ILE',
+  'LEU',
+  'LYS',
+  'MET',
+  'PHE',
+  'PRO',
+  'SER',
+  'THR',
+  'TRP',
+  'TYR',
+  'VAL',
+  'SEC',
+  'PYL',
+  'ASX',
+  'GLX',
+  'UNK',
+  'A',
+  'C',
+  'G',
+  'U',
+  'I',
+  'DA',
+  'DC',
+  'DG',
+  'DT',
+  'DI',
+  'DU'
+]);
+
+function isHydrogenLikeElement(raw: string): boolean {
+  const value = raw.trim().toUpperCase();
+  if (!value) return false;
+  const head = value.replace(/[^A-Z]/g, '').slice(0, 1);
+  return head === 'H' || head === 'D' || head === 'T';
+}
+
+function toFiniteNumberArray(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is number => typeof item === 'number' && Number.isFinite(item));
+}
+
+function normalizeLigandAtomPlddts(values: number[]): number[] {
+  const normalized = values
+    .filter((value) => Number.isFinite(value))
+    .map((value) => normalizePlddt(value))
+    .filter((value) => Number.isFinite(value));
+  if (!normalized.length) return [];
+  return normalized.slice(0, 320);
+}
+
+function findHeaderIndex(headers: string[], names: string[]): number {
+  const lowered = headers.map((header) => header.toLowerCase());
+  for (const name of names) {
+    const idx = lowered.indexOf(name.toLowerCase());
+    if (idx >= 0) return idx;
+  }
+  return -1;
+}
+
+function extractLigandAtomPlddtsFromCif(structureText: string): number[] {
+  if (!structureText) return [];
+  const lines = structureText.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() !== 'loop_') continue;
+
+    let headerIndex = i + 1;
+    const headers: string[] = [];
+    while (headerIndex < lines.length) {
+      const rawHeader = lines[headerIndex].trim();
+      if (!rawHeader.startsWith('_')) break;
+      headers.push(rawHeader);
+      headerIndex += 1;
+    }
+
+    if (!headers.some((header) => header.toLowerCase().startsWith('_atom_site.'))) {
+      i = headerIndex - 1;
+      continue;
+    }
+
+    const groupCol = findHeaderIndex(headers, ['_atom_site.group_pdb']);
+    const chainCol = findHeaderIndex(headers, ['_atom_site.label_asym_id', '_atom_site.auth_asym_id']);
+    const seqCol = findHeaderIndex(headers, ['_atom_site.label_seq_id', '_atom_site.auth_seq_id']);
+    const compCol = findHeaderIndex(headers, ['_atom_site.label_comp_id', '_atom_site.auth_comp_id']);
+    const bFactorCol = findHeaderIndex(headers, ['_atom_site.b_iso_or_equiv']);
+    const typeCol = findHeaderIndex(headers, ['_atom_site.type_symbol']);
+    const atomIdCol = findHeaderIndex(headers, ['_atom_site.label_atom_id', '_atom_site.auth_atom_id']);
+
+    if (compCol < 0 || bFactorCol < 0) {
+      i = headerIndex - 1;
+      continue;
+    }
+
+    let targetResidueKey: string | null = null;
+    const ligandAtomPlddts: number[] = [];
+    let rowIndex = headerIndex;
+    while (rowIndex < lines.length) {
+      const rawRow = lines[rowIndex];
+      const row = rawRow.trim();
+      if (!row || row === '#') {
+        rowIndex += 1;
+        continue;
+      }
+      if (row === 'loop_' || row.startsWith('_')) break;
+
+      const tokens = tokenizeCifRow(rawRow);
+      if (tokens.length >= headers.length) {
+        const compId = stripCifTokenQuotes(tokens[compCol]).trim().toUpperCase();
+        const groupPdb = groupCol >= 0 ? stripCifTokenQuotes(tokens[groupCol]).trim().toUpperCase() : '';
+        const bFactor = Number(stripCifTokenQuotes(tokens[bFactorCol]));
+        const element = typeCol >= 0 ? stripCifTokenQuotes(tokens[typeCol]) : '';
+        const atomName = atomIdCol >= 0 ? stripCifTokenQuotes(tokens[atomIdCol]) : '';
+        if (!compId || !Number.isFinite(bFactor)) {
+          rowIndex += 1;
+          continue;
+        }
+        if (WATER_COMP_IDS.has(compId)) {
+          rowIndex += 1;
+          continue;
+        }
+        if (groupPdb && groupPdb !== 'HETATM') {
+          rowIndex += 1;
+          continue;
+        }
+        if (!groupPdb && POLYMER_COMP_IDS.has(compId)) {
+          rowIndex += 1;
+          continue;
+        }
+        if (isHydrogenLikeElement(element || atomName)) {
+          rowIndex += 1;
+          continue;
+        }
+
+        const chainId = chainCol >= 0 ? stripCifTokenQuotes(tokens[chainCol]).trim() : '';
+        const seqId = seqCol >= 0 ? stripCifTokenQuotes(tokens[seqCol]).trim() : '';
+        const residueKey = `${chainId}|${seqId}|${compId}`;
+        if (!targetResidueKey) {
+          targetResidueKey = residueKey;
+        }
+        if (residueKey === targetResidueKey) {
+          ligandAtomPlddts.push(bFactor);
+        }
+      }
+      rowIndex += 1;
+    }
+
+    if (ligandAtomPlddts.length > 0) {
+      return normalizeLigandAtomPlddts(ligandAtomPlddts);
+    }
+    i = rowIndex - 1;
+  }
+  return [];
+}
+
+function extractLigandAtomPlddtsFromPdb(structureText: string): number[] {
+  if (!structureText) return [];
+  const lines = structureText.split(/\r?\n/);
+  let targetResidueKey: string | null = null;
+  const ligandAtomPlddts: number[] = [];
+
+  for (const line of lines) {
+    if (!line.startsWith('HETATM')) continue;
+    const compId = line.slice(17, 20).trim().toUpperCase();
+    if (!compId || WATER_COMP_IDS.has(compId)) continue;
+
+    const atomName = line.slice(12, 16).trim();
+    const rawElement = line.length >= 78 ? line.slice(76, 78).trim() : '';
+    const element = rawElement || atomName;
+    if (isHydrogenLikeElement(element)) continue;
+
+    const bFactorToken = line.slice(60, 66).trim();
+    const bFactor = Number.parseFloat(bFactorToken);
+    if (!Number.isFinite(bFactor)) continue;
+
+    const chainId = line.slice(21, 22).trim();
+    const seqId = `${line.slice(22, 26).trim()}${line.slice(26, 27).trim()}`;
+    const residueKey = `${chainId}|${seqId}|${compId}`;
+    if (!targetResidueKey) {
+      targetResidueKey = residueKey;
+    }
+    if (residueKey === targetResidueKey) {
+      ligandAtomPlddts.push(bFactor);
+    }
+  }
+
+  return normalizeLigandAtomPlddts(ligandAtomPlddts);
+}
+
+function extractLigandAtomPlddtsFromStructure(structureText: string, structureFormat: 'cif' | 'pdb'): number[] {
+  if (!structureText) return [];
+  return structureFormat === 'pdb'
+    ? extractLigandAtomPlddtsFromPdb(structureText)
+    : extractLigandAtomPlddtsFromCif(structureText);
+}
+
 function parseMaQaLocalMetricIdFromCif(structureText: string): string | null {
   const lines = structureText.split(/\r?\n/);
   for (let i = 0; i < lines.length; i += 1) {
@@ -722,6 +927,20 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
         backend: 'boltz'
       };
     }
+  }
+
+  const existingLigandAtomPlddts = normalizeLigandAtomPlddts(
+    toFiniteNumberArray((confidence as Record<string, unknown>).ligand_atom_plddts)
+  );
+  const extractedLigandAtomPlddts =
+    existingLigandAtomPlddts.length > 0
+      ? existingLigandAtomPlddts
+      : extractLigandAtomPlddtsFromStructure(structureText, structureFormat);
+  if (extractedLigandAtomPlddts.length > 0) {
+    confidence = {
+      ...confidence,
+      ligand_atom_plddts: extractedLigandAtomPlddts
+    };
   }
 
   const affinityFile = names

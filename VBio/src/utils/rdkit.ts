@@ -4,6 +4,7 @@ import { loadScript } from './script';
 export interface RDKitMol {
   get_svg: (width: number, height: number) => string;
   get_svg_with_highlights?: (details: string) => string;
+  get_num_atoms?: () => number;
   get_descriptors?: () => string | Record<string, unknown>;
   get_substruct_match?: (query: RDKitMol) => string | unknown;
   get_substruct_matches?: (query: RDKitMol) => string | unknown;
