@@ -10,6 +10,7 @@ import type {
 
 const COMPONENT_KEY = 'vbio_project_input_config_v1';
 const UI_STATE_KEY = 'vbio_project_ui_state_v1';
+const TEMPLATE_CONTENT_REF_PREFIX = '@pool:';
 const VALID_MOLECULE_TYPES: MoleculeType[] = ['protein', 'ligand', 'dna', 'rna'];
 const VALID_LIGAND_INPUT_METHODS = new Set(['smiles', 'ccd', 'jsme']);
 const INVALID_COMPONENT_ID_TOKENS = new Set(['undefined', 'null', 'nan']);
@@ -17,6 +18,7 @@ const INVALID_COMPONENT_ID_TOKENS = new Set(['undefined', 'null', 'nan']);
 export interface ProjectUiState {
   proteinTemplates: Record<string, ProteinTemplateUpload>;
   taskProteinTemplates?: Record<string, Record<string, ProteinTemplateUpload>>;
+  templateContentPool?: Record<string, string>;
   activeConstraintId: string | null;
   selectedConstraintTemplateComponentId: string | null;
 }
@@ -266,7 +268,73 @@ function writeUiStore(data: Record<string, ProjectUiState>): void {
   localStorage.setItem(UI_STATE_KEY, JSON.stringify(data));
 }
 
-function normalizeStoredProteinTemplates(value: unknown): Record<string, ProteinTemplateUpload> {
+function createContentHash(value: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function createTemplateContentKey(content: string): string {
+  return `${content.length.toString(36)}-${createContentHash(content)}`;
+}
+
+function buildTemplateContentRef(contentKey: string): string {
+  return `${TEMPLATE_CONTENT_REF_PREFIX}${contentKey}`;
+}
+
+function resolveTemplateContent(value: unknown, pool: Record<string, string>): string {
+  if (typeof value !== 'string') return '';
+  if (!value.startsWith(TEMPLATE_CONTENT_REF_PREFIX)) {
+    return value;
+  }
+  const key = value.slice(TEMPLATE_CONTENT_REF_PREFIX.length).trim();
+  return key ? pool[key] || '' : '';
+}
+
+function encodeStoredProteinTemplates(
+  templates: Record<string, ProteinTemplateUpload>,
+  contentPool: Record<string, string>
+): Record<string, ProteinTemplateUpload> {
+  const encoded: Record<string, ProteinTemplateUpload> = {};
+  for (const [componentId, upload] of Object.entries(templates || {})) {
+    if (!upload || typeof upload !== 'object') continue;
+    const rawContent = typeof upload.content === 'string' ? upload.content : '';
+    if (!rawContent.trim()) continue;
+    let contentKey = createTemplateContentKey(rawContent);
+    if (contentPool[contentKey] && contentPool[contentKey] !== rawContent) {
+      // Rare hash collision fallback.
+      contentKey = `${contentKey}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+    contentPool[contentKey] = rawContent;
+    encoded[componentId] = {
+      fileName: upload.fileName,
+      format: upload.format,
+      content: buildTemplateContentRef(contentKey),
+      chainId: upload.chainId,
+      chainSequences: upload.chainSequences
+    };
+  }
+  return encoded;
+}
+
+function normalizeTemplateContentPool(value: unknown): Record<string, string> {
+  const pool: Record<string, string> = {};
+  if (!value || typeof value !== 'object') return pool;
+  for (const [key, text] of Object.entries(value as Record<string, unknown>)) {
+    if (!key || typeof text !== 'string') continue;
+    if (!text.trim()) continue;
+    pool[key] = text;
+  }
+  return pool;
+}
+
+function normalizeStoredProteinTemplates(
+  value: unknown,
+  contentPool: Record<string, string>
+): Record<string, ProteinTemplateUpload> {
   const proteinTemplates: Record<string, ProteinTemplateUpload> = {};
   if (!value || typeof value !== 'object') return proteinTemplates;
 
@@ -274,7 +342,7 @@ function normalizeStoredProteinTemplates(value: unknown): Record<string, Protein
     if (!upload || typeof upload !== 'object') continue;
     const fileName = typeof (upload as any).fileName === 'string' ? (upload as any).fileName : '';
     const format = (upload as any).format === 'cif' ? 'cif' : (upload as any).format === 'pdb' ? 'pdb' : null;
-    const content = typeof (upload as any).content === 'string' ? (upload as any).content : '';
+    const content = resolveTemplateContent((upload as any).content, contentPool);
     const chainId = typeof (upload as any).chainId === 'string' ? (upload as any).chainId : '';
     if (!fileName || !format || !content) continue;
     const chainSequencesValue = (upload as any).chainSequences;
@@ -315,6 +383,7 @@ export function loadProjectUiState(projectId: string): ProjectUiState | null {
   const store = readUiStore();
   const found = store[projectId];
   if (!found || typeof found !== 'object') return null;
+  const templateContentPool = normalizeTemplateContentPool((found as any).templateContentPool);
 
   const activeConstraintId =
     typeof found.activeConstraintId === 'string' && found.activeConstraintId.trim() ? found.activeConstraintId : null;
@@ -324,12 +393,12 @@ export function loadProjectUiState(projectId: string): ProjectUiState | null {
       ? (found as any).selectedConstraintTemplateComponentId
       : null;
 
-  const proteinTemplates = normalizeStoredProteinTemplates((found as any).proteinTemplates);
+  const proteinTemplates = normalizeStoredProteinTemplates((found as any).proteinTemplates, templateContentPool);
   const taskProteinTemplates: Record<string, Record<string, ProteinTemplateUpload>> = {};
   const rawTaskTemplates = (found as any).taskProteinTemplates;
   if (rawTaskTemplates && typeof rawTaskTemplates === 'object') {
     for (const [taskRowId, taskTemplates] of Object.entries(rawTaskTemplates as Record<string, unknown>)) {
-      const normalized = normalizeStoredProteinTemplates(taskTemplates);
+      const normalized = normalizeStoredProteinTemplates(taskTemplates, templateContentPool);
       if (Object.keys(normalized).length === 0) continue;
       taskProteinTemplates[taskRowId] = normalized;
     }
@@ -338,15 +407,63 @@ export function loadProjectUiState(projectId: string): ProjectUiState | null {
   return {
     proteinTemplates,
     taskProteinTemplates,
+    templateContentPool,
     activeConstraintId,
     selectedConstraintTemplateComponentId
   };
 }
 
 export function saveProjectUiState(projectId: string, uiState: ProjectUiState): void {
-  const store = readUiStore();
-  store[projectId] = uiState;
-  writeUiStore(store);
+  const baseStore = readUiStore();
+  const contentPool: Record<string, string> = {};
+  const encodedProteinTemplates = encodeStoredProteinTemplates(uiState.proteinTemplates || {}, contentPool);
+  const encodedTaskProteinTemplates: Record<string, Record<string, ProteinTemplateUpload>> = {};
+  const rawTaskTemplates = uiState.taskProteinTemplates || {};
+  for (const [taskRowId, templates] of Object.entries(rawTaskTemplates)) {
+    const encoded = encodeStoredProteinTemplates(templates || {}, contentPool);
+    if (Object.keys(encoded).length === 0) continue;
+    encodedTaskProteinTemplates[taskRowId] = encoded;
+  }
+
+  const encodedUiState: ProjectUiState = {
+    proteinTemplates: encodedProteinTemplates,
+    taskProteinTemplates: encodedTaskProteinTemplates,
+    templateContentPool: contentPool,
+    activeConstraintId: uiState.activeConstraintId || null,
+    selectedConstraintTemplateComponentId: uiState.selectedConstraintTemplateComponentId || null
+  };
+
+  const writeOrFallback = (storeValue: Record<string, ProjectUiState>): boolean => {
+    try {
+      writeUiStore(storeValue);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const primaryStore = { ...baseStore, [projectId]: encodedUiState };
+  if (writeOrFallback(primaryStore)) return;
+
+  // Fallback 1: keep only current project in UI storage.
+  const projectOnlyStore: Record<string, ProjectUiState> = { [projectId]: encodedUiState };
+  if (writeOrFallback(projectOnlyStore)) return;
+
+  // Fallback 2: drop task-level template history and keep only live templates.
+  const withoutTaskSnapshots: ProjectUiState = {
+    ...encodedUiState,
+    taskProteinTemplates: {}
+  };
+  if (writeOrFallback({ [projectId]: withoutTaskSnapshots })) return;
+
+  // Fallback 3: preserve only lightweight UI selectors; avoid throwing to callers.
+  const minimalUiState: ProjectUiState = {
+    proteinTemplates: {},
+    taskProteinTemplates: {},
+    activeConstraintId: uiState.activeConstraintId || null,
+    selectedConstraintTemplateComponentId: uiState.selectedConstraintTemplateComponentId || null
+  };
+  writeOrFallback({ [projectId]: minimalUiState });
 }
 
 export function removeProjectUiState(projectId: string): void {

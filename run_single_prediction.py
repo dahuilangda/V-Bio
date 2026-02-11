@@ -2699,13 +2699,30 @@ try:
             merged = lines[:insert_at] + injection + lines[insert_at:]
             return "\n".join(merged) + ("\n" if merged else "")
 
-        def _safe_from_mmcif(mmcif, *args, **kwargs):
+        def _looks_like_mmcif_text(value) -> bool:
+            if not isinstance(value, str):
+                return False
+            sample = value[:2048]
+            return (
+                sample.lstrip().startswith("data_")
+                or "_atom_site." in sample
+                or "_entry.id" in sample
+                or "_pdbx_database_status." in sample
+            )
+
+        def _safe_from_mmcif(*args, **kwargs):
+            safe_args = list(args)
+            safe_kwargs = dict(kwargs)
             try:
-                if isinstance(mmcif, str):
-                    mmcif = _ensure_release_date_in_mmcif_text(mmcif)
+                for idx, arg in enumerate(safe_args):
+                    if _looks_like_mmcif_text(arg):
+                        safe_args[idx] = _ensure_release_date_in_mmcif_text(arg)
+                for key, value in list(safe_kwargs.items()):
+                    if _looks_like_mmcif_text(value):
+                        safe_kwargs[key] = _ensure_release_date_in_mmcif_text(value)
             except Exception:
                 pass
-            return _orig_from_mmcif(mmcif, *args, **kwargs)
+            return _orig_from_mmcif(*safe_args, **safe_kwargs)
 
         _af3_structure.from_mmcif = _safe_from_mmcif
 except Exception:
