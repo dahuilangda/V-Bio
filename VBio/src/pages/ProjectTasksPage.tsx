@@ -256,35 +256,39 @@ function readChainMeanPlddtForChain(confidence: Record<string, unknown>, chainId
 }
 
 function resolveTaskSelectionContext(task: ProjectTask): TaskSelectionContext {
+  const taskProperties = task.properties && typeof task.properties === 'object' ? task.properties : null;
+  const rawTarget = taskProperties && typeof taskProperties.target === 'string' ? taskProperties.target.trim().toUpperCase() : '';
+  const rawLigand = taskProperties && typeof taskProperties.ligand === 'string' ? taskProperties.ligand.trim().toUpperCase() : '';
   const activeComponents = readTaskComponents(task).filter((item) => Boolean(item.sequence.trim()));
   const ligandComponentCount = activeComponents.filter((item) => item.type === 'ligand').length;
+
   if (activeComponents.length === 0) {
     const ligand = readTaskPrimaryLigand(task, [], null);
+    const fallbackChainIds = Array.from(new Set([rawTarget, rawLigand].filter(Boolean)));
     return {
-      chainIds: [],
-      targetChainId: null,
-      ligandChainId: null,
+      chainIds: fallbackChainIds,
+      targetChainId: rawTarget || null,
+      ligandChainId: rawLigand || null,
       ligandSmiles: ligand.smiles,
       ligandIsSmiles: ligand.isSmiles,
-      ligandComponentCount
+      ligandComponentCount: ligand.smiles ? 1 : 0
     };
   }
 
   const chainAssignments = assignChainIdsForComponents(activeComponents);
-  const chainIds = chainAssignments.flat();
+  const chainIds = chainAssignments.flat().map((value) => value.toUpperCase());
   const validChainIds = new Set(chainIds);
-  const taskProperties = task.properties && typeof task.properties === 'object' ? task.properties : null;
-  const rawTarget = taskProperties && typeof taskProperties.target === 'string' ? taskProperties.target.trim() : '';
-  const rawLigand = taskProperties && typeof taskProperties.ligand === 'string' ? taskProperties.ligand.trim() : '';
   const fallbackTargetChainId = chainAssignments[0]?.[0] || null;
   const fallbackLigandChainId = chainAssignments[chainAssignments.length - 1]?.[0] || null;
-  const targetChainId = rawTarget && validChainIds.has(rawTarget) ? rawTarget : fallbackTargetChainId;
-  const ligandChainId = rawLigand && validChainIds.has(rawLigand) ? rawLigand : fallbackLigandChainId;
+  const normalizedFallbackTarget = fallbackTargetChainId ? fallbackTargetChainId.toUpperCase() : null;
+  const normalizedFallbackLigand = fallbackLigandChainId ? fallbackLigandChainId.toUpperCase() : null;
+  const targetChainId = rawTarget && validChainIds.has(rawTarget) ? rawTarget : normalizedFallbackTarget;
+  const ligandChainId = rawLigand && validChainIds.has(rawLigand) ? rawLigand : normalizedFallbackLigand;
 
   const chainToComponent = new Map<string, InputComponent>();
   chainAssignments.forEach((chainGroup, index) => {
     chainGroup.forEach((chainId) => {
-      chainToComponent.set(chainId, activeComponents[index]);
+      chainToComponent.set(chainId.toUpperCase(), activeComponents[index]);
     });
   });
   const selectedLigandComponent = ligandChainId ? chainToComponent.get(ligandChainId) || null : null;
@@ -511,7 +515,10 @@ interface LoadTaskDataOptions {
   silent?: boolean;
   showRefreshing?: boolean;
   preferBackendStatus?: boolean;
+  forceRefetch?: boolean;
 }
+
+const SILENT_CACHE_SYNC_WINDOW_MS = 30000;
 
 export function ProjectTasksPage() {
   const { projectId = '' } = useParams();
@@ -544,10 +551,22 @@ export function ProjectTasksPage() {
   const [pageSize, setPageSize] = useState<number>(12);
   const [page, setPage] = useState<number>(1);
   const [filtersHydrated, setFiltersHydrated] = useState(false);
+  const loadSeqRef = useRef(0);
   const loadInFlightRef = useRef(false);
+  const lastFullFetchTsRef = useRef(0);
+  const projectRef = useRef<Project | null>(null);
+  const tasksRef = useRef<ProjectTask[]>([]);
   const resultHydrationInFlightRef = useRef<Set<string>>(new Set());
   const resultHydrationDoneRef = useRef<Set<string>>(new Set());
   const resultHydrationAttemptsRef = useRef<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    projectRef.current = project;
+  }, [project]);
+
+  useEffect(() => {
+    tasksRef.current = tasks;
+  }, [tasks]);
 
   const syncRuntimeTasks = useCallback(async (projectRow: Project, taskRows: ProjectTask[]) => {
     const runtimeRows = taskRows.filter((row) => Boolean(row.task_id) && (row.task_state === 'QUEUED' || row.task_state === 'RUNNING'));
@@ -718,9 +737,12 @@ export function ProjectTasksPage() {
   const loadData = useCallback(
     async (options?: LoadTaskDataOptions) => {
       if (loadInFlightRef.current) return;
+      const loadSeq = ++loadSeqRef.current;
       loadInFlightRef.current = true;
       const silent = Boolean(options?.silent);
       const showRefreshing = silent && options?.showRefreshing !== false;
+      const preferBackendStatus = options?.preferBackendStatus !== false;
+      const forceRefetch = Boolean(options?.forceRefetch);
       if (showRefreshing) {
         setRefreshing(true);
       } else if (!silent) {
@@ -730,6 +752,21 @@ export function ProjectTasksPage() {
         setError(null);
       }
       try {
+        const now = Date.now();
+        const cachedProject = projectRef.current;
+        const cachedTasks = tasksRef.current;
+        const withinCacheWindow = now - lastFullFetchTsRef.current <= SILENT_CACHE_SYNC_WINDOW_MS;
+        const canUseCachedSync =
+          silent && !forceRefetch && preferBackendStatus && withinCacheWindow && cachedProject && cachedTasks.length > 0;
+
+        if (canUseCachedSync) {
+          const synced = await syncRuntimeTasks(cachedProject, cachedTasks);
+          if (loadSeqRef.current !== loadSeq) return;
+          setProject(synced.project);
+          setTasks(synced.taskRows);
+          return;
+        }
+
         const [projectRow, taskRows] = await Promise.all([getProjectById(projectId), listProjectTasksForList(projectId)]);
         if (!projectRow || projectRow.deleted_at) {
           throw new Error('Project not found or already deleted.');
@@ -738,17 +775,32 @@ export function ProjectTasksPage() {
           throw new Error('You do not have permission to access this project.');
         }
 
-        const synced =
-          options?.preferBackendStatus === false
-            ? { project: projectRow, taskRows: sortProjectTasks(taskRows) }
-            : await syncRuntimeTasks(projectRow, taskRows);
-        const hydrated =
-          options?.preferBackendStatus === false
-            ? synced
-            : await hydrateTaskMetricsFromResults(synced.project, synced.taskRows);
+        lastFullFetchTsRef.current = Date.now();
+        const sortedTaskRows = sortProjectTasks(taskRows);
+        if (loadSeqRef.current !== loadSeq) return;
+        setProject(projectRow);
+        setTasks(sortedTaskRows);
 
-        setProject(hydrated.project);
-        setTasks(hydrated.taskRows);
+        if (!preferBackendStatus) {
+          return;
+        }
+
+        void (async () => {
+          try {
+            const synced = await syncRuntimeTasks(projectRow, sortedTaskRows);
+            if (loadSeqRef.current !== loadSeq) return;
+            setProject(synced.project);
+            setTasks(synced.taskRows);
+
+            if (silent) return;
+            const hydrated = await hydrateTaskMetricsFromResults(synced.project, synced.taskRows);
+            if (loadSeqRef.current !== loadSeq) return;
+            setProject(hydrated.project);
+            setTasks(hydrated.taskRows);
+          } catch {
+            // Keep base rows rendered; background refinement is best-effort.
+          }
+        })();
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load task history.');
       } finally {
@@ -769,11 +821,11 @@ export function ProjectTasksPage() {
 
   useEffect(() => {
     const onFocus = () => {
-      void loadData({ silent: true, showRefreshing: false });
+      void loadData({ silent: true, showRefreshing: false, forceRefetch: true });
     };
     const onVisible = () => {
       if (document.visibilityState === 'visible') {
-        void loadData({ silent: true, showRefreshing: false });
+        void loadData({ silent: true, showRefreshing: false, forceRefetch: true });
       }
     };
     window.addEventListener('focus', onFocus);
@@ -1176,6 +1228,10 @@ export function ProjectTasksPage() {
         navigate(`/projects/${project.id}?${query}`);
         return;
       }
+      const nextAffinity =
+        task.affinity && typeof task.affinity === 'object' && Object.keys(task.affinity).length > 0
+          ? task.affinity
+          : project.affinity || {};
       await updateProject(project.id, {
         task_id: task.task_id,
         task_state: task.task_state,
@@ -1185,7 +1241,7 @@ export function ProjectTasksPage() {
         completed_at: task.completed_at,
         duration_seconds: task.duration_seconds,
         confidence: task.confidence || {},
-        affinity: task.affinity || {},
+        affinity: nextAffinity,
         structure_name: task.structure_name || '',
         backend: task.backend || project.backend
       });
@@ -1257,7 +1313,11 @@ export function ProjectTasksPage() {
             <ArrowLeft size={14} />
             Back to Project
           </Link>
-          <button className="btn btn-ghost btn-compact btn-square" onClick={() => void loadData({ silent: true })} disabled={refreshing}>
+          <button
+            className="btn btn-ghost btn-compact btn-square"
+            onClick={() => void loadData({ silent: true, forceRefetch: true })}
+            disabled={refreshing}
+          >
             <RefreshCcw size={15} className={refreshing ? 'spin' : undefined} />
           </button>
         </div>

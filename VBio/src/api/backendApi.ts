@@ -943,6 +943,16 @@ function ensureCifHasMaQaMetricLocal(structureText: string): string {
   return `${structureText}${suffix}#\n${appendBlocks.join('\n#\n')}\n`;
 }
 
+function compactConfidenceForStorage(input: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...input };
+  const pae = next.pae;
+  // Full PAE matrices dominate payload size but UI reads compact summary metrics (complex_pde/complex_pae).
+  if (Array.isArray(pae) || (pae && typeof pae === 'object')) {
+    delete next.pae;
+  }
+  return next;
+}
+
 export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle | null> {
   const zip = await JSZip.loadAsync(blob);
   const names = Object.keys(zip.files).filter((name) => !zip.files[name]?.dir);
@@ -999,9 +1009,6 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
       if (avgPae !== null) {
         af3Metrics.complex_pde = avgPae;
       }
-      if (Array.isArray(confidencesRaw.pae) && confidencesRaw.pae.length > 0) {
-        af3Metrics.pae = confidencesRaw.pae;
-      }
     }
 
     const ptm = summary ? toFiniteNumber(summary.ptm) : null;
@@ -1035,10 +1042,10 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
     const confFile = chooseBestBoltzConfidenceFile(names, structureFile);
     const parsedConfidence = await readZipJson(zip, confFile);
     if (parsedConfidence) {
-      confidence = {
+      confidence = compactConfidenceForStorage({
         ...parsedConfidence,
         backend: 'boltz'
-      };
+      });
     }
   }
 
@@ -1062,6 +1069,7 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
       chain_mean_plddt: chainMeanPlddt
     };
   }
+  confidence = compactConfidenceForStorage(confidence);
 
   const affinityFile = names
     .filter((name) => name.toLowerCase().endsWith('.json') && name.toLowerCase().includes('affinity'))

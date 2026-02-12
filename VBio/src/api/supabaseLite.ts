@@ -284,34 +284,47 @@ export async function listProjectTasks(projectId: string): Promise<ProjectTask[]
 }
 
 export async function listProjectTasksForList(projectId: string): Promise<ProjectTask[]> {
-  const rows = await request<Array<Partial<ProjectTask>>>('/project_tasks', undefined, {
-    select: [
-      'id',
-      'project_id',
-      'task_id',
-      'task_state',
-      'status_text',
-      'error_text',
-      'backend',
-      'seed',
-      'ligand_smiles',
-      'components',
-      'properties',
-      'confidence',
-      'affinity',
-      'structure_name',
-      'submitted_at',
-      'completed_at',
-      'duration_seconds',
-      'created_at',
-      'updated_at'
-    ].join(','),
-    project_id: `eq.${projectId}`,
-    order: 'created_at.desc'
-  });
+  const selectFields = [
+    'id',
+    'project_id',
+    'task_id',
+    'task_state',
+    'status_text',
+    'error_text',
+    'backend',
+    'seed',
+    'protein_sequence',
+    'ligand_smiles',
+    'components',
+    'properties',
+    'confidence',
+    'structure_name',
+    'submitted_at',
+    'completed_at',
+    'duration_seconds',
+    'created_at',
+    'updated_at'
+  ].join(',');
+
+  let rows: Array<Partial<ProjectTask>> = [];
+  try {
+    rows = await request<Array<Partial<ProjectTask>>>('/project_tasks_list', undefined, {
+      select: selectFields,
+      project_id: `eq.${projectId}`,
+      order: 'created_at.desc'
+    });
+  } catch {
+    // Backward compatibility when the DB view is not initialized yet.
+    rows = await request<Array<Partial<ProjectTask>>>('/project_tasks', undefined, {
+      select: selectFields,
+      project_id: `eq.${projectId}`,
+      order: 'created_at.desc'
+    });
+  }
 
   return rows.map((row) => ({
     protein_sequence: '',
+    affinity: {},
     components: [],
     constraints: [],
     properties: {
@@ -322,6 +335,35 @@ export async function listProjectTasksForList(projectId: string): Promise<Projec
     },
     ...row
   })) as ProjectTask[];
+}
+
+function stripTemplateContentFromTaskComponents(components: unknown): unknown {
+  if (!Array.isArray(components)) return components;
+  return components.map((component) => {
+    if (!component || typeof component !== 'object' || Array.isArray(component)) return component;
+    const next = { ...(component as Record<string, unknown>) };
+    const camelUpload = next.templateUpload;
+    if (camelUpload && typeof camelUpload === 'object' && !Array.isArray(camelUpload)) {
+      const compactUpload = { ...(camelUpload as Record<string, unknown>) };
+      delete compactUpload.content;
+      next.templateUpload = compactUpload;
+    }
+    const snakeUpload = next.template_upload;
+    if (snakeUpload && typeof snakeUpload === 'object' && !Array.isArray(snakeUpload)) {
+      const compactUpload = { ...(snakeUpload as Record<string, unknown>) };
+      delete compactUpload.content;
+      next.template_upload = compactUpload;
+    }
+    return next;
+  });
+}
+
+function sanitizeProjectTaskWritePayload(payload: Partial<ProjectTask>): Partial<ProjectTask> {
+  if (!Object.prototype.hasOwnProperty.call(payload, 'components')) return payload;
+  return {
+    ...payload,
+    components: stripTemplateContentFromTaskComponents((payload as { components?: unknown }).components) as ProjectTask['components']
+  };
 }
 
 interface ProjectTaskStateRow {
@@ -353,6 +395,7 @@ export async function listProjectTaskStatesByProjects(projectIds: string[]): Pro
 }
 
 export async function insertProjectTask(input: Partial<ProjectTask>): Promise<ProjectTask> {
+  const sanitized = sanitizeProjectTaskWritePayload(input);
   const rows = await request<ProjectTask[]>(
     '/project_tasks',
     {
@@ -360,7 +403,7 @@ export async function insertProjectTask(input: Partial<ProjectTask>): Promise<Pr
       headers: {
         Prefer: 'return=representation'
       },
-      body: JSON.stringify(input)
+      body: JSON.stringify(sanitized)
     },
     {
       select: '*'
@@ -370,6 +413,7 @@ export async function insertProjectTask(input: Partial<ProjectTask>): Promise<Pr
 }
 
 export async function updateProjectTask(taskRowId: string, patch: Partial<ProjectTask>): Promise<ProjectTask> {
+  const sanitized = sanitizeProjectTaskWritePayload(patch);
   const rows = await request<ProjectTask[]>(
     '/project_tasks',
     {
@@ -377,7 +421,7 @@ export async function updateProjectTask(taskRowId: string, patch: Partial<Projec
       headers: {
         Prefer: 'return=representation'
       },
-      body: JSON.stringify(patch)
+      body: JSON.stringify(sanitized)
     },
     {
       id: `eq.${taskRowId}`,

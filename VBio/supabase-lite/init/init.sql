@@ -193,6 +193,10 @@ update public.project_tasks set affinity = '{}'::jsonb where affinity is null;
 update public.project_tasks set structure_name = '' where structure_name is null;
 update public.project_tasks set created_at = now() where created_at is null;
 update public.project_tasks set updated_at = now() where updated_at is null;
+-- Compact oversized confidence payloads. Full PAE matrices are not needed by current UI views.
+update public.project_tasks
+set confidence = confidence - 'pae'
+where jsonb_typeof(confidence->'pae') = 'array';
 
 alter table public.project_tasks alter column task_id set not null;
 alter table public.project_tasks alter column task_state set not null;
@@ -250,6 +254,94 @@ create index if not exists idx_projects_deleted_at on public.projects (deleted_a
 create index if not exists idx_project_tasks_project_id on public.project_tasks (project_id, created_at desc);
 create index if not exists idx_project_tasks_task_id on public.project_tasks (task_id);
 
+create or replace function public.strip_task_components_for_storage(input jsonb)
+returns jsonb
+language sql
+immutable
+as $$
+  select
+    case
+      when jsonb_typeof(input) = 'array' then (
+        select coalesce(
+          jsonb_agg(
+            case
+              when jsonb_typeof(compact_snake.elem->'templateUpload') = 'object'
+                then jsonb_set(
+                  compact_snake.elem,
+                  '{templateUpload}',
+                  (compact_snake.elem->'templateUpload') - 'content',
+                  true
+                )
+              else compact_snake.elem
+            end
+          ),
+          '[]'::jsonb
+        )
+        from (
+          select
+            case
+              when jsonb_typeof(elem->'template_upload') = 'object'
+                then jsonb_set(elem, '{template_upload}', (elem->'template_upload') - 'content', true)
+              else elem
+            end as elem
+          from jsonb_array_elements(input) as elem
+        ) as compact_snake
+      )
+      else '[]'::jsonb
+    end;
+$$;
+
+-- Keep task snapshot metadata, but strip bulky template file text from components.
+update public.project_tasks
+set components = public.strip_task_components_for_storage(components)
+where public.strip_task_components_for_storage(components) is distinct from components;
+
+create or replace function public.strip_task_components_for_list(input jsonb)
+returns jsonb
+language sql
+immutable
+as $$
+  select
+    case
+      when jsonb_typeof(input) = 'array' then (
+        select coalesce(jsonb_agg(elem - 'templateUpload' - 'template_upload'), '[]'::jsonb)
+        from jsonb_array_elements(input) as elem
+      )
+      else '[]'::jsonb
+    end;
+$$;
+
+create or replace function public.project_tasks_compact_components_for_storage()
+returns trigger as $$
+begin
+  NEW.components = public.strip_task_components_for_storage(NEW.components);
+  return NEW;
+end;
+$$ language plpgsql;
+
+create or replace view public.project_tasks_list as
+select
+  id,
+  project_id,
+  task_id,
+  task_state,
+  status_text,
+  error_text,
+  backend,
+  seed,
+  protein_sequence,
+  ligand_smiles,
+  public.strip_task_components_for_list(components) as components,
+  properties,
+  confidence,
+  structure_name,
+  submitted_at,
+  completed_at,
+  duration_seconds,
+  created_at,
+  updated_at
+from public.project_tasks;
+
 create or replace function public.set_updated_at()
 returns trigger as $$
 begin
@@ -275,6 +367,12 @@ create trigger trg_project_tasks_updated_at
 before update on public.project_tasks
 for each row
 execute procedure public.set_updated_at();
+
+drop trigger if exists trg_project_tasks_compact_components on public.project_tasks;
+create trigger trg_project_tasks_compact_components
+before insert or update of components on public.project_tasks
+for each row
+execute procedure public.project_tasks_compact_components_for_storage();
 
 alter table public.app_users enable row level security;
 alter table public.projects enable row level security;
@@ -373,3 +471,4 @@ grant usage on schema public to anon, authenticated, service_role;
 grant select, insert, update, delete on public.app_users to anon, authenticated, service_role;
 grant select, insert, update, delete on public.projects to anon, authenticated, service_role;
 grant select, insert, update, delete on public.project_tasks to anon, authenticated, service_role;
+grant select on public.project_tasks_list to anon, authenticated, service_role;

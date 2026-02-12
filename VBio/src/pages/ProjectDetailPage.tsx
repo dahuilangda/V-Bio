@@ -420,9 +420,15 @@ function addTemplatesToTaskSnapshotComponents(
     if (component.type !== 'protein') return component;
     const upload = templates[component.id];
     if (!upload) return component;
+    const compactTemplateUpload = {
+      fileName: upload.fileName,
+      format: upload.format,
+      chainId: upload.chainId,
+      chainSequences: upload.chainSequences
+    };
     return ({
       ...(component as unknown as Record<string, unknown>),
-      templateUpload: upload
+      templateUpload: compactTemplateUpload
     } as unknown) as InputComponent;
   });
 }
