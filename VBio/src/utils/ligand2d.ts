@@ -20,21 +20,17 @@ function colorForConfidence(value: number): [number, number, number] {
 function buildPerAtomConfidence(
   values: number[] | null | undefined,
   atomCount: number,
-  confidenceHint: number | null | undefined
+  _confidenceHint: number | null | undefined
 ): number[] {
   if (atomCount <= 0) return [];
   const normalized = values
     ?.filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
     .map((value) => normalizePlddt(value));
   if (normalized && normalized.length > 0) {
+    // Keep per-atom coloring strictly one-to-one. If atom counts don't match,
+    // skip highlights to avoid incorrect atom-level confidence mapping.
     if (normalized.length === atomCount) return normalized;
-    if (normalized.length > atomCount) return normalized.slice(0, atomCount);
-    const avg = normalized.reduce((sum, value) => sum + value, 0) / normalized.length;
-    return [...normalized, ...Array.from({ length: atomCount - normalized.length }, () => avg)];
-  }
-  if (typeof confidenceHint === 'number' && Number.isFinite(confidenceHint)) {
-    const hinted = normalizePlddt(confidenceHint);
-    return Array.from({ length: atomCount }, () => hinted);
+    return [];
   }
   return [];
 }

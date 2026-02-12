@@ -459,8 +459,42 @@ function isDraftTaskSnapshot(task: ProjectTask | null): boolean {
   return task.task_state === 'DRAFT' && !String(task.task_id || '').trim();
 }
 
-function readLigandAtomPlddtsFromConfidence(confidence: Record<string, unknown> | null): number[] {
+function normalizeChainKey(value: string): string {
+  return value.trim().toUpperCase();
+}
+
+function readLigandAtomPlddtsFromConfidence(
+  confidence: Record<string, unknown> | null,
+  preferredLigandChainId: string | null = null
+): number[] {
   if (!confidence) return [];
+  const byChainCandidates: unknown[] = [
+    confidence.ligand_atom_plddts_by_chain,
+    readObjectPath(confidence, 'ligand.atom_plddts_by_chain'),
+    readObjectPath(confidence, 'ligand_confidence.atom_plddts_by_chain')
+  ];
+  const preferred = preferredLigandChainId ? normalizeChainKey(preferredLigandChainId) : '';
+  for (const candidate of byChainCandidates) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+    const entries = Object.entries(candidate as Record<string, unknown>);
+    if (preferred) {
+      for (const [chainId, chainValues] of entries) {
+        if (normalizeChainKey(chainId) !== preferred || !Array.isArray(chainValues)) continue;
+        const values = chainValues
+          .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+          .map((value) => normalizePlddtValue(value));
+        if (values.length > 0) return values;
+      }
+    }
+    for (const [, chainValues] of entries) {
+      if (!Array.isArray(chainValues)) continue;
+      const values = chainValues
+        .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+        .map((value) => normalizePlddtValue(value));
+      if (values.length > 0) return values;
+    }
+  }
+
   const candidates: unknown[] = [
     confidence.ligand_atom_plddts,
     confidence.ligand_atom_plddt,
@@ -962,8 +996,8 @@ export function ProjectDetailPage() {
     return null;
   }, [activeResultTask?.affinity, project?.affinity]);
   const snapshotLigandAtomPlddts = useMemo(() => {
-    return readLigandAtomPlddtsFromConfidence(snapshotConfidence);
-  }, [snapshotConfidence]);
+    return readLigandAtomPlddtsFromConfidence(snapshotConfidence, selectedResultLigandChainId);
+  }, [snapshotConfidence, selectedResultLigandChainId]);
   const snapshotLigandMeanPlddt = useMemo(() => {
     if (!snapshotLigandAtomPlddts.length) return null;
     return mean(snapshotLigandAtomPlddts);
@@ -3128,49 +3162,6 @@ export function ProjectDetailPage() {
         </div>
 
         <div className="row gap-8 page-header-actions">
-          <div className="detail-tabs detail-tabs-inline">
-            <button
-              type="button"
-              className={`detail-tab ${workspaceTab === 'basics' ? 'active' : ''}`}
-              onClick={() => setWorkspaceTab('basics')}
-              aria-label="Edit basics"
-            >
-              <SlidersHorizontal size={13} />
-              Basics
-            </button>
-            {isPredictionWorkflow && (
-              <>
-                <button
-                  type="button"
-                  className={`detail-tab ${workspaceTab === 'components' ? 'active' : ''}`}
-                  onClick={() => setWorkspaceTab('components')}
-                  aria-label="Edit components"
-                >
-                  <Dna size={13} />
-                  Components
-                </button>
-                <button
-                  type="button"
-                  className={`detail-tab ${workspaceTab === 'constraints' ? 'active' : ''}`}
-                  onClick={() => setWorkspaceTab('constraints')}
-                  aria-label="Edit constraints"
-                >
-                  <Target size={13} />
-                  Constraints
-                </button>
-              </>
-            )}
-            <button
-              type="button"
-              className={`detail-tab ${workspaceTab === 'results' ? 'active' : ''}`}
-              onClick={() => setWorkspaceTab('results')}
-              aria-label="View current result"
-            >
-              <Eye size={13} />
-              Current Result
-            </button>
-          </div>
-          <div className="toolbar-divider" />
           <Link className="btn btn-ghost btn-compact" to={`/projects/${project.id}/tasks`} title="Open task history">
             <Clock3 size={14} />
             Tasks
@@ -3257,105 +3248,163 @@ export function ProjectDetailPage() {
 
       {(error || resultError) && <div className="alert error">{error || resultError}</div>}
 
-      {workspaceTab === 'results' && isPredictionWorkflow && (
-        <>
-          <div ref={resultsGridRef} className={`results-grid ${isResultsResizing ? 'is-resizing' : ''}`} style={resultsGridStyle}>
-            <section className="panel structure-panel">
-              <h2>Structure Viewer</h2>
+      <div className="workspace-shell">
+        <aside className="workspace-stepper" aria-label="Workspace sections">
+          <div className="workspace-stepper-track" aria-hidden="true" />
+          <button
+            type="button"
+            className={`workspace-step ${workspaceTab === 'basics' ? 'active' : ''}`}
+            onClick={() => setWorkspaceTab('basics')}
+            aria-label="Edit basics"
+            data-label="Basics"
+            title="Basics"
+          >
+            <span className="workspace-step-dot">
+              <SlidersHorizontal size={13} />
+            </span>
+          </button>
+          {isPredictionWorkflow && (
+            <button
+              type="button"
+              className={`workspace-step ${workspaceTab === 'components' ? 'active' : ''}`}
+              onClick={() => setWorkspaceTab('components')}
+              aria-label="Edit components"
+              data-label="Components"
+              title="Components"
+            >
+              <span className="workspace-step-dot">
+                <Dna size={13} />
+              </span>
+            </button>
+          )}
+          {isPredictionWorkflow && (
+            <button
+              type="button"
+              className={`workspace-step ${workspaceTab === 'constraints' ? 'active' : ''}`}
+              onClick={() => setWorkspaceTab('constraints')}
+              aria-label="Edit constraints"
+              data-label="Constraints"
+              title="Constraints"
+            >
+              <span className="workspace-step-dot">
+                <Target size={13} />
+              </span>
+            </button>
+          )}
+          <button
+            type="button"
+            className={`workspace-step ${workspaceTab === 'results' ? 'active' : ''}`}
+            onClick={() => setWorkspaceTab('results')}
+            aria-label="View current result"
+            data-label="Current Result"
+            title="Current Result"
+          >
+            <span className="workspace-step-dot">
+              <Eye size={13} />
+            </span>
+          </button>
+        </aside>
 
-              <MolstarViewer structureText={displayStructureText} format={displayStructureFormat} colorMode={displayStructureColorMode} />
+        <div className="workspace-content">
+          {workspaceTab === 'results' && isPredictionWorkflow && (
+            <>
+              <div ref={resultsGridRef} className={`results-grid ${isResultsResizing ? 'is-resizing' : ''}`} style={resultsGridStyle}>
+                <section className="panel structure-panel">
+                  <h2>Structure Viewer</h2>
 
-              <span className="muted small">Current structure file: {displayStructureName}</span>
+                  <MolstarViewer structureText={displayStructureText} format={displayStructureFormat} colorMode={displayStructureColorMode} />
+
+                  <span className="muted small">Current structure file: {displayStructureName}</span>
+                </section>
+
+                <div
+                  className={`results-resizer ${isResultsResizing ? 'dragging' : ''}`}
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="Resize structure and overview panels"
+                  tabIndex={0}
+                  onPointerDown={handleResultsResizerPointerDown}
+                  onKeyDown={handleResultsResizerKeyDown}
+                />
+
+                <aside className="panel info-panel">
+                  <h2>Overview</h2>
+
+                  <section className="result-aside-block result-aside-block-ligand">
+                    <div className="result-aside-title">Ligand</div>
+                    <div className="ligand-preview-panel">
+                      {overviewPrimaryLigand.smiles && overviewPrimaryLigand.isSmiles ? (
+                        <Ligand2DPreview
+                          smiles={overviewPrimaryLigand.smiles}
+                          atomConfidences={snapshotLigandAtomPlddts}
+                          confidenceHint={snapshotPlddt}
+                        />
+                      ) : (
+                        <div className="ligand-preview-empty">
+                          {overviewPrimaryLigand.smiles ? '2D preview requires SMILES input.' : 'No ligand input.'}
+                        </div>
+                      )}
+                    </div>
+                    <LigandPropertyGrid smiles={overviewPrimaryLigand.isSmiles ? overviewPrimaryLigand.smiles : ''} variant="radar" />
+                  </section>
+
+                  <section className="result-aside-block">
+                    <div className="result-aside-title">Model Signals</div>
+                    <div className="overview-signal-list">
+                      {snapshotCards.map((card) => (
+                        <div key={card.key} className={`overview-signal-row tone-${card.tone}`}>
+                          <div className="overview-signal-main">
+                            <span className="overview-signal-label">{card.label}</span>
+                            <span className="overview-signal-detail">{card.detail}</span>
+                          </div>
+                          <strong className={`overview-signal-value metric-value-${card.tone}`}>{card.value}</strong>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                </aside>
+              </div>
+
+              <div className="results-bottom">
+                <MetricsPanel
+                  title="Confidence"
+                  data={snapshotConfidence || {}}
+                  chainIds={resultChainIds}
+                  selectedTargetChainId={selectedResultTargetChainId}
+                  selectedLigandChainId={selectedResultLigandChainId}
+                />
+              </div>
+            </>
+          )}
+
+          {workspaceTab === 'results' && !isPredictionWorkflow && (
+            <section className="panel">
+              <h2>{workflow.title}</h2>
+              <p className="muted">
+                This project is set to <strong>{workflow.shortTitle}</strong>. Configure workflow-specific parameters in Basics.
+              </p>
+              <div className="status-stats">
+                <div className="status-stat">
+                  <span className="muted small">Workflow</span>
+                  <strong>{workflow.title}</strong>
+                </div>
+                <div className="status-stat">
+                  <span className="muted small">Current State</span>
+                  <strong>{project.task_state}</strong>
+                </div>
+                <div className="status-stat">
+                  <span className="muted small">Task ID</span>
+                  <strong>{project.task_id || '-'}</strong>
+                </div>
+              </div>
             </section>
+          )}
 
-            <div
-              className={`results-resizer ${isResultsResizing ? 'dragging' : ''}`}
-              role="separator"
-              aria-orientation="vertical"
-              aria-label="Resize structure and overview panels"
-              tabIndex={0}
-              onPointerDown={handleResultsResizerPointerDown}
-              onKeyDown={handleResultsResizerKeyDown}
-            />
+          {workspaceTab !== 'results' && (
+            <section className="panel inputs-panel">
+              <h2>{workspaceTab === 'constraints' ? 'Constraints' : workspaceTab === 'components' ? 'Components' : 'Basics'}</h2>
 
-            <aside className="panel info-panel">
-              <h2>Overview</h2>
-
-              <section className="result-aside-block result-aside-block-ligand">
-                <div className="result-aside-title">Ligand</div>
-                <div className="ligand-preview-panel">
-                  {overviewPrimaryLigand.smiles && overviewPrimaryLigand.isSmiles ? (
-                    <Ligand2DPreview
-                      smiles={overviewPrimaryLigand.smiles}
-                      atomConfidences={snapshotLigandAtomPlddts}
-                      confidenceHint={snapshotPlddt}
-                    />
-                  ) : (
-                    <div className="ligand-preview-empty">
-                      {overviewPrimaryLigand.smiles ? '2D preview requires SMILES input.' : 'No ligand input.'}
-                    </div>
-                  )}
-                </div>
-                <LigandPropertyGrid smiles={overviewPrimaryLigand.isSmiles ? overviewPrimaryLigand.smiles : ''} variant="radar" />
-              </section>
-
-              <section className="result-aside-block">
-                <div className="result-aside-title">Model Signals</div>
-                <div className="overview-signal-list">
-                  {snapshotCards.map((card) => (
-                    <div key={card.key} className={`overview-signal-row tone-${card.tone}`}>
-                      <div className="overview-signal-main">
-                        <span className="overview-signal-label">{card.label}</span>
-                        <span className="overview-signal-detail">{card.detail}</span>
-                      </div>
-                      <strong className={`overview-signal-value metric-value-${card.tone}`}>{card.value}</strong>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            </aside>
-          </div>
-
-          <div className="results-bottom">
-            <MetricsPanel
-              title="Confidence"
-              data={snapshotConfidence || {}}
-              chainIds={resultChainIds}
-              selectedTargetChainId={selectedResultTargetChainId}
-              selectedLigandChainId={selectedResultLigandChainId}
-            />
-          </div>
-        </>
-      )}
-
-      {workspaceTab === 'results' && !isPredictionWorkflow && (
-        <section className="panel">
-          <h2>{workflow.title}</h2>
-          <p className="muted">
-            This project is set to <strong>{workflow.shortTitle}</strong>. Configure workflow-specific parameters in Basics.
-          </p>
-          <div className="status-stats">
-            <div className="status-stat">
-              <span className="muted small">Workflow</span>
-              <strong>{workflow.title}</strong>
-            </div>
-            <div className="status-stat">
-              <span className="muted small">Current State</span>
-              <strong>{project.task_state}</strong>
-            </div>
-            <div className="status-stat">
-              <span className="muted small">Task ID</span>
-              <strong>{project.task_id || '-'}</strong>
-            </div>
-          </div>
-        </section>
-      )}
-
-      {workspaceTab !== 'results' && (
-        <section className="panel inputs-panel">
-          <h2>{workspaceTab === 'constraints' ? 'Constraints' : workspaceTab === 'components' ? 'Components' : 'Basics'}</h2>
-
-          <form className="form-grid" onSubmit={saveDraft}>
+              <form className="form-grid" onSubmit={saveDraft}>
             {workspaceTab === 'basics' && (
               <section className="panel subtle basics-panel">
                 <label className="field">
@@ -3895,6 +3944,8 @@ export function ProjectDetailPage() {
           </form>
         </section>
       )}
+        </div>
+      </div>
     </div>
   );
 }

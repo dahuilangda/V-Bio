@@ -505,7 +505,27 @@ function normalizeLigandAtomPlddts(values: number[]): number[] {
     .map((value) => normalizePlddt(value))
     .filter((value) => Number.isFinite(value));
   if (!normalized.length) return [];
-  return normalized.slice(0, 320);
+  return normalized;
+}
+
+function normalizeLigandAtomPlddtsByChain(value: unknown): Record<string, number[]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const byChain: Record<string, number[]> = {};
+  for (const [rawChainId, rawValues] of Object.entries(value as Record<string, unknown>)) {
+    const chainId = rawChainId.trim().toUpperCase();
+    if (!chainId) continue;
+    const parsed = normalizeLigandAtomPlddts(toFiniteNumberArray(rawValues));
+    if (parsed.length === 0) continue;
+    byChain[chainId] = parsed;
+  }
+  return byChain;
+}
+
+function pickFirstLigandAtomPlddts(byChain: Record<string, number[]>): number[] {
+  for (const values of Object.values(byChain)) {
+    if (values.length > 0) return values;
+  }
+  return [];
 }
 
 function findHeaderIndex(headers: string[], names: string[]): number {
@@ -517,8 +537,8 @@ function findHeaderIndex(headers: string[], names: string[]): number {
   return -1;
 }
 
-function extractLigandAtomPlddtsFromCif(structureText: string): number[] {
-  if (!structureText) return [];
+function extractLigandAtomPlddtsByChainFromCif(structureText: string): Record<string, number[]> {
+  if (!structureText) return {};
   const lines = structureText.split(/\r?\n/);
   for (let i = 0; i < lines.length; i += 1) {
     if (lines[i].trim() !== 'loop_') continue;
@@ -550,8 +570,9 @@ function extractLigandAtomPlddtsFromCif(structureText: string): number[] {
       continue;
     }
 
-    let targetResidueKey: string | null = null;
-    const ligandAtomPlddts: number[] = [];
+    const residueChainByKey = new Map<string, string>();
+    const ligandByResidue = new Map<string, number[]>();
+    const firstResidueKeyByChain = new Map<string, string>();
     let rowIndex = headerIndex;
     while (rowIndex < lines.length) {
       const rawRow = lines[rowIndex];
@@ -590,32 +611,50 @@ function extractLigandAtomPlddtsFromCif(structureText: string): number[] {
           continue;
         }
 
-        const chainId = chainCol >= 0 ? stripCifTokenQuotes(tokens[chainCol]).trim() : '';
+        const chainIdRaw = chainCol >= 0 ? stripCifTokenQuotes(tokens[chainCol]).trim() : '';
+        const chainId = chainIdRaw.toUpperCase();
+        if (!chainId) {
+          rowIndex += 1;
+          continue;
+        }
         const seqId = seqCol >= 0 ? stripCifTokenQuotes(tokens[seqCol]).trim() : '';
         const residueKey = `${chainId}|${seqId}|${compId}`;
-        if (!targetResidueKey) {
-          targetResidueKey = residueKey;
+        if (!firstResidueKeyByChain.has(chainId)) {
+          firstResidueKeyByChain.set(chainId, residueKey);
+          residueChainByKey.set(residueKey, chainId);
+          ligandByResidue.set(residueKey, []);
         }
-        if (residueKey === targetResidueKey) {
-          ligandAtomPlddts.push(bFactor);
+        if (firstResidueKeyByChain.get(chainId) === residueKey) {
+          const rowValues = ligandByResidue.get(residueKey);
+          if (rowValues) {
+            rowValues.push(bFactor);
+          }
         }
       }
       rowIndex += 1;
     }
 
-    if (ligandAtomPlddts.length > 0) {
-      return normalizeLigandAtomPlddts(ligandAtomPlddts);
+    const byChain: Record<string, number[]> = {};
+    for (const [residueKey, values] of ligandByResidue.entries()) {
+      const chainId = residueChainByKey.get(residueKey);
+      if (!chainId) continue;
+      const normalized = normalizeLigandAtomPlddts(values);
+      if (normalized.length === 0) continue;
+      byChain[chainId] = normalized;
+    }
+    if (Object.keys(byChain).length > 0) {
+      return byChain;
     }
     i = rowIndex - 1;
   }
-  return [];
+  return {};
 }
 
-function extractLigandAtomPlddtsFromPdb(structureText: string): number[] {
-  if (!structureText) return [];
+function extractLigandAtomPlddtsByChainFromPdb(structureText: string): Record<string, number[]> {
+  if (!structureText) return {};
   const lines = structureText.split(/\r?\n/);
-  let targetResidueKey: string | null = null;
-  const ligandAtomPlddts: number[] = [];
+  const firstResidueKeyByChain = new Map<string, string>();
+  const ligandByResidue = new Map<string, number[]>();
 
   for (const line of lines) {
     if (!line.startsWith('HETATM')) continue;
@@ -631,25 +670,40 @@ function extractLigandAtomPlddtsFromPdb(structureText: string): number[] {
     const bFactor = Number.parseFloat(bFactorToken);
     if (!Number.isFinite(bFactor)) continue;
 
-    const chainId = line.slice(21, 22).trim();
+    const chainId = line.slice(21, 22).trim().toUpperCase();
+    if (!chainId) continue;
     const seqId = `${line.slice(22, 26).trim()}${line.slice(26, 27).trim()}`;
     const residueKey = `${chainId}|${seqId}|${compId}`;
-    if (!targetResidueKey) {
-      targetResidueKey = residueKey;
+    if (!firstResidueKeyByChain.has(chainId)) {
+      firstResidueKeyByChain.set(chainId, residueKey);
+      ligandByResidue.set(residueKey, []);
     }
-    if (residueKey === targetResidueKey) {
-      ligandAtomPlddts.push(bFactor);
+    if (firstResidueKeyByChain.get(chainId) === residueKey) {
+      const rowValues = ligandByResidue.get(residueKey);
+      if (rowValues) {
+        rowValues.push(bFactor);
+      }
     }
   }
 
-  return normalizeLigandAtomPlddts(ligandAtomPlddts);
+  const byChain: Record<string, number[]> = {};
+  for (const [chainId, residueKey] of firstResidueKeyByChain.entries()) {
+    const values = ligandByResidue.get(residueKey) || [];
+    const normalized = normalizeLigandAtomPlddts(values);
+    if (normalized.length === 0) continue;
+    byChain[chainId] = normalized;
+  }
+  return byChain;
 }
 
-function extractLigandAtomPlddtsFromStructure(structureText: string, structureFormat: 'cif' | 'pdb'): number[] {
-  if (!structureText) return [];
+function extractLigandAtomPlddtsByChainFromStructure(
+  structureText: string,
+  structureFormat: 'cif' | 'pdb'
+): Record<string, number[]> {
+  if (!structureText) return {};
   return structureFormat === 'pdb'
-    ? extractLigandAtomPlddtsFromPdb(structureText)
-    : extractLigandAtomPlddtsFromCif(structureText);
+    ? extractLigandAtomPlddtsByChainFromPdb(structureText)
+    : extractLigandAtomPlddtsByChainFromCif(structureText);
 }
 
 function extractChainMeanPlddtFromCif(structureText: string): Record<string, number> {
@@ -1052,11 +1106,24 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
   const existingLigandAtomPlddts = normalizeLigandAtomPlddts(
     toFiniteNumberArray((confidence as Record<string, unknown>).ligand_atom_plddts)
   );
+  const existingLigandAtomPlddtsByChain = normalizeLigandAtomPlddtsByChain(
+    (confidence as Record<string, unknown>).ligand_atom_plddts_by_chain
+  );
+  const extractedLigandAtomPlddtsByChain =
+    Object.keys(existingLigandAtomPlddtsByChain).length > 0
+      ? existingLigandAtomPlddtsByChain
+      : extractLigandAtomPlddtsByChainFromStructure(structureText, structureFormat);
   const extractedLigandAtomPlddts =
     existingLigandAtomPlddts.length > 0
       ? existingLigandAtomPlddts
-      : extractLigandAtomPlddtsFromStructure(structureText, structureFormat);
+      : pickFirstLigandAtomPlddts(extractedLigandAtomPlddtsByChain);
   const chainMeanPlddt = extractChainMeanPlddtFromStructure(structureText, structureFormat);
+  if (Object.keys(extractedLigandAtomPlddtsByChain).length > 0) {
+    confidence = {
+      ...confidence,
+      ligand_atom_plddts_by_chain: extractedLigandAtomPlddtsByChain
+    };
+  }
   if (extractedLigandAtomPlddts.length > 0) {
     confidence = {
       ...confidence,

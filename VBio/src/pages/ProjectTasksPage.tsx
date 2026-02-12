@@ -358,7 +358,7 @@ function normalizeAtomPlddts(values: number[]): number[] {
     })
     .map((value) => Math.max(0, Math.min(100, value)));
   if (normalized.length === 0) return [];
-  return normalized.slice(0, 320);
+  return normalized;
 }
 
 function mean(values: number[] | null): number | null {
@@ -366,8 +366,70 @@ function mean(values: number[] | null): number | null {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
-function readTaskLigandAtomPlddts(task: ProjectTask): number[] | null {
+function normalizeChainKey(value: string): string {
+  return value.trim().toUpperCase();
+}
+
+function readTaskLigandAtomPlddtsFromChainMap(
+  value: unknown,
+  preferredLigandChainId: string | null,
+  allowFallbackToAnyChain: boolean
+): number[] | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const map = value as Record<string, unknown>;
+  const entries = Object.entries(map);
+  if (entries.length === 0) return null;
+
+  const preferred = preferredLigandChainId ? normalizeChainKey(preferredLigandChainId) : '';
+  if (preferred) {
+    for (const [key, chainValues] of entries) {
+      if (normalizeChainKey(key) !== preferred) continue;
+      const parsed = normalizeAtomPlddts(toFiniteNumberArray(chainValues));
+      if (parsed.length > 0) {
+        return parsed;
+      }
+    }
+  }
+
+  if (allowFallbackToAnyChain) {
+    for (const [, chainValues] of entries) {
+      const parsed = normalizeAtomPlddts(toFiniteNumberArray(chainValues));
+      if (parsed.length > 0) {
+        return parsed;
+      }
+    }
+  }
+  return null;
+}
+
+function readTaskLigandAtomPlddts(
+  task: ProjectTask,
+  preferredLigandChainId: string | null = null,
+  allowFlatFallback = true
+): number[] | null {
   const confidence = (task.confidence || {}) as Record<string, unknown>;
+  const byChainCandidates: unknown[] = [
+    confidence.ligand_atom_plddts_by_chain,
+    readObjectPath(confidence, 'ligand.atom_plddts_by_chain'),
+    readObjectPath(confidence, 'ligand_confidence.atom_plddts_by_chain')
+  ];
+  let hasChainMap = false;
+  for (const candidate of byChainCandidates) {
+    if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+      hasChainMap = true;
+    }
+    const parsed = readTaskLigandAtomPlddtsFromChainMap(
+      candidate,
+      preferredLigandChainId,
+      !preferredLigandChainId
+    );
+    if (parsed && parsed.length > 0) {
+      return parsed;
+    }
+  }
+  if (preferredLigandChainId && hasChainMap && !allowFlatFallback) return null;
+  if (!allowFlatFallback) return null;
+
   const candidates: unknown[] = [
     confidence.ligand_atom_plddts,
     confidence.ligand_atom_plddt,
@@ -384,8 +446,12 @@ function readTaskLigandAtomPlddts(task: ProjectTask): number[] | null {
   return null;
 }
 
-function hasTaskLigandAtomPlddts(task: ProjectTask): boolean {
-  return Boolean(readTaskLigandAtomPlddts(task)?.length);
+function hasTaskLigandAtomPlddts(
+  task: ProjectTask,
+  preferredLigandChainId: string | null = null,
+  allowFlatFallback = true
+): boolean {
+  return Boolean(readTaskLigandAtomPlddts(task, preferredLigandChainId, allowFlatFallback)?.length);
 }
 
 function hasTaskSummaryMetrics(task: ProjectTask): boolean {
@@ -679,8 +745,11 @@ export function ProjectTasksPage() {
         const selection = resolveTaskSelectionContext(row);
         const needsSummaryHydration = !hasTaskSummaryMetrics(row);
         const needsLigandAtomHydration =
-          selection.ligandComponentCount === 1 &&
-          Boolean(selection.ligandSmiles && selection.ligandIsSmiles && !hasTaskLigandAtomPlddts(row));
+          Boolean(
+            selection.ligandSmiles &&
+              selection.ligandIsSmiles &&
+              !hasTaskLigandAtomPlddts(row, selection.ligandChainId, selection.ligandComponentCount === 1)
+          );
         if (!needsSummaryHydration && !needsLigandAtomHydration) {
           resultHydrationDoneRef.current.add(taskId);
           return false;
@@ -905,8 +974,11 @@ export function ProjectTasksPage() {
       const submittedTs = new Date(task.submitted_at || task.created_at).getTime();
       const durationValue = typeof task.duration_seconds === 'number' && Number.isFinite(task.duration_seconds) ? task.duration_seconds : null;
       const selection = resolveTaskSelectionContext(task);
-      const ligandAtomPlddtsRaw = readTaskLigandAtomPlddts(task);
-      const ligandAtomPlddts = selection.ligandComponentCount === 1 ? ligandAtomPlddtsRaw : null;
+      const ligandAtomPlddts = readTaskLigandAtomPlddts(
+        task,
+        selection.ligandChainId,
+        selection.ligandComponentCount === 1
+      );
       const metrics = readTaskConfidenceMetrics(task, selection);
       const ligandMeanPlddt = mean(ligandAtomPlddts);
       const plddt = metrics.plddt !== null ? metrics.plddt : ligandMeanPlddt;
@@ -1355,7 +1427,9 @@ export function ProjectTasksPage() {
         const selection = resolveTaskSelectionContext(task);
         const ligandSmiles = selection.ligandSmiles;
         const ligandIsSmiles = selection.ligandIsSmiles;
-        const ligandAtomPlddts = readTaskLigandAtomPlddts(task) ?? row.ligandAtomPlddts;
+        const ligandAtomPlddts =
+          readTaskLigandAtomPlddts(task, selection.ligandChainId, selection.ligandComponentCount === 1) ??
+          row.ligandAtomPlddts;
         const submittedText = formatDateTime(task.submitted_at || task.created_at);
         const runtimeTaskId = String(task.task_id || '').trim();
         let imageBytes: Uint8Array | null = null;
