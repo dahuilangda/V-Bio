@@ -319,32 +319,6 @@ function defaultConfigFromProject(project: Project): ProjectInputConfig {
   return config;
 }
 
-function readTaskPrimaryLigand(task: ProjectTask | null): { smiles: string; isSmiles: boolean } {
-  if (!task) {
-    return { smiles: '', isSmiles: false };
-  }
-
-  const directLigand = normalizeComponentSequence('ligand', task.ligand_smiles || '');
-  if (directLigand) {
-    return {
-      smiles: directLigand,
-      isSmiles: true
-    };
-  }
-
-  const components = Array.isArray(task.components) ? task.components : [];
-  const ligand = components.find((item) => item.type === 'ligand' && normalizeComponentSequence('ligand', item.sequence));
-  if (!ligand) {
-    return { smiles: '', isSmiles: false };
-  }
-
-  const value = normalizeComponentSequence('ligand', ligand.sequence);
-  return {
-    smiles: value,
-    isSmiles: ligand.inputMethod !== 'ccd'
-  };
-}
-
 function readTaskComponents(task: ProjectTask | null): InputComponent[] {
   if (!task) return [];
 
@@ -510,6 +484,206 @@ function readLigandAtomPlddtsFromConfidence(
     if (values.length > 0) return values;
   }
   return [];
+}
+
+function toFiniteNumberArray(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === 'number') return Number.isFinite(item) ? item : null;
+      if (typeof item === 'string') {
+        const parsed = Number(item.trim());
+        return Number.isFinite(parsed) ? parsed : null;
+      }
+      return null;
+    })
+    .filter((item): item is number => item !== null);
+}
+
+function chainKeysMatch(candidate: string, preferred: string): boolean {
+  const normalizedCandidate = normalizeChainKey(candidate);
+  const normalizedPreferred = normalizeChainKey(preferred);
+  if (!normalizedCandidate || !normalizedPreferred) return false;
+  if (normalizedCandidate === normalizedPreferred) return true;
+  const compactCandidate = normalizedCandidate.replace(/[^A-Z0-9]/g, '');
+  const compactPreferred = normalizedPreferred.replace(/[^A-Z0-9]/g, '');
+  if (compactCandidate && compactPreferred && compactCandidate === compactPreferred) return true;
+  return compactCandidate.endsWith(compactPreferred);
+}
+
+function readResiduePlddtsFromChainMap(value: unknown, preferredLigandChainId: string | null): number[] | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !preferredLigandChainId) return null;
+  const preferred = normalizeChainKey(preferredLigandChainId);
+  const entries = Object.entries(value as Record<string, unknown>);
+  for (const [key, chainValues] of entries) {
+    if (!chainKeysMatch(key, preferred)) continue;
+    const parsed = toFiniteNumberArray(chainValues).map((item) => normalizePlddtValue(item));
+    if (parsed.length > 0) return parsed;
+  }
+  return null;
+}
+
+function readTokenPlddtsForChain(confidence: Record<string, unknown> | null, preferredLigandChainId: string | null): number[] | null {
+  if (!confidence || !preferredLigandChainId) return null;
+  const preferred = normalizeChainKey(preferredLigandChainId);
+  const tokenPlddtCandidates: unknown[] = [
+    confidence.token_plddts,
+    confidence.token_plddt,
+    readObjectPath(confidence, 'token_plddts'),
+    readObjectPath(confidence, 'token_plddt'),
+    readObjectPath(confidence, 'plddt_by_token')
+  ];
+  const tokenChainCandidates: unknown[] = [
+    confidence.token_chain_ids,
+    confidence.token_chain_id,
+    readObjectPath(confidence, 'token_chain_ids'),
+    readObjectPath(confidence, 'token_chain_id'),
+    readObjectPath(confidence, 'chain_ids_by_token')
+  ];
+
+  for (const plddtCandidate of tokenPlddtCandidates) {
+    const tokenPlddts = toFiniteNumberArray(plddtCandidate).map((item) => normalizePlddtValue(item));
+    if (tokenPlddts.length === 0) continue;
+    for (const chainCandidate of tokenChainCandidates) {
+      if (!Array.isArray(chainCandidate) || chainCandidate.length !== tokenPlddts.length) continue;
+      const tokenChains = chainCandidate.map((value) => normalizeChainKey(String(value || '')));
+      if (tokenChains.some((value) => !value)) continue;
+      const byChain = tokenPlddts.filter((_, index) => chainKeysMatch(tokenChains[index], preferred));
+      if (byChain.length > 0) return byChain;
+    }
+  }
+  return null;
+}
+
+function readResiduePlddtsForChain(confidence: Record<string, unknown> | null, preferredLigandChainId: string | null): number[] | null {
+  if (!confidence || !preferredLigandChainId) return null;
+  const chainMapCandidates: unknown[] = [
+    confidence.residue_plddt_by_chain,
+    confidence.chain_residue_plddt,
+    confidence.chain_plddt,
+    confidence.chain_plddts,
+    confidence.plddt_by_chain,
+    readObjectPath(confidence, 'residue_plddt_by_chain'),
+    readObjectPath(confidence, 'chain_residue_plddt'),
+    readObjectPath(confidence, 'chain_plddt'),
+    readObjectPath(confidence, 'chain_plddts'),
+    readObjectPath(confidence, 'plddt.by_chain')
+  ];
+
+  for (const candidate of chainMapCandidates) {
+    const parsed = readResiduePlddtsFromChainMap(candidate, preferredLigandChainId);
+    if (parsed && parsed.length > 0) return parsed;
+  }
+  return readTokenPlddtsForChain(confidence, preferredLigandChainId);
+}
+
+function alignConfidenceSeriesToLength(values: number[] | null, sequenceLength: number): number[] | null {
+  if (!values || values.length === 0 || sequenceLength <= 0) return null;
+  if (values.length === sequenceLength) return values;
+  if (values.length > sequenceLength) {
+    const reduced: number[] = [];
+    for (let i = 0; i < sequenceLength; i += 1) {
+      const start = Math.floor((i * values.length) / sequenceLength);
+      const end = Math.max(start + 1, Math.floor(((i + 1) * values.length) / sequenceLength));
+      const chunk = values.slice(start, end);
+      const avg = chunk.reduce((sum, value) => sum + value, 0) / chunk.length;
+      reduced.push(normalizePlddtValue(avg));
+    }
+    return reduced;
+  }
+  const expanded: number[] = [];
+  for (let i = 0; i < sequenceLength; i += 1) {
+    const mapped = Math.floor((i * values.length) / sequenceLength);
+    expanded.push(values[Math.min(values.length - 1, Math.max(0, mapped))]);
+  }
+  return expanded;
+}
+
+function isSequenceLigandType(type: InputComponent['type'] | null): boolean {
+  return type === 'protein' || type === 'dna' || type === 'rna';
+}
+
+function overviewResiduesPerLineForLength(length: number): number {
+  if (length <= 40) return 12;
+  if (length <= 120) return 14;
+  if (length <= 220) return 16;
+  return 18;
+}
+
+function splitOverviewSequenceNodesIntoBalancedLines<T>(nodes: T[]): T[][] {
+  if (nodes.length === 0) return [];
+  const preferredPerLine = overviewResiduesPerLineForLength(nodes.length);
+  const lineCount = Math.max(1, Math.ceil(nodes.length / preferredPerLine));
+  const baseSize = Math.floor(nodes.length / lineCount);
+  const remainder = nodes.length % lineCount;
+  const lines: T[][] = [];
+  let cursor = 0;
+  for (let i = 0; i < lineCount; i += 1) {
+    const size = baseSize + (i < remainder ? 1 : 0);
+    lines.push(nodes.slice(cursor, cursor + size));
+    cursor += size;
+  }
+  return lines;
+}
+
+function OverviewLigandSequencePreview({
+  sequence,
+  residuePlddts
+}: {
+  sequence: string;
+  residuePlddts: number[] | null;
+}) {
+  const residues = sequence.trim().toUpperCase().split('');
+  const nodes = useMemo(() => {
+    return residues.map((rawResidue, index) => {
+      const residue = /^[A-Z]$/.test(rawResidue) ? rawResidue : '?';
+      const confidence = residuePlddts?.[index] ?? null;
+      const tone = toneForPlddt(confidence);
+      return {
+        index,
+        residue,
+        confidence,
+        tone
+      };
+    });
+  }, [residues, residuePlddts]);
+  const lines = useMemo(() => splitOverviewSequenceNodesIntoBalancedLines(nodes), [nodes]);
+
+  if (residues.length === 0) {
+    return <div className="ligand-preview-empty">No sequence.</div>;
+  }
+
+  return (
+    <div className="overview-ligand-sequence">
+      <div className="overview-ligand-sequence-lines">
+        {lines.map((line, rowIndex) => (
+          <div className="overview-ligand-sequence-line" key={`overview-seq-line-${rowIndex}`}>
+            <span className="overview-ligand-sequence-line-index left" aria-hidden="true">
+              {line[0]?.index + 1}
+            </span>
+            <span className="overview-ligand-sequence-line-track">
+              {line.map((item, colIndex) => {
+                const confidenceText = item.confidence === null ? '-' : item.confidence.toFixed(1);
+                const linkTone = colIndex > 0 ? line[colIndex - 1].tone : item.tone;
+                const position = item.index + 1;
+                return (
+                  <span className="overview-ligand-sequence-node" key={`overview-seq-${item.index}`}>
+                    {colIndex > 0 && <span className={`overview-ligand-sequence-link tone-${linkTone}`} aria-hidden="true" />}
+                    <span className={`overview-ligand-sequence-residue tone-${item.tone}`} title={`#${position} ${item.residue} | pLDDT ${confidenceText}`}>
+                      {item.residue}
+                    </span>
+                  </span>
+                );
+              })}
+            </span>
+            <span className="overview-ligand-sequence-line-index right" aria-hidden="true">
+              {line[line.length - 1]?.index + 1}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function normalizeComponents(components: InputComponent[]): InputComponent[] {
@@ -946,37 +1120,69 @@ export function ProjectDetailPage() {
   }, [resultPairPreference, resultChainInfoById, resultComponentOptions]);
   const selectedResultLigandChainId = useMemo(() => {
     const preferred = typeof resultPairPreference?.ligand === 'string' ? resultPairPreference.ligand.trim() : '';
-    if (preferred && resultChainInfoById.has(preferred)) {
-      return preferred;
+    if (preferred) {
+      if (resultChainInfoById.has(preferred)) {
+        return preferred;
+      }
+      const byComponent = resultComponentOptions.find((item) => item.id === preferred);
+      if (byComponent?.chainId) {
+        return byComponent.chainId;
+      }
+      const normalizedPreferred = preferred.toUpperCase();
+      const byNormalizedChain = resultComponentOptions.find((item) => String(item.chainId || '').toUpperCase() === normalizedPreferred);
+      if (byNormalizedChain?.chainId) {
+        return byNormalizedChain.chainId;
+      }
+      return null;
     }
-    return resultComponentOptions[resultComponentOptions.length - 1]?.chainId || null;
-  }, [resultPairPreference, resultChainInfoById, resultComponentOptions]);
+    const optionsWithoutTarget = resultComponentOptions.filter((item) => item.chainId && item.chainId !== selectedResultTargetChainId);
+    const defaultOption =
+      optionsWithoutTarget.find((item) => item.isSmiles) ||
+      resultComponentOptions.find((item) => item.isSmiles) ||
+      optionsWithoutTarget[0] ||
+      resultComponentOptions[0] ||
+      null;
+    return defaultOption?.chainId || null;
+  }, [resultPairPreference, resultChainInfoById, resultComponentOptions, selectedResultTargetChainId]);
   const selectedResultLigandComponent = useMemo(() => {
     if (!selectedResultLigandChainId) return null;
     const info = resultChainInfoById.get(selectedResultLigandChainId);
     if (!info) return null;
     return resultComponentById.get(info.componentId) || null;
   }, [selectedResultLigandChainId, resultChainInfoById, resultComponentById]);
+  const selectedResultLigandSequence = useMemo(() => {
+    if (!selectedResultLigandComponent || !isSequenceLigandType(selectedResultLigandComponent.type)) return '';
+    return normalizeComponentSequence(selectedResultLigandComponent.type, selectedResultLigandComponent.sequence || '');
+  }, [selectedResultLigandComponent]);
   const overviewPrimaryLigand = useMemo(() => {
-    if (
-      selectedResultLigandComponent &&
-      selectedResultLigandComponent.type === 'ligand' &&
-      selectedResultLigandComponent.inputMethod !== 'ccd' &&
-      selectedResultLigandComponent.sequence.trim()
-    ) {
-      return { smiles: selectedResultLigandComponent.sequence.trim(), isSmiles: true };
-    }
-    const taskLigand = readTaskPrimaryLigand(activeResultTask);
-    if (taskLigand.smiles) return taskLigand;
-    const draftLigand = normalizedDraftComponents.find((comp) => comp.type === 'ligand' && comp.sequence);
-    if (!draftLigand) {
-      return { smiles: '', isSmiles: false };
+    if (selectedResultLigandComponent) {
+      const selectedSequence = normalizeComponentSequence(
+        selectedResultLigandComponent.type,
+        selectedResultLigandComponent.sequence || ''
+      );
+      if (
+        selectedResultLigandComponent.type === 'ligand' &&
+        selectedResultLigandComponent.inputMethod !== 'ccd' &&
+        selectedSequence
+      ) {
+        return {
+          smiles: selectedSequence,
+          isSmiles: true,
+          selectedComponentType: selectedResultLigandComponent.type as InputComponent['type'] | null
+        };
+      }
+      return {
+        smiles: '',
+        isSmiles: false,
+        selectedComponentType: selectedResultLigandComponent.type as InputComponent['type'] | null
+      };
     }
     return {
-      smiles: draftLigand.sequence,
-      isSmiles: draftLigand.inputMethod !== 'ccd'
+      smiles: '',
+      isSmiles: false,
+      selectedComponentType: null as InputComponent['type'] | null
     };
-  }, [selectedResultLigandComponent, activeResultTask, normalizedDraftComponents]);
+  }, [selectedResultLigandComponent]);
   const snapshotConfidence = useMemo(() => {
     if (activeResultTask?.confidence && Object.keys(activeResultTask.confidence).length > 0) {
       return activeResultTask.confidence as Record<string, unknown>;
@@ -998,6 +1204,11 @@ export function ProjectDetailPage() {
   const snapshotLigandAtomPlddts = useMemo(() => {
     return readLigandAtomPlddtsFromConfidence(snapshotConfidence, selectedResultLigandChainId);
   }, [snapshotConfidence, selectedResultLigandChainId]);
+  const snapshotLigandResiduePlddts = useMemo(() => {
+    if (!selectedResultLigandSequence || !selectedResultLigandChainId) return null;
+    const raw = readResiduePlddtsForChain(snapshotConfidence, selectedResultLigandChainId);
+    return alignConfidenceSeriesToLength(raw, selectedResultLigandSequence.length);
+  }, [snapshotConfidence, selectedResultLigandChainId, selectedResultLigandSequence]);
   const snapshotLigandMeanPlddt = useMemo(() => {
     if (!snapshotLigandAtomPlddts.length) return null;
     return mean(snapshotLigandAtomPlddts);
@@ -1586,7 +1797,7 @@ export function ProjectDetailPage() {
           componentIndex: index + 1,
           chainId,
           type: component.type,
-          label: `Comp ${index + 1}`,
+          label: `Comp ${index + 1} · ${componentTypeLabel(component.type)}`,
           isSmallMolecule
         };
       })
@@ -1596,7 +1807,7 @@ export function ProjectDetailPage() {
     return workspaceAffinityOptions.filter((item) => item.type !== 'ligand');
   }, [workspaceAffinityOptions]);
   const workspaceLigandOptions = useMemo(() => {
-    return workspaceAffinityOptions.filter((item) => item.type === 'ligand');
+    return workspaceAffinityOptions;
   }, [workspaceAffinityOptions]);
   const resolveChainFromProperty = useCallback(
     (
@@ -1636,8 +1847,24 @@ export function ProjectDetailPage() {
   }, [draft, resolveChainFromProperty, workspaceTargetOptions]);
   const selectedWorkspaceLigand = useMemo(() => {
     if (!draft) return { chainId: null as string | null, componentId: null as string | null };
-    return resolveChainFromProperty(draft.inputConfig.properties.ligand, workspaceLigandOptions);
-  }, [draft, resolveChainFromProperty, workspaceLigandOptions]);
+    const rawLigand = String(draft.inputConfig.properties.ligand || '').trim();
+    if (rawLigand) {
+      return resolveChainFromProperty(rawLigand, workspaceLigandOptions);
+    }
+    const optionsWithoutTarget = workspaceLigandOptions.filter(
+      (item) => item.componentId !== selectedWorkspaceTarget.componentId
+    );
+    const defaultSmallMolecule =
+      optionsWithoutTarget.find((item) => item.isSmallMolecule) ||
+      workspaceLigandOptions.find((item) => item.isSmallMolecule) ||
+      optionsWithoutTarget[0] ||
+      workspaceLigandOptions[0] ||
+      null;
+    return {
+      chainId: defaultSmallMolecule?.chainId || null,
+      componentId: defaultSmallMolecule?.componentId || null
+    };
+  }, [draft, resolveChainFromProperty, selectedWorkspaceTarget.componentId, workspaceLigandOptions]);
   const selectedWorkspaceLigandOption = useMemo(() => {
     if (!selectedWorkspaceLigand.componentId) return null;
     return workspaceLigandOptions.find((item) => item.componentId === selectedWorkspaceLigand.componentId) || null;
@@ -1653,7 +1880,9 @@ export function ProjectDetailPage() {
   const affinityEnableDisabledReason = useMemo(() => {
     if (!selectedWorkspaceTarget.chainId) return 'Choose a target component first.';
     if (!selectedWorkspaceLigand.chainId) return 'Choose a ligand component first.';
-    if (!selectedWorkspaceLigandOption?.isSmallMolecule) return 'Binding score requires a small-molecule ligand (SMILES/JSME).';
+    if (!selectedWorkspaceLigandOption?.isSmallMolecule) {
+      return 'Affinity compute requires a small-molecule ligand (SMILES/JSME). Pair ipTM and selected-chain pLDDT are still available.';
+    }
     return '';
   }, [selectedWorkspaceLigand.chainId, selectedWorkspaceLigandOption?.isSmallMolecule, selectedWorkspaceTarget.chainId]);
 
@@ -3339,13 +3568,24 @@ export function ProjectDetailPage() {
                           atomConfidences={snapshotLigandAtomPlddts}
                           confidenceHint={snapshotPlddt}
                         />
+                      ) : selectedResultLigandSequence && isSequenceLigandType(selectedResultLigandComponent?.type || null) ? (
+                        <OverviewLigandSequencePreview
+                          sequence={selectedResultLigandSequence}
+                          residuePlddts={snapshotLigandResiduePlddts}
+                        />
                       ) : (
                         <div className="ligand-preview-empty">
-                          {overviewPrimaryLigand.smiles ? '2D preview requires SMILES input.' : 'No ligand input.'}
+                          {overviewPrimaryLigand.selectedComponentType && overviewPrimaryLigand.selectedComponentType !== 'ligand'
+                            ? `Selected binding ligand component is ${componentTypeLabel(overviewPrimaryLigand.selectedComponentType)}.`
+                            : overviewPrimaryLigand.smiles
+                              ? '2D preview requires SMILES input.'
+                              : 'No ligand input.'}
                         </div>
                       )}
                     </div>
-                    <LigandPropertyGrid smiles={overviewPrimaryLigand.isSmiles ? overviewPrimaryLigand.smiles : ''} variant="radar" />
+                    {overviewPrimaryLigand.isSmiles ? (
+                      <LigandPropertyGrid smiles={overviewPrimaryLigand.smiles} variant="radar" />
+                    ) : null}
                   </section>
 
                   <section className="result-aside-block">
@@ -3919,7 +4159,7 @@ export function ProjectDetailPage() {
                             >
                               {workspaceLigandOptions.map((item) => (
                                 <option key={`workspace-affinity-ligand-${item.componentId}`} value={item.componentId}>
-                                  {item.isSmallMolecule ? item.label : `${item.label} (non-small)`}
+                                  {item.isSmallMolecule ? item.label : `${item.label} (affinity disabled)`}
                                 </option>
                               ))}
                             </select>

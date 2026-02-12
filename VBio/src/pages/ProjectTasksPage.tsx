@@ -22,7 +22,7 @@ import type { InputComponent, Project, ProjectTask } from '../types/models';
 import { assignChainIdsForComponents } from '../utils/chainAssignments';
 import { formatDateTime, formatDuration } from '../utils/date';
 import { renderLigand2DSvg } from '../utils/ligand2d';
-import { normalizeComponentSequence, normalizeInputComponents } from '../utils/projectInputs';
+import { loadProjectInputConfig, normalizeComponentSequence, normalizeInputComponents } from '../utils/projectInputs';
 import { loadRDKitModule } from '../utils/rdkit';
 
 function normalizeTaskComponents(components: InputComponent[]): InputComponent[] {
@@ -155,10 +155,17 @@ interface TaskMetricContext {
   ligandChainId: string | null;
 }
 
+interface WorkspacePairPreference {
+  targetChainId: string | null;
+  ligandChainId: string | null;
+}
+
 interface TaskSelectionContext extends TaskMetricContext {
   ligandSmiles: string;
   ligandIsSmiles: boolean;
   ligandComponentCount: number;
+  ligandSequence: string;
+  ligandSequenceType: InputComponent['type'] | null;
 }
 
 interface TaskListRow {
@@ -170,6 +177,9 @@ interface TaskListRow {
   ligandSmiles: string;
   ligandIsSmiles: boolean;
   ligandAtomPlddts: number[] | null;
+  ligandSequence: string;
+  ligandSequenceType: InputComponent['type'] | null;
+  ligandResiduePlddts: number[] | null;
 }
 
 function toneForPlddt(value: number | null): MetricTone {
@@ -178,6 +188,87 @@ function toneForPlddt(value: number | null): MetricTone {
   if (value >= 70) return 'good';
   if (value >= 50) return 'medium';
   return 'low';
+}
+
+function ligandSequenceDensityClass(length: number): 'is-short' | 'is-medium' | 'is-long' | 'is-xlong' {
+  if (length <= 26) return 'is-short';
+  if (length <= 56) return 'is-medium';
+  if (length <= 110) return 'is-long';
+  return 'is-xlong';
+}
+
+function residuesPerLineForLength(length: number): number {
+  if (length <= 30) return 10;
+  if (length <= 90) return 11;
+  if (length <= 180) return 12;
+  return 13;
+}
+
+function splitSequenceNodesIntoBalancedLines<T>(nodes: T[]): T[][] {
+  if (nodes.length === 0) return [];
+  const preferredPerLine = residuesPerLineForLength(nodes.length);
+  const lineCount = Math.max(1, Math.ceil(nodes.length / preferredPerLine));
+  const baseSize = Math.floor(nodes.length / lineCount);
+  const remainder = nodes.length % lineCount;
+  const lines: T[][] = [];
+  let cursor = 0;
+  for (let i = 0; i < lineCount; i += 1) {
+    const size = baseSize + (i < remainder ? 1 : 0);
+    lines.push(nodes.slice(cursor, cursor + size));
+    cursor += size;
+  }
+  return lines;
+}
+
+function ligandSequenceHeightClass(lineCount: number): 'is-height-normal' | 'is-height-tall' | 'is-height-xtall' {
+  if (lineCount <= 5) return 'is-height-normal';
+  if (lineCount <= 10) return 'is-height-tall';
+  return 'is-height-xtall';
+}
+
+function isSequenceLigandType(type: InputComponent['type'] | null): boolean {
+  return type === 'protein' || type === 'dna' || type === 'rna';
+}
+
+function clampPlddtValue(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  if (value >= 0 && value <= 1) return Math.max(0, Math.min(100, value * 100));
+  return Math.max(0, Math.min(100, value));
+}
+
+function alignConfidenceSeriesToLength(
+  values: number[] | null,
+  sequenceLength: number,
+  fallbackValue: number | null
+): number[] | null {
+  if (sequenceLength <= 0) return null;
+  const series = (values || []).filter((value) => Number.isFinite(value)).map((value) => clampPlddtValue(value));
+  if (series.length === 0) {
+    if (fallbackValue === null || !Number.isFinite(fallbackValue)) return null;
+    const normalizedFallback = clampPlddtValue(fallbackValue);
+    return Array.from({ length: sequenceLength }, () => normalizedFallback);
+  }
+
+  if (series.length === sequenceLength) return series;
+
+  if (series.length > sequenceLength) {
+    const reduced: number[] = [];
+    for (let i = 0; i < sequenceLength; i += 1) {
+      const start = Math.floor((i * series.length) / sequenceLength);
+      const end = Math.max(start + 1, Math.floor(((i + 1) * series.length) / sequenceLength));
+      const chunk = series.slice(start, end);
+      const avg = chunk.reduce((sum, value) => sum + value, 0) / chunk.length;
+      reduced.push(clampPlddtValue(avg));
+    }
+    return reduced;
+  }
+
+  const expanded: number[] = [];
+  for (let i = 0; i < sequenceLength; i += 1) {
+    const mapped = Math.floor((i * series.length) / sequenceLength);
+    expanded.push(series[Math.min(series.length - 1, Math.max(0, mapped))]);
+  }
+  return expanded;
 }
 
 function toneForIptm(value: number | null): MetricTone {
@@ -257,23 +348,33 @@ function readChainMeanPlddtForChain(confidence: Record<string, unknown>, chainId
   return value >= 0 && value <= 1 ? value * 100 : value;
 }
 
-function resolveTaskSelectionContext(task: ProjectTask): TaskSelectionContext {
+function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: WorkspacePairPreference): TaskSelectionContext {
   const taskProperties = task.properties && typeof task.properties === 'object' ? task.properties : null;
   const rawTarget = taskProperties && typeof taskProperties.target === 'string' ? taskProperties.target.trim().toUpperCase() : '';
   const rawLigand = taskProperties && typeof taskProperties.ligand === 'string' ? taskProperties.ligand.trim().toUpperCase() : '';
+  const preferredTarget = String(workspacePreference?.targetChainId || '')
+    .trim()
+    .toUpperCase();
+  const preferredLigand = String(workspacePreference?.ligandChainId || '')
+    .trim()
+    .toUpperCase();
+  const targetCandidate = preferredTarget || rawTarget;
+  const ligandCandidate = preferredLigand || rawLigand;
   const activeComponents = readTaskComponents(task).filter((item) => Boolean(item.sequence.trim()));
   const ligandComponentCount = activeComponents.filter((item) => item.type === 'ligand').length;
 
   if (activeComponents.length === 0) {
     const ligand = readTaskPrimaryLigand(task, [], null);
-    const fallbackChainIds = Array.from(new Set([rawTarget, rawLigand].filter(Boolean)));
+    const fallbackChainIds = Array.from(new Set([targetCandidate, ligandCandidate].filter(Boolean)));
     return {
       chainIds: fallbackChainIds,
-      targetChainId: rawTarget || null,
-      ligandChainId: rawLigand || null,
+      targetChainId: targetCandidate || null,
+      ligandChainId: ligandCandidate || null,
       ligandSmiles: ligand.smiles,
       ligandIsSmiles: ligand.isSmiles,
-      ligandComponentCount: ligand.smiles ? 1 : 0
+      ligandComponentCount: ligand.smiles ? 1 : 0,
+      ligandSequence: '',
+      ligandSequenceType: null
     };
   }
 
@@ -284,8 +385,8 @@ function resolveTaskSelectionContext(task: ProjectTask): TaskSelectionContext {
   const fallbackLigandChainId = chainAssignments[chainAssignments.length - 1]?.[0] || null;
   const normalizedFallbackTarget = fallbackTargetChainId ? fallbackTargetChainId.toUpperCase() : null;
   const normalizedFallbackLigand = fallbackLigandChainId ? fallbackLigandChainId.toUpperCase() : null;
-  const targetChainId = rawTarget && validChainIds.has(rawTarget) ? rawTarget : normalizedFallbackTarget;
-  const ligandChainId = rawLigand && validChainIds.has(rawLigand) ? rawLigand : normalizedFallbackLigand;
+  const targetChainId = targetCandidate && validChainIds.has(targetCandidate) ? targetCandidate : normalizedFallbackTarget;
+  const ligandChainId = ligandCandidate && validChainIds.has(ligandCandidate) ? ligandCandidate : normalizedFallbackLigand;
 
   const chainToComponent = new Map<string, InputComponent>();
   chainAssignments.forEach((chainGroup, index) => {
@@ -294,7 +395,18 @@ function resolveTaskSelectionContext(task: ProjectTask): TaskSelectionContext {
     });
   });
   const selectedLigandComponent = ligandChainId ? chainToComponent.get(ligandChainId) || null : null;
-  const ligand = readTaskPrimaryLigand(task, activeComponents, selectedLigandComponent?.id || null);
+  const ligand =
+    selectedLigandComponent?.type === 'ligand'
+      ? readTaskPrimaryLigand(task, activeComponents, selectedLigandComponent.id || null)
+      : {
+          smiles: '',
+          isSmiles: false
+        };
+  const ligandSequence =
+    selectedLigandComponent && isSequenceLigandType(selectedLigandComponent.type)
+      ? normalizeComponentSequence(selectedLigandComponent.type, selectedLigandComponent.sequence || '')
+      : '';
+  const ligandSequenceType = selectedLigandComponent?.type || null;
 
   return {
     chainIds,
@@ -302,7 +414,9 @@ function resolveTaskSelectionContext(task: ProjectTask): TaskSelectionContext {
     ligandChainId,
     ligandSmiles: ligand.smiles,
     ligandIsSmiles: ligand.isSmiles,
-    ligandComponentCount
+    ligandComponentCount,
+    ligandSequence,
+    ligandSequenceType
   };
 }
 
@@ -333,14 +447,49 @@ function readTaskConfidenceMetrics(task: ProjectTask, context?: TaskMetricContex
 }
 
 function toFiniteNumberArray(value: unknown): number[] {
+  const normalizeItems = (items: unknown[]): number[] =>
+    items
+      .map((item) => {
+        if (typeof item === 'number') return Number.isFinite(item) ? item : null;
+        if (typeof item === 'string') {
+          const parsed = Number(item.trim());
+          return Number.isFinite(parsed) ? parsed : null;
+        }
+        return null;
+      })
+      .filter((item): item is number => item !== null);
+
   if (Array.isArray(value)) {
-    return value.filter((item): item is number => typeof item === 'number' && Number.isFinite(item));
+    return normalizeItems(value);
+  }
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const nestedCandidates: unknown[] = [
+      obj.values,
+      obj.value,
+      obj.plddt,
+      obj.plddts,
+      obj.residue_plddt,
+      obj.residue_plddts,
+      obj.token_plddt,
+      obj.token_plddts,
+      obj.scores
+    ];
+    for (const candidate of nestedCandidates) {
+      if (Array.isArray(candidate)) {
+        const parsed = normalizeItems(candidate);
+        if (parsed.length > 0) return parsed;
+      }
+    }
   }
   if (typeof value === 'string') {
     try {
       const parsed = JSON.parse(value) as unknown;
       if (Array.isArray(parsed)) {
-        return parsed.filter((item): item is number => typeof item === 'number' && Number.isFinite(item));
+        return normalizeItems(parsed);
+      }
+      if (parsed && typeof parsed === 'object') {
+        return toFiniteNumberArray(parsed);
       }
     } catch {
       return [];
@@ -370,6 +519,27 @@ function normalizeChainKey(value: string): string {
   return value.trim().toUpperCase();
 }
 
+function chainKeysMatch(candidate: string, preferred: string): boolean {
+  const normalizedCandidate = normalizeChainKey(candidate);
+  const normalizedPreferred = normalizeChainKey(preferred);
+  if (!normalizedCandidate || !normalizedPreferred) return false;
+  if (normalizedCandidate === normalizedPreferred) return true;
+
+  const compactCandidate = normalizedCandidate.replace(/[^A-Z0-9]/g, '');
+  const compactPreferred = normalizedPreferred.replace(/[^A-Z0-9]/g, '');
+  if (compactCandidate && compactPreferred && compactCandidate === compactPreferred) return true;
+
+  const candidateTokens = normalizedCandidate.split(/[^A-Z0-9]+/).filter(Boolean);
+  if (candidateTokens.includes(normalizedPreferred) || (compactPreferred && candidateTokens.includes(compactPreferred))) {
+    return true;
+  }
+
+  if (compactCandidate && compactPreferred) {
+    return compactCandidate.endsWith(compactPreferred);
+  }
+  return false;
+}
+
 function readTaskLigandAtomPlddtsFromChainMap(
   value: unknown,
   preferredLigandChainId: string | null,
@@ -383,7 +553,7 @@ function readTaskLigandAtomPlddtsFromChainMap(
   const preferred = preferredLigandChainId ? normalizeChainKey(preferredLigandChainId) : '';
   if (preferred) {
     for (const [key, chainValues] of entries) {
-      if (normalizeChainKey(key) !== preferred) continue;
+      if (!chainKeysMatch(key, preferred)) continue;
       const parsed = normalizeAtomPlddts(toFiniteNumberArray(chainValues));
       if (parsed.length > 0) {
         return parsed;
@@ -399,6 +569,90 @@ function readTaskLigandAtomPlddtsFromChainMap(
       }
     }
   }
+  return null;
+}
+
+function readTaskResiduePlddtsFromChainMap(
+  value: unknown,
+  preferredLigandChainId: string | null
+): number[] | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const map = value as Record<string, unknown>;
+  const entries = Object.entries(map);
+  if (entries.length === 0) return null;
+
+  const preferred = preferredLigandChainId ? normalizeChainKey(preferredLigandChainId) : '';
+  if (preferred) {
+    for (const [key, chainValues] of entries) {
+      if (!chainKeysMatch(key, preferred)) continue;
+      const parsed = normalizeAtomPlddts(toFiniteNumberArray(chainValues));
+      if (parsed.length > 0) return parsed;
+    }
+  }
+  return null;
+}
+
+function readTaskTokenPlddtsForChain(
+  confidence: Record<string, unknown>,
+  preferredLigandChainId: string | null
+): number[] | null {
+  const tokenPlddtCandidates: unknown[] = [
+    confidence.token_plddts,
+    confidence.token_plddt,
+    readObjectPath(confidence, 'token_plddts'),
+    readObjectPath(confidence, 'token_plddt'),
+    readObjectPath(confidence, 'plddt_by_token')
+  ];
+  const tokenChainCandidates: unknown[] = [
+    confidence.token_chain_ids,
+    confidence.token_chain_id,
+    readObjectPath(confidence, 'token_chain_ids'),
+    readObjectPath(confidence, 'token_chain_id'),
+    readObjectPath(confidence, 'chain_ids_by_token')
+  ];
+
+  const preferred = preferredLigandChainId ? normalizeChainKey(preferredLigandChainId) : '';
+  if (!preferred) return null;
+  for (const plddtCandidate of tokenPlddtCandidates) {
+    const tokenPlddts = normalizeAtomPlddts(toFiniteNumberArray(plddtCandidate));
+    if (tokenPlddts.length === 0) continue;
+
+    for (const chainCandidate of tokenChainCandidates) {
+      if (!Array.isArray(chainCandidate)) continue;
+      if (chainCandidate.length !== tokenPlddts.length) continue;
+      const tokenChains = chainCandidate.map((value) => normalizeChainKey(String(value || '')));
+      if (tokenChains.some((value) => !value)) continue;
+
+      const byChain = tokenPlddts.filter((_, index) => chainKeysMatch(tokenChains[index], preferred));
+      if (byChain.length > 0) return byChain;
+    }
+  }
+  return null;
+}
+
+function readTaskLigandResiduePlddts(task: ProjectTask, preferredLigandChainId: string | null): number[] | null {
+  const confidence = (task.confidence || {}) as Record<string, unknown>;
+  if (!preferredLigandChainId) return null;
+  const chainMapCandidates: unknown[] = [
+    confidence.residue_plddt_by_chain,
+    confidence.chain_residue_plddt,
+    confidence.chain_plddt,
+    confidence.chain_plddts,
+    confidence.plddt_by_chain,
+    readObjectPath(confidence, 'residue_plddt_by_chain'),
+    readObjectPath(confidence, 'chain_residue_plddt'),
+    readObjectPath(confidence, 'chain_plddt'),
+    readObjectPath(confidence, 'chain_plddts'),
+    readObjectPath(confidence, 'plddt.by_chain')
+  ];
+  for (const candidate of chainMapCandidates) {
+    const parsed = readTaskResiduePlddtsFromChainMap(candidate, preferredLigandChainId);
+    if (parsed && parsed.length > 0) return parsed;
+  }
+
+  const tokenPlddts = readTaskTokenPlddtsForChain(confidence, preferredLigandChainId);
+  if (tokenPlddts && tokenPlddts.length > 0) return tokenPlddts;
+
   return null;
 }
 
@@ -577,6 +831,76 @@ function shouldShowRunNote(state: ProjectTask['task_state'], note: string): bool
   const label = taskStateLabel(state);
   if (normalizedNote === normalizeStatusToken(label)) return false;
   return true;
+}
+
+interface TaskLigandSequencePreviewProps {
+  sequence: string;
+  residuePlddts: number[] | null;
+}
+
+function TaskLigandSequencePreview({ sequence, residuePlddts }: TaskLigandSequencePreviewProps) {
+  const residues = sequence.trim().toUpperCase().split('');
+  const densityClass = ligandSequenceDensityClass(residues.length);
+  const nodes = useMemo(() => {
+    return residues.map((rawResidue, index) => {
+      const residue = /^[A-Z]$/.test(rawResidue) ? rawResidue : '?';
+      const confidence = residuePlddts?.[index] ?? null;
+      const tone = toneForPlddt(confidence);
+      return {
+        index,
+        residue,
+        confidence,
+        tone
+      };
+    });
+  }, [residues, residuePlddts]);
+  const lines = useMemo(() => splitSequenceNodesIntoBalancedLines(nodes), [nodes]);
+  const heightClass = ligandSequenceHeightClass(lines.length);
+
+  if (nodes.length === 0) {
+    return (
+      <div className={`task-ligand-sequence ${densityClass}`}>
+        <div className="task-ligand-thumb task-ligand-thumb-empty">
+          <span className="muted small">No sequence</span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`task-ligand-sequence ${densityClass} ${heightClass}`}>
+      <div className="task-ligand-sequence-lines">
+        {lines.map((line, rowIndex) => (
+          <div className="task-ligand-sequence-line" key={`ligand-seq-row-${rowIndex}`}>
+            <span className="task-ligand-sequence-line-index left" aria-hidden="true">
+              {line[0]?.index + 1}
+            </span>
+            <span className="task-ligand-sequence-line-track">
+              {line.map((item, colIndex) => {
+                const confidenceText = item.confidence === null ? '-' : item.confidence.toFixed(1);
+                const linkTone = colIndex > 0 ? line[colIndex - 1].tone : item.tone;
+                const position = item.index + 1;
+                return (
+                  <span className="task-ligand-sequence-node" key={`ligand-seq-residue-${item.index}`}>
+                    {colIndex > 0 && <span className={`task-ligand-sequence-link tone-${linkTone}`} aria-hidden="true" />}
+                    <span
+                      className={`task-ligand-sequence-residue tone-${item.tone}`}
+                      title={`#${position} ${item.residue} | pLDDT ${confidenceText}`}
+                    >
+                      {item.residue}
+                    </span>
+                  </span>
+                );
+              })}
+            </span>
+            <span className="task-ligand-sequence-line-index right" aria-hidden="true">
+              {line[line.length - 1]?.index + 1}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function sanitizeFileName(value: string): string {
@@ -968,20 +1292,59 @@ export function ProjectTasksPage() {
     }
     return `/projects/${project.id}?${params.toString()}`;
   }, [project, currentTaskRow]);
+  const workspacePairPreference = useMemo<WorkspacePairPreference>(() => {
+    if (!project) {
+      return {
+        targetChainId: null,
+        ligandChainId: null
+      };
+    }
+
+    const savedConfig = loadProjectInputConfig(project.id);
+    const savedTarget = String(savedConfig?.properties?.target || '')
+      .trim()
+      .toUpperCase();
+    const savedLigand = String(savedConfig?.properties?.ligand || '')
+      .trim()
+      .toUpperCase();
+    const currentProps =
+      currentTaskRow?.properties && typeof currentTaskRow.properties === 'object' ? currentTaskRow.properties : null;
+    const currentTarget = String(currentProps?.target || '')
+      .trim()
+      .toUpperCase();
+    const currentLigand = String(currentProps?.ligand || '')
+      .trim()
+      .toUpperCase();
+
+    return {
+      targetChainId: savedTarget || currentTarget || null,
+      ligandChainId: savedLigand || currentLigand || null
+    };
+  }, [project, currentTaskRow]);
 
   const taskRows = useMemo<TaskListRow[]>(() => {
     return tasks.map((task) => {
       const submittedTs = new Date(task.submitted_at || task.created_at).getTime();
       const durationValue = typeof task.duration_seconds === 'number' && Number.isFinite(task.duration_seconds) ? task.duration_seconds : null;
-      const selection = resolveTaskSelectionContext(task);
+      const selection = resolveTaskSelectionContext(task, workspacePairPreference);
       const ligandAtomPlddts = readTaskLigandAtomPlddts(
         task,
         selection.ligandChainId,
         selection.ligandComponentCount === 1
       );
+      const ligandResiduePlddtsRaw =
+        selection.ligandSequence && isSequenceLigandType(selection.ligandSequenceType)
+          ? readTaskLigandResiduePlddts(task, selection.ligandChainId)
+          : null;
+      const ligandResiduePlddts = alignConfidenceSeriesToLength(
+        ligandResiduePlddtsRaw,
+        selection.ligandSequence.length,
+        null
+      );
       const metrics = readTaskConfidenceMetrics(task, selection);
       const ligandMeanPlddt = mean(ligandAtomPlddts);
-      const plddt = metrics.plddt !== null ? metrics.plddt : ligandMeanPlddt;
+      const ligandSequenceMeanPlddt = mean(ligandResiduePlddts);
+      const plddt = metrics.plddt !== null ? metrics.plddt : ligandMeanPlddt ?? ligandSequenceMeanPlddt;
       return {
         task,
         metrics: {
@@ -993,10 +1356,13 @@ export function ProjectTasksPage() {
         durationValue,
         ligandSmiles: selection.ligandSmiles,
         ligandIsSmiles: selection.ligandIsSmiles,
-        ligandAtomPlddts
+        ligandAtomPlddts,
+        ligandSequence: selection.ligandSequence,
+        ligandSequenceType: selection.ligandSequenceType,
+        ligandResiduePlddts
       };
     });
-  }, [tasks]);
+  }, [tasks, workspacePairPreference]);
   const backendOptions = useMemo(
     () =>
       Array.from(new Set(taskRows.map((row) => row.backendValue).filter(Boolean))).sort((a, b) =>
@@ -1424,7 +1790,7 @@ export function ProjectTasksPage() {
         const row = filteredRows[i];
         const { metrics } = row;
         const task = authoritativeTaskMap.get(row.task.id) || row.task;
-        const selection = resolveTaskSelectionContext(task);
+        const selection = resolveTaskSelectionContext(task, workspacePairPreference);
         const ligandSmiles = selection.ligandSmiles;
         const ligandIsSmiles = selection.ligandIsSmiles;
         const ligandAtomPlddts =
@@ -1516,7 +1882,7 @@ export function ProjectTasksPage() {
     } finally {
       setExportingExcel(false);
     }
-  }, [project, filteredRows]);
+  }, [project, filteredRows, workspacePairPreference]);
 
   const openTask = async (task: ProjectTask) => {
     if (!project) return;
@@ -1833,7 +2199,7 @@ export function ProjectTasksPage() {
               <thead>
                 <tr>
                   <th>
-                    <span className="project-th">Ligand 2D</span>
+                    <span className="project-th">Ligand View</span>
                   </th>
                   <th>
                     <button type="button" className={`task-th-sort ${sortKey === 'plddt' ? 'active' : ''}`} onClick={() => handleSort('plddt')}>
@@ -1900,6 +2266,11 @@ export function ProjectTasksPage() {
                               confidenceHint={metrics.plddt}
                             />
                           </div>
+                        ) : row.ligandSequence && isSequenceLigandType(row.ligandSequenceType) ? (
+                          <TaskLigandSequencePreview
+                            sequence={row.ligandSequence}
+                            residuePlddts={row.ligandResiduePlddts}
+                          />
                         ) : (
                           <div className="task-ligand-thumb task-ligand-thumb-empty">
                             <span className="muted small">No ligand</span>

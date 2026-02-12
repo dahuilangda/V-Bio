@@ -521,6 +521,19 @@ function normalizeLigandAtomPlddtsByChain(value: unknown): Record<string, number
   return byChain;
 }
 
+function normalizeResiduePlddtsByChain(value: unknown): Record<string, number[]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const byChain: Record<string, number[]> = {};
+  for (const [rawChainId, rawValues] of Object.entries(value as Record<string, unknown>)) {
+    const chainId = rawChainId.trim().toUpperCase();
+    if (!chainId) continue;
+    const parsed = normalizeLigandAtomPlddts(toFiniteNumberArray(rawValues));
+    if (parsed.length === 0) continue;
+    byChain[chainId] = parsed;
+  }
+  return byChain;
+}
+
 function pickFirstLigandAtomPlddts(byChain: Record<string, number[]>): number[] {
   for (const values of Object.values(byChain)) {
     if (values.length > 0) return values;
@@ -817,6 +830,174 @@ function extractChainMeanPlddtFromStructure(structureText: string, structureForm
   return structureFormat === 'pdb'
     ? extractChainMeanPlddtFromPdb(structureText)
     : extractChainMeanPlddtFromCif(structureText);
+}
+
+function extractResiduePlddtsByChainFromCif(structureText: string): Record<string, number[]> {
+  if (!structureText) return {};
+  const lines = structureText.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() !== 'loop_') continue;
+
+    let headerIndex = i + 1;
+    const headers: string[] = [];
+    while (headerIndex < lines.length) {
+      const rawHeader = lines[headerIndex].trim();
+      if (!rawHeader.startsWith('_')) break;
+      headers.push(rawHeader);
+      headerIndex += 1;
+    }
+
+    if (!headers.some((header) => header.toLowerCase().startsWith('_atom_site.'))) {
+      i = headerIndex - 1;
+      continue;
+    }
+
+    const groupCol = findHeaderIndex(headers, ['_atom_site.group_pdb']);
+    const chainCol = findHeaderIndex(headers, ['_atom_site.label_asym_id', '_atom_site.auth_asym_id']);
+    const seqCol = findHeaderIndex(headers, ['_atom_site.label_seq_id', '_atom_site.auth_seq_id']);
+    const compCol = findHeaderIndex(headers, ['_atom_site.label_comp_id', '_atom_site.auth_comp_id']);
+    const bFactorCol = findHeaderIndex(headers, ['_atom_site.b_iso_or_equiv']);
+    const typeCol = findHeaderIndex(headers, ['_atom_site.type_symbol']);
+    const atomIdCol = findHeaderIndex(headers, ['_atom_site.label_atom_id', '_atom_site.auth_atom_id']);
+
+    if (chainCol < 0 || seqCol < 0 || compCol < 0 || bFactorCol < 0) {
+      i = headerIndex - 1;
+      continue;
+    }
+
+    const residueStats = new Map<string, { chainId: string; sum: number; count: number }>();
+    const residueOrderByChain = new Map<string, string[]>();
+    let rowIndex = headerIndex;
+    while (rowIndex < lines.length) {
+      const rawRow = lines[rowIndex];
+      const row = rawRow.trim();
+      if (!row || row === '#') {
+        rowIndex += 1;
+        continue;
+      }
+      if (row === 'loop_' || row.startsWith('_')) break;
+
+      const tokens = tokenizeCifRow(rawRow);
+      if (tokens.length >= headers.length) {
+        const compId = stripCifTokenQuotes(tokens[compCol]).trim().toUpperCase();
+        const groupPdb = groupCol >= 0 ? stripCifTokenQuotes(tokens[groupCol]).trim().toUpperCase() : '';
+        const chainId = stripCifTokenQuotes(tokens[chainCol]).trim().toUpperCase();
+        const seqId = stripCifTokenQuotes(tokens[seqCol]).trim();
+        const bFactor = Number(stripCifTokenQuotes(tokens[bFactorCol]));
+        const element = typeCol >= 0 ? stripCifTokenQuotes(tokens[typeCol]) : '';
+        const atomName = atomIdCol >= 0 ? stripCifTokenQuotes(tokens[atomIdCol]) : '';
+        if (!chainId || !seqId || !compId || !Number.isFinite(bFactor)) {
+          rowIndex += 1;
+          continue;
+        }
+        if (seqId === '.' || seqId === '?') {
+          rowIndex += 1;
+          continue;
+        }
+        if (isHydrogenLikeElement(element || atomName)) {
+          rowIndex += 1;
+          continue;
+        }
+        if (groupPdb) {
+          if (groupPdb !== 'ATOM' && !POLYMER_COMP_IDS.has(compId)) {
+            rowIndex += 1;
+            continue;
+          }
+        } else if (!POLYMER_COMP_IDS.has(compId)) {
+          rowIndex += 1;
+          continue;
+        }
+
+        const residueKey = `${chainId}|${seqId}|${compId}`;
+        const current = residueStats.get(residueKey);
+        if (current) {
+          current.sum += bFactor;
+          current.count += 1;
+        } else {
+          residueStats.set(residueKey, { chainId, sum: bFactor, count: 1 });
+          const chainOrder = residueOrderByChain.get(chainId) || [];
+          chainOrder.push(residueKey);
+          residueOrderByChain.set(chainId, chainOrder);
+        }
+      }
+      rowIndex += 1;
+    }
+
+    const byChain: Record<string, number[]> = {};
+    for (const [chainId, residueOrder] of residueOrderByChain.entries()) {
+      const values: number[] = [];
+      for (const key of residueOrder) {
+        const stat = residueStats.get(key);
+        if (!stat || stat.count <= 0) continue;
+        values.push(normalizePlddt(stat.sum / stat.count));
+      }
+      const normalized = normalizeLigandAtomPlddts(values);
+      if (normalized.length > 0) {
+        byChain[chainId] = normalized;
+      }
+    }
+    if (Object.keys(byChain).length > 0) {
+      return byChain;
+    }
+    i = rowIndex - 1;
+  }
+  return {};
+}
+
+function extractResiduePlddtsByChainFromPdb(structureText: string): Record<string, number[]> {
+  if (!structureText) return {};
+  const lines = structureText.split(/\r?\n/);
+  const residueStats = new Map<string, { chainId: string; sum: number; count: number }>();
+  const residueOrderByChain = new Map<string, string[]>();
+
+  for (const line of lines) {
+    if (!line.startsWith('ATOM')) continue;
+    const chainId = line.slice(21, 22).trim().toUpperCase();
+    const seqId = `${line.slice(22, 26).trim()}${line.slice(26, 27).trim()}`;
+    const compId = line.slice(17, 20).trim().toUpperCase();
+    const atomName = line.slice(12, 16).trim();
+    const rawElement = line.length >= 78 ? line.slice(76, 78).trim() : '';
+    const element = rawElement || atomName;
+    const bFactor = Number.parseFloat(line.slice(60, 66).trim());
+    if (!chainId || !seqId || !compId || !Number.isFinite(bFactor) || isHydrogenLikeElement(element)) continue;
+
+    const residueKey = `${chainId}|${seqId}|${compId}`;
+    const current = residueStats.get(residueKey);
+    if (current) {
+      current.sum += bFactor;
+      current.count += 1;
+    } else {
+      residueStats.set(residueKey, { chainId, sum: bFactor, count: 1 });
+      const chainOrder = residueOrderByChain.get(chainId) || [];
+      chainOrder.push(residueKey);
+      residueOrderByChain.set(chainId, chainOrder);
+    }
+  }
+
+  const byChain: Record<string, number[]> = {};
+  for (const [chainId, residueOrder] of residueOrderByChain.entries()) {
+    const values: number[] = [];
+    for (const key of residueOrder) {
+      const stat = residueStats.get(key);
+      if (!stat || stat.count <= 0) continue;
+      values.push(normalizePlddt(stat.sum / stat.count));
+    }
+    const normalized = normalizeLigandAtomPlddts(values);
+    if (normalized.length > 0) {
+      byChain[chainId] = normalized;
+    }
+  }
+  return byChain;
+}
+
+function extractResiduePlddtsByChainFromStructure(
+  structureText: string,
+  structureFormat: 'cif' | 'pdb'
+): Record<string, number[]> {
+  if (!structureText) return {};
+  return structureFormat === 'pdb'
+    ? extractResiduePlddtsByChainFromPdb(structureText)
+    : extractResiduePlddtsByChainFromCif(structureText);
 }
 
 function parseMaQaLocalMetricIdFromCif(structureText: string): string | null {
@@ -1117,6 +1298,24 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
     existingLigandAtomPlddts.length > 0
       ? existingLigandAtomPlddts
       : pickFirstLigandAtomPlddts(extractedLigandAtomPlddtsByChain);
+  const residuePlddtByChainCandidates: unknown[] = [
+    (confidence as Record<string, unknown>).residue_plddt_by_chain,
+    (confidence as Record<string, unknown>).chain_residue_plddt,
+    (confidence as Record<string, unknown>).chain_plddt,
+    (confidence as Record<string, unknown>).chain_plddts
+  ];
+  let existingResiduePlddtByChain: Record<string, number[]> = {};
+  for (const candidate of residuePlddtByChainCandidates) {
+    const parsed = normalizeResiduePlddtsByChain(candidate);
+    if (Object.keys(parsed).length > 0) {
+      existingResiduePlddtByChain = parsed;
+      break;
+    }
+  }
+  const extractedResiduePlddtByChain =
+    Object.keys(existingResiduePlddtByChain).length > 0
+      ? existingResiduePlddtByChain
+      : extractResiduePlddtsByChainFromStructure(structureText, structureFormat);
   const chainMeanPlddt = extractChainMeanPlddtFromStructure(structureText, structureFormat);
   if (Object.keys(extractedLigandAtomPlddtsByChain).length > 0) {
     confidence = {
@@ -1134,6 +1333,12 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
     confidence = {
       ...confidence,
       chain_mean_plddt: chainMeanPlddt
+    };
+  }
+  if (Object.keys(extractedResiduePlddtByChain).length > 0) {
+    confidence = {
+      ...confidence,
+      residue_plddt_by_chain: extractedResiduePlddtByChain
     };
   }
   confidence = compactConfidenceForStorage(confidence);
