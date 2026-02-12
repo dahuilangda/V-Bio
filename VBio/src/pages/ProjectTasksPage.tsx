@@ -13,7 +13,7 @@ import {
   Trash2
 } from 'lucide-react';
 import { downloadResultBlob, getTaskStatus, parseResultBundle } from '../api/backendApi';
-import { deleteProjectTask, getProjectById, listProjectTasks, updateProject, updateProjectTask } from '../api/supabaseLite';
+import { deleteProjectTask, getProjectById, listProjectTasksForList, updateProject, updateProjectTask } from '../api/supabaseLite';
 import { JSMEEditor } from '../components/project/JSMEEditor';
 import { Ligand2DPreview } from '../components/project/Ligand2DPreview';
 import { useAuth } from '../hooks/useAuth';
@@ -730,7 +730,7 @@ export function ProjectTasksPage() {
         setError(null);
       }
       try {
-        const [projectRow, taskRows] = await Promise.all([getProjectById(projectId), listProjectTasks(projectId)]);
+        const [projectRow, taskRows] = await Promise.all([getProjectById(projectId), listProjectTasksForList(projectId)]);
         if (!projectRow || projectRow.deleted_at) {
           throw new Error('Project not found or already deleted.');
         }
@@ -1527,9 +1527,10 @@ export function ProjectTasksPage() {
                           <div className="task-ligand-thumb">
                             <Ligand2DPreview
                               smiles={row.ligandSmiles}
-                              width={160}
-                              height={102}
+                              width={220}
+                              height={132}
                               atomConfidences={row.ligandAtomPlddts}
+                              confidenceHint={metrics.plddt}
                             />
                           </div>
                         ) : (

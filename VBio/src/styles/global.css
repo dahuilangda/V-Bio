@@ -1625,11 +1625,11 @@ select:focus {
 .task-table {
   min-width: 1260px;
   --task-row-pad-y: 7px;
-  --task-ligand-inner-h: 74px;
-  --task-ligand-thumb-h: 82px;
-  --task-ligand-thumb-w: 120px;
-  --task-ligand-col-w: 132px;
-  --task-ligand-svg-max-h: 70px;
+  --task-ligand-inner-h: 102px;
+  --task-ligand-thumb-h: 112px;
+  --task-ligand-thumb-w: 172px;
+  --task-ligand-col-w: 184px;
+  --task-ligand-svg-max-h: 98px;
 }
 
 .task-table-wrap {
@@ -1714,6 +1714,7 @@ select:focus {
 }
 
 .task-ligand-thumb .ligand-preview-svg svg {
+  width: 100%;
   max-height: var(--task-ligand-svg-max-h);
 }
 
@@ -2884,6 +2885,13 @@ select:focus {
   width: 100%;
   height: auto;
   max-height: 210px;
+}
+
+.ligand-preview-svg svg text {
+  paint-order: stroke;
+  stroke: rgba(255, 255, 255, 0.92);
+  stroke-width: 1.1px;
+  stroke-linejoin: round;
 }
 
 .ligand-preview-empty {

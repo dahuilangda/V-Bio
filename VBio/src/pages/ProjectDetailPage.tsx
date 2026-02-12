@@ -3224,7 +3224,11 @@ export function ProjectDetailPage() {
                 <div className="result-aside-title">Ligand</div>
                 <div className="ligand-preview-panel">
                   {overviewPrimaryLigand.smiles && overviewPrimaryLigand.isSmiles ? (
-                    <Ligand2DPreview smiles={overviewPrimaryLigand.smiles} />
+                    <Ligand2DPreview
+                      smiles={overviewPrimaryLigand.smiles}
+                      atomConfidences={snapshotLigandAtomPlddts}
+                      confidenceHint={snapshotPlddt}
+                    />
                   ) : (
                     <div className="ligand-preview-empty">
                       {overviewPrimaryLigand.smiles ? '2D preview requires SMILES input.' : 'No ligand input.'}

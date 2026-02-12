@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Project, ProjectTask, ProjectTaskCounts, Session, TaskState } from '../types/models';
 import {
   insertProject,
@@ -97,13 +97,22 @@ function stateBucket(state: TaskState): keyof Pick<ProjectTaskCounts, 'running' 
   return 'other';
 }
 
+function withFallbackCounts(rows: Project[], existingCounts?: Map<string, ProjectTaskCounts | undefined>): Project[] {
+  return rows.map((row) => ({
+    ...row,
+    task_counts: existingCounts?.get(row.id) || fallbackCountsFromState(row.task_state, Boolean(row.task_id))
+  }));
+}
+
 export function useProjects(session: Session | null) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  const loadSeqRef = useRef(0);
 
   const load = useCallback(async (options?: LoadProjectsOptions) => {
+    const loadSeq = ++loadSeqRef.current;
     const silent = Boolean(options?.silent);
     const statusOnly = Boolean(options?.statusOnly);
     const preferBackendStatus = Boolean(options?.preferBackendStatus);
@@ -118,7 +127,8 @@ export function useProjects(session: Session | null) {
     }
     try {
       let rows = await listProjects({
-        userId: session.userId
+        userId: session.userId,
+        lightweight: true
       });
 
       if (preferBackendStatus) {
@@ -184,76 +194,90 @@ export function useProjects(session: Session | null) {
           }
         }
       }
-
-      const projectIds = rows.map((row) => row.id).filter(Boolean);
-      let countsByProject = new Map<string, ProjectTaskCounts>();
-      if (projectIds.length > 0) {
-        const taskStates = await listProjectTaskStatesByProjects(projectIds);
-        countsByProject = countProjectTaskStates(projectIds, taskStates);
-        const taskStateByProjectAndTaskId = new Map(taskStates.map((item) => [`${item.project_id}:${item.task_id}`, item.task_state]));
-        rows.forEach((projectRow) => {
-          const activeTaskId = String(projectRow.task_id || '').trim();
-          if (!activeTaskId) return;
-          const counts = countsByProject.get(projectRow.id);
-          if (!counts) return;
-          const rowState = taskStateByProjectAndTaskId.get(`${projectRow.id}:${activeTaskId}`);
-          if (!rowState || rowState === projectRow.task_state) return;
-          const sourceBucket = stateBucket(rowState);
-          const targetBucket = stateBucket(projectRow.task_state);
-          if (sourceBucket === targetBucket) return;
-          counts[sourceBucket] = Math.max(0, counts[sourceBucket] - 1);
-          counts[targetBucket] += 1;
-        });
-      }
-      rows = rows.map((row) => ({
-        ...row,
-        task_counts:
-          (() => {
-            const counted = countsByProject.get(row.id);
-            if (!counted || counted.total <= 0) {
-              return fallbackCountsFromState(row.task_state, Boolean(row.task_id));
-            }
-            return counted;
-          })()
-      }));
+      if (loadSeqRef.current !== loadSeq) return;
 
       if (!statusOnly) {
-        setProjects(rows);
-        return;
+        setProjects((prev) => {
+          const countsByProjectId = new Map(prev.map((item) => [item.id, item.task_counts]));
+          return withFallbackCounts(rows, countsByProjectId);
+        });
       }
 
       const rowById = new Map(rows.map((row) => [row.id, row]));
-      setProjects((prev) =>
-        prev.map((project) => {
-          const next = rowById.get(project.id);
-          if (!next) return project;
+      if (statusOnly) {
+        if (loadSeqRef.current !== loadSeq) return;
+        setProjects((prev) =>
+          prev.map((project) => {
+            const next = rowById.get(project.id);
+            if (!next) return project;
 
-          if (
-            project.task_state === next.task_state &&
-            project.task_id === next.task_id &&
-            project.status_text === next.status_text &&
-            project.error_text === next.error_text &&
-            project.submitted_at === next.submitted_at &&
-            project.completed_at === next.completed_at &&
-            project.duration_seconds === next.duration_seconds &&
-            JSON.stringify(project.task_counts || {}) === JSON.stringify(next.task_counts || {})
-          ) {
-            return project;
-          }
+            if (
+              project.task_state === next.task_state &&
+              project.task_id === next.task_id &&
+              project.status_text === next.status_text &&
+              project.error_text === next.error_text &&
+              project.submitted_at === next.submitted_at &&
+              project.completed_at === next.completed_at &&
+              project.duration_seconds === next.duration_seconds
+            ) {
+              return project;
+            }
 
-          return {
-            ...project,
-            task_state: next.task_state,
-            task_id: next.task_id,
-            status_text: next.status_text,
-            error_text: next.error_text,
-            submitted_at: next.submitted_at,
-            completed_at: next.completed_at,
-            duration_seconds: next.duration_seconds,
-            task_counts: next.task_counts
-          };
-        })
-      );
+            return {
+              ...project,
+              task_state: next.task_state,
+              task_id: next.task_id,
+              status_text: next.status_text,
+              error_text: next.error_text,
+              submitted_at: next.submitted_at,
+              completed_at: next.completed_at,
+              duration_seconds: next.duration_seconds
+            };
+          })
+        );
+        return;
+      }
+
+      const projectIds = rows.map((row) => row.id).filter(Boolean);
+      if (projectIds.length === 0) return;
+
+      void (async () => {
+        try {
+          const taskStates = await listProjectTaskStatesByProjects(projectIds);
+          const countsByProject = countProjectTaskStates(projectIds, taskStates);
+          const taskStateByProjectAndTaskId = new Map(taskStates.map((item) => [`${item.project_id}:${item.task_id}`, item.task_state]));
+          rows.forEach((projectRow) => {
+            const activeTaskId = String(projectRow.task_id || '').trim();
+            if (!activeTaskId) return;
+            const counts = countsByProject.get(projectRow.id);
+            if (!counts) return;
+            const rowState = taskStateByProjectAndTaskId.get(`${projectRow.id}:${activeTaskId}`);
+            if (!rowState || rowState === projectRow.task_state) return;
+            const sourceBucket = stateBucket(rowState);
+            const targetBucket = stateBucket(projectRow.task_state);
+            if (sourceBucket === targetBucket) return;
+            counts[sourceBucket] = Math.max(0, counts[sourceBucket] - 1);
+            counts[targetBucket] += 1;
+          });
+          const rowsWithCounts = rows.map((row) => {
+            const counted = countsByProject.get(row.id);
+            if (!counted || counted.total <= 0) {
+              return {
+                ...row,
+                task_counts: fallbackCountsFromState(row.task_state, Boolean(row.task_id))
+              };
+            }
+            return {
+              ...row,
+              task_counts: counted
+            };
+          });
+          if (loadSeqRef.current !== loadSeq) return;
+          setProjects(rowsWithCounts);
+        } catch {
+          // Keep fallback counts if heavy count query fails.
+        }
+      })();
     } catch (e) {
       if (!silent) {
         setError(e instanceof Error ? e.message : 'Failed to load projects.');

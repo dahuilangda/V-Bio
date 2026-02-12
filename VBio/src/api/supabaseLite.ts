@@ -179,11 +179,35 @@ interface ListProjectsOptions {
   userId?: string;
   includeDeleted?: boolean;
   search?: string;
+  lightweight?: boolean;
 }
 
 export async function listProjects(options: ListProjectsOptions = {}): Promise<Project[]> {
+  const projectSelect = options.lightweight === false
+    ? '*'
+    : [
+        'id',
+        'user_id',
+        'name',
+        'summary',
+        'backend',
+        'use_msa',
+        'color_mode',
+        'task_type',
+        'task_id',
+        'task_state',
+        'status_text',
+        'error_text',
+        'submitted_at',
+        'completed_at',
+        'duration_seconds',
+        'structure_name',
+        'created_at',
+        'updated_at',
+        'deleted_at'
+      ].join(',');
   const query: Record<string, string | undefined> = {
-    select: '*',
+    select: projectSelect,
     order: 'updated_at.desc'
   };
 
@@ -197,7 +221,14 @@ export async function listProjects(options: ListProjectsOptions = {}): Promise<P
     query.name = `ilike.*${options.search.trim()}*`;
   }
 
-  return request<Project[]>('/projects', undefined, query);
+  const rows = await request<Array<Partial<Project>>>('/projects', undefined, query);
+  return rows.map((row) => ({
+    protein_sequence: '',
+    ligand_smiles: '',
+    confidence: {},
+    affinity: {},
+    ...row
+  })) as Project[];
 }
 
 export async function getProjectById(projectId: string): Promise<Project | null> {
@@ -252,6 +283,47 @@ export async function listProjectTasks(projectId: string): Promise<ProjectTask[]
   });
 }
 
+export async function listProjectTasksForList(projectId: string): Promise<ProjectTask[]> {
+  const rows = await request<Array<Partial<ProjectTask>>>('/project_tasks', undefined, {
+    select: [
+      'id',
+      'project_id',
+      'task_id',
+      'task_state',
+      'status_text',
+      'error_text',
+      'backend',
+      'seed',
+      'ligand_smiles',
+      'components',
+      'properties',
+      'confidence',
+      'affinity',
+      'structure_name',
+      'submitted_at',
+      'completed_at',
+      'duration_seconds',
+      'created_at',
+      'updated_at'
+    ].join(','),
+    project_id: `eq.${projectId}`,
+    order: 'created_at.desc'
+  });
+
+  return rows.map((row) => ({
+    protein_sequence: '',
+    components: [],
+    constraints: [],
+    properties: {
+      affinity: false,
+      target: null,
+      ligand: null,
+      binder: null
+    },
+    ...row
+  })) as ProjectTask[];
+}
+
 interface ProjectTaskStateRow {
   project_id: string;
   task_id: string;
@@ -261,10 +333,23 @@ interface ProjectTaskStateRow {
 export async function listProjectTaskStatesByProjects(projectIds: string[]): Promise<ProjectTaskStateRow[]> {
   const normalizedIds = Array.from(new Set(projectIds.map((id) => id.trim()).filter(Boolean)));
   if (normalizedIds.length === 0) return [];
-  return request<ProjectTaskStateRow[]>('/project_tasks', undefined, {
-    select: 'project_id,task_id,task_state',
-    project_id: `in.(${normalizedIds.join(',')})`
-  });
+
+  // Keep query strings bounded; very large `in (...)` filters can time out or exceed URL limits.
+  const chunkSize = 150;
+  const chunks: string[][] = [];
+  for (let i = 0; i < normalizedIds.length; i += chunkSize) {
+    chunks.push(normalizedIds.slice(i, i + chunkSize));
+  }
+
+  const results = await Promise.all(
+    chunks.map((chunk) =>
+      request<ProjectTaskStateRow[]>('/project_tasks', undefined, {
+        select: 'project_id,task_id,task_state',
+        project_id: `in.(${chunk.join(',')})`
+      })
+    )
+  );
+  return results.flat();
 }
 
 export async function insertProjectTask(input: Partial<ProjectTask>): Promise<ProjectTask> {
