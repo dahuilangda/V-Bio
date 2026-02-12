@@ -1363,6 +1363,10 @@ select:focus {
 
 .workspace-shell {
   position: relative;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  column-gap: 12px;
+  align-items: start;
 }
 
 .workspace-content {
@@ -1372,16 +1376,17 @@ select:focus {
 }
 
 .workspace-stepper {
-  position: absolute;
-  top: 0;
+  position: sticky;
+  top: 86px;
   left: 0;
   z-index: 2;
   width: 36px;
-  margin-left: -78px;
+  margin-left: calc(-1 * min(78px, max(18px, ((100vw - 1480px) / 2) + 18px)));
   overflow: visible;
   display: grid;
   gap: 10px;
   padding: 4px 0;
+  align-self: start;
 }
 
 .workspace-stepper-track {
@@ -3893,7 +3898,7 @@ select:focus {
   }
 }
 
-@media (max-width: 1260px) {
+@media (max-width: 1460px) {
   .workspace-shell {
     display: grid;
     grid-template-columns: 1fr;
