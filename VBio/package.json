@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "dayjs": "^1.11.13",
+    "exceljs": "^4.4.0",
     "js-yaml": "^4.1.0",
     "jszip": "^3.10.1",
     "lucide-react": "^0.525.0",
