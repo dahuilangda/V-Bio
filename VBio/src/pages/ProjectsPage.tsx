@@ -95,7 +95,7 @@ export function ProjectsPage() {
     () =>
       projects.some((item) => {
         const counts = item.task_counts || fallbackCounts(item.task_state, Boolean(item.task_id));
-        return counts.queued > 0 || counts.running > 0;
+        return counts.queued > 0 || counts.running > 0 || item.task_state === 'QUEUED' || item.task_state === 'RUNNING';
       }),
     [projects]
   );
@@ -317,6 +317,13 @@ export function ProjectsPage() {
     }, 2500);
     return () => window.clearInterval(timer);
   }, [hasActiveRuntime, load]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void load({ silent: true, preferBackendStatus: true });
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [load]);
 
   const openCreateModal = () => {
     setWorkflow('prediction');

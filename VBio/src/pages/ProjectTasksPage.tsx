@@ -764,6 +764,16 @@ export function ProjectTasksPage() {
           if (loadSeqRef.current !== loadSeq) return;
           setProject(synced.project);
           setTasks(synced.taskRows);
+          void (async () => {
+            try {
+              const hydrated = await hydrateTaskMetricsFromResults(synced.project, synced.taskRows);
+              if (loadSeqRef.current !== loadSeq) return;
+              setProject(hydrated.project);
+              setTasks(hydrated.taskRows);
+            } catch {
+              // Keep cached sync state if result hydration fails.
+            }
+          })();
           return;
         }
 
@@ -792,7 +802,6 @@ export function ProjectTasksPage() {
             setProject(synced.project);
             setTasks(synced.taskRows);
 
-            if (silent) return;
             const hydrated = await hydrateTaskMetricsFromResults(synced.project, synced.taskRows);
             if (loadSeqRef.current !== loadSeq) return;
             setProject(hydrated.project);
