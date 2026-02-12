@@ -905,6 +905,12 @@ select:focus {
   font-size: var(--text-sm);
 }
 
+.project-page-size input {
+  width: 72px;
+  padding: 6px 10px;
+  font-size: var(--text-sm);
+}
+
 .project-table-wrap {
   border: 1px solid var(--line);
   border-radius: 12px;

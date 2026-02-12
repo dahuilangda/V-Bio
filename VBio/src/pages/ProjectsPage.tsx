@@ -275,6 +275,11 @@ export function ProjectsPage() {
 
   const totalPages = useMemo(() => Math.max(1, Math.ceil(filteredProjects.length / pageSize)), [filteredProjects.length, pageSize]);
   const currentPage = Math.min(page, totalPages);
+  const jumpToPage = (rawValue: string) => {
+    const parsed = Number(rawValue);
+    if (!Number.isFinite(parsed)) return;
+    setPage(Math.min(totalPages, Math.max(1, Math.floor(parsed))));
+  };
   const pagedProjects = useMemo(() => {
     const start = (currentPage - 1) * pageSize;
     return filteredProjects.slice(start, start + pageSize);
@@ -697,6 +702,9 @@ export function ProjectsPage() {
                   <option value="50">50</option>
                 </select>
               </label>
+              <button className="btn btn-ghost btn-compact" disabled={currentPage <= 1} onClick={() => setPage(1)}>
+                First
+              </button>
               <button className="btn btn-ghost btn-compact" disabled={currentPage <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>
                 Prev
               </button>
@@ -707,6 +715,20 @@ export function ProjectsPage() {
               >
                 Next
               </button>
+              <button className="btn btn-ghost btn-compact" disabled={currentPage >= totalPages} onClick={() => setPage(totalPages)}>
+                Last
+              </button>
+              <label className="project-page-size">
+                <span className="muted small">Go to</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={totalPages}
+                  value={String(currentPage)}
+                  onChange={(e) => jumpToPage(e.target.value)}
+                  aria-label="Go to projects page"
+                />
+              </label>
             </div>
           </div>
         )}

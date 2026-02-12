@@ -317,6 +317,55 @@ function normalizeStoredProteinTemplates(
   return proteinTemplates;
 }
 
+function hashTemplateContent(content: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < content.length; i += 1) {
+    hash ^= content.charCodeAt(i);
+    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function serializeProteinTemplates(
+  templates: Record<string, ProteinTemplateUpload> | undefined,
+  contentPool: Record<string, string>,
+  usedPoolKeys: Set<string>
+): Record<string, ProteinTemplateUpload> {
+  const serialized: Record<string, ProteinTemplateUpload> = {};
+  if (!templates || typeof templates !== 'object') return serialized;
+
+  for (const [componentId, upload] of Object.entries(templates)) {
+    if (!upload || typeof upload !== 'object') continue;
+    const fileName = typeof upload.fileName === 'string' ? upload.fileName.trim() : '';
+    const format = upload.format === 'cif' ? 'cif' : upload.format === 'pdb' ? 'pdb' : null;
+    const content = typeof upload.content === 'string' ? upload.content : '';
+    const chainId = typeof upload.chainId === 'string' ? upload.chainId.trim() : '';
+    if (!fileName || !format || !content.trim()) continue;
+    const key = `tpl-${hashTemplateContent(content)}-${content.length.toString(36)}`;
+    contentPool[key] = content;
+    usedPoolKeys.add(key);
+    serialized[componentId] = {
+      fileName,
+      format,
+      content: `${TEMPLATE_CONTENT_REF_PREFIX}${key}`,
+      chainId,
+      chainSequences: upload.chainSequences && typeof upload.chainSequences === 'object' ? upload.chainSequences : {}
+    };
+  }
+
+  return serialized;
+}
+
+function compactTemplateContentPool(pool: Record<string, string>, usedPoolKeys: Set<string>): Record<string, string> {
+  const compacted: Record<string, string> = {};
+  for (const key of usedPoolKeys) {
+    const content = pool[key];
+    if (typeof content !== 'string' || !content.trim()) continue;
+    compacted[key] = content;
+  }
+  return compacted;
+}
+
 export function loadProjectInputConfig(projectId: string): ProjectInputConfig | null {
   const store = readStore();
   const found = store[projectId];
@@ -372,25 +421,40 @@ export function loadProjectUiState(projectId: string): ProjectUiState | null {
 
 export function saveProjectUiState(projectId: string, uiState: ProjectUiState): void {
   const baseStore = readUiStore();
-  const compactStore: Record<string, ProjectUiState> = {};
+  const currentStoredState = baseStore[projectId];
+  const contentPool = normalizeTemplateContentPool(uiState.templateContentPool || (currentStoredState as any)?.templateContentPool);
+  const usedPoolKeys = new Set<string>();
+  const proteinTemplates = serializeProteinTemplates(uiState.proteinTemplates, contentPool, usedPoolKeys);
+  const taskProteinTemplates: Record<string, Record<string, ProteinTemplateUpload>> = {};
 
-  for (const [storedProjectId, storedUiState] of Object.entries(baseStore)) {
-    compactStore[storedProjectId] = {
-      proteinTemplates: {},
-      taskProteinTemplates: {},
-      activeConstraintId: storedUiState?.activeConstraintId || null,
-      selectedConstraintTemplateComponentId: storedUiState?.selectedConstraintTemplateComponentId || null
-    };
+  if (uiState.taskProteinTemplates && typeof uiState.taskProteinTemplates === 'object') {
+    for (const [taskRowId, templates] of Object.entries(uiState.taskProteinTemplates)) {
+      if (!taskRowId) continue;
+      const serialized = serializeProteinTemplates(templates, contentPool, usedPoolKeys);
+      if (Object.keys(serialized).length === 0) continue;
+      taskProteinTemplates[taskRowId] = serialized;
+    }
   }
 
-  compactStore[projectId] = {
-    proteinTemplates: {},
-    taskProteinTemplates: {},
+  baseStore[projectId] = {
+    proteinTemplates,
+    taskProteinTemplates,
+    templateContentPool: compactTemplateContentPool(contentPool, usedPoolKeys),
     activeConstraintId: uiState.activeConstraintId || null,
     selectedConstraintTemplateComponentId: uiState.selectedConstraintTemplateComponentId || null
   };
 
-  writeUiStore(compactStore);
+  try {
+    writeUiStore(baseStore);
+  } catch {
+    baseStore[projectId] = {
+      proteinTemplates: {},
+      taskProteinTemplates: {},
+      activeConstraintId: uiState.activeConstraintId || null,
+      selectedConstraintTemplateComponentId: uiState.selectedConstraintTemplateComponentId || null
+    };
+    writeUiStore(baseStore);
+  }
 }
 
 export function removeProjectUiState(projectId: string): void {

@@ -575,6 +575,10 @@ function createProteinTemplatesFingerprint(templates: Record<string, ProteinTemp
   return JSON.stringify(normalized);
 }
 
+function hasProteinTemplates(templates: Record<string, ProteinTemplateUpload> | null | undefined): boolean {
+  return Boolean(templates && Object.keys(templates).length > 0);
+}
+
 export function ProjectDetailPage() {
   const { projectId = '' } = useParams();
   const location = useLocation();
@@ -598,6 +602,7 @@ export function ProjectDetailPage() {
   const [savedTemplateFingerprint, setSavedTemplateFingerprint] = useState('');
   const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [proteinTemplates, setProteinTemplates] = useState<Record<string, ProteinTemplateUpload>>({});
+  const [taskProteinTemplates, setTaskProteinTemplates] = useState<Record<string, Record<string, ProteinTemplateUpload>>>({});
   const [pickedResidue, setPickedResidue] = useState<ConstraintResiduePick | null>(null);
   const [activeConstraintId, setActiveConstraintId] = useState<string | null>(null);
   const [selectedContactConstraintIds, setSelectedContactConstraintIds] = useState<string[]>([]);
@@ -682,6 +687,24 @@ export function ProjectDetailPage() {
     return project.user_id === session.userId;
   }, [project, session]);
 
+  const rememberTemplatesForTaskRow = useCallback((taskRowId: string | null, templates: Record<string, ProteinTemplateUpload>) => {
+    const normalizedTaskRowId = String(taskRowId || '').trim();
+    if (!normalizedTaskRowId) return;
+    setTaskProteinTemplates((prev) => {
+      const current = prev[normalizedTaskRowId] || {};
+      const sameFingerprint =
+        createProteinTemplatesFingerprint(current) === createProteinTemplatesFingerprint(templates || {});
+      if (sameFingerprint) return prev;
+      const next = { ...prev };
+      if (!hasProteinTemplates(templates)) {
+        delete next[normalizedTaskRowId];
+      } else {
+        next[normalizedTaskRowId] = templates;
+      }
+      return next;
+    });
+  }, []);
+
   const requestedStatusTaskRow = useMemo(() => {
     const requestedTaskRowId = new URLSearchParams(location.search).get('task_row_id');
     if (!requestedTaskRowId || !requestedTaskRowId.trim()) return null;
@@ -699,6 +722,12 @@ export function ProjectDetailPage() {
   const displaySubmittedAt = statusContextTaskRow?.submitted_at ?? project?.submitted_at ?? null;
   const displayCompletedAt = statusContextTaskRow?.completed_at ?? project?.completed_at ?? null;
   const displayDurationSeconds = statusContextTaskRow?.duration_seconds ?? project?.duration_seconds ?? null;
+
+  useEffect(() => {
+    const templateContextTask = requestedStatusTaskRow || activeStatusTaskRow;
+    if (!templateContextTask || !isDraftTaskSnapshot(templateContextTask)) return;
+    rememberTemplatesForTaskRow(templateContextTask.id, proteinTemplates);
+  }, [requestedStatusTaskRow, activeStatusTaskRow, proteinTemplates, rememberTemplatesForTaskRow]);
 
   const progressPercent = useMemo(() => {
     if (['SUCCESS', 'FAILURE', 'REVOKED'].includes(displayTaskState)) return 100;
@@ -1831,19 +1860,37 @@ export function ProjectDetailPage() {
           .filter((component) => component.type === 'protein')
           .map((component) => component.id)
       );
+      const savedTaskTemplates = savedUiState?.taskProteinTemplates || {};
+      const readSavedTaskTemplates = (task: ProjectTask | null) => {
+        if (!task) return {};
+        return savedTaskTemplates[task.id] || {};
+      };
       const templateSource = (() => {
         if (requestedTaskRow) {
-          return readTaskProteinTemplates(requestedTaskRow);
+          const requestedEmbedded = readTaskProteinTemplates(requestedTaskRow);
+          if (hasProteinTemplates(requestedEmbedded)) return requestedEmbedded;
+          const requestedCached = readSavedTaskTemplates(requestedTaskRow);
+          if (hasProteinTemplates(requestedCached)) return requestedCached;
+          return {};
         }
 
         if (activeTaskRow) {
-          return readTaskProteinTemplates(activeTaskRow);
+          const activeEmbedded = readTaskProteinTemplates(activeTaskRow);
+          if (hasProteinTemplates(activeEmbedded)) return activeEmbedded;
+          const activeCached = readSavedTaskTemplates(activeTaskRow);
+          if (hasProteinTemplates(activeCached)) return activeCached;
+          return {};
         }
 
-        if (latestDraftTask?.id) {
-          return readTaskProteinTemplates(latestDraftTask);
+        if (latestDraftTask) {
+          const latestDraftEmbedded = readTaskProteinTemplates(latestDraftTask);
+          if (hasProteinTemplates(latestDraftEmbedded)) return latestDraftEmbedded;
+          const latestDraftCached = readSavedTaskTemplates(latestDraftTask);
+          if (hasProteinTemplates(latestDraftCached)) return latestDraftCached;
+          return {};
         }
-        return {};
+
+        return savedUiState?.proteinTemplates || {};
       })();
       const restoredTemplates = Object.fromEntries(
         Object.entries(templateSource).filter(([componentId]) => validProteinIds.has(componentId))
@@ -1854,6 +1901,7 @@ export function ProjectDetailPage() {
       setSavedTemplateFingerprint(createProteinTemplatesFingerprint(restoredTemplates));
       setRunMenuOpen(false);
       setProteinTemplates(restoredTemplates);
+      setTaskProteinTemplates(savedTaskTemplates);
       setActiveConstraintId(savedUiState?.activeConstraintId || null);
       setSelectedContactConstraintIds([]);
       constraintSelectionAnchorRef.current = null;
@@ -1886,12 +1934,12 @@ export function ProjectDetailPage() {
   useEffect(() => {
     if (!project) return;
     saveProjectUiState(project.id, {
-      proteinTemplates: {},
-      taskProteinTemplates: {},
+      proteinTemplates,
+      taskProteinTemplates,
       activeConstraintId,
       selectedConstraintTemplateComponentId
     });
-  }, [project, activeConstraintId, selectedConstraintTemplateComponentId]);
+  }, [project, proteinTemplates, taskProteinTemplates, activeConstraintId, selectedConstraintTemplateComponentId]);
 
   const patch = async (payload: Partial<Project>) => {
     if (!project) return null;
@@ -1929,6 +1977,7 @@ export function ProjectDetailPage() {
       if (requested) {
         return isDraftTaskSnapshot(requested) ? requested.id : null;
       }
+      return null;
     }
     const activeTaskId = String(project?.task_id || '').trim();
     if (activeTaskId) {
@@ -1936,6 +1985,7 @@ export function ProjectDetailPage() {
       if (activeRow) {
         return isDraftTaskSnapshot(activeRow) ? activeRow.id : null;
       }
+      return null;
     }
     const latestDraft = projectTasks.find((item) => isDraftTaskSnapshot(item)) || null;
     return latestDraft ? latestDraft.id : null;
@@ -2030,6 +2080,7 @@ export function ProjectDetailPage() {
           reuseTaskRowId: reusableDraftTaskRowId,
           snapshotComponents
         });
+        rememberTemplatesForTaskRow(draftTaskRow.id, proteinTemplates);
         const nextDraft: DraftFields = {
           name: next.name,
           summary: next.summary,
@@ -2247,6 +2298,7 @@ export function ProjectDetailPage() {
         reuseTaskRowId: resolveEditableDraftTaskRowId(),
         snapshotComponents
       });
+      rememberTemplatesForTaskRow(draftTaskRow.id, proteinTemplates);
 
       const activeAssignments = assignChainIdsForComponents(activeComponents);
       const templateUploads: NonNullable<Parameters<typeof submitPrediction>[0]['templateUploads']> = [];
@@ -2451,7 +2503,10 @@ export function ProjectDetailPage() {
   }, [runMenuOpen]);
 
   if (loading) {
-    return <div className="centered-page">Loading project...</div>;
+    const query = new URLSearchParams(location.search);
+    const requestedTaskRowId = String(query.get('task_row_id') || '').trim();
+    const loadingLabel = requestedTaskRowId || query.get('tab') === 'results' ? 'Loading current task...' : 'Loading project...';
+    return <div className="centered-page">{loadingLabel}</div>;
   }
 
   if (error && !project) {

@@ -850,6 +850,27 @@ export function ProjectTasksPage() {
   }, [hasActiveRuntime, loadData]);
 
   const taskCountText = useMemo(() => `${tasks.length} tasks`, [tasks.length]);
+  const currentTaskRow = useMemo(() => {
+    if (!project) return null;
+    const currentRuntimeTaskId = String(project.task_id || '').trim();
+    if (currentRuntimeTaskId) {
+      const matchedRuntime = tasks.find((row) => String(row.task_id || '').trim() === currentRuntimeTaskId);
+      if (matchedRuntime) return matchedRuntime;
+    }
+    const latestDraft = tasks.find((row) => row.task_state === 'DRAFT' && !String(row.task_id || '').trim());
+    if (latestDraft) return latestDraft;
+    return tasks[0] || null;
+  }, [project, tasks]);
+  const backToCurrentTaskHref = useMemo(() => {
+    if (!project) return '/projects';
+    const params = new URLSearchParams();
+    const currentTaskId = String(currentTaskRow?.task_id || project.task_id || '').trim();
+    params.set('tab', currentTaskId ? 'results' : 'components');
+    if (currentTaskRow?.id) {
+      params.set('task_row_id', currentTaskRow.id);
+    }
+    return `/projects/${project.id}?${params.toString()}`;
+  }, [project, currentTaskRow]);
 
   const taskRows = useMemo<TaskListRow[]>(() => {
     return tasks.map((task) => {
@@ -1187,6 +1208,14 @@ export function ProjectTasksPage() {
 
   const totalPages = useMemo(() => Math.max(1, Math.ceil(filteredRows.length / pageSize)), [filteredRows.length, pageSize]);
   const currentPage = Math.min(page, totalPages);
+  const jumpToPage = useCallback(
+    (rawValue: string) => {
+      const parsed = Number(rawValue);
+      if (!Number.isFinite(parsed)) return;
+      setPage(Math.min(totalPages, Math.max(1, Math.floor(parsed))));
+    },
+    [totalPages]
+  );
   const pagedRows = useMemo(() => {
     const start = (currentPage - 1) * pageSize;
     return filteredRows.slice(start, start + pageSize);
@@ -1306,20 +1335,14 @@ export function ProjectTasksPage() {
           <h1>Tasks</h1>
           <p className="muted">
             {project.name} · {taskCountText}
+            {refreshing ? ' · Syncing...' : ''}
           </p>
         </div>
         <div className="row gap-8 page-header-actions">
-          <Link className="btn btn-ghost btn-compact" to={`/projects/${project.id}`}>
+          <Link className="btn btn-ghost btn-compact" to={backToCurrentTaskHref}>
             <ArrowLeft size={14} />
-            Back to Project
+            Back to Current Task
           </Link>
-          <button
-            className="btn btn-ghost btn-compact btn-square"
-            onClick={() => void loadData({ silent: true, forceRefetch: true })}
-            disabled={refreshing}
-          >
-            <RefreshCcw size={15} className={refreshing ? 'spin' : undefined} />
-          </button>
         </div>
       </section>
 
@@ -1666,6 +1689,9 @@ export function ProjectTasksPage() {
                   <option value="50">50</option>
                 </select>
               </label>
+              <button className="btn btn-ghost btn-compact" disabled={currentPage <= 1} onClick={() => setPage(1)}>
+                First
+              </button>
               <button className="btn btn-ghost btn-compact" disabled={currentPage <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>
                 Prev
               </button>
@@ -1676,6 +1702,20 @@ export function ProjectTasksPage() {
               >
                 Next
               </button>
+              <button className="btn btn-ghost btn-compact" disabled={currentPage >= totalPages} onClick={() => setPage(totalPages)}>
+                Last
+              </button>
+              <label className="project-page-size">
+                <span className="muted small">Go to</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={totalPages}
+                  value={String(currentPage)}
+                  onChange={(e) => jumpToPage(e.target.value)}
+                  aria-label="Go to tasks page"
+                />
+              </label>
             </div>
           </div>
         )}
