@@ -156,8 +156,14 @@ class TaskProgressTracker:
     def register_process(self, pid):
         """注册进程ID"""
         try:
+            pgid = None
+            try:
+                pgid = os.getpgid(pid)
+            except Exception:
+                pgid = None
             process_data = {
                 "pid": pid,
+                "pgid": pgid,
                 "start_time": datetime.now().isoformat()
             }
             self.redis_client.setex(self.process_key, 3600, json.dumps(process_data))
@@ -464,6 +470,7 @@ def predict_task(self, predict_args: dict):
         task_temp_dir = tempfile.mkdtemp(prefix=f"boltz_task_{task_id}_")
         output_archive_path = os.path.join(task_temp_dir, f"{task_id}_results.zip")
         predict_args['output_archive_path'] = output_archive_path
+        predict_args['task_id'] = task_id
 
         args_file_path = os.path.join(task_temp_dir, 'args.json')
         with open(args_file_path, 'w') as f:
@@ -473,6 +480,7 @@ def predict_task(self, predict_args: dict):
 
         proc_env = os.environ.copy()
         proc_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        proc_env["BOLTZ_TASK_ID"] = task_id
         
         command = [
             sys.executable,
@@ -489,7 +497,8 @@ def predict_task(self, predict_args: dict):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env=proc_env
+            env=proc_env,
+            start_new_session=True
         )
         
         # 注册进程ID用于监控
@@ -810,6 +819,7 @@ def affinity_task(self, affinity_args: dict):
 
         proc_env = os.environ.copy()
         proc_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        proc_env["BOLTZ_TASK_ID"] = task_id
 
         command = [
             sys.executable,
@@ -826,7 +836,8 @@ def affinity_task(self, affinity_args: dict):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env=proc_env
+            env=proc_env,
+            start_new_session=True
         )
 
         tracker.register_process(process.pid)
@@ -1085,6 +1096,7 @@ def boltz2score_task(self, score_args: dict):
 
         proc_env = os.environ.copy()
         proc_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        proc_env["BOLTZ_TASK_ID"] = task_id
 
         process = subprocess.Popen(
             command,
@@ -1093,6 +1105,7 @@ def boltz2score_task(self, score_args: dict):
             text=True,
             env=proc_env,
             cwd=str(BASE_DIR),
+            start_new_session=True,
         )
 
         tracker.register_process(process.pid)
@@ -1264,12 +1277,16 @@ def virtual_screening_task(self, screening_args: dict):
         tracker.update_status("running", "Virtual screening subprocess started")
 
         with open(log_path, 'w', encoding='utf-8') as log_file:
+            proc_env = os.environ.copy()
+            proc_env["BOLTZ_TASK_ID"] = task_id
             process = subprocess.Popen(
                 command,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 text=True,
-                cwd=str(BASE_DIR)
+                cwd=str(BASE_DIR),
+                env=proc_env,
+                start_new_session=True
             )
 
             tracker.register_process(process.pid)
@@ -1469,6 +1486,7 @@ def lead_optimization_task(self, optimization_args: dict):
 
         env = os.environ.copy()
         env["BOLTZ_API_TOKEN"] = config.BOLTZ_API_TOKEN
+        env["BOLTZ_TASK_ID"] = task_id
         env["PYTHONPATH"] = f"{BASE_DIR}{os.pathsep}{env.get('PYTHONPATH', '')}"
 
         log_path = os.path.join(output_dir, "lead_optimization.log")
@@ -1486,7 +1504,8 @@ def lead_optimization_task(self, optimization_args: dict):
                 stderr=subprocess.STDOUT,
                 text=True,
                 env=env,
-                cwd=str(BASE_DIR)
+                cwd=str(BASE_DIR),
+                start_new_session=True
             )
 
             tracker.register_process(process.pid)

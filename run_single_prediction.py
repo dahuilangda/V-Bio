@@ -1225,6 +1225,16 @@ def sanitize_docker_extra_args(raw_args: list) -> list:
     return sanitized
 
 
+def make_task_scoped_container_name(task_id: Optional[str]) -> Optional[str]:
+    raw_task_id = str(task_id or "").strip()
+    if not raw_task_id:
+        return None
+    token = re.sub(r"[^a-zA-Z0-9_.-]+", "-", raw_task_id).strip(".-_").lower()
+    if not token:
+        token = hashlib.sha1(raw_task_id.encode("utf-8")).hexdigest()[:12]
+    return f"boltz-af3-{token[:48]}"
+
+
 def sanitize_a3m_content(content: str, context: str = "") -> str:
     """
     移除 A3M 内容中的非法控制字符（例如 \\x00）。
@@ -2497,6 +2507,7 @@ def run_alphafold3_backend(
     use_msa_server: bool,
     seed: Optional[int] = None,
     template_payloads: Optional[List[dict]] = None,
+    task_id: Optional[str] = None,
 ) -> None:
     print("🚀 Using AlphaFold3 backend (AF3 input preparation)", file=sys.stderr)
 
@@ -2762,6 +2773,8 @@ except Exception:
     container_database_dir = "/workspace/public_databases"
     container_cache_dir = "/workspace/af_cache"
     container_colabfold_jobs_dir = "/app/jobs"
+    runtime_task_id = str(task_id or os.environ.get("BOLTZ_TASK_ID") or "").strip()
+    task_container_name = make_task_scoped_container_name(runtime_task_id)
 
     runtime_overridden = any(token == "--runtime" for token in extra_args)
 
@@ -2770,6 +2783,12 @@ except Exception:
         "run",
         "--rm",
     ]
+
+    if task_container_name:
+        # Stable naming/labeling makes termination deterministic from the API server.
+        docker_command.extend(["--name", task_container_name])
+        docker_command.extend(["--label", f"boltz.task_id={runtime_task_id}"])
+        docker_command.extend(["--label", "boltz.runtime=alphafold3"])
 
     if not runtime_overridden:
         docker_command.extend(["--runtime", "nvidia"])
@@ -2851,6 +2870,16 @@ except Exception:
     )
 
     display_command = " ".join(shlex.quote(part) for part in docker_command)
+    if task_container_name:
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", task_container_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False
+            )
+        except Exception:
+            pass
     print(f"🐳 运行 AlphaFold3 Docker: {display_command}", file=sys.stderr)
     af3_log_path = os.path.join(temp_dir, "af3_docker.log")
     with open(af3_log_path, "w", encoding="utf-8") as log_file:
@@ -2926,6 +2955,7 @@ def main():
             predict_args = json.load(f)
 
         output_archive_path = predict_args.pop("output_archive_path")
+        runtime_task_id = str(predict_args.pop("task_id", "")).strip() or None
         yaml_content = predict_args.pop("yaml_content")
         backend = str(predict_args.pop("backend", "boltz")).strip().lower()
         if backend not in ("boltz", "alphafold3"):
@@ -2956,6 +2986,7 @@ def main():
                     use_msa_server,
                     seed=seed,
                     template_payloads=af3_template_payloads,
+                    task_id=runtime_task_id,
                 )
             else:
                 if seed is not None:

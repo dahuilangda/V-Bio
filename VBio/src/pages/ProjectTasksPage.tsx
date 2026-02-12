@@ -13,7 +13,7 @@ import {
   SlidersHorizontal,
   Trash2
 } from 'lucide-react';
-import { downloadResultBlob, getTaskStatus, parseResultBundle } from '../api/backendApi';
+import { downloadResultBlob, getTaskStatus, parseResultBundle, terminateTask as terminateBackendTask } from '../api/backendApi';
 import { deleteProjectTask, getProjectById, listProjectTasks, listProjectTasksForList, updateProject, updateProjectTask } from '../api/supabaseLite';
 import { JSMEEditor } from '../components/project/JSMEEditor';
 import { Ligand2DPreview } from '../components/project/Ligand2DPreview';
@@ -101,6 +101,18 @@ function sortProjectTasks(rows: ProjectTask[]): ProjectTask[] {
     const bt = new Date(b.submitted_at || b.created_at).getTime();
     return bt - at;
   });
+}
+
+function isProjectTaskRow(value: ProjectTask | null | undefined): value is ProjectTask {
+  return Boolean(value && typeof value === 'object' && typeof value.id === 'string' && value.id.trim());
+}
+
+function sanitizeTaskRows(rows: Array<ProjectTask | null | undefined>): ProjectTask[] {
+  return rows.filter((row): row is ProjectTask => isProjectTaskRow(row));
+}
+
+function isProjectRow(value: Project | null | undefined): value is Project {
+  return Boolean(value && typeof value === 'object' && typeof value.id === 'string' && value.id.trim());
 }
 
 function readObjectPath(data: Record<string, unknown>, path: string): unknown {
@@ -744,6 +756,31 @@ function mapTaskState(raw: string): ProjectTask['task_state'] {
   return 'RUNNING';
 }
 
+async function waitForRuntimeTaskToStop(taskId: string, timeoutMs = 12000, intervalMs = 900): Promise<ProjectTask['task_state'] | null> {
+  const normalizedTaskId = String(taskId || '').trim();
+  if (!normalizedTaskId) return null;
+  const deadline = Date.now() + Math.max(1000, timeoutMs);
+  let lastState: ProjectTask['task_state'] | null = null;
+
+  while (Date.now() < deadline) {
+    try {
+      const status = await getTaskStatus(normalizedTaskId);
+      const mapped = mapTaskState(String(status.state || ''));
+      lastState = mapped;
+      if (mapped !== 'QUEUED' && mapped !== 'RUNNING') {
+        return mapped;
+      }
+    } catch {
+      // Status endpoint can be briefly unavailable while workers update state.
+    }
+    await new Promise<void>((resolve) => {
+      window.setTimeout(() => resolve(), intervalMs);
+    });
+  }
+
+  return lastState;
+}
+
 function readStatusText(status: { info?: Record<string, unknown>; state: string }): string {
   if (!status.info) return status.state;
   const s1 = status.info.status;
@@ -974,21 +1011,24 @@ export function ProjectTasksPage() {
   }, [project]);
 
   useEffect(() => {
-    tasksRef.current = tasks;
+    tasksRef.current = sanitizeTaskRows(tasks);
   }, [tasks]);
 
   const syncRuntimeTasks = useCallback(async (projectRow: Project, taskRows: ProjectTask[]) => {
-    const runtimeRows = taskRows.filter((row) => Boolean(row.task_id) && (row.task_state === 'QUEUED' || row.task_state === 'RUNNING'));
+    const safeTaskRows = sanitizeTaskRows(taskRows);
+    const runtimeRows = safeTaskRows.filter(
+      (row) => Boolean(row.task_id) && (row.task_state === 'QUEUED' || row.task_state === 'RUNNING')
+    );
     if (runtimeRows.length === 0) {
       return {
         project: projectRow,
-        taskRows: sortProjectTasks(taskRows)
+        taskRows: sortProjectTasks(safeTaskRows)
       };
     }
 
     const checks = await Promise.allSettled(runtimeRows.map((row) => getTaskStatus(row.task_id)));
     let nextProject = projectRow;
-    let nextTaskRows = [...taskRows];
+    let nextTaskRows = [...safeTaskRows];
 
     for (let i = 0; i < checks.length; i += 1) {
       const result = checks[i];
@@ -1024,11 +1064,13 @@ export function ProjectTasksPage() {
           completed_at: completedAt,
           duration_seconds: durationSeconds
         };
-        const patchedTask = await updateProjectTask(runtimeTask.id, taskPatch).catch(() => ({
+        const fallbackTask: ProjectTask = {
           ...runtimeTask,
           ...taskPatch
-        }));
-        nextTaskRows = nextTaskRows.map((row) => (row.id === runtimeTask.id ? patchedTask : row));
+        };
+        const patchedTask = await updateProjectTask(runtimeTask.id, taskPatch).catch(() => fallbackTask);
+        const nextTask = isProjectTaskRow(patchedTask) ? patchedTask : fallbackTask;
+        nextTaskRows = nextTaskRows.map((row) => (row.id === runtimeTask.id ? nextTask : row));
       }
 
       if (nextProject.task_id === runtimeTask.task_id) {
@@ -1046,23 +1088,25 @@ export function ProjectTasksPage() {
             completed_at: completedAt,
             duration_seconds: durationSeconds
           };
-          const patchedProject = await updateProject(nextProject.id, projectPatch).catch(() => ({
+          const fallbackProject: Project = {
             ...nextProject,
             ...projectPatch
-          }));
-          nextProject = patchedProject;
+          };
+          const patchedProject = await updateProject(nextProject.id, projectPatch).catch(() => fallbackProject);
+          nextProject = isProjectRow(patchedProject) ? patchedProject : fallbackProject;
         }
       }
     }
 
     return {
       project: nextProject,
-      taskRows: sortProjectTasks(nextTaskRows)
+      taskRows: sortProjectTasks(sanitizeTaskRows(nextTaskRows))
     };
   }, []);
 
   const hydrateTaskMetricsFromResults = useCallback(async (projectRow: Project, taskRows: ProjectTask[]) => {
-    const candidates = taskRows
+    const safeTaskRows = sanitizeTaskRows(taskRows);
+    const candidates = safeTaskRows
       .filter((row) => {
         const taskId = String(row.task_id || '').trim();
         if (!taskId || row.task_state !== 'SUCCESS') return false;
@@ -1088,12 +1132,12 @@ export function ProjectTasksPage() {
     if (candidates.length === 0) {
       return {
         project: projectRow,
-        taskRows
+        taskRows: safeTaskRows
       };
     }
 
     let nextProject = projectRow;
-    let nextTaskRows = [...taskRows];
+    let nextTaskRows = [...safeTaskRows];
 
     for (const task of candidates) {
       const taskId = String(task.task_id || '').trim();
@@ -1112,12 +1156,13 @@ export function ProjectTasksPage() {
           affinity: parsed.affinity || {},
           structure_name: parsed.structureName || task.structure_name || ''
         };
-        const patchedTask = await updateProjectTask(task.id, taskPatch).catch(() => ({
+        const fallbackTask: ProjectTask = {
           ...task,
           ...taskPatch
-        }));
-
-        nextTaskRows = nextTaskRows.map((row) => (row.id === task.id ? patchedTask : row));
+        };
+        const patchedTask = await updateProjectTask(task.id, taskPatch).catch(() => fallbackTask);
+        const nextTask = isProjectTaskRow(patchedTask) ? patchedTask : fallbackTask;
+        nextTaskRows = nextTaskRows.map((row) => (row.id === task.id ? nextTask : row));
 
         if (nextProject.task_id === taskId) {
           const projectPatch: Partial<Project> = {
@@ -1125,11 +1170,12 @@ export function ProjectTasksPage() {
             affinity: taskPatch.affinity || {},
             structure_name: taskPatch.structure_name || ''
           };
-          const patchedProject = await updateProject(nextProject.id, projectPatch).catch(() => ({
+          const fallbackProject: Project = {
             ...nextProject,
             ...projectPatch
-          }));
-          nextProject = patchedProject;
+          };
+          const patchedProject = await updateProject(nextProject.id, projectPatch).catch(() => fallbackProject);
+          nextProject = isProjectRow(patchedProject) ? patchedProject : fallbackProject;
         }
 
         resultHydrationDoneRef.current.add(taskId);
@@ -1142,7 +1188,7 @@ export function ProjectTasksPage() {
 
     return {
       project: nextProject,
-      taskRows: sortProjectTasks(nextTaskRows)
+      taskRows: sortProjectTasks(sanitizeTaskRows(nextTaskRows))
     };
   }, []);
 
@@ -1166,7 +1212,7 @@ export function ProjectTasksPage() {
       try {
         const now = Date.now();
         const cachedProject = projectRef.current;
-        const cachedTasks = tasksRef.current;
+        const cachedTasks = sanitizeTaskRows(tasksRef.current);
         const withinCacheWindow = now - lastFullFetchTsRef.current <= SILENT_CACHE_SYNC_WINDOW_MS;
         const canUseCachedSync =
           silent && !forceRefetch && preferBackendStatus && withinCacheWindow && cachedProject && cachedTasks.length > 0;
@@ -1175,13 +1221,13 @@ export function ProjectTasksPage() {
           const synced = await syncRuntimeTasks(cachedProject, cachedTasks);
           if (loadSeqRef.current !== loadSeq) return;
           setProject(synced.project);
-          setTasks(synced.taskRows);
+          setTasks(sanitizeTaskRows(synced.taskRows));
           void (async () => {
             try {
               const hydrated = await hydrateTaskMetricsFromResults(synced.project, synced.taskRows);
               if (loadSeqRef.current !== loadSeq) return;
               setProject(hydrated.project);
-              setTasks(hydrated.taskRows);
+              setTasks(sanitizeTaskRows(hydrated.taskRows));
             } catch {
               // Keep cached sync state if result hydration fails.
             }
@@ -1198,10 +1244,10 @@ export function ProjectTasksPage() {
         }
 
         lastFullFetchTsRef.current = Date.now();
-        const sortedTaskRows = sortProjectTasks(taskRows);
+        const sortedTaskRows = sortProjectTasks(sanitizeTaskRows(taskRows));
         if (loadSeqRef.current !== loadSeq) return;
         setProject(projectRow);
-        setTasks(sortedTaskRows);
+        setTasks(sanitizeTaskRows(sortedTaskRows));
 
         if (!preferBackendStatus) {
           return;
@@ -1212,12 +1258,12 @@ export function ProjectTasksPage() {
             const synced = await syncRuntimeTasks(projectRow, sortedTaskRows);
             if (loadSeqRef.current !== loadSeq) return;
             setProject(synced.project);
-            setTasks(synced.taskRows);
+            setTasks(sanitizeTaskRows(synced.taskRows));
 
             const hydrated = await hydrateTaskMetricsFromResults(synced.project, synced.taskRows);
             if (loadSeqRef.current !== loadSeq) return;
             setProject(hydrated.project);
-            setTasks(hydrated.taskRows);
+            setTasks(sanitizeTaskRows(hydrated.taskRows));
           } catch {
             // Keep base rows rendered; background refinement is best-effort.
           }
@@ -1258,7 +1304,10 @@ export function ProjectTasksPage() {
   }, [loadData]);
 
   const hasActiveRuntime = useMemo(
-    () => tasks.some((row) => Boolean(row.task_id) && (row.task_state === 'QUEUED' || row.task_state === 'RUNNING')),
+    () =>
+      tasks.some(
+        (row) => isProjectTaskRow(row) && Boolean(row.task_id) && (row.task_state === 'QUEUED' || row.task_state === 'RUNNING')
+      ),
     [tasks]
   );
 
@@ -1270,17 +1319,21 @@ export function ProjectTasksPage() {
     return () => window.clearInterval(timer);
   }, [hasActiveRuntime, loadData]);
 
-  const taskCountText = useMemo(() => `${tasks.length} tasks`, [tasks.length]);
+  const taskCountText = useMemo(() => `${sanitizeTaskRows(tasks).length} tasks`, [tasks]);
   const currentTaskRow = useMemo(() => {
     if (!project) return null;
     const currentRuntimeTaskId = String(project.task_id || '').trim();
     if (currentRuntimeTaskId) {
-      const matchedRuntime = tasks.find((row) => String(row.task_id || '').trim() === currentRuntimeTaskId);
+      const matchedRuntime = tasks.find(
+        (row) => isProjectTaskRow(row) && String(row.task_id || '').trim() === currentRuntimeTaskId
+      );
       if (matchedRuntime) return matchedRuntime;
     }
-    const latestDraft = tasks.find((row) => row.task_state === 'DRAFT' && !String(row.task_id || '').trim());
+    const latestDraft = tasks.find(
+      (row) => isProjectTaskRow(row) && row.task_state === 'DRAFT' && !String(row.task_id || '').trim()
+    );
     if (latestDraft) return latestDraft;
-    return tasks[0] || null;
+    return tasks.find((row) => isProjectTaskRow(row)) || null;
   }, [project, tasks]);
   const backToCurrentTaskHref = useMemo(() => {
     if (!project) return '/projects';
@@ -1323,7 +1376,7 @@ export function ProjectTasksPage() {
   }, [project, currentTaskRow]);
 
   const taskRows = useMemo<TaskListRow[]>(() => {
-    return tasks.map((task) => {
+    return sanitizeTaskRows(tasks).map((task) => {
       const submittedTs = new Date(task.submitted_at || task.created_at).getTime();
       const durationValue = typeof task.duration_seconds === 'number' && Number.isFinite(task.duration_seconds) ? task.duration_seconds : null;
       const selection = resolveTaskSelectionContext(task, workspacePairPreference);
@@ -1923,12 +1976,45 @@ export function ProjectTasksPage() {
   };
 
   const removeTask = async (task: ProjectTask) => {
-    if (!window.confirm(`Delete task "${task.task_id || task.id}" from this project?`)) return;
+    const runtimeTaskId = String(task.task_id || '').trim();
+    const runtimeState = task.task_state;
+    const isActiveRuntime = Boolean(runtimeTaskId) && (runtimeState === 'QUEUED' || runtimeState === 'RUNNING');
+    const confirmText = isActiveRuntime
+      ? runtimeState === 'QUEUED'
+        ? `Task "${runtimeTaskId}" is queued. Delete will first cancel it on backend. Continue?`
+        : `Task "${runtimeTaskId}" is running. Delete will first stop it on backend. Continue?`
+      : `Delete task "${task.task_id || task.id}" from this project?`;
+    if (!window.confirm(confirmText)) return;
     setDeletingTaskId(task.id);
     setError(null);
     try {
+      if (runtimeState === 'QUEUED' || runtimeState === 'RUNNING') {
+        if (!runtimeTaskId) {
+          throw new Error(
+            runtimeState === 'RUNNING'
+              ? 'Task is running but task_id is missing; cannot stop backend task, deletion is blocked.'
+              : 'Task is queued but task_id is missing; cannot cancel backend task, deletion is blocked.'
+          );
+        }
+        const terminateResult = await terminateBackendTask(runtimeTaskId);
+        if (terminateResult.terminated !== true) {
+          throw new Error(
+            runtimeState === 'RUNNING'
+              ? `Backend did not confirm stop for task "${runtimeTaskId}", deletion is blocked.`
+              : `Backend did not confirm cancellation for task "${runtimeTaskId}", deletion is blocked.`
+          );
+        }
+        const terminalState = await waitForRuntimeTaskToStop(runtimeTaskId, runtimeState === 'RUNNING' ? 14000 : 9000);
+        if (terminalState === null || terminalState === 'QUEUED' || terminalState === 'RUNNING') {
+          throw new Error(
+            runtimeState === 'RUNNING'
+              ? `Failed to stop backend task "${runtimeTaskId}". Task is still active, so deletion is blocked.`
+              : `Failed to cancel backend task "${runtimeTaskId}". Task is still active, so deletion is blocked.`
+          );
+        }
+      }
       await deleteProjectTask(task.id);
-      setTasks((prev) => prev.filter((row) => row.id !== task.id));
+      setTasks((prev) => sanitizeTaskRows(prev).filter((row) => row.id !== task.id));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete task.');
     } finally {
