@@ -1364,8 +1364,8 @@ select:focus {
 .workspace-shell {
   position: relative;
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr);
-  column-gap: 12px;
+  grid-template-columns: 0 minmax(0, 1fr);
+  column-gap: 0;
   align-items: start;
 }
 
@@ -1381,7 +1381,7 @@ select:focus {
   left: 0;
   z-index: 2;
   width: 36px;
-  margin-left: calc(-1 * min(78px, max(18px, ((100vw - 1480px) / 2) + 18px)));
+  margin-left: calc(-1 * min(78px, max(36px, ((100vw - 1480px) / 2) + 18px)));
   overflow: visible;
   display: grid;
   gap: 10px;
@@ -4199,7 +4199,7 @@ select:focus {
   }
 }
 
-@media (max-width: 1460px) {
+@media (max-width: 1540px) {
   .workspace-shell {
     display: grid;
     grid-template-columns: 1fr;
