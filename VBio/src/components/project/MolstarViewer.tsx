@@ -17,6 +17,7 @@ interface MolstarViewerProps {
   structureText: string;
   format: 'cif' | 'pdb';
   colorMode?: string;
+  confidenceBackend?: string;
   onResiduePick?: (pick: MolstarResiduePick) => void;
   pickMode?: 'click' | 'alt-left';
   highlightResidues?: MolstarResidueHighlight[];
@@ -279,46 +280,218 @@ async function loadStructure(viewer: any, text: string, format: 'cif' | 'pdb') {
   throw new Error('Mol* Viewer API is unavailable for loading this structure.');
 }
 
-async function tryApplyAlphaFoldTheme(viewer: any) {
+function collectStructureComponents(viewer: any): any[] {
+  const plugin = viewer?.plugin;
+  const hierarchyCurrent = plugin?.managers?.structure?.hierarchy?.current;
+  const hierarchySelection = plugin?.managers?.structure?.hierarchy?.selection;
+  const componentManager = plugin?.managers?.structure?.component;
+  const fromGroups = Array.isArray(hierarchyCurrent?.componentGroups) ? hierarchyCurrent.componentGroups.flat() : [];
+  const fromHierarchy = Array.isArray(hierarchyCurrent?.components) ? hierarchyCurrent.components : [];
+  const fromSelectionHierarchy = Array.isArray(hierarchySelection?.components) ? hierarchySelection.components : [];
+  const fromManager = Array.isArray(componentManager?.components) ? componentManager.components : [];
+  const collectFromStructureEntries = (entries: any[]): any[] => {
+    const acc: any[] = [];
+    for (const entry of entries) {
+      if (Array.isArray(entry?.components)) {
+        acc.push(...entry.components);
+      }
+    }
+    return acc;
+  };
+  const currentStructures = Array.isArray(hierarchyCurrent?.structures) ? hierarchyCurrent.structures : [];
+  const selectionStructures = Array.isArray(hierarchySelection?.structures) ? hierarchySelection.structures : [];
+  const managerStructures = Array.isArray(componentManager?.currentStructures) ? componentManager.currentStructures : [];
+  const fromStructureEntries = collectFromStructureEntries([...currentStructures, ...selectionStructures, ...managerStructures]);
+  const merged = [
+    ...fromGroups,
+    ...fromHierarchy,
+    ...fromSelectionHierarchy,
+    ...fromManager,
+    ...fromStructureEntries
+  ].filter(Boolean);
+  return Array.from(new Set(merged));
+}
+
+function collectStructureEntries(viewer: any): any[] {
+  const plugin = viewer?.plugin;
+  const hierarchyCurrent = plugin?.managers?.structure?.hierarchy?.current;
+  const hierarchySelection = plugin?.managers?.structure?.hierarchy?.selection;
+  const componentManager = plugin?.managers?.structure?.component;
+  const currentStructures = Array.isArray(hierarchyCurrent?.structures) ? hierarchyCurrent.structures : [];
+  const selectionStructures = Array.isArray(hierarchySelection?.structures) ? hierarchySelection.structures : [];
+  const managerStructures = Array.isArray(componentManager?.currentStructures) ? componentManager.currentStructures : [];
+  return Array.from(new Set([...currentStructures, ...selectionStructures, ...managerStructures].filter(Boolean)));
+}
+
+function describeThemeCapabilities(viewer: any): string {
   const plugin = viewer?.plugin;
   const manager = plugin?.managers?.structure?.component;
-  const groups = plugin?.managers?.structure?.hierarchy?.current?.componentGroups;
+  const hierarchyCurrent = plugin?.managers?.structure?.hierarchy?.current;
+  const hierarchySelection = plugin?.managers?.structure?.hierarchy?.selection;
+  const hasManagerTheme = typeof manager?.updateRepresentationsTheme === 'function';
+  const hasSetStyle = typeof viewer?.setStyle === 'function';
+  const groupsLen = Array.isArray(hierarchyCurrent?.componentGroups) ? hierarchyCurrent.componentGroups.length : 0;
+  const componentsLen = collectStructureComponents(viewer).length;
+  const currentStructuresLen = Array.isArray(hierarchyCurrent?.structures) ? hierarchyCurrent.structures.length : 0;
+  const selectionStructuresLen = Array.isArray(hierarchySelection?.structures) ? hierarchySelection.structures.length : 0;
+  const managerStructuresLen = Array.isArray(manager?.currentStructures) ? manager.currentStructures.length : 0;
+  const managerKeys = manager && typeof manager === 'object' ? Object.keys(manager).slice(0, 12).join(',') : '';
+  const builder = plugin?.builders?.structure;
+  const builderKeys = builder && typeof builder === 'object' ? Object.keys(builder).slice(0, 16).join(',') : '';
+  return `managerTheme=${hasManagerTheme} setStyle=${hasSetStyle} groups=${groupsLen} components=${componentsLen} currentStructures=${currentStructuresLen} selectionStructures=${selectionStructuresLen} managerStructures=${managerStructuresLen} managerKeys=[${managerKeys}] builderKeys=[${builderKeys}]`;
+}
 
-  const components = Array.isArray(groups) ? groups.flat() : [];
-
-  if (manager?.updateRepresentationsTheme && components.length > 0) {
-    try {
-      await manager.updateRepresentationsTheme(components, { color: 'plddt-confidence' });
-      return;
-    } catch {
-      // fallback
-    }
+async function waitForThemeComponents(viewer: any, timeoutMs = 6000, intervalMs = 80): Promise<any[]> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const components = collectStructureComponents(viewer);
+    if (components.length > 0) return components;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
+  return collectStructureComponents(viewer);
+}
 
-  if (typeof viewer?.setStyle === 'function') {
-    try {
-      viewer.setStyle({ theme: 'plddt-confidence' });
-    } catch {
-      // no-op
+async function tryCreateThemeComponentsFromStructures(viewer: any): Promise<void> {
+  const plugin = viewer?.plugin;
+  const builders = plugin?.builders?.structure;
+  const structures = collectStructureEntries(viewer);
+  if (!builders || structures.length === 0) return;
+
+  const tryCreateComponentStatic = builders?.tryCreateComponentStatic;
+  if (typeof tryCreateComponentStatic !== 'function') return;
+
+  const staticKinds = ['polymer', 'ligand', 'branched', 'water', 'all'];
+  for (const entry of structures) {
+    const targets = [entry, entry?.cell, entry?.structure, entry?.structure?.cell].filter(Boolean);
+    for (const target of targets) {
+      for (const kind of staticKinds) {
+        try {
+          await tryCreateComponentStatic(target, kind);
+        } catch {
+          // try next kind/target
+        }
+      }
     }
   }
 }
 
-async function tryApplyCartoonPreset(viewer: any) {
+async function tryBuildRepresentationsFromStructures(viewer: any, colorTheme: string): Promise<void> {
   const plugin = viewer?.plugin;
-  const applyPreset = plugin?.builders?.structure?.representation?.applyPreset;
-  const structures = plugin?.managers?.structure?.hierarchy?.current?.structures;
-  if (typeof applyPreset !== 'function' || !Array.isArray(structures) || structures.length === 0) {
+  const addRepresentation = plugin?.builders?.structure?.representation?.addRepresentation;
+  const structures = collectStructureEntries(viewer);
+  if (typeof addRepresentation !== 'function' || structures.length === 0) return;
+
+  const representationCandidates = [
+    { type: 'cartoon', color: colorTheme },
+    { type: 'ball-and-stick', color: colorTheme },
+    { type: 'spacefill', color: colorTheme }
+  ];
+
+  for (const entry of structures) {
+    const targets = [entry, entry?.cell].filter(Boolean);
+    for (const target of targets) {
+      for (const params of representationCandidates) {
+        try {
+          await addRepresentation(target, params);
+          break;
+        } catch {
+          // try next representation style
+        }
+      }
+    }
+  }
+}
+
+async function tryApplyAlphaFoldTheme(
+  viewer: any,
+  confidenceBackend?: string
+) {
+  const plugin = viewer?.plugin;
+  const manager = plugin?.managers?.structure?.component;
+  const hasManagerTheme = typeof manager?.updateRepresentationsTheme === 'function';
+  const backend = String(confidenceBackend || '').trim().toLowerCase();
+  // Align Protenix with AF3/Boltz2: primary AlphaFold palette is always pLDDT.
+  const primaryTheme = 'plddt-confidence';
+  const structures = collectStructureEntries(viewer);
+
+  // Strict mode: apply one deterministic theme per backend.
+  if (hasManagerTheme) {
+    let components = await waitForThemeComponents(viewer);
+    if (components.length === 0) {
+      await tryApplyCartoonPreset(viewer);
+      components = await waitForThemeComponents(viewer, 6000, 80);
+    }
+    if (components.length === 0) {
+      await tryCreateThemeComponentsFromStructures(viewer);
+      components = await waitForThemeComponents(viewer, 3000, 80);
+    }
+    if (components.length === 0) {
+      await tryBuildRepresentationsFromStructures(viewer, primaryTheme);
+      components = await waitForThemeComponents(viewer, 2500, 80);
+    }
+    if (components.length === 0) {
+      if (structures.length > 0) {
+        try {
+          await manager.updateRepresentationsTheme(structures, { color: primaryTheme });
+          return;
+        } catch {
+          // keep strict failure with diagnostics
+        }
+      }
+      throw new Error(
+        `Unable to apply ${primaryTheme} theme: no structure components (backend=${backend || '-'}). ${describeThemeCapabilities(viewer)}`
+      );
+    }
+    await manager.updateRepresentationsTheme(components, { color: primaryTheme });
     return;
   }
+
+  if (typeof viewer?.setStyle === 'function') {
+    viewer.setStyle({ theme: primaryTheme });
+    return;
+  }
+  throw new Error(
+    `Unable to apply ${primaryTheme} theme: missing manager theme API and viewer.setStyle API (backend=${backend || '-'}). ${describeThemeCapabilities(viewer)}`
+  );
+}
+
+async function tryApplyCartoonPreset(viewer: any) {
+  const plugin = viewer?.plugin;
+  const structures = plugin?.managers?.structure?.hierarchy?.current?.structures;
+  if (!Array.isArray(structures) || structures.length === 0) {
+    return;
+  }
+
+  const applyPreset = plugin?.builders?.structure?.representation?.applyPreset;
+  const hierarchyApplyPreset = plugin?.managers?.structure?.hierarchy?.applyPreset;
+  const presetIds = ['polymer-and-ligand', 'default', 'auto'];
 
   for (const entry of structures) {
     const target = entry?.cell ?? entry;
     if (!target) continue;
-    try {
-      await applyPreset(target, 'polymer-and-ligand');
-    } catch {
-      // Keep current representation if preset application fails.
+    let applied = false;
+    if (typeof applyPreset === 'function') {
+      for (const presetId of presetIds) {
+        try {
+          await applyPreset(target, presetId);
+          applied = true;
+          break;
+        } catch {
+          // try next preset id
+        }
+      }
+    }
+    if (applied) continue;
+    if (typeof hierarchyApplyPreset === 'function') {
+      for (const presetId of presetIds) {
+        try {
+          await hierarchyApplyPreset(target, presetId);
+          applied = true;
+          break;
+        } catch {
+          // try next preset id
+        }
+      }
     }
   }
 }
@@ -1249,6 +1422,7 @@ export function MolstarViewer({
   structureText,
   format,
   colorMode = 'white',
+  confidenceBackend,
   onResiduePick,
   pickMode = 'click',
   highlightResidues,
@@ -1479,7 +1653,7 @@ export function MolstarViewer({
         if (requestId !== structureRequestIdRef.current) return;
 
         if (colorMode === 'alphafold') {
-          await tryApplyAlphaFoldTheme(viewer);
+          await tryApplyAlphaFoldTheme(viewer, confidenceBackend);
         } else {
           await tryApplyWhiteTheme(viewer);
         }
@@ -1499,7 +1673,7 @@ export function MolstarViewer({
         structureRequestIdRef.current += 1;
       }
     };
-  }, [ready, structureText, format, colorMode]);
+  }, [ready, structureText, format, colorMode, confidenceBackend]);
 
   useEffect(() => {
     if (!ready || !viewerRef.current || !structureText.trim()) return;

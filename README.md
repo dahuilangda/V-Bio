@@ -66,6 +66,10 @@
 
       * 支持将同一份 YAML 输入转换为 AlphaFold3 兼容的 FASTA/JSON/MSA 数据，并在配置好 Docker 环境后直接调用官方 AlphaFold3 推理；最终返回的 ZIP 同时包含模型输出与（可选）Boltz 亲和力分析结果。
 
+  * **🧬 Protenix 支持**
+
+      * 支持将同一份 YAML 输入转换为 Protenix `input.json`（含 `sequences` / `covalent_bonds`），并通过 Docker 调用 `runner/inference.py`；结果 ZIP 包含 `protenix/` 输入输出目录，可直接复现。
+
 ## 视频演示 (Video Demo)
 [https://www.bilibili.com/video/BV1tcYWz1E7f/](https://www.bilibili.com/video/BV1tcYWz1E7f/)
 
@@ -140,6 +144,52 @@ export ALPHAFOLD3_DOCKER_EXTRA_ARGS="--env TF_FORCE_UNIFIED_MEMORY=1 --shm-size=
 - 建议将上述导出语句写入 `~/.bashrc` 或 supervisor/systemd 环境配置，确保 `run.sh`、Celery worker 与监控进程都能读取。
 - 若只需要导出 AlphaFold3 输入文件而不运行容器，可跳过此步骤。
 - 更多细节请参考下文 [AlphaFold3 Docker 推理集成](#alphafold3-docker-推理集成)。
+
+#### **第 6 步：Protenix 推理环境配置（可选）**
+
+若希望在平台内直接运行 Protenix 推理，请在启动 Celery Worker 之前设置以下环境变量：
+
+```bash
+# 1) 拉取 Protenix 容器（官方 release 镜像）
+docker pull ai4s-share-public-cn-beijing.cr.volces.com/release/protenix:1.0.0.4
+
+# 2) 克隆 Protenix 源码（该镜像默认不包含源码）
+git clone https://github.com/bytedance/Protenix.git /data/protenix
+
+# 3) 准备模型目录并下载权重（参考 dependency_url.py）
+mkdir -p /data/protenix/model
+cd /data/protenix/model
+wget -c https://protenix.tos-cn-beijing.volces.com/checkpoint/protenix_base_20250630_v1.0.0.pt
+
+# 5) （可选）预下载 release_data 依赖文件，避免运行时临时下载
+mkdir -p /data/protenix/release_data
+cd /data/protenix/release_data
+wget -c https://protenix.tos-cn-beijing.volces.com/common/components.cif
+wget -c https://protenix.tos-cn-beijing.volces.com/common/components.cif.rdkit_mol.pkl
+wget -c https://protenix.tos-cn-beijing.volces.com/common/clusters-by-entity-40.txt
+
+# 6) 配置 Boltz-WebUI 环境变量
+export PROTENIX_SOURCE_DIR=/data/protenix
+export PROTENIX_MODEL_DIR=/data/protenix/model
+export PROTENIX_MODEL_NAME=protenix_base_20250630_v1.0.0
+export PROTENIX_DOCKER_IMAGE=ai4s-share-public-cn-beijing.cr.volces.com/release/protenix:1.0.0.4
+# 可选：传递 docker run 额外参数
+export PROTENIX_DOCKER_EXTRA_ARGS="--shm-size=16g -v /dev/shm:/dev/shm"
+# 可选：传递 inference.py 额外参数
+export PROTENIX_INFER_EXTRA_ARGS="--sample_diffusion.step_scale_eta 1.5"
+# 可选：容器内 Python 可执行名（某些镜像只有 python3）
+export PROTENIX_PYTHON_BIN=python3
+# 建议：保持 false，使用镜像默认 root 用户（避免 torch 环境丢失）
+export PROTENIX_USE_HOST_USER=false
+```
+
+- `PROTENIX_SOURCE_DIR` 必须指向已克隆的 Protenix 仓库根目录（需包含 `runner/inference.py`）。
+- `PROTENIX_MODEL_DIR` 必须指向宿主机存在且可读目录，且包含 `${PROTENIX_MODEL_NAME}.pt`。
+- `PROTENIX_MODEL_NAME` 默认值为 `protenix_base_20250630_v1.0.0`。
+- 若镜像内没有 `python` 命令（仅有 `python3`），请设置 `PROTENIX_PYTHON_BIN=python3`。
+- 官方镜像建议使用默认 root 用户；若启用宿主机用户（`PROTENIX_USE_HOST_USER=true`）可能触发 `No module named 'torch'`。
+- 若使用外部 MSA，系统会复用当前平台的 MSA 生成缓存并写入 Protenix 输入 JSON。
+- `dependency_url.py` 中还提供其他模型（如 `protenix_base_default_v1.0.0`）和依赖文件下载地址，可按同样方式替换下载。
 
 ### AlphaFold3 数据库/模型获取
 
@@ -295,6 +345,7 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
     * `backend`（可选）:
       * `boltz`（默认）: 运行原有的 Boltz 结构预测流程
       * `alphafold3`: 在配置好 AlphaFold3 环境后自动生成 FASTA/JSON/MSA 并触发 Docker 推理；若未配置相关环境变量，则仅导出输入文件
+      * `protenix`: 生成 Protenix `input.json` 并触发 Protenix Docker 推理；输出归档位于 `protenix/` 目录
     * `seed`（可选）: 固定随机种子（整数）。用于复现实验；不填则使用随机种子。
     * `template_files`（可选）: 一个或多个 PDB/CIF 模板文件（multipart 文件字段）。
     * `template_meta`（可选）: 模板元数据 JSON（字符串），用于描述模板链与目标链的映射。

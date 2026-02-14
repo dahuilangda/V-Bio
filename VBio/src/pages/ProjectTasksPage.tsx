@@ -449,7 +449,7 @@ function readTaskConfidenceMetrics(task: ProjectTask, context?: TaskMetricContex
     'plddt'
   ]);
   const iptmRaw = selectedPairIptm ?? readFirstFiniteMetric(confidence, ['iptm', 'ligand_iptm', 'protein_iptm']);
-  const paeRaw = readFirstFiniteMetric(confidence, ['complex_pde', 'complex_pae', 'pae']);
+  const paeRaw = readFirstFiniteMetric(confidence, ['complex_pde', 'complex_pae', 'gpde', 'pae']);
   const mergedPlddt = selectedLigandPlddt ?? plddtRaw;
   return {
     plddt: mergedPlddt === null ? null : mergedPlddt <= 1 ? mergedPlddt * 100 : mergedPlddt,
@@ -814,6 +814,7 @@ function normalizeStatusToken(value: string): string {
 
 function backendLabel(value: string): string {
   if (value === 'alphafold3') return 'AlphaFold3';
+  if (value === 'protenix') return 'Protenix';
   if (value === 'boltz') return 'Boltz-2';
   return value ? value.toUpperCase() : 'Unknown';
 }

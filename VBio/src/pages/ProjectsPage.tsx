@@ -66,6 +66,7 @@ const PROJECTS_PAGE_SIZE_OPTIONS = [8, 12, 20, 50];
 
 function backendLabel(value: string): string {
   if (value === 'alphafold3') return 'AlphaFold3';
+  if (value === 'protenix') return 'Protenix';
   if (value === 'boltz') return 'Boltz-2';
   return value ? value.toUpperCase() : 'Unknown';
 }

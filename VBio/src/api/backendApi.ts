@@ -74,7 +74,7 @@ async function requestWithFallback(path: string, init: RequestInit): Promise<Res
 export async function submitPrediction(input: PredictionSubmitInput): Promise<string> {
   const backend = String(input.backend || 'boltz').trim().toLowerCase();
   const constraintsForBackend = (input.constraints || []).filter((constraint) =>
-    backend === 'alphafold3' ? constraint.type === 'bond' : true
+    backend === 'alphafold3' || backend === 'protenix' ? constraint.type === 'bond' : true
   );
   const normalizedComponents = (input.components || [])
     .map((comp) => ({
@@ -477,6 +477,178 @@ function applyAtomPlddtToStructure(
   return applyAtomPlddtToCifStructure(structureText, atomPlddts);
 }
 
+function applyLigandAtomPlddtsByChainToCifStructure(
+  structureText: string,
+  atomPlddtsByChain: Record<string, number[]>
+): string {
+  if (!structureText) return structureText;
+  if (Object.keys(atomPlddtsByChain).length === 0) return structureText;
+
+  const lines = structureText.split(/\r?\n/);
+
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() !== 'loop_') continue;
+
+    let headerIndex = i + 1;
+    const headers: string[] = [];
+    while (headerIndex < lines.length) {
+      const rawHeader = lines[headerIndex].trim();
+      if (!rawHeader.startsWith('_')) break;
+      headers.push(rawHeader);
+      headerIndex += 1;
+    }
+
+    if (!headers.some((header) => header.toLowerCase().startsWith('_atom_site.'))) {
+      i = headerIndex - 1;
+      continue;
+    }
+
+    const groupCol = findHeaderIndex(headers, ['_atom_site.group_pdb']);
+    const chainCol = findHeaderIndex(headers, ['_atom_site.label_asym_id', '_atom_site.auth_asym_id']);
+    const seqCol = findHeaderIndex(headers, ['_atom_site.label_seq_id', '_atom_site.auth_seq_id']);
+    const compCol = findHeaderIndex(headers, ['_atom_site.label_comp_id', '_atom_site.auth_comp_id']);
+    const bFactorCol = findHeaderIndex(headers, ['_atom_site.b_iso_or_equiv']);
+    const typeCol = findHeaderIndex(headers, ['_atom_site.type_symbol']);
+    const atomIdCol = findHeaderIndex(headers, ['_atom_site.label_atom_id', '_atom_site.auth_atom_id']);
+    if (compCol < 0 || chainCol < 0 || bFactorCol < 0) {
+      i = headerIndex - 1;
+      continue;
+    }
+
+    const firstResidueKeyByChain = new Map<string, string>();
+    const chainAtomCursor = new Map<string, number>();
+    let rowIndex = headerIndex;
+    while (rowIndex < lines.length) {
+      const rawRow = lines[rowIndex];
+      const row = rawRow.trim();
+      if (!row || row === '#') {
+        rowIndex += 1;
+        continue;
+      }
+      if (row === 'loop_' || row.startsWith('_')) break;
+
+      const tokens = tokenizeCifRow(rawRow);
+      if (tokens.length >= headers.length) {
+        const compId = stripCifTokenQuotes(tokens[compCol]).trim().toUpperCase();
+        const groupPdb = groupCol >= 0 ? stripCifTokenQuotes(tokens[groupCol]).trim().toUpperCase() : '';
+        const element = typeCol >= 0 ? stripCifTokenQuotes(tokens[typeCol]) : '';
+        const atomName = atomIdCol >= 0 ? stripCifTokenQuotes(tokens[atomIdCol]) : '';
+        if (!compId || WATER_COMP_IDS.has(compId)) {
+          rowIndex += 1;
+          continue;
+        }
+        if (groupPdb) {
+          if (groupPdb !== 'HETATM') {
+            rowIndex += 1;
+            continue;
+          }
+        } else if (POLYMER_COMP_IDS.has(compId)) {
+          rowIndex += 1;
+          continue;
+        }
+        if (isHydrogenLikeElement(element || atomName)) {
+          rowIndex += 1;
+          continue;
+        }
+
+        const chainIdRaw = stripCifTokenQuotes(tokens[chainCol]).trim();
+        const chainId = chainIdRaw.toUpperCase();
+        if (!chainId) {
+          rowIndex += 1;
+          continue;
+        }
+        const seqId = seqCol >= 0 ? stripCifTokenQuotes(tokens[seqCol]).trim() : '';
+        const residueKey = `${chainId}|${seqId}|${compId}`;
+        if (!firstResidueKeyByChain.has(chainId)) {
+          firstResidueKeyByChain.set(chainId, residueKey);
+        }
+        if (firstResidueKeyByChain.get(chainId) !== residueKey) {
+          rowIndex += 1;
+          continue;
+        }
+
+        const chainValues = atomPlddtsByChain[chainId];
+        if (!Array.isArray(chainValues) || chainValues.length === 0) {
+          rowIndex += 1;
+          continue;
+        }
+        const cursor = chainAtomCursor.get(chainId) || 0;
+        if (cursor >= chainValues.length) {
+          rowIndex += 1;
+          continue;
+        }
+
+        tokens[bFactorCol] = formatPlddtNumber(chainValues[cursor]);
+        lines[rowIndex] = tokens.join(' ');
+        chainAtomCursor.set(chainId, cursor + 1);
+      }
+      rowIndex += 1;
+    }
+
+    i = rowIndex - 1;
+  }
+
+  return lines.join('\n');
+}
+
+function applyLigandAtomPlddtsByChainToPdbStructure(
+  structureText: string,
+  atomPlddtsByChain: Record<string, number[]>
+): string {
+  if (!structureText) return structureText;
+  if (Object.keys(atomPlddtsByChain).length === 0) return structureText;
+
+  const lines = structureText.split(/\r?\n/);
+  const firstResidueKeyByChain = new Map<string, string>();
+  const chainAtomCursor = new Map<string, number>();
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (!line.startsWith('HETATM')) continue;
+
+    const compId = line.slice(17, 20).trim().toUpperCase();
+    if (!compId || WATER_COMP_IDS.has(compId)) continue;
+
+    const atomName = line.slice(12, 16).trim();
+    const rawElement = line.length >= 78 ? line.slice(76, 78).trim() : '';
+    const element = rawElement || atomName;
+    if (isHydrogenLikeElement(element)) continue;
+
+    const chainId = line.slice(21, 22).trim().toUpperCase();
+    if (!chainId) continue;
+
+    const seqId = `${line.slice(22, 26).trim()}${line.slice(26, 27).trim()}`;
+    const residueKey = `${chainId}|${seqId}|${compId}`;
+    if (!firstResidueKeyByChain.has(chainId)) {
+      firstResidueKeyByChain.set(chainId, residueKey);
+    }
+    if (firstResidueKeyByChain.get(chainId) !== residueKey) continue;
+
+    const chainValues = atomPlddtsByChain[chainId];
+    if (!Array.isArray(chainValues) || chainValues.length === 0) continue;
+    const cursor = chainAtomCursor.get(chainId) || 0;
+    if (cursor >= chainValues.length) continue;
+
+    const bFactor = normalizePlddt(chainValues[cursor]).toFixed(2).padStart(6);
+    const padded = line.length >= 66 ? line : line.padEnd(66, ' ');
+    lines[i] = `${padded.slice(0, 60)}${bFactor}${padded.slice(66)}`;
+    chainAtomCursor.set(chainId, cursor + 1);
+  }
+
+  return lines.join('\n');
+}
+
+function applyLigandAtomPlddtsByChainToStructure(
+  structureText: string,
+  structureFormat: 'cif' | 'pdb',
+  atomPlddtsByChain: Record<string, number[]>
+): string {
+  if (Object.keys(atomPlddtsByChain).length === 0) return structureText;
+  return structureFormat === 'pdb'
+    ? applyLigandAtomPlddtsByChainToPdbStructure(structureText, atomPlddtsByChain)
+    : applyLigandAtomPlddtsByChainToCifStructure(structureText, atomPlddtsByChain);
+}
+
 const WATER_COMP_IDS = new Set(['HOH', 'WAT', 'DOD', 'SOL']);
 const POLYMER_COMP_IDS = new Set([
   'ALA',
@@ -549,6 +721,121 @@ function normalizeLigandAtomPlddtsByChain(value: unknown): Record<string, number
     byChain[chainId] = parsed;
   }
   return byChain;
+}
+
+function inferSingleLigandChainIdFromCif(structureText: string): string | null {
+  if (!structureText) return null;
+  const lines = structureText.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() !== 'loop_') continue;
+
+    let headerIndex = i + 1;
+    const headers: string[] = [];
+    while (headerIndex < lines.length) {
+      const rawHeader = lines[headerIndex].trim();
+      if (!rawHeader.startsWith('_')) break;
+      headers.push(rawHeader);
+      headerIndex += 1;
+    }
+
+    if (!headers.some((header) => header.toLowerCase().startsWith('_atom_site.'))) {
+      i = headerIndex - 1;
+      continue;
+    }
+
+    const groupCol = findHeaderIndex(headers, ['_atom_site.group_pdb']);
+    const chainCol = findHeaderIndex(headers, ['_atom_site.label_asym_id', '_atom_site.auth_asym_id']);
+    const compCol = findHeaderIndex(headers, ['_atom_site.label_comp_id', '_atom_site.auth_comp_id']);
+    const typeCol = findHeaderIndex(headers, ['_atom_site.type_symbol']);
+    const atomIdCol = findHeaderIndex(headers, ['_atom_site.label_atom_id', '_atom_site.auth_atom_id']);
+    if (chainCol < 0 || compCol < 0) {
+      i = headerIndex - 1;
+      continue;
+    }
+
+    const chainSet = new Set<string>();
+    let rowIndex = headerIndex;
+    while (rowIndex < lines.length) {
+      const rawRow = lines[rowIndex];
+      const row = rawRow.trim();
+      if (!row || row === '#') {
+        rowIndex += 1;
+        continue;
+      }
+      if (row === 'loop_' || row.startsWith('_')) break;
+
+      const tokens = tokenizeCifRow(rawRow);
+      if (tokens.length >= headers.length) {
+        const compId = stripCifTokenQuotes(tokens[compCol]).trim().toUpperCase();
+        const groupPdb = groupCol >= 0 ? stripCifTokenQuotes(tokens[groupCol]).trim().toUpperCase() : '';
+        const element = typeCol >= 0 ? stripCifTokenQuotes(tokens[typeCol]) : '';
+        const atomName = atomIdCol >= 0 ? stripCifTokenQuotes(tokens[atomIdCol]) : '';
+        if (!compId || WATER_COMP_IDS.has(compId)) {
+          rowIndex += 1;
+          continue;
+        }
+        if (groupPdb) {
+          if (groupPdb !== 'HETATM') {
+            rowIndex += 1;
+            continue;
+          }
+        } else if (POLYMER_COMP_IDS.has(compId)) {
+          rowIndex += 1;
+          continue;
+        }
+        if (isHydrogenLikeElement(element || atomName)) {
+          rowIndex += 1;
+          continue;
+        }
+
+        const chainIdRaw = stripCifTokenQuotes(tokens[chainCol]).trim();
+        const chainId = chainIdRaw.toUpperCase();
+        if (chainId) {
+          chainSet.add(chainId);
+        }
+      }
+      rowIndex += 1;
+    }
+
+    if (chainSet.size === 1) {
+      return Array.from(chainSet)[0] || null;
+    }
+
+    i = rowIndex - 1;
+  }
+
+  return null;
+}
+
+function inferSingleLigandChainIdFromPdb(structureText: string): string | null {
+  if (!structureText) return null;
+  const lines = structureText.split(/\r?\n/);
+  const chainSet = new Set<string>();
+  for (const line of lines) {
+    if (!line.startsWith('HETATM')) continue;
+    const compId = line.slice(17, 20).trim().toUpperCase();
+    if (!compId || WATER_COMP_IDS.has(compId)) continue;
+    const atomName = line.slice(12, 16).trim();
+    const rawElement = line.length >= 78 ? line.slice(76, 78).trim() : '';
+    const element = rawElement || atomName;
+    if (isHydrogenLikeElement(element)) continue;
+    const chainId = line.slice(21, 22).trim().toUpperCase();
+    if (!chainId) continue;
+    chainSet.add(chainId);
+  }
+  if (chainSet.size === 1) {
+    return Array.from(chainSet)[0] || null;
+  }
+  return null;
+}
+
+function inferSingleLigandChainIdFromStructure(
+  structureText: string,
+  structureFormat: 'cif' | 'pdb'
+): string | null {
+  return structureFormat === 'pdb'
+    ? inferSingleLigandChainIdFromPdb(structureText)
+    : inferSingleLigandChainIdFromCif(structureText);
 }
 
 function normalizeResiduePlddtsByChain(value: unknown): Record<string, number[]> {
@@ -1106,6 +1393,7 @@ function buildResidueConfidenceRowsFromCif(structureText: string): CifResidueCon
       continue;
     }
 
+    const groupCol = headers.findIndex((header) => header.toLowerCase() === '_atom_site.group_pdb');
     const chainCol = headers.findIndex((header) => header.toLowerCase() === '_atom_site.label_asym_id');
     const seqCol = headers.findIndex((header) => header.toLowerCase() === '_atom_site.label_seq_id');
     const compCol = headers.findIndex((header) => header.toLowerCase() === '_atom_site.label_comp_id');
@@ -1127,12 +1415,27 @@ function buildResidueConfidenceRowsFromCif(structureText: string): CifResidueCon
 
       const tokens = tokenizeCifRow(rawRow);
       if (tokens.length >= headers.length) {
+        const groupPdb = groupCol >= 0 ? stripCifTokenQuotes(tokens[groupCol]).trim().toUpperCase() : '';
         const chainId = stripCifTokenQuotes(tokens[chainCol]).trim();
         const seqToken = stripCifTokenQuotes(tokens[seqCol]).trim();
-        const compId = stripCifTokenQuotes(tokens[compCol]).trim();
+        const compId = stripCifTokenQuotes(tokens[compCol]).trim().toUpperCase();
         const bFactor = Number(tokens[bFactorCol]);
         const seqId = Number.parseInt(seqToken, 10);
-        if (chainId && compId && Number.isFinite(seqId) && seqId > 0 && Number.isFinite(bFactor)) {
+        if (!chainId || !compId || !Number.isFinite(seqId) || seqId <= 0 || !Number.isFinite(bFactor)) {
+          rowIndex += 1;
+          continue;
+        }
+        // Keep local QA rows polymer-only, so ligands can retain atom-level B-factor confidence coloring.
+        if (groupPdb) {
+          if (groupPdb !== 'ATOM') {
+            rowIndex += 1;
+            continue;
+          }
+        } else if (!POLYMER_COMP_IDS.has(compId)) {
+          rowIndex += 1;
+          continue;
+        }
+        {
           const key = `${chainId}|${seqId}|${compId}`;
           const current = residueMap.get(key);
           if (current) {
@@ -1208,6 +1511,87 @@ function ensureCifHasMaQaMetricLocal(structureText: string): string {
   return `${structureText}${suffix}#\n${appendBlocks.join('\n#\n')}\n`;
 }
 
+function pruneCifMaQaMetricLocalToPolymer(structureText: string): string {
+  if (!structureText) return structureText;
+  if (!structureText.includes('_ma_qa_metric_local.label_comp_id')) return structureText;
+  const lines = structureText.split(/\r?\n/);
+  const output: string[] = [];
+  let changed = false;
+
+  let i = 0;
+  while (i < lines.length) {
+    if (lines[i].trim() !== 'loop_') {
+      output.push(lines[i]);
+      i += 1;
+      continue;
+    }
+
+    let headerIndex = i + 1;
+    const headers: string[] = [];
+    while (headerIndex < lines.length) {
+      const rawHeader = lines[headerIndex].trim();
+      if (!rawHeader.startsWith('_')) break;
+      headers.push(rawHeader);
+      headerIndex += 1;
+    }
+
+    const isQaLocalLoop = headers.some((header) => header.toLowerCase().startsWith('_ma_qa_metric_local.'));
+    const compCol = headers.findIndex((header) => header.toLowerCase() === '_ma_qa_metric_local.label_comp_id');
+    if (!isQaLocalLoop || compCol < 0) {
+      let rowIndex = headerIndex;
+      while (rowIndex < lines.length) {
+        const row = lines[rowIndex].trim();
+        if (row === 'loop_' || row.startsWith('_')) break;
+        rowIndex += 1;
+      }
+      output.push(...lines.slice(i, rowIndex));
+      i = rowIndex;
+      continue;
+    }
+
+    output.push(lines[i]);
+    output.push(...lines.slice(i + 1, headerIndex));
+    let rowIndex = headerIndex;
+    while (rowIndex < lines.length) {
+      const rawRow = lines[rowIndex];
+      const row = rawRow.trim();
+      if (row === 'loop_' || row.startsWith('_')) break;
+      if (!row || row === '#') {
+        rowIndex += 1;
+        continue;
+      }
+      const tokens = tokenizeCifRow(rawRow);
+      if (tokens.length >= headers.length) {
+        const compId = stripCifTokenQuotes(tokens[compCol]).trim().toUpperCase();
+        if (POLYMER_COMP_IDS.has(compId)) {
+          output.push(tokens.join(' '));
+        } else {
+          changed = true;
+        }
+      }
+      rowIndex += 1;
+    }
+    output.push('#');
+    i = rowIndex;
+  }
+
+  if (!changed) return structureText;
+  return output.join('\n');
+}
+
+export function ensureStructureConfidenceColoringData(
+  structureText: string,
+  structureFormat: 'cif' | 'pdb',
+  backend: string
+): string {
+  if (!structureText) return structureText;
+  if (structureFormat !== 'cif') return structureText;
+  const normalizedBackend = String(backend || '').trim().toLowerCase();
+  if (normalizedBackend !== 'protenix') return structureText;
+  const pruned = pruneCifMaQaMetricLocalToPolymer(structureText);
+  return ensureCifHasMaQaMetricLocal(pruned);
+}
+
 function compactConfidenceForStorage(input: Record<string, unknown>): Record<string, unknown> {
   const next = { ...input };
   const pae = next.pae;
@@ -1222,6 +1606,7 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
   const zip = await JSZip.loadAsync(blob);
   const names = Object.keys(zip.files).filter((name) => !zip.files[name]?.dir);
   const isAf3 = names.some((name) => name.toLowerCase().includes('af3/output/'));
+  const isProtenix = names.some((name) => name.toLowerCase().includes('protenix/output/'));
 
   const structureFile = isAf3 ? chooseBestAf3StructureFile(names) : chooseBestBoltzStructureFile(names);
   if (!structureFile) return null;
@@ -1309,20 +1694,67 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
     if (parsedConfidence) {
       confidence = compactConfidenceForStorage({
         ...parsedConfidence,
-        backend: 'boltz'
+        backend: isProtenix ? 'protenix' : 'boltz'
       });
+    } else {
+      confidence = {
+        backend: isProtenix ? 'protenix' : 'boltz'
+      };
+    }
+    if (isProtenix) {
+      const raw = confidence as Record<string, unknown>;
+      const paeScalar =
+        toFiniteNumber(raw.complex_pde) ??
+        toFiniteNumber(raw.complex_pae) ??
+        toFiniteNumber(raw.gpde) ??
+        toFiniteNumber(raw.pae);
+      if (paeScalar !== null) {
+        confidence = {
+          ...confidence,
+          complex_pde: paeScalar,
+          complex_pae: paeScalar,
+          pae: paeScalar
+        };
+      }
+      const chainPairGpde = raw.chain_pair_gpde;
+      if (Array.isArray(chainPairGpde) && !Array.isArray(raw.chain_pair_pae)) {
+        confidence = {
+          ...confidence,
+          chain_pair_pae: chainPairGpde
+        };
+      }
     }
   }
 
   const existingLigandAtomPlddts = normalizeLigandAtomPlddts(
     toFiniteNumberArray((confidence as Record<string, unknown>).ligand_atom_plddts)
   );
-  const existingLigandAtomPlddtsByChain = normalizeLigandAtomPlddtsByChain(
+  const existingLigandAtomPlddtsByChainRaw = normalizeLigandAtomPlddtsByChain(
     (confidence as Record<string, unknown>).ligand_atom_plddts_by_chain
   );
+  let ligandAtomPlddtsByChainForRender = existingLigandAtomPlddtsByChainRaw;
+  if (Object.keys(ligandAtomPlddtsByChainForRender).length === 0 && existingLigandAtomPlddts.length > 0) {
+    const singleLigandChainId = inferSingleLigandChainIdFromStructure(structureText, structureFormat);
+    if (singleLigandChainId) {
+      ligandAtomPlddtsByChainForRender = {
+        [singleLigandChainId]: existingLigandAtomPlddts
+      };
+    }
+  }
+  if (Object.keys(ligandAtomPlddtsByChainForRender).length > 0) {
+    structureText = applyLigandAtomPlddtsByChainToStructure(
+      structureText,
+      structureFormat,
+      ligandAtomPlddtsByChainForRender
+    );
+  }
+  if (isProtenix && structureFormat === 'cif') {
+    // Keep Protenix rendering aligned with AF3/Boltz2 AlphaFold palette requirements.
+    structureText = ensureStructureConfidenceColoringData(structureText, structureFormat, 'protenix');
+  }
   const extractedLigandAtomPlddtsByChain =
-    Object.keys(existingLigandAtomPlddtsByChain).length > 0
-      ? existingLigandAtomPlddtsByChain
+    Object.keys(ligandAtomPlddtsByChainForRender).length > 0
+      ? ligandAtomPlddtsByChainForRender
       : extractLigandAtomPlddtsByChainFromStructure(structureText, structureFormat);
   const extractedLigandAtomPlddts =
     existingLigandAtomPlddts.length > 0

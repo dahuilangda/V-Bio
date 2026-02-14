@@ -221,7 +221,7 @@ def main():
     parser.add_argument("--input_compound", type=str, help="Input compound SMILES")
     parser.add_argument("--input_file", type=str, help="Input file (CSV or text) with compounds")
     parser.add_argument("--target_config", type=str, required=True, help="Target protein YAML config")
-    parser.add_argument("--backend", type=str, choices=["boltz", "alphafold3"],
+    parser.add_argument("--backend", type=str, choices=["boltz", "alphafold3", "protenix"],
                        help="Backend engine for prediction")
     
     # Optimization parameters

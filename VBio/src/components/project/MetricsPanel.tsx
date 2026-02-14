@@ -366,7 +366,7 @@ function ConfidencePanel({
   const selectedPairIptm = readPairIptmForChains(data, selectedTargetChainId, selectedLigandChainId, chainIds);
   const iptm = selectedPairIptm ?? pickNumber(data, ['iptm']);
   const ptm = pickNumber(data, ['ptm']);
-  const pae = pickNumber(data, ['complex_pde', 'complex_pae']);
+  const pae = pickNumber(data, ['complex_pde', 'complex_pae', 'gpde', 'pae']);
   const rankingScore = pickNumber(data, ['ranking_score']);
   const fractionDisordered = pickNumber(data, ['fraction_disordered']);
 

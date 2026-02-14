@@ -29,7 +29,14 @@ import type {
   TaskState
 } from '../types/models';
 import { useAuth } from '../hooks/useAuth';
-import { downloadResultBlob, downloadResultFile, getTaskStatus, parseResultBundle, submitPrediction } from '../api/backendApi';
+import {
+  downloadResultBlob,
+  downloadResultFile,
+  ensureStructureConfidenceColoringData,
+  getTaskStatus,
+  parseResultBundle,
+  submitPrediction
+} from '../api/backendApi';
 import { getProjectById, insertProjectTask, listProjectTasks, updateProject, updateProjectTask } from '../api/supabaseLite';
 import { formatDuration } from '../utils/date';
 import type { MolstarResidueHighlight, MolstarResiduePick } from '../components/project/MolstarViewer';
@@ -732,7 +739,8 @@ const ALL_CONSTRAINT_TYPES: PredictionConstraintType[] = ['contact', 'bond', 'po
 const AF3_CONSTRAINT_TYPES: PredictionConstraintType[] = ['bond'];
 
 function allowedConstraintTypesForBackend(backend: string): PredictionConstraintType[] {
-  if (String(backend || '').trim().toLowerCase() === 'alphafold3') {
+  const normalized = String(backend || '').trim().toLowerCase();
+  if (normalized === 'alphafold3' || normalized === 'protenix') {
     return AF3_CONSTRAINT_TYPES;
   }
   return ALL_CONSTRAINT_TYPES;
@@ -976,8 +984,9 @@ export function ProjectDetailPage() {
   const allowedConstraintTypes = useMemo(() => {
     return allowedConstraintTypesForBackend(draft?.backend || project?.backend || 'boltz');
   }, [draft?.backend, project?.backend]);
-  const isAf3Backend = useMemo(() => {
-    return String(draft?.backend || project?.backend || '').toLowerCase() === 'alphafold3';
+  const isBondOnlyBackend = useMemo(() => {
+    const backend = String(draft?.backend || project?.backend || '').toLowerCase();
+    return backend === 'alphafold3' || backend === 'protenix';
   }, [draft?.backend, project?.backend]);
 
   useEffect(() => {
@@ -2765,6 +2774,34 @@ export function ProjectDetailPage() {
     };
   }, [runMenuOpen]);
 
+  const confidenceBackend =
+    snapshotConfidence && typeof snapshotConfidence.backend === 'string' ? String(snapshotConfidence.backend).toLowerCase() : '';
+  const projectBackend = String(project?.backend || '').trim().toLowerCase();
+  const hasProtenixConfidenceSignals = Boolean(
+    confidenceBackend === 'protenix' ||
+      readFirstFiniteMetric(snapshotConfidence || {}, [
+        'complex_plddt',
+        'complex_plddt_protein',
+        'complex_iplddt',
+        'plddt',
+        'ligand_mean_plddt'
+      ]) !== null ||
+      readObjectPath(snapshotConfidence || {}, 'chain_mean_plddt') !== undefined ||
+      readObjectPath(snapshotConfidence || {}, 'residue_plddt_by_chain') !== undefined
+  );
+  const hasAf3ConfidenceSignals = Boolean(
+    readFirstFiniteMetric(snapshotConfidence || {}, ['ranking_score', 'fraction_disordered']) !== null ||
+      readObjectPath(snapshotConfidence || {}, 'chain_pair_iptm') !== undefined
+  );
+
+  useEffect(() => {
+    if (!draft) return;
+    if (projectBackend !== 'protenix') return;
+    if (!hasProtenixConfidenceSignals) return;
+    if (draft.color_mode === 'alphafold') return;
+    setDraft((prev) => (prev ? { ...prev, color_mode: 'alphafold' } : prev));
+  }, [draft, projectBackend, hasProtenixConfidenceSignals]);
+
   if (loading) {
     const query = new URLSearchParams(location.search);
     const requestedTaskRowId = String(query.get('task_row_id') || '').trim();
@@ -2862,7 +2899,7 @@ export function ProjectDetailPage() {
     const chainA = activeChainInfos[0]?.id || 'A';
     const chainB = activeChainInfos.find((item) => item.id !== chainA)?.id || chainA;
     const firstLigandChain = ligandChainOptions[0]?.id || null;
-    const resolvedType = preferredType || (isAf3Backend ? 'bond' : firstLigandChain ? 'pocket' : 'contact');
+    const resolvedType = preferredType || (isBondOnlyBackend ? 'bond' : firstLigandChain ? 'pocket' : 'contact');
 
     if (resolvedType === 'bond') {
       return {
@@ -2923,7 +2960,7 @@ export function ProjectDetailPage() {
   };
   const addConstraintFromSidebar = () => {
     if (!draft) return;
-    const next = buildDefaultConstraint(isAf3Backend ? 'bond' : undefined);
+    const next = buildDefaultConstraint(isBondOnlyBackend ? 'bond' : undefined);
     setWorkspaceTab('constraints');
     setSidebarConstraintsOpen(true);
     setActiveConstraintId(next.id);
@@ -3290,20 +3327,20 @@ export function ProjectDetailPage() {
       };
     });
   };
-  const displayStructureText = structureText;
+  const displayStructureText = ensureStructureConfidenceColoringData(
+    structureText,
+    structureFormat,
+    confidenceBackend || projectBackend
+  );
   const displayStructureFormat: 'cif' | 'pdb' = structureFormat;
   const displayStructureName = activeResultTask?.structure_name || project.structure_name || '-';
-  const confidenceBackend =
-    snapshotConfidence && typeof snapshotConfidence.backend === 'string' ? String(snapshotConfidence.backend).toLowerCase() : '';
-  const hasAf3ConfidenceSignals = Boolean(
-    readFirstFiniteMetric(snapshotConfidence || {}, ['ranking_score', 'fraction_disordered']) !== null ||
-      readObjectPath(snapshotConfidence || {}, 'chain_pair_iptm') !== undefined
-  );
   const displayStructureColorMode: 'white' | 'alphafold' =
-    project.backend === 'alphafold3' ||
+    projectBackend === 'alphafold3' ||
+    projectBackend === 'protenix' ||
     draft.color_mode === 'alphafold' ||
     confidenceBackend === 'alphafold3' ||
-    hasAf3ConfidenceSignals
+    hasAf3ConfidenceSignals ||
+    hasProtenixConfidenceSignals
       ? 'alphafold'
       : 'white';
   const constraintStructureText = selectedTemplatePreview?.content || '';
@@ -3541,7 +3578,12 @@ export function ProjectDetailPage() {
                 <section className="panel structure-panel">
                   <h2>Structure Viewer</h2>
 
-                  <MolstarViewer structureText={displayStructureText} format={displayStructureFormat} colorMode={displayStructureColorMode} />
+                  <MolstarViewer
+                    structureText={displayStructureText}
+                    format={displayStructureFormat}
+                    colorMode={displayStructureColorMode}
+                    confidenceBackend={confidenceBackend || projectBackend}
+                  />
 
                   <span className="muted small">Current structure file: {displayStructureName}</span>
                 </section>
@@ -3694,6 +3736,7 @@ export function ProjectDetailPage() {
                   >
                     <option value="boltz">Boltz-2</option>
                     <option value="alphafold3">AlphaFold3</option>
+                    <option value="protenix">Protenix</option>
                   </select>
                 </label>
 
@@ -3941,7 +3984,7 @@ export function ProjectDetailPage() {
                             showAffinitySection={false}
                             allowedConstraintTypes={allowedConstraintTypes}
                             compatibilityHint={
-                              isAf3Backend ? 'AlphaFold3 backend currently supports Bond constraints only.' : undefined
+                              isBondOnlyBackend ? 'Current backend currently supports Bond constraints only.' : undefined
                             }
                             onConstraintsChange={(constraints) =>
                               setDraft((d) =>

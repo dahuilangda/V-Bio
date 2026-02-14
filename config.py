@@ -158,3 +158,22 @@ ALPHAFOLD3_DOCKER_IMAGE = os.environ.get("ALPHAFOLD3_DOCKER_IMAGE", "alphafold3"
 ALPHAFOLD3_MODEL_DIR = os.environ.get("ALPHAFOLD3_MODEL_DIR")
 ALPHAFOLD3_DATABASE_DIR = os.environ.get("ALPHAFOLD3_DATABASE_DIR")
 ALPHAFOLD3_DOCKER_EXTRA_ARGS = os.environ.get("ALPHAFOLD3_DOCKER_EXTRA_ARGS", "")
+
+# ==============================================================================
+# 6. Protenix Docker 集成
+# ==============================================================================
+
+PROTENIX_DOCKER_IMAGE = os.environ.get(
+    "PROTENIX_DOCKER_IMAGE",
+    "ai4s-share-public-cn-beijing.cr.volces.com/release/protenix:1.0.0.4"
+)
+PROTENIX_MODEL_DIR = os.environ.get("PROTENIX_MODEL_DIR")
+PROTENIX_MODEL_NAME = os.environ.get("PROTENIX_MODEL_NAME", "protenix_base_20250630_v1.0.0")
+PROTENIX_SOURCE_DIR = os.environ.get(
+    "PROTENIX_SOURCE_DIR",
+    str(Path(__file__).parent / "protenix")
+)
+PROTENIX_DOCKER_EXTRA_ARGS = os.environ.get("PROTENIX_DOCKER_EXTRA_ARGS", "")
+PROTENIX_INFER_EXTRA_ARGS = os.environ.get("PROTENIX_INFER_EXTRA_ARGS", "")
+PROTENIX_PYTHON_BIN = os.environ.get("PROTENIX_PYTHON_BIN", "python3")
+PROTENIX_USE_HOST_USER = os.environ.get("PROTENIX_USE_HOST_USER", "false")

@@ -377,8 +377,10 @@ class TaskMonitor:
             result['errors'].extend(containers_snapshot['errors'])
 
         if not containers_snapshot.get('docker_available'):
-            if result['backend'] == 'alphafold3':
-                result['errors'].append("Docker CLI unavailable; cannot guarantee AlphaFold3 container termination.")
+            if result['backend'] in ('alphafold3', 'protenix'):
+                result['errors'].append(
+                    "Docker CLI unavailable; cannot guarantee container termination for the selected backend."
+                )
         else:
             for container in containers:
                 container_id = str(container.get('id') or '').strip()
@@ -666,7 +668,7 @@ def handle_predict():
 
     backend_raw = request.form.get('backend', 'boltz')
     backend = str(backend_raw).strip().lower()
-    if backend not in ['boltz', 'alphafold3']:
+    if backend not in ['boltz', 'alphafold3', 'protenix']:
         logger.warning(f"Invalid backend '{backend}' provided by client {request.remote_addr}. Defaulting to 'boltz'.")
         backend = 'boltz'
     logger.info(f"backend parameter received: {backend} for client {request.remote_addr}.")
@@ -886,7 +888,7 @@ def submit_lead_optimization():
         'backend': request.form.get('backend')
     }
 
-    if options.get('backend') and options['backend'] not in ['boltz', 'alphafold3']:
+    if options.get('backend') and options['backend'] not in ['boltz', 'alphafold3', 'protenix']:
         options['backend'] = None
 
     optimization_args = {
