@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   ArrowLeft,
+  CheckCircle2,
   Clock3,
   ChevronDown,
   ChevronRight,
@@ -795,6 +796,10 @@ function hasProteinTemplates(templates: Record<string, ProteinTemplateUpload> | 
   return Boolean(templates && Object.keys(templates).length > 0);
 }
 
+function hasRecordData(value: unknown): boolean {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length > 0);
+}
+
 export function ProjectDetailPage() {
   const { projectId = '' } = useParams();
   const location = useLocation();
@@ -809,6 +814,8 @@ export function ProjectDetailPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resultError, setResultError] = useState<string | null>(null);
+  const [runRedirectTaskId, setRunRedirectTaskId] = useState<string | null>(null);
+  const [runSuccessNotice, setRunSuccessNotice] = useState<string | null>(null);
   const [structureText, setStructureText] = useState('');
   const [structureFormat, setStructureFormat] = useState<'cif' | 'pdb'>('cif');
   const [statusInfo, setStatusInfo] = useState<Record<string, unknown> | null>(null);
@@ -828,6 +835,9 @@ export function ProjectDetailPage() {
   const constraintSelectionAnchorRef = useRef<string | null>(null);
   const prevTaskStateRef = useRef<TaskState | null>(null);
   const statusRefreshInFlightRef = useRef<Set<string>>(new Set());
+  const submitInFlightRef = useRef(false);
+  const runRedirectTimerRef = useRef<number | null>(null);
+  const runSuccessNoticeTimerRef = useRef<number | null>(null);
   const runActionRef = useRef<HTMLDivElement | null>(null);
   const [activeComponentId, setActiveComponentId] = useState<string | null>(null);
   const [sidebarTypeOpen, setSidebarTypeOpen] = useState<Record<InputComponent['type'], boolean>>({
@@ -1854,26 +1864,30 @@ export function ProjectDetailPage() {
     if (!draft) return { chainId: null as string | null, componentId: null as string | null };
     return resolveChainFromProperty(draft.inputConfig.properties.target, workspaceTargetOptions);
   }, [draft, resolveChainFromProperty, workspaceTargetOptions]);
+  const workspaceLigandSelectableOptions = useMemo(() => {
+    if (!selectedWorkspaceTarget.componentId) return workspaceLigandOptions;
+    return workspaceLigandOptions.filter((item) => item.componentId !== selectedWorkspaceTarget.componentId);
+  }, [selectedWorkspaceTarget.componentId, workspaceLigandOptions]);
   const selectedWorkspaceLigand = useMemo(() => {
     if (!draft) return { chainId: null as string | null, componentId: null as string | null };
     const rawLigand = String(draft.inputConfig.properties.ligand || '').trim();
     if (rawLigand) {
-      return resolveChainFromProperty(rawLigand, workspaceLigandOptions);
+      const resolved = resolveChainFromProperty(rawLigand, workspaceLigandOptions);
+      if (resolved.componentId && resolved.componentId !== selectedWorkspaceTarget.componentId) {
+        return resolved;
+      }
+      return { chainId: null, componentId: null };
     }
-    const optionsWithoutTarget = workspaceLigandOptions.filter(
-      (item) => item.componentId !== selectedWorkspaceTarget.componentId
-    );
+    const optionsWithoutTarget = workspaceLigandSelectableOptions;
     const defaultSmallMolecule =
       optionsWithoutTarget.find((item) => item.isSmallMolecule) ||
-      workspaceLigandOptions.find((item) => item.isSmallMolecule) ||
       optionsWithoutTarget[0] ||
-      workspaceLigandOptions[0] ||
       null;
     return {
       chainId: defaultSmallMolecule?.chainId || null,
       componentId: defaultSmallMolecule?.componentId || null
     };
-  }, [draft, resolveChainFromProperty, selectedWorkspaceTarget.componentId, workspaceLigandOptions]);
+  }, [draft, resolveChainFromProperty, selectedWorkspaceTarget.componentId, workspaceLigandOptions, workspaceLigandSelectableOptions]);
   const selectedWorkspaceLigandOption = useMemo(() => {
     if (!selectedWorkspaceLigand.componentId) return null;
     return workspaceLigandOptions.find((item) => item.componentId === selectedWorkspaceLigand.componentId) || null;
@@ -2097,7 +2111,8 @@ export function ProjectDetailPage() {
       const activeTaskId = (next.task_id || '').trim();
       const activeTaskRow =
         activeTaskId.length > 0 ? taskRows.find((item) => String(item.task_id || '').trim() === activeTaskId) || null : null;
-      const requestedTaskRowId = new URLSearchParams(location.search).get('task_row_id');
+      const query = new URLSearchParams(location.search);
+      const requestedTaskRowId = query.get('task_row_id');
       const requestedTaskRow =
         requestedTaskRowId && requestedTaskRowId.trim()
           ? taskRows.find((item) => String(item.id || '').trim() === requestedTaskRowId.trim()) || null
@@ -2167,6 +2182,23 @@ export function ProjectDetailPage() {
       const restoredTemplates = Object.fromEntries(
         Object.entries(templateSource).filter(([componentId]) => validProteinIds.has(componentId))
       ) as Record<string, ProteinTemplateUpload>;
+      const defaultContextTask = requestedTaskRow || activeTaskRow;
+      const contextHasResult = Boolean(
+        String(defaultContextTask?.structure_name || '').trim() ||
+          hasRecordData(defaultContextTask?.confidence) ||
+          hasRecordData(defaultContextTask?.affinity)
+      );
+      const projectHasResult = Boolean(
+        String(next.structure_name || '').trim() || hasRecordData(next.confidence) || hasRecordData(next.affinity)
+      );
+      if (!query.get('tab')) {
+        const workflowDef = getWorkflowDefinition(next.task_type);
+        if (workflowDef.key === 'prediction') {
+          setWorkspaceTab(contextHasResult || projectHasResult ? 'results' : 'components');
+        } else {
+          setWorkspaceTab('basics');
+        }
+      }
 
       setDraft(loadedDraft);
       setSavedDraftFingerprint(createDraftFingerprint(loadedDraft));
@@ -2502,6 +2534,8 @@ export function ProjectDetailPage() {
 
   const submitTask = async () => {
     if (!project || !draft) return;
+    if (submitInFlightRef.current) return;
+    const shouldStayOnComponentsAfterSubmit = workspaceTab === 'components';
     const workflow = getWorkflowDefinition(project.task_type);
     if (workflow.key !== 'prediction') {
       setError(`${workflow.title} runner is not wired yet in React UI.`);
@@ -2525,8 +2559,15 @@ export function ProjectDetailPage() {
       return;
     }
 
+    submitInFlightRef.current = true;
     setSubmitting(true);
     setError(null);
+    setRunRedirectTaskId(null);
+    setRunSuccessNotice(null);
+    if (runSuccessNoticeTimerRef.current !== null) {
+      window.clearTimeout(runSuccessNoticeTimerRef.current);
+      runSuccessNoticeTimerRef.current = null;
+    }
 
     try {
       const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(normalizedConfig);
@@ -2667,15 +2708,35 @@ export function ProjectDetailPage() {
           `saving project state failed: ${dbError instanceof Error ? dbError.message : 'unknown error'}`
         );
       }
-      if (persistenceWarnings.length > 0) {
-        setError(`Prediction submitted (task: ${taskId}), but ${persistenceWarnings.join('; ')}.`);
-      }
+      const warningNotice = persistenceWarnings.length > 0 ? `Task ${taskId.slice(0, 8)} queued with sync warning.` : '';
       void loadProjectTasks(project.id, { silent: true });
       setStatusInfo(null);
+      if (shouldStayOnComponentsAfterSubmit) {
+        const inlineNotice = warningNotice || `Task ${taskId.slice(0, 8)} queued.`;
+        setRunSuccessNotice(inlineNotice);
+        if (runSuccessNoticeTimerRef.current !== null) {
+          window.clearTimeout(runSuccessNoticeTimerRef.current);
+        }
+        runSuccessNoticeTimerRef.current = window.setTimeout(() => {
+          runSuccessNoticeTimerRef.current = null;
+          setRunSuccessNotice(null);
+        }, 5200);
+      } else {
+        setRunRedirectTaskId(taskId);
+        if (runRedirectTimerRef.current !== null) {
+          window.clearTimeout(runRedirectTimerRef.current);
+        }
+        runRedirectTimerRef.current = window.setTimeout(() => {
+          runRedirectTimerRef.current = null;
+          navigate(`/projects/${project.id}/tasks`);
+        }, 620);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to submit prediction.';
+      setRunRedirectTaskId(null);
       setError(message);
     } finally {
+      submitInFlightRef.current = false;
       setSubmitting(false);
     }
   };
@@ -2747,6 +2808,19 @@ export function ProjectDetailPage() {
     [draft, savedTemplateFingerprint, currentTemplateFingerprint]
   );
   const hasUnsavedChanges = isDraftDirty || isTemplateDirty;
+
+  useEffect(() => {
+    return () => {
+      if (runRedirectTimerRef.current !== null) {
+        window.clearTimeout(runRedirectTimerRef.current);
+        runRedirectTimerRef.current = null;
+      }
+      if (runSuccessNoticeTimerRef.current !== null) {
+        window.clearTimeout(runSuccessNoticeTimerRef.current);
+        runSuccessNoticeTimerRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!runMenuOpen) return;
@@ -2826,12 +2900,13 @@ export function ProjectDetailPage() {
 
   const workflow = getWorkflowDefinition(project.task_type);
   const isPredictionWorkflow = workflow.key === 'prediction';
+  const isRunRedirecting = Boolean(runRedirectTaskId);
   const runBlockedReason = !isPredictionWorkflow
     ? 'Runner UI for this workflow is being integrated.'
     : hasIncompleteComponents
       ? `Complete all components before run (${componentCompletion.filledCount}/${componentCompletion.total} ready).`
       : '';
-  const runDisabled = submitting || saving || !isPredictionWorkflow || hasIncompleteComponents;
+  const runDisabled = submitting || saving || isRunRedirecting || !isPredictionWorkflow || hasIncompleteComponents;
   const canOpenRunMenu = false;
   const handleRunAction = () => {
     if (runDisabled) return;
@@ -3001,7 +3076,7 @@ export function ProjectDetailPage() {
     );
   };
   const setAffinityComponentFromWorkspace = (field: 'target' | 'ligand', componentId: string | null) => {
-    const optionSource = field === 'target' ? workspaceTargetOptions : workspaceLigandOptions;
+    const optionSource = field === 'target' ? workspaceTargetOptions : workspaceLigandSelectableOptions;
     const nextOption = optionSource.find((item) => item.componentId === componentId) || null;
     const nextChain = nextOption?.chainId || null;
     setDraft((prev) =>
@@ -3469,24 +3544,28 @@ export function ProjectDetailPage() {
               disabled={runDisabled}
               title={
                 submitting
-                    ? 'Submitting'
-                  : runBlockedReason
-                    ? runBlockedReason
-                    : hasUnsavedChanges
-                    ? `${workflow.runLabel} (has unsaved changes)`
-                    : workflow.runLabel
+                  ? 'Submitting'
+                  : isRunRedirecting
+                    ? 'Opening task history'
+                    : runBlockedReason
+                      ? runBlockedReason
+                      : hasUnsavedChanges
+                        ? `${workflow.runLabel} (has unsaved changes)`
+                        : workflow.runLabel
               }
               aria-label={
                 submitting
                   ? 'Submitting'
-                  : runBlockedReason
-                    ? runBlockedReason
-                    : workflow.runLabel
+                  : isRunRedirecting
+                    ? 'Opening task history'
+                    : runBlockedReason
+                      ? runBlockedReason
+                      : workflow.runLabel
               }
               aria-haspopup={canOpenRunMenu ? 'menu' : undefined}
               aria-expanded={canOpenRunMenu ? runMenuOpen : undefined}
             >
-              {submitting ? <LoaderCircle size={15} className="spin" /> : <Play size={15} />}
+              {submitting || isRunRedirecting ? <LoaderCircle size={15} className="spin" /> : <Play size={15} />}
             </button>
             {runMenuOpen && hasUnsavedChanges && (
               <div className="run-action-menu" role="menu" aria-label="Run options">
@@ -3511,6 +3590,31 @@ export function ProjectDetailPage() {
           </div>
         </div>
       </section>
+
+      {runSuccessNotice && (
+        <div className="run-inline-toast" role="status" aria-live="polite" aria-label="New task started">
+          <span className="run-inline-toast-icon" aria-hidden="true">
+            <CheckCircle2 size={16} />
+          </span>
+          <div className="run-inline-toast-line">
+            <div className="run-inline-toast-text">{runSuccessNotice}</div>
+            <Link className="run-inline-toast-link" to={`/projects/${project.id}/tasks`}>
+              Tasks
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {isRunRedirecting && (
+        <div className="run-submit-transition" role="status" aria-live="polite" aria-label="Task submitted, opening task history">
+          <div className="run-submit-transition-card">
+            <span className="run-submit-transition-icon" aria-hidden="true">
+              <CheckCircle2 size={15} />
+            </span>
+            <span className="run-submit-transition-title">Task queued. Opening Tasks...</span>
+          </div>
+        </div>
+      )}
 
       {(error || resultError) && <div className="alert error">{error || resultError}</div>}
 
@@ -4197,10 +4301,11 @@ export function ProjectDetailPage() {
                             <span className="affinity-key">Ligand</span>
                             <select
                               value={selectedWorkspaceLigand.componentId || ''}
-                              disabled={!canEdit || workspaceLigandOptions.length === 0}
+                              disabled={!canEdit || workspaceLigandSelectableOptions.length === 0}
                               onChange={(e) => setAffinityComponentFromWorkspace('ligand', e.target.value || null)}
                             >
-                              {workspaceLigandOptions.map((item) => (
+                              <option value="">-</option>
+                              {workspaceLigandSelectableOptions.map((item) => (
                                 <option key={`workspace-affinity-ligand-${item.componentId}`} value={item.componentId}>
                                   {item.isSmallMolecule ? item.label : `${item.label} (affinity disabled)`}
                                 </option>

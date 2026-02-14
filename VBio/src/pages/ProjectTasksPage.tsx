@@ -393,12 +393,6 @@ function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: Wo
   const chainAssignments = assignChainIdsForComponents(activeComponents);
   const chainIds = chainAssignments.flat().map((value) => value.toUpperCase());
   const validChainIds = new Set(chainIds);
-  const fallbackTargetChainId = chainAssignments[0]?.[0] || null;
-  const fallbackLigandChainId = chainAssignments[chainAssignments.length - 1]?.[0] || null;
-  const normalizedFallbackTarget = fallbackTargetChainId ? fallbackTargetChainId.toUpperCase() : null;
-  const normalizedFallbackLigand = fallbackLigandChainId ? fallbackLigandChainId.toUpperCase() : null;
-  const targetChainId = targetCandidate && validChainIds.has(targetCandidate) ? targetCandidate : normalizedFallbackTarget;
-  const ligandChainId = ligandCandidate && validChainIds.has(ligandCandidate) ? ligandCandidate : normalizedFallbackLigand;
 
   const chainToComponent = new Map<string, InputComponent>();
   chainAssignments.forEach((chainGroup, index) => {
@@ -406,6 +400,28 @@ function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: Wo
       chainToComponent.set(chainId.toUpperCase(), activeComponents[index]);
     });
   });
+  const fallbackTargetChainId = chainAssignments[0]?.[0] || null;
+  const normalizedFallbackTarget = fallbackTargetChainId ? fallbackTargetChainId.toUpperCase() : null;
+  const targetChainId = targetCandidate && validChainIds.has(targetCandidate) ? targetCandidate : normalizedFallbackTarget;
+  const targetComponentId = targetChainId ? chainToComponent.get(targetChainId)?.id || null : null;
+  const candidateLigandChains = chainIds.filter((chainId) => {
+    if (chainId === targetChainId) return false;
+    const chainComponentId = chainToComponent.get(chainId)?.id || null;
+    if (!chainComponentId) return false;
+    if (targetComponentId && chainComponentId === targetComponentId) return false;
+    return true;
+  });
+  const defaultLigandChainId =
+    candidateLigandChains.find((chainId) => chainToComponent.get(chainId)?.type === 'ligand') || candidateLigandChains[0] || null;
+  const preferredLigandChainId = ligandCandidate && validChainIds.has(ligandCandidate) ? ligandCandidate : null;
+  const preferredLigandComponentId = preferredLigandChainId ? chainToComponent.get(preferredLigandChainId)?.id || null : null;
+  const ligandChainId =
+    preferredLigandChainId &&
+    preferredLigandChainId !== targetChainId &&
+    preferredLigandComponentId &&
+    preferredLigandComponentId !== targetComponentId
+      ? preferredLigandChainId
+      : defaultLigandChainId;
   const selectedLigandComponent = ligandChainId ? chainToComponent.get(ligandChainId) || null : null;
   const ligand =
     selectedLigandComponent?.type === 'ligand'
@@ -1968,7 +1984,21 @@ export function ProjectTasksPage() {
         structure_name: task.structure_name || '',
         backend: task.backend || project.backend
       });
-      navigate(`/projects/${project.id}?tab=results`);
+      const hasTaskResult = Boolean(
+        task.task_state === 'SUCCESS' &&
+          (String(task.structure_name || '').trim() ||
+            (task.confidence && typeof task.confidence === 'object' && Object.keys(task.confidence).length > 0) ||
+            (task.affinity && typeof task.affinity === 'object' && Object.keys(task.affinity).length > 0))
+      );
+      if (hasTaskResult) {
+        navigate(`/projects/${project.id}?tab=results`);
+      } else {
+        const query = new URLSearchParams({
+          tab: 'components',
+          task_row_id: task.id
+        }).toString();
+        navigate(`/projects/${project.id}?${query}`);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to open selected task.');
     } finally {

@@ -52,6 +52,7 @@ from af3_adapter import (
     serialize_af3_json,
 )
 from protenix_adapter import (
+    ProtenixPreparation,
     apply_protein_msa_paths,
     parse_yaml_for_protenix,
     serialize_protenix_json,
@@ -1717,6 +1718,200 @@ def run_af3_affinity_pipeline(
     return affinity_entries
 
 
+def locate_protenix_structure_file(protenix_output_dir: Path, input_name: str) -> Optional[Path]:
+    """Locate the primary Protenix structure file (.cif or .pdb) for affinity post-processing."""
+    base_dir = Path(protenix_output_dir)
+    if not base_dir.exists():
+        return None
+
+    candidates: List[Tuple[int, Path]] = []
+
+    def register_candidate(path: Path, base_priority: int) -> None:
+        if not path.is_file():
+            return
+        try:
+            rel_name = str(path.relative_to(base_dir))
+        except ValueError:
+            rel_name = path.name
+        priority = _structure_candidate_priority(rel_name, base_priority, input_name)
+        lowered = rel_name.lower()
+        if f"{os.sep}msa{os.sep}" in lowered or lowered.startswith("msa/"):
+            priority += 20
+        candidates.append((priority, path))
+
+    for path in base_dir.rglob("*.cif"):
+        register_candidate(path, 0)
+    for path in base_dir.rglob("*.pdb"):
+        register_candidate(path, 2)
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (item[0], len(str(item[1]))))
+    return candidates[0][1]
+
+
+def _find_ligand_chain_and_resname_in_structure(path: Path) -> Optional[Tuple[str, str]]:
+    """Fallback ligand locator when binder chain ID does not match output chain naming."""
+    polymer_like_names = set(AMINO_ACID_MAPPING.keys()) | {
+        "A", "C", "G", "U", "I",
+        "DA", "DC", "DG", "DT", "DI", "DU",
+    }
+    solvent_names = {"HOH", "WAT"}
+
+    try:
+        structure = gemmi.read_structure(str(path))
+        for model in structure:
+            for chain in model:
+                chain_id = (chain.name or "").strip()
+                for residue in chain:
+                    resname = residue.name.strip().upper()
+                    if not resname or resname in solvent_names or resname in polymer_like_names:
+                        continue
+                    return (chain_id, residue.name.strip())
+    except Exception:
+        pass
+
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if not line.startswith("HETATM"):
+                    continue
+
+                if len(line) >= 22:
+                    chain_id = line[21].strip()
+                    resname = line[17:20].strip().upper()
+                    if resname and resname not in solvent_names:
+                        return (chain_id, resname)
+
+                parts = line.split()
+                if len(parts) >= 7:
+                    resname = parts[5].strip().upper()
+                    chain_id = parts[6].strip()
+                    if resname and resname not in solvent_names:
+                        return (chain_id, resname)
+    except OSError:
+        return None
+
+    return None
+
+
+def run_protenix_affinity_pipeline(
+    temp_dir: str,
+    yaml_data: Dict[str, Any],
+    prep: ProtenixPreparation,
+    protenix_output_dir: str,
+) -> List[Tuple[Path, str]]:
+    """
+    若 YAML 配置请求亲和力预测，则在 Protenix 结果上运行 Boltz-2 亲和力流程。
+    返回需要附加到归档中的额外文件列表 (Path, arcname)。
+    """
+    affinity_config = extract_affinity_config_from_yaml(yaml_data)
+    if not affinity_config:
+        return []
+
+    binder_chain_raw = affinity_config.get("binder")
+    if not binder_chain_raw:
+        print("ℹ️ 亲和力配置未提供有效的 binder，跳过亲和力预测。", file=sys.stderr)
+        return []
+
+    binder_chain_raw = str(binder_chain_raw).strip()
+    if not binder_chain_raw:
+        print("ℹ️ 亲和力配置 binder 为空，跳过亲和力预测。", file=sys.stderr)
+        return []
+
+    ligand_entries = [
+        entry for entry in yaml_data.get("sequences", [])
+        if isinstance(entry, dict) and "ligand" in entry
+    ]
+    if not ligand_entries:
+        print("ℹ️ 未检测到配体条目，跳过亲和力预测。", file=sys.stderr)
+        return []
+
+    binder_chain = (
+        prep.chain_alias_map.get(binder_chain_raw)
+        or prep.chain_alias_map.get(binder_chain_raw.upper())
+        or prep.chain_alias_map.get(binder_chain_raw.lower())
+        or binder_chain_raw
+    )
+
+    model_path = locate_protenix_structure_file(Path(protenix_output_dir), prep.input_name)
+    if not model_path or not model_path.exists():
+        print("⚠️ 未找到 Protenix 预测的结构文件，无法进行亲和力预测。", file=sys.stderr)
+        return []
+
+    print(f"🔍 使用 Protenix 结构进行亲和力评估: {model_path}", file=sys.stderr)
+
+    ligand_resname = find_ligand_resname_in_cif(model_path, binder_chain)
+    if not ligand_resname:
+        inferred = _find_ligand_chain_and_resname_in_structure(model_path)
+        if inferred:
+            inferred_chain, inferred_resname = inferred
+            print(
+                f"ℹ️ 未在链 {binder_chain} 找到配体，自动回退到链 {inferred_chain} ({inferred_resname})。",
+                file=sys.stderr,
+            )
+            binder_chain = inferred_chain
+            ligand_resname = inferred_resname
+
+    if not ligand_resname:
+        print(
+            f"⚠️ 未能在结构中找到链 {binder_chain} 的配体残基，跳过亲和力预测。",
+            file=sys.stderr,
+        )
+        return []
+
+    try:
+        from affinity.main import Boltzina
+    except ImportError as err:
+        print(f"⚠️ 无法导入 Boltz-2 亲和力模块：{err}，跳过亲和力预测。", file=sys.stderr)
+        return []
+
+    affinity_base = Path(temp_dir) / "protenix_affinity"
+    output_dir = affinity_base / "boltzina_output"
+    work_dir = affinity_base / "boltzina_work"
+    sanitized_struct_dir = affinity_base / "sanitized_structures"
+    model_for_affinity = prepare_structure_for_affinity(model_path, sanitized_struct_dir)
+
+    affinity_entries: List[Tuple[Path, str]] = []
+    try:
+        print(
+            f"⚙️ 开始运行 Boltz-2 亲和力评估，配体链: {binder_chain}, 残基名: {ligand_resname}",
+            file=sys.stderr,
+        )
+        boltzina = Boltzina(
+            output_dir=str(output_dir),
+            work_dir=str(work_dir),
+            ligand_resname=ligand_resname,
+        )
+        boltzina.predict([str(model_for_affinity)])
+
+        if not boltzina.results:
+            print("⚠️ 亲和力预测未产生结果，跳过生成 affinity_data.json。", file=sys.stderr)
+            return []
+
+        affinity_result = dict(boltzina.results[0])
+        affinity_result["ligand_resname"] = ligand_resname
+        affinity_result["binder_chain"] = binder_chain
+        affinity_result["source"] = "protenix"
+
+        affinity_base.mkdir(parents=True, exist_ok=True)
+        affinity_json_path = affinity_base / "affinity_data.json"
+        with affinity_json_path.open("w") as json_file:
+            json.dump(affinity_result, json_file, indent=2)
+        affinity_entries.append((affinity_json_path, "affinity_data.json"))
+
+        affinity_csv_path = output_dir / "affinity_results.csv"
+        if affinity_csv_path.exists():
+            affinity_entries.append((affinity_csv_path, "protenix/affinity_results.csv"))
+
+        print("✅ 亲和力预测完成，结果已写入 affinity_data.json。", file=sys.stderr)
+    except Exception as err:
+        print(f"⚠️ 运行 Boltz-2 亲和力预测失败: {err}", file=sys.stderr)
+
+    return affinity_entries
+
+
 def get_sequence_hash(sequence: str) -> str:
     """计算序列的MD5哈希值作为缓存键"""
     return hashlib.md5(sequence.encode('utf-8')).hexdigest()
@@ -2758,7 +2953,24 @@ def run_protenix_backend(
             f"{hint}\nFull log: {protenix_log_path}"
         )
 
+    yaml_data: Dict[str, Any] = {}
+    try:
+        parsed_yaml = yaml.safe_load(yaml_content)
+        if isinstance(parsed_yaml, dict):
+            yaml_data = parsed_yaml
+    except Exception as yaml_err:
+        print(f"⚠️ Protenix 亲和力流程解析 YAML 失败，将跳过亲和力预测: {yaml_err}", file=sys.stderr)
+
     extra_files: List[Tuple[Path, str]] = [(Path(protenix_log_path), "protenix/protenix_docker.log")]
+    extra_files.extend(
+        run_protenix_affinity_pipeline(
+            temp_dir=temp_dir,
+            yaml_data=yaml_data,
+            prep=prep,
+            protenix_output_dir=protenix_output_dir,
+        )
+    )
+
     create_protenix_archive(
         output_archive_path=output_archive_path,
         protenix_json=protenix_json,
