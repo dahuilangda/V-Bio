@@ -816,6 +816,7 @@ export function ProjectDetailPage() {
   const [resultError, setResultError] = useState<string | null>(null);
   const [runRedirectTaskId, setRunRedirectTaskId] = useState<string | null>(null);
   const [runSuccessNotice, setRunSuccessNotice] = useState<string | null>(null);
+  const [showFloatingRunButton, setShowFloatingRunButton] = useState(false);
   const [structureText, setStructureText] = useState('');
   const [structureFormat, setStructureFormat] = useState<'cif' | 'pdb'>('cif');
   const [statusInfo, setStatusInfo] = useState<Record<string, unknown> | null>(null);
@@ -839,6 +840,7 @@ export function ProjectDetailPage() {
   const runRedirectTimerRef = useRef<number | null>(null);
   const runSuccessNoticeTimerRef = useRef<number | null>(null);
   const runActionRef = useRef<HTMLDivElement | null>(null);
+  const topRunButtonRef = useRef<HTMLButtonElement | null>(null);
   const [activeComponentId, setActiveComponentId] = useState<string | null>(null);
   const [sidebarTypeOpen, setSidebarTypeOpen] = useState<Record<InputComponent['type'], boolean>>({
     protein: true,
@@ -2055,7 +2057,7 @@ export function ProjectDetailPage() {
     if (workflowDef.key !== 'prediction' && (workspaceTab === 'components' || workspaceTab === 'constraints')) {
       setWorkspaceTab('basics');
     }
-  }, [project, workspaceTab]);
+  }, [project?.task_type, workspaceTab]);
 
   useEffect(() => {
     if (!project) return;
@@ -2848,6 +2850,48 @@ export function ProjectDetailPage() {
     };
   }, [runMenuOpen]);
 
+  useEffect(() => {
+    const isPredictionWorkflow = project ? getWorkflowDefinition(project.task_type).key === 'prediction' : false;
+    const shouldEnableFloatingRun =
+      isPredictionWorkflow && (workspaceTab === 'components' || workspaceTab === 'constraints');
+    if (!shouldEnableFloatingRun) {
+      setShowFloatingRunButton(false);
+      return;
+    }
+
+    const topRunButton = topRunButtonRef.current;
+    if (!topRunButton) return;
+
+    if (typeof IntersectionObserver === 'undefined') {
+      const update = () => {
+        setShowFloatingRunButton(window.scrollY > 260);
+      };
+      update();
+      window.addEventListener('scroll', update, { passive: true });
+      window.addEventListener('resize', update);
+      return () => {
+        window.removeEventListener('scroll', update);
+        window.removeEventListener('resize', update);
+      };
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        const visible = Boolean(entry?.isIntersecting && entry.intersectionRatio > 0.92);
+        setShowFloatingRunButton(!visible);
+      },
+      {
+        threshold: [0, 0.5, 0.92, 1],
+        rootMargin: '-64px 0px 0px 0px'
+      }
+    );
+    observer.observe(topRunButton);
+    return () => {
+      observer.disconnect();
+    };
+  }, [project, workspaceTab]);
+
   const confidenceBackend =
     snapshotConfidence && typeof snapshotConfidence.backend === 'string' ? String(snapshotConfidence.backend).toLowerCase() : '';
   const projectBackend = String(project?.backend || '').trim().toLowerCase();
@@ -2901,6 +2945,7 @@ export function ProjectDetailPage() {
   const workflow = getWorkflowDefinition(project.task_type);
   const isPredictionWorkflow = workflow.key === 'prediction';
   const isRunRedirecting = Boolean(runRedirectTaskId);
+  const showQuickRunFab = showFloatingRunButton && !isRunRedirecting;
   const runBlockedReason = !isPredictionWorkflow
     ? 'Runner UI for this workflow is being integrated.'
     : hasIncompleteComponents
@@ -3540,6 +3585,7 @@ export function ProjectDetailPage() {
             <button
               className="btn btn-primary btn-compact btn-square run-btn-primary"
               type="button"
+              ref={topRunButtonRef}
               onClick={handleRunAction}
               disabled={runDisabled}
               title={
@@ -3614,6 +3660,19 @@ export function ProjectDetailPage() {
             <span className="run-submit-transition-title">Task queued. Opening Tasks...</span>
           </div>
         </div>
+      )}
+
+      {showQuickRunFab && (
+        <button
+          type="button"
+          className="run-fab"
+          onClick={handleRunAction}
+          disabled={runDisabled}
+          title={runBlockedReason || workflow.runLabel}
+          aria-label={runBlockedReason || workflow.runLabel}
+        >
+          {submitting ? <LoaderCircle size={16} className="spin" /> : <Play size={16} />}
+        </button>
       )}
 
       {(error || resultError) && <div className="alert error">{error || resultError}</div>}
