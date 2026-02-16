@@ -203,6 +203,10 @@ export function JSMEEditor({ smiles, onSmilesChange, height = 340 }: JSMEEditorP
     if (incoming !== current) {
       try {
         appletRef.current.readGenericMolecularInput(incoming);
+        const parsed = (appletRef.current.smiles?.() || '').trim();
+        if (parsed && parsed !== incoming) {
+          onSmilesChangeRef.current(parsed);
+        }
       } catch {
         // ignore malformed incoming smiles
       }

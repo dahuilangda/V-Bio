@@ -16,6 +16,8 @@ declare global {
 interface MolstarViewerProps {
   structureText: string;
   format: 'cif' | 'pdb';
+  overlayStructureText?: string;
+  overlayFormat?: 'cif' | 'pdb';
   colorMode?: string;
   confidenceBackend?: string;
   onResiduePick?: (pick: MolstarResiduePick) => void;
@@ -245,8 +247,14 @@ async function waitForMolstarReady(timeoutMs = 12000, intervalMs = 120) {
   throw new Error('Mol* failed to initialize.');
 }
 
-async function loadStructure(viewer: any, text: string, format: 'cif' | 'pdb') {
-  if (typeof viewer?.clear === 'function') {
+async function loadStructure(
+  viewer: any,
+  text: string,
+  format: 'cif' | 'pdb',
+  options?: { clearBefore?: boolean }
+) {
+  const clearBefore = options?.clearBefore !== false;
+  if (clearBefore && typeof viewer?.clear === 'function') {
     await viewer.clear();
   }
   const formats = format === 'cif' ? ['mmcif', 'pdb'] : ['pdb', 'mmcif'];
@@ -323,6 +331,47 @@ function collectStructureEntries(viewer: any): any[] {
   return Array.from(new Set([...currentStructures, ...selectionStructures, ...managerStructures].filter(Boolean)));
 }
 
+async function waitForStructureEntries(viewer: any, timeoutMs = 6000, intervalMs = 80): Promise<any[]> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const entries = collectStructureEntries(viewer);
+    if (entries.length > 0) return entries;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return collectStructureEntries(viewer);
+}
+
+function getStructureSignature(text: string, format: 'cif' | 'pdb'): string {
+  const trimmed = text.trim();
+  const head = trimmed.slice(0, 128);
+  const tail = trimmed.slice(-128);
+  return `${format}:${trimmed.length}:${head}:${tail}`;
+}
+
+async function clearStructureComponents(viewer: any): Promise<void> {
+  const plugin = viewer?.plugin;
+  const manager = plugin?.managers?.structure?.component;
+  const components = collectStructureComponents(viewer);
+  if (!manager) return;
+
+  if (typeof manager.clear === 'function') {
+    try {
+      await manager.clear();
+      return;
+    } catch {
+      // fallback to explicit remove
+    }
+  }
+
+  if (components.length > 0 && typeof manager.remove === 'function') {
+    try {
+      await manager.remove(components);
+    } catch {
+      // no-op
+    }
+  }
+}
+
 function describeThemeCapabilities(viewer: any): string {
   const plugin = viewer?.plugin;
   const manager = plugin?.managers?.structure?.component;
@@ -375,31 +424,70 @@ async function tryCreateThemeComponentsFromStructures(viewer: any): Promise<void
   }
 }
 
-async function tryBuildRepresentationsFromStructures(viewer: any, colorTheme: string): Promise<void> {
+async function tryBuildRepresentationsFromStructures(
+  viewer: any,
+  colorTheme: string,
+  structures?: any[]
+): Promise<boolean> {
   const plugin = viewer?.plugin;
+  const tryCreateComponentStatic = plugin?.builders?.structure?.tryCreateComponentStatic;
   const addRepresentation = plugin?.builders?.structure?.representation?.addRepresentation;
-  const structures = collectStructureEntries(viewer);
-  if (typeof addRepresentation !== 'function' || structures.length === 0) return;
+  const entries = Array.isArray(structures) ? structures : collectStructureEntries(viewer);
+  if (typeof addRepresentation !== 'function' || entries.length === 0 || typeof tryCreateComponentStatic !== 'function') {
+    return false;
+  }
 
-  const representationCandidates = [
-    { type: 'cartoon', color: colorTheme },
-    { type: 'ball-and-stick', color: colorTheme },
-    { type: 'spacefill', color: colorTheme }
+  const staticPlan = [
+    { kind: 'polymer', type: 'cartoon' },
+    { kind: 'ligand', type: 'ball-and-stick' },
+    { kind: 'branched', type: 'ball-and-stick' },
+    { kind: 'ion', type: 'ball-and-stick' }
   ];
 
-  for (const entry of structures) {
+  const representationParamVariants = (type: string, color: string) => [
+    { type, color },
+    { type: { name: type }, color: { name: color } },
+    { type, colorTheme: { name: color } },
+    { type: { name: type }, colorTheme: { name: color } },
+    { type }
+  ];
+
+  let createdAnyRepresentation = false;
+  for (const entry of entries) {
     const targets = [entry, entry?.cell].filter(Boolean);
     for (const target of targets) {
-      for (const params of representationCandidates) {
+      for (const plan of staticPlan) {
+        let component: any = null;
         try {
-          await addRepresentation(target, params);
-          break;
+          component = await tryCreateComponentStatic(target, plan.kind);
         } catch {
-          // try next representation style
+          component = null;
+        }
+        if (!component) continue;
+        const componentTargets = Array.isArray(component) ? component : [component];
+        for (const componentTarget of componentTargets) {
+          const reprTargets = [componentTarget, componentTarget?.cell].filter(Boolean);
+          for (const reprTarget of reprTargets) {
+            let created = false;
+            for (const params of representationParamVariants(plan.type, colorTheme)) {
+              try {
+                await addRepresentation(reprTarget, params);
+                created = true;
+                break;
+              } catch {
+                // try next param variant
+              }
+            }
+            if (created) {
+              createdAnyRepresentation = true;
+              break;
+            }
+          }
         }
       }
     }
   }
+  return createdAnyRepresentation;
 }
 
 async function tryApplyAlphaFoldTheme(
@@ -455,18 +543,19 @@ async function tryApplyAlphaFoldTheme(
   );
 }
 
-async function tryApplyCartoonPreset(viewer: any) {
+async function tryApplyCartoonPreset(viewer: any, structures?: any[]): Promise<boolean> {
   const plugin = viewer?.plugin;
-  const structures = plugin?.managers?.structure?.hierarchy?.current?.structures;
-  if (!Array.isArray(structures) || structures.length === 0) {
-    return;
+  const entries = Array.isArray(structures) ? structures : plugin?.managers?.structure?.hierarchy?.current?.structures;
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return false;
   }
 
   const applyPreset = plugin?.builders?.structure?.representation?.applyPreset;
   const hierarchyApplyPreset = plugin?.managers?.structure?.hierarchy?.applyPreset;
-  const presetIds = ['polymer-and-ligand', 'default', 'auto'];
+  const presetIds = ['polymer-and-ligand', 'polymer-cartoon'];
+  let anyApplied = false;
 
-  for (const entry of structures) {
+  for (const entry of entries) {
     const target = entry?.cell ?? entry;
     if (!target) continue;
     let applied = false;
@@ -475,6 +564,7 @@ async function tryApplyCartoonPreset(viewer: any) {
         try {
           await applyPreset(target, presetId);
           applied = true;
+          anyApplied = true;
           break;
         } catch {
           // try next preset id
@@ -487,6 +577,7 @@ async function tryApplyCartoonPreset(viewer: any) {
         try {
           await hierarchyApplyPreset(target, presetId);
           applied = true;
+          anyApplied = true;
           break;
         } catch {
           // try next preset id
@@ -494,6 +585,7 @@ async function tryApplyCartoonPreset(viewer: any) {
       }
     }
   }
+  return anyApplied;
 }
 
 async function tryApplyWhiteTheme(viewer: any) {
@@ -1421,6 +1513,8 @@ function subscribePickEvents(
 export function MolstarViewer({
   structureText,
   format,
+  overlayStructureText,
+  overlayFormat,
   colorMode = 'white',
   confidenceBackend,
   onResiduePick,
@@ -1439,6 +1533,8 @@ export function MolstarViewer({
   const hadExternalHighlightsRef = useRef(false);
   const structureApplyQueueRef = useRef<Promise<void>>(Promise.resolve());
   const structureRequestIdRef = useRef(0);
+  const loadedPrimarySignatureRef = useRef('');
+  const loadedOverlaySignatureRef = useRef('');
   const altPressedRef = useRef(false);
   const shiftPressedRef = useRef(false);
   const ctrlPressedRef = useRef(false);
@@ -1580,6 +1676,8 @@ export function MolstarViewer({
         viewer.plugin.dispose();
       }
       viewerRef.current = null;
+      loadedPrimarySignatureRef.current = '';
+      loadedOverlaySignatureRef.current = '';
       setReady(false);
     };
   }, [showSequence]);
@@ -1636,21 +1734,69 @@ export function MolstarViewer({
         setError(null);
         const viewer = viewerRef.current;
         if (!viewer) return;
+        const primaryText = structureText.trim();
+        const overlayText = String(overlayStructureText || '').trim();
+        const resolvedOverlayFormat: 'cif' | 'pdb' = overlayFormat === 'pdb' ? 'pdb' : 'cif';
 
-        if (!structureText.trim()) {
+        if (!primaryText) {
           if (typeof viewer.clear === 'function') {
             await viewer.clear();
           }
+          loadedPrimarySignatureRef.current = '';
+          loadedOverlaySignatureRef.current = '';
           if (requestId === structureRequestIdRef.current) {
             setStructureReadyVersion((prev) => prev + 1);
           }
           return;
         }
 
-        await loadStructure(viewer, structureText, format);
+        const nextPrimarySignature = getStructureSignature(primaryText, format);
+        const nextOverlaySignature = overlayText ? getStructureSignature(overlayText, resolvedOverlayFormat) : '';
+        const previousPrimarySignature = loadedPrimarySignatureRef.current;
+        const previousOverlaySignature = loadedOverlaySignatureRef.current;
+        const primaryChanged = nextPrimarySignature !== previousPrimarySignature;
+        const overlayChanged = nextOverlaySignature !== previousOverlaySignature;
+
+        if (primaryChanged) {
+          await loadStructure(viewer, primaryText, format, { clearBefore: true });
+          loadedPrimarySignatureRef.current = nextPrimarySignature;
+          loadedOverlaySignatureRef.current = '';
+          if (requestId !== structureRequestIdRef.current) return;
+          if (overlayText) {
+            await loadStructure(viewer, overlayText, resolvedOverlayFormat, { clearBefore: false });
+            loadedOverlaySignatureRef.current = nextOverlaySignature;
+            if (requestId !== structureRequestIdRef.current) return;
+          }
+        } else if (overlayChanged) {
+          if (!overlayText) {
+            await loadStructure(viewer, primaryText, format, { clearBefore: true });
+            loadedOverlaySignatureRef.current = '';
+          } else if (!previousOverlaySignature) {
+            await loadStructure(viewer, overlayText, resolvedOverlayFormat, { clearBefore: false });
+            loadedOverlaySignatureRef.current = nextOverlaySignature;
+          } else {
+            await loadStructure(viewer, primaryText, format, { clearBefore: true });
+            if (requestId !== structureRequestIdRef.current) return;
+            await loadStructure(viewer, overlayText, resolvedOverlayFormat, { clearBefore: false });
+            loadedOverlaySignatureRef.current = nextOverlaySignature;
+          }
+          if (requestId !== structureRequestIdRef.current) return;
+        }
+
+        const structureEntries = await waitForStructureEntries(viewer);
         if (requestId !== structureRequestIdRef.current) return;
-        await tryApplyCartoonPreset(viewer);
+        const presetApplied = await tryApplyCartoonPreset(viewer, structureEntries);
         if (requestId !== structureRequestIdRef.current) return;
+        if (!presetApplied && colorMode === 'alphafold') {
+          const supportsStaticBuilder =
+            typeof viewer?.plugin?.builders?.structure?.tryCreateComponentStatic === 'function' &&
+            typeof viewer?.plugin?.builders?.structure?.representation?.addRepresentation === 'function';
+          if (supportsStaticBuilder) {
+            await clearStructureComponents(viewer);
+            await tryBuildRepresentationsFromStructures(viewer, 'plddt-confidence', structureEntries);
+            if (requestId !== structureRequestIdRef.current) return;
+          }
+        }
 
         if (colorMode === 'alphafold') {
           await tryApplyAlphaFoldTheme(viewer, confidenceBackend);
@@ -1673,7 +1819,7 @@ export function MolstarViewer({
         structureRequestIdRef.current += 1;
       }
     };
-  }, [ready, structureText, format, colorMode, confidenceBackend]);
+  }, [ready, structureText, format, overlayStructureText, overlayFormat, colorMode, confidenceBackend]);
 
   useEffect(() => {
     if (!ready || !viewerRef.current || !structureText.trim()) return;

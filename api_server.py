@@ -3,9 +3,14 @@ import json
 import logging
 import glob
 import time
+import uuid
 import hashlib
 import shutil
 import subprocess
+import io
+import math
+import re
+import zipfile
 import psutil
 import signal
 import base64
@@ -13,7 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
 from typing import Dict, List, Optional
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, send_file
 from werkzeug.utils import secure_filename
 from celery.result import AsyncResult
 import config
@@ -22,10 +27,12 @@ from tasks import (
     predict_task,
     affinity_task,
     boltz2score_task,
+    protenix2score_task,
     virtual_screening_task,
     lead_optimization_task,
 )
 from gpu_manager import get_redis_client, release_gpu, get_gpu_status
+from affinity_preview import AffinityPreviewError, build_affinity_preview
 
 # --- Configure Logging ---
 logging.basicConfig(
@@ -566,6 +573,322 @@ def _find_result_archive(task_id: str) -> Optional[str]:
 
     return None
 
+
+def _resolve_result_archive_path(task_id: str) -> tuple[str, str]:
+    """Resolve and validate the on-disk archive path for a task."""
+    task_result = AsyncResult(task_id, app=celery_app)
+
+    result_info = None
+    if not task_result.ready():
+        archive_name = _find_result_archive(task_id)
+        if not archive_name:
+            raise FileNotFoundError(f"Task has not completed yet. State: {task_result.state}")
+        logger.info(f"Serving result archive for task {task_id} without Celery readiness: {archive_name}")
+        result_info = {'result_file': archive_name}
+    else:
+        result_info = task_result.info
+        if not isinstance(result_info, dict) or 'result_file' not in result_info or not result_info['result_file']:
+            archive_name = _find_result_archive(task_id)
+            if not archive_name:
+                raise FileNotFoundError("Result file information not found in task metadata or on disk.")
+            logger.info(f"Recovered result archive for task {task_id} from disk: {archive_name}")
+            result_info = {'result_file': archive_name}
+
+    filename = secure_filename(result_info['result_file'])
+    directory = app.config['UPLOAD_FOLDER']
+    filepath = os.path.join(directory, filename)
+
+    abs_filepath = os.path.abspath(filepath)
+    abs_upload_folder = os.path.abspath(directory)
+    if not abs_filepath.startswith(abs_upload_folder):
+        raise PermissionError(f"Invalid file path outside upload folder: {filepath}")
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"Result file not found on disk: {filepath}")
+
+    return filename, filepath
+
+
+def _choose_preferred_path(candidates: list[str]) -> Optional[str]:
+    if not candidates:
+        return None
+    return sorted(
+        candidates,
+        key=lambda item: (1 if "seed-" in item.lower() else 0, len(item))
+    )[0]
+
+
+def _extract_record_id_from_structure_name(name: str) -> Optional[str]:
+    base = os.path.basename(name)
+    if "_model_" not in base:
+        return None
+    return base.split("_model_")[0] or None
+
+
+def _choose_best_boltz_structure_file(names: list[str]) -> Optional[str]:
+    candidates: list[tuple[int, int, str]] = []
+    for name in names:
+        lower = name.lower()
+        if not re.search(r"\.(cif|pdb)$", lower):
+            continue
+        if "af3/output/" in lower:
+            continue
+        score = 100
+        if lower.endswith(".cif"):
+            score -= 5
+        if "model_0" in lower or "ranked_0" in lower:
+            score -= 20
+        elif "model_" in lower or "ranked_" in lower:
+            score -= 5
+        candidates.append((score, len(name), name))
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[0][2]
+
+
+def _choose_best_boltz_confidence_file(names: list[str], selected_structure: Optional[str]) -> Optional[str]:
+    candidates = [
+        name for name in names
+        if name.lower().endswith(".json")
+        and "confidence" in name.lower()
+        and "af3/output/" not in name.lower()
+    ]
+    if not candidates:
+        return None
+
+    selected_record_id = _extract_record_id_from_structure_name(selected_structure or "")
+    if selected_record_id:
+        preferred_suffix = f"confidence_{selected_record_id}_model_0.json".lower()
+        for name in candidates:
+            if name.lower().endswith(preferred_suffix):
+                return name
+
+    scored: list[tuple[int, int, str]] = []
+    for name in candidates:
+        lower = name.lower()
+        score = 100
+        if "confidence_" in lower:
+            score -= 5
+        if "model_0" in lower or "ranked_0" in lower:
+            score -= 20
+        elif "model_" in lower or "ranked_" in lower:
+            score -= 5
+        scored.append((score, len(name), name))
+    scored.sort()
+    return scored[0][2]
+
+
+def _choose_best_af3_structure_file(names: list[str]) -> Optional[str]:
+    candidates: list[tuple[int, int, str]] = []
+    for name in names:
+        lower = name.lower()
+        if not re.search(r"\.(cif|pdb)$", lower):
+            continue
+        if "af3/output/" not in lower:
+            continue
+        score = 100
+        if lower.endswith(".cif"):
+            score -= 5
+        if os.path.basename(lower) == "boltz_af3_model.cif":
+            score -= 30
+        if "/model.cif" in lower or lower.endswith("model.cif"):
+            score -= 8
+        if "seed-" in lower:
+            score += 8
+        else:
+            score -= 6
+        if "predicted" in lower:
+            score -= 1
+        if "model" in lower:
+            score -= 1
+        candidates.append((score, len(name), name))
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[0][2]
+
+
+_PROTENIX_SUMMARY_SAMPLE_RE = re.compile(r"_summary_confidence_sample_(\d+)\.json$", re.IGNORECASE)
+
+
+def _choose_best_protenix_files(src_zip: zipfile.ZipFile, names: list[str]) -> tuple[Optional[str], Optional[str]]:
+    canonical_structure_candidates = [
+        "protenix/output/protenix_model_0.cif",
+        "protenix/output/protenix_model_0.mmcif",
+        "protenix/output/protenix_model_0.pdb",
+    ]
+    canonical_confidence = "protenix/output/confidence_protenix_model_0.json"
+    structure = next((item for item in canonical_structure_candidates if item in names), None)
+    if structure and canonical_confidence in names:
+        return structure, canonical_confidence
+
+    summary_candidates = [
+        item
+        for item in names
+        if item.lower().startswith("protenix/output/")
+        and item.lower().endswith(".json")
+        and _PROTENIX_SUMMARY_SAMPLE_RE.search(os.path.basename(item))
+    ]
+    if not summary_candidates:
+        return None, None
+
+    scored: list[tuple[float, int, str]] = []
+    for item in summary_candidates:
+        try:
+            payload = json.loads(src_zip.read(item))
+            score = float(payload.get("ranking_score"))
+        except Exception:
+            continue
+        if not math.isfinite(score):
+            continue
+        scored.append((score, -len(item), item))
+    if not scored:
+        raise RuntimeError("Protenix summary confidence files are present but ranking_score is invalid.")
+    scored.sort(reverse=True)
+    selected_summary = scored[0][2]
+    sample_match = _PROTENIX_SUMMARY_SAMPLE_RE.search(os.path.basename(selected_summary))
+    if not sample_match:
+        raise RuntimeError(f"Unable to parse Protenix summary sample index from: {selected_summary}")
+    sample_index = sample_match.group(1)
+    summary_dir = os.path.dirname(selected_summary)
+    summary_base = os.path.basename(selected_summary)
+    structure_base = re.sub(
+        r"_summary_confidence_sample_\d+\.json$",
+        f"_sample_{sample_index}",
+        summary_base,
+        flags=re.IGNORECASE,
+    )
+    if structure_base == summary_base:
+        raise RuntimeError(f"Unable to derive Protenix sample structure name from: {selected_summary}")
+
+    structure_candidates = [
+        os.path.join(summary_dir, f"{structure_base}.cif"),
+        os.path.join(summary_dir, f"{structure_base}.mmcif"),
+        os.path.join(summary_dir, f"{structure_base}.pdb"),
+    ]
+    structure = next((item for item in structure_candidates if item in names), None)
+    if not structure:
+        raise RuntimeError(
+            f"Unable to locate Protenix structure for summary '{selected_summary}' "
+            f"(expected sample index {sample_index})."
+        )
+    return structure, selected_summary
+
+
+def _build_view_archive_bytes(source_zip_path: str) -> bytes:
+    """Create a minimal view archive for UI rendering from a full result archive."""
+    with zipfile.ZipFile(source_zip_path, "r") as src_zip:
+        names = [name for name in src_zip.namelist() if not name.endswith("/")]
+        lower_names = [name.lower() for name in names]
+        is_af3 = any("af3/output/" in name for name in lower_names)
+        is_protenix = any("protenix/output/" in name for name in lower_names)
+
+        include: list[str] = []
+        if is_af3:
+            structure = _choose_best_af3_structure_file(names)
+            if structure:
+                include.append(structure)
+            summary_candidates = [
+                name for name in names
+                if name.lower().endswith(".json")
+                and "af3/output/" in name.lower()
+                and "summary_confidences" in name.lower()
+            ]
+            confidences_candidates = [
+                name for name in names
+                if name.lower().endswith(".json")
+                and "af3/output/" in name.lower()
+                and os.path.basename(name).lower() == "confidences.json"
+            ]
+            summary = _choose_preferred_path(summary_candidates)
+            confidences = _choose_preferred_path(confidences_candidates)
+            if summary:
+                include.append(summary)
+            if confidences:
+                include.append(confidences)
+        elif is_protenix:
+            structure, confidence = _choose_best_protenix_files(src_zip, names)
+            if structure:
+                include.append(structure)
+            if confidence:
+                include.append(confidence)
+            protenix_metrics = next(
+                (
+                    name
+                    for name in names
+                    if name.lower() == "protenix/output/protenix2score_metrics.json"
+                ),
+                None,
+            )
+            if protenix_metrics:
+                include.append(protenix_metrics)
+            # Keep both canonical and legacy affinity payload locations for
+            # deterministic ligand-chain context in affinity task views.
+            affinity_candidates = [
+                name
+                for name in names
+                if name.lower().endswith(".json")
+                and os.path.basename(name).lower() == "affinity_data.json"
+            ]
+            protenix_affinity = _choose_preferred_path(affinity_candidates)
+            if protenix_affinity:
+                include.append(protenix_affinity)
+        else:
+            structure = _choose_best_boltz_structure_file(names)
+            confidence = _choose_best_boltz_confidence_file(names, structure)
+            if structure:
+                include.append(structure)
+            if confidence:
+                include.append(confidence)
+            affinity_candidates = [
+                name for name in names
+                if name.lower().endswith(".json") and "affinity" in name.lower()
+            ]
+            if affinity_candidates:
+                include.append(sorted(affinity_candidates, key=lambda item: len(item))[0])
+
+        if not include:
+            # If we cannot classify the archive type, keep original behavior.
+            raise RuntimeError("Unable to build view archive: no renderable files found.")
+
+        include_unique: list[str] = []
+        seen = set()
+        for item in include:
+            if item in seen:
+                continue
+            seen.add(item)
+            include_unique.append(item)
+
+        out_buffer = io.BytesIO()
+        with zipfile.ZipFile(out_buffer, "w", compression=zipfile.ZIP_DEFLATED) as out_zip:
+            for member_name in include_unique:
+                try:
+                    payload = src_zip.read(member_name)
+                except KeyError:
+                    continue
+                out_zip.writestr(member_name, payload)
+        out_buffer.seek(0)
+        return out_buffer.getvalue()
+
+
+def _build_or_get_view_archive(source_zip_path: str) -> str:
+    """Build a cached view archive and return the cached file path."""
+    src_stat = os.stat(source_zip_path)
+    cache_schema_version = "view-v3-protenix-affinity-context"
+    cache_seed = f"{cache_schema_version}|{source_zip_path}|{int(src_stat.st_mtime_ns)}|{src_stat.st_size}"
+    cache_key = hashlib.sha256(cache_seed.encode("utf-8")).hexdigest()[:24]
+    cache_dir = Path("/tmp/boltz_result_view_cache")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"{cache_key}.zip"
+    if cache_path.exists():
+        return str(cache_path)
+
+    data = _build_view_archive_bytes(source_zip_path)
+    temp_path = cache_dir / f"{cache_key}.tmp"
+    temp_path.write_bytes(data)
+    os.replace(str(temp_path), str(cache_path))
+    return str(cache_path)
+
 def _get_tracker_status(task_id: str) -> tuple[Optional[Dict], Optional[str]]:
     """Fetch status/heartbeat from Redis when Celery state is unavailable."""
     try:
@@ -941,6 +1264,80 @@ def download_lead_optimization_results(task_id):
     return download_results(task_id)
 
 
+@app.route('/api/affinity/preview', methods=['POST'])
+@require_api_token
+def preview_affinity_complex():
+    """Build a temporary target(+optional ligand) structure for Mol* preview and ligand metadata."""
+    logger.info("Received affinity preview request.")
+
+    if 'protein_file' not in request.files:
+        return jsonify({'error': "Request form must contain 'protein_file' part"}), 400
+
+    protein_file = request.files['protein_file']
+    ligand_file = request.files.get('ligand_file')
+
+    if protein_file.filename == '':
+        return jsonify({'error': 'protein_file must be selected'}), 400
+
+    try:
+        protein_text = protein_file.read().decode('utf-8')
+    except UnicodeDecodeError:
+        return jsonify({'error': 'Failed to decode protein_file as UTF-8 text.'}), 400
+    except IOError as e:
+        logger.exception("Failed to read protein_file for affinity preview: %s", e)
+        return jsonify({'error': f'Failed to read protein_file: {e}'}), 400
+
+    ligand_text = ""
+    ligand_filename = ""
+    if ligand_file is not None and ligand_file.filename != '':
+        try:
+            ligand_file.seek(0)
+            try:
+                ligand_text = ligand_file.read().decode('utf-8')
+            except UnicodeDecodeError:
+                ligand_file.seek(0)
+                ligand_text = ligand_file.read().decode('utf-8', errors='replace')
+            ligand_filename = secure_filename(ligand_file.filename)
+        except IOError as e:
+            logger.exception("Failed to read ligand_file for affinity preview: %s", e)
+            return jsonify({'error': f'Failed to read ligand_file: {e}'}), 400
+
+    protein_filename = secure_filename(protein_file.filename)
+
+    try:
+        preview = build_affinity_preview(
+            protein_text=protein_text,
+            protein_filename=protein_filename,
+            ligand_text=ligand_text,
+            ligand_filename=ligand_filename,
+        )
+    except AffinityPreviewError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.exception("Failed to build affinity preview: %s", e)
+        return jsonify({'error': 'Failed to generate affinity preview.', 'details': str(e)}), 500
+
+    return jsonify(
+        {
+            'structure_text': preview.structure_text,
+            'structure_format': preview.structure_format,
+            'structure_name': preview.structure_name,
+            'target_structure_text': preview.target_structure_text,
+            'target_structure_format': preview.target_structure_format,
+            'ligand_structure_text': preview.ligand_structure_text,
+            'ligand_structure_format': preview.ligand_structure_format,
+            'ligand_smiles': preview.ligand_smiles,
+            'target_chain_ids': preview.target_chain_ids,
+            'ligand_chain_id': preview.ligand_chain_id,
+            'has_ligand': preview.has_ligand,
+            'ligand_is_small_molecule': preview.ligand_is_small_molecule,
+            'supports_activity': preview.supports_activity,
+            'protein_filename': protein_filename,
+            'ligand_filename': ligand_filename,
+        }
+    )
+
+
 @app.route('/api/affinity', methods=['POST'])
 @require_api_token
 def handle_affinity():
@@ -1228,6 +1625,87 @@ def handle_boltz2score():
     return jsonify({'task_id': task.id}), 202
 
 
+@app.route('/api/protenix2score', methods=['POST'])
+@require_api_token
+def handle_protenix2score():
+    """
+    Receives Protenix2Score requests and dispatches Celery tasks.
+    Supports confidence scoring and optional Boltzina affinity estimation.
+    """
+    logger.info("Received Protenix2Score request.")
+
+    if 'input_file' not in request.files:
+        logger.error("Missing input_file in Protenix2Score request. Client IP: %s", request.remote_addr)
+        return jsonify({'error': "Request form must contain 'input_file'."}), 400
+
+    input_file = request.files['input_file']
+    if input_file.filename == '':
+        logger.error("No selected file for input_file in Protenix2Score request.")
+        return jsonify({'error': 'No selected file for input_file'}), 400
+
+    try:
+        input_file_content = input_file.read().decode('utf-8')
+    except UnicodeDecodeError:
+        logger.error("Failed to decode Protenix2Score input_file as UTF-8. Client IP: %s", request.remote_addr)
+        return jsonify({'error': "Failed to decode input_file. Ensure it's a valid UTF-8 text file."}), 400
+    except IOError as e:
+        logger.exception("Failed to read Protenix2Score input_file: %s", e)
+        return jsonify({'error': f"Failed to read input_file: {e}"}), 400
+
+    priority = request.form.get('priority', 'default').lower()
+    if priority not in ['high', 'default']:
+        logger.warning("Invalid priority '%s' for Protenix2Score, defaulting to default.", priority)
+        priority = 'default'
+    target_queue = config.HIGH_PRIORITY_QUEUE if priority == 'high' else config.DEFAULT_QUEUE
+
+    target_chain = request.form.get('target_chain')
+    ligand_chain = request.form.get('ligand_chain')
+    ligand_smiles_map = {}
+    ligand_smiles_map_raw = request.form.get('ligand_smiles_map')
+    if ligand_smiles_map_raw:
+        try:
+            parsed = json.loads(ligand_smiles_map_raw)
+            if isinstance(parsed, dict):
+                for key, value in parsed.items():
+                    if not isinstance(key, str) or not isinstance(value, str):
+                        continue
+                    key = key.strip()
+                    value = value.strip()
+                    if key and value:
+                        ligand_smiles_map[key] = value
+        except Exception as e:
+            logger.error("Invalid ligand_smiles_map JSON from %s: %s", request.remote_addr, e)
+            return jsonify({'error': "Invalid 'ligand_smiles_map' JSON format."}), 400
+
+    score_args = {
+        'input_file_content': input_file_content,
+        'input_filename': secure_filename(input_file.filename),
+    }
+
+    score_args['affinity_refine'] = _parse_bool(request.form.get('affinity_refine'), False)
+    score_args['enable_affinity'] = _parse_bool(request.form.get('enable_affinity'), False)
+    score_args['auto_enable_affinity'] = _parse_bool(request.form.get('auto_enable_affinity'), False)
+    if target_chain:
+        score_args['target_chain'] = target_chain
+    if ligand_chain:
+        score_args['ligand_chain'] = ligand_chain
+    if ligand_smiles_map:
+        score_args['ligand_smiles_map'] = ligand_smiles_map
+
+    seed = _parse_int(request.form.get('seed'))
+    if seed is not None:
+        score_args['seed'] = seed
+
+    try:
+        task = protenix2score_task.apply_async(args=[score_args], queue=target_queue)
+        logger.info("Protenix2Score task %s dispatched to queue '%s'.", task.id, target_queue)
+    except Exception as e:
+        logger.exception("Failed to dispatch Protenix2Score task from %s: %s", request.remote_addr, e)
+        return jsonify({'error': 'Failed to dispatch Protenix2Score task.', 'details': str(e)}), 500
+
+    return jsonify({'task_id': task.id}), 202
+
+
 @app.route('/status/<task_id>', methods=['GET'])
 def get_task_status(task_id):
     """
@@ -1309,43 +1787,64 @@ def download_results(task_id):
     Includes checks for task completion and path security.
     """
     logger.info(f"Received download request for task ID: {task_id}")
-    task_result = AsyncResult(task_id, app=celery_app)
-    
-    result_info = None
-    if not task_result.ready():
-        archive_name = _find_result_archive(task_id)
-        if not archive_name:
-            logger.warning(f"Attempted to download results for task {task_id} which is not ready. State: {task_result.state}")
-            return jsonify({'error': 'Task has not completed yet.', 'state': task_result.state}), 404
-        logger.info(f"Serving result archive for task {task_id} without Celery readiness: {archive_name}")
-        result_info = {'result_file': archive_name}
-    else:
-        result_info = task_result.info
-        if not isinstance(result_info, dict) or 'result_file' not in result_info or not result_info['result_file']:
-            archive_name = _find_result_archive(task_id)
-            if not archive_name:
-                logger.error(f"Result file information missing or invalid for task {task_id}. Info: {result_info}")
-                return jsonify({'error': 'Result file information not found in task metadata or is invalid.'}), 404
-            logger.info(f"Recovered result archive for task {task_id} from disk: {archive_name}")
-            result_info = {'result_file': archive_name}
-
-    filename = secure_filename(result_info['result_file'])
-    directory = app.config['UPLOAD_FOLDER']
-    filepath = os.path.join(directory, filename)
-
-    # Critical security check: Ensure the file path is within the allowed directory.
-    abs_filepath = os.path.abspath(filepath)
-    abs_upload_folder = os.path.abspath(directory)
-    if not abs_filepath.startswith(abs_upload_folder):
-        logger.error(f"Attempted directory traversal for task {task_id}. Filepath: {filepath}")
+    try:
+        filename, filepath = _resolve_result_archive_path(task_id)
+    except FileNotFoundError as exc:
+        task_result = AsyncResult(task_id, app=celery_app)
+        logger.warning(f"Failed to resolve results for task {task_id}: {exc}")
+        return jsonify({'error': str(exc), 'state': task_result.state}), 404
+    except PermissionError as exc:
+        logger.error(f"Invalid result path for task {task_id}: {exc}")
         return jsonify({'error': 'Invalid file path detected.'}), 400
 
-    if not os.path.exists(filepath):
-        logger.error(f"Result file not found on disk for task {task_id} at path: {filepath}")
-        return jsonify({'error': 'Result file not found on disk.'}), 404
-    
-    logger.info(f"Serving result file {filename} for task {task_id} from {filepath}.")
-    return send_from_directory(directory, filename, as_attachment=True)
+    directory = app.config['UPLOAD_FOLDER']
+    logger.info(f"Serving full result file {filename} for task {task_id} from {filepath}.")
+    return send_from_directory(
+        directory,
+        filename,
+        as_attachment=True,
+        conditional=False,
+        etag=False,
+        max_age=0
+    )
+
+
+@app.route('/results/<task_id>/view', methods=['GET'])
+def download_results_view(task_id):
+    """Serve a minimized result archive for UI hydration and structure viewing."""
+    logger.info(f"Received view download request for task ID: {task_id}")
+    try:
+        _, filepath = _resolve_result_archive_path(task_id)
+    except FileNotFoundError as exc:
+        task_result = AsyncResult(task_id, app=celery_app)
+        logger.warning(f"Failed to resolve view results for task {task_id}: {exc}")
+        return jsonify({'error': str(exc), 'state': task_result.state}), 404
+    except PermissionError as exc:
+        logger.error(f"Invalid view result path for task {task_id}: {exc}")
+        return jsonify({'error': 'Invalid file path detected.'}), 400
+
+    try:
+        view_path = _build_or_get_view_archive(filepath)
+    except Exception as exc:
+        logger.warning(
+            "Failed to build view archive for task %s from %s: %s",
+            task_id,
+            filepath,
+            exc,
+        )
+        return jsonify({'error': f'Failed to build view archive: {exc}'}), 500
+
+    download_name = f"{task_id}_view_results.zip"
+    logger.info(f"Serving view result archive for task {task_id}: {view_path}")
+    return send_file(
+        view_path,
+        as_attachment=True,
+        download_name=download_name,
+        conditional=False,
+        etag=False,
+        max_age=0,
+        mimetype="application/zip",
+    )
 
 
 @app.route('/upload_result/<task_id>', methods=['POST'])
@@ -1369,14 +1868,41 @@ def upload_result_from_worker(task_id):
     try:
         filename = secure_filename(file.filename)
         save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        
-        file.save(save_path)
+        temp_save_path = f"{save_path}.upload-{uuid.uuid4().hex}.tmp"
+        file.save(temp_save_path)
+        os.replace(temp_save_path, save_path)
+        lower_name = filename.lower()
+        should_prebuild_view = (
+            lower_name.endswith(".zip")
+            and "virtual_screening" not in lower_name
+            and "lead_optimization" not in lower_name
+        )
+        if should_prebuild_view:
+            try:
+                _build_or_get_view_archive(save_path)
+            except Exception as view_exc:
+                logger.warning(
+                    "Failed to prebuild view archive for %s (task %s): %s",
+                    filename,
+                    task_id,
+                    view_exc,
+                )
         logger.info(f"Result file '{filename}' for task {task_id} received and saved to {save_path}.")
         return jsonify({'message': f"File '{filename}' uploaded successfully for task {task_id}"}), 200
     except IOError as e:
+        try:
+            if 'temp_save_path' in locals() and os.path.exists(temp_save_path):
+                os.remove(temp_save_path)
+        except Exception:
+            pass
         logger.exception(f"Failed to save uploaded file '{filename}' for task {task_id}: {e}")
         return jsonify({'error': f"Failed to save file: {e}"}), 500
     except Exception as e:
+        try:
+            if 'temp_save_path' in locals() and os.path.exists(temp_save_path):
+                os.remove(temp_save_path)
+        except Exception:
+            pass
         logger.exception(f"An unexpected error occurred during file upload for task {task_id}: {e}")
         return jsonify({'error': f"An unexpected error occurred: {e}"}), 500
 

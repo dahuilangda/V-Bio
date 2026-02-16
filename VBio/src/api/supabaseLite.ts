@@ -283,6 +283,57 @@ export async function listProjectTasks(projectId: string): Promise<ProjectTask[]
   });
 }
 
+export async function listProjectTasksCompact(projectId: string): Promise<ProjectTask[]> {
+  const selectFields = [
+    'id',
+    'project_id',
+    'task_id',
+    'task_state',
+    'status_text',
+    'error_text',
+    'backend',
+    'seed',
+    'ligand_smiles',
+    'properties',
+    'structure_name',
+    'submitted_at',
+    'completed_at',
+    'duration_seconds',
+    'created_at',
+    'updated_at'
+  ].join(',');
+
+  let rows: Array<Partial<ProjectTask>> = [];
+  try {
+    rows = await request<Array<Partial<ProjectTask>>>('/project_tasks_list', undefined, {
+      select: selectFields,
+      project_id: `eq.${projectId}`,
+      order: 'created_at.desc'
+    });
+  } catch {
+    rows = await request<Array<Partial<ProjectTask>>>('/project_tasks', undefined, {
+      select: selectFields,
+      project_id: `eq.${projectId}`,
+      order: 'created_at.desc'
+    });
+  }
+
+  return rows.map((row) => ({
+    protein_sequence: '',
+    affinity: {},
+    confidence: {},
+    components: [],
+    constraints: [],
+    properties: {
+      affinity: false,
+      target: null,
+      ligand: null,
+      binder: null
+    },
+    ...row
+  })) as ProjectTask[];
+}
+
 export async function listProjectTasksForList(projectId: string): Promise<ProjectTask[]> {
   const selectFields = [
     'id',
@@ -337,6 +388,17 @@ export async function listProjectTasksForList(projectId: string): Promise<Projec
   })) as ProjectTask[];
 }
 
+export async function getProjectTaskById(taskRowId: string): Promise<ProjectTask | null> {
+  const normalizedTaskRowId = String(taskRowId || '').trim();
+  if (!normalizedTaskRowId) return null;
+  const rows = await request<ProjectTask[]>('/project_tasks', undefined, {
+    select: '*',
+    id: `eq.${normalizedTaskRowId}`,
+    limit: '1'
+  });
+  return rows[0] || null;
+}
+
 function stripTemplateContentFromTaskComponents(components: unknown): unknown {
   if (!Array.isArray(components)) return components;
   return components.map((component) => {
@@ -358,11 +420,52 @@ function stripTemplateContentFromTaskComponents(components: unknown): unknown {
   });
 }
 
+const AFFINITY_TARGET_UPLOAD_COMPONENT_ID = '__affinity_target_upload__';
+const AFFINITY_LIGAND_UPLOAD_COMPONENT_ID = '__affinity_ligand_upload__';
+
+function affinityUploadRoleFromTaskComponent(component: Record<string, unknown>): 'target' | 'ligand' | null {
+  const uploadMeta =
+    component.affinityUpload && typeof component.affinityUpload === 'object' && !Array.isArray(component.affinityUpload)
+      ? (component.affinityUpload as Record<string, unknown>)
+      : component.affinity_upload && typeof component.affinity_upload === 'object' && !Array.isArray(component.affinity_upload)
+        ? (component.affinity_upload as Record<string, unknown>)
+        : null;
+  const roleFromMeta = uploadMeta?.role;
+  if (roleFromMeta === 'target' || roleFromMeta === 'ligand') return roleFromMeta;
+  const componentId = typeof component.id === 'string' ? component.id.trim() : '';
+  if (componentId === AFFINITY_TARGET_UPLOAD_COMPONENT_ID) return 'target';
+  if (componentId === AFFINITY_LIGAND_UPLOAD_COMPONENT_ID) return 'ligand';
+  return null;
+}
+
+function stripAffinityUploadContentFromTaskComponents(components: unknown): unknown {
+  if (!Array.isArray(components)) return components;
+  return components.map((component) => {
+    if (!component || typeof component !== 'object' || Array.isArray(component)) return component;
+    const role = affinityUploadRoleFromTaskComponent(component as Record<string, unknown>);
+    if (!role) return component;
+    const next = { ...(component as Record<string, unknown>) };
+    next.sequence = '';
+    if (next.affinityUpload && typeof next.affinityUpload === 'object' && !Array.isArray(next.affinityUpload)) {
+      const compactUpload = { ...(next.affinityUpload as Record<string, unknown>) };
+      delete compactUpload.content;
+      next.affinityUpload = compactUpload;
+    }
+    if (next.affinity_upload && typeof next.affinity_upload === 'object' && !Array.isArray(next.affinity_upload)) {
+      const compactUpload = { ...(next.affinity_upload as Record<string, unknown>) };
+      delete compactUpload.content;
+      next.affinity_upload = compactUpload;
+    }
+    return next;
+  });
+}
+
 function sanitizeProjectTaskWritePayload(payload: Partial<ProjectTask>): Partial<ProjectTask> {
   if (!Object.prototype.hasOwnProperty.call(payload, 'components')) return payload;
+  const compactComponents = stripTemplateContentFromTaskComponents((payload as { components?: unknown }).components);
   return {
     ...payload,
-    components: stripTemplateContentFromTaskComponents((payload as { components?: unknown }).components) as ProjectTask['components']
+    components: stripAffinityUploadContentFromTaskComponents(compactComponents) as ProjectTask['components']
   };
 }
 

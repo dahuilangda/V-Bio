@@ -27,10 +27,28 @@ function buildPerAtomConfidence(
     ?.filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
     .map((value) => normalizePlddt(value));
   if (normalized && normalized.length > 0) {
-    // Keep per-atom coloring strictly one-to-one. If atom counts don't match,
-    // skip highlights to avoid incorrect atom-level confidence mapping.
     if (normalized.length === atomCount) return normalized;
-    return [];
+
+    // Deterministic remapping: project confidence series onto RDKit atom count.
+    // This preserves relative confidence trend even when upstream atom indexing differs.
+    if (normalized.length > atomCount) {
+      const reduced: number[] = [];
+      for (let i = 0; i < atomCount; i += 1) {
+        const start = Math.floor((i * normalized.length) / atomCount);
+        const end = Math.max(start + 1, Math.floor(((i + 1) * normalized.length) / atomCount));
+        const chunk = normalized.slice(start, end);
+        const avg = chunk.reduce((sum, item) => sum + item, 0) / chunk.length;
+        reduced.push(normalizePlddt(avg));
+      }
+      return reduced;
+    }
+
+    const expanded: number[] = [];
+    for (let i = 0; i < atomCount; i += 1) {
+      const mapped = Math.floor((i * normalized.length) / atomCount);
+      expanded.push(normalized[Math.min(normalized.length - 1, Math.max(0, mapped))]);
+    }
+    return expanded;
   }
   return [];
 }

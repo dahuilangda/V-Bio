@@ -1,5 +1,12 @@
-import JSZip from 'jszip';
-import type { InputComponent, ParsedResultBundle, PredictionSubmitInput, TaskStatusResponse } from '../types/models';
+import type JSZip from 'jszip';
+import type {
+  AffinityPreviewPayload,
+  AffinitySubmitInput,
+  InputComponent,
+  ParsedResultBundle,
+  PredictionSubmitInput,
+  TaskStatusResponse
+} from '../types/models';
 import { apiUrl, ENV } from '../utils/env';
 import { normalizeComponentSequence } from '../utils/projectInputs';
 import { buildPredictionYaml, buildPredictionYamlFromComponents } from '../utils/yaml';
@@ -29,46 +36,14 @@ async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs =
   }
 }
 
-function unique<T>(items: T[]): T[] {
-  return Array.from(new Set(items));
-}
-
-function buildApiUrlCandidates(path: string): string[] {
-  const primary = apiUrl(path);
-  const candidates = [primary];
-  if (typeof window !== 'undefined') {
-    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
-    candidates.push(`${window.location.origin}${normalizedPath}`);
-    // Remote-access fallback: bypass Vite proxy and call backend host directly.
-    candidates.push(`${window.location.protocol}//${window.location.hostname}:5000${normalizedPath}`);
+async function requestBackend(path: string, init: RequestInit, timeoutMs = BACKEND_TIMEOUT_MS): Promise<Response> {
+  const url = apiUrl(path);
+  try {
+    return await fetchWithTimeout(url, init, timeoutMs);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Backend request failed for ${path} (${url}): ${message}`);
   }
-  return unique(candidates.filter(Boolean));
-}
-
-async function requestWithFallback(path: string, init: RequestInit): Promise<Response> {
-  const candidates = buildApiUrlCandidates(path);
-  let lastError: Error | null = null;
-
-  for (let i = 0; i < candidates.length; i += 1) {
-    const url = candidates[i];
-    try {
-      const response = await fetchWithTimeout(url, init);
-
-      // If this host doesn't serve backend routes, try the next candidate.
-      if ((response.status === 404 || response.status === 405) && i < candidates.length - 1) {
-        continue;
-      }
-
-      return response;
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-    }
-  }
-
-  if (lastError) {
-    throw new Error(`All backend endpoints failed for ${path}. Tried: ${candidates.join(', ')}. Last error: ${lastError.message}`);
-  }
-  throw new Error(`All backend endpoints failed for ${path}. Tried: ${candidates.join(', ')}`);
 }
 
 export async function submitPrediction(input: PredictionSubmitInput): Promise<string> {
@@ -83,11 +58,11 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
     }))
     .filter((comp) => Boolean(comp.sequence));
 
-  const fallbackComponents: InputComponent[] = [];
+  const compatComponents: InputComponent[] = [];
   const proteinSequence = normalizeComponentSequence('protein', input.proteinSequence || '');
   const ligandSmiles = normalizeComponentSequence('ligand', input.ligandSmiles || '');
   if (proteinSequence) {
-    fallbackComponents.push({
+    compatComponents.push({
       id: 'A',
       type: 'protein',
       numCopies: 1,
@@ -97,7 +72,7 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
     });
   }
   if (ligandSmiles) {
-    fallbackComponents.push({
+    compatComponents.push({
       id: 'B',
       type: 'ligand',
       numCopies: 1,
@@ -106,7 +81,7 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
     });
   }
 
-  const componentsForYaml = normalizedComponents.length > 0 ? normalizedComponents : fallbackComponents;
+  const componentsForYaml = normalizedComponents.length > 0 ? normalizedComponents : compatComponents;
   if (!componentsForYaml.length) {
     throw new Error('Please provide at least one non-empty component sequence before submitting.');
   }
@@ -159,7 +134,7 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
 
   let res: Response;
   try {
-    res = await requestWithFallback('/predict', {
+    res = await requestBackend('/predict', {
       method: 'POST',
       headers: {
         ...API_HEADERS,
@@ -186,8 +161,151 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
   return data.task_id;
 }
 
+export async function previewAffinityComplex(input: {
+  targetFile: File;
+  ligandFile?: File | null;
+}): Promise<AffinityPreviewPayload> {
+  const form = new FormData();
+  form.append('protein_file', input.targetFile);
+  if (input.ligandFile) {
+    form.append('ligand_file', input.ligandFile);
+  }
+
+  const res = await requestBackend('/api/affinity/preview', {
+    method: 'POST',
+    headers: {
+      ...API_HEADERS,
+      Accept: 'application/json'
+    },
+    body: form
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to generate affinity preview (${res.status}): ${text}`);
+  }
+
+  const data = (await res.json()) as {
+    structure_text?: string;
+    structure_format?: string;
+    structure_name?: string;
+    target_structure_text?: string;
+    target_structure_format?: string;
+    ligand_structure_text?: string;
+    ligand_structure_format?: string;
+    ligand_smiles?: string;
+    target_chain_ids?: unknown;
+    ligand_chain_id?: string;
+    has_ligand?: boolean;
+    ligand_is_small_molecule?: boolean;
+    supports_activity?: boolean;
+    protein_filename?: string;
+    ligand_filename?: string;
+  };
+
+  const structureText = typeof data.structure_text === 'string' ? data.structure_text : '';
+  if (!structureText.trim()) {
+    throw new Error('Affinity preview response did not include structure_text.');
+  }
+
+  const structureFormat = data.structure_format === 'pdb' ? 'pdb' : 'cif';
+  const targetChainIds = Array.isArray(data.target_chain_ids)
+    ? data.target_chain_ids
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean)
+    : [];
+
+  return {
+    structureText,
+    structureFormat,
+    structureName:
+      typeof data.structure_name === 'string' && data.structure_name.trim() ? data.structure_name : input.targetFile.name,
+    targetStructureText:
+      typeof data.target_structure_text === 'string' && data.target_structure_text.trim()
+        ? data.target_structure_text
+        : structureText,
+    targetStructureFormat: data.target_structure_format === 'pdb' ? 'pdb' : structureFormat,
+    ligandStructureText:
+      typeof data.ligand_structure_text === 'string' && data.ligand_structure_text.trim() ? data.ligand_structure_text : '',
+    ligandStructureFormat: data.ligand_structure_format === 'pdb' ? 'pdb' : 'cif',
+    ligandSmiles: typeof data.ligand_smiles === 'string' ? data.ligand_smiles.trim() : '',
+    targetChainIds,
+    hasLigand: Boolean(data.has_ligand),
+    ligandIsSmallMolecule: Boolean(data.ligand_is_small_molecule),
+    supportsActivity: Boolean(data.supports_activity),
+    ligandChainId:
+      typeof data.ligand_chain_id === 'string' ? data.ligand_chain_id.trim() : '',
+    proteinFileName: typeof data.protein_filename === 'string' ? data.protein_filename.trim() : input.targetFile.name,
+    ligandFileName: typeof data.ligand_filename === 'string' ? data.ligand_filename.trim() : input.ligandFile?.name || ''
+  };
+}
+
+export async function submitAffinityScoring(input: AffinitySubmitInput): Promise<string> {
+  const structureText = String(input.inputStructureText || '').trim();
+  if (!structureText) {
+    throw new Error('Affinity scoring requires a prepared input structure.');
+  }
+  const backend = String(input.backend || 'boltz').trim().toLowerCase();
+  const useProtenix = backend === 'protenix';
+
+  const form = new FormData();
+  form.append(
+    'input_file',
+    new File([structureText], input.inputStructureName || 'affinity_input.cif', { type: 'chemical/x-cif' })
+  );
+  const targetChainIds = Array.isArray(input.targetChainIds)
+    ? input.targetChainIds.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+  const ligandChainId = String(input.ligandChainId || '').trim();
+  const ligandSmiles = String(input.ligandSmiles || '').trim();
+  if (targetChainIds.length > 0) {
+    form.append('target_chain', targetChainIds.join(','));
+  }
+  if (ligandChainId) {
+    form.append('ligand_chain', ligandChainId);
+  }
+  if (ligandChainId && ligandSmiles) {
+    form.append('ligand_smiles_map', JSON.stringify({ [ligandChainId]: ligandSmiles }));
+  }
+
+  const enableAffinity = Boolean(input.enableAffinity);
+  if (enableAffinity) {
+    if (!targetChainIds.length || !ligandChainId || !ligandSmiles) {
+      throw new Error('Affinity mode needs target chain(s), ligand chain, and ligand SMILES.');
+    }
+    form.append('enable_affinity', 'true');
+    form.append('auto_enable_affinity', 'true');
+  }
+  if (input.affinityRefine) {
+    form.append('affinity_refine', 'true');
+  }
+  form.append('priority', 'high');
+  const endpoint = useProtenix ? '/api/protenix2score' : '/api/boltz2score';
+
+  const res = await requestBackend(endpoint, {
+    method: 'POST',
+    headers: {
+      ...API_HEADERS,
+      Accept: 'application/json'
+    },
+    body: form
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to submit affinity scoring (${res.status}): ${text}`);
+  }
+
+  const data = (await res.json()) as { task_id?: string };
+  if (!data.task_id) {
+    throw new Error('Affinity submit response did not include task_id.');
+  }
+  return data.task_id;
+}
+
 export async function getTaskStatus(taskId: string): Promise<TaskStatusResponse> {
-  const res = await requestWithFallback(`/status/${taskId}`, {
+  const res = await requestBackend(`/status/${taskId}`, {
     headers: {
       Accept: 'application/json'
     }
@@ -209,7 +327,7 @@ export async function terminateTask(taskId: string): Promise<{
   if (!normalizedTaskId) {
     throw new Error('Missing task_id for termination.');
   }
-  const res = await requestWithFallback(`/tasks/${encodeURIComponent(normalizedTaskId)}`, {
+  const res = await requestBackend(`/tasks/${encodeURIComponent(normalizedTaskId)}`, {
     method: 'DELETE',
     headers: {
       ...API_HEADERS,
@@ -229,11 +347,18 @@ export async function terminateTask(taskId: string): Promise<{
   return payload;
 }
 
-export async function downloadResultBlob(taskId: string): Promise<Blob> {
-  const res = await requestWithFallback(`/results/${taskId}`, {});
+type DownloadResultMode = 'view' | 'full';
+
+export async function downloadResultBlob(taskId: string, options?: { mode?: DownloadResultMode }): Promise<Blob> {
+  const mode = options?.mode || 'full';
+  const path = mode === 'view' ? `/results/${taskId}/view` : `/results/${taskId}`;
+  const url = apiUrl(path);
+  const res = await fetchWithTimeout(url, {
+    cache: 'no-store'
+  });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Failed to download result (${res.status}): ${text}`);
+    throw new Error(`Failed to download result (${res.status}) from ${url}: ${text}`);
   }
   return await res.blob();
 }
@@ -331,6 +456,69 @@ function chooseBestAf3StructureFile(names: string[]): string | null {
     })
     .sort((a, b) => a.score - b.score || a.name.length - b.name.length);
   return candidates[0]?.name ?? null;
+}
+
+const PROTENIX_SUMMARY_SAMPLE_RE = /_summary_confidence_sample_(\d+)\.json$/i;
+
+async function chooseBestProtenixStructureAndConfidence(
+  zip: JSZip,
+  names: string[]
+): Promise<{ structureFile: string | null; confidenceFile: string | null }> {
+  const canonicalStructures = [
+    'protenix/output/protenix_model_0.cif',
+    'protenix/output/protenix_model_0.mmcif',
+    'protenix/output/protenix_model_0.pdb'
+  ];
+  const canonicalConfidence = 'protenix/output/confidence_protenix_model_0.json';
+  const canonicalStructure = canonicalStructures.find((candidate) => names.includes(candidate)) || null;
+  if (canonicalStructure && names.includes(canonicalConfidence)) {
+    return { structureFile: canonicalStructure, confidenceFile: canonicalConfidence };
+  }
+
+  const summaryCandidates = names.filter((name) => {
+    const lower = name.toLowerCase();
+    if (!lower.startsWith('protenix/output/')) return false;
+    if (!lower.endsWith('.json')) return false;
+    return PROTENIX_SUMMARY_SAMPLE_RE.test(getBaseName(name));
+  });
+  if (summaryCandidates.length === 0) {
+    return { structureFile: null, confidenceFile: null };
+  }
+
+  const scored: Array<{ file: string; score: number }> = [];
+  for (const file of summaryCandidates) {
+    const payload = await readZipJson(zip, file);
+    if (!payload) continue;
+    const score = toFiniteNumber(payload.ranking_score);
+    if (score === null) continue;
+    scored.push({ file, score });
+  }
+  if (scored.length === 0) {
+    throw new Error('Protenix summary confidence exists but ranking_score is missing.');
+  }
+  scored.sort((a, b) => b.score - a.score || a.file.length - b.file.length);
+  const selectedSummary = scored[0].file;
+  const sampleMatch = PROTENIX_SUMMARY_SAMPLE_RE.exec(getBaseName(selectedSummary));
+  if (!sampleMatch) {
+    throw new Error(`Cannot parse sample index from Protenix summary: ${selectedSummary}`);
+  }
+  const sampleIndex = sampleMatch[1];
+  const summaryDir = selectedSummary.includes('/') ? selectedSummary.slice(0, selectedSummary.lastIndexOf('/')) : '';
+  const base = getBaseName(selectedSummary);
+  const structureBase = base.replace(/_summary_confidence_sample_\d+\.json$/i, `_sample_${sampleIndex}`);
+  const withSummaryDir = (file: string) => (summaryDir ? `${summaryDir}/${file}` : file);
+  const structureCandidates = [
+    withSummaryDir(`${structureBase}.cif`),
+    withSummaryDir(`${structureBase}.mmcif`),
+    withSummaryDir(`${structureBase}.pdb`)
+  ];
+  const structureFile = structureCandidates.find((candidate) => names.includes(candidate)) || null;
+  if (!structureFile) {
+    throw new Error(
+      `Cannot locate Protenix structure for summary ${selectedSummary} (sample ${sampleIndex}).`
+    );
+  }
+  return { structureFile, confidenceFile: selectedSummary };
 }
 
 function flattenNumberMatrix(values: unknown): number[] {
@@ -689,6 +877,23 @@ const POLYMER_COMP_IDS = new Set([
   'DU'
 ]);
 
+function isLikelyLigandCompId(compId: string): boolean {
+  const normalized = compId.trim().toUpperCase();
+  if (!normalized) return false;
+  if (WATER_COMP_IDS.has(normalized)) return false;
+  return !POLYMER_COMP_IDS.has(normalized);
+}
+
+function isLikelyLigandAtomRow(groupPdb: string, compId: string): boolean {
+  const normalizedGroup = groupPdb.trim().toUpperCase();
+  if (!isLikelyLigandCompId(compId)) return false;
+  if (!normalizedGroup) return true;
+  // Some runtimes may emit ligand atoms as ATOM instead of HETATM.
+  if (normalizedGroup === 'HETATM') return true;
+  if (normalizedGroup === 'ATOM') return true;
+  return false;
+}
+
 function isHydrogenLikeElement(raw: string): boolean {
   const value = raw.trim().toUpperCase();
   if (!value) return false;
@@ -774,12 +979,7 @@ function inferSingleLigandChainIdFromCif(structureText: string): string | null {
           rowIndex += 1;
           continue;
         }
-        if (groupPdb) {
-          if (groupPdb !== 'HETATM') {
-            rowIndex += 1;
-            continue;
-          }
-        } else if (POLYMER_COMP_IDS.has(compId)) {
+        if (!isLikelyLigandAtomRow(groupPdb, compId)) {
           rowIndex += 1;
           continue;
         }
@@ -924,15 +1124,7 @@ function extractLigandAtomPlddtsByChainFromCif(structureText: string): Record<st
           rowIndex += 1;
           continue;
         }
-        if (WATER_COMP_IDS.has(compId)) {
-          rowIndex += 1;
-          continue;
-        }
-        if (groupPdb && groupPdb !== 'HETATM') {
-          rowIndex += 1;
-          continue;
-        }
-        if (!groupPdb && POLYMER_COMP_IDS.has(compId)) {
+        if (!isLikelyLigandAtomRow(groupPdb, compId)) {
           rowIndex += 1;
           continue;
         }
@@ -1603,12 +1795,18 @@ function compactConfidenceForStorage(input: Record<string, unknown>): Record<str
 }
 
 export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle | null> {
-  const zip = await JSZip.loadAsync(blob);
+  const { default: JSZipLib } = await import('jszip');
+  const zip = await JSZipLib.loadAsync(blob);
   const names = Object.keys(zip.files).filter((name) => !zip.files[name]?.dir);
   const isAf3 = names.some((name) => name.toLowerCase().includes('af3/output/'));
   const isProtenix = names.some((name) => name.toLowerCase().includes('protenix/output/'));
+  const protenixSelection = isProtenix ? await chooseBestProtenixStructureAndConfidence(zip, names) : null;
 
-  const structureFile = isAf3 ? chooseBestAf3StructureFile(names) : chooseBestBoltzStructureFile(names);
+  const structureFile = isAf3
+    ? chooseBestAf3StructureFile(names)
+    : isProtenix
+      ? protenixSelection?.structureFile || null
+      : chooseBestBoltzStructureFile(names);
   if (!structureFile) return null;
   const structureFormat: 'cif' | 'pdb' = getBaseName(structureFile).toLowerCase().endsWith('.pdb') ? 'pdb' : 'cif';
 
@@ -1689,7 +1887,9 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
       backend: 'alphafold3'
     };
   } else {
-    const confFile = chooseBestBoltzConfidenceFile(names, structureFile);
+    const confFile = isProtenix
+      ? protenixSelection?.confidenceFile || null
+      : chooseBestBoltzConfidenceFile(names, structureFile);
     const parsedConfidence = await readZipJson(zip, confFile);
     if (parsedConfidence) {
       confidence = compactConfidenceForStorage({
@@ -1822,7 +2022,7 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
 }
 
 export async function downloadResultFile(taskId: string): Promise<void> {
-  const blob = await downloadResultBlob(taskId);
+  const blob = await downloadResultBlob(taskId, { mode: 'full' });
   const href = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = href;

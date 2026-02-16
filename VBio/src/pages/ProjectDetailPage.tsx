@@ -1,4 +1,4 @@
-import type { CSSProperties, FormEvent, KeyboardEvent, PointerEvent } from 'react';
+import type { CSSProperties, FormEvent, KeyboardEvent, MouseEvent, PointerEvent } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
@@ -36,18 +36,27 @@ import {
   ensureStructureConfidenceColoringData,
   getTaskStatus,
   parseResultBundle,
+  submitAffinityScoring,
   submitPrediction
 } from '../api/backendApi';
-import { getProjectById, insertProjectTask, listProjectTasks, updateProject, updateProjectTask } from '../api/supabaseLite';
+import {
+  getProjectById,
+  getProjectTaskById,
+  insertProjectTask,
+  listProjectTasksCompact,
+  updateProject,
+  updateProjectTask
+} from '../api/supabaseLite';
 import { formatDuration } from '../utils/date';
 import type { MolstarResidueHighlight, MolstarResiduePick } from '../components/project/MolstarViewer';
 import { MolstarViewer } from '../components/project/MolstarViewer';
-import { MetricsPanel } from '../components/project/MetricsPanel';
+import { AffinityBasicsWorkspace } from '../components/project/AffinityWorkspace';
 import { ComponentInputEditor } from '../components/project/ComponentInputEditor';
 import type { ConstraintResiduePick } from '../components/project/ConstraintEditor';
 import { ConstraintEditor } from '../components/project/ConstraintEditor';
 import { Ligand2DPreview } from '../components/project/Ligand2DPreview';
-import { LigandPropertyGrid } from '../components/project/LigandPropertyGrid';
+import { ProjectBasicsMetadataForm } from '../components/project/ProjectBasicsMetadataForm';
+import { ProjectResultsSection } from '../components/project/ProjectResultsSection';
 import { assignChainIdsForComponents, buildChainInfos } from '../utils/chainAssignments';
 import { extractProteinChainResidueIndexMap } from '../utils/structureParser';
 import {
@@ -64,6 +73,8 @@ import {
 } from '../utils/projectInputs';
 import { validateComponents } from '../utils/inputValidation';
 import { getWorkflowDefinition } from '../utils/workflows';
+import { useAffinityWorkflow } from '../hooks/useAffinityWorkflow';
+import type { AffinityPersistedUpload, AffinityPersistedUploads } from '../hooks/useAffinityWorkflow';
 
 interface DraftFields {
   name: string;
@@ -92,6 +103,8 @@ const CONSTRAINTS_MAIN_WIDTH_STORAGE_KEY = 'vbio:constraints-main-width';
 const DEFAULT_CONSTRAINTS_MAIN_WIDTH = 63;
 const MIN_CONSTRAINTS_MAIN_WIDTH = 52;
 const MAX_CONSTRAINTS_MAIN_WIDTH = 82;
+const AFFINITY_TARGET_UPLOAD_COMPONENT_ID = '__affinity_target_upload__';
+const AFFINITY_LIGAND_UPLOAD_COMPONENT_ID = '__affinity_ligand_upload__';
 
 function clampResultsMainWidth(value: number): number {
   return Math.max(MIN_RESULTS_MAIN_WIDTH, Math.min(MAX_RESULTS_MAIN_WIDTH, value));
@@ -171,6 +184,17 @@ function readFirstFiniteMetric(data: Record<string, unknown>, paths: string[]): 
     }
   }
   return null;
+}
+
+function readFirstNonEmptyStringMetric(data: Record<string, unknown> | null, paths: string[]): string {
+  if (!data) return '';
+  for (const path of paths) {
+    const value = readObjectPath(data, path);
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return '';
 }
 
 function toFiniteNumber(value: unknown): number | null {
@@ -327,10 +351,112 @@ function defaultConfigFromProject(project: Project): ProjectInputConfig {
   return config;
 }
 
+function affinityUploadRoleFromComponentId(componentId: string): 'target' | 'ligand' | null {
+  const normalizedId = String(componentId || '').trim();
+  if (normalizedId === AFFINITY_TARGET_UPLOAD_COMPONENT_ID) return 'target';
+  if (normalizedId === AFFINITY_LIGAND_UPLOAD_COMPONENT_ID) return 'ligand';
+  return null;
+}
+
+function extractAffinityUploadFromRawComponent(component: Record<string, unknown>): {
+  role: 'target' | 'ligand';
+  fileName: string;
+  content: string;
+} | null {
+  const componentId = typeof component.id === 'string' ? component.id.trim() : '';
+  const uploadMeta =
+    component.affinityUpload && typeof component.affinityUpload === 'object'
+      ? (component.affinityUpload as Record<string, unknown>)
+      : component.affinity_upload && typeof component.affinity_upload === 'object'
+        ? (component.affinity_upload as Record<string, unknown>)
+        : null;
+  const roleFromMeta = uploadMeta?.role;
+  const role =
+    roleFromMeta === 'target' || roleFromMeta === 'ligand'
+      ? roleFromMeta
+      : affinityUploadRoleFromComponentId(componentId);
+  if (!role) return null;
+  const fileNameFromMeta = uploadMeta && typeof uploadMeta.fileName === 'string' ? uploadMeta.fileName.trim() : '';
+  const fallbackName = role === 'target' ? 'target_upload.pdb' : 'ligand_upload.sdf';
+  const fileName = fileNameFromMeta || fallbackName;
+  const contentFromMeta = uploadMeta && typeof uploadMeta.content === 'string' ? uploadMeta.content : '';
+  const contentFromSequence = typeof component.sequence === 'string' ? component.sequence : '';
+  const content = (contentFromMeta || contentFromSequence || '').trim();
+  if (!content) return null;
+  return { role, fileName, content };
+}
+
+function readTaskAffinityUploads(task: ProjectTask | null): AffinityPersistedUploads {
+  const empty: AffinityPersistedUploads = { target: null, ligand: null };
+  if (!task || !Array.isArray(task.components)) return empty;
+  const rawComponents = task.components as unknown as Array<Record<string, unknown>>;
+  let target: AffinityPersistedUpload | null = null;
+  let ligand: AffinityPersistedUpload | null = null;
+  for (const component of rawComponents) {
+    if (!component || typeof component !== 'object') continue;
+    const parsed = extractAffinityUploadFromRawComponent(component);
+    if (!parsed) continue;
+    if (parsed.role === 'target' && !target) {
+      target = { fileName: parsed.fileName, content: parsed.content };
+    }
+    if (parsed.role === 'ligand' && !ligand) {
+      ligand = { fileName: parsed.fileName, content: parsed.content };
+    }
+  }
+  return { target, ligand };
+}
+
+async function buildAffinityUploadSnapshotComponents(
+  baseComponents: InputComponent[],
+  targetFile: File | null,
+  ligandFile: File | null,
+  ligandSmiles: string = ''
+): Promise<InputComponent[]> {
+  const filteredBase = normalizeComponents(baseComponents).filter((component) => {
+    const role = affinityUploadRoleFromComponentId(component.id);
+    return role === null;
+  });
+  if (!targetFile) return filteredBase;
+
+  const targetUploadComponent = ({
+    id: AFFINITY_TARGET_UPLOAD_COMPONENT_ID,
+    type: 'protein',
+    numCopies: 1,
+    sequence: '',
+    useMsa: false,
+    cyclic: false,
+    affinityUpload: {
+      role: 'target',
+      fileName: targetFile.name
+    }
+  } as unknown) as InputComponent;
+
+  const next: InputComponent[] = [...filteredBase, targetUploadComponent];
+
+  if (ligandFile) {
+    const ligandUploadComponent = ({
+      id: AFFINITY_LIGAND_UPLOAD_COMPONENT_ID,
+      type: 'ligand',
+      numCopies: 1,
+      sequence: normalizeComponentSequence('ligand', ligandSmiles),
+      inputMethod: 'jsme',
+      affinityUpload: {
+        role: 'ligand',
+        fileName: ligandFile.name
+      }
+    } as unknown) as InputComponent;
+    next.push(ligandUploadComponent);
+  }
+
+  return next;
+}
+
 function readTaskComponents(task: ProjectTask | null): InputComponent[] {
   if (!task) return [];
 
-  const components = Array.isArray(task.components) ? normalizeComponents(task.components) : [];
+  const rawComponents = Array.isArray(task.components) ? (task.components as unknown as Array<Record<string, unknown>>) : [];
+  const filteredRawComponents = rawComponents.filter((component) => !extractAffinityUploadFromRawComponent(component));
+  const components = filteredRawComponents.length > 0 ? normalizeComponents(filteredRawComponents as unknown as InputComponent[]) : [];
   if (components.length > 0) return components;
 
   const fallback: InputComponent[] = [];
@@ -455,13 +581,13 @@ function readLigandAtomPlddtsFromConfidence(
     readObjectPath(confidence, 'ligand.atom_plddts_by_chain'),
     readObjectPath(confidence, 'ligand_confidence.atom_plddts_by_chain')
   ];
-  const preferred = preferredLigandChainId ? normalizeChainKey(preferredLigandChainId) : '';
+  const preferredKeys = collectPreferredLigandChainKeys(confidence, preferredLigandChainId);
   for (const candidate of byChainCandidates) {
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
     const entries = Object.entries(candidate as Record<string, unknown>);
-    if (preferred) {
+    if (preferredKeys.size > 0) {
       for (const [chainId, chainValues] of entries) {
-        if (normalizeChainKey(chainId) !== preferred || !Array.isArray(chainValues)) continue;
+        if (!preferredKeys.has(normalizeChainKey(chainId)) || !Array.isArray(chainValues)) continue;
         const values = chainValues
           .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
           .map((value) => normalizePlddtValue(value));
@@ -519,21 +645,42 @@ function chainKeysMatch(candidate: string, preferred: string): boolean {
   return compactCandidate.endsWith(compactPreferred);
 }
 
-function readResiduePlddtsFromChainMap(value: unknown, preferredLigandChainId: string | null): number[] | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || !preferredLigandChainId) return null;
-  const preferred = normalizeChainKey(preferredLigandChainId);
+function collectPreferredLigandChainKeys(
+  confidence: Record<string, unknown>,
+  preferredLigandChainId: string | null
+): Set<string> {
+  const keys = new Set<string>();
+  if (preferredLigandChainId) {
+    keys.add(normalizeChainKey(preferredLigandChainId));
+  }
+  const modelLigandChain = readFirstNonEmptyStringMetric(confidence, ['model_ligand_chain_id']);
+  if (modelLigandChain) {
+    keys.add(normalizeChainKey(modelLigandChain));
+  }
+  const requestedLigandChain = readFirstNonEmptyStringMetric(confidence, ['requested_ligand_chain_id', 'ligand_chain_id']);
+  if (requestedLigandChain) {
+    keys.add(normalizeChainKey(requestedLigandChain));
+  }
+  return keys;
+}
+
+function readResiduePlddtsFromChainMap(value: unknown, preferredChainKeys: Set<string>): number[] | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || preferredChainKeys.size === 0) return null;
   const entries = Object.entries(value as Record<string, unknown>);
   for (const [key, chainValues] of entries) {
-    if (!chainKeysMatch(key, preferred)) continue;
+    const matched = Array.from(preferredChainKeys).some((preferred) => chainKeysMatch(key, preferred));
+    if (!matched) continue;
     const parsed = toFiniteNumberArray(chainValues).map((item) => normalizePlddtValue(item));
     if (parsed.length > 0) return parsed;
   }
   return null;
 }
 
-function readTokenPlddtsForChain(confidence: Record<string, unknown> | null, preferredLigandChainId: string | null): number[] | null {
-  if (!confidence || !preferredLigandChainId) return null;
-  const preferred = normalizeChainKey(preferredLigandChainId);
+function readTokenPlddtsForChain(
+  confidence: Record<string, unknown> | null,
+  preferredChainKeys: Set<string>
+): number[] | null {
+  if (!confidence || preferredChainKeys.size === 0) return null;
   const tokenPlddtCandidates: unknown[] = [
     confidence.token_plddts,
     confidence.token_plddt,
@@ -556,7 +703,9 @@ function readTokenPlddtsForChain(confidence: Record<string, unknown> | null, pre
       if (!Array.isArray(chainCandidate) || chainCandidate.length !== tokenPlddts.length) continue;
       const tokenChains = chainCandidate.map((value) => normalizeChainKey(String(value || '')));
       if (tokenChains.some((value) => !value)) continue;
-      const byChain = tokenPlddts.filter((_, index) => chainKeysMatch(tokenChains[index], preferred));
+      const byChain = tokenPlddts.filter((_, index) => {
+        return Array.from(preferredChainKeys).some((preferred) => chainKeysMatch(tokenChains[index], preferred));
+      });
       if (byChain.length > 0) return byChain;
     }
   }
@@ -564,7 +713,9 @@ function readTokenPlddtsForChain(confidence: Record<string, unknown> | null, pre
 }
 
 function readResiduePlddtsForChain(confidence: Record<string, unknown> | null, preferredLigandChainId: string | null): number[] | null {
-  if (!confidence || !preferredLigandChainId) return null;
+  if (!confidence) return null;
+  const preferredChainKeys = collectPreferredLigandChainKeys(confidence, preferredLigandChainId);
+  if (preferredChainKeys.size === 0) return null;
   const chainMapCandidates: unknown[] = [
     confidence.residue_plddt_by_chain,
     confidence.chain_residue_plddt,
@@ -579,10 +730,10 @@ function readResiduePlddtsForChain(confidence: Record<string, unknown> | null, p
   ];
 
   for (const candidate of chainMapCandidates) {
-    const parsed = readResiduePlddtsFromChainMap(candidate, preferredLigandChainId);
+    const parsed = readResiduePlddtsFromChainMap(candidate, preferredChainKeys);
     if (parsed && parsed.length > 0) return parsed;
   }
-  return readTokenPlddtsForChain(confidence, preferredLigandChainId);
+  return readTokenPlddtsForChain(confidence, preferredChainKeys);
 }
 
 function alignConfidenceSeriesToLength(values: number[] | null, sequenceLength: number): number[] | null {
@@ -827,6 +978,10 @@ export function ProjectDetailPage() {
   const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [proteinTemplates, setProteinTemplates] = useState<Record<string, ProteinTemplateUpload>>({});
   const [taskProteinTemplates, setTaskProteinTemplates] = useState<Record<string, Record<string, ProteinTemplateUpload>>>({});
+  const [affinitySavedUploads, setAffinitySavedUploads] = useState<AffinityPersistedUploads>({
+    target: null,
+    ligand: null
+  });
   const [pickedResidue, setPickedResidue] = useState<ConstraintResiduePick | null>(null);
   const [activeConstraintId, setActiveConstraintId] = useState<string | null>(null);
   const [selectedContactConstraintIds, setSelectedContactConstraintIds] = useState<string[]>([]);
@@ -879,7 +1034,6 @@ export function ProjectDetailPage() {
   const [isConstraintsResizing, setIsConstraintsResizing] = useState(false);
   const constraintsWorkspaceRef = useRef<HTMLDivElement | null>(null);
   const constraintsResizeRef = useRef<{ startX: number; startWidthPercent: number } | null>(null);
-
   useEffect(() => {
     const tab = new URLSearchParams(location.search).get('tab');
     if (tab === 'inputs') {
@@ -893,10 +1047,13 @@ export function ProjectDetailPage() {
 
   useEffect(() => {
     if (!draft) return;
+    const validProteinIds = new Set(
+      draft.inputConfig.components.filter((component) => component.type === 'protein').map((component) => component.id)
+    );
+    const hasInvalidTemplate = Object.keys(proteinTemplates).some((componentId) => !validProteinIds.has(componentId));
+    if (!hasInvalidTemplate) return;
+
     setProteinTemplates((prev) => {
-      const validProteinIds = new Set(
-        draft.inputConfig.components.filter((component) => component.type === 'protein').map((component) => component.id)
-      );
       let changed = false;
       const next: Record<string, ProteinTemplateUpload> = {};
       for (const [componentId, upload] of Object.entries(prev)) {
@@ -908,12 +1065,15 @@ export function ProjectDetailPage() {
       }
       return changed ? next : prev;
     });
-  }, [draft]);
+  }, [draft, proteinTemplates]);
 
   const canEdit = useMemo(() => {
     if (!project || !session) return false;
     return project.user_id === session.userId;
   }, [project, session]);
+  const workflowKey = useMemo(() => getWorkflowDefinition(project?.task_type).key, [project?.task_type]);
+  const isPredictionWorkflow = workflowKey === 'prediction';
+  const isAffinityWorkflow = workflowKey === 'affinity';
 
   const rememberTemplatesForTaskRow = useCallback((taskRowId: string | null, templates: Record<string, ProteinTemplateUpload>) => {
     const normalizedTaskRowId = String(taskRowId || '').trim();
@@ -1007,6 +1167,7 @@ export function ProjectDetailPage() {
     if (nextConstraints.length === draft.inputConfig.constraints.length) return;
 
     const keptIds = new Set(nextConstraints.map((item) => item.id));
+    const filteredSelectedContactIds = selectedContactConstraintIds.filter((id) => keptIds.has(id));
     setDraft((prev) =>
       prev
         ? {
@@ -1018,14 +1179,19 @@ export function ProjectDetailPage() {
           }
         : prev
     );
-    setSelectedContactConstraintIds((prev) => prev.filter((id) => keptIds.has(id)));
+    if (
+      filteredSelectedContactIds.length !== selectedContactConstraintIds.length ||
+      filteredSelectedContactIds.some((id, index) => id !== selectedContactConstraintIds[index])
+    ) {
+      setSelectedContactConstraintIds(filteredSelectedContactIds);
+    }
     if (activeConstraintId && !keptIds.has(activeConstraintId)) {
       setActiveConstraintId(null);
     }
     if (constraintSelectionAnchorRef.current && !keptIds.has(constraintSelectionAnchorRef.current)) {
       constraintSelectionAnchorRef.current = null;
     }
-  }, [draft, activeConstraintId]);
+  }, [draft, activeConstraintId, selectedContactConstraintIds]);
 
   const componentTypeBuckets = useMemo(() => {
     const buckets: Record<
@@ -1133,28 +1299,126 @@ export function ProjectDetailPage() {
     return null;
   }, [draft?.inputConfig.properties, activeResultTask?.properties]);
   const selectedResultTargetChainId = useMemo(() => {
+    const affinityData =
+      activeResultTask?.affinity && typeof activeResultTask.affinity === 'object' && !Array.isArray(activeResultTask.affinity)
+        ? (activeResultTask.affinity as Record<string, unknown>)
+        : project?.affinity && typeof project.affinity === 'object' && !Array.isArray(project.affinity)
+          ? (project.affinity as Record<string, unknown>)
+          : null;
     const preferred = typeof resultPairPreference?.target === 'string' ? resultPairPreference.target.trim() : '';
-    if (preferred && resultChainInfoById.has(preferred)) {
-      return preferred;
+    const affinityTarget = readFirstNonEmptyStringMetric(affinityData, [
+      'requested_target_chain',
+      'target_chain',
+      'binder_chain'
+    ]);
+    const resolveChain = (candidate: string): string | null => {
+      const raw = String(candidate || '').trim();
+      if (!raw) return null;
+      const direct = resultChainInfoById.has(raw) ? raw : null;
+      if (direct) return direct;
+      const byComponent = resultComponentOptions.find((item) => item.id === raw);
+      if (byComponent?.chainId) return byComponent.chainId;
+      const normalized = raw.toUpperCase();
+      const byNormalized = resultComponentOptions.find((item) => String(item.chainId || '').toUpperCase() === normalized);
+      if (byNormalized?.chainId) return byNormalized.chainId;
+      for (const chainId of resultChainIds) {
+        if (chainKeysMatch(chainId, normalized) || chainKeysMatch(normalized, chainId)) {
+          return chainId;
+        }
+      }
+      return null;
+    };
+    const targetCandidates = [preferred, affinityTarget];
+    for (const candidate of targetCandidates) {
+      const chain = resolveChain(candidate);
+      if (chain) return chain;
+      const split = String(candidate || '')
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+      for (const part of split) {
+        const partChain = resolveChain(part);
+        if (partChain) return partChain;
+      }
     }
     return resultComponentOptions[0]?.chainId || null;
-  }, [resultPairPreference, resultChainInfoById, resultComponentOptions]);
+  }, [resultPairPreference, resultChainInfoById, resultComponentOptions, resultChainIds, activeResultTask?.affinity, project?.affinity]);
   const selectedResultLigandChainId = useMemo(() => {
+    const affinityData =
+      activeResultTask?.affinity && typeof activeResultTask.affinity === 'object' && !Array.isArray(activeResultTask.affinity)
+        ? (activeResultTask.affinity as Record<string, unknown>)
+        : project?.affinity && typeof project.affinity === 'object' && !Array.isArray(project.affinity)
+          ? (project.affinity as Record<string, unknown>)
+          : null;
+    const confidenceData =
+      activeResultTask?.confidence && typeof activeResultTask.confidence === 'object' && !Array.isArray(activeResultTask.confidence)
+        ? (activeResultTask.confidence as Record<string, unknown>)
+        : project?.confidence && typeof project.confidence === 'object' && !Array.isArray(project.confidence)
+          ? (project.confidence as Record<string, unknown>)
+          : null;
     const preferred = typeof resultPairPreference?.ligand === 'string' ? resultPairPreference.ligand.trim() : '';
-    if (preferred) {
-      if (resultChainInfoById.has(preferred)) {
-        return preferred;
+    const affinityModelLigand = readFirstNonEmptyStringMetric(affinityData, [
+      'model_ligand_chain_id'
+    ]);
+    const affinityLigand = readFirstNonEmptyStringMetric(affinityData, [
+      'requested_ligand_chain',
+      'ligand_chain'
+    ]);
+    const confidenceModelLigand = readFirstNonEmptyStringMetric(confidenceData, [
+      'model_ligand_chain_id'
+    ]);
+    const confidenceLigand = readFirstNonEmptyStringMetric(confidenceData, [
+      'ligand_chain_id'
+    ]);
+    const confidenceLigandIds =
+      confidenceData?.ligand_chain_ids && Array.isArray(confidenceData.ligand_chain_ids)
+        ? (confidenceData.ligand_chain_ids as unknown[])
+            .filter((item): item is string => typeof item === 'string')
+            .map((item) => item.trim())
+            .filter(Boolean)
+        : [];
+    const confidenceByChain =
+      confidenceData?.ligand_atom_plddts_by_chain &&
+      typeof confidenceData.ligand_atom_plddts_by_chain === 'object' &&
+      !Array.isArray(confidenceData.ligand_atom_plddts_by_chain)
+        ? Object.keys(confidenceData.ligand_atom_plddts_by_chain as Record<string, unknown>)
+            .map((item) => item.trim())
+            .filter(Boolean)
+        : [];
+    const resolveChain = (candidate: string): string | null => {
+      const raw = String(candidate || '').trim();
+      if (!raw) return null;
+      if (resultChainInfoById.has(raw)) {
+        return raw;
       }
-      const byComponent = resultComponentOptions.find((item) => item.id === preferred);
+      const byComponent = resultComponentOptions.find((item) => item.id === raw);
       if (byComponent?.chainId) {
         return byComponent.chainId;
       }
-      const normalizedPreferred = preferred.toUpperCase();
-      const byNormalizedChain = resultComponentOptions.find((item) => String(item.chainId || '').toUpperCase() === normalizedPreferred);
+      const normalized = raw.toUpperCase();
+      const byNormalizedChain = resultComponentOptions.find((item) => String(item.chainId || '').toUpperCase() === normalized);
       if (byNormalizedChain?.chainId) {
         return byNormalizedChain.chainId;
       }
+      for (const chainId of resultChainIds) {
+        if (chainKeysMatch(chainId, normalized) || chainKeysMatch(normalized, chainId)) {
+          return chainId;
+        }
+      }
       return null;
+    };
+    const preferredCandidates = [
+      preferred,
+      affinityModelLigand,
+      confidenceModelLigand,
+      affinityLigand,
+      confidenceLigand,
+      ...confidenceLigandIds,
+      ...confidenceByChain
+    ];
+    for (const candidate of preferredCandidates) {
+      const chain = resolveChain(candidate);
+      if (chain) return chain;
     }
     const optionsWithoutTarget = resultComponentOptions.filter((item) => item.chainId && item.chainId !== selectedResultTargetChainId);
     const defaultOption =
@@ -1164,7 +1428,17 @@ export function ProjectDetailPage() {
       resultComponentOptions[0] ||
       null;
     return defaultOption?.chainId || null;
-  }, [resultPairPreference, resultChainInfoById, resultComponentOptions, selectedResultTargetChainId]);
+  }, [
+    resultPairPreference,
+    resultChainInfoById,
+    resultComponentOptions,
+    selectedResultTargetChainId,
+    resultChainIds,
+    activeResultTask?.affinity,
+    project?.affinity,
+    activeResultTask?.confidence,
+    project?.confidence
+  ]);
   const selectedResultLigandComponent = useMemo(() => {
     if (!selectedResultLigandChainId) return null;
     const info = resultChainInfoById.get(selectedResultLigandChainId);
@@ -1213,6 +1487,33 @@ export function ProjectDetailPage() {
     }
     return null;
   }, [activeResultTask?.confidence, project?.confidence]);
+  const resultChainConsistencyWarning = useMemo(() => {
+    if (workflowKey !== 'affinity') return null;
+    if (!snapshotConfidence) return null;
+    const confidenceChainIdsRaw = snapshotConfidence.chain_ids;
+    if (!Array.isArray(confidenceChainIdsRaw)) return null;
+    const confidenceChainIds = confidenceChainIdsRaw
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (confidenceChainIds.length <= resultChainIds.length) return null;
+
+    const proteinComponents = resultOverviewActiveComponents.filter((item) => item.type === 'protein').length;
+    const ligandComponents = resultOverviewActiveComponents.filter((item) => item.type === 'ligand').length;
+    if (proteinComponents !== 1 || ligandComponents !== 1 || resultChainIds.length !== 2) return null;
+
+    const modelLigandChain = readFirstNonEmptyStringMetric(snapshotConfidence, ['model_ligand_chain_id']);
+    const requestedLigandChain = readFirstNonEmptyStringMetric(snapshotConfidence, ['requested_ligand_chain_id', 'ligand_chain_id']);
+    const mappingText =
+      modelLigandChain && requestedLigandChain
+        ? ` (model ligand chain: ${modelLigandChain}, requested: ${requestedLigandChain})`
+        : '';
+    return (
+      `Result artifact chain count is inconsistent with task components: expected 2 chains from components, `
+      + `but confidence reports ${confidenceChainIds.length} (${confidenceChainIds.join(', ')}). `
+      + `This usually means a malformed Protenix chain split in an older run; rerun the task with current backend.${mappingText}`
+    );
+  }, [workflowKey, snapshotConfidence, resultChainIds, resultOverviewActiveComponents]);
   const snapshotAffinity = useMemo(() => {
     if (activeResultTask?.affinity && Object.keys(activeResultTask.affinity).length > 0) {
       return activeResultTask.affinity as Record<string, unknown>;
@@ -1414,7 +1715,9 @@ export function ProjectDetailPage() {
     const ids = draft.inputConfig.constraints.map((item) => item.id);
     if (ids.length === 0) {
       if (activeConstraintId !== null) setActiveConstraintId(null);
-      setSelectedContactConstraintIds((prev) => (prev.length > 0 ? [] : prev));
+      if (selectedContactConstraintIds.length > 0) {
+        setSelectedContactConstraintIds([]);
+      }
       constraintSelectionAnchorRef.current = null;
       return;
     }
@@ -1424,17 +1727,17 @@ export function ProjectDetailPage() {
     const validContactIds = new Set(
       draft.inputConfig.constraints.filter((item) => item.type === 'contact').map((item) => item.id)
     );
-    setSelectedContactConstraintIds((prev) => {
-      const filtered = prev.filter((id) => validContactIds.has(id));
-      if (filtered.length === prev.length && filtered.every((id, index) => id === prev[index])) {
-        return prev;
-      }
-      return filtered;
-    });
+    const filtered = selectedContactConstraintIds.filter((id) => validContactIds.has(id));
+    if (
+      filtered.length !== selectedContactConstraintIds.length ||
+      filtered.some((id, index) => id !== selectedContactConstraintIds[index])
+    ) {
+      setSelectedContactConstraintIds(filtered);
+    }
     if (constraintSelectionAnchorRef.current && !validContactIds.has(constraintSelectionAnchorRef.current)) {
       constraintSelectionAnchorRef.current = null;
     }
-  }, [draft, activeConstraintId]);
+  }, [draft, activeConstraintId, selectedContactConstraintIds]);
 
   useEffect(() => {
     if (!constraintPickModeEnabled || !activeConstraintId) return;
@@ -2018,6 +2321,7 @@ export function ProjectDetailPage() {
   }, [selectedTemplatePreview, activeConstraintResidue, constraintViewerHighlightResidues]);
 
   useEffect(() => {
+    if (workflowKey !== 'prediction') return;
     if (!draft) return;
     const props = draft.inputConfig.properties;
     const nextLigand = selectedWorkspaceLigand.chainId;
@@ -2049,12 +2353,17 @@ export function ProjectDetailPage() {
           : prev
       );
     }
-  }, [draft, selectedWorkspaceLigand.chainId, selectedWorkspaceTarget.chainId, canEnableAffinityFromWorkspace]);
+  }, [draft, selectedWorkspaceLigand.chainId, selectedWorkspaceTarget.chainId, canEnableAffinityFromWorkspace, workflowKey]);
 
   useEffect(() => {
     if (!project) return;
     const workflowDef = getWorkflowDefinition(project.task_type);
-    if (workflowDef.key !== 'prediction' && (workspaceTab === 'components' || workspaceTab === 'constraints')) {
+    const allowsComponentsTab = workflowDef.key === 'prediction' || workflowDef.key === 'affinity';
+    const allowsConstraintsTab = workflowDef.key === 'prediction';
+    if (
+      (!allowsComponentsTab && workspaceTab === 'components') ||
+      (!allowsConstraintsTab && workspaceTab === 'constraints')
+    ) {
       setWorkspaceTab('basics');
     }
   }, [project?.task_type, workspaceTab]);
@@ -2084,18 +2393,6 @@ export function ProjectDetailPage() {
     return null;
   }, [displayDurationSeconds, displaySubmittedAt, displayCompletedAt]);
 
-  const loadProjectTasks = useCallback(async (currentProjectId: string, options?: { silent?: boolean }) => {
-    const silent = Boolean(options?.silent);
-    try {
-      const rows = await listProjectTasks(currentProjectId);
-      setProjectTasks(sortProjectTasks(rows));
-    } catch (err) {
-      if (!silent) {
-        setError(err instanceof Error ? err.message : 'Failed to load task history.');
-      }
-    }
-  }, []);
-
   const loadProject = async () => {
     setLoading(true);
     setError(null);
@@ -2109,23 +2406,35 @@ export function ProjectDetailPage() {
         throw new Error('You do not have permission to access this project.');
       }
 
-      const taskRows = sortProjectTasks(await listProjectTasks(next.id));
+      const taskRowsBase = sortProjectTasks(await listProjectTasksCompact(next.id));
       const activeTaskId = (next.task_id || '').trim();
       const activeTaskRow =
-        activeTaskId.length > 0 ? taskRows.find((item) => String(item.task_id || '').trim() === activeTaskId) || null : null;
+        activeTaskId.length > 0 ? taskRowsBase.find((item) => String(item.task_id || '').trim() === activeTaskId) || null : null;
       const query = new URLSearchParams(location.search);
       const requestedTaskRowId = query.get('task_row_id');
       const requestedTaskRow =
         requestedTaskRowId && requestedTaskRowId.trim()
-          ? taskRows.find((item) => String(item.id || '').trim() === requestedTaskRowId.trim()) || null
+          ? taskRowsBase.find((item) => String(item.id || '').trim() === requestedTaskRowId.trim()) || null
           : null;
-      const snapshotSourceTaskRow = requestedTaskRow || activeTaskRow;
+      const snapshotSourceTaskRowBase = requestedTaskRow || activeTaskRow;
       const latestDraftTask = (() => {
         if (requestedTaskRow && requestedTaskRow.task_state === 'DRAFT' && !String(requestedTaskRow.task_id || '').trim()) {
           return requestedTaskRow;
         }
-        return taskRows.find((item) => item.task_state === 'DRAFT' && !String(item.task_id || '').trim()) || null;
+        return taskRowsBase.find((item) => item.task_state === 'DRAFT' && !String(item.task_id || '').trim()) || null;
       })();
+      const workflowDef = getWorkflowDefinition(next.task_type);
+      const snapshotTaskRowId = snapshotSourceTaskRowBase?.id || latestDraftTask?.id || null;
+      const shouldLoadSnapshotDetail = Boolean(snapshotTaskRowId && workflowDef.key === 'prediction');
+      const snapshotSourceTaskRowDetail = shouldLoadSnapshotDetail && snapshotTaskRowId
+        ? await getProjectTaskById(snapshotTaskRowId)
+        : null;
+      const snapshotSourceTaskRow = snapshotSourceTaskRowDetail || snapshotSourceTaskRowBase;
+      const taskRows = sortProjectTasks(
+        taskRowsBase.map((item) =>
+          snapshotSourceTaskRowDetail && item.id === snapshotSourceTaskRowDetail.id ? snapshotSourceTaskRowDetail : item
+        )
+      );
 
       const savedConfig = loadProjectInputConfig(next.id);
       const baseConfig = savedConfig || defaultConfigFromProject(next);
@@ -2184,7 +2493,16 @@ export function ProjectDetailPage() {
       const restoredTemplates = Object.fromEntries(
         Object.entries(templateSource).filter(([componentId]) => validProteinIds.has(componentId))
       ) as Record<string, ProteinTemplateUpload>;
-      const defaultContextTask = requestedTaskRow || activeTaskRow;
+      const restoredAffinityUploadsFromUi = savedUiState?.affinityUploads || {
+        target: null,
+        ligand: null
+      };
+      const restoredAffinityUploadsFromTask = readTaskAffinityUploads(snapshotSourceTaskRow);
+      const restoredAffinityUploads: AffinityPersistedUploads = {
+        target: restoredAffinityUploadsFromUi.target || restoredAffinityUploadsFromTask.target,
+        ligand: restoredAffinityUploadsFromUi.ligand || restoredAffinityUploadsFromTask.ligand
+      };
+      const defaultContextTask = snapshotSourceTaskRow || requestedTaskRow || activeTaskRow;
       const contextHasResult = Boolean(
         String(defaultContextTask?.structure_name || '').trim() ||
           hasRecordData(defaultContextTask?.confidence) ||
@@ -2194,8 +2512,7 @@ export function ProjectDetailPage() {
         String(next.structure_name || '').trim() || hasRecordData(next.confidence) || hasRecordData(next.affinity)
       );
       if (!query.get('tab')) {
-        const workflowDef = getWorkflowDefinition(next.task_type);
-        if (workflowDef.key === 'prediction') {
+        if (workflowDef.key === 'prediction' || workflowDef.key === 'affinity') {
           setWorkspaceTab(contextHasResult || projectHasResult ? 'results' : 'components');
         } else {
           setWorkspaceTab('basics');
@@ -2208,6 +2525,7 @@ export function ProjectDetailPage() {
       setRunMenuOpen(false);
       setProteinTemplates(restoredTemplates);
       setTaskProteinTemplates(savedTaskTemplates);
+      setAffinitySavedUploads(restoredAffinityUploads);
       setActiveConstraintId(savedUiState?.activeConstraintId || null);
       setSelectedContactConstraintIds([]);
       constraintSelectionAnchorRef.current = null;
@@ -2242,10 +2560,119 @@ export function ProjectDetailPage() {
     saveProjectUiState(project.id, {
       proteinTemplates,
       taskProteinTemplates,
+      affinityUploads: affinitySavedUploads,
       activeConstraintId,
       selectedConstraintTemplateComponentId
     });
-  }, [project, proteinTemplates, taskProteinTemplates, activeConstraintId, selectedConstraintTemplateComponentId]);
+  }, [
+    project,
+    proteinTemplates,
+    taskProteinTemplates,
+    affinitySavedUploads,
+    activeConstraintId,
+    selectedConstraintTemplateComponentId
+  ]);
+
+  const applyAffinityChainsToDraft = useCallback(
+    (targetChainId: string, ligandChainId: string, forceEnable = false) => {
+      const target = String(targetChainId || '').trim() || null;
+      const ligand = String(ligandChainId || '').trim() || null;
+      setDraft((prev) =>
+        prev
+          ? (() => {
+              const nextAffinity = forceEnable ? true : prev.inputConfig.properties.affinity;
+              const same =
+                prev.inputConfig.properties.affinity === nextAffinity &&
+                prev.inputConfig.properties.target === target &&
+                prev.inputConfig.properties.ligand === ligand &&
+                prev.inputConfig.properties.binder === ligand;
+              if (same) return prev;
+              return {
+                ...prev,
+                inputConfig: {
+                  ...prev.inputConfig,
+                  properties: {
+                    ...prev.inputConfig.properties,
+                    affinity: nextAffinity,
+                    target,
+                    ligand,
+                    binder: ligand
+                  }
+                }
+              };
+            })()
+          : prev
+      );
+    },
+    [setDraft]
+  );
+  const onAffinityChainsResolved = useCallback(
+    (targetChainId: string, ligandChainId: string) => {
+      applyAffinityChainsToDraft(
+        targetChainId,
+        ligandChainId,
+        String(draft?.backend || 'boltz').trim().toLowerCase() === 'boltz'
+      );
+    },
+    [applyAffinityChainsToDraft, draft?.backend]
+  );
+
+  const affinityPersistedUploads = useMemo<AffinityPersistedUploads>(() => {
+    if (!isAffinityWorkflow) {
+      return { target: null, ligand: null };
+    }
+    const sourceTask = statusContextTaskRow || activeResultTask || null;
+    const fromTask = readTaskAffinityUploads(sourceTask);
+    return {
+      target: affinitySavedUploads.target || fromTask.target,
+      ligand: affinitySavedUploads.ligand || fromTask.ligand
+    };
+  }, [isAffinityWorkflow, affinitySavedUploads, statusContextTaskRow, activeResultTask]);
+
+  const {
+    targetFile: affinityTargetFile,
+    ligandFile: affinityLigandFile,
+    ligandSmiles: affinityLigandSmiles,
+    targetChainIds: affinityTargetChainIds,
+    ligandChainId: affinityLigandChainId,
+    preview: affinityPreview,
+    previewTargetStructureText: affinityPreviewTargetStructureText,
+    previewTargetStructureFormat: affinityPreviewTargetStructureFormat,
+    previewLigandStructureText: affinityPreviewLigandStructureText,
+    previewLigandStructureFormat: affinityPreviewLigandStructureFormat,
+    previewLoading: affinityPreviewLoading,
+    previewError: affinityPreviewError,
+    isPreviewCurrent: affinityPreviewCurrent,
+    hasLigand: affinityHasLigand,
+    supportsActivity: affinitySupportsActivity,
+    confidenceOnly: affinityConfidenceOnly,
+    confidenceOnlyLocked: affinityConfidenceOnlyLocked,
+    persistedUploads: affinityCurrentUploads,
+    onTargetFileChange: onAffinityTargetFileChange,
+    onLigandFileChange: onAffinityLigandFileChange,
+    onConfidenceOnlyChange: onAffinityConfidenceOnlyChange,
+    setLigandSmiles: setAffinityLigandSmiles
+  } = useAffinityWorkflow({
+    enabled: isAffinityWorkflow && workspaceTab === 'components',
+    scopeKey: project?.id,
+    persistedLigandSmiles: activeResultTask?.ligand_smiles || project?.ligand_smiles || '',
+    persistedUploads: affinityPersistedUploads,
+    onChainsResolved: onAffinityChainsResolved
+  });
+
+  useEffect(() => {
+    if (!isAffinityWorkflow || workspaceTab !== 'components') return;
+    setAffinitySavedUploads((prev) => {
+      const sameTarget =
+        String(prev.target?.fileName || '') === String(affinityCurrentUploads.target?.fileName || '') &&
+        String(prev.target?.content || '') === String(affinityCurrentUploads.target?.content || '');
+      const sameLigand =
+        String(prev.ligand?.fileName || '') === String(affinityCurrentUploads.ligand?.fileName || '') &&
+        String(prev.ligand?.content || '') === String(affinityCurrentUploads.ligand?.content || '');
+      if (sameTarget && sameLigand) return prev;
+      return affinityCurrentUploads;
+    });
+  }, [isAffinityWorkflow, workspaceTab, affinityCurrentUploads]);
 
   const patch = async (payload: Partial<Project>) => {
     if (!project) return null;
@@ -2299,7 +2726,13 @@ export function ProjectDetailPage() {
 
   const persistDraftTaskSnapshot = async (
     normalizedConfig: ProjectInputConfig,
-    options?: { statusText?: string; reuseTaskRowId?: string | null; snapshotComponents?: InputComponent[] }
+    options?: {
+      statusText?: string;
+      reuseTaskRowId?: string | null;
+      snapshotComponents?: InputComponent[];
+      proteinSequenceOverride?: string;
+      ligandSmilesOverride?: string;
+    }
   ): Promise<ProjectTask> => {
     if (!project || !draft) {
       throw new Error('Project context is not ready.');
@@ -2311,6 +2744,9 @@ export function ProjectDetailPage() {
       Array.isArray(options?.snapshotComponents) && options?.snapshotComponents.length > 0
         ? options.snapshotComponents
         : normalizedConfig.components;
+    const storedProteinSequence =
+      typeof options?.proteinSequenceOverride === 'string' ? options.proteinSequenceOverride : proteinSequence;
+    const storedLigandSmiles = typeof options?.ligandSmilesOverride === 'string' ? options.ligandSmilesOverride : ligandSmiles;
     const basePayload: Partial<ProjectTask> = {
       project_id: project.id,
       task_id: '',
@@ -2319,8 +2755,8 @@ export function ProjectDetailPage() {
       error_text: '',
       backend: draft.backend,
       seed: normalizedConfig.options.seed ?? null,
-      protein_sequence: proteinSequence,
-      ligand_smiles: ligandSmiles,
+      protein_sequence: storedProteinSequence,
+      ligand_smiles: storedLigandSmiles,
       components: snapshotComponents,
       constraints: normalizedConfig.constraints,
       properties: normalizedConfig.properties,
@@ -2361,18 +2797,26 @@ export function ProjectDetailPage() {
     setSaving(true);
     setError(null);
     try {
-      const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, draft.backend);
+      const workflowDef = getWorkflowDefinition(project.task_type);
+      const persistedBackend = draft.backend;
+      const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, persistedBackend);
       const activeComponents = nonEmptyComponents(normalizedConfig.components);
       const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(normalizedConfig);
-      const hasMsa = activeComponents.some((comp) => comp.type === 'protein' && comp.useMsa !== false);
+      const hasMsa =
+        workflowDef.key === 'affinity' ? false : activeComponents.some((comp) => comp.type === 'protein' && comp.useMsa !== false);
+      const storedProteinSequence = workflowDef.key === 'affinity' ? '' : proteinSequence;
+      const storedLigandSmiles =
+        workflowDef.key === 'affinity'
+          ? affinityLigandSmiles.trim() || String(affinityPreview?.ligandSmiles || '').trim() || ligandSmiles
+          : ligandSmiles;
 
       const next = await patch({
         name: draft.name.trim(),
         summary: draft.summary.trim(),
-        backend: draft.backend,
+        backend: persistedBackend,
         use_msa: hasMsa,
-        protein_sequence: proteinSequence,
-        ligand_smiles: ligandSmiles,
+        protein_sequence: storedProteinSequence,
+        ligand_smiles: storedLigandSmiles,
         color_mode: draft.color_mode,
         status_text: 'Draft saved'
       });
@@ -2380,11 +2824,21 @@ export function ProjectDetailPage() {
       if (next) {
         saveProjectInputConfig(next.id, normalizedConfig);
         const reusableDraftTaskRowId = resolveEditableDraftTaskRowId();
-        const snapshotComponents = addTemplatesToTaskSnapshotComponents(normalizedConfig.components, proteinTemplates);
+        const snapshotComponents =
+          workflowDef.key === 'affinity'
+            ? await buildAffinityUploadSnapshotComponents(
+                normalizedConfig.components,
+                affinityTargetFile,
+                affinityLigandFile,
+                storedLigandSmiles
+              )
+            : addTemplatesToTaskSnapshotComponents(normalizedConfig.components, proteinTemplates);
         const draftTaskRow = await persistDraftTaskSnapshot(normalizedConfig, {
           statusText: 'Draft saved (not submitted)',
           reuseTaskRowId: reusableDraftTaskRowId,
-          snapshotComponents
+          snapshotComponents,
+          proteinSequenceOverride: storedProteinSequence,
+          ligandSmilesOverride: storedLigandSmiles
         });
         rememberTemplatesForTaskRow(draftTaskRow.id, proteinTemplates);
         const nextDraft: DraftFields = {
@@ -2399,8 +2853,9 @@ export function ProjectDetailPage() {
         setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
         setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
         setRunMenuOpen(false);
+        const nextTab = workflowDef.key === 'prediction' ? 'components' : 'basics';
         const query = new URLSearchParams({
-          tab: 'components',
+          tab: nextTab,
           task_row_id: draftTaskRow.id
         }).toString();
         navigate(`/projects/${next.id}?${query}`, { replace: true });
@@ -2416,7 +2871,7 @@ export function ProjectDetailPage() {
     const shouldPersistProject = options?.persistProject !== false;
     setResultError(null);
     try {
-      const blob = await downloadResultBlob(taskId);
+      const blob = await downloadResultBlob(taskId, { mode: 'view' });
       const parsed = await parseResultBundle(blob);
       if (!parsed) {
         throw new Error('No structure file was found in the result archive.');
@@ -2449,7 +2904,7 @@ export function ProjectDetailPage() {
 
     if (!project?.task_id) {
       if (!silent) {
-        setError('No task ID yet. Submit a prediction first.');
+        setError('No task ID yet. Submit a task first.');
       }
       return;
     }
@@ -2534,10 +2989,225 @@ export function ProjectDetailPage() {
     }
   };
 
+  const submitAffinityTask = async () => {
+    if (!project || !draft) return;
+    if (submitInFlightRef.current) return;
+
+    if (!affinityTargetFile) {
+      setError('Please upload target structure first.');
+      return;
+    }
+    if (affinityPreviewLoading) {
+      setError('Preview is building. Please wait a moment.');
+      return;
+    }
+    if (!affinityPreviewCurrent || !affinityPreview?.structureText.trim()) {
+      setError(affinityPreviewError || 'Failed to prepare scoring input from uploaded files.');
+      return;
+    }
+    const activeAffinityBackend = String(draft.backend || 'boltz').trim().toLowerCase();
+    const backendSupportsActivity = activeAffinityBackend === 'boltz' || activeAffinityBackend === 'protenix';
+    const effectiveConfidenceOnly = backendSupportsActivity ? affinityConfidenceOnly : true;
+    const runAffinityActivity = backendSupportsActivity && !effectiveConfidenceOnly && affinityHasLigand && affinitySupportsActivity;
+    const targetChains = affinityTargetChainIds.filter((item) => item.trim());
+    const ligandChain = affinityLigandChainId.trim();
+    const ligandSmiles = affinityLigandSmiles.trim();
+    if (runAffinityActivity && !targetChains.length) {
+      setError('No target chain could be inferred from uploaded target structure.');
+      return;
+    }
+    if (runAffinityActivity && !ligandChain) {
+      setError('No ligand chain was detected for affinity activity mode.');
+      return;
+    }
+    if (runAffinityActivity && !ligandSmiles) {
+      setError('Ligand SMILES is required for affinity activity mode.');
+      return;
+    }
+
+    submitInFlightRef.current = true;
+    setSubmitting(true);
+    setError(null);
+    if (runRedirectTimerRef.current !== null) {
+      window.clearTimeout(runRedirectTimerRef.current);
+      runRedirectTimerRef.current = null;
+    }
+    setRunRedirectTaskId(null);
+    setRunSuccessNotice(null);
+    if (runSuccessNoticeTimerRef.current !== null) {
+      window.clearTimeout(runSuccessNoticeTimerRef.current);
+      runSuccessNoticeTimerRef.current = null;
+    }
+
+    try {
+      const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, activeAffinityBackend);
+      const configWithAffinity: ProjectInputConfig = {
+        ...normalizedConfig,
+        properties: {
+          ...normalizedConfig.properties,
+          affinity: runAffinityActivity,
+          target: runAffinityActivity ? targetChains[0] : null,
+          ligand: runAffinityActivity ? ligandChain : null,
+          binder: runAffinityActivity ? ligandChain : null
+        }
+      };
+      const persistenceWarnings: string[] = [];
+      const storedLigandSmiles = affinityLigandSmiles.trim() || String(affinityPreview?.ligandSmiles || '').trim();
+      const snapshotComponents = await buildAffinityUploadSnapshotComponents(
+        configWithAffinity.components,
+        affinityTargetFile,
+        affinityLigandFile,
+        storedLigandSmiles
+      );
+
+      saveProjectInputConfig(project.id, configWithAffinity);
+      const nextDraft: DraftFields = {
+        name: draft.name.trim(),
+        summary: draft.summary.trim(),
+        backend: activeAffinityBackend,
+        use_msa: false,
+        color_mode: draft.color_mode || 'white',
+        inputConfig: configWithAffinity
+      };
+      setDraft(nextDraft);
+      setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
+      setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
+      setRunMenuOpen(false);
+
+      try {
+        await patch({
+          name: nextDraft.name,
+          summary: nextDraft.summary,
+          backend: nextDraft.backend,
+          use_msa: false,
+          protein_sequence: '',
+          ligand_smiles: storedLigandSmiles,
+          color_mode: nextDraft.color_mode,
+          status_text: 'Draft saved'
+        });
+      } catch (draftPersistError) {
+        persistenceWarnings.push(
+          `saving draft failed: ${draftPersistError instanceof Error ? draftPersistError.message : 'unknown error'}`
+        );
+      }
+
+      const draftTaskRow = await persistDraftTaskSnapshot(configWithAffinity, {
+        statusText: 'Affinity draft snapshot prepared for run',
+        reuseTaskRowId: resolveEditableDraftTaskRowId(),
+        snapshotComponents,
+        proteinSequenceOverride: '',
+        ligandSmilesOverride: storedLigandSmiles
+      });
+
+      const taskId = await submitAffinityScoring({
+        inputStructureText: affinityPreview.structureText,
+        inputStructureName: affinityPreview.structureName || 'affinity_input.cif',
+        backend: activeAffinityBackend,
+        enableAffinity: runAffinityActivity,
+        ligandSmiles: runAffinityActivity ? ligandSmiles : '',
+        targetChainIds: runAffinityActivity ? targetChains : [],
+        ligandChainId: runAffinityActivity ? ligandChain : ''
+      });
+
+      const queuedAt = new Date().toISOString();
+      const queuedTaskPatch: Partial<ProjectTask> = {
+        task_id: taskId,
+        task_state: 'QUEUED',
+        status_text: 'Task submitted and waiting in queue',
+        error_text: '',
+        backend: activeAffinityBackend,
+        seed: null,
+        protein_sequence: '',
+        ligand_smiles: storedLigandSmiles,
+        components: snapshotComponents,
+        constraints: configWithAffinity.constraints,
+        properties: configWithAffinity.properties,
+        confidence: {},
+        affinity: {},
+        structure_name: '',
+        submitted_at: queuedAt,
+        completed_at: null,
+        duration_seconds: null
+      };
+
+      try {
+        if (draftTaskRow.id.startsWith('local-')) {
+          await patchTask(draftTaskRow.id, queuedTaskPatch);
+        } else {
+          const queuedTaskRow = await updateProjectTask(draftTaskRow.id, queuedTaskPatch);
+          setProjectTasks((prev) =>
+            sortProjectTasks(prev.map((row) => (row.id === queuedTaskRow.id ? queuedTaskRow : row)))
+          );
+        }
+      } catch (taskPersistError) {
+        throw new Error(
+          `Task submitted (${taskId}) but failed to persist queued task row: ${
+            taskPersistError instanceof Error ? taskPersistError.message : 'unknown error'
+          }`
+        );
+      }
+
+      const dbPayload: Partial<Project> = {
+        task_id: taskId,
+        task_state: 'QUEUED',
+        status_text: 'Task submitted and waiting in queue',
+        error_text: '',
+        backend: activeAffinityBackend,
+        submitted_at: queuedAt,
+        completed_at: null,
+        duration_seconds: null,
+        ligand_smiles: storedLigandSmiles
+      };
+
+      try {
+        await patch(dbPayload);
+      } catch (dbError) {
+        setProject((prev) =>
+          prev
+            ? {
+                ...prev,
+                ...dbPayload
+              }
+            : prev
+        );
+        persistenceWarnings.push(
+          `saving project state failed: ${dbError instanceof Error ? dbError.message : 'unknown error'}`
+        );
+      }
+
+      setStatusInfo(null);
+      const shouldAutoRedirect = workspaceTab !== 'components';
+      if (shouldAutoRedirect) {
+        setRunRedirectTaskId(taskId);
+      } else {
+        setRunRedirectTaskId(null);
+      }
+      if (persistenceWarnings.length > 0) {
+        showRunQueuedNotice(`Task ${taskId.slice(0, 8)} queued with sync warning.`);
+      } else if (!shouldAutoRedirect) {
+        showRunQueuedNotice(`Task ${taskId.slice(0, 8)} queued.`);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to submit affinity scoring.';
+      if (runRedirectTimerRef.current !== null) {
+        window.clearTimeout(runRedirectTimerRef.current);
+        runRedirectTimerRef.current = null;
+      }
+      setRunRedirectTaskId(null);
+      setError(message);
+    } finally {
+      submitInFlightRef.current = false;
+      setSubmitting(false);
+    }
+  };
+
   const submitTask = async () => {
     if (!project || !draft) return;
     if (submitInFlightRef.current) return;
-    const shouldStayOnComponentsAfterSubmit = workspaceTab === 'components';
+    if (workflowKey === 'affinity') {
+      await submitAffinityTask();
+      return;
+    }
     const workflow = getWorkflowDefinition(project.task_type);
     if (workflow.key !== 'prediction') {
       setError(`${workflow.title} runner is not wired yet in React UI.`);
@@ -2564,6 +3234,10 @@ export function ProjectDetailPage() {
     submitInFlightRef.current = true;
     setSubmitting(true);
     setError(null);
+    if (runRedirectTimerRef.current !== null) {
+      window.clearTimeout(runRedirectTimerRef.current);
+      runRedirectTimerRef.current = null;
+    }
     setRunRedirectTaskId(null);
     setRunSuccessNotice(null);
     if (runSuccessNoticeTimerRef.current !== null) {
@@ -2710,31 +3384,24 @@ export function ProjectDetailPage() {
           `saving project state failed: ${dbError instanceof Error ? dbError.message : 'unknown error'}`
         );
       }
-      const warningNotice = persistenceWarnings.length > 0 ? `Task ${taskId.slice(0, 8)} queued with sync warning.` : '';
-      void loadProjectTasks(project.id, { silent: true });
       setStatusInfo(null);
-      if (shouldStayOnComponentsAfterSubmit) {
-        const inlineNotice = warningNotice || `Task ${taskId.slice(0, 8)} queued.`;
-        setRunSuccessNotice(inlineNotice);
-        if (runSuccessNoticeTimerRef.current !== null) {
-          window.clearTimeout(runSuccessNoticeTimerRef.current);
-        }
-        runSuccessNoticeTimerRef.current = window.setTimeout(() => {
-          runSuccessNoticeTimerRef.current = null;
-          setRunSuccessNotice(null);
-        }, 5200);
-      } else {
+      const shouldAutoRedirect = workspaceTab !== 'components';
+      if (shouldAutoRedirect) {
         setRunRedirectTaskId(taskId);
-        if (runRedirectTimerRef.current !== null) {
-          window.clearTimeout(runRedirectTimerRef.current);
-        }
-        runRedirectTimerRef.current = window.setTimeout(() => {
-          runRedirectTimerRef.current = null;
-          navigate(`/projects/${project.id}/tasks`);
-        }, 620);
+      } else {
+        setRunRedirectTaskId(null);
+      }
+      if (persistenceWarnings.length > 0) {
+        showRunQueuedNotice(`Task ${taskId.slice(0, 8)} queued with sync warning.`);
+      } else if (!shouldAutoRedirect) {
+        showRunQueuedNotice(`Task ${taskId.slice(0, 8)} queued.`);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to submit prediction.';
+      if (runRedirectTimerRef.current !== null) {
+        window.clearTimeout(runRedirectTimerRef.current);
+        runRedirectTimerRef.current = null;
+      }
       setRunRedirectTaskId(null);
       setError(message);
     } finally {
@@ -2825,6 +3492,30 @@ export function ProjectDetailPage() {
   }, []);
 
   useEffect(() => {
+    if (!runRedirectTaskId || !project?.id) return;
+    const taskPagePath = `/projects/${project.id}/tasks`;
+    if (runRedirectTimerRef.current !== null) {
+      window.clearTimeout(runRedirectTimerRef.current);
+      runRedirectTimerRef.current = null;
+    }
+    runRedirectTimerRef.current = window.setTimeout(() => {
+      runRedirectTimerRef.current = null;
+      navigate(taskPagePath);
+      window.setTimeout(() => {
+        if (window.location.pathname !== taskPagePath) {
+          window.location.assign(taskPagePath);
+        }
+      }, 140);
+    }, 620);
+    return () => {
+      if (runRedirectTimerRef.current !== null) {
+        window.clearTimeout(runRedirectTimerRef.current);
+        runRedirectTimerRef.current = null;
+      }
+    };
+  }, [runRedirectTaskId, project?.id, navigate]);
+
+  useEffect(() => {
     if (!runMenuOpen) return;
     if (hasUnsavedChanges && !submitting && !saving) return;
     setRunMenuOpen(false);
@@ -2851,9 +3542,9 @@ export function ProjectDetailPage() {
   }, [runMenuOpen]);
 
   useEffect(() => {
-    const isPredictionWorkflow = project ? getWorkflowDefinition(project.task_type).key === 'prediction' : false;
     const shouldEnableFloatingRun =
-      isPredictionWorkflow && (workspaceTab === 'components' || workspaceTab === 'constraints');
+      (isPredictionWorkflow && (workspaceTab === 'components' || workspaceTab === 'constraints')) ||
+      (isAffinityWorkflow && workspaceTab === 'components');
     if (!shouldEnableFloatingRun) {
       setShowFloatingRunButton(false);
       return;
@@ -2890,7 +3581,7 @@ export function ProjectDetailPage() {
     return () => {
       observer.disconnect();
     };
-  }, [project, workspaceTab]);
+  }, [isPredictionWorkflow, isAffinityWorkflow, workspaceTab]);
 
   const confidenceBackend =
     snapshotConfidence && typeof snapshotConfidence.backend === 'string' ? String(snapshotConfidence.backend).toLowerCase() : '';
@@ -2943,19 +3634,60 @@ export function ProjectDetailPage() {
   }
 
   const workflow = getWorkflowDefinition(project.task_type);
-  const isPredictionWorkflow = workflow.key === 'prediction';
   const isRunRedirecting = Boolean(runRedirectTaskId);
   const showQuickRunFab = showFloatingRunButton && !isRunRedirecting;
-  const runBlockedReason = !isPredictionWorkflow
-    ? 'Runner UI for this workflow is being integrated.'
-    : hasIncompleteComponents
+  const componentStepLabel = isAffinityWorkflow ? 'Component' : 'Components';
+  const affinityBackend = String(draft.backend || 'boltz').trim().toLowerCase();
+  const affinityBackendSupportsActivity = affinityBackend === 'boltz' || affinityBackend === 'protenix';
+  const affinityConfidenceOnlyForced = !affinityBackendSupportsActivity;
+  const affinityConfidenceOnlyUiValue = affinityConfidenceOnlyForced ? true : affinityConfidenceOnly;
+  const affinityConfidenceOnlyUiLocked = affinityConfidenceOnlyLocked || affinityConfidenceOnlyForced;
+  const affinityRunActivity =
+    affinityBackendSupportsActivity && !affinityConfidenceOnlyUiValue && affinityHasLigand && affinitySupportsActivity;
+  const affinityReadyReason = workspaceTab !== 'components'
+    ? 'Open Component tab to prepare affinity inputs.'
+    : !affinityTargetFile
+    ? 'Upload target structure first.'
+    : affinityPreviewLoading
+      ? 'Building preview input...'
+      : !affinityPreviewCurrent
+        ? affinityPreviewError || 'Failed to prepare preview input from uploaded files.'
+        : affinityRunActivity && !affinityTargetChainIds.length
+          ? 'No target chain could be inferred from target structure.'
+          : affinityRunActivity && !affinityLigandChainId.trim()
+            ? 'No ligand chain is available for activity mode.'
+            : affinityRunActivity && !affinityLigandSmiles.trim()
+              ? 'Ligand SMILES is required for activity mode.'
+              : '';
+  const runBlockedReason = isPredictionWorkflow
+    ? hasIncompleteComponents
       ? `Complete all components before run (${componentCompletion.filledCount}/${componentCompletion.total} ready).`
-      : '';
-  const runDisabled = submitting || saving || isRunRedirecting || !isPredictionWorkflow || hasIncompleteComponents;
+      : ''
+    : isAffinityWorkflow
+      ? affinityReadyReason
+      : 'Runner UI for this workflow is being integrated.';
+  const runDisabled =
+    submitting ||
+    saving ||
+    isRunRedirecting ||
+    (!isPredictionWorkflow && !isAffinityWorkflow) ||
+    (isPredictionWorkflow && hasIncompleteComponents) ||
+    (isAffinityWorkflow && Boolean(affinityReadyReason));
   const canOpenRunMenu = false;
   const handleRunAction = () => {
     if (runDisabled) return;
     void submitTask();
+  };
+  const showRunQueuedNotice = (message: string) => {
+    if (runSuccessNoticeTimerRef.current !== null) {
+      window.clearTimeout(runSuccessNoticeTimerRef.current);
+      runSuccessNoticeTimerRef.current = null;
+    }
+    setRunSuccessNotice(message);
+    runSuccessNoticeTimerRef.current = window.setTimeout(() => {
+      runSuccessNoticeTimerRef.current = null;
+      setRunSuccessNotice(null);
+    }, 4200);
   };
   const handleRunCurrentDraft = () => {
     setRunMenuOpen(false);
@@ -3512,6 +4244,60 @@ export function ProjectDetailPage() {
       tone: snapshotBindingTone
     }
   ];
+  const affinityPreviewStructureText = affinityPreviewTargetStructureText;
+  const affinityPreviewStructureFormat: 'cif' | 'pdb' = affinityPreviewTargetStructureFormat;
+  const affinityPreviewLigandOverlayText = affinityPreviewLigandStructureText;
+  const affinityPreviewLigandOverlayFormat: 'cif' | 'pdb' = affinityPreviewLigandStructureFormat;
+  const affinityResultLigandSmiles = (() => {
+    const fromAffinityMetrics = readFirstNonEmptyStringMetric(snapshotAffinity, [
+      'ligand_smiles',
+      'ligandSmiles',
+      'smiles',
+      'ligand.smiles'
+    ]);
+    return (
+      affinityLigandSmiles.trim() ||
+      String(activeResultTask?.ligand_smiles || '').trim() ||
+      String(project?.ligand_smiles || '').trim() ||
+      fromAffinityMetrics
+    );
+  })();
+  const affinityDisplayStructureText = displayStructureText.trim() ? displayStructureText : affinityPreviewStructureText;
+  const affinityDisplayStructureFormat: 'cif' | 'pdb' = displayStructureText.trim()
+    ? displayStructureFormat
+    : affinityPreviewStructureFormat;
+  const hasAffinityDisplayStructure = Boolean(affinityDisplayStructureText.trim());
+  const predictionLigandPreview =
+    overviewPrimaryLigand.smiles && overviewPrimaryLigand.isSmiles ? (
+      <Ligand2DPreview
+        smiles={overviewPrimaryLigand.smiles}
+        atomConfidences={snapshotLigandAtomPlddts}
+        confidenceHint={snapshotPlddt}
+      />
+    ) : selectedResultLigandSequence && isSequenceLigandType(selectedResultLigandComponent?.type || null) ? (
+      <OverviewLigandSequencePreview sequence={selectedResultLigandSequence} residuePlddts={snapshotLigandResiduePlddts} />
+    ) : (
+      <div className="ligand-preview-empty">
+        {overviewPrimaryLigand.selectedComponentType && overviewPrimaryLigand.selectedComponentType !== 'ligand'
+          ? `Selected binding ligand component is ${componentTypeLabel(overviewPrimaryLigand.selectedComponentType)}.`
+          : overviewPrimaryLigand.smiles
+            ? '2D preview requires SMILES input.'
+            : 'No ligand input.'}
+      </div>
+    );
+  const predictionLigandRadarSmiles = overviewPrimaryLigand.isSmiles ? overviewPrimaryLigand.smiles : '';
+  const taskHistoryPath = `/projects/${project.id}/tasks`;
+  const handleOpenTaskHistory = (event: MouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    setRunRedirectTaskId(null);
+    if (window.location.pathname === taskHistoryPath) return;
+    navigate(taskHistoryPath);
+    window.setTimeout(() => {
+      if (window.location.pathname !== taskHistoryPath) {
+        window.location.assign(taskHistoryPath);
+      }
+    }, 120);
+  };
 
   return (
     <div className="page-grid project-detail">
@@ -3548,10 +4334,10 @@ export function ProjectDetailPage() {
         </div>
 
         <div className="row gap-8 page-header-actions">
-          <Link className="btn btn-ghost btn-compact" to={`/projects/${project.id}/tasks`} title="Open task history">
+          <a className="btn btn-ghost btn-compact" href={taskHistoryPath} onClick={handleOpenTaskHistory} title="Open task history">
             <Clock3 size={14} />
             Tasks
-          </Link>
+          </a>
           <button
             type="button"
             className="btn btn-ghost btn-compact btn-square"
@@ -3644,9 +4430,9 @@ export function ProjectDetailPage() {
           </span>
           <div className="run-inline-toast-line">
             <div className="run-inline-toast-text">{runSuccessNotice}</div>
-            <Link className="run-inline-toast-link" to={`/projects/${project.id}/tasks`}>
+            <a className="run-inline-toast-link" href={taskHistoryPath} onClick={handleOpenTaskHistory}>
               Tasks
-            </Link>
+            </a>
           </div>
         </div>
       )}
@@ -3675,7 +4461,10 @@ export function ProjectDetailPage() {
         </button>
       )}
 
-      {(error || resultError) && <div className="alert error">{error || resultError}</div>}
+      {(error || resultError || affinityPreviewError) && (
+        <div className="alert error">{error || resultError || affinityPreviewError}</div>
+      )}
+      {resultChainConsistencyWarning && <div className="alert warning">{resultChainConsistencyWarning}</div>}
 
       <div className="workspace-shell">
         <aside className="workspace-stepper" aria-label="Workspace sections">
@@ -3692,14 +4481,14 @@ export function ProjectDetailPage() {
               <SlidersHorizontal size={13} />
             </span>
           </button>
-          {isPredictionWorkflow && (
+          {(isPredictionWorkflow || isAffinityWorkflow) && (
             <button
               type="button"
               className={`workspace-step ${workspaceTab === 'components' ? 'active' : ''}`}
               onClick={() => setWorkspaceTab('components')}
-              aria-label="Edit components"
-              data-label="Components"
-              title="Components"
+              aria-label={`Edit ${componentStepLabel.toLowerCase()}`}
+              data-label={componentStepLabel}
+              title={componentStepLabel}
             >
               <span className="workspace-step-dot">
                 <Dna size={13} />
@@ -3735,203 +4524,134 @@ export function ProjectDetailPage() {
         </aside>
 
         <div className="workspace-content">
-          {workspaceTab === 'results' && isPredictionWorkflow && (
-            <>
-              <div ref={resultsGridRef} className={`results-grid ${isResultsResizing ? 'is-resizing' : ''}`} style={resultsGridStyle}>
-                <section className="panel structure-panel">
-                  <h2>Structure Viewer</h2>
-
-                  <MolstarViewer
-                    structureText={displayStructureText}
-                    format={displayStructureFormat}
-                    colorMode={displayStructureColorMode}
-                    confidenceBackend={confidenceBackend || projectBackend}
-                  />
-
-                  <span className="muted small">Current structure file: {displayStructureName}</span>
-                </section>
-
-                <div
-                  className={`results-resizer ${isResultsResizing ? 'dragging' : ''}`}
-                  role="separator"
-                  aria-orientation="vertical"
-                  aria-label="Resize structure and overview panels"
-                  tabIndex={0}
-                  onPointerDown={handleResultsResizerPointerDown}
-                  onKeyDown={handleResultsResizerKeyDown}
-                />
-
-                <aside className="panel info-panel">
-                  <h2>Overview</h2>
-
-                  <section className="result-aside-block result-aside-block-ligand">
-                    <div className="result-aside-title">Ligand</div>
-                    <div className="ligand-preview-panel">
-                      {overviewPrimaryLigand.smiles && overviewPrimaryLigand.isSmiles ? (
-                        <Ligand2DPreview
-                          smiles={overviewPrimaryLigand.smiles}
-                          atomConfidences={snapshotLigandAtomPlddts}
-                          confidenceHint={snapshotPlddt}
-                        />
-                      ) : selectedResultLigandSequence && isSequenceLigandType(selectedResultLigandComponent?.type || null) ? (
-                        <OverviewLigandSequencePreview
-                          sequence={selectedResultLigandSequence}
-                          residuePlddts={snapshotLigandResiduePlddts}
-                        />
-                      ) : (
-                        <div className="ligand-preview-empty">
-                          {overviewPrimaryLigand.selectedComponentType && overviewPrimaryLigand.selectedComponentType !== 'ligand'
-                            ? `Selected binding ligand component is ${componentTypeLabel(overviewPrimaryLigand.selectedComponentType)}.`
-                            : overviewPrimaryLigand.smiles
-                              ? '2D preview requires SMILES input.'
-                              : 'No ligand input.'}
-                        </div>
-                      )}
-                    </div>
-                    {overviewPrimaryLigand.isSmiles ? (
-                      <LigandPropertyGrid smiles={overviewPrimaryLigand.smiles} variant="radar" />
-                    ) : null}
-                  </section>
-
-                  <section className="result-aside-block">
-                    <div className="result-aside-title">Model Signals</div>
-                    <div className="overview-signal-list">
-                      {snapshotCards.map((card) => (
-                        <div key={card.key} className={`overview-signal-row tone-${card.tone}`}>
-                          <div className="overview-signal-main">
-                            <span className="overview-signal-label">{card.label}</span>
-                            <span className="overview-signal-detail">{card.detail}</span>
-                          </div>
-                          <strong className={`overview-signal-value metric-value-${card.tone}`}>{card.value}</strong>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-                </aside>
-              </div>
-
-              <div className="results-bottom">
-                <MetricsPanel
-                  title="Confidence"
-                  data={snapshotConfidence || {}}
-                  chainIds={resultChainIds}
-                  selectedTargetChainId={selectedResultTargetChainId}
-                  selectedLigandChainId={selectedResultLigandChainId}
-                />
-              </div>
-            </>
-          )}
-
-          {workspaceTab === 'results' && !isPredictionWorkflow && (
-            <section className="panel">
-              <h2>{workflow.title}</h2>
-              <p className="muted">
-                This project is set to <strong>{workflow.shortTitle}</strong>. Configure workflow-specific parameters in Basics.
-              </p>
-              <div className="status-stats">
-                <div className="status-stat">
-                  <span className="muted small">Workflow</span>
-                  <strong>{workflow.title}</strong>
-                </div>
-                <div className="status-stat">
-                  <span className="muted small">Current State</span>
-                  <strong>{project.task_state}</strong>
-                </div>
-                <div className="status-stat">
-                  <span className="muted small">Task ID</span>
-                  <strong>{project.task_id || '-'}</strong>
-                </div>
-              </div>
-            </section>
+          {workspaceTab === 'results' && (
+            <ProjectResultsSection
+              isPredictionWorkflow={isPredictionWorkflow}
+              isAffinityWorkflow={isAffinityWorkflow}
+              workflowTitle={workflow.title}
+              workflowShortTitle={workflow.shortTitle}
+              projectTaskState={project.task_state}
+              projectTaskId={project.task_id}
+              resultsGridRef={resultsGridRef}
+              isResultsResizing={isResultsResizing}
+              resultsGridStyle={resultsGridStyle}
+              onResizerPointerDown={handleResultsResizerPointerDown}
+              onResizerKeyDown={handleResultsResizerKeyDown}
+              snapshotCards={snapshotCards}
+              snapshotConfidence={snapshotConfidence || {}}
+              resultChainIds={resultChainIds}
+              selectedResultTargetChainId={selectedResultTargetChainId}
+              selectedResultLigandChainId={selectedResultLigandChainId}
+              displayStructureText={displayStructureText}
+              displayStructureFormat={displayStructureFormat}
+              displayStructureColorMode={displayStructureColorMode}
+              displayStructureName={displayStructureName}
+              confidenceBackend={confidenceBackend}
+              projectBackend={projectBackend}
+              predictionLigandPreview={predictionLigandPreview}
+              predictionLigandRadarSmiles={predictionLigandRadarSmiles}
+              hasAffinityDisplayStructure={hasAffinityDisplayStructure}
+              affinityDisplayStructureText={affinityDisplayStructureText}
+              affinityDisplayStructureFormat={affinityDisplayStructureFormat}
+              affinityLigandSmiles={affinityResultLigandSmiles}
+              affinityPrimaryTargetChainId={affinityTargetChainIds[0] || null}
+              affinityLigandAtomPlddts={snapshotLigandAtomPlddts}
+              affinityLigandConfidenceHint={snapshotPlddt}
+            />
           )}
 
           {workspaceTab !== 'results' && (
             <section className="panel inputs-panel">
-              <h2>{workspaceTab === 'constraints' ? 'Constraints' : workspaceTab === 'components' ? 'Components' : 'Basics'}</h2>
+              <h2>{workspaceTab === 'constraints' ? 'Constraints' : workspaceTab === 'components' ? componentStepLabel : 'Basics'}</h2>
 
               <form className="form-grid" onSubmit={saveDraft}>
             {workspaceTab === 'basics' && (
-              <section className="panel subtle basics-panel">
-                <label className="field">
-                  <span>
-                    Project Name <span className="required-mark">*</span>
-                  </span>
-                  <input
-                    required
-                    value={draft.name}
-                    onChange={(e) => setDraft((d) => (d ? { ...d, name: e.target.value } : d))}
-                    disabled={!canEdit}
-                  />
-                </label>
-
-                <label className="field">
-                  <span>Summary</span>
-                  <textarea
-                    value={draft.summary}
-                    rows={3}
-                    onChange={(e) => setDraft((d) => (d ? { ...d, summary: e.target.value } : d))}
-                    disabled={!canEdit}
-                  />
-                </label>
-
-                <label className="field">
-                  <span>
-                    Backend <span className="required-mark">*</span>
-                  </span>
-                  <select
-                    required
-                    value={draft.backend}
-                    onChange={(e) =>
-                      setDraft((d) =>
-                        d
-                          ? {
-                              ...d,
-                              backend: e.target.value,
-                              inputConfig: {
-                                ...d.inputConfig,
-                                constraints: filterConstraintsByBackend(d.inputConfig.constraints, e.target.value)
-                              }
+              <ProjectBasicsMetadataForm
+                canEdit={canEdit}
+                isPredictionWorkflow={isPredictionWorkflow}
+                showBackend
+                backendOptions={
+                  isAffinityWorkflow
+                    ? [
+                        { value: 'boltz', label: 'Boltz-2' },
+                        { value: 'protenix', label: 'Protenix2Score' }
+                      ]
+                    : [
+                        { value: 'boltz', label: 'Boltz-2' },
+                        { value: 'alphafold3', label: 'AlphaFold3' },
+                        { value: 'protenix', label: 'Protenix' }
+                      ]
+                }
+                name={draft.name}
+                summary={draft.summary}
+                backend={draft.backend}
+                seed={draft.inputConfig.options.seed}
+                onNameChange={(value) => setDraft((d) => (d ? { ...d, name: value } : d))}
+                onSummaryChange={(value) => setDraft((d) => (d ? { ...d, summary: value } : d))}
+                onBackendChange={(backend) =>
+                  setDraft((d) =>
+                    d
+                      ? {
+                          ...d,
+                          backend,
+                          inputConfig: {
+                            ...d.inputConfig,
+                            constraints: filterConstraintsByBackend(d.inputConfig.constraints, backend)
+                          }
+                        }
+                      : d
+                  )
+                }
+                onSeedChange={(seed) =>
+                  setDraft((d) =>
+                    d
+                      ? {
+                          ...d,
+                          inputConfig: {
+                            ...d.inputConfig,
+                            options: {
+                              ...d.inputConfig.options,
+                              seed
                             }
-                          : d
-                      )
-                    }
-                    disabled={!canEdit}
-                  >
-                    <option value="boltz">Boltz-2</option>
-                    <option value="alphafold3">AlphaFold3</option>
-                    <option value="protenix">Protenix</option>
-                  </select>
-                </label>
+                          }
+                        }
+                      : d
+                  )
+                }
+              />
+            )}
 
-                {isPredictionWorkflow && (
-                  <label className="field">
-                    <span>Random Seed (optional)</span>
-                    <input
-                      type="number"
-                      min={0}
-                      value={draft.inputConfig.options.seed ?? ''}
-                      onChange={(e) =>
-                        setDraft((d) =>
-                          d
-                            ? {
-                                ...d,
-                                inputConfig: {
-                                  ...d.inputConfig,
-                                  options: {
-                                    ...d.inputConfig.options,
-                                    seed: e.target.value === '' ? null : Math.max(0, Math.floor(Number(e.target.value) || 0))
-                                  }
-                                }
-                              }
-                            : d
-                        )
-                      }
-                      disabled={!canEdit}
-                      placeholder="Default: 42"
-                    />
-                  </label>
-                )}
-              </section>
+            {workspaceTab === 'components' && isAffinityWorkflow && (
+              <AffinityBasicsWorkspace
+                canEdit={canEdit}
+                submitting={submitting}
+                targetFileName={affinityTargetFile?.name || ''}
+                ligandFileName={affinityLigandFile?.name || ''}
+                ligandSmiles={affinityLigandSmiles}
+                ligandEditorInput={affinityLigandSmiles.trim() || affinityPreviewLigandStructureText}
+                confidenceOnly={affinityConfidenceOnlyUiValue}
+                confidenceOnlyLocked={affinityConfidenceOnlyUiLocked}
+                confidenceOnlyHint={
+                  affinityConfidenceOnlyUiLocked
+                    ? affinityHasLigand
+                      ? 'Only small-molecule ligand supports activity.'
+                      : 'No ligand uploaded: confidence only.'
+                    : 'Unchecked: confidence + activity.'
+                }
+                previewTargetStructureText={affinityPreviewStructureText}
+                previewTargetStructureFormat={affinityPreviewStructureFormat}
+                previewLigandStructureText={affinityPreviewLigandOverlayText}
+                previewLigandStructureFormat={affinityPreviewLigandOverlayFormat}
+                resultsGridRef={resultsGridRef}
+                isResultsResizing={isResultsResizing}
+                resultsGridStyle={resultsGridStyle}
+                onTargetFileChange={onAffinityTargetFileChange}
+                onLigandFileChange={onAffinityLigandFileChange}
+                onConfidenceOnlyChange={onAffinityConfidenceOnlyChange}
+                onLigandSmilesChange={setAffinityLigandSmiles}
+                onResizerPointerDown={handleResultsResizerPointerDown}
+                onResizerKeyDown={handleResultsResizerKeyDown}
+              />
             )}
 
             {isPredictionWorkflow ? (
@@ -4383,7 +5103,7 @@ export function ProjectDetailPage() {
                   </div>
                 )}
               </>
-            ) : (
+            ) : isAffinityWorkflow ? null : (
               <div className="workflow-note">
                 {workflow.description}
               </div>

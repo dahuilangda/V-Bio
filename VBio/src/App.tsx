@@ -1,16 +1,22 @@
+import { Suspense, lazy } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { AppShell } from './components/layout/AppShell';
 import { AdminRoute, ProtectedRoute } from './components/layout/ProtectedRoute';
 import { LoginPage } from './pages/LoginPage';
-import { ProjectDetailPage } from './pages/ProjectDetailPage';
-import { ProjectTasksPage } from './pages/ProjectTasksPage';
-import { ProjectsPage } from './pages/ProjectsPage';
 import { RegisterPage } from './pages/RegisterPage';
-import { SettingsPage } from './pages/SettingsPage';
-import { UsersPage } from './pages/UsersPage';
+
+const ProjectsPage = lazy(() => import('./pages/ProjectsPage').then((m) => ({ default: m.ProjectsPage })));
+const ProjectDetailPage = lazy(() => import('./pages/ProjectDetailPage').then((m) => ({ default: m.ProjectDetailPage })));
+const ProjectTasksPage = lazy(() => import('./pages/ProjectTasksPage').then((m) => ({ default: m.ProjectTasksPage })));
+const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
+const UsersPage = lazy(() => import('./pages/UsersPage').then((m) => ({ default: m.UsersPage })));
 
 function ShellPage({ children }: { children: JSX.Element }) {
   return <AppShell>{children}</AppShell>;
+}
+
+function PageLoading() {
+  return <div className="centered-page">Loading page...</div>;
 }
 
 export default function App() {
@@ -24,7 +30,9 @@ export default function App() {
         element={
           <ProtectedRoute>
             <ShellPage>
-              <ProjectsPage />
+              <Suspense fallback={<PageLoading />}>
+                <ProjectsPage />
+              </Suspense>
             </ShellPage>
           </ProtectedRoute>
         }
@@ -34,7 +42,9 @@ export default function App() {
         element={
           <ProtectedRoute>
             <ShellPage>
-              <ProjectDetailPage />
+              <Suspense fallback={<PageLoading />}>
+                <ProjectDetailPage />
+              </Suspense>
             </ShellPage>
           </ProtectedRoute>
         }
@@ -44,7 +54,9 @@ export default function App() {
         element={
           <ProtectedRoute>
             <ShellPage>
-              <ProjectTasksPage />
+              <Suspense fallback={<PageLoading />}>
+                <ProjectTasksPage />
+              </Suspense>
             </ShellPage>
           </ProtectedRoute>
         }
@@ -54,7 +66,9 @@ export default function App() {
         element={
           <ProtectedRoute>
             <ShellPage>
-              <SettingsPage />
+              <Suspense fallback={<PageLoading />}>
+                <SettingsPage />
+              </Suspense>
             </ShellPage>
           </ProtectedRoute>
         }
@@ -64,7 +78,9 @@ export default function App() {
         element={
           <AdminRoute>
             <ShellPage>
-              <UsersPage />
+              <Suspense fallback={<PageLoading />}>
+                <UsersPage />
+              </Suspense>
             </ShellPage>
           </AdminRoute>
         }

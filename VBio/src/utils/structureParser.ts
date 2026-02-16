@@ -338,6 +338,78 @@ function parseCifProteinResidueIndexMap(text: string): Record<string, Record<num
   return result;
 }
 
+function parsePdbChainIds(text: string): string[] {
+  const chains = new Set<string>();
+  const lines = text.split(/\r?\n/);
+  for (const line of lines) {
+    if (!line.startsWith('ATOM') && !line.startsWith('HETATM')) continue;
+    const chainId = normalizeChainId(line.slice(21, 22));
+    if (chainId) chains.add(chainId);
+  }
+  return Array.from(chains).sort((a, b) => a.localeCompare(b));
+}
+
+function parseCifChainIds(text: string): string[] {
+  const lines = text.split(/\r?\n/);
+  const chains = new Set<string>();
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i].trim();
+    if (line !== 'loop_') continue;
+
+    let j = i + 1;
+    const headers: string[] = [];
+    while (j < lines.length) {
+      const header = lines[j].trim();
+      if (!header.startsWith('_')) break;
+      headers.push(header);
+      j += 1;
+    }
+    if (!headers.some((h) => h.startsWith('_atom_site.'))) {
+      i = j - 1;
+      continue;
+    }
+
+    const col = (names: string[]) => {
+      for (const name of names) {
+        const idx = headers.indexOf(name);
+        if (idx >= 0) return idx;
+      }
+      return -1;
+    };
+
+    const chainIdx = col(['_atom_site.auth_asym_id', '_atom_site.label_asym_id']);
+    if (chainIdx < 0) {
+      i = j - 1;
+      continue;
+    }
+
+    while (j < lines.length) {
+      const rowRaw = lines[j];
+      const row = rowRaw.trim();
+      if (!row || row === '#') {
+        j += 1;
+        continue;
+      }
+      if (row === 'loop_' || row.startsWith('_')) break;
+
+      const tokens = tokenizeCifRow(rowRaw);
+      if (tokens.length < headers.length) {
+        j += 1;
+        continue;
+      }
+
+      const chainId = normalizeChainId(tokens[chainIdx] || '');
+      if (chainId) chains.add(chainId);
+      j += 1;
+    }
+
+    i = j - 1;
+  }
+
+  return Array.from(chains).sort((a, b) => a.localeCompare(b));
+}
+
 export function extractProteinChainSequences(structureText: string, format: 'pdb' | 'cif'): Record<string, string> {
   return format === 'pdb' ? parsePdbProteinChains(structureText) : parseCifProteinChains(structureText);
 }
@@ -347,4 +419,8 @@ export function extractProteinChainResidueIndexMap(
   format: 'pdb' | 'cif'
 ): Record<string, Record<number, number>> {
   return format === 'pdb' ? parsePdbProteinResidueIndexMap(structureText) : parseCifProteinResidueIndexMap(structureText);
+}
+
+export function extractStructureChainIds(structureText: string, format: 'pdb' | 'cif'): string[] {
+  return format === 'pdb' ? parsePdbChainIds(structureText) : parseCifChainIds(structureText);
 }

@@ -1213,6 +1213,12 @@ select:focus {
   border: 1px solid #b9dec7;
 }
 
+.alert.warning {
+  color: #6a4a13;
+  background: #fff6e5;
+  border: 1px solid #e8d3a6;
+}
+
 .icon-btn {
   border: 1px solid var(--line);
   background: #fff;
@@ -2475,6 +2481,66 @@ select:focus {
 
 .basics-panel .field:nth-of-type(2) {
   grid-column: 1 / -1;
+}
+
+.affinity-basics-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.affinity-basics-controls {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(200px, 1fr));
+}
+
+.affinity-field-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.affinity-confidence-toggle {
+  justify-content: flex-start;
+  align-items: center;
+  gap: 8px;
+  margin-top: 24px;
+}
+
+.affinity-confidence-toggle > input[type='checkbox'] {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+}
+
+.affinity-confidence-hint {
+  max-width: 180px;
+}
+
+.affinity-upload-ok {
+  color: #2e6c53;
+}
+
+.affinity-section-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.affinity-title-with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.affinity-chain-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.affinity-jsme-shell {
+  width: 100%;
 }
 
 .component-sidebar {
@@ -4373,6 +4439,10 @@ select:focus {
 
   .basics-panel .field:nth-of-type(2) {
     grid-column: auto;
+  }
+
+  .affinity-basics-controls {
+    grid-template-columns: 1fr;
   }
 
   .component-sidebar {

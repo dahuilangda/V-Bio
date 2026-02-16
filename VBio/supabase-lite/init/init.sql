@@ -280,12 +280,57 @@ as $$
         from (
           select
             case
-              when jsonb_typeof(elem->'template_upload') = 'object'
-                then jsonb_set(elem, '{template_upload}', (elem->'template_upload') - 'content', true)
-              else elem
+              when jsonb_typeof(compact_upload.elem->'affinityUpload') = 'object'
+                then jsonb_set(
+                  jsonb_set(
+                    compact_upload.elem,
+                    '{affinityUpload}',
+                    (compact_upload.elem->'affinityUpload') - 'content',
+                    true
+                  ),
+                  '{sequence}',
+                  to_jsonb(''::text),
+                  true
+                )
+              when jsonb_typeof(compact_upload.elem->'affinity_upload') = 'object'
+                then jsonb_set(
+                  jsonb_set(
+                    compact_upload.elem,
+                    '{affinity_upload}',
+                    (compact_upload.elem->'affinity_upload') - 'content',
+                    true
+                  ),
+                  '{sequence}',
+                  to_jsonb(''::text),
+                  true
+                )
+              when coalesce(compact_upload.elem->>'id', '') in ('__affinity_target_upload__', '__affinity_ligand_upload__')
+                then jsonb_set(compact_upload.elem, '{sequence}', to_jsonb(''::text), true)
+              else compact_upload.elem
             end as elem
-          from jsonb_array_elements(input) as elem
-        ) as compact_snake
+          from (
+            select
+              case
+                when jsonb_typeof(compact_snake.elem->'templateUpload') = 'object'
+                  then jsonb_set(
+                    compact_snake.elem,
+                    '{templateUpload}',
+                    (compact_snake.elem->'templateUpload') - 'content',
+                    true
+                  )
+                else compact_snake.elem
+              end as elem
+            from (
+              select
+                case
+                  when jsonb_typeof(elem->'template_upload') = 'object'
+                    then jsonb_set(elem, '{template_upload}', (elem->'template_upload') - 'content', true)
+                  else elem
+                end as elem
+              from jsonb_array_elements(input) as elem
+            ) as compact_snake
+          ) as compact_upload
+        ) as compact_affinity
       )
       else '[]'::jsonb
     end;
@@ -304,7 +349,20 @@ as $$
   select
     case
       when jsonb_typeof(input) = 'array' then (
-        select coalesce(jsonb_agg(elem - 'templateUpload' - 'template_upload'), '[]'::jsonb)
+        select coalesce(
+          jsonb_agg(
+            (
+              case
+                when coalesce(elem->>'id', '') in ('__affinity_target_upload__', '__affinity_ligand_upload__')
+                  or jsonb_typeof(elem->'affinityUpload') = 'object'
+                  or jsonb_typeof(elem->'affinity_upload') = 'object'
+                  then jsonb_set(elem, '{sequence}', to_jsonb(''::text), true)
+                else elem
+              end
+            ) - 'templateUpload' - 'template_upload' - 'affinityUpload' - 'affinity_upload'
+          ),
+          '[]'::jsonb
+        )
         from jsonb_array_elements(input) as elem
       )
       else '[]'::jsonb

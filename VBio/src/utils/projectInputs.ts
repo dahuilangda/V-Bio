@@ -19,6 +19,10 @@ export interface ProjectUiState {
   proteinTemplates: Record<string, ProteinTemplateUpload>;
   taskProteinTemplates?: Record<string, Record<string, ProteinTemplateUpload>>;
   templateContentPool?: Record<string, string>;
+  affinityUploads?: {
+    target: { fileName: string; content: string } | null;
+    ligand: { fileName: string; content: string } | null;
+  };
   activeConstraintId: string | null;
   selectedConstraintTemplateComponentId: string | null;
 }
@@ -366,6 +370,35 @@ function compactTemplateContentPool(pool: Record<string, string>, usedPoolKeys: 
   return compacted;
 }
 
+function serializeAffinityUpload(
+  upload: { fileName: string; content: string } | null | undefined,
+  contentPool: Record<string, string>,
+  usedPoolKeys: Set<string>
+): { fileName: string; content: string } | null {
+  if (!upload || typeof upload !== 'object') return null;
+  const fileName = typeof upload.fileName === 'string' ? upload.fileName.trim() : '';
+  const content = typeof upload.content === 'string' ? upload.content : '';
+  if (!fileName || !content.trim()) return null;
+  const key = `aff-${hashTemplateContent(content)}-${content.length.toString(36)}`;
+  contentPool[key] = content;
+  usedPoolKeys.add(key);
+  return {
+    fileName,
+    content: `${TEMPLATE_CONTENT_REF_PREFIX}${key}`
+  };
+}
+
+function normalizeAffinityUpload(
+  upload: unknown,
+  contentPool: Record<string, string>
+): { fileName: string; content: string } | null {
+  if (!upload || typeof upload !== 'object') return null;
+  const fileName = typeof (upload as any).fileName === 'string' ? (upload as any).fileName.trim() : '';
+  const content = resolveTemplateContent((upload as any).content, contentPool);
+  if (!fileName || !content.trim()) return null;
+  return { fileName, content };
+}
+
 export function loadProjectInputConfig(projectId: string): ProjectInputConfig | null {
   const store = readStore();
   const found = store[projectId];
@@ -400,6 +433,16 @@ export function loadProjectUiState(projectId: string): ProjectUiState | null {
       : null;
 
   const proteinTemplates = normalizeStoredProteinTemplates((found as any).proteinTemplates, templateContentPool);
+  const affinityUploads = (() => {
+    const raw = (found as any).affinityUploads;
+    if (!raw || typeof raw !== 'object') {
+      return { target: null, ligand: null };
+    }
+    return {
+      target: normalizeAffinityUpload((raw as any).target, templateContentPool),
+      ligand: normalizeAffinityUpload((raw as any).ligand, templateContentPool)
+    };
+  })();
   const taskProteinTemplates: Record<string, Record<string, ProteinTemplateUpload>> = {};
   const rawTaskTemplates = (found as any).taskProteinTemplates;
   if (rawTaskTemplates && typeof rawTaskTemplates === 'object') {
@@ -414,6 +457,7 @@ export function loadProjectUiState(projectId: string): ProjectUiState | null {
     proteinTemplates,
     taskProteinTemplates,
     templateContentPool,
+    affinityUploads,
     activeConstraintId,
     selectedConstraintTemplateComponentId
   };
@@ -425,6 +469,10 @@ export function saveProjectUiState(projectId: string, uiState: ProjectUiState): 
   const contentPool = normalizeTemplateContentPool(uiState.templateContentPool || (currentStoredState as any)?.templateContentPool);
   const usedPoolKeys = new Set<string>();
   const proteinTemplates = serializeProteinTemplates(uiState.proteinTemplates, contentPool, usedPoolKeys);
+  const affinityUploads = {
+    target: serializeAffinityUpload(uiState.affinityUploads?.target || null, contentPool, usedPoolKeys),
+    ligand: serializeAffinityUpload(uiState.affinityUploads?.ligand || null, contentPool, usedPoolKeys)
+  };
   const taskProteinTemplates: Record<string, Record<string, ProteinTemplateUpload>> = {};
 
   if (uiState.taskProteinTemplates && typeof uiState.taskProteinTemplates === 'object') {
@@ -440,6 +488,7 @@ export function saveProjectUiState(projectId: string, uiState: ProjectUiState): 
     proteinTemplates,
     taskProteinTemplates,
     templateContentPool: compactTemplateContentPool(contentPool, usedPoolKeys),
+    affinityUploads,
     activeConstraintId: uiState.activeConstraintId || null,
     selectedConstraintTemplateComponentId: uiState.selectedConstraintTemplateComponentId || null
   };
@@ -450,6 +499,10 @@ export function saveProjectUiState(projectId: string, uiState: ProjectUiState): 
     baseStore[projectId] = {
       proteinTemplates: {},
       taskProteinTemplates: {},
+      affinityUploads: {
+        target: null,
+        ligand: null
+      },
       activeConstraintId: uiState.activeConstraintId || null,
       selectedConstraintTemplateComponentId: uiState.selectedConstraintTemplateComponentId || null
     };

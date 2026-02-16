@@ -182,8 +182,9 @@ function readPairIptmForChains(
     }
   }
 
-  const pairMatrix = readByPath(data, 'chain_pair_iptm');
-  if (!Array.isArray(pairMatrix)) return null;
+  const pairMatrixRaw = readByPath(data, 'chain_pair_iptm') ?? readByPath(data, 'chain_pair_iptm_global');
+  if (!Array.isArray(pairMatrixRaw)) return null;
+  const pairMatrix = pairMatrixRaw;
 
   const chainsFromData = readByPath(data, 'chain_ids');
   const chainIds =
@@ -299,8 +300,9 @@ function extractPairIptmRows(data: Record<string, unknown>, fallbackChainIds: st
     return Array.from(best.values()).sort((a, b) => b.value - a.value);
   }
 
-  const pairMatrix = readByPath(data, 'chain_pair_iptm');
-  if (!Array.isArray(pairMatrix)) return rows;
+  const pairMatrixRaw = readByPath(data, 'chain_pair_iptm') ?? readByPath(data, 'chain_pair_iptm_global');
+  if (!Array.isArray(pairMatrixRaw)) return rows;
+  const pairMatrix = pairMatrixRaw;
 
   const chainsFromData = readByPath(data, 'chain_ids');
   const chainIds =

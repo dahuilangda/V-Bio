@@ -191,6 +191,35 @@ export interface PredictionSubmitInput {
   templateUploads?: PredictionTemplateUpload[];
 }
 
+export interface AffinityPreviewPayload {
+  structureText: string;
+  structureFormat: 'cif' | 'pdb';
+  structureName: string;
+  targetStructureText: string;
+  targetStructureFormat: 'cif' | 'pdb';
+  ligandStructureText: string;
+  ligandStructureFormat: 'cif' | 'pdb';
+  ligandSmiles: string;
+  targetChainIds: string[];
+  ligandChainId: string;
+  hasLigand: boolean;
+  ligandIsSmallMolecule: boolean;
+  supportsActivity: boolean;
+  proteinFileName: string;
+  ligandFileName: string;
+}
+
+export interface AffinitySubmitInput {
+  inputStructureText: string;
+  inputStructureName?: string;
+  backend?: string;
+  enableAffinity: boolean;
+  ligandSmiles?: string;
+  targetChainIds?: string[];
+  ligandChainId?: string;
+  affinityRefine?: boolean;
+}
+
 export interface TaskStatusResponse {
   task_id: string;
   state: string;

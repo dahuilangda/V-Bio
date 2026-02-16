@@ -29,8 +29,30 @@ function normalizeTaskComponents(components: InputComponent[]): InputComponent[]
   return normalizeInputComponents(components);
 }
 
+const AFFINITY_TARGET_UPLOAD_COMPONENT_ID = '__affinity_target_upload__';
+const AFFINITY_LIGAND_UPLOAD_COMPONENT_ID = '__affinity_ligand_upload__';
+
+function isAffinityUploadRawComponent(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const component = value as Record<string, unknown>;
+  const id = typeof component.id === 'string' ? component.id.trim() : '';
+  if (id === AFFINITY_TARGET_UPLOAD_COMPONENT_ID || id === AFFINITY_LIGAND_UPLOAD_COMPONENT_ID) {
+    return true;
+  }
+  const uploadMeta =
+    component.affinityUpload && typeof component.affinityUpload === 'object'
+      ? (component.affinityUpload as Record<string, unknown>)
+      : component.affinity_upload && typeof component.affinity_upload === 'object'
+        ? (component.affinity_upload as Record<string, unknown>)
+        : null;
+  const role = typeof uploadMeta?.role === 'string' ? uploadMeta.role.trim().toLowerCase() : '';
+  return role === 'target' || role === 'ligand';
+}
+
 function readTaskComponents(task: ProjectTask): InputComponent[] {
-  const components = Array.isArray(task.components) ? normalizeTaskComponents(task.components) : [];
+  const rawComponents = Array.isArray(task.components) ? (task.components as unknown[]) : [];
+  const filteredRawComponents = rawComponents.filter((component) => !isAffinityUploadRawComponent(component));
+  const components = filteredRawComponents.length > 0 ? normalizeTaskComponents(filteredRawComponents as InputComponent[]) : [];
   if (components.length > 0) return components;
 
   const fallback: InputComponent[] = [];
@@ -89,6 +111,30 @@ function readTaskPrimaryLigand(
     return { smiles: directLigand, isSmiles: true };
   }
 
+  const affinityData =
+    task.affinity && typeof task.affinity === 'object' && !Array.isArray(task.affinity)
+      ? (task.affinity as Record<string, unknown>)
+      : null;
+  const affinityLigand = normalizeComponentSequence(
+    'ligand',
+    readFirstNonEmptyStringMetric(affinityData, ['ligand_smiles', 'ligandSmiles', 'smiles', 'ligand.smiles'])
+  );
+  if (affinityLigand) {
+    return { smiles: affinityLigand, isSmiles: true };
+  }
+
+  const confidenceData =
+    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
+      ? (task.confidence as Record<string, unknown>)
+      : null;
+  const confidenceLigand = normalizeComponentSequence(
+    'ligand',
+    readFirstNonEmptyStringMetric(confidenceData, ['ligand_smiles', 'ligandSmiles', 'smiles', 'ligand.smiles'])
+  );
+  if (confidenceLigand) {
+    return { smiles: confidenceLigand, isSmiles: true };
+  }
+
   return {
     smiles: '',
     isSmiles: false
@@ -132,6 +178,17 @@ function readFirstFiniteMetric(data: Record<string, unknown>, paths: string[]): 
     }
   }
   return null;
+}
+
+function readFirstNonEmptyStringMetric(data: Record<string, unknown> | null, paths: string[]): string {
+  if (!data) return '';
+  for (const path of paths) {
+    const value = readObjectPath(data, path);
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return '';
 }
 
 function normalizeProbability(value: number | null): number | null {
@@ -331,8 +388,11 @@ function readPairIptmForChains(
     }
   }
 
-  const pairMatrix = readObjectPath(confidence, 'chain_pair_iptm');
-  if (!Array.isArray(pairMatrix)) return null;
+  const pairMatrixRaw =
+    readObjectPath(confidence, 'chain_pair_iptm') ??
+    readObjectPath(confidence, 'chain_pair_iptm_global');
+  if (!Array.isArray(pairMatrixRaw)) return null;
+  const pairMatrix = pairMatrixRaw;
   const chainIdsRaw = readObjectPath(confidence, 'chain_ids');
   const chainIds =
     Array.isArray(chainIdsRaw) && chainIdsRaw.every((item) => typeof item === 'string')
@@ -362,16 +422,40 @@ function readChainMeanPlddtForChain(confidence: Record<string, unknown>, chainId
 
 function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: WorkspacePairPreference): TaskSelectionContext {
   const taskProperties = task.properties && typeof task.properties === 'object' ? task.properties : null;
-  const rawTarget = taskProperties && typeof taskProperties.target === 'string' ? taskProperties.target.trim().toUpperCase() : '';
-  const rawLigand = taskProperties && typeof taskProperties.ligand === 'string' ? taskProperties.ligand.trim().toUpperCase() : '';
+  const rawTarget = taskProperties && typeof taskProperties.target === 'string' ? taskProperties.target.trim() : '';
+  const rawLigand = taskProperties && typeof taskProperties.ligand === 'string' ? taskProperties.ligand.trim() : '';
+  const rawBinder = taskProperties && typeof taskProperties.binder === 'string' ? taskProperties.binder.trim() : '';
+  const affinityData =
+    task.affinity && typeof task.affinity === 'object' && !Array.isArray(task.affinity)
+      ? (task.affinity as Record<string, unknown>)
+      : null;
+  const confidenceData =
+    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
+      ? (task.confidence as Record<string, unknown>)
+      : null;
+  const affinityTargetHint = readFirstNonEmptyStringMetric(affinityData, [
+    'requested_target_chain',
+    'target_chain',
+    'binder_chain'
+  ]);
+  const affinityLigandHint = readFirstNonEmptyStringMetric(affinityData, [
+    'requested_ligand_chain',
+    'ligand_chain'
+  ]);
+  const affinityModelLigandHint = readFirstNonEmptyStringMetric(affinityData, [
+    'model_ligand_chain_id'
+  ]);
+  const confidenceModelLigandHint = readFirstNonEmptyStringMetric(confidenceData, [
+    'model_ligand_chain_id'
+  ]);
   const preferredTarget = String(workspacePreference?.targetChainId || '')
-    .trim()
-    .toUpperCase();
+    .trim();
   const preferredLigand = String(workspacePreference?.ligandChainId || '')
-    .trim()
-    .toUpperCase();
-  const targetCandidate = preferredTarget || rawTarget;
-  const ligandCandidate = preferredLigand || rawLigand;
+    .trim();
+  // Row-level task setting should win over workspace preference.
+  // For prediction workflows, "binding ligand" is represented by `binder`.
+  const targetCandidate = rawTarget || affinityTargetHint || preferredTarget;
+  const ligandCandidate = rawBinder || rawLigand || affinityLigandHint || preferredLigand;
   const activeComponents = readTaskComponents(task).filter((item) => Boolean(item.sequence.trim()));
   const ligandComponentCount = activeComponents.filter((item) => item.type === 'ligand').length;
 
@@ -400,20 +484,81 @@ function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: Wo
       chainToComponent.set(chainId.toUpperCase(), activeComponents[index]);
     });
   });
+  const componentOptions = activeComponents.map((component, index) => {
+    const firstChain = chainAssignments[index]?.[0] || null;
+    return {
+      componentId: component.id,
+      chainId: firstChain ? firstChain.toUpperCase() : null,
+      type: component.type,
+      isSmiles: component.type === 'ligand' && component.inputMethod !== 'ccd'
+    };
+  });
+  const resolveChainFromCandidate = (candidate: string): string | null => {
+    const raw = String(candidate || '').trim();
+    if (!raw) return null;
+    const normalized = raw.toUpperCase();
+    if (validChainIds.has(normalized)) return normalized;
+    const byComponent = componentOptions.find((item) => item.componentId === raw);
+    if (byComponent?.chainId) return byComponent.chainId;
+    const byNormalizedChain = componentOptions.find((item) => String(item.chainId || '').toUpperCase() === normalized);
+    if (byNormalizedChain?.chainId) return byNormalizedChain.chainId;
+    for (const chainId of validChainIds) {
+      if (chainKeysMatch(chainId, normalized) || chainKeysMatch(normalized, chainId)) {
+        return chainId;
+      }
+    }
+    return null;
+  };
   const fallbackTargetChainId = chainAssignments[0]?.[0] || null;
   const normalizedFallbackTarget = fallbackTargetChainId ? fallbackTargetChainId.toUpperCase() : null;
-  const targetChainId = targetCandidate && validChainIds.has(targetCandidate) ? targetCandidate : normalizedFallbackTarget;
+  const targetChainId = resolveChainFromCandidate(targetCandidate) || normalizedFallbackTarget;
   const targetComponentId = targetChainId ? chainToComponent.get(targetChainId)?.id || null : null;
-  const candidateLigandChains = chainIds.filter((chainId) => {
-    if (chainId === targetChainId) return false;
-    const chainComponentId = chainToComponent.get(chainId)?.id || null;
-    if (!chainComponentId) return false;
-    if (targetComponentId && chainComponentId === targetComponentId) return false;
+  const candidateLigandOptions = componentOptions.filter((item) => {
+    if (!item.chainId) return false;
+    if (item.chainId === targetChainId) return false;
+    if (targetComponentId && item.componentId === targetComponentId) return false;
     return true;
   });
-  const defaultLigandChainId =
-    candidateLigandChains.find((chainId) => chainToComponent.get(chainId)?.type === 'ligand') || candidateLigandChains[0] || null;
-  const preferredLigandChainId = ligandCandidate && validChainIds.has(ligandCandidate) ? ligandCandidate : null;
+  const defaultLigandOption =
+    candidateLigandOptions.find((item) => item.isSmiles) ||
+    componentOptions.find((item) => item.isSmiles && item.chainId) ||
+    candidateLigandOptions[0] ||
+    componentOptions.find((item) => Boolean(item.chainId)) ||
+    null;
+  const confidenceLigandHintCandidates: string[] = [];
+  const confidenceLigandId = confidenceData && typeof confidenceData.ligand_chain_id === 'string'
+    ? confidenceData.ligand_chain_id.trim()
+    : '';
+  if (confidenceLigandId) {
+    confidenceLigandHintCandidates.push(confidenceLigandId);
+  }
+  const confidenceLigandIds = confidenceData?.ligand_chain_ids;
+  if (Array.isArray(confidenceLigandIds)) {
+    for (const candidate of confidenceLigandIds) {
+      if (typeof candidate !== 'string' || !candidate.trim()) continue;
+      confidenceLigandHintCandidates.push(candidate.trim());
+    }
+  }
+  const confidenceByChain = confidenceData?.ligand_atom_plddts_by_chain;
+  if (confidenceByChain && typeof confidenceByChain === 'object' && !Array.isArray(confidenceByChain)) {
+    for (const key of Object.keys(confidenceByChain as Record<string, unknown>)) {
+      if (!key.trim()) continue;
+      confidenceLigandHintCandidates.push(key.trim());
+    }
+  }
+  const confidencePreferredLigandChainId = confidenceLigandHintCandidates
+    .map((candidate) => resolveChainFromCandidate(candidate))
+    .find((candidate): candidate is string => Boolean(candidate));
+  const preferredLigandChainId =
+    resolveChainFromCandidate(rawBinder) ||
+    resolveChainFromCandidate(rawLigand) ||
+    resolveChainFromCandidate(affinityModelLigandHint) ||
+    resolveChainFromCandidate(confidenceModelLigandHint) ||
+    resolveChainFromCandidate(affinityLigandHint) ||
+    resolveChainFromCandidate(preferredLigand) ||
+    resolveChainFromCandidate(ligandCandidate) ||
+    confidencePreferredLigandChainId ||
+    null;
   const preferredLigandComponentId = preferredLigandChainId ? chainToComponent.get(preferredLigandChainId)?.id || null : null;
   const ligandChainId =
     preferredLigandChainId &&
@@ -421,15 +566,17 @@ function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: Wo
     preferredLigandComponentId &&
     preferredLigandComponentId !== targetComponentId
       ? preferredLigandChainId
-      : defaultLigandChainId;
+      : defaultLigandOption?.chainId || null;
   const selectedLigandComponent = ligandChainId ? chainToComponent.get(ligandChainId) || null : null;
   const ligand =
     selectedLigandComponent?.type === 'ligand'
       ? readTaskPrimaryLigand(task, activeComponents, selectedLigandComponent.id || null)
-      : {
-          smiles: '',
-          isSmiles: false
-        };
+      : selectedLigandComponent
+        ? {
+            smiles: '',
+            isSmiles: false
+          }
+        : readTaskPrimaryLigand(task, activeComponents, null);
   const ligandSequence =
     selectedLigandComponent && isSequenceLigandType(selectedLigandComponent.type)
       ? normalizeComponentSequence(selectedLigandComponent.type, selectedLigandComponent.sequence || '')
@@ -570,7 +717,7 @@ function chainKeysMatch(candidate: string, preferred: string): boolean {
 
 function readTaskLigandAtomPlddtsFromChainMap(
   value: unknown,
-  preferredLigandChainId: string | null,
+  preferredChainKeys: Set<string>,
   allowFallbackToAnyChain: boolean
 ): number[] | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -578,10 +725,10 @@ function readTaskLigandAtomPlddtsFromChainMap(
   const entries = Object.entries(map);
   if (entries.length === 0) return null;
 
-  const preferred = preferredLigandChainId ? normalizeChainKey(preferredLigandChainId) : '';
-  if (preferred) {
+  if (preferredChainKeys.size > 0) {
     for (const [key, chainValues] of entries) {
-      if (!chainKeysMatch(key, preferred)) continue;
+      const matched = Array.from(preferredChainKeys).some((preferred) => chainKeysMatch(key, preferred));
+      if (!matched) continue;
       const parsed = normalizeAtomPlddts(toFiniteNumberArray(chainValues));
       if (parsed.length > 0) {
         return parsed;
@@ -602,17 +749,17 @@ function readTaskLigandAtomPlddtsFromChainMap(
 
 function readTaskResiduePlddtsFromChainMap(
   value: unknown,
-  preferredLigandChainId: string | null
+  preferredChainKeys: Set<string>
 ): number[] | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const map = value as Record<string, unknown>;
   const entries = Object.entries(map);
   if (entries.length === 0) return null;
 
-  const preferred = preferredLigandChainId ? normalizeChainKey(preferredLigandChainId) : '';
-  if (preferred) {
+  if (preferredChainKeys.size > 0) {
     for (const [key, chainValues] of entries) {
-      if (!chainKeysMatch(key, preferred)) continue;
+      const matched = Array.from(preferredChainKeys).some((preferred) => chainKeysMatch(key, preferred));
+      if (!matched) continue;
       const parsed = normalizeAtomPlddts(toFiniteNumberArray(chainValues));
       if (parsed.length > 0) return parsed;
     }
@@ -620,9 +767,28 @@ function readTaskResiduePlddtsFromChainMap(
   return null;
 }
 
-function readTaskTokenPlddtsForChain(
+function collectTaskPreferredLigandChainKeys(
   confidence: Record<string, unknown>,
   preferredLigandChainId: string | null
+): Set<string> {
+  const keys = new Set<string>();
+  if (preferredLigandChainId) {
+    keys.add(normalizeChainKey(preferredLigandChainId));
+  }
+  const modelLigandChain = readFirstNonEmptyStringMetric(confidence, ['model_ligand_chain_id']);
+  if (modelLigandChain) {
+    keys.add(normalizeChainKey(modelLigandChain));
+  }
+  const requestedLigandChain = readFirstNonEmptyStringMetric(confidence, ['requested_ligand_chain_id', 'ligand_chain_id']);
+  if (requestedLigandChain) {
+    keys.add(normalizeChainKey(requestedLigandChain));
+  }
+  return keys;
+}
+
+function readTaskTokenPlddtsForChain(
+  confidence: Record<string, unknown>,
+  preferredChainKeys: Set<string>
 ): number[] | null {
   const tokenPlddtCandidates: unknown[] = [
     confidence.token_plddts,
@@ -639,8 +805,7 @@ function readTaskTokenPlddtsForChain(
     readObjectPath(confidence, 'chain_ids_by_token')
   ];
 
-  const preferred = preferredLigandChainId ? normalizeChainKey(preferredLigandChainId) : '';
-  if (!preferred) return null;
+  if (preferredChainKeys.size === 0) return null;
   for (const plddtCandidate of tokenPlddtCandidates) {
     const tokenPlddts = normalizeAtomPlddts(toFiniteNumberArray(plddtCandidate));
     if (tokenPlddts.length === 0) continue;
@@ -651,7 +816,9 @@ function readTaskTokenPlddtsForChain(
       const tokenChains = chainCandidate.map((value) => normalizeChainKey(String(value || '')));
       if (tokenChains.some((value) => !value)) continue;
 
-      const byChain = tokenPlddts.filter((_, index) => chainKeysMatch(tokenChains[index], preferred));
+      const byChain = tokenPlddts.filter((_, index) => {
+        return Array.from(preferredChainKeys).some((preferred) => chainKeysMatch(tokenChains[index], preferred));
+      });
       if (byChain.length > 0) return byChain;
     }
   }
@@ -660,7 +827,8 @@ function readTaskTokenPlddtsForChain(
 
 function readTaskLigandResiduePlddts(task: ProjectTask, preferredLigandChainId: string | null): number[] | null {
   const confidence = (task.confidence || {}) as Record<string, unknown>;
-  if (!preferredLigandChainId) return null;
+  const preferredChainKeys = collectTaskPreferredLigandChainKeys(confidence, preferredLigandChainId);
+  if (preferredChainKeys.size === 0) return null;
   const chainMapCandidates: unknown[] = [
     confidence.residue_plddt_by_chain,
     confidence.chain_residue_plddt,
@@ -674,11 +842,11 @@ function readTaskLigandResiduePlddts(task: ProjectTask, preferredLigandChainId: 
     readObjectPath(confidence, 'plddt.by_chain')
   ];
   for (const candidate of chainMapCandidates) {
-    const parsed = readTaskResiduePlddtsFromChainMap(candidate, preferredLigandChainId);
+    const parsed = readTaskResiduePlddtsFromChainMap(candidate, preferredChainKeys);
     if (parsed && parsed.length > 0) return parsed;
   }
 
-  const tokenPlddts = readTaskTokenPlddtsForChain(confidence, preferredLigandChainId);
+  const tokenPlddts = readTaskTokenPlddtsForChain(confidence, preferredChainKeys);
   if (tokenPlddts && tokenPlddts.length > 0) return tokenPlddts;
 
   return null;
@@ -690,6 +858,7 @@ function readTaskLigandAtomPlddts(
   allowFlatFallback = true
 ): number[] | null {
   const confidence = (task.confidence || {}) as Record<string, unknown>;
+  const preferredChainKeys = collectTaskPreferredLigandChainKeys(confidence, preferredLigandChainId);
   const byChainCandidates: unknown[] = [
     confidence.ligand_atom_plddts_by_chain,
     readObjectPath(confidence, 'ligand.atom_plddts_by_chain'),
@@ -702,14 +871,14 @@ function readTaskLigandAtomPlddts(
     }
     const parsed = readTaskLigandAtomPlddtsFromChainMap(
       candidate,
-      preferredLigandChainId,
-      !preferredLigandChainId
+      preferredChainKeys,
+      preferredChainKeys.size === 0
     );
     if (parsed && parsed.length > 0) {
       return parsed;
     }
   }
-  if (preferredLigandChainId && hasChainMap && !allowFlatFallback) return null;
+  if (preferredChainKeys.size > 0 && hasChainMap && !allowFlatFallback) return null;
   if (!allowFlatFallback) return null;
 
   const candidates: unknown[] = [
@@ -1128,14 +1297,35 @@ export function ProjectTasksPage() {
         const taskId = String(row.task_id || '').trim();
         if (!taskId || row.task_state !== 'SUCCESS') return false;
         const selection = resolveTaskSelectionContext(row);
+        const confidence =
+          row.confidence && typeof row.confidence === 'object' && !Array.isArray(row.confidence)
+            ? (row.confidence as Record<string, unknown>)
+            : null;
+        const backendValue = String(row.backend || confidence?.backend || '').trim().toLowerCase();
+        const ligandByChain =
+          confidence?.ligand_atom_plddts_by_chain &&
+          typeof confidence.ligand_atom_plddts_by_chain === 'object' &&
+          !Array.isArray(confidence.ligand_atom_plddts_by_chain)
+            ? (confidence.ligand_atom_plddts_by_chain as Record<string, unknown>)
+            : null;
+        const hasLigandByChain = Boolean(ligandByChain && Object.keys(ligandByChain).length > 0);
+        const residueByChain =
+          confidence?.residue_plddt_by_chain &&
+          typeof confidence.residue_plddt_by_chain === 'object' &&
+          !Array.isArray(confidence.residue_plddt_by_chain)
+            ? (confidence.residue_plddt_by_chain as Record<string, unknown>)
+            : null;
+        const hasResidueByChain = Boolean(residueByChain && Object.keys(residueByChain).length > 0);
         const needsSummaryHydration = !hasTaskSummaryMetrics(row);
         const needsLigandAtomHydration =
           Boolean(
             selection.ligandSmiles &&
               selection.ligandIsSmiles &&
-              !hasTaskLigandAtomPlddts(row, selection.ligandChainId, selection.ligandComponentCount === 1)
+              !hasTaskLigandAtomPlddts(row, selection.ligandChainId, selection.ligandComponentCount <= 1)
           );
-        if (!needsSummaryHydration && !needsLigandAtomHydration) {
+        const needsProtenixDetailHydration =
+          backendValue === 'protenix' && (!hasLigandByChain || !hasResidueByChain);
+        if (!needsSummaryHydration && !needsLigandAtomHydration && !needsProtenixDetailHydration) {
           resultHydrationDoneRef.current.add(taskId);
           return false;
         }
@@ -1164,7 +1354,7 @@ export function ProjectTasksPage() {
       resultHydrationInFlightRef.current.add(taskId);
 
       try {
-        const resultBlob = await downloadResultBlob(taskId);
+        const resultBlob = await downloadResultBlob(taskId, { mode: 'view' });
         const parsed = await parseResultBundle(resultBlob);
         if (!parsed) continue;
 
@@ -1400,7 +1590,7 @@ export function ProjectTasksPage() {
       const ligandAtomPlddts = readTaskLigandAtomPlddts(
         task,
         selection.ligandChainId,
-        selection.ligandComponentCount === 1
+        selection.ligandComponentCount <= 1
       );
       const ligandResiduePlddtsRaw =
         selection.ligandSequence && isSequenceLigandType(selection.ligandSequenceType)
@@ -1864,7 +2054,7 @@ export function ProjectTasksPage() {
         const ligandSmiles = selection.ligandSmiles;
         const ligandIsSmiles = selection.ligandIsSmiles;
         const ligandAtomPlddts =
-          readTaskLigandAtomPlddts(task, selection.ligandChainId, selection.ligandComponentCount === 1) ??
+          readTaskLigandAtomPlddts(task, selection.ligandChainId, selection.ligandComponentCount <= 1) ??
           row.ligandAtomPlddts;
         const submittedText = formatDateTime(task.submitted_at || task.created_at);
         const runtimeTaskId = String(task.task_id || '').trim();
