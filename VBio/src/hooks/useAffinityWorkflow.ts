@@ -81,6 +81,7 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
   const requestSeqRef = useRef(0);
   const confidenceOnlyTouchedRef = useRef(false);
   const hydratedUploadKeyRef = useRef('');
+  const hydratedPersistedSmilesKeyRef = useRef('');
 
   const currentPairKey = useMemo(() => buildPairKey(targetFile, ligandFile), [targetFile, ligandFile]);
   const isPreviewCurrent = Boolean(currentPairKey) && previewPairKey === currentPairKey;
@@ -114,6 +115,7 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
     requestSeqRef.current += 1;
     resetAll();
     hydratedUploadKeyRef.current = '';
+    hydratedPersistedSmilesKeyRef.current = '';
   }, [scopeKey, resetAll]);
 
   const persistedUploadKey = useMemo(() => {
@@ -266,6 +268,8 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
         setLigandChainId(nextPreview.ligandChainId || '');
         setLigandSmiles((prev) => {
           const nextSmiles = String(nextPreview.ligandSmiles || '').trim();
+          // When ligand file changes, preview is the source of truth.
+          if (ligandFile) return nextSmiles;
           if (!nextSmiles) return prev;
           return prev.trim() ? prev : nextSmiles;
         });
@@ -293,10 +297,14 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
 
   useEffect(() => {
     if (!enabled) return;
+    if (targetFile || ligandFile || preview || previewLoading) return;
     const persisted = String(persistedLigandSmiles || '').trim();
     if (!persisted) return;
+    const persistedSmilesKey = `${String(scopeKey || '')}|${persisted}`;
+    if (hydratedPersistedSmilesKeyRef.current === persistedSmilesKey) return;
+    hydratedPersistedSmilesKeyRef.current = persistedSmilesKey;
     setLigandSmiles((prev) => (prev.trim() ? prev : persisted));
-  }, [enabled, persistedLigandSmiles]);
+  }, [enabled, persistedLigandSmiles, targetFile, ligandFile, preview, previewLoading, scopeKey]);
 
   useEffect(() => {
     if (!enabled) return;

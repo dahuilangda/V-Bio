@@ -305,6 +305,12 @@ h3 {
   padding: 4px;
 }
 
+.page-header-actions-minimal {
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+
 .muted {
   color: var(--muted);
 }
@@ -1237,6 +1243,26 @@ select:focus {
 
 .icon-btn.danger {
   color: var(--danger);
+}
+
+.task-new-button {
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+  border-radius: 999px;
+  border-color: #2d5d48;
+  background: linear-gradient(180deg, #2d6a53 0%, #255a46 100%);
+  color: #fff;
+  box-shadow: 0 6px 16px rgba(21, 48, 37, 0.2);
+}
+
+.task-new-button:hover {
+  background: linear-gradient(180deg, #34765d 0%, #2a634d 100%);
+}
+
+.task-new-button:focus-visible {
+  outline: 2px solid #8db9a2;
+  outline-offset: 2px;
 }
 
 .modal-mask {
@@ -2198,6 +2224,18 @@ select:focus {
   gap: 4px;
 }
 
+.task-submitted-title {
+  font-weight: 700;
+  color: #123126;
+  line-height: 1.2;
+}
+
+.task-submitted-summary {
+  color: #4d685b;
+  font-size: var(--text-2xs);
+  line-height: 1.25;
+}
+
 .task-submitted-main {
   display: flex;
   align-items: center;
@@ -2481,6 +2519,17 @@ select:focus {
 
 .basics-panel .field:nth-of-type(2) {
   grid-column: 1 / -1;
+}
+
+.component-runtime-settings {
+  margin-top: 2px;
+}
+
+.component-runtime-settings-row {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(260px, 1fr) minmax(220px, 1fr);
+  align-items: start;
 }
 
 .affinity-basics-panel {
@@ -4441,6 +4490,10 @@ select:focus {
     grid-column: auto;
   }
 
+  .component-runtime-settings-row {
+    grid-template-columns: 1fr;
+  }
+
   .affinity-basics-controls {
     grid-template-columns: 1fr;
   }
@@ -4575,6 +4628,11 @@ select:focus {
     width: 100%;
     justify-content: flex-start;
     padding: 6px;
+  }
+
+  .page-header-actions-minimal {
+    width: auto;
+    padding: 0;
   }
 
   .detail-tabs-inline {

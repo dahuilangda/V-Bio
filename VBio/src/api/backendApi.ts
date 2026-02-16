@@ -282,6 +282,12 @@ export async function submitAffinityScoring(input: AffinitySubmitInput): Promise
   }
   form.append('priority', 'high');
   const endpoint = useProtenix ? '/api/protenix2score' : '/api/boltz2score';
+  if (useProtenix) {
+    const useMsa = input.useMsa !== false;
+    const useTemplate = Boolean(input.useTemplate);
+    form.append('use_msa', String(useMsa).toLowerCase());
+    form.append('use_template', String(useTemplate).toLowerCase());
+  }
 
   const res = await requestBackend(endpoint, {
     method: 'POST',

@@ -163,6 +163,7 @@ function readPairIptmForChains(
   fallbackChainIds: string[]
 ): number | null {
   if (!chainA || !chainB) return null;
+  if (chainA === chainB) return null;
 
   const pairMap = readByPath(data, 'pair_chains_iptm');
   if (pairMap && typeof pairMap === 'object' && !Array.isArray(pairMap)) {

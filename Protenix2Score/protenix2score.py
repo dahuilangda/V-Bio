@@ -259,7 +259,7 @@ def main() -> int:
     parser.add_argument("--python_bin", default=DEFAULT_PYTHON_BIN, help="Python executable inside container.")
     parser.add_argument("--dtype", default="bf16", choices=["bf16", "fp32"], help="Inference dtype.")
     parser.add_argument("--seed", type=int, default=None, help="Optional inference seed.")
-    parser.add_argument("--use_msa", default="false", help="Enable MSA feature (true/false).")
+    parser.add_argument("--use_msa", default="true", help="Enable MSA feature (true/false).")
     parser.add_argument("--use_template", default="false", help="Enable template feature (true/false).")
     parser.add_argument("--docker_extra_args", default=DEFAULT_DOCKER_EXTRA_ARGS, help="Extra args for `docker run`.")
     parser.add_argument("--infer_extra_args", default=DEFAULT_INFER_EXTRA_ARGS, help="Extra args for inference.py.")

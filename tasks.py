@@ -1339,6 +1339,10 @@ def protenix2score_task(self, score_args: dict):
             "--output_dir", output_dir,
             "--work_dir", work_dir,
         ]
+        use_msa = bool(score_args.get('use_msa', True))
+        use_template = bool(score_args.get('use_template', False))
+        command.extend(["--use_msa", "true" if use_msa else "false"])
+        command.extend(["--use_template", "true" if use_template else "false"])
         seed = score_args.get('seed')
         if isinstance(seed, int):
             command.extend(["--seed", str(seed)])

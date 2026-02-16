@@ -8,6 +8,7 @@ import {
   ExternalLink,
   Filter,
   LoaderCircle,
+  Plus,
   RefreshCcw,
   Search,
   SlidersHorizontal,
@@ -80,11 +81,41 @@ function readTaskComponents(task: ProjectTask): InputComponent[] {
   return fallback;
 }
 
+function hasAffinityUploadComponent(task: ProjectTask): boolean {
+  const rawComponents = Array.isArray(task.components) ? (task.components as unknown[]) : [];
+  return rawComponents.some((component) => isAffinityUploadRawComponent(component));
+}
+
 function readTaskPrimaryLigand(
   task: ProjectTask,
   components: InputComponent[],
   preferredComponentId: string | null
 ): { smiles: string; isSmiles: boolean } {
+  const affinityUploadTask = hasAffinityUploadComponent(task);
+  const directLigand = normalizeComponentSequence('ligand', task.ligand_smiles || '');
+  const affinityData =
+    task.affinity && typeof task.affinity === 'object' && !Array.isArray(task.affinity)
+      ? (task.affinity as Record<string, unknown>)
+      : null;
+  const affinityLigand = normalizeComponentSequence(
+    'ligand',
+    readFirstNonEmptyStringMetric(affinityData, ['ligand_smiles', 'ligandSmiles', 'smiles', 'ligand.smiles'])
+  );
+  const confidenceData =
+    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
+      ? (task.confidence as Record<string, unknown>)
+      : null;
+  const confidenceLigand = normalizeComponentSequence(
+    'ligand',
+    readFirstNonEmptyStringMetric(confidenceData, ['ligand_smiles', 'ligandSmiles', 'smiles', 'ligand.smiles'])
+  );
+
+  if (affinityUploadTask) {
+    if (directLigand) return { smiles: directLigand, isSmiles: true };
+    if (affinityLigand) return { smiles: affinityLigand, isSmiles: true };
+    if (confidenceLigand) return { smiles: confidenceLigand, isSmiles: true };
+  }
+
   if (preferredComponentId) {
     const selected = components.find((item) => item.id === preferredComponentId);
     const selectedValue =
@@ -106,31 +137,14 @@ function readTaskPrimaryLigand(
     };
   }
 
-  const directLigand = normalizeComponentSequence('ligand', task.ligand_smiles || '');
   if (directLigand) {
     return { smiles: directLigand, isSmiles: true };
   }
 
-  const affinityData =
-    task.affinity && typeof task.affinity === 'object' && !Array.isArray(task.affinity)
-      ? (task.affinity as Record<string, unknown>)
-      : null;
-  const affinityLigand = normalizeComponentSequence(
-    'ligand',
-    readFirstNonEmptyStringMetric(affinityData, ['ligand_smiles', 'ligandSmiles', 'smiles', 'ligand.smiles'])
-  );
   if (affinityLigand) {
     return { smiles: affinityLigand, isSmiles: true };
   }
 
-  const confidenceData =
-    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
-      ? (task.confidence as Record<string, unknown>)
-      : null;
-  const confidenceLigand = normalizeComponentSequence(
-    'ligand',
-    readFirstNonEmptyStringMetric(confidenceData, ['ligand_smiles', 'ligandSmiles', 'smiles', 'ligand.smiles'])
-  );
   if (confidenceLigand) {
     return { smiles: confidenceLigand, isSmiles: true };
   }
@@ -189,6 +203,27 @@ function readFirstNonEmptyStringMetric(data: Record<string, unknown> | null, pat
     }
   }
   return '';
+}
+
+function readStringListMetric(data: Record<string, unknown> | null, paths: string[]): string[] {
+  if (!data) return [];
+  for (const path of paths) {
+    const value = readObjectPath(data, path);
+    if (!Array.isArray(value)) continue;
+    const rows = value
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (rows.length > 0) return rows;
+  }
+  return [];
+}
+
+function splitChainTokens(value: string): string[] {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function normalizeProbability(value: number | null): number | null {
@@ -369,6 +404,7 @@ function readPairIptmForChains(
   fallbackChainIds: string[]
 ): number | null {
   if (!chainA || !chainB) return null;
+  if (chainA === chainB) return null;
 
   const pairMap = readObjectPath(confidence, 'pair_chains_iptm');
   if (pairMap && typeof pairMap === 'object' && !Array.isArray(pairMap)) {
@@ -448,6 +484,7 @@ function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: Wo
   const confidenceModelLigandHint = readFirstNonEmptyStringMetric(confidenceData, [
     'model_ligand_chain_id'
   ]);
+  const confidenceChainIds = readStringListMetric(confidenceData, ['chain_ids']);
   const preferredTarget = String(workspacePreference?.targetChainId || '')
     .trim();
   const preferredLigand = String(workspacePreference?.ligandChainId || '')
@@ -461,7 +498,13 @@ function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: Wo
 
   if (activeComponents.length === 0) {
     const ligand = readTaskPrimaryLigand(task, [], null);
-    const fallbackChainIds = Array.from(new Set([targetCandidate, ligandCandidate].filter(Boolean)));
+    const fallbackChainIds = Array.from(
+      new Set([
+        ...splitChainTokens(targetCandidate),
+        ...splitChainTokens(ligandCandidate),
+        ...confidenceChainIds
+      ])
+    );
     return {
       chainIds: fallbackChainIds,
       targetChainId: targetCandidate || null,
@@ -475,13 +518,19 @@ function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: Wo
   }
 
   const chainAssignments = assignChainIdsForComponents(activeComponents);
-  const chainIds = chainAssignments.flat().map((value) => value.toUpperCase());
-  const validChainIds = new Set(chainIds);
+  const chainIdsByConfig = chainAssignments.flat().map((value) => value.toUpperCase());
+  const chainIdByKey = new Map<string, string>();
+  for (const chainId of [...chainIdsByConfig, ...confidenceChainIds]) {
+    const key = normalizeChainKey(chainId);
+    if (!key || chainIdByKey.has(key)) continue;
+    chainIdByKey.set(key, chainId);
+  }
+  const chainIds = Array.from(chainIdByKey.values());
 
   const chainToComponent = new Map<string, InputComponent>();
   chainAssignments.forEach((chainGroup, index) => {
     chainGroup.forEach((chainId) => {
-      chainToComponent.set(chainId.toUpperCase(), activeComponents[index]);
+      chainToComponent.set(normalizeChainKey(chainId), activeComponents[index]);
     });
   });
   const componentOptions = activeComponents.map((component, index) => {
@@ -497,34 +546,21 @@ function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: Wo
     const raw = String(candidate || '').trim();
     if (!raw) return null;
     const normalized = raw.toUpperCase();
-    if (validChainIds.has(normalized)) return normalized;
+    const byKnownChain = chainIdByKey.get(normalizeChainKey(raw));
+    if (byKnownChain) return byKnownChain;
     const byComponent = componentOptions.find((item) => item.componentId === raw);
     if (byComponent?.chainId) return byComponent.chainId;
-    const byNormalizedChain = componentOptions.find((item) => String(item.chainId || '').toUpperCase() === normalized);
+    const byNormalizedChain = componentOptions.find(
+      (item) => normalizeChainKey(String(item.chainId || '')) === normalizeChainKey(normalized)
+    );
     if (byNormalizedChain?.chainId) return byNormalizedChain.chainId;
-    for (const chainId of validChainIds) {
+    for (const chainId of chainIds) {
       if (chainKeysMatch(chainId, normalized) || chainKeysMatch(normalized, chainId)) {
         return chainId;
       }
     }
     return null;
   };
-  const fallbackTargetChainId = chainAssignments[0]?.[0] || null;
-  const normalizedFallbackTarget = fallbackTargetChainId ? fallbackTargetChainId.toUpperCase() : null;
-  const targetChainId = resolveChainFromCandidate(targetCandidate) || normalizedFallbackTarget;
-  const targetComponentId = targetChainId ? chainToComponent.get(targetChainId)?.id || null : null;
-  const candidateLigandOptions = componentOptions.filter((item) => {
-    if (!item.chainId) return false;
-    if (item.chainId === targetChainId) return false;
-    if (targetComponentId && item.componentId === targetComponentId) return false;
-    return true;
-  });
-  const defaultLigandOption =
-    candidateLigandOptions.find((item) => item.isSmiles) ||
-    componentOptions.find((item) => item.isSmiles && item.chainId) ||
-    candidateLigandOptions[0] ||
-    componentOptions.find((item) => Boolean(item.chainId)) ||
-    null;
   const confidenceLigandHintCandidates: string[] = [];
   const confidenceLigandId = confidenceData && typeof confidenceData.ligand_chain_id === 'string'
     ? confidenceData.ligand_chain_id.trim()
@@ -546,6 +582,41 @@ function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: Wo
       confidenceLigandHintCandidates.push(key.trim());
     }
   }
+  const ligandHintKeys = new Set(
+    [
+      ...confidenceLigandHintCandidates,
+      ...splitChainTokens(rawBinder),
+      ...splitChainTokens(rawLigand),
+      ...splitChainTokens(affinityModelLigandHint),
+      ...splitChainTokens(confidenceModelLigandHint),
+      ...splitChainTokens(affinityLigandHint),
+      ...splitChainTokens(preferredLigand),
+      ...splitChainTokens(ligandCandidate)
+    ]
+      .map((item) => normalizeChainKey(item))
+      .filter(Boolean)
+  );
+  const fallbackTargetChainId =
+    componentOptions.find((item) => item.type !== 'ligand' && item.chainId)?.chainId || chainAssignments[0]?.[0] || null;
+  const normalizedFallbackTarget = fallbackTargetChainId ? resolveChainFromCandidate(fallbackTargetChainId) : null;
+  const inferredFallbackTarget =
+    chainIds.find((chainId) => !ligandHintKeys.has(normalizeChainKey(chainId))) ||
+    chainIds[0] ||
+    null;
+  const targetChainId = resolveChainFromCandidate(targetCandidate) || normalizedFallbackTarget || inferredFallbackTarget;
+  const targetComponentId = targetChainId ? chainToComponent.get(normalizeChainKey(targetChainId))?.id || null : null;
+  const candidateLigandOptions = componentOptions.filter((item) => {
+    if (!item.chainId) return false;
+    if (item.chainId === targetChainId) return false;
+    if (targetComponentId && item.componentId === targetComponentId) return false;
+    return true;
+  });
+  const defaultLigandOption =
+    candidateLigandOptions.find((item) => item.isSmiles) ||
+    componentOptions.find((item) => item.isSmiles && item.chainId) ||
+    candidateLigandOptions[0] ||
+    componentOptions.find((item) => Boolean(item.chainId)) ||
+    null;
   const confidencePreferredLigandChainId = confidenceLigandHintCandidates
     .map((candidate) => resolveChainFromCandidate(candidate))
     .find((candidate): candidate is string => Boolean(candidate));
@@ -559,15 +630,21 @@ function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: Wo
     resolveChainFromCandidate(ligandCandidate) ||
     confidencePreferredLigandChainId ||
     null;
-  const preferredLigandComponentId = preferredLigandChainId ? chainToComponent.get(preferredLigandChainId)?.id || null : null;
+  const preferredLigandComponentId = preferredLigandChainId
+    ? chainToComponent.get(normalizeChainKey(preferredLigandChainId))?.id || null
+    : null;
+  const inferredFallbackLigand =
+    chainIds.find((chainId) => chainId !== targetChainId && ligandHintKeys.has(normalizeChainKey(chainId))) ||
+    chainIds.find((chainId) => chainId !== targetChainId) ||
+    null;
   const ligandChainId =
     preferredLigandChainId &&
     preferredLigandChainId !== targetChainId &&
     preferredLigandComponentId &&
     preferredLigandComponentId !== targetComponentId
       ? preferredLigandChainId
-      : defaultLigandOption?.chainId || null;
-  const selectedLigandComponent = ligandChainId ? chainToComponent.get(ligandChainId) || null : null;
+      : defaultLigandOption?.chainId || inferredFallbackLigand;
+  const selectedLigandComponent = ligandChainId ? chainToComponent.get(normalizeChainKey(ligandChainId)) || null : null;
   const ligand =
     selectedLigandComponent?.type === 'ligand'
       ? readTaskPrimaryLigand(task, activeComponents, selectedLigandComponent.id || null)
@@ -1552,6 +1629,13 @@ export function ProjectTasksPage() {
     }
     return `/projects/${project.id}?${params.toString()}`;
   }, [project, currentTaskRow]);
+  const createTaskHref = useMemo(() => {
+    if (!project) return '/projects';
+    const params = new URLSearchParams();
+    params.set('tab', 'components');
+    params.set('new_task', '1');
+    return `/projects/${project.id}?${params.toString()}`;
+  }, [project]);
   const workspacePairPreference = useMemo<WorkspacePairPreference>(() => {
     if (!project) {
       return {
@@ -1577,8 +1661,8 @@ export function ProjectTasksPage() {
       .toUpperCase();
 
     return {
-      targetChainId: savedTarget || currentTarget || null,
-      ligandChainId: savedLigand || currentLigand || null
+      targetChainId: currentTarget || savedTarget || null,
+      ligandChainId: currentLigand || savedLigand || null
     };
   }, [project, currentTaskRow]);
 
@@ -1873,6 +1957,8 @@ export function ProjectTasksPage() {
       if (!query) return true;
 
       const haystack = [
+        task.name,
+        task.summary,
         task.task_state,
         task.backend,
         task.status_text,
@@ -2028,6 +2114,8 @@ export function ProjectTasksPage() {
       const worksheet = workbook.addWorksheet(sheetName);
       worksheet.columns = [
         { header: '#', key: 'index', width: 6 },
+        { header: 'Task Name', key: 'taskName', width: 24 },
+        { header: 'Task Summary', key: 'taskSummary', width: 36 },
         { header: 'Task Row ID', key: 'taskRowId', width: 38 },
         { header: 'Runtime Task ID', key: 'runtimeTaskId', width: 24 },
         { header: 'State', key: 'state', width: 12 },
@@ -2081,6 +2169,8 @@ export function ProjectTasksPage() {
         }
         const excelRow = worksheet.addRow({
           index: i + 1,
+          taskName: String(task.name || '').trim(),
+          taskSummary: String(task.summary || '').trim(),
           taskRowId: task.id,
           runtimeTaskId,
           state: taskStateLabel(task.task_state),
@@ -2100,7 +2190,7 @@ export function ProjectTasksPage() {
             extension: 'png'
           });
           worksheet.addImage(imageId, {
-            tl: { col: 11, row: excelRow.number - 1 },
+            tl: { col: 13, row: excelRow.number - 1 },
             ext: { width: imageWidthPx, height: imageHeightPx },
             editAs: 'oneCell'
           });
@@ -2285,10 +2375,9 @@ export function ProjectTasksPage() {
             {refreshing ? ' · Syncing...' : ''}
           </p>
         </div>
-        <div className="row gap-8 page-header-actions">
-          <Link className="btn btn-ghost btn-compact" to={backToCurrentTaskHref}>
-            <ArrowLeft size={14} />
-            Back to Current Task
+        <div className="row gap-8 page-header-actions page-header-actions-minimal">
+          <Link className="icon-btn task-new-button" to={createTaskHref} title="New Task" aria-label="New Task">
+            <Plus size={15} />
           </Link>
         </div>
       </section>
@@ -2345,6 +2434,14 @@ export function ProjectTasksPage() {
           </div>
           <div className="project-toolbar-meta project-toolbar-meta-rich">
             <span className="muted small">{filteredRows.length} matched</span>
+            <Link
+              className="btn btn-ghost btn-compact btn-square"
+              to={backToCurrentTaskHref}
+              title="Back to Current Task"
+              aria-label="Back to Current Task"
+            >
+              <ArrowLeft size={14} />
+            </Link>
             <button
               type="button"
               className="btn btn-ghost btn-compact btn-square"
@@ -2552,6 +2649,8 @@ export function ProjectTasksPage() {
                 {pagedRows.map((row) => {
                   const { task, metrics } = row;
                   const runNote = (task.status_text || '').trim();
+                  const taskName = String(task.name || '').trim() || `Task ${String(task.id || '').slice(0, 8)}`;
+                  const taskSummary = String(task.summary || '').trim();
                   const showRunNote = shouldShowRunNote(task.task_state, runNote);
                   const submittedTs = task.submitted_at || task.created_at;
                   const hasRuntimeTaskId = Boolean(String(task.task_id || '').trim());
@@ -2595,6 +2694,8 @@ export function ProjectTasksPage() {
                       </td>
                       <td className="project-col-time task-col-submitted">
                         <div className="task-submitted-cell">
+                          <div className="task-submitted-title">{taskName}</div>
+                          {taskSummary ? <div className="task-submitted-summary">{taskSummary}</div> : null}
                           <div className="task-submitted-main">
                             <span className={`task-state-chip ${stateTone}`}>{taskStateLabel(task.task_state)}</span>
                             <span className="task-submitted-time">{formatDateTime(submittedTs)}</span>

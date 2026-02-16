@@ -1685,6 +1685,14 @@ def handle_protenix2score():
     score_args['affinity_refine'] = _parse_bool(request.form.get('affinity_refine'), False)
     score_args['enable_affinity'] = _parse_bool(request.form.get('enable_affinity'), False)
     score_args['auto_enable_affinity'] = _parse_bool(request.form.get('auto_enable_affinity'), False)
+    score_args['use_msa'] = _parse_bool(request.form.get('use_msa'), True)
+    score_args['use_template'] = _parse_bool(request.form.get('use_template'), False)
+    logger.info(
+        "Protenix2Score options: use_msa=%s, use_template=%s, enable_affinity=%s",
+        score_args['use_msa'],
+        score_args['use_template'],
+        score_args['enable_affinity'],
+    )
     if target_chain:
         score_args['target_chain'] = target_chain
     if ligand_chain:

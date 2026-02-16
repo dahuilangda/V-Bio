@@ -134,6 +134,8 @@ export interface Project {
 export interface ProjectTask {
   id: string;
   project_id: string;
+  name: string;
+  summary: string;
   task_id: string;
   task_state: TaskState;
   status_text: string;
@@ -218,6 +220,8 @@ export interface AffinitySubmitInput {
   targetChainIds?: string[];
   ligandChainId?: string;
   affinityRefine?: boolean;
+  useMsa?: boolean;
+  useTemplate?: boolean;
 }
 
 export interface TaskStatusResponse {

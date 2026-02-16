@@ -13,6 +13,7 @@ import {
   FolderOpen,
   FlaskConical,
   Hash,
+  Pencil,
   Plus,
   RefreshCcw,
   Search,
@@ -74,12 +75,17 @@ function backendLabel(value: string): string {
 export function ProjectsPage() {
   const navigate = useNavigate();
   const { session } = useAuth();
-  const { projects, loading, error, search, setSearch, createProject, softDeleteProject, load } =
+  const { projects, loading, error, search, setSearch, createProject, patchProject, softDeleteProject, load } =
     useProjects(session);
 
   const [showCreate, setShowCreate] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
+  const [editProjectName, setEditProjectName] = useState('');
+  const [editProjectSummary, setEditProjectSummary] = useState('');
+  const [editError, setEditError] = useState<string | null>(null);
+  const [editSaving, setEditSaving] = useState(false);
   const [workflow, setWorkflow] = useState<WorkflowKey>('prediction');
   const [typeFilter, setTypeFilter] = useState<'all' | WorkflowKey>('all');
   const [stateFilter, setStateFilter] = useState<'all' | TaskState>('all');
@@ -349,12 +355,13 @@ export function ProjectsPage() {
     const form = new FormData(e.currentTarget);
 
     const name = String(form.get('name') || '').trim() || fallbackName();
+    const summary = String(form.get('summary') || '').trim();
 
     setSaving(true);
     try {
       const created = await createProject({
         name,
-        summary: '',
+        summary,
         taskType: workflow,
         backend: 'boltz',
         useMsa: false,
@@ -371,6 +378,36 @@ export function ProjectsPage() {
       setCreateError(err instanceof Error ? err.message : 'Failed to create project.');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const openEditProjectModal = (projectId: string, name: string, summary: string) => {
+    setEditingProjectId(projectId);
+    setEditProjectName(name);
+    setEditProjectSummary(summary);
+    setEditError(null);
+  };
+
+  const onEditProject = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!editingProjectId) return;
+    const normalizedName = editProjectName.trim();
+    if (!normalizedName) {
+      setEditError('Project name cannot be empty.');
+      return;
+    }
+    setEditSaving(true);
+    setEditError(null);
+    try {
+      await patchProject(editingProjectId, {
+        name: normalizedName,
+        summary: editProjectSummary.trim()
+      });
+      setEditingProjectId(null);
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : 'Failed to update project.');
+    } finally {
+      setEditSaving(false);
     }
   };
 
@@ -671,6 +708,13 @@ export function ProjectsPage() {
                             Open
                           </Link>
                           <button
+                            className="icon-btn"
+                            onClick={() => openEditProjectModal(project.id, project.name, project.summary || '')}
+                            title="Edit project"
+                          >
+                            <Pencil size={14} />
+                          </button>
+                          <button
                             className="icon-btn danger"
                             onClick={() => {
                               if (window.confirm(`Delete project "${project.name}"?`)) {
@@ -772,6 +816,10 @@ export function ProjectsPage() {
                 <span>Name (optional)</span>
                 <input name="name" placeholder={fallbackName()} />
               </label>
+              <label className="field">
+                <span>Summary (optional)</span>
+                <textarea name="summary" rows={3} />
+              </label>
 
               {createError && <div className="alert error">{createError}</div>}
 
@@ -781,6 +829,49 @@ export function ProjectsPage() {
                 </button>
                 <button type="submit" className="btn btn-primary" disabled={saving}>
                   {saving ? 'Creating...' : 'Create'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {editingProjectId && (
+        <div
+          className="modal-mask"
+          onClick={() => {
+            setEditingProjectId(null);
+            setEditError(null);
+          }}
+        >
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>Edit Project</h2>
+            <form className="form-grid" onSubmit={onEditProject}>
+              <label className="field">
+                <span>Project Name</span>
+                <input
+                  value={editProjectName}
+                  onChange={(event) => setEditProjectName(event.target.value)}
+                  required
+                />
+              </label>
+              <label className="field">
+                <span>Project Summary</span>
+                <textarea
+                  value={editProjectSummary}
+                  rows={3}
+                  onChange={(event) => setEditProjectSummary(event.target.value)}
+                />
+              </label>
+
+              {editError && <div className="alert error">{editError}</div>}
+
+              <div className="row gap-8 end">
+                <button type="button" className="btn btn-ghost" onClick={() => setEditingProjectId(null)}>
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn-primary" disabled={editSaving}>
+                  {editSaving ? 'Saving...' : 'Save'}
                 </button>
               </div>
             </form>

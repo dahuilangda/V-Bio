@@ -114,7 +114,7 @@ export function AffinityBasicsWorkspace({
             <Eye size={13} />
             Confidence Only
           </span>
-          <span className="muted small affinity-confidence-hint">{confidenceOnlyHint}</span>
+          {confidenceOnlyHint.trim() ? <span className="muted small affinity-confidence-hint">{confidenceOnlyHint}</span> : null}
         </label>
 
       </div>

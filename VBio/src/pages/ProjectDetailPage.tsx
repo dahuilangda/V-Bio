@@ -77,8 +77,8 @@ import { useAffinityWorkflow } from '../hooks/useAffinityWorkflow';
 import type { AffinityPersistedUpload, AffinityPersistedUploads } from '../hooks/useAffinityWorkflow';
 
 interface DraftFields {
-  name: string;
-  summary: string;
+  taskName: string;
+  taskSummary: string;
   backend: string;
   use_msa: boolean;
   color_mode: string;
@@ -197,6 +197,27 @@ function readFirstNonEmptyStringMetric(data: Record<string, unknown> | null, pat
   return '';
 }
 
+function readStringListMetric(data: Record<string, unknown> | null, paths: string[]): string[] {
+  if (!data) return [];
+  for (const path of paths) {
+    const value = readObjectPath(data, path);
+    if (!Array.isArray(value)) continue;
+    const rows = value
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (rows.length > 0) return rows;
+  }
+  return [];
+}
+
+function splitChainTokens(value: string): string[] {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function toFiniteNumber(value: unknown): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   return value;
@@ -215,6 +236,7 @@ function readPairIptmForChains(
   fallbackChainIds: string[]
 ): number | null {
   if (!confidence || !chainA || !chainB) return null;
+  if (chainA === chainB) return null;
 
   const pairMap = readObjectPath(confidence, 'pair_chains_iptm');
   if (pairMap && typeof pairMap === 'object' && !Array.isArray(pairMap)) {
@@ -918,11 +940,22 @@ function createDraftFingerprint(draft: DraftFields): string {
   const activeComponents = nonEmptyComponents(normalizedConfig.components);
   const hasMsa = activeComponents.some((comp) => comp.type === 'protein' && comp.useMsa !== false);
   return JSON.stringify({
-    name: draft.name.trim(),
-    summary: draft.summary.trim(),
+    taskName: draft.taskName.trim(),
+    taskSummary: draft.taskSummary.trim(),
     backend: draft.backend,
     use_msa: hasMsa,
     color_mode: draft.color_mode || 'white',
+    inputConfig: normalizedConfig
+  });
+}
+
+function createComputationFingerprint(draft: DraftFields): string {
+  const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, draft.backend);
+  const activeComponents = nonEmptyComponents(normalizedConfig.components);
+  const hasMsa = activeComponents.some((comp) => comp.type === 'protein' && comp.useMsa !== false);
+  return JSON.stringify({
+    backend: draft.backend,
+    use_msa: hasMsa,
     inputConfig: normalizedConfig
   });
 }
@@ -956,6 +989,15 @@ export function ProjectDetailPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const { session } = useAuth();
+  const hasExplicitWorkspaceQuery = useMemo(() => {
+    const query = new URLSearchParams(location.search);
+    if (query.get('new_task') === '1') return true;
+    return query.has('tab') || query.has('task_row_id');
+  }, [location.search]);
+  const requestNewTask = useMemo(() => {
+    const query = new URLSearchParams(location.search);
+    return query.get('new_task') === '1';
+  }, [location.search]);
 
   const [project, setProject] = useState<Project | null>(null);
   const [projectTasks, setProjectTasks] = useState<ProjectTask[]>([]);
@@ -974,6 +1016,7 @@ export function ProjectDetailPage() {
   const [nowTs, setNowTs] = useState(Date.now());
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('results');
   const [savedDraftFingerprint, setSavedDraftFingerprint] = useState('');
+  const [savedComputationFingerprint, setSavedComputationFingerprint] = useState('');
   const [savedTemplateFingerprint, setSavedTemplateFingerprint] = useState('');
   const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [proteinTemplates, setProteinTemplates] = useState<Record<string, ProteinTemplateUpload>>({});
@@ -1034,6 +1077,7 @@ export function ProjectDetailPage() {
   const [isConstraintsResizing, setIsConstraintsResizing] = useState(false);
   const constraintsWorkspaceRef = useRef<HTMLDivElement | null>(null);
   const constraintsResizeRef = useRef<{ startX: number; startWidthPercent: number } | null>(null);
+  const [entryRoutingResolved, setEntryRoutingResolved] = useState(false);
   useEffect(() => {
     const tab = new URLSearchParams(location.search).get('tab');
     if (tab === 'inputs') {
@@ -1044,6 +1088,37 @@ export function ProjectDetailPage() {
       setWorkspaceTab(tab);
     }
   }, [location.search, projectId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const resolveEntryRoute = async () => {
+      const normalizedProjectId = String(projectId || '').trim();
+      if (!normalizedProjectId) {
+        if (!cancelled) setEntryRoutingResolved(true);
+        return;
+      }
+      if (hasExplicitWorkspaceQuery) {
+        if (!cancelled) setEntryRoutingResolved(true);
+        return;
+      }
+      try {
+        const rows = await listProjectTasksCompact(normalizedProjectId);
+        if (cancelled) return;
+        if (rows.length > 0) {
+          navigate(`/projects/${normalizedProjectId}/tasks`, { replace: true });
+          return;
+        }
+      } catch {
+        // If list lookup fails, keep current route and let loadProject surface actual errors.
+      }
+      if (!cancelled) setEntryRoutingResolved(true);
+    };
+    setEntryRoutingResolved(false);
+    void resolveEntryRoute();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, hasExplicitWorkspaceQuery, navigate]);
 
   useEffect(() => {
     if (!draft) return;
@@ -1305,23 +1380,39 @@ export function ProjectDetailPage() {
         : project?.affinity && typeof project.affinity === 'object' && !Array.isArray(project.affinity)
           ? (project.affinity as Record<string, unknown>)
           : null;
+    const confidenceData =
+      activeResultTask?.confidence && typeof activeResultTask.confidence === 'object' && !Array.isArray(activeResultTask.confidence)
+        ? (activeResultTask.confidence as Record<string, unknown>)
+        : project?.confidence && typeof project.confidence === 'object' && !Array.isArray(project.confidence)
+          ? (project.confidence as Record<string, unknown>)
+          : null;
     const preferred = typeof resultPairPreference?.target === 'string' ? resultPairPreference.target.trim() : '';
     const affinityTarget = readFirstNonEmptyStringMetric(affinityData, [
       'requested_target_chain',
       'target_chain',
       'binder_chain'
     ]);
+    const confidenceChainIds = readStringListMetric(confidenceData, ['chain_ids']);
+    const knownChainIdByKey = new Map<string, string>();
+    for (const chainId of [...resultChainIds, ...confidenceChainIds]) {
+      const key = normalizeChainKey(chainId);
+      if (!key || knownChainIdByKey.has(key)) continue;
+      knownChainIdByKey.set(key, chainId);
+    }
+    const knownChainIds = Array.from(knownChainIdByKey.values());
     const resolveChain = (candidate: string): string | null => {
       const raw = String(candidate || '').trim();
       if (!raw) return null;
       const direct = resultChainInfoById.has(raw) ? raw : null;
       if (direct) return direct;
+      const byKnown = knownChainIdByKey.get(normalizeChainKey(raw));
+      if (byKnown) return byKnown;
       const byComponent = resultComponentOptions.find((item) => item.id === raw);
       if (byComponent?.chainId) return byComponent.chainId;
       const normalized = raw.toUpperCase();
       const byNormalized = resultComponentOptions.find((item) => String(item.chainId || '').toUpperCase() === normalized);
       if (byNormalized?.chainId) return byNormalized.chainId;
-      for (const chainId of resultChainIds) {
+      for (const chainId of knownChainIds) {
         if (chainKeysMatch(chainId, normalized) || chainKeysMatch(normalized, chainId)) {
           return chainId;
         }
@@ -1332,17 +1423,41 @@ export function ProjectDetailPage() {
     for (const candidate of targetCandidates) {
       const chain = resolveChain(candidate);
       if (chain) return chain;
-      const split = String(candidate || '')
-        .split(',')
-        .map((item) => item.trim())
-        .filter(Boolean);
+      const split = splitChainTokens(candidate);
       for (const part of split) {
         const partChain = resolveChain(part);
         if (partChain) return partChain;
       }
     }
-    return resultComponentOptions[0]?.chainId || null;
-  }, [resultPairPreference, resultChainInfoById, resultComponentOptions, resultChainIds, activeResultTask?.affinity, project?.affinity]);
+    const ligandHintKeys = new Set(
+      [
+        ...splitChainTokens(readFirstNonEmptyStringMetric(affinityData, ['model_ligand_chain_id'])),
+        ...splitChainTokens(readFirstNonEmptyStringMetric(affinityData, ['requested_ligand_chain', 'ligand_chain'])),
+        ...splitChainTokens(readFirstNonEmptyStringMetric(confidenceData, ['model_ligand_chain_id'])),
+        ...splitChainTokens(readFirstNonEmptyStringMetric(confidenceData, ['requested_ligand_chain_id', 'ligand_chain_id'])),
+        ...readStringListMetric(confidenceData, ['ligand_chain_ids'])
+      ]
+        .map((item) => normalizeChainKey(item))
+        .filter(Boolean)
+    );
+    const firstNonLigand = resultComponentOptions.find((item) => item.type !== 'ligand' && item.chainId);
+    return (
+      firstNonLigand?.chainId ||
+      knownChainIds.find((chainId) => !ligandHintKeys.has(normalizeChainKey(chainId))) ||
+      resultComponentOptions[0]?.chainId ||
+      knownChainIds[0] ||
+      null
+    );
+  }, [
+    resultPairPreference,
+    resultChainInfoById,
+    resultComponentOptions,
+    resultChainIds,
+    activeResultTask?.affinity,
+    project?.affinity,
+    activeResultTask?.confidence,
+    project?.confidence
+  ]);
   const selectedResultLigandChainId = useMemo(() => {
     const affinityData =
       activeResultTask?.affinity && typeof activeResultTask.affinity === 'object' && !Array.isArray(activeResultTask.affinity)
@@ -1370,6 +1485,14 @@ export function ProjectDetailPage() {
     const confidenceLigand = readFirstNonEmptyStringMetric(confidenceData, [
       'ligand_chain_id'
     ]);
+    const confidenceChainIds = readStringListMetric(confidenceData, ['chain_ids']);
+    const knownChainIdByKey = new Map<string, string>();
+    for (const chainId of [...resultChainIds, ...confidenceChainIds]) {
+      const key = normalizeChainKey(chainId);
+      if (!key || knownChainIdByKey.has(key)) continue;
+      knownChainIdByKey.set(key, chainId);
+    }
+    const knownChainIds = Array.from(knownChainIdByKey.values());
     const confidenceLigandIds =
       confidenceData?.ligand_chain_ids && Array.isArray(confidenceData.ligand_chain_ids)
         ? (confidenceData.ligand_chain_ids as unknown[])
@@ -1391,6 +1514,10 @@ export function ProjectDetailPage() {
       if (resultChainInfoById.has(raw)) {
         return raw;
       }
+      const byKnown = knownChainIdByKey.get(normalizeChainKey(raw));
+      if (byKnown) {
+        return byKnown;
+      }
       const byComponent = resultComponentOptions.find((item) => item.id === raw);
       if (byComponent?.chainId) {
         return byComponent.chainId;
@@ -1400,7 +1527,7 @@ export function ProjectDetailPage() {
       if (byNormalizedChain?.chainId) {
         return byNormalizedChain.chainId;
       }
-      for (const chainId of resultChainIds) {
+      for (const chainId of knownChainIds) {
         if (chainKeysMatch(chainId, normalized) || chainKeysMatch(normalized, chainId)) {
           return chainId;
         }
@@ -1418,16 +1545,20 @@ export function ProjectDetailPage() {
     ];
     for (const candidate of preferredCandidates) {
       const chain = resolveChain(candidate);
-      if (chain) return chain;
+      if (chain && chain !== selectedResultTargetChainId) return chain;
     }
     const optionsWithoutTarget = resultComponentOptions.filter((item) => item.chainId && item.chainId !== selectedResultTargetChainId);
+    const inferredFallbackLigand =
+      knownChainIds.find((chainId) => chainId !== selectedResultTargetChainId && confidenceLigandIds.includes(chainId)) ||
+      knownChainIds.find((chainId) => chainId !== selectedResultTargetChainId) ||
+      null;
     const defaultOption =
       optionsWithoutTarget.find((item) => item.isSmiles) ||
       resultComponentOptions.find((item) => item.isSmiles) ||
       optionsWithoutTarget[0] ||
       resultComponentOptions[0] ||
       null;
-    return defaultOption?.chainId || null;
+    return defaultOption?.chainId || inferredFallbackLigand;
   }, [
     resultPairPreference,
     resultChainInfoById,
@@ -2416,13 +2547,15 @@ export function ProjectDetailPage() {
         requestedTaskRowId && requestedTaskRowId.trim()
           ? taskRowsBase.find((item) => String(item.id || '').trim() === requestedTaskRowId.trim()) || null
           : null;
-      const snapshotSourceTaskRowBase = requestedTaskRow || activeTaskRow;
-      const latestDraftTask = (() => {
-        if (requestedTaskRow && requestedTaskRow.task_state === 'DRAFT' && !String(requestedTaskRow.task_id || '').trim()) {
-          return requestedTaskRow;
-        }
-        return taskRowsBase.find((item) => item.task_state === 'DRAFT' && !String(item.task_id || '').trim()) || null;
-      })();
+      const snapshotSourceTaskRowBase = requestNewTask ? null : requestedTaskRow || activeTaskRow;
+      const latestDraftTask = requestNewTask
+        ? null
+        : (() => {
+            if (requestedTaskRow && requestedTaskRow.task_state === 'DRAFT' && !String(requestedTaskRow.task_id || '').trim()) {
+              return requestedTaskRow;
+            }
+            return taskRowsBase.find((item) => item.task_state === 'DRAFT' && !String(item.task_id || '').trim()) || null;
+          })();
       const workflowDef = getWorkflowDefinition(next.task_type);
       const snapshotTaskRowId = snapshotSourceTaskRowBase?.id || latestDraftTask?.id || null;
       const shouldLoadSnapshotDetail = Boolean(snapshotTaskRowId && workflowDef.key === 'prediction');
@@ -2437,14 +2570,14 @@ export function ProjectDetailPage() {
       );
 
       const savedConfig = loadProjectInputConfig(next.id);
-      const baseConfig = savedConfig || defaultConfigFromProject(next);
+      const baseConfig = requestNewTask ? defaultConfigFromProject(next) : savedConfig || defaultConfigFromProject(next);
       const taskAlignedConfig = mergeTaskSnapshotIntoConfig(baseConfig, snapshotSourceTaskRow);
       const backendConstraints = filterConstraintsByBackend(taskAlignedConfig.constraints, next.backend);
 
       const savedUiState = loadProjectUiState(next.id);
       const loadedDraft: DraftFields = {
-        name: next.name,
-        summary: next.summary,
+        taskName: String(snapshotSourceTaskRow?.name || '').trim(),
+        taskSummary: String(snapshotSourceTaskRow?.summary || '').trim(),
         backend: next.backend,
         use_msa: next.use_msa,
         color_mode: next.color_mode || 'white',
@@ -2464,6 +2597,9 @@ export function ProjectDetailPage() {
         return savedTaskTemplates[task.id] || {};
       };
       const templateSource = (() => {
+        if (requestNewTask) {
+          return {};
+        }
         if (requestedTaskRow) {
           const requestedEmbedded = readTaskProteinTemplates(requestedTaskRow);
           if (hasProteinTemplates(requestedEmbedded)) return requestedEmbedded;
@@ -2512,7 +2648,9 @@ export function ProjectDetailPage() {
         String(next.structure_name || '').trim() || hasRecordData(next.confidence) || hasRecordData(next.affinity)
       );
       if (!query.get('tab')) {
-        if (workflowDef.key === 'prediction' || workflowDef.key === 'affinity') {
+        if (requestNewTask && (workflowDef.key === 'prediction' || workflowDef.key === 'affinity')) {
+          setWorkspaceTab('components');
+        } else if (workflowDef.key === 'prediction' || workflowDef.key === 'affinity') {
           setWorkspaceTab(contextHasResult || projectHasResult ? 'results' : 'components');
         } else {
           setWorkspaceTab('basics');
@@ -2521,6 +2659,7 @@ export function ProjectDetailPage() {
 
       setDraft(loadedDraft);
       setSavedDraftFingerprint(createDraftFingerprint(loadedDraft));
+      setSavedComputationFingerprint(createComputationFingerprint(loadedDraft));
       setSavedTemplateFingerprint(createProteinTemplatesFingerprint(restoredTemplates));
       setRunMenuOpen(false);
       setProteinTemplates(restoredTemplates);
@@ -2541,8 +2680,9 @@ export function ProjectDetailPage() {
   };
 
   useEffect(() => {
+    if (!entryRoutingResolved) return;
     void loadProject();
-  }, [projectId, location.search]);
+  }, [projectId, location.search, entryRoutingResolved]);
 
   useEffect(() => {
     if (!project) return;
@@ -2704,6 +2844,7 @@ export function ProjectDetailPage() {
   };
 
   const resolveEditableDraftTaskRowId = (): string | null => {
+    if (requestNewTask) return null;
     const requestedTaskRowId = new URLSearchParams(location.search).get('task_row_id');
     if (requestedTaskRowId && requestedTaskRowId.trim()) {
       const requested = projectTasks.find((item) => String(item.id || '').trim() === requestedTaskRowId.trim()) || null;
@@ -2722,6 +2863,12 @@ export function ProjectDetailPage() {
     }
     const latestDraft = projectTasks.find((item) => isDraftTaskSnapshot(item)) || null;
     return latestDraft ? latestDraft.id : null;
+  };
+  const resolveRuntimeTaskRowId = (): string | null => {
+    const activeTaskId = String(project?.task_id || '').trim();
+    if (!activeTaskId) return null;
+    const runtimeRow = projectTasks.find((item) => String(item.task_id || '').trim() === activeTaskId) || null;
+    return runtimeRow?.id || null;
   };
 
   const persistDraftTaskSnapshot = async (
@@ -2749,6 +2896,8 @@ export function ProjectDetailPage() {
     const storedLigandSmiles = typeof options?.ligandSmilesOverride === 'string' ? options.ligandSmilesOverride : ligandSmiles;
     const basePayload: Partial<ProjectTask> = {
       project_id: project.id,
+      name: draft.taskName.trim(),
+      summary: draft.taskSummary.trim(),
       task_id: '',
       task_state: 'DRAFT',
       status_text: statusText,
@@ -2811,8 +2960,6 @@ export function ProjectDetailPage() {
           : ligandSmiles;
 
       const next = await patch({
-        name: draft.name.trim(),
-        summary: draft.summary.trim(),
         backend: persistedBackend,
         use_msa: hasMsa,
         protein_sequence: storedProteinSequence,
@@ -2823,6 +2970,32 @@ export function ProjectDetailPage() {
 
       if (next) {
         saveProjectInputConfig(next.id, normalizedConfig);
+        const nextDraft: DraftFields = {
+          taskName: draft.taskName.trim(),
+          taskSummary: draft.taskSummary.trim(),
+          backend: next.backend,
+          use_msa: next.use_msa,
+          color_mode: next.color_mode || 'white',
+          inputConfig: normalizedConfig
+        };
+
+        if (workspaceTab === 'basics' || metadataOnlyDraftDirty) {
+          const metadataTaskRowId =
+            requestedStatusTaskRow?.id || activeStatusTaskRow?.id || resolveRuntimeTaskRowId() || resolveEditableDraftTaskRowId();
+          if (metadataTaskRowId) {
+            await patchTask(metadataTaskRowId, {
+              name: nextDraft.taskName,
+              summary: nextDraft.taskSummary
+            });
+          }
+          setDraft(nextDraft);
+          setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
+          setSavedComputationFingerprint(createComputationFingerprint(nextDraft));
+          setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
+          setRunMenuOpen(false);
+          return;
+        }
+
         const reusableDraftTaskRowId = resolveEditableDraftTaskRowId();
         const snapshotComponents =
           workflowDef.key === 'affinity'
@@ -2841,16 +3014,9 @@ export function ProjectDetailPage() {
           ligandSmilesOverride: storedLigandSmiles
         });
         rememberTemplatesForTaskRow(draftTaskRow.id, proteinTemplates);
-        const nextDraft: DraftFields = {
-          name: next.name,
-          summary: next.summary,
-          backend: next.backend,
-          use_msa: next.use_msa,
-          color_mode: next.color_mode || 'white',
-          inputConfig: normalizedConfig
-        };
         setDraft(nextDraft);
         setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
+        setSavedComputationFingerprint(createComputationFingerprint(nextDraft));
         setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
         setRunMenuOpen(false);
         const nextTab = workflowDef.key === 'prediction' ? 'components' : 'basics';
@@ -3062,8 +3228,8 @@ export function ProjectDetailPage() {
 
       saveProjectInputConfig(project.id, configWithAffinity);
       const nextDraft: DraftFields = {
-        name: draft.name.trim(),
-        summary: draft.summary.trim(),
+        taskName: draft.taskName.trim(),
+        taskSummary: draft.taskSummary.trim(),
         backend: activeAffinityBackend,
         use_msa: false,
         color_mode: draft.color_mode || 'white',
@@ -3071,13 +3237,12 @@ export function ProjectDetailPage() {
       };
       setDraft(nextDraft);
       setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
+      setSavedComputationFingerprint(createComputationFingerprint(nextDraft));
       setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
       setRunMenuOpen(false);
 
       try {
         await patch({
-          name: nextDraft.name,
-          summary: nextDraft.summary,
           backend: nextDraft.backend,
           use_msa: false,
           protein_sequence: '',
@@ -3111,6 +3276,8 @@ export function ProjectDetailPage() {
 
       const queuedAt = new Date().toISOString();
       const queuedTaskPatch: Partial<ProjectTask> = {
+        name: nextDraft.taskName.trim(),
+        summary: nextDraft.taskSummary.trim(),
         task_id: taskId,
         task_state: 'QUEUED',
         status_text: 'Task submitted and waiting in queue',
@@ -3252,8 +3419,8 @@ export function ProjectDetailPage() {
 
       saveProjectInputConfig(project.id, normalizedConfig);
       const nextDraft: DraftFields = {
-        name: draft.name.trim(),
-        summary: draft.summary.trim(),
+        taskName: draft.taskName.trim(),
+        taskSummary: draft.taskSummary.trim(),
         backend: draft.backend,
         use_msa: hasMsa,
         color_mode: draft.color_mode || 'white',
@@ -3261,13 +3428,12 @@ export function ProjectDetailPage() {
       };
       setDraft(nextDraft);
       setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
+      setSavedComputationFingerprint(createComputationFingerprint(nextDraft));
       setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
       setRunMenuOpen(false);
 
       try {
         await patch({
-          name: nextDraft.name,
-          summary: nextDraft.summary,
           backend: nextDraft.backend,
           use_msa: nextDraft.use_msa,
           protein_sequence: proteinSequence,
@@ -3308,7 +3474,7 @@ export function ProjectDetailPage() {
 
       const taskId = await submitPrediction({
         projectId: project.id,
-        projectName: draft.name,
+        projectName: project.name,
         proteinSequence,
         ligandSmiles,
         components: activeComponents,
@@ -3322,6 +3488,8 @@ export function ProjectDetailPage() {
 
       const queuedAt = new Date().toISOString();
       const queuedTaskPatch: Partial<ProjectTask> = {
+        name: nextDraft.taskName.trim(),
+        summary: nextDraft.taskSummary.trim(),
         task_id: taskId,
         task_state: 'QUEUED',
         status_text: 'Task submitted and waiting in queue',
@@ -3464,6 +3632,10 @@ export function ProjectDetailPage() {
     };
   }, [workspaceTab, activeConstraintId, selectedContactConstraintIds.length]);
   const currentDraftFingerprint = useMemo(() => (draft ? createDraftFingerprint(draft) : ''), [draft]);
+  const currentComputationFingerprint = useMemo(
+    () => (draft ? createComputationFingerprint(draft) : ''),
+    [draft]
+  );
   const currentTemplateFingerprint = useMemo(
     () => createProteinTemplatesFingerprint(proteinTemplates),
     [proteinTemplates]
@@ -3475,6 +3647,23 @@ export function ProjectDetailPage() {
   const isTemplateDirty = useMemo(
     () => Boolean(draft) && Boolean(savedTemplateFingerprint) && currentTemplateFingerprint !== savedTemplateFingerprint,
     [draft, savedTemplateFingerprint, currentTemplateFingerprint]
+  );
+  const metadataOnlyDraftDirty = useMemo(
+    () =>
+      Boolean(draft) &&
+      Boolean(savedDraftFingerprint) &&
+      currentDraftFingerprint !== savedDraftFingerprint &&
+      Boolean(savedComputationFingerprint) &&
+      currentComputationFingerprint === savedComputationFingerprint &&
+      !isTemplateDirty,
+    [
+      draft,
+      savedDraftFingerprint,
+      currentDraftFingerprint,
+      savedComputationFingerprint,
+      currentComputationFingerprint,
+      isTemplateDirty
+    ]
   );
   const hasUnsavedChanges = isDraftDirty || isTemplateDirty;
 
@@ -3611,10 +3800,15 @@ export function ProjectDetailPage() {
     setDraft((prev) => (prev ? { ...prev, color_mode: 'alphafold' } : prev));
   }, [draft, projectBackend, hasProtenixConfidenceSignals]);
 
-  if (loading) {
+  if (!entryRoutingResolved || loading) {
     const query = new URLSearchParams(location.search);
     const requestedTaskRowId = String(query.get('task_row_id') || '').trim();
-    const loadingLabel = requestedTaskRowId || query.get('tab') === 'results' ? 'Loading current task...' : 'Loading project...';
+    const loadingLabel =
+      !entryRoutingResolved
+        ? 'Loading project...'
+        : requestedTaskRowId || query.get('tab') === 'results'
+          ? 'Loading current task...'
+          : 'Loading project...';
     return <div className="centered-page">{loadingLabel}</div>;
   }
 
@@ -4222,7 +4416,10 @@ export function ProjectDetailPage() {
       key: 'iptm',
       label: 'ipTM',
       value: snapshotIptm === null ? '-' : snapshotIptm.toFixed(4),
-      detail: snapshotSelectedPairIptm !== null ? selectedResultPairLabel : 'Interface conf',
+      detail:
+        snapshotSelectedPairIptm !== null && selectedResultTargetLabel !== selectedResultLigandLabel
+          ? selectedResultPairLabel
+          : 'Interface conf',
       tone: snapshotIptmTone
     },
     {
@@ -4568,56 +4765,10 @@ export function ProjectDetailPage() {
             {workspaceTab === 'basics' && (
               <ProjectBasicsMetadataForm
                 canEdit={canEdit}
-                isPredictionWorkflow={isPredictionWorkflow}
-                showBackend
-                backendOptions={
-                  isAffinityWorkflow
-                    ? [
-                        { value: 'boltz', label: 'Boltz-2' },
-                        { value: 'protenix', label: 'Protenix2Score' }
-                      ]
-                    : [
-                        { value: 'boltz', label: 'Boltz-2' },
-                        { value: 'alphafold3', label: 'AlphaFold3' },
-                        { value: 'protenix', label: 'Protenix' }
-                      ]
-                }
-                name={draft.name}
-                summary={draft.summary}
-                backend={draft.backend}
-                seed={draft.inputConfig.options.seed}
-                onNameChange={(value) => setDraft((d) => (d ? { ...d, name: value } : d))}
-                onSummaryChange={(value) => setDraft((d) => (d ? { ...d, summary: value } : d))}
-                onBackendChange={(backend) =>
-                  setDraft((d) =>
-                    d
-                      ? {
-                          ...d,
-                          backend,
-                          inputConfig: {
-                            ...d.inputConfig,
-                            constraints: filterConstraintsByBackend(d.inputConfig.constraints, backend)
-                          }
-                        }
-                      : d
-                  )
-                }
-                onSeedChange={(seed) =>
-                  setDraft((d) =>
-                    d
-                      ? {
-                          ...d,
-                          inputConfig: {
-                            ...d.inputConfig,
-                            options: {
-                              ...d.inputConfig.options,
-                              seed
-                            }
-                          }
-                        }
-                      : d
-                  )
-                }
+                taskName={draft.taskName}
+                taskSummary={draft.taskSummary}
+                onTaskNameChange={(value) => setDraft((d) => (d ? { ...d, taskName: value } : d))}
+                onTaskSummaryChange={(value) => setDraft((d) => (d ? { ...d, taskSummary: value } : d))}
               />
             )}
 
@@ -4636,7 +4787,7 @@ export function ProjectDetailPage() {
                     ? affinityHasLigand
                       ? 'Only small-molecule ligand supports activity.'
                       : 'No ligand uploaded: confidence only.'
-                    : 'Unchecked: confidence + activity.'
+                    : ''
                 }
                 previewTargetStructureText={affinityPreviewStructureText}
                 previewTargetStructureFormat={affinityPreviewStructureFormat}
@@ -5107,6 +5258,84 @@ export function ProjectDetailPage() {
               <div className="workflow-note">
                 {workflow.description}
               </div>
+            )}
+
+            {workspaceTab === 'components' && (
+              <section className="panel subtle component-runtime-settings">
+                <div className="component-runtime-settings-row">
+                  <label className="field">
+                    <span>
+                      Backend <span className="required-mark">*</span>
+                    </span>
+                    <select
+                      required
+                      value={draft.backend}
+                      onChange={(e) => {
+                        const backend = e.target.value;
+                        setDraft((d) =>
+                          d
+                            ? {
+                                ...d,
+                                backend,
+                                inputConfig: {
+                                  ...d.inputConfig,
+                                  constraints: filterConstraintsByBackend(d.inputConfig.constraints, backend)
+                                }
+                              }
+                            : d
+                        );
+                      }}
+                      disabled={!canEdit}
+                    >
+                      {(isAffinityWorkflow
+                        ? [
+                            { value: 'boltz', label: 'Boltz-2' },
+                            { value: 'protenix', label: 'Protenix2Score' }
+                          ]
+                        : [
+                            { value: 'boltz', label: 'Boltz-2' },
+                            { value: 'alphafold3', label: 'AlphaFold3' },
+                            { value: 'protenix', label: 'Protenix' }
+                          ]
+                      ).map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  {isPredictionWorkflow && (
+                    <label className="field">
+                      <span>Random Seed (optional)</span>
+                      <input
+                        type="number"
+                        min={0}
+                        value={draft.inputConfig.options.seed ?? ''}
+                        onChange={(e) => {
+                          const seed = e.target.value === '' ? null : Math.max(0, Math.floor(Number(e.target.value) || 0));
+                          setDraft((d) =>
+                            d
+                              ? {
+                                  ...d,
+                                  inputConfig: {
+                                    ...d.inputConfig,
+                                    options: {
+                                      ...d.inputConfig.options,
+                                      seed
+                                    }
+                                  }
+                                }
+                              : d
+                          );
+                        }}
+                        disabled={!canEdit}
+                        placeholder="Default: 42"
+                      />
+                    </label>
+                  )}
+                </div>
+              </section>
             )}
           </form>
         </section>

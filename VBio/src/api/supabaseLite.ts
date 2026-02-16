@@ -287,6 +287,8 @@ export async function listProjectTasksCompact(projectId: string): Promise<Projec
   const selectFields = [
     'id',
     'project_id',
+    'name',
+    'summary',
     'task_id',
     'task_state',
     'status_text',
@@ -302,23 +304,15 @@ export async function listProjectTasksCompact(projectId: string): Promise<Projec
     'created_at',
     'updated_at'
   ].join(',');
-
-  let rows: Array<Partial<ProjectTask>> = [];
-  try {
-    rows = await request<Array<Partial<ProjectTask>>>('/project_tasks_list', undefined, {
-      select: selectFields,
-      project_id: `eq.${projectId}`,
-      order: 'created_at.desc'
-    });
-  } catch {
-    rows = await request<Array<Partial<ProjectTask>>>('/project_tasks', undefined, {
-      select: selectFields,
-      project_id: `eq.${projectId}`,
-      order: 'created_at.desc'
-    });
-  }
+  const rows = await request<Array<Partial<ProjectTask>>>('/project_tasks_list', undefined, {
+    select: selectFields,
+    project_id: `eq.${projectId}`,
+    order: 'created_at.desc'
+  });
 
   return rows.map((row) => ({
+    name: '',
+    summary: '',
     protein_sequence: '',
     affinity: {},
     confidence: {},
@@ -338,6 +332,8 @@ export async function listProjectTasksForList(projectId: string): Promise<Projec
   const selectFields = [
     'id',
     'project_id',
+    'name',
+    'summary',
     'task_id',
     'task_state',
     'status_text',
@@ -356,24 +352,15 @@ export async function listProjectTasksForList(projectId: string): Promise<Projec
     'created_at',
     'updated_at'
   ].join(',');
-
-  let rows: Array<Partial<ProjectTask>> = [];
-  try {
-    rows = await request<Array<Partial<ProjectTask>>>('/project_tasks_list', undefined, {
-      select: selectFields,
-      project_id: `eq.${projectId}`,
-      order: 'created_at.desc'
-    });
-  } catch {
-    // Backward compatibility when the DB view is not initialized yet.
-    rows = await request<Array<Partial<ProjectTask>>>('/project_tasks', undefined, {
-      select: selectFields,
-      project_id: `eq.${projectId}`,
-      order: 'created_at.desc'
-    });
-  }
+  const rows = await request<Array<Partial<ProjectTask>>>('/project_tasks_list', undefined, {
+    select: selectFields,
+    project_id: `eq.${projectId}`,
+    order: 'created_at.desc'
+  });
 
   return rows.map((row) => ({
+    name: '',
+    summary: '',
     protein_sequence: '',
     affinity: {},
     components: [],

@@ -118,6 +118,8 @@ create table if not exists public.projects (
 create table if not exists public.project_tasks (
   id uuid primary key default gen_random_uuid(),
   project_id uuid not null,
+  name text not null default '',
+  summary text not null default '',
   task_id text not null default '',
   task_state text not null default 'DRAFT',
   status_text text not null default 'Ready for input',
@@ -142,6 +144,8 @@ create table if not exists public.project_tasks (
 alter table public.projects add column if not exists user_id uuid;
 alter table public.projects alter column backend set default 'boltz';
 alter table public.project_tasks add column if not exists project_id uuid;
+alter table public.project_tasks add column if not exists name text;
+alter table public.project_tasks add column if not exists summary text;
 alter table public.project_tasks add column if not exists task_id text;
 alter table public.project_tasks add column if not exists task_state text;
 alter table public.project_tasks add column if not exists status_text text;
@@ -162,6 +166,8 @@ alter table public.project_tasks add column if not exists duration_seconds doubl
 alter table public.project_tasks add column if not exists created_at timestamptz;
 alter table public.project_tasks add column if not exists updated_at timestamptz;
 alter table public.project_tasks alter column project_id set not null;
+alter table public.project_tasks alter column name set default '';
+alter table public.project_tasks alter column summary set default '';
 alter table public.project_tasks alter column task_id set default '';
 alter table public.project_tasks alter column task_state set default 'DRAFT';
 alter table public.project_tasks alter column status_text set default 'Ready for input';
@@ -179,6 +185,8 @@ alter table public.project_tasks alter column created_at set default now();
 alter table public.project_tasks alter column updated_at set default now();
 
 update public.project_tasks set task_id = '' where task_id is null;
+update public.project_tasks set name = '' where name is null;
+update public.project_tasks set summary = '' where summary is null;
 update public.project_tasks set task_state = 'DRAFT' where task_state is null or task_state = '';
 update public.project_tasks set status_text = 'Ready for input' where status_text is null;
 update public.project_tasks set error_text = '' where error_text is null;
@@ -199,6 +207,8 @@ set confidence = confidence - 'pae'
 where jsonb_typeof(confidence->'pae') = 'array';
 
 alter table public.project_tasks alter column task_id set not null;
+alter table public.project_tasks alter column name set not null;
+alter table public.project_tasks alter column summary set not null;
 alter table public.project_tasks alter column task_state set not null;
 alter table public.project_tasks alter column status_text set not null;
 alter table public.project_tasks alter column error_text set not null;
@@ -265,14 +275,14 @@ as $$
         select coalesce(
           jsonb_agg(
             case
-              when jsonb_typeof(compact_snake.elem->'templateUpload') = 'object'
+              when jsonb_typeof(compact_affinity.elem->'templateUpload') = 'object'
                 then jsonb_set(
-                  compact_snake.elem,
+                  compact_affinity.elem,
                   '{templateUpload}',
-                  (compact_snake.elem->'templateUpload') - 'content',
+                  (compact_affinity.elem->'templateUpload') - 'content',
                   true
                 )
-              else compact_snake.elem
+              else compact_affinity.elem
             end
           ),
           '[]'::jsonb
@@ -377,10 +387,13 @@ begin
 end;
 $$ language plpgsql;
 
+drop view if exists public.project_tasks_list;
 create or replace view public.project_tasks_list as
 select
   id,
   project_id,
+  name,
+  summary,
   task_id,
   task_state,
   status_text,
