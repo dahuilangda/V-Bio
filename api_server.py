@@ -617,18 +617,11 @@ def _choose_preferred_path(candidates: list[str]) -> Optional[str]:
     )[0]
 
 
-def _extract_record_id_from_structure_name(name: str) -> Optional[str]:
-    base = os.path.basename(name)
-    if "_model_" not in base:
-        return None
-    return base.split("_model_")[0] or None
-
-
 def _choose_best_boltz_structure_file(names: list[str]) -> Optional[str]:
     candidates: list[tuple[int, int, str]] = []
     for name in names:
         lower = name.lower()
-        if not re.search(r"\.(cif|pdb)$", lower):
+        if not re.search(r"\.(cif|mmcif|pdb)$", lower):
             continue
         if "af3/output/" in lower:
             continue
@@ -646,43 +639,102 @@ def _choose_best_boltz_structure_file(names: list[str]) -> Optional[str]:
     return candidates[0][2]
 
 
-def _choose_best_boltz_confidence_file(names: list[str], selected_structure: Optional[str]) -> Optional[str]:
+def _to_finite_float(value: object) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _boltz_confidence_heuristic_score(path: str) -> int:
+    lower = path.lower()
+    score = 100
+    if "confidence_" in lower:
+        score -= 5
+    if "model_0" in lower or "ranked_0" in lower:
+        score -= 20
+    elif "model_" in lower or "ranked_" in lower:
+        score -= 5
+    return score
+
+
+def _resolve_boltz_structure_for_confidence(names: list[str], confidence_path: str) -> Optional[str]:
+    base = os.path.basename(confidence_path)
+    lower = base.lower()
+    if not lower.startswith("confidence_") or not lower.endswith(".json"):
+        return None
+    structure_stem = base[len("confidence_"):-len(".json")]
+    if not structure_stem.strip():
+        return None
+
+    confidence_dir = os.path.dirname(confidence_path)
+
+    def _with_dir(file_name: str) -> str:
+        return os.path.join(confidence_dir, file_name) if confidence_dir else file_name
+
     candidates = [
+        _with_dir(f"{structure_stem}.cif"),
+        _with_dir(f"{structure_stem}.mmcif"),
+        _with_dir(f"{structure_stem}.pdb"),
+    ]
+    return next((item for item in candidates if item in names), None)
+
+
+def _choose_best_boltz_files(src_zip: zipfile.ZipFile, names: list[str]) -> tuple[Optional[str], Optional[str]]:
+    confidence_candidates = [
         name for name in names
         if name.lower().endswith(".json")
         and "confidence" in name.lower()
         and "af3/output/" not in name.lower()
     ]
-    if not candidates:
-        return None
+    if not confidence_candidates:
+        return _choose_best_boltz_structure_file(names), None
 
-    selected_record_id = _extract_record_id_from_structure_name(selected_structure or "")
-    if selected_record_id:
-        preferred_suffix = f"confidence_{selected_record_id}_model_0.json".lower()
-        for name in candidates:
-            if name.lower().endswith(preferred_suffix):
-                return name
+    scored: list[tuple[int, float, int, float, int, float, int, int, str]] = []
+    for name in confidence_candidates:
+        payload = None
+        try:
+            parsed = json.loads(src_zip.read(name))
+            if isinstance(parsed, dict):
+                payload = parsed
+        except Exception:
+            payload = None
 
-    scored: list[tuple[int, int, str]] = []
-    for name in candidates:
-        lower = name.lower()
-        score = 100
-        if "confidence_" in lower:
-            score -= 5
-        if "model_0" in lower or "ranked_0" in lower:
-            score -= 20
-        elif "model_" in lower or "ranked_" in lower:
-            score -= 5
-        scored.append((score, len(name), name))
-    scored.sort()
-    return scored[0][2]
+        confidence_score = _to_finite_float(payload.get("confidence_score")) if payload else None
+        complex_plddt = _to_finite_float(payload.get("complex_plddt")) if payload else None
+        iptm = _to_finite_float(payload.get("iptm")) if payload else None
+        heuristic = _boltz_confidence_heuristic_score(name)
+        scored.append(
+            (
+                1 if confidence_score is not None else 0,
+                confidence_score if confidence_score is not None else float("-inf"),
+                1 if complex_plddt is not None else 0,
+                complex_plddt if complex_plddt is not None else float("-inf"),
+                1 if iptm is not None else 0,
+                iptm if iptm is not None else float("-inf"),
+                -heuristic,
+                -len(name),
+                name,
+            )
+        )
+
+    scored.sort(reverse=True)
+    selected_confidence = scored[0][8] if scored else None
+    matched_structure = (
+        _resolve_boltz_structure_for_confidence(names, selected_confidence)
+        if selected_confidence
+        else None
+    )
+    selected_structure = matched_structure or _choose_best_boltz_structure_file(names)
+    return selected_structure, selected_confidence
 
 
 def _choose_best_af3_structure_file(names: list[str]) -> Optional[str]:
     candidates: list[tuple[int, int, str]] = []
     for name in names:
         lower = name.lower()
-        if not re.search(r"\.(cif|pdb)$", lower):
+        if not re.search(r"\.(cif|mmcif|pdb)$", lower):
             continue
         if "af3/output/" not in lower:
             continue
@@ -834,8 +886,7 @@ def _build_view_archive_bytes(source_zip_path: str) -> bytes:
             if protenix_affinity:
                 include.append(protenix_affinity)
         else:
-            structure = _choose_best_boltz_structure_file(names)
-            confidence = _choose_best_boltz_confidence_file(names, structure)
+            structure, confidence = _choose_best_boltz_files(src_zip, names)
             if structure:
                 include.append(structure)
             if confidence:
@@ -874,7 +925,7 @@ def _build_view_archive_bytes(source_zip_path: str) -> bytes:
 def _build_or_get_view_archive(source_zip_path: str) -> str:
     """Build a cached view archive and return the cached file path."""
     src_stat = os.stat(source_zip_path)
-    cache_schema_version = "view-v3-protenix-affinity-context"
+    cache_schema_version = "view-v4-boltz-confidence-ranking"
     cache_seed = f"{cache_schema_version}|{source_zip_path}|{int(src_stat.st_mtime_ns)}|{src_stat.st_size}"
     cache_key = hashlib.sha256(cache_seed.encode("utf-8")).hexdigest()[:24]
     cache_dir = Path("/tmp/boltz_result_view_cache")
@@ -1478,6 +1529,12 @@ def handle_boltz2score():
 
     target_chain = request.form.get('target_chain')
     ligand_chain = request.form.get('ligand_chain')
+    requested_recycling_steps = _parse_int(request.form.get('recycling_steps'))
+    requested_sampling_steps = _parse_int(request.form.get('sampling_steps'))
+    requested_diffusion_samples = _parse_int(request.form.get('diffusion_samples'))
+    requested_max_parallel_samples = _parse_int(request.form.get('max_parallel_samples'))
+    requested_seed = _parse_int(request.form.get('seed'))
+    requested_structure_refine = _parse_bool(request.form.get('structure_refine'), False)
     ligand_smiles_map = {}
     ligand_smiles_map_raw = request.form.get('ligand_smiles_map')
     if ligand_smiles_map_raw:
@@ -1600,6 +1657,18 @@ def handle_boltz2score():
         return jsonify({
             'error': "Request form must contain 'input_file' or 'protein_file' with ('ligand_file' or 'ligand_smiles')."
         }), 400
+
+    if requested_recycling_steps is not None:
+        score_args['recycling_steps'] = requested_recycling_steps
+    if requested_sampling_steps is not None:
+        score_args['sampling_steps'] = requested_sampling_steps
+    if requested_diffusion_samples is not None:
+        score_args['diffusion_samples'] = requested_diffusion_samples
+    if requested_max_parallel_samples is not None:
+        score_args['max_parallel_samples'] = requested_max_parallel_samples
+    if requested_seed is not None:
+        score_args['seed'] = requested_seed
+    score_args['structure_refine'] = requested_structure_refine
 
     priority = request.form.get('priority', 'default').lower()
     if priority not in ['high', 'default']:

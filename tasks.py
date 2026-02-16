@@ -68,6 +68,16 @@ MAX_EXCEPTION_MESSAGE_CHARS = 20_000
 MAX_TRACEBACK_CHARS = 40_000
 MAX_STDIO_TAIL_CHARS = 12_000
 
+BOLTZ2SCORE_DEFAULT_RECYCLING_STEPS = 7
+BOLTZ2SCORE_DEFAULT_SAMPLING_STEPS = 1
+BOLTZ2SCORE_DEFAULT_DIFFUSION_SAMPLES = 1
+BOLTZ2SCORE_DEFAULT_MAX_PARALLEL_SAMPLES = 1
+BOLTZ2SCORE_DEFAULT_STRUCTURE_REFINE = False
+BOLTZ2SCORE_DEFAULT_SEED = 42
+BOLTZ2SCORE_REFINE_RECYCLING_STEPS = 3
+BOLTZ2SCORE_REFINE_SAMPLING_STEPS = 200
+BOLTZ2SCORE_REFINE_DIFFUSION_SAMPLES = 5
+
 
 def _truncate_text(value, limit: int, *, prefer_tail: bool = False) -> str:
     """Return a bounded-length string representation for Redis/Celery metadata."""
@@ -115,6 +125,31 @@ def _build_failure_meta(error: Exception) -> dict:
         'exc_message': _truncate_text(error, MAX_EXCEPTION_MESSAGE_CHARS),
         'traceback': _truncate_text(traceback.format_exc(), MAX_TRACEBACK_CHARS),
     }
+
+
+def _coerce_positive_int(value: Any, default: int, min_value: int = 1) -> int:
+    """Parse int-like value with lower bound, otherwise return default."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= min_value else default
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    """Parse a bool-like value, otherwise return default."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
 
 
 class TaskProgressTracker:
@@ -1155,6 +1190,59 @@ def boltz2score_task(self, score_args: dict):
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(work_dir, exist_ok=True)
 
+        structure_refine = _coerce_bool(
+            score_args.get('structure_refine'),
+            BOLTZ2SCORE_DEFAULT_STRUCTURE_REFINE,
+        )
+        default_recycling_steps = (
+            BOLTZ2SCORE_REFINE_RECYCLING_STEPS
+            if structure_refine
+            else BOLTZ2SCORE_DEFAULT_RECYCLING_STEPS
+        )
+        default_sampling_steps = (
+            BOLTZ2SCORE_REFINE_SAMPLING_STEPS
+            if structure_refine
+            else BOLTZ2SCORE_DEFAULT_SAMPLING_STEPS
+        )
+        default_diffusion_samples = (
+            BOLTZ2SCORE_REFINE_DIFFUSION_SAMPLES
+            if structure_refine
+            else BOLTZ2SCORE_DEFAULT_DIFFUSION_SAMPLES
+        )
+
+        recycling_steps = _coerce_positive_int(
+            score_args.get('recycling_steps'),
+            default_recycling_steps,
+        )
+        sampling_steps = _coerce_positive_int(
+            score_args.get('sampling_steps'),
+            default_sampling_steps,
+        )
+        diffusion_samples = _coerce_positive_int(
+            score_args.get('diffusion_samples'),
+            default_diffusion_samples,
+        )
+        max_parallel_samples = _coerce_positive_int(
+            score_args.get('max_parallel_samples'),
+            BOLTZ2SCORE_DEFAULT_MAX_PARALLEL_SAMPLES,
+        )
+        raw_seed = score_args.get('seed')
+        seed = BOLTZ2SCORE_DEFAULT_SEED
+        if isinstance(raw_seed, int):
+            seed = max(0, raw_seed)
+        elif isinstance(raw_seed, str):
+            seed_text = raw_seed.strip()
+            if seed_text:
+                try:
+                    seed = max(0, int(seed_text))
+                except ValueError:
+                    logger.warning(
+                        "Task %s: ignoring invalid Boltz2Score seed %r, using default seed=%d",
+                        task_id,
+                        raw_seed,
+                        BOLTZ2SCORE_DEFAULT_SEED,
+                    )
+
         command = [
             sys.executable,
             str(BASE_DIR / "Boltz2Score" / "boltz2score.py"),
@@ -1163,7 +1251,13 @@ def boltz2score_task(self, score_args: dict):
             "--accelerator", "gpu",
             "--devices", "1",
             "--num_workers", "0",
+            "--recycling_steps", str(recycling_steps),
+            "--sampling_steps", str(sampling_steps),
+            "--diffusion_samples", str(diffusion_samples),
+            "--max_parallel_samples", str(max_parallel_samples),
         ]
+        if structure_refine:
+            command.append("--structure_refine")
         if using_separate_inputs:
             command.extend([
                 "--protein_file", protein_file_path,
@@ -1171,6 +1265,7 @@ def boltz2score_task(self, score_args: dict):
             ])
         else:
             command.extend(["--input", input_file_path])
+        command.extend(["--seed", str(seed)])
 
         target_chain = score_args.get('target_chain') or (detected_target_chain if using_separate_inputs else None)
         ligand_chain = score_args.get('ligand_chain')
@@ -1197,6 +1292,17 @@ def boltz2score_task(self, score_args: dict):
             )
 
         tracker.update_status("running", "Executing Boltz2Score subprocess")
+        logger.info(
+            "Task %s: Boltz2Score settings: structure_refine=%s, recycling_steps=%d, "
+            "sampling_steps=%d, diffusion_samples=%d, max_parallel_samples=%d, seed=%s",
+            task_id,
+            structure_refine,
+            recycling_steps,
+            sampling_steps,
+            diffusion_samples,
+            max_parallel_samples,
+            seed,
+        )
         logger.info(f"Task {task_id}: Running Boltz2Score. Command: {' '.join(command)}")
 
         proc_env = os.environ.copy()

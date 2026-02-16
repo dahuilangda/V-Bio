@@ -101,6 +101,7 @@ function readTaskPrimaryLigand(
     'ligand',
     readFirstNonEmptyStringMetric(affinityData, ['ligand_smiles', 'ligandSmiles', 'smiles', 'ligand.smiles'])
   );
+  const affinityMapLigand = normalizeComponentSequence('ligand', readLigandSmilesFromMap(affinityData));
   const confidenceData =
     task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
       ? (task.confidence as Record<string, unknown>)
@@ -109,11 +110,14 @@ function readTaskPrimaryLigand(
     'ligand',
     readFirstNonEmptyStringMetric(confidenceData, ['ligand_smiles', 'ligandSmiles', 'smiles', 'ligand.smiles'])
   );
+  const confidenceMapLigand = normalizeComponentSequence('ligand', readLigandSmilesFromMap(confidenceData));
 
   if (affinityUploadTask) {
     if (directLigand) return { smiles: directLigand, isSmiles: true };
     if (affinityLigand) return { smiles: affinityLigand, isSmiles: true };
+    if (affinityMapLigand) return { smiles: affinityMapLigand, isSmiles: true };
     if (confidenceLigand) return { smiles: confidenceLigand, isSmiles: true };
+    if (confidenceMapLigand) return { smiles: confidenceMapLigand, isSmiles: true };
   }
 
   if (preferredComponentId) {
@@ -145,8 +149,16 @@ function readTaskPrimaryLigand(
     return { smiles: affinityLigand, isSmiles: true };
   }
 
+  if (affinityMapLigand) {
+    return { smiles: affinityMapLigand, isSmiles: true };
+  }
+
   if (confidenceLigand) {
     return { smiles: confidenceLigand, isSmiles: true };
+  }
+
+  if (confidenceMapLigand) {
+    return { smiles: confidenceMapLigand, isSmiles: true };
   }
 
   return {
@@ -200,6 +212,26 @@ function readFirstNonEmptyStringMetric(data: Record<string, unknown> | null, pat
     const value = readObjectPath(data, path);
     if (typeof value === 'string' && value.trim()) {
       return value.trim();
+    }
+  }
+  return '';
+}
+
+function readLigandSmilesFromMap(data: Record<string, unknown> | null): string {
+  if (!data) return '';
+  const mapCandidates: unknown[] = [
+    readObjectPath(data, 'ligand_smiles_map'),
+    readObjectPath(data, 'ligand.smiles_map'),
+    readObjectPath(data, 'ligand.smilesMap')
+  ];
+  for (const mapValue of mapCandidates) {
+    if (!mapValue || typeof mapValue !== 'object' || Array.isArray(mapValue)) continue;
+    const entries = Object.values(mapValue as Record<string, unknown>)
+      .filter((value): value is string => typeof value === 'string')
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (entries.length === 1) {
+      return entries[0];
     }
   }
   return '';
@@ -787,6 +819,12 @@ function chainKeysMatch(candidate: string, preferred: string): boolean {
   }
 
   if (compactCandidate && compactPreferred) {
+    if (compactCandidate.startsWith(compactPreferred) || compactCandidate.endsWith(compactPreferred)) {
+      return true;
+    }
+    if (compactPreferred.startsWith(compactCandidate) || compactPreferred.endsWith(compactCandidate)) {
+      return true;
+    }
     return compactCandidate.endsWith(compactPreferred);
   }
   return false;
@@ -798,28 +836,37 @@ function readTaskLigandAtomPlddtsFromChainMap(
   allowFallbackToAnyChain: boolean
 ): number[] | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const map = value as Record<string, unknown>;
-  const entries = Object.entries(map);
-  if (entries.length === 0) return null;
+  const parsedEntries = Object.entries(value as Record<string, unknown>)
+    .map(([key, chainValues]) => {
+      const parsed = normalizeAtomPlddts(toFiniteNumberArray(chainValues));
+      if (parsed.length === 0) return null;
+      return {
+        chainId: normalizeChainKey(key),
+        values: parsed
+      };
+    })
+    .filter((entry): entry is { chainId: string; values: number[] } => entry !== null);
+  if (parsedEntries.length === 0) return null;
+
+  const pickLongest = (values: number[][]): number[] | null => {
+    if (values.length === 0) return null;
+    return values.reduce((best, current) => (current.length > best.length ? current : best), values[0]);
+  };
 
   if (preferredChainKeys.size > 0) {
-    for (const [key, chainValues] of entries) {
-      const matched = Array.from(preferredChainKeys).some((preferred) => chainKeysMatch(key, preferred));
-      if (!matched) continue;
-      const parsed = normalizeAtomPlddts(toFiniteNumberArray(chainValues));
-      if (parsed.length > 0) {
-        return parsed;
-      }
-    }
+    const matched = parsedEntries
+      .filter((entry) =>
+        Array.from(preferredChainKeys).some(
+          (preferred) => chainKeysMatch(entry.chainId, preferred) || chainKeysMatch(preferred, entry.chainId)
+        )
+      )
+      .map((entry) => entry.values);
+    const selected = pickLongest(matched);
+    if (selected) return selected;
   }
 
   if (allowFallbackToAnyChain) {
-    for (const [, chainValues] of entries) {
-      const parsed = normalizeAtomPlddts(toFiniteNumberArray(chainValues));
-      if (parsed.length > 0) {
-        return parsed;
-      }
-    }
+    return pickLongest(parsedEntries.map((entry) => entry.values));
   }
   return null;
 }

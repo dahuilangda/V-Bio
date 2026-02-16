@@ -45,6 +45,7 @@ export interface AffinityWorkflowState {
   supportsActivity: boolean;
   confidenceOnly: boolean;
   confidenceOnlyLocked: boolean;
+  uploadsHydrating: boolean;
   persistedUploads: AffinityPersistedUploads;
   onTargetFileChange: (file: File | null) => void;
   onLigandFileChange: (file: File | null) => void;
@@ -76,6 +77,7 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewPairKey, setPreviewPairKey] = useState('');
   const [confidenceOnly, setConfidenceOnly] = useState(true);
+  const [uploadsHydrating, setUploadsHydrating] = useState(false);
   const [persistedTargetUpload, setPersistedTargetUpload] = useState<AffinityPersistedUpload | null>(null);
   const [persistedLigandUpload, setPersistedLigandUpload] = useState<AffinityPersistedUpload | null>(null);
   const requestSeqRef = useRef(0);
@@ -113,6 +115,7 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
 
   useEffect(() => {
     requestSeqRef.current += 1;
+    setUploadsHydrating(true);
     resetAll();
     hydratedUploadKeyRef.current = '';
     hydratedPersistedSmilesKeyRef.current = '';
@@ -131,8 +134,14 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
     if (!enabled) return;
     const targetName = String(persistedUploads?.target?.fileName || '').trim();
     const targetContent = String(persistedUploads?.target?.content || '').trim();
-    if (!targetName || !targetContent) return;
-    if (hydratedUploadKeyRef.current === persistedUploadKey) return;
+    if (!targetName || !targetContent) {
+      setUploadsHydrating(false);
+      return;
+    }
+    if (hydratedUploadKeyRef.current === persistedUploadKey) {
+      setUploadsHydrating(false);
+      return;
+    }
 
     hydratedUploadKeyRef.current = persistedUploadKey;
     const restoredTarget = new File([targetContent], targetName, { type: 'text/plain' });
@@ -151,6 +160,7 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
     setPreview(null);
     setPreviewVersion((prev) => prev + 1);
     confidenceOnlyTouchedRef.current = false;
+    setUploadsHydrating(false);
   }, [enabled, persistedUploads, persistedUploadKey]);
 
   const onTargetFileChange = useCallback(
@@ -340,6 +350,7 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
     supportsActivity,
     confidenceOnly,
     confidenceOnlyLocked,
+    uploadsHydrating,
     persistedUploads: {
       target: persistedTargetUpload,
       ligand: persistedLigandUpload

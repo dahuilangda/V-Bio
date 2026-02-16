@@ -19,6 +19,13 @@ export interface ProjectUiState {
   proteinTemplates: Record<string, ProteinTemplateUpload>;
   taskProteinTemplates?: Record<string, Record<string, ProteinTemplateUpload>>;
   templateContentPool?: Record<string, string>;
+  taskAffinityUploads?: Record<
+    string,
+    {
+      target: { fileName: string; content: string } | null;
+      ligand: { fileName: string; content: string } | null;
+    }
+  >;
   affinityUploads?: {
     target: { fileName: string; content: string } | null;
     ligand: { fileName: string; content: string } | null;
@@ -433,7 +440,7 @@ export function loadProjectUiState(projectId: string): ProjectUiState | null {
       : null;
 
   const proteinTemplates = normalizeStoredProteinTemplates((found as any).proteinTemplates, templateContentPool);
-  const affinityUploads = (() => {
+  const legacyAffinityUploads = (() => {
     const raw = (found as any).affinityUploads;
     if (!raw || typeof raw !== 'object') {
       return { target: null, ligand: null };
@@ -443,6 +450,30 @@ export function loadProjectUiState(projectId: string): ProjectUiState | null {
       ligand: normalizeAffinityUpload((raw as any).ligand, templateContentPool)
     };
   })();
+  const taskAffinityUploads: Record<
+    string,
+    {
+      target: { fileName: string; content: string } | null;
+      ligand: { fileName: string; content: string } | null;
+    }
+  > = {};
+  const rawTaskAffinityUploads = (found as any).taskAffinityUploads;
+  if (rawTaskAffinityUploads && typeof rawTaskAffinityUploads === 'object') {
+    for (const [taskRowId, uploads] of Object.entries(rawTaskAffinityUploads as Record<string, unknown>)) {
+      const normalizedTaskRowId = String(taskRowId || '').trim();
+      if (!normalizedTaskRowId || !uploads || typeof uploads !== 'object') continue;
+      const normalized = {
+        target: normalizeAffinityUpload((uploads as any).target, templateContentPool),
+        ligand: normalizeAffinityUpload((uploads as any).ligand, templateContentPool)
+      };
+      if (!normalized.target && !normalized.ligand) continue;
+      taskAffinityUploads[normalizedTaskRowId] = normalized;
+    }
+  }
+
+  if (Object.keys(taskAffinityUploads).length === 0 && (legacyAffinityUploads.target || legacyAffinityUploads.ligand)) {
+    taskAffinityUploads.__legacy__ = legacyAffinityUploads;
+  }
   const taskProteinTemplates: Record<string, Record<string, ProteinTemplateUpload>> = {};
   const rawTaskTemplates = (found as any).taskProteinTemplates;
   if (rawTaskTemplates && typeof rawTaskTemplates === 'object') {
@@ -457,7 +488,8 @@ export function loadProjectUiState(projectId: string): ProjectUiState | null {
     proteinTemplates,
     taskProteinTemplates,
     templateContentPool,
-    affinityUploads,
+    taskAffinityUploads,
+    affinityUploads: legacyAffinityUploads,
     activeConstraintId,
     selectedConstraintTemplateComponentId
   };
@@ -473,6 +505,25 @@ export function saveProjectUiState(projectId: string, uiState: ProjectUiState): 
     target: serializeAffinityUpload(uiState.affinityUploads?.target || null, contentPool, usedPoolKeys),
     ligand: serializeAffinityUpload(uiState.affinityUploads?.ligand || null, contentPool, usedPoolKeys)
   };
+  const taskAffinityUploads: Record<
+    string,
+    {
+      target: { fileName: string; content: string } | null;
+      ligand: { fileName: string; content: string } | null;
+    }
+  > = {};
+  if (uiState.taskAffinityUploads && typeof uiState.taskAffinityUploads === 'object') {
+    for (const [taskRowId, uploads] of Object.entries(uiState.taskAffinityUploads)) {
+      const normalizedTaskRowId = String(taskRowId || '').trim();
+      if (!normalizedTaskRowId || !uploads || typeof uploads !== 'object') continue;
+      const serialized = {
+        target: serializeAffinityUpload((uploads as any).target || null, contentPool, usedPoolKeys),
+        ligand: serializeAffinityUpload((uploads as any).ligand || null, contentPool, usedPoolKeys)
+      };
+      if (!serialized.target && !serialized.ligand) continue;
+      taskAffinityUploads[normalizedTaskRowId] = serialized;
+    }
+  }
   const taskProteinTemplates: Record<string, Record<string, ProteinTemplateUpload>> = {};
 
   if (uiState.taskProteinTemplates && typeof uiState.taskProteinTemplates === 'object') {
@@ -487,6 +538,7 @@ export function saveProjectUiState(projectId: string, uiState: ProjectUiState): 
   baseStore[projectId] = {
     proteinTemplates,
     taskProteinTemplates,
+    taskAffinityUploads,
     templateContentPool: compactTemplateContentPool(contentPool, usedPoolKeys),
     affinityUploads,
     activeConstraintId: uiState.activeConstraintId || null,
@@ -499,6 +551,7 @@ export function saveProjectUiState(projectId: string, uiState: ProjectUiState): 
     baseStore[projectId] = {
       proteinTemplates: {},
       taskProteinTemplates: {},
+      taskAffinityUploads: {},
       affinityUploads: {
         target: null,
         ligand: null

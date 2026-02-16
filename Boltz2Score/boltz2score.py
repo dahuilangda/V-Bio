@@ -697,7 +697,13 @@ def _collect_atom_coverage(processed_dir: Path, record_id: str) -> dict:
     }
 
 
-def _write_atom_coverage(processed_dir: Path, output_dir: Path, record_id: str) -> None:
+def _write_atom_coverage(
+    processed_dir: Path,
+    output_dir: Path,
+    record_id: str,
+    requested_ligand_chain_id: str | None = None,
+    ligand_smiles_map: dict[str, str] | None = None,
+) -> None:
     """Write atom coverage diagnostics and attach summary to confidence JSON."""
     try:
         coverage = _collect_atom_coverage(processed_dir, record_id)
@@ -714,6 +720,30 @@ def _write_atom_coverage(processed_dir: Path, output_dir: Path, record_id: str) 
                 continue
             data["ligand_atom_coverage"] = coverage["ligand_atom_coverage"]
             data["chain_atom_coverage"] = coverage["chain_atom_coverage"]
+            selected_ligand_smiles = ""
+            normalized_map: dict[str, str] = {}
+            if isinstance(ligand_smiles_map, dict) and ligand_smiles_map:
+                for key, value in ligand_smiles_map.items():
+                    key_norm = str(key or "").strip()
+                    value_norm = str(value or "").strip()
+                    if key_norm and value_norm:
+                        normalized_map[key_norm] = value_norm
+                if normalized_map:
+                    data["ligand_smiles_map"] = normalized_map
+            if requested_ligand_chain_id:
+                requested_chain = requested_ligand_chain_id.strip()
+                if requested_chain:
+                    data["requested_ligand_chain_id"] = requested_chain
+                    if normalized_map:
+                        selected_ligand_smiles = (
+                            normalized_map.get(requested_chain)
+                            or normalized_map.get(requested_chain.upper())
+                            or normalized_map.get(requested_chain.lower())
+                        )
+            if not selected_ligand_smiles and len(normalized_map) == 1:
+                selected_ligand_smiles = next(iter(normalized_map.values()))
+            if selected_ligand_smiles:
+                data["ligand_smiles"] = selected_ligand_smiles
             conf_path.write_text(json.dumps(data, indent=2))
     except Exception as exc:  # noqa: BLE001
         print(f"[Warning] Failed to write atom coverage diagnostics: {exc}")
@@ -765,10 +795,35 @@ def main() -> None:
         default="mmcif",
         choices=["pdb", "mmcif"],
     )
-    parser.add_argument("--recycling_steps", type=int, default=3)
-    parser.add_argument("--sampling_steps", type=int, default=1)
-    parser.add_argument("--diffusion_samples", type=int, default=1)
+    parser.add_argument(
+        "--recycling_steps",
+        type=int,
+        default=None,
+        help="Override recycling steps. Defaults depend on refinement mode.",
+    )
+    parser.add_argument(
+        "--sampling_steps",
+        type=int,
+        default=None,
+        help="Override sampling steps. Defaults depend on refinement mode.",
+    )
+    parser.add_argument(
+        "--diffusion_samples",
+        type=int,
+        default=None,
+        help="Override diffusion sample count. Defaults depend on refinement mode.",
+    )
     parser.add_argument("--max_parallel_samples", type=int, default=1)
+    parser.add_argument(
+        "--structure_refine",
+        action="store_true",
+        help="Enable diffusion structure refinement before confidence scoring.",
+    )
+    parser.add_argument(
+        "--no_structure_refine",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--step_scale", type=float, default=1.5)
     parser.add_argument("--no_kernels", action="store_true")
     parser.add_argument("--seed", type=int, default=None)
@@ -836,6 +891,19 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    if args.structure_refine and args.no_structure_refine:
+        raise ValueError("Cannot set both --structure_refine and --no_structure_refine.")
+
+    structure_refine = bool(args.structure_refine and not args.no_structure_refine)
+    if structure_refine:
+        resolved_recycling_steps = args.recycling_steps if args.recycling_steps is not None else 3
+        resolved_sampling_steps = args.sampling_steps if args.sampling_steps is not None else 200
+        resolved_diffusion_samples = args.diffusion_samples if args.diffusion_samples is not None else 5
+    else:
+        resolved_recycling_steps = args.recycling_steps if args.recycling_steps is not None else 7
+        resolved_sampling_steps = args.sampling_steps if args.sampling_steps is not None else 1
+        resolved_diffusion_samples = args.diffusion_samples if args.diffusion_samples is not None else 1
 
     # Validate input arguments
     has_input = args.input is not None
@@ -1064,10 +1132,11 @@ def main() -> None:
         accelerator=args.accelerator,
         num_workers=args.num_workers,
         output_format=args.output_format,
-        recycling_steps=args.recycling_steps,
-        sampling_steps=args.sampling_steps,
-        diffusion_samples=args.diffusion_samples,
+        recycling_steps=resolved_recycling_steps,
+        sampling_steps=resolved_sampling_steps,
+        diffusion_samples=resolved_diffusion_samples,
         max_parallel_samples=args.max_parallel_samples,
+        structure_refine=structure_refine,
         step_scale=args.step_scale,
         no_kernels=args.no_kernels,
         seed=args.seed,
@@ -1083,6 +1152,8 @@ def main() -> None:
         processed_dir=work_dir / "processed",
         output_dir=output_dir,
         record_id=record_id,
+        requested_ligand_chain_id=ligand_chains[0] if ligand_chains else None,
+        ligand_smiles_map=ligand_smiles_map if ligand_smiles_map else None,
     )
 
     if run_affinity:

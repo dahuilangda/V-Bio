@@ -112,7 +112,9 @@ def _to_ligand_smiles(mol: Any) -> str:
         mol_no_h = Chem.RemoveHs(Chem.Mol(mol), sanitize=False)
     except Exception:
         mol_no_h = Chem.Mol(mol)
-    smiles = Chem.MolToSmiles(mol_no_h, canonical=True)
+    # Keep atom traversal close to input atom order so per-atom confidence can
+    # map to 2D atoms deterministically in the UI.
+    smiles = Chem.MolToSmiles(mol_no_h, canonical=False, rootedAtAtom=0)
     if not smiles:
         raise AffinityPreviewError("Failed to derive ligand SMILES from uploaded ligand file.")
     return smiles

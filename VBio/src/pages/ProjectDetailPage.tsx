@@ -105,6 +105,8 @@ const MIN_CONSTRAINTS_MAIN_WIDTH = 52;
 const MAX_CONSTRAINTS_MAIN_WIDTH = 82;
 const AFFINITY_TARGET_UPLOAD_COMPONENT_ID = '__affinity_target_upload__';
 const AFFINITY_LIGAND_UPLOAD_COMPONENT_ID = '__affinity_ligand_upload__';
+const AFFINITY_UPLOAD_SCOPE_PREFIX = '__new_from_';
+const AFFINITY_UPLOAD_SCOPE_NEW = '__new__';
 
 function clampResultsMainWidth(value: number): number {
   return Math.max(MIN_RESULTS_MAIN_WIDTH, Math.min(MAX_RESULTS_MAIN_WIDTH, value));
@@ -209,6 +211,48 @@ function readStringListMetric(data: Record<string, unknown> | null, paths: strin
     if (rows.length > 0) return rows;
   }
   return [];
+}
+
+function readLigandSmilesFromMap(data: Record<string, unknown> | null, preferredLigandChainId: string | null): string {
+  if (!data) return '';
+  const mapCandidates: unknown[] = [
+    readObjectPath(data, 'ligand_smiles_map'),
+    readObjectPath(data, 'ligand.smiles_map'),
+    readObjectPath(data, 'ligand.smilesMap')
+  ];
+  const preferredChain = String(preferredLigandChainId || '').trim().toUpperCase();
+
+  for (const mapValue of mapCandidates) {
+    if (!mapValue || typeof mapValue !== 'object' || Array.isArray(mapValue)) continue;
+    const entries = Object.entries(mapValue as Record<string, unknown>)
+      .map(([key, value]) => {
+        if (typeof value !== 'string') return null;
+        const normalizedValue = value.trim();
+        if (!normalizedValue) return null;
+        return {
+          key: String(key || '').trim(),
+          value: normalizedValue
+        };
+      })
+      .filter((item): item is { key: string; value: string } => item !== null);
+    if (entries.length === 0) continue;
+
+    if (preferredChain) {
+      for (const entry of entries) {
+        const key = entry.key.toUpperCase();
+        const keyChain = key.includes(':') ? key.slice(0, key.indexOf(':')).trim() : key;
+        if (keyChain === preferredChain) {
+          return entry.value;
+        }
+      }
+    }
+
+    if (entries.length === 1) {
+      return entries[0].value;
+    }
+  }
+
+  return '';
 }
 
 function splitChainTokens(value: string): string[] {
@@ -348,6 +392,10 @@ function std(values: number[]): number {
 
 function defaultConfigFromProject(project: Project): ProjectInputConfig {
   const config = buildDefaultInputConfig();
+  if (project.task_type === 'affinity') {
+    config.components = [createInputComponent('protein')];
+    return config;
+  }
   const proteinSequence = (project.protein_sequence || '').trim();
   const ligandSmiles = (project.ligand_smiles || '').trim();
 
@@ -477,8 +525,35 @@ function readTaskComponents(task: ProjectTask | null): InputComponent[] {
   if (!task) return [];
 
   const rawComponents = Array.isArray(task.components) ? (task.components as unknown as Array<Record<string, unknown>>) : [];
-  const filteredRawComponents = rawComponents.filter((component) => !extractAffinityUploadFromRawComponent(component));
-  const components = filteredRawComponents.length > 0 ? normalizeComponents(filteredRawComponents as unknown as InputComponent[]) : [];
+  const normalizedRawComponents: Array<Record<string, unknown>> = [];
+  for (const component of rawComponents) {
+    if (!component || typeof component !== 'object') continue;
+    const upload = extractAffinityUploadFromRawComponent(component);
+    if (!upload) {
+      normalizedRawComponents.push(component);
+      continue;
+    }
+    if (upload.role === 'target') {
+      continue;
+    }
+    const ligandSequence = normalizeComponentSequence(
+      'ligand',
+      typeof component.sequence === 'string' ? component.sequence : ''
+    );
+    if (!ligandSequence) {
+      continue;
+    }
+    normalizedRawComponents.push({
+      ...component,
+      type: 'ligand',
+      inputMethod: 'jsme',
+      sequence: ligandSequence,
+      affinityUpload: undefined,
+      affinity_upload: undefined
+    });
+  }
+
+  const components = normalizedRawComponents.length > 0 ? normalizeComponents(normalizedRawComponents as unknown as InputComponent[]) : [];
   if (components.length > 0) return components;
 
   const fallback: InputComponent[] = [];
@@ -593,6 +668,52 @@ function normalizeChainKey(value: string): string {
   return value.trim().toUpperCase();
 }
 
+function resolveAffinityUploadStorageTaskRowId(taskRowId: string | null | undefined): string | null {
+  const normalized = String(taskRowId || '').trim();
+  if (!normalized || normalized === AFFINITY_UPLOAD_SCOPE_NEW) return null;
+  if (normalized.startsWith(AFFINITY_UPLOAD_SCOPE_PREFIX)) {
+    const sourceTaskRowId = normalized.slice(AFFINITY_UPLOAD_SCOPE_PREFIX.length).trim();
+    return sourceTaskRowId || null;
+  }
+  return normalized;
+}
+
+function pickLongestConfidenceSeries(valuesByChain: number[][]): number[] {
+  if (valuesByChain.length === 0) return [];
+  return valuesByChain.reduce((best, current) => (current.length > best.length ? current : best), valuesByChain[0]);
+}
+
+function readLigandCoverageChainKeys(confidence: Record<string, unknown> | null): Set<string> {
+  const keys = new Set<string>();
+  if (!confidence) return keys;
+  const addChain = (value: unknown) => {
+    if (typeof value !== 'string') return;
+    const normalized = normalizeChainKey(value);
+    if (normalized) keys.add(normalized);
+  };
+
+  const ligandCoverage = confidence.ligand_atom_coverage;
+  if (Array.isArray(ligandCoverage)) {
+    for (const row of ligandCoverage) {
+      if (!row || typeof row !== 'object') continue;
+      addChain((row as Record<string, unknown>).chain);
+    }
+  }
+  const chainCoverage = confidence.chain_atom_coverage;
+  if (Array.isArray(chainCoverage)) {
+    for (const row of chainCoverage) {
+      if (!row || typeof row !== 'object') continue;
+      const entry = row as Record<string, unknown>;
+      const molType = String(entry.mol_type || '').trim().toLowerCase();
+      if (!molType) continue;
+      if (molType.includes('nonpolymer') || molType.includes('ligand')) {
+        addChain(entry.chain);
+      }
+    }
+  }
+  return keys;
+}
+
 function readLigandAtomPlddtsFromConfidence(
   confidence: Record<string, unknown> | null,
   preferredLigandChainId: string | null = null
@@ -604,25 +725,40 @@ function readLigandAtomPlddtsFromConfidence(
     readObjectPath(confidence, 'ligand_confidence.atom_plddts_by_chain')
   ];
   const preferredKeys = collectPreferredLigandChainKeys(confidence, preferredLigandChainId);
+  const ligandCoverageKeys = readLigandCoverageChainKeys(confidence);
   for (const candidate of byChainCandidates) {
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
-    const entries = Object.entries(candidate as Record<string, unknown>);
-    if (preferredKeys.size > 0) {
-      for (const [chainId, chainValues] of entries) {
-        if (!preferredKeys.has(normalizeChainKey(chainId)) || !Array.isArray(chainValues)) continue;
+    const parsedEntries = Object.entries(candidate as Record<string, unknown>)
+      .map(([chainId, chainValues]) => {
+        if (!Array.isArray(chainValues)) return null;
         const values = chainValues
           .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
           .map((value) => normalizePlddtValue(value));
-        if (values.length > 0) return values;
-      }
+        if (values.length === 0) return null;
+        return { chainId: normalizeChainKey(chainId), values };
+      })
+      .filter((entry): entry is { chainId: string; values: number[] } => entry !== null);
+    if (parsedEntries.length === 0) continue;
+
+    if (preferredKeys.size > 0) {
+      const matched = parsedEntries
+        .filter((entry) =>
+          Array.from(preferredKeys).some((preferred) => chainKeysMatch(entry.chainId, preferred) || chainKeysMatch(preferred, entry.chainId))
+        )
+        .map((entry) => entry.values);
+      if (matched.length > 0) return pickLongestConfidenceSeries(matched);
     }
-    for (const [, chainValues] of entries) {
-      if (!Array.isArray(chainValues)) continue;
-      const values = chainValues
-        .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
-        .map((value) => normalizePlddtValue(value));
-      if (values.length > 0) return values;
+
+    if (ligandCoverageKeys.size > 0) {
+      const matchedByCoverage = parsedEntries
+        .filter((entry) =>
+          Array.from(ligandCoverageKeys).some((preferred) => chainKeysMatch(entry.chainId, preferred) || chainKeysMatch(preferred, entry.chainId))
+        )
+        .map((entry) => entry.values);
+      if (matchedByCoverage.length > 0) return pickLongestConfidenceSeries(matchedByCoverage);
     }
+
+    return pickLongestConfidenceSeries(parsedEntries.map((entry) => entry.values));
   }
 
   const candidates: unknown[] = [
@@ -664,7 +800,15 @@ function chainKeysMatch(candidate: string, preferred: string): boolean {
   const compactCandidate = normalizedCandidate.replace(/[^A-Z0-9]/g, '');
   const compactPreferred = normalizedPreferred.replace(/[^A-Z0-9]/g, '');
   if (compactCandidate && compactPreferred && compactCandidate === compactPreferred) return true;
-  return compactCandidate.endsWith(compactPreferred);
+  if (compactCandidate && compactPreferred) {
+    if (compactCandidate.startsWith(compactPreferred) || compactCandidate.endsWith(compactPreferred)) return true;
+    if (compactPreferred.startsWith(compactCandidate) || compactPreferred.endsWith(compactCandidate)) return true;
+  }
+  const candidateTokens = normalizedCandidate.split(/[^A-Z0-9]+/).filter(Boolean);
+  if (candidateTokens.includes(normalizedPreferred) || (compactPreferred && candidateTokens.includes(compactPreferred))) {
+    return true;
+  }
+  return false;
 }
 
 function collectPreferredLigandChainKeys(
@@ -1012,6 +1156,7 @@ export function ProjectDetailPage() {
   const [showFloatingRunButton, setShowFloatingRunButton] = useState(false);
   const [structureText, setStructureText] = useState('');
   const [structureFormat, setStructureFormat] = useState<'cif' | 'pdb'>('cif');
+  const [structureTaskId, setStructureTaskId] = useState<string | null>(null);
   const [statusInfo, setStatusInfo] = useState<Record<string, unknown> | null>(null);
   const [nowTs, setNowTs] = useState(Date.now());
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('results');
@@ -1021,10 +1166,7 @@ export function ProjectDetailPage() {
   const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [proteinTemplates, setProteinTemplates] = useState<Record<string, ProteinTemplateUpload>>({});
   const [taskProteinTemplates, setTaskProteinTemplates] = useState<Record<string, Record<string, ProteinTemplateUpload>>>({});
-  const [affinitySavedUploads, setAffinitySavedUploads] = useState<AffinityPersistedUploads>({
-    target: null,
-    ligand: null
-  });
+  const [taskAffinityUploads, setTaskAffinityUploads] = useState<Record<string, AffinityPersistedUploads>>({});
   const [pickedResidue, setPickedResidue] = useState<ConstraintResiduePick | null>(null);
   const [activeConstraintId, setActiveConstraintId] = useState<string | null>(null);
   const [selectedContactConstraintIds, setSelectedContactConstraintIds] = useState<string[]>([]);
@@ -1167,6 +1309,34 @@ export function ProjectDetailPage() {
       return next;
     });
   }, []);
+  const rememberAffinityUploadsForTaskRow = useCallback(
+    (taskRowId: string | null, uploads: AffinityPersistedUploads) => {
+      const normalizedTaskRowId = String(taskRowId || '').trim();
+      if (!normalizedTaskRowId) return;
+      setTaskAffinityUploads((prev) => {
+        const current = prev[normalizedTaskRowId] || { target: null, ligand: null };
+        const sameTarget =
+          String(current.target?.fileName || '') === String(uploads.target?.fileName || '') &&
+          String(current.target?.content || '') === String(uploads.target?.content || '');
+        const sameLigand =
+          String(current.ligand?.fileName || '') === String(uploads.ligand?.fileName || '') &&
+          String(current.ligand?.content || '') === String(uploads.ligand?.content || '');
+        if (sameTarget && sameLigand) return prev;
+
+        const next = { ...prev };
+        if (!uploads.target && !uploads.ligand) {
+          delete next[normalizedTaskRowId];
+        } else {
+          next[normalizedTaskRowId] = {
+            target: uploads.target ? { ...uploads.target } : null,
+            ligand: uploads.ligand ? { ...uploads.ligand } : null
+          };
+        }
+        return next;
+      });
+    },
+    []
+  );
 
   const requestedStatusTaskRow = useMemo(() => {
     const requestedTaskRowId = new URLSearchParams(location.search).get('task_row_id');
@@ -1300,11 +1470,27 @@ export function ProjectDetailPage() {
   }, [normalizedDraftComponents]);
 
   const constraintCount = draft?.inputConfig.constraints.length || 0;
-  const activeResultTask = useMemo(() => {
+  const runtimeResultTask = useMemo(() => {
     const activeTaskId = (project?.task_id || '').trim();
     if (!activeTaskId) return null;
     return projectTasks.find((item) => String(item.task_id || '').trim() === activeTaskId) || null;
   }, [project?.task_id, projectTasks]);
+  const activeResultTask = statusContextTaskRow || runtimeResultTask;
+  const affinityUploadScopeTaskRowId = useMemo(() => {
+    if (requestedStatusTaskRow?.id) {
+      if (isDraftTaskSnapshot(requestedStatusTaskRow)) return requestedStatusTaskRow.id;
+      return `__new_from_${requestedStatusTaskRow.id}`;
+    }
+    if (statusContextTaskRow?.id) {
+      if (isDraftTaskSnapshot(statusContextTaskRow)) return statusContextTaskRow.id;
+      return `__new_from_${statusContextTaskRow.id}`;
+    }
+    if (runtimeResultTask?.id && isDraftTaskSnapshot(runtimeResultTask)) return runtimeResultTask.id;
+    const latestDraftTask =
+      projectTasks.find((item) => item.task_state === 'DRAFT' && !String(item.task_id || '').trim()) || null;
+    if (latestDraftTask?.id) return latestDraftTask.id;
+    return '__new__';
+  }, [requestedStatusTaskRow, statusContextTaskRow, runtimeResultTask, projectTasks]);
   const resultOverviewComponents = useMemo(() => {
     const taskComponents = readTaskComponents(activeResultTask);
     if (taskComponents.length > 0) return taskComponents;
@@ -2629,15 +2815,38 @@ export function ProjectDetailPage() {
       const restoredTemplates = Object.fromEntries(
         Object.entries(templateSource).filter(([componentId]) => validProteinIds.has(componentId))
       ) as Record<string, ProteinTemplateUpload>;
-      const restoredAffinityUploadsFromUi = savedUiState?.affinityUploads || {
-        target: null,
-        ligand: null
-      };
+      const restoredTaskAffinityUploadsRaw = savedUiState?.taskAffinityUploads || {};
+      const restoredTaskAffinityUploads: Record<string, AffinityPersistedUploads> = {};
+      for (const [scopeKey, uploads] of Object.entries(restoredTaskAffinityUploadsRaw as Record<string, unknown>)) {
+        if (scopeKey === '__legacy__') {
+          restoredTaskAffinityUploads.__legacy__ = uploads as AffinityPersistedUploads;
+          continue;
+        }
+        const storageTaskRowId = resolveAffinityUploadStorageTaskRowId(scopeKey);
+        if (!storageTaskRowId) continue;
+        restoredTaskAffinityUploads[storageTaskRowId] = uploads as AffinityPersistedUploads;
+      }
+      const affinityContextTaskRowId =
+        snapshotSourceTaskRow?.id || requestedTaskRow?.id || activeTaskRow?.id || latestDraftTask?.id || null;
+      const restoredAffinityUploadsFromLegacyScope = restoredTaskAffinityUploads.__legacy__ || null;
       const restoredAffinityUploadsFromTask = readTaskAffinityUploads(snapshotSourceTaskRow);
+      const restoredAffinityUploadsFromTaskScope = affinityContextTaskRowId
+        ? restoredTaskAffinityUploads[affinityContextTaskRowId] || null
+        : null;
       const restoredAffinityUploads: AffinityPersistedUploads = {
-        target: restoredAffinityUploadsFromUi.target || restoredAffinityUploadsFromTask.target,
-        ligand: restoredAffinityUploadsFromUi.ligand || restoredAffinityUploadsFromTask.ligand
+        target:
+          restoredAffinityUploadsFromTaskScope?.target ||
+          restoredAffinityUploadsFromTask.target ||
+          (!affinityContextTaskRowId ? restoredAffinityUploadsFromLegacyScope?.target : null),
+        ligand:
+          restoredAffinityUploadsFromTaskScope?.ligand ||
+          restoredAffinityUploadsFromTask.ligand ||
+          (!affinityContextTaskRowId ? restoredAffinityUploadsFromLegacyScope?.ligand : null)
       };
+      const hydratedTaskAffinityUploads = { ...restoredTaskAffinityUploads };
+      if (affinityContextTaskRowId && (restoredAffinityUploads.target || restoredAffinityUploads.ligand)) {
+        hydratedTaskAffinityUploads[affinityContextTaskRowId] = restoredAffinityUploads;
+      }
       const defaultContextTask = snapshotSourceTaskRow || requestedTaskRow || activeTaskRow;
       const contextHasResult = Boolean(
         String(defaultContextTask?.structure_name || '').trim() ||
@@ -2664,7 +2873,7 @@ export function ProjectDetailPage() {
       setRunMenuOpen(false);
       setProteinTemplates(restoredTemplates);
       setTaskProteinTemplates(savedTaskTemplates);
-      setAffinitySavedUploads(restoredAffinityUploads);
+      setTaskAffinityUploads(hydratedTaskAffinityUploads);
       setActiveConstraintId(savedUiState?.activeConstraintId || null);
       setSelectedContactConstraintIds([]);
       constraintSelectionAnchorRef.current = null;
@@ -2700,7 +2909,7 @@ export function ProjectDetailPage() {
     saveProjectUiState(project.id, {
       proteinTemplates,
       taskProteinTemplates,
-      affinityUploads: affinitySavedUploads,
+      taskAffinityUploads,
       activeConstraintId,
       selectedConstraintTemplateComponentId
     });
@@ -2708,7 +2917,7 @@ export function ProjectDetailPage() {
     project,
     proteinTemplates,
     taskProteinTemplates,
-    affinitySavedUploads,
+    taskAffinityUploads,
     activeConstraintId,
     selectedConstraintTemplateComponentId
   ]);
@@ -2761,13 +2970,15 @@ export function ProjectDetailPage() {
     if (!isAffinityWorkflow) {
       return { target: null, ligand: null };
     }
+    const storageTaskRowId = resolveAffinityUploadStorageTaskRowId(affinityUploadScopeTaskRowId);
+    const savedByScope = storageTaskRowId ? taskAffinityUploads[storageTaskRowId] || null : null;
     const sourceTask = statusContextTaskRow || activeResultTask || null;
-    const fromTask = readTaskAffinityUploads(sourceTask);
+    const fromTask = sourceTask && isDraftTaskSnapshot(sourceTask) ? readTaskAffinityUploads(sourceTask) : { target: null, ligand: null };
     return {
-      target: affinitySavedUploads.target || fromTask.target,
-      ligand: affinitySavedUploads.ligand || fromTask.ligand
+      target: savedByScope?.target || fromTask.target,
+      ligand: savedByScope?.ligand || fromTask.ligand
     };
-  }, [isAffinityWorkflow, affinitySavedUploads, statusContextTaskRow, activeResultTask]);
+  }, [isAffinityWorkflow, taskAffinityUploads, affinityUploadScopeTaskRowId, statusContextTaskRow, activeResultTask]);
 
   const {
     targetFile: affinityTargetFile,
@@ -2787,6 +2998,7 @@ export function ProjectDetailPage() {
     supportsActivity: affinitySupportsActivity,
     confidenceOnly: affinityConfidenceOnly,
     confidenceOnlyLocked: affinityConfidenceOnlyLocked,
+    uploadsHydrating: affinityUploadsHydrating,
     persistedUploads: affinityCurrentUploads,
     onTargetFileChange: onAffinityTargetFileChange,
     onLigandFileChange: onAffinityLigandFileChange,
@@ -2794,25 +3006,26 @@ export function ProjectDetailPage() {
     setLigandSmiles: setAffinityLigandSmiles
   } = useAffinityWorkflow({
     enabled: isAffinityWorkflow && workspaceTab === 'components',
-    scopeKey: project?.id,
-    persistedLigandSmiles: activeResultTask?.ligand_smiles || project?.ligand_smiles || '',
+    scopeKey: `${project?.id || ''}:${affinityUploadScopeTaskRowId}`,
+    persistedLigandSmiles: statusContextTaskRow?.ligand_smiles || activeResultTask?.ligand_smiles || '',
     persistedUploads: affinityPersistedUploads,
     onChainsResolved: onAffinityChainsResolved
   });
 
   useEffect(() => {
     if (!isAffinityWorkflow || workspaceTab !== 'components') return;
-    setAffinitySavedUploads((prev) => {
-      const sameTarget =
-        String(prev.target?.fileName || '') === String(affinityCurrentUploads.target?.fileName || '') &&
-        String(prev.target?.content || '') === String(affinityCurrentUploads.target?.content || '');
-      const sameLigand =
-        String(prev.ligand?.fileName || '') === String(affinityCurrentUploads.ligand?.fileName || '') &&
-        String(prev.ligand?.content || '') === String(affinityCurrentUploads.ligand?.content || '');
-      if (sameTarget && sameLigand) return prev;
-      return affinityCurrentUploads;
-    });
-  }, [isAffinityWorkflow, workspaceTab, affinityCurrentUploads]);
+    if (affinityUploadsHydrating) return;
+    const storageTaskRowId = resolveAffinityUploadStorageTaskRowId(affinityUploadScopeTaskRowId);
+    if (!storageTaskRowId) return;
+    rememberAffinityUploadsForTaskRow(storageTaskRowId, affinityCurrentUploads);
+  }, [
+    isAffinityWorkflow,
+    workspaceTab,
+    affinityCurrentUploads,
+    affinityUploadScopeTaskRowId,
+    affinityUploadsHydrating,
+    rememberAffinityUploadsForTaskRow
+  ]);
 
   const patch = async (payload: Partial<Project>) => {
     if (!project) return null;
@@ -2843,7 +3056,8 @@ export function ProjectDetailPage() {
     return next;
   };
 
-  const resolveEditableDraftTaskRowId = (): string | null => {
+  const resolveEditableDraftTaskRowId = (options?: { allowLatestDraftFallback?: boolean }): string | null => {
+    const allowLatestDraftFallback = options?.allowLatestDraftFallback !== false;
     if (requestNewTask) return null;
     const requestedTaskRowId = new URLSearchParams(location.search).get('task_row_id');
     if (requestedTaskRowId && requestedTaskRowId.trim()) {
@@ -2861,6 +3075,7 @@ export function ProjectDetailPage() {
       }
       return null;
     }
+    if (!allowLatestDraftFallback) return null;
     const latestDraft = projectTasks.find((item) => isDraftTaskSnapshot(item)) || null;
     return latestDraft ? latestDraft.id : null;
   };
@@ -2959,14 +3174,17 @@ export function ProjectDetailPage() {
           ? affinityLigandSmiles.trim() || String(affinityPreview?.ligandSmiles || '').trim() || ligandSmiles
           : ligandSmiles;
 
-      const next = await patch({
+      const projectPatch: Partial<Project> = {
         backend: persistedBackend,
         use_msa: hasMsa,
-        protein_sequence: storedProteinSequence,
-        ligand_smiles: storedLigandSmiles,
         color_mode: draft.color_mode,
         status_text: 'Draft saved'
-      });
+      };
+      if (workflowDef.key !== 'affinity') {
+        projectPatch.protein_sequence = storedProteinSequence;
+        projectPatch.ligand_smiles = storedLigandSmiles;
+      }
+      const next = await patch(projectPatch);
 
       if (next) {
         saveProjectInputConfig(next.id, normalizedConfig);
@@ -2981,7 +3199,10 @@ export function ProjectDetailPage() {
 
         if (workspaceTab === 'basics' || metadataOnlyDraftDirty) {
           const metadataTaskRowId =
-            requestedStatusTaskRow?.id || activeStatusTaskRow?.id || resolveRuntimeTaskRowId() || resolveEditableDraftTaskRowId();
+            requestedStatusTaskRow?.id ||
+            activeStatusTaskRow?.id ||
+            resolveRuntimeTaskRowId() ||
+            resolveEditableDraftTaskRowId({ allowLatestDraftFallback: false });
           if (metadataTaskRowId) {
             await patchTask(metadataTaskRowId, {
               name: nextDraft.taskName,
@@ -2996,7 +3217,9 @@ export function ProjectDetailPage() {
           return;
         }
 
-        const reusableDraftTaskRowId = resolveEditableDraftTaskRowId();
+        const reusableDraftTaskRowId = resolveEditableDraftTaskRowId({
+          allowLatestDraftFallback: workflowDef.key !== 'affinity'
+        });
         const snapshotComponents =
           workflowDef.key === 'affinity'
             ? await buildAffinityUploadSnapshotComponents(
@@ -3014,6 +3237,9 @@ export function ProjectDetailPage() {
           ligandSmilesOverride: storedLigandSmiles
         });
         rememberTemplatesForTaskRow(draftTaskRow.id, proteinTemplates);
+        if (workflowDef.key === 'affinity') {
+          rememberAffinityUploadsForTaskRow(draftTaskRow.id, affinityCurrentUploads);
+        }
         setDraft(nextDraft);
         setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
         setSavedComputationFingerprint(createComputationFingerprint(nextDraft));
@@ -3045,6 +3271,7 @@ export function ProjectDetailPage() {
 
       setStructureText(parsed.structureText);
       setStructureFormat(parsed.structureFormat);
+      setStructureTaskId(taskId);
 
       if (shouldPersistProject) {
         await patch({
@@ -3061,6 +3288,7 @@ export function ProjectDetailPage() {
         });
       }
     } catch (err) {
+      setStructureTaskId(null);
       setResultError(err instanceof Error ? err.message : 'Failed to parse downloaded result.');
     }
   };
@@ -3177,7 +3405,9 @@ export function ProjectDetailPage() {
     const runAffinityActivity = backendSupportsActivity && !effectiveConfidenceOnly && affinityHasLigand && affinitySupportsActivity;
     const targetChains = affinityTargetChainIds.filter((item) => item.trim());
     const ligandChain = affinityLigandChainId.trim();
-    const ligandSmiles = affinityLigandSmiles.trim();
+    const previewLigandSmiles = String(affinityPreview?.ligandSmiles || '').trim();
+    const ligandSmilesInput = affinityLigandSmiles.trim();
+    const ligandSmiles = ligandSmilesInput || previewLigandSmiles;
     if (runAffinityActivity && !targetChains.length) {
       setError('No target chain could be inferred from uploaded target structure.');
       return;
@@ -3218,7 +3448,7 @@ export function ProjectDetailPage() {
         }
       };
       const persistenceWarnings: string[] = [];
-      const storedLigandSmiles = affinityLigandSmiles.trim() || String(affinityPreview?.ligandSmiles || '').trim();
+      const storedLigandSmiles = ligandSmiles;
       const snapshotComponents = await buildAffinityUploadSnapshotComponents(
         configWithAffinity.components,
         affinityTargetFile,
@@ -3245,8 +3475,6 @@ export function ProjectDetailPage() {
         await patch({
           backend: nextDraft.backend,
           use_msa: false,
-          protein_sequence: '',
-          ligand_smiles: storedLigandSmiles,
           color_mode: nextDraft.color_mode,
           status_text: 'Draft saved'
         });
@@ -3258,20 +3486,22 @@ export function ProjectDetailPage() {
 
       const draftTaskRow = await persistDraftTaskSnapshot(configWithAffinity, {
         statusText: 'Affinity draft snapshot prepared for run',
-        reuseTaskRowId: resolveEditableDraftTaskRowId(),
+        reuseTaskRowId: resolveEditableDraftTaskRowId({ allowLatestDraftFallback: false }),
         snapshotComponents,
         proteinSequenceOverride: '',
         ligandSmilesOverride: storedLigandSmiles
       });
+      rememberAffinityUploadsForTaskRow(draftTaskRow.id, affinityCurrentUploads);
 
       const taskId = await submitAffinityScoring({
         inputStructureText: affinityPreview.structureText,
         inputStructureName: affinityPreview.structureName || 'affinity_input.cif',
         backend: activeAffinityBackend,
+        seed: configWithAffinity.options.seed ?? null,
         enableAffinity: runAffinityActivity,
-        ligandSmiles: runAffinityActivity ? ligandSmiles : '',
-        targetChainIds: runAffinityActivity ? targetChains : [],
-        ligandChainId: runAffinityActivity ? ligandChain : ''
+        ligandSmiles,
+        targetChainIds: ligandChain ? targetChains : [],
+        ligandChainId: ligandChain
       });
 
       const queuedAt = new Date().toISOString();
@@ -3283,7 +3513,7 @@ export function ProjectDetailPage() {
         status_text: 'Task submitted and waiting in queue',
         error_text: '',
         backend: activeAffinityBackend,
-        seed: null,
+        seed: configWithAffinity.options.seed ?? null,
         protein_sequence: '',
         ligand_smiles: storedLigandSmiles,
         components: snapshotComponents,
@@ -3322,8 +3552,7 @@ export function ProjectDetailPage() {
         backend: activeAffinityBackend,
         submitted_at: queuedAt,
         completed_at: null,
-        duration_seconds: null,
-        ligand_smiles: storedLigandSmiles
+        duration_seconds: null
       };
 
       try {
@@ -3590,15 +3819,24 @@ export function ProjectDetailPage() {
   }, [project?.task_id, project?.task_state, projectTasks]);
 
   useEffect(() => {
-    if (!project?.task_id) return;
-    if (project.task_state !== 'SUCCESS') return;
-    if (structureText) return;
-    const runtimeTask = projectTasks.find((item) => item.task_id === project.task_id);
-    void pullResultForViewer(project.task_id, {
-      taskRowId: runtimeTask?.id,
-      persistProject: true
+    const contextTask = statusContextTaskRow || runtimeResultTask;
+    const contextTaskId = String(contextTask?.task_id || '').trim();
+    if (!contextTaskId) return;
+    if (contextTask?.task_state !== 'SUCCESS') return;
+    if (structureTaskId === contextTaskId && structureText.trim()) return;
+
+    const activeRuntimeTaskId = String(project?.task_id || '').trim();
+    void pullResultForViewer(contextTaskId, {
+      taskRowId: contextTask?.id,
+      persistProject: activeRuntimeTaskId === contextTaskId
     });
-  }, [project?.task_id, project?.task_state, projectTasks, structureText]);
+  }, [
+    statusContextTaskRow,
+    runtimeResultTask,
+    project?.task_id,
+    structureTaskId,
+    structureText
+  ]);
 
   useEffect(() => {
     if (workspaceTab !== 'constraints') return;
@@ -4446,17 +4684,28 @@ export function ProjectDetailPage() {
   const affinityPreviewLigandOverlayText = affinityPreviewLigandStructureText;
   const affinityPreviewLigandOverlayFormat: 'cif' | 'pdb' = affinityPreviewLigandStructureFormat;
   const affinityResultLigandSmiles = (() => {
+    const fromAffinityMap = readLigandSmilesFromMap(snapshotAffinity, selectedResultLigandChainId);
+    const fromConfidenceMap = readLigandSmilesFromMap(snapshotConfidence, selectedResultLigandChainId);
     const fromAffinityMetrics = readFirstNonEmptyStringMetric(snapshotAffinity, [
       'ligand_smiles',
       'ligandSmiles',
       'smiles',
       'ligand.smiles'
     ]);
+    const fromConfidenceMetrics = readFirstNonEmptyStringMetric(snapshotConfidence, [
+      'ligand_smiles',
+      'ligandSmiles',
+      'smiles',
+      'ligand.smiles'
+    ]);
     return (
-      affinityLigandSmiles.trim() ||
+      String(statusContextTaskRow?.ligand_smiles || '').trim() ||
       String(activeResultTask?.ligand_smiles || '').trim() ||
-      String(project?.ligand_smiles || '').trim() ||
-      fromAffinityMetrics
+      fromAffinityMap ||
+      fromConfidenceMap ||
+      fromAffinityMetrics ||
+      fromConfidenceMetrics ||
+      affinityLigandSmiles.trim()
     );
   })();
   const affinityDisplayStructureText = displayStructureText.trim() ? displayStructureText : affinityPreviewStructureText;

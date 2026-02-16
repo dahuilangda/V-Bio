@@ -17,6 +17,13 @@ if (ENV.apiToken) {
 }
 
 const BACKEND_TIMEOUT_MS = 20000;
+const BOLTZ2SCORE_AFFINITY_PROFILE = Object.freeze({
+  structureRefine: false,
+  recyclingSteps: 7,
+  samplingSteps: 1,
+  diffusionSamples: 1,
+  maxParallelSamples: 1
+});
 
 async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = BACKEND_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();
@@ -248,6 +255,8 @@ export async function submitAffinityScoring(input: AffinitySubmitInput): Promise
   }
   const backend = String(input.backend || 'boltz').trim().toLowerCase();
   const useProtenix = backend === 'protenix';
+  const normalizedSeed =
+    typeof input.seed === 'number' && Number.isFinite(input.seed) ? Math.max(0, Math.floor(input.seed)) : null;
 
   const form = new FormData();
   form.append(
@@ -279,6 +288,16 @@ export async function submitAffinityScoring(input: AffinitySubmitInput): Promise
   }
   if (input.affinityRefine) {
     form.append('affinity_refine', 'true');
+  }
+  if (normalizedSeed !== null) {
+    form.append('seed', String(normalizedSeed));
+  }
+  if (!useProtenix) {
+    form.append('structure_refine', String(BOLTZ2SCORE_AFFINITY_PROFILE.structureRefine).toLowerCase());
+    form.append('recycling_steps', String(BOLTZ2SCORE_AFFINITY_PROFILE.recyclingSteps));
+    form.append('sampling_steps', String(BOLTZ2SCORE_AFFINITY_PROFILE.samplingSteps));
+    form.append('diffusion_samples', String(BOLTZ2SCORE_AFFINITY_PROFILE.diffusionSamples));
+    form.append('max_parallel_samples', String(BOLTZ2SCORE_AFFINITY_PROFILE.maxParallelSamples));
   }
   form.append('priority', 'high');
   const endpoint = useProtenix ? '/api/protenix2score' : '/api/boltz2score';
@@ -385,12 +404,6 @@ function parseJsonObject(text: string | null | undefined): Record<string, unknow
   }
 }
 
-function extractRecordIdFromStructureName(name: string): string | null {
-  const base = getBaseName(name);
-  if (!base.includes('_model_')) return null;
-  return base.split('_model_')[0] || null;
-}
-
 function choosePreferredPath(candidates: string[]): string | null {
   if (!candidates.length) return null;
   return [...candidates].sort((a, b) => {
@@ -403,7 +416,7 @@ function choosePreferredPath(candidates: string[]): string | null {
 
 function chooseBestBoltzStructureFile(names: string[]): string | null {
   const candidates = names
-    .filter((name) => /\.(cif|pdb)$/i.test(name) && !name.toLowerCase().includes('af3/output/'))
+    .filter((name) => /\.(cif|mmcif|pdb)$/i.test(name) && !name.toLowerCase().includes('af3/output/'))
     .map((name) => {
       const lower = name.toLowerCase();
       let score = 100;
@@ -416,37 +429,95 @@ function chooseBestBoltzStructureFile(names: string[]): string | null {
   return candidates[0]?.name ?? null;
 }
 
-function chooseBestBoltzConfidenceFile(names: string[], selectedStructure: string | null): string | null {
-  const candidates = names.filter((name) => {
+function boltzConfidenceHeuristicScore(path: string): number {
+  const lower = path.toLowerCase();
+  let score = 100;
+  if (lower.includes('confidence_')) score -= 5;
+  if (lower.includes('model_0') || lower.includes('ranked_0')) score -= 20;
+  else if (lower.includes('model_') || lower.includes('ranked_')) score -= 5;
+  return score;
+}
+
+function resolveBoltzStructureForConfidence(names: string[], confidencePath: string): string | null {
+  const base = getBaseName(confidencePath);
+  if (!base.toLowerCase().startsWith('confidence_') || !base.toLowerCase().endsWith('.json')) {
+    return null;
+  }
+  const structureStem = base.slice('confidence_'.length, -'.json'.length);
+  if (!structureStem.trim()) return null;
+
+  const dir = confidencePath.includes('/') ? confidencePath.slice(0, confidencePath.lastIndexOf('/')) : '';
+  const withDir = (file: string) => (dir ? `${dir}/${file}` : file);
+  const candidates = [withDir(`${structureStem}.cif`), withDir(`${structureStem}.mmcif`), withDir(`${structureStem}.pdb`)];
+  return candidates.find((candidate) => names.includes(candidate)) || null;
+}
+
+async function chooseBestBoltzStructureAndConfidence(
+  zip: JSZip,
+  names: string[]
+): Promise<{ structureFile: string | null; confidenceFile: string | null }> {
+  const confidenceCandidates = names.filter((name) => {
     const lower = name.toLowerCase();
     return lower.endsWith('.json') && lower.includes('confidence') && !lower.includes('af3/output/');
   });
-  if (!candidates.length) return null;
 
-  const selectedRecordId = selectedStructure ? extractRecordIdFromStructureName(selectedStructure) : null;
-  if (selectedRecordId) {
-    const preferredSuffix = `confidence_${selectedRecordId}_model_0.json`;
-    const preferred = candidates.find((name) => name.toLowerCase().endsWith(preferredSuffix.toLowerCase()));
-    if (preferred) return preferred;
+  if (confidenceCandidates.length === 0) {
+    return {
+      structureFile: chooseBestBoltzStructureFile(names),
+      confidenceFile: null
+    };
   }
 
-  const scored = candidates
-    .map((name) => {
-      const lower = name.toLowerCase();
-      let score = 100;
-      if (lower.includes('confidence_')) score -= 5;
-      if (lower.includes('model_0') || lower.includes('ranked_0')) score -= 20;
-      else if (lower.includes('model_') || lower.includes('ranked_')) score -= 5;
-      return { name, score };
+  const scoredCandidates = await Promise.all(
+    confidenceCandidates.map(async (file) => {
+      const payload = await readZipJson(zip, file);
+      return {
+        file,
+        confidenceScore: payload ? toFiniteNumber(payload.confidence_score) : null,
+        complexPlddt: payload ? toFiniteNumber(payload.complex_plddt) : null,
+        iptm: payload ? toFiniteNumber(payload.iptm) : null,
+        heuristicScore: boltzConfidenceHeuristicScore(file)
+      };
     })
-    .sort((a, b) => a.score - b.score || a.name.length - b.name.length);
+  );
 
-  return scored[0]?.name ?? null;
+  scoredCandidates.sort((a, b) => {
+    const aHasConfidence = a.confidenceScore !== null ? 1 : 0;
+    const bHasConfidence = b.confidenceScore !== null ? 1 : 0;
+    if (aHasConfidence !== bHasConfidence) return bHasConfidence - aHasConfidence;
+    if (a.confidenceScore !== null && b.confidenceScore !== null && a.confidenceScore !== b.confidenceScore) {
+      return b.confidenceScore - a.confidenceScore;
+    }
+
+    const aHasPlddt = a.complexPlddt !== null ? 1 : 0;
+    const bHasPlddt = b.complexPlddt !== null ? 1 : 0;
+    if (aHasPlddt !== bHasPlddt) return bHasPlddt - aHasPlddt;
+    if (a.complexPlddt !== null && b.complexPlddt !== null && a.complexPlddt !== b.complexPlddt) {
+      return b.complexPlddt - a.complexPlddt;
+    }
+
+    const aHasIptm = a.iptm !== null ? 1 : 0;
+    const bHasIptm = b.iptm !== null ? 1 : 0;
+    if (aHasIptm !== bHasIptm) return bHasIptm - aHasIptm;
+    if (a.iptm !== null && b.iptm !== null && a.iptm !== b.iptm) {
+      return b.iptm - a.iptm;
+    }
+
+    if (a.heuristicScore !== b.heuristicScore) return a.heuristicScore - b.heuristicScore;
+    return a.file.length - b.file.length;
+  });
+
+  const selectedConfidence = scoredCandidates[0]?.file || null;
+  const matchedStructure = selectedConfidence ? resolveBoltzStructureForConfidence(names, selectedConfidence) : null;
+  return {
+    structureFile: matchedStructure || chooseBestBoltzStructureFile(names),
+    confidenceFile: selectedConfidence
+  };
 }
 
 function chooseBestAf3StructureFile(names: string[]): string | null {
   const candidates = names
-    .filter((name) => /\.(cif|pdb)$/i.test(name) && name.toLowerCase().includes('af3/output/'))
+    .filter((name) => /\.(cif|mmcif|pdb)$/i.test(name) && name.toLowerCase().includes('af3/output/'))
     .map((name) => {
       const lower = name.toLowerCase();
       let score = 100;
@@ -845,6 +916,10 @@ function applyLigandAtomPlddtsByChainToStructure(
 
 const WATER_COMP_IDS = new Set(['HOH', 'WAT', 'DOD', 'SOL']);
 const POLYMER_COMP_IDS = new Set([
+  'ACE',
+  'NME',
+  'NMA',
+  'NH2',
   'ALA',
   'ARG',
   'ASN',
@@ -921,6 +996,25 @@ function normalizeLigandAtomPlddts(values: number[]): number[] {
   return normalized;
 }
 
+function normalizeChainToken(value: string): string {
+  return value.trim().toUpperCase();
+}
+
+function chainIdMatches(candidate: string, preferred: string): boolean {
+  const normalizedCandidate = normalizeChainToken(candidate);
+  const normalizedPreferred = normalizeChainToken(preferred);
+  if (!normalizedCandidate || !normalizedPreferred) return false;
+  if (normalizedCandidate === normalizedPreferred) return true;
+
+  const compactCandidate = normalizedCandidate.replace(/[^A-Z0-9]/g, '');
+  const compactPreferred = normalizedPreferred.replace(/[^A-Z0-9]/g, '');
+  if (!compactCandidate || !compactPreferred) return false;
+  if (compactCandidate === compactPreferred) return true;
+  if (compactCandidate.startsWith(compactPreferred) || compactCandidate.endsWith(compactPreferred)) return true;
+  if (compactPreferred.startsWith(compactCandidate) || compactPreferred.endsWith(compactCandidate)) return true;
+  return false;
+}
+
 function normalizeLigandAtomPlddtsByChain(value: unknown): Record<string, number[]> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const byChain: Record<string, number[]> = {};
@@ -931,6 +1025,73 @@ function normalizeLigandAtomPlddtsByChain(value: unknown): Record<string, number
     if (parsed.length === 0) continue;
     byChain[chainId] = parsed;
   }
+  return byChain;
+}
+
+function collectLigandCoverageChainIds(confidence: Record<string, unknown>): Set<string> {
+  const ids = new Set<string>();
+  const add = (value: unknown) => {
+    if (typeof value !== 'string') return;
+    const normalized = normalizeChainToken(value);
+    if (normalized) ids.add(normalized);
+  };
+
+  const ligandCoverage = confidence.ligand_atom_coverage;
+  if (Array.isArray(ligandCoverage)) {
+    for (const row of ligandCoverage) {
+      if (!row || typeof row !== 'object') continue;
+      add((row as Record<string, unknown>).chain);
+    }
+  }
+
+  const chainCoverage = confidence.chain_atom_coverage;
+  if (Array.isArray(chainCoverage)) {
+    for (const row of chainCoverage) {
+      if (!row || typeof row !== 'object') continue;
+      const entry = row as Record<string, unknown>;
+      const molType = String(entry.mol_type || '').trim().toLowerCase();
+      if (!molType) continue;
+      if (molType.includes('nonpolymer') || molType.includes('ligand')) {
+        add(entry.chain);
+      }
+    }
+  }
+  return ids;
+}
+
+function selectLigandAtomPlddtsByChain(
+  confidence: Record<string, unknown>,
+  byChain: Record<string, number[]>
+): Record<string, number[]> {
+  const entries = Object.entries(byChain);
+  if (entries.length <= 1) return byChain;
+
+  const selectByHints = (hints: Set<string>): Record<string, number[]> | null => {
+    if (hints.size === 0) return null;
+    const filtered = Object.fromEntries(
+      entries.filter(([chainId]) =>
+        Array.from(hints).some((hint) => chainIdMatches(chainId, hint) || chainIdMatches(hint, chainId))
+      )
+    ) as Record<string, number[]>;
+    return Object.keys(filtered).length > 0 ? filtered : null;
+  };
+
+  const coverageSelected = selectByHints(collectLigandCoverageChainIds(confidence));
+  if (coverageSelected) return coverageSelected;
+
+  const preferredHints = new Set<string>();
+  for (const value of [
+    confidence.requested_ligand_chain_id,
+    confidence.ligand_chain_id,
+    confidence.model_ligand_chain_id
+  ]) {
+    if (typeof value !== 'string') continue;
+    const normalized = normalizeChainToken(value);
+    if (normalized) preferredHints.add(normalized);
+  }
+  const preferredSelected = selectByHints(preferredHints);
+  if (preferredSelected) return preferredSelected;
+
   return byChain;
 }
 
@@ -1807,12 +1968,13 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
   const isAf3 = names.some((name) => name.toLowerCase().includes('af3/output/'));
   const isProtenix = names.some((name) => name.toLowerCase().includes('protenix/output/'));
   const protenixSelection = isProtenix ? await chooseBestProtenixStructureAndConfidence(zip, names) : null;
+  const boltzSelection = !isAf3 && !isProtenix ? await chooseBestBoltzStructureAndConfidence(zip, names) : null;
 
   const structureFile = isAf3
     ? chooseBestAf3StructureFile(names)
     : isProtenix
       ? protenixSelection?.structureFile || null
-      : chooseBestBoltzStructureFile(names);
+      : boltzSelection?.structureFile || null;
   if (!structureFile) return null;
   const structureFormat: 'cif' | 'pdb' = getBaseName(structureFile).toLowerCase().endsWith('.pdb') ? 'pdb' : 'cif';
 
@@ -1895,7 +2057,7 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
   } else {
     const confFile = isProtenix
       ? protenixSelection?.confidenceFile || null
-      : chooseBestBoltzConfidenceFile(names, structureFile);
+      : boltzSelection?.confidenceFile || null;
     const parsedConfidence = await readZipJson(zip, confFile);
     if (parsedConfidence) {
       confidence = compactConfidenceForStorage({
@@ -1932,13 +2094,21 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
     }
   }
 
-  const existingLigandAtomPlddts = normalizeLigandAtomPlddts(
+  const existingLigandAtomPlddtsFlat = normalizeLigandAtomPlddts(
     toFiniteNumberArray((confidence as Record<string, unknown>).ligand_atom_plddts)
   );
   const existingLigandAtomPlddtsByChainRaw = normalizeLigandAtomPlddtsByChain(
     (confidence as Record<string, unknown>).ligand_atom_plddts_by_chain
   );
-  let ligandAtomPlddtsByChainForRender = existingLigandAtomPlddtsByChainRaw;
+  const existingLigandAtomPlddtsByChain = selectLigandAtomPlddtsByChain(
+    confidence as Record<string, unknown>,
+    existingLigandAtomPlddtsByChainRaw
+  );
+  const existingLigandAtomPlddtsFromChainMap = pickFirstLigandAtomPlddts(existingLigandAtomPlddtsByChain);
+  const existingLigandAtomPlddts =
+    existingLigandAtomPlddtsFromChainMap.length > 0 ? existingLigandAtomPlddtsFromChainMap : existingLigandAtomPlddtsFlat;
+
+  let ligandAtomPlddtsByChainForRender = existingLigandAtomPlddtsByChain;
   if (Object.keys(ligandAtomPlddtsByChainForRender).length === 0 && existingLigandAtomPlddts.length > 0) {
     const singleLigandChainId = inferSingleLigandChainIdFromStructure(structureText, structureFormat);
     if (singleLigandChainId) {

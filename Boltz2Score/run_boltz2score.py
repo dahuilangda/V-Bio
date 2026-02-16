@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Boltz2 scoring-only inference (skip structure generation)."""
+"""Run Boltz2 confidence inference with optional structure refinement."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import os
 import warnings
 from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import torch
 from pytorch_lightning import Trainer, seed_everything
@@ -28,7 +28,46 @@ from boltz.model.models.boltz2 import Boltz2
 
 
 class Boltz2ScoreModel(Boltz2):
-    """Boltz2 model with scoring-only predict_step."""
+    """Boltz2 model with an explicit coordinate output policy."""
+
+    def _coords_from_input_batch(self, batch: dict) -> torch.Tensor:
+        """Build prediction coordinates directly from input structure coordinates."""
+        coords = batch["coords"]
+        if coords.dim() == 4:
+            # (B, S, L, 3) -> use first structure sample per batch item.
+            coords = coords[:, 0]
+        if coords.dim() == 3:
+            if coords.size(0) != 1:
+                raise RuntimeError(
+                    "Input-coordinate mode only supports batch size 1 for predict; "
+                    f"got coords shape {tuple(coords.shape)}."
+                )
+            coords = coords[0]
+        if coords.dim() != 2 or coords.size(-1) != 3:
+            raise RuntimeError(
+                f"Unexpected input coords shape {tuple(coords.shape)} in input-coordinate mode."
+            )
+        num_samples = int(self.predict_args.get("diffusion_samples", 1))
+        return coords.unsqueeze(0).repeat(num_samples, 1, 1)
+
+    def _coords_from_structure_samples(self, out: dict) -> torch.Tensor:
+        """Build prediction coordinates from diffusion/refinement samples."""
+        coords = out.get("sample_atom_coords")
+        if coords is None:
+            raise RuntimeError(
+                "Expected 'sample_atom_coords' in model output when structure refinement is enabled."
+            )
+        return coords
+
+    def _resolve_coords(self, batch: dict, out: dict) -> torch.Tensor:
+        source = str(self.predict_args.get("coordinate_source", "sample")).strip().lower()
+        if source == "sample":
+            return self._coords_from_structure_samples(out)
+        if source == "input":
+            return self._coords_from_input_batch(batch)
+        raise ValueError(
+            f"Unsupported coordinate_source={source!r}. Expected 'sample' or 'input'."
+        )
 
     def predict_step(self, batch, batch_idx: int, dataloader_idx: int = 0) -> dict:
         out = self(
@@ -45,59 +84,39 @@ class Boltz2ScoreModel(Boltz2):
         pred_dict["token_masks"] = batch["token_pad_mask"]
         pred_dict["s"] = out["s"]
         pred_dict["z"] = out["z"]
-
-        # Debug: check if sample_atom_coords is in output
-        print(f"DEBUG: sample_atom_coords in out: {'sample_atom_coords' in out}")
-        print(f"DEBUG: skip_run_structure: {self.skip_run_structure}")
-        if "sample_atom_coords" in out:
-            print(f"DEBUG: sample_atom_coords shape: {out['sample_atom_coords'].shape}")
-
-        # Always use input coordinates for scoring-only mode
-        # When skip_run_structure=True, diffusion doesn't run so we use input coords
-        coords = batch["coords"]
-        if coords.dim() == 4:
-            coords = coords[:, 0]  # (B, L, 3)
-        if coords.dim() == 3:
-            coords = coords[0]  # (L, 3) assuming batch size 1
-        num_samples = int(self.predict_args.get("diffusion_samples", 1))
-        pred_dict["coords"] = coords.unsqueeze(0).repeat(num_samples, 1, 1)
+        pred_dict["coords"] = self._resolve_coords(batch, out)
 
         if self.confidence_prediction:
-            if "pde" in out:
-                pred_dict["pde"] = out["pde"]
-            if "plddt" in out:
-                pred_dict["plddt"] = out["plddt"]
+            for key in (
+                "pde",
+                "plddt",
+                "complex_plddt",
+                "complex_iplddt",
+                "complex_pde",
+                "complex_ipde",
+                "pae",
+                "ptm",
+                "iptm",
+                "ligand_iptm",
+                "protein_iptm",
+                "pair_chains_iptm",
+            ):
+                if key in out:
+                    pred_dict[key] = out[key]
 
-            if "complex_plddt" in out:
-                pred_dict["complex_plddt"] = out["complex_plddt"]
-            if "complex_iplddt" in out:
-                pred_dict["complex_iplddt"] = out["complex_iplddt"]
-            if "complex_pde" in out:
-                pred_dict["complex_pde"] = out["complex_pde"]
-            if "complex_ipde" in out:
-                pred_dict["complex_ipde"] = out["complex_ipde"]
-
-            if "ptm" in out:
-                pred_dict["ptm"] = out["ptm"]
-            if "iptm" in out:
-                pred_dict["iptm"] = out["iptm"]
-            if "ligand_iptm" in out:
-                pred_dict["ligand_iptm"] = out["ligand_iptm"]
-            if "protein_iptm" in out:
-                pred_dict["protein_iptm"] = out["protein_iptm"]
-            if "pair_chains_iptm" in out:
-                pred_dict["pair_chains_iptm"] = out["pair_chains_iptm"]
-
-            if ("complex_plddt" in out) and ("ptm" in out):
-                if "iptm" in out and not torch.allclose(
-                    out["iptm"], torch.zeros_like(out["iptm"])
-                ):
-                    iptm_or_ptm = out["iptm"]
+            if "complex_plddt" in out and ("ptm" in out or "iptm" in out):
+                iptm = out.get("iptm")
+                ptm = out.get("ptm")
+                if iptm is not None and not torch.allclose(iptm, torch.zeros_like(iptm)):
+                    iptm_or_ptm = iptm
+                elif ptm is not None:
+                    iptm_or_ptm = ptm
                 else:
-                    iptm_or_ptm = out["ptm"]
-                pred_dict["confidence_score"] = (
-                    4 * out["complex_plddt"] + iptm_or_ptm
-                ) / 5
+                    iptm_or_ptm = None
+                if iptm_or_ptm is not None:
+                    pred_dict["confidence_score"] = (
+                        4 * out["complex_plddt"] + iptm_or_ptm
+                    ) / 5
 
         return pred_dict
 
@@ -131,16 +150,17 @@ def run_scoring(
     accelerator: str = "gpu",
     num_workers: int = 2,
     output_format: str = "mmcif",
-    recycling_steps: int = 3,
+    recycling_steps: int = 7,
     sampling_steps: int = 1,
     diffusion_samples: int = 1,
     max_parallel_samples: int = 1,
+    structure_refine: bool = False,
     step_scale: float = 1.5,
     no_kernels: bool = False,
     seed: Optional[int] = None,
     trainer_precision: int | str | None = None,
 ) -> None:
-    """Run scoring-only inference on a processed directory."""
+    """Run confidence inference on a processed directory."""
     warnings.filterwarnings(
         "ignore", ".*that has Tensor Cores. To properly utilize them.*"
     )
@@ -203,15 +223,23 @@ def run_scoring(
     steering_args.physical_guidance_update = False
     steering_args.contact_guidance_update = False
 
+    coordinate_source: Literal["sample", "input"] = "sample" if structure_refine else "input"
     predict_args = {
         "recycling_steps": recycling_steps,
         "sampling_steps": sampling_steps,
         "diffusion_samples": diffusion_samples,
         "max_parallel_samples": max_parallel_samples,
+        "coordinate_source": coordinate_source,
         "write_confidence_summary": True,
         "write_full_pae": False,
         "write_full_pde": False,
     }
+    print(
+        "[Info] Boltz2Score inference mode="
+        f"{'structure_refine' if structure_refine else 'input_structure_only'}; "
+        f"recycling_steps={recycling_steps}, sampling_steps={sampling_steps}, "
+        f"diffusion_samples={diffusion_samples}, max_parallel_samples={max_parallel_samples}."
+    )
 
     model_module = Boltz2ScoreModel.load_from_checkpoint(
         checkpoint,
@@ -226,7 +254,7 @@ def run_scoring(
         steering_args=asdict(steering_args),
         confidence_prediction=True,
         affinity_prediction=False,
-        skip_run_structure=True,
+        skip_run_structure=not structure_refine,
         run_trunk_and_structure=True,
     )
     model_module.eval()
@@ -273,7 +301,7 @@ def run_scoring(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run Boltz2 scoring-only inference (skip diffusion)."
+        description="Run Boltz2 confidence inference with optional structure refinement."
     )
     parser.add_argument(
         "--processed_dir",
@@ -312,10 +340,35 @@ def main() -> None:
         default="mmcif",
         choices=["pdb", "mmcif"],
     )
-    parser.add_argument("--recycling_steps", type=int, default=3)
-    parser.add_argument("--sampling_steps", type=int, default=1)
-    parser.add_argument("--diffusion_samples", type=int, default=1)
+    parser.add_argument(
+        "--recycling_steps",
+        type=int,
+        default=None,
+        help="Override recycling steps. Defaults depend on refinement mode.",
+    )
+    parser.add_argument(
+        "--sampling_steps",
+        type=int,
+        default=None,
+        help="Override sampling steps. Defaults depend on refinement mode.",
+    )
+    parser.add_argument(
+        "--diffusion_samples",
+        type=int,
+        default=None,
+        help="Override diffusion sample count. Defaults depend on refinement mode.",
+    )
     parser.add_argument("--max_parallel_samples", type=int, default=1)
+    parser.add_argument(
+        "--structure_refine",
+        action="store_true",
+        help="Enable diffusion structure refinement before confidence scoring.",
+    )
+    parser.add_argument(
+        "--no_structure_refine",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--step_scale", type=float, default=1.5)
     parser.add_argument("--no_kernels", action="store_true")
     parser.add_argument("--seed", type=int, default=None)
@@ -328,6 +381,20 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    if args.structure_refine and args.no_structure_refine:
+        raise ValueError("Cannot set both --structure_refine and --no_structure_refine.")
+
+    structure_refine = bool(args.structure_refine and not args.no_structure_refine)
+
+    if structure_refine:
+        resolved_recycling_steps = args.recycling_steps if args.recycling_steps is not None else 3
+        resolved_sampling_steps = args.sampling_steps if args.sampling_steps is not None else 200
+        resolved_diffusion_samples = args.diffusion_samples if args.diffusion_samples is not None else 5
+    else:
+        resolved_recycling_steps = args.recycling_steps if args.recycling_steps is not None else 7
+        resolved_sampling_steps = args.sampling_steps if args.sampling_steps is not None else 1
+        resolved_diffusion_samples = args.diffusion_samples if args.diffusion_samples is not None else 1
+
     run_scoring(
         processed_dir=Path(args.processed_dir),
         output_dir=Path(args.output_dir),
@@ -337,10 +404,11 @@ def main() -> None:
         accelerator=args.accelerator,
         num_workers=args.num_workers,
         output_format=args.output_format,
-        recycling_steps=args.recycling_steps,
-        sampling_steps=args.sampling_steps,
-        diffusion_samples=args.diffusion_samples,
+        recycling_steps=resolved_recycling_steps,
+        sampling_steps=resolved_sampling_steps,
+        diffusion_samples=resolved_diffusion_samples,
         max_parallel_samples=args.max_parallel_samples,
+        structure_refine=structure_refine,
         step_scale=args.step_scale,
         no_kernels=args.no_kernels,
         seed=args.seed,

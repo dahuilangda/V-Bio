@@ -215,6 +215,7 @@ export interface AffinitySubmitInput {
   inputStructureText: string;
   inputStructureName?: string;
   backend?: string;
+  seed?: number | null;
   enableAffinity: boolean;
   ligandSmiles?: string;
   targetChainIds?: string[];

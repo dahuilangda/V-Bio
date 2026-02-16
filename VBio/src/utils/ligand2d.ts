@@ -17,39 +17,96 @@ function colorForConfidence(value: number): [number, number, number] {
   return [0.16, 0.47, 0.9];
 }
 
+function normalizeConfidenceValues(values: number[] | null | undefined): number[] {
+  if (!Array.isArray(values)) return [];
+  return values
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+    .map((value) => normalizePlddt(value));
+}
+
+function readAtomCount(mol: { get_num_atoms?: () => number }): number {
+  return typeof mol.get_num_atoms === 'function' ? Math.max(0, Math.floor(mol.get_num_atoms())) : 0;
+}
+
+function tryReadSmilesVariants(mol: { get_smiles?: (details?: string) => string }): string[] {
+  if (typeof mol.get_smiles !== 'function') return [];
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  const options: Array<string | undefined> = [
+    JSON.stringify({ canonical: false, allHsExplicit: false }),
+    JSON.stringify({ canonical: false }),
+    undefined
+  ];
+
+  for (const option of options) {
+    try {
+      const value = (mol.get_smiles(option) || '').trim();
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      candidates.push(value);
+    } catch {
+      // Skip unsupported option payloads.
+    }
+  }
+  return candidates;
+}
+
+function tryBuildExactConfidenceMol(
+  rdkit: RDKitModule,
+  sourceMol: { get_smiles?: (details?: string) => string },
+  expectedAtomCount: number
+): { mol: ReturnType<RDKitModule['get_mol']>; atomCount: number } | null {
+  if (expectedAtomCount <= 0) return null;
+  const smilesCandidates = tryReadSmilesVariants(sourceMol);
+  for (const smiles of smilesCandidates) {
+    const candidateMol = rdkit.get_mol(smiles);
+    if (!candidateMol) continue;
+    const count = readAtomCount(candidateMol);
+    if (count === expectedAtomCount) {
+      return { mol: candidateMol, atomCount: count };
+    }
+    candidateMol.delete();
+  }
+  return null;
+}
+
+function buildPerAtomConfidenceWithMol(
+  rdkit: RDKitModule,
+  values: number[] | null | undefined,
+  confidenceHint: number | null | undefined,
+  primaryMol: ReturnType<RDKitModule['get_mol']>
+): { renderMol: ReturnType<RDKitModule['get_mol']>; atomCount: number; perAtomConfidence: number[] } {
+  const atomCount = readAtomCount(primaryMol || {});
+  const exactFromPrimary = buildPerAtomConfidence(values, atomCount, confidenceHint);
+  if (exactFromPrimary.length > 0 || !primaryMol) {
+    return { renderMol: primaryMol, atomCount, perAtomConfidence: exactFromPrimary };
+  }
+
+  const normalized = normalizeConfidenceValues(values);
+  if (normalized.length === 0) {
+    return { renderMol: primaryMol, atomCount, perAtomConfidence: [] };
+  }
+
+  const exactMol = tryBuildExactConfidenceMol(rdkit, primaryMol, normalized.length);
+  if (!exactMol || !exactMol.mol) {
+    return { renderMol: primaryMol, atomCount, perAtomConfidence: [] };
+  }
+
+  return {
+    renderMol: exactMol.mol,
+    atomCount: exactMol.atomCount,
+    perAtomConfidence: normalized
+  };
+}
+
 function buildPerAtomConfidence(
   values: number[] | null | undefined,
   atomCount: number,
   _confidenceHint: number | null | undefined
 ): number[] {
   if (atomCount <= 0) return [];
-  const normalized = values
-    ?.filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
-    .map((value) => normalizePlddt(value));
-  if (normalized && normalized.length > 0) {
-    if (normalized.length === atomCount) return normalized;
-
-    // Deterministic remapping: project confidence series onto RDKit atom count.
-    // This preserves relative confidence trend even when upstream atom indexing differs.
-    if (normalized.length > atomCount) {
-      const reduced: number[] = [];
-      for (let i = 0; i < atomCount; i += 1) {
-        const start = Math.floor((i * normalized.length) / atomCount);
-        const end = Math.max(start + 1, Math.floor(((i + 1) * normalized.length) / atomCount));
-        const chunk = normalized.slice(start, end);
-        const avg = chunk.reduce((sum, item) => sum + item, 0) / chunk.length;
-        reduced.push(normalizePlddt(avg));
-      }
-      return reduced;
-    }
-
-    const expanded: number[] = [];
-    for (let i = 0; i < atomCount; i += 1) {
-      const mapped = Math.floor((i * normalized.length) / atomCount);
-      expanded.push(normalized[Math.min(normalized.length - 1, Math.max(0, mapped))]);
-    }
-    return expanded;
-  }
+  const normalized = normalizeConfidenceValues(values);
+  if (normalized.length === atomCount) return normalized;
   return [];
 }
 
@@ -83,17 +140,19 @@ export function renderLigand2DSvg(
     throw new Error('SMILES is empty.');
   }
 
-  const mol = rdkit.get_mol(value);
-  if (!mol) {
+  const sourceMol = rdkit.get_mol(value);
+  if (!sourceMol) {
     throw new Error('Invalid SMILES for RDKit.');
   }
+  const resolved = buildPerAtomConfidenceWithMol(rdkit, atomConfidences, confidenceHint, sourceMol);
+  const mol = resolved.renderMol || sourceMol;
+  const atomCount = resolved.atomCount;
+  const perAtomConfidence = resolved.perAtomConfidence;
 
   try {
     mol.set_new_coords?.();
     mol.normalize_depiction?.();
     let rawSvg = '';
-    const atomCount = typeof mol.get_num_atoms === 'function' ? Math.max(0, Math.floor(mol.get_num_atoms())) : 0;
-    const perAtomConfidence = buildPerAtomConfidence(atomConfidences, atomCount, confidenceHint);
     if (typeof mol.get_svg_with_highlights === 'function') {
       try {
         const details: Record<string, unknown> = {
@@ -138,5 +197,8 @@ export function renderLigand2DSvg(
     return injectReadabilityStyle(rawSvg);
   } finally {
     mol.delete();
+    if (mol !== sourceMol) {
+      sourceMol.delete();
+    }
   }
 }
