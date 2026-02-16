@@ -1535,6 +1535,7 @@ def handle_boltz2score():
     requested_max_parallel_samples = _parse_int(request.form.get('max_parallel_samples'))
     requested_seed = _parse_int(request.form.get('seed'))
     requested_structure_refine = _parse_bool(request.form.get('structure_refine'), False)
+    requested_use_msa_server = _parse_bool(request.form.get('use_msa_server'), False)
     ligand_smiles_map = {}
     ligand_smiles_map_raw = request.form.get('ligand_smiles_map')
     if ligand_smiles_map_raw:
@@ -1669,6 +1670,7 @@ def handle_boltz2score():
     if requested_seed is not None:
         score_args['seed'] = requested_seed
     score_args['structure_refine'] = requested_structure_refine
+    score_args['use_msa_server'] = requested_use_msa_server
 
     priority = request.form.get('priority', 'default').lower()
     if priority not in ['high', 'default']:

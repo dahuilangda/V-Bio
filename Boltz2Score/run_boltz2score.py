@@ -150,7 +150,7 @@ def run_scoring(
     accelerator: str = "gpu",
     num_workers: int = 2,
     output_format: str = "mmcif",
-    recycling_steps: int = 7,
+    recycling_steps: int = 20,
     sampling_steps: int = 1,
     diffusion_samples: int = 1,
     max_parallel_samples: int = 1,

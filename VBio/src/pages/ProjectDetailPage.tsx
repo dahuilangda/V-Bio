@@ -1019,6 +1019,12 @@ function nonEmptyComponents(components: InputComponent[]): InputComponent[] {
   return components.filter((comp) => Boolean(comp.sequence));
 }
 
+function computeUseMsaFlag(components: InputComponent[], fallback = true): boolean {
+  const proteinComponents = components.filter((component) => component.type === 'protein');
+  if (proteinComponents.length === 0) return fallback;
+  return proteinComponents.some((component) => component.useMsa !== false);
+}
+
 function listIncompleteComponentOrders(components: InputComponent[]): number[] {
   const missing: number[] = [];
   components.forEach((component, index) => {
@@ -1081,8 +1087,7 @@ function normalizeConfigForBackend(inputConfig: ProjectInputConfig, backend: str
 
 function createDraftFingerprint(draft: DraftFields): string {
   const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, draft.backend);
-  const activeComponents = nonEmptyComponents(normalizedConfig.components);
-  const hasMsa = activeComponents.some((comp) => comp.type === 'protein' && comp.useMsa !== false);
+  const hasMsa = computeUseMsaFlag(normalizedConfig.components, draft.use_msa);
   return JSON.stringify({
     taskName: draft.taskName.trim(),
     taskSummary: draft.taskSummary.trim(),
@@ -1095,8 +1100,7 @@ function createDraftFingerprint(draft: DraftFields): string {
 
 function createComputationFingerprint(draft: DraftFields): string {
   const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, draft.backend);
-  const activeComponents = nonEmptyComponents(normalizedConfig.components);
-  const hasMsa = activeComponents.some((comp) => comp.type === 'protein' && comp.useMsa !== false);
+  const hasMsa = computeUseMsaFlag(normalizedConfig.components, draft.use_msa);
   return JSON.stringify({
     backend: draft.backend,
     use_msa: hasMsa,
@@ -2965,6 +2969,33 @@ export function ProjectDetailPage() {
     },
     [applyAffinityChainsToDraft, draft?.backend]
   );
+  const onAffinityUseMsaChange = useCallback((checked: boolean) => {
+    const nextChecked = Boolean(checked);
+    setDraft((prev) => {
+      if (!prev) return prev;
+      let changed = false;
+      const nextComponents = prev.inputConfig.components.map((component) => {
+        if (component.type !== 'protein') return component;
+        const current = component.useMsa !== false;
+        if (current === nextChecked) return component;
+        changed = true;
+        return {
+          ...component,
+          useMsa: nextChecked
+        };
+      });
+      const nextUseMsa = computeUseMsaFlag(nextComponents, nextChecked);
+      if (!changed && prev.use_msa === nextUseMsa) return prev;
+      return {
+        ...prev,
+        use_msa: nextUseMsa,
+        inputConfig: {
+          ...prev.inputConfig,
+          components: nextComponents
+        }
+      };
+    });
+  }, []);
 
   const affinityPersistedUploads = useMemo<AffinityPersistedUploads>(() => {
     if (!isAffinityWorkflow) {
@@ -3166,8 +3197,8 @@ export function ProjectDetailPage() {
       const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, persistedBackend);
       const activeComponents = nonEmptyComponents(normalizedConfig.components);
       const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(normalizedConfig);
-      const hasMsa =
-        workflowDef.key === 'affinity' ? false : activeComponents.some((comp) => comp.type === 'protein' && comp.useMsa !== false);
+      const msaComponents = workflowDef.key === 'affinity' ? normalizedConfig.components : activeComponents;
+      const hasMsa = computeUseMsaFlag(msaComponents, draft.use_msa);
       const storedProteinSequence = workflowDef.key === 'affinity' ? '' : proteinSequence;
       const storedLigandSmiles =
         workflowDef.key === 'affinity'
@@ -3437,6 +3468,7 @@ export function ProjectDetailPage() {
 
     try {
       const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, activeAffinityBackend);
+      const hasMsa = computeUseMsaFlag(normalizedConfig.components, draft.use_msa);
       const configWithAffinity: ProjectInputConfig = {
         ...normalizedConfig,
         properties: {
@@ -3461,7 +3493,7 @@ export function ProjectDetailPage() {
         taskName: draft.taskName.trim(),
         taskSummary: draft.taskSummary.trim(),
         backend: activeAffinityBackend,
-        use_msa: false,
+        use_msa: hasMsa,
         color_mode: draft.color_mode || 'white',
         inputConfig: configWithAffinity
       };
@@ -3474,7 +3506,7 @@ export function ProjectDetailPage() {
       try {
         await patch({
           backend: nextDraft.backend,
-          use_msa: false,
+          use_msa: nextDraft.use_msa,
           color_mode: nextDraft.color_mode,
           status_text: 'Draft saved'
         });
@@ -3501,7 +3533,8 @@ export function ProjectDetailPage() {
         enableAffinity: runAffinityActivity,
         ligandSmiles,
         targetChainIds: ligandChain ? targetChains : [],
-        ligandChainId: ligandChain
+        ligandChainId: ligandChain,
+        useMsa: nextDraft.use_msa
       });
 
       const queuedAt = new Date().toISOString();
@@ -3643,7 +3676,7 @@ export function ProjectDetailPage() {
 
     try {
       const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(normalizedConfig);
-      const hasMsa = activeComponents.some((comp) => comp.type === 'protein' && comp.useMsa !== false);
+      const hasMsa = computeUseMsaFlag(activeComponents, draft.use_msa);
       const persistenceWarnings: string[] = [];
 
       saveProjectInputConfig(project.id, normalizedConfig);
@@ -4070,6 +4103,7 @@ export function ProjectDetailPage() {
   const showQuickRunFab = showFloatingRunButton && !isRunRedirecting;
   const componentStepLabel = isAffinityWorkflow ? 'Component' : 'Components';
   const affinityBackend = String(draft.backend || 'boltz').trim().toLowerCase();
+  const affinityUseMsa = computeUseMsaFlag(draft.inputConfig.components, draft.use_msa);
   const affinityBackendSupportsActivity = affinityBackend === 'boltz' || affinityBackend === 'protenix';
   const affinityConfidenceOnlyForced = !affinityBackendSupportsActivity;
   const affinityConfidenceOnlyUiValue = affinityConfidenceOnlyForced ? true : affinityConfidenceOnly;
@@ -5029,6 +5063,7 @@ export function ProjectDetailPage() {
                 ligandFileName={affinityLigandFile?.name || ''}
                 ligandSmiles={affinityLigandSmiles}
                 ligandEditorInput={affinityLigandSmiles.trim() || affinityPreviewLigandStructureText}
+                useMsa={affinityUseMsa}
                 confidenceOnly={affinityConfidenceOnlyUiValue}
                 confidenceOnlyLocked={affinityConfidenceOnlyUiLocked}
                 confidenceOnlyHint={
@@ -5047,6 +5082,7 @@ export function ProjectDetailPage() {
                 resultsGridStyle={resultsGridStyle}
                 onTargetFileChange={onAffinityTargetFileChange}
                 onLigandFileChange={onAffinityLigandFileChange}
+                onUseMsaChange={onAffinityUseMsaChange}
                 onConfidenceOnlyChange={onAffinityConfidenceOnlyChange}
                 onLigandSmilesChange={setAffinityLigandSmiles}
                 onResizerPointerDown={handleResultsResizerPointerDown}

@@ -889,6 +889,29 @@ def main() -> None:
         default=None,
         help="Optional JSON map of ligand chain (or 'chain:resname') to SMILES for topology override.",
     )
+    parser.add_argument(
+        "--use_msa_server",
+        action="store_true",
+        help="Enable external MSA generation for protein chains during input preparation.",
+    )
+    parser.add_argument(
+        "--msa_server_url",
+        type=str,
+        default=os.environ.get("MSA_SERVER_URL", "https://api.colabfold.com"),
+        help="MSA server URL used when --use_msa_server is enabled.",
+    )
+    parser.add_argument(
+        "--msa_pairing_strategy",
+        type=str,
+        default="greedy",
+        help="MSA pairing strategy for multi-protein inputs (default: greedy).",
+    )
+    parser.add_argument(
+        "--max_msa_seqs",
+        type=int,
+        default=8192,
+        help="Maximum number of MSA sequences to keep per protein chain.",
+    )
 
     args = parser.parse_args()
 
@@ -901,7 +924,7 @@ def main() -> None:
         resolved_sampling_steps = args.sampling_steps if args.sampling_steps is not None else 200
         resolved_diffusion_samples = args.diffusion_samples if args.diffusion_samples is not None else 5
     else:
-        resolved_recycling_steps = args.recycling_steps if args.recycling_steps is not None else 7
+        resolved_recycling_steps = args.recycling_steps if args.recycling_steps is not None else 20
         resolved_sampling_steps = args.sampling_steps if args.sampling_steps is not None else 1
         resolved_diffusion_samples = args.diffusion_samples if args.diffusion_samples is not None else 1
 
@@ -1120,6 +1143,10 @@ def main() -> None:
         recursive=False,
         preloaded_custom_mols=preloaded_custom_mols,
         ligand_smiles_map=ligand_smiles_map if ligand_smiles_map else None,
+        use_msa_server=args.use_msa_server,
+        msa_server_url=args.msa_server_url,
+        msa_pairing_strategy=args.msa_pairing_strategy,
+        max_msa_seqs=args.max_msa_seqs,
     )
 
     # Run scoring

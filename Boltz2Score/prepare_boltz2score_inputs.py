@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import os
 import pickle
 from dataclasses import replace
 from pathlib import Path
@@ -17,6 +19,9 @@ from rdkit.Chem import rdDetermineBonds
 from boltz.main import get_cache_path
 import gemmi
 from boltz.data import const
+from boltz.data.msa.mmseqs2 import run_mmseqs2
+from boltz.data.parse.a3m import parse_a3m
+from boltz.data.parse.csv import parse_csv
 from boltz.data.parse.mmcif import parse_mmcif
 from boltz.data.types import ChainInfo, Manifest, Record
 
@@ -32,6 +37,183 @@ ION_RESNAMES = {
     "NA", "CL", "MG", "CA", "K", "ZN", "FE", "MN", "CU", "CO", "NI",
     "CD", "HG", "SR", "BA", "CS", "LI", "BR", "I",
 }
+PROTEIN_CHAIN_TYPE = const.chain_type_ids["PROTEIN"]
+DEFAULT_MSA_SERVER_URL = os.environ.get("MSA_SERVER_URL", "https://api.colabfold.com")
+DEFAULT_MSA_CACHE_DIR = Path("/tmp/boltz_msa_cache")
+MSA_ALLOWED_AA = set("ACDEFGHIKLMNPQRSTVWY")
+
+
+def _sequence_cache_path(sequence: str, cache_dir: Path) -> Path:
+    digest = hashlib.md5(sequence.encode("utf-8")).hexdigest()
+    return cache_dir / f"msa_{digest}.a3m"
+
+
+def _sanitize_sequence_for_msa(sequence: str) -> tuple[str, int]:
+    seq = str(sequence or "").strip().upper()
+    if not seq:
+        raise RuntimeError("Cannot build MSA for empty protein sequence.")
+    replaced = 0
+    normalized: list[str] = []
+    for aa in seq:
+        if aa in MSA_ALLOWED_AA:
+            normalized.append(aa)
+        else:
+            normalized.append("A")
+            replaced += 1
+    return "".join(normalized), replaced
+
+
+def _write_raw_msas(
+    sequences_by_name: dict[str, str],
+    raw_msa_dir: Path,
+    msa_server_url: str,
+    msa_pairing_strategy: str,
+    max_msa_seqs: int,
+    msa_cache_dir: Path | None,
+) -> None:
+    if not sequences_by_name:
+        return
+
+    names = list(sequences_by_name.keys())
+    sequences = [sequences_by_name[name] for name in names]
+    if len(sequences) > 1:
+        paired_msas = run_mmseqs2(
+            sequences,
+            raw_msa_dir / "paired_tmp",
+            use_env=True,
+            use_pairing=True,
+            host_url=msa_server_url,
+            pairing_strategy=msa_pairing_strategy,
+        )
+    else:
+        paired_msas = [""] * len(sequences)
+
+    unpaired_msas = run_mmseqs2(
+        sequences,
+        raw_msa_dir / "unpaired_tmp",
+        use_env=True,
+        use_pairing=False,
+        host_url=msa_server_url,
+        pairing_strategy=msa_pairing_strategy,
+    )
+
+    if msa_cache_dir is not None:
+        msa_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    for idx, name in enumerate(names):
+        paired_lines = paired_msas[idx].strip().splitlines()
+        paired = paired_lines[1::2]
+        paired = paired[: const.max_paired_seqs]
+        keys = [seq_idx for seq_idx, seq in enumerate(paired) if seq != "-" * len(seq)]
+        paired = [seq for seq in paired if seq != "-" * len(seq)]
+
+        unpaired_lines = unpaired_msas[idx].strip().splitlines()
+        unpaired = unpaired_lines[1::2]
+        unpaired_budget = max(0, max_msa_seqs - len(paired))
+        unpaired = unpaired[:unpaired_budget]
+        if paired:
+            # Query sequence is already present in paired rows.
+            unpaired = unpaired[1:]
+
+        merged = paired + unpaired
+        merged_keys = keys + [-1] * len(unpaired)
+        csv_rows = ["key,sequence"] + [f"{key},{seq}" for key, seq in zip(merged_keys, merged)]
+        (raw_msa_dir / f"{name}.csv").write_text("\n".join(csv_rows), encoding="utf-8")
+
+        if msa_cache_dir is not None:
+            cache_path = _sequence_cache_path(sequences[idx], msa_cache_dir)
+            if not cache_path.exists():
+                cache_path.write_text(unpaired_msas[idx], encoding="utf-8")
+
+
+def _attach_msa_to_record(
+    parsed,
+    record: Record,
+    target_id: str,
+    msa_dir: Path,
+    use_msa_server: bool,
+    msa_server_url: str,
+    msa_pairing_strategy: str,
+    max_msa_seqs: int,
+    msa_cache_dir: Path | None,
+) -> None:
+    protein_entity_to_seq: dict[int, str] = {}
+    missing_sequences: list[str] = []
+    for chain in record.chains:
+        if chain.mol_type != PROTEIN_CHAIN_TYPE:
+            continue
+        raw_sequence = str(parsed.sequences.get(chain.chain_name) or "").strip().upper()
+        if not raw_sequence:
+            missing_sequences.append(chain.chain_name)
+            continue
+        sequence, replaced = _sanitize_sequence_for_msa(raw_sequence)
+        if replaced:
+            print(
+                f"[Info] Normalized {replaced} non-canonical residue(s) in chain {chain.chain_name} "
+                "for MSA query."
+            )
+        protein_entity_to_seq.setdefault(chain.entity_id, sequence)
+
+    if missing_sequences:
+        missing_chains = ", ".join(sorted(set(missing_sequences)))
+        raise RuntimeError(f"Missing parsed protein sequences for chain(s): {missing_chains}")
+
+    if not protein_entity_to_seq:
+        return
+    if not use_msa_server:
+        return
+
+    entity_to_source: dict[int, Path] = {}
+    to_generate: dict[str, str] = {}
+    generated_name_to_entity: dict[str, int] = {}
+    for entity_id, sequence in protein_entity_to_seq.items():
+        cache_path = _sequence_cache_path(sequence, msa_cache_dir) if msa_cache_dir is not None else None
+        if cache_path is not None and cache_path.exists():
+            entity_to_source[entity_id] = cache_path
+            continue
+        msa_name = f"{target_id}_{entity_id}"
+        to_generate[msa_name] = sequence
+        generated_name_to_entity[msa_name] = entity_id
+
+    if to_generate:
+        raw_msa_dir = msa_dir / f"{target_id}_raw"
+        raw_msa_dir.mkdir(parents=True, exist_ok=True)
+        print(
+            f"[Info] Generating MSA for {len(to_generate)} protein entities via {msa_server_url} "
+            f"(pairing={msa_pairing_strategy})."
+        )
+        _write_raw_msas(
+            sequences_by_name=to_generate,
+            raw_msa_dir=raw_msa_dir,
+            msa_server_url=msa_server_url,
+            msa_pairing_strategy=msa_pairing_strategy,
+            max_msa_seqs=max_msa_seqs,
+            msa_cache_dir=msa_cache_dir,
+        )
+        for msa_name, entity_id in generated_name_to_entity.items():
+            csv_path = raw_msa_dir / f"{msa_name}.csv"
+            if not csv_path.exists():
+                raise FileNotFoundError(f"Expected generated MSA file not found: {csv_path}")
+            entity_to_source[entity_id] = csv_path
+
+    entity_to_processed: dict[int, str] = {}
+    for msa_idx, entity_id in enumerate(sorted(entity_to_source.keys())):
+        source_path = entity_to_source[entity_id]
+        processed_id = f"{target_id}_{msa_idx}"
+        processed_path = msa_dir / f"{processed_id}.npz"
+        if source_path.suffix.lower() == ".a3m":
+            msa = parse_a3m(source_path, taxonomy=None, max_seqs=max_msa_seqs)
+        elif source_path.suffix.lower() == ".csv":
+            msa = parse_csv(source_path, max_seqs=max_msa_seqs)
+        else:
+            raise RuntimeError(f"Unsupported MSA format: {source_path}")
+        msa.dump(processed_path)
+        entity_to_processed[entity_id] = processed_id
+
+    for chain in record.chains:
+        if chain.mol_type != PROTEIN_CHAIN_TYPE:
+            continue
+        chain.msa_id = entity_to_processed.get(chain.entity_id, -1)
 
 
 def _ccd_matches_residue(residue: gemmi.Residue, ccd_mol: Chem.Mol) -> bool:
@@ -605,6 +787,11 @@ def prepare_inputs(
     recursive: bool,
     preloaded_custom_mols: dict[str, Chem.Mol] | None = None,
     ligand_smiles_map: dict[str, str] | None = None,
+    use_msa_server: bool = False,
+    msa_server_url: str = DEFAULT_MSA_SERVER_URL,
+    msa_pairing_strategy: str = "greedy",
+    max_msa_seqs: int = 8192,
+    msa_cache_dir: Path | None = DEFAULT_MSA_CACHE_DIR,
 ) -> Tuple[Manifest, List[Path]]:
     struct_dir = out_dir / "processed" / "structures"
     records_dir = out_dir / "processed" / "records"
@@ -654,6 +841,17 @@ def prepare_inputs(
 
             parsed = _parse_structure(path, mols=mols, mol_dir=mol_dir)
             record = _build_record(target_id, parsed)
+            _attach_msa_to_record(
+                parsed=parsed,
+                record=record,
+                target_id=target_id,
+                msa_dir=msa_dir,
+                use_msa_server=use_msa_server,
+                msa_server_url=msa_server_url,
+                msa_pairing_strategy=msa_pairing_strategy,
+                max_msa_seqs=max_msa_seqs,
+                msa_cache_dir=msa_cache_dir,
+            )
             # Dump structure and record
             parsed.data.dump(struct_dir / f"{target_id}.npz")
             record.dump(records_dir / f"{target_id}.json")
@@ -706,6 +904,35 @@ def main() -> None:
         action="store_true",
         help="Recursively scan input_dir for structures",
     )
+    parser.add_argument(
+        "--use_msa_server",
+        action="store_true",
+        help="Enable external MSA generation for protein chains.",
+    )
+    parser.add_argument(
+        "--msa_server_url",
+        type=str,
+        default=DEFAULT_MSA_SERVER_URL,
+        help="MSA server URL used when --use_msa_server is enabled.",
+    )
+    parser.add_argument(
+        "--msa_pairing_strategy",
+        type=str,
+        default="greedy",
+        help="MSA pairing strategy for multi-protein inputs.",
+    )
+    parser.add_argument(
+        "--max_msa_seqs",
+        type=int,
+        default=8192,
+        help="Maximum MSA sequences retained per protein chain.",
+    )
+    parser.add_argument(
+        "--msa_cache_dir",
+        type=str,
+        default=str(DEFAULT_MSA_CACHE_DIR),
+        help="Cache directory for sequence-keyed .a3m files.",
+    )
 
     args = parser.parse_args()
 
@@ -720,6 +947,11 @@ def main() -> None:
         out_dir=out_dir,
         cache_dir=cache_dir,
         recursive=args.recursive,
+        use_msa_server=args.use_msa_server,
+        msa_server_url=args.msa_server_url,
+        msa_pairing_strategy=args.msa_pairing_strategy,
+        max_msa_seqs=max(1, int(args.max_msa_seqs)),
+        msa_cache_dir=Path(args.msa_cache_dir).expanduser().resolve() if args.msa_cache_dir else None,
     )
 
     print(f"Prepared {len(manifest.records)} inputs in {out_dir / 'processed'}")

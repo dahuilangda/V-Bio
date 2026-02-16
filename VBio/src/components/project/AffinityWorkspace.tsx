@@ -24,6 +24,7 @@ interface AffinityBasicsWorkspaceProps {
   ligandFileName: string;
   ligandSmiles: string;
   ligandEditorInput: string;
+  useMsa: boolean;
   confidenceOnly: boolean;
   confidenceOnlyLocked: boolean;
   confidenceOnlyHint: string;
@@ -36,6 +37,7 @@ interface AffinityBasicsWorkspaceProps {
   resultsGridStyle: ResultsGridStyle;
   onTargetFileChange: (file: File | null) => void;
   onLigandFileChange: (file: File | null) => void;
+  onUseMsaChange: (checked: boolean) => void;
   onConfidenceOnlyChange: (checked: boolean) => void;
   onLigandSmilesChange: (smiles: string) => void;
   onResizerPointerDown: (event: PointerEvent<HTMLDivElement>) => void;
@@ -49,6 +51,7 @@ export function AffinityBasicsWorkspace({
   ligandFileName,
   ligandSmiles,
   ligandEditorInput,
+  useMsa,
   confidenceOnly,
   confidenceOnlyLocked,
   confidenceOnlyHint,
@@ -61,6 +64,7 @@ export function AffinityBasicsWorkspace({
   resultsGridStyle,
   onTargetFileChange,
   onLigandFileChange,
+  onUseMsaChange,
   onConfidenceOnlyChange,
   onLigandSmilesChange,
   onResizerPointerDown,
@@ -69,7 +73,7 @@ export function AffinityBasicsWorkspace({
   return (
     <section className="panel subtle affinity-basics-panel">
       <div className="affinity-basics-controls">
-        <label className="field">
+        <label className="field affinity-upload-field">
           <span className="affinity-field-title">
             <Dna size={13} />
             Target <span className="required-mark">*</span>
@@ -86,7 +90,7 @@ export function AffinityBasicsWorkspace({
           />
         </label>
 
-        <label className="field">
+        <label className="field affinity-upload-field">
           <span className="affinity-field-title">
             <FlaskConical size={13} />
             Ligand
@@ -102,22 +106,35 @@ export function AffinityBasicsWorkspace({
             onChange={(event) => onLigandFileChange(event.target.files?.[0] || null)}
           />
         </label>
+        <div className="affinity-basics-inline-options">
+          <label className="switch-field affinity-inline-toggle">
+            <input
+              type="checkbox"
+              checked={useMsa}
+              disabled={!canEdit || submitting}
+              onChange={(event) => onUseMsaChange(event.target.checked)}
+            />
+            <span className="affinity-field-title">
+              <Dna size={13} />
+              Use MSA
+            </span>
+          </label>
 
-        <label className="switch-field affinity-confidence-toggle">
-          <input
-            type="checkbox"
-            checked={confidenceOnly}
-            disabled={!canEdit || submitting || confidenceOnlyLocked}
-            onChange={(event) => onConfidenceOnlyChange(event.target.checked)}
-          />
-          <span className="affinity-field-title">
-            <Eye size={13} />
-            Confidence Only
-          </span>
-          {confidenceOnlyHint.trim() ? <span className="muted small affinity-confidence-hint">{confidenceOnlyHint}</span> : null}
-        </label>
-
+          <label className="switch-field affinity-inline-toggle">
+            <input
+              type="checkbox"
+              checked={confidenceOnly}
+              disabled={!canEdit || submitting || confidenceOnlyLocked}
+              onChange={(event) => onConfidenceOnlyChange(event.target.checked)}
+            />
+            <span className="affinity-field-title">
+              <Eye size={13} />
+              Confidence Only
+            </span>
+          </label>
+        </div>
       </div>
+      {confidenceOnlyHint.trim() ? <div className="muted small affinity-toggles-hint">{confidenceOnlyHint}</div> : null}
 
       <div ref={resultsGridRef} className={`results-grid ${isResultsResizing ? 'is-resizing' : ''}`} style={resultsGridStyle}>
         <section className="panel structure-panel">

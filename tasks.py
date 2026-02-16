@@ -68,7 +68,7 @@ MAX_EXCEPTION_MESSAGE_CHARS = 20_000
 MAX_TRACEBACK_CHARS = 40_000
 MAX_STDIO_TAIL_CHARS = 12_000
 
-BOLTZ2SCORE_DEFAULT_RECYCLING_STEPS = 7
+BOLTZ2SCORE_DEFAULT_RECYCLING_STEPS = 20
 BOLTZ2SCORE_DEFAULT_SAMPLING_STEPS = 1
 BOLTZ2SCORE_DEFAULT_DIFFUSION_SAMPLES = 1
 BOLTZ2SCORE_DEFAULT_MAX_PARALLEL_SAMPLES = 1
@@ -1194,6 +1194,10 @@ def boltz2score_task(self, score_args: dict):
             score_args.get('structure_refine'),
             BOLTZ2SCORE_DEFAULT_STRUCTURE_REFINE,
         )
+        use_msa_server = _coerce_bool(
+            score_args.get('use_msa_server'),
+            False,
+        )
         default_recycling_steps = (
             BOLTZ2SCORE_REFINE_RECYCLING_STEPS
             if structure_refine
@@ -1258,6 +1262,8 @@ def boltz2score_task(self, score_args: dict):
         ]
         if structure_refine:
             command.append("--structure_refine")
+        if use_msa_server:
+            command.append("--use_msa_server")
         if using_separate_inputs:
             command.extend([
                 "--protein_file", protein_file_path,
@@ -1293,10 +1299,11 @@ def boltz2score_task(self, score_args: dict):
 
         tracker.update_status("running", "Executing Boltz2Score subprocess")
         logger.info(
-            "Task %s: Boltz2Score settings: structure_refine=%s, recycling_steps=%d, "
+            "Task %s: Boltz2Score settings: structure_refine=%s, use_msa_server=%s, recycling_steps=%d, "
             "sampling_steps=%d, diffusion_samples=%d, max_parallel_samples=%d, seed=%s",
             task_id,
             structure_refine,
+            use_msa_server,
             recycling_steps,
             sampling_steps,
             diffusion_samples,

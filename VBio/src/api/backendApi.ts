@@ -19,7 +19,8 @@ if (ENV.apiToken) {
 const BACKEND_TIMEOUT_MS = 20000;
 const BOLTZ2SCORE_AFFINITY_PROFILE = Object.freeze({
   structureRefine: false,
-  recyclingSteps: 7,
+  // Empirically more stable for affinity confidence than 7 in input-structure mode.
+  recyclingSteps: 20,
   samplingSteps: 1,
   diffusionSamples: 1,
   maxParallelSamples: 1
@@ -293,6 +294,8 @@ export async function submitAffinityScoring(input: AffinitySubmitInput): Promise
     form.append('seed', String(normalizedSeed));
   }
   if (!useProtenix) {
+    const useMsaServer = input.useMsa === true;
+    form.append('use_msa_server', String(useMsaServer).toLowerCase());
     form.append('structure_refine', String(BOLTZ2SCORE_AFFINITY_PROFILE.structureRefine).toLowerCase());
     form.append('recycling_steps', String(BOLTZ2SCORE_AFFINITY_PROFILE.recyclingSteps));
     form.append('sampling_steps', String(BOLTZ2SCORE_AFFINITY_PROFILE.samplingSteps));
