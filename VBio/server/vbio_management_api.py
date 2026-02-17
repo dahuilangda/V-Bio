@@ -44,6 +44,7 @@ SERVER_PORT = int(os.environ.get("VBIO_MGMT_PORT", "5055"))
 FORM_FIELDS_INTERNAL = {"project_id", "task_name", "task_summary", "operation_mode"}
 AFFINITY_TARGET_UPLOAD_COMPONENT_ID = "__affinity_target_upload__"
 AFFINITY_LIGAND_UPLOAD_COMPONENT_ID = "__affinity_ligand_upload__"
+DEFAULT_PROTENIX_PREDICT_SEED = 42
 
 
 @dataclass
@@ -297,6 +298,15 @@ def _proxy_multipart(upstream_path: str) -> requests.Response:
             logger.info(
                 "Auto-filled use_msa_server=%s for /predict because the form field was missing.",
                 inferred_use_msa,
+            )
+
+        raw_seed = request.form.get("seed")
+        form_backend = str(request.form.get("backend") or "boltz").strip().lower()
+        if (raw_seed is None or not str(raw_seed).strip()) and form_backend == "protenix":
+            data.append(("seed", str(DEFAULT_PROTENIX_PREDICT_SEED)))
+            logger.info(
+                "Auto-filled seed=%s for /predict because backend=protenix and the form field was missing.",
+                DEFAULT_PROTENIX_PREDICT_SEED,
             )
 
     files: List[Tuple[str, Tuple[str, Any, str]]] = []
@@ -804,9 +814,11 @@ def _insert_project_task_snapshot(
     )
 
 
-def _read_seed() -> Optional[int]:
+def _read_seed(backend: str = "") -> Optional[int]:
     seed_raw = (request.form.get("seed") or "").strip()
     if not seed_raw:
+        if str(backend).strip().lower() == "protenix":
+            return DEFAULT_PROTENIX_PREDICT_SEED
         return None
     try:
         return int(seed_raw)
@@ -913,7 +925,7 @@ def _forward_submit(upstream_path: str, action: str) -> Tuple[Response, int]:
                     task_name=_read_task_name(task_id),
                     task_summary=_read_task_summary(),
                     backend=backend,
-                    seed=_read_seed(),
+                    seed=_read_seed(backend),
                     extra_payload=extra_snapshot_payload,
                 )
 

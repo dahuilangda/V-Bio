@@ -1231,6 +1231,13 @@ def handle_predict():
     logger.info(f"Prediction priority: {priority}, targeting queue: '{target_queue}' for client {request.remote_addr}.")
 
     seed_value = _parse_int(request.form.get('seed'))
+    if seed_value is None and backend == 'protenix':
+        seed_value = 42
+        logger.info(
+            "seed parameter missing for backend=protenix; defaulting to %s for client %s.",
+            seed_value,
+            request.remote_addr,
+        )
     template_inputs = []
     template_meta_raw = request.form.get('template_meta')
     template_meta = []
