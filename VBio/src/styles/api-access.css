@@ -176,6 +176,12 @@
   background: #eef7f1;
 }
 
+.api-project-table th:nth-child(4),
+.api-project-table td:nth-child(4) {
+  width: 88px;
+  min-width: 88px;
+}
+
 .api-workflow-pill {
   display: inline-flex;
   align-items: center;
@@ -301,33 +307,17 @@
 }
 
 .api-project-calls-cell {
-  display: grid;
-  gap: 5px;
-  min-width: 120px;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
 }
 
 .api-project-calls-head {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   color: #315246;
-  font-size: var(--text-sm);
-}
-
-.api-project-calls-track {
-  display: block;
-  width: 100%;
-  height: 6px;
-  border-radius: 999px;
-  background: #e8efea;
-  overflow: hidden;
-}
-
-.api-project-calls-fill {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #4ca07f 0%, #245f49 100%);
+  font-size: var(--text-xs);
 }
 
 .api-project-success-chip {

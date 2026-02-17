@@ -897,10 +897,6 @@ export function ApiAccessPage() {
     const start = (projectStatsPage - 1) * PROJECT_STATS_PAGE_SIZE;
     return filteredProjectStatsRows.slice(start, start + PROJECT_STATS_PAGE_SIZE);
   }, [filteredProjectStatsRows, projectStatsPage]);
-  const maxProjectCalls = useMemo(
-    () => Math.max(1, ...filteredProjectStatsRows.map((item) => item.totalCalls)),
-    [filteredProjectStatsRows]
-  );
   const registryScopeProject = useMemo(
     () => projects.find((project) => project.id === registryScopeProjectId) || null,
     [projects, registryScopeProjectId]
@@ -1557,7 +1553,6 @@ ${submitTaskIdCapture}`;
               ) : (
                 pagedProjectStatsRows.map((item) => {
                   const isSelected = item.project.id === selectedTokenProjectId;
-                  const callsRatio = item.totalCalls > 0 ? Math.max(8, Math.round((item.totalCalls / maxProjectCalls) * 100)) : 0;
                   return (
                     <tr
                       key={item.project.id}
@@ -1579,9 +1574,6 @@ ${submitTaskIdCapture}`;
                             <BarChart3 size={12} />
                             <strong>{item.totalCalls}</strong>
                           </div>
-                          <span className="api-project-calls-track">
-                            <span className="api-project-calls-fill" style={{ width: `${callsRatio}%` }} />
-                          </span>
                         </div>
                       </td>
                       <td>
