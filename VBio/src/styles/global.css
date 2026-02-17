@@ -1,3 +1,5 @@
+@import './api-access.css';
+
 :root {
   --bg: #f4f7f4;
   --surface: #ffffff;
@@ -1972,13 +1974,13 @@ select:focus {
 }
 
 .task-table {
-  min-width: 1260px;
+  min-width: 1120px;
   --task-row-pad-y: 7px;
   --task-ligand-inner-h: 120px;
-  --task-ligand-thumb-h: 132px;
-  --task-ligand-thumb-w: 216px;
-  --task-ligand-col-w: 228px;
-  --task-ligand-svg-max-h: 114px;
+  --task-ligand-thumb-h: 120px;
+  --task-ligand-thumb-w: 184px;
+  --task-ligand-col-w: 196px;
+  --task-ligand-svg-max-h: 104px;
 }
 
 .task-table-wrap {
@@ -4360,12 +4362,54 @@ select:focus {
 
 .settings-panel {
   height: 100%;
+  align-content: start;
 }
 
 .settings-grid {
   display: grid;
   gap: 14px;
   grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.settings-panel-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.settings-panel-head h2 {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 18px;
+}
+
+.settings-panel-head p {
+  margin: 0;
+  white-space: normal;
+}
+
+.token-plain-block {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f7fbf8;
+  display: grid;
+  gap: 8px;
+}
+
+.btn-inline {
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-weight: 600;
 }
 
 .settings-avatar-preview {
@@ -4395,7 +4439,6 @@ select:focus {
 .table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 900px;
 }
 
 .table th,
@@ -4567,6 +4610,15 @@ select:focus {
     grid-template-columns: 1fr;
   }
 
+  .settings-panel-head {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .settings-panel-head p {
+    white-space: normal;
+  }
+
   .inputs-workspace {
     grid-template-columns: 1fr;
   }
@@ -4640,6 +4692,28 @@ select:focus {
   .constraint-nav-actions {
     justify-content: flex-start;
     flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 1460px) {
+  .task-table {
+    min-width: 980px;
+  }
+
+  .task-table th:nth-child(7),
+  .task-table td:nth-child(7) {
+    display: none;
+  }
+}
+
+@media (max-width: 1300px) {
+  .task-table {
+    min-width: 860px;
+  }
+
+  .task-table th:nth-child(6),
+  .task-table td:nth-child(6) {
+    display: none;
   }
 }
 

@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react';
+import { KeyRound, UserRound } from 'lucide-react';
 import type { AppUser } from '../types/models';
 import { useAuth } from '../hooks/useAuth';
 import { findUserByUsername, updateUser } from '../api/supabaseLite';
@@ -137,7 +138,7 @@ export function SettingsPage() {
       <section className="page-header">
         <div>
           <h1>Settings</h1>
-          <p className="muted">Manage profile, avatar, email, and password.</p>
+          <p className="muted">Manage profile and password.</p>
         </div>
       </section>
 
@@ -146,7 +147,9 @@ export function SettingsPage() {
 
       <div className="settings-grid">
         <section className="panel settings-panel">
-          <h2>Profile</h2>
+          <div className="settings-panel-head">
+            <h2><UserRound size={16} /> Profile</h2>
+          </div>
           {loading ? (
             <div className="muted">Loading profile...</div>
           ) : (
@@ -186,7 +189,9 @@ export function SettingsPage() {
         </section>
 
         <section className="panel settings-panel">
-          <h2>Change Password</h2>
+          <div className="settings-panel-head">
+            <h2><KeyRound size={16} /> Password</h2>
+          </div>
           <form className="form-grid" onSubmit={changePassword}>
             <label className="field">
               <span>Current Password</span>

@@ -26,11 +26,19 @@ export default defineConfig(({ mode }) => {
     normalizeProxyTarget(env.VITE_SUPABASE_REST_PROXY_TARGET) ||
     normalizeProxyTarget(env.VITE_SUPABASE_REST_URL) ||
     'http://127.0.0.1:54321';
+  const managementTarget =
+    normalizeProxyTarget(env.VITE_VBIO_MANAGEMENT_PROXY_TARGET) ||
+    normalizeProxyTarget(env.VITE_VBIO_MANAGEMENT_API_BASE_URL) ||
+    'http://127.0.0.1:5055';
   const proxy: Record<string, string | { target: string; changeOrigin: boolean; rewrite?: (path: string) => string }> = {
     '/supabase': {
       target: supabaseTarget,
       changeOrigin: true,
       rewrite: (path) => path.replace(/^\/supabase/, '')
+    },
+    '/vbio-api': {
+      target: managementTarget,
+      changeOrigin: true
     },
     '/predict': target,
     '/status': target,

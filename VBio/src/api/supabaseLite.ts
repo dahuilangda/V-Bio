@@ -1,4 +1,4 @@
-import type { AppUser, Project, ProjectTask, TaskState } from '../types/models';
+import type { ApiToken, ApiTokenUsage, ApiTokenUsageDaily, AppUser, Project, ProjectTask, TaskState } from '../types/models';
 import { ENV } from '../utils/env';
 
 const configuredBaseUrl = ENV.supabaseRestUrl.replace(/\/$/, '');
@@ -587,4 +587,203 @@ export async function deleteProjectTask(taskRowId: string): Promise<void> {
       id: `eq.${taskRowId}`
     }
   );
+}
+
+export async function listApiTokens(userId: string): Promise<ApiToken[]> {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return [];
+  return request<ApiToken[]>('/api_tokens', undefined, {
+    select: '*',
+    user_id: `eq.${normalizedUserId}`,
+    order: 'created_at.desc'
+  });
+}
+
+export async function findApiTokenByHash(tokenHash: string): Promise<ApiToken | null> {
+  const normalizedHash = String(tokenHash || '').trim();
+  if (!normalizedHash) return null;
+  const rows = await request<ApiToken[]>('/api_tokens', undefined, {
+    select: '*',
+    token_hash: `eq.${normalizedHash}`,
+    limit: '1'
+  });
+  return rows[0] || null;
+}
+
+export async function insertApiToken(input: Partial<ApiToken>): Promise<ApiToken> {
+  const rows = await request<ApiToken[]>(
+    '/api_tokens',
+    {
+      method: 'POST',
+      headers: {
+        Prefer: 'return=representation'
+      },
+      body: JSON.stringify(input)
+    },
+    {
+      select: '*'
+    }
+  );
+  return rows[0];
+}
+
+export async function updateApiToken(tokenId: string, patch: Partial<ApiToken>): Promise<ApiToken> {
+  const rows = await request<ApiToken[]>(
+    '/api_tokens',
+    {
+      method: 'PATCH',
+      headers: {
+        Prefer: 'return=representation'
+      },
+      body: JSON.stringify(patch)
+    },
+    {
+      id: `eq.${tokenId}`,
+      select: '*'
+    }
+  );
+  return rows[0];
+}
+
+export async function revokeApiToken(tokenId: string): Promise<ApiToken> {
+  return updateApiToken(tokenId, {
+    is_active: false,
+    revoked_at: new Date().toISOString()
+  });
+}
+
+export async function deleteApiToken(tokenId: string): Promise<void> {
+  await request<ApiToken[]>(
+    '/api_tokens',
+    {
+      method: 'DELETE',
+      headers: {
+        Prefer: 'return=minimal'
+      }
+    },
+    {
+      id: `eq.${tokenId}`
+    }
+  );
+}
+
+export async function listApiTokenUsage(tokenId: string, sinceIso?: string): Promise<ApiTokenUsage[]> {
+  const normalizedTokenId = String(tokenId || '').trim();
+  if (!normalizedTokenId) return [];
+  const query: Record<string, string | undefined> = {
+    select: '*',
+    token_id: `eq.${normalizedTokenId}`,
+    order: 'created_at.desc'
+  };
+  if (sinceIso?.trim()) {
+    query.created_at = `gte.${sinceIso.trim()}`;
+  }
+  return request<ApiTokenUsage[]>('/api_token_usage', undefined, query);
+}
+
+function parseTotalFromContentRange(value: string | null): number {
+  if (!value) return 0;
+  const slashIdx = value.lastIndexOf('/');
+  if (slashIdx < 0) return 0;
+  const raw = value.slice(slashIdx + 1).trim();
+  const total = Number(raw);
+  return Number.isFinite(total) && total >= 0 ? Math.floor(total) : 0;
+}
+
+export async function listApiTokenUsagePage(
+  tokenId: string,
+  options: {
+    sinceIso?: string;
+    limit: number;
+    offset: number;
+  }
+): Promise<{ rows: ApiTokenUsage[]; total: number }> {
+  const normalizedTokenId = String(tokenId || '').trim();
+  if (!normalizedTokenId) {
+    return { rows: [], total: 0 };
+  }
+  const limit = Math.max(1, Math.floor(options.limit || 1));
+  const offset = Math.max(0, Math.floor(options.offset || 0));
+  const query: Record<string, string | undefined> = {
+    select: '*',
+    token_id: `eq.${normalizedTokenId}`,
+    order: 'created_at.desc',
+    limit: String(limit),
+    offset: String(offset)
+  };
+  if (options.sinceIso?.trim()) {
+    query.created_at = `gte.${options.sinceIso.trim()}`;
+  }
+
+  const candidates = buildSupabaseUrlCandidates('/api_token_usage', query);
+  let lastError: Error | null = null;
+  for (let i = 0; i < candidates.length; i += 1) {
+    const url = candidates[i];
+    let res: Response;
+    try {
+      res = await fetchWithTimeout(url, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          Prefer: 'count=exact'
+        }
+      });
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error('Unknown network error');
+      continue;
+    }
+
+    if ((res.status === 404 || res.status === 405) && i < candidates.length - 1) {
+      lastError = new Error(`Supabase candidate returned ${res.status}: ${url}`);
+      continue;
+    }
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`PostgREST ${res.status}: ${text}`);
+    }
+
+    const rows = (await res.json()) as ApiTokenUsage[];
+    const total = parseTotalFromContentRange(res.headers.get('content-range'));
+    return { rows, total };
+  }
+
+  const detail = lastError ? ` Last error: ${lastError.message}` : '';
+  throw new Error(`Supabase-lite request failed. Tried: ${candidates.join(', ')}.${detail}`);
+}
+
+export async function listApiTokenUsageDaily(tokenId: string, sinceIso?: string): Promise<ApiTokenUsageDaily[]> {
+  const normalizedTokenId = String(tokenId || '').trim();
+  if (!normalizedTokenId) return [];
+  const query: Record<string, string | undefined> = {
+    select: '*',
+    token_id: `eq.${normalizedTokenId}`,
+    order: 'usage_day.asc'
+  };
+  if (sinceIso?.trim()) {
+    query.usage_day = `gte.${sinceIso.trim().slice(0, 10)}`;
+  }
+  return request<ApiTokenUsageDaily[]>('/api_token_usage_daily', undefined, query);
+}
+
+export async function listApiTokenUsageDailyByTokenIds(tokenIds: string[], sinceIso?: string): Promise<ApiTokenUsageDaily[]> {
+  const ids = Array.from(new Set(tokenIds.map((id) => String(id || '').trim()).filter(Boolean)));
+  if (ids.length === 0) return [];
+  const chunkSize = 150;
+  const rows = await Promise.all(
+    Array.from({ length: Math.ceil(ids.length / chunkSize) }, (_, i) => ids.slice(i * chunkSize, (i + 1) * chunkSize)).map(
+      (chunk) => {
+        const query: Record<string, string | undefined> = {
+          select: '*',
+          token_id: `in.(${chunk.join(',')})`,
+          order: 'usage_day.asc'
+        };
+        if (sinceIso?.trim()) {
+          query.usage_day = `gte.${sinceIso.trim().slice(0, 10)}`;
+        }
+        return request<ApiTokenUsageDaily[]>('/api_token_usage_daily', undefined, query);
+      }
+    )
+  );
+  return rows.flat();
 }

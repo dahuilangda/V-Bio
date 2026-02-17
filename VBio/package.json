@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
+    "db:migrate": "bash ./scripts/migrate-supabase-lite.sh",
     "create-admin": "node scripts/create-admin.mjs",
     "users": "node scripts/users.mjs"
   },

@@ -8,6 +8,7 @@ import { RegisterPage } from './pages/RegisterPage';
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage').then((m) => ({ default: m.ProjectsPage })));
 const ProjectDetailPage = lazy(() => import('./pages/ProjectDetailPage').then((m) => ({ default: m.ProjectDetailPage })));
 const ProjectTasksPage = lazy(() => import('./pages/ProjectTasksPage').then((m) => ({ default: m.ProjectTasksPage })));
+const ApiAccessPage = lazy(() => import('./pages/ApiAccessPage').then((m) => ({ default: m.ApiAccessPage })));
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
 const UsersPage = lazy(() => import('./pages/UsersPage').then((m) => ({ default: m.UsersPage })));
 
@@ -56,6 +57,18 @@ export default function App() {
             <ShellPage>
               <Suspense fallback={<PageLoading />}>
                 <ProjectTasksPage />
+              </Suspense>
+            </ShellPage>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/api-access"
+        element={
+          <ProtectedRoute>
+            <ShellPage>
+              <Suspense fallback={<PageLoading />}>
+                <ApiAccessPage />
               </Suspense>
             </ShellPage>
           </ProtectedRoute>

@@ -2807,8 +2807,8 @@ export function ProjectTasksPage() {
                           <div className="task-ligand-thumb">
                             <Ligand2DPreview
                               smiles={row.ligandSmiles}
-                              width={220}
-                              height={132}
+                              width={184}
+                              height={120}
                               atomConfidences={row.ligandAtomPlddts}
                               confidenceHint={metrics.plddt}
                             />

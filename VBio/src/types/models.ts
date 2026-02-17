@@ -104,6 +104,50 @@ export interface AppUser {
   updated_at: string;
 }
 
+export interface ApiToken {
+  id: string;
+  user_id: string;
+  name: string;
+  token_hash: string;
+  token_plain: string;
+  token_prefix: string;
+  token_last4: string;
+  project_id: string | null;
+  allow_submit: boolean;
+  allow_delete: boolean;
+  allow_cancel: boolean;
+  scopes: string[];
+  is_active: boolean;
+  last_used_at: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiTokenUsage {
+  id: string;
+  token_id: string | null;
+  user_id: string | null;
+  method: string;
+  path: string;
+  action: string;
+  status_code: number;
+  succeeded: boolean;
+  duration_ms: number | null;
+  client: string;
+  meta: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ApiTokenUsageDaily {
+  token_id: string;
+  usage_day: string;
+  total_count: number;
+  success_count: number;
+  error_count: number;
+}
+
 export interface Project {
   id: string;
   user_id: string | null;

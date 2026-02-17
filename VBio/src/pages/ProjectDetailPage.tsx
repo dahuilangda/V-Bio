@@ -2760,7 +2760,9 @@ export function ProjectDetailPage() {
           })();
       const workflowDef = getWorkflowDefinition(next.task_type);
       const snapshotTaskRowId = snapshotSourceTaskRowBase?.id || latestDraftTask?.id || null;
-      const shouldLoadSnapshotDetail = Boolean(snapshotTaskRowId && workflowDef.key === 'prediction');
+      const shouldLoadSnapshotDetail = Boolean(
+        snapshotTaskRowId && (workflowDef.key === 'prediction' || workflowDef.key === 'affinity')
+      );
       const snapshotSourceTaskRowDetail = shouldLoadSnapshotDetail && snapshotTaskRowId
         ? await getProjectTaskById(snapshotTaskRowId)
         : null;
@@ -3050,6 +3052,7 @@ export function ProjectDetailPage() {
   } = useAffinityWorkflow({
     enabled: isAffinityWorkflow && workspaceTab === 'components',
     scopeKey: `${project?.id || ''}:${affinityUploadScopeTaskRowId}`,
+    preferredConfidenceOnly: !Boolean(draft?.inputConfig.properties.affinity),
     persistedLigandSmiles: statusContextTaskRow?.ligand_smiles || activeResultTask?.ligand_smiles || '',
     persistedUploads: affinityPersistedUploads,
     onChainsResolved: onAffinityChainsResolved
@@ -3445,12 +3448,16 @@ export function ProjectDetailPage() {
     const activeAffinityBackend = String(draft.backend || 'boltz').trim().toLowerCase();
     const backendSupportsActivity = activeAffinityBackend === 'boltz' || activeAffinityBackend === 'protenix';
     const effectiveConfidenceOnly = backendSupportsActivity ? affinityConfidenceOnly : true;
-    const runAffinityActivity = backendSupportsActivity && !effectiveConfidenceOnly && affinityHasLigand && affinitySupportsActivity;
     const targetChains = affinityTargetChainIds.filter((item) => item.trim());
     const ligandChain = affinityLigandChainId.trim();
     const previewLigandSmiles = String(affinityPreview?.ligandSmiles || '').trim();
     const ligandSmilesInput = affinityLigandSmiles.trim();
     const ligandSmiles = ligandSmilesInput || previewLigandSmiles;
+    const runAffinityActivity =
+      backendSupportsActivity &&
+      !effectiveConfidenceOnly &&
+      affinityHasLigand &&
+      (affinitySupportsActivity || Boolean(ligandSmiles.trim()));
     if (runAffinityActivity && !targetChains.length) {
       setError('No target chain could be inferred from uploaded target structure.');
       return;
@@ -4123,7 +4130,10 @@ export function ProjectDetailPage() {
   const affinityConfidenceOnlyUiValue = affinityConfidenceOnlyForced ? true : affinityConfidenceOnly;
   const affinityConfidenceOnlyUiLocked = affinityConfidenceOnlyLocked || affinityConfidenceOnlyForced;
   const affinityRunActivity =
-    affinityBackendSupportsActivity && !affinityConfidenceOnlyUiValue && affinityHasLigand && affinitySupportsActivity;
+    affinityBackendSupportsActivity &&
+    !affinityConfidenceOnlyUiValue &&
+    affinityHasLigand &&
+    (affinitySupportsActivity || Boolean(affinityLigandSmiles.trim()));
   const affinityReadyReason = workspaceTab !== 'components'
     ? 'Open Component tab to prepare affinity inputs.'
     : !affinityTargetFile

@@ -42,6 +42,15 @@ const resolvedApiBaseUrl =
     ? apiBase
     : '';
 
+const managementApiBase = normalizeBaseUrl(import.meta.env.VITE_VBIO_MANAGEMENT_API_BASE_URL);
+const managementPointsToLocalhost = /(^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$)|(^127\.0\.0\.1:\d+$)|(^localhost:\d+$)/i.test(
+  managementApiBase
+);
+const resolvedManagementApiBaseUrl =
+  managementApiBase && !(managementPointsToLocalhost && !runningOnLocalhost)
+    ? managementApiBase
+    : '';
+
 // If frontend is opened from another machine, localhost in env points to the user's own browser host.
 const resolvedSupabaseRestUrl =
   supabaseConfigured && !(supabasePointsToLocalhost && !runningOnLocalhost)
@@ -50,6 +59,7 @@ const resolvedSupabaseRestUrl =
 
 export const ENV = {
   apiBaseUrl: resolvedApiBaseUrl,
+  managementApiBaseUrl: resolvedManagementApiBaseUrl,
   apiToken: import.meta.env.VITE_API_TOKEN?.trim() || 'development-api-token',
   supabaseRestUrl: resolvedSupabaseRestUrl,
   jsmeScriptUrl:

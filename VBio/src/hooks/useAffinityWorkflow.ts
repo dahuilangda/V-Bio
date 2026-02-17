@@ -7,6 +7,7 @@ import { detectStructureFormat, extractProteinChainSequences, extractStructureCh
 interface UseAffinityWorkflowOptions {
   enabled: boolean;
   scopeKey?: string | null;
+  preferredConfidenceOnly?: boolean;
   persistedLigandSmiles?: string;
   persistedUploads?: {
     target?: { fileName: string; content: string } | null;
@@ -64,7 +65,7 @@ function buildPairKey(targetFile: File | null, ligandFile: File | null): string 
 }
 
 export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): AffinityWorkflowState {
-  const { enabled, scopeKey, persistedLigandSmiles, persistedUploads, onChainsResolved } = options;
+  const { enabled, scopeKey, preferredConfidenceOnly = true, persistedLigandSmiles, persistedUploads, onChainsResolved } = options;
 
   const [targetFile, setTargetFile] = useState<File | null>(null);
   const [ligandFile, setLigandFile] = useState<File | null>(null);
@@ -82,6 +83,7 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
   const [persistedLigandUpload, setPersistedLigandUpload] = useState<AffinityPersistedUpload | null>(null);
   const requestSeqRef = useRef(0);
   const confidenceOnlyTouchedRef = useRef(false);
+  const preferredConfidenceOnlyRef = useRef(Boolean(preferredConfidenceOnly));
   const hydratedUploadKeyRef = useRef('');
   const hydratedPersistedSmilesKeyRef = useRef('');
 
@@ -94,7 +96,14 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
   const previewTargetStructureFormat: 'cif' | 'pdb' = preview?.targetStructureFormat || preview?.structureFormat || 'cif';
   const previewLigandStructureText = preview?.ligandStructureText || '';
   const previewLigandStructureFormat: 'cif' | 'pdb' = preview?.ligandStructureFormat || 'cif';
-  const confidenceOnlyLocked = !hasLigand || !supportsActivity;
+  const confidenceOnlyLocked = !hasLigand;
+
+  useEffect(() => {
+    preferredConfidenceOnlyRef.current = Boolean(preferredConfidenceOnly);
+    if (!confidenceOnlyTouchedRef.current) {
+      setConfidenceOnly(Boolean(preferredConfidenceOnly));
+    }
+  }, [preferredConfidenceOnly]);
 
   const resetAll = useCallback(() => {
     setTargetFile(null);
@@ -107,7 +116,7 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
     setPreviewLoading(false);
     setPreviewError(null);
     setPreviewPairKey('');
-    setConfidenceOnly(true);
+    setConfidenceOnly(Boolean(preferredConfidenceOnlyRef.current));
     setPersistedTargetUpload(null);
     setPersistedLigandUpload(null);
     confidenceOnlyTouchedRef.current = false;
@@ -283,10 +292,10 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
           if (!nextSmiles) return prev;
           return prev.trim() ? prev : nextSmiles;
         });
-        const nextLocked = !nextPreview.hasLigand || !nextPreview.supportsActivity;
+        const nextLocked = !nextPreview.hasLigand;
         setConfidenceOnly((prev) => {
           if (nextLocked) return true;
-          if (!confidenceOnlyTouchedRef.current) return true;
+          if (!confidenceOnlyTouchedRef.current) return Boolean(preferredConfidenceOnlyRef.current);
           return prev;
         });
       } catch (error) {

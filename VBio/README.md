@@ -21,6 +21,28 @@ docker compose up -d
 
 Default PostgREST URL: `http://127.0.0.1:54321`
 
+If you pulled new VBio code on an existing Postgres volume, run schema upgrade once:
+
+```bash
+cd VBio
+npm run db:migrate
+```
+
+One-command startup for production-style VBio stack:
+
+```bash
+cd /data/Boltz-WebUI
+bash VBio/run.sh start
+```
+
+Useful runtime commands:
+
+```bash
+bash VBio/run.sh status
+bash VBio/run.sh stop
+bash VBio/run.sh dev
+```
+
 ## 2) Configure environment variables
 
 ```bash
@@ -85,7 +107,103 @@ Optional for all commands:
 
 - `--rest-url http://127.0.0.1:54321`
 
-## 6) Notes
+## 6) Start VBio Management API (gateway)
+
+This gateway is the VBio layer for cURL submission and project-scoped token auth.
+It forwards runtime requests to Boltz-WebUI using an internal backend token.
+Original Boltz-WebUI API behavior is not modified.
+
+```bash
+cd /data/Boltz-WebUI
+source ./venv/bin/activate
+
+export VBIO_POSTGREST_URL="http://127.0.0.1:54321"
+export VBIO_RUNTIME_API_BASE_URL="http://127.0.0.1:5000"
+export VBIO_RUNTIME_API_TOKEN="<BOLTZ_BACKEND_TOKEN>"
+
+python ./VBio/server/vbio_management_api.py
+```
+
+Default gateway URL: `http://127.0.0.1:5055/vbio-api`
+
+## 7) Local submit with cURL
+
+1. Sign in to VBio web UI.
+2. Open `API Access`.
+3. Create API token and copy it (shown once).
+4. Run cURL from your local machine where your input files are stored.
+
+```bash
+export VBIO_API_BASE="http://127.0.0.1:5055/vbio-api"
+export VBIO_API_TOKEN="<YOUR_PROJECT_TOKEN>"
+export VBIO_PROJECT_ID="<PROJECT_UUID>"
+```
+
+Predict with local YAML:
+
+```bash
+curl -X POST "${VBIO_API_BASE}/predict" \
+  -H "X-API-Token: ${VBIO_API_TOKEN}" \
+  -F "project_id=${VBIO_PROJECT_ID}" \
+  -F "task_name=Predict task (optional)" \
+  -F "task_summary=Short summary (optional)" \
+  -F "yaml_file=@./config.yaml" \
+  -F "backend=boltz"
+```
+
+Affinity score (Boltz2Score) with local target/ligand files:
+
+```bash
+curl -X POST "${VBIO_API_BASE}/api/boltz2score" \
+  -H "X-API-Token: ${VBIO_API_TOKEN}" \
+  -F "project_id=${VBIO_PROJECT_ID}" \
+  -F "protein_file=@./target.cif" \
+  -F "ligand_file=@./ligand.sdf" \
+  -F "backend=boltz"
+```
+
+Affinity score (Protenix2Score) with local complex file:
+
+```bash
+curl -X POST "${VBIO_API_BASE}/api/protenix2score" \
+  -H "X-API-Token: ${VBIO_API_TOKEN}" \
+  -F "project_id=${VBIO_PROJECT_ID}" \
+  -F "input_file=@./complex.cif" \
+  -F "use_msa=true"
+```
+
+Cancel task:
+
+```bash
+curl -X DELETE "${VBIO_API_BASE}/tasks/<TASK_ID>?project_id=${VBIO_PROJECT_ID}&operation_mode=cancel" \
+  -H "X-API-Token: ${VBIO_API_TOKEN}"
+```
+
+Check task status:
+
+```bash
+curl -X GET "${VBIO_API_BASE}/status/<TASK_ID>?project_id=${VBIO_PROJECT_ID}" \
+  -H "X-API-Token: ${VBIO_API_TOKEN}"
+```
+
+Download task result:
+
+```bash
+curl -X GET "${VBIO_API_BASE}/results/<TASK_ID>?project_id=${VBIO_PROJECT_ID}" \
+  -H "X-API-Token: ${VBIO_API_TOKEN}" \
+  -o ./result.zip
+```
+
+Notes:
+- Projects are created in VBio web UI (not via API).
+- Each token is bound to one project and permissions (`submit/delete/cancel`).
+- cURL requests must include `project_id`; gateway stores task snapshot into that project.
+- API token lifecycle and usage analytics are in `API Access`.
+- Runtime backend still uses its original token/auth config.
+- Prediction `backend` can be `boltz`, `alphafold3`, or `protenix`.
+- Prediction MSA behavior should be declared in YAML (`protein.msa: empty` disables external MSA generation).
+
+## 8) Notes
 
 - Authentication uses lightweight `app_users.password_hash` (suitable for local `supabase-lite` workflow).
 - New projects now start from workflow selection (prediction/designer/bicyclic/lead optimization/affinity).

@@ -258,6 +258,213 @@ BEGIN
 END
 $$;
 
+create table if not exists public.api_tokens (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null,
+  name text not null default '',
+  token_hash text not null,
+  token_plain text not null default '',
+  token_prefix text not null default '',
+  token_last4 text not null default '',
+  project_id uuid,
+  allow_submit boolean not null default true,
+  allow_delete boolean not null default false,
+  allow_cancel boolean not null default true,
+  scopes jsonb not null default '[]'::jsonb,
+  is_active boolean not null default true,
+  last_used_at timestamptz,
+  expires_at timestamptz,
+  revoked_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.api_tokens add column if not exists user_id uuid;
+alter table public.api_tokens add column if not exists name text;
+alter table public.api_tokens add column if not exists token_hash text;
+alter table public.api_tokens add column if not exists token_plain text;
+alter table public.api_tokens add column if not exists token_prefix text;
+alter table public.api_tokens add column if not exists token_last4 text;
+alter table public.api_tokens add column if not exists project_id uuid;
+alter table public.api_tokens add column if not exists allow_submit boolean;
+alter table public.api_tokens add column if not exists allow_delete boolean;
+alter table public.api_tokens add column if not exists allow_cancel boolean;
+alter table public.api_tokens add column if not exists scopes jsonb;
+alter table public.api_tokens add column if not exists is_active boolean;
+alter table public.api_tokens add column if not exists last_used_at timestamptz;
+alter table public.api_tokens add column if not exists expires_at timestamptz;
+alter table public.api_tokens add column if not exists revoked_at timestamptz;
+alter table public.api_tokens add column if not exists created_at timestamptz;
+alter table public.api_tokens add column if not exists updated_at timestamptz;
+
+update public.api_tokens set name = 'Token' where name is null or name = '';
+update public.api_tokens set token_hash = encode(gen_random_bytes(32), 'hex') where token_hash is null or token_hash = '';
+update public.api_tokens set token_plain = '' where token_plain is null;
+update public.api_tokens set token_prefix = substring(token_hash from 1 for 12) where token_prefix is null or token_prefix = '';
+update public.api_tokens set token_last4 = right(token_hash, 4) where token_last4 is null or token_last4 = '';
+update public.api_tokens set allow_submit = true where allow_submit is null;
+update public.api_tokens set allow_delete = false where allow_delete is null;
+update public.api_tokens set allow_cancel = true where allow_cancel is null;
+update public.api_tokens set scopes = '[]'::jsonb where scopes is null;
+update public.api_tokens set is_active = true where is_active is null;
+update public.api_tokens set created_at = now() where created_at is null;
+update public.api_tokens set updated_at = now() where updated_at is null;
+delete from public.api_tokens where user_id is null;
+
+alter table public.api_tokens alter column user_id set not null;
+alter table public.api_tokens alter column name set not null;
+alter table public.api_tokens alter column token_hash set not null;
+alter table public.api_tokens alter column token_plain set not null;
+alter table public.api_tokens alter column token_prefix set not null;
+alter table public.api_tokens alter column token_last4 set not null;
+alter table public.api_tokens alter column allow_submit set not null;
+alter table public.api_tokens alter column allow_delete set not null;
+alter table public.api_tokens alter column allow_cancel set not null;
+alter table public.api_tokens alter column scopes set not null;
+alter table public.api_tokens alter column is_active set not null;
+alter table public.api_tokens alter column created_at set not null;
+alter table public.api_tokens alter column updated_at set not null;
+alter table public.api_tokens alter column name set default '';
+alter table public.api_tokens alter column token_plain set default '';
+alter table public.api_tokens alter column token_prefix set default '';
+alter table public.api_tokens alter column token_last4 set default '';
+alter table public.api_tokens alter column allow_submit set default true;
+alter table public.api_tokens alter column allow_delete set default false;
+alter table public.api_tokens alter column allow_cancel set default true;
+alter table public.api_tokens alter column scopes set default '[]'::jsonb;
+alter table public.api_tokens alter column is_active set default true;
+alter table public.api_tokens alter column created_at set default now();
+alter table public.api_tokens alter column updated_at set default now();
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'api_tokens_project_id_fkey'
+      AND conrelid = 'public.api_tokens'::regclass
+  ) THEN
+    ALTER TABLE public.api_tokens
+      ADD CONSTRAINT api_tokens_project_id_fkey
+      FOREIGN KEY (project_id)
+      REFERENCES public.projects(id)
+      ON DELETE SET NULL;
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'api_tokens_user_id_fkey'
+      AND conrelid = 'public.api_tokens'::regclass
+  ) THEN
+    ALTER TABLE public.api_tokens
+      ADD CONSTRAINT api_tokens_user_id_fkey
+      FOREIGN KEY (user_id)
+      REFERENCES public.app_users(id)
+      ON DELETE CASCADE;
+  END IF;
+END
+$$;
+
+create unique index if not exists idx_api_tokens_token_hash on public.api_tokens (token_hash);
+create index if not exists idx_api_tokens_user_id on public.api_tokens (user_id, created_at desc);
+create index if not exists idx_api_tokens_active on public.api_tokens (is_active, created_at desc);
+create index if not exists idx_api_tokens_project_id on public.api_tokens (project_id, created_at desc);
+
+create table if not exists public.api_token_usage (
+  id uuid primary key default gen_random_uuid(),
+  token_id uuid,
+  user_id uuid,
+  method text not null default '',
+  path text not null default '',
+  action text not null default '',
+  status_code integer not null default 0,
+  succeeded boolean not null default false,
+  duration_ms integer,
+  client text not null default '',
+  meta jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+alter table public.api_token_usage add column if not exists token_id uuid;
+alter table public.api_token_usage add column if not exists user_id uuid;
+alter table public.api_token_usage add column if not exists method text;
+alter table public.api_token_usage add column if not exists path text;
+alter table public.api_token_usage add column if not exists action text;
+alter table public.api_token_usage add column if not exists status_code integer;
+alter table public.api_token_usage add column if not exists succeeded boolean;
+alter table public.api_token_usage add column if not exists duration_ms integer;
+alter table public.api_token_usage add column if not exists client text;
+alter table public.api_token_usage add column if not exists meta jsonb;
+alter table public.api_token_usage add column if not exists created_at timestamptz;
+
+update public.api_token_usage set method = '' where method is null;
+update public.api_token_usage set path = '' where path is null;
+update public.api_token_usage set action = '' where action is null;
+update public.api_token_usage set status_code = 0 where status_code is null;
+update public.api_token_usage set succeeded = false where succeeded is null;
+update public.api_token_usage set client = '' where client is null;
+update public.api_token_usage set meta = '{}'::jsonb where meta is null;
+update public.api_token_usage set created_at = now() where created_at is null;
+
+alter table public.api_token_usage alter column method set not null;
+alter table public.api_token_usage alter column path set not null;
+alter table public.api_token_usage alter column action set not null;
+alter table public.api_token_usage alter column status_code set not null;
+alter table public.api_token_usage alter column succeeded set not null;
+alter table public.api_token_usage alter column client set not null;
+alter table public.api_token_usage alter column meta set not null;
+alter table public.api_token_usage alter column created_at set not null;
+alter table public.api_token_usage alter column method set default '';
+alter table public.api_token_usage alter column path set default '';
+alter table public.api_token_usage alter column action set default '';
+alter table public.api_token_usage alter column status_code set default 0;
+alter table public.api_token_usage alter column succeeded set default false;
+alter table public.api_token_usage alter column client set default '';
+alter table public.api_token_usage alter column meta set default '{}'::jsonb;
+alter table public.api_token_usage alter column created_at set default now();
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'api_token_usage_token_id_fkey'
+      AND conrelid = 'public.api_token_usage'::regclass
+  ) THEN
+    ALTER TABLE public.api_token_usage
+      ADD CONSTRAINT api_token_usage_token_id_fkey
+      FOREIGN KEY (token_id)
+      REFERENCES public.api_tokens(id)
+      ON DELETE SET NULL;
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'api_token_usage_user_id_fkey'
+      AND conrelid = 'public.api_token_usage'::regclass
+  ) THEN
+    ALTER TABLE public.api_token_usage
+      ADD CONSTRAINT api_token_usage_user_id_fkey
+      FOREIGN KEY (user_id)
+      REFERENCES public.app_users(id)
+      ON DELETE SET NULL;
+  END IF;
+END
+$$;
+
+create index if not exists idx_api_token_usage_token_id_created_at on public.api_token_usage (token_id, created_at desc);
+create index if not exists idx_api_token_usage_created_at on public.api_token_usage (created_at desc);
+
 create index if not exists idx_projects_user_id on public.projects (user_id);
 create index if not exists idx_projects_updated_at on public.projects (updated_at desc);
 create index if not exists idx_projects_deleted_at on public.projects (deleted_at);
@@ -275,14 +482,14 @@ as $$
         select coalesce(
           jsonb_agg(
             case
-              when jsonb_typeof(compact_affinity.elem->'templateUpload') = 'object'
+              when jsonb_typeof(compact_snake.elem->'templateUpload') = 'object'
                 then jsonb_set(
-                  compact_affinity.elem,
+                  compact_snake.elem,
                   '{templateUpload}',
-                  (compact_affinity.elem->'templateUpload') - 'content',
+                  (compact_snake.elem->'templateUpload') - 'content',
                   true
                 )
-              else compact_affinity.elem
+              else compact_snake.elem
             end
           ),
           '[]'::jsonb
@@ -290,63 +497,18 @@ as $$
         from (
           select
             case
-              when jsonb_typeof(compact_upload.elem->'affinityUpload') = 'object'
-                then jsonb_set(
-                  jsonb_set(
-                    compact_upload.elem,
-                    '{affinityUpload}',
-                    (compact_upload.elem->'affinityUpload') - 'content',
-                    true
-                  ),
-                  '{sequence}',
-                  to_jsonb(''::text),
-                  true
-                )
-              when jsonb_typeof(compact_upload.elem->'affinity_upload') = 'object'
-                then jsonb_set(
-                  jsonb_set(
-                    compact_upload.elem,
-                    '{affinity_upload}',
-                    (compact_upload.elem->'affinity_upload') - 'content',
-                    true
-                  ),
-                  '{sequence}',
-                  to_jsonb(''::text),
-                  true
-                )
-              when coalesce(compact_upload.elem->>'id', '') in ('__affinity_target_upload__', '__affinity_ligand_upload__')
-                then jsonb_set(compact_upload.elem, '{sequence}', to_jsonb(''::text), true)
-              else compact_upload.elem
+              when jsonb_typeof(elem->'template_upload') = 'object'
+                then jsonb_set(elem, '{template_upload}', (elem->'template_upload') - 'content', true)
+              else elem
             end as elem
-          from (
-            select
-              case
-                when jsonb_typeof(compact_snake.elem->'templateUpload') = 'object'
-                  then jsonb_set(
-                    compact_snake.elem,
-                    '{templateUpload}',
-                    (compact_snake.elem->'templateUpload') - 'content',
-                    true
-                  )
-                else compact_snake.elem
-              end as elem
-            from (
-              select
-                case
-                  when jsonb_typeof(elem->'template_upload') = 'object'
-                    then jsonb_set(elem, '{template_upload}', (elem->'template_upload') - 'content', true)
-                  else elem
-                end as elem
-              from jsonb_array_elements(input) as elem
-            ) as compact_snake
-          ) as compact_upload
-        ) as compact_affinity
+          from jsonb_array_elements(input) as elem
+        ) as compact_snake
       )
       else '[]'::jsonb
     end;
 $$;
 
--- Keep task snapshot metadata, but strip bulky template file text from components.
+-- Keep task snapshot metadata, strip bulky template text, keep affinity upload content for Components recovery.
 update public.project_tasks
 set components = public.strip_task_components_for_storage(components)
 where public.strip_task_components_for_storage(components) is distinct from components;
@@ -439,6 +601,12 @@ before update on public.project_tasks
 for each row
 execute procedure public.set_updated_at();
 
+drop trigger if exists trg_api_tokens_updated_at on public.api_tokens;
+create trigger trg_api_tokens_updated_at
+before update on public.api_tokens
+for each row
+execute procedure public.set_updated_at();
+
 drop trigger if exists trg_project_tasks_compact_components on public.project_tasks;
 create trigger trg_project_tasks_compact_components
 before insert or update of components on public.project_tasks
@@ -448,6 +616,8 @@ execute procedure public.project_tasks_compact_components_for_storage();
 alter table public.app_users enable row level security;
 alter table public.projects enable row level security;
 alter table public.project_tasks enable row level security;
+alter table public.api_tokens enable row level security;
+alter table public.api_token_usage enable row level security;
 
 drop policy if exists app_users_anon_select on public.app_users;
 drop policy if exists app_users_anon_insert on public.app_users;
@@ -487,6 +657,14 @@ drop policy if exists project_tasks_anon_select on public.project_tasks;
 drop policy if exists project_tasks_anon_insert on public.project_tasks;
 drop policy if exists project_tasks_anon_update on public.project_tasks;
 drop policy if exists project_tasks_anon_delete on public.project_tasks;
+drop policy if exists api_tokens_anon_select on public.api_tokens;
+drop policy if exists api_tokens_anon_insert on public.api_tokens;
+drop policy if exists api_tokens_anon_update on public.api_tokens;
+drop policy if exists api_tokens_anon_delete on public.api_tokens;
+drop policy if exists api_token_usage_anon_select on public.api_token_usage;
+drop policy if exists api_token_usage_anon_insert on public.api_token_usage;
+drop policy if exists api_token_usage_anon_update on public.api_token_usage;
+drop policy if exists api_token_usage_anon_delete on public.api_token_usage;
 
 create policy projects_anon_select
 on public.projects
@@ -538,8 +716,72 @@ for delete
 to anon
 using (true);
 
+create policy api_tokens_anon_select
+on public.api_tokens
+for select
+to anon
+using (true);
+
+create policy api_tokens_anon_insert
+on public.api_tokens
+for insert
+to anon
+with check (true);
+
+create policy api_tokens_anon_update
+on public.api_tokens
+for update
+to anon
+using (true)
+with check (true);
+
+create policy api_tokens_anon_delete
+on public.api_tokens
+for delete
+to anon
+using (true);
+
+create policy api_token_usage_anon_select
+on public.api_token_usage
+for select
+to anon
+using (true);
+
+create policy api_token_usage_anon_insert
+on public.api_token_usage
+for insert
+to anon
+with check (true);
+
+create policy api_token_usage_anon_update
+on public.api_token_usage
+for update
+to anon
+using (true)
+with check (true);
+
+create policy api_token_usage_anon_delete
+on public.api_token_usage
+for delete
+to anon
+using (true);
+
+drop view if exists public.api_token_usage_daily;
+create or replace view public.api_token_usage_daily as
+select
+  token_id,
+  date_trunc('day', created_at)::date as usage_day,
+  count(*)::bigint as total_count,
+  count(*) filter (where succeeded)::bigint as success_count,
+  count(*) filter (where not succeeded)::bigint as error_count
+from public.api_token_usage
+group by token_id, date_trunc('day', created_at)::date;
+
 grant usage on schema public to anon, authenticated, service_role;
 grant select, insert, update, delete on public.app_users to anon, authenticated, service_role;
 grant select, insert, update, delete on public.projects to anon, authenticated, service_role;
 grant select, insert, update, delete on public.project_tasks to anon, authenticated, service_role;
+grant select, insert, update, delete on public.api_tokens to anon, authenticated, service_role;
+grant select, insert, update, delete on public.api_token_usage to anon, authenticated, service_role;
 grant select on public.project_tasks_list to anon, authenticated, service_role;
+grant select on public.api_token_usage_daily to anon, authenticated, service_role;

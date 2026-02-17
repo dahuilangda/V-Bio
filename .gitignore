@@ -81,3 +81,4 @@ VBio/pnpm-debug.log*
 VBio/supabase-lite/.env
 !VBio/supabase-lite/.env.example
 VBio/supabase-lite/data/
+VBio/.run/
