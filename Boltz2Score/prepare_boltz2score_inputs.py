@@ -402,27 +402,44 @@ def _build_custom_ligand_mol_from_smiles(
     smiles: str,
     resname: str,
 ) -> Chem.Mol | None:
-    """Build ligand topology from SMILES while preserving residue coordinates."""
+    """Build ligand topology from SMILES while preserving residue heavy-atom coordinates.
+
+    Residue coordinates can include explicit hydrogens (e.g. from SDF/MOL2 uploads),
+    while SMILES templates are matched on heavy atoms. Matching on all atoms causes
+    frequent failures and silently falls back to weaker topology inference.
+    """
     template = Chem.MolFromSmiles((smiles or "").strip())
     if template is None:
         return None
     template = Chem.RemoveHs(template)
 
+    # Build coordinate candidate from heavy atoms only, so template matching remains
+    # stable for ligands with explicit hydrogens in uploaded structures.
     rw_mol = Chem.RWMol()
     atom_names = []
+    kept_positions: list[tuple[float, float, float]] = []
     for atom in residue:
         element = atom.element.name if atom.element.name else atom.name[:1]
+        if str(element or "").strip().upper() in {"H", "D", "T"}:
+            continue
         idx = rw_mol.AddAtom(Chem.Atom(element))
         atom_name = atom.name.strip()
         rw_mol.GetAtomWithIdx(idx).SetProp("name", atom_name)
         atom_names.append(atom_name)
+        pos = atom.pos
+        kept_positions.append((pos.x, pos.y, pos.z))
+
+    if not atom_names:
+        return None
 
     coord_mol = rw_mol.GetMol()
     conf = Chem.Conformer(coord_mol.GetNumAtoms())
-    for i, atom in enumerate(residue):
-        pos = atom.pos
-        conf.SetAtomPosition(i, (pos.x, pos.y, pos.z))
+    for i, (x, y, z) in enumerate(kept_positions):
+        conf.SetAtomPosition(i, (x, y, z))
     coord_mol.AddConformer(conf, assignId=True)
+
+    if coord_mol.GetNumAtoms() != template.GetNumAtoms():
+        return None
 
     try:
         candidate = Chem.Mol(coord_mol)
