@@ -4711,8 +4711,8 @@ select:focus {
     min-width: 860px;
   }
 
-  .task-table th:nth-child(6),
-  .task-table td:nth-child(6) {
+  .task-table th:nth-child(8),
+  .task-table td:nth-child(8) {
     display: none;
   }
 }

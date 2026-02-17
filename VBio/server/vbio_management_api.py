@@ -287,6 +287,18 @@ def _proxy_multipart(upstream_path: str) -> requests.Response:
         for value in request.form.getlist(key):
             data.append((key, value))
 
+    if upstream_path == "/predict":
+        raw_use_msa = request.form.get("use_msa_server")
+        if raw_use_msa is None or not str(raw_use_msa).strip():
+            yaml_upload = request.files.get("yaml_file")
+            yaml_text = _read_upload_text(yaml_upload)
+            inferred_use_msa = _infer_use_msa_server_from_yaml_text(yaml_text)
+            data.append(("use_msa_server", "true" if inferred_use_msa else "false"))
+            logger.info(
+                "Auto-filled use_msa_server=%s for /predict because the form field was missing.",
+                inferred_use_msa,
+            )
+
     files: List[Tuple[str, Tuple[str, Any, str]]] = []
     for key in request.files.keys():
         for fs in request.files.getlist(key):
@@ -398,6 +410,55 @@ def _parse_ligand_smiles_map_from_form() -> Dict[str, str]:
         if chain_id and smiles:
             output[chain_id] = smiles
     return output
+
+
+def _infer_use_msa_server_from_yaml_text(yaml_text: str) -> bool:
+    """
+    Infer `use_msa_server` from submitted prediction YAML.
+
+    Returns True when at least one protein entry requires external MSA
+    (no explicit `msa` field). Returns False when there are no proteins,
+    all proteins use `msa: empty`, or all proteins already provide MSA.
+    """
+    if not yaml_text.strip():
+        return False
+
+    try:
+        yaml_data = yaml.safe_load(yaml_text) or {}
+    except Exception:
+        return False
+    if not isinstance(yaml_data, dict):
+        return False
+
+    sequences = yaml_data.get("sequences")
+    if not isinstance(sequences, list):
+        return False
+
+    has_protein = False
+    needs_external_msa = False
+    for item in sequences:
+        if not isinstance(item, dict):
+            continue
+        protein = item.get("protein")
+        if not isinstance(protein, dict):
+            continue
+        has_protein = True
+        msa_value = protein.get("msa")
+        if msa_value is None:
+            needs_external_msa = True
+            continue
+        if isinstance(msa_value, str):
+            normalized = msa_value.strip().lower()
+            if not normalized:
+                needs_external_msa = True
+                continue
+            if normalized in {"empty", "none", "null"}:
+                continue
+            # Non-empty string path/reference: assume user provided MSA.
+            continue
+        # dict/list/object payload is treated as provided MSA.
+
+    return has_protein and needs_external_msa
 
 
 def _normalize_chain_id_list(value: Any) -> List[str]:

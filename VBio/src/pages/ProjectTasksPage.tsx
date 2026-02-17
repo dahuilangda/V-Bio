@@ -1168,6 +1168,18 @@ function backendLabel(value: string): string {
   return value ? value.toUpperCase() : 'Unknown';
 }
 
+function resolveTaskBackendValue(task: ProjectTask, fallbackBackend = ''): string {
+  const direct = String(task.backend || '').trim().toLowerCase();
+  if (direct) return direct;
+  const confidence =
+    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
+      ? (task.confidence as Record<string, unknown>)
+      : null;
+  const fromConfidence = confidence && typeof confidence.backend === 'string' ? confidence.backend.trim().toLowerCase() : '';
+  if (fromConfidence) return fromConfidence;
+  return String(fallbackBackend || '').trim().toLowerCase();
+}
+
 function parseNumberOrNull(value: string): number | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
@@ -1468,7 +1480,7 @@ export function ProjectTasksPage() {
           row.confidence && typeof row.confidence === 'object' && !Array.isArray(row.confidence)
             ? (row.confidence as Record<string, unknown>)
             : null;
-        const backendValue = String(row.backend || confidence?.backend || '').trim().toLowerCase();
+        const backendValue = resolveTaskBackendValue(row);
         const ligandByChain =
           confidence?.ligand_atom_plddts_by_chain &&
           typeof confidence.ligand_atom_plddts_by_chain === 'object' &&
@@ -1786,7 +1798,7 @@ export function ProjectTasksPage() {
           plddt
         },
         submittedTs,
-        backendValue: String(task.backend || '').trim().toLowerCase(),
+        backendValue: resolveTaskBackendValue(task, project?.backend || ''),
         durationValue,
         ligandSmiles: selection.ligandSmiles,
         ligandIsSmiles: selection.ligandIsSmiles,
@@ -1796,7 +1808,7 @@ export function ProjectTasksPage() {
         ligandResiduePlddts
       };
     });
-  }, [tasks, workspacePairPreference]);
+  }, [tasks, workspacePairPreference, project?.backend]);
   const backendOptions = useMemo(
     () =>
       Array.from(new Set(taskRows.map((row) => row.backendValue).filter(Boolean))).sort((a, b) =>
@@ -2050,7 +2062,8 @@ export function ProjectTasksPage() {
         task.name,
         task.summary,
         task.task_state,
-        task.backend,
+        row.backendValue,
+        backendLabel(row.backendValue),
         task.status_text,
         task.error_text,
         task.structure_name,
@@ -2877,7 +2890,7 @@ export function ProjectTasksPage() {
                         </div>
                       </td>
                       <td className="task-col-backend">
-                        <span className="badge task-backend-badge">{task.backend || '-'}</span>
+                        <span className="badge task-backend-badge">{backendLabel(row.backendValue)}</span>
                       </td>
                       <td className="task-col-seed">{task.seed ?? '-'}</td>
                       <td className="project-col-time">{formatDuration(task.duration_seconds)}</td>
