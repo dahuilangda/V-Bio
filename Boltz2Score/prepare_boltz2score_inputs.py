@@ -8,6 +8,7 @@ import hashlib
 import os
 import pickle
 import re
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 import tempfile
@@ -459,6 +460,98 @@ def _build_custom_ligand_mol_from_smiles(
     return assigned
 
 
+def _build_custom_ligand_mol_from_smiles_with_reference(
+    reference_mol: Chem.Mol,
+    smiles: str,
+    resname: str,
+) -> Chem.Mol | None:
+    """Apply SMILES bond orders on a reference ligand while preserving atom names."""
+    template = Chem.MolFromSmiles((smiles or "").strip())
+    if template is None:
+        return None
+    template = Chem.RemoveHs(template)
+
+    try:
+        candidate = Chem.RemoveHs(Chem.Mol(reference_mol), sanitize=False)
+    except Exception:
+        return None
+
+    atom_names: list[str] = []
+    for atom in candidate.GetAtoms():
+        if atom.HasProp("name"):
+            atom_names.append(atom.GetProp("name"))
+        else:
+            atom_names.append("")
+
+    if candidate.GetNumAtoms() != template.GetNumAtoms():
+        return None
+
+    try:
+        assigned = AllChem.AssignBondOrdersFromTemplate(template, candidate)
+    except Exception:
+        return None
+
+    for idx, atom in enumerate(assigned.GetAtoms()):
+        if idx < len(atom_names) and atom_names[idx]:
+            atom.SetProp("name", atom_names[idx])
+
+    assigned.SetProp("_Name", resname)
+    assigned.SetProp("name", resname)
+    assigned.SetProp("id", resname)
+    return assigned
+
+
+def _atom_name_mapping_stats(residue: gemmi.Residue, mol: Chem.Mol) -> dict[str, object]:
+    """Compute heavy-atom name matching statistics between residue and reference mol."""
+    residue_names: list[str] = []
+    for atom in residue:
+        element = str(atom.element.name or atom.name[:1]).strip().upper()
+        if element in {"H", "D", "T"}:
+            continue
+        name = atom.name.strip()
+        if name:
+            residue_names.append(name)
+
+    try:
+        ref_heavy = Chem.RemoveHs(Chem.Mol(mol), sanitize=False)
+    except Exception:
+        ref_heavy = mol
+
+    mol_names: list[str] = []
+    for atom in ref_heavy.GetAtoms():
+        name = atom.GetProp("name").strip() if atom.HasProp("name") else ""
+        if name:
+            mol_names.append(name)
+
+    residue_counter = Counter(residue_names)
+    mol_counter = Counter(mol_names)
+    matched = sum(min(count, mol_counter.get(name, 0)) for name, count in residue_counter.items())
+    residue_duplicates = sorted(name for name, count in residue_counter.items() if count > 1)
+    mol_duplicates = sorted(name for name, count in mol_counter.items() if count > 1)
+
+    missing_in_mol = []
+    for name, count in residue_counter.items():
+        deficit = count - mol_counter.get(name, 0)
+        if deficit > 0:
+            missing_in_mol.extend([name] * deficit)
+
+    missing_in_residue = []
+    for name, count in mol_counter.items():
+        deficit = count - residue_counter.get(name, 0)
+        if deficit > 0:
+            missing_in_residue.extend([name] * deficit)
+
+    return {
+        "residue_total": len(residue_names),
+        "mol_total": len(mol_names),
+        "matched": matched,
+        "residue_duplicates": residue_duplicates[:10],
+        "mol_duplicates": mol_duplicates[:10],
+        "missing_in_mol": sorted(set(missing_in_mol))[:10],
+        "missing_in_residue": sorted(set(missing_in_residue))[:10],
+    }
+
+
 def _extract_pdb_ligand_block(
     pdb_lines: list[str],
     resname: str,
@@ -661,6 +754,8 @@ def _collect_custom_ligands(
             ):
                 if candidate in map_data:
                     return map_data[candidate]
+        if len(map_data) == 1:
+            return next(iter(map_data.values()))
         return None
 
     normalized_ligand_smiles_map = _normalized_ligand_map(ligand_smiles_map)
@@ -695,11 +790,25 @@ def _collect_custom_ligands(
                             smiles=chain_smiles,
                             resname=resname,
                         )
-                        if custom_mol is not None:
-                            print(
-                                f"[Info] Applied SMILES topology override for chain {chain.name} "
-                                f"({resname})."
+                        if (
+                            custom_mol is None
+                            and preloaded_custom_mols
+                            and resname in preloaded_custom_mols
+                        ):
+                            custom_mol = _build_custom_ligand_mol_from_smiles_with_reference(
+                                reference_mol=preloaded_custom_mols[resname],
+                                smiles=chain_smiles,
+                                resname=resname,
                             )
+                        if custom_mol is None:
+                            raise RuntimeError(
+                                "Failed to apply SMILES topology override for "
+                                f"chain {chain.name} ({resname})."
+                            )
+                        print(
+                            f"[Info] Applied SMILES topology override for chain {chain.name} "
+                            f"({resname})."
+                        )
                     if preloaded_custom_mols and resname in preloaded_custom_mols:
                         # Reuse preloaded ligand definition (e.g., separate-input mode)
                         # to avoid reconstructing topology from coordinates.
@@ -723,6 +832,27 @@ def _collect_custom_ligands(
                                 )
                     if custom_mol is None:
                         custom_mol = _build_custom_ligand_mol(residue)
+                    mapping_stats = _atom_name_mapping_stats(residue, custom_mol)
+                    residue_total = int(mapping_stats["residue_total"])
+                    mol_total = int(mapping_stats["mol_total"])
+                    matched = int(mapping_stats["matched"])
+                    if chain_smiles and (
+                        residue_total == 0
+                        or mol_total == 0
+                        or matched != residue_total
+                        or matched != mol_total
+                        or bool(mapping_stats["residue_duplicates"])
+                        or bool(mapping_stats["mol_duplicates"])
+                    ):
+                        raise RuntimeError(
+                            "SMILES override produced incomplete heavy-atom name mapping for "
+                            f"chain {chain.name} ({resname}): matched={matched}, "
+                            f"residue_total={residue_total}, mol_total={mol_total}, "
+                            f"residue_duplicates={mapping_stats['residue_duplicates']}, "
+                            f"mol_duplicates={mapping_stats['mol_duplicates']}, "
+                            f"missing_in_mol={mapping_stats['missing_in_mol']}, "
+                            f"missing_in_residue={mapping_stats['missing_in_residue']}."
+                        )
                     bond_count = custom_mol.GetNumBonds()
                     non_single = sum(
                         1
@@ -732,7 +862,8 @@ def _collect_custom_ligands(
                     print(
                         f"[Info] Built custom ligand {resname} "
                         f"(atoms={custom_mol.GetNumAtoms()}, bonds={bond_count}, "
-                        f"non_single_bonds={non_single})."
+                        f"non_single_bonds={non_single}, "
+                        f"mapped_heavy_atoms={matched}/{max(residue_total, mol_total)})."
                     )
                     custom_mols[resname] = custom_mol
 
