@@ -487,6 +487,18 @@ async function buildAffinityUploadSnapshotComponents(
     return role === null;
   });
   if (!targetFile) return filteredBase;
+  const [targetContent, ligandContent] = await Promise.all([
+    targetFile
+      .text()
+      .then((value) => value)
+      .catch(() => ''),
+    ligandFile
+      ? ligandFile
+          .text()
+          .then((value) => value)
+          .catch(() => '')
+      : Promise.resolve('')
+  ]);
 
   const targetUploadComponent = ({
     id: AFFINITY_TARGET_UPLOAD_COMPONENT_ID,
@@ -497,7 +509,8 @@ async function buildAffinityUploadSnapshotComponents(
     cyclic: false,
     affinityUpload: {
       role: 'target',
-      fileName: targetFile.name
+      fileName: targetFile.name,
+      content: targetContent
     }
   } as unknown) as InputComponent;
 
@@ -512,7 +525,8 @@ async function buildAffinityUploadSnapshotComponents(
       inputMethod: 'jsme',
       affinityUpload: {
         role: 'ligand',
-        fileName: ligandFile.name
+        fileName: ligandFile.name,
+        content: ligandContent
       }
     } as unknown) as InputComponent;
     next.push(ligandUploadComponent);
@@ -671,10 +685,8 @@ function normalizeChainKey(value: string): string {
 function resolveAffinityUploadStorageTaskRowId(taskRowId: string | null | undefined): string | null {
   const normalized = String(taskRowId || '').trim();
   if (!normalized || normalized === AFFINITY_UPLOAD_SCOPE_NEW) return null;
-  if (normalized.startsWith(AFFINITY_UPLOAD_SCOPE_PREFIX)) {
-    const sourceTaskRowId = normalized.slice(AFFINITY_UPLOAD_SCOPE_PREFIX.length).trim();
-    return sourceTaskRowId || null;
-  }
+  // Keep synthetic scopes (`__new_from_<taskRowId>`) isolated from the source task row.
+  // This mirrors prediction behavior: edits on a finished/running task are a new draft branch.
   return normalized;
 }
 
@@ -1483,11 +1495,11 @@ export function ProjectDetailPage() {
   const affinityUploadScopeTaskRowId = useMemo(() => {
     if (requestedStatusTaskRow?.id) {
       if (isDraftTaskSnapshot(requestedStatusTaskRow)) return requestedStatusTaskRow.id;
-      return `__new_from_${requestedStatusTaskRow.id}`;
+      return `${AFFINITY_UPLOAD_SCOPE_PREFIX}${requestedStatusTaskRow.id}`;
     }
     if (statusContextTaskRow?.id) {
       if (isDraftTaskSnapshot(statusContextTaskRow)) return statusContextTaskRow.id;
-      return `__new_from_${statusContextTaskRow.id}`;
+      return `${AFFINITY_UPLOAD_SCOPE_PREFIX}${statusContextTaskRow.id}`;
     }
     if (runtimeResultTask?.id && isDraftTaskSnapshot(runtimeResultTask)) return runtimeResultTask.id;
     const latestDraftTask =
@@ -3004,7 +3016,7 @@ export function ProjectDetailPage() {
     const storageTaskRowId = resolveAffinityUploadStorageTaskRowId(affinityUploadScopeTaskRowId);
     const savedByScope = storageTaskRowId ? taskAffinityUploads[storageTaskRowId] || null : null;
     const sourceTask = statusContextTaskRow || activeResultTask || null;
-    const fromTask = sourceTask && isDraftTaskSnapshot(sourceTask) ? readTaskAffinityUploads(sourceTask) : { target: null, ligand: null };
+    const fromTask = sourceTask ? readTaskAffinityUploads(sourceTask) : { target: null, ligand: null };
     return {
       target: savedByScope?.target || fromTask.target,
       ligand: savedByScope?.ligand || fromTask.ligand
@@ -4103,7 +4115,7 @@ export function ProjectDetailPage() {
   const workflow = getWorkflowDefinition(project.task_type);
   const isRunRedirecting = Boolean(runRedirectTaskId);
   const showQuickRunFab = showFloatingRunButton && !isRunRedirecting;
-  const componentStepLabel = isAffinityWorkflow ? 'Component' : 'Components';
+  const componentStepLabel = 'Components';
   const affinityBackend = String(draft.backend || 'boltz').trim().toLowerCase();
   const affinityUseMsa = computeUseMsaFlag(draft.inputConfig.components, draft.use_msa);
   const affinityBackendSupportsActivity = affinityBackend === 'boltz' || affinityBackend === 'protenix';

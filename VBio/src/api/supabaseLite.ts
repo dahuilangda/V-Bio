@@ -425,6 +425,32 @@ function affinityUploadRoleFromTaskComponent(component: Record<string, unknown>)
   return null;
 }
 
+function normalizeAffinityUploadMeta(
+  raw: unknown,
+  role: 'target' | 'ligand'
+): Record<string, unknown> | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const next = { ...(raw as Record<string, unknown>) };
+  next.role = role;
+
+  if (typeof next.fileName === 'string') {
+    const trimmed = next.fileName.trim();
+    if (trimmed) {
+      next.fileName = trimmed;
+    } else {
+      delete next.fileName;
+    }
+  } else {
+    delete next.fileName;
+  }
+
+  if (typeof next.content !== 'string') {
+    delete next.content;
+  }
+
+  return next;
+}
+
 function stripAffinityUploadContentFromTaskComponents(components: unknown): unknown {
   if (!Array.isArray(components)) return components;
   return components.map((component) => {
@@ -432,16 +458,17 @@ function stripAffinityUploadContentFromTaskComponents(components: unknown): unkn
     const role = affinityUploadRoleFromTaskComponent(component as Record<string, unknown>);
     if (!role) return component;
     const next = { ...(component as Record<string, unknown>) };
-    next.sequence = '';
-    if (next.affinityUpload && typeof next.affinityUpload === 'object' && !Array.isArray(next.affinityUpload)) {
-      const compactUpload = { ...(next.affinityUpload as Record<string, unknown>) };
-      delete compactUpload.content;
-      next.affinityUpload = compactUpload;
+    const normalizedCamel = normalizeAffinityUploadMeta(next.affinityUpload, role);
+    const normalizedSnake = normalizeAffinityUploadMeta(next.affinity_upload, role);
+    if (normalizedCamel) {
+      next.affinityUpload = normalizedCamel;
+    } else {
+      delete next.affinityUpload;
     }
-    if (next.affinity_upload && typeof next.affinity_upload === 'object' && !Array.isArray(next.affinity_upload)) {
-      const compactUpload = { ...(next.affinity_upload as Record<string, unknown>) };
-      delete compactUpload.content;
-      next.affinity_upload = compactUpload;
+    if (normalizedSnake) {
+      next.affinity_upload = normalizedSnake;
+    } else {
+      delete next.affinity_upload;
     }
     return next;
   });
