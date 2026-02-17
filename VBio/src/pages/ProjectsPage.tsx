@@ -13,7 +13,6 @@ import {
   FolderOpen,
   FlaskConical,
   Hash,
-  Pencil,
   Plus,
   RefreshCcw,
   Search,
@@ -81,11 +80,10 @@ export function ProjectsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
-  const [editProjectName, setEditProjectName] = useState('');
-  const [editProjectSummary, setEditProjectSummary] = useState('');
-  const [editError, setEditError] = useState<string | null>(null);
-  const [editSaving, setEditSaving] = useState(false);
+  const [editingProjectNameId, setEditingProjectNameId] = useState<string | null>(null);
+  const [editingProjectNameValue, setEditingProjectNameValue] = useState('');
+  const [savingProjectNameId, setSavingProjectNameId] = useState<string | null>(null);
+  const [renameError, setRenameError] = useState<string | null>(null);
   const [workflow, setWorkflow] = useState<WorkflowKey>('prediction');
   const [typeFilter, setTypeFilter] = useState<'all' | WorkflowKey>('all');
   const [stateFilter, setStateFilter] = useState<'all' | TaskState>('all');
@@ -381,33 +379,42 @@ export function ProjectsPage() {
     }
   };
 
-  const openEditProjectModal = (projectId: string, name: string, summary: string) => {
-    setEditingProjectId(projectId);
-    setEditProjectName(name);
-    setEditProjectSummary(summary);
-    setEditError(null);
+  const beginProjectNameEdit = (projectId: string, displayName: string) => {
+    if (savingProjectNameId) return;
+    setEditingProjectNameId(projectId);
+    setEditingProjectNameValue(displayName);
+    setRenameError(null);
   };
 
-  const onEditProject = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    if (!editingProjectId) return;
-    const normalizedName = editProjectName.trim();
+  const cancelProjectNameEdit = () => {
+    if (savingProjectNameId) return;
+    setEditingProjectNameId(null);
+    setEditingProjectNameValue('');
+  };
+
+  const saveProjectNameEdit = async (projectId: string, currentName: string) => {
+    if (editingProjectNameId !== projectId) return;
+    if (savingProjectNameId && savingProjectNameId !== projectId) return;
+    const normalizedName = editingProjectNameValue.trim();
     if (!normalizedName) {
-      setEditError('Project name cannot be empty.');
+      setRenameError('Project name cannot be empty.');
       return;
     }
-    setEditSaving(true);
-    setEditError(null);
+    if (normalizedName === currentName.trim()) {
+      setEditingProjectNameId(null);
+      setEditingProjectNameValue('');
+      return;
+    }
+    setSavingProjectNameId(projectId);
+    setRenameError(null);
     try {
-      await patchProject(editingProjectId, {
-        name: normalizedName,
-        summary: editProjectSummary.trim()
-      });
-      setEditingProjectId(null);
+      await patchProject(projectId, { name: normalizedName });
+      setEditingProjectNameId(null);
+      setEditingProjectNameValue('');
     } catch (err) {
-      setEditError(err instanceof Error ? err.message : 'Failed to update project.');
+      setRenameError(err instanceof Error ? err.message : 'Failed to update project name.');
     } finally {
-      setEditSaving(false);
+      setSavingProjectNameId(null);
     }
   };
 
@@ -578,7 +585,7 @@ export function ProjectsPage() {
           </div>
         )}
 
-        {error && <div className="alert error">{error}</div>}
+        {(error || renameError) && <div className="alert error">{error || renameError}</div>}
 
         {loading ? (
           <div className="muted">Loading projects...</div>
@@ -639,14 +646,45 @@ export function ProjectsPage() {
                 {pagedProjects.map((project) => {
                   const workflowDef = getWorkflowDefinition(project.task_type);
                   const counts = project.task_counts || fallbackCounts(project.task_state, Boolean(project.task_id));
+                  const projectName = String(project.name || '').trim() || `Project ${String(project.id || '').slice(0, 8)}`;
+                  const isEditingProjectName = editingProjectNameId === project.id;
+                  const isSavingProjectName = savingProjectNameId === project.id;
                   return (
                     <tr key={project.id}>
                       <td className="project-col-name">
                         <div className="project-name-row">
                           <FolderOpen size={14} className="project-name-icon" />
-                          <Link className="project-name-link" to={`/projects/${project.id}`}>
-                            {project.name}
-                          </Link>
+                          {isEditingProjectName ? (
+                            <input
+                              className="project-name-input"
+                              value={editingProjectNameValue}
+                              onChange={(event) => setEditingProjectNameValue(event.target.value)}
+                              onBlur={() => void saveProjectNameEdit(project.id, projectName)}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Escape') {
+                                  event.preventDefault();
+                                  cancelProjectNameEdit();
+                                  return;
+                                }
+                                if (event.key === 'Enter') {
+                                  event.preventDefault();
+                                  void saveProjectNameEdit(project.id, projectName);
+                                }
+                              }}
+                              disabled={isSavingProjectName}
+                              autoFocus
+                            />
+                          ) : (
+                            <button
+                              type="button"
+                              className="project-name-edit-btn"
+                              onClick={() => beginProjectNameEdit(project.id, projectName)}
+                              disabled={Boolean(savingProjectNameId)}
+                              title="Edit project name"
+                            >
+                              <span className="project-name-link">{projectName}</span>
+                            </button>
+                          )}
                         </div>
                         {project.summary ? <div className="muted project-row-summary clamp-1">{project.summary}</div> : null}
                       </td>
@@ -708,16 +746,13 @@ export function ProjectsPage() {
                             Open
                           </Link>
                           <button
-                            className="icon-btn"
-                            onClick={() => openEditProjectModal(project.id, project.name, project.summary || '')}
-                            title="Edit project"
-                          >
-                            <Pencil size={14} />
-                          </button>
-                          <button
                             className="icon-btn danger"
                             onClick={() => {
                               if (window.confirm(`Delete project "${project.name}"?`)) {
+                                if (editingProjectNameId === project.id) {
+                                  setEditingProjectNameId(null);
+                                  setEditingProjectNameValue('');
+                                }
                                 void softDeleteProject(project.id);
                               }
                             }}
@@ -836,48 +871,6 @@ export function ProjectsPage() {
         </div>
       )}
 
-      {editingProjectId && (
-        <div
-          className="modal-mask"
-          onClick={() => {
-            setEditingProjectId(null);
-            setEditError(null);
-          }}
-        >
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h2>Edit Project</h2>
-            <form className="form-grid" onSubmit={onEditProject}>
-              <label className="field">
-                <span>Project Name</span>
-                <input
-                  value={editProjectName}
-                  onChange={(event) => setEditProjectName(event.target.value)}
-                  required
-                />
-              </label>
-              <label className="field">
-                <span>Project Summary</span>
-                <textarea
-                  value={editProjectSummary}
-                  rows={3}
-                  onChange={(event) => setEditProjectSummary(event.target.value)}
-                />
-              </label>
-
-              {editError && <div className="alert error">{editError}</div>}
-
-              <div className="row gap-8 end">
-                <button type="button" className="btn btn-ghost" onClick={() => setEditingProjectId(null)}>
-                  Cancel
-                </button>
-                <button type="submit" className="btn btn-primary" disabled={editSaving}>
-                  {editSaving ? 'Saving...' : 'Save'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

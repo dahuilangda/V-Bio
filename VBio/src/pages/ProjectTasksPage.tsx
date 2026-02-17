@@ -89,10 +89,11 @@ function hasAffinityUploadComponent(task: ProjectTask): boolean {
 function readTaskPrimaryLigand(
   task: ProjectTask,
   components: InputComponent[],
-  preferredComponentId: string | null
+  preferredComponentId: string | null,
+  preferredLigandChainId: string | null = null
 ): { smiles: string; isSmiles: boolean } {
   const affinityUploadTask = hasAffinityUploadComponent(task);
-  const hasAtomLevelLigandConfidence = hasTaskLigandAtomPlddts(task, null, true);
+  const hasAtomLevelLigandConfidence = hasTaskLigandAtomPlddts(task, preferredLigandChainId, true);
   const directLigand = normalizeComponentSequence('ligand', task.ligand_smiles || '');
   const affinityData =
     task.affinity && typeof task.affinity === 'object' && !Array.isArray(task.affinity)
@@ -102,7 +103,7 @@ function readTaskPrimaryLigand(
     'ligand',
     readFirstNonEmptyStringMetric(affinityData, ['ligand_smiles', 'ligandSmiles', 'smiles', 'ligand.smiles'])
   );
-  const affinityMapLigand = normalizeComponentSequence('ligand', readLigandSmilesFromMap(affinityData));
+  const affinityMapLigand = normalizeComponentSequence('ligand', readLigandSmilesFromMap(affinityData, preferredLigandChainId));
   const confidenceData =
     task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
       ? (task.confidence as Record<string, unknown>)
@@ -111,7 +112,7 @@ function readTaskPrimaryLigand(
     'ligand',
     readFirstNonEmptyStringMetric(confidenceData, ['ligand_smiles', 'ligandSmiles', 'smiles', 'ligand.smiles'])
   );
-  const confidenceMapLigand = normalizeComponentSequence('ligand', readLigandSmilesFromMap(confidenceData));
+  const confidenceMapLigand = normalizeComponentSequence('ligand', readLigandSmilesFromMap(confidenceData, preferredLigandChainId));
 
   if (affinityUploadTask) {
     if (confidenceLigand) return { smiles: confidenceLigand, isSmiles: true };
@@ -119,6 +120,26 @@ function readTaskPrimaryLigand(
     if (affinityLigand) return { smiles: affinityLigand, isSmiles: true };
     if (affinityMapLigand) return { smiles: affinityMapLigand, isSmiles: true };
     if (directLigand) return { smiles: directLigand, isSmiles: true };
+  }
+
+  // When atom-level confidence exists, always bind 2D rendering to the aligned
+  // confidence/affinity SMILES first, otherwise atom colors and ordering can drift.
+  if (hasAtomLevelLigandConfidence) {
+    if (confidenceMapLigand) {
+      return { smiles: confidenceMapLigand, isSmiles: true };
+    }
+    if (confidenceLigand) {
+      return { smiles: confidenceLigand, isSmiles: true };
+    }
+    if (affinityMapLigand) {
+      return { smiles: affinityMapLigand, isSmiles: true };
+    }
+    if (affinityLigand) {
+      return { smiles: affinityLigand, isSmiles: true };
+    }
+    if (directLigand) {
+      return { smiles: directLigand, isSmiles: true };
+    }
   }
 
   if (preferredComponentId) {
@@ -140,24 +161,6 @@ function readTaskPrimaryLigand(
       smiles: value,
       isSmiles: ligand.inputMethod !== 'ccd'
     };
-  }
-
-  if (hasAtomLevelLigandConfidence) {
-    if (confidenceLigand) {
-      return { smiles: confidenceLigand, isSmiles: true };
-    }
-    if (confidenceMapLigand) {
-      return { smiles: confidenceMapLigand, isSmiles: true };
-    }
-    if (affinityLigand) {
-      return { smiles: affinityLigand, isSmiles: true };
-    }
-    if (affinityMapLigand) {
-      return { smiles: affinityMapLigand, isSmiles: true };
-    }
-    if (directLigand) {
-      return { smiles: directLigand, isSmiles: true };
-    }
   }
 
   if (directLigand) {
@@ -236,21 +239,39 @@ function readFirstNonEmptyStringMetric(data: Record<string, unknown> | null, pat
   return '';
 }
 
-function readLigandSmilesFromMap(data: Record<string, unknown> | null): string {
+function readLigandSmilesFromMap(data: Record<string, unknown> | null, preferredLigandChainId: string | null = null): string {
   if (!data) return '';
   const mapCandidates: unknown[] = [
     readObjectPath(data, 'ligand_smiles_map'),
     readObjectPath(data, 'ligand.smiles_map'),
     readObjectPath(data, 'ligand.smilesMap')
   ];
+  const preferredChain = normalizeChainKey(String(preferredLigandChainId || ''));
+  const modelChain = normalizeChainKey(readFirstNonEmptyStringMetric(data, ['model_ligand_chain_id']));
+  const requestedChain = normalizeChainKey(readFirstNonEmptyStringMetric(data, ['requested_ligand_chain_id', 'requested_ligand_chain']));
+  const preferredCandidates = [preferredChain, modelChain, requestedChain].filter(Boolean);
   for (const mapValue of mapCandidates) {
     if (!mapValue || typeof mapValue !== 'object' || Array.isArray(mapValue)) continue;
-    const entries = Object.values(mapValue as Record<string, unknown>)
-      .filter((value): value is string => typeof value === 'string')
-      .map((value) => value.trim())
-      .filter(Boolean);
+    const entries = Object.entries(mapValue as Record<string, unknown>)
+      .map(([key, value]) => {
+        if (typeof value !== 'string') return null;
+        const next = value.trim();
+        if (!next) return null;
+        return { key: normalizeChainKey(key), value: next };
+      })
+      .filter((entry): entry is { key: string; value: string } => entry !== null);
+    if (entries.length === 0) continue;
+
+    for (const preferred of preferredCandidates) {
+      const matched = entries.find((entry) => {
+        const keyChain = entry.key.includes(':') ? entry.key.slice(0, entry.key.indexOf(':')).trim() : entry.key;
+        return chainKeysMatch(keyChain, preferred) || chainKeysMatch(preferred, keyChain);
+      });
+      if (matched?.value) return matched.value;
+    }
+
     if (entries.length === 1) {
-      return entries[0];
+      return entries[0].value;
     }
   }
   return '';
@@ -548,7 +569,7 @@ function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: Wo
   const ligandComponentCount = activeComponents.filter((item) => item.type === 'ligand').length;
 
   if (activeComponents.length === 0) {
-    const ligand = readTaskPrimaryLigand(task, [], null);
+    const ligand = readTaskPrimaryLigand(task, [], null, ligandCandidate || null);
     const fallbackChainIds = Array.from(
       new Set([
         ...splitChainTokens(targetCandidate),
@@ -698,13 +719,13 @@ function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: Wo
   const selectedLigandComponent = ligandChainId ? chainToComponent.get(normalizeChainKey(ligandChainId)) || null : null;
   const ligand =
     selectedLigandComponent?.type === 'ligand'
-      ? readTaskPrimaryLigand(task, activeComponents, selectedLigandComponent.id || null)
+      ? readTaskPrimaryLigand(task, activeComponents, selectedLigandComponent.id || null, ligandChainId)
       : selectedLigandComponent
         ? {
             smiles: '',
             isSmiles: false
           }
-        : readTaskPrimaryLigand(task, activeComponents, null);
+        : readTaskPrimaryLigand(task, activeComponents, null, ligandChainId);
   const ligandSequence =
     selectedLigandComponent && isSequenceLigandType(selectedLigandComponent.type)
       ? normalizeComponentSequence(selectedLigandComponent.type, selectedLigandComponent.sequence || '')
@@ -1305,6 +1326,9 @@ export function ProjectTasksPage() {
   const [exportingExcel, setExportingExcel] = useState(false);
   const [openingTaskId, setOpeningTaskId] = useState<string | null>(null);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
+  const [editingTaskNameId, setEditingTaskNameId] = useState<string | null>(null);
+  const [editingTaskNameValue, setEditingTaskNameValue] = useState('');
+  const [savingTaskNameId, setSavingTaskNameId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('submitted');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
@@ -2352,6 +2376,51 @@ export function ProjectTasksPage() {
     }
   };
 
+  const beginTaskNameEdit = (task: ProjectTask, displayName: string) => {
+    if (savingTaskNameId) return;
+    setEditingTaskNameId(task.id);
+    setEditingTaskNameValue(displayName);
+    setError(null);
+  };
+
+  const cancelTaskNameEdit = () => {
+    if (savingTaskNameId) return;
+    setEditingTaskNameId(null);
+    setEditingTaskNameValue('');
+  };
+
+  const saveTaskNameEdit = async (task: ProjectTask, displayName: string) => {
+    if (editingTaskNameId !== task.id) return;
+    if (savingTaskNameId && savingTaskNameId !== task.id) return;
+    const nextName = editingTaskNameValue.trim();
+    const currentName = String(task.name || '').trim();
+    if (nextName === currentName || (!nextName && !currentName)) {
+      setEditingTaskNameId(null);
+      setEditingTaskNameValue('');
+      return;
+    }
+    setSavingTaskNameId(task.id);
+    setError(null);
+    try {
+      const patch: Partial<ProjectTask> = {
+        name: nextName
+      };
+      const updatedTask = await updateProjectTask(task.id, patch);
+      if (!isProjectTaskRow(updatedTask)) {
+        throw new Error('Backend returned invalid task row while updating task name.');
+      }
+      setTasks((prev) =>
+        sanitizeTaskRows(prev).map((row) => (row.id === task.id ? { ...row, ...updatedTask } : row))
+      );
+      setEditingTaskNameId(null);
+      setEditingTaskNameValue('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to update task name "${displayName}".`);
+    } finally {
+      setSavingTaskNameId(null);
+    }
+  };
+
   const removeTask = async (task: ProjectTask) => {
     const runtimeTaskId = String(task.task_id || '').trim();
     const runtimeState = task.task_state;
@@ -2392,6 +2461,10 @@ export function ProjectTasksPage() {
       }
       await deleteProjectTask(task.id);
       setTasks((prev) => sanitizeTaskRows(prev).filter((row) => row.id !== task.id));
+      if (editingTaskNameId === task.id) {
+        setEditingTaskNameId(null);
+        setEditingTaskNameValue('');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete task.');
     } finally {
@@ -2716,6 +2789,8 @@ export function ProjectTasksPage() {
                   const { task, metrics } = row;
                   const runNote = (task.status_text || '').trim();
                   const taskName = String(task.name || '').trim() || `Task ${String(task.id || '').slice(0, 8)}`;
+                  const isEditingTaskName = editingTaskNameId === task.id;
+                  const isSavingTaskName = savingTaskNameId === task.id;
                   const taskSummary = String(task.summary || '').trim();
                   const showRunNote = shouldShowRunNote(task.task_state, runNote);
                   const submittedTs = task.submitted_at || task.created_at;
@@ -2760,7 +2835,39 @@ export function ProjectTasksPage() {
                       </td>
                       <td className="project-col-time task-col-submitted">
                         <div className="task-submitted-cell">
-                          <div className="task-submitted-title">{taskName}</div>
+                          {isEditingTaskName ? (
+                            <input
+                              className="task-submitted-title-input"
+                              value={editingTaskNameValue}
+                              onChange={(event) => setEditingTaskNameValue(event.target.value)}
+                              onBlur={() => void saveTaskNameEdit(task, taskName)}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Escape') {
+                                  event.preventDefault();
+                                  cancelTaskNameEdit();
+                                  return;
+                                }
+                                if (event.key === 'Enter') {
+                                  event.preventDefault();
+                                  void saveTaskNameEdit(task, taskName);
+                                }
+                              }}
+                              placeholder={`Task ${String(task.id || '').slice(0, 8)}`}
+                              disabled={isSavingTaskName}
+                              autoFocus
+                            />
+                          ) : (
+                            <button
+                              type="button"
+                              className="task-submitted-title task-submitted-title-btn"
+                              onClick={() => beginTaskNameEdit(task, taskName)}
+                              disabled={Boolean(savingTaskNameId)}
+                              title="Edit task name"
+                            >
+                              {taskName}
+                              {isSavingTaskName ? <LoaderCircle size={11} className="spin" /> : null}
+                            </button>
+                          )}
                           {taskSummary ? <div className="task-submitted-summary">{taskSummary}</div> : null}
                           <div className="task-submitted-main">
                             <span className={`task-state-chip ${stateTone}`}>{taskStateLabel(task.task_state)}</span>

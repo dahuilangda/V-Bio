@@ -742,6 +742,7 @@ def _run_affinity(
     affinity_refine: bool = False,
     seed: int | None = None,
     work_dir: Path | None = None,
+    ligand_alignment: dict[str, object] | None = None,
 ) -> Optional[dict]:
     try:
         import sys
@@ -793,6 +794,82 @@ def _run_affinity(
         return None
 
     result = dict(boltzina.results[0])
+    if isinstance(ligand_alignment, dict):
+        aligned_smiles = str(ligand_alignment.get("ligand_smiles") or "").strip()
+        model_chain = str(ligand_alignment.get("model_ligand_chain_id") or "").strip()
+        requested_chain = str(ligand_alignment.get("requested_ligand_chain_id") or "").strip()
+
+        normalized_map: dict[str, str] = {}
+        raw_map = ligand_alignment.get("ligand_smiles_map")
+        if isinstance(raw_map, dict):
+            for key, value in raw_map.items():
+                key_norm = str(key or "").strip()
+                value_norm = str(value or "").strip()
+                if key_norm and value_norm:
+                    normalized_map[key_norm] = value_norm
+
+        if aligned_smiles and model_chain and model_chain not in normalized_map:
+            normalized_map[model_chain] = aligned_smiles
+        if aligned_smiles and requested_chain and requested_chain not in normalized_map:
+            normalized_map[requested_chain] = aligned_smiles
+
+        if aligned_smiles:
+            result["ligand_smiles"] = aligned_smiles
+        if model_chain:
+            result["model_ligand_chain_id"] = model_chain
+        if requested_chain:
+            result["requested_ligand_chain_id"] = requested_chain
+            result["requested_ligand_chain"] = requested_chain
+            result["ligand_chain"] = requested_chain
+        if normalized_map:
+            result["ligand_smiles_map"] = normalized_map
+
+        atom_name_keys = ligand_alignment.get("ligand_atom_name_keys")
+        if isinstance(atom_name_keys, list):
+            normalized_name_keys = [
+                str(item or "").strip() for item in atom_name_keys if str(item or "").strip()
+            ]
+            if normalized_name_keys:
+                result["ligand_atom_name_keys"] = normalized_name_keys
+
+        atom_name_keys_by_chain = ligand_alignment.get("ligand_atom_name_keys_by_chain")
+        if isinstance(atom_name_keys_by_chain, dict):
+            normalized_name_keys_by_chain: dict[str, list[str]] = {}
+            for key, value in atom_name_keys_by_chain.items():
+                chain_key = str(key or "").strip()
+                if not chain_key or not isinstance(value, list):
+                    continue
+                normalized_values = [
+                    str(item or "").strip()
+                    for item in value
+                    if str(item or "").strip()
+                ]
+                if normalized_values:
+                    normalized_name_keys_by_chain[chain_key] = normalized_values
+            if normalized_name_keys_by_chain:
+                result["ligand_atom_name_keys_by_chain"] = normalized_name_keys_by_chain
+
+        atom_plddt_by_name = ligand_alignment.get("ligand_atom_plddts_by_chain_and_name")
+        if isinstance(atom_plddt_by_name, dict):
+            normalized_plddt_by_name: dict[str, dict[str, float]] = {}
+            for chain_key, atom_map in atom_plddt_by_name.items():
+                chain = str(chain_key or "").strip()
+                if not chain or not isinstance(atom_map, dict):
+                    continue
+                normalized_atom_map: dict[str, float] = {}
+                for atom_key, atom_value in atom_map.items():
+                    atom_name = str(atom_key or "").strip()
+                    if not atom_name:
+                        continue
+                    try:
+                        normalized_atom_map[atom_name] = float(atom_value)
+                    except Exception:
+                        continue
+                if normalized_atom_map:
+                    normalized_plddt_by_name[chain] = normalized_atom_map
+            if normalized_plddt_by_name:
+                result["ligand_atom_plddts_by_chain_and_name"] = normalized_plddt_by_name
+
     result["input_file"] = str(complex_file)
     affinity_json = output_dir / result_id / f"affinity_{result_id}.json"
     affinity_json.parent.mkdir(parents=True, exist_ok=True)
@@ -869,7 +946,7 @@ def _write_atom_coverage(
     requested_ligand_chain_id: str | None = None,
     ligand_smiles_map: dict[str, str] | None = None,
     reference_ligand_mol: Chem.Mol | None = None,
-) -> None:
+) -> dict[str, object] | None:
     """Write atom coverage diagnostics and attach summary to confidence JSON."""
     try:
         coverage = _collect_atom_coverage(processed_dir, record_id)
@@ -882,6 +959,8 @@ def _write_atom_coverage(
         aligned_ligand_smiles = ""
         aligned_ligand_plddts: list[float] = []
         aligned_ligand_chain_id = ""
+        aligned_ligand_atom_name_keys: list[str] = []
+        aligned_ligand_atom_plddts_by_name: dict[str, float] = {}
         if reference_ligand_mol is not None:
             ligand_chains = [
                 str(item.get("chain") or "").strip()
@@ -895,6 +974,37 @@ def _write_atom_coverage(
             aligned_ligand_smiles, smiles_to_heavy, heavy_name_keys = _build_smiles_order_from_ligand_mol(
                 reference_ligand_mol
             )
+
+        normalized_map: dict[str, str] = {}
+        if isinstance(ligand_smiles_map, dict) and ligand_smiles_map:
+            for key, value in ligand_smiles_map.items():
+                key_norm = str(key or "").strip()
+                value_norm = str(value or "").strip()
+                if key_norm and value_norm:
+                    normalized_map[key_norm] = value_norm
+
+        requested_chain = ""
+        if requested_ligand_chain_id:
+            requested_chain = requested_ligand_chain_id.strip()
+
+        if aligned_ligand_smiles:
+            if aligned_ligand_chain_id and aligned_ligand_chain_id not in normalized_map:
+                normalized_map[aligned_ligand_chain_id] = aligned_ligand_smiles
+            if requested_chain and requested_chain not in normalized_map:
+                normalized_map[requested_chain] = aligned_ligand_smiles
+
+        selected_ligand_smiles = ""
+        if aligned_ligand_smiles:
+            selected_ligand_smiles = aligned_ligand_smiles
+        elif requested_chain and normalized_map:
+            selected_ligand_smiles = (
+                normalized_map.get(requested_chain)
+                or normalized_map.get(requested_chain.upper())
+                or normalized_map.get(requested_chain.lower())
+                or ""
+            )
+        if not selected_ligand_smiles and len(normalized_map) == 1:
+            selected_ligand_smiles = next(iter(normalized_map.values()))
 
         for conf_path in sorted(struct_dir.glob(f"confidence_{record_id}_model_*.json")):
             try:
@@ -940,48 +1050,64 @@ def _write_atom_coverage(
                         f"{len(heavy_bfactors)} vs {len(heavy_name_keys)}."
                     )
                 aligned_ligand_plddts = [heavy_bfactors[idx] for idx in smiles_to_heavy]
+                aligned_ligand_atom_name_keys = [heavy_name_keys[idx] for idx in smiles_to_heavy]
+                aligned_ligand_atom_plddts_by_name = {
+                    aligned_ligand_atom_name_keys[idx]: float(aligned_ligand_plddts[idx])
+                    for idx in range(len(aligned_ligand_atom_name_keys))
+                }
                 data["model_ligand_chain_id"] = aligned_ligand_chain_id
                 data["ligand_atom_plddts_by_chain"] = {
                     aligned_ligand_chain_id: aligned_ligand_plddts
                 }
+                if aligned_ligand_atom_name_keys:
+                    data["ligand_atom_name_keys"] = aligned_ligand_atom_name_keys
+                    data["ligand_atom_name_keys_by_chain"] = {
+                        aligned_ligand_chain_id: aligned_ligand_atom_name_keys
+                    }
+                if aligned_ligand_atom_plddts_by_name:
+                    data["ligand_atom_plddts_by_chain_and_name"] = {
+                        aligned_ligand_chain_id: aligned_ligand_atom_plddts_by_name
+                    }
                 data["ligand_atom_plddts"] = aligned_ligand_plddts
                 data["ligand_smiles"] = aligned_ligand_smiles
 
             data["ligand_atom_coverage"] = coverage["ligand_atom_coverage"]
             data["chain_atom_coverage"] = coverage["chain_atom_coverage"]
-            selected_ligand_smiles = ""
-            normalized_map: dict[str, str] = {}
-            if isinstance(ligand_smiles_map, dict) and ligand_smiles_map:
-                for key, value in ligand_smiles_map.items():
-                    key_norm = str(key or "").strip()
-                    value_norm = str(value or "").strip()
-                    if key_norm and value_norm:
-                        normalized_map[key_norm] = value_norm
-                if normalized_map:
-                    data["ligand_smiles_map"] = normalized_map
-            if requested_ligand_chain_id:
-                requested_chain = requested_ligand_chain_id.strip()
-                if requested_chain:
-                    data["requested_ligand_chain_id"] = requested_chain
-                    if normalized_map:
-                        selected_ligand_smiles = (
-                            normalized_map.get(requested_chain)
-                            or normalized_map.get(requested_chain.upper())
-                            or normalized_map.get(requested_chain.lower())
-                        )
-            if not selected_ligand_smiles and len(normalized_map) == 1:
-                selected_ligand_smiles = next(iter(normalized_map.values()))
-            if not selected_ligand_smiles and aligned_ligand_smiles:
-                selected_ligand_smiles = aligned_ligand_smiles
+            if normalized_map:
+                data["ligand_smiles_map"] = normalized_map
+            if requested_chain:
+                data["requested_ligand_chain_id"] = requested_chain
             if selected_ligand_smiles and reference_ligand_mol is None:
                 data["ligand_smiles"] = selected_ligand_smiles
             conf_path.write_text(json.dumps(data, indent=2))
+
+        alignment_payload: dict[str, object] = {}
+        if selected_ligand_smiles:
+            alignment_payload["ligand_smiles"] = selected_ligand_smiles
+        if aligned_ligand_chain_id:
+            alignment_payload["model_ligand_chain_id"] = aligned_ligand_chain_id
+        if requested_chain:
+            alignment_payload["requested_ligand_chain_id"] = requested_chain
+        if normalized_map:
+            alignment_payload["ligand_smiles_map"] = normalized_map
+        if aligned_ligand_atom_name_keys:
+            alignment_payload["ligand_atom_name_keys"] = aligned_ligand_atom_name_keys
+            if aligned_ligand_chain_id:
+                alignment_payload["ligand_atom_name_keys_by_chain"] = {
+                    aligned_ligand_chain_id: aligned_ligand_atom_name_keys
+                }
+        if aligned_ligand_atom_plddts_by_name and aligned_ligand_chain_id:
+            alignment_payload["ligand_atom_plddts_by_chain_and_name"] = {
+                aligned_ligand_chain_id: aligned_ligand_atom_plddts_by_name
+            }
+        return alignment_payload or None
     except Exception as exc:  # noqa: BLE001
         if reference_ligand_mol is not None:
             raise RuntimeError(
                 f"Failed to write strict ligand atom-confidence alignment: {exc}"
             ) from exc
         print(f"[Warning] Failed to write atom coverage diagnostics: {exc}")
+        return None
 
 
 def main() -> None:
@@ -1425,7 +1551,7 @@ def main() -> None:
         output_dir=output_dir,
         record_id=record_id,
     )
-    _write_atom_coverage(
+    ligand_alignment = _write_atom_coverage(
         processed_dir=work_dir / "processed",
         output_dir=output_dir,
         record_id=record_id,
@@ -1446,6 +1572,7 @@ def main() -> None:
             affinity_refine=args.affinity_refine,
             seed=args.seed,
             work_dir=work_dir,
+            ligand_alignment=ligand_alignment,
         )
 
     if cleanup:

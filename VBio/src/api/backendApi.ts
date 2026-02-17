@@ -791,15 +791,14 @@ function applyAtomPlddtToStructure(
   return applyAtomPlddtToCifStructure(structureText, atomPlddts);
 }
 
-function applyLigandAtomPlddtsByChainToCifStructure(
+function applyLigandAtomPlddtsByChainAndNameToCifStructure(
   structureText: string,
-  atomPlddtsByChain: Record<string, number[]>
+  atomPlddtsByChainAndName: Record<string, Record<string, number>>
 ): string {
   if (!structureText) return structureText;
-  if (Object.keys(atomPlddtsByChain).length === 0) return structureText;
+  if (Object.keys(atomPlddtsByChainAndName).length === 0) return structureText;
 
   const lines = structureText.split(/\r?\n/);
-
   for (let i = 0; i < lines.length; i += 1) {
     if (lines[i].trim() !== 'loop_') continue;
 
@@ -824,13 +823,12 @@ function applyLigandAtomPlddtsByChainToCifStructure(
     const bFactorCol = findHeaderIndex(headers, ['_atom_site.b_iso_or_equiv']);
     const typeCol = findHeaderIndex(headers, ['_atom_site.type_symbol']);
     const atomIdCol = findHeaderIndex(headers, ['_atom_site.label_atom_id', '_atom_site.auth_atom_id']);
-    if (compCol < 0 || chainCol < 0 || bFactorCol < 0) {
+    if (compCol < 0 || chainCol < 0 || bFactorCol < 0 || atomIdCol < 0) {
       i = headerIndex - 1;
       continue;
     }
 
     const firstResidueKeyByChain = new Map<string, string>();
-    const chainAtomCursor = new Map<string, number>();
     let rowIndex = headerIndex;
     while (rowIndex < lines.length) {
       const rawRow = lines[rowIndex];
@@ -846,7 +844,7 @@ function applyLigandAtomPlddtsByChainToCifStructure(
         const compId = stripCifTokenQuotes(tokens[compCol]).trim().toUpperCase();
         const groupPdb = groupCol >= 0 ? stripCifTokenQuotes(tokens[groupCol]).trim().toUpperCase() : '';
         const element = typeCol >= 0 ? stripCifTokenQuotes(tokens[typeCol]) : '';
-        const atomName = atomIdCol >= 0 ? stripCifTokenQuotes(tokens[atomIdCol]) : '';
+        const atomName = stripCifTokenQuotes(tokens[atomIdCol]).trim();
         if (!compId || WATER_COMP_IDS.has(compId)) {
           rowIndex += 1;
           continue;
@@ -881,20 +879,18 @@ function applyLigandAtomPlddtsByChainToCifStructure(
           continue;
         }
 
-        const chainValues = atomPlddtsByChain[chainId];
-        if (!Array.isArray(chainValues) || chainValues.length === 0) {
+        const byName = atomPlddtsByChainAndName[chainId];
+        if (!byName || typeof byName !== 'object') {
           rowIndex += 1;
           continue;
         }
-        const cursor = chainAtomCursor.get(chainId) || 0;
-        if (cursor >= chainValues.length) {
+        const atomKey = normalizeAtomNameKey(atomName);
+        if (!atomKey || !Object.prototype.hasOwnProperty.call(byName, atomKey)) {
           rowIndex += 1;
           continue;
         }
-
-        tokens[bFactorCol] = formatPlddtNumber(chainValues[cursor]);
+        tokens[bFactorCol] = formatPlddtNumber(byName[atomKey]);
         lines[rowIndex] = tokens.join(' ');
-        chainAtomCursor.set(chainId, cursor + 1);
       }
       rowIndex += 1;
     }
@@ -905,17 +901,15 @@ function applyLigandAtomPlddtsByChainToCifStructure(
   return lines.join('\n');
 }
 
-function applyLigandAtomPlddtsByChainToPdbStructure(
+function applyLigandAtomPlddtsByChainAndNameToPdbStructure(
   structureText: string,
-  atomPlddtsByChain: Record<string, number[]>
+  atomPlddtsByChainAndName: Record<string, Record<string, number>>
 ): string {
   if (!structureText) return structureText;
-  if (Object.keys(atomPlddtsByChain).length === 0) return structureText;
+  if (Object.keys(atomPlddtsByChainAndName).length === 0) return structureText;
 
   const lines = structureText.split(/\r?\n/);
   const firstResidueKeyByChain = new Map<string, string>();
-  const chainAtomCursor = new Map<string, number>();
-
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     if (!line.startsWith('HETATM')) continue;
@@ -938,29 +932,28 @@ function applyLigandAtomPlddtsByChainToPdbStructure(
     }
     if (firstResidueKeyByChain.get(chainId) !== residueKey) continue;
 
-    const chainValues = atomPlddtsByChain[chainId];
-    if (!Array.isArray(chainValues) || chainValues.length === 0) continue;
-    const cursor = chainAtomCursor.get(chainId) || 0;
-    if (cursor >= chainValues.length) continue;
+    const byName = atomPlddtsByChainAndName[chainId];
+    if (!byName || typeof byName !== 'object') continue;
+    const atomKey = normalizeAtomNameKey(atomName);
+    if (!atomKey || !Object.prototype.hasOwnProperty.call(byName, atomKey)) continue;
 
-    const bFactor = normalizePlddt(chainValues[cursor]).toFixed(2).padStart(6);
+    const bFactor = normalizePlddt(byName[atomKey]).toFixed(2).padStart(6);
     const padded = line.length >= 66 ? line : line.padEnd(66, ' ');
     lines[i] = `${padded.slice(0, 60)}${bFactor}${padded.slice(66)}`;
-    chainAtomCursor.set(chainId, cursor + 1);
   }
 
   return lines.join('\n');
 }
 
-function applyLigandAtomPlddtsByChainToStructure(
+function applyLigandAtomPlddtsByChainAndNameToStructure(
   structureText: string,
   structureFormat: 'cif' | 'pdb',
-  atomPlddtsByChain: Record<string, number[]>
+  atomPlddtsByChainAndName: Record<string, Record<string, number>>
 ): string {
-  if (Object.keys(atomPlddtsByChain).length === 0) return structureText;
+  if (Object.keys(atomPlddtsByChainAndName).length === 0) return structureText;
   return structureFormat === 'pdb'
-    ? applyLigandAtomPlddtsByChainToPdbStructure(structureText, atomPlddtsByChain)
-    : applyLigandAtomPlddtsByChainToCifStructure(structureText, atomPlddtsByChain);
+    ? applyLigandAtomPlddtsByChainAndNameToPdbStructure(structureText, atomPlddtsByChainAndName)
+    : applyLigandAtomPlddtsByChainAndNameToCifStructure(structureText, atomPlddtsByChainAndName);
 }
 
 const WATER_COMP_IDS = new Set(['HOH', 'WAT', 'DOD', 'SOL']);
@@ -1031,6 +1024,13 @@ function isHydrogenLikeElement(raw: string): boolean {
   return head === 'H' || head === 'D' || head === 'T';
 }
 
+function normalizeAtomNameKey(raw: string): string {
+  return String(raw || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+}
+
 function toFiniteNumberArray(value: unknown): number[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is number => typeof item === 'number' && Number.isFinite(item));
@@ -1073,6 +1073,53 @@ function normalizeLigandAtomPlddtsByChain(value: unknown): Record<string, number
     const parsed = normalizeLigandAtomPlddts(toFiniteNumberArray(rawValues));
     if (parsed.length === 0) continue;
     byChain[chainId] = parsed;
+  }
+  return byChain;
+}
+
+function normalizeLigandAtomPlddtsByChainAndName(value: unknown): Record<string, Record<string, number>> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const byChainAndName: Record<string, Record<string, number>> = {};
+  for (const [rawChainId, rawNameMap] of Object.entries(value as Record<string, unknown>)) {
+    const chainId = normalizeChainToken(rawChainId);
+    if (!chainId || !rawNameMap || typeof rawNameMap !== 'object' || Array.isArray(rawNameMap)) continue;
+    const nextMap: Record<string, number> = {};
+    for (const [rawAtomName, rawPlddt] of Object.entries(rawNameMap as Record<string, unknown>)) {
+      const atomKey = normalizeAtomNameKey(rawAtomName);
+      if (!atomKey) continue;
+      const value = Number(rawPlddt);
+      if (!Number.isFinite(value)) continue;
+      nextMap[atomKey] = normalizePlddt(value);
+    }
+    if (Object.keys(nextMap).length > 0) {
+      byChainAndName[chainId] = nextMap;
+    }
+  }
+  return byChainAndName;
+}
+
+function normalizeLigandAtomNameKeys(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const keys: string[] = [];
+  const used = new Set<string>();
+  for (const item of value) {
+    const key = normalizeAtomNameKey(String(item || ''));
+    if (!key || used.has(key)) continue;
+    used.add(key);
+    keys.push(key);
+  }
+  return keys;
+}
+
+function normalizeLigandAtomNameKeysByChain(value: unknown): Record<string, string[]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const byChain: Record<string, string[]> = {};
+  for (const [rawChainId, rawKeys] of Object.entries(value as Record<string, unknown>)) {
+    const chainId = normalizeChainToken(rawChainId);
+    if (!chainId) continue;
+    const keys = normalizeLigandAtomNameKeys(rawKeys);
+    if (keys.length === 0) continue;
+    byChain[chainId] = keys;
   }
   return byChain;
 }
@@ -1140,6 +1187,122 @@ function selectLigandAtomPlddtsByChain(
   }
   const preferredSelected = selectByHints(preferredHints);
   if (preferredSelected) return preferredSelected;
+
+  return byChain;
+}
+
+function selectLigandAtomPlddtsByChainAndName(
+  confidence: Record<string, unknown>,
+  byChainAndName: Record<string, Record<string, number>>
+): Record<string, Record<string, number>> {
+  const entries = Object.entries(byChainAndName);
+  if (entries.length <= 1) return byChainAndName;
+
+  const selectByHints = (hints: Set<string>): Record<string, Record<string, number>> | null => {
+    if (hints.size === 0) return null;
+    const filtered = Object.fromEntries(
+      entries.filter(([chainId]) =>
+        Array.from(hints).some((hint) => chainIdMatches(chainId, hint) || chainIdMatches(hint, chainId))
+      )
+    ) as Record<string, Record<string, number>>;
+    return Object.keys(filtered).length > 0 ? filtered : null;
+  };
+
+  const coverageSelected = selectByHints(collectLigandCoverageChainIds(confidence));
+  if (coverageSelected) return coverageSelected;
+
+  const preferredHints = new Set<string>();
+  for (const value of [
+    confidence.requested_ligand_chain_id,
+    confidence.ligand_chain_id,
+    confidence.model_ligand_chain_id
+  ]) {
+    if (typeof value !== 'string') continue;
+    const normalized = normalizeChainToken(value);
+    if (normalized) preferredHints.add(normalized);
+  }
+  const preferredSelected = selectByHints(preferredHints);
+  if (preferredSelected) return preferredSelected;
+
+  return byChainAndName;
+}
+
+function selectLigandAtomNameKeysByChain(
+  confidence: Record<string, unknown>,
+  nameKeysByChain: Record<string, string[]>
+): Record<string, string[]> {
+  const entries = Object.entries(nameKeysByChain);
+  if (entries.length <= 1) return nameKeysByChain;
+
+  const selectByHints = (hints: Set<string>): Record<string, string[]> | null => {
+    if (hints.size === 0) return null;
+    const filtered = Object.fromEntries(
+      entries.filter(([chainId]) =>
+        Array.from(hints).some((hint) => chainIdMatches(chainId, hint) || chainIdMatches(hint, chainId))
+      )
+    ) as Record<string, string[]>;
+    return Object.keys(filtered).length > 0 ? filtered : null;
+  };
+
+  const coverageSelected = selectByHints(collectLigandCoverageChainIds(confidence));
+  if (coverageSelected) return coverageSelected;
+
+  const preferredHints = new Set<string>();
+  for (const value of [
+    confidence.requested_ligand_chain_id,
+    confidence.ligand_chain_id,
+    confidence.model_ligand_chain_id
+  ]) {
+    if (typeof value !== 'string') continue;
+    const normalized = normalizeChainToken(value);
+    if (normalized) preferredHints.add(normalized);
+  }
+  const preferredSelected = selectByHints(preferredHints);
+  if (preferredSelected) return preferredSelected;
+
+  return nameKeysByChain;
+}
+
+function buildLigandAtomPlddtsFromNameMap(nameMap: Record<string, number>, orderedNameKeys: string[]): number[] {
+  const values: number[] = [];
+  const used = new Set<string>();
+
+  for (const rawKey of orderedNameKeys) {
+    const key = normalizeAtomNameKey(rawKey);
+    if (!key || used.has(key) || !Object.prototype.hasOwnProperty.call(nameMap, key)) continue;
+    const value = Number(nameMap[key]);
+    if (!Number.isFinite(value)) continue;
+    used.add(key);
+    values.push(normalizePlddt(value));
+  }
+
+  for (const [rawKey, rawValue] of Object.entries(nameMap)) {
+    const key = normalizeAtomNameKey(rawKey);
+    if (!key || used.has(key)) continue;
+    const value = Number(rawValue);
+    if (!Number.isFinite(value)) continue;
+    used.add(key);
+    values.push(normalizePlddt(value));
+  }
+
+  return values;
+}
+
+function buildLigandAtomPlddtsByChainFromNameMaps(
+  byChainAndName: Record<string, Record<string, number>>,
+  nameKeysByChain: Record<string, string[]>,
+  fallbackNameKeys: string[]
+): Record<string, number[]> {
+  const byChain: Record<string, number[]> = {};
+  const chainIds = Object.keys(byChainAndName);
+  const fallbackKeys = chainIds.length === 1 ? fallbackNameKeys : [];
+
+  for (const [chainId, nameMap] of Object.entries(byChainAndName)) {
+    const chainNameKeys = nameKeysByChain[chainId] || fallbackKeys;
+    const values = buildLigandAtomPlddtsFromNameMap(nameMap, chainNameKeys);
+    if (values.length === 0) continue;
+    byChain[chainId] = values;
+  }
 
   return byChain;
 }
@@ -2143,16 +2306,32 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
     }
   }
 
-  const existingLigandAtomPlddtsFlat = normalizeLigandAtomPlddts(
-    toFiniteNumberArray((confidence as Record<string, unknown>).ligand_atom_plddts)
+  const confidenceRecord = confidence as Record<string, unknown>;
+  const existingLigandAtomPlddtsFlat = normalizeLigandAtomPlddts(toFiniteNumberArray(confidenceRecord.ligand_atom_plddts));
+  const existingLigandAtomPlddtsByChainRaw = normalizeLigandAtomPlddtsByChain(confidenceRecord.ligand_atom_plddts_by_chain);
+  const existingLigandAtomPlddtsByChainAndNameRaw = normalizeLigandAtomPlddtsByChainAndName(
+    confidenceRecord.ligand_atom_plddts_by_chain_and_name
   );
-  const existingLigandAtomPlddtsByChainRaw = normalizeLigandAtomPlddtsByChain(
-    (confidence as Record<string, unknown>).ligand_atom_plddts_by_chain
+  const existingLigandAtomNameKeys = normalizeLigandAtomNameKeys(confidenceRecord.ligand_atom_name_keys);
+  const existingLigandAtomNameKeysByChainRaw = normalizeLigandAtomNameKeysByChain(confidenceRecord.ligand_atom_name_keys_by_chain);
+
+  const existingLigandAtomPlddtsByChainAndName = selectLigandAtomPlddtsByChainAndName(
+    confidenceRecord,
+    existingLigandAtomPlddtsByChainAndNameRaw
   );
-  const existingLigandAtomPlddtsByChain = selectLigandAtomPlddtsByChain(
-    confidence as Record<string, unknown>,
-    existingLigandAtomPlddtsByChainRaw
+  const existingLigandAtomNameKeysByChain = selectLigandAtomNameKeysByChain(
+    confidenceRecord,
+    existingLigandAtomNameKeysByChainRaw
   );
+  const alignedLigandAtomPlddtsByChain = buildLigandAtomPlddtsByChainFromNameMaps(
+    existingLigandAtomPlddtsByChainAndName,
+    existingLigandAtomNameKeysByChain,
+    existingLigandAtomNameKeys
+  );
+  const existingLigandAtomPlddtsByChain = selectLigandAtomPlddtsByChain(confidenceRecord, {
+    ...existingLigandAtomPlddtsByChainRaw,
+    ...alignedLigandAtomPlddtsByChain
+  });
   const existingLigandAtomPlddtsFromChainMap = pickFirstLigandAtomPlddts(existingLigandAtomPlddtsByChain);
   const existingLigandAtomPlddts =
     existingLigandAtomPlddtsFromChainMap.length > 0 ? existingLigandAtomPlddtsFromChainMap : existingLigandAtomPlddtsFlat;
@@ -2166,11 +2345,13 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
       };
     }
   }
-  if (Object.keys(ligandAtomPlddtsByChainForRender).length > 0) {
-    structureText = applyLigandAtomPlddtsByChainToStructure(
+  if (Object.keys(existingLigandAtomPlddtsByChainAndName).length > 0) {
+    // Apply atom-level confidence to structure only when an atom-name map exists.
+    // Writing by raw atom order can drift from aligned 2D confidence ordering.
+    structureText = applyLigandAtomPlddtsByChainAndNameToStructure(
       structureText,
       structureFormat,
-      ligandAtomPlddtsByChainForRender
+      existingLigandAtomPlddtsByChainAndName
     );
   }
   if (isProtenix && structureFormat === 'cif') {

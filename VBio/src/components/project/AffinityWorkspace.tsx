@@ -171,10 +171,6 @@ export function AffinityBasicsWorkspace({
             Ligand
           </h2>
           <section className="result-aside-block result-aside-block-ligand">
-            <div className="result-aside-title affinity-title-with-icon">
-              <Dna size={13} />
-              2D (JSME)
-            </div>
             <div className="jsme-editor-container affinity-jsme-shell">
               <JSMEEditor smiles={ligandEditorInput} onSmilesChange={onLigandSmilesChange} height={336} />
             </div>
