@@ -16,6 +16,7 @@ import {
   ChevronRight,
   Clock3,
   Copy,
+  Download,
   Info,
   KeyRound,
   Plus,
@@ -105,7 +106,10 @@ interface YamlProteinTemplateConfig {
   targetChains: string;
 }
 
-type ApiBuilderGridStyle = CSSProperties & { '--api-builder-left-width'?: string };
+type ApiBuilderGridStyle = CSSProperties & {
+  '--api-builder-left-width'?: string;
+  '--api-yaml-left-width'?: string;
+};
 
 const TOKEN_PAGE_SIZE = 8;
 const EVENT_PAGE_SIZE = 20;
@@ -234,7 +238,11 @@ function normalizeChainId(value: string, fallback: string): string {
 }
 
 function createYamlBuilderComponent(type: InputComponent['type'] = 'protein'): InputComponent {
-  return createInputComponent(type);
+  const component = createInputComponent(type);
+  if (component.type === 'ligand') {
+    component.inputMethod = 'smiles';
+  }
+  return component;
 }
 
 function readCommandHistoryFromStorage(): CommandHistoryEntry[] {
@@ -322,8 +330,8 @@ export function ApiAccessPage() {
   const [tokenLoading, setTokenLoading] = useState(false);
   const [projectLoading, setProjectLoading] = useState(false);
   const [registryOpen, setRegistryOpen] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
+  const [, setError] = useState<string | null>(null);
+  const [, setSuccess] = useState<string | null>(null);
 
   const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -397,11 +405,15 @@ export function ApiAccessPage() {
   const [builderAffinityBackend, setBuilderAffinityBackend] = useState<AffinityBackend>('boltz');
   const [builderLeftWidth, setBuilderLeftWidth] = useState(38);
   const [isBuilderResizing, setIsBuilderResizing] = useState(false);
+  const [yamlBuilderLeftWidth, setYamlBuilderLeftWidth] = useState(68);
+  const [isYamlBuilderResizing, setIsYamlBuilderResizing] = useState(false);
   const [commandHistory, setCommandHistory] = useState<CommandHistoryEntry[]>([]);
   const [copiedActionId, setCopiedActionId] = useState('');
   const commandPanelRef = useRef<HTMLElement | null>(null);
   const builderGridRef = useRef<HTMLDivElement | null>(null);
   const builderResizeRef = useRef<{ startX: number; startWidthPercent: number } | null>(null);
+  const yamlBuilderGridRef = useRef<HTMLDivElement | null>(null);
+  const yamlBuilderResizeRef = useRef<{ startX: number; startWidthPercent: number } | null>(null);
   const copiedResetTimerRef = useRef<number | null>(null);
 
   const managementApiBaseUrl = normalizeBaseUrl(
@@ -953,6 +965,7 @@ export function ApiAccessPage() {
   );
 
   const clampBuilderLeftWidth = (value: number): number => Math.min(60, Math.max(28, value));
+  const clampYamlBuilderLeftWidth = (value: number): number => Math.min(82, Math.max(52, value));
 
   const handleBuilderResizerPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -984,6 +997,36 @@ export function ApiAccessPage() {
     }
   };
 
+  const handleYamlBuilderResizerPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    if (window.matchMedia('(max-width: 1100px)').matches) return;
+    const grid = yamlBuilderGridRef.current;
+    if (!grid) return;
+    yamlBuilderResizeRef.current = {
+      startX: event.clientX,
+      startWidthPercent: yamlBuilderLeftWidth
+    };
+    setIsYamlBuilderResizing(true);
+    event.preventDefault();
+  };
+
+  const handleYamlBuilderResizerKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      setYamlBuilderLeftWidth((current) => clampYamlBuilderLeftWidth(current - 1.5));
+      return;
+    }
+    if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      setYamlBuilderLeftWidth((current) => clampYamlBuilderLeftWidth(current + 1.5));
+      return;
+    }
+    if (event.key === 'Home') {
+      event.preventDefault();
+      setYamlBuilderLeftWidth(68);
+    }
+  };
+
   useEffect(() => {
     if (!isBuilderResizing) return;
     const onPointerMove = (event: PointerEvent) => {
@@ -1008,11 +1051,41 @@ export function ApiAccessPage() {
     };
   }, [isBuilderResizing]);
 
+  useEffect(() => {
+    if (!isYamlBuilderResizing) return;
+    const onPointerMove = (event: PointerEvent) => {
+      const context = yamlBuilderResizeRef.current;
+      const grid = yamlBuilderGridRef.current;
+      if (!context || !grid) return;
+      const rect = grid.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const deltaPercent = ((event.clientX - context.startX) / rect.width) * 100;
+      const next = clampYamlBuilderLeftWidth(context.startWidthPercent + deltaPercent);
+      setYamlBuilderLeftWidth(next);
+    };
+    const onPointerUp = () => {
+      yamlBuilderResizeRef.current = null;
+      setIsYamlBuilderResizing(false);
+    };
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+    };
+  }, [isYamlBuilderResizing]);
+
   const builderGridStyle = useMemo<ApiBuilderGridStyle>(
     () => ({
       '--api-builder-left-width': `${builderLeftWidth.toFixed(2)}%`
     }),
     [builderLeftWidth]
+  );
+  const yamlBuilderGridStyle = useMemo<ApiBuilderGridStyle>(
+    () => ({
+      '--api-yaml-left-width': `${yamlBuilderLeftWidth.toFixed(2)}%`
+    }),
+    [yamlBuilderLeftWidth]
   );
 
   const curlToken = String(builderTokenPlainInput || '').trim() || String(selectedToken?.token_plain || '').trim() || String(newTokenPlainText || '').trim() || '<YOUR_API_TOKEN>';
@@ -1025,19 +1098,6 @@ export function ApiAccessPage() {
   const escapedResultPath = escapeForDoubleQuotedShell(builderResultPath.trim() || './result.zip');
   const escapedYamlPath = escapeForDoubleQuotedShell(builderYamlPath.trim() || './config.yaml');
   const normalizedYamlBuilderComponents = normalizeInputComponents(builderYamlComponents);
-  const yamlBuilderText = (() => {
-    if (normalizedYamlBuilderComponents.length === 0) {
-      return 'version: 1\nsequences: []';
-    }
-    try {
-      return buildPredictionYamlFromComponents(normalizedYamlBuilderComponents, {
-        constraints: builderYamlConstraints,
-        properties: builderYamlProperties
-      });
-    } catch {
-      return '# YAML generation failed. Please check component content.';
-    }
-  })();
   const yamlComponentStats = useMemo(() => {
     const stats: Record<InputComponent['type'], number> = {
       protein: 0,
@@ -1063,25 +1123,40 @@ export function ApiAccessPage() {
       .map((item) => normalizeChainId(item, ''))
       .filter(Boolean);
     const assignmentChains = yamlAssignments[index] || [];
+    const fileName = extractFileNameFromPath(path) || `template_${component.id}.${format === 'pdb' ? 'pdb' : 'cif'}`;
+    const targetChainIds = targetChains.length > 0 ? targetChains : (assignmentChains.length > 0 ? assignmentChains : ['A']);
     return [{
       componentId: component.id,
       path,
       escapedPath: escapeForDoubleQuotedShell(path),
-      meta: {
-        file_name: extractFileNameFromPath(path) || `template_${component.id}.${format === 'pdb' ? 'pdb' : 'cif'}`,
-        format,
-        template_chain_id: templateChain,
-        target_chain_ids: targetChains.length > 0 ? targetChains : (assignmentChains.length > 0 ? assignmentChains : ['A'])
-      }
+      fileName,
+      format,
+      templateChainId: templateChain,
+      targetChainIds
     }];
   });
   const predictionTemplateEnabled = predictionTemplateEntries.length > 0;
-  const yamlTemplateMetaObject = predictionTemplateEntries.map((entry) => entry.meta);
-  const yamlTemplateMetaJson = JSON.stringify(yamlTemplateMetaObject);
-  const escapedYamlTemplateMetaJson = escapeForDoubleQuotedShell(yamlTemplateMetaJson);
+  const yamlBuilderText = (() => {
+    if (normalizedYamlBuilderComponents.length === 0) {
+      return 'version: 1\nsequences: []';
+    }
+    try {
+      return buildPredictionYamlFromComponents(normalizedYamlBuilderComponents, {
+        constraints: builderYamlConstraints,
+        properties: builderYamlProperties,
+        templates: predictionTemplateEntries.map((entry) => ({
+          fileName: entry.fileName,
+          format: entry.format,
+          templateChainId: entry.templateChainId,
+          targetChainIds: entry.targetChainIds
+        }))
+      });
+    } catch {
+      return '# YAML generation failed. Please check component content.';
+    }
+  })();
   const predictionTemplateFlags = predictionTemplateEnabled
-    ? `${predictionTemplateEntries.map((entry) => ` \\\n  -F "template_files=@${entry.escapedPath}"`).join('')} \\
-  -F "template_meta=${escapedYamlTemplateMetaJson}"`
+    ? predictionTemplateEntries.map((entry) => ` \\\n  -F "template_files=@${entry.escapedPath}"`).join('')
     : '';
   const escapedTargetPath = escapeForDoubleQuotedShell(builderTargetPath.trim() || './target.cif');
   const escapedLigandPath = escapeForDoubleQuotedShell(builderLigandPath.trim() || './ligand.sdf');
@@ -1207,6 +1282,28 @@ ${submitTaskIdCapture}`;
     setSuccess(okMessage);
   };
 
+  const downloadGeneratedYaml = () => {
+    if (typeof document === 'undefined' || typeof window === 'undefined') return;
+    try {
+      const requestedName = extractFileNameFromPath(builderYamlPath.trim());
+      const fileName = requestedName
+        ? (/\.(ya?ml)$/i.test(requestedName) ? requestedName : `${requestedName}.yaml`)
+        : 'config.yaml';
+      const blob = new Blob([yamlBuilderText], { type: 'text/yaml;charset=utf-8' });
+      const url = window.URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = fileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      window.URL.revokeObjectURL(url);
+      setSuccess(`Generated YAML downloaded: ${fileName}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to download generated YAML.');
+    }
+  };
+
   const selectProjectContext = (projectId: string) => {
     setSelectedProjectId(projectId);
     const projectTokens = tokens.filter((item) => item.project_id === projectId);
@@ -1307,9 +1404,6 @@ ${submitTaskIdCapture}`;
           </button>
         </div>
       </section>
-
-      {error && <div className="alert error">{error}</div>}
-      {success && <div className="alert success">{success}</div>}
 
       <section className="panel api-project-stats-panel">
         <div className="api-section-head">
@@ -1543,7 +1637,7 @@ ${submitTaskIdCapture}`;
                   </span>
                 </div>
                 <div className="api-builder-note muted small">
-                  YAML Builder uses component-based input (type / copies / sequence) and template absolute path metadata.
+                  YAML Builder uses component-based input (type / copies / sequence) and writes templates into generated YAML.
                 </div>
               </>
             )}
@@ -1703,18 +1797,17 @@ ${submitTaskIdCapture}`;
                 <article className="api-command-item">
                   <header>
                     <span>YAML Preview</span>
-                    <button className={`icon-btn ${copiedActionId === 'copy-yaml-preview' ? 'is-copied' : ''}`} type="button" aria-label="Copy generated YAML" onClick={() => { void copyText(yamlBuilderText, 'Generated YAML copied.', 'YAML Preview', 'copy-yaml-preview'); }}>
-                      <Copy size={14} />
-                    </button>
+                    <div className="api-yaml-preview-actions">
+                      <button className="icon-btn" type="button" aria-label="Download generated YAML" onClick={downloadGeneratedYaml}>
+                        <Download size={14} />
+                      </button>
+                      <button className={`icon-btn ${copiedActionId === 'copy-yaml-preview' ? 'is-copied' : ''}`} type="button" aria-label="Copy generated YAML" onClick={() => { void copyText(yamlBuilderText, 'Generated YAML copied.', 'YAML Preview', 'copy-yaml-preview'); }}>
+                        <Copy size={14} />
+                      </button>
+                    </div>
                   </header>
                   <p className="muted small">Generated from YAML Builder inputs.</p>
                   <pre><code>{yamlBuilderText}</code></pre>
-                  {predictionTemplateEnabled && (
-                    <>
-                      <p className="muted small">Template metadata injected into submit cURL:</p>
-                      <pre><code>{yamlTemplateMetaJson}</code></pre>
-                    </>
-                  )}
                 </article>
               )}
 
@@ -1976,7 +2069,7 @@ ${submitTaskIdCapture}`;
           </li>
           <li>
             <strong>YAML format (prediction)</strong>
-            <span className="muted small">Use `version + sequences`; add `constraints/properties` only when needed. If using structure templates, provide absolute template path and generated `template_meta` in cURL.</span>
+            <span className="muted small">Use `version + sequences`; add `constraints/properties/templates` only when needed.</span>
           </li>
           <li>
             <strong>Track and download</strong>
@@ -2008,7 +2101,11 @@ ${submitTaskIdCapture}`;
               </button>
             </div>
 
-            <div className="api-yaml-modal-body">
+            <div
+              ref={yamlBuilderGridRef}
+              className={`api-yaml-modal-body api-yaml-modal-body-resizable ${isYamlBuilderResizing ? 'is-resizing' : ''}`}
+              style={yamlBuilderGridStyle}
+            >
               <section className="api-yaml-modal-editor">
                 <div className="api-builder-meta">
                   <span className="badge">Protein {yamlComponentStats.protein}</span>
@@ -2018,26 +2115,12 @@ ${submitTaskIdCapture}`;
                   <span className="badge">Constraints {builderYamlConstraints.length}</span>
                   <span className="badge">Affinity {builderYamlProperties.affinity ? 'on' : 'off'}</span>
                 </div>
-                <div className="api-yaml-component-toolbar">
-                  <span className="muted small">Add component</span>
-                  <div className="api-yaml-component-toolbar-actions">
-                    <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderComponent('protein')}>
-                      <Plus size={13} /> Protein
-                    </button>
-                    <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderComponent('ligand')}>
-                      <Plus size={13} /> Ligand
-                    </button>
-                    <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderComponent('dna')}>
-                      <Plus size={13} /> DNA
-                    </button>
-                    <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderComponent('rna')}>
-                      <Plus size={13} /> RNA
-                    </button>
-                  </div>
-                </div>
                 <div className="component-sidebar-list api-yaml-components api-yaml-components-flat">
                   {builderYamlComponents.map((component, index) => (
-                    <article key={component.id} className="api-yaml-component-card">
+                    <article
+                      key={component.id}
+                      className={`api-yaml-component-card ${index % 2 === 0 ? 'api-yaml-component-card-odd' : 'api-yaml-component-card-even'}`}
+                    >
                       <header>
                         <button
                           className="btn btn-ghost api-yaml-collapse-btn"
@@ -2066,7 +2149,7 @@ ${submitTaskIdCapture}`;
                                   updateYamlBuilderComponent(component.id, (current) => {
                                     const next: InputComponent = { ...current, type: nextType };
                                     if (nextType === 'ligand') {
-                                      next.inputMethod = current.inputMethod === 'ccd' ? 'ccd' : current.inputMethod === 'smiles' ? 'smiles' : 'jsme';
+                                      next.inputMethod = current.inputMethod === 'ccd' ? 'ccd' : current.inputMethod === 'jsme' ? 'jsme' : 'smiles';
                                       delete next.useMsa;
                                       delete next.cyclic;
                                     } else {
@@ -2233,6 +2316,23 @@ ${submitTaskIdCapture}`;
                     </article>
                   ))}
                 </div>
+                <div className="api-yaml-component-toolbar api-yaml-component-toolbar-bottom">
+                  <span className="muted small">Add component below</span>
+                  <div className="api-yaml-component-toolbar-actions">
+                    <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderComponent('protein')}>
+                      <Plus size={13} /> Protein
+                    </button>
+                    <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderComponent('ligand')}>
+                      <Plus size={13} /> Ligand
+                    </button>
+                    <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderComponent('dna')}>
+                      <Plus size={13} /> DNA
+                    </button>
+                    <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderComponent('rna')}>
+                      <Plus size={13} /> RNA
+                    </button>
+                  </div>
+                </div>
                 <section className="api-yaml-constraints">
                   <button
                     className="btn btn-ghost api-yaml-collapse-btn api-yaml-constraints-toggle"
@@ -2262,27 +2362,31 @@ ${submitTaskIdCapture}`;
                 </section>
               </section>
 
+              <div
+                className={`panel-resizer ${isYamlBuilderResizing ? 'dragging' : ''}`}
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize YAML Builder panels"
+                tabIndex={0}
+                onPointerDown={handleYamlBuilderResizerPointerDown}
+                onKeyDown={handleYamlBuilderResizerKeyDown}
+              />
+
               <section className="api-yaml-modal-preview">
                 <div className="api-command-item">
                   <header>
                     <span>Generated YAML</span>
-                    <button className={`icon-btn ${copiedActionId === 'copy-yaml-modal' ? 'is-copied' : ''}`} type="button" aria-label="Copy generated YAML" onClick={() => { void copyText(yamlBuilderText, 'Generated YAML copied.', 'YAML Builder', 'copy-yaml-modal'); }}>
-                      <Copy size={14} />
-                    </button>
+                    <div className="api-yaml-preview-actions">
+                      <button className="icon-btn" type="button" aria-label="Download generated YAML" onClick={downloadGeneratedYaml}>
+                        <Download size={14} />
+                      </button>
+                      <button className={`icon-btn ${copiedActionId === 'copy-yaml-modal' ? 'is-copied' : ''}`} type="button" aria-label="Copy generated YAML" onClick={() => { void copyText(yamlBuilderText, 'Generated YAML copied.', 'YAML Builder', 'copy-yaml-modal'); }}>
+                        <Copy size={14} />
+                      </button>
+                    </div>
                   </header>
                   <pre><code>{yamlBuilderText}</code></pre>
                 </div>
-                {predictionTemplateEnabled && (
-                  <div className="api-command-item">
-                    <header>
-                      <span>template_meta JSON</span>
-                      <button className={`icon-btn ${copiedActionId === 'copy-template-meta' ? 'is-copied' : ''}`} type="button" aria-label="Copy template meta" onClick={() => { void copyText(yamlTemplateMetaJson, 'Template metadata copied.', 'Template Meta', 'copy-template-meta'); }}>
-                        <Copy size={14} />
-                      </button>
-                    </header>
-                    <pre><code>{yamlTemplateMetaJson}</code></pre>
-                  </div>
-                )}
               </section>
             </div>
           </div>

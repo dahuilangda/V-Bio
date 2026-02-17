@@ -1,5 +1,6 @@
 import os
 import json
+import yaml
 import logging
 import glob
 import time
@@ -1064,6 +1065,51 @@ def _parse_float(value: Optional[str], default: Optional[float] = None) -> Optio
     except ValueError:
         return default
 
+
+def _normalize_chain_id_list(value) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    normalized = str(value).strip()
+    return [normalized] if normalized else []
+
+
+def _extract_template_meta_from_yaml(yaml_content: str) -> Dict[str, Dict]:
+    try:
+        yaml_data = yaml.safe_load(yaml_content) or {}
+    except Exception:
+        return {}
+    if not isinstance(yaml_data, dict):
+        return {}
+
+    template_entries = yaml_data.get("templates")
+    if not isinstance(template_entries, list):
+        return {}
+
+    metadata_by_file: Dict[str, Dict] = {}
+    for entry in template_entries:
+        if not isinstance(entry, dict):
+            continue
+        path_ref = entry.get("cif") or entry.get("mmcif") or entry.get("pdb")
+        if not path_ref:
+            continue
+        file_name = Path(str(path_ref)).name
+        if not file_name:
+            continue
+
+        fmt = "pdb" if "pdb" in entry else "cif"
+        template_chain_id = entry.get("template_id") or entry.get("template_chain_id")
+        target_chain_ids = _normalize_chain_id_list(
+            entry.get("chain_id") or entry.get("target_chain_ids") or entry.get("chain_ids")
+        )
+        metadata_by_file[file_name] = {
+            "format": fmt,
+            "template_chain_id": str(template_chain_id).strip() if template_chain_id else None,
+            "target_chain_ids": target_chain_ids,
+        }
+    return metadata_by_file
+
 def _load_progress(redis_key: str) -> Optional[Dict]:
     try:
         redis_client = get_redis_client()
@@ -1139,6 +1185,7 @@ def handle_predict():
             template_meta = json.loads(template_meta_raw)
         except json.JSONDecodeError:
             logger.warning("Invalid template_meta JSON provided; ignoring template metadata.")
+    yaml_template_meta_map = _extract_template_meta_from_yaml(yaml_content)
 
     meta_map = {
         entry.get("file_name"): entry
@@ -1152,16 +1199,17 @@ def handle_predict():
             continue
         filename = uploaded.filename
         content_bytes = uploaded.read()
-        meta = meta_map.get(filename, {})
+        meta = meta_map.get(filename) or yaml_template_meta_map.get(filename, {})
         fmt = meta.get("format")
         if not fmt:
             lower_name = filename.lower()
             fmt = "pdb" if lower_name.endswith(".pdb") else "cif"
+        target_chain_ids = _normalize_chain_id_list(meta.get("target_chain_ids") or meta.get("chain_id"))
         template_inputs.append({
             "file_name": filename,
             "format": fmt,
             "template_chain_id": meta.get("template_chain_id"),
-            "target_chain_ids": meta.get("target_chain_ids", []),
+            "target_chain_ids": target_chain_ids,
             "content_base64": base64.b64encode(content_bytes).decode("utf-8"),
         })
 

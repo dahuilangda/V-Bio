@@ -93,10 +93,19 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
   if (!componentsForYaml.length) {
     throw new Error('Please provide at least one non-empty component sequence before submitting.');
   }
+  const templateUploads = Array.isArray(input.templateUploads) ? input.templateUploads : [];
+  const yamlTemplates = templateUploads.map((item) => ({
+    fileName: item.fileName,
+    format: item.format,
+    templateChainId: item.templateChainId,
+    targetChainIds: item.targetChainIds
+  }));
+  const hasTemplateUploads = yamlTemplates.length > 0;
   const useMsaServer = componentsForYaml.some((comp) => comp.type === 'protein' && comp.useMsa !== false);
   const hasConstraints = constraintsForBackend.length > 0;
   const hasAffinityProperty = Boolean(input.properties?.affinity && (input.properties?.ligand || input.properties?.binder));
   const useSimpleYaml =
+    !hasTemplateUploads &&
     !hasConstraints &&
     !hasAffinityProperty &&
     componentsForYaml.length === 2 &&
@@ -109,7 +118,8 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
     ? buildPredictionYaml(componentsForYaml[0].sequence, componentsForYaml[1].sequence)
     : buildPredictionYamlFromComponents(componentsForYaml, {
         constraints: constraintsForBackend,
-        properties: input.properties
+        properties: input.properties,
+        templates: yamlTemplates
       });
 
   const form = new FormData();
@@ -120,15 +130,8 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
   if (typeof input.seed === 'number' && Number.isFinite(input.seed)) {
     form.append('seed', String(Math.max(0, Math.floor(input.seed))));
   }
-  if (Array.isArray(input.templateUploads) && input.templateUploads.length > 0) {
-    const templateMeta = input.templateUploads.map((item) => ({
-      file_name: item.fileName,
-      format: item.format,
-      template_chain_id: item.templateChainId,
-      target_chain_ids: item.targetChainIds
-    }));
-    form.append('template_meta', JSON.stringify(templateMeta));
-    for (const item of input.templateUploads) {
+  if (hasTemplateUploads) {
+    for (const item of templateUploads) {
       form.append(
         'template_files',
         new File([item.content], item.fileName, {

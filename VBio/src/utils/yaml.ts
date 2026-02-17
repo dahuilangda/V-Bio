@@ -201,6 +201,54 @@ function buildPropertyPayload(
 interface BuildYamlOptions {
   constraints?: PredictionConstraint[];
   properties?: PredictionProperties;
+  templates?: YamlTemplateInput[];
+}
+
+export interface YamlTemplateInput {
+  fileName: string;
+  format?: 'pdb' | 'cif';
+  templateChainId?: string;
+  targetChainIds?: string[];
+}
+
+function inferTemplateFormat(fileName: string, format: 'pdb' | 'cif' | undefined): 'pdb' | 'cif' {
+  if (format === 'pdb' || format === 'cif') return format;
+  return fileName.toLowerCase().endsWith('.pdb') ? 'pdb' : 'cif';
+}
+
+function normalizeChainIdList(values: string[] | undefined): string[] {
+  if (!Array.isArray(values)) return [];
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const value of values) {
+    const chainId = String(value || '').trim();
+    if (!chainId || seen.has(chainId)) continue;
+    seen.add(chainId);
+    normalized.push(chainId);
+  }
+  return normalized;
+}
+
+function buildTemplatePayload(templates: YamlTemplateInput[] | undefined): Array<Record<string, unknown>> {
+  if (!Array.isArray(templates) || templates.length === 0) return [];
+  return templates.reduce<Array<Record<string, unknown>>>((acc, template) => {
+    const fileName = String(template.fileName || '').trim();
+    if (!fileName) return acc;
+
+    const entry: Record<string, unknown> = {
+      [inferTemplateFormat(fileName, template.format)]: fileName
+    };
+    const targetChainIds = normalizeChainIdList(template.targetChainIds);
+    if (targetChainIds.length > 0) {
+      entry.chain_id = normalizeId(targetChainIds);
+    }
+    const templateChainId = String(template.templateChainId || '').trim();
+    if (templateChainId) {
+      entry.template_id = templateChainId;
+    }
+    acc.push(entry);
+    return acc;
+  }, []);
 }
 
 export function buildPredictionYamlFromComponents(components: InputComponent[], options: BuildYamlOptions = {}): string {
@@ -259,6 +307,10 @@ export function buildPredictionYamlFromComponents(components: InputComponent[], 
   const constraints = buildConstraintPayload(options.constraints || [], chainTypeById, ligandTokenById, chainIds);
   if (constraints.length > 0) {
     payload.constraints = constraints;
+  }
+  const templates = buildTemplatePayload(options.templates);
+  if (templates.length > 0) {
+    payload.templates = templates;
   }
 
   return yaml.dump(payload, {

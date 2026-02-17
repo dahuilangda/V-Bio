@@ -634,29 +634,47 @@
 }
 
 .api-yaml-modal {
-  max-width: 1480px;
+  width: min(96vw, 1760px);
+  max-width: 1760px;
+  display: grid;
+  gap: 14px;
 }
 
 .api-yaml-modal-body {
   display: grid;
-  gap: 10px;
-  grid-template-columns: minmax(720px, 1.35fr) minmax(320px, 0.65fr);
+  gap: 12px;
+  grid-template-columns: minmax(860px, 1.45fr) minmax(360px, 0.7fr);
   align-items: start;
+}
+
+.api-yaml-modal-body-resizable {
+  grid-template-columns: minmax(0, var(--api-yaml-left-width, 68%)) 10px minmax(320px, 1fr);
+  gap: 0;
+  align-items: start;
+}
+
+.api-yaml-modal-body-resizable .api-yaml-modal-editor {
+  margin-right: 12px;
+}
+
+.api-yaml-modal-body-resizable .api-yaml-modal-preview {
+  margin-left: 12px;
 }
 
 .api-yaml-modal-editor {
   display: grid;
   gap: 8px;
-  max-height: 76vh;
-  overflow: auto;
+  max-height: none;
+  overflow: visible;
   padding-right: 2px;
 }
 
 .api-yaml-modal-preview {
   display: grid;
   gap: 10px;
-  max-height: 76vh;
-  overflow: auto;
+  max-height: none;
+  overflow: visible;
+  align-content: start;
 }
 
 .api-yaml-toolbar {
@@ -699,6 +717,16 @@
   padding: 8px;
   display: grid;
   gap: 6px;
+}
+
+.api-yaml-component-card-odd {
+  background: linear-gradient(180deg, #f8fcfa 0%, #f3f9f6 100%);
+  border-color: #d4e4db;
+}
+
+.api-yaml-component-card-even {
+  background: linear-gradient(180deg, #fbfdfc 0%, #f4f7f5 100%);
+  border-color: #dbe5df;
 }
 
 .api-yaml-component-card > header {
@@ -759,6 +787,16 @@
 
 .api-yaml-jsme-shell {
   min-height: 350px;
+}
+
+.api-yaml-component-toolbar-bottom {
+  margin-top: 2px;
+}
+
+.api-yaml-preview-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .api-yaml-constraints {
@@ -1029,8 +1067,14 @@
     grid-template-columns: 1fr;
   }
 
-  .api-yaml-modal-body {
+  .api-yaml-modal-body,
+  .api-yaml-modal-body-resizable {
     grid-template-columns: 1fr;
+  }
+
+  .api-yaml-modal-body-resizable .api-yaml-modal-editor,
+  .api-yaml-modal-body-resizable .api-yaml-modal-preview {
+    margin: 0;
   }
 
   .api-affinity-options {
@@ -1043,6 +1087,10 @@
   }
 
   .api-builder-resizable .panel-resizer {
+    display: none;
+  }
+
+  .api-yaml-modal-body-resizable .panel-resizer {
     display: none;
   }
 
