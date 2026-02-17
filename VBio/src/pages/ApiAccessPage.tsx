@@ -330,6 +330,7 @@ export function ApiAccessPage() {
   const [tokenLoading, setTokenLoading] = useState(false);
   const [projectLoading, setProjectLoading] = useState(false);
   const [registryOpen, setRegistryOpen] = useState(false);
+  const [registryScopeProjectId, setRegistryScopeProjectId] = useState<string | null>(null);
   const [, setError] = useState<string | null>(null);
   const [, setSuccess] = useState<string | null>(null);
 
@@ -347,7 +348,7 @@ export function ApiAccessPage() {
   const [newTokenPlainText, setNewTokenPlainText] = useState('');
   const [selectedProjectId, setSelectedProjectId] = useState('');
   const [allowSubmit, setAllowSubmit] = useState(true);
-  const [allowDelete, setAllowDelete] = useState(false);
+  const [allowDelete, setAllowDelete] = useState(true);
   const [allowCancel, setAllowCancel] = useState(true);
 
   const [usageWindow, setUsageWindow] = useState<UsageWindow>(() => {
@@ -407,6 +408,7 @@ export function ApiAccessPage() {
   const [isBuilderResizing, setIsBuilderResizing] = useState(false);
   const [yamlBuilderLeftWidth, setYamlBuilderLeftWidth] = useState(68);
   const [isYamlBuilderResizing, setIsYamlBuilderResizing] = useState(false);
+  const [projectTokenPanelProjectId, setProjectTokenPanelProjectId] = useState<string | null>(null);
   const [commandHistory, setCommandHistory] = useState<CommandHistoryEntry[]>([]);
   const [copiedActionId, setCopiedActionId] = useState('');
   const commandPanelRef = useRef<HTMLElement | null>(null);
@@ -717,6 +719,10 @@ export function ApiAccessPage() {
       setSelectedTokenId(saved.id);
       setNewTokenPlainText(plain);
       setNewTokenName(shortUuidLike());
+      setNewTokenExpiresDays('');
+      setAllowSubmit(true);
+      setAllowDelete(true);
+      setAllowCancel(true);
       setSuccess(existing ? 'Existing token updated.' : 'API token created. Copy it now; it will not be shown again.');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to create API token.';
@@ -828,6 +834,24 @@ export function ApiAccessPage() {
       };
     });
   }, [projects, tokens, usageByTokenId]);
+  const projectTokensByProjectId = useMemo(() => {
+    const grouped: Record<string, ApiToken[]> = {};
+    for (const token of tokens) {
+      const projectId = String(token.project_id || '').trim();
+      if (!projectId) continue;
+      if (!grouped[projectId]) {
+        grouped[projectId] = [];
+      }
+      grouped[projectId].push(token);
+    }
+    for (const projectId of Object.keys(grouped)) {
+      grouped[projectId].sort((a, b) => {
+        if (a.is_active !== b.is_active) return a.is_active ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+    }
+    return grouped;
+  }, [tokens]);
 
   const filteredProjectStatsRows = useMemo(() => {
     const keyword = projectStatsSearch.trim().toLowerCase();
@@ -873,6 +897,27 @@ export function ApiAccessPage() {
     const start = (projectStatsPage - 1) * PROJECT_STATS_PAGE_SIZE;
     return filteredProjectStatsRows.slice(start, start + PROJECT_STATS_PAGE_SIZE);
   }, [filteredProjectStatsRows, projectStatsPage]);
+  const maxProjectCalls = useMemo(
+    () => Math.max(1, ...filteredProjectStatsRows.map((item) => item.totalCalls)),
+    [filteredProjectStatsRows]
+  );
+  const registryScopeProject = useMemo(
+    () => projects.find((project) => project.id === registryScopeProjectId) || null,
+    [projects, registryScopeProjectId]
+  );
+  const showRegistryProjectColumn = !registryScopeProjectId;
+  const registryTokensSource = useMemo(() => {
+    if (!registryScopeProjectId) return tokens;
+    return tokens.filter((token) => token.project_id === registryScopeProjectId);
+  }, [tokens, registryScopeProjectId]);
+  const projectTokenPanelProject = useMemo(
+    () => projects.find((project) => project.id === projectTokenPanelProjectId) || null,
+    [projects, projectTokenPanelProjectId]
+  );
+  const projectTokenPanelTokens = useMemo(() => {
+    if (!projectTokenPanelProjectId) return [];
+    return projectTokensByProjectId[projectTokenPanelProjectId] || [];
+  }, [projectTokenPanelProjectId, projectTokensByProjectId]);
 
   useEffect(() => {
     setBuilderPredictionBackend(normalizePredictionBackend(selectedBackend));
@@ -915,12 +960,12 @@ export function ApiAccessPage() {
 
   const filteredTokens = useMemo(() => {
     const keyword = tokenQuery.trim().toLowerCase();
-    if (!keyword) return tokens;
-    return tokens.filter((item) => {
+    if (!keyword) return registryTokensSource;
+    return registryTokensSource.filter((item) => {
       const hay = `${item.name} ${item.token_prefix} ${item.token_last4}`.toLowerCase();
       return hay.includes(keyword);
     });
-  }, [tokens, tokenQuery]);
+  }, [registryTokensSource, tokenQuery]);
 
   const tokenPageCount = Math.max(1, Math.ceil(filteredTokens.length / TOKEN_PAGE_SIZE));
   useEffect(() => {
@@ -1315,6 +1360,34 @@ ${submitTaskIdCapture}`;
     setSelectedTokenId(preferred.id);
   };
 
+  const openTokenRegistry = (projectId: string | null = null) => {
+    setRegistryScopeProjectId(projectId);
+    if (projectId) {
+      selectProjectContext(projectId);
+    }
+    setNewTokenExpiresDays('');
+    setAllowSubmit(true);
+    setAllowDelete(true);
+    setAllowCancel(true);
+    setTokenQuery('');
+    setTokenPage(1);
+    setRegistryOpen(true);
+  };
+
+  const closeTokenRegistry = () => {
+    setRegistryOpen(false);
+    setRegistryScopeProjectId(null);
+  };
+
+  const openTokenRegistryForProject = (projectId: string) => {
+    openTokenRegistry(projectId);
+  };
+
+  const openProjectTokenPanel = (projectId: string) => {
+    selectProjectContext(projectId);
+    setProjectTokenPanelProjectId(projectId);
+  };
+
   const applyCommandHistory = (entry: CommandHistoryEntry) => {
     if (entry.projectId) {
       selectProjectContext(entry.projectId);
@@ -1385,6 +1458,11 @@ ${submitTaskIdCapture}`;
     commandPanelRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
+  const jumpToCommandBuilderForProject = (projectId: string) => {
+    selectProjectContext(projectId);
+    jumpToCommandBuilder();
+  };
+
   return (
     <div className="page-grid api-access-page">
       <section className="page-header api-access-header">
@@ -1392,23 +1470,14 @@ ${submitTaskIdCapture}`;
           <h1>API Access</h1>
           <p className="muted">Project-scoped tokens for VBio gateway cURL submission.</p>
         </div>
-        <div className="page-header-actions-minimal api-access-actions">
-          <button
-            className="task-new-button api-create-button"
-            type="button"
-            title="Open token registry"
-            aria-label="Open token registry"
-            onClick={() => setRegistryOpen(true)}
-          >
-            <Plus size={16} />
-          </button>
-        </div>
       </section>
 
       <section className="panel api-project-stats-panel">
         <div className="api-section-head">
           <h2><BarChart3 size={16} /> Project Stats</h2>
-          <div className="api-project-stats-controls">
+        </div>
+        <div className="api-project-stats-controls">
+          <div className="api-project-stats-controls-left">
             <label className="field api-project-search-field">
               <span><Search size={12} /> Find</span>
               <input
@@ -1442,6 +1511,8 @@ ${submitTaskIdCapture}`;
                 <option value="success_asc">Success (low to high)</option>
               </select>
             </label>
+          </div>
+          <div className="api-project-stats-controls-right">
             <div className="api-range-switch" role="radiogroup" aria-label="Project stats window">
               <span className="api-range-icon" aria-hidden="true"><Clock3 size={13} /></span>
               {(['7d', '30d', '90d', 'all'] as UsageWindow[]).map((item) => (
@@ -1457,7 +1528,7 @@ ${submitTaskIdCapture}`;
               ))}
             </div>
             <button className="btn btn-secondary api-builder-jump-btn" type="button" onClick={jumpToCommandBuilder}>
-              <KeyRound size={13} /> Builder
+              <KeyRound size={13} /> Open Builder
             </button>
           </div>
         </div>
@@ -1471,20 +1542,22 @@ ${submitTaskIdCapture}`;
                 <th>Calls</th>
                 <th>Success</th>
                 <th>Last Call</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {projectStatsLoading ? (
                 <tr>
-                  <td colSpan={6} className="muted">Loading project stats...</td>
+                  <td colSpan={7} className="muted">Loading project stats...</td>
                 </tr>
               ) : pagedProjectStatsRows.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="muted">No projects.</td>
+                  <td colSpan={7} className="muted">No projects.</td>
                 </tr>
               ) : (
                 pagedProjectStatsRows.map((item) => {
                   const isSelected = item.project.id === selectedTokenProjectId;
+                  const callsRatio = item.totalCalls > 0 ? Math.max(8, Math.round((item.totalCalls / maxProjectCalls) * 100)) : 0;
                   return (
                     <tr
                       key={item.project.id}
@@ -1492,11 +1565,71 @@ ${submitTaskIdCapture}`;
                       onClick={() => selectProjectContext(item.project.id)}
                     >
                       <td>{item.project.name}</td>
-                      <td>{item.workflowLabel}</td>
-                      <td>{item.activeTokenCount}/{item.tokenCount}</td>
-                      <td>{item.totalCalls}</td>
-                      <td>{item.successRate.toFixed(1)}%</td>
+                      <td>
+                        <span className={`api-workflow-pill workflow-${item.workflowKey}`}>
+                          {item.workflowLabel}
+                        </span>
+                      </td>
+                      <td>
+                        <div className="api-project-token-stat">{item.activeTokenCount}/{item.tokenCount}</div>
+                      </td>
+                      <td>
+                        <div className="api-project-calls-cell">
+                          <div className="api-project-calls-head">
+                            <BarChart3 size={12} />
+                            <strong>{item.totalCalls}</strong>
+                          </div>
+                          <span className="api-project-calls-track">
+                            <span className="api-project-calls-fill" style={{ width: `${callsRatio}%` }} />
+                          </span>
+                        </div>
+                      </td>
+                      <td>
+                        <span className={`api-project-success-chip ${item.successRate >= 80 ? 'high' : item.successRate >= 50 ? 'mid' : 'low'}`}>
+                          {item.successRate.toFixed(1)}%
+                        </span>
+                      </td>
                       <td>{item.lastEventAt ? formatIso(item.lastEventAt) : '-'}</td>
+                      <td>
+                        <div className="api-project-manage-actions">
+                          <button
+                            type="button"
+                            className="api-project-builder-btn"
+                            title="Open Builder"
+                            aria-label="Open Builder"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              jumpToCommandBuilderForProject(item.project.id);
+                            }}
+                          >
+                            <ChevronRight size={12} />
+                          </button>
+                          <button
+                            type="button"
+                            className="api-project-token-view-btn"
+                            title="View project tokens"
+                            aria-label="View project tokens"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openProjectTokenPanel(item.project.id);
+                            }}
+                          >
+                            <KeyRound size={12} />
+                          </button>
+                          <button
+                            type="button"
+                            className="api-project-manage-btn"
+                            title="Open token registry"
+                            aria-label="Open token registry"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openTokenRegistryForProject(item.project.id);
+                            }}
+                          >
+                            <ShieldCheck size={12} />
+                          </button>
+                        </div>
+                      </td>
                     </tr>
                   );
                 })
@@ -1940,7 +2073,7 @@ ${submitTaskIdCapture}`;
         {!selectedTokenId ? (
           <div className="api-empty-state">
             <p className="muted">No token selected.</p>
-            <button className="btn btn-primary" type="button" onClick={() => setRegistryOpen(true)}>
+            <button className="btn btn-primary" type="button" onClick={() => openTokenRegistry()}>
               <Plus size={14} /> New Token
             </button>
           </div>
@@ -2393,16 +2526,105 @@ ${submitTaskIdCapture}`;
         </div>
       )}
 
+      {projectTokenPanelProjectId && (
+        <div className="modal-mask" onClick={() => setProjectTokenPanelProjectId(null)}>
+          <div className="modal api-project-token-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="api-token-modal-head">
+              <h2><KeyRound size={17} /> {projectTokenPanelProject?.name || 'Project'} Tokens</h2>
+              <button
+                className="icon-btn"
+                type="button"
+                aria-label="Close project token panel"
+                onClick={() => setProjectTokenPanelProjectId(null)}
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="api-project-token-modal-body">
+              {projectTokenPanelTokens.length === 0 ? (
+                <div className="api-project-token-modal-empty muted">
+                  <ShieldOff size={16} />
+                  <span>No tokens in this project yet.</span>
+                </div>
+              ) : (
+                <div className="api-project-token-modal-list">
+                  {projectTokenPanelTokens.map((token) => (
+                    <article key={token.id} className="api-project-token-modal-item">
+                      <div className="api-project-token-modal-main">
+                        <strong>{token.name}</strong>
+                        <code>{token.token_prefix}...{token.token_last4}</code>
+                      </div>
+                      <div className="api-project-token-modal-meta">
+                        <span className={`badge ${token.is_active ? '' : 'badge-muted'}`}>
+                          {token.is_active ? 'active' : 'revoked'}
+                        </span>
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-compact"
+                          onClick={() => {
+                            setSelectedProjectId(String(token.project_id || ''));
+                            setSelectedTokenId(token.id);
+                            setProjectTokenPanelProjectId(null);
+                          }}
+                        >
+                          Use
+                        </button>
+                        {token.is_active && (
+                          <button
+                            type="button"
+                            className="icon-btn"
+                            title="Revoke token"
+                            aria-label="Revoke token"
+                            disabled={tokenRevokingId === token.id}
+                            onClick={() => { void revokeToken(token.id); }}
+                          >
+                            <ShieldOff size={13} />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="icon-btn danger"
+                          title="Delete token"
+                          aria-label="Delete token"
+                          disabled={tokenDeletingId === token.id}
+                          onClick={() => { void removeToken(token.id); }}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+              <div className="api-project-token-modal-actions">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    if (!projectTokenPanelProjectId) return;
+                    setProjectTokenPanelProjectId(null);
+                    openTokenRegistryForProject(projectTokenPanelProjectId);
+                  }}
+                >
+                  <KeyRound size={13} />
+                  Open Token Registry
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {registryOpen && (
-        <div className="modal-mask" onClick={() => setRegistryOpen(false)}>
+        <div className="modal-mask" onClick={closeTokenRegistry}>
           <div className="modal modal-wide api-token-modal" onClick={(e) => e.stopPropagation()}>
             <div className="api-token-modal-head">
-              <h2><ShieldCheck size={17} /> Token Registry</h2>
+              <h2><ShieldCheck size={17} /> Token Registry{registryScopeProject ? ` · ${registryScopeProject.name}` : ''}</h2>
               <button
                 className="icon-btn"
                 type="button"
                 aria-label="Close token registry"
-                onClick={() => setRegistryOpen(false)}
+                onClick={closeTokenRegistry}
               >
                 <X size={16} />
               </button>
@@ -2411,45 +2633,72 @@ ${submitTaskIdCapture}`;
             <div className="api-token-modal-body">
               <section className="api-token-modal-create">
                 <form className="api-token-create" onSubmit={createApiToken}>
-                  <label className="field">
+                  <label className="field api-token-name-field">
                     <span>Name</span>
                     <input value={newTokenName} onChange={(e) => setNewTokenName(e.target.value)} placeholder="token-xxxxxxxx" required />
                   </label>
 
-                  <label className="field">
-                    <span>Project</span>
-                    <select value={selectedProjectId} onChange={(e) => setSelectedProjectId(e.target.value)} disabled={projectLoading || projects.length === 0}>
-                      {projects.length === 0 ? (
-                        <option value="">No project</option>
-                      ) : (
-                        projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)
-                      )}
-                    </select>
-                  </label>
+                  {!registryScopeProject && (
+                    <label className="field api-token-project-field">
+                      <span>Project</span>
+                      <select
+                        value={selectedProjectId}
+                        onChange={(e) => setSelectedProjectId(e.target.value)}
+                        disabled={projectLoading || projects.length === 0}
+                      >
+                        {projects.length === 0 ? (
+                          <option value="">No project</option>
+                        ) : (
+                          projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)
+                        )}
+                      </select>
+                    </label>
+                  )}
 
-                  <label className="field">
+                  <label className="field api-token-expiry-field">
                     <span>Expire (d)</span>
                     <input
                       type="number"
                       min={1}
                       value={newTokenExpiresDays}
                       onChange={(e) => setNewTokenExpiresDays(e.target.value)}
-                      placeholder="optional"
+                      placeholder="Never"
                     />
                   </label>
 
-                  <div className="field api-token-source-wrap">
+                  <div className="field api-token-source-wrap api-token-permissions-field">
                     <span>Permissions</span>
                     <div className="api-permission-grid">
-                      <label className="checkbox-inline"><input type="checkbox" checked={allowSubmit} onChange={(e) => setAllowSubmit(e.target.checked)} /> Submit</label>
-                      <label className="checkbox-inline"><input type="checkbox" checked={allowDelete} onChange={(e) => setAllowDelete(e.target.checked)} /> Delete</label>
-                      <label className="checkbox-inline"><input type="checkbox" checked={allowCancel} onChange={(e) => setAllowCancel(e.target.checked)} /> Cancel</label>
+                      <button
+                        type="button"
+                        className={`api-permission-chip ${allowSubmit ? 'active' : ''}`}
+                        onClick={() => setAllowSubmit((prev) => !prev)}
+                        aria-pressed={allowSubmit}
+                      >
+                        Submit
+                      </button>
+                      <button
+                        type="button"
+                        className={`api-permission-chip ${allowDelete ? 'active' : ''}`}
+                        onClick={() => setAllowDelete((prev) => !prev)}
+                        aria-pressed={allowDelete}
+                      >
+                        Delete
+                      </button>
+                      <button
+                        type="button"
+                        className={`api-permission-chip ${allowCancel ? 'active' : ''}`}
+                        onClick={() => setAllowCancel((prev) => !prev)}
+                        aria-pressed={allowCancel}
+                      >
+                        Cancel
+                      </button>
                     </div>
                   </div>
 
                   <div className="row end api-token-create-action">
                     <button className="btn btn-primary" type="submit" disabled={tokenCreating || !selectedProjectId}>
-                      <Plus size={14} /> {tokenCreating ? 'Creating...' : 'Create'}
+                      <Plus size={14} /> {tokenCreating ? 'Creating...' : 'Create Token'}
                     </button>
                   </div>
                 </form>
@@ -2478,6 +2727,12 @@ ${submitTaskIdCapture}`;
 
               <section className="api-token-modal-list">
                 <div className="api-token-list-toolbar">
+                  {registryScopeProject && (
+                    <div className="api-token-scope-indicator">
+                      <span className="badge">Project scope</span>
+                      <strong>{registryScopeProject.name}</strong>
+                    </div>
+                  )}
                   <label className="field api-token-search-field">
                     <span><Search size={12} /> Find</span>
                     <input
@@ -2493,8 +2748,8 @@ ${submitTaskIdCapture}`;
                     <thead>
                       <tr>
                         <th>Name</th>
-                        <th>Project</th>
-                        <th>Perm</th>
+                        {showRegistryProjectColumn && <th>Project</th>}
+                        <th>Permissions</th>
                         <th>Status</th>
                         <th>Actions</th>
                       </tr>
@@ -2502,26 +2757,31 @@ ${submitTaskIdCapture}`;
                     <tbody>
                       {tokenLoading ? (
                         <tr>
-                          <td colSpan={5} className="muted">Loading...</td>
+                          <td colSpan={showRegistryProjectColumn ? 5 : 4} className="muted">Loading...</td>
                         </tr>
                       ) : pagedTokens.length === 0 ? (
                         <tr>
-                          <td colSpan={5} className="muted">No tokens.</td>
+                          <td colSpan={showRegistryProjectColumn ? 5 : 4} className="muted">No tokens.</td>
                         </tr>
                       ) : (
                         pagedTokens.map((token) => {
                           const projectName = projects.find((item) => item.id === token.project_id)?.name || '-';
-                          const perm = [
-                            token.allow_submit ? 'S' : '-',
-                            token.allow_delete ? 'D' : '-',
-                            token.allow_cancel ? 'C' : '-'
-                          ].join('');
                           return (
                             <tr key={token.id} className={selectedTokenId === token.id ? 'row-selected' : ''}>
                               <td>{token.name}<br /><code>{token.token_prefix}...{token.token_last4}</code></td>
-                              <td>{projectName}</td>
-                              <td><code>{perm}</code></td>
-                              <td>{token.is_active ? 'Active' : 'Revoked'}</td>
+                              {showRegistryProjectColumn && <td>{projectName}</td>}
+                              <td>
+                                <div className="api-token-perm-badges">
+                                  <span className={`api-token-perm-badge ${token.allow_submit ? 'on' : 'off'}`}>S</span>
+                                  <span className={`api-token-perm-badge ${token.allow_delete ? 'on' : 'off'}`}>D</span>
+                                  <span className={`api-token-perm-badge ${token.allow_cancel ? 'on' : 'off'}`}>C</span>
+                                </div>
+                              </td>
+                              <td>
+                                <span className={`api-token-status-chip ${token.is_active ? 'active' : 'revoked'}`}>
+                                  {token.is_active ? 'Active' : 'Revoked'}
+                                </span>
+                              </td>
                               <td>
                                 <div className="api-token-actions">
                                   <button
