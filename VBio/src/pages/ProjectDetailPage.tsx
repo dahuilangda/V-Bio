@@ -3528,6 +3528,8 @@ export function ProjectDetailPage() {
       const taskId = await submitAffinityScoring({
         inputStructureText: affinityPreview.structureText,
         inputStructureName: affinityPreview.structureName || 'affinity_input.cif',
+        targetFile: affinityTargetFile,
+        ligandFile: affinityLigandFile,
         backend: activeAffinityBackend,
         seed: configWithAffinity.options.seed ?? null,
         enableAffinity: runAffinityActivity,

@@ -10,6 +10,7 @@ import subprocess
 import io
 import math
 import re
+import tempfile
 import zipfile
 import psutil
 import signal
@@ -21,6 +22,7 @@ from typing import Dict, List, Optional
 from flask import Flask, request, jsonify, send_from_directory, send_file
 from werkzeug.utils import secure_filename
 from celery.result import AsyncResult
+import gemmi
 import config
 from celery_app import celery_app
 from tasks import (
@@ -681,6 +683,61 @@ def _resolve_boltz_structure_for_confidence(names: list[str], confidence_path: s
     return next((item for item in candidates if item in names), None)
 
 
+_BOLTZ_WATER_RESNAMES = {"HOH", "WAT", "H2O"}
+_BOLTZ_ION_RESNAMES = {
+    "NA", "CL", "MG", "CA", "K", "ZN", "FE", "MN", "CU", "CO", "NI",
+    "CD", "HG", "SR", "BA", "CS", "LI", "BR", "I",
+}
+
+
+def _normalize_plddt_value(value: float) -> float:
+    return value * 100.0 if value <= 1.0 else value
+
+
+def _estimate_ligand_mean_plddt_from_structure_bytes(structure_name: str, payload: bytes) -> Optional[float]:
+    """Estimate ligand atom mean pLDDT from structure B-factors."""
+    suffix = os.path.splitext(structure_name)[1] or ".cif"
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+            handle.write(payload)
+            temp_path = handle.name
+        structure = gemmi.read_structure(temp_path)
+        structure.setup_entities()
+    except Exception:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+        return None
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+    entity_types = {
+        subchain: entity.entity_type.name
+        for entity in structure.entities
+        for subchain in entity.subchains
+    }
+
+    values: list[float] = []
+    for model in structure:
+        for chain in model:
+            for residue in chain:
+                if entity_types.get(residue.subchain) not in {"NonPolymer", "Branched"}:
+                    continue
+                resname = residue.name.strip().upper()
+                if resname in _BOLTZ_WATER_RESNAMES or resname in _BOLTZ_ION_RESNAMES:
+                    continue
+                for atom in residue:
+                    b_iso = _to_finite_float(atom.b_iso)
+                    if b_iso is None:
+                        continue
+                    values.append(_normalize_plddt_value(b_iso))
+
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
 def _choose_best_boltz_files(src_zip: zipfile.ZipFile, names: list[str]) -> tuple[Optional[str], Optional[str]]:
     confidence_candidates = [
         name for name in names
@@ -691,7 +748,9 @@ def _choose_best_boltz_files(src_zip: zipfile.ZipFile, names: list[str]) -> tupl
     if not confidence_candidates:
         return _choose_best_boltz_structure_file(names), None
 
-    scored: list[tuple[int, float, int, float, int, float, int, int, str]] = []
+    ligand_mean_cache: dict[str, Optional[float]] = {}
+    structure_for_confidence: dict[str, Optional[str]] = {}
+    scored: list[tuple[int, float, int, float, int, float, int, float, int, float, int, int, str]] = []
     for name in confidence_candidates:
         payload = None
         try:
@@ -701,12 +760,32 @@ def _choose_best_boltz_files(src_zip: zipfile.ZipFile, names: list[str]) -> tupl
         except Exception:
             payload = None
 
+        matched_structure = _resolve_boltz_structure_for_confidence(names, name)
+        structure_for_confidence[name] = matched_structure
+
         confidence_score = _to_finite_float(payload.get("confidence_score")) if payload else None
         complex_plddt = _to_finite_float(payload.get("complex_plddt")) if payload else None
         iptm = _to_finite_float(payload.get("iptm")) if payload else None
+        ligand_mean_plddt = _to_finite_float(payload.get("ligand_mean_plddt")) if payload else None
+        if ligand_mean_plddt is not None:
+            ligand_mean_plddt = _normalize_plddt_value(ligand_mean_plddt)
+        if ligand_mean_plddt is None and matched_structure:
+            if matched_structure not in ligand_mean_cache:
+                try:
+                    structure_bytes = src_zip.read(matched_structure)
+                except Exception:
+                    ligand_mean_cache[matched_structure] = None
+                else:
+                    ligand_mean_cache[matched_structure] = _estimate_ligand_mean_plddt_from_structure_bytes(
+                        matched_structure,
+                        structure_bytes,
+                    )
+            ligand_mean_plddt = ligand_mean_cache.get(matched_structure)
         heuristic = _boltz_confidence_heuristic_score(name)
         scored.append(
             (
+                1 if ligand_mean_plddt is not None else 0,
+                ligand_mean_plddt if ligand_mean_plddt is not None else float("-inf"),
                 1 if confidence_score is not None else 0,
                 confidence_score if confidence_score is not None else float("-inf"),
                 1 if complex_plddt is not None else 0,
@@ -720,12 +799,8 @@ def _choose_best_boltz_files(src_zip: zipfile.ZipFile, names: list[str]) -> tupl
         )
 
     scored.sort(reverse=True)
-    selected_confidence = scored[0][8] if scored else None
-    matched_structure = (
-        _resolve_boltz_structure_for_confidence(names, selected_confidence)
-        if selected_confidence
-        else None
-    )
+    selected_confidence = scored[0][10] if scored else None
+    matched_structure = structure_for_confidence.get(selected_confidence) if selected_confidence else None
     selected_structure = matched_structure or _choose_best_boltz_structure_file(names)
     return selected_structure, selected_confidence
 
@@ -925,7 +1000,7 @@ def _build_view_archive_bytes(source_zip_path: str) -> bytes:
 def _build_or_get_view_archive(source_zip_path: str) -> str:
     """Build a cached view archive and return the cached file path."""
     src_stat = os.stat(source_zip_path)
-    cache_schema_version = "view-v4-boltz-confidence-ranking"
+    cache_schema_version = "view-v5-boltz-ligand-aware-ranking"
     cache_seed = f"{cache_schema_version}|{source_zip_path}|{int(src_stat.st_mtime_ns)}|{src_stat.st_size}"
     cache_key = hashlib.sha256(cache_seed.encode("utf-8")).hexdigest()[:24]
     cache_dir = Path("/tmp/boltz_result_view_cache")

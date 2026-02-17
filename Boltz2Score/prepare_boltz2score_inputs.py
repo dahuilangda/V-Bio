@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import os
 import pickle
+import re
 from dataclasses import replace
 from pathlib import Path
 import tempfile
@@ -589,6 +590,64 @@ def _collect_custom_ligands(
             pdb_lines = None
 
     custom_mols: dict = {}
+
+    def _normalized_ligand_map(source: dict[str, str] | None) -> dict[str, str]:
+        if not source:
+            return {}
+        normalized: dict[str, str] = {}
+        for raw_key, raw_value in source.items():
+            key = str(raw_key or "").strip()
+            value = str(raw_value or "").strip()
+            if not key or not value:
+                continue
+            normalized[key] = value
+        return normalized
+
+    def _chain_aliases(chain_name: str) -> list[str]:
+        raw = str(chain_name or "").strip()
+        if not raw:
+            return []
+        aliases: list[str] = []
+        seen: set[str] = set()
+
+        def _push(value: str) -> None:
+            key = value.strip()
+            if not key:
+                return
+            for variant in (key, key.upper(), key.lower()):
+                if variant not in seen:
+                    seen.add(variant)
+                    aliases.append(variant)
+
+        _push(raw)
+        m = re.match(r"^(.+?)x(?:p|\d+)$", raw, flags=re.IGNORECASE)
+        if m:
+            _push(m.group(1))
+        if "x" in raw:
+            _push(raw.split("x", 1)[0])
+        return aliases
+
+    def _resolve_chain_smiles(
+        map_data: dict[str, str],
+        chain_name: str,
+        resname: str,
+    ) -> str | None:
+        if not map_data:
+            return None
+        residue = str(resname or "").strip()
+        for chain_key in _chain_aliases(chain_name):
+            for candidate in (
+                f"{chain_key}:{residue}",
+                f"{chain_key}:{residue.upper()}",
+                f"{chain_key}:{residue.lower()}",
+                chain_key,
+            ):
+                if candidate in map_data:
+                    return map_data[candidate]
+        return None
+
+    normalized_ligand_smiles_map = _normalized_ligand_map(ligand_smiles_map)
+
     for chain in structure[0]:
         for residue in chain:
             sub = residue.subchain
@@ -608,12 +667,11 @@ def _collect_custom_ligands(
             ):
                 if resname not in custom_mols:
                     custom_mol = None
-                    chain_smiles = None
-                    if ligand_smiles_map:
-                        chain_smiles = (
-                            ligand_smiles_map.get(f"{chain.name}:{resname}")
-                            or ligand_smiles_map.get(chain.name)
-                        )
+                    chain_smiles = _resolve_chain_smiles(
+                        normalized_ligand_smiles_map,
+                        chain.name,
+                        resname,
+                    )
                     if chain_smiles:
                         custom_mol = _build_custom_ligand_mol_from_smiles(
                             residue=residue,

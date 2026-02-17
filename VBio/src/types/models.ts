@@ -214,6 +214,8 @@ export interface AffinityPreviewPayload {
 export interface AffinitySubmitInput {
   inputStructureText: string;
   inputStructureName?: string;
+  targetFile?: File | null;
+  ligandFile?: File | null;
   backend?: string;
   seed?: number | null;
   enableAffinity: boolean;

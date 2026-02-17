@@ -18,8 +18,8 @@ if (ENV.apiToken) {
 
 const BACKEND_TIMEOUT_MS = 20000;
 const BOLTZ2SCORE_AFFINITY_PROFILE = Object.freeze({
+  // Affinity scoring should keep input complex geometry by default (score-only mode).
   structureRefine: false,
-  // Empirically more stable for affinity confidence than 7 in input-structure mode.
   recyclingSteps: 20,
   samplingSteps: 1,
   diffusionSamples: 1,
@@ -251,19 +251,27 @@ export async function previewAffinityComplex(input: {
 
 export async function submitAffinityScoring(input: AffinitySubmitInput): Promise<string> {
   const structureText = String(input.inputStructureText || '').trim();
-  if (!structureText) {
-    throw new Error('Affinity scoring requires a prepared input structure.');
-  }
   const backend = String(input.backend || 'boltz').trim().toLowerCase();
   const useProtenix = backend === 'protenix';
+  const targetFile = input.targetFile instanceof File ? input.targetFile : null;
+  const ligandFile = input.ligandFile instanceof File ? input.ligandFile : null;
+  const useSeparateBoltzInputs = !useProtenix && Boolean(targetFile && ligandFile);
+  if (!useSeparateBoltzInputs && !structureText) {
+    throw new Error('Affinity scoring requires a prepared input structure.');
+  }
   const normalizedSeed =
     typeof input.seed === 'number' && Number.isFinite(input.seed) ? Math.max(0, Math.floor(input.seed)) : null;
 
   const form = new FormData();
-  form.append(
-    'input_file',
-    new File([structureText], input.inputStructureName || 'affinity_input.cif', { type: 'chemical/x-cif' })
-  );
+  if (useSeparateBoltzInputs && targetFile && ligandFile) {
+    form.append('protein_file', targetFile);
+    form.append('ligand_file', ligandFile);
+  } else {
+    form.append(
+      'input_file',
+      new File([structureText], input.inputStructureName || 'affinity_input.cif', { type: 'chemical/x-cif' })
+    );
+  }
   const targetChainIds = Array.isArray(input.targetChainIds)
     ? input.targetChainIds.map((item) => String(item || '').trim()).filter(Boolean)
     : [];
@@ -275,8 +283,11 @@ export async function submitAffinityScoring(input: AffinitySubmitInput): Promise
   if (ligandChainId) {
     form.append('ligand_chain', ligandChainId);
   }
-  if (ligandChainId && ligandSmiles) {
-    form.append('ligand_smiles_map', JSON.stringify({ [ligandChainId]: ligandSmiles }));
+  if (ligandSmiles) {
+    const ligandMapChainId = ligandChainId || (useSeparateBoltzInputs ? 'L' : '');
+    if (ligandMapChainId) {
+      form.append('ligand_smiles_map', JSON.stringify({ [ligandMapChainId]: ligandSmiles }));
+    }
   }
 
   const enableAffinity = Boolean(input.enableAffinity);
@@ -471,11 +482,39 @@ async function chooseBestBoltzStructureAndConfidence(
     };
   }
 
+  const ligandMeanByStructure = new Map<string, Promise<number | null>>();
+  const readLigandMeanForStructure = (structureFile: string | null): Promise<number | null> => {
+    if (!structureFile) return Promise.resolve(null);
+    const cached = ligandMeanByStructure.get(structureFile);
+    if (cached) return cached;
+    const pending = (async () => {
+      const structureText = await zip.file(structureFile)?.async('text');
+      if (!structureText) return null;
+      const structureFormat: 'cif' | 'pdb' = getBaseName(structureFile).toLowerCase().endsWith('.pdb') ? 'pdb' : 'cif';
+      const byChain = extractLigandAtomPlddtsByChainFromStructure(structureText, structureFormat);
+      const values = Object.values(byChain)
+        .flat()
+        .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+      const avg = mean(values);
+      return avg === null ? null : normalizePlddt(avg);
+    })();
+    ligandMeanByStructure.set(structureFile, pending);
+    return pending;
+  };
+
   const scoredCandidates = await Promise.all(
     confidenceCandidates.map(async (file) => {
       const payload = await readZipJson(zip, file);
+      const matchedStructure = resolveBoltzStructureForConfidence(names, file);
+      const ligandMeanFromPayload = payload ? toFiniteNumber(payload.ligand_mean_plddt) : null;
+      const ligandMeanPlddt =
+        ligandMeanFromPayload !== null
+          ? normalizePlddt(ligandMeanFromPayload)
+          : await readLigandMeanForStructure(matchedStructure);
       return {
         file,
+        matchedStructure,
+        ligandMeanPlddt,
         confidenceScore: payload ? toFiniteNumber(payload.confidence_score) : null,
         complexPlddt: payload ? toFiniteNumber(payload.complex_plddt) : null,
         iptm: payload ? toFiniteNumber(payload.iptm) : null,
@@ -485,6 +524,13 @@ async function chooseBestBoltzStructureAndConfidence(
   );
 
   scoredCandidates.sort((a, b) => {
+    const aHasLigandMean = a.ligandMeanPlddt !== null ? 1 : 0;
+    const bHasLigandMean = b.ligandMeanPlddt !== null ? 1 : 0;
+    if (aHasLigandMean !== bHasLigandMean) return bHasLigandMean - aHasLigandMean;
+    if (a.ligandMeanPlddt !== null && b.ligandMeanPlddt !== null && a.ligandMeanPlddt !== b.ligandMeanPlddt) {
+      return b.ligandMeanPlddt - a.ligandMeanPlddt;
+    }
+
     const aHasConfidence = a.confidenceScore !== null ? 1 : 0;
     const bHasConfidence = b.confidenceScore !== null ? 1 : 0;
     if (aHasConfidence !== bHasConfidence) return bHasConfidence - aHasConfidence;
@@ -511,7 +557,7 @@ async function chooseBestBoltzStructureAndConfidence(
   });
 
   const selectedConfidence = scoredCandidates[0]?.file || null;
-  const matchedStructure = selectedConfidence ? resolveBoltzStructureForConfidence(names, selectedConfidence) : null;
+  const matchedStructure = scoredCandidates[0]?.matchedStructure || null;
   return {
     structureFile: matchedStructure || chooseBestBoltzStructureFile(names),
     confidenceFile: selectedConfidence
