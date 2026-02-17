@@ -1075,6 +1075,52 @@ def _normalize_chain_id_list(value) -> List[str]:
     return [normalized] if normalized else []
 
 
+def _infer_use_msa_server_from_yaml_text(yaml_content: str) -> bool:
+    """
+    Infer whether external MSA generation should be enabled for prediction YAML.
+
+    True: at least one protein sequence has no explicit `msa` field.
+    False: no proteins, or proteins all use `msa: empty` / self-provided MSA.
+    """
+    if not yaml_content.strip():
+        return False
+    try:
+        yaml_data = yaml.safe_load(yaml_content) or {}
+    except Exception:
+        return False
+    if not isinstance(yaml_data, dict):
+        return False
+    sequences = yaml_data.get("sequences")
+    if not isinstance(sequences, list):
+        return False
+
+    has_protein = False
+    needs_external_msa = False
+    for item in sequences:
+        if not isinstance(item, dict):
+            continue
+        protein = item.get("protein")
+        if not isinstance(protein, dict):
+            continue
+        has_protein = True
+        msa_value = protein.get("msa")
+        if msa_value is None:
+            needs_external_msa = True
+            continue
+        if isinstance(msa_value, str):
+            normalized = msa_value.strip().lower()
+            if not normalized:
+                needs_external_msa = True
+                continue
+            if normalized in {"empty", "none", "null"}:
+                continue
+            # Non-empty path/reference is treated as user-supplied MSA.
+            continue
+        # dict/list/object payload is treated as user-supplied MSA.
+
+    return has_protein and needs_external_msa
+
+
 def _extract_template_meta_from_yaml(yaml_content: str) -> Dict[str, Dict]:
     try:
         yaml_data = yaml.safe_load(yaml_content) or {}
@@ -1152,9 +1198,17 @@ def handle_predict():
         logger.exception(f"Failed to read yaml_file from request: {e}. Client IP: {request.remote_addr}")
         return jsonify({'error': f"Failed to read yaml_file: {e}"}), 400
 
-    use_msa_server_str = request.form.get('use_msa_server', 'false')
-    use_msa_server = str(use_msa_server_str).strip().lower() == 'true'
-    logger.info(f"use_msa_server parameter received: {use_msa_server} for client {request.remote_addr}.")
+    use_msa_server_raw = request.form.get('use_msa_server')
+    if use_msa_server_raw is None or not str(use_msa_server_raw).strip():
+        use_msa_server = _infer_use_msa_server_from_yaml_text(yaml_content)
+        logger.info(
+            "use_msa_server missing in form; inferred as %s from YAML for client %s.",
+            use_msa_server,
+            request.remote_addr,
+        )
+    else:
+        use_msa_server = _parse_bool(use_msa_server_raw, False)
+        logger.info(f"use_msa_server parameter received: {use_msa_server} for client {request.remote_addr}.")
     
     # 处理模型参数
     model_name = request.form.get('model', None)
