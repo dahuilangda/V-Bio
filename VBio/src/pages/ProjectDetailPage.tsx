@@ -4734,9 +4734,23 @@ export function ProjectDetailPage() {
       'smiles',
       'ligand.smiles'
     ]);
-    return (
+    const fromTaskRows = (
       String(statusContextTaskRow?.ligand_smiles || '').trim() ||
-      String(activeResultTask?.ligand_smiles || '').trim() ||
+      String(activeResultTask?.ligand_smiles || '').trim()
+    );
+    const preferConfidenceAlignedSmiles = snapshotLigandAtomPlddts.length > 0;
+    if (preferConfidenceAlignedSmiles) {
+      return (
+        fromConfidenceMap ||
+        fromConfidenceMetrics ||
+        fromAffinityMap ||
+        fromAffinityMetrics ||
+        fromTaskRows ||
+        affinityLigandSmiles.trim()
+      );
+    }
+    return (
+      fromTaskRows ||
       fromAffinityMap ||
       fromConfidenceMap ||
       fromAffinityMetrics ||
@@ -4744,15 +4758,19 @@ export function ProjectDetailPage() {
       affinityLigandSmiles.trim()
     );
   })();
+  const predictionLigandPreviewSmiles = (
+    affinityResultLigandSmiles.trim() ||
+    (overviewPrimaryLigand.isSmiles ? overviewPrimaryLigand.smiles : '')
+  ).trim();
   const affinityDisplayStructureText = displayStructureText.trim() ? displayStructureText : affinityPreviewStructureText;
   const affinityDisplayStructureFormat: 'cif' | 'pdb' = displayStructureText.trim()
     ? displayStructureFormat
     : affinityPreviewStructureFormat;
   const hasAffinityDisplayStructure = Boolean(affinityDisplayStructureText.trim());
   const predictionLigandPreview =
-    overviewPrimaryLigand.smiles && overviewPrimaryLigand.isSmiles ? (
+    predictionLigandPreviewSmiles ? (
       <Ligand2DPreview
-        smiles={overviewPrimaryLigand.smiles}
+        smiles={predictionLigandPreviewSmiles}
         atomConfidences={snapshotLigandAtomPlddts}
         confidenceHint={snapshotPlddt}
       />
@@ -4767,7 +4785,7 @@ export function ProjectDetailPage() {
             : 'No ligand input.'}
       </div>
     );
-  const predictionLigandRadarSmiles = overviewPrimaryLigand.isSmiles ? overviewPrimaryLigand.smiles : '';
+  const predictionLigandRadarSmiles = predictionLigandPreviewSmiles;
   const taskHistoryPath = `/projects/${project.id}/tasks`;
   const handleOpenTaskHistory = (event: MouseEvent<HTMLElement>) => {
     event.preventDefault();

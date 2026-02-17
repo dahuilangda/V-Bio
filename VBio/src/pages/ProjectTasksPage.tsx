@@ -92,6 +92,7 @@ function readTaskPrimaryLigand(
   preferredComponentId: string | null
 ): { smiles: string; isSmiles: boolean } {
   const affinityUploadTask = hasAffinityUploadComponent(task);
+  const hasAtomLevelLigandConfidence = hasTaskLigandAtomPlddts(task, null, true);
   const directLigand = normalizeComponentSequence('ligand', task.ligand_smiles || '');
   const affinityData =
     task.affinity && typeof task.affinity === 'object' && !Array.isArray(task.affinity)
@@ -113,11 +114,11 @@ function readTaskPrimaryLigand(
   const confidenceMapLigand = normalizeComponentSequence('ligand', readLigandSmilesFromMap(confidenceData));
 
   if (affinityUploadTask) {
-    if (directLigand) return { smiles: directLigand, isSmiles: true };
-    if (affinityLigand) return { smiles: affinityLigand, isSmiles: true };
-    if (affinityMapLigand) return { smiles: affinityMapLigand, isSmiles: true };
     if (confidenceLigand) return { smiles: confidenceLigand, isSmiles: true };
     if (confidenceMapLigand) return { smiles: confidenceMapLigand, isSmiles: true };
+    if (affinityLigand) return { smiles: affinityLigand, isSmiles: true };
+    if (affinityMapLigand) return { smiles: affinityMapLigand, isSmiles: true };
+    if (directLigand) return { smiles: directLigand, isSmiles: true };
   }
 
   if (preferredComponentId) {
@@ -139,6 +140,24 @@ function readTaskPrimaryLigand(
       smiles: value,
       isSmiles: ligand.inputMethod !== 'ccd'
     };
+  }
+
+  if (hasAtomLevelLigandConfidence) {
+    if (confidenceLigand) {
+      return { smiles: confidenceLigand, isSmiles: true };
+    }
+    if (confidenceMapLigand) {
+      return { smiles: confidenceMapLigand, isSmiles: true };
+    }
+    if (affinityLigand) {
+      return { smiles: affinityLigand, isSmiles: true };
+    }
+    if (affinityMapLigand) {
+      return { smiles: affinityMapLigand, isSmiles: true };
+    }
+    if (directLigand) {
+      return { smiles: directLigand, isSmiles: true };
+    }
   }
 
   if (directLigand) {
