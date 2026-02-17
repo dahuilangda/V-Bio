@@ -779,41 +779,39 @@ def _collect_custom_ligands(
             ):
                 if resname not in custom_mols:
                     custom_mol = None
+                    if preloaded_custom_mols and resname in preloaded_custom_mols:
+                        # Separate-input mode: uploaded ligand file is the highest-fidelity
+                        # topology source; start from it to preserve atom naming/order.
+                        custom_mol = Chem.Mol(preloaded_custom_mols[resname])
                     chain_smiles = _resolve_chain_smiles(
                         normalized_ligand_smiles_map,
                         chain.name,
                         resname,
                     )
                     if chain_smiles:
-                        custom_mol = _build_custom_ligand_mol_from_smiles(
-                            residue=residue,
-                            smiles=chain_smiles,
-                            resname=resname,
-                        )
-                        if (
-                            custom_mol is None
-                            and preloaded_custom_mols
-                            and resname in preloaded_custom_mols
-                        ):
-                            custom_mol = _build_custom_ligand_mol_from_smiles_with_reference(
-                                reference_mol=preloaded_custom_mols[resname],
+                        smiles_mol = None
+                        if custom_mol is not None:
+                            smiles_mol = _build_custom_ligand_mol_from_smiles_with_reference(
+                                reference_mol=custom_mol,
                                 smiles=chain_smiles,
                                 resname=resname,
                             )
-                        if custom_mol is None:
+                        else:
+                            smiles_mol = _build_custom_ligand_mol_from_smiles(
+                                residue=residue,
+                                smiles=chain_smiles,
+                                resname=resname,
+                            )
+                        if smiles_mol is None:
                             raise RuntimeError(
                                 "Failed to apply SMILES topology override for "
                                 f"chain {chain.name} ({resname})."
                             )
+                        custom_mol = smiles_mol
                         print(
                             f"[Info] Applied SMILES topology override for chain {chain.name} "
                             f"({resname})."
                         )
-                    if preloaded_custom_mols and resname in preloaded_custom_mols:
-                        # Reuse preloaded ligand definition (e.g., separate-input mode)
-                        # to avoid reconstructing topology from coordinates.
-                        if custom_mol is None:
-                            custom_mol = Chem.Mol(preloaded_custom_mols[resname])
                     if pdb_lines:
                         extracted = _extract_pdb_ligand_block(
                             pdb_lines=pdb_lines,

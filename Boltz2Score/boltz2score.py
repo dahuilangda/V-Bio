@@ -253,6 +253,16 @@ def _load_ligand_from_file(ligand_path: Path):
         raise ValueError(f"Unsupported ligand file format: {ligand_path.suffix}")
 
 
+def _canonical_isomeric_smiles_from_mol(mol: Chem.Mol) -> str:
+    """Build a canonical isomeric SMILES from a ligand molecule."""
+    try:
+        base = Chem.RemoveHs(Chem.Mol(mol), sanitize=False)
+        Chem.AssignStereochemistry(base, cleanIt=True, force=True)
+        return Chem.MolToSmiles(base, canonical=True, isomericSmiles=True)
+    except Exception:
+        return ""
+
+
 def _fix_cif_entity_ids(cif_file: Path) -> None:
     """Fix entity IDs in CIF file to remove special characters like '!'.
 
@@ -996,6 +1006,19 @@ def main() -> None:
         if ligand_mol is None:
             raise ValueError(f"Failed to load ligand from {ligand_path}")
         preloaded_custom_mols = {"LIG": Chem.Mol(ligand_mol)}
+        ligand_smiles_from_file = _canonical_isomeric_smiles_from_mol(ligand_mol)
+        if ligand_smiles_from_file:
+            if ligand_smiles_map:
+                provided_values = [str(v or "").strip() for v in ligand_smiles_map.values()]
+                if any(v and v != ligand_smiles_from_file for v in provided_values):
+                    print(
+                        "[Info] Replacing provided ligand_smiles_map values with "
+                        "canonical SMILES derived from uploaded ligand file."
+                    )
+                ligand_smiles_map = {key: ligand_smiles_from_file for key in ligand_smiles_map}
+            else:
+                ligand_smiles_map = {"L": ligand_smiles_from_file}
+            print(f"[Info] Canonical ligand SMILES from file: {ligand_smiles_from_file}")
 
         # Read protein structure
         if protein_path.suffix.lower() in {'.pdb', '.ent'}:
