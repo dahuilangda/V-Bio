@@ -3,6 +3,7 @@ import {
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -126,6 +127,23 @@ const EMPTY_PREDICTION_PROPERTIES: PredictionProperties = {
   ligand: null,
   binder: null
 };
+
+function normalizePredictionChainValue(value: unknown): string | null {
+  const chainId = String(value || '').trim();
+  return chainId || null;
+}
+
+function isSamePredictionProperties(
+  a: PredictionProperties | null | undefined,
+  b: PredictionProperties | null | undefined
+): boolean {
+  return (
+    Boolean(a?.affinity) === Boolean(b?.affinity) &&
+    normalizePredictionChainValue(a?.target) === normalizePredictionChainValue(b?.target) &&
+    normalizePredictionChainValue(a?.ligand) === normalizePredictionChainValue(b?.ligand) &&
+    normalizePredictionChainValue(a?.binder) === normalizePredictionChainValue(b?.binder)
+  );
+}
 
 function normalizeUsageWindow(value: string | null | undefined): UsageWindow {
   if (value === '7d' || value === '30d' || value === '90d' || value === 'all') return value;
@@ -424,7 +442,7 @@ export function ApiAccessPage() {
   const [builderYamlConstraintsOpen, setBuilderYamlConstraintsOpen] = useState(false);
   const [builderYamlConstraints, setBuilderYamlConstraints] = useState<PredictionConstraint[]>([]);
   const [builderYamlProperties, setBuilderYamlProperties] = useState<PredictionProperties>({ ...EMPTY_PREDICTION_PROPERTIES });
-  const [builderTargetPath, setBuilderTargetPath] = useState('./target.cif');
+  const [builderTargetPath, setBuilderTargetPath] = useState('./protein.pdb');
   const [builderLigandPath, setBuilderLigandPath] = useState('./ligand.sdf');
   const [builderComplexPath, setBuilderComplexPath] = useState('./complex.cif');
   const [builderResultPath, setBuilderResultPath] = useState('./result.zip');
@@ -1275,7 +1293,10 @@ export function ApiAccessPage() {
   const submitTaskMetaFlags = `${taskNameForCommand ? ` \\\n  -F "task_name=${escapedTaskName}"` : ''}${taskSummaryForCommand ? ` \\\n  -F "task_summary=${escapedTaskSummary}"` : ''}`;
   const escapedResultPath = escapeForDoubleQuotedShell(builderResultPath.trim() || './result.zip');
   const escapedYamlPath = escapeForDoubleQuotedShell(builderYamlPath.trim() || './config.yaml');
-  const normalizedYamlBuilderComponents = normalizeInputComponents(builderYamlComponents);
+  const normalizedYamlBuilderComponents = useMemo(
+    () => normalizeInputComponents(builderYamlComponents),
+    [builderYamlComponents]
+  );
   const yamlComponentStats = useMemo(() => {
     const stats: Record<InputComponent['type'], number> = {
       protein: 0,
@@ -1288,7 +1309,48 @@ export function ApiAccessPage() {
     }
     return stats;
   }, [normalizedYamlBuilderComponents]);
-  const yamlAssignments = assignChainIdsForComponents(normalizedYamlBuilderComponents);
+  const yamlAssignments = useMemo(
+    () => assignChainIdsForComponents(normalizedYamlBuilderComponents),
+    [normalizedYamlBuilderComponents]
+  );
+  const predictionChainOptions = useMemo(
+    () =>
+      normalizedYamlBuilderComponents.flatMap((component, index) => {
+        const chainIds = yamlAssignments[index] || [];
+        const isSmallMolecule = component.type === 'ligand' && component.inputMethod !== 'ccd';
+        return chainIds.map((chainId) => ({
+          chainId,
+          componentId: component.id,
+          type: component.type,
+          isSmallMolecule,
+          label: `${chainId} · ${componentTypeLabel(component.type)} ${index + 1}`
+        }));
+      }),
+    [normalizedYamlBuilderComponents, yamlAssignments]
+  );
+  const predictionTargetChainOptions = useMemo(() => {
+    const preferred = predictionChainOptions.filter((item) => item.type !== 'ligand');
+    return preferred.length > 0 ? preferred : predictionChainOptions;
+  }, [predictionChainOptions]);
+  const predictionPairTargetChain = String(builderYamlProperties.target || '').trim();
+  const predictionLigandChainOptions = useMemo(() => {
+    if (!predictionPairTargetChain) return predictionChainOptions;
+    return predictionChainOptions.filter((item) => item.chainId !== predictionPairTargetChain);
+  }, [predictionChainOptions, predictionPairTargetChain]);
+  const predictionPairLigandChain = String(builderYamlProperties.ligand || builderYamlProperties.binder || '').trim();
+  const predictionSelectedLigandOption = useMemo(
+    () => predictionChainOptions.find((item) => item.chainId === predictionPairLigandChain) || null,
+    [predictionChainOptions, predictionPairLigandChain]
+  );
+  const predictionPairReady = Boolean(
+    predictionPairTargetChain &&
+      predictionPairLigandChain &&
+      predictionPairTargetChain !== predictionPairLigandChain &&
+      predictionTargetChainOptions.some((item) => item.chainId === predictionPairTargetChain) &&
+      predictionLigandChainOptions.some((item) => item.chainId === predictionPairLigandChain)
+  );
+  const predictionAffinityAvailable = Boolean(predictionPairReady && predictionSelectedLigandOption?.isSmallMolecule);
+  const predictionAffinityEnabled = Boolean(builderYamlProperties.affinity);
   const predictionTemplateEntries = normalizedYamlBuilderComponents.flatMap((component, index) => {
     if (component.type !== 'protein') return [];
     const config = builderYamlTemplates[component.id];
@@ -1314,6 +1376,87 @@ export function ApiAccessPage() {
     }];
   });
   const predictionTemplateEnabled = predictionTemplateEntries.length > 0;
+  const setPredictionAffinityEnabled = useCallback(
+    (enabled: boolean) => {
+      setBuilderYamlProperties((prev) => {
+        const base = { ...EMPTY_PREDICTION_PROPERTIES, ...prev };
+        const currentTarget = normalizePredictionChainValue(base.target);
+        const currentLigand = normalizePredictionChainValue(base.ligand || base.binder);
+        const target =
+          currentTarget && predictionTargetChainOptions.some((item) => item.chainId === currentTarget)
+            ? currentTarget
+            : (predictionTargetChainOptions[0]?.chainId || null);
+        const ligandOptions = target
+          ? predictionChainOptions.filter((item) => item.chainId !== target)
+          : predictionChainOptions;
+        const ligand =
+          currentLigand && ligandOptions.some((item) => item.chainId === currentLigand)
+            ? currentLigand
+            : (ligandOptions[0]?.chainId || null);
+        const selectedLigand = ligand ? predictionChainOptions.find((item) => item.chainId === ligand) || null : null;
+        const allowAffinity = Boolean(enabled && target && ligand && target !== ligand && selectedLigand?.isSmallMolecule);
+        return {
+          ...base,
+          affinity: allowAffinity,
+          target,
+          ligand,
+          binder: ligand
+        };
+      });
+    },
+    [predictionTargetChainOptions, predictionChainOptions]
+  );
+  const setPredictionAffinityTargetChain = useCallback((chainId: string) => {
+    setBuilderYamlProperties((prev) => ({
+      ...EMPTY_PREDICTION_PROPERTIES,
+      ...prev,
+      target: chainId || null
+    }));
+  }, []);
+  const setPredictionAffinityLigandChain = useCallback((chainId: string) => {
+    setBuilderYamlProperties((prev) => ({
+      ...EMPTY_PREDICTION_PROPERTIES,
+      ...prev,
+      ligand: chainId || null,
+      binder: chainId || null
+    }));
+  }, []);
+  useEffect(() => {
+    if (!isPredictionWorkflow) return;
+    setBuilderYamlProperties((prev) => {
+      const base = { ...EMPTY_PREDICTION_PROPERTIES, ...prev };
+      const currentTarget = normalizePredictionChainValue(base.target);
+      const currentLigand = normalizePredictionChainValue(base.ligand || base.binder);
+      const resolvedTarget =
+        currentTarget && predictionTargetChainOptions.some((item) => item.chainId === currentTarget)
+          ? currentTarget
+          : (predictionTargetChainOptions[0]?.chainId || null);
+      const resolvedLigandOptions = resolvedTarget
+        ? predictionChainOptions.filter((item) => item.chainId !== resolvedTarget)
+        : predictionChainOptions;
+      const resolvedLigand =
+        currentLigand && resolvedLigandOptions.some((item) => item.chainId === currentLigand)
+          ? currentLigand
+          : (resolvedLigandOptions[0]?.chainId || null);
+      const selectedLigand = resolvedLigand
+        ? predictionChainOptions.find((item) => item.chainId === resolvedLigand) || null
+        : null;
+      const allowAffinity = Boolean(
+        resolvedTarget &&
+          resolvedLigand &&
+          resolvedTarget !== resolvedLigand &&
+          selectedLigand?.isSmallMolecule
+      );
+      const normalized: PredictionProperties = {
+        ...base,
+        affinity: allowAffinity ? Boolean(base.affinity) : false,
+        target: resolvedTarget,
+        ligand: resolvedLigand,
+        binder: resolvedLigand
+      };
+      return isSamePredictionProperties(base, normalized) ? prev : normalized;
+    });
+  }, [isPredictionWorkflow, predictionTargetChainOptions, predictionChainOptions]);
   const yamlBuilderText = (() => {
     if (normalizedYamlBuilderComponents.length === 0) {
       return 'version: 1\nsequences: []';
@@ -1336,7 +1479,7 @@ export function ApiAccessPage() {
   const predictionTemplateFlags = predictionTemplateEnabled
     ? predictionTemplateEntries.map((entry) => ` \\\n  -F "template_files=@${entry.escapedPath}"`).join('')
     : '';
-  const escapedTargetPath = escapeForDoubleQuotedShell(builderTargetPath.trim() || './target.cif');
+  const escapedTargetPath = escapeForDoubleQuotedShell(builderTargetPath.trim() || './protein.pdb');
   const escapedLigandPath = escapeForDoubleQuotedShell(builderLigandPath.trim() || './ligand.sdf');
   const escapedComplexPath = escapeForDoubleQuotedShell(builderComplexPath.trim() || './complex.cif');
   const affinityTargetChain = String(builderAffinityTargetChain || '').trim();
@@ -1361,19 +1504,35 @@ export function ApiAccessPage() {
     !builderAffinityConfidenceOnly && !affinityCanEnableActivity
       ? '\n# Affinity mode requires target chain, ligand chain, and ligand SMILES.'
       : '';
+  const predictionPairHint =
+    isPredictionWorkflow && !predictionPairReady
+      ? '\n# Prediction requires both target_chain and ligand_chain.'
+      : '';
+  const predictionAffinityHint =
+    isPredictionWorkflow && predictionAffinityEnabled && !predictionAffinityAvailable
+      ? '\n# Affinity compute requires the selected ligand chain to be a small molecule.'
+      : '';
+  const predictionPairFlags = predictionPairReady
+    ? ` \\\n  -F "target_chain=${escapeForDoubleQuotedShell(predictionPairTargetChain)}" \\
+  -F "ligand_chain=${escapeForDoubleQuotedShell(predictionPairLigandChain)}"`
+    : '';
+  const predictionAffinityFlags = predictionAffinityEnabled && predictionAffinityAvailable
+    ? ` \\\n  -F "enable_affinity=true"`
+    : '';
   const commandEnv = `export VBIO_API_BASE="${managementApiBaseUrl}"\nexport VBIO_API_TOKEN="${curlToken}"\nexport VBIO_PROJECT_ID="${selectedTokenProjectId}"`;
   const submitTaskIdCapture = `echo "$RESPONSE"
 TASK_ID=$(printf '%s' "$RESPONSE" | tr -d '\\n\\r' | sed -n 's/.*"task_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
 if [ -z "$TASK_ID" ] || [ "$TASK_ID" = "null" ]; then
-  echo "Failed to parse task_id from submit response." >&2
-  exit 1
+  echo "Warning: failed to parse task_id from submit response. Continue without TASK_ID." >&2
+else
+  echo "TASK_ID=$TASK_ID"
 fi
-echo "TASK_ID=$TASK_ID"`;
+`;
   const commandSubmitPrediction = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/predict" \\
   -H "X-API-Token: ${curlToken}" \\
   -F "project_id=${selectedTokenProjectId}"${submitTaskMetaFlags} \\
   -F "yaml_file=@${escapedYamlPath}" \\
-  -F "backend=${effectivePredictionBackend}"${predictionTemplateFlags})
+  -F "backend=${effectivePredictionBackend}"${predictionTemplateFlags}${predictionPairFlags}${predictionAffinityFlags})
 ${submitTaskIdCapture}`;
   const commandSubmitAffinityBoltz = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/api/boltz2score" \\
   -H "X-API-Token: ${curlToken}" \\
@@ -1402,7 +1561,7 @@ ${submitTaskIdCapture}`;
     : (builderWorkflowKey === 'affinity'
       ? (effectiveAffinityBackend === 'protenix' ? commandSubmitAffinityProtenix : commandSubmitAffinityBoltz)
       : commandSubmitPrediction);
-  const commandSubmitWithHints = `${commandSubmit}${affinityModeHint}`;
+  const commandSubmitWithHints = `${commandSubmit}${affinityModeHint}${predictionPairHint}${predictionAffinityHint}`;
   const submitBackendLabel = builderWorkflowKey === 'affinity' ? effectiveAffinityBackend : effectivePredictionBackend;
   const commandStatus = `curl -X GET "${managementApiBaseUrl}/status/${taskIdForCommand}?project_id=${selectedTokenProjectId}" \\
   -H "X-API-Token: ${curlToken}"`;
@@ -1967,6 +2126,67 @@ ${submitTaskIdCapture}`;
                 <div className="api-builder-note muted small">
                   YAML Builder uses component-based input (type / copies / sequence) and writes templates into generated YAML.
                 </div>
+                <section className="api-prediction-affinity-panel">
+                  <div className="api-prediction-affinity-head">
+                    <span className="api-prediction-affinity-title">
+                      <ShieldCheck size={14} />
+                      Pair
+                    </span>
+                    <label className="checkbox-inline api-prediction-affinity-toggle">
+                      <input
+                        type="checkbox"
+                        checked={predictionAffinityEnabled}
+                        onChange={(e) => setPredictionAffinityEnabled(e.target.checked)}
+                        disabled={!predictionAffinityAvailable}
+                      />
+                      <span>Affinity</span>
+                    </label>
+                  </div>
+                  <div className="api-prediction-affinity-grid">
+                    <label className="field">
+                      <span>Target chain</span>
+                      <select
+                        value={predictionPairTargetChain}
+                        onChange={(e) => setPredictionAffinityTargetChain(e.target.value)}
+                        disabled={predictionTargetChainOptions.length === 0}
+                      >
+                        {predictionTargetChainOptions.length === 0 ? (
+                          <option value="">None</option>
+                        ) : (
+                          predictionTargetChainOptions.map((item) => (
+                            <option key={`prediction-target-${item.chainId}`} value={item.chainId}>
+                              {item.label}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </label>
+                    <label className="field">
+                      <span>Ligand chain</span>
+                      <select
+                        value={predictionPairLigandChain}
+                        onChange={(e) => setPredictionAffinityLigandChain(e.target.value)}
+                        disabled={predictionLigandChainOptions.length === 0}
+                      >
+                        {predictionLigandChainOptions.length === 0 ? (
+                          <option value="">None</option>
+                        ) : (
+                          predictionLigandChainOptions.map((item) => (
+                            <option key={`prediction-ligand-${item.chainId}`} value={item.chainId}>
+                              {item.label}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </label>
+                  </div>
+                  {!predictionPairReady && (
+                    <span className="muted small">Target + ligand are required.</span>
+                  )}
+                  {predictionPairReady && !predictionAffinityAvailable && (
+                    <span className="muted small">Selected ligand is not a small molecule. Pair metrics still work.</span>
+                  )}
+                </section>
               </>
             )}
 
@@ -1992,7 +2212,7 @@ ${submitTaskIdCapture}`;
                 </div>
                 <label className="field">
                   <span>Target file path</span>
-                  <input value={builderTargetPath} onChange={(e) => setBuilderTargetPath(e.target.value)} placeholder="./target.cif" />
+                  <input value={builderTargetPath} onChange={(e) => setBuilderTargetPath(e.target.value)} placeholder="./protein.pdb" />
                 </label>
                 <label className="field">
                   <span>Ligand file path</span>

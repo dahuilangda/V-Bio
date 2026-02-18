@@ -9,7 +9,6 @@ import {
   Filter,
   KeyRound,
   LoaderCircle,
-  MoreHorizontal,
   Plus,
   RefreshCcw,
   Search,
@@ -1374,7 +1373,6 @@ export function ProjectTasksPage() {
   const [structureSearchError, setStructureSearchError] = useState<string | null>(null);
   const [pageSize, setPageSize] = useState<number>(12);
   const [page, setPage] = useState<number>(1);
-  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [filtersHydrated, setFiltersHydrated] = useState(false);
   const loadSeqRef = useRef(0);
   const loadInFlightRef = useRef(false);
@@ -1384,36 +1382,11 @@ export function ProjectTasksPage() {
   const resultHydrationInFlightRef = useRef<Set<string>>(new Set());
   const resultHydrationDoneRef = useRef<Set<string>>(new Set());
   const resultHydrationAttemptsRef = useRef<Map<string, number>>(new Map());
-  const headerMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const nextView = normalizeTaskWorkspaceView(new URLSearchParams(location.search).get('view'));
     setWorkspaceView((prev) => (prev === nextView ? prev : nextView));
   }, [location.search]);
-
-  useEffect(() => {
-    setHeaderMenuOpen(false);
-  }, [workspaceView]);
-
-  useEffect(() => {
-    if (!headerMenuOpen) return;
-    const onPointerDown = (event: globalThis.PointerEvent) => {
-      if (!headerMenuRef.current) return;
-      if (headerMenuRef.current.contains(event.target as Node)) return;
-      setHeaderMenuOpen(false);
-    };
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setHeaderMenuOpen(false);
-      }
-    };
-    document.addEventListener('pointerdown', onPointerDown, true);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown, true);
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [headerMenuOpen]);
 
   const setWorkspaceViewWithUrl = useCallback(
     (nextView: TaskWorkspaceView) => {
@@ -2629,55 +2602,32 @@ export function ProjectTasksPage() {
             </p>
           </div>
           <div className="row gap-8 page-header-actions page-header-actions-minimal">
-            <div className="task-header-menu" ref={headerMenuRef}>
+            <div className="task-header-inline-actions" role="toolbar" aria-label="Task actions">
+              <Link className="task-row-action-btn task-row-action-btn-primary" to={createTaskHref} title="New task" aria-label="New task">
+                <Plus size={14} />
+              </Link>
+              <Link className="task-row-action-btn" to={backToCurrentTaskHref} title="Open current task" aria-label="Open current task">
+                <ArrowLeft size={14} />
+              </Link>
               <button
                 type="button"
-                className={`icon-btn task-header-menu-toggle ${headerMenuOpen ? 'open' : ''}`}
-                title="Task actions"
-                aria-label="Task actions"
-                aria-haspopup="menu"
-                aria-expanded={headerMenuOpen}
-                onClick={() => setHeaderMenuOpen((prev) => !prev)}
+                className="task-row-action-btn"
+                onClick={() => { void downloadExcel(); }}
+                disabled={exportingExcel || filteredRows.length === 0}
+                title="Export task list"
+                aria-label="Export task list"
               >
-                <MoreHorizontal size={17} />
+                {exportingExcel ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}
               </button>
-              {headerMenuOpen && (
-                <div className="task-header-menu-popover" role="menu" aria-label="Task actions">
-                  <Link className="task-header-menu-item" to={createTaskHref} onClick={() => setHeaderMenuOpen(false)}>
-                    <span className="task-header-menu-icon"><Plus size={17} /></span>
-                    New Task
-                  </Link>
-                  <Link className="task-header-menu-item" to={backToCurrentTaskHref} onClick={() => setHeaderMenuOpen(false)}>
-                    <span className="task-header-menu-icon"><ArrowLeft size={17} /></span>
-                    Open Task
-                  </Link>
-                  <button
-                    type="button"
-                    className="task-header-menu-item"
-                    onClick={() => {
-                      setHeaderMenuOpen(false);
-                      void downloadExcel();
-                    }}
-                    disabled={exportingExcel || filteredRows.length === 0}
-                  >
-                    <span className="task-header-menu-icon">
-                      {exportingExcel ? <LoaderCircle size={17} className="spin" /> : <Download size={17} />}
-                    </span>
-                    Export List
-                  </button>
-                  <button
-                    type="button"
-                    className="task-header-menu-item api-toggle"
-                    onClick={() => {
-                      setHeaderMenuOpen(false);
-                      setWorkspaceViewWithUrl('api');
-                    }}
-                  >
-                    <span className="task-header-menu-icon"><KeyRound size={17} /></span>
-                    API Access
-                  </button>
-                </div>
-              )}
+              <button
+                type="button"
+                className="task-row-action-btn"
+                onClick={() => setWorkspaceViewWithUrl('api')}
+                title="API access"
+                aria-label="API access"
+              >
+                <KeyRound size={14} />
+              </button>
             </div>
           </div>
         </section>

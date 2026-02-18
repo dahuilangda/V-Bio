@@ -1099,6 +1099,49 @@
   line-height: 1.45;
 }
 
+.api-prediction-affinity-panel {
+  border: 1px solid #d7e3dc;
+  border-radius: 10px;
+  background: #fff;
+  padding: 8px 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.api-prediction-affinity-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.api-prediction-affinity-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: #2f4f42;
+}
+
+.api-prediction-affinity-toggle {
+  gap: 6px;
+  font-size: var(--text-xs);
+}
+
+.api-prediction-affinity-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.api-prediction-affinity-panel .field {
+  margin: 0;
+}
+
+.api-prediction-affinity-panel .field > span {
+  font-size: var(--text-2xs);
+}
+
 .api-yaml-builder-trigger {
   display: flex;
   align-items: center;
@@ -1587,6 +1630,10 @@
 
   .api-yaml-builder-grid,
   .api-yaml-template-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .api-prediction-affinity-grid {
     grid-template-columns: 1fr;
   }
 
