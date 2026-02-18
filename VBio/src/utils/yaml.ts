@@ -2,6 +2,8 @@ import yaml from 'js-yaml';
 import type { InputComponent, PredictionConstraint, PredictionProperties } from '../types/models';
 import { assignChainIdsForComponents } from './chainAssignments';
 
+const YAML_NO_WRAP = -1;
+
 export function buildPredictionYaml(proteinSequence: string, ligandSmiles: string): string {
   const payload = {
     version: 1,
@@ -22,7 +24,8 @@ export function buildPredictionYaml(proteinSequence: string, ligandSmiles: strin
   };
 
   return yaml.dump(payload, {
-    lineWidth: 120,
+    // Keep long sequences as plain one-line scalars instead of folded `>-` blocks.
+    lineWidth: YAML_NO_WRAP,
     noRefs: true,
     sortKeys: false
   });
@@ -314,7 +317,8 @@ export function buildPredictionYamlFromComponents(components: InputComponent[], 
   }
 
   return yaml.dump(payload, {
-    lineWidth: 120,
+    // Keep long sequences as plain one-line scalars instead of folded `>-` blocks.
+    lineWidth: YAML_NO_WRAP,
     noRefs: true,
     sortKeys: false
   });

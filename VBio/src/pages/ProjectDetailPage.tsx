@@ -4,7 +4,6 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   ArrowLeft,
   CheckCircle2,
-  Clock3,
   ChevronDown,
   ChevronRight,
   Download,
@@ -14,10 +13,10 @@ import {
   LoaderCircle,
   Play,
   Plus,
+  RefreshCcw,
   Save,
   SlidersHorizontal,
-  Target,
-  Undo2
+  Target
 } from 'lucide-react';
 import type {
   InputComponent,
@@ -4856,22 +4855,17 @@ export function ProjectDetailPage() {
         </div>
 
         <div className="row gap-8 page-header-actions">
-          <a className="btn btn-ghost btn-compact" href={taskHistoryPath} onClick={handleOpenTaskHistory} title="Open task history">
-            <Clock3 size={14} />
-            Tasks
+          <a
+            className="task-row-action-btn"
+            href={taskHistoryPath}
+            onClick={handleOpenTaskHistory}
+            title="Back to task list"
+            aria-label="Back to task list"
+          >
+            <ArrowLeft size={14} />
           </a>
           <button
-            type="button"
-            className="btn btn-ghost btn-compact btn-square"
-            onClick={handleResetFromHeader}
-            disabled={loading || saving || submitting || !hasUnsavedChanges}
-            title={hasUnsavedChanges ? 'Reset to last saved draft' : 'No unsaved changes'}
-            aria-label="Reset to last saved draft"
-          >
-            <Undo2 size={14} />
-          </button>
-          <button
-            className="btn btn-ghost btn-compact btn-square"
+            className="task-row-action-btn"
             onClick={() => project.task_id && void downloadResultFile(project.task_id)}
             disabled={!project.task_id}
             title="Download result"
@@ -4880,7 +4874,7 @@ export function ProjectDetailPage() {
             <Download size={15} />
           </button>
           <button
-            className="btn btn-ghost btn-compact btn-square"
+            className="task-row-action-btn"
             type="button"
             onClick={() => void saveDraft()}
             disabled={!canEdit || saving || !hasUnsavedChanges}
@@ -4889,9 +4883,19 @@ export function ProjectDetailPage() {
           >
             {saving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}
           </button>
+          <button
+            type="button"
+            className="task-row-action-btn"
+            onClick={handleResetFromHeader}
+            disabled={loading || saving || submitting || !hasUnsavedChanges}
+            title={hasUnsavedChanges ? 'Discard unsaved edits' : 'No unsaved edits'}
+            aria-label={hasUnsavedChanges ? 'Discard unsaved edits' : 'No unsaved edits'}
+          >
+            <RefreshCcw size={14} />
+          </button>
           <div className="run-action" ref={runActionRef}>
             <button
-              className="btn btn-primary btn-compact btn-square run-btn-primary"
+              className="task-row-action-btn task-row-action-btn-primary"
               type="button"
               ref={topRunButtonRef}
               onClick={handleRunAction}

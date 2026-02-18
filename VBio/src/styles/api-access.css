@@ -4,7 +4,7 @@
 
 .api-access-page .icon-btn,
 .api-access-page .btn {
-  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease, transform 0.12s ease;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
 }
 
 .api-access-page .icon-btn.is-copied,
@@ -12,7 +12,6 @@
   background: #e7ece8;
   border-color: #c6d2cb;
   color: #365247;
-  transform: translateY(1px);
 }
 
 .api-access-header {
@@ -25,10 +24,85 @@
   gap: 6px;
 }
 
-.api-access-actions {
+.api-access-title-row {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.api-access-project-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  border: 1px solid #d3ded7;
+  background: #f4f9f6;
+  color: #27493c;
+  padding: 4px 9px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.api-access-context {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.api-context-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  border: 1px solid #d9e3dd;
+  background: #ffffff;
+  color: #48685b;
+  padding: 3px 9px;
+  font-size: var(--text-xs);
+  line-height: 1.2;
+}
+
+.api-access-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+}
+
+.api-access-action-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  border: 1px solid #d3dfd8;
+  background: #ffffff;
+  color: #335548;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 1px 0 #edf4ef inset;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.api-access-action-btn:hover {
+  background: #eef6f1;
+  border-color: #c2d3ca;
+  color: #1f4134;
+}
+
+.api-access-action-btn:focus-visible {
+  outline: 2px solid #9cbba9;
+  outline-offset: 1px;
+}
+
+.api-access-action-btn.active {
+  background: #e9f3ed;
+  border-color: #bfd2c6;
+  color: #1a3d2f;
+  box-shadow: 0 0 0 1px #d4e4da inset;
 }
 
 .api-create-button {
@@ -1601,14 +1675,19 @@
 }
 
 @media (max-width: 760px) {
+  .api-access-context {
+    width: 100%;
+  }
+
   .api-access-header {
     align-items: flex-start;
     gap: 10px;
   }
 
   .api-access-actions {
-    width: 100%;
+    width: auto;
     justify-content: flex-start;
+    flex-wrap: nowrap;
   }
 
   .api-token-create {

@@ -26,7 +26,7 @@ import {
   Trash2,
   X
 } from 'lucide-react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import type {
   ApiToken,
   ApiTokenUsage,
@@ -41,6 +41,7 @@ import { ConstraintEditor } from '../components/project/ConstraintEditor';
 import { JSMEEditor } from '../components/project/JSMEEditor';
 import {
   deleteApiToken,
+  getProjectTaskById,
   findApiTokenByHash,
   insertApiToken,
   listApiTokenUsagePage,
@@ -117,6 +118,14 @@ const DAILY_USAGE_PAGE_SIZE = 30;
 const PROJECT_STATS_PAGE_SIZE = 8;
 const COMMAND_HISTORY_LIMIT = 12;
 const COMMAND_HISTORY_STORAGE_KEY = 'vbio_api_command_history_v1';
+const AFFINITY_TARGET_UPLOAD_COMPONENT_ID = '__affinity_target_upload__';
+const AFFINITY_LIGAND_UPLOAD_COMPONENT_ID = '__affinity_ligand_upload__';
+const EMPTY_PREDICTION_PROPERTIES: PredictionProperties = {
+  affinity: false,
+  target: null,
+  ligand: null,
+  binder: null
+};
 
 function normalizeUsageWindow(value: string | null | undefined): UsageWindow {
   if (value === '7d' || value === '30d' || value === '90d' || value === 'all') return value;
@@ -245,6 +254,23 @@ function createYamlBuilderComponent(type: InputComponent['type'] = 'protein'): I
   return component;
 }
 
+function isAffinityUploadComponent(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const component = value as Record<string, unknown>;
+  const componentId = String(component.id || '').trim();
+  if (componentId === AFFINITY_TARGET_UPLOAD_COMPONENT_ID || componentId === AFFINITY_LIGAND_UPLOAD_COMPONENT_ID) {
+    return true;
+  }
+  const uploadMeta =
+    component.affinityUpload && typeof component.affinityUpload === 'object'
+      ? (component.affinityUpload as Record<string, unknown>)
+      : component.affinity_upload && typeof component.affinity_upload === 'object'
+        ? (component.affinity_upload as Record<string, unknown>)
+        : null;
+  const role = String(uploadMeta?.role || '').trim().toLowerCase();
+  return role === 'target' || role === 'ligand';
+}
+
 function readCommandHistoryFromStorage(): CommandHistoryEntry[] {
   if (typeof window === 'undefined') return [];
   try {
@@ -321,8 +347,20 @@ function fallbackCopyText(text: string): boolean {
 
 export function ApiAccessPage() {
   const { session } = useAuth();
+  const { projectId: routeProjectId } = useParams<{ projectId?: string }>();
   const location = useLocation();
   const navigate = useNavigate();
+  const scopedProjectId = String(routeProjectId || '').trim();
+  const isProjectScoped = Boolean(scopedProjectId);
+  const routeQuery = useMemo(() => new URLSearchParams(location.search), [location.search]);
+  const scopedTaskRowId = String(routeQuery.get('task_row_id') || '').trim();
+  const scopedTaskId = String(routeQuery.get('task_id') || '').trim();
+  const scopedTaskName = String(routeQuery.get('task_name') || '').trim();
+  const scopedTaskSummary = String(routeQuery.get('task_summary') || '').trim();
+  const hasScopedTaskContext = Boolean(scopedTaskId || scopedTaskRowId || scopedTaskName || scopedTaskSummary);
+  const scopedTaskContextTitle = scopedTaskName || scopedTaskSummary || scopedTaskId || scopedTaskRowId;
+  const openBuilderFromQuery = routeQuery.get('open_builder') === '1';
+  const projectBackPath = isProjectScoped ? `/projects/${scopedProjectId}/tasks` : '/projects';
 
   const [tokenCreating, setTokenCreating] = useState(false);
   const [tokenRevokingId, setTokenRevokingId] = useState<string | null>(null);
@@ -385,12 +423,7 @@ export function ApiAccessPage() {
   const [builderYamlCollapsed, setBuilderYamlCollapsed] = useState<Record<string, boolean>>({});
   const [builderYamlConstraintsOpen, setBuilderYamlConstraintsOpen] = useState(false);
   const [builderYamlConstraints, setBuilderYamlConstraints] = useState<PredictionConstraint[]>([]);
-  const [builderYamlProperties, setBuilderYamlProperties] = useState<PredictionProperties>({
-    affinity: false,
-    target: null,
-    ligand: null,
-    binder: null
-  });
+  const [builderYamlProperties, setBuilderYamlProperties] = useState<PredictionProperties>({ ...EMPTY_PREDICTION_PROPERTIES });
   const [builderTargetPath, setBuilderTargetPath] = useState('./target.cif');
   const [builderLigandPath, setBuilderLigandPath] = useState('./ligand.sdf');
   const [builderComplexPath, setBuilderComplexPath] = useState('./complex.cif');
@@ -417,6 +450,8 @@ export function ApiAccessPage() {
   const yamlBuilderGridRef = useRef<HTMLDivElement | null>(null);
   const yamlBuilderResizeRef = useRef<{ startX: number; startWidthPercent: number } | null>(null);
   const copiedResetTimerRef = useRef<number | null>(null);
+  const scopedTaskPrefillRef = useRef('');
+  const openBuilderHandledRef = useRef('');
 
   const managementApiBaseUrl = normalizeBaseUrl(
     ENV.managementApiBaseUrl ||
@@ -440,8 +475,20 @@ export function ApiAccessPage() {
 
         setTokens(tokenRows);
         setProjects(projectRows);
-        setSelectedTokenId((prev) => (prev && tokenRows.some((item) => item.id === prev) ? prev : tokenRows[0]?.id || ''));
-        setSelectedProjectId((prev) => prev || tokenRows[0]?.project_id || projectRows[0]?.id || '');
+        const scopedProjectTokens = isProjectScoped
+          ? tokenRows.filter((item) => String(item.project_id || '').trim() === scopedProjectId)
+          : tokenRows;
+        setSelectedTokenId((prev) => {
+          if (isProjectScoped) {
+            if (prev && scopedProjectTokens.some((item) => item.id === prev)) return prev;
+            return scopedProjectTokens[0]?.id || '';
+          }
+          return prev && tokenRows.some((item) => item.id === prev) ? prev : tokenRows[0]?.id || '';
+        });
+        setSelectedProjectId((prev) => {
+          if (isProjectScoped) return scopedProjectId;
+          return prev || tokenRows[0]?.project_id || projectRows[0]?.id || '';
+        });
       } catch (err) {
         if (cancelled) return;
         setError(err instanceof Error ? err.message : 'Failed to load API access data.');
@@ -457,7 +504,7 @@ export function ApiAccessPage() {
     return () => {
       cancelled = true;
     };
-  }, [session?.userId]);
+  }, [session?.userId, isProjectScoped, scopedProjectId]);
 
   useEffect(() => {
     if (!selectedTokenId) {
@@ -498,7 +545,19 @@ export function ApiAccessPage() {
   }, [selectedTokenId, usageWindow, eventPage]);
 
   useEffect(() => {
+    if (!isProjectScoped) return;
+    if (selectedProjectId === scopedProjectId) return;
+    setSelectedProjectId(scopedProjectId);
+  }, [isProjectScoped, scopedProjectId, selectedProjectId]);
+
+  useEffect(() => {
+    if (!isProjectScoped) return;
+    setRegistryScopeProjectId(scopedProjectId);
+  }, [isProjectScoped, scopedProjectId]);
+
+  useEffect(() => {
     if (!selectedProjectId) return;
+    if (isProjectScoped && selectedProjectId !== scopedProjectId) return;
     const tokenProjectId = tokens.find((item) => item.id === selectedTokenId)?.project_id || '';
     if (tokenProjectId && tokenProjectId !== selectedProjectId) return;
     const projectTokens = tokens.filter((item) => item.project_id === selectedProjectId);
@@ -507,10 +566,13 @@ export function ApiAccessPage() {
       const preferred = projectTokens.find((item) => item.is_active) || projectTokens[0];
       setSelectedTokenId(preferred.id);
     }
-  }, [tokens, selectedTokenId, selectedProjectId]);
+  }, [tokens, selectedTokenId, selectedProjectId, isProjectScoped, scopedProjectId]);
 
   useEffect(() => {
-    if (tokens.length === 0) {
+    const usageSourceTokens = isProjectScoped
+      ? tokens.filter((item) => String(item.project_id || '').trim() === scopedProjectId)
+      : tokens;
+    if (usageSourceTokens.length === 0) {
       setUsageByTokenId({});
       return;
     }
@@ -521,7 +583,7 @@ export function ApiAccessPage() {
       try {
         const since = usageSince(usageWindow);
         const dailyRows = await listApiTokenUsageDailyByTokenIds(
-          tokens.map((item) => item.id),
+          usageSourceTokens.map((item) => item.id),
           since
         );
         if (cancelled) return;
@@ -535,7 +597,7 @@ export function ApiAccessPage() {
           rowsByTokenId[tokenId].push(row);
         }
         const next: Record<string, UsageSummary> = {};
-        for (const token of tokens) {
+        for (const token of usageSourceTokens) {
           const tokenRows = rowsByTokenId[token.id] || [];
           next[token.id] = computeUsageSummaryFromDaily(tokenRows, token.last_used_at || null);
         }
@@ -555,7 +617,7 @@ export function ApiAccessPage() {
     return () => {
       cancelled = true;
     };
-  }, [tokens, usageWindow]);
+  }, [tokens, usageWindow, isProjectScoped, scopedProjectId]);
 
   useEffect(() => {
     setCommandHistory(readCommandHistoryFromStorage());
@@ -783,13 +845,19 @@ export function ApiAccessPage() {
   }, [selectedTokenId, selectedToken?.token_plain]);
 
   useEffect(() => {
+    if (isProjectScoped) {
+      if (selectedProjectId !== scopedProjectId) {
+        setSelectedProjectId(scopedProjectId);
+      }
+      return;
+    }
     const tokenProjectId = selectedToken?.project_id || '';
     if (tokenProjectId && tokenProjectId !== selectedProjectId) {
       setSelectedProjectId(tokenProjectId);
     }
-  }, [selectedToken?.project_id, selectedProjectId]);
+  }, [selectedToken?.project_id, selectedProjectId, isProjectScoped, scopedProjectId]);
 
-  const selectedTokenProjectId = selectedProjectId || selectedToken?.project_id || '<PROJECT_UUID>';
+  const selectedTokenProjectId = (isProjectScoped ? scopedProjectId : selectedProjectId) || selectedToken?.project_id || '<PROJECT_UUID>';
   const selectedProject = useMemo(
     () => projects.find((item) => item.id === selectedTokenProjectId) || null,
     [projects, selectedTokenProjectId]
@@ -807,7 +875,10 @@ export function ApiAccessPage() {
     [tokens, selectedTokenProjectId]
   );
   const projectStatsRows = useMemo<ProjectStatsRow[]>(() => {
-    return projects.map((project) => {
+    const visibleProjects = isProjectScoped
+      ? projects.filter((project) => project.id === scopedProjectId)
+      : projects;
+    return visibleProjects.map((project) => {
       const projectTokens = tokens.filter((token) => token.project_id === project.id);
       const totalCalls = projectTokens.reduce((acc, token) => acc + (usageByTokenId[token.id]?.total || 0), 0);
       const successCalls = projectTokens.reduce((acc, token) => acc + (usageByTokenId[token.id]?.success || 0), 0);
@@ -833,7 +904,7 @@ export function ApiAccessPage() {
         lastEventTs: Number.isFinite(lastEventTs) ? lastEventTs : 0
       };
     });
-  }, [projects, tokens, usageByTokenId]);
+  }, [projects, tokens, usageByTokenId, isProjectScoped, scopedProjectId]);
   const projectTokensByProjectId = useMemo(() => {
     const grouped: Record<string, ApiToken[]> = {};
     for (const token of tokens) {
@@ -901,11 +972,14 @@ export function ApiAccessPage() {
     () => projects.find((project) => project.id === registryScopeProjectId) || null,
     [projects, registryScopeProjectId]
   );
-  const showRegistryProjectColumn = !registryScopeProjectId;
+  const showRegistryProjectColumn = !registryScopeProjectId && !isProjectScoped;
   const registryTokensSource = useMemo(() => {
+    if (isProjectScoped) {
+      return tokens.filter((token) => String(token.project_id || '').trim() === scopedProjectId);
+    }
     if (!registryScopeProjectId) return tokens;
     return tokens.filter((token) => token.project_id === registryScopeProjectId);
-  }, [tokens, registryScopeProjectId]);
+  }, [tokens, registryScopeProjectId, isProjectScoped, scopedProjectId]);
   const projectTokenPanelProject = useMemo(
     () => projects.find((project) => project.id === projectTokenPanelProjectId) || null,
     [projects, projectTokenPanelProjectId]
@@ -953,6 +1027,69 @@ export function ApiAccessPage() {
       return next.length > 0 ? next : prev;
     });
   }, [isPredictionWorkflow, selectedTokenProjectId, selectedProject?.protein_sequence, selectedProject?.ligand_smiles]);
+
+  useEffect(() => {
+    if (!isProjectScoped) return;
+    const scopedPrefillKey = `${scopedProjectId}|${scopedTaskRowId}|${scopedTaskName}|${scopedTaskSummary}`;
+    if (scopedTaskPrefillRef.current === scopedPrefillKey) return;
+    scopedTaskPrefillRef.current = scopedPrefillKey;
+    if (scopedTaskName) {
+      setBuilderTaskName(scopedTaskName);
+    }
+    if (scopedTaskSummary) {
+      setBuilderTaskSummary(scopedTaskSummary);
+    }
+  }, [isProjectScoped, scopedProjectId, scopedTaskRowId, scopedTaskName, scopedTaskSummary]);
+
+  useEffect(() => {
+    if (!isProjectScoped || !scopedTaskRowId) return;
+    let cancelled = false;
+    const loadTaskSnapshot = async () => {
+      try {
+        const task = await getProjectTaskById(scopedTaskRowId);
+        if (cancelled || !task) return;
+        if (String(task.project_id || '').trim() !== scopedProjectId) return;
+
+        const taskName = String(task.name || '').trim();
+        const taskSummary = String(task.summary || '').trim();
+        if (taskName) setBuilderTaskName(taskName);
+        if (taskSummary) setBuilderTaskSummary(taskSummary);
+
+        const taskBackend = String(task.backend || '').trim();
+        if (taskBackend) {
+          setBuilderPredictionBackend(normalizePredictionBackend(taskBackend));
+          setBuilderAffinityBackend(normalizeAffinityBackend(taskBackend));
+        }
+
+        const taskComponents = Array.isArray(task.components)
+          ? normalizeInputComponents(task.components.filter((component) => !isAffinityUploadComponent(component)) as InputComponent[])
+          : [];
+        if (taskComponents.length > 0) {
+          setBuilderYamlComponents(taskComponents);
+        }
+        if (Array.isArray(task.constraints)) {
+          setBuilderYamlConstraints(task.constraints);
+          setBuilderYamlConstraintsOpen(task.constraints.length > 0);
+        }
+        const taskProperties =
+          task.properties && typeof task.properties === 'object'
+            ? (task.properties as PredictionProperties)
+            : null;
+        if (taskProperties) {
+          setBuilderYamlProperties({
+            ...EMPTY_PREDICTION_PROPERTIES,
+            ...taskProperties
+          });
+        }
+      } catch {
+        // ignore task prefill failures; manual builder setup is still available
+      }
+    };
+    void loadTaskSnapshot();
+    return () => {
+      cancelled = true;
+    };
+  }, [isProjectScoped, scopedProjectId, scopedTaskRowId]);
 
   const filteredTokens = useMemo(() => {
     const keyword = tokenQuery.trim().toLowerCase();
@@ -1346,6 +1483,7 @@ ${submitTaskIdCapture}`;
   };
 
   const selectProjectContext = (projectId: string) => {
+    if (isProjectScoped && projectId !== scopedProjectId) return;
     setSelectedProjectId(projectId);
     const projectTokens = tokens.filter((item) => item.project_id === projectId);
     if (projectTokens.length === 0) {
@@ -1357,9 +1495,10 @@ ${submitTaskIdCapture}`;
   };
 
   const openTokenRegistry = (projectId: string | null = null) => {
-    setRegistryScopeProjectId(projectId);
-    if (projectId) {
-      selectProjectContext(projectId);
+    const targetProjectId = projectId || (isProjectScoped ? scopedProjectId : null);
+    setRegistryScopeProjectId(targetProjectId);
+    if (targetProjectId) {
+      selectProjectContext(targetProjectId);
     }
     setNewTokenExpiresDays('');
     setAllowSubmit(true);
@@ -1372,7 +1511,7 @@ ${submitTaskIdCapture}`;
 
   const closeTokenRegistry = () => {
     setRegistryOpen(false);
-    setRegistryScopeProjectId(null);
+    setRegistryScopeProjectId(isProjectScoped ? scopedProjectId : null);
   };
 
   const openTokenRegistryForProject = (projectId: string) => {
@@ -1380,11 +1519,16 @@ ${submitTaskIdCapture}`;
   };
 
   const openProjectTokenPanel = (projectId: string) => {
+    if (isProjectScoped && projectId !== scopedProjectId) return;
     selectProjectContext(projectId);
     setProjectTokenPanelProjectId(projectId);
   };
 
   const applyCommandHistory = (entry: CommandHistoryEntry) => {
+    if (isProjectScoped && entry.projectId && entry.projectId !== scopedProjectId) {
+      setError('This command history entry belongs to another project.');
+      return;
+    }
     if (entry.projectId) {
       selectProjectContext(entry.projectId);
     }
@@ -1459,15 +1603,80 @@ ${submitTaskIdCapture}`;
     jumpToCommandBuilder();
   };
 
+  const goBackToTaskList = () => {
+    navigate(projectBackPath);
+  };
+
+  useEffect(() => {
+    if (!openBuilderFromQuery) return;
+    const scopedKey = `${scopedProjectId}|${scopedTaskRowId}|${scopedTaskId}`;
+    if (openBuilderHandledRef.current === scopedKey) return;
+    if (!commandPanelRef.current) return;
+    openBuilderHandledRef.current = scopedKey;
+    window.requestAnimationFrame(() => {
+      commandPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }, [openBuilderFromQuery, scopedProjectId, scopedTaskRowId, scopedTaskId, selectedProjectId, selectedTokenId]);
+
   return (
-    <div className="page-grid api-access-page">
+    <div className={`page-grid api-access-page ${isProjectScoped ? 'is-project-scope' : ''}`}>
       <section className="page-header api-access-header">
         <div className="api-access-header-main">
-          <h1>API Access</h1>
-          <p className="muted">Project-scoped tokens for VBio gateway cURL submission.</p>
+          <div className="api-access-title-row">
+            <h1>API Access</h1>
+            {isProjectScoped && (
+              <span className="api-access-project-chip">
+                <ShieldCheck size={12} />
+                {selectedProject?.name || 'Project'}
+              </span>
+            )}
+          </div>
+          <div className="api-access-context" aria-label="API access context">
+            <span className="api-context-pill">
+              <KeyRound size={12} />
+              Tokens
+            </span>
+            <span className="api-context-pill">
+              <BarChart3 size={12} />
+              Usage
+            </span>
+            <span className="api-context-pill">
+              <Download size={12} />
+              Builder
+            </span>
+            {isProjectScoped && hasScopedTaskContext && (
+              <span className="api-context-pill" title={scopedTaskContextTitle || undefined}>
+                <Info size={12} />
+                Task Prefill
+              </span>
+            )}
+          </div>
         </div>
+        {isProjectScoped && (
+          <div className="api-access-actions" role="group" aria-label="API access quick actions">
+            <button
+              type="button"
+              className="api-access-action-btn"
+              onClick={goBackToTaskList}
+              aria-label="Back to tasks"
+              title="Back to tasks"
+            >
+              <ChevronLeft size={14} />
+            </button>
+            <button
+              className={`api-access-action-btn ${registryOpen ? 'active' : ''}`}
+              type="button"
+              onClick={() => openTokenRegistry(scopedProjectId)}
+              aria-label="Manage tokens"
+              title="Manage tokens"
+            >
+              <ShieldCheck size={14} />
+            </button>
+          </div>
+        )}
       </section>
 
+      {!isProjectScoped && (
       <section className="panel api-project-stats-panel">
         <div className="api-section-head">
           <h2><BarChart3 size={16} /> Project Stats</h2>
@@ -1655,6 +1864,7 @@ ${submitTaskIdCapture}`;
           </div>
         )}
       </section>
+      )}
       <section className="panel api-command-panel" ref={commandPanelRef}>
         <div className="api-section-head">
           <h2><KeyRound size={16} /> Command Builder</h2>
@@ -1695,13 +1905,6 @@ ${submitTaskIdCapture}`;
               <span className="muted small">Project (from token)</span>
               <strong>{selectedProject?.name || '-'}</strong>
               <code>{selectedTokenProjectId}</code>
-            </div>
-
-            <div className="api-builder-meta">
-              <span className="badge">{selectedWorkflow.shortTitle} Workflow</span>
-              <span className="badge">Selected backend: {submitBackendLabel}</span>
-              <span className="badge">Project default: {selectedBackend}</span>
-              <span className="badge">Tokens in project: {selectedProjectTokens.length}</span>
             </div>
 
             {!isSupportedSubmitWorkflow && (
@@ -2175,6 +2378,7 @@ ${submitTaskIdCapture}`;
         )}
       </section>
 
+      {!isProjectScoped && (
       <section className="panel api-docs-panel">
         <div className="api-section-head">
           <h2><Info size={16} /> API Docs</h2>
@@ -2210,6 +2414,7 @@ ${submitTaskIdCapture}`;
           </li>
         </ol>
       </section>
+      )}
 
       {yamlBuilderOpen && (
         <div className="modal-mask" onClick={() => setYamlBuilderOpen(false)}>

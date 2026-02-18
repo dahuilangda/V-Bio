@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   Activity,
   ArrowLeft,
@@ -7,7 +7,9 @@ import {
   Download,
   ExternalLink,
   Filter,
+  KeyRound,
   LoaderCircle,
+  MoreHorizontal,
   Plus,
   RefreshCcw,
   Search,
@@ -16,6 +18,7 @@ import {
 } from 'lucide-react';
 import { downloadResultBlob, getTaskStatus, parseResultBundle, terminateTask as terminateBackendTask } from '../api/backendApi';
 import { deleteProjectTask, getProjectById, listProjectTasks, listProjectTasksForList, updateProject, updateProjectTask } from '../api/supabaseLite';
+import { ApiAccessPage } from './ApiAccessPage';
 import { JSMEEditor } from '../components/project/JSMEEditor';
 import { Ligand2DPreview } from '../components/project/Ligand2DPreview';
 import { useAuth } from '../hooks/useAuth';
@@ -310,6 +313,7 @@ type SortDirection = 'asc' | 'desc';
 type SubmittedWithinDaysOption = 'all' | '1' | '7' | '30' | '90';
 type SeedFilterOption = 'all' | 'with_seed' | 'without_seed';
 type StructureSearchMode = 'exact' | 'substructure';
+type TaskWorkspaceView = 'tasks' | 'api';
 
 const TASKS_PAGE_FILTERS_STORAGE_KEY = 'vbio:tasks-page-filters:v1';
 const TASK_SORT_KEYS: SortKey[] = ['plddt', 'iptm', 'pae', 'submitted', 'backend', 'seed', 'duration'];
@@ -318,6 +322,10 @@ const TASK_SUBMITTED_WINDOW_OPTIONS: SubmittedWithinDaysOption[] = ['all', '1', 
 const TASK_SEED_FILTER_OPTIONS: SeedFilterOption[] = ['all', 'with_seed', 'without_seed'];
 const TASK_STRUCTURE_SEARCH_MODES: StructureSearchMode[] = ['exact', 'substructure'];
 const TASK_PAGE_SIZE_OPTIONS = [8, 12, 20, 50];
+
+function normalizeTaskWorkspaceView(value: string | null): TaskWorkspaceView {
+  return value === 'api' ? 'api' : 'tasks';
+}
 
 interface TaskConfidenceMetrics {
   plddt: number | null;
@@ -1329,8 +1337,13 @@ const SILENT_CACHE_SYNC_WINDOW_MS = 30000;
 
 export function ProjectTasksPage() {
   const { projectId = '' } = useParams();
+  const location = useLocation();
   const navigate = useNavigate();
   const { session } = useAuth();
+  const [workspaceView, setWorkspaceView] = useState<TaskWorkspaceView>(() => {
+    if (typeof window === 'undefined') return 'tasks';
+    return normalizeTaskWorkspaceView(new URLSearchParams(window.location.search).get('view'));
+  });
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<ProjectTask[]>([]);
   const [loading, setLoading] = useState(false);
@@ -1361,6 +1374,7 @@ export function ProjectTasksPage() {
   const [structureSearchError, setStructureSearchError] = useState<string | null>(null);
   const [pageSize, setPageSize] = useState<number>(12);
   const [page, setPage] = useState<number>(1);
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [filtersHydrated, setFiltersHydrated] = useState(false);
   const loadSeqRef = useRef(0);
   const loadInFlightRef = useRef(false);
@@ -1370,6 +1384,65 @@ export function ProjectTasksPage() {
   const resultHydrationInFlightRef = useRef<Set<string>>(new Set());
   const resultHydrationDoneRef = useRef<Set<string>>(new Set());
   const resultHydrationAttemptsRef = useRef<Map<string, number>>(new Map());
+  const headerMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const nextView = normalizeTaskWorkspaceView(new URLSearchParams(location.search).get('view'));
+    setWorkspaceView((prev) => (prev === nextView ? prev : nextView));
+  }, [location.search]);
+
+  useEffect(() => {
+    setHeaderMenuOpen(false);
+  }, [workspaceView]);
+
+  useEffect(() => {
+    if (!headerMenuOpen) return;
+    const onPointerDown = (event: globalThis.PointerEvent) => {
+      if (!headerMenuRef.current) return;
+      if (headerMenuRef.current.contains(event.target as Node)) return;
+      setHeaderMenuOpen(false);
+    };
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setHeaderMenuOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [headerMenuOpen]);
+
+  const setWorkspaceViewWithUrl = useCallback(
+    (nextView: TaskWorkspaceView) => {
+      setWorkspaceView(nextView);
+      const query = new URLSearchParams(location.search);
+      if (nextView === 'api') {
+        query.set('view', 'api');
+      } else {
+        query.delete('view');
+        query.delete('open_builder');
+        query.delete('task_row_id');
+        query.delete('task_id');
+        query.delete('task_name');
+        query.delete('task_summary');
+        query.delete('from');
+      }
+      const nextSearch = query.toString();
+      const currentSearch = new URLSearchParams(location.search).toString();
+      if (nextSearch === currentSearch) return;
+      navigate(
+        {
+          pathname: location.pathname,
+          search: nextSearch ? `?${nextSearch}` : ''
+        },
+        { replace: true }
+      );
+    },
+    [location.pathname, location.search, navigate]
+  );
 
   useEffect(() => {
     projectRef.current = project;
@@ -1673,6 +1746,7 @@ export function ProjectTasksPage() {
   }, [loadData]);
 
   useEffect(() => {
+    if (workspaceView !== 'tasks') return;
     const onFocus = () => {
       void loadData({ silent: true, showRefreshing: false, forceRefetch: true });
     };
@@ -1687,7 +1761,7 @@ export function ProjectTasksPage() {
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [loadData]);
+  }, [loadData, workspaceView]);
 
   const hasActiveRuntime = useMemo(
     () =>
@@ -1698,12 +1772,13 @@ export function ProjectTasksPage() {
   );
 
   useEffect(() => {
+    if (workspaceView !== 'tasks') return;
     if (!hasActiveRuntime) return;
     const timer = window.setInterval(() => {
       void loadData({ silent: true, showRefreshing: false });
     }, 4000);
     return () => window.clearInterval(timer);
-  }, [hasActiveRuntime, loadData]);
+  }, [hasActiveRuntime, loadData, workspaceView]);
 
   const taskCountText = useMemo(() => `${sanitizeTaskRows(tasks).length} tasks`, [tasks]);
   const currentTaskRow = useMemo(() => {
@@ -1738,6 +1813,31 @@ export function ProjectTasksPage() {
     params.set('new_task', '1');
     return `/projects/${project.id}?${params.toString()}`;
   }, [project]);
+
+  useEffect(() => {
+    if (workspaceView !== 'api') return;
+    const query = new URLSearchParams(location.search);
+    if (normalizeTaskWorkspaceView(query.get('view')) !== 'api') return;
+    if (!currentTaskRow) return;
+    if (query.get('task_row_id')) return;
+    query.set('task_row_id', currentTaskRow.id);
+    const taskId = String(currentTaskRow.task_id || '').trim();
+    const taskName = String(currentTaskRow.name || '').trim();
+    const taskSummary = String(currentTaskRow.summary || '').trim();
+    if (taskId) query.set('task_id', taskId);
+    if (taskName) query.set('task_name', taskName);
+    if (taskSummary) query.set('task_summary', taskSummary);
+    const nextSearch = query.toString();
+    const currentSearch = new URLSearchParams(location.search).toString();
+    if (nextSearch === currentSearch) return;
+    navigate(
+      {
+        pathname: location.pathname,
+        search: nextSearch ? `?${nextSearch}` : ''
+      },
+      { replace: true }
+    );
+  }, [workspaceView, currentTaskRow, location.pathname, location.search, navigate]);
   const workspacePairPreference = useMemo<WorkspacePairPreference>(() => {
     if (!project) {
       return {
@@ -2519,24 +2619,76 @@ export function ProjectTasksPage() {
 
   return (
     <div className="page-grid">
-      <section className="page-header">
-        <div className="page-header-left">
-          <h1>Tasks</h1>
-          <p className="muted">
-            {project.name} · {taskCountText}
-            {refreshing ? ' · Syncing...' : ''}
-          </p>
-        </div>
-        <div className="row gap-8 page-header-actions page-header-actions-minimal">
-          <Link className="icon-btn task-new-button" to={createTaskHref} title="New Task" aria-label="New Task">
-            <Plus size={15} />
-          </Link>
-        </div>
-      </section>
+      {workspaceView === 'tasks' && (
+        <section className="page-header">
+          <div className="page-header-left">
+            <h1>Tasks</h1>
+            <p className="muted">
+              {project.name} · {taskCountText}
+              {refreshing ? ' · Syncing...' : ''}
+            </p>
+          </div>
+          <div className="row gap-8 page-header-actions page-header-actions-minimal">
+            <div className="task-header-menu" ref={headerMenuRef}>
+              <button
+                type="button"
+                className={`icon-btn task-header-menu-toggle ${headerMenuOpen ? 'open' : ''}`}
+                title="Task actions"
+                aria-label="Task actions"
+                aria-haspopup="menu"
+                aria-expanded={headerMenuOpen}
+                onClick={() => setHeaderMenuOpen((prev) => !prev)}
+              >
+                <MoreHorizontal size={17} />
+              </button>
+              {headerMenuOpen && (
+                <div className="task-header-menu-popover" role="menu" aria-label="Task actions">
+                  <Link className="task-header-menu-item" to={createTaskHref} onClick={() => setHeaderMenuOpen(false)}>
+                    <span className="task-header-menu-icon"><Plus size={17} /></span>
+                    New Task
+                  </Link>
+                  <Link className="task-header-menu-item" to={backToCurrentTaskHref} onClick={() => setHeaderMenuOpen(false)}>
+                    <span className="task-header-menu-icon"><ArrowLeft size={17} /></span>
+                    Open Task
+                  </Link>
+                  <button
+                    type="button"
+                    className="task-header-menu-item"
+                    onClick={() => {
+                      setHeaderMenuOpen(false);
+                      void downloadExcel();
+                    }}
+                    disabled={exportingExcel || filteredRows.length === 0}
+                  >
+                    <span className="task-header-menu-icon">
+                      {exportingExcel ? <LoaderCircle size={17} className="spin" /> : <Download size={17} />}
+                    </span>
+                    Export List
+                  </button>
+                  <button
+                    type="button"
+                    className="task-header-menu-item api-toggle"
+                    onClick={() => {
+                      setHeaderMenuOpen(false);
+                      setWorkspaceViewWithUrl('api');
+                    }}
+                  >
+                    <span className="task-header-menu-icon"><KeyRound size={17} /></span>
+                    API Access
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
 
-      {error && <div className="alert error">{error}</div>}
+      {error && workspaceView === 'tasks' && <div className="alert error">{error}</div>}
 
-      <section className="panel">
+      {workspaceView === 'api' ? (
+        <ApiAccessPage />
+      ) : (
+        <section className="panel">
         <div className="toolbar project-toolbar">
           <div className="project-toolbar-filters">
             <div className="project-filter-field project-filter-field-search">
@@ -2586,24 +2738,6 @@ export function ProjectTasksPage() {
           </div>
           <div className="project-toolbar-meta project-toolbar-meta-rich">
             <span className="muted small">{filteredRows.length} matched</span>
-            <Link
-              className="btn btn-ghost btn-compact btn-square"
-              to={backToCurrentTaskHref}
-              title="Back to Current Task"
-              aria-label="Back to Current Task"
-            >
-              <ArrowLeft size={14} />
-            </Link>
-            <button
-              type="button"
-              className="btn btn-ghost btn-compact btn-square"
-              onClick={() => void downloadExcel()}
-              disabled={exportingExcel || filteredRows.length === 0}
-              title={exportingExcel ? 'Exporting Excel...' : 'Download Excel'}
-              aria-label="Download tasks Excel"
-            >
-              {exportingExcel ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}
-            </button>
             <button
               type="button"
               className={`btn btn-ghost btn-compact advanced-filter-toggle ${showAdvancedFilters ? 'active' : ''}`}
@@ -2816,26 +2950,35 @@ export function ProjectTasksPage() {
                   return (
                     <tr key={task.id}>
                       <td className="task-col-ligand">
-                        {row.ligandSmiles && row.ligandIsSmiles ? (
-                          <div className="task-ligand-thumb">
-                            <Ligand2DPreview
-                              smiles={row.ligandSmiles}
-                              width={184}
-                              height={120}
-                              atomConfidences={row.ligandAtomPlddts}
-                              confidenceHint={metrics.plddt}
+                        <button
+                          type="button"
+                          className="task-ligand-open-btn"
+                          onClick={() => void openTask(task)}
+                          disabled={openingTaskId === task.id}
+                          title={actionTitle}
+                          aria-label={actionTitle}
+                        >
+                          {row.ligandSmiles && row.ligandIsSmiles ? (
+                            <div className="task-ligand-thumb">
+                              <Ligand2DPreview
+                                smiles={row.ligandSmiles}
+                                width={184}
+                                height={120}
+                                atomConfidences={row.ligandAtomPlddts}
+                                confidenceHint={metrics.plddt}
+                              />
+                            </div>
+                          ) : row.ligandSequence && isSequenceLigandType(row.ligandSequenceType) ? (
+                            <TaskLigandSequencePreview
+                              sequence={row.ligandSequence}
+                              residuePlddts={row.ligandResiduePlddts}
                             />
-                          </div>
-                        ) : row.ligandSequence && isSequenceLigandType(row.ligandSequenceType) ? (
-                          <TaskLigandSequencePreview
-                            sequence={row.ligandSequence}
-                            residuePlddts={row.ligandResiduePlddts}
-                          />
-                        ) : (
-                          <div className="task-ligand-thumb task-ligand-thumb-empty">
-                            <span className="muted small">No ligand</span>
-                          </div>
-                        )}
+                          ) : (
+                            <div className="task-ligand-thumb task-ligand-thumb-empty">
+                              <span className="muted small">No ligand</span>
+                            </div>
+                          )}
+                        </button>
                       </td>
                       <td className="task-col-metric">
                         <span className={`task-metric-value metric-value-${plddtTone}`}>{formatMetric(metrics.plddt, 1)}</span>
@@ -2897,19 +3040,22 @@ export function ProjectTasksPage() {
                       <td className="project-col-actions">
                         <div className="row gap-6 project-action-row">
                           <button
-                            className="btn btn-ghost btn-compact task-action-open"
+                            type="button"
+                            className="task-row-action-btn"
                             onClick={() => void openTask(task)}
                             disabled={openingTaskId === task.id}
                             title={actionTitle}
+                            aria-label={actionTitle}
                           >
-                            {openingTaskId === task.id ? <LoaderCircle size={13} className="spin" /> : <ExternalLink size={13} />}
-                            Current
+                            {openingTaskId === task.id ? <LoaderCircle size={13} className="spin" /> : <ExternalLink size={14} />}
                           </button>
                           <button
-                            className="icon-btn danger"
+                            type="button"
+                            className="task-row-action-btn danger"
                             onClick={() => void removeTask(task)}
                             disabled={deletingTaskId === task.id}
                             title="Delete task"
+                            aria-label="Delete task"
                           >
                             {deletingTaskId === task.id ? <LoaderCircle size={13} className="spin" /> : <Trash2 size={14} />}
                           </button>
@@ -2968,7 +3114,8 @@ export function ProjectTasksPage() {
             </div>
           </div>
         )}
-      </section>
+        </section>
+      )}
     </div>
   );
 }

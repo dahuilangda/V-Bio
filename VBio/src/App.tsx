@@ -1,5 +1,5 @@
 import { Suspense, lazy } from 'react';
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import { AppShell } from './components/layout/AppShell';
 import { AdminRoute, ProtectedRoute } from './components/layout/ProtectedRoute';
 import { LoginPage } from './pages/LoginPage';
@@ -8,7 +8,6 @@ import { RegisterPage } from './pages/RegisterPage';
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage').then((m) => ({ default: m.ProjectsPage })));
 const ProjectDetailPage = lazy(() => import('./pages/ProjectDetailPage').then((m) => ({ default: m.ProjectDetailPage })));
 const ProjectTasksPage = lazy(() => import('./pages/ProjectTasksPage').then((m) => ({ default: m.ProjectTasksPage })));
-const ApiAccessPage = lazy(() => import('./pages/ApiAccessPage').then((m) => ({ default: m.ApiAccessPage })));
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
 const UsersPage = lazy(() => import('./pages/UsersPage').then((m) => ({ default: m.UsersPage })));
 
@@ -18,6 +17,15 @@ function ShellPage({ children }: { children: JSX.Element }) {
 
 function PageLoading() {
   return <div className="centered-page">Loading page...</div>;
+}
+
+function ProjectApiAccessRedirect() {
+  const { projectId = '' } = useParams();
+  const location = useLocation();
+  const query = new URLSearchParams(location.search);
+  query.set('view', 'api');
+  const nextSearch = query.toString();
+  return <Navigate to={`/projects/${projectId}/tasks${nextSearch ? `?${nextSearch}` : ''}`} replace />;
 }
 
 export default function App() {
@@ -66,11 +74,15 @@ export default function App() {
         path="/api-access"
         element={
           <ProtectedRoute>
-            <ShellPage>
-              <Suspense fallback={<PageLoading />}>
-                <ApiAccessPage />
-              </Suspense>
-            </ShellPage>
+            <Navigate to="/projects" replace />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/projects/:projectId/api-access"
+        element={
+          <ProtectedRoute>
+            <ProjectApiAccessRedirect />
           </ProtectedRoute>
         }
       />
