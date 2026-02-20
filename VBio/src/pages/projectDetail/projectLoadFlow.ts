@@ -1,4 +1,4 @@
-import { getProjectById, getProjectTaskById, listProjectTasksCompact } from '../../api/supabaseLite';
+import { getProjectById, getProjectTaskById, listProjectTasksCompact, listProjectTasksForList } from '../../api/supabaseLite';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import type { Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
 import { loadProjectInputConfig, loadProjectUiState } from '../../utils/projectInputs';
@@ -61,9 +61,11 @@ export async function loadProjectFlow(params: {
     throw new Error('You do not have permission to access this project.');
   }
 
-  const taskRowsBase = sortProjectTasks(await listProjectTasksCompact(next.id));
   const activeTaskId = (next.task_id || '').trim();
   const workflowDef = getWorkflowDefinition(next.task_type);
+  const taskRowsBase = sortProjectTasks(
+    await (workflowDef.key === 'lead_optimization' ? listProjectTasksForList(next.id) : listProjectTasksCompact(next.id))
+  );
   const query = new URLSearchParams(locationSearch);
 
   const {

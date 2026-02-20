@@ -101,6 +101,33 @@ function compactLeadOptPredictionMap(value: Record<string, LeadOptPredictionReco
   return out;
 }
 
+function buildLeadOptPredictionPersistSignature(records: Record<string, LeadOptPredictionRecord>): string {
+  return Object.entries(records)
+    .map(([key, record]) => {
+      const normalizedKey = readText(key).trim();
+      const taskId = readText(record.taskId).trim();
+      const state = readText(record.state).trim().toUpperCase();
+      const backend = readText(record.backend).trim().toLowerCase() || 'boltz';
+      const pairIptm = toFiniteNumber(record.pairIptm);
+      const pairPae = toFiniteNumber(record.pairPae);
+      const ligandPlddt = toFiniteNumber(record.ligandPlddt);
+      const error = readText(record.error).trim();
+      return [
+        normalizedKey,
+        taskId,
+        state,
+        backend,
+        pairIptm === null ? '' : pairIptm.toFixed(4),
+        pairPae === null ? '' : pairPae.toFixed(3),
+        record.pairIptmResolved === true ? '1' : '0',
+        ligandPlddt === null ? '' : ligandPlddt.toFixed(3),
+        error
+      ].join('~');
+    })
+    .sort((a, b) => a.localeCompare(b))
+    .join('||');
+}
+
 function buildLeadOptSelectionFromPayload(payload: Record<string, unknown>, context: {
   querySmiles: string;
   targetChain: string;
@@ -692,7 +719,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         summary.success,
         summary.failure,
         readText(payload.summary?.latestTaskId).trim(),
-        Object.keys(referenceRecords).length
+        buildLeadOptPredictionPersistSignature(records),
+        buildLeadOptPredictionPersistSignature(referenceRecords)
       ].join('|');
       if (leadOptPredictionPersistKeyRef.current === persistKey) return;
       leadOptPredictionPersistKeyRef.current = persistKey;
