@@ -41,7 +41,7 @@ python lead_optimization/setup_mmpdb.py \
 
 ### 2.1) Full ChEMBL build example (download + build + import)
 
-Use this when you want `setup_mmpdb.py` to download/process ChEMBL and import into PostgreSQL in one run:
+Use this when you want `setup_mmpdb.py` to download/process ChEMBL and build directly into PostgreSQL in one run:
 
 ```bash
 cd /data/Boltz-WebUI
@@ -51,9 +51,10 @@ python lead_optimization/setup_mmpdb.py \
   --max_heavy_atoms 60 \
   --force \
   --attachment_force_recompute \
-  --pg_copy_workers 32 \
-  --pg_copy_batch_size 10000 \
-  --pg_copy_flush_rows 2000 \
+  --fragment_jobs 32 \
+  --pg_index_maintenance_work_mem_mb 65536 \
+  --pg_index_work_mem_mb 512 \
+  --pg_index_parallel_workers 16 \
   --postgres_url 'postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp' \
   --postgres_schema public
 ```
@@ -65,17 +66,24 @@ Parameter notes:
 - `--max_heavy_atoms 60`: pre-filter very large molecules to speed rule generation and reduce noise.
 - `--force`: rebuild intermediate outputs even if files already exist.
 - `--attachment_force_recompute`: force recompute attachment/fragment metadata for consistency.
-- `--pg_copy_workers 32`: parallel PostgreSQL COPY workers; tune by CPU/IO capacity.
-- `--pg_copy_batch_size 10000`: rows pulled per batch from staging tables.
-- `--pg_copy_flush_rows 2000`: flush size for COPY writes; lower can reduce memory spikes.
+- `--fragment_jobs 32`: `mmpdb fragment` parallel workers (CPU scaling happens mainly here).
+- `--pg_index_maintenance_work_mem_mb 65536`: PostgreSQL index-build memory budget (`maintenance_work_mem=64GB`).
+- `--pg_index_work_mem_mb 512`: per-operation work memory (`work_mem=512MB`).
+- `--pg_index_parallel_workers 16`: PostgreSQL index parallelism (`max_parallel_maintenance_workers`).
 - `--postgres_url`: PostgreSQL DSN used by Lead Optimization runtime.
 - `--postgres_schema`: target schema name. Use a dedicated schema in production (for example `chembl_cyp3a4_herg`) instead of `public`.
 
 Practical tuning:
 
-- If host memory/IO is limited, start from `--pg_copy_workers 8` and increase gradually.
-- If import is slow but stable, increase `--pg_copy_batch_size` first.
-- If memory peaks are high, reduce `--pg_copy_flush_rows`.
+- For a 512GB host with up to 256GB available for this job, start with:
+  - `--pg_index_maintenance_work_mem_mb 65536`
+  - `--pg_index_work_mem_mb 512`
+  - `--pg_index_parallel_workers 16`
+  - `--fragment_jobs 32`
+- If memory peaks are still high, reduce `--pg_index_work_mem_mb` first, then `--fragment_jobs`.
+- If indexing is stable but slow, increase `--pg_index_parallel_workers` gradually (watch CPU saturation and I/O wait).
+- If runtime pipeline does not depend on construct tables, add `--pg_skip_construct_tables` to significantly reduce build time and memory.
+- If runtime pipeline does not query `constant_smiles.smiles_mol`, add `--pg_skip_constant_smiles_mol_index`.
 
 Expected completion output includes:
 
@@ -86,8 +94,8 @@ Expected completion output includes:
 
 Notes:
 
-- `setup_mmpdb.py` may use a staging SQLite file during build, but runtime query path is PostgreSQL-only.
-- On success, staging DB is removed by default (unless `--keep_staging_db`).
+- `setup_mmpdb.py` is PostgreSQL-only. No SQLite staging/import path remains.
+- Build keeps a temporary `.fragdb` file only during processing; it is removed on success unless `--keep_fragdb` is set.
 
 ### 3) Verify catalog via API
 

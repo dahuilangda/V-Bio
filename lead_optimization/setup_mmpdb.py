@@ -14,9 +14,7 @@ import logging
 import subprocess
 import shutil
 import re
-import sqlite3
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 try:
     from rdkit import Chem
@@ -43,21 +41,12 @@ except ImportError:
     HAS_PSYCOPG = False
 
 
-CORE_TABLES = [
-    "dataset",
-    "compound",
-    "rule_smiles",
-    "constant_smiles",
-    "rule",
-    "environment_fingerprint",
-    "rule_environment",
-    "pair",
-    "property_name",
-    "compound_property",
-    "rule_environment_statistics",
-]
-
 PG_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _is_postgres_dsn(value: str) -> bool:
+    token = str(value or "").strip().lower()
+    return token.startswith("postgres://") or token.startswith("postgresql://")
 
 def setup_logging():
     """Setup logging"""
@@ -344,310 +333,143 @@ def validate_smiles_file(smiles_file: str) -> bool:
 
 def create_mmp_database(
     smiles_file: str,
-    output_db: str,
+    postgres_url: str,
     max_heavy_atoms: int = 50,
     *,
+    output_dir: str,
+    postgres_schema: str = "public",
     properties_file: Optional[str] = None,
     skip_attachment_enrichment: bool = False,
     attachment_force_recompute: bool = False,
+    keep_fragments: bool = False,
+    fragment_jobs: int = 0,
+    index_maintenance_work_mem_mb: int = 0,
+    index_work_mem_mb: int = 0,
+    index_parallel_workers: int = 0,
+    build_construct_tables: bool = True,
+    build_constant_smiles_mol_index: bool = True,
 ) -> bool:
-    """Create MMP database using mmpdb"""
+    """Create MMP database directly in PostgreSQL using mmpdb."""
     logger = logging.getLogger(__name__)
-    
+
     try:
-        # Create output directory
-        os.makedirs(os.path.dirname(output_db), exist_ok=True)
-        
-        # Temporary fragments file (.fragdb)
-        fragments_file = f"{output_db}.fragdb"
-        
+        if not _is_postgres_dsn(str(postgres_url or "").strip()):
+            logger.error("PostgreSQL DSN is required. Received: %s", postgres_url)
+            return False
+        normalized_schema = _validate_pg_schema(postgres_schema)
+        os.makedirs(output_dir, exist_ok=True)
+
+        base_name = os.path.splitext(os.path.basename(str(smiles_file or "").strip()))[0] or "dataset"
+        fragments_file = os.path.join(output_dir, f"{base_name}.fragdb")
+
         # Step 1: Fragment compounds
         logger.info("Step 1: Fragmenting compounds (this may take a while for large datasets)...")
         fragment_cmd = [
-            sys.executable, "-m", "mmpdblib", "fragment", 
+            sys.executable, "-m", "mmpdblib", "fragment",
             smiles_file,
             "-o", fragments_file,
             "--max-heavies", str(max_heavy_atoms),
             "--has-header"  # Our SMILES file has a header
         ]
-        
+        if int(fragment_jobs or 0) > 0:
+            fragment_cmd.extend(["-j", str(int(fragment_jobs))])
+
         logger.info(f"Running: {' '.join(fragment_cmd)}")
         result = subprocess.run(fragment_cmd, capture_output=True, text=True)
-        
+
         if result.returncode != 0:
             logger.error(f"Fragmentation failed: {result.stderr}")
             logger.error(f"Fragmentation stdout: {result.stdout}")
             return False
-        
+
         logger.info("Fragmentation completed successfully")
         if result.stdout:
             logger.info(f"Fragment output: {result.stdout[-500:]}")  # Last 500 chars
-        
+
         # Check fragments file
         if not os.path.exists(fragments_file):
             logger.error("Fragments file not created")
             return False
-        
-        # Step 2: Create index (MMP database)
-        logger.info("Step 2: Creating MMP database index (this will take some time)...")
+
+        # Step 2: Create index directly in PostgreSQL
+        logger.info("Step 2: Creating MMP database index in PostgreSQL (this may take a while)...")
         index_cmd = [
             sys.executable, "-m", "mmpdblib", "index",
             fragments_file,
-            "-o", output_db
+            "-o", postgres_url
         ]
         if properties_file:
             index_cmd.extend(["--properties", properties_file])
-        
+
+        # Let mmpdb index session inherit memory/parallel/search_path tuning through libpq.
+        index_env = os.environ.copy()
+        index_pgoptions: List[str] = [f"-c search_path={normalized_schema},public"]
+        if int(index_maintenance_work_mem_mb or 0) > 0:
+            index_pgoptions.append(f"-c maintenance_work_mem={int(index_maintenance_work_mem_mb)}MB")
+        if int(index_work_mem_mb or 0) > 0:
+            index_pgoptions.append(f"-c work_mem={int(index_work_mem_mb)}MB")
+        if int(index_parallel_workers or 0) > 0:
+            index_pgoptions.append(f"-c max_parallel_maintenance_workers={int(index_parallel_workers)}")
+        if index_pgoptions:
+            existing_pgoptions = str(index_env.get("PGOPTIONS", "") or "").strip()
+            merged_pgoptions = " ".join(index_pgoptions)
+            index_env["PGOPTIONS"] = (
+                f"{existing_pgoptions} {merged_pgoptions}".strip()
+                if existing_pgoptions else merged_pgoptions
+            )
+            logger.info("PGOPTIONS for mmpdb index: %s", index_env["PGOPTIONS"])
+
         logger.info(f"Running: {' '.join(index_cmd)}")
-        result = subprocess.run(index_cmd, capture_output=True, text=True)
-        
+        result = subprocess.run(index_cmd, capture_output=True, text=True, env=index_env)
+
         if result.returncode != 0:
             logger.error(f"Index creation failed: {result.stderr}")
             logger.error(f"Index stdout: {result.stdout}")
-            # Keep fragments file for debugging
             logger.info(f"Fragments file kept for debugging: {fragments_file}")
             return False
-        
-        logger.info("Database indexing completed successfully")
+
+        logger.info("PostgreSQL indexing completed successfully")
         if result.stdout:
             logger.info(f"Index output: {result.stdout[-500:]}")  # Last 500 chars
-        
-        # Keep fragments file as backup (don't delete it)
-        logger.info(f"Fragments file preserved: {fragments_file}")
-        
-        # Verify database
-        if verify_mmp_database(output_db):
-            if not skip_attachment_enrichment:
-                if not enrich_attachment_schema(
-                    output_db,
-                    force_recompute=attachment_force_recompute,
-                ):
-                    logger.warning(
-                        "Attachment enrichment failed; database is still usable but "
-                        "single/multi-attachment filtering quality will be degraded."
-                    )
-            return True
-        else:
-            logger.error("Database verification failed")
+
+        list_cmd = [sys.executable, "-m", "mmpdblib", "list", postgres_url]
+        list_result = subprocess.run(list_cmd, capture_output=True, text=True, env=index_env)
+        if list_result.returncode != 0:
+            logger.error("PostgreSQL database verification failed: %s", list_result.stderr)
             return False
-        
+        logger.info("PostgreSQL dataset summary:\n%s", list_result.stdout.strip())
+
+        if not skip_attachment_enrichment:
+            enrich_ok = finalize_postgres_database(
+                postgres_url,
+                schema=normalized_schema,
+                force_recompute_num_frags=attachment_force_recompute,
+                index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+                index_work_mem_mb=index_work_mem_mb,
+                index_parallel_workers=index_parallel_workers,
+                build_construct_tables=build_construct_tables,
+                build_constant_smiles_mol_index=build_constant_smiles_mol_index,
+            )
+            if not enrich_ok:
+                logger.warning(
+                    "Attachment/index enrichment failed; base MMP data exists but "
+                    "lead-opt query quality/performance may degrade."
+                )
+                return False
+
+        if keep_fragments:
+            logger.info("Fragments file preserved: %s", fragments_file)
+        else:
+            try:
+                os.remove(fragments_file)
+                logger.info("Removed fragments file: %s", fragments_file)
+            except Exception as exc:
+                logger.warning("Failed to remove fragments file %s: %s", fragments_file, exc)
+
+        return True
     except Exception as e:
         logger.error(f"Database creation failed: {e}")
         return False
-
-def verify_mmp_database(db_path: str) -> bool:
-    """Verify MMP database structure and content"""
-    logger = logging.getLogger(__name__)
-    
-    if not os.path.exists(db_path):
-        logger.error(f"Database file does not exist: {db_path}")
-        return False
-    
-    try:
-        file_size = os.path.getsize(db_path)
-        logger.info(f"MMP database created: {db_path}")
-        logger.info(f"Database size: {file_size / (1024*1024):.2f} MB")
-        
-        # Use mmpdb list command to verify
-        list_cmd = [sys.executable, "-m", "mmpdblib", "list", db_path]
-        result = subprocess.run(list_cmd, capture_output=True, text=True)
-        
-        if result.returncode != 0:
-            logger.error(f"Database verification failed: {result.stderr}")
-            return False
-        
-        logger.info("Database verification successful:")
-        logger.info(result.stdout)
-        
-        # Also do a basic SQLite verification
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        # Check compound count
-        cursor.execute("SELECT COUNT(*) FROM compound")
-        compound_count = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM rule")
-        rule_count = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM pair")
-        pair_count = cursor.fetchone()[0]
-        
-        conn.close()
-        
-        logger.info(f"Database statistics:")
-        logger.info(f"  - Compounds: {compound_count}")
-        logger.info(f"  - Rules: {rule_count}")
-        logger.info(f"  - Pairs: {pair_count}")
-        
-        if compound_count == 0 or rule_count == 0:
-            logger.warning("Database tables are empty")
-            return False
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Database verification failed: {e}")
-        return False
-
-
-def _has_column(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
-    cursor = conn.cursor()
-    cursor.execute(f"PRAGMA table_info({table_name})")
-    for row in cursor.fetchall():
-        if str(row[1] or "") == column_name:
-            return True
-    return False
-
-
-def _distribution_map(cursor: sqlite3.Cursor, table_name: str) -> Dict[int, int]:
-    cursor.execute(
-        f"SELECT COALESCE(num_frags, -1) AS num_frags, COUNT(*) FROM {table_name} GROUP BY COALESCE(num_frags, -1)"
-    )
-    stats: Dict[int, int] = {}
-    for row in cursor.fetchall():
-        stats[int(row[0])] = int(row[1])
-    return stats
-
-
-def enrich_attachment_schema(db_path: str, force_recompute: bool = False) -> bool:
-    """Inline attachment enrichment for single/multi attachment aware query flow."""
-    logger = logging.getLogger(__name__)
-    conn = sqlite3.connect(db_path)
-    try:
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.execute("PRAGMA temp_store=MEMORY")
-
-        # Both rule_smiles and constant_smiles carry attachment count.
-        if not _has_column(conn, "rule_smiles", "num_frags"):
-            cursor.execute("ALTER TABLE rule_smiles ADD COLUMN num_frags INTEGER")
-        if not _has_column(conn, "constant_smiles", "num_frags"):
-            cursor.execute("ALTER TABLE constant_smiles ADD COLUMN num_frags INTEGER")
-        conn.commit()
-
-        rule_where = ""
-        constant_where = ""
-        if not force_recompute:
-            rule_where = "WHERE num_frags IS NULL OR num_frags < 1 OR num_frags > 3"
-            constant_where = "WHERE num_frags IS NULL OR num_frags < 0 OR num_frags > 3"
-
-        # Rule fragments: at least 1 attachment in valid MMP rules.
-        cursor.execute(
-            f"""
-            UPDATE rule_smiles
-            SET num_frags = CASE
-                WHEN instr(smiles, '[*:3]') > 0 THEN 3
-                WHEN instr(smiles, '[*:2]') > 0 THEN 2
-                WHEN instr(smiles, '[*:1]') > 0 THEN 1
-                WHEN instr(smiles, '*') > 0 THEN CASE
-                    WHEN (LENGTH(smiles) - LENGTH(REPLACE(smiles, '*', ''))) >= 3 THEN 3
-                    WHEN (LENGTH(smiles) - LENGTH(REPLACE(smiles, '*', ''))) >= 2 THEN 2
-                    ELSE 1
-                END
-                ELSE 1
-            END
-            {rule_where}
-            """
-        )
-        # Constant fragments: allow 0 when star is absent.
-        cursor.execute(
-            f"""
-            UPDATE constant_smiles
-            SET num_frags = CASE
-                WHEN instr(smiles, '[*:3]') > 0 THEN 3
-                WHEN instr(smiles, '[*:2]') > 0 THEN 2
-                WHEN instr(smiles, '[*:1]') > 0 THEN 1
-                WHEN instr(smiles, '*') > 0 THEN CASE
-                    WHEN (LENGTH(smiles) - LENGTH(REPLACE(smiles, '*', ''))) >= 3 THEN 3
-                    WHEN (LENGTH(smiles) - LENGTH(REPLACE(smiles, '*', ''))) >= 2 THEN 2
-                    ELSE 1
-                END
-                ELSE 0
-            END
-            {constant_where}
-            """
-        )
-        conn.commit()
-
-        # Query speed indexes for one-attachment / multi-attachment filtering.
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_smiles_num_frags ON rule_smiles(num_frags)")
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_rule_smiles_num_frags_heavies ON rule_smiles(num_frags, num_heavies)"
-        )
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_constant_smiles_num_frags ON constant_smiles(num_frags)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_from_to ON rule(from_smiles_id, to_smiles_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_environment_rule_radius ON rule_environment(rule_id, radius)")
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_pair_rule_env_constant ON pair(rule_environment_id, constant_id)"
-        )
-
-        # Helper views for downstream analytics / debugging.
-        cursor.execute(
-            """
-            CREATE VIEW IF NOT EXISTS leadopt_from_construct AS
-            SELECT
-                p.id AS pair_id,
-                p.rule_environment_id AS rule_environment_id,
-                COALESCE(p.constant_id, -1) AS constant_id,
-                re.rule_id AS rule_id,
-                re.radius AS radius,
-                r.from_smiles_id AS rule_smiles_id,
-                COALESCE(rs.num_frags, 1) AS num_frags
-            FROM pair p
-            INNER JOIN rule_environment re ON re.id = p.rule_environment_id
-            INNER JOIN rule r ON r.id = re.rule_id
-            INNER JOIN rule_smiles rs ON rs.id = r.from_smiles_id
-            """
-        )
-        cursor.execute(
-            """
-            CREATE VIEW IF NOT EXISTS leadopt_to_construct AS
-            SELECT
-                p.id AS pair_id,
-                p.rule_environment_id AS rule_environment_id,
-                COALESCE(p.constant_id, -1) AS constant_id,
-                re.rule_id AS rule_id,
-                re.radius AS radius,
-                r.to_smiles_id AS rule_smiles_id,
-                COALESCE(rs.num_frags, 1) AS num_frags
-            FROM pair p
-            INNER JOIN rule_environment re ON re.id = p.rule_environment_id
-            INNER JOIN rule r ON r.id = re.rule_id
-            INNER JOIN rule_smiles rs ON rs.id = r.to_smiles_id
-            """
-        )
-        conn.commit()
-
-        rule_stats = _distribution_map(cursor, "rule_smiles")
-        constant_stats = _distribution_map(cursor, "constant_smiles")
-        cursor.execute(
-            """
-            SELECT
-                COALESCE(rs_from.num_frags, 1) AS from_num_frags,
-                COALESCE(rs_to.num_frags, 1) AS to_num_frags,
-                COUNT(*) AS n_rules
-            FROM rule r
-            INNER JOIN rule_smiles rs_from ON rs_from.id = r.from_smiles_id
-            INNER JOIN rule_smiles rs_to ON rs_to.id = r.to_smiles_id
-            GROUP BY COALESCE(rs_from.num_frags, 1), COALESCE(rs_to.num_frags, 1)
-            ORDER BY from_num_frags, to_num_frags
-            """
-        )
-        transition_rows = cursor.fetchall()
-
-        logger.info("Attachment enrichment complete for DB: %s", db_path)
-        logger.info("rule_smiles num_frags distribution: %s", rule_stats)
-        logger.info("constant_smiles num_frags distribution: %s", constant_stats)
-        logger.info("attachment transition matrix (from_num_frags -> to_num_frags): %s", transition_rows)
-        return True
-    except Exception as exc:
-        logger.error("Attachment enrichment failed: %s", exc, exc_info=True)
-        return False
-    finally:
-        conn.close()
-
 
 def _validate_pg_schema(schema: str) -> str:
     token = str(schema or "public").strip().lower()
@@ -680,133 +502,8 @@ def _pg_column_exists(cursor, schema: str, table_name: str, column_name: str) ->
     return cursor.fetchone() is not None
 
 
-def _create_postgres_base_tables(cursor, schema: str) -> None:
-    table_statements = [
-        """
-        CREATE TABLE IF NOT EXISTS dataset (
-            id INTEGER PRIMARY KEY,
-            mmpdb_version INTEGER NOT NULL,
-            title VARCHAR(255) NOT NULL,
-            creation_date TIMESTAMP NOT NULL,
-            fragment_options VARCHAR(2000) NOT NULL,
-            index_options VARCHAR(2000) NOT NULL,
-            is_symmetric INTEGER NOT NULL,
-            num_compounds INTEGER,
-            num_rules INTEGER,
-            num_pairs INTEGER,
-            num_rule_environments INTEGER,
-            num_rule_environment_stats INTEGER
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS compound (
-            id INTEGER PRIMARY KEY,
-            public_id VARCHAR(255) NOT NULL,
-            input_smiles VARCHAR(255) NOT NULL,
-            clean_smiles VARCHAR(255) NOT NULL,
-            clean_num_heavies INTEGER NOT NULL
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS rule_smiles (
-            id INTEGER PRIMARY KEY,
-            smiles VARCHAR(255) NOT NULL,
-            num_heavies INTEGER,
-            num_frags INTEGER
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS constant_smiles (
-            id INTEGER PRIMARY KEY,
-            smiles VARCHAR(255),
-            num_frags INTEGER
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS rule (
-            id INTEGER PRIMARY KEY,
-            from_smiles_id INTEGER NOT NULL,
-            to_smiles_id INTEGER NOT NULL
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS environment_fingerprint (
-            id INTEGER PRIMARY KEY,
-            smarts VARCHAR(1000) NOT NULL,
-            pseudosmiles VARCHAR(400) NOT NULL,
-            parent_smarts VARCHAR(1000),
-            environment_radius INTEGER
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS rule_environment (
-            id INTEGER PRIMARY KEY,
-            rule_id INTEGER,
-            environment_fingerprint_id INTEGER,
-            radius INTEGER,
-            num_pairs INTEGER
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS pair (
-            id INTEGER PRIMARY KEY,
-            rule_environment_id INTEGER NOT NULL,
-            compound1_id INTEGER NOT NULL,
-            compound2_id INTEGER NOT NULL,
-            constant_id INTEGER
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS property_name (
-            id INTEGER PRIMARY KEY,
-            name VARCHAR(255) NOT NULL,
-            base VARCHAR(64),
-            unit VARCHAR(64),
-            display_name VARCHAR(255),
-            display_base VARCHAR(64),
-            display_unit VARCHAR(64),
-            change_displayed VARCHAR(64)
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS compound_property (
-            id INTEGER PRIMARY KEY,
-            compound_id INTEGER NOT NULL,
-            property_name_id INTEGER NOT NULL,
-            value DOUBLE PRECISION NOT NULL
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS rule_environment_statistics (
-            id INTEGER PRIMARY KEY,
-            rule_environment_id INTEGER,
-            property_name_id INTEGER NOT NULL,
-            count INTEGER NOT NULL,
-            avg DOUBLE PRECISION NOT NULL,
-            std DOUBLE PRECISION,
-            kurtosis DOUBLE PRECISION,
-            skewness DOUBLE PRECISION,
-            min DOUBLE PRECISION NOT NULL,
-            q1 DOUBLE PRECISION NOT NULL,
-            median DOUBLE PRECISION NOT NULL,
-            q3 DOUBLE PRECISION NOT NULL,
-            max DOUBLE PRECISION NOT NULL,
-            paired_t DOUBLE PRECISION,
-            p_value DOUBLE PRECISION
-        )
-        """,
-    ]
-    for statement in table_statements:
-        cursor.execute(statement)
-
-    if _pg_column_exists(cursor, schema, "rule_smiles", "smiles_mol"):
-        cursor.execute("DROP INDEX IF EXISTS idx_rule_smiles_smiles_mol")
-    if _pg_column_exists(cursor, schema, "constant_smiles", "smiles_mol"):
-        cursor.execute("DROP INDEX IF EXISTS idx_constant_smiles_smiles_mol")
-
-
-def _ensure_postgres_copy_schema_extensions(cursor, schema: str) -> None:
-    """Backfill columns expected by attachment-aware workflows before COPY."""
+def _ensure_postgres_attachment_columns(cursor, schema: str) -> None:
+    """Backfill columns expected by attachment-aware workflows."""
     required_columns = [
         ("rule_smiles", "num_heavies", "INTEGER"),
         ("rule_smiles", "num_frags", "INTEGER"),
@@ -823,7 +520,7 @@ def _ensure_postgres_copy_schema_extensions(cursor, schema: str) -> None:
             cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
 
-def _assert_postgres_copy_schema_ready(cursor, schema: str) -> None:
+def _assert_postgres_attachment_columns_ready(cursor, schema: str) -> None:
     required_columns = [
         ("rule_smiles", "num_heavies"),
         ("rule_smiles", "num_frags"),
@@ -834,14 +531,19 @@ def _assert_postgres_copy_schema_ready(cursor, schema: str) -> None:
         if not _pg_column_exists(cursor, schema, table_name, column_name):
             missing.append(f"{table_name}.{column_name}")
     if missing:
-        raise RuntimeError(f"PostgreSQL schema missing required columns for COPY: {', '.join(missing)}")
+        raise RuntimeError(f"PostgreSQL schema missing required attachment columns: {', '.join(missing)}")
     logging.getLogger(__name__).info(
         "PostgreSQL attachment columns verified: %s",
         ", ".join(f"{table}.{column}" for table, column in required_columns),
     )
 
 
-def _create_postgres_core_indexes(cursor, schema: str) -> None:
+def _create_postgres_core_indexes(
+    cursor,
+    schema: str,
+    *,
+    enable_constant_smiles_mol_index: bool = True,
+) -> None:
     index_statements = [
         "CREATE INDEX IF NOT EXISTS idx_compound_public_id ON compound(public_id)",
         "CREATE INDEX IF NOT EXISTS idx_compound_clean_smiles ON compound(clean_smiles)",
@@ -858,103 +560,32 @@ def _create_postgres_core_indexes(cursor, schema: str) -> None:
 
     if _pg_column_exists(cursor, schema, "rule_smiles", "smiles_mol"):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_smiles_smiles_mol ON rule_smiles USING gist(smiles_mol)")
-    if _pg_column_exists(cursor, schema, "constant_smiles", "smiles_mol"):
+    if enable_constant_smiles_mol_index and _pg_column_exists(cursor, schema, "constant_smiles", "smiles_mol"):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_constant_smiles_smiles_mol ON constant_smiles USING gist(smiles_mol)")
 
 
-def _drop_postgres_import_indexes(cursor) -> None:
-    index_names = [
-        "idx_compound_public_id",
-        "idx_compound_clean_smiles",
-        "idx_rule_from_to",
-        "idx_rule_environment_rule_radius",
-        "idx_pair_rule_env",
-        "idx_pair_constant",
-        "idx_prop_name_name",
-        "idx_compound_prop_compound_prop",
-        "idx_rule_env_stats_prop",
-        "idx_rule_smiles_num_frags",
-        "idx_rule_smiles_num_frags_heavies",
-        "idx_constant_smiles_num_frags",
-        "idx_pair_rule_env_constant",
-        "idx_rule_smiles_smiles_mol",
-        "idx_constant_smiles_smiles_mol",
-    ]
-    for index_name in index_names:
-        cursor.execute(f"DROP INDEX IF EXISTS {index_name}")
-
-
-def _iter_sqlite_table_rows(sqlite_db: str, table_name: str, batch_size: int = 20000):
-    conn = sqlite3.connect(sqlite_db)
-    try:
-        cursor = conn.cursor()
-        cursor.execute(f"SELECT * FROM {table_name}")
-        column_names = [str(desc[0]) for desc in cursor.description]
-        while True:
-            rows = cursor.fetchmany(batch_size)
-            if not rows:
-                break
-            yield column_names, rows
-    finally:
-        conn.close()
-
-
-def _truncate_postgres_tables(cursor, tables: List[str]) -> None:
-    if not tables:
-        return
-    table_list = ", ".join(tables)
-    cursor.execute(f"TRUNCATE TABLE {table_list} RESTART IDENTITY")
-
-
-def _copy_rows_to_postgres(
+def _apply_postgres_build_tuning(
     cursor,
-    table_name: str,
-    column_names: List[str],
-    rows: List[tuple],
     *,
-    flush_rows: int = 2000,
+    maintenance_work_mem_mb: int = 0,
+    work_mem_mb: int = 0,
+    parallel_maintenance_workers: int = 0,
 ) -> None:
-    if not rows:
-        return
-    column_sql = ", ".join(column_names)
-    # Use text COPY + write_row so Python None is mapped to SQL NULL correctly.
-    # CSV mode would quote "\\N" and turn it into a literal string, which breaks numeric columns.
-    copy_sql = f"COPY {table_name} ({column_sql}) FROM STDIN"
-    with cursor.copy(copy_sql) as copy:
-        for row in rows:
-            copy.write_row(row)
+    if maintenance_work_mem_mb and maintenance_work_mem_mb > 0:
+        cursor.execute(f"SET maintenance_work_mem TO '{int(maintenance_work_mem_mb)}MB'")
+    if work_mem_mb and work_mem_mb > 0:
+        cursor.execute(f"SET work_mem TO '{int(work_mem_mb)}MB'")
+    if parallel_maintenance_workers and parallel_maintenance_workers > 0:
+        cursor.execute(f"SET max_parallel_maintenance_workers TO {int(parallel_maintenance_workers)}")
 
 
-def _copy_single_table_sqlite_to_postgres(
-    sqlite_db: str,
-    postgres_url: str,
+def _enrich_attachment_schema_postgres(
+    cursor,
     schema: str,
-    table_name: str,
+    force_recompute: bool = False,
     *,
-    batch_size: int,
-    flush_rows: int,
-) -> tuple[str, int]:
-    total_rows = 0
-    with psycopg.connect(postgres_url, autocommit=False) as conn:
-        with conn.cursor() as cursor:
-            _pg_set_search_path(cursor, schema)
-            first_columns: List[str] = []
-            for column_names, rows in _iter_sqlite_table_rows(sqlite_db, table_name, batch_size=batch_size):
-                if not first_columns:
-                    first_columns = column_names
-                _copy_rows_to_postgres(
-                    cursor,
-                    table_name,
-                    first_columns,
-                    rows,
-                    flush_rows=flush_rows,
-                )
-                total_rows += len(rows)
-            conn.commit()
-    return table_name, total_rows
-
-
-def _enrich_attachment_schema_postgres(cursor, schema: str, force_recompute: bool = False) -> None:
+    enable_constant_smiles_mol_index: bool = True,
+) -> None:
     if not _pg_column_exists(cursor, schema, "rule_smiles", "num_frags"):
         cursor.execute("ALTER TABLE rule_smiles ADD COLUMN num_frags INTEGER")
     if not _pg_column_exists(cursor, schema, "constant_smiles", "num_frags"):
@@ -1012,14 +643,15 @@ def _enrich_attachment_schema_postgres(cursor, schema: str, force_recompute: boo
     else:
         cursor.execute("ALTER TABLE rule_smiles ADD COLUMN smiles_mol mol")
         cursor.execute("UPDATE rule_smiles SET smiles_mol = mol_from_smiles(smiles)")
-    if _pg_column_exists(cursor, schema, "constant_smiles", "smiles_mol"):
-        cursor.execute("UPDATE constant_smiles SET smiles_mol = mol_from_smiles(smiles) WHERE smiles_mol IS NULL")
-    else:
-        cursor.execute("ALTER TABLE constant_smiles ADD COLUMN smiles_mol mol")
-        cursor.execute("UPDATE constant_smiles SET smiles_mol = mol_from_smiles(smiles)")
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_smiles_smiles_mol ON rule_smiles USING gist(smiles_mol)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_constant_smiles_smiles_mol ON constant_smiles USING gist(smiles_mol)")
+    if enable_constant_smiles_mol_index:
+        if _pg_column_exists(cursor, schema, "constant_smiles", "smiles_mol"):
+            cursor.execute("UPDATE constant_smiles SET smiles_mol = mol_from_smiles(smiles) WHERE smiles_mol IS NULL")
+        else:
+            cursor.execute("ALTER TABLE constant_smiles ADD COLUMN smiles_mol mol")
+            cursor.execute("UPDATE constant_smiles SET smiles_mol = mol_from_smiles(smiles)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_constant_smiles_smiles_mol ON constant_smiles USING gist(smiles_mol)")
 
 
 def _rebuild_construct_tables_postgres(cursor) -> None:
@@ -1136,93 +768,53 @@ def apply_property_metadata_postgres(postgres_url: str, schema: str, metadata_fi
         return False
 
 
-def import_sqlite_to_postgres(
-    sqlite_db: str,
+def finalize_postgres_database(
     postgres_url: str,
     *,
     schema: str = "public",
     force_recompute_num_frags: bool = False,
-    copy_batch_size: int = 10000,
-    copy_flush_rows: int = 2000,
-    copy_workers: int = 1,
+    index_maintenance_work_mem_mb: int = 0,
+    index_work_mem_mb: int = 0,
+    index_parallel_workers: int = 0,
+    build_construct_tables: bool = True,
+    build_constant_smiles_mol_index: bool = True,
 ) -> bool:
     logger = logging.getLogger(__name__)
     if not HAS_PSYCOPG:
-        logger.error("psycopg is required for PostgreSQL import. Please install: pip install psycopg[binary]")
-        return False
-    if not sqlite_db or not os.path.exists(sqlite_db):
-        logger.error("SQLite source DB not found: %s", sqlite_db)
+        logger.error("psycopg is required for PostgreSQL finalize step. Install: pip install psycopg[binary]")
         return False
 
     normalized_schema = _validate_pg_schema(schema)
-    normalized_batch_size = max(1000, int(copy_batch_size or 10000))
-    normalized_flush_rows = max(100, int(copy_flush_rows or 2000))
-    normalized_workers = max(1, int(copy_workers or 1))
-    logger.info("Importing SQLite mmpdb into PostgreSQL schema '%s' from: %s", normalized_schema, sqlite_db)
-    logger.info(
-        "PostgreSQL COPY settings: workers=%s batch_size=%s flush_rows=%s",
-        normalized_workers,
-        normalized_batch_size,
-        normalized_flush_rows,
-    )
+    normalized_index_maintenance_mem_mb = max(0, int(index_maintenance_work_mem_mb or 0))
+    normalized_index_work_mem_mb = max(0, int(index_work_mem_mb or 0))
+    normalized_index_parallel_workers = max(0, int(index_parallel_workers or 0))
+    enable_construct_tables = bool(build_construct_tables)
+    enable_constant_smiles_mol_index = bool(build_constant_smiles_mol_index)
     try:
         with psycopg.connect(postgres_url, autocommit=False) as conn:
             with conn.cursor() as cursor:
-                cursor.execute("CREATE EXTENSION IF NOT EXISTS rdkit")
-                if normalized_schema != "public":
-                    cursor.execute(SQL("CREATE SCHEMA IF NOT EXISTS {}").format(Identifier(normalized_schema)))
                 _pg_set_search_path(cursor, normalized_schema)
-                _create_postgres_base_tables(cursor, normalized_schema)
-                _ensure_postgres_copy_schema_extensions(cursor, normalized_schema)
-                _assert_postgres_copy_schema_ready(cursor, normalized_schema)
-                logger.info("PostgreSQL COPY schema ready for attachment-aware columns.")
-                _drop_postgres_import_indexes(cursor)
-                _truncate_postgres_tables(cursor, CORE_TABLES)
-                conn.commit()
-
-        effective_workers = min(len(CORE_TABLES), normalized_workers)
-        logger.info("Starting table copy with %s worker(s)...", effective_workers)
-        if effective_workers == 1:
-            for table_name in CORE_TABLES:
-                logger.info("Copying table: %s", table_name)
-                copied_table, total_rows = _copy_single_table_sqlite_to_postgres(
-                    sqlite_db,
-                    postgres_url,
-                    normalized_schema,
-                    table_name,
-                    batch_size=normalized_batch_size,
-                    flush_rows=normalized_flush_rows,
+                _ensure_postgres_attachment_columns(cursor, normalized_schema)
+                _assert_postgres_attachment_columns_ready(cursor, normalized_schema)
+                _apply_postgres_build_tuning(
+                    cursor,
+                    maintenance_work_mem_mb=normalized_index_maintenance_mem_mb,
+                    work_mem_mb=normalized_index_work_mem_mb,
+                    parallel_maintenance_workers=normalized_index_parallel_workers,
                 )
-                logger.info("Copied %s rows into %s", total_rows, copied_table)
-        else:
-            futures = []
-            with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-                for table_name in CORE_TABLES:
-                    futures.append(
-                        executor.submit(
-                            _copy_single_table_sqlite_to_postgres,
-                            sqlite_db,
-                            postgres_url,
-                            normalized_schema,
-                            table_name,
-                            batch_size=normalized_batch_size,
-                            flush_rows=normalized_flush_rows,
-                        )
-                    )
-                for future in as_completed(futures):
-                    copied_table, total_rows = future.result()
-                    logger.info("Copied %s rows into %s", total_rows, copied_table)
-
-        with psycopg.connect(postgres_url, autocommit=False) as conn:
-            with conn.cursor() as cursor:
-                _pg_set_search_path(cursor, normalized_schema)
                 _enrich_attachment_schema_postgres(
                     cursor,
                     normalized_schema,
                     force_recompute=force_recompute_num_frags,
+                    enable_constant_smiles_mol_index=enable_constant_smiles_mol_index,
                 )
-                _rebuild_construct_tables_postgres(cursor)
-                _create_postgres_core_indexes(cursor, normalized_schema)
+                if enable_construct_tables:
+                    _rebuild_construct_tables_postgres(cursor)
+                _create_postgres_core_indexes(
+                    cursor,
+                    normalized_schema,
+                    enable_constant_smiles_mol_index=enable_constant_smiles_mol_index,
+                )
                 cursor.execute("ANALYZE")
                 conn.commit()
 
@@ -1234,77 +826,28 @@ def import_sqlite_to_postgres(
                 rules = int(cursor.fetchone()[0])
                 cursor.execute("SELECT COUNT(*) FROM pair")
                 pairs = int(cursor.fetchone()[0])
-                cursor.execute("SELECT COUNT(*) FROM from_construct")
-                from_construct_rows = int(cursor.fetchone()[0])
-                cursor.execute("SELECT COUNT(*) FROM to_construct")
-                to_construct_rows = int(cursor.fetchone()[0])
+                if enable_construct_tables:
+                    cursor.execute("SELECT COUNT(*) FROM from_construct")
+                    from_construct_rows = int(cursor.fetchone()[0])
+                    cursor.execute("SELECT COUNT(*) FROM to_construct")
+                    to_construct_rows = int(cursor.fetchone()[0])
+                else:
+                    from_construct_rows = 0
+                    to_construct_rows = 0
 
-            logger.info(
-                "PostgreSQL import complete: compounds=%s rules=%s pairs=%s from_construct=%s to_construct=%s",
-                compounds,
-                rules,
-                pairs,
-                from_construct_rows,
-                to_construct_rows,
-            )
+        logger.info(
+            "PostgreSQL finalize complete: compounds=%s rules=%s pairs=%s from_construct=%s to_construct=%s",
+            compounds,
+            rules,
+            pairs,
+            from_construct_rows,
+            to_construct_rows,
+        )
         return True
     except Exception as exc:
-        logger.error("Failed importing SQLite mmpdb to PostgreSQL: %s", exc, exc_info=True)
+        logger.error("Failed finalizing PostgreSQL mmpdb: %s", exc, exc_info=True)
         return False
 
-def download_prebuilt_database(output_db: str) -> bool:
-    """Download prebuilt ChEMBL MMP database from external source"""
-    logger = logging.getLogger(__name__)
-    
-    # URLs for prebuilt MMP databases (these would need to be real URLs)
-    prebuilt_urls = [
-        # These are example URLs - in practice you'd host these somewhere
-        # "https://github.com/rdkit/mmpdb/releases/download/v2.1/chembl_30_mmp.db.gz",
-        # "https://zenodo.org/record/4725643/files/chembl_mmp_database.db.gz"
-    ]
-    
-    if not prebuilt_urls:
-        logger.error("No prebuilt database URLs configured")
-        logger.info("Use --download_chembl to build from ChEMBL data")
-        return False
-    
-    for url in prebuilt_urls:
-        try:
-            logger.info(f"Attempting to download prebuilt database from: {url}")
-            
-            response = requests.get(url, stream=True, timeout=600)
-            response.raise_for_status()
-            
-            # Create output directory
-            os.makedirs(os.path.dirname(output_db), exist_ok=True)
-            
-            # Download and decompress
-            if url.endswith('.gz'):
-                logger.info("Decompressing database...")
-                decompressed_data = gzip.decompress(response.content)
-                
-                with open(output_db, 'wb') as f:
-                    f.write(decompressed_data)
-            else:
-                with open(output_db, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        f.write(chunk)
-            
-            # Verify database
-            if verify_mmp_database(output_db):
-                logger.info(f"Successfully downloaded prebuilt database: {output_db}")
-                return True
-            else:
-                logger.warning("Downloaded database failed verification")
-                if os.path.exists(output_db):
-                    os.remove(output_db)
-                
-        except Exception as e:
-            logger.warning(f"Failed to download from {url}: {e}")
-            continue
-    
-    logger.error("All prebuilt database URLs failed")
-    return False
 
 def create_sample_data(output_dir: str) -> str:
     """Create sample compound data for testing"""
@@ -1413,12 +956,6 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
         action='store_true',
         help='创建示例化合物数据库'
     )
-    input_group.add_argument(
-        '--download_prebuilt',
-        action='store_true',
-        help='下载预构建的数据库'
-    )
-    
     # ChEMBL download options
     parser.add_argument(
         '--subset_size',
@@ -1452,14 +989,6 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
         type=str,
         default='',
         help='属性元数据文件（property_name/base/unit/display_*），导入PostgreSQL后写入property_name'
-    )
-    
-    # Output options
-    parser.add_argument(
-        '--output_db',
-        type=str,
-        default='lead_optimization/data/.mmp_staging.db',
-        help='中间staging SQLite路径（仅构建阶段使用）'
     )
     
     parser.add_argument(
@@ -1504,24 +1033,43 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
     )
 
     parser.add_argument(
-        '--pg_copy_workers',
+        '--fragment_jobs',
         type=int,
-        default=max(1, int(os.cpu_count() or 1)),
-        help='PostgreSQL导入并行worker数 (默认: 当前机器CPU核数)'
+        default=max(1, min(16, int(os.cpu_count() or 1))),
+        help='mmpdb fragment 并行线程数 (默认: min(16, CPU核数))'
     )
 
     parser.add_argument(
-        '--pg_copy_batch_size',
+        '--pg_index_maintenance_work_mem_mb',
         type=int,
-        default=10000,
-        help='SQLite->PostgreSQL每批读取行数 (默认: 10000)'
+        default=1024,
+        help='索引构建阶段 maintenance_work_mem (MB, 默认: 1024)'
     )
 
     parser.add_argument(
-        '--pg_copy_flush_rows',
+        '--pg_index_work_mem_mb',
         type=int,
-        default=2000,
-        help='COPY缓冲区分段写入行数 (默认: 2000, 降低内存峰值)'
+        default=128,
+        help='索引/排序阶段 work_mem (MB, 默认: 128)'
+    )
+
+    parser.add_argument(
+        '--pg_index_parallel_workers',
+        type=int,
+        default=max(1, min(8, int((os.cpu_count() or 2) // 2))),
+        help='索引构建并行 worker 上限 (max_parallel_maintenance_workers)'
+    )
+
+    parser.add_argument(
+        '--pg_skip_construct_tables',
+        action='store_true',
+        help='跳过 from_construct/to_construct 重型构建（可显著降低内存和时间）'
+    )
+
+    parser.add_argument(
+        '--pg_skip_constant_smiles_mol_index',
+        action='store_true',
+        help='跳过 constant_smiles 的 smiles_mol GiST（通常不影响当前推理链路）'
     )
     
     parser.add_argument(
@@ -1531,9 +1079,9 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
     )
 
     parser.add_argument(
-        '--keep_staging_db',
+        '--keep_fragdb',
         action='store_true',
-        help='保留构建中间SQLite文件（默认构建成功后自动删除）'
+        help='保留中间 .fragdb 文件（默认构建成功后自动删除）'
     )
     
     args = parser.parse_args()
@@ -1542,12 +1090,14 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
     setup_logging()
     logger = logging.getLogger(__name__)
 
-    if args.pg_copy_workers < 1:
-        args.pg_copy_workers = 1
-    if args.pg_copy_batch_size < 1000:
-        args.pg_copy_batch_size = 1000
-    if args.pg_copy_flush_rows < 100:
-        args.pg_copy_flush_rows = 100
+    if args.fragment_jobs < 1:
+        args.fragment_jobs = 1
+    if args.pg_index_maintenance_work_mem_mb < 0:
+        args.pg_index_maintenance_work_mem_mb = 0
+    if args.pg_index_work_mem_mb < 0:
+        args.pg_index_work_mem_mb = 0
+    if args.pg_index_parallel_workers < 0:
+        args.pg_index_parallel_workers = 0
     
     try:
         # Check if RDKit and mmpdb are available
@@ -1566,16 +1116,10 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
         # Create output directory
         os.makedirs(args.output_dir, exist_ok=True)
 
-        sqlite_source_db = ""
+        postgres_url = str(args.postgres_url or "").strip()
         smiles_file = None
         properties_file = str(args.properties_file or "").strip()
         property_metadata_file = str(args.property_metadata_file or "").strip()
-
-        # Check if staging DB already exists.
-        if os.path.exists(args.output_db) and not args.force:
-            logger.error(f"Staging database already exists: {args.output_db}")
-            logger.error("Use --force to overwrite")
-            sys.exit(1)
 
         if args.create_sample:
             logger.info("Creating sample compound database...")
@@ -1610,67 +1154,54 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                 logger.error("structures_file not found: %s", smiles_file)
                 sys.exit(1)
 
-        elif args.download_prebuilt:
-            logger.info("Downloading prebuilt database...")
-            if not download_prebuilt_database(args.output_db):
-                logger.error("Failed to download prebuilt database")
-                sys.exit(1)
-            if not args.skip_attachment_enrichment:
-                enrich_ok = enrich_attachment_schema(
-                    args.output_db,
-                    force_recompute=args.attachment_force_recompute,
-                )
-                if not enrich_ok:
-                    logger.warning(
-                        "Prebuilt DB downloaded but attachment enrichment failed; attachment filtering may be degraded."
-                    )
-            logger.info("Prebuilt database downloaded successfully")
-            sqlite_source_db = args.output_db
-
-        if not sqlite_source_db:
-            # Validate SMILES file
-            if smiles_file and not validate_smiles_file(smiles_file):
-                logger.error("SMILES file validation failed")
-                sys.exit(1)
-            if properties_file and not os.path.exists(properties_file):
-                logger.error("properties_file not found: %s", properties_file)
-                sys.exit(1)
-            if property_metadata_file and not os.path.exists(property_metadata_file):
-                logger.error("property_metadata_file not found: %s", property_metadata_file)
-                sys.exit(1)
-
-            logger.info(f"Creating staging MMP database: {args.output_db}")
-            build_ok = create_mmp_database(
-                smiles_file,
-                args.output_db,
-                args.max_heavy_atoms,
-                properties_file=properties_file if properties_file else None,
-                skip_attachment_enrichment=args.skip_attachment_enrichment,
-                attachment_force_recompute=args.attachment_force_recompute,
-            )
-            if not build_ok:
-                logger.error("MMP database setup failed")
-                sys.exit(1)
-            sqlite_source_db = args.output_db
-            logger.info("MMP staging database setup completed successfully")
-
-        postgres_url = str(args.postgres_url or "").strip()
-        if not sqlite_source_db:
-            logger.error("Cannot import to PostgreSQL because staging SQLite DB is missing.")
+        # Validate SMILES file
+        if smiles_file and not validate_smiles_file(smiles_file):
+            logger.error("SMILES file validation failed")
             sys.exit(1)
-        logger.info("Starting PostgreSQL import...")
-        import_ok = import_sqlite_to_postgres(
-            sqlite_source_db,
+        if properties_file and not os.path.exists(properties_file):
+            logger.error("properties_file not found: %s", properties_file)
+            sys.exit(1)
+        if property_metadata_file and not os.path.exists(property_metadata_file):
+            logger.error("property_metadata_file not found: %s", property_metadata_file)
+            sys.exit(1)
+
+        base_name = os.path.splitext(os.path.basename(str(smiles_file or "").strip()))[0] or "dataset"
+        fragments_file = os.path.join(args.output_dir, f"{base_name}.fragdb")
+        if os.path.exists(fragments_file):
+            if args.force:
+                try:
+                    os.remove(fragments_file)
+                    logger.info("Removed existing fragments file due to --force: %s", fragments_file)
+                except Exception as exc:
+                    logger.error("Failed to remove old fragments file %s: %s", fragments_file, exc)
+                    sys.exit(1)
+            else:
+                logger.error("Fragments file already exists: %s", fragments_file)
+                logger.error("Use --force to overwrite")
+                sys.exit(1)
+
+        logger.info("Building MMP dataset directly into PostgreSQL...")
+        build_ok = create_mmp_database(
+            smiles_file,
             postgres_url,
-            schema=args.postgres_schema,
-            force_recompute_num_frags=args.attachment_force_recompute,
-            copy_batch_size=args.pg_copy_batch_size,
-            copy_flush_rows=args.pg_copy_flush_rows,
-            copy_workers=args.pg_copy_workers,
+            args.max_heavy_atoms,
+            output_dir=args.output_dir,
+            postgres_schema=args.postgres_schema,
+            properties_file=properties_file if properties_file else None,
+            skip_attachment_enrichment=args.skip_attachment_enrichment,
+            attachment_force_recompute=args.attachment_force_recompute,
+            keep_fragments=args.keep_fragdb,
+            fragment_jobs=args.fragment_jobs,
+            index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
+            index_work_mem_mb=args.pg_index_work_mem_mb,
+            index_parallel_workers=args.pg_index_parallel_workers,
+            build_construct_tables=not args.pg_skip_construct_tables,
+            build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
         )
-        if not import_ok:
-            logger.error("PostgreSQL import failed")
+        if not build_ok:
+            logger.error("MMP database setup failed")
             sys.exit(1)
+
         if property_metadata_file:
             metadata_ok = apply_property_metadata_postgres(
                 postgres_url,
@@ -1681,13 +1212,6 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                 logger.error("PostgreSQL property metadata import failed")
                 sys.exit(1)
         logger.info("PostgreSQL database is ready.")
-
-        if not args.keep_staging_db and sqlite_source_db and os.path.exists(sqlite_source_db):
-            try:
-                os.remove(sqlite_source_db)
-                logger.info("Removed staging SQLite DB: %s", sqlite_source_db)
-            except Exception as exc:
-                logger.warning("Failed to remove staging SQLite DB %s: %s", sqlite_source_db, exc)
 
         # Print usage instructions
         print("\n" + "=" * 60)
