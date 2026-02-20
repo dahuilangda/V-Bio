@@ -38,6 +38,60 @@ resolve_gunicorn_workers() {
     echo "$workers"
 }
 
+detect_cpu_cores() {
+    local cores=""
+    if command -v nproc >/dev/null 2>&1; then
+        cores="$(nproc --all 2>/dev/null || nproc 2>/dev/null || true)"
+    fi
+    if ! [[ "$cores" =~ ^[0-9]+$ ]] || [ "$cores" -le 0 ]; then
+        cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+    fi
+    if ! [[ "$cores" =~ ^[0-9]+$ ]] || [ "$cores" -le 0 ]; then
+        cores=1
+    fi
+    echo "$cores"
+}
+
+resolve_cpu_worker_concurrency() {
+    local cli_concurrency="$1"
+    local detected_cores
+    detected_cores="$(detect_cpu_cores)"
+
+    local raw_concurrency=""
+    if [ -n "$cli_concurrency" ]; then
+        raw_concurrency="$cli_concurrency"
+    elif [ -n "${CPU_MAX_CONCURRENT_TASKS:-}" ]; then
+        raw_concurrency="${CPU_MAX_CONCURRENT_TASKS}"
+    elif [ -n "${MMP_CELERY_CONCURRENCY:-}" ]; then
+        echo "Warning: MMP_CELERY_CONCURRENCY is deprecated. Please use CPU_MAX_CONCURRENT_TASKS." >&2
+        raw_concurrency="${MMP_CELERY_CONCURRENCY}"
+    else
+        raw_concurrency="0"
+    fi
+
+    if ! [[ "$raw_concurrency" =~ ^[0-9]+$ ]]; then
+        echo "Warning: Invalid CPU concurrency '${raw_concurrency}', fallback to auto (all CPU cores)." >&2
+        raw_concurrency="0"
+    fi
+
+    local concurrency
+    if [ "$raw_concurrency" -le 0 ]; then
+        concurrency="$detected_cores"
+    else
+        concurrency="$raw_concurrency"
+    fi
+
+    if [ "$concurrency" -gt "$detected_cores" ]; then
+        echo "Warning: Requested CPU concurrency ${concurrency} exceeds available cores ${detected_cores}; capping to ${detected_cores}." >&2
+        concurrency="$detected_cores"
+    fi
+    if [ "$concurrency" -le 0 ]; then
+        concurrency=1
+    fi
+
+    echo "$concurrency"
+}
+
 # Function to start the Flask API server
 start_flask() {
     echo "Starting Flask API server with Gunicorn..."
@@ -48,10 +102,10 @@ start_flask() {
     gunicorn --workers "${workers}" --bind 0.0.0.0:5000 --timeout 120 "api_server:app"
 }
 
-# Function to start the Celery workers
-start_celery() {
-    echo "Starting Celery workers..."
-    echo "Workers will prioritize tasks from 'high_priority' queue over 'default' queue."
+# Function to start GPU-bound Celery worker
+start_celery_gpu() {
+    echo "Starting GPU Celery worker..."
+    echo "Worker queues: 'high_priority,default' (GPU-bound prediction/scoring tasks)."
 
     # Determine concurrency based on the actual initialized pool size for clarity.
     CONCURRENCY=$(python -c "from gpu_manager import get_gpu_status; print(get_gpu_status()['available_count'])")
@@ -63,8 +117,50 @@ start_celery() {
         echo "Found ${CONCURRENCY} GPUs in the pool. Starting worker with this concurrency."
     fi
 
-    # The --max-tasks-per-child argument is excellent for preventing memory leaks.
-    celery -A celery_app worker -l info --concurrency=${CONCURRENCY} -Q high_priority,default --max-tasks-per-child 1
+    # The --max-tasks-per-child argument helps prevent long-lived memory growth.
+    celery -A celery_app worker -n "gpu@%h" -l info --concurrency=${CONCURRENCY} -Q high_priority,default --max-tasks-per-child 1
+}
+
+# Function to start CPU-only worker
+start_celery_cpu() {
+    echo "Starting dedicated CPU Celery worker..."
+    echo "Worker queue: '${CPU_QUEUE:-cpu_queue}' (CPU-only tasks like MMP queries)."
+
+    local cli_concurrency="$1"
+    local detected_cores
+    detected_cores="$(detect_cpu_cores)"
+    local concurrency
+    concurrency="$(resolve_cpu_worker_concurrency "$cli_concurrency")"
+
+    echo "Detected CPU cores: ${detected_cores}"
+    echo "CPU worker concurrency: ${concurrency} (1 task per process, no GPU)"
+    # Explicitly hide GPUs for this process to avoid any accidental GPU usage.
+    CUDA_VISIBLE_DEVICES="" celery -A celery_app worker -l info \
+      -n "cpu@%h" \
+      --pool=prefork \
+      --concurrency="${concurrency}" \
+      -Q "${CPU_QUEUE:-cpu_queue}" \
+      --prefetch-multiplier=1 \
+      --max-tasks-per-child 20
+}
+
+restart_services() {
+    local mode="${1:-all}"
+    echo "Restarting services in '${mode}' mode..."
+    bash "$0" stop || true
+    sleep 1
+    case "$mode" in
+        all)
+            bash "$0" all
+            ;;
+        dev)
+            bash "$0" dev
+            ;;
+        *)
+            echo "Error: restart mode must be 'all' or 'dev'."
+            exit 1
+            ;;
+    esac
 }
 
 # Function to start the Streamlit frontend
@@ -197,7 +293,10 @@ case "$1" in
             echo "Error: The GPU pool is empty. Please run '$0 init' before starting Celery workers."
             exit 1
         fi
-        start_celery
+        start_celery_gpu
+        ;;
+    _cpu-worker-internal)
+        start_celery_cpu "$2"
         ;;
     frontend)
         start_frontend
@@ -206,7 +305,8 @@ case "$1" in
         start_monitor
         ;;
     all)
-        echo "Starting all services in the background for development..."
+        CPU_CONCURRENCY_ARG="$2"
+        echo "Starting all services in the background..."
         echo "Use 'bash run.sh stop' to stop all services."
         
         # 1. Initialize the pool
@@ -218,15 +318,23 @@ case "$1" in
         echo "Using ${WORKERS} Gunicorn worker(s) for background API server."
         nohup gunicorn --workers "${WORKERS}" --bind 0.0.0.0:5000 --timeout 120 "api_server:app" > flask.log 2>&1 &
         
-        # 3. Start Celery in the background
-        echo "Starting Celery worker in background..."
-        nohup bash "$0" celery > celery.log 2>&1 &
-        
-        # 4. Start monitoring daemon in the background
+        # 3. Start GPU Celery in the background
+        echo "Starting GPU Celery worker in background..."
+        : > celery.log
+        nohup bash "$0" celery >> celery.log 2>&1 &
+
+        # 4. Start CPU Celery in the background
+        CPU_CORES="$(detect_cpu_cores)"
+        CPU_CONCURRENCY="$(resolve_cpu_worker_concurrency "${CPU_CONCURRENCY_ARG}")"
+        echo "Starting CPU Celery worker in background..."
+        echo "Detected ${CPU_CORES} CPU cores; CPU worker concurrency=${CPU_CONCURRENCY}."
+        nohup bash "$0" _cpu-worker-internal "${CPU_CONCURRENCY}" >> celery.log 2>&1 &
+
+        # 5. Start monitoring daemon in the background
         echo "Starting task monitor in background..."
         nohup bash "$0" monitor > monitor.log 2>&1 &
-        
-        # 5. Start frontend in the background
+
+        # 6. Start frontend in the background
         echo "Starting Streamlit frontend in background..."
         STREAMLIT_BIND_ADDRESS="0.0.0.0"
         STREAMLIT_PORT="8501"
@@ -241,6 +349,7 @@ case "$1" in
         echo "Run 'tail -f monitor.log' to monitor task cleanup activities."
         ;;
     dev)
+        CPU_CONCURRENCY_ARG="$2"
         echo "Starting all services with frontend for development..."
         echo "This will start backend services in background and frontend in foreground."
         
@@ -253,11 +362,19 @@ case "$1" in
         echo "Using ${WORKERS} Gunicorn worker(s) for background API server."
         nohup gunicorn --workers "${WORKERS}" --bind 0.0.0.0:5000 --timeout 120 "api_server:app" > flask.log 2>&1 &
         
-        # 3. Start Celery in the background
-        echo "Starting Celery worker in background..."
-        nohup bash "$0" celery > celery.log 2>&1 &
-        
-        # 4. Start monitoring daemon in the background
+        # 3. Start GPU Celery in the background
+        echo "Starting GPU Celery worker in background..."
+        : > celery.log
+        nohup bash "$0" celery >> celery.log 2>&1 &
+
+        # 4. Start CPU Celery in the background
+        CPU_CORES="$(detect_cpu_cores)"
+        CPU_CONCURRENCY="$(resolve_cpu_worker_concurrency "${CPU_CONCURRENCY_ARG}")"
+        echo "Starting CPU Celery worker in background..."
+        echo "Detected ${CPU_CORES} CPU cores; CPU worker concurrency=${CPU_CONCURRENCY}."
+        nohup bash "$0" _cpu-worker-internal "${CPU_CONCURRENCY}" >> celery.log 2>&1 &
+
+        # 5. Start monitoring daemon in the background
         echo "Starting task monitor in background..."
         nohup bash "$0" monitor > monitor.log 2>&1 &
         
@@ -284,10 +401,16 @@ case "$1" in
             echo "❌ Flask API server is not running"
         fi
         
-        if pgrep -f "celery.*worker" > /dev/null; then
-            echo "✅ Celery worker is running"
+        if pgrep -f "celery.*worker.*-Q high_priority,default" > /dev/null; then
+            echo "✅ GPU Celery worker is running"
         else
-            echo "❌ Celery worker is not running"
+            echo "❌ GPU Celery worker is not running"
+        fi
+
+        if pgrep -f "celery.*worker.*-Q ${CPU_QUEUE:-cpu_queue}" > /dev/null; then
+            echo "✅ CPU Celery worker is running"
+        else
+            echo "❌ CPU Celery worker is not running"
         fi
         
         if pgrep -f "monitor_daemon" > /dev/null; then
@@ -304,6 +427,10 @@ case "$1" in
         
         echo ""
         echo "=== GPU and Task Status ==="
+        CPU_CORES="$(detect_cpu_cores)"
+        CPU_CONCURRENCY="$(resolve_cpu_worker_concurrency "")"
+        echo "CPU cores detected: ${CPU_CORES}"
+        echo "CPU worker target concurrency: ${CPU_CONCURRENCY}"
         if command -v curl > /dev/null; then
             curl -s http://localhost:5000/monitor/health 2>/dev/null | python -m json.tool 2>/dev/null || echo "API server not responding"
         else
@@ -361,15 +488,21 @@ except Exception as e:
         # 清理临时文件
         rm -f monitor_daemon.py
         ;;
+    restart)
+        restart_services "$2"
+        ;;
     *)
-        echo "Usage: $0 {init|celery|flask|frontend|monitor|all|dev|status|clean|stop}"
+        echo "Usage: $0 {init|celery|flask|frontend|monitor|all [CPU_N]|dev [CPU_N]|restart [all|dev]|status|clean|stop}"
         echo "  init     - Initializes the Redis GPU pool. Run this once before starting workers."
-        echo "  celery   - Starts the Celery workers. Requires 'init' to be run first."
+        echo "  celery   - Starts GPU Celery worker for prediction/scoring. Requires 'init'."
         echo "  flask    - Starts the Flask API server."
         echo "  frontend - Starts the Streamlit web interface."
         echo "  monitor  - Starts the automatic task monitoring daemon."
-        echo "  all      - Starts all services in the background (for production)."
-        echo "  dev      - Starts backend services in background and frontend in foreground (for development)."
+        echo "  all [CPU_N] - Starts all services (API + GPU worker + CPU worker + monitor + frontend) in background."
+        echo "                CPU_N not provided (or 0) => auto use all CPU cores."
+        echo "  dev [CPU_N] - Starts backend services in background and frontend in foreground (for development)."
+        echo "                CPU_N not provided (or 0) => auto use all CPU cores."
+        echo "  restart [all|dev] - Stops then starts services again. Default mode: all."
         echo "  status   - Shows the status of all services and system health."
         echo "  clean    - Manually trigger task cleanup via API."
         echo "  stop     - Stops all running services."

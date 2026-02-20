@@ -1,0 +1,32 @@
+@media (max-width: 1460px) {
+  .task-table {
+    min-width: 980px;
+  }
+
+  .task-table th:nth-child(7),
+  .task-table td:nth-child(7) {
+    display: none;
+  }
+}
+
+@media (max-width: 1300px) {
+  .task-table {
+    min-width: 860px;
+  }
+
+  .task-table th:nth-child(8),
+  .task-table td:nth-child(8) {
+    display: none;
+  }
+}
+
+@media (max-width: 860px) {
+  .task-structure-query-head {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .task-structure-query-status {
+    text-align: left;
+  }
+}

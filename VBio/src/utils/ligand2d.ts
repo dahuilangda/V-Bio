@@ -74,8 +74,12 @@ function buildPerAtomConfidenceWithMol(
   rdkit: RDKitModule,
   values: number[] | null | undefined,
   confidenceHint: number | null | undefined,
-  primaryMol: ReturnType<RDKitModule['get_mol']>
+  primaryMol: ReturnType<RDKitModule['get_mol']>,
+  options?: {
+    allowAlternateMol?: boolean;
+  }
 ): { renderMol: ReturnType<RDKitModule['get_mol']>; atomCount: number; perAtomConfidence: number[] } {
+  const allowAlternateMol = options?.allowAlternateMol !== false;
   const atomCount = readAtomCount(primaryMol || {});
   const exactFromPrimary = buildPerAtomConfidence(values, atomCount, confidenceHint);
   if (exactFromPrimary.length > 0 || !primaryMol) {
@@ -84,6 +88,9 @@ function buildPerAtomConfidenceWithMol(
 
   const normalized = normalizeConfidenceValues(values);
   if (normalized.length === 0) {
+    return { renderMol: primaryMol, atomCount, perAtomConfidence: [] };
+  }
+  if (!allowAlternateMol) {
     return { renderMol: primaryMol, atomCount, perAtomConfidence: [] };
   }
 
@@ -110,6 +117,64 @@ function buildPerAtomConfidence(
   return [];
 }
 
+function normalizeHighlightAtomIndices(atomIndices: number[]): number[] {
+  const normalized = Array.from(
+    new Set(
+      atomIndices
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value >= 0)
+        .map((value) => Math.floor(value))
+    )
+  );
+  return normalized;
+}
+
+function injectAtomRingOverlay(svg: string, atomIndices: number[]): string {
+  const normalized = normalizeHighlightAtomIndices(atomIndices);
+  if (normalized.length === 0) return svg;
+  if (typeof DOMParser === 'undefined' || typeof XMLSerializer === 'undefined') return svg;
+  try {
+    const parser = new DOMParser();
+    const xml = parser.parseFromString(svg, 'image/svg+xml');
+    const svgRoot = xml.querySelector('svg');
+    if (!svgRoot) return svg;
+    for (const atomIdx of normalized) {
+      const nodes = Array.from(svgRoot.querySelectorAll(`ellipse.atom-${atomIdx}, circle.atom-${atomIdx}`));
+      for (const node of nodes) {
+        const ring = node.cloneNode(false) as Element;
+        ring.setAttribute('fill', 'none');
+        ring.setAttribute('fill-opacity', '0');
+        ring.setAttribute('stroke', 'rgba(102, 109, 118, 0.96)');
+        ring.setAttribute('stroke-width', '1.95');
+        ring.setAttribute('stroke-linecap', 'round');
+        ring.setAttribute('stroke-linejoin', 'round');
+        ring.setAttribute(
+          'style',
+          'fill:none !important; fill-opacity:0 !important; stroke:rgba(102,109,118,0.96) !important;'
+        );
+        ring.setAttribute('pointer-events', 'none');
+        const currentClass = String(node.getAttribute('class') || '').trim();
+        ring.setAttribute('class', `${currentClass} lead-opt-mod-ring`.trim());
+
+        const tag = String(node.tagName || '').toLowerCase();
+        if (tag === 'circle') {
+          const radius = Number.parseFloat(String(node.getAttribute('r') || '0'));
+          if (Number.isFinite(radius) && radius > 0) ring.setAttribute('r', String(radius + 1.25));
+        } else if (tag === 'ellipse') {
+          const rx = Number.parseFloat(String(node.getAttribute('rx') || '0'));
+          const ry = Number.parseFloat(String(node.getAttribute('ry') || '0'));
+          if (Number.isFinite(rx) && rx > 0) ring.setAttribute('rx', String(rx + 1.25));
+          if (Number.isFinite(ry) && ry > 0) ring.setAttribute('ry', String(ry + 1.25));
+        }
+        svgRoot.appendChild(ring);
+      }
+    }
+    return new XMLSerializer().serializeToString(xml);
+  } catch {
+    return svg;
+  }
+}
+
 function injectReadabilityStyle(svg: string): string {
   const svgTagStart = svg.indexOf('<svg');
   if (svgTagStart < 0) return svg;
@@ -123,17 +188,135 @@ function injectReadabilityStyle(svg: string): string {
   return `${svg.slice(0, svgTagEnd + 1)}${style}${svg.slice(svgTagEnd + 1)}`;
 }
 
+function enforceSvgCanvasFit(svg: string): string {
+  const svgTagStart = svg.indexOf('<svg');
+  if (svgTagStart < 0) return svg;
+  const svgTagEnd = svg.indexOf('>', svgTagStart);
+  if (svgTagEnd < 0) return svg;
+  const openTag = svg.slice(svgTagStart, svgTagEnd + 1);
+  const hasPreserve = /preserveAspectRatio\s*=/.test(openTag);
+  const nextTag = hasPreserve
+    ? openTag.replace(/preserveAspectRatio\s*=\s*['"][^'"]*['"]/, 'preserveAspectRatio="xMidYMid meet"')
+    : openTag.replace('<svg', '<svg preserveAspectRatio="xMidYMid meet"');
+  return `${svg.slice(0, svgTagStart)}${nextTag}${svg.slice(svgTagEnd + 1)}`;
+}
+
 export interface Ligand2DRenderOptions {
   smiles: string;
   width: number;
   height: number;
   atomConfidences?: number[] | null;
   confidenceHint?: number | null;
+  highlightQuery?: string | null;
+  highlightAtomIndices?: number[] | null;
+  templateSmiles?: string | null;
+}
+
+function tryAlignDepictionToTemplate(
+  rdkit: RDKitModule,
+  mol: ReturnType<RDKitModule['get_mol']>,
+  templateSmiles: string | null | undefined
+): boolean {
+  const template = String(templateSmiles || '').trim();
+  if (!template || !mol) return false;
+  const templateMol = rdkit.get_mol(template);
+  if (!templateMol) return false;
+  let aligned = false;
+  try {
+    templateMol.set_new_coords?.();
+    const anyMol = mol as unknown as Record<string, unknown>;
+    const candidate = [
+      'generate_aligned_coords',
+      'generateDepictionMatching2DStructure',
+      'generate_depiction_matching2d_structure',
+      'generate_depiction_matching2D_structure',
+      'generate_depiction_matching2DStructure',
+    ]
+      .map((name) => anyMol[name])
+      .find((fn) => typeof fn === 'function') as ((...args: unknown[]) => unknown) | undefined;
+    if (!candidate) return false;
+    try {
+      candidate.call(mol, templateMol);
+      aligned = true;
+      return aligned;
+    } catch {
+      // try alternative signatures below
+    }
+    try {
+      candidate.call(mol, templateMol, JSON.stringify({ acceptFailure: true, allowRGroups: true }));
+      aligned = true;
+      return aligned;
+    } catch {
+      // try alternative signatures below
+    }
+    try {
+      candidate.call(mol, template);
+      aligned = true;
+      return aligned;
+    } catch {
+      // try alternative signatures below
+    }
+    try {
+      candidate.call(mol, template, JSON.stringify({ acceptFailure: true, allowRGroups: true }));
+      aligned = true;
+    } catch {
+      // no-op; fallback to default depiction orientation.
+    }
+  } finally {
+    templateMol.delete();
+  }
+  return aligned;
+}
+
+function parseSubstructureMatchAtoms(value: unknown): number[] {
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text || text === '-1' || text === '[]' || text === 'null' || text === '{}') return [];
+    try {
+      return parseSubstructureMatchAtoms(JSON.parse(text));
+    } catch {
+      return [];
+    }
+  }
+  if (Array.isArray(value)) {
+    const flat: number[] = [];
+    value.forEach((item) => {
+      if (typeof item === 'number' && Number.isFinite(item) && item >= 0) {
+        flat.push(Math.floor(item));
+        return;
+      }
+      if (Array.isArray(item)) {
+        item.forEach((sub) => {
+          if (typeof sub === 'number' && Number.isFinite(sub) && sub >= 0) {
+            flat.push(Math.floor(sub));
+          }
+        });
+      }
+    });
+    return Array.from(new Set(flat));
+  }
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    if (Array.isArray(obj.atoms)) {
+      return parseSubstructureMatchAtoms(obj.atoms);
+    }
+    return [];
+  }
+  return [];
 }
 
 export function renderLigand2DSvg(
   rdkit: RDKitModule,
-  { smiles, width, height, atomConfidences = null, confidenceHint = null }: Ligand2DRenderOptions
+  {
+    smiles,
+    width,
+    height,
+    atomConfidences = null,
+    confidenceHint = null,
+    highlightQuery = null,
+    highlightAtomIndices = null,
+    templateSmiles = null
+  }: Ligand2DRenderOptions
 ): string {
   const value = smiles.trim();
   if (!value) {
@@ -144,23 +327,59 @@ export function renderLigand2DSvg(
   if (!sourceMol) {
     throw new Error('Invalid SMILES for RDKit.');
   }
-  const resolved = buildPerAtomConfidenceWithMol(rdkit, atomConfidences, confidenceHint, sourceMol);
+  const explicitHighlightAtoms = Array.isArray(highlightAtomIndices)
+    ? Array.from(
+        new Set(
+          highlightAtomIndices
+            .map((value) => Number(value))
+            .filter((value) => Number.isFinite(value) && value >= 0)
+            .map((value) => Math.floor(value))
+        )
+      )
+    : [];
+  const resolved = buildPerAtomConfidenceWithMol(rdkit, atomConfidences, confidenceHint, sourceMol, {
+    // Keep backend-provided highlight indices on the exact same atom ordering.
+    allowAlternateMol: explicitHighlightAtoms.length === 0
+  });
   const mol = resolved.renderMol || sourceMol;
   const atomCount = resolved.atomCount;
   const perAtomConfidence = resolved.perAtomConfidence;
+  const compactCanvas = Math.min(width, height) <= 140;
+  const depictionPadding = compactCanvas ? 0.045 : 0.03;
+  const fixedFontSize = compactCanvas
+    ? atomCount > 80
+      ? 9
+      : atomCount > 52
+        ? 10
+        : 11
+    : atomCount > 80
+      ? 10
+      : atomCount > 52
+        ? 11
+        : 13;
 
   try {
+    // Ensure deterministic base orientation before template matching.
     mol.set_new_coords?.();
-    mol.normalize_depiction?.();
+    const alignedByTemplate = tryAlignDepictionToTemplate(rdkit, mol, templateSmiles)
+      || tryAlignDepictionToTemplate(rdkit, mol, templateSmiles);
+    if (!alignedByTemplate) {
+      mol.normalize_depiction?.();
+    }
     let rawSvg = '';
     if (typeof mol.get_svg_with_highlights === 'function') {
       try {
         const details: Record<string, unknown> = {
           width,
           height,
+          padding: depictionPadding,
+          clearBackground: false,
           minFontSize: 9,
-          fixedFontSize: atomCount > 80 ? 10 : atomCount > 52 ? 11 : 13,
-          maxFontSize: 36
+          fixedFontSize,
+          maxFontSize: 36,
+          drawOptions: {
+            padding: depictionPadding
+          }
         };
 
         if (perAtomConfidence.length > 0) {
@@ -183,6 +402,65 @@ export function renderLigand2DSvg(
           details.highlightBonds = [];
         }
 
+        if (explicitHighlightAtoms.length > 0) {
+          if (perAtomConfidence.length === 0) {
+            const highlightAtoms = Array.isArray(details.highlightAtoms)
+              ? ([...details.highlightAtoms] as number[])
+              : [];
+            const highlightAtomColors = (details.highlightAtomColors || {}) as Record<number, [number, number, number]>;
+            const highlightAtomRadii = (details.highlightAtomRadii || {}) as Record<number, number>;
+            explicitHighlightAtoms.forEach((atomIdx) => {
+              if (!highlightAtoms.includes(atomIdx)) highlightAtoms.push(atomIdx);
+              highlightAtomColors[atomIdx] = [0.95, 0.79, 0.43];
+              highlightAtomRadii[atomIdx] = 0.34;
+            });
+            details.atoms = highlightAtoms;
+            details.highlightAtoms = highlightAtoms;
+            details.highlightAtomColors = highlightAtomColors;
+            details.highlightAtomRadii = highlightAtomRadii;
+            details.highlightRadii = highlightAtomRadii;
+            details.fillHighlights = false;
+            details.atomHighlightsAreCircles = true;
+            details.highlightBonds = [];
+          }
+        } else if (highlightQuery && highlightQuery.trim()) {
+          const queryMol =
+            (typeof rdkit.get_qmol === 'function' ? rdkit.get_qmol(highlightQuery.trim()) : null) ||
+            rdkit.get_mol(highlightQuery.trim());
+          if (queryMol) {
+            try {
+              let matchedAtoms: number[] = [];
+              if (typeof mol.get_substruct_match === 'function') {
+                matchedAtoms = parseSubstructureMatchAtoms(mol.get_substruct_match(queryMol));
+              }
+              if (matchedAtoms.length === 0 && typeof mol.get_substruct_matches === 'function') {
+                matchedAtoms = parseSubstructureMatchAtoms(mol.get_substruct_matches(queryMol));
+              }
+              if (matchedAtoms.length > 0) {
+                const highlightAtoms = Array.isArray(details.highlightAtoms)
+                  ? ([...details.highlightAtoms] as number[])
+                  : [];
+                const highlightAtomColors = (details.highlightAtomColors || {}) as Record<number, [number, number, number]>;
+                const highlightAtomRadii = (details.highlightAtomRadii || {}) as Record<number, number>;
+                matchedAtoms.forEach((atomIdx) => {
+                  if (!highlightAtoms.includes(atomIdx)) highlightAtoms.push(atomIdx);
+                  highlightAtomColors[atomIdx] = [0.94, 0.55, 0.18];
+                  highlightAtomRadii[atomIdx] = 0.34;
+                });
+                details.atoms = highlightAtoms;
+                details.highlightAtoms = highlightAtoms;
+                details.highlightAtomColors = highlightAtomColors;
+                details.highlightAtomRadii = highlightAtomRadii;
+                details.highlightRadii = highlightAtomRadii;
+                details.fillHighlights = true;
+                details.atomHighlightsAreCircles = true;
+              }
+            } finally {
+              queryMol.delete();
+            }
+          }
+        }
+
         rawSvg = mol.get_svg_with_highlights(JSON.stringify(details));
       } catch {
         rawSvg = '';
@@ -194,7 +472,7 @@ export function renderLigand2DSvg(
     if (!rawSvg) {
       throw new Error('RDKit returned empty SVG.');
     }
-    return injectReadabilityStyle(rawSvg);
+    return enforceSvgCanvasFit(injectReadabilityStyle(injectAtomRingOverlay(rawSvg, explicitHighlightAtoms)));
   } finally {
     mol.delete();
     if (mol !== sourceMol) {

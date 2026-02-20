@@ -14,6 +14,7 @@ import re
 import base64
 import zipfile
 from datetime import datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 import importlib.util
@@ -46,6 +47,24 @@ def _ensure_repo_root_on_path() -> Path | None:
     return None
 
 _ensure_repo_root_on_path()
+
+
+@lru_cache(maxsize=1)
+def _load_local_mmp_query_runner():
+    """Load mmp_query_service from current workspace path, avoiding site-packages shadowing."""
+    module_path = BASE_DIR / "lead_optimization" / "mmp_query_service.py"
+    if not module_path.exists():
+        raise RuntimeError(f"Local mmp_query_service.py not found at: {module_path}")
+    spec = importlib.util.spec_from_file_location("lead_optimization_local_mmp_query_service", str(module_path))
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to load module spec from: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    runner = getattr(module, "run_mmp_query", None)
+    if not callable(runner):
+        raise RuntimeError("run_mmp_query callable not found in local mmp_query_service.py")
+    logger.info("Lead-opt MMP query runner loaded from local path: %s", module_path)
+    return runner
 
 try:
     import psutil
@@ -1907,9 +1926,11 @@ def lead_optimization_task(self, optimization_args: dict):
         os.makedirs(output_dir, exist_ok=True)
 
         opt_config = _load_lead_optimization_config()
-        db_path = opt_config.mmp_database.database_path
-        if not db_path or not os.path.exists(db_path):
-            raise RuntimeError(f"MMP database not found: {db_path}")
+        db_url = str(getattr(opt_config.mmp_database, "database_url", "") or "").strip()
+        if not db_url:
+            raise RuntimeError("MMP PostgreSQL database_url is required (LEAD_OPT_MMP_DB_URL).")
+        if not (db_url.lower().startswith("postgresql://") or db_url.lower().startswith("postgres://")):
+            raise RuntimeError("MMP database must be PostgreSQL DSN (postgresql://...).")
         if not _mmpdb_available():
             raise RuntimeError("mmpdb CLI not available. Install mmpdb or ensure it is in PATH.")
 
@@ -1921,12 +1942,23 @@ def lead_optimization_task(self, optimization_args: dict):
         input_compound = optimization_args.get('input_compound')
         input_file_path = None
         expected_compounds = None
+        reference_target_path = None
+        reference_ligand_path = None
 
         if optimization_args.get('input_file_base64'):
             input_filename = optimization_args.get('input_filename', 'input_compounds.csv')
             input_file_path = os.path.join(input_dir, input_filename)
             _write_base64_file(optimization_args['input_file_base64'], input_file_path, text_mode=False)
             expected_compounds = _count_compounds(input_file_path)
+
+        if optimization_args.get('reference_target_file_base64'):
+            reference_target_name = optimization_args.get('reference_target_filename', 'reference_target.pdb')
+            reference_target_path = os.path.join(input_dir, reference_target_name)
+            _write_base64_file(optimization_args['reference_target_file_base64'], reference_target_path, text_mode=False)
+        if optimization_args.get('reference_ligand_file_base64'):
+            reference_ligand_name = optimization_args.get('reference_ligand_filename', 'reference_ligand.sdf')
+            reference_ligand_path = os.path.join(input_dir, reference_ligand_name)
+            _write_base64_file(optimization_args['reference_ligand_file_base64'], reference_ligand_path, text_mode=False)
 
         options = optimization_args.get('options', {})
 
@@ -1976,10 +2008,29 @@ def lead_optimization_task(self, optimization_args: dict):
             command.extend(["--variable_smarts", str(options['variable_smarts'])])
         if options.get('variable_const_smarts'):
             command.extend(["--variable_const_smarts", str(options['variable_const_smarts'])])
+        if options.get('objective_profile'):
+            command.extend(["--objective_profile", str(options['objective_profile'])])
+        for json_option in ("property_constraints", "property_objectives", "fragment_policies", "workflow_context"):
+            option_value = options.get(json_option)
+            if isinstance(option_value, dict):
+                command.extend([f"--{json_option}", json.dumps(option_value, ensure_ascii=False)])
+        if options.get('target_chain'):
+            command.extend(["--target_chain", str(options['target_chain'])])
+        if options.get('ligand_chain'):
+            command.extend(["--ligand_chain", str(options['ligand_chain'])])
+        if options.get('enable_affinity'):
+            command.append("--enable_affinity")
+        ligand_smiles_map = options.get('ligand_smiles_map')
+        if isinstance(ligand_smiles_map, dict) and ligand_smiles_map:
+            command.extend(["--ligand_smiles_map", json.dumps(ligand_smiles_map, ensure_ascii=False)])
         if options.get('verbosity') is not None:
             command.extend(["--verbosity", str(options['verbosity'])])
         if options.get('backend'):
             command.extend(["--backend", str(options['backend'])])
+        if reference_target_path:
+            command.extend(["--reference_target_file", reference_target_path])
+        if reference_ligand_path:
+            command.extend(["--reference_ligand_file", reference_ligand_path])
 
         env = os.environ.copy()
         env["BOLTZ_API_TOKEN"] = config.BOLTZ_API_TOKEN
@@ -2091,3 +2142,50 @@ def lead_optimization_task(self, optimization_args: dict):
         if tracker:
             tracker.stop_heartbeat()
             logger.info(f"Task {task_id}: Cleanup completed")
+
+
+@celery_app.task(bind=True)
+def lead_optimization_mmp_query_task(self, payload: dict):
+    """Run Lead Opt MMP query asynchronously for responsive API UX."""
+    task_id = self.request.id
+    redis_client = get_redis_client()
+    progress_key = f"lead_optimization:mmp_query:progress:{task_id}"
+    started_at = time.time()
+    try:
+        _store_progress(
+            redis_client,
+            progress_key,
+            {
+                "task_id": task_id,
+                "status": "running",
+                "started_at": datetime.now().isoformat(),
+            },
+        )
+        self.update_state(state="PROGRESS", meta={"status": "running"})
+        payload_obj = payload if isinstance(payload, dict) else {}
+        logger.info(
+            "Lead-opt MMP task payload: db_id=%s schema=%s has_runtime=%s",
+            str(payload_obj.get("mmp_database_id") or "").strip() or "<empty>",
+            str(payload_obj.get("mmp_database_schema") or "").strip() or "<empty>",
+            bool(str(payload_obj.get("mmp_database_runtime") or "").strip()),
+        )
+        run_mmp_query_runner = _load_local_mmp_query_runner()
+        result = run_mmp_query_runner(payload_obj)
+        result_payload = {
+            "status": "completed",
+            "task_id": task_id,
+            "elapsed_seconds": max(0.0, time.time() - started_at),
+            **result,
+        }
+        _store_progress(redis_client, progress_key, result_payload)
+        return result_payload
+    except Exception as exc:
+        failed_payload = {
+            "task_id": task_id,
+            "status": "failed",
+            "error": _truncate_text(exc, MAX_EXCEPTION_MESSAGE_CHARS),
+            "failed_at": datetime.now().isoformat(),
+        }
+        _store_progress(redis_client, progress_key, failed_payload)
+        self.update_state(state="FAILURE", meta=_build_failure_meta(exc))
+        raise

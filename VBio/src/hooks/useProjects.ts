@@ -34,8 +34,9 @@ function mapTaskState(raw: string): Project['task_state'] {
   if (normalized === 'SUCCESS') return 'SUCCESS';
   if (normalized === 'FAILURE') return 'FAILURE';
   if (normalized === 'REVOKED') return 'REVOKED';
-  if (normalized === 'PENDING') return 'QUEUED';
-  return 'RUNNING';
+  if (normalized === 'PENDING' || normalized === 'RECEIVED' || normalized === 'RETRY') return 'QUEUED';
+  if (normalized === 'STARTED' || normalized === 'RUNNING' || normalized === 'PROGRESS') return 'RUNNING';
+  return 'QUEUED';
 }
 
 function readStatusText(status: { info?: Record<string, unknown>; state: string }): string {

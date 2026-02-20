@@ -1,0 +1,79 @@
+.task-header-inline-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.task-structure-query-row > .jsme-editor-container.task-structure-jsme-shell {
+  border: 1px solid #dbe6df;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+  width: min(100%, 720px);
+  max-width: 720px;
+  min-height: 300px;
+  margin-inline: auto;
+}
+
+.task-structure-query-row {
+  gap: 10px;
+}
+
+.task-structure-query-row > .task-structure-query-head,
+.task-structure-query-row > .task-structure-query-status {
+  width: min(100%, 720px);
+  margin-inline: auto;
+}
+
+.task-structure-query-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.task-structure-query-head > span {
+  font-size: var(--text-2xs);
+  color: #597063;
+  letter-spacing: 0.2px;
+  font-weight: 600;
+}
+
+.task-structure-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid #d8e4dd;
+  border-radius: 999px;
+  background: #f4faf6;
+}
+
+.task-structure-mode-btn {
+  border: 0;
+  background: transparent;
+  color: #4f695d;
+  border-radius: 999px;
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  line-height: 1;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.task-structure-mode-btn.active {
+  background: #deeee4;
+  color: #204633;
+}
+
+.task-structure-query-status {
+  font-size: var(--text-2xs);
+  color: #5f786b;
+  line-height: 1.2;
+  text-align: right;
+}
+
+.task-structure-query-status.is-error {
+  color: #8a2626;
+}
+

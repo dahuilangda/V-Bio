@@ -205,6 +205,22 @@ def _choose_ligand_chain_id(structure: Any) -> str:
 
 
 def _pick_atom_name(atom: Any, serial: int) -> str:
+    return _pick_atom_name_with_index(atom, serial, None)
+
+
+def _encode_heavy_atom_tag(index: int) -> str:
+    chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    value = max(0, int(index))
+    digits = ["0", "0", "0"]
+    for i in range(2, -1, -1):
+        digits[i] = chars[value % 36]
+        value //= 36
+    return f"Q{''.join(digits)}"
+
+
+def _pick_atom_name_with_index(atom: Any, serial: int, smiles_atom_index: int | None) -> str:
+    if smiles_atom_index is not None and smiles_atom_index >= 0:
+        return _encode_heavy_atom_tag(smiles_atom_index)
     if atom.HasProp("_TriposAtomName"):
         name = atom.GetProp("_TriposAtomName").strip()
         if name:
@@ -217,7 +233,40 @@ def _pick_atom_name(atom: Any, serial: int) -> str:
     return f"{symbol[:2]}{serial % 100:02d}"[:4]
 
 
-def _append_ligand_chain(structure: Any, ligand_mol: Any, ligand_chain_id: str) -> None:
+def _build_heavy_to_smiles_index_map(ligand_mol: Any, ligand_smiles: str) -> dict[int, int]:
+    Chem = _load_chem()
+    template = Chem.RemoveHs(Chem.Mol(ligand_mol), sanitize=False)
+    if template is None or template.GetNumAtoms() <= 0:
+        return {}
+
+    tagged = Chem.Mol(template)
+    for idx, atom in enumerate(tagged.GetAtoms()):
+        atom.SetAtomMapNum(int(idx + 1))
+    try:
+        tagged_smiles = Chem.MolToSmiles(tagged, canonical=False, rootedAtAtom=0)
+        mapped_mol = Chem.MolFromSmiles(tagged_smiles)
+    except Exception:
+        mapped_mol = None
+    if mapped_mol is None or mapped_mol.GetNumAtoms() != template.GetNumAtoms():
+        return {}
+
+    mapping: dict[int, int] = {}
+    for smiles_idx, atom in enumerate(mapped_mol.GetAtoms()):
+        map_num = int(atom.GetAtomMapNum() or 0)
+        if map_num <= 0:
+            continue
+        mapping[int(map_num - 1)] = int(smiles_idx)
+    if len(mapping) != template.GetNumAtoms():
+        return {}
+    return mapping
+
+
+def _append_ligand_chain(
+    structure: Any,
+    ligand_mol: Any,
+    ligand_chain_id: str,
+    heavy_to_smiles_atom_index: dict[int, int] | None = None,
+) -> None:
     gemmi = _load_gemmi()
     if len(structure) == 0:
         structure.add_model(gemmi.Model("1"))
@@ -231,11 +280,18 @@ def _append_ligand_chain(structure: Any, ligand_mol: Any, ligand_chain_id: str) 
     residue.seqid = gemmi.SeqId(1, " ")
 
     conformer = ligand_mol.GetConformer()
+    heavy_atom_index = -1
+    mapping = heavy_to_smiles_atom_index or {}
     for idx in range(ligand_mol.GetNumAtoms()):
         atom = ligand_mol.GetAtomWithIdx(idx)
         position = conformer.GetAtomPosition(idx)
         gemmi_atom = gemmi.Atom()
-        gemmi_atom.name = _pick_atom_name(atom, idx + 1)
+        is_hydrogen = int(atom.GetAtomicNum() or 0) == 1
+        smiles_atom_index: int | None = None
+        if not is_hydrogen:
+            heavy_atom_index += 1
+            smiles_atom_index = mapping.get(heavy_atom_index, heavy_atom_index)
+        gemmi_atom.name = _pick_atom_name_with_index(atom, idx + 1, smiles_atom_index)
         gemmi_atom.element = gemmi.Element(atom.GetSymbol() or "C")
         gemmi_atom.pos = gemmi.Position(float(position.x), float(position.y), float(position.z))
         residue.add_atom(gemmi_atom)
@@ -358,8 +414,9 @@ def build_affinity_preview(
             if ligand_suffix in {".sdf", ".sd", ".mol2", ".mol"}:
                 ligand_mol = _load_ligand_from_file(ligand_path)
                 ligand_smiles = _to_ligand_smiles(ligand_mol)
+                heavy_to_smiles_atom_index = _build_heavy_to_smiles_index_map(ligand_mol, ligand_smiles)
                 chain_id = _choose_ligand_chain_id(structure)
-                _append_ligand_chain(structure, ligand_mol, chain_id)
+                _append_ligand_chain(structure, ligand_mol, chain_id, heavy_to_smiles_atom_index)
                 ligand_chain_ids = [chain_id]
                 ligand_is_small_molecule = True
             elif ligand_suffix in {".pdb", ".ent"}:
@@ -370,8 +427,9 @@ def build_affinity_preview(
                     try:
                         ligand_mol = _load_ligand_from_file(ligand_path)
                         ligand_smiles = _to_ligand_smiles(ligand_mol)
+                        heavy_to_smiles_atom_index = _build_heavy_to_smiles_index_map(ligand_mol, ligand_smiles)
                         chain_id = _choose_ligand_chain_id(structure)
-                        _append_ligand_chain(structure, ligand_mol, chain_id)
+                        _append_ligand_chain(structure, ligand_mol, chain_id, heavy_to_smiles_atom_index)
                         ligand_chain_ids = [chain_id]
                         ligand_is_small_molecule = True
                     except Exception:

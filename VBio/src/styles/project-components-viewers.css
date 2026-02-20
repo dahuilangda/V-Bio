@@ -1,0 +1,553 @@
+.component-jsme-shell {
+  border: 1px solid #d8e6de;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #f8fcfa 0%, #f1f7f3 100%);
+  padding: 10px;
+  box-shadow: 0 1px 2px rgba(19, 43, 31, 0.06);
+  width: 100%;
+  min-width: 0;
+}
+
+.component-jsme-shell .jsme-host {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.molstar-host {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  position: relative;
+  width: 100%;
+  height: clamp(560px, 74vh, 880px);
+  min-height: 560px;
+  background: #fff;
+}
+
+.molstar-host > .msp-plugin {
+  position: absolute;
+  inset: 0;
+}
+
+.molstar-host.molstar-host-locked {
+  cursor: crosshair;
+}
+
+.molstar-host .msp-plugin,
+.molstar-host .msp-plugin-content,
+.molstar-host .msp-layout-standard,
+.molstar-host .msp-layout-expanded,
+.molstar-host .msp-layout-static,
+.molstar-host .msp-viewport {
+  background: #fff !important;
+}
+
+.molstar-host .msp-sequence-wrapper,
+.molstar-host .msp-sequence-view {
+  background: #fff !important;
+}
+
+.molstar-host [class*='msp-control'],
+.molstar-host [class*='msp-btn'],
+.molstar-host [class*='msp-collapse'],
+.molstar-host [class*='msp-panel'] {
+  border-color: #d8e0e7 !important;
+  color: #2f4150 !important;
+}
+
+.molstar-host [class*='msp-control'],
+.molstar-host [class*='msp-collapse-header'],
+.molstar-host [class*='msp-btn'] {
+  background: #fff !important;
+}
+
+.molstar-host [class*='msp-btn']:hover,
+.molstar-host [class*='msp-collapse-header']:hover {
+  background: #f3f6f8 !important;
+}
+
+.molstar-host .msp-plugin .msp-form-control,
+.molstar-host .msp-plugin input.msp-form-control,
+.molstar-host .msp-plugin select.msp-form-control,
+.molstar-host .msp-plugin textarea.msp-form-control,
+.molstar-host .msp-plugin .msp-form-control input,
+.molstar-host .msp-plugin .msp-form-control select,
+.molstar-host .msp-plugin .msp-form-control textarea {
+  background: #fff !important;
+  border-color: #d8e0e7 !important;
+  color: #2f4150 !important;
+  box-shadow: none !important;
+}
+
+.molstar-host .msp-plugin .msp-form-control:focus,
+.molstar-host .msp-plugin input.msp-form-control:focus,
+.molstar-host .msp-plugin select.msp-form-control:focus,
+.molstar-host .msp-plugin textarea.msp-form-control:focus,
+.molstar-host .msp-plugin .msp-form-control input:focus,
+.molstar-host .msp-plugin .msp-form-control select:focus,
+.molstar-host .msp-plugin .msp-form-control textarea:focus {
+  outline: 1px solid #afc0d0 !important;
+  box-shadow: none !important;
+}
+
+.molstar-host .msp-plugin .msp-form-control option,
+.molstar-host .msp-plugin select.msp-form-control option,
+.molstar-host .msp-plugin .msp-form-control select option {
+  background: #fff !important;
+  color: #2f4150 !important;
+}
+
+.molstar-host [class*='msp-btn'] svg,
+.molstar-host [class*='msp-icon'] svg {
+  color: #2f4150 !important;
+  fill: currentColor !important;
+  stroke: currentColor !important;
+}
+
+.molstar-host [class*='msp-sequence'] {
+  border-color: #d8e0e7 !important;
+}
+
+.molstar-host [class*='msp-layout-left'],
+.molstar-host [class*='msp-layout-right'],
+.molstar-host [class*='msp-left-panel'],
+.molstar-host [class*='msp-right-panel'],
+.molstar-host [class*='msp-sequence-wrapper'],
+.molstar-host [class*='msp-sequence-view'],
+.molstar-host [class*='msp-sequence-header'],
+.molstar-host [class*='msp-control-group-header'],
+.molstar-host [class*='msp-control-group-body'],
+.molstar-host [class*='msp-collapse-content'],
+.molstar-host [class*='msp-scroll'] {
+  background: #fff !important;
+  border-color: #d8e0e7 !important;
+}
+
+.molstar-host [class*='msp-sequence'] [class*='highlight'],
+.molstar-host [class*='msp-sequence'] [class*='selection'],
+.molstar-host [class*='msp-sequence'] [class*='marker'] {
+  background: #8fb5a2 !important;
+  border-color: #7ea892 !important;
+}
+
+.molstar-host [class*='msp-sequence'] {
+  color: #2f4150 !important;
+}
+
+/* Explicit fix for sequence root block */
+.molstar-host .msp-plugin .msp-sequence,
+.molstar-host .msp-plugin .msp-sequence > div {
+  background: #fff !important;
+  border-color: #d8e0e7 !important;
+  color: #2f4150 !important;
+}
+
+/* Sequence top strip / overview track: neutralize residual warm tones */
+.molstar-host [class*='msp-sequence'] [class*='top'],
+.molstar-host [class*='msp-sequence'] [class*='overview'],
+.molstar-host [class*='msp-sequence'] [class*='strip'],
+.molstar-host [class*='msp-sequence'] [class*='track'] {
+  background: #fff !important;
+  border-color: #d8e0e7 !important;
+}
+
+/* Explicit fix for sequence selector remaining warm/brown */
+.molstar-host .msp-plugin .msp-sequence-select,
+.molstar-host .msp-plugin select.msp-sequence-select,
+.molstar-host .msp-plugin .msp-sequence-select select {
+  background: #fff !important;
+  border-color: #d8e0e7 !important;
+  color: #2f4150 !important;
+}
+
+.molstar-host .msp-plugin .msp-sequence-select option,
+.molstar-host .msp-plugin .msp-sequence-select select option {
+  background: #fff !important;
+  color: #2f4150 !important;
+}
+
+.molstar-host .msp-plugin .msp-sequence-select:focus,
+.molstar-host .msp-plugin .msp-sequence-select select:focus {
+  outline: 1px solid #afc0d0 !important;
+  box-shadow: none !important;
+}
+
+/* Explicit fix for control-group header still showing warm tone */
+.molstar-host .msp-plugin .msp-control-group-header > button,
+.molstar-host .msp-plugin .msp-control-group-header > div {
+  background: #fff !important;
+  border-color: #d8e0e7 !important;
+  color: #2f4150 !important;
+}
+
+.molstar-host .msp-plugin .msp-control-group-header > button:hover,
+.molstar-host .msp-plugin .msp-control-group-header > div:hover {
+  background: #f3f6f8 !important;
+}
+
+.molstar-host .msp-plugin .msp-control-group-header > button:active,
+.molstar-host .msp-plugin .msp-control-group-header > button:focus {
+  background: #edf2f6 !important;
+  outline: 1px solid #afc0d0 !important;
+  box-shadow: none !important;
+}
+
+.ligand-preview-panel {
+  background: transparent;
+  padding: 0;
+}
+
+.overview-ligand-sequence {
+  border: 1px solid #e7efe9;
+  border-radius: 8px;
+  background: #fff;
+  min-height: 150px;
+  padding: 8px 6px 6px;
+  display: grid;
+  align-content: center;
+}
+
+.overview-ligand-sequence-lines {
+  width: 100%;
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+}
+
+.overview-ligand-sequence-line {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 22px;
+  column-gap: 2px;
+  align-items: center;
+}
+
+.overview-ligand-sequence-line-track {
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: nowrap;
+}
+
+.overview-ligand-sequence-line-index {
+  font-family: 'IBM Plex Mono', 'SFMono-Regular', Menlo, monospace;
+  font-size: 8px;
+  line-height: 1;
+  color: #6a8075;
+  text-align: center;
+}
+
+.overview-ligand-sequence-line-index.left {
+  text-align: left;
+}
+
+.overview-ligand-sequence-line-index.right {
+  text-align: right;
+}
+
+.overview-ligand-sequence-node {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.overview-ligand-sequence-link {
+  width: 3px;
+  height: 1px;
+  border-radius: 999px;
+  background: #ccd9d2;
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.overview-ligand-sequence-residue {
+  width: 16px;
+  height: 16px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  font-family: 'IBM Plex Mono', 'SFMono-Regular', Menlo, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  color: #2a4c3e;
+  background: #f2f7f4;
+  box-shadow: inset 0 0 0 0.5px rgba(58, 79, 69, 0.1);
+}
+
+.overview-ligand-sequence-residue.tone-excellent {
+  background: #e9f2ff;
+  color: #0f3f9a;
+}
+
+.overview-ligand-sequence-residue.tone-good {
+  background: #ebf8fd;
+  color: #1f6b8f;
+}
+
+.overview-ligand-sequence-residue.tone-medium {
+  background: #fff8df;
+  color: #8a6200;
+}
+
+.overview-ligand-sequence-residue.tone-low {
+  background: #fff0ea;
+  color: #a6451d;
+}
+
+.overview-ligand-sequence-residue.tone-neutral {
+  background: #f2f7f4;
+  color: #567166;
+}
+
+.overview-ligand-sequence-link.tone-excellent {
+  background: #8db4ff;
+}
+
+.overview-ligand-sequence-link.tone-good {
+  background: #9ed6eb;
+}
+
+.overview-ligand-sequence-link.tone-medium {
+  background: #ead48b;
+}
+
+.overview-ligand-sequence-link.tone-low {
+  background: #edb199;
+}
+
+.overview-ligand-sequence-link.tone-neutral {
+  background: #ccd9d2;
+}
+
+.ligand-prop-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.ligand-prop-item {
+  border: 1px solid #dfeae3;
+  border-radius: 8px;
+  padding: 6px;
+  background: #fff;
+  display: grid;
+  gap: 2px;
+}
+
+.ligand-prop-item span {
+  color: var(--muted);
+  font-size: var(--text-2xs);
+}
+
+.ligand-prop-item strong {
+  font-size: var(--text-sm);
+  line-height: 1.1;
+}
+
+.ligand-prop-value {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.ligand-prop-empty {
+  border: 1px dashed #c7d8cc;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  padding: 8px;
+  text-align: center;
+}
+
+.ligand-radar-shell {
+  border: 1px solid #dfeae3;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #f8fcfa 0%, #f4faf7 100%);
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.ligand-radar {
+  width: 100%;
+  max-width: 240px;
+  margin: 0 auto;
+  display: block;
+}
+
+.ligand-radar-ring {
+  fill: none;
+  stroke: #d7e6de;
+  stroke-width: 1;
+}
+
+.ligand-radar-axis {
+  stroke: #dbe7e0;
+  stroke-width: 1;
+}
+
+.ligand-radar-axis-label {
+  font-size: 10px;
+  font-weight: 600;
+  fill: #4f6459;
+  letter-spacing: 0.15px;
+  pointer-events: none;
+}
+
+.ligand-radar-area {
+  fill: url(#ligand-radar-fill);
+  stroke: none;
+}
+
+.ligand-radar-stroke {
+  fill: none;
+  stroke: #0f5ec4;
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+
+.ligand-radar-dot {
+  fill: #fff;
+  stroke: #0f5ec4;
+  stroke-width: 1.6;
+}
+
+.ligand-radar-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+}
+
+.ligand-radar-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #dbe7e0;
+  border-radius: 999px;
+  background: #fff;
+  padding: 4px 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ligand-radar-chip span {
+  font-size: var(--text-2xs);
+  color: #5f7468;
+}
+
+.ligand-radar-chip strong {
+  font-size: var(--text-xs);
+  line-height: 1;
+}
+
+.ligand-preview-svg-wrap {
+  border: 1px solid #e7efe9;
+  border-radius: 8px;
+  background: #fff;
+  min-height: 150px;
+  overflow: hidden;
+}
+
+.ligand-preview-svg {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-height: 150px;
+}
+
+.ligand-preview-svg svg {
+  width: 100%;
+  height: auto;
+  max-height: 210px;
+}
+
+.ligand-preview-svg svg text {
+  paint-order: stroke;
+  stroke: rgba(255, 255, 255, 0.92);
+  stroke-width: 1.1px;
+  stroke-linejoin: round;
+}
+
+.ligand-preview-empty {
+  border: 1px dashed #c7d8cc;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  min-height: 120px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  padding: 10px;
+}
+
+.jsme-host {
+  border: 0;
+  border-radius: 11px;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  background: #fff;
+  overflow: visible;
+  padding: 0;
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  box-shadow:
+    inset 0 0 0 1px #e0ebe4,
+    0 1px 2px rgba(22, 46, 35, 0.05);
+}
+
+.jsme-editor-shell {
+  width: 100%;
+  min-width: 0;
+  display: block;
+}
+
+.jsme-editor-container {
+  width: 100%;
+  min-width: 0;
+  border-radius: 12px;
+}
+
+.jsme-mount {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-width: 100%;
+  border-radius: 10px;
+  overflow: visible;
+}
+
+.jsme-mount > * {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.legend-row {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.legend-item {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+}
+
+.legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+

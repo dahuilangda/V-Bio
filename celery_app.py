@@ -22,6 +22,7 @@ celery_app = Celery(
 celery_app.conf.task_queues = (
     Queue('high_priority', routing_key='high_priority'),
     Queue('default', routing_key='default'),
+    Queue(config.CPU_QUEUE, routing_key=config.CPU_QUEUE),
 )
 celery_app.conf.task_default_queue = 'default'
 celery_app.conf.task_default_exchange = 'default'
@@ -34,6 +35,17 @@ celery_app.conf.update(
     timezone='UTC',
     enable_utc=True,
     task_create_missing_queues=True,
+    # Reliability: avoid losing tasks when worker crashes/restarts.
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    broker_connection_retry_on_startup=True,
+    broker_transport_options={
+        # Must be larger than expected long-running prediction tasks.
+        "visibility_timeout": 24 * 60 * 60,
+    },
+    task_track_started=True,
+    worker_send_task_events=True,
+    task_send_sent_event=True,
 )
 
 # Ensure workers request tasks one at a time to avoid queue starvation and

@@ -1,0 +1,137 @@
+.inputs-panel {
+  max-width: none;
+}
+
+.inputs-subtabs {
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f5faf7;
+  width: fit-content;
+}
+
+.inputs-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1.9fr) minmax(250px, 320px);
+  gap: 10px;
+  align-items: start;
+}
+
+.inputs-workspace.components-resizable {
+  grid-template-columns: minmax(0, var(--inputs-main-width, 74%)) 10px minmax(250px, 1fr);
+  gap: 6px;
+}
+
+.inputs-workspace.constraints-focus {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.inputs-main {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.basics-panel {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr);
+  align-items: start;
+}
+
+.basics-panel .field:nth-of-type(2) {
+  grid-column: 1 / -1;
+}
+
+.component-runtime-settings {
+  margin-top: 2px;
+}
+
+.component-runtime-settings-row {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(260px, 1fr) minmax(220px, 1fr);
+  align-items: start;
+}
+
+.affinity-basics-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.affinity-basics-controls {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(250px, 320px);
+  align-items: end;
+}
+
+.affinity-upload-field {
+  min-width: 0;
+}
+
+.affinity-field-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.affinity-basics-inline-options {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: flex-start;
+  min-width: 0;
+  align-self: end;
+  min-height: 42px;
+}
+
+.affinity-inline-toggle {
+  grid-auto-flow: column;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  min-height: 42px;
+  white-space: nowrap;
+}
+
+.affinity-inline-toggle > input[type='checkbox'] {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+}
+
+.affinity-toggles-hint {
+  text-align: right;
+  line-height: 1.3;
+  margin-top: -2px;
+}
+
+.affinity-upload-ok {
+  color: #2e6c53;
+}
+
+.affinity-section-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.affinity-title-with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.affinity-chain-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.affinity-jsme-shell {
+  width: 100%;
+}

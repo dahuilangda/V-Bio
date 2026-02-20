@@ -4,6 +4,7 @@ import type { AppUser } from '../types/models';
 import { hashPassword } from '../utils/crypto';
 import { formatDateTime } from '../utils/date';
 import { insertUser, listUsers, updateUser } from '../api/supabaseLite';
+import { MmpDatabaseAdminPanel } from '../components/admin/MmpDatabaseAdminPanel';
 
 export function UsersPage() {
   const [users, setUsers] = useState<AppUser[]>([]);
@@ -90,7 +91,12 @@ export function UsersPage() {
           <h1>User Management</h1>
           <p className="muted">Create users, grant admin role, reset passwords, and deactivate accounts.</p>
         </div>
-        <button className="btn btn-ghost" onClick={() => void load()}>
+        <button
+          className="btn btn-ghost"
+          onClick={() => {
+            void load();
+          }}
+        >
           <RefreshCcw size={14} />
           Refresh
         </button>
@@ -174,7 +180,8 @@ export function UsersPage() {
           </div>
         )}
       </section>
+
+      <MmpDatabaseAdminPanel />
     </div>
   );
 }
-

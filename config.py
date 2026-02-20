@@ -48,7 +48,7 @@ def print_config_debug_info():
     print("="*60)
 
     config_vars = [
-        'REDIS_URL', 'MAX_CONCURRENT_TASKS', 'CENTRAL_API_URL',
+        'REDIS_URL', 'MAX_CONCURRENT_TASKS', 'CPU_MAX_CONCURRENT_TASKS', 'CENTRAL_API_URL',
         'MSA_SERVER_URL', 'RESULTS_BASE_DIR', 'BOLTZ_API_TOKEN'
     ]
 
@@ -78,6 +78,8 @@ CELERY_RESULT_BACKEND = REDIS_URL
 HIGH_PRIORITY_QUEUE = 'high_priority'
 # 默认队列
 DEFAULT_QUEUE = 'default'
+# CPU 任务专用队列（与 GPU 预测任务隔离）
+CPU_QUEUE = 'cpu_queue'
 
 # ==============================================================================
 # 2. Worker & GPU 配置
@@ -87,6 +89,10 @@ DEFAULT_QUEUE = 'default'
 # Worker 可以同时运行的最大并发任务数。
 # 这是一个“期望值”，实际的并发数应在 Worker 启动时根据可用 GPU 动态调整。
 MAX_CONCURRENT_TASKS = int(os.environ.get("MAX_CONCURRENT_TASKS", 2))
+
+# CPU worker 并发（用于 CPU_QUEUE，独立于 GPU 数量）
+# 0 表示自动使用本机全部 CPU 核心。
+CPU_MAX_CONCURRENT_TASKS = int(os.environ.get("CPU_MAX_CONCURRENT_TASKS", 0))
 
 # -- GPU 设备选择 --
 # 通过环境变量 GPU_DEVICE_IDS 指定可用的 GPU ID 列表（例如："0,1,3"）。
@@ -121,6 +127,10 @@ VIRTUAL_SCREENING_OUTPUT_DIR = os.environ.get(
 LEAD_OPTIMIZATION_OUTPUT_DIR = os.environ.get(
     "LEAD_OPTIMIZATION_OUTPUT_DIR",
     "/data/boltz_lead_optimization_results"
+)
+LEAD_OPT_MMP_QUERY_CACHE_DIR = os.environ.get(
+    "LEAD_OPT_MMP_QUERY_CACHE_DIR",
+    str(Path(__file__).parent / "lead_optimization" / "data" / "mmp_query_cache"),
 )
 
 # -- 中心 API 地址 --

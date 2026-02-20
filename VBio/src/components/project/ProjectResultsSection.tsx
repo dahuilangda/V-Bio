@@ -5,7 +5,7 @@ import { LigandPropertyGrid } from './LigandPropertyGrid';
 import { MetricsPanel } from './MetricsPanel';
 import { MolstarViewer } from './MolstarViewer';
 
-interface ProjectResultsSectionProps {
+export interface ProjectResultsSectionProps {
   isPredictionWorkflow: boolean;
   isAffinityWorkflow: boolean;
   workflowTitle: string;

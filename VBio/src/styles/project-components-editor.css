@@ -1,0 +1,289 @@
+.component-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.component-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.component-add-quick {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.component-add-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-inline: 10px;
+}
+
+.component-type-glyph {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  line-height: 1;
+}
+
+.component-type-pill {
+  min-width: 24px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #c9d9cf;
+  background: #f7fbf8;
+  color: #2f4f40;
+}
+
+.component-card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.component-add-kind.type-protein,
+.component-type-pill.type-protein {
+  border-color: #b9d2c3;
+  color: #255443;
+  background: #edf6f1;
+}
+
+.component-add-kind.type-ligand,
+.component-type-pill.type-ligand {
+  border-color: #cdd3e4;
+  color: #344b82;
+  background: #f1f4fb;
+}
+
+.component-add-kind.type-dna,
+.component-type-pill.type-dna,
+.component-add-kind.type-rna,
+.component-type-pill.type-rna {
+  border-color: #d4d7dd;
+  color: #495567;
+  background: #f5f6f9;
+}
+
+.protein-template-upload input[type='file'] {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  padding: 8px 10px;
+  font-size: var(--text-sm);
+}
+
+.template-upload-meta {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid #d7e4dc;
+  border-radius: 10px;
+  background: #f8fcf9;
+  padding: 8px 10px;
+  font-size: var(--text-xs);
+  color: #355547;
+}
+
+.field-error {
+  color: var(--danger);
+  font-size: var(--text-xs);
+}
+
+.component-list {
+  display: grid;
+  gap: 8px;
+}
+
+.component-card {
+  gap: 7px;
+  padding: 10px;
+  scroll-margin-top: 108px;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+}
+
+.component-card.component-tone-green {
+  background: linear-gradient(180deg, #f8fcf9 0%, #f2f8f4 100%);
+  border-color: #d8e5dd;
+}
+
+.component-card.component-tone-slate {
+  background: linear-gradient(180deg, #f8f9fb 0%, #f1f3f6 100%);
+  border-color: #dde2e8;
+}
+
+.component-card.active {
+  border-color: #93b8a1;
+  box-shadow: 0 0 0 1px #d1e3d8 inset;
+}
+
+.component-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.component-card-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.component-card-summary {
+  border: 1px dashed rgba(125, 146, 134, 0.34);
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: rgba(255, 255, 255, 0.64);
+}
+
+.component-meta {
+  display: grid;
+  gap: 5px;
+  grid-template-columns: 1fr 1fr auto auto;
+  align-items: end;
+}
+
+.component-meta-compact {
+  grid-template-columns: 1fr 1fr;
+}
+
+.component-content-split {
+  display: grid;
+  gap: 6px;
+}
+
+.component-content-split.has-side {
+  grid-template-columns: minmax(0, 0.95fr) minmax(400px, 1.28fr);
+  align-items: start;
+}
+
+.component-content-main {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.component-content-side {
+  display: grid;
+  align-content: start;
+  min-width: 0;
+}
+
+.component-side-field {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  min-width: 0;
+}
+
+.component-content-side .component-template-inline {
+  width: 100%;
+  max-width: none;
+}
+
+.component-content-side .jsme-editor-container {
+  width: 100%;
+  max-width: none;
+}
+
+.component-card .field,
+.component-card .switch-field {
+  gap: 4px;
+}
+
+.component-card .field span,
+.component-card .switch-field span {
+  font-size: var(--text-xs);
+}
+
+.component-card input,
+.component-card select {
+  padding: 8px 10px;
+  font-size: var(--text-sm);
+}
+
+.component-card textarea {
+  padding: 8px 10px;
+  font-size: var(--text-sm);
+  line-height: 1.35;
+}
+
+.component-card .switch-tight {
+  margin-top: 19px;
+}
+
+.component-card .btn.btn-compact {
+  padding: 6px 10px;
+  font-size: var(--text-xs);
+}
+
+.component-card-ligand {
+  gap: 6px;
+}
+
+.component-card-ligand .component-meta {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.component-card-ligand .component-content-split-ligand.has-side {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  align-items: stretch;
+}
+
+.component-card-ligand .component-content-side .jsme-editor-container {
+  max-width: none;
+}
+
+.ligand-input-left,
+.ligand-input-right {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+
+.component-card-ligand .ligand-input-left {
+  height: 100%;
+}
+
+.component-card-ligand .ligand-input-right {
+  height: 100%;
+}
+
+.component-card-ligand .ligand-input-right .component-side-field {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.component-card-ligand .ligand-input-right .component-jsme-shell {
+  margin-top: auto;
+}
+
+.ligand-live-props {
+  display: grid;
+  gap: 6px;
+}
+
+.ligand-live-props span {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.ligand-live-props.align-bottom {
+  margin-top: auto;
+}
+

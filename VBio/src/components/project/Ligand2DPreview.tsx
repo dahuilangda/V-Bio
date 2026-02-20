@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import { renderLigand2DSvg } from '../../utils/ligand2d';
 import { loadRDKitModule } from '../../utils/rdkit';
 
@@ -8,6 +8,9 @@ interface Ligand2DPreviewProps {
   height?: number;
   atomConfidences?: number[] | null;
   confidenceHint?: number | null;
+  highlightQuery?: string | null;
+  highlightAtomIndices?: number[] | null;
+  templateSmiles?: string | null;
 }
 
 export function Ligand2DPreview({
@@ -15,10 +18,23 @@ export function Ligand2DPreview({
   width = 340,
   height = 210,
   atomConfidences = null,
-  confidenceHint = null
+  confidenceHint = null,
+  highlightQuery = null,
+  highlightAtomIndices = null,
+  templateSmiles = null
 }: Ligand2DPreviewProps) {
   const [svg, setSvg] = useState<string>('');
   const [error, setError] = useState<string>('');
+
+  const atomConfidenceSignature = useMemo(() => {
+    if (!Array.isArray(atomConfidences) || atomConfidences.length === 0) return '';
+    return atomConfidences.map((value) => Number(value).toFixed(2)).join(',');
+  }, [atomConfidences]);
+
+  const highlightAtomSignature = useMemo(() => {
+    if (!Array.isArray(highlightAtomIndices) || highlightAtomIndices.length === 0) return '';
+    return highlightAtomIndices.map((value) => Math.floor(Number(value) || 0)).join(',');
+  }, [highlightAtomIndices]);
 
   useEffect(() => {
     let cancelled = false;
@@ -41,7 +57,10 @@ export function Ligand2DPreview({
           width,
           height,
           atomConfidences,
-          confidenceHint
+          confidenceHint,
+          highlightQuery,
+          highlightAtomIndices,
+          templateSmiles
         });
         if (cancelled) return;
         setSvg(rendered);
@@ -56,7 +75,7 @@ export function Ligand2DPreview({
     return () => {
       cancelled = true;
     };
-  }, [smiles, width, height, atomConfidences, confidenceHint]);
+  }, [smiles, width, height, confidenceHint, highlightQuery, templateSmiles, atomConfidenceSignature, highlightAtomSignature]);
 
   if (!smiles.trim()) {
     return <div className="ligand-preview-empty">No ligand input.</div>;
@@ -76,3 +95,5 @@ export function Ligand2DPreview({
     </div>
   );
 }
+
+export const MemoLigand2DPreview = memo(Ligand2DPreview);

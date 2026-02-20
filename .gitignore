@@ -45,7 +45,6 @@ data/affinity2.yaml
 virtual_screening/LM
 virtual_screening/small_molecule_results/
 method.md
-lead_optimization/data/chembl_*
 docs/
 data/fold_input.json
 .gitignore
@@ -82,3 +81,13 @@ VBio/supabase-lite/.env
 !VBio/supabase-lite/.env.example
 VBio/supabase-lite/data/
 VBio/.run/
+# Lead Optimization
+lead_optimization/postgres/.env
+lead_optimization/postgres/data/
+lead_optimization/data/mmp_query_cache/
+lead_optimization/data/chembl_*
+lead_optimization/data/.mmp_staging.db
+lead_optimization/data/*.db
+lead_optimization/data/*.sqlite
+lead_optimization/data/*.sqlite3
+lead_optimization/**/__pycache__/

@@ -1,0 +1,254 @@
+.task-col-submitted {
+  min-width: 272px;
+  white-space: normal;
+}
+
+.task-submitted-cell {
+  display: grid;
+  gap: 4px;
+}
+
+.task-submitted-title {
+  font-weight: 700;
+  color: #123126;
+  line-height: 1.2;
+}
+
+.task-submitted-title-btn {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: text;
+}
+
+.task-submitted-title-btn:hover {
+  color: #0f4f35;
+}
+
+.task-submitted-title-btn:disabled {
+  cursor: default;
+}
+
+.task-submitted-title-input {
+  width: min(320px, 100%);
+  max-width: 100%;
+  border: 1px solid #b9cdc2;
+  border-radius: 8px;
+  padding: 3px 8px;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  line-height: 1.2;
+  color: #123126;
+  background: #f8fbf9;
+}
+
+.task-submitted-title-input:focus {
+  outline: none;
+  border-color: #328064;
+  box-shadow: 0 0 0 2px rgba(50, 128, 100, 0.16);
+}
+
+.task-submitted-summary {
+  color: #4d685b;
+  font-size: var(--text-2xs);
+  line-height: 1.25;
+}
+
+.task-submitted-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.task-submitted-time {
+  color: #1c382d;
+  font-weight: 600;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.task-state-chip,
+.task-workflow-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  padding: 2px 8px;
+  font-size: var(--text-2xs);
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.task-state-chip.draft {
+  color: #4b5650;
+  border-color: #c6d0ca;
+  background: #eef2ef;
+}
+
+.task-state-chip.queued {
+  color: #1f4a72;
+  border-color: #99b5d3;
+  background: #e8f1fb;
+}
+
+.task-state-chip.running {
+  color: #6a4a0f;
+  border-color: #d8b474;
+  background: #fff2db;
+}
+
+.task-state-chip.success {
+  color: #1d5b3f;
+  border-color: #8fc2a9;
+  background: #e5f5ec;
+}
+
+.task-state-chip.failure {
+  color: #8a2626;
+  border-color: #e1a7a7;
+  background: #fdeeee;
+}
+
+.task-state-chip.revoked {
+  color: #5d4f66;
+  border-color: #c9bdd0;
+  background: #f3eef6;
+}
+
+.task-workflow-chip.workflow-prediction {
+  color: #285172;
+  border-color: #aac4db;
+  background: #eef6fd;
+}
+
+.task-workflow-chip.workflow-affinity {
+  color: #5a3a87;
+  border-color: #cbb7e9;
+  background: #f4effd;
+}
+
+.task-workflow-chip.workflow-lead-optimization {
+  color: #5f4712;
+  border-color: #e2c588;
+  background: #fff6e6;
+}
+
+.task-col-backend {
+  min-width: 110px;
+}
+
+.task-backend-badge {
+  text-transform: lowercase;
+}
+
+.task-col-seed {
+  min-width: 86px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.task-col-metric {
+  min-width: 86px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: #3e5c4f;
+}
+
+.task-metric-value {
+  font-weight: 700;
+}
+
+.task-col-mmp {
+  min-width: 280px;
+  white-space: normal;
+}
+
+.task-mmp-cell {
+  display: block;
+}
+
+.task-mmp-inline {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0;
+  min-height: 24px;
+}
+
+.task-mmp-inline-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding-right: 10px;
+  margin-right: 10px;
+  position: relative;
+}
+
+.task-mmp-inline-item:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 3px;
+  bottom: 3px;
+  width: 1px;
+  background: #c8dbcf;
+}
+
+.task-mmp-inline-key {
+  color: #2f5b4c;
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.task-mmp-inline-value {
+  color: #123f30;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-mmp-empty {
+  color: #2f5b4c;
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.task-run-note {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 1.3;
+  max-width: 340px;
+  white-space: normal;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.task-run-note.is-running {
+  color: #6a4a0f;
+}
+
+.task-run-note.is-queued {
+  color: #1f4a72;
+}
+
+.task-run-note.is-success {
+  color: #1d5b3f;
+}
+
+.task-run-note.is-failure {
+  color: #8a2626;
+  font-weight: 600;
+}
+
+.task-run-note.is-revoked {
+  color: #5d4f66;
+}

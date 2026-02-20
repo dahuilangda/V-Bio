@@ -1,0 +1,55 @@
+.task-table {
+  min-width: 1120px;
+  --task-row-pad-y: 7px;
+  --task-ligand-inner-h: 120px;
+  --task-ligand-thumb-h: 120px;
+  --task-ligand-thumb-w: 184px;
+  --task-ligand-col-w: 196px;
+  --task-ligand-svg-max-h: 104px;
+}
+
+.task-table-wrap {
+  border-color: #d3e0d8;
+}
+
+.task-table thead th {
+  position: static;
+  top: auto;
+}
+
+.task-table td {
+  padding-top: var(--task-row-pad-y);
+  padding-bottom: var(--task-row-pad-y);
+}
+
+.task-table th,
+.task-table td {
+  vertical-align: middle;
+}
+
+.task-th-sort {
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.task-th-sort .project-th {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.task-th-sort.active {
+  color: #2f5443;
+}
+
+.task-th-arrow {
+  font-size: var(--text-2xs);
+  color: #728b7f;
+  margin-left: auto;
+}
+

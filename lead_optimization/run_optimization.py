@@ -1,430 +1,58 @@
 #!/usr/bin/env python3
+"""Legacy lead optimization submit runner shim.
 
+The historical optimization-engine pipeline is removed.
+VBio lead optimization now runs through MMP workflow APIs.
 """
-Lead optimization script - optimized version
-Uses MMPDB + Boltz-WebUI for drug lead optimization
-"""
+
+from __future__ import annotations
 
 import argparse
-import os
-import sys
-import logging
-import time
+import csv
 import json
+import sys
+import time
 from pathlib import Path
-from typing import Optional, List, Dict, Any
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lead_optimization.config import OptimizationConfig, load_config
-from lead_optimization.optimization_engine import OptimizationEngine, OptimizationResult
-from lead_optimization.result_analyzer import OptimizationAnalyzer
-from lead_optimization.exceptions import OptimizationError
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Legacy lead optimization runner (disabled).")
+    parser.add_argument("--target_config", type=str, required=False)
+    parser.add_argument("--input_compound", type=str, required=False)
+    parser.add_argument("--input_file", type=str, required=False)
+    parser.add_argument("--output_dir", type=str, required=True)
+    return parser
 
-def setup_logging(verbosity: int = 1):
-    """Setup logging configuration"""
-    log_levels = {
-        0: logging.WARNING,
-        1: logging.INFO,
-        2: logging.DEBUG
+
+def main() -> int:
+    parser = _build_parser()
+    args, _unknown = parser.parse_known_args()
+
+    output_dir = Path(args.output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = {
+        "status": "deprecated",
+        "message": (
+            "Legacy /api/lead_optimization/submit pipeline has been disabled. "
+            "Use Lead Optimization MMP workflow APIs instead."
+        ),
+        "created_at": time.time(),
     }
-    
-    level = log_levels.get(verbosity, logging.INFO)
-    
-    logging.basicConfig(
-        level=level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler('optimization.log')
-        ]
+    (output_dir / "optimization_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
 
-def validate_inputs(args) -> bool:
-    """Validate input arguments"""
-    # Check mutually exclusive inputs
-    if args.input_compound and args.input_file:
-        print("错误: --input_compound 和 --input_file 不能同时指定")
-        return False
-    
-    if not args.input_compound and not args.input_file:
-        print("错误: 必须指定 --input_compound 或 --input_file")
-        return False
-    
-    # Check target protein file
-    if not os.path.isfile(args.target_config):
-        print(f"错误: 目标配置文件未找到: {args.target_config}")
-        return False
-    
-    # Check input file if specified
-    if args.input_file and not os.path.isfile(args.input_file):
-        print(f"错误: 输入文件未找到: {args.input_file}")
-        return False
-    
-    # Validate strategy
-    valid_strategies = ['scaffold_hopping', 'fragment_replacement', 'multi_objective']
-    if args.optimization_strategy not in valid_strategies:
-        print(f"错误: 无效的优化策略. 可用策略: {', '.join(valid_strategies)}")
-        return False
-    
-    return True
+    with (output_dir / "optimization_results.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["status", "message"])
+        writer.writerow(["deprecated", summary["message"]])
 
-def create_output_directory(base_dir: str, prefix: str = "optimization") -> str:
-    """Create unique output directory"""
-    timestamp = int(time.time())
-    output_dir = os.path.join(base_dir, f"{prefix}_{timestamp}")
-    os.makedirs(output_dir, exist_ok=True)
-    return output_dir
+    sys.stderr.write(f"{summary['message']}\n")
+    return 2
 
-def run_single_optimization(engine: OptimizationEngine,
-                          compound_smiles: str,
-                          target_config: str,
-                          strategy: str,
-                          max_candidates: int,
-                          output_dir: str,
-                          iterations: int = 1,
-                          batch_size: int = 4,
-                          top_k_per_iteration: int = 5,
-                          diversity_weight: float = 0.3,
-                          similarity_threshold: float = 0.5,
-                          max_similarity_threshold: float = 0.9,
-                          diversity_selection_strategy: str = "tanimoto_diverse",
-                          max_chiral_centers: int = None,
-                          core_smarts: str = None,
-                          exclude_smarts: str = None,
-                          rgroup_smarts: str = None,
-                          variable_smarts: str = None,
-                          variable_const_smarts: str = None) -> OptimizationResult:
-    """Run optimization for a single compound with iterative evolution"""
-    logger = logging.getLogger(__name__)
-    
-    logger.info("=== 开始迭代化合物优化 ===")
-    logger.info(f"输入化合物: {compound_smiles}")
-    logger.info(f"优化策略: {strategy}")
-    logger.info(f"迭代次数: {iterations}")
-    logger.info(f"每轮最大候选数: {max_candidates}")
-    logger.info(f"批次大小: {batch_size}")
-    logger.info(f"每轮保留前K: {top_k_per_iteration}")
-    logger.info(f"多样性权重: {diversity_weight}")
-    logger.info(f"相似性范围: {similarity_threshold} - {max_similarity_threshold}")
-    logger.info(f"多样性选择策略: {diversity_selection_strategy}")
-    if core_smarts:
-        logger.info(f"核心片段限制: {core_smarts}")
-    if exclude_smarts:
-        logger.info(f"排除片段限制: {exclude_smarts}")
-    if rgroup_smarts:
-        logger.info(f"R-group 片段限制: {rgroup_smarts}")
-    if variable_smarts:
-        logger.info(f"严格可变片段: {variable_smarts}")
-    if variable_const_smarts:
-        logger.info(f"可变片段常量约束: {variable_const_smarts}")
-    
-    try:
-        result = engine.optimize_compound(
-            compound_smiles=compound_smiles,
-            target_protein_yaml=target_config,
-            strategy=strategy,
-            max_candidates=max_candidates,
-            output_dir=output_dir,
-            iterations=iterations,
-            batch_size=batch_size,
-            top_k_per_iteration=top_k_per_iteration,
-            diversity_weight=diversity_weight,
-            similarity_threshold=similarity_threshold,
-            max_similarity_threshold=max_similarity_threshold,
-            diversity_selection_strategy=diversity_selection_strategy,
-            max_chiral_centers=max_chiral_centers,
-            core_smarts=core_smarts,
-            exclude_smarts=exclude_smarts,
-            rgroup_smarts=rgroup_smarts,
-            variable_smarts=variable_smarts,
-            variable_const_smarts=variable_const_smarts
-        )
-        
-        logger.info("=== 优化完成 ===")
-        logger.info(f"生成候选化合物: {len(result.candidates)}")
-        logger.info(f"成功评估: {len(result.scores)}")
-        logger.info(f"执行时间: {result.execution_time:.2f}秒")
-        
-        if result.top_candidates:
-            logger.info(f"最佳候选评分: {result.top_candidates[0]['combined_score']:.4f}")
-            logger.info(f"最佳候选SMILES: {result.top_candidates[0]['smiles']}")
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"优化失败: {e}")
-        raise
-
-def run_batch_optimization(engine: OptimizationEngine,
-                         compounds_file: str,
-                         target_config: str,
-                         strategy: str,
-                         max_candidates: int,
-                         output_dir: str,
-                         core_smarts: str = None,
-                         exclude_smarts: str = None,
-                         rgroup_smarts: str = None,
-                         variable_smarts: str = None,
-                         variable_const_smarts: str = None) -> Dict[str, OptimizationResult]:
-    """Run optimization for multiple compounds"""
-    logger = logging.getLogger(__name__)
-    
-    logger.info("=== 开始批量优化 ===")
-    logger.info(f"输入文件: {compounds_file}")
-    logger.info(f"优化策略: {strategy}")
-    logger.info(f"每化合物最大候选数: {max_candidates}")
-    
-    try:
-        results = engine.batch_optimize(
-            compounds_file=compounds_file,
-            target_protein_yaml=target_config,
-            strategy=strategy,
-            max_candidates=max_candidates,
-            output_dir=output_dir,
-            core_smarts=core_smarts,
-            exclude_smarts=exclude_smarts,
-            rgroup_smarts=rgroup_smarts,
-            variable_smarts=variable_smarts,
-            variable_const_smarts=variable_const_smarts
-        )
-        
-        logger.info("=== 批量优化完成 ===")
-        logger.info(f"处理化合物数: {len(results)}")
-        
-        # Statistics
-        successful = len([r for r in results.values() if r.top_candidates])
-        logger.info(f"成功优化: {successful}/{len(results)}")
-        
-        return results
-        
-    except Exception as e:
-        logger.error(f"批量优化失败: {e}")
-        raise
-
-def save_results(results: Dict[str, Any], output_dir: str):
-    """Save results to files (JSON summary only - real-time CSV already exists)"""
-    logger = logging.getLogger(__name__)
-    
-    # Save summary JSON only (no final CSV needed)
-    summary_file = os.path.join(output_dir, "optimization_summary.json")
-    with open(summary_file, 'w') as f:
-        json.dump(results, f, indent=2, default=str)
-    
-    logger.info(f"Optimization summary saved to: {summary_file}")
-    logger.info(f"Real-time results are available in: {output_dir}/optimization_results_live.csv")
-
-def main():
-    parser = argparse.ArgumentParser(description="Lead Optimization using MMPDB + Boltz-WebUI")
-    
-    # Input options
-    parser.add_argument("--input_compound", type=str, help="Input compound SMILES")
-    parser.add_argument("--input_file", type=str, help="Input file (CSV or text) with compounds")
-    parser.add_argument("--target_config", type=str, required=True, help="Target protein YAML config")
-    parser.add_argument("--backend", type=str, choices=["boltz", "alphafold3", "protenix"],
-                       help="Backend engine for prediction")
-    
-    # Optimization parameters
-    parser.add_argument("--optimization_strategy", type=str, default="scaffold_hopping",
-                       choices=["scaffold_hopping", "fragment_replacement", "multi_objective"],
-                       help="Optimization strategy")
-    parser.add_argument("--max_candidates", type=int, default=50,
-                       help="Maximum candidates per iteration")
-    parser.add_argument("--iterations", type=int, default=1,
-                       help="Number of optimization iterations (genetic evolution)")
-    parser.add_argument("--batch_size", type=int, default=4,
-                       help="Number of compounds to submit to Boltz simultaneously")
-    parser.add_argument("--top_k_per_iteration", type=int, default=5,
-                       help="Top compounds to use as seeds for next iteration")
-    
-    # Diversity control options
-    parser.add_argument("--diversity_weight", type=float, default=0.3,
-                       help="Weight for diversity in compound selection (0.0-1.0)")
-    parser.add_argument("--similarity_threshold", type=float, default=0.5,
-                       help="Minimum similarity threshold for candidate selection")
-    parser.add_argument("--max_similarity_threshold", type=float, default=0.9,
-                       help="Maximum similarity threshold to avoid too similar compounds")
-    parser.add_argument("--diversity_selection_strategy", type=str, default="tanimoto_diverse",
-                       choices=["tanimoto_diverse", "scaffold_diverse", "property_diverse", "hybrid"],
-                       help="Strategy for diverse compound selection")
-    
-    # Chirality control
-    parser.add_argument("--max_chiral_centers", type=int, default=None,
-                       help="Maximum number of chiral centers allowed in generated compounds (default: same as reference)")
-    
-    # Output options
-    parser.add_argument("--output_dir", type=str, help="Output directory")
-    parser.add_argument("--generate_report", action="store_true", help="Generate HTML report")
-    parser.add_argument("--core_smarts", type=str, default=None,
-                       help="Core substructure (SMILES/SMARTS) to keep unchanged")
-    parser.add_argument("--exclude_smarts", type=str, default=None,
-                       help="Substructure (SMILES/SMARTS) to exclude from candidates")
-    parser.add_argument("--rgroup_smarts", type=str, default=None,
-                       help="R-group style scaffold (SMILES/SMARTS) with [*] for editable positions")
-    parser.add_argument("--variable_smarts", type=str, default=None,
-                       help="Strict variable fragments (SMILES/SMARTS) from auto split")
-    parser.add_argument("--variable_const_smarts", type=str, default=None,
-                       help="Constant fragments for strict variable mode")
-    
-    # System options
-    parser.add_argument("--parallel_workers", type=int, default=1, 
-                       help="Number of parallel workers for batch processing")
-    parser.add_argument("--verbosity", type=int, default=1, choices=[0, 1, 2],
-                       help="Logging verbosity (0=WARNING, 1=INFO, 2=DEBUG)")
-    
-    args = parser.parse_args()
-    
-    # Setup logging
-    setup_logging(args.verbosity)
-    logger = logging.getLogger(__name__)
-    
-    # Validate inputs
-    if not validate_inputs(args):
-        sys.exit(1)
-    
-    try:
-        # Load configuration
-        config = load_config()
-        
-        # Create output directory
-        if not args.output_dir:
-            args.output_dir = create_output_directory(".", "lead_optimization")
-        else:
-            os.makedirs(args.output_dir, exist_ok=True)
-        
-        logger.info(f"输出目录: {args.output_dir}")
-        
-        # Initialize engine
-        if args.backend:
-            config.boltz_api.backend = args.backend
-
-        engine = OptimizationEngine(config)
-        
-        # Run optimization
-        results = {}
-        
-        if args.input_compound:
-            # Single compound optimization
-            result = run_single_optimization(
-                engine=engine,
-                compound_smiles=args.input_compound,
-                target_config=args.target_config,
-                strategy=args.optimization_strategy,
-                max_candidates=args.max_candidates,
-                output_dir=args.output_dir,
-                iterations=args.iterations,
-                batch_size=args.batch_size,
-                top_k_per_iteration=args.top_k_per_iteration,
-                diversity_weight=args.diversity_weight,
-                similarity_threshold=args.similarity_threshold,
-                max_similarity_threshold=args.max_similarity_threshold,
-                diversity_selection_strategy=args.diversity_selection_strategy,
-                max_chiral_centers=args.max_chiral_centers,
-                core_smarts=args.core_smarts,
-                exclude_smarts=args.exclude_smarts,
-                rgroup_smarts=args.rgroup_smarts,
-                variable_smarts=args.variable_smarts,
-                variable_const_smarts=args.variable_const_smarts
-            )
-            results["single_compound"] = result
-            
-        else:
-            # Batch optimization
-            results = run_batch_optimization(
-                engine=engine,
-                compounds_file=args.input_file,
-                target_config=args.target_config,
-                strategy=args.optimization_strategy,
-                max_candidates=args.max_candidates,
-                output_dir=args.output_dir,
-                core_smarts=args.core_smarts,
-                exclude_smarts=args.exclude_smarts,
-                rgroup_smarts=args.rgroup_smarts,
-                variable_smarts=args.variable_smarts,
-                variable_const_smarts=args.variable_const_smarts
-            )
-        
-        # Save results
-        save_results(results, args.output_dir)
-        
-        # Generate HTML report if requested
-        if args.generate_report:
-            try:
-                # 准备优化数据用于分析器
-                optimization_data = {
-                    'original_compound': args.input_compound or 'batch_input',
-                    'strategy': args.optimization_strategy,
-                    'execution_time': 0,  # 这个值会从结果中获取
-                    'statistics': {},
-                    'top_candidates': []
-                }
-                
-                # 从results中提取数据
-                if args.input_compound and 'single_compound' in results:
-                    result = results['single_compound']
-                    optimization_data['execution_time'] = result.execution_time
-                    optimization_data['top_candidates'] = result.top_candidates or []
-                    optimization_data['statistics'] = {
-                        'total_candidates': len(result.candidates),
-                        'successful_evaluations': len(result.scores),
-                        'success_rate': len(result.scores) / len(result.candidates) if result.candidates else 0
-                    }
-                else:
-                    # 批处理结果
-                    all_candidates = []
-                    total_time = 0
-                    total_candidates = 0
-                    successful_evaluations = 0
-                    
-                    for compound_id, result in results.items():
-                        if hasattr(result, 'top_candidates') and result.top_candidates:
-                            all_candidates.extend(result.top_candidates)
-                        if hasattr(result, 'execution_time'):
-                            total_time += result.execution_time
-                        if hasattr(result, 'candidates'):
-                            total_candidates += len(result.candidates)
-                        if hasattr(result, 'scores'):
-                            successful_evaluations += len(result.scores)
-                    
-                    # 按评分排序并取前10个
-                    all_candidates.sort(key=lambda x: x.get('combined_score', 0), reverse=True)
-                    optimization_data['top_candidates'] = all_candidates[:10]
-                    optimization_data['execution_time'] = total_time
-                    optimization_data['statistics'] = {
-                        'total_compounds': len(results),
-                        'total_candidates': total_candidates,
-                        'successful_evaluations': successful_evaluations,
-                        'success_rate': successful_evaluations / total_candidates if total_candidates else 0
-                    }
-                
-                # 初始化分析器
-                analyzer = OptimizationAnalyzer(optimization_data, args.output_dir)
-                
-                # 生成图表
-                plots = analyzer.generate_optimization_plots()
-                logger.info(f"成功生成 {len(plots)} 个分析图表")
-                
-                # 保存CSV结果
-                analyzer.save_results_to_csv()
-                logger.info("分析结果已保存为CSV格式")
-                
-                # 生成HTML报告
-                html_report_path = analyzer.generate_html_report(results)
-                logger.info(f"HTML报告已生成: {html_report_path}")
-                
-                logger.info(f"优化分析完成，结果保存在: {args.output_dir}")
-                
-            except Exception as e:
-                logger.warning(f"生成分析报告失败: {e}")
-                import traceback
-                logger.debug(f"详细错误信息: {traceback.format_exc()}")
-        
-        logger.info("=== 优化任务完成 ===")
-        print(f"结果保存在: {args.output_dir}")
-        
-    except Exception as e:
-        logger.error(f"优化任务失败: {e}")
-        sys.exit(1)
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
+

@@ -1,0 +1,294 @@
+.component-sidebar {
+  position: sticky;
+  top: 86px;
+  gap: 6px;
+}
+
+.component-sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.component-sidebar-head h3 {
+  font-size: var(--text-lg);
+}
+
+.component-sidebar-head-meta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.component-count-chip,
+.component-readiness-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: var(--text-2xs);
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: 0.15px;
+  white-space: nowrap;
+}
+
+.component-count-chip {
+  color: #4e665a;
+  border-color: #d5e2db;
+  background: #f2f7f4;
+}
+
+.component-readiness-chip.complete {
+  color: #1e5d42;
+  border-color: #9cc7b1;
+  background: #e8f6ee;
+}
+
+.component-readiness-chip.incomplete {
+  color: #8b2f2f;
+  border-color: #e1b3b3;
+  background: #fdeeee;
+}
+
+.component-sidebar-note {
+  border-top: 1px dashed #cad8d0;
+  padding-top: 8px;
+}
+
+.component-sidebar-section {
+  display: grid;
+  gap: 5px;
+}
+
+.component-tree-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px;
+}
+
+.component-sidebar-section-head {
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+.component-sidebar-toggle {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  font: inherit;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+}
+
+.component-sidebar-toggle-static {
+  cursor: default;
+}
+
+.component-tree-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.component-tree-add {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+
+.component-sidebar-list {
+  display: grid;
+  gap: 5px;
+}
+
+.component-sidebar-list-components {
+  margin-left: 6px;
+  padding-left: 8px;
+  border-left: 1px dashed #d8e3dc;
+}
+
+.component-sidebar-list-nested {
+  margin-left: 6px;
+  padding-left: 8px;
+  border-left: 1px dashed #d8e3dc;
+}
+
+.component-sidebar-link {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  text-align: left;
+}
+
+.affinity-sidebar-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.affinity-enable-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: #365748;
+}
+
+.affinity-enable-toggle input[type='checkbox'] {
+  width: 14px;
+  height: 14px;
+}
+
+.affinity-field {
+  gap: 4px;
+  border: 1px solid #d4e1d9;
+  border-radius: 9px;
+  background: #f8fcf9;
+  padding: 6px;
+}
+
+.affinity-key {
+  font-size: 11px;
+  font-weight: 700;
+  color: #365748;
+  letter-spacing: 0.15px;
+}
+
+.affinity-field select {
+  background-color: #fff;
+  border-color: #cfdcd5;
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+
+.component-sidebar-link-meta {
+  margin-left: 10px;
+}
+
+.component-sidebar-link.active {
+  border-color: #9fc0ab;
+  background: #eef6f1;
+}
+
+.component-sidebar-link-constraint {
+  display: grid;
+  gap: 3px;
+  align-items: start;
+  justify-items: start;
+}
+
+.component-sidebar-empty {
+  border: 1px dashed #d0ddd6;
+  border-radius: 9px;
+  padding: 8px 9px;
+}
+
+.workflow-note {
+  border: 1px dashed #c4d8ca;
+  border-radius: 10px;
+  padding: 10px;
+  background: #f7fbf8;
+  color: #2b4a3b;
+  font-size: var(--text-sm);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes runSubmitFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes runSubmitCardLift {
+  from {
+    opacity: 0;
+    transform: translateY(-2px) scale(0.998);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes runToastIn {
+  from {
+    opacity: 0;
+    transform: translateY(-2px) translateX(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) translateX(0);
+  }
+}
+
+@keyframes runFabIn {
+  from {
+    opacity: 0;
+    transform: translateY(1px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes statusPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(31, 79, 63, 0.3);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(31, 79, 63, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(31, 79, 63, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .run-submit-transition,
+  .run-submit-transition-card,
+  .run-inline-toast,
+  .run-fab {
+    animation: none;
+  }
+}
+

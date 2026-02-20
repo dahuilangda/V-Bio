@@ -1,0 +1,22 @@
+services:
+  leadopt-mmp-db:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: leadopt_mmp_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${LEADOPT_MMP_POSTGRES_DB:-leadopt_mmp}
+      POSTGRES_USER: ${LEADOPT_MMP_POSTGRES_USER:-leadopt}
+      POSTGRES_PASSWORD: ${LEADOPT_MMP_POSTGRES_PASSWORD:-leadopt}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${LEADOPT_MMP_POSTGRES_USER:-leadopt} -d ${LEADOPT_MMP_POSTGRES_DB:-leadopt_mmp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - ./data:/var/lib/postgresql/data
+      - ./init/01-extensions.sql:/docker-entrypoint-initdb.d/01-extensions.sql:ro
+    ports:
+      - "${LEADOPT_MMP_POSTGRES_PORT:-54330}:5432"

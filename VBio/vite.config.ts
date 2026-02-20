@@ -21,7 +21,8 @@ function normalizeProxyTarget(raw?: string): string {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
   const normalizedApiBase = normalizeProxyTarget(env.VITE_API_BASE_URL);
-  const target = normalizedApiBase || 'http://127.0.0.1:5000';
+  const centralApiBase = normalizeProxyTarget(env.CENTRAL_API_URL);
+  const target = normalizedApiBase || centralApiBase || 'http://127.0.0.1:5000';
   const supabaseTarget =
     normalizeProxyTarget(env.VITE_SUPABASE_REST_PROXY_TARGET) ||
     normalizeProxyTarget(env.VITE_SUPABASE_REST_URL) ||

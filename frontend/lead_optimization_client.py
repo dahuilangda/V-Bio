@@ -1,4 +1,5 @@
 import os
+import json
 from typing import Optional, Dict
 
 import requests
@@ -32,7 +33,12 @@ def submit_lead_optimization(
     if options:
         for key, value in options.items():
             if value is not None:
-                data[key] = str(value)
+                if isinstance(value, (dict, list)):
+                    data[key] = json.dumps(value, ensure_ascii=False)
+                elif isinstance(value, bool):
+                    data[key] = 'true' if value else 'false'
+                else:
+                    data[key] = str(value)
 
     response = requests.post(endpoint, headers=headers, files=files, data=data)
     response.raise_for_status()

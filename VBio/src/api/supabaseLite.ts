@@ -342,7 +342,6 @@ export async function listProjectTasksForList(projectId: string): Promise<Projec
     'seed',
     'protein_sequence',
     'ligand_smiles',
-    'components',
     'properties',
     'confidence',
     'structure_name',

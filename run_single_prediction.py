@@ -2193,6 +2193,68 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
         print(f"❌ 生成 MSA 时出现错误: {e}", file=sys.stderr)
         return False
 
+
+def _inject_local_msa_paths_into_yaml(yaml_content: str, temp_dir: str) -> Tuple[str, int]:
+    try:
+        yaml_data = yaml.safe_load(yaml_content) or {}
+    except Exception:
+        return yaml_content, 0
+    if not isinstance(yaml_data, dict):
+        return yaml_content, 0
+
+    sequences = yaml_data.get("sequences")
+    if not isinstance(sequences, list):
+        return yaml_content, 0
+
+    local_files: Dict[str, str] = {}
+    for root, _, files in os.walk(temp_dir):
+        for file_name in files:
+            if not (file_name.endswith(".a3m") or file_name.endswith(".csv")):
+                continue
+            local_files[file_name] = os.path.join(root, file_name)
+
+    injected = 0
+    for entity in sequences:
+        if not isinstance(entity, dict):
+            continue
+        protein = entity.get("protein")
+        if not isinstance(protein, dict):
+            continue
+        current_msa = protein.get("msa")
+        if isinstance(current_msa, str) and current_msa.strip() and current_msa.strip() not in {"0", "empty"}:
+            continue
+        ids = protein.get("id")
+        if isinstance(ids, list):
+            chain_ids = [str(item or "").strip() for item in ids if str(item or "").strip()]
+        else:
+            chain_ids = [str(ids or "").strip()] if str(ids or "").strip() else []
+        if not chain_ids:
+            continue
+        selected_path = ""
+        for chain_id in chain_ids:
+            candidates = (
+                f"{chain_id}_msa.a3m",
+                f"{chain_id}.a3m",
+                f"{chain_id}_msa.csv",
+                f"{chain_id}.csv",
+            )
+            for candidate in candidates:
+                candidate_path = local_files.get(candidate, "")
+                if candidate_path:
+                    selected_path = candidate_path
+                    break
+            if selected_path:
+                break
+        if not selected_path:
+            continue
+        protein["msa"] = selected_path
+        injected += 1
+
+    if injected <= 0:
+        return yaml_content, 0
+    return yaml.safe_dump(yaml_data, sort_keys=False, default_flow_style=False), injected
+
+
 def cache_msa_files_from_temp_dir(temp_dir: str, yaml_content: str):
     """
     从临时目录中缓存生成的MSA文件
@@ -2559,6 +2621,435 @@ def create_archive_with_a3m(output_archive_path: str, output_directory_path: str
             root_dir=output_directory_path
         )
         print(f"回退到标准归档方式: {created_archive_path}", file=sys.stderr)
+
+
+def _extract_protein_chain_lengths_from_yaml(yaml_data: Dict[str, Any]) -> Dict[str, int]:
+    chain_lengths: Dict[str, int] = {}
+    if not isinstance(yaml_data, dict):
+        return chain_lengths
+    for entity in yaml_data.get("sequences", []) or []:
+        if not isinstance(entity, dict):
+            continue
+        protein = entity.get("protein")
+        if not isinstance(protein, dict):
+            continue
+        sequence = str(protein.get("sequence") or "").replace("\n", "").replace(" ", "").strip()
+        if not sequence:
+            continue
+        ids = protein.get("id")
+        if isinstance(ids, list):
+            chain_ids = [str(item or "").strip() for item in ids]
+        else:
+            chain_ids = [str(ids or "").strip()]
+        for chain_id in chain_ids:
+            if not chain_id:
+                continue
+            chain_lengths[chain_id] = len(sequence)
+    return chain_lengths
+
+
+def _extract_sequence_chain_types_from_yaml(yaml_data: Dict[str, Any]) -> Dict[str, str]:
+    chain_types: Dict[str, str] = {}
+    if not isinstance(yaml_data, dict):
+        return chain_types
+    for entity in yaml_data.get("sequences", []) or []:
+        if not isinstance(entity, dict):
+            continue
+        entity_type = ""
+        entity_payload: Dict[str, Any] = {}
+        for key in ("protein", "ligand", "rna", "dna"):
+            payload = entity.get(key)
+            if isinstance(payload, dict):
+                entity_type = key
+                entity_payload = payload
+                break
+        if not entity_type:
+            continue
+        ids = entity_payload.get("id")
+        if isinstance(ids, list):
+            chain_ids = [str(item or "").strip() for item in ids]
+        else:
+            chain_ids = [str(ids or "").strip()]
+        for chain_id in chain_ids:
+            if not chain_id:
+                continue
+            existing_type = chain_types.get(chain_id)
+            if existing_type and existing_type != entity_type:
+                raise ValueError(
+                    f"Duplicate chain id '{chain_id}' used by multiple sequence types: {existing_type}, {entity_type}."
+                )
+            if existing_type == entity_type:
+                raise ValueError(
+                    f"Duplicate chain id '{chain_id}' appears multiple times in sequences."
+                )
+            chain_types[chain_id] = entity_type
+    return chain_types
+
+
+def _validate_unique_sequence_chain_ids(yaml_content: str) -> None:
+    try:
+        yaml_data = yaml.safe_load(yaml_content) or {}
+    except Exception:
+        return
+    if not isinstance(yaml_data, dict):
+        return
+    _extract_sequence_chain_types_from_yaml(yaml_data)
+
+
+def _next_available_chain_id(occupied: set[str]) -> str:
+    chain_pool = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    for token in chain_pool:
+        if token not in occupied:
+            return token
+    index = 1
+    while True:
+        token = f"L{index}"
+        if token not in occupied:
+            return token
+        index += 1
+
+
+def _normalize_ligand_chain_collisions(yaml_content: str) -> str:
+    try:
+        yaml_data = yaml.safe_load(yaml_content) or {}
+    except Exception:
+        return yaml_content
+    if not isinstance(yaml_data, dict):
+        return yaml_content
+
+    sequences = yaml_data.get("sequences")
+    if not isinstance(sequences, list) or not sequences:
+        return yaml_content
+
+    non_ligand_ids: set[str] = set()
+    occupied_ids: set[str] = set()
+    ligand_id_mapping: Dict[str, str] = {}
+
+    for entity in sequences:
+        if not isinstance(entity, dict):
+            continue
+        for key in ("protein", "rna", "dna"):
+            payload = entity.get(key)
+            if not isinstance(payload, dict):
+                continue
+            ids = payload.get("id")
+            chain_ids = [str(item or "").strip() for item in ids] if isinstance(ids, list) else [str(ids or "").strip()]
+            for chain_id in chain_ids:
+                if chain_id:
+                    non_ligand_ids.add(chain_id)
+                    occupied_ids.add(chain_id)
+
+    for entity in sequences:
+        if not isinstance(entity, dict):
+            continue
+        ligand = entity.get("ligand")
+        if not isinstance(ligand, dict):
+            continue
+        ids = ligand.get("id")
+        chain_ids = [str(item or "").strip() for item in ids] if isinstance(ids, list) else [str(ids or "").strip()]
+        next_ids: List[str] = []
+        for chain_id in chain_ids:
+            if not chain_id:
+                continue
+            if chain_id in non_ligand_ids or chain_id in occupied_ids:
+                mapped = ligand_id_mapping.get(chain_id)
+                if not mapped:
+                    mapped = _next_available_chain_id(occupied_ids)
+                    ligand_id_mapping[chain_id] = mapped
+                next_ids.append(mapped)
+                occupied_ids.add(mapped)
+            else:
+                next_ids.append(chain_id)
+                occupied_ids.add(chain_id)
+        if isinstance(ids, list):
+            ligand["id"] = next_ids
+        else:
+            ligand["id"] = next_ids[0] if next_ids else ""
+
+    if not ligand_id_mapping:
+        return yaml_content
+
+    for prop in yaml_data.get("properties", []) or []:
+        if not isinstance(prop, dict):
+            continue
+        affinity = prop.get("affinity")
+        if isinstance(affinity, dict):
+            binder = str(affinity.get("binder") or "").strip()
+            if binder in ligand_id_mapping:
+                affinity["binder"] = ligand_id_mapping[binder]
+
+    for constraint in yaml_data.get("constraints", []) or []:
+        if not isinstance(constraint, dict):
+            continue
+        pocket = constraint.get("pocket")
+        if isinstance(pocket, dict):
+            binder = str(pocket.get("binder") or "").strip()
+            if binder in ligand_id_mapping:
+                pocket["binder"] = ligand_id_mapping[binder]
+        bond = constraint.get("bond")
+        if isinstance(bond, dict):
+            atom1 = bond.get("atom1")
+            if isinstance(atom1, list) and len(atom1) >= 1:
+                chain_id = str(atom1[0] or "").strip()
+                if chain_id in ligand_id_mapping:
+                    atom1[0] = ligand_id_mapping[chain_id]
+
+    print(
+        f"ℹ️ Normalized ligand chain collisions: {ligand_id_mapping}",
+        file=sys.stderr,
+    )
+    return yaml.safe_dump(yaml_data, sort_keys=False, default_flow_style=False)
+
+
+def _sanitize_constraints_for_chain_lengths(yaml_content: str) -> str:
+    try:
+        yaml_data = yaml.safe_load(yaml_content) or {}
+    except Exception:
+        return yaml_content
+    if not isinstance(yaml_data, dict):
+        return yaml_content
+    constraints = yaml_data.get("constraints")
+    if not isinstance(constraints, list) or not constraints:
+        return yaml_content
+
+    _extract_sequence_chain_types_from_yaml(yaml_data)
+    chain_lengths = _extract_protein_chain_lengths_from_yaml(yaml_data)
+    if not chain_lengths:
+        return yaml_content
+
+    invalid_pocket_contacts: List[str] = []
+    invalid_bonds: List[str] = []
+    for constraint in constraints:
+        if not isinstance(constraint, dict):
+            continue
+        pocket = constraint.get("pocket")
+        if isinstance(pocket, dict):
+            contacts = pocket.get("contacts")
+            if not isinstance(contacts, list):
+                continue
+            for contact in contacts:
+                if not isinstance(contact, (list, tuple)) or len(contact) < 2:
+                    invalid_pocket_contacts.append(str(contact))
+                    continue
+                chain_id = str(contact[0] or "").strip()
+                try:
+                    residue_number = int(contact[1])
+                except Exception:
+                    residue_number = 0
+                chain_len = int(chain_lengths.get(chain_id) or 0)
+                if not chain_id or residue_number <= 0 or (chain_len > 0 and residue_number > chain_len):
+                    invalid_pocket_contacts.append(f"{chain_id}:{residue_number}")
+            continue
+
+        bond = constraint.get("bond")
+        if isinstance(bond, dict):
+            atom2 = bond.get("atom2")
+            if isinstance(atom2, (list, tuple)) and len(atom2) >= 2:
+                chain_id = str(atom2[0] or "").strip()
+                try:
+                    residue_number = int(atom2[1])
+                except Exception:
+                    residue_number = 0
+                chain_len = int(chain_lengths.get(chain_id) or 0)
+                if not (chain_id and residue_number > 0 and (chain_len <= 0 or residue_number <= chain_len)):
+                    invalid_bonds.append(f"{chain_id}:{residue_number}")
+                continue
+
+    if invalid_pocket_contacts or invalid_bonds:
+        pocket_preview = ", ".join(invalid_pocket_contacts[:8]) if invalid_pocket_contacts else ""
+        bond_preview = ", ".join(invalid_bonds[:8]) if invalid_bonds else ""
+        raise ValueError(
+            "Invalid constraints for protein chain length mapping. "
+            f"invalid_pocket_contacts=[{pocket_preview}] invalid_bonds=[{bond_preview}]"
+        )
+    return yaml_content
+
+
+def _load_template_residue_number_mapping(
+    template_path: Path,
+    preferred_chain: Optional[str] = None,
+) -> Tuple[str, List[int]]:
+    structure = gemmi.read_structure(str(template_path))
+    structure.setup_entities()
+    if len(structure) == 0:
+        return "", []
+    model = structure[0]
+    selected_chain = None
+    preferred = str(preferred_chain or "").strip()
+    if preferred:
+        for chain in model:
+            if str(chain.name or "").strip() == preferred:
+                selected_chain = chain
+                break
+    if selected_chain is None:
+        for chain in model:
+            if any(residue.het_flag == "A" for residue in chain):
+                selected_chain = chain
+                break
+    if selected_chain is None:
+        selected_chain = next(iter(model), None)
+    if selected_chain is None:
+        return "", []
+
+    aa3_to1 = {
+        "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C", "GLN": "Q", "GLU": "E", "GLY": "G",
+        "HIS": "H", "ILE": "I", "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P", "SER": "S",
+        "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V", "SEC": "U", "PYL": "O",
+    }
+    seen: set[Tuple[int, str]] = set()
+    sequence_chars: List[str] = []
+    residue_numbers: List[int] = []
+    for residue in selected_chain:
+        if residue.het_flag != "A":
+            continue
+        residue_key = (int(residue.seqid.num), str(residue.seqid.icode or "").strip())
+        if residue_key in seen:
+            continue
+        seen.add(residue_key)
+        residue_numbers.append(int(residue.seqid.num))
+        residue_name = str(residue.name or "").strip().upper()
+        sequence_chars.append(aa3_to1.get(residue_name, "X"))
+    return "".join(sequence_chars), residue_numbers
+
+
+def _remap_constraints_by_template_alignment(yaml_content: str) -> str:
+    try:
+        yaml_data = yaml.safe_load(yaml_content) or {}
+    except Exception:
+        return yaml_content
+    if not isinstance(yaml_data, dict):
+        return yaml_content
+
+    constraints = yaml_data.get("constraints")
+    templates = yaml_data.get("templates")
+    if not isinstance(constraints, list) or not constraints:
+        return yaml_content
+    if not isinstance(templates, list) or not templates:
+        return yaml_content
+
+    chain_seq_map = build_chain_sequence_map(yaml_data)
+    if not chain_seq_map:
+        return yaml_content
+
+    mapping_by_chain: Dict[str, Dict[int, int]] = {}
+    for entry in templates:
+        if not isinstance(entry, dict):
+            continue
+        template_path_raw = entry.get("cif") or entry.get("mmcif") or entry.get("pdb")
+        template_path_text = str(template_path_raw or "").strip()
+        if not template_path_text:
+            continue
+        template_path = Path(template_path_text)
+        if not template_path.exists():
+            continue
+        chain_ids = _normalize_chain_id_list(entry.get("chain_id") or entry.get("target_chain_ids"))
+        if not chain_ids:
+            continue
+        preferred_chain = str(entry.get("template_id") or entry.get("template_chain_id") or "").strip() or None
+        try:
+            template_seq, residue_numbers = _load_template_residue_number_mapping(template_path, preferred_chain)
+        except Exception:
+            continue
+        if not template_seq or not residue_numbers:
+            continue
+
+        for query_chain in chain_ids:
+            query_seq = str(chain_seq_map.get(query_chain) or "").strip()
+            if not query_seq:
+                continue
+            query_indices, template_indices = build_alignment_indices(query_seq, template_seq)
+            if not query_indices or not template_indices:
+                continue
+            template_to_query = {int(t): int(q) + 1 for q, t in zip(query_indices, template_indices)}
+            residue_map: Dict[int, int] = {}
+            for template_idx, residue_number in enumerate(residue_numbers):
+                mapped_pos = template_to_query.get(int(template_idx))
+                if mapped_pos is not None:
+                    residue_map[int(residue_number)] = int(mapped_pos)
+            if residue_map:
+                mapping_by_chain[query_chain] = residue_map
+
+    if not mapping_by_chain:
+        return yaml_content
+
+    replaced_contacts = 0
+    for constraint in constraints:
+        if not isinstance(constraint, dict):
+            continue
+        pocket = constraint.get("pocket")
+        if not isinstance(pocket, dict):
+            continue
+        contacts = pocket.get("contacts")
+        if not isinstance(contacts, list):
+            continue
+        next_contacts: List[List[Any]] = []
+        for contact in contacts:
+            if not isinstance(contact, (list, tuple)) or len(contact) < 2:
+                continue
+            chain_id = str(contact[0] or "").strip()
+            try:
+                residue_number = int(contact[1])
+            except Exception:
+                residue_number = 0
+            mapped = mapping_by_chain.get(chain_id, {}).get(residue_number)
+            if mapped is not None and mapped != residue_number:
+                replaced_contacts += 1
+                residue_number = mapped
+            next_contacts.append([chain_id, residue_number])
+        pocket["contacts"] = next_contacts
+
+    if replaced_contacts > 0:
+        print(
+            f"ℹ️ Remapped pocket contacts by template/query alignment: replaced={replaced_contacts}",
+            file=sys.stderr,
+        )
+        yaml_data["constraints"] = constraints
+        return yaml.safe_dump(yaml_data, sort_keys=False, default_flow_style=False)
+    return yaml_content
+
+
+def _print_constraint_residue_summary(yaml_content: str) -> None:
+    try:
+        yaml_data = yaml.safe_load(yaml_content) or {}
+    except Exception:
+        return
+    if not isinstance(yaml_data, dict):
+        return
+    chain_lengths = _extract_protein_chain_lengths_from_yaml(yaml_data)
+    constraints = yaml_data.get("constraints")
+    if not isinstance(constraints, list) or not constraints:
+        return
+    chain_max_residue: Dict[str, int] = {}
+    total_contacts = 0
+    for constraint in constraints:
+        if not isinstance(constraint, dict):
+            continue
+        pocket = constraint.get("pocket")
+        if not isinstance(pocket, dict):
+            continue
+        contacts = pocket.get("contacts")
+        if not isinstance(contacts, list):
+            continue
+        for contact in contacts:
+            if not isinstance(contact, (list, tuple)) or len(contact) < 2:
+                continue
+            chain_id = str(contact[0] or "").strip()
+            try:
+                residue_number = int(contact[1])
+            except Exception:
+                continue
+            if not chain_id:
+                continue
+            total_contacts += 1
+            prev = int(chain_max_residue.get(chain_id) or 0)
+            if residue_number > prev:
+                chain_max_residue[chain_id] = residue_number
+    if total_contacts <= 0:
+        return
+    print(
+        f"ℹ️ Constraint summary: total_contacts={total_contacts}, max_residue_by_chain={chain_max_residue}, chain_lengths={chain_lengths}",
+        file=sys.stderr,
+    )
 
 
 def create_af3_archive(
@@ -3024,17 +3515,17 @@ def run_boltz_backend(
     predict_args: dict,
     model_name: Optional[str],
 ) -> None:
-    tmp_yaml_path = os.path.join(temp_dir, 'data.yaml')
-    with open(tmp_yaml_path, 'w') as tmp_yaml:
-        tmp_yaml.write(yaml_content)
+    normalized_yaml = _normalize_ligand_chain_collisions(yaml_content)
+    _validate_unique_sequence_chain_ids(normalized_yaml)
+    normalized_yaml = _remap_constraints_by_template_alignment(normalized_yaml)
+    _validate_unique_sequence_chain_ids(normalized_yaml)
+    normalized_yaml = _sanitize_constraints_for_chain_lengths(normalized_yaml)
+    _print_constraint_residue_summary(normalized_yaml)
 
     cli_args = dict(predict_args)
     if model_name:
         cli_args['model'] = model_name
         print(f"DEBUG: Using model: {model_name}", file=sys.stderr)
-
-    cli_args['data'] = tmp_yaml_path
-    cli_args['out_dir'] = temp_dir
 
     if 'diffusion_samples' not in cli_args or cli_args['diffusion_samples'] is None:
         effective_model = str(cli_args.get('model') or model_name or 'boltz2').lower()
@@ -3047,13 +3538,25 @@ def run_boltz_backend(
 
     if MSA_SERVER_URL and MSA_SERVER_URL != "":
         print(f"🧬 开始使用 MSA 服务器生成多序列比对: {MSA_SERVER_URL}", file=sys.stderr)
-        msa_generated = generate_msa_for_sequences(yaml_content, temp_dir)
+        msa_generated = generate_msa_for_sequences(normalized_yaml, temp_dir)
         if msa_generated:
             print(f"✅ MSA 生成成功，将用于结构预测", file=sys.stderr)
         else:
             print(f"⚠️ MSA 生成失败，将使用默认方法进行预测", file=sys.stderr)
+        normalized_yaml, injected_count = _inject_local_msa_paths_into_yaml(normalized_yaml, temp_dir)
+        if injected_count > 0:
+            print(f"ℹ️ Injected local MSA paths into YAML: {injected_count}", file=sys.stderr)
+        # If YAML still has missing MSA entries, let boltz_wrapper call MSA server explicitly.
+        cli_args['use_msa_server'] = True
+        cli_args['msa_server_url'] = MSA_SERVER_URL
     else:
         print(f"ℹ️ 未配置 MSA 服务器，跳过 MSA 生成", file=sys.stderr)
+
+    tmp_yaml_path = os.path.join(temp_dir, 'data.yaml')
+    with open(tmp_yaml_path, 'w') as tmp_yaml:
+        tmp_yaml.write(normalized_yaml)
+    cli_args['data'] = tmp_yaml_path
+    cli_args['out_dir'] = temp_dir
 
     POSITIONAL_KEYS = ['data']
     cmd_positional = []
@@ -3077,8 +3580,8 @@ def run_boltz_backend(
     print(f"DEBUG: Invoking predict with args: {cmd_args}", file=sys.stderr)
     predict.main(args=cmd_args, standalone_mode=False)
 
-    cache_msa_files_from_temp_dir(temp_dir, yaml_content)
-    assert_boltz_preprocessing_succeeded(temp_dir, yaml_content)
+    cache_msa_files_from_temp_dir(temp_dir, normalized_yaml)
+    assert_boltz_preprocessing_succeeded(temp_dir, normalized_yaml)
 
     output_directory_path = find_results_dir(temp_dir)
     if not os.listdir(output_directory_path):
@@ -3086,7 +3589,7 @@ def run_boltz_backend(
             f"Prediction result directory was found but is empty: {output_directory_path}"
         )
 
-    create_archive_with_a3m(output_archive_path, output_directory_path, yaml_content)
+    create_archive_with_a3m(output_archive_path, output_directory_path, normalized_yaml)
 
 
 def run_alphafold3_backend(
@@ -3554,7 +4057,13 @@ def main():
         seed = predict_args.pop("seed", None)
         template_inputs = predict_args.pop("template_inputs", None)
 
-        use_msa_server = predict_args.get("use_msa_server", False)
+        use_msa_raw = predict_args.get("use_msa_server", True)
+        if isinstance(use_msa_raw, bool):
+            use_msa_server = use_msa_raw
+        elif isinstance(use_msa_raw, (int, float)):
+            use_msa_server = bool(use_msa_raw)
+        else:
+            use_msa_server = str(use_msa_raw).strip().lower() in {"1", "true", "yes", "y"}
 
         with tempfile.TemporaryDirectory() as temp_dir:
             processed_yaml = yaml_content

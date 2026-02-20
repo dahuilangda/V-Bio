@@ -116,12 +116,15 @@ docker run -d -p 6379:6379 --name boltz-webui-redis redis:latest
 
 1.  `RESULTS_BASE_DIR`: 确认结果存储路径存在且有写入权限。
 2.  `MAX_CONCURRENT_TASKS`: 根据您的 GPU 数量和显存大小设置最大并发任务数。
-3.  `GPU_DEVICE_IDS`: （可选）通过逗号或空格指定允许被调度的 GPU ID，如 `GPU_DEVICE_IDS="0,2,3"`。不设置时默认自动探测全部 GPU。
-4.  `MSA_SERVER_MODE`: （可选）根据 MSA 服务配置选择模式，如 `colabfold`、`mmseqs2-uniref` 等。
-5.  `COLABFOLD_JOBS_DIR`: （可选）ColabFold 服务器在宿主机上的任务缓存目录，用于新提供的清理接口。
-6.  `VIRTUAL_SCREENING_OUTPUT_DIR`: （可选）虚拟筛选任务的本地输出目录（默认 `/data/boltz_virtual_screening_results`）。
-7.  `LEAD_OPTIMIZATION_OUTPUT_DIR`: （可选）Lead optimization 任务的本地输出目录（默认 `/data/boltz_lead_optimization_results`）。
-8.  `BOLTZ_API_TOKEN`: 设置一个复杂的安全令牌。**强烈建议**通过环境变量进行配置以提高安全性。
+3.  `CPU_MAX_CONCURRENT_TASKS`: CPU 队列（`CPU_QUEUE`）并发上限，和 GPU 并发完全独立（默认 `0`，表示自动使用本机全部 CPU 核心）。
+4.  `GPU_DEVICE_IDS`: （可选）通过逗号或空格指定允许被调度的 GPU ID，如 `GPU_DEVICE_IDS="0,2,3"`。不设置时默认自动探测全部 GPU。
+5.  `MSA_SERVER_MODE`: （可选）根据 MSA 服务配置选择模式，如 `colabfold`、`mmseqs2-uniref` 等。
+6.  `COLABFOLD_JOBS_DIR`: （可选）ColabFold 服务器在宿主机上的任务缓存目录，用于新提供的清理接口。
+7.  `VIRTUAL_SCREENING_OUTPUT_DIR`: （可选）虚拟筛选任务的本地输出目录（默认 `/data/boltz_virtual_screening_results`）。
+8.  `LEAD_OPTIMIZATION_OUTPUT_DIR`: （可选）Lead optimization 任务的本地输出目录（默认 `/data/boltz_lead_optimization_results`）。
+9.  `LEAD_OPT_MMP_DB_URL`: （可选）Lead Optimization MMP 查询使用的 PostgreSQL DSN（推荐）。
+10. `LEAD_OPT_MMP_DB_SCHEMA`: （可选）Lead Optimization 默认 schema（默认 `public`）。
+11.  `BOLTZ_API_TOKEN`: 设置一个复杂的安全令牌。**强烈建议**通过环境变量进行配置以提高安全性。
 
 #### **第 5 步：AlphaFold3 推理环境配置（可选）**
 
@@ -297,7 +300,7 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
     bash run.sh init
     ```
 
-2.  **终端 2 - 启动 Celery 计算节点**:
+2.  **终端 2 - 启动 GPU Celery 计算节点**:
 
     ```bash
     bash run.sh celery
@@ -490,76 +493,19 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
 
 #### **Lead Optimization API**
 
-  * **提交任务**: `POST /api/lead_optimization/submit`
-  * **状态查询**: `GET /api/lead_optimization/status/<task_id>`
-  * **结果下载**: `GET /api/lead_optimization/results/<task_id>`
   * **认证**: 需要 API 令牌
-  * **必填字段**:
-    * `target_config`: 目标蛋白 YAML 配置文件
-    * `input_compound` 或 `input_file` 二选一
-  * **常用可选字段**:
-    * `optimization_strategy`: `scaffold_hopping` / `fragment_replacement` / `multi_objective`
-    * `max_candidates`, `iterations`, `batch_size`, `top_k_per_iteration`
-    * `diversity_weight`, `similarity_threshold`, `max_similarity_threshold`
-    * `diversity_selection_strategy`, `max_chiral_centers`
-    * `generate_report`, `verbosity`
-    * `core_smarts`: 必须包含的子结构（SMARTS/SMILES）
-    * `exclude_smarts`: 必须排除的子结构（SMARTS/SMILES）
-    * `rgroup_smarts`: R-group 骨架约束（SMARTS/SMILES，含 `[*]`）
-    * `variable_smarts`: mmpdb 规则可变片段（用于 mmpdb 规则生成）
-    * `variable_const_smarts`: 可变片段对应的常量约束（mmpdb constant_smiles）
-    * `priority`, `task_timeout`
-  * **提交示例（单化合物）**:
-    ```bash
-    curl -X POST \
-         -H "X-API-Token: your-secret-token" \
-         -F "target_config=@/path/to/target.yaml" \
-         -F "input_compound=CC(=O)Oc1ccccc1C(=O)O" \
-         -F "optimization_strategy=scaffold_hopping" \
-         -F "max_candidates=50" \
-         -F "iterations=2" \
-         http://127.0.0.1:5000/api/lead_optimization/submit
-    ```
-  * **提交示例（mmpdb 规则可变片段）**:
-    ```bash
-    curl -X POST \
-         -H "X-API-Token: your-secret-token" \
-         -F "target_config=@/path/to/target.yaml" \
-         -F "input_compound=CC(C[C@@H](C(N[C@H](C(NCC1C=CC=NC=1)=O)CC1C=CC=CC=1)=O)CC(NO)=O)C" \
-         -F "optimization_strategy=fragment_replacement" \
-         -F "max_candidates=30" \
-         -F "variable_smarts=*C" \
-         -F "variable_const_smarts=*C(C)C[C@H](CC(=O)NO)C(=O)N[C@@H](Cc1ccccc1)C(=O)NCc1cccnc1" \
-         http://127.0.0.1:5000/api/lead_optimization/submit
-    ```
-  * **提交示例（批量文件）**:
-    ```bash
-    curl -X POST \
-         -H "X-API-Token: your-secret-token" \
-         -F "target_config=@/path/to/target.yaml" \
-         -F "input_file=@/path/to/compounds.csv" \
-         -F "max_candidates=30" \
-         http://127.0.0.1:5000/api/lead_optimization/submit
-    ```
-  * **状态示例**:
-    ```bash
-    curl -H "X-API-Token: your-secret-token" \
-         http://127.0.0.1:5000/api/lead_optimization/status/<task_id>
-    ```
-  * **返回示例（节选）**:
-    ```json
-    {
-      "task_id": "xxxx",
-      "state": "PROGRESS",
-      "progress": {
-        "processed_candidates": 40,
-        "expected_candidates": 100,
-        "progress_percent": 40.0,
-        "estimated_remaining_seconds": 1800,
-        "estimated_completion_time": "2025-01-01T12:10:00"
-      }
-    }
-    ```
+  * **注意**: `POST /api/lead_optimization/submit` 已禁用（返回 `410`）
+  * **当前可用 MMP 工作流接口**:
+    * `POST /api/lead_optimization/fragment_preview`
+    * `POST /api/lead_optimization/reference_preview`
+    * `POST /api/lead_optimization/mmp_query`
+    * `GET /api/lead_optimization/mmp_query_status/<task_id>`
+    * `GET /api/lead_optimization/mmp_query_result/<query_id>`
+    * `POST /api/lead_optimization/mmp_enumerate`
+    * `GET /api/lead_optimization/mmp_evidence/<transform_id>`
+    * `POST /api/lead_optimization/predict_candidate`
+    * `GET /api/lead_optimization/mmp_databases`
+  * **数据库从零构建指南**: `lead_optimization/README.md`
 
 ### **AlphaFold3 Docker 推理集成**
 
@@ -925,7 +871,7 @@ bash run.sh clean
 
 # 实时监控日志
 tail -f flask.log      # API服务器日志
-tail -f celery.log     # 工作进程日志
+tail -f celery.log     # Celery工作进程日志（GPU+CPU）
 tail -f monitor.log    # 监控系统日志
 tail -f streamlit.log  # 前端界面日志
 ```
@@ -934,12 +880,13 @@ tail -f streamlit.log  # 前端界面日志
 
 | 命令 | 说明 | 适用场景 |
 |------|------|----------|
-| `bash run.sh dev` | 开发模式启动（前端前台运行） | 开发调试 |
-| `bash run.sh all` | 生产模式启动（全后台运行） | 生产部署 |
+| `bash run.sh dev [CPU_N]` | 开发模式启动（前端前台运行，可选 CPU 并发） | 开发调试 |
+| `bash run.sh all [CPU_N]` | 生产模式启动（全后台运行，含 GPU+CPU worker，可选 CPU 并发） | 生产部署 |
 | `bash run.sh frontend` | 仅启动前端界面 | 前端开发 |
 | `bash run.sh flask` | 仅启动API服务器 | 后端调试 |
-| `bash run.sh celery` | 仅启动工作进程 | 任务处理测试 |
+| `bash run.sh celery` | 仅启动GPU工作进程 | 结构预测/打分任务 |
 | `bash run.sh monitor` | 仅启动监控守护进程 | 系统监控 |
+| `bash run.sh restart [all|dev]` | 停止后重启服务（默认 all） | 快速重启 |
 | `bash run.sh status` | 查看所有服务状态 | 运维监控 |
 | `bash run.sh clean` | 手动清理问题任务 | 故障恢复 |
 | `bash run.sh stop` | 停止所有服务 | 系统维护 |

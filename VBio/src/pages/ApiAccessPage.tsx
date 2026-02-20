@@ -61,9 +61,9 @@ import { buildPredictionYamlFromComponents } from '../utils/yaml';
 import { assignChainIdsForComponents } from '../utils/chainAssignments';
 
 type UsageWindow = '7d' | '30d' | '90d' | 'all';
-type ProjectStatsWorkflowFilter = 'all' | 'prediction' | 'affinity';
+type ProjectStatsWorkflowFilter = 'all' | 'prediction' | 'affinity' | 'lead_optimization';
 type ProjectStatsSort = 'calls_desc' | 'calls_asc' | 'success_desc' | 'success_asc' | 'last_desc' | 'last_asc';
-type BuilderWorkflowKey = 'prediction' | 'affinity';
+type BuilderWorkflowKey = 'prediction' | 'affinity' | 'lead_optimization';
 type PredictionBackend = 'boltz' | 'alphafold3' | 'protenix';
 type AffinityBackend = 'boltz' | 'protenix';
 
@@ -119,6 +119,7 @@ const DAILY_USAGE_PAGE_SIZE = 30;
 const PROJECT_STATS_PAGE_SIZE = 8;
 const COMMAND_HISTORY_LIMIT = 12;
 const COMMAND_HISTORY_STORAGE_KEY = 'vbio_api_command_history_v1';
+const LEAD_OPT_API_ACCESS_ENABLED: boolean = false;
 const AFFINITY_TARGET_UPLOAD_COMPONENT_ID = '__affinity_target_upload__';
 const AFFINITY_LIGAND_UPLOAD_COMPONENT_ID = '__affinity_ligand_upload__';
 const EMPTY_PREDICTION_PROPERTIES: PredictionProperties = {
@@ -151,7 +152,7 @@ function normalizeUsageWindow(value: string | null | undefined): UsageWindow {
 }
 
 function normalizeProjectStatsWorkflowFilter(value: string | null | undefined): ProjectStatsWorkflowFilter {
-  if (value === 'prediction' || value === 'affinity' || value === 'all') return value;
+  if (value === 'prediction' || value === 'affinity' || value === 'lead_optimization' || value === 'all') return value;
   return 'all';
 }
 
@@ -301,7 +302,12 @@ function readCommandHistoryFromStorage(): CommandHistoryEntry[] {
       .map((item) => {
         const record = item as Partial<CommandHistoryEntry>;
         const legacyTemplate = (record as { template?: string }).template;
-        const workflow: BuilderWorkflowKey = record.workflow === 'affinity' || legacyTemplate === 'affinity' ? 'affinity' : 'prediction';
+        const normalizedWorkflow = String(record.workflow || legacyTemplate || '').trim().toLowerCase();
+        const workflow: BuilderWorkflowKey = normalizedWorkflow === 'affinity'
+          ? 'affinity'
+          : (normalizedWorkflow === 'lead_optimization' || normalizedWorkflow === 'lead optimization' || normalizedWorkflow === 'leadopt')
+            ? 'lead_optimization'
+            : 'prediction';
         return {
           id: String(record.id || ''),
           createdAt: String(record.createdAt || ''),
@@ -453,6 +459,12 @@ export function ApiAccessPage() {
   const [builderAffinityTargetChain, setBuilderAffinityTargetChain] = useState('A');
   const [builderAffinityLigandChain, setBuilderAffinityLigandChain] = useState('L');
   const [builderAffinityLigandSmiles, setBuilderAffinityLigandSmiles] = useState('');
+  const [builderLeadOptTargetConfigPath, setBuilderLeadOptTargetConfigPath] = useState('./target.yaml');
+  const [builderLeadOptInputCompound, setBuilderLeadOptInputCompound] = useState('');
+  const [builderLeadOptTargetChain, setBuilderLeadOptTargetChain] = useState('A');
+  const [builderLeadOptLigandChain, setBuilderLeadOptLigandChain] = useState('L');
+  const [builderLeadOptObjectiveProfile, setBuilderLeadOptObjectiveProfile] = useState('balanced');
+  const [builderLeadOptEnableAffinity, setBuilderLeadOptEnableAffinity] = useState(false);
   const [builderTaskOperation, setBuilderTaskOperation] = useState<'cancel' | 'delete'>('cancel');
   const [builderAffinityBackend, setBuilderAffinityBackend] = useState<AffinityBackend>('boltz');
   const [builderLeftWidth, setBuilderLeftWidth] = useState(38);
@@ -884,6 +896,7 @@ export function ApiAccessPage() {
   const selectedBackend = String(selectedProject?.backend || 'boltz').trim().toLowerCase() || 'boltz';
   const isAffinityWorkflow = selectedWorkflow.key === 'affinity';
   const isPredictionWorkflow = selectedWorkflow.key === 'prediction';
+  const isLeadOptimizationWorkflow = selectedWorkflow.key === 'lead_optimization';
   const isSupportedSubmitWorkflow = isPredictionWorkflow || isAffinityWorkflow;
   const effectivePredictionBackend: PredictionBackend = normalizePredictionBackend(builderPredictionBackend);
   const effectiveAffinityBackend: AffinityBackend = normalizeAffinityBackend(builderAffinityBackend);
@@ -1045,6 +1058,14 @@ export function ApiAccessPage() {
       return next.length > 0 ? next : prev;
     });
   }, [isPredictionWorkflow, selectedTokenProjectId, selectedProject?.protein_sequence, selectedProject?.ligand_smiles]);
+
+  useEffect(() => {
+    if (!LEAD_OPT_API_ACCESS_ENABLED || !isLeadOptimizationWorkflow) return;
+    const ligand = String(selectedProject?.ligand_smiles || '').trim();
+    if (ligand) {
+      setBuilderLeadOptInputCompound((prev) => prev.trim() ? prev : ligand);
+    }
+  }, [isLeadOptimizationWorkflow, selectedTokenProjectId, selectedProject?.ligand_smiles]);
 
   useEffect(() => {
     if (!isProjectScoped) return;
@@ -1519,6 +1540,11 @@ export function ApiAccessPage() {
   const predictionAffinityFlags = predictionAffinityEnabled && predictionAffinityAvailable
     ? ` \\\n  -F "enable_affinity=true"`
     : '';
+  const leadOptInputCompound = String(builderLeadOptInputCompound || '').trim();
+  const leadOptHint =
+    LEAD_OPT_API_ACCESS_ENABLED && isLeadOptimizationWorkflow && !leadOptInputCompound
+      ? '\n# Lead Optimization requires input_compound (SMILES).'
+      : '';
   const commandEnv = `export VBIO_API_BASE="${managementApiBaseUrl}"\nexport VBIO_API_TOKEN="${curlToken}"\nexport VBIO_PROJECT_ID="${selectedTokenProjectId}"`;
   const submitTaskIdCapture = `echo "$RESPONSE"
 TASK_ID=$(printf '%s' "$RESPONSE" | tr -d '\\n\\r' | sed -n 's/.*"task_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
@@ -1561,11 +1587,13 @@ ${submitTaskIdCapture}`;
     : (builderWorkflowKey === 'affinity'
       ? (effectiveAffinityBackend === 'protenix' ? commandSubmitAffinityProtenix : commandSubmitAffinityBoltz)
       : commandSubmitPrediction);
-  const commandSubmitWithHints = `${commandSubmit}${affinityModeHint}${predictionPairHint}${predictionAffinityHint}`;
+  const commandSubmitWithHints = `${commandSubmit}${affinityModeHint}${predictionPairHint}${predictionAffinityHint}${leadOptHint}`;
   const submitBackendLabel = builderWorkflowKey === 'affinity' ? effectiveAffinityBackend : effectivePredictionBackend;
-  const commandStatus = `curl -X GET "${managementApiBaseUrl}/status/${taskIdForCommand}?project_id=${selectedTokenProjectId}" \\
+  const statusEndpoint = `/status/${taskIdForCommand}`;
+  const resultsEndpoint = `/results/${taskIdForCommand}`;
+  const commandStatus = `curl -X GET "${managementApiBaseUrl}${statusEndpoint}?project_id=${selectedTokenProjectId}" \\
   -H "X-API-Token: ${curlToken}"`;
-  const commandResults = `curl -X GET "${managementApiBaseUrl}/results/${taskIdForCommand}?project_id=${selectedTokenProjectId}" \\
+  const commandResults = `curl -X GET "${managementApiBaseUrl}${resultsEndpoint}?project_id=${selectedTokenProjectId}" \\
   -H "X-API-Token: ${curlToken}" \\
   -o "${escapedResultPath}"`;
   const commandTaskAction = `curl -X DELETE "${managementApiBaseUrl}/tasks/${taskIdForCommand}?project_id=${selectedTokenProjectId}&operation_mode=${builderTaskOperation}" \\
@@ -2068,13 +2096,13 @@ ${submitTaskIdCapture}`;
 
             {!isSupportedSubmitWorkflow && (
               <div className="api-builder-note muted small">
-                Command Builder currently supports Prediction and Affinity projects only.
+                Command Builder currently supports Prediction and Affinity projects.
               </div>
             )}
 
-            {isPredictionWorkflow && (
+            {(isPredictionWorkflow || (LEAD_OPT_API_ACCESS_ENABLED && isLeadOptimizationWorkflow)) && (
               <label className="field">
-                <span>Prediction Backend</span>
+                <span>{isLeadOptimizationWorkflow ? 'Lead Opt Backend' : 'Prediction Backend'}</span>
                 <select
                   value={effectivePredictionBackend}
                   onChange={(e) => setBuilderPredictionBackend(normalizePredictionBackend(e.target.value))}
@@ -2084,6 +2112,66 @@ ${submitTaskIdCapture}`;
                   <option value="protenix">protenix</option>
                 </select>
               </label>
+            )}
+
+            {LEAD_OPT_API_ACCESS_ENABLED && isLeadOptimizationWorkflow && (
+              <>
+                <label className="field">
+                  <span>target_config path</span>
+                  <input
+                    value={builderLeadOptTargetConfigPath}
+                    onChange={(e) => setBuilderLeadOptTargetConfigPath(e.target.value)}
+                    placeholder="./target.yaml"
+                  />
+                </label>
+                <label className="field">
+                  <span>Input compound (SMILES)</span>
+                  <input
+                    value={builderLeadOptInputCompound}
+                    onChange={(e) => setBuilderLeadOptInputCompound(e.target.value)}
+                    placeholder="CCOc1ccc..."
+                  />
+                </label>
+                <section className="api-prediction-affinity-panel api-leadopt-panel">
+                  <div className="api-prediction-affinity-head">
+                    <span className="api-prediction-affinity-title">
+                      <ShieldCheck size={14} />
+                      Lead Opt Options
+                    </span>
+                    <label className="checkbox-inline api-prediction-affinity-toggle">
+                      <input
+                        type="checkbox"
+                        checked={builderLeadOptEnableAffinity}
+                        onChange={(e) => setBuilderLeadOptEnableAffinity(e.target.checked)}
+                      />
+                      <span>Enable affinity</span>
+                    </label>
+                  </div>
+                  <div className="api-prediction-affinity-grid">
+                    <label className="field">
+                      <span>Target chain</span>
+                      <input value={builderLeadOptTargetChain} onChange={(e) => setBuilderLeadOptTargetChain(e.target.value)} placeholder="A" />
+                    </label>
+                    <label className="field">
+                      <span>Ligand chain</span>
+                      <input value={builderLeadOptLigandChain} onChange={(e) => setBuilderLeadOptLigandChain(e.target.value)} placeholder="L" />
+                    </label>
+                    <label className="field">
+                      <span>Objective profile</span>
+                      <select value={builderLeadOptObjectiveProfile} onChange={(e) => setBuilderLeadOptObjectiveProfile(e.target.value)}>
+                        <option value="balanced">balanced</option>
+                        <option value="potency_first">potency_first</option>
+                        <option value="admet_safe">admet_safe</option>
+                        <option value="cns_like">cns_like</option>
+                        <option value="custom">custom</option>
+                      </select>
+                    </label>
+                  </div>
+                </section>
+                <div className="api-builder-note muted small">
+                  `target_config` is required and should point to a valid lead-optimization YAML with protein sequence.
+                </div>
+              </>
             )}
 
             {isAffinityWorkflow && (

@@ -280,6 +280,12 @@
   border-color: #d7e9db;
 }
 
+.api-workflow-pill.workflow-lead_optimization {
+  background: #f4f0fa;
+  color: #513378;
+  border-color: #dfd2ee;
+}
+
 .api-project-token-stat {
   display: inline-flex;
   align-items: center;
