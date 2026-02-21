@@ -12,7 +12,12 @@ import {
 import { LoaderCircle } from 'lucide-react';
 import { type LigandFragmentItem } from './LigandFragmentSketcher';
 import { MolstarViewer, type MolstarAtomHighlight } from './MolstarViewer';
-import { LeadOptCandidatesPanel } from './leadopt/LeadOptCandidatesPanel';
+import {
+  LeadOptCandidatesPanel,
+  buildLeadOptCandidatesUiStateSignature,
+  normalizeLeadOptCandidatesUiState,
+  type LeadOptCandidatesUiState
+} from './leadopt/LeadOptCandidatesPanel';
 import { LeadOptFragmentPanel } from './leadopt/LeadOptFragmentPanel';
 import { LeadOptReferencePanel } from './leadopt/LeadOptReferencePanel';
 import {
@@ -63,6 +68,7 @@ interface LeadOptimizationWorkspaceProps {
   }) => void | Promise<void>;
   onMmpTaskFailed?: (payload: { taskId: string; error: string }) => void | Promise<void>;
   initialMmpSnapshot?: LeadOptMmpPersistedSnapshot | null;
+  onMmpUiStateChange?: (payload: { uiState: LeadOptCandidatesUiState }) => void | Promise<void>;
   onPredictionQueued?: (payload: { taskId: string; backend: string; candidateSmiles: string }) => void | Promise<void>;
   onPredictionStateChange?: (payload: {
     records: Record<string, LeadOptPredictionRecord>;
@@ -84,7 +90,7 @@ const RESIZER_WIDTH = 10;
 const LEFT_PANEL_KEY_STEP = 24;
 const LEFT_PANEL_DEFAULT = 760;
 const RESULT_VIEWER_MIN = 340;
-const RESULT_MAIN_MIN = 560;
+const RESULT_MAIN_MIN = 612;
 const RESULT_VIEWER_DEFAULT = 780;
 
 interface LeadOptPropertyOption {
@@ -95,6 +101,10 @@ interface LeadOptPropertyOption {
 function readText(value: unknown): string {
   if (value === null || value === undefined) return '';
   return String(value);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 function normalizeAtomIndices(value: unknown): number[] {
@@ -222,6 +232,7 @@ export function LeadOptimizationWorkspace({
   onMmpTaskCompleted,
   onMmpTaskFailed,
   initialMmpSnapshot,
+  onMmpUiStateChange,
   onPredictionQueued,
   onPredictionStateChange
 }: LeadOptimizationWorkspaceProps) {
@@ -245,6 +256,13 @@ export function LeadOptimizationWorkspace({
   const [openedResultHighlightAtomIndices, setOpenedResultHighlightAtomIndices] = useState<number[]>([]);
   const [resultViewerOpen, setResultViewerOpen] = useState(false);
   const [showMmpRunTransition, setShowMmpRunTransition] = useState(false);
+  const snapshotUiState = useMemo(() => {
+    const payload = asRecord(initialMmpSnapshot || null);
+    return normalizeLeadOptCandidatesUiState(payload.ui_state, backend);
+  }, [backend, initialMmpSnapshot]);
+  const [resultsUiState, setResultsUiState] = useState<LeadOptCandidatesUiState>(snapshotUiState);
+  const resultsUiStateRef = useRef<LeadOptCandidatesUiState>(snapshotUiState);
+  const hydratedUiStateKeyRef = useRef('');
 
   const computeLeftBounds = (containerWidth: number): { min: number; max: number } => {
     const minWidth = LEFT_PANEL_MIN;
@@ -263,6 +281,21 @@ export function LeadOptimizationWorkspace({
       max: Math.max(minWidth, maxWidth)
     };
   };
+
+  useEffect(() => {
+    resultsUiStateRef.current = resultsUiState;
+  }, [resultsUiState]);
+
+  useEffect(() => {
+    const snapshot = asRecord(initialMmpSnapshot || null);
+    const queryResult = asRecord(snapshot.query_result);
+    const queryId = readText(queryResult.query_id).trim();
+    const signature = buildLeadOptCandidatesUiStateSignature(snapshotUiState);
+    const key = `${queryId}|${signature}`;
+    if (hydratedUiStateKeyRef.current === key) return;
+    hydratedUiStateKeyRef.current = key;
+    setResultsUiState(snapshotUiState);
+  }, [initialMmpSnapshot, snapshotUiState]);
 
   const initialFragmentSelection = useMemo(() => {
     const snapshot = (initialMmpSnapshot || null) as Record<string, unknown> | null;
@@ -599,6 +632,16 @@ export function LeadOptimizationWorkspace({
     [mmp.ensurePredictionResult, mmp.enumeratedCandidates]
   );
 
+  const handleCandidatesUiStateChange = useCallback(
+    (nextUiState: LeadOptCandidatesUiState) => {
+      setResultsUiState(nextUiState);
+      if (typeof onMmpUiStateChange === 'function') {
+        void onMmpUiStateChange({ uiState: nextUiState });
+      }
+    },
+    [onMmpUiStateChange]
+  );
+
   const runMmpQuery = useCallback(async () => {
     const variableItems = queryForm.buildVariableItems(selectedFragmentItems, reference.fragments);
     const querySmiles = fragmentSketchSmiles;
@@ -624,7 +667,19 @@ export function LeadOptimizationWorkspace({
               });
             }
           : undefined,
-      onTaskCompleted: onMmpTaskCompleted,
+      onTaskCompleted:
+        typeof onMmpTaskCompleted === 'function'
+          ? async (payload) => {
+              const baseSnapshot = asRecord(payload.resultSnapshot);
+              await onMmpTaskCompleted({
+                ...payload,
+                resultSnapshot: {
+                  ...baseSnapshot,
+                  ui_state: { ...resultsUiStateRef.current }
+                }
+              });
+            }
+          : undefined,
       onTaskFailed: onMmpTaskFailed
     });
   }, [
@@ -787,7 +842,8 @@ export function LeadOptimizationWorkspace({
     () =>
       ({
         '--lead-opt-left-width': `${leftPanelWidth}px`,
-        '--lead-opt-result-left-width': `${resultViewerWidth}px`
+        '--lead-opt-result-left-width': `${resultViewerWidth}px`,
+        '--lead-opt-result-main-min-width': `${RESULT_MAIN_MIN}px`
       }) as CSSProperties,
     [leftPanelWidth, resultViewerWidth]
   );
@@ -900,6 +956,7 @@ export function LeadOptimizationWorkspace({
               predictionBySmiles={mmp.predictionBySmiles}
               referencePredictionByBackend={mmp.referencePredictionByBackend}
               defaultPredictionBackend={backend}
+              initialUiState={resultsUiState}
               activeSmiles={activeSmiles}
               onActiveSmilesChange={setActiveSmiles}
               onRunPredictCandidate={(candidateSmiles, predictionBackend) => {
@@ -928,6 +985,7 @@ export function LeadOptimizationWorkspace({
               onOpenPredictionResult={(candidateSmiles, highlightAtomIndices) => {
                 void handleOpenPredictionResult(candidateSmiles, highlightAtomIndices);
               }}
+              onUiStateChange={handleCandidatesUiStateChange}
               onExitCardMode={() => setResultViewerOpen(false)}
             />
           </div>

@@ -186,11 +186,94 @@ function normalizeBackend(value: string): string {
   return BACKEND_OPTIONS.some((item) => item.key === token) ? token : 'boltz';
 }
 
+type CandidateStateFilter = 'all' | 'pending' | 'queued' | 'running' | 'success' | 'failure';
+type CandidateStructureSearchMode = 'exact' | 'substructure';
+type CandidatePreviewRenderMode = 'confidence' | 'fragment';
+
+export interface LeadOptCandidatesUiState {
+  selectedBackend: string;
+  stateFilter: CandidateStateFilter;
+  showAdvanced: boolean;
+  mwMin: string;
+  mwMax: string;
+  logpMin: string;
+  logpMax: string;
+  tpsaMin: string;
+  tpsaMax: string;
+  structureSearchMode: CandidateStructureSearchMode;
+  structureSearchQuery: string;
+  previewRenderMode: CandidatePreviewRenderMode;
+}
+
+function normalizeStateFilter(value: unknown): CandidateStateFilter {
+  const token = String(value || '').trim().toLowerCase();
+  if (token === 'pending' || token === 'queued' || token === 'running' || token === 'success' || token === 'failure') {
+    return token;
+  }
+  return 'all';
+}
+
+function normalizeStructureSearchMode(value: unknown): CandidateStructureSearchMode {
+  return String(value || '').trim().toLowerCase() === 'substructure' ? 'substructure' : 'exact';
+}
+
+function normalizePreviewRenderMode(value: unknown): CandidatePreviewRenderMode {
+  return String(value || '').trim().toLowerCase() === 'fragment' ? 'fragment' : 'confidence';
+}
+
+function normalizeBoolean(value: unknown, fallback = false): boolean {
+  if (typeof value === 'boolean') return value;
+  const token = String(value || '').trim().toLowerCase();
+  if (token === 'true' || token === '1' || token === 'yes') return true;
+  if (token === 'false' || token === '0' || token === 'no') return false;
+  return fallback;
+}
+
+export function normalizeLeadOptCandidatesUiState(
+  value: unknown,
+  defaultPredictionBackend: string
+): LeadOptCandidatesUiState {
+  const payload =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  return {
+    selectedBackend: normalizeBackend(readText(payload.selectedBackend ?? payload.selected_backend) || defaultPredictionBackend),
+    stateFilter: normalizeStateFilter(payload.stateFilter ?? payload.state_filter),
+    showAdvanced: normalizeBoolean(payload.showAdvanced ?? payload.show_advanced, false),
+    mwMin: readText(payload.mwMin ?? payload.mw_min).trim(),
+    mwMax: readText(payload.mwMax ?? payload.mw_max).trim(),
+    logpMin: readText(payload.logpMin ?? payload.logp_min).trim(),
+    logpMax: readText(payload.logpMax ?? payload.logp_max).trim(),
+    tpsaMin: readText(payload.tpsaMin ?? payload.tpsa_min).trim(),
+    tpsaMax: readText(payload.tpsaMax ?? payload.tpsa_max).trim(),
+    structureSearchMode: normalizeStructureSearchMode(payload.structureSearchMode ?? payload.structure_search_mode),
+    structureSearchQuery: readText(payload.structureSearchQuery ?? payload.structure_search_query).trim(),
+    previewRenderMode: normalizePreviewRenderMode(payload.previewRenderMode ?? payload.preview_render_mode)
+  };
+}
+
+export function buildLeadOptCandidatesUiStateSignature(value: LeadOptCandidatesUiState): string {
+  return [
+    normalizeBackend(value.selectedBackend),
+    normalizeStateFilter(value.stateFilter),
+    value.showAdvanced ? '1' : '0',
+    readText(value.mwMin).trim(),
+    readText(value.mwMax).trim(),
+    readText(value.logpMin).trim(),
+    readText(value.logpMax).trim(),
+    readText(value.tpsaMin).trim(),
+    readText(value.tpsaMax).trim(),
+    normalizeStructureSearchMode(value.structureSearchMode),
+    readText(value.structureSearchQuery).trim(),
+    normalizePreviewRenderMode(value.previewRenderMode)
+  ].join('|');
+}
+
 const TABLE_CANDIDATE_2D_WIDTH = 288;
-const CARD_CANDIDATE_2D_WIDTH = 232;
+const CARD_CANDIDATE_2D_WIDTH = 190;
 const CARD_PREVIEW_2D_HEIGHT = 166;
 const PREVIEW_2D_HEIGHT = 138;
-const BACKEND_PREF_STORAGE_KEY = 'leadopt:selected_prediction_backend';
 
 interface LeadOptCandidatesPanelProps {
   sectionId?: string;
@@ -202,10 +285,12 @@ interface LeadOptCandidatesPanelProps {
   predictionBySmiles: Record<string, LeadOptPredictionRecord>;
   referencePredictionByBackend?: Record<string, LeadOptPredictionRecord>;
   defaultPredictionBackend: string;
+  initialUiState?: LeadOptCandidatesUiState | null;
   activeSmiles: string;
   onActiveSmilesChange: (smiles: string) => void;
   onRunPredictCandidate: (candidateSmiles: string, backend: string) => void;
   onOpenPredictionResult: (candidateSmiles: string, highlightAtomIndices?: number[]) => void;
+  onUiStateChange?: (state: LeadOptCandidatesUiState) => void;
   onExitCardMode?: () => void;
 }
 
@@ -219,42 +304,46 @@ export function LeadOptCandidatesPanel({
   predictionBySmiles,
   referencePredictionByBackend = {},
   defaultPredictionBackend,
+  initialUiState,
   activeSmiles,
   onActiveSmilesChange,
   onRunPredictCandidate,
   onOpenPredictionResult,
+  onUiStateChange,
   onExitCardMode
 }: LeadOptCandidatesPanelProps) {
   const PAGE_SIZE = 12;
   const CARD_BATCH_SIZE = 24;
+  const normalizedInitialUiState = useMemo(
+    () => normalizeLeadOptCandidatesUiState(initialUiState, defaultPredictionBackend),
+    [defaultPredictionBackend, initialUiState]
+  );
   const [page, setPage] = useState(1);
   const [pageInput, setPageInput] = useState('1');
   const [visibleCardCount, setVisibleCardCount] = useState(CARD_BATCH_SIZE);
-  const [selectedBackend, setSelectedBackend] = useState<string>(() => {
-    const fallback = normalizeBackend(defaultPredictionBackend);
-    if (typeof window === 'undefined') return fallback;
-    try {
-      const stored = window.localStorage.getItem(BACKEND_PREF_STORAGE_KEY);
-      return stored ? normalizeBackend(stored) : fallback;
-    } catch {
-      return fallback;
-    }
-  });
-  const [stateFilter, setStateFilter] = useState<'all' | 'pending' | 'queued' | 'running' | 'success' | 'failure'>('all');
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [mwMin, setMwMin] = useState('');
-  const [mwMax, setMwMax] = useState('');
-  const [logpMin, setLogpMin] = useState('');
-  const [logpMax, setLogpMax] = useState('');
-  const [tpsaMin, setTpsaMin] = useState('');
-  const [tpsaMax, setTpsaMax] = useState('');
-  const [structureSearchMode, setStructureSearchMode] = useState<'exact' | 'substructure'>('exact');
-  const [structureSearchQuery, setStructureSearchQuery] = useState('');
+  const [selectedBackend, setSelectedBackend] = useState<string>(normalizedInitialUiState.selectedBackend);
+  const [stateFilter, setStateFilter] = useState<CandidateStateFilter>(normalizedInitialUiState.stateFilter);
+  const [showAdvanced, setShowAdvanced] = useState(normalizedInitialUiState.showAdvanced);
+  const [mwMin, setMwMin] = useState(normalizedInitialUiState.mwMin);
+  const [mwMax, setMwMax] = useState(normalizedInitialUiState.mwMax);
+  const [logpMin, setLogpMin] = useState(normalizedInitialUiState.logpMin);
+  const [logpMax, setLogpMax] = useState(normalizedInitialUiState.logpMax);
+  const [tpsaMin, setTpsaMin] = useState(normalizedInitialUiState.tpsaMin);
+  const [tpsaMax, setTpsaMax] = useState(normalizedInitialUiState.tpsaMax);
+  const [structureSearchMode, setStructureSearchMode] = useState<CandidateStructureSearchMode>(
+    normalizedInitialUiState.structureSearchMode
+  );
+  const [structureSearchQuery, setStructureSearchQuery] = useState(normalizedInitialUiState.structureSearchQuery);
+  const [previewRenderMode, setPreviewRenderMode] = useState<CandidatePreviewRenderMode>(
+    normalizedInitialUiState.previewRenderMode
+  );
   const [debouncedStructureSearchQuery, setDebouncedStructureSearchQuery] = useState('');
   const [structureSearchMatches, setStructureSearchMatches] = useState<Record<string, boolean>>({});
   const [structureSearchLoading, setStructureSearchLoading] = useState(false);
   const [structureSearchError, setStructureSearchError] = useState<string | null>(null);
   const cardLoadMoreRef = useRef<HTMLDivElement | null>(null);
+  const uiStateHydrationSignatureRef = useRef('');
+  const uiStateEmitSignatureRef = useRef('');
   const selectedBackendKey = normalizeBackend(selectedBackend);
 
   const predictionForBackend = (smiles: string): LeadOptPredictionRecord | null => {
@@ -265,9 +354,29 @@ export function LeadOptCandidatesPanel({
   };
 
   useEffect(() => {
+    const signature = buildLeadOptCandidatesUiStateSignature(normalizedInitialUiState);
+    if (uiStateHydrationSignatureRef.current === signature) return;
+    uiStateHydrationSignatureRef.current = signature;
+    setSelectedBackend(normalizedInitialUiState.selectedBackend);
+    setStateFilter(normalizedInitialUiState.stateFilter);
+    setShowAdvanced(normalizedInitialUiState.showAdvanced);
+    setMwMin(normalizedInitialUiState.mwMin);
+    setMwMax(normalizedInitialUiState.mwMax);
+    setLogpMin(normalizedInitialUiState.logpMin);
+    setLogpMax(normalizedInitialUiState.logpMax);
+    setTpsaMin(normalizedInitialUiState.tpsaMin);
+    setTpsaMax(normalizedInitialUiState.tpsaMax);
+    setStructureSearchMode(normalizedInitialUiState.structureSearchMode);
+    setStructureSearchQuery(normalizedInitialUiState.structureSearchQuery);
+    setPreviewRenderMode(normalizedInitialUiState.previewRenderMode);
+    setDebouncedStructureSearchQuery(normalizedInitialUiState.structureSearchQuery);
     setPage(1);
     setPageInput('1');
-    setStateFilter('all');
+  }, [normalizedInitialUiState]);
+
+  useEffect(() => {
+    setPage(1);
+    setPageInput('1');
   }, [enumeratedCandidates]);
 
   useEffect(() => {
@@ -275,13 +384,43 @@ export function LeadOptCandidatesPanel({
   }, [defaultPredictionBackend]);
 
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    try {
-      window.localStorage.setItem(BACKEND_PREF_STORAGE_KEY, normalizeBackend(selectedBackend));
-    } catch {
-      // ignore storage failures
-    }
-  }, [selectedBackend]);
+    if (typeof onUiStateChange !== 'function') return;
+    const nextState: LeadOptCandidatesUiState = {
+      selectedBackend: normalizeBackend(selectedBackend),
+      stateFilter: normalizeStateFilter(stateFilter),
+      showAdvanced,
+      mwMin: readText(mwMin).trim(),
+      mwMax: readText(mwMax).trim(),
+      logpMin: readText(logpMin).trim(),
+      logpMax: readText(logpMax).trim(),
+      tpsaMin: readText(tpsaMin).trim(),
+      tpsaMax: readText(tpsaMax).trim(),
+      structureSearchMode: normalizeStructureSearchMode(structureSearchMode),
+      structureSearchQuery: readText(structureSearchQuery).trim(),
+      previewRenderMode: normalizePreviewRenderMode(previewRenderMode)
+    };
+    const signature = buildLeadOptCandidatesUiStateSignature(nextState);
+    const timer = window.setTimeout(() => {
+      if (uiStateEmitSignatureRef.current === signature) return;
+      uiStateEmitSignatureRef.current = signature;
+      onUiStateChange(nextState);
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [
+    logpMax,
+    logpMin,
+    mwMax,
+    mwMin,
+    onUiStateChange,
+    selectedBackend,
+    showAdvanced,
+    stateFilter,
+    previewRenderMode,
+    structureSearchMode,
+    structureSearchQuery,
+    tpsaMax,
+    tpsaMin
+  ]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -598,6 +737,28 @@ export function LeadOptCandidatesPanel({
                 ))}
               </select>
             ) : null}
+            <div className="lead-opt-render-mode-switch" role="tablist" aria-label="2D preview render mode">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={previewRenderMode === 'confidence'}
+                className={`lead-opt-render-mode-btn ${previewRenderMode === 'confidence' ? 'active' : ''}`}
+                onClick={() => setPreviewRenderMode('confidence')}
+                title="Color by model confidence"
+              >
+                Confidence
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={previewRenderMode === 'fragment'}
+                className={`lead-opt-render-mode-btn ${previewRenderMode === 'fragment' ? 'active' : ''}`}
+                onClick={() => setPreviewRenderMode('fragment')}
+                title="Highlight modified fragment"
+              >
+                Fragment
+              </button>
+            </div>
             <button
               type="button"
               className="btn btn-ghost btn-compact"
@@ -794,6 +955,7 @@ export function LeadOptCandidatesPanel({
               const iptmValue = prediction?.pairIptm ?? null;
               const paeValue = prediction?.pairPae ?? null;
               const plddtTone = resolveConfidenceTone(plddtValue);
+              const useConfidenceRender = previewRenderMode === 'confidence';
               const isActive = activeSmiles === smiles;
               const rowDelta = readNumberOrNull(row.median_delta);
               const rowDeltaTone = resolveDeltaTone(rowDelta);
@@ -836,10 +998,11 @@ export function LeadOptCandidatesPanel({
                         smiles={smiles}
                         width={CARD_CANDIDATE_2D_WIDTH}
                         height={CARD_PREVIEW_2D_HEIGHT}
-                        highlightAtomIndices={highlightAtomIndices}
+                        highlightAtomIndices={useConfidenceRender ? null : highlightAtomIndices}
                         templateSmiles={referenceSmiles}
-                        atomConfidences={prediction?.ligandAtomPlddts || null}
-                        confidenceHint={prediction?.ligandPlddt ?? null}
+                        strictTemplateAlignment
+                        atomConfidences={useConfidenceRender ? prediction?.ligandAtomPlddts || null : null}
+                        confidenceHint={useConfidenceRender ? prediction?.ligandPlddt ?? null : null}
                       />
                     </div>
                   </div>
@@ -923,6 +1086,7 @@ export function LeadOptCandidatesPanel({
                   const iptmDeltaTone = resolveDeltaTone(iptmDelta);
                   const paeDeltaTone = resolveDeltaTone(paeDelta === null ? null : -paeDelta);
                   const isActive = activeSmiles === smiles;
+                  const useConfidenceRender = previewRenderMode === 'confidence';
                   const mwDelta = readNumberOrNull(deltas.mw);
                   const logpDelta = readNumberOrNull(deltas.logp);
                   const tpsaDelta = readNumberOrNull(deltas.tpsa);
@@ -951,10 +1115,11 @@ export function LeadOptCandidatesPanel({
                             smiles={smiles}
                             width={TABLE_CANDIDATE_2D_WIDTH}
                             height={PREVIEW_2D_HEIGHT}
-                            highlightAtomIndices={highlightAtomIndices}
+                            highlightAtomIndices={useConfidenceRender ? null : highlightAtomIndices}
                             templateSmiles={referenceSmiles}
-                            atomConfidences={prediction?.ligandAtomPlddts || null}
-                            confidenceHint={prediction?.ligandPlddt ?? null}
+                            strictTemplateAlignment
+                            atomConfidences={useConfidenceRender ? prediction?.ligandAtomPlddts || null : null}
+                            confidenceHint={useConfidenceRender ? prediction?.ligandPlddt ?? null : null}
                           />
                         </button>
                       </td>

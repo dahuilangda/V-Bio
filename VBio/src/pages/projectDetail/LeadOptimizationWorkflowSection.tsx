@@ -1,5 +1,6 @@
 import { LeadOptimizationWorkspace } from '../../components/project/LeadOptimizationWorkspace';
 import type { LeadOptPersistedUploads } from '../../components/project/leadopt/hooks/useLeadOptReferenceFragment';
+import type { LeadOptCandidatesUiState } from '../../components/project/leadopt/LeadOptCandidatesPanel';
 import type {
   LeadOptMmpPersistedSnapshot,
   LeadOptPredictionRecord
@@ -38,6 +39,7 @@ export interface LeadOptimizationWorkflowSectionProps {
   }) => void | Promise<void>;
   onMmpTaskFailed?: (payload: { taskId: string; error: string }) => void | Promise<void>;
   initialMmpSnapshot?: LeadOptMmpPersistedSnapshot | null;
+  onMmpUiStateChange?: (payload: { uiState: LeadOptCandidatesUiState }) => void | Promise<void>;
   onPredictionQueued?: (payload: { taskId: string; backend: string; candidateSmiles: string }) => void | Promise<void>;
   onPredictionStateChange?: (payload: {
     records: Record<string, LeadOptPredictionRecord>;
@@ -73,6 +75,7 @@ export function LeadOptimizationWorkflowSection({
   onMmpTaskCompleted,
   onMmpTaskFailed,
   initialMmpSnapshot,
+  onMmpUiStateChange,
   onPredictionQueued,
   onPredictionStateChange
 }: LeadOptimizationWorkflowSectionProps) {
@@ -99,6 +102,7 @@ export function LeadOptimizationWorkflowSection({
       onMmpTaskCompleted={onMmpTaskCompleted}
       onMmpTaskFailed={onMmpTaskFailed}
       initialMmpSnapshot={initialMmpSnapshot}
+      onMmpUiStateChange={onMmpUiStateChange}
       onPredictionQueued={onPredictionQueued}
       onPredictionStateChange={onPredictionStateChange}
     />

@@ -11,6 +11,7 @@ interface Ligand2DPreviewProps {
   highlightQuery?: string | null;
   highlightAtomIndices?: number[] | null;
   templateSmiles?: string | null;
+  strictTemplateAlignment?: boolean;
 }
 
 export function Ligand2DPreview({
@@ -21,7 +22,8 @@ export function Ligand2DPreview({
   confidenceHint = null,
   highlightQuery = null,
   highlightAtomIndices = null,
-  templateSmiles = null
+  templateSmiles = null,
+  strictTemplateAlignment = false
 }: Ligand2DPreviewProps) {
   const [svg, setSvg] = useState<string>('');
   const [error, setError] = useState<string>('');
@@ -60,7 +62,8 @@ export function Ligand2DPreview({
           confidenceHint,
           highlightQuery,
           highlightAtomIndices,
-          templateSmiles
+          templateSmiles,
+          strictTemplateAlignment
         });
         if (cancelled) return;
         setSvg(rendered);
@@ -75,7 +78,17 @@ export function Ligand2DPreview({
     return () => {
       cancelled = true;
     };
-  }, [smiles, width, height, confidenceHint, highlightQuery, templateSmiles, atomConfidenceSignature, highlightAtomSignature]);
+  }, [
+    smiles,
+    width,
+    height,
+    confidenceHint,
+    highlightQuery,
+    templateSmiles,
+    strictTemplateAlignment,
+    atomConfidenceSignature,
+    highlightAtomSignature
+  ]);
 
   if (!smiles.trim()) {
     return <div className="ligand-preview-empty">No ligand input.</div>;

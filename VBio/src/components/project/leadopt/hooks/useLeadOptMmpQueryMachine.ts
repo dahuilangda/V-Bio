@@ -61,6 +61,7 @@ export interface LeadOptMmpPersistedSnapshot {
   enumerated_candidates?: Array<Record<string, unknown>>;
   prediction_by_smiles?: Record<string, LeadOptPredictionRecord>;
   reference_prediction_by_backend?: Record<string, LeadOptPredictionRecord>;
+  ui_state?: Record<string, unknown>;
   selection?: Record<string, unknown>;
   target_chain?: string;
   ligand_chain?: string;

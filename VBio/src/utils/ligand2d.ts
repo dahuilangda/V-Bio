@@ -210,6 +210,7 @@ export interface Ligand2DRenderOptions {
   highlightQuery?: string | null;
   highlightAtomIndices?: number[] | null;
   templateSmiles?: string | null;
+  strictTemplateAlignment?: boolean;
 }
 
 function tryAlignDepictionToTemplate(
@@ -243,7 +244,7 @@ function tryAlignDepictionToTemplate(
       // try alternative signatures below
     }
     try {
-      candidate.call(mol, templateMol, JSON.stringify({ acceptFailure: true, allowRGroups: true }));
+      candidate.call(mol, templateMol, JSON.stringify({ acceptFailure: false, allowRGroups: false }));
       aligned = true;
       return aligned;
     } catch {
@@ -257,10 +258,10 @@ function tryAlignDepictionToTemplate(
       // try alternative signatures below
     }
     try {
-      candidate.call(mol, template, JSON.stringify({ acceptFailure: true, allowRGroups: true }));
+      candidate.call(mol, template, JSON.stringify({ acceptFailure: false, allowRGroups: false }));
       aligned = true;
     } catch {
-      // no-op; fallback to default depiction orientation.
+      // no-op
     }
   } finally {
     templateMol.delete();
@@ -315,7 +316,8 @@ export function renderLigand2DSvg(
     confidenceHint = null,
     highlightQuery = null,
     highlightAtomIndices = null,
-    templateSmiles = null
+    templateSmiles = null,
+    strictTemplateAlignment = false
   }: Ligand2DRenderOptions
 ): string {
   const value = smiles.trim();
@@ -359,11 +361,20 @@ export function renderLigand2DSvg(
         : 13;
 
   try {
+    const normalizedTemplate = String(templateSmiles || '').trim();
+    const templateRequired = strictTemplateAlignment === true;
+    if (templateRequired && !normalizedTemplate) {
+      throw new Error('Template alignment requires a reference template SMILES.');
+    }
     // Ensure deterministic base orientation before template matching.
     mol.set_new_coords?.();
-    const alignedByTemplate = tryAlignDepictionToTemplate(rdkit, mol, templateSmiles)
-      || tryAlignDepictionToTemplate(rdkit, mol, templateSmiles);
-    if (!alignedByTemplate) {
+    const alignedByTemplate = normalizedTemplate
+      ? tryAlignDepictionToTemplate(rdkit, mol, normalizedTemplate)
+      : false;
+    if (normalizedTemplate && templateRequired && !alignedByTemplate) {
+      throw new Error('Failed to align 2D depiction to the reference template.');
+    }
+    if (!templateRequired && !alignedByTemplate) {
       mol.normalize_depiction?.();
     }
     let rawSvg = '';

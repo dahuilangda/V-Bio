@@ -2,6 +2,7 @@ import type { CSSProperties, Dispatch, KeyboardEvent, PointerEvent, ReactNode, R
 import type { InputComponent, ProteinTemplateUpload } from '../../types/models';
 import type { MolstarResiduePick } from '../../components/project/MolstarViewer';
 import type { AffinitySignalCard } from '../../components/project/AffinityWorkspace';
+import type { LeadOptCandidatesUiState } from '../../components/project/leadopt/LeadOptCandidatesPanel';
 import type { LeadOptPersistedUploads } from '../../components/project/leadopt/hooks/useLeadOptReferenceFragment';
 import type {
   LeadOptMmpPersistedSnapshot,
@@ -91,6 +92,7 @@ interface UseProjectWorkflowSectionPropsInput {
     resultSnapshot?: Record<string, unknown>;
   }) => void | Promise<void>;
   onLeadOptMmpTaskFailed?: (payload: { taskId: string; error: string }) => void | Promise<void>;
+  onLeadOptUiStateChange?: (payload: { uiState: LeadOptCandidatesUiState }) => void | Promise<void>;
   onLeadOptPredictionQueued?: (payload: { taskId: string; backend: string; candidateSmiles: string }) => void | Promise<void>;
   onLeadOptPredictionStateChange?: (payload: {
     records: Record<string, LeadOptPredictionRecord>;
@@ -199,6 +201,7 @@ export function useProjectWorkflowSectionProps({
   onLeadOptMmpTaskQueued,
   onLeadOptMmpTaskCompleted,
   onLeadOptMmpTaskFailed,
+  onLeadOptUiStateChange,
   onLeadOptPredictionQueued,
   onLeadOptPredictionStateChange,
   onLeadOptNavigateToResults,
@@ -315,6 +318,7 @@ export function useProjectWorkflowSectionProps({
     onMmpTaskQueued: onLeadOptMmpTaskQueued,
     onMmpTaskCompleted: onLeadOptMmpTaskCompleted,
     onMmpTaskFailed: onLeadOptMmpTaskFailed,
+    onMmpUiStateChange: onLeadOptUiStateChange,
     onPredictionQueued: onLeadOptPredictionQueued,
     onPredictionStateChange: onLeadOptPredictionStateChange,
     initialMmpSnapshot: leadOptInitialMmpSnapshot

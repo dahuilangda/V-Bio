@@ -25,6 +25,7 @@ import { useProjectRunState } from './useProjectRunState';
 import { usePredictionWorkspaceProps } from './usePredictionWorkspaceProps';
 import { useProjectDetailRuntimeContext } from './useProjectDetailRuntimeContext';
 import { buildLeadOptUploadSnapshotComponents, type LeadOptPersistedUploads } from './projectTaskSnapshot';
+import { buildLeadOptCandidatesUiStateSignature, type LeadOptCandidatesUiState } from '../../components/project/leadopt/LeadOptCandidatesPanel';
 import type { LeadOptPredictionRecord } from '../../components/project/leadopt/hooks/useLeadOptMmpQueryMachine';
 
 function readText(value: unknown): string {
@@ -126,6 +127,23 @@ function buildLeadOptPredictionPersistSignature(records: Record<string, LeadOptP
     })
     .sort((a, b) => a.localeCompare(b))
     .join('||');
+}
+
+function compactLeadOptCandidatesUiState(value: LeadOptCandidatesUiState): LeadOptCandidatesUiState {
+  return {
+    selectedBackend: readText(value.selectedBackend).trim().toLowerCase() || 'boltz',
+    stateFilter: value.stateFilter,
+    showAdvanced: value.showAdvanced === true,
+    mwMin: readText(value.mwMin).trim(),
+    mwMax: readText(value.mwMax).trim(),
+    logpMin: readText(value.logpMin).trim(),
+    logpMax: readText(value.logpMax).trim(),
+    tpsaMin: readText(value.tpsaMin).trim(),
+    tpsaMax: readText(value.tpsaMax).trim(),
+    structureSearchMode: value.structureSearchMode,
+    structureSearchQuery: readText(value.structureSearchQuery).trim(),
+    previewRenderMode: value.previewRenderMode
+  };
 }
 
 function buildLeadOptSelectionFromPayload(payload: Record<string, unknown>, context: {
@@ -375,6 +393,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   const leadOptUploadPersistKeyRef = useRef('');
   const leadOptActiveTaskRowIdRef = useRef('');
   const leadOptPredictionPersistKeyRef = useRef('');
+  const leadOptUiStatePersistKeyRef = useRef('');
   const leadOptMmpContextByTaskIdRef = useRef<Record<string, Record<string, unknown>>>({});
 
   const resolveLeadOptTaskRowId = useCallback((): string => {
@@ -492,6 +511,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     const snapshot = asRecord(payload.resultSnapshot);
     const queryResult = asRecord(snapshot.query_result);
     const enumeratedCandidates = Array.isArray(snapshot.enumerated_candidates) ? snapshot.enumerated_candidates : [];
+    const uiState = asRecord(snapshot.ui_state);
     const compactQueryResult = {
       query_id: readText(payload.queryId).trim(),
       query_mode: readText(queryResult.query_mode).trim() || 'one-to-many',
@@ -521,6 +541,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
           query_result: compactQueryResult,
           result_storage: 'server_query_cache',
           enumerated_candidates: enumeratedCandidates,
+          ui_state: uiState,
           prediction_stage: 'idle',
           prediction_summary: {
             total: 0,
@@ -736,6 +757,37 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     [patchTask, resolveLeadOptSourceTask, resolveLeadOptTaskRowId]
   );
 
+  const handleLeadOptUiStateChange = useCallback(
+    async (payload: { uiState: LeadOptCandidatesUiState }) => {
+      if (!project) return;
+      const taskRowId = resolveLeadOptTaskRowId();
+      if (!taskRowId) return;
+      leadOptActiveTaskRowIdRef.current = taskRowId;
+      const sourceTask = resolveLeadOptSourceTask(taskRowId);
+      const sourceConfidence = asRecord(sourceTask?.confidence);
+      const sourceLeadOpt = asRecord(sourceConfidence.lead_opt_mmp);
+      if (Object.keys(sourceLeadOpt).length === 0) return;
+      const compactUiState = compactLeadOptCandidatesUiState(payload.uiState);
+      const persistKey = [
+        taskRowId,
+        buildLeadOptCandidatesUiStateSignature(compactUiState),
+        readText(sourceLeadOpt.query_id || asRecord(sourceLeadOpt.query_result).query_id).trim()
+      ].join('|');
+      if (leadOptUiStatePersistKeyRef.current === persistKey) return;
+      leadOptUiStatePersistKeyRef.current = persistKey;
+      await patchTask(taskRowId, {
+        confidence: {
+          ...sourceConfidence,
+          lead_opt_mmp: {
+            ...sourceLeadOpt,
+            ui_state: compactUiState
+          }
+        }
+      });
+    },
+    [patchTask, project, resolveLeadOptSourceTask, resolveLeadOptTaskRowId]
+  );
+
   const handleLeadOptReferenceUploadsChange = useCallback(
     async (uploads: LeadOptPersistedUploads) => {
       if (!project || !draft || !canEdit) return;
@@ -808,6 +860,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       reference_prediction_by_backend: compactLeadOptPredictionMap(
         asPredictionRecordMap(leadOptMmp.reference_prediction_by_backend)
       ),
+      ui_state: asRecord(leadOptMmp.ui_state),
       selection: asRecord(leadOptMmp.selection),
       target_chain: readText(leadOptMmp.target_chain).trim(),
       ligand_chain: readText(leadOptMmp.ligand_chain).trim()
@@ -1107,6 +1160,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     onLeadOptMmpTaskQueued: handleLeadOptMmpTaskQueued,
     onLeadOptMmpTaskCompleted: handleLeadOptMmpTaskCompleted,
     onLeadOptMmpTaskFailed: handleLeadOptMmpTaskFailed,
+    onLeadOptUiStateChange: handleLeadOptUiStateChange,
     onLeadOptPredictionQueued: handleLeadOptPredictionQueued,
     onLeadOptPredictionStateChange: handleLeadOptPredictionStateChange,
     onLeadOptNavigateToResults: () => {},
