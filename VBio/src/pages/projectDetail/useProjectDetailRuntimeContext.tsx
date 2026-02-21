@@ -4,6 +4,7 @@ import { useAuth } from '../../hooks/useAuth';
 import {
   insertProjectTask,
   listProjectTasksCompact,
+  listProjectTasksForList,
   updateProject,
   updateProjectTask
 } from '../../api/supabaseLite';
@@ -48,6 +49,26 @@ import { useProjectDirtyState } from './useProjectDirtyState';
 import { useProjectConfidenceSignals } from './useProjectConfidenceSignals';
 import { useComponentTypeBuckets } from './useComponentTypeBuckets';
 import { useProjectDetailLocalState } from './useProjectDetailLocalState';
+
+function buildTaskRuntimeSignature(
+  rows: Array<{
+    id?: string | null;
+    task_id?: string | null;
+    task_state?: string | null;
+    status_text?: string | null;
+    error_text?: string | null;
+    updated_at?: string | null;
+    completed_at?: string | null;
+    duration_seconds?: number | null;
+  }>
+): string {
+  return rows
+    .map(
+      (row) =>
+        `${String(row.id || '').trim()}|${String(row.task_id || '').trim()}|${String(row.task_state || '').trim()}|${String(row.status_text || '').trim()}|${String(row.error_text || '').trim()}|${String(row.updated_at || '').trim()}|${String(row.completed_at || '').trim()}|${Number.isFinite(Number(row.duration_seconds)) ? Number(row.duration_seconds) : ''}`
+    )
+    .join('\n');
+}
 
 export function useProjectDetailRuntimeContext() {
   const { projectId = '' } = useParams();
@@ -154,6 +175,92 @@ export function useProjectDetailRuntimeContext() {
   const isPredictionWorkflow = workflowKey === 'prediction';
   const isAffinityWorkflow = workflowKey === 'affinity';
   const isLeadOptimizationWorkflow = workflowKey === 'lead_optimization';
+  const runtimeTaskSignature = useMemo(() => buildTaskRuntimeSignature(projectTasks), [projectTasks]);
+
+  useEffect(() => {
+    const projectIdValue = String(project?.id || '').trim();
+    if (!projectIdValue) return;
+    const hasRuntimeTasks = projectTasks.some((row) => {
+      const taskId = String(row.task_id || '').trim();
+      const taskState = String(row.task_state || '').toUpperCase();
+      if (!taskId) return false;
+      return taskState === 'QUEUED' || taskState === 'RUNNING';
+    });
+    if (!hasRuntimeTasks) return;
+
+    let cancelled = false;
+    let inFlight = false;
+
+    const refreshTaskRows = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      try {
+        const rowsRaw =
+          workflowKey === 'lead_optimization'
+            ? await listProjectTasksForList(projectIdValue)
+            : await listProjectTasksCompact(projectIdValue);
+        if (cancelled) return;
+        const nextRows = sortProjectTasks(rowsRaw);
+        const nextSignature = buildTaskRuntimeSignature(nextRows);
+        setProjectTasks((prev) => (buildTaskRuntimeSignature(prev) === nextSignature ? prev : nextRows));
+
+        const activeTaskId = String(project?.task_id || '').trim();
+        if (!activeTaskId) return;
+        const activeRow = nextRows.find((row) => String(row.task_id || '').trim() === activeTaskId) || null;
+        if (!activeRow) return;
+        setProject((prev) => {
+          if (!prev) return prev;
+          const rawTaskState = String(activeRow.task_state || '').trim().toUpperCase();
+          const nextTaskState = (
+            rawTaskState === 'QUEUED' ||
+            rawTaskState === 'RUNNING' ||
+            rawTaskState === 'SUCCESS' ||
+            rawTaskState === 'FAILURE' ||
+            rawTaskState === 'REVOKED' ||
+            rawTaskState === 'DRAFT'
+              ? rawTaskState
+              : prev.task_state
+          ) as typeof prev.task_state;
+          const nextStatusText = String(activeRow.status_text || '').trim();
+          const nextErrorText = String(activeRow.error_text || '').trim();
+          const nextCompletedAt = activeRow.completed_at || null;
+          const nextDurationCandidate = Number(activeRow.duration_seconds);
+          const nextDurationSeconds = Number.isFinite(nextDurationCandidate) ? nextDurationCandidate : null;
+          if (
+            prev.task_state === nextTaskState &&
+            String(prev.status_text || '') === nextStatusText &&
+            String(prev.error_text || '') === nextErrorText &&
+            (prev.completed_at || null) === nextCompletedAt &&
+            (prev.duration_seconds ?? null) === nextDurationSeconds
+          ) {
+            return prev;
+          }
+          return {
+            ...prev,
+            task_state: nextTaskState,
+            status_text: nextStatusText,
+            error_text: nextErrorText,
+            completed_at: nextCompletedAt,
+            duration_seconds: nextDurationSeconds
+          };
+        });
+      } catch {
+        // keep local state and retry on next cycle
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void refreshTaskRows();
+    const timer = window.setInterval(() => {
+      void refreshTaskRows();
+    }, 4200);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [project?.id, project?.task_id, projectTasks, runtimeTaskSignature, setProject, setProjectTasks, workflowKey]);
 
   const {
     requestedStatusTaskRow,

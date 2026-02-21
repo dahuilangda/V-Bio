@@ -663,6 +663,32 @@ export function LeadOptimizationWorkspace({
     setViewerPreviewRenderMode(mode);
   }, []);
 
+  useEffect(() => {
+    if (effectiveViewMode !== 'design') return;
+    const backendKey = readText(resultsUiState.selectedBackend).trim().toLowerCase();
+    if (!backendKey) return;
+    const record = mmp.referencePredictionByBackend[backendKey];
+    if (!record) return;
+    if (String(record.state || '').toUpperCase() !== 'SUCCESS') return;
+    if (readText(record.structureText).trim() && record.pairIptmResolved === true) return;
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      if (cancelled) return;
+      void mmp.ensureReferencePredictionResult(backendKey);
+    }, 220);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    effectiveViewMode,
+    mmp.ensureReferencePredictionResult,
+    mmp.referencePredictionByBackend,
+    resultsUiState.selectedBackend
+  ]);
+
   const runMmpQuery = useCallback(async () => {
     const variableItems = queryForm.buildVariableItems(selectedFragmentItems, reference.fragments);
     const querySmiles = fragmentSketchSmiles;

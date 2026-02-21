@@ -1612,65 +1612,8 @@ export function useLeadOptMmpQueryMachine({
     [ligandChain, onError, referencePredictionByBackend, targetChain]
   );
 
-  useEffect(() => {
-    const needHydrate = Object.entries(predictionBySmiles)
-      .filter(([, record]) => {
-        if (String(record.state || '').toUpperCase() !== 'SUCCESS') return false;
-        return !readText(record.structureText).trim() || record.pairIptmResolved !== true;
-      })
-      .slice(0, 3)
-      .map(([smiles]) => smiles);
-    if (needHydrate.length === 0) return;
-
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        for (const smiles of needHydrate) {
-          if (cancelled) return;
-          try {
-            await ensurePredictionResult(smiles);
-          } catch {
-            // transient parse/download errors will retry on next cycle
-          }
-        }
-      })();
-    }, 260);
-
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [ensurePredictionResult, predictionBySmiles]);
-
-  useEffect(() => {
-    const needHydrate = Object.entries(referencePredictionByBackend)
-      .filter(([, record]) => {
-        if (String(record.state || '').toUpperCase() !== 'SUCCESS') return false;
-        return !readText(record.structureText).trim() || record.pairIptmResolved !== true;
-      })
-      .slice(0, 3)
-      .map(([backendKey]) => backendKey);
-    if (needHydrate.length === 0) return;
-
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        for (const backendKey of needHydrate) {
-          if (cancelled) return;
-          try {
-            await ensureReferencePredictionResult(backendKey);
-          } catch {
-            // transient parse/download errors will retry on next cycle
-          }
-        }
-      })();
-    }, 260);
-
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [ensureReferencePredictionResult, referencePredictionByBackend]);
+  // Keep result-bundle hydration on-demand to avoid heavy background downloads
+  // when users are only browsing candidate/task lists.
 
   const toggleTransformSelection = useCallback((transformId: string) => {
     if (!transformId) return;
