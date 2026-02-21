@@ -49,6 +49,19 @@ except ImportError:
 
 
 PG_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+MMPDB_CORE_TABLE_NAMES = (
+    "dataset",
+    "compound",
+    "rule_smiles",
+    "constant_smiles",
+    "rule",
+    "environment_fingerprint",
+    "rule_environment",
+    "pair",
+    "property_name",
+    "compound_property",
+    "rule_environment_statistics",
+)
 
 
 def _is_postgres_dsn(value: str) -> bool:
@@ -338,11 +351,70 @@ def validate_smiles_file(smiles_file: str) -> bool:
         logger.error(f"Error reading SMILES file: {e}")
         return False
 
+
+def _ensure_postgres_schema_exists(postgres_url: str, schema: str) -> None:
+    if not HAS_PSYCOPG:
+        return
+    normalized_schema = _validate_pg_schema(schema)
+    with psycopg.connect(postgres_url, autocommit=True) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                SQL("CREATE SCHEMA IF NOT EXISTS {}").format(Identifier(normalized_schema))
+            )
+
+
+def _run_mmpdb_index_with_schema_safe_patch(index_args: List[str], env: dict[str, str]) -> subprocess.CompletedProcess:
+    patch_runner_code = r"""
+import sys
+from mmpdblib import cli, index_writers, schema as mmp_schema
+
+def _q_ident(value):
+    return '"' + str(value).replace('"', '""') + '"'
+
+def _patched_create_schema(self):
+    c = self.conn
+    c.execute("SELECT current_schema()")
+    row = c.fetchone()
+    current_schema = (row[0] if row and row[0] else "public")
+    c.execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
+        (current_schema,),
+    )
+    table_names = set(r[0] for r in c)
+    existing = [t for t in mmp_schema.SCHEMA_TABLE_NAMES if t in table_names]
+    for table_name in existing:
+        c.execute(
+            "DROP TABLE {}.{} CASCADE".format(
+                _q_ident(current_schema),
+                _q_ident(table_name),
+            )
+        )
+    mmp_schema.create_schema(self.db, mmp_schema.PostgresConfig)
+
+index_writers.PostgresIndexWriter.create_schema = _patched_create_schema
+sys.argv = ["mmpdb"] + sys.argv[1:]
+cli.main()
+"""
+    cmd = [sys.executable, "-c", patch_runner_code, *index_args]
+    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+
+
+def _summarize_core_tables(rows: List[tuple[str, str]]) -> str:
+    by_schema: dict[str, List[str]] = {}
+    for table_schema, table_name in rows:
+        by_schema.setdefault(table_schema, []).append(table_name)
+    return "; ".join(
+        f"{table_schema}: {', '.join(sorted(set(table_names)))}"
+        for table_schema, table_names in sorted(by_schema.items())
+    )
+
+
 def _index_fragments_to_postgres(
     fragments_file: str,
     postgres_url: str,
     *,
     postgres_schema: str = "public",
+    force_rebuild_schema: bool = False,
     properties_file: Optional[str] = None,
     skip_attachment_enrichment: bool = False,
     attachment_force_recompute: bool = False,
@@ -360,6 +432,33 @@ def _index_fragments_to_postgres(
             logger.error("PostgreSQL DSN is required. Received: %s", postgres_url)
             return False
 
+        _ensure_postgres_schema_exists(postgres_url, normalized_schema)
+        existing_core_tables = _find_mmpdb_core_tables(postgres_url)
+        if existing_core_tables:
+            logger.warning(
+                "Detected existing mmpdb core tables in database: %s",
+                _summarize_core_tables(existing_core_tables),
+            )
+            logger.warning(
+                "Applying schema-safe mmpdb index patch; only current schema '%s' tables will be replaced.",
+                normalized_schema,
+            )
+        current_schema_tables = _find_mmpdb_core_tables_in_schema(postgres_url, normalized_schema)
+        if current_schema_tables and not force_rebuild_schema:
+            logger.error(
+                "Target schema '%s' already contains mmpdb core tables: %s. "
+                "Use --force to rebuild this schema, or choose another --postgres_schema.",
+                normalized_schema,
+                ", ".join(current_schema_tables),
+            )
+            return False
+        if current_schema_tables and force_rebuild_schema:
+            logger.warning(
+                "Target schema '%s' contains existing core tables and will be rebuilt due to --force: %s",
+                normalized_schema,
+                ", ".join(current_schema_tables),
+            )
+
         # Check fragments file
         if not os.path.exists(fragments_file):
             logger.error("Fragments file not found: %s", fragments_file)
@@ -367,13 +466,13 @@ def _index_fragments_to_postgres(
 
         # Step 2: Create index directly in PostgreSQL
         logger.info("Step 2: Creating MMP database index in PostgreSQL (this may take a while)...")
-        index_cmd = [
-            sys.executable, "-m", "mmpdblib", "index",
+        index_args = [
+            "index",
             fragments_file,
             "-o", postgres_url
         ]
         if properties_file:
-            index_cmd.extend(["--properties", properties_file])
+            index_args.extend(["--properties", properties_file])
 
         # Let mmpdb index session inherit memory/parallel/search_path tuning through libpq.
         index_env = os.environ.copy()
@@ -393,8 +492,11 @@ def _index_fragments_to_postgres(
             )
             logger.info("PGOPTIONS for mmpdb index: %s", index_env["PGOPTIONS"])
 
-        logger.info(f"Running: {' '.join(index_cmd)}")
-        result = subprocess.run(index_cmd, capture_output=True, text=True, env=index_env)
+        logger.info(
+            "Running mmpdb index with schema-safe patch: %s",
+            " ".join([sys.executable, "-m", "mmpdblib", *index_args]),
+        )
+        result = _run_mmpdb_index_with_schema_safe_patch(index_args, index_env)
 
         if result.returncode != 0:
             logger.error(f"Index creation failed: {result.stderr}")
@@ -447,6 +549,7 @@ def create_mmp_database(
     properties_file: Optional[str] = None,
     skip_attachment_enrichment: bool = False,
     attachment_force_recompute: bool = False,
+    force_rebuild_schema: bool = False,
     keep_fragments: bool = False,
     fragment_jobs: int = 0,
     index_maintenance_work_mem_mb: int = 0,
@@ -495,6 +598,7 @@ def create_mmp_database(
             fragments_file,
             postgres_url,
             postgres_schema=postgres_schema,
+            force_rebuild_schema=force_rebuild_schema,
             properties_file=properties_file,
             skip_attachment_enrichment=skip_attachment_enrichment,
             attachment_force_recompute=attachment_force_recompute,
@@ -529,6 +633,41 @@ def _validate_pg_schema(schema: str) -> str:
     if not PG_IDENTIFIER_RE.match(token):
         raise ValueError(f"Invalid PostgreSQL schema name: {schema}")
     return token
+
+
+def _find_mmpdb_core_tables(postgres_url: str) -> List[tuple[str, str]]:
+    if not HAS_PSYCOPG:
+        return []
+    placeholders = ", ".join(["%s"] * len(MMPDB_CORE_TABLE_NAMES))
+    query = f"""
+        SELECT table_schema, table_name
+          FROM information_schema.tables
+         WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+           AND table_name IN ({placeholders})
+         ORDER BY table_schema, table_name
+    """
+    with psycopg.connect(postgres_url, autocommit=True) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query, list(MMPDB_CORE_TABLE_NAMES))
+            return [(str(row[0]), str(row[1])) for row in cursor.fetchall()]
+
+
+def _find_mmpdb_core_tables_in_schema(postgres_url: str, schema: str) -> List[str]:
+    if not HAS_PSYCOPG:
+        return []
+    normalized_schema = _validate_pg_schema(schema)
+    placeholders = ", ".join(["%s"] * len(MMPDB_CORE_TABLE_NAMES))
+    query = f"""
+        SELECT table_name
+          FROM information_schema.tables
+         WHERE table_schema = %s
+           AND table_name IN ({placeholders})
+         ORDER BY table_name
+    """
+    with psycopg.connect(postgres_url, autocommit=True) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query, [normalized_schema, *list(MMPDB_CORE_TABLE_NAMES)])
+            return [str(row[0]) for row in cursor.fetchall()]
 
 
 def _pg_set_search_path(cursor, schema: str) -> None:
@@ -1245,6 +1384,7 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                 fragments_input_file,
                 postgres_url,
                 postgres_schema=args.postgres_schema,
+                force_rebuild_schema=args.force,
                 properties_file=properties_file if properties_file else None,
                 skip_attachment_enrichment=args.skip_attachment_enrichment,
                 attachment_force_recompute=args.attachment_force_recompute,
@@ -1280,6 +1420,7 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                 properties_file=properties_file if properties_file else None,
                 skip_attachment_enrichment=args.skip_attachment_enrichment,
                 attachment_force_recompute=args.attachment_force_recompute,
+                force_rebuild_schema=args.force,
                 keep_fragments=args.keep_fragdb,
                 fragment_jobs=args.fragment_jobs,
                 index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
