@@ -40,6 +40,13 @@ except ImportError:
     SQL = None
     HAS_PSYCOPG = False
 
+try:
+    import psycopg2  # Required by mmpdblib/peewee PostgreSQL writer.
+    HAS_PSYCOPG2 = True
+except ImportError:
+    psycopg2 = None
+    HAS_PSYCOPG2 = False
+
 
 PG_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -331,64 +338,31 @@ def validate_smiles_file(smiles_file: str) -> bool:
         logger.error(f"Error reading SMILES file: {e}")
         return False
 
-def create_mmp_database(
-    smiles_file: str,
+def _index_fragments_to_postgres(
+    fragments_file: str,
     postgres_url: str,
-    max_heavy_atoms: int = 50,
     *,
-    output_dir: str,
     postgres_schema: str = "public",
     properties_file: Optional[str] = None,
     skip_attachment_enrichment: bool = False,
     attachment_force_recompute: bool = False,
-    keep_fragments: bool = False,
-    fragment_jobs: int = 0,
     index_maintenance_work_mem_mb: int = 0,
     index_work_mem_mb: int = 0,
     index_parallel_workers: int = 0,
     build_construct_tables: bool = True,
     build_constant_smiles_mol_index: bool = True,
 ) -> bool:
-    """Create MMP database directly in PostgreSQL using mmpdb."""
+    """Index an existing .fragdb file into PostgreSQL and run finalize steps."""
     logger = logging.getLogger(__name__)
-
+    normalized_schema = _validate_pg_schema(postgres_schema)
     try:
         if not _is_postgres_dsn(str(postgres_url or "").strip()):
             logger.error("PostgreSQL DSN is required. Received: %s", postgres_url)
             return False
-        normalized_schema = _validate_pg_schema(postgres_schema)
-        os.makedirs(output_dir, exist_ok=True)
-
-        base_name = os.path.splitext(os.path.basename(str(smiles_file or "").strip()))[0] or "dataset"
-        fragments_file = os.path.join(output_dir, f"{base_name}.fragdb")
-
-        # Step 1: Fragment compounds
-        logger.info("Step 1: Fragmenting compounds (this may take a while for large datasets)...")
-        fragment_cmd = [
-            sys.executable, "-m", "mmpdblib", "fragment",
-            smiles_file,
-            "-o", fragments_file,
-            "--max-heavies", str(max_heavy_atoms),
-            "--has-header"  # Our SMILES file has a header
-        ]
-        if int(fragment_jobs or 0) > 0:
-            fragment_cmd.extend(["-j", str(int(fragment_jobs))])
-
-        logger.info(f"Running: {' '.join(fragment_cmd)}")
-        result = subprocess.run(fragment_cmd, capture_output=True, text=True)
-
-        if result.returncode != 0:
-            logger.error(f"Fragmentation failed: {result.stderr}")
-            logger.error(f"Fragmentation stdout: {result.stdout}")
-            return False
-
-        logger.info("Fragmentation completed successfully")
-        if result.stdout:
-            logger.info(f"Fragment output: {result.stdout[-500:]}")  # Last 500 chars
 
         # Check fragments file
         if not os.path.exists(fragments_file):
-            logger.error("Fragments file not created")
+            logger.error("Fragments file not found: %s", fragments_file)
             return False
 
         # Step 2: Create index directly in PostgreSQL
@@ -456,6 +430,83 @@ def create_mmp_database(
                     "lead-opt query quality/performance may degrade."
                 )
                 return False
+
+        return True
+    except Exception as e:
+        logger.error(f"Database creation failed: {e}")
+        return False
+
+
+def create_mmp_database(
+    smiles_file: str,
+    postgres_url: str,
+    max_heavy_atoms: int = 50,
+    *,
+    output_dir: str,
+    postgres_schema: str = "public",
+    properties_file: Optional[str] = None,
+    skip_attachment_enrichment: bool = False,
+    attachment_force_recompute: bool = False,
+    keep_fragments: bool = False,
+    fragment_jobs: int = 0,
+    index_maintenance_work_mem_mb: int = 0,
+    index_work_mem_mb: int = 0,
+    index_parallel_workers: int = 0,
+    build_construct_tables: bool = True,
+    build_constant_smiles_mol_index: bool = True,
+) -> bool:
+    """Create MMP database directly in PostgreSQL using mmpdb."""
+    logger = logging.getLogger(__name__)
+
+    try:
+        if not _is_postgres_dsn(str(postgres_url or "").strip()):
+            logger.error("PostgreSQL DSN is required. Received: %s", postgres_url)
+            return False
+        os.makedirs(output_dir, exist_ok=True)
+
+        base_name = os.path.splitext(os.path.basename(str(smiles_file or "").strip()))[0] or "dataset"
+        fragments_file = os.path.join(output_dir, f"{base_name}.fragdb")
+
+        # Step 1: Fragment compounds
+        logger.info("Step 1: Fragmenting compounds (this may take a while for large datasets)...")
+        fragment_cmd = [
+            sys.executable, "-m", "mmpdblib", "fragment",
+            smiles_file,
+            "-o", fragments_file,
+            "--max-heavies", str(max_heavy_atoms),
+            "--has-header"  # Our SMILES file has a header
+        ]
+        if int(fragment_jobs or 0) > 0:
+            fragment_cmd.extend(["-j", str(int(fragment_jobs))])
+
+        logger.info(f"Running: {' '.join(fragment_cmd)}")
+        result = subprocess.run(fragment_cmd, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            logger.error(f"Fragmentation failed: {result.stderr}")
+            logger.error(f"Fragmentation stdout: {result.stdout}")
+            return False
+
+        logger.info("Fragmentation completed successfully")
+        if result.stdout:
+            logger.info(f"Fragment output: {result.stdout[-500:]}")  # Last 500 chars
+
+        index_ok = _index_fragments_to_postgres(
+            fragments_file,
+            postgres_url,
+            postgres_schema=postgres_schema,
+            properties_file=properties_file,
+            skip_attachment_enrichment=skip_attachment_enrichment,
+            attachment_force_recompute=attachment_force_recompute,
+            index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+            index_work_mem_mb=index_work_mem_mb,
+            index_parallel_workers=index_parallel_workers,
+            build_construct_tables=build_construct_tables,
+            build_constant_smiles_mol_index=build_constant_smiles_mol_index,
+        )
+        if not index_ok:
+            logger.info("Fragments file kept for debugging: %s", fragments_file)
+            return False
 
         if keep_fragments:
             logger.info("Fragments file preserved: %s", fragments_file)
@@ -956,6 +1007,11 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
         action='store_true',
         help='创建示例化合物数据库'
     )
+    input_group.add_argument(
+        '--fragments_file',
+        type=str,
+        help='已存在的 .fragdb 文件（跳过fragment步骤，直接index到PostgreSQL）'
+    )
     # ChEMBL download options
     parser.add_argument(
         '--subset_size',
@@ -1112,12 +1168,20 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
             logger.error("PostgreSQL import requested but psycopg is not installed.")
             logger.error("  pip install psycopg[binary]")
             sys.exit(1)
+        if str(args.postgres_url or "").strip() and not HAS_PSYCOPG2:
+            logger.error(
+                "mmpdb PostgreSQL index backend requires psycopg2, but it is not installed."
+            )
+            logger.error("  pip install psycopg2-binary")
+            logger.error("  # or install lead_optimization/requirements.txt again")
+            sys.exit(1)
         
         # Create output directory
         os.makedirs(args.output_dir, exist_ok=True)
 
         postgres_url = str(args.postgres_url or "").strip()
         smiles_file = None
+        fragments_input_file = None
         properties_file = str(args.properties_file or "").strip()
         property_metadata_file = str(args.property_metadata_file or "").strip()
 
@@ -1153,6 +1217,16 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
             if not smiles_file or not os.path.exists(smiles_file):
                 logger.error("structures_file not found: %s", smiles_file)
                 sys.exit(1)
+        elif args.fragments_file:
+            fragments_input_file = str(args.fragments_file or "").strip()
+            if not fragments_input_file or not os.path.exists(fragments_input_file):
+                logger.error("fragments_file not found: %s", fragments_input_file)
+                sys.exit(1)
+            if not fragments_input_file.endswith(".fragdb"):
+                logger.warning(
+                    "fragments_file does not end with .fragdb: %s (continuing anyway)",
+                    fragments_input_file,
+                )
 
         # Validate SMILES file
         if smiles_file and not validate_smiles_file(smiles_file):
@@ -1165,39 +1239,55 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
             logger.error("property_metadata_file not found: %s", property_metadata_file)
             sys.exit(1)
 
-        base_name = os.path.splitext(os.path.basename(str(smiles_file or "").strip()))[0] or "dataset"
-        fragments_file = os.path.join(args.output_dir, f"{base_name}.fragdb")
-        if os.path.exists(fragments_file):
-            if args.force:
-                try:
-                    os.remove(fragments_file)
-                    logger.info("Removed existing fragments file due to --force: %s", fragments_file)
-                except Exception as exc:
-                    logger.error("Failed to remove old fragments file %s: %s", fragments_file, exc)
+        if fragments_input_file:
+            logger.info("Indexing existing fragments file into PostgreSQL...")
+            build_ok = _index_fragments_to_postgres(
+                fragments_input_file,
+                postgres_url,
+                postgres_schema=args.postgres_schema,
+                properties_file=properties_file if properties_file else None,
+                skip_attachment_enrichment=args.skip_attachment_enrichment,
+                attachment_force_recompute=args.attachment_force_recompute,
+                index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
+                index_work_mem_mb=args.pg_index_work_mem_mb,
+                index_parallel_workers=args.pg_index_parallel_workers,
+                build_construct_tables=not args.pg_skip_construct_tables,
+                build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
+            )
+        else:
+            base_name = os.path.splitext(os.path.basename(str(smiles_file or "").strip()))[0] or "dataset"
+            fragments_file = os.path.join(args.output_dir, f"{base_name}.fragdb")
+            if os.path.exists(fragments_file):
+                if args.force:
+                    try:
+                        os.remove(fragments_file)
+                        logger.info("Removed existing fragments file due to --force: %s", fragments_file)
+                    except Exception as exc:
+                        logger.error("Failed to remove old fragments file %s: %s", fragments_file, exc)
+                        sys.exit(1)
+                else:
+                    logger.error("Fragments file already exists: %s", fragments_file)
+                    logger.error("Use --force to overwrite")
                     sys.exit(1)
-            else:
-                logger.error("Fragments file already exists: %s", fragments_file)
-                logger.error("Use --force to overwrite")
-                sys.exit(1)
 
-        logger.info("Building MMP dataset directly into PostgreSQL...")
-        build_ok = create_mmp_database(
-            smiles_file,
-            postgres_url,
-            args.max_heavy_atoms,
-            output_dir=args.output_dir,
-            postgres_schema=args.postgres_schema,
-            properties_file=properties_file if properties_file else None,
-            skip_attachment_enrichment=args.skip_attachment_enrichment,
-            attachment_force_recompute=args.attachment_force_recompute,
-            keep_fragments=args.keep_fragdb,
-            fragment_jobs=args.fragment_jobs,
-            index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
-            index_work_mem_mb=args.pg_index_work_mem_mb,
-            index_parallel_workers=args.pg_index_parallel_workers,
-            build_construct_tables=not args.pg_skip_construct_tables,
-            build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
-        )
+            logger.info("Building MMP dataset directly into PostgreSQL...")
+            build_ok = create_mmp_database(
+                smiles_file,
+                postgres_url,
+                args.max_heavy_atoms,
+                output_dir=args.output_dir,
+                postgres_schema=args.postgres_schema,
+                properties_file=properties_file if properties_file else None,
+                skip_attachment_enrichment=args.skip_attachment_enrichment,
+                attachment_force_recompute=args.attachment_force_recompute,
+                keep_fragments=args.keep_fragdb,
+                fragment_jobs=args.fragment_jobs,
+                index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
+                index_work_mem_mb=args.pg_index_work_mem_mb,
+                index_parallel_workers=args.pg_index_parallel_workers,
+                build_construct_tables=not args.pg_skip_construct_tables,
+                build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
+            )
         if not build_ok:
             logger.error("MMP database setup failed")
             sys.exit(1)

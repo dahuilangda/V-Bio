@@ -2,6 +2,13 @@
 
 This directory contains the runtime code that `VBio` currently uses for Lead Optimization.
 
+## Build Dependencies
+
+`setup_mmpdb.py` PostgreSQL build path requires both:
+
+- `psycopg` (v3, used by finalize/metadata steps)
+- `psycopg2` (used by current `mmpdb` PostgreSQL writer backend via peewee)
+
 ## Runtime Environment
 
 Set these before running API/Celery:
@@ -52,6 +59,22 @@ python lead_optimization/setup_mmpdb.py \
   --force \
   --attachment_force_recompute \
   --fragment_jobs 32 \
+  --pg_index_maintenance_work_mem_mb 65536 \
+  --pg_index_work_mem_mb 512 \
+  --pg_index_parallel_workers 16 \
+  --postgres_url 'postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp' \
+  --postgres_schema public
+```
+
+### 2.2) Resume from existing `.fragdb` (skip fragment step)
+
+If fragmenting already finished (for example `lead_optimization/data/chembl_compounds.fragdb`), resume directly:
+
+```bash
+cd /data/Boltz-WebUI
+python lead_optimization/setup_mmpdb.py \
+  --fragments_file lead_optimization/data/chembl_compounds.fragdb \
+  --attachment_force_recompute \
   --pg_index_maintenance_work_mem_mb 65536 \
   --pg_index_work_mem_mb 512 \
   --pg_index_parallel_workers 16 \
