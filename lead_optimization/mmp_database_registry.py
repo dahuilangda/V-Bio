@@ -190,7 +190,57 @@ def _get_pg_property_catalog(conn: Any, schema: str) -> List[Dict[str, Any]]:
     return result
 
 
-def _discover_postgres_schemas(default_dsn: str) -> List[Dict[str, Any]]:
+def _empty_mmp_stats() -> Dict[str, Optional[int]]:
+    return {
+        "compounds": None,
+        "rules": None,
+        "pairs": None,
+    }
+
+
+def _quote_pg_identifier(token: str) -> str:
+    value = str(token or "").strip()
+    if not _PG_SCHEMA_TOKEN_RE.match(value):
+        raise ValueError(f"Invalid PostgreSQL identifier: {token}")
+    return f'"{value}"'
+
+
+def _to_int_or_none(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _get_pg_dataset_counts(conn: Any, schema: str) -> Dict[str, Optional[int]]:
+    stats = _empty_mmp_stats()
+    try:
+        quoted_schema = _quote_pg_identifier(schema)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                f"SELECT num_compounds, num_rules, num_pairs FROM {quoted_schema}.dataset ORDER BY id LIMIT 1"
+            )
+            row = cursor.fetchone()
+    except Exception:
+        return stats
+    if not row:
+        return stats
+
+    compounds = _to_int_or_none(row[0] if len(row) > 0 else None)
+    rules = _to_int_or_none(row[1] if len(row) > 1 else None)
+    pairs = _to_int_or_none(row[2] if len(row) > 2 else None)
+    if compounds is not None and compounds >= 0:
+        stats["compounds"] = compounds
+    if rules is not None and rules >= 0:
+        stats["rules"] = rules
+    if pairs is not None and pairs >= 0:
+        stats["pairs"] = pairs
+    return stats
+
+
+def _discover_postgres_schemas(default_dsn: str, *, include_stats: bool = False) -> List[Dict[str, Any]]:
     if psycopg is None:
         return []
     try:
@@ -230,6 +280,7 @@ def _discover_postgres_schemas(default_dsn: str) -> List[Dict[str, Any]]:
                     "backend": "postgres",
                     "source": "discovered",
                     "properties": _get_pg_property_catalog(conn, schema),
+                    "stats": _get_pg_dataset_counts(conn, schema) if include_stats else _empty_mmp_stats(),
                 }
             )
     finally:
@@ -240,10 +291,10 @@ def _discover_postgres_schemas(default_dsn: str) -> List[Dict[str, Any]]:
     return entries
 
 
-def _build_discovered_entries() -> List[Dict[str, Any]]:
+def _build_discovered_entries(*, include_stats: bool = False) -> List[Dict[str, Any]]:
     database, backend = _resolve_default_database()
     if backend == "postgres" and _is_postgres_dsn(database):
-        discovered = _discover_postgres_schemas(database)
+        discovered = _discover_postgres_schemas(database, include_stats=include_stats)
         if discovered:
             return discovered
         # Fallback: keep the configured runtime DB visible in catalog even when
@@ -261,6 +312,7 @@ def _build_discovered_entries() -> List[Dict[str, Any]]:
                 "backend": "postgres",
                 "source": "configured",
                 "properties": [],
+                "stats": _empty_mmp_stats(),
             }
         ]
     # Lead Optimization runtime is PostgreSQL-only now.
@@ -332,8 +384,8 @@ def _write_manual_entries(entries: List[Dict[str, Any]]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def get_mmp_database_catalog(include_hidden: bool = False) -> Dict[str, Any]:
-    discovered_entries = _build_discovered_entries()
+def get_mmp_database_catalog(include_hidden: bool = False, *, include_stats: bool = False) -> Dict[str, Any]:
+    discovered_entries = _build_discovered_entries(include_stats=include_stats)
     manual_entries = _read_manual_entries()
 
     merged: Dict[str, Dict[str, Any]] = {}
@@ -358,15 +410,19 @@ def get_mmp_database_catalog(include_hidden: bool = False) -> Dict[str, Any]:
                 schema = str(item.get("schema") or "").strip() or _parse_schema_from_dsn(dsn)
                 item["schema"] = schema
                 item["properties"] = []
+                item["stats"] = _empty_mmp_stats()
                 if _is_postgres_dsn(dsn) and psycopg is not None:
                     try:
                         conn = psycopg.connect(dsn, autocommit=True)
                         try:
                             item["properties"] = _get_pg_property_catalog(conn, schema)
+                            if include_stats:
+                                item["stats"] = _get_pg_dataset_counts(conn, schema)
                         finally:
                             conn.close()
                     except Exception:
                         item["properties"] = []
+                        item["stats"] = _empty_mmp_stats()
             merged[key] = item
 
     entries = list(merged.values())
@@ -396,7 +452,7 @@ def get_mmp_database_catalog(include_hidden: bool = False) -> Dict[str, Any]:
 
 
 def resolve_mmp_database(database_id: str = "", *, include_hidden: bool = False) -> Dict[str, Any]:
-    catalog = get_mmp_database_catalog(include_hidden=True)
+    catalog = get_mmp_database_catalog(include_hidden=True, include_stats=False)
     entries = catalog.get("databases") if isinstance(catalog, dict) else []
     by_id = {str(item.get("id") or ""): item for item in entries if isinstance(item, dict)}
     selected_id = str(database_id or "").strip() or str(catalog.get("default_database_id") or "").strip()
@@ -434,11 +490,12 @@ def patch_mmp_database(
     label: Optional[str] = None,
     description: Optional[str] = None,
     is_default: Optional[bool] = None,
+    include_stats: bool = False,
 ) -> Dict[str, Any]:
     token = str(database_id or "").strip()
     if not token:
         raise ValueError("database_id is required.")
-    catalog = get_mmp_database_catalog(include_hidden=True)
+    catalog = get_mmp_database_catalog(include_hidden=True, include_stats=False)
     databases = catalog.get("databases") if isinstance(catalog, dict) else []
     source = None
     for item in databases if isinstance(databases, list) else []:
@@ -474,10 +531,10 @@ def patch_mmp_database(
         for item in entries:
             item["is_default"] = str(item.get("id") or "") == token
     _write_manual_entries(entries)
-    return get_mmp_database_catalog(include_hidden=True)
+    return get_mmp_database_catalog(include_hidden=True, include_stats=include_stats)
 
 
-def delete_mmp_database(database_id: str, *, drop_data: bool = True) -> Dict[str, Any]:
+def delete_mmp_database(database_id: str, *, drop_data: bool = True, include_stats: bool = False) -> Dict[str, Any]:
     token = str(database_id or "").strip()
     if not token:
         raise ValueError("database_id is required.")
@@ -505,4 +562,4 @@ def delete_mmp_database(database_id: str, *, drop_data: bool = True) -> Dict[str
     manual_entries = _read_manual_entries()
     filtered_entries = [item for item in manual_entries if str(item.get("id") or "") != token]
     _write_manual_entries(filtered_entries)
-    return get_mmp_database_catalog(include_hidden=True)
+    return get_mmp_database_catalog(include_hidden=True, include_stats=include_stats)

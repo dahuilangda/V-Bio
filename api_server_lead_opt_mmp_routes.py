@@ -166,7 +166,7 @@ def register_lead_opt_mmp_routes(
     @require_api_token
     def lead_optimization_mmp_databases():
         try:
-            catalog = get_mmp_database_catalog(include_hidden=False)
+            catalog = get_mmp_database_catalog(include_hidden=False, include_stats=False)
             return jsonify(catalog)
         except Exception as exc:
             logger.exception('Failed to list lead optimization MMP databases: %s', exc)
@@ -176,7 +176,7 @@ def register_lead_opt_mmp_routes(
     @require_api_token
     def admin_list_lead_optimization_mmp_databases():
         try:
-            catalog = get_mmp_database_catalog(include_hidden=True)
+            catalog = get_mmp_database_catalog(include_hidden=True, include_stats=True)
             return jsonify(catalog)
         except Exception as exc:
             logger.exception('Admin failed to list lead optimization MMP databases: %s', exc)
@@ -210,6 +210,7 @@ def register_lead_opt_mmp_routes(
                 label=payload.get('label') if 'label' in payload else None,
                 description=payload.get('description') if 'description' in payload else None,
                 is_default=payload.get('is_default') if 'is_default' in payload else None,
+                include_stats=True,
             )
             return jsonify(catalog)
         except ValueError as exc:
@@ -223,7 +224,7 @@ def register_lead_opt_mmp_routes(
     def admin_delete_lead_optimization_mmp_database(database_id: str):
         drop_data = parse_bool(request.args.get('drop_data'), True)
         try:
-            catalog = delete_mmp_database(database_id, drop_data=drop_data)
+            catalog = delete_mmp_database(database_id, drop_data=drop_data, include_stats=True)
             return jsonify(catalog)
         except ValueError as exc:
             return jsonify({'error': str(exc)}), 400

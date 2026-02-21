@@ -86,15 +86,24 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
     }
   };
 
+  const formatCount = (value: unknown): string => {
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+      return value.toLocaleString();
+    }
+    if (typeof value === 'string') {
+      const num = Number(value);
+      if (Number.isFinite(num) && num >= 0) {
+        return Math.trunc(num).toLocaleString();
+      }
+    }
+    return '-';
+  };
+
   return (
     <section className="panel settings-admin-panel">
       <div className="settings-panel-head">
         <h2>Lead Opt Databases</h2>
         {!compact ? <p className="muted">Global catalog. Create/import from CLI only.</p> : null}
-      </div>
-
-      <div className="settings-admin-hint muted">
-        Recommended import source: `ChEMBL_CYP3A4_hERG`.
       </div>
 
       {error ? <div className="alert error">{error}</div> : null}
@@ -109,6 +118,7 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
               <tr>
                 <th>Label</th>
                 <th>Schema</th>
+                <th>Counts (Cmp/Rule/Pair)</th>
                 <th>Visible</th>
                 <th>Default</th>
                 <th>Actions</th>
@@ -120,10 +130,13 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
                 const schema = String(db.schema || '');
                 const isPublicSchema = schema.trim().toLowerCase() === 'public';
                 const displayLabel = String(db.label || id || '-').trim();
+                const counts = db.stats || {};
+                const countsText = `${formatCount(counts.compounds)} / ${formatCount(counts.rules)} / ${formatCount(counts.pairs)}`;
                 return (
                   <tr key={id}>
                     <td>{displayLabel || '-'}</td>
                     <td>{schema || '-'}</td>
+                    <td title="Compounds / Rules / Pairs">{countsText}</td>
                     <td>{db.visible === false ? 'No' : 'Yes'}</td>
                     <td>{db.is_default ? 'Yes' : 'No'}</td>
                     <td>

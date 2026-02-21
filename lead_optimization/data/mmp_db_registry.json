@@ -1,14 +1,4 @@
 {
   "version": 1,
-  "entries": [
-    {
-      "id": "pg:127.0.0.1:54330:leadopt_mmp:chembl_cyp3a4_herg",
-      "label": "chembl_cyp3a4_herg",
-      "description": "",
-      "visible": true,
-      "is_default": true,
-      "database_url": "postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp",
-      "schema": "chembl_cyp3a4_herg"
-    }
-  ]
+  "entries": []
 }

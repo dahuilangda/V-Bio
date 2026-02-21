@@ -95,6 +95,12 @@ export interface LeadOptMmpDatabaseProperty {
   change_displayed?: string;
 }
 
+export interface LeadOptMmpDatabaseStats {
+  compounds?: number | null;
+  rules?: number | null;
+  pairs?: number | null;
+}
+
 export interface LeadOptMmpDatabaseItem {
   id: string;
   label: string;
@@ -105,6 +111,7 @@ export interface LeadOptMmpDatabaseItem {
   is_default?: boolean;
   source?: string;
   properties: LeadOptMmpDatabaseProperty[];
+  stats?: LeadOptMmpDatabaseStats;
 }
 
 export interface LeadOptMmpDatabaseCatalogResponse {
