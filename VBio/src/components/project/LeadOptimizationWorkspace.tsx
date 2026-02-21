@@ -1034,6 +1034,7 @@ export function LeadOptimizationWorkspace({
               onOpenPredictionResult={(candidateSmiles, highlightAtomIndices) => {
                 void handleOpenPredictionResult(candidateSmiles, highlightAtomIndices);
               }}
+              onEnsurePredictionResult={mmp.ensurePredictionResult}
               onUiStateChange={handleCandidatesUiStateChange}
               onPreviewRenderModeChange={handlePreviewRenderModeChange}
               onExitCardMode={() => setResultViewerOpen(false)}

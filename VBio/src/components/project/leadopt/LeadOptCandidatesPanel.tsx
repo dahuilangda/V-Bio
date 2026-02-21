@@ -274,6 +274,8 @@ const TABLE_CANDIDATE_2D_WIDTH = 288;
 const CARD_CANDIDATE_2D_WIDTH = 190;
 const CARD_PREVIEW_2D_HEIGHT = 166;
 const PREVIEW_2D_HEIGHT = 138;
+const CONFIDENCE_HYDRATION_MAX_PER_TICK = 4;
+const CONFIDENCE_HYDRATION_COOLDOWN_MS = 1800;
 
 interface LeadOptCandidatesPanelProps {
   sectionId?: string;
@@ -290,6 +292,7 @@ interface LeadOptCandidatesPanelProps {
   onActiveSmilesChange: (smiles: string) => void;
   onRunPredictCandidate: (candidateSmiles: string, backend: string) => void;
   onOpenPredictionResult: (candidateSmiles: string, highlightAtomIndices?: number[]) => void;
+  onEnsurePredictionResult?: (candidateSmiles: string) => Promise<LeadOptPredictionRecord | null>;
   onUiStateChange?: (state: LeadOptCandidatesUiState) => void;
   onPreviewRenderModeChange?: (mode: CandidatePreviewRenderMode) => void;
   onExitCardMode?: () => void;
@@ -310,6 +313,7 @@ export function LeadOptCandidatesPanel({
   onActiveSmilesChange,
   onRunPredictCandidate,
   onOpenPredictionResult,
+  onEnsurePredictionResult,
   onUiStateChange,
   onPreviewRenderModeChange,
   onExitCardMode
@@ -344,6 +348,8 @@ export function LeadOptCandidatesPanel({
   const [structureSearchLoading, setStructureSearchLoading] = useState(false);
   const [structureSearchError, setStructureSearchError] = useState<string | null>(null);
   const cardLoadMoreRef = useRef<HTMLDivElement | null>(null);
+  const confidenceHydrationInFlightRef = useRef<Record<string, boolean>>({});
+  const confidenceHydrationAttemptAtRef = useRef<Record<string, number>>({});
   const uiStateHydrationSignatureRef = useRef('');
   const uiStateEmitSignatureRef = useRef('');
   const selectedBackendKey = normalizeBackend(selectedBackend);
@@ -666,6 +672,38 @@ export function LeadOptCandidatesPanel({
     observer.observe(node);
     return () => observer.disconnect();
   }, [CARD_BATCH_SIZE, cardMode, hasMoreCardRows, renderedRows.length]);
+
+  useEffect(() => {
+    if (previewRenderMode !== 'confidence') return;
+    if (typeof onEnsurePredictionResult !== 'function') return;
+    const visibleRows = cardMode ? cardRows : pageRows;
+    if (visibleRows.length === 0) return;
+    const now = Date.now();
+    const pendingHydrationSmiles: string[] = [];
+    for (const row of visibleRows) {
+      const smiles = readText(row.smiles).trim();
+      if (!smiles) continue;
+      const record = predictionForBackend(smiles);
+      if (!record || normalizeState(record.state) !== 'SUCCESS') continue;
+      if ((record.ligandAtomPlddts || []).length > 0) continue;
+      if (confidenceHydrationInFlightRef.current[smiles]) continue;
+      const lastAttempt = Number(confidenceHydrationAttemptAtRef.current[smiles] || 0);
+      if (now - lastAttempt < CONFIDENCE_HYDRATION_COOLDOWN_MS) continue;
+      pendingHydrationSmiles.push(smiles);
+      if (pendingHydrationSmiles.length >= CONFIDENCE_HYDRATION_MAX_PER_TICK) break;
+    }
+    if (pendingHydrationSmiles.length === 0) return;
+    for (const smiles of pendingHydrationSmiles) {
+      confidenceHydrationInFlightRef.current[smiles] = true;
+      confidenceHydrationAttemptAtRef.current[smiles] = now;
+      void onEnsurePredictionResult(smiles)
+        .catch(() => null)
+        .finally(() => {
+          delete confidenceHydrationInFlightRef.current[smiles];
+          confidenceHydrationAttemptAtRef.current[smiles] = Date.now();
+        });
+    }
+  }, [cardMode, cardRows, onEnsurePredictionResult, pageRows, predictionBySmiles, previewRenderMode, selectedBackendKey]);
 
   const renderPredictAction = (
     smiles: string,
