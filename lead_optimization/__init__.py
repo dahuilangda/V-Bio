@@ -6,8 +6,7 @@ Legacy optimization-engine modules are removed from the active surface.
 
 __all__ = [
     "config",
+    "mmp_lifecycle",
     "mmp_database_registry",
     "mmp_query_service",
-    "setup_mmpdb",
 ]
-

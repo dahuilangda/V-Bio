@@ -60,16 +60,21 @@ export function ProjectTasksTable({
         <div className="empty-state">No task runs yet.</div>
       ) : (
         <div className="table-wrap project-table-wrap task-table-wrap">
-          <table className="table project-table task-table">
+          <table className={`table project-table task-table${leadOptOnlyView ? ' task-table--leadopt' : ''}`}>
             <thead>
               <tr>
                 <th>
                   <span className="project-th">Ligand View</span>
                 </th>
                 {leadOptOnlyView ? (
-                  <th>
-                    <span className="project-th">MMP Stats</span>
-                  </th>
+                  <>
+                    <th>
+                      <span className="project-th">MMP Stats</span>
+                    </th>
+                    <th>
+                      <span className="project-th">Database</span>
+                    </th>
+                  </>
                 ) : (
                   <>
                     <th>
@@ -101,16 +106,20 @@ export function ProjectTasksTable({
                     </button>
                   </th>
                 )}
-                <th>
-                  <button type="button" className={`task-th-sort ${sortKey === 'seed' ? 'active' : ''}`} onClick={() => onSort('seed')}>
-                    <span className="project-th">Seed <span className="task-th-arrow">{sortMark('seed')}</span></span>
-                  </button>
-                </th>
-                <th>
-                  <button type="button" className={`task-th-sort ${sortKey === 'duration' ? 'active' : ''}`} onClick={() => onSort('duration')}>
-                    <span className="project-th">Duration <span className="task-th-arrow">{sortMark('duration')}</span></span>
-                  </button>
-                </th>
+                {!leadOptOnlyView && (
+                  <th>
+                    <button type="button" className={`task-th-sort ${sortKey === 'seed' ? 'active' : ''}`} onClick={() => onSort('seed')}>
+                      <span className="project-th">Seed <span className="task-th-arrow">{sortMark('seed')}</span></span>
+                    </button>
+                  </th>
+                )}
+                {!leadOptOnlyView && (
+                  <th>
+                    <button type="button" className={`task-th-sort ${sortKey === 'duration' ? 'active' : ''}`} onClick={() => onSort('duration')}>
+                      <span className="project-th">Duration <span className="task-th-arrow">{sortMark('duration')}</span></span>
+                    </button>
+                  </th>
+                )}
                 <th>
                   <span className="project-th">Actions</span>
                 </th>

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Check, Eye, EyeOff, Pencil, Star, Trash2, X } from 'lucide-react';
 import {
   deleteLeadOptimizationMmpDatabaseAdmin,
   fetchLeadOptimizationMmpDatabases,
@@ -14,6 +15,8 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
   const [databases, setDatabases] = useState<LeadOptMmpDatabaseItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [editingLabelId, setEditingLabelId] = useState('');
+  const [editingLabelValue, setEditingLabelValue] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
@@ -67,9 +70,40 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
     }
   };
 
-  const deleteDatabase = async (databaseId: string, schema: string) => {
+  const beginEditLabel = (databaseId: string, currentLabel: string) => {
+    setEditingLabelId(String(databaseId || '').trim());
+    setEditingLabelValue(String(currentLabel || '').trim());
+    setError(null);
+    setSuccess(null);
+  };
+
+  const cancelEditLabel = () => {
+    setEditingLabelId('');
+    setEditingLabelValue('');
+  };
+
+  const saveLabel = async (databaseId: string) => {
+    const normalizedId = String(databaseId || '').trim();
+    if (!normalizedId) return;
+    const nextLabel = String(editingLabelValue || '').trim();
+    setSaving(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      await patchLeadOptimizationMmpDatabaseAdmin(normalizedId, { label: nextLabel });
+      await loadCatalog();
+      setSuccess('Database label updated.');
+      cancelEditLabel();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update database label.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteDatabase = async (databaseId: string, schema: string, isDefault: boolean) => {
     if (!databaseId) return;
-    if (schema.trim().toLowerCase() === 'public') return;
+    if (schema.trim().toLowerCase() === 'public' || isDefault) return;
     const confirmed = window.confirm(`Delete schema "${schema}" permanently?`);
     if (!confirmed) return;
     setSaving(true);
@@ -99,6 +133,19 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
     return '-';
   };
 
+  const formatProperties = (items: LeadOptMmpDatabaseItem['properties']): string => {
+    if (!Array.isArray(items) || items.length === 0) return '-';
+    const seen = new Set<string>();
+    const rows: string[] = [];
+    for (const item of items) {
+      const name = String(item.display_name || item.label || item.name || '').trim();
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      rows.push(name);
+    }
+    return rows.length > 0 ? rows.join(', ') : '-';
+  };
+
   return (
     <section className="panel settings-admin-panel">
       <div className="settings-panel-head">
@@ -119,6 +166,7 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
                 <th>Label</th>
                 <th>Schema</th>
                 <th>Counts (Cmp/Rule/Pair)</th>
+                <th>Properties</th>
                 <th>Visible</th>
                 <th>Default</th>
                 <th>Actions</th>
@@ -129,42 +177,138 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
                 const id = String(db.id || '');
                 const schema = String(db.schema || '');
                 const isPublicSchema = schema.trim().toLowerCase() === 'public';
-                const displayLabel = String(db.label || id || '-').trim();
+                const isDefault = db.is_default === true;
+                const rawLabel = String(db.label || '').trim();
+                const sourceLabel = String(db.source || '').trim();
+                const normalizedSchema = schema.trim().toLowerCase();
+                const labelFromSchema =
+                  Boolean(rawLabel) && Boolean(schema) && rawLabel.trim().toLowerCase() === normalizedSchema;
+                const displayLabel = (() => {
+                  if (rawLabel) {
+                    if (
+                      labelFromSchema &&
+                      sourceLabel &&
+                      sourceLabel.trim().toLowerCase() !== normalizedSchema
+                    ) {
+                      return sourceLabel;
+                    }
+                    return rawLabel;
+                  }
+                  if (sourceLabel) return sourceLabel;
+                  if (id) return id;
+                  return '-';
+                })();
                 const counts = db.stats || {};
                 const countsText = `${formatCount(counts.compounds)} / ${formatCount(counts.rules)} / ${formatCount(counts.pairs)}`;
+                const propertiesText = formatProperties(db.properties);
+                const isEditingLabel = editingLabelId === id;
+                const deleteDisabled = saving || isPublicSchema || isDefault;
+                const deleteTitle = isPublicSchema
+                  ? 'public schema cannot be deleted'
+                  : isDefault
+                    ? 'Default database cannot be deleted'
+                    : 'Delete schema';
                 return (
                   <tr key={id}>
-                    <td>{displayLabel || '-'}</td>
-                    <td>{schema || '-'}</td>
+                    <td>
+                      {isEditingLabel ? (
+                        <div className="leadopt-db-label-edit-row">
+                          <input
+                            className="leadopt-db-label-input"
+                            value={editingLabelValue}
+                            onChange={(event) => setEditingLabelValue(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') {
+                                event.preventDefault();
+                                void saveLabel(id);
+                              }
+                              if (event.key === 'Escape') {
+                                event.preventDefault();
+                                cancelEditLabel();
+                              }
+                            }}
+                            placeholder={schema || 'database label'}
+                            disabled={saving}
+                            autoFocus
+                          />
+                          <button
+                            className="leadopt-db-label-action"
+                            type="button"
+                            onClick={() => void saveLabel(id)}
+                            disabled={saving}
+                            title="Save label"
+                            aria-label="Save label"
+                          >
+                            <Check size={13} />
+                          </button>
+                          <button
+                            className="leadopt-db-label-action"
+                            type="button"
+                            onClick={cancelEditLabel}
+                            disabled={saving}
+                            title="Cancel edit"
+                            aria-label="Cancel edit"
+                          >
+                            <X size={13} />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="leadopt-db-label-cell">
+                          <span className="leadopt-db-label-main">{displayLabel || '-'}</span>
+                          {labelFromSchema ? <span className="leadopt-db-label-note">Alias not set (same as schema)</span> : null}
+                          <button
+                            className="leadopt-db-label-edit-btn"
+                            type="button"
+                            onClick={() => beginEditLabel(id, rawLabel || displayLabel)}
+                            disabled={saving}
+                            title="Edit label"
+                            aria-label="Edit label"
+                          >
+                            <Pencil size={12} />
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      <code className="leadopt-db-schema-code">{schema || '-'}</code>
+                    </td>
                     <td title="Compounds / Rules / Pairs">{countsText}</td>
+                    <td className="leadopt-db-props" title={propertiesText}>
+                      {propertiesText}
+                    </td>
                     <td>{db.visible === false ? 'No' : 'Yes'}</td>
                     <td>{db.is_default ? 'Yes' : 'No'}</td>
                     <td>
-                      <div className="row gap-6">
+                      <div className="leadopt-db-actions">
                         <button
-                          className="btn btn-ghost btn-compact"
+                          className="leadopt-db-action"
                           type="button"
                           onClick={() => void updateVisibility(id, !(db.visible === false))}
                           disabled={saving}
+                          title={db.visible === false ? 'Show database' : 'Hide database'}
+                          aria-label={db.visible === false ? 'Show database' : 'Hide database'}
                         >
-                          {db.visible === false ? 'Show' : 'Hide'}
+                          {db.visible === false ? <Eye size={14} /> : <EyeOff size={14} />}
                         </button>
                         <button
-                          className="btn btn-ghost btn-compact"
+                          className="leadopt-db-action"
                           type="button"
                           onClick={() => void setDefault(id)}
-                          disabled={saving}
+                          disabled={saving || isDefault}
+                          title={isDefault ? 'Default database' : 'Set default database'}
+                          aria-label={isDefault ? 'Default database' : 'Set default database'}
                         >
-                          Set Default
+                          <Star size={14} />
                         </button>
                         <button
-                          className="btn btn-danger btn-compact"
+                          className="leadopt-db-action leadopt-db-action--danger"
                           type="button"
-                          onClick={() => void deleteDatabase(id, schema)}
-                          disabled={saving || isPublicSchema}
-                          title={isPublicSchema ? 'public schema cannot be deleted' : 'Delete schema'}
+                          onClick={() => void deleteDatabase(id, schema, isDefault)}
+                          disabled={deleteDisabled}
+                          title={deleteTitle}
+                          aria-label={deleteTitle}
                         >
-                          Delete
+                          <Trash2 size={14} />
                         </button>
                       </div>
                     </td>

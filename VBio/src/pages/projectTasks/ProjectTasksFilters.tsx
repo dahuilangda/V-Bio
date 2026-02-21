@@ -185,18 +185,20 @@ export function ProjectTasksFilters({
                 <option value="90">Last 90 days</option>
               </select>
             </label>
-            <label className="advanced-filter-field">
-              <span>Seed</span>
-              <select
-                value={seedFilter}
-                onChange={(e) => onSeedFilterChange(e.target.value as SeedFilterOption)}
-                aria-label="Advanced filter by seed"
-              >
-                <option value="all">Any seed</option>
-                <option value="with_seed">With seed</option>
-                <option value="without_seed">Without seed</option>
-              </select>
-            </label>
+            {!leadOptOnlyView && (
+              <label className="advanced-filter-field">
+                <span>Seed</span>
+                <select
+                  value={seedFilter}
+                  onChange={(e) => onSeedFilterChange(e.target.value as SeedFilterOption)}
+                  aria-label="Advanced filter by seed"
+                >
+                  <option value="all">Any seed</option>
+                  <option value="with_seed">With seed</option>
+                  <option value="without_seed">Without seed</option>
+                </select>
+              </label>
+            )}
             {!leadOptOnlyView && (
               <>
                 <label className="advanced-filter-field">

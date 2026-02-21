@@ -609,7 +609,6 @@ def _compute_descriptor_value(smiles: str, property_name: str) -> Optional[float
     return None
 
 
-@lru_cache(maxsize=8)
 def _list_available_db_properties(database_path: str, schema_override: str = "") -> List[str]:
     if not database_path:
         return []
@@ -2211,7 +2210,7 @@ def run_mmp_query(payload: Dict[str, Any]) -> Dict[str, Any]:
         if not has_num_frags:
             raise ValueError(
                 "MMP database schema is missing attachment metadata on rule_smiles (num_frags). "
-                "Please rebuild/enrich via lead_optimization/setup_mmpdb.py before running lead optimization queries."
+                "Please rebuild/enrich via lead_optimization.mmp_lifecycle before running lead optimization queries."
             )
         max_rule_smiles = max(200, min(5000, int(payload.get("max_rule_smiles") or 2000)))
         rule_smiles_ids = _lookup_rule_smiles_ids(

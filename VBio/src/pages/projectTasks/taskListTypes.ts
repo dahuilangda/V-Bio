@@ -51,6 +51,9 @@ export interface TaskListRow {
   workflowLabel: string;
   leadOptMmpSummary: string;
   leadOptMmpStage: string;
+  leadOptDatabaseId: string;
+  leadOptDatabaseLabel: string;
+  leadOptDatabaseSchema: string;
   leadOptTransformCount: number | null;
   leadOptCandidateCount: number | null;
   leadOptBucketCount: number | null;

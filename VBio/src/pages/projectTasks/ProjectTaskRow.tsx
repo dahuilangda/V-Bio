@@ -134,6 +134,23 @@ export function ProjectTaskRow({
             </div>
           </div>
         </td>
+      ) : null}
+      {isLeadOptMode ? (
+        <td className="task-col-leadopt-db">
+          {row.leadOptDatabaseLabel || row.leadOptDatabaseSchema || row.leadOptDatabaseId ? (
+            <div className="task-leadopt-db-cell">
+              <span className="task-leadopt-db-name">
+                {row.leadOptDatabaseLabel || row.leadOptDatabaseSchema || row.leadOptDatabaseId}
+              </span>
+              {row.leadOptDatabaseSchema &&
+              row.leadOptDatabaseSchema !== (row.leadOptDatabaseLabel || row.leadOptDatabaseSchema) ? (
+                <span className="task-leadopt-db-schema">{row.leadOptDatabaseSchema}</span>
+              ) : null}
+            </div>
+          ) : (
+            <span className="task-mmp-empty">-</span>
+          )}
+        </td>
       ) : (
         <>
           <td className="task-col-metric">
@@ -196,8 +213,8 @@ export function ProjectTaskRow({
           <span className="badge task-backend-badge">{backendLabel(row.backendValue)}</span>
         </td>
       ) : null}
-      <td className="task-col-seed">{task.seed ?? '-'}</td>
-      <td className="project-col-time">{formatDuration(task.duration_seconds)}</td>
+      {!isLeadOptMode ? <td className="task-col-seed">{task.seed ?? '-'}</td> : null}
+      {!isLeadOptMode ? <td className="project-col-time">{formatDuration(task.duration_seconds)}</td> : null}
       <td className="project-col-actions">
         <div className="row gap-6 project-action-row">
           <button

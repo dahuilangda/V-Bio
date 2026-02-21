@@ -44,7 +44,7 @@ interface LeadOptimizationWorkspaceProps {
   submitting: boolean;
   backend: string;
   onNavigateToResults?: () => void;
-  onRegisterHeaderRunAction?: (action: (() => void) | null) => void;
+  onRegisterHeaderRunAction?: (action: (() => void | Promise<void>) | null) => void;
   proteinSequence: string;
   ligandSmiles: string;
   targetChain: string;
@@ -751,10 +751,10 @@ export function LeadOptimizationWorkspace({
   ]);
   runMmpQueryRef.current = runMmpQuery;
 
-  const triggerHeaderRun = useCallback(() => {
+  const triggerHeaderRun = useCallback(async () => {
     const action = runMmpQueryRef.current;
     if (!action) return;
-    void action();
+    await action();
   }, []);
 
   const handleResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {

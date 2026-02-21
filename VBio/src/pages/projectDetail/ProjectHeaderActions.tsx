@@ -14,6 +14,7 @@ interface ProjectHeaderActionsProps {
   onReset: () => void;
   loading: boolean;
   submitting: boolean;
+  runSubmitting: boolean;
   runActionRef: RefObject<HTMLDivElement>;
   topRunButtonRef: RefObject<HTMLButtonElement>;
   onRunAction: () => void;
@@ -40,6 +41,7 @@ export function ProjectHeaderActions({
   onReset,
   loading,
   submitting,
+  runSubmitting,
   runActionRef,
   topRunButtonRef,
   onRunAction,
@@ -54,7 +56,7 @@ export function ProjectHeaderActions({
   showRunAction = true
 }: ProjectHeaderActionsProps) {
   const runTitle =
-    submitting
+    runSubmitting
       ? 'Submitting'
       : isRunRedirecting
         ? 'Opening task history'
@@ -65,7 +67,7 @@ export function ProjectHeaderActions({
             : workflowRunLabel;
 
   const runAriaLabel =
-    submitting
+    runSubmitting
       ? 'Submitting'
       : isRunRedirecting
         ? 'Opening task history'
@@ -126,7 +128,7 @@ export function ProjectHeaderActions({
             aria-haspopup={canOpenRunMenu ? 'menu' : undefined}
             aria-expanded={canOpenRunMenu ? runMenuOpen : undefined}
           >
-            {submitting || isRunRedirecting ? <LoaderCircle size={15} className="spin" /> : <RunPlayIcon size={15} />}
+            {runSubmitting || isRunRedirecting ? <LoaderCircle size={15} className="spin" /> : <RunPlayIcon size={15} />}
           </button>
           {runMenuOpen && hasUnsavedChanges && (
             <div className="run-action-menu" role="menu" aria-label="Run options">

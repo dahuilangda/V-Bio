@@ -14,7 +14,7 @@ export interface LeadOptimizationWorkflowSectionProps {
   submitting: boolean;
   backend: string;
   onNavigateToResults?: () => void;
-  onRegisterHeaderRunAction?: (action: (() => void) | null) => void;
+  onRegisterHeaderRunAction?: (action: (() => void | Promise<void>) | null) => void;
   proteinSequence: string;
   ligandSmiles: string;
   targetChain: string;

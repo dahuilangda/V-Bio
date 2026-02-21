@@ -93,3 +93,6 @@ lead_optimization/data/*.sqlite3
 lead_optimization/**/__pycache__/
 lead_optimization/data/ChEMBL_CYP3A4_hERG_structures.fragdb*
 lead_optimization/data/mmp_db_registry.json
+lead_optimization/data/bench_compound_batch_*
+lead_optimization/data/bench_herg_*
+lead_optimization/data/*_compound_state.cache.fragdb

@@ -37,6 +37,7 @@ export interface ProjectDetailLayoutProps {
   loading: boolean;
   saving: boolean;
   submitting: boolean;
+  runSubmitting: boolean;
   hasUnsavedChanges: boolean;
   runMenuOpen: boolean;
   runDisabled: boolean;
@@ -91,6 +92,7 @@ export function ProjectDetailLayout({
   loading,
   saving,
   submitting,
+  runSubmitting,
   hasUnsavedChanges,
   runMenuOpen,
   runDisabled,
@@ -149,6 +151,7 @@ export function ProjectDetailLayout({
           onReset={onReset}
           loading={loading}
           submitting={submitting}
+          runSubmitting={runSubmitting}
           runActionRef={runActionRef}
           topRunButtonRef={topRunButtonRef}
           onRunAction={onRunAction}
@@ -174,7 +177,7 @@ export function ProjectDetailLayout({
         runDisabled={runDisabled}
         runBlockedReason={runBlockedReason}
         workflowRunLabel={workflow.runLabel}
-        submitting={submitting}
+        submitting={runSubmitting}
         error={error}
         resultError={resultError}
         affinityPreviewError={affinityPreviewError}

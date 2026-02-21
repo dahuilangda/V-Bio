@@ -8,6 +8,10 @@
   --task-ligand-svg-max-h: 104px;
 }
 
+.task-table.task-table--leadopt {
+  min-width: 1120px;
+}
+
 .task-table-wrap {
   border-color: #d3e0d8;
 }
@@ -52,4 +56,3 @@
   color: #728b7f;
   margin-left: auto;
 }
-

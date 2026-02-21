@@ -110,7 +110,7 @@ interface UseProjectWorkflowSectionPropsInput {
   leadOptInitialMmpSnapshot?: LeadOptMmpPersistedSnapshot | null;
   setDraft: Dispatch<SetStateAction<ProjectWorkspaceDraft | null>>;
   setWorkspaceTab: Dispatch<SetStateAction<WorkspaceTab>>;
-  onRegisterLeadOptHeaderRunAction?: (action: (() => void) | null) => void;
+  onRegisterLeadOptHeaderRunAction?: (action: (() => void | Promise<void>) | null) => void;
   workspaceTab: WorkspaceTab;
   componentsWorkspaceRef: RefObject<HTMLDivElement>;
   isComponentsResizing: boolean;

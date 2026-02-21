@@ -229,8 +229,9 @@ export function useProjectDetailWorkspaceView() {
 }
 
 function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeReady }) {
-  const [leadOptHeaderRunAction, setLeadOptHeaderRunAction] = useState<(() => void) | null>(null);
-  const handleRegisterLeadOptHeaderRunAction = useCallback((action: (() => void) | null) => {
+  const [leadOptHeaderRunAction, setLeadOptHeaderRunAction] = useState<(() => void | Promise<void>) | null>(null);
+  const [leadOptHeaderRunPending, setLeadOptHeaderRunPending] = useState(false);
+  const handleRegisterLeadOptHeaderRunAction = useCallback((action: (() => void | Promise<void>) | null) => {
     setLeadOptHeaderRunAction(() => action);
   }, []);
   const {
@@ -833,6 +834,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
 
   const workflow = getWorkflowDefinition(project.task_type);
   const affinityUseMsa = computeUseMsaFlag(draft.inputConfig.components, draft.use_msa);
+  const runSubmitting = submitting || (isLeadOptimizationWorkflow && leadOptHeaderRunPending);
   const leadOptInitialMmpSnapshot = (() => {
     const sourceTask =
       statusContextTaskRow ||
@@ -883,7 +885,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     isLeadOptimizationWorkflow,
     hasIncompleteComponents,
     componentCompletion,
-    submitting,
+    submitting: runSubmitting,
     saving,
     runRedirectTaskId,
     showFloatingRunButton,
@@ -1221,7 +1223,15 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
 
   const handleHeaderRunAction = () => {
     if (isLeadOptimizationWorkflow) {
-      leadOptHeaderRunAction?.();
+      if (!leadOptHeaderRunAction || leadOptHeaderRunPending) return;
+      setLeadOptHeaderRunPending(true);
+      void Promise.resolve(leadOptHeaderRunAction())
+        .catch(() => {
+          // Lead opt workspace already surfaces query errors.
+        })
+        .finally(() => {
+          setLeadOptHeaderRunPending(false);
+        });
       return;
     }
     handleRunAction();
@@ -1256,6 +1266,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       loading={loading}
       saving={saving}
       submitting={submitting}
+      runSubmitting={runSubmitting}
       hasUnsavedChanges={hasUnsavedChanges}
       runMenuOpen={runMenuOpen}
       runDisabled={effectiveRunDisabled}

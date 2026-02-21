@@ -658,6 +658,9 @@ function readTaskConfidenceMetrics(task: ProjectTask, context?: TaskMetricContex
 interface LeadOptTaskSummary {
   stage: string;
   summary: string;
+  databaseId: string;
+  databaseLabel: string;
+  databaseSchema: string;
   transformCount: number | null;
   candidateCount: number | null;
   bucketCount: number | null;
@@ -725,6 +728,11 @@ function readLeadOptTaskSummary(task: ProjectTask): LeadOptTaskSummary | null {
       ? (confidence.lead_opt_mmp as Record<string, unknown>)
       : null;
   if (!leadOptMmp) return null;
+  const queryResultRaw = readObjectPath(leadOptMmp, 'query_result');
+  const queryResult =
+    queryResultRaw && typeof queryResultRaw === 'object' && !Array.isArray(queryResultRaw)
+      ? (queryResultRaw as Record<string, unknown>)
+      : {};
 
   const stage = normalizeLeadOptTaskStage(
     String(
@@ -846,10 +854,22 @@ function readLeadOptTaskSummary(task: ProjectTask): LeadOptTaskSummary | null {
     }
     return parts.join(' · ');
   })();
+  const databaseId = String(
+    leadOptMmp.mmp_database_id || queryResult.mmp_database_id || ''
+  ).trim();
+  const databaseSchema = String(
+    leadOptMmp.mmp_database_schema || queryResult.mmp_database_schema || ''
+  ).trim();
+  const databaseLabel = String(
+    leadOptMmp.mmp_database_label || queryResult.mmp_database_label || databaseSchema || databaseId || ''
+  ).trim();
 
   return {
     stage,
     summary,
+    databaseId,
+    databaseLabel,
+    databaseSchema,
     transformCount: transformCount === null ? null : Math.max(0, Math.floor(transformCount)),
     candidateCount: candidateCount === null ? null : Math.max(0, Math.floor(candidateCount)),
     bucketCount,

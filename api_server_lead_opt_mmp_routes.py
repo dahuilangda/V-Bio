@@ -190,7 +190,7 @@ def register_lead_opt_mmp_routes(
                 {
                     'error': (
                         "MMP database creation/registration via API is disabled. "
-                        "Use lead_optimization/setup_mmpdb.py to import/build databases."
+                        "Use lead_optimization.mmp_lifecycle to import/build databases."
                     )
                 }
             ),

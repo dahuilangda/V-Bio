@@ -3,6 +3,10 @@
   white-space: normal;
 }
 
+.task-table.task-table--leadopt .task-col-submitted {
+  min-width: 380px;
+}
+
 .task-submitted-cell {
   display: grid;
   gap: 4px;
@@ -168,6 +172,30 @@
 .task-col-mmp {
   min-width: 280px;
   white-space: normal;
+}
+
+.task-col-leadopt-db {
+  min-width: 220px;
+  white-space: normal;
+}
+
+.task-leadopt-db-cell {
+  display: grid;
+  gap: 2px;
+}
+
+.task-leadopt-db-name {
+  color: #163c2d;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.task-leadopt-db-schema {
+  color: #5f7468;
+  font-size: var(--text-2xs);
+  line-height: 1.2;
+  font-family: 'IBM Plex Mono', 'SFMono-Regular', Menlo, monospace;
 }
 
 .task-mmp-cell {

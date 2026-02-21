@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import type { ProjectTask } from '../../types/models';
 import { ProjectTasksFilters } from './ProjectTasksFilters';
 import { ProjectTasksTable } from './ProjectTasksTable';
@@ -130,6 +131,12 @@ export function ProjectTasksWorkspace({
   const leadOptOnlyView =
     workflowFilter === 'lead_optimization' ||
     (filteredRows.length > 0 && filteredRows.every((row) => row.workflowKey === 'lead_optimization'));
+
+  useEffect(() => {
+    if (!leadOptOnlyView) return;
+    if (sortKey !== 'seed' && sortKey !== 'duration') return;
+    onSort('submitted');
+  }, [leadOptOnlyView, onSort, sortKey]);
 
   return (
     <section className="panel">

@@ -106,7 +106,7 @@ export function useTaskListFiltering(taskRows: TaskListRow[]): UseTaskListFilter
     const leadOptOnlyFiltering = workflowFilter === 'lead_optimization';
     let count = 0;
     if (submittedWithinDays !== 'all') count += 1;
-    if (seedFilter !== 'all') count += 1;
+    if (!leadOptOnlyFiltering && seedFilter !== 'all') count += 1;
     if (failureOnly) count += 1;
     if (!leadOptOnlyFiltering && minPlddt.trim()) count += 1;
     if (!leadOptOnlyFiltering && minIptm.trim()) count += 1;
@@ -346,8 +346,8 @@ export function useTaskListFiltering(taskRows: TaskListRow[]): UseTaskListFilter
       if (stateFilter !== 'all' && task.task_state !== stateFilter) return false;
       if (workflowFilter !== 'all' && row.workflowKey !== workflowFilter) return false;
       if (!leadOptOnlyFiltering && backendFilter !== 'all' && row.backendValue !== backendFilter) return false;
-      if (seedFilter === 'with_seed' && (task.seed === null || task.seed === undefined)) return false;
-      if (seedFilter === 'without_seed' && task.seed !== null && task.seed !== undefined) return false;
+      if (!leadOptOnlyFiltering && seedFilter === 'with_seed' && (task.seed === null || task.seed === undefined)) return false;
+      if (!leadOptOnlyFiltering && seedFilter === 'without_seed' && task.seed !== null && task.seed !== undefined) return false;
       if (failureOnly && task.task_state !== 'FAILURE' && !(task.error_text || '').trim()) return false;
       if (submittedCutoff !== null && (!Number.isFinite(row.submittedTs) || row.submittedTs < submittedCutoff)) return false;
       if (minPlddtThreshold !== null && (metrics.plddt === null || metrics.plddt < minPlddtThreshold)) return false;
@@ -372,6 +372,8 @@ export function useTaskListFiltering(taskRows: TaskListRow[]): UseTaskListFilter
         metrics.pae ?? '',
         row.leadOptMmpSummary,
         row.leadOptMmpStage,
+        row.leadOptDatabaseLabel,
+        row.leadOptDatabaseSchema,
         row.leadOptSelectedFragmentIds.join(' '),
         row.leadOptSelectedFragmentQuery
       ]
