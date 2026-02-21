@@ -154,7 +154,7 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
       taskSummary: draft.taskSummary.trim(),
       backend: draft.backend,
       use_msa: hasMsa,
-      color_mode: draft.color_mode || 'white',
+      color_mode: draft.color_mode === 'alphafold' ? 'alphafold' : 'default',
       inputConfig: normalizedConfig
     };
     setDraft(nextDraft);

@@ -13,6 +13,7 @@ interface ApplyMolstarHighlightsArgs {
   highlightAtoms?: MolstarAtomHighlight[];
   activeAtom?: MolstarAtomHighlight | null;
   suppressAutoFocus: boolean;
+  disableExternalFocus?: boolean;
   hadExternalHighlightsRef: { current: boolean };
   suppressPickEventsRef: { current: boolean };
 }
@@ -25,6 +26,7 @@ export function applyMolstarHighlights({
   highlightAtoms,
   activeAtom,
   suppressAutoFocus,
+  disableExternalFocus,
   hadExternalHighlightsRef,
   suppressPickEventsRef
 }: ApplyMolstarHighlightsArgs) {
@@ -113,7 +115,7 @@ export function applyMolstarHighlights({
     const focusResidueTarget = activeResidue || normalized.find((item) => item.emphasis === 'active') || null;
     const lociHighlights = viewer?.plugin?.managers?.interactivity?.lociHighlights;
 
-    if (!suppressAutoFocus && focusManager?.setFromLoci) {
+    if (!disableExternalFocus && !suppressAutoFocus && focusManager?.setFromLoci) {
       if (focusAtomTarget) {
         const atomFocusLoci = buildAtomLoci(
           viewer,
@@ -147,7 +149,7 @@ export function applyMolstarHighlights({
       }
     }
 
-    void applyLigandSpotlight(viewer, normalizedAtoms.length > 0, 0.08);
+    void applyLigandSpotlight(viewer, normalizedAtoms.length > 0 || normalized.length > 0, 0.16);
   } catch {
     // no-op
   } finally {

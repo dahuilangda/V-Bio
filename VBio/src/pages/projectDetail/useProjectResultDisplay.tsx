@@ -59,7 +59,7 @@ interface UseProjectResultDisplayResult {
   displayStructureText: string;
   displayStructureFormat: 'cif' | 'pdb';
   displayStructureName: string;
-  displayStructureColorMode: 'white' | 'alphafold';
+  displayStructureColorMode: 'default' | 'alphafold';
   constraintStructureText: string;
   constraintStructureFormat: 'cif' | 'pdb';
   hasConstraintStructure: boolean;
@@ -126,7 +126,7 @@ export function useProjectResultDisplay({
   );
   const displayStructureFormat: 'cif' | 'pdb' = structureFormat;
   const displayStructureName = activeResultTaskStructureName || projectStructureName || '-';
-  const displayStructureColorMode: 'white' | 'alphafold' =
+  const displayStructureColorMode: 'default' | 'alphafold' =
     projectBackend === 'alphafold3' ||
     projectBackend === 'protenix' ||
     draftColorMode === 'alphafold' ||
@@ -134,7 +134,7 @@ export function useProjectResultDisplay({
     hasAf3ConfidenceSignals ||
     hasProtenixConfidenceSignals
       ? 'alphafold'
-      : 'white';
+      : 'default';
 
   const constraintStructureText = selectedTemplatePreviewContent || '';
   const constraintStructureFormat: 'cif' | 'pdb' = selectedTemplatePreviewFormat || 'pdb';

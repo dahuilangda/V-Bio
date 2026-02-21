@@ -11,14 +11,15 @@ import {
 } from 'react';
 import { LoaderCircle } from 'lucide-react';
 import { type LigandFragmentItem } from './LigandFragmentSketcher';
-import { MolstarViewer, type MolstarAtomHighlight } from './MolstarViewer';
+import { type MolstarAtomHighlight, type MolstarResidueHighlight } from './MolstarViewer';
 import {
   LeadOptCandidatesPanel,
-  buildLeadOptCandidatesUiStateSignature,
   normalizeLeadOptCandidatesUiState,
+  type CandidatePreviewRenderMode,
   type LeadOptCandidatesUiState
 } from './leadopt/LeadOptCandidatesPanel';
 import { LeadOptFragmentPanel } from './leadopt/LeadOptFragmentPanel';
+import { LeadOptMolstarViewer } from './leadopt/LeadOptMolstarViewer';
 import { LeadOptReferencePanel } from './leadopt/LeadOptReferencePanel';
 import {
   useLeadOptMmpQueryMachine,
@@ -261,6 +262,9 @@ export function LeadOptimizationWorkspace({
     return normalizeLeadOptCandidatesUiState(payload.ui_state, backend);
   }, [backend, initialMmpSnapshot]);
   const [resultsUiState, setResultsUiState] = useState<LeadOptCandidatesUiState>(snapshotUiState);
+  const [viewerPreviewRenderMode, setViewerPreviewRenderMode] = useState<CandidatePreviewRenderMode>(
+    snapshotUiState.previewRenderMode
+  );
   const resultsUiStateRef = useRef<LeadOptCandidatesUiState>(snapshotUiState);
   const hydratedUiStateKeyRef = useRef('');
 
@@ -287,14 +291,19 @@ export function LeadOptimizationWorkspace({
   }, [resultsUiState]);
 
   useEffect(() => {
+    setViewerPreviewRenderMode(resultsUiState.previewRenderMode);
+  }, [resultsUiState.previewRenderMode]);
+
+  useEffect(() => {
     const snapshot = asRecord(initialMmpSnapshot || null);
     const queryResult = asRecord(snapshot.query_result);
     const queryId = readText(queryResult.query_id).trim();
-    const signature = buildLeadOptCandidatesUiStateSignature(snapshotUiState);
-    const key = `${queryId}|${signature}`;
+    const taskId = readText(queryResult.task_id || snapshot.task_id).trim();
+    const key = queryId || taskId || '__initial__';
     if (hydratedUiStateKeyRef.current === key) return;
     hydratedUiStateKeyRef.current = key;
     setResultsUiState(snapshotUiState);
+    setViewerPreviewRenderMode(snapshotUiState.previewRenderMode);
   }, [initialMmpSnapshot, snapshotUiState]);
 
   const initialFragmentSelection = useMemo(() => {
@@ -547,7 +556,7 @@ export function LeadOptimizationWorkspace({
   const openedStructureFormat: 'cif' | 'pdb' =
     readText(openedPredictionRecord?.structureFormat).toLowerCase() === 'pdb' ? 'pdb' : 'cif';
   const openedStructureTaskId = readText(openedPredictionRecord?.taskId).trim();
-  const openedResultViewerKey = `${openedResultSmiles}:${openedStructureTaskId}:${openedStructureFormat}`;
+  const openedResultViewerKey = `${openedResultSmiles}:${openedStructureTaskId}:${openedStructureFormat}:${viewerPreviewRenderMode}`;
   const openedResultLigandAnchor = useMemo(
     () => inferLigandAnchor(openedStructureText, openedStructureFormat, effectiveLigandChain),
     [effectiveLigandChain, openedStructureFormat, openedStructureText]
@@ -555,15 +564,23 @@ export function LeadOptimizationWorkspace({
   const openedResultHighlightAtoms = useMemo<MolstarAtomHighlight[]>(() => {
     if (!resultViewerOpen) return [];
     if (!openedResultLigandAnchor || openedResultHighlightAtomIndices.length === 0) return [];
-    return openedResultHighlightAtomIndices.map((atomIndex, index) => ({
+    return openedResultHighlightAtomIndices.map((atomIndex) => ({
       chainId: openedResultLigandAnchor.chainId,
       residue: openedResultLigandAnchor.residue,
       atomName: '',
       atomIndex,
-      emphasis: index === 0 ? 'active' : 'default'
+      emphasis: 'default'
     }));
   }, [openedResultHighlightAtomIndices, openedResultLigandAnchor, resultViewerOpen]);
-  const openedResultActiveAtom = openedResultHighlightAtoms[0] || null;
+  const openedResultActiveAtom: MolstarAtomHighlight | null = null;
+  const openedResultActiveResidue = useMemo<MolstarResidueHighlight | null>(() => {
+    if (!resultViewerOpen || !openedResultLigandAnchor) return null;
+    return {
+      chainId: openedResultLigandAnchor.chainId,
+      residue: openedResultLigandAnchor.residue,
+      emphasis: 'active'
+    };
+  }, [openedResultLigandAnchor, resultViewerOpen]);
   const referenceProteinSequence = useMemo(() => {
     const map = reference.targetChainSequences || {};
     const direct = readText((map as Record<string, unknown>)[effectiveTargetChain]).replace(/\s+/g, '').trim();
@@ -641,6 +658,10 @@ export function LeadOptimizationWorkspace({
     },
     [onMmpUiStateChange]
   );
+
+  const handlePreviewRenderModeChange = useCallback((mode: CandidatePreviewRenderMode) => {
+    setViewerPreviewRenderMode(mode);
+  }, []);
 
   const runMmpQuery = useCallback(async () => {
     const variableItems = queryForm.buildVariableItems(selectedFragmentItems, reference.fragments);
@@ -915,14 +936,16 @@ export function LeadOptimizationWorkspace({
           {resultViewerOpen ? (
             <section className="lead-opt-mmp-viewer">
               {openedStructureText ? (
-                <MolstarViewer
+                <LeadOptMolstarViewer
                   key={openedResultViewerKey}
                   structureText={openedStructureText}
                   format={openedStructureFormat}
-                  colorMode="white"
-                  scenePreset="lead_opt"
+                  colorMode={viewerPreviewRenderMode === 'confidence' ? 'alphafold' : 'default'}
+                  confidenceBackend={resultsUiState.selectedBackend}
+                  styleVariant="results"
                   ligandFocusChainId={effectiveLigandChain}
                   highlightAtoms={openedResultHighlightAtoms}
+                  activeResidue={openedResultActiveResidue}
                   activeAtom={openedResultActiveAtom}
                   showSequence={false}
                   suppressResidueSelection
@@ -986,6 +1009,7 @@ export function LeadOptimizationWorkspace({
                 void handleOpenPredictionResult(candidateSmiles, highlightAtomIndices);
               }}
               onUiStateChange={handleCandidatesUiStateChange}
+              onPreviewRenderModeChange={handlePreviewRenderModeChange}
               onExitCardMode={() => setResultViewerOpen(false)}
             />
           </div>

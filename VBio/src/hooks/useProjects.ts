@@ -306,7 +306,7 @@ export function useProjects(session: Session | null) {
         use_msa: input.useMsa ?? true,
         protein_sequence: input.proteinSequence || '',
         ligand_smiles: input.ligandSmiles || '',
-        color_mode: 'white',
+        color_mode: 'default',
         task_type: workflow || DEFAULT_TASK_TYPE,
         task_id: '',
         task_state: 'DRAFT',

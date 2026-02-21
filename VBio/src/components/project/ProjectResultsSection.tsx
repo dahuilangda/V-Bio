@@ -24,7 +24,7 @@ export interface ProjectResultsSectionProps {
   selectedResultLigandChainId: string | null;
   displayStructureText: string;
   displayStructureFormat: 'cif' | 'pdb';
-  displayStructureColorMode: 'white' | 'alphafold';
+  displayStructureColorMode: 'default' | 'alphafold';
   displayStructureName: string;
   confidenceBackend: string;
   projectBackend: string;

@@ -161,7 +161,7 @@ export function PredictionConstraintsWorkspace({
             key={`constraint-viewer-${selectedTemplatePreview?.componentId || 'none'}-${selectedTemplatePreview?.chainId || 'none'}`}
             structureText={constraintStructureText}
             format={constraintStructureFormat}
-            colorMode="white"
+            colorMode="default"
             pickMode="click"
             highlightResidues={constraintViewerHighlightResidues}
             activeResidue={constraintViewerActiveResidue}

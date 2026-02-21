@@ -73,7 +73,7 @@ export function PredictionWorkflowSection({
                 <MolstarViewer
                   structureText={upload.content}
                   format={upload.format}
-                  colorMode="white"
+                  colorMode="default"
                   showSequence={false}
                   pickMode="alt-left"
                   onResiduePick={(pick: MolstarResiduePick) => onProteinTemplateResiduePick(pick)}

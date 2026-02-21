@@ -1,9 +1,6 @@
-import {
-  MolstarViewer,
-  type MolstarAtomHighlight,
-  type MolstarResidueHighlight,
-  type MolstarResiduePick
-} from '../MolstarViewer';
+import { useMemo } from 'react';
+import { type MolstarAtomHighlight, type MolstarResidueHighlight, type MolstarResiduePick } from '../MolstarViewer';
+import { LeadOptMolstarViewer } from './LeadOptMolstarViewer';
 
 interface LeadOptReferencePanelProps {
   sectionId?: string;
@@ -42,6 +39,24 @@ export function LeadOptReferencePanel({
   onTargetFileChange,
   onLigandFileChange
 }: LeadOptReferencePanelProps) {
+  const activeLigandResidue = useMemo<MolstarResidueHighlight | null>(() => {
+    const anchor = activeMolstarAtom || highlightedLigandAtoms[0] || null;
+    if (!anchor) return null;
+    const chainId = String(anchor.chainId || '').trim();
+    const residue = Math.floor(Number(anchor.residue) || 0);
+    if (!chainId || residue <= 0) return null;
+    return { chainId, residue, emphasis: 'active' };
+  }, [activeMolstarAtom, highlightedLigandAtoms]);
+
+  const displayLigandAtoms = useMemo<MolstarAtomHighlight[]>(
+    () =>
+      highlightedLigandAtoms.map((item) => ({
+        ...item,
+        emphasis: 'default'
+      })),
+    [highlightedLigandAtoms]
+  );
+
   return (
     <section id={sectionId} className="panel subtle lead-opt-panel">
       <div className="lead-opt-reference-grid">
@@ -77,19 +92,19 @@ export function LeadOptReferencePanel({
       </p>
       <div className="lead-opt-structure-panel">
         {previewStructureText ? (
-          <MolstarViewer
+          <LeadOptMolstarViewer
             structureText={previewStructureText}
             format={previewStructureFormat}
             overlayStructureText={previewOverlayStructureText}
             overlayFormat={previewOverlayStructureFormat}
-            colorMode="white"
-            scenePreset="lead_opt"
+            colorMode="default"
             ligandFocusChainId={ligandChain}
             onResiduePick={onResiduePick}
             highlightResidues={highlightedPocketResidues}
             suppressResidueSelection
-            highlightAtoms={highlightedLigandAtoms}
-            activeAtom={activeMolstarAtom}
+            highlightAtoms={displayLigandAtoms}
+            activeResidue={activeLigandResidue}
+            activeAtom={null}
             interactionGranularity="element"
             suppressAutoFocus={false}
           />

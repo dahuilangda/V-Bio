@@ -38,7 +38,7 @@ interface UseProjectWorkflowSectionPropsInput {
   selectedResultLigandChainId: string | null;
   displayStructureText: string;
   displayStructureFormat: 'pdb' | 'cif';
-  displayStructureColorMode: 'white' | 'alphafold';
+  displayStructureColorMode: 'default' | 'alphafold';
   displayStructureName: string;
   confidenceBackend: string;
   projectBackend: string;

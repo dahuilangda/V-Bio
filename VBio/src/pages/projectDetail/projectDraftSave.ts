@@ -135,7 +135,7 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
     taskSummary: draft.taskSummary.trim(),
     backend: next.backend,
     use_msa: next.use_msa,
-    color_mode: next.color_mode || 'white',
+    color_mode: next.color_mode === 'alphafold' ? 'alphafold' : 'default',
     inputConfig: normalizedConfig,
   };
 

@@ -95,7 +95,7 @@ export async function loadProjectFlow(params: {
     taskSummary: String(snapshotSourceTaskRow?.summary || '').trim(),
     backend: next.backend,
     use_msa: next.use_msa,
-    color_mode: next.color_mode || 'white',
+    color_mode: next.color_mode === 'alphafold' ? 'alphafold' : 'default',
     inputConfig: {
       ...taskAlignedConfig,
       constraints: backendConstraints,

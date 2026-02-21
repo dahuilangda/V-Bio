@@ -1231,8 +1231,10 @@
 .lead-opt-card-list {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 190px));
-  justify-content: start;
+  width: 100%;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  justify-content: stretch;
+  justify-items: stretch;
   align-items: start;
   align-content: start;
 }
@@ -1398,13 +1400,13 @@
 
 @media (max-width: 1440px) {
   .lead-opt-card-list {
-    grid-template-columns: repeat(auto-fill, minmax(184px, 184px));
+    grid-template-columns: repeat(auto-fit, minmax(184px, 1fr));
   }
 }
 
 @media (max-width: 980px) {
   .lead-opt-card-list {
-    grid-template-columns: repeat(auto-fill, minmax(172px, 172px));
+    grid-template-columns: repeat(auto-fit, minmax(172px, 1fr));
   }
 }
 

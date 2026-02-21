@@ -99,7 +99,7 @@ export function createDraftFingerprint(draft: DraftFingerprintFields): string {
     taskSummary: draft.taskSummary.trim(),
     backend: draft.backend,
     use_msa: hasMsa,
-    color_mode: draft.color_mode || 'white',
+    color_mode: draft.color_mode === 'alphafold' ? 'alphafold' : 'default',
     inputConfig: normalizedConfig
   });
 }

@@ -188,7 +188,7 @@ function normalizeBackend(value: string): string {
 
 type CandidateStateFilter = 'all' | 'pending' | 'queued' | 'running' | 'success' | 'failure';
 type CandidateStructureSearchMode = 'exact' | 'substructure';
-type CandidatePreviewRenderMode = 'confidence' | 'fragment';
+export type CandidatePreviewRenderMode = 'confidence' | 'fragment';
 
 export interface LeadOptCandidatesUiState {
   selectedBackend: string;
@@ -291,6 +291,7 @@ interface LeadOptCandidatesPanelProps {
   onRunPredictCandidate: (candidateSmiles: string, backend: string) => void;
   onOpenPredictionResult: (candidateSmiles: string, highlightAtomIndices?: number[]) => void;
   onUiStateChange?: (state: LeadOptCandidatesUiState) => void;
+  onPreviewRenderModeChange?: (mode: CandidatePreviewRenderMode) => void;
   onExitCardMode?: () => void;
 }
 
@@ -310,6 +311,7 @@ export function LeadOptCandidatesPanel({
   onRunPredictCandidate,
   onOpenPredictionResult,
   onUiStateChange,
+  onPreviewRenderModeChange,
   onExitCardMode
 }: LeadOptCandidatesPanelProps) {
   const PAGE_SIZE = 12;
@@ -345,6 +347,32 @@ export function LeadOptCandidatesPanel({
   const uiStateHydrationSignatureRef = useRef('');
   const uiStateEmitSignatureRef = useRef('');
   const selectedBackendKey = normalizeBackend(selectedBackend);
+
+  const buildUiState = (
+    overrides?: Partial<LeadOptCandidatesUiState>
+  ): LeadOptCandidatesUiState => ({
+    selectedBackend: normalizeBackend(overrides?.selectedBackend ?? selectedBackend),
+    stateFilter: normalizeStateFilter(overrides?.stateFilter ?? stateFilter),
+    showAdvanced: overrides?.showAdvanced ?? showAdvanced,
+    mwMin: readText(overrides?.mwMin ?? mwMin).trim(),
+    mwMax: readText(overrides?.mwMax ?? mwMax).trim(),
+    logpMin: readText(overrides?.logpMin ?? logpMin).trim(),
+    logpMax: readText(overrides?.logpMax ?? logpMax).trim(),
+    tpsaMin: readText(overrides?.tpsaMin ?? tpsaMin).trim(),
+    tpsaMax: readText(overrides?.tpsaMax ?? tpsaMax).trim(),
+    structureSearchMode: normalizeStructureSearchMode(overrides?.structureSearchMode ?? structureSearchMode),
+    structureSearchQuery: readText(overrides?.structureSearchQuery ?? structureSearchQuery).trim(),
+    previewRenderMode: normalizePreviewRenderMode(overrides?.previewRenderMode ?? previewRenderMode)
+  });
+
+  const emitUiStateNow = (overrides?: Partial<LeadOptCandidatesUiState>) => {
+    if (typeof onUiStateChange !== 'function') return;
+    const nextState = buildUiState(overrides);
+    const signature = buildLeadOptCandidatesUiStateSignature(nextState);
+    if (uiStateEmitSignatureRef.current === signature) return;
+    uiStateEmitSignatureRef.current = signature;
+    onUiStateChange(nextState);
+  };
 
   const predictionForBackend = (smiles: string): LeadOptPredictionRecord | null => {
     const record = predictionBySmiles[smiles];
@@ -385,20 +413,7 @@ export function LeadOptCandidatesPanel({
 
   useEffect(() => {
     if (typeof onUiStateChange !== 'function') return;
-    const nextState: LeadOptCandidatesUiState = {
-      selectedBackend: normalizeBackend(selectedBackend),
-      stateFilter: normalizeStateFilter(stateFilter),
-      showAdvanced,
-      mwMin: readText(mwMin).trim(),
-      mwMax: readText(mwMax).trim(),
-      logpMin: readText(logpMin).trim(),
-      logpMax: readText(logpMax).trim(),
-      tpsaMin: readText(tpsaMin).trim(),
-      tpsaMax: readText(tpsaMax).trim(),
-      structureSearchMode: normalizeStructureSearchMode(structureSearchMode),
-      structureSearchQuery: readText(structureSearchQuery).trim(),
-      previewRenderMode: normalizePreviewRenderMode(previewRenderMode)
-    };
+    const nextState = buildUiState();
     const signature = buildLeadOptCandidatesUiStateSignature(nextState);
     const timer = window.setTimeout(() => {
       if (uiStateEmitSignatureRef.current === signature) return;
@@ -743,7 +758,11 @@ export function LeadOptCandidatesPanel({
                 role="tab"
                 aria-selected={previewRenderMode === 'confidence'}
                 className={`lead-opt-render-mode-btn ${previewRenderMode === 'confidence' ? 'active' : ''}`}
-                onClick={() => setPreviewRenderMode('confidence')}
+                onClick={() => {
+                  setPreviewRenderMode('confidence');
+                  onPreviewRenderModeChange?.('confidence');
+                  emitUiStateNow({ previewRenderMode: 'confidence' });
+                }}
                 title="Color by model confidence"
               >
                 Confidence
@@ -753,7 +772,11 @@ export function LeadOptCandidatesPanel({
                 role="tab"
                 aria-selected={previewRenderMode === 'fragment'}
                 className={`lead-opt-render-mode-btn ${previewRenderMode === 'fragment' ? 'active' : ''}`}
-                onClick={() => setPreviewRenderMode('fragment')}
+                onClick={() => {
+                  setPreviewRenderMode('fragment');
+                  onPreviewRenderModeChange?.('fragment');
+                  emitUiStateNow({ previewRenderMode: 'fragment' });
+                }}
                 title="Highlight modified fragment"
               >
                 Fragment

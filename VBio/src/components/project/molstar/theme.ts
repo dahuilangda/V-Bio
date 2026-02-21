@@ -237,9 +237,39 @@ async function updateRepresentationAlpha(components: any[], manager: any, alpha:
   return false;
 }
 
+async function updateRepresentationTypeParams(
+  components: any[],
+  manager: any,
+  typeParams: Record<string, unknown>
+): Promise<boolean> {
+  if (!manager || !Array.isArray(components) || components.length === 0) return false;
+  const fns = [
+    manager.updateRepresentations,
+    manager.updateRepresentation,
+    manager.setRepresentations,
+    manager.setRepresentation
+  ].filter((fn) => typeof fn === 'function');
+  const variants = [
+    { typeParams },
+    { type: { params: typeParams } },
+    { reprParams: typeParams }
+  ];
+  for (const fn of fns) {
+    for (const payload of variants) {
+      try {
+        await fn.call(manager, components, payload);
+        return true;
+      } catch {
+        // try next payload
+      }
+    }
+  }
+  return false;
+}
+
 export async function tryApplyLeadOptSceneStyle(
   viewer: any,
-  options?: { polymerAlpha?: number; ligandAlpha?: number }
+  options?: { polymerAlpha?: number; ligandAlpha?: number; pocketStickScale?: number; pocketStickRatio?: number }
 ): Promise<void> {
   const plugin = viewer?.plugin;
   const manager = plugin?.managers?.structure?.component;
@@ -253,11 +283,22 @@ export async function tryApplyLeadOptSceneStyle(
 
   const polymerAlpha = Number.isFinite(Number(options?.polymerAlpha)) ? Number(options?.polymerAlpha) : 0.3;
   const ligandAlpha = Number.isFinite(Number(options?.ligandAlpha)) ? Number(options?.ligandAlpha) : 1.0;
+  const pocketStickScale = Number.isFinite(Number(options?.pocketStickScale)) ? Number(options?.pocketStickScale) : 0.62;
+  const pocketStickRatio = Number.isFinite(Number(options?.pocketStickRatio)) ? Number(options?.pocketStickRatio) : 0.8;
   if (proteinComponents.length > 0) {
     await updateRepresentationAlpha(proteinComponents, manager, polymerAlpha);
+    // Keep pocket/protein sticks slimmer so ligand remains visually primary.
+    await updateRepresentationTypeParams(proteinComponents, manager, {
+      sizeFactor: pocketStickScale,
+      sizeAspectRatio: pocketStickRatio
+    });
   }
   if (ligandComponents.length > 0) {
     await updateRepresentationAlpha(ligandComponents, manager, ligandAlpha);
+    await updateRepresentationTypeParams(ligandComponents, manager, {
+      sizeFactor: 1.0,
+      sizeAspectRatio: 1.0
+    });
   }
 
   const canvas = plugin?.canvas3d;
@@ -275,6 +316,106 @@ export async function tryApplyLeadOptSceneStyle(
       // no-op
     }
   }
+}
+
+async function updateComponentsTheme(manager: any, components: any[], payload: Record<string, unknown>): Promise<void> {
+  if (!manager || typeof manager.updateRepresentationsTheme !== 'function') {
+    throw new Error('Missing updateRepresentationsTheme API.');
+  }
+  if (!Array.isArray(components) || components.length === 0) return;
+  try {
+    await manager.updateRepresentationsTheme(components, payload);
+    return;
+  } catch {
+    const cells = components.map((component) => component?.cell).filter(Boolean);
+    if (cells.length > 0) {
+      await manager.updateRepresentationsTheme(cells, payload);
+      return;
+    }
+  }
+}
+
+async function updateThemeTargetsWithVariants(
+  manager: any,
+  components: any[],
+  structures: any[],
+  payloads: Array<Record<string, unknown>>
+): Promise<void> {
+  let lastError: unknown = null;
+  for (const payload of payloads) {
+    let applied = false;
+    try {
+      await updateComponentsTheme(manager, components, payload);
+      applied = true;
+    } catch (error) {
+      lastError = error;
+    }
+    if (Array.isArray(structures) && structures.length > 0) {
+      try {
+        await manager.updateRepresentationsTheme(structures, payload);
+        applied = true;
+      } catch (error) {
+        if (!applied) {
+          lastError = error;
+        }
+      }
+    }
+    if (applied) return;
+  }
+  if (lastError) throw lastError;
+}
+
+function buildBaseElementSymbolThemeVariants(): Array<Record<string, unknown>> {
+  return [
+    { color: 'element-symbol' },
+    { color: { name: 'element-symbol' } },
+    { colorTheme: 'element-symbol' },
+    { colorTheme: { name: 'element-symbol' } }
+  ];
+}
+
+export async function tryApplyLeadOptResultsInteractionTheme(viewer: any): Promise<void> {
+  const plugin = viewer?.plugin;
+  const manager = plugin?.managers?.structure?.component;
+  const hasManagerTheme = typeof manager?.updateRepresentationsTheme === 'function';
+  const structures = await waitForStructureEntries(viewer);
+  if (!hasManagerTheme) {
+    throw new Error(
+      `Unable to apply lead_opt results interaction theme: missing manager theme API. ${describeThemeCapabilities(viewer)}`
+    );
+  }
+
+  // Deterministic fragment mode: always rebuild as element-symbol.
+  await clearStructureComponents(viewer);
+  await tryBuildRepresentationsFromStructures(
+    viewer,
+    'element-symbol',
+    structures,
+    [
+      { kind: 'polymer', type: 'cartoon' },
+      { kind: 'ligand', type: 'ball-and-stick' },
+      { kind: 'branched', type: 'ball-and-stick' },
+      { kind: 'ion', type: 'ball-and-stick' }
+    ]
+  );
+
+  if (typeof viewer?.setStyle === 'function') {
+    try {
+      viewer.setStyle({ theme: 'element-symbol' });
+    } catch {
+      // no-op
+    }
+  }
+
+  const components = await waitForThemeComponents(viewer, 2200, 80);
+  if (components.length === 0) {
+    throw new Error(
+      `Unable to apply lead_opt results interaction theme: no structure components. ${describeThemeCapabilities(viewer)}`
+    );
+  }
+
+  // Force element-symbol first so AF confidence colors are always cleared.
+  await updateThemeTargetsWithVariants(manager, components, structures, buildBaseElementSymbolThemeVariants());
 }
 
 export function tryFocusLikelyLigand(viewer: any): boolean {
@@ -391,53 +532,4 @@ export async function tryApplyCartoonPreset(viewer: any, structures?: any[]): Pr
     }
   }
   return anyApplied;
-}
-
-export async function tryApplyWhiteTheme(viewer: any): Promise<void> {
-  const plugin = viewer?.plugin;
-  const manager = plugin?.managers?.structure?.component;
-  const groups = plugin?.managers?.structure?.hierarchy?.current?.componentGroups;
-  const components = Array.isArray(groups) ? groups.flat() : [];
-
-  if (manager?.updateRepresentationsTheme && components.length > 0) {
-    try {
-      await manager.updateRepresentationsTheme(components, {
-        color: 'uniform',
-        colorParams: {
-          value: 0xe8edf2
-        }
-      });
-    } catch {
-      // no-op
-    }
-  }
-
-  if (typeof viewer?.setStyle === 'function') {
-    try {
-      viewer.setStyle({
-        theme: 'uniform',
-        themeParams: {
-          value: 0xe8edf2
-        }
-      });
-    } catch {
-      // no-op
-    }
-  }
-
-  const canvas = plugin?.canvas3d;
-  if (canvas?.setProps) {
-    try {
-      canvas.setProps({
-        renderer: { backgroundColor: 0xffffff },
-        marking: {
-          highlightColor: 0x6b9b84,
-          selectColor: 0x2f6f57,
-          edgeScale: 0.8
-        }
-      });
-    } catch {
-      // no-op
-    }
-  }
 }

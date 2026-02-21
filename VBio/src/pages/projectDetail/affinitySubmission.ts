@@ -211,7 +211,7 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
       taskSummary: draft.taskSummary.trim(),
       backend: activeAffinityBackend,
       use_msa: hasMsa,
-      color_mode: draft.color_mode || 'white',
+      color_mode: draft.color_mode === 'alphafold' ? 'alphafold' : 'default',
       inputConfig: configWithAffinity
     };
     setDraft(nextDraft);

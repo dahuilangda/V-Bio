@@ -148,7 +148,7 @@ export function AffinityBasicsWorkspace({
               format={previewTargetStructureFormat}
               overlayStructureText={previewLigandStructureText}
               overlayFormat={previewLigandStructureFormat}
-              colorMode="white"
+              colorMode="default"
             />
           ) : (
             <div className="ligand-preview-empty">Upload target file.</div>
@@ -192,7 +192,7 @@ interface AffinityResultsWorkspaceProps {
   hasStructure: boolean;
   structureText: string;
   structureFormat: 'cif' | 'pdb';
-  colorMode: 'white' | 'alphafold';
+  colorMode: 'default' | 'alphafold';
   confidenceBackend: string;
   projectBackend: string;
   ligandSmiles: string;
