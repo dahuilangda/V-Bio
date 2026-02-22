@@ -5,7 +5,7 @@ import json
 import logging
 
 from .models import PostgresTarget
-from .services import registry_service, report_service, setup_service, template_service, verify_service
+from .services import check_service, registry_service, report_service, setup_service, template_service, verify_service
 
 
 def _setup_logging() -> None:
@@ -42,6 +42,7 @@ def _cmd_db_build(args: argparse.Namespace) -> int:
         index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
         index_work_mem_mb=args.pg_index_work_mem_mb,
         index_parallel_workers=args.pg_index_parallel_workers,
+        index_commit_every_flushes=args.pg_index_commit_every_flushes,
         build_construct_tables=not args.pg_skip_construct_tables,
         build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
     )
@@ -65,6 +66,7 @@ def _cmd_db_index_fragdb(args: argparse.Namespace) -> int:
         index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
         index_work_mem_mb=args.pg_index_work_mem_mb,
         index_parallel_workers=args.pg_index_parallel_workers,
+        index_commit_every_flushes=args.pg_index_commit_every_flushes,
         build_construct_tables=not args.pg_skip_construct_tables,
         build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
     )
@@ -121,6 +123,7 @@ def _cmd_compound_import(args: argparse.Namespace) -> int:
         index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
         index_work_mem_mb=args.pg_index_work_mem_mb,
         index_parallel_workers=args.pg_index_parallel_workers,
+        index_commit_every_flushes=args.pg_index_commit_every_flushes,
         incremental_index_shards=args.pg_incremental_index_shards,
         incremental_index_jobs=args.pg_incremental_index_jobs,
         build_construct_tables=not args.pg_skip_construct_tables,
@@ -152,6 +155,7 @@ def _cmd_compound_delete(args: argparse.Namespace) -> int:
         index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
         index_work_mem_mb=args.pg_index_work_mem_mb,
         index_parallel_workers=args.pg_index_parallel_workers,
+        index_commit_every_flushes=args.pg_index_commit_every_flushes,
         incremental_index_shards=args.pg_incremental_index_shards,
         incremental_index_jobs=args.pg_incremental_index_jobs,
         build_construct_tables=not args.pg_skip_construct_tables,
@@ -254,6 +258,67 @@ def _cmd_report_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_action_preview_rows(rows: list[dict[str, object]], *, columns: list[str], limit: int) -> None:
+    if not rows:
+        print("(empty)")
+        return
+    preview_limit = max(1, int(limit))
+    shown = rows[:preview_limit]
+    print("\\t".join(columns))
+    for row in shown:
+        print(
+            "\\t".join(
+                "1"
+                if row.get(col) is True
+                else "0"
+                if row.get(col) is False
+                else ""
+                if row.get(col) is None
+                else str(row.get(col))
+                for col in columns
+            )
+        )
+    if len(rows) > preview_limit:
+        print(f"... ({len(rows) - preview_limit} more rows omitted)")
+
+
+def _cmd_check_compound_import(args: argparse.Namespace) -> int:
+    target = _build_target(args)
+    payload = check_service.preview_compound_import(
+        target,
+        structures_file=args.file,
+        smiles_column=args.smiles_column,
+        id_column=args.id_column,
+        canonicalize_smiles=not args.no_canonicalize,
+    )
+    print(json.dumps(payload.get("summary", {}), ensure_ascii=False, indent=2))
+    columns = list(payload.get("columns", []))
+    rows = list(payload.get("rows", []))
+    _print_action_preview_rows(rows, columns=columns, limit=args.print_limit)
+    if args.output_tsv:
+        path = check_service.write_annotated_table_tsv(args.output_tsv, columns, rows)
+        print(path)
+    return 0
+
+
+def _cmd_check_property_import(args: argparse.Namespace) -> int:
+    target = _build_target(args)
+    payload = check_service.preview_property_import(
+        target,
+        property_file=args.file,
+        smiles_column=args.smiles_column,
+        canonicalize_smiles=not args.no_canonicalize,
+    )
+    print(json.dumps(payload.get("summary", {}), ensure_ascii=False, indent=2))
+    columns = list(payload.get("columns", []))
+    rows = list(payload.get("rows", []))
+    _print_action_preview_rows(rows, columns=columns, limit=args.print_limit)
+    if args.output_tsv:
+        path = check_service.write_annotated_table_tsv(args.output_tsv, columns, rows)
+        print(path)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="leadopt-mmp",
@@ -276,6 +341,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_build.add_argument("--pg_index_maintenance_work_mem_mb", default=1024, type=int)
     p_build.add_argument("--pg_index_work_mem_mb", default=128, type=int)
     p_build.add_argument("--pg_index_parallel_workers", default=4, type=int)
+    p_build.add_argument(
+        "--pg_index_commit_every_flushes",
+        default=0,
+        type=int,
+        help="Commit cadence for mmpdb index flushes (<=0: auto-adaptive).",
+    )
     p_build.add_argument("--pg_skip_construct_tables", action="store_true")
     p_build.add_argument("--pg_skip_constant_smiles_mol_index", action="store_true")
     p_build.set_defaults(func=_cmd_db_build)
@@ -291,6 +362,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_index.add_argument("--pg_index_maintenance_work_mem_mb", default=1024, type=int)
     p_index.add_argument("--pg_index_work_mem_mb", default=128, type=int)
     p_index.add_argument("--pg_index_parallel_workers", default=4, type=int)
+    p_index.add_argument(
+        "--pg_index_commit_every_flushes",
+        default=0,
+        type=int,
+        help="Commit cadence for mmpdb index flushes (<=0: auto-adaptive).",
+    )
     p_index.add_argument("--pg_skip_construct_tables", action="store_true")
     p_index.add_argument("--pg_skip_constant_smiles_mol_index", action="store_true")
     p_index.set_defaults(func=_cmd_db_index_fragdb)
@@ -331,6 +408,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_cmp_import.add_argument("--pg_index_maintenance_work_mem_mb", default=1024, type=int)
     p_cmp_import.add_argument("--pg_index_work_mem_mb", default=128, type=int)
     p_cmp_import.add_argument("--pg_index_parallel_workers", default=4, type=int)
+    p_cmp_import.add_argument(
+        "--pg_index_commit_every_flushes",
+        default=0,
+        type=int,
+        help="Commit cadence for mmpdb index flushes (<=0: auto-adaptive).",
+    )
     p_cmp_import.add_argument("--pg_incremental_index_shards", default=1, type=int)
     p_cmp_import.add_argument("--pg_incremental_index_jobs", default=1, type=int)
     p_cmp_import.add_argument("--pg_skip_construct_tables", action="store_true")
@@ -349,6 +432,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_cmp_delete.add_argument("--pg_index_maintenance_work_mem_mb", default=1024, type=int)
     p_cmp_delete.add_argument("--pg_index_work_mem_mb", default=128, type=int)
     p_cmp_delete.add_argument("--pg_index_parallel_workers", default=4, type=int)
+    p_cmp_delete.add_argument(
+        "--pg_index_commit_every_flushes",
+        default=0,
+        type=int,
+        help="Commit cadence for mmpdb index flushes (<=0: auto-adaptive).",
+    )
     p_cmp_delete.add_argument("--pg_incremental_index_shards", default=1, type=int)
     p_cmp_delete.add_argument("--pg_incremental_index_jobs", default=1, type=int)
     p_cmp_delete.add_argument("--pg_skip_construct_tables", action="store_true")
@@ -414,6 +503,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_metrics.add_argument("--recent_limit", default=10, type=int)
     p_metrics.add_argument("--output_json", default="", type=str)
     p_metrics.set_defaults(func=_cmd_report_metrics)
+
+    p_check_cmp = sub.add_parser(
+        "check-compound-import",
+        help="Dry-run check for compound batch import and annotate planned row operations",
+    )
+    _add_target_args(p_check_cmp)
+    p_check_cmp.add_argument("--file", required=True, type=str)
+    p_check_cmp.add_argument("--smiles_column", default="", type=str)
+    p_check_cmp.add_argument("--id_column", default="", type=str)
+    p_check_cmp.add_argument("--no_canonicalize", action="store_true")
+    p_check_cmp.add_argument("--print_limit", default=80, type=int)
+    p_check_cmp.add_argument("--output_tsv", default="", type=str)
+    p_check_cmp.set_defaults(func=_cmd_check_compound_import)
+
+    p_check_prop = sub.add_parser(
+        "check-property-import",
+        help="Dry-run check for property batch import and annotate planned row operations",
+    )
+    _add_target_args(p_check_prop)
+    p_check_prop.add_argument("--file", required=True, type=str)
+    p_check_prop.add_argument("--smiles_column", default="", type=str)
+    p_check_prop.add_argument("--no_canonicalize", action="store_true")
+    p_check_prop.add_argument("--print_limit", default=80, type=int)
+    p_check_prop.add_argument("--output_tsv", default="", type=str)
+    p_check_prop.set_defaults(func=_cmd_check_property_import)
 
     return parser
 

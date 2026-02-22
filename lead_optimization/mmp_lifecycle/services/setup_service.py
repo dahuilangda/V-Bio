@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
-
 from lead_optimization.mmp_lifecycle import engine as legacy
 
 from ..models import PostgresTarget
@@ -23,6 +21,7 @@ def build_database_from_smiles(
     index_maintenance_work_mem_mb: int = 0,
     index_work_mem_mb: int = 0,
     index_parallel_workers: int = 0,
+    index_commit_every_flushes: int = 0,
     build_construct_tables: bool = True,
     build_constant_smiles_mol_index: bool = True,
 ) -> bool:
@@ -41,6 +40,7 @@ def build_database_from_smiles(
         index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
         index_work_mem_mb=index_work_mem_mb,
         index_parallel_workers=index_parallel_workers,
+        index_commit_every_flushes=index_commit_every_flushes,
         build_construct_tables=build_construct_tables,
         build_constant_smiles_mol_index=build_constant_smiles_mol_index,
     )
@@ -61,6 +61,7 @@ def index_fragdb_into_database(
     index_maintenance_work_mem_mb: int = 0,
     index_work_mem_mb: int = 0,
     index_parallel_workers: int = 0,
+    index_commit_every_flushes: int = 0,
     build_construct_tables: bool = True,
     build_constant_smiles_mol_index: bool = True,
 ) -> bool:
@@ -75,6 +76,7 @@ def index_fragdb_into_database(
         index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
         index_work_mem_mb=index_work_mem_mb,
         index_parallel_workers=index_parallel_workers,
+        index_commit_every_flushes=index_commit_every_flushes,
         build_construct_tables=build_construct_tables,
         build_constant_smiles_mol_index=build_constant_smiles_mol_index,
     )
@@ -131,6 +133,7 @@ def import_compound_batch(
     index_maintenance_work_mem_mb: int = 1024,
     index_work_mem_mb: int = 128,
     index_parallel_workers: int = 4,
+    index_commit_every_flushes: int = 0,
     incremental_index_shards: int = 1,
     incremental_index_jobs: int = 1,
     build_construct_tables: bool = True,
@@ -154,6 +157,7 @@ def import_compound_batch(
         index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
         index_work_mem_mb=index_work_mem_mb,
         index_parallel_workers=index_parallel_workers,
+        index_commit_every_flushes=index_commit_every_flushes,
         incremental_index_shards=incremental_index_shards,
         incremental_index_jobs=incremental_index_jobs,
         build_construct_tables=build_construct_tables,
@@ -173,6 +177,7 @@ def delete_compound_batch(
     index_maintenance_work_mem_mb: int = 1024,
     index_work_mem_mb: int = 128,
     index_parallel_workers: int = 4,
+    index_commit_every_flushes: int = 0,
     incremental_index_shards: int = 1,
     incremental_index_jobs: int = 1,
     build_construct_tables: bool = True,
@@ -190,6 +195,7 @@ def delete_compound_batch(
         index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
         index_work_mem_mb=index_work_mem_mb,
         index_parallel_workers=index_parallel_workers,
+        index_commit_every_flushes=index_commit_every_flushes,
         incremental_index_shards=incremental_index_shards,
         incremental_index_jobs=incremental_index_jobs,
         build_construct_tables=build_construct_tables,

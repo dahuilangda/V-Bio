@@ -8,13 +8,16 @@ Enhanced with ChEMBL data download capabilities
 
 import argparse
 import csv
+import glob
+import hashlib
+import json
+import math
 import os
 import sys
 import logging
 import subprocess
 import shutil
 import re
-import sqlite3
 import time
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -381,6 +384,7 @@ def _run_mmpdb_index_with_schema_safe_patch(
     *,
     skip_post_index_finalize: bool = False,
     skip_post_index_analyze_only: bool = False,
+    commit_every_flushes: int = 0,
 ) -> subprocess.CompletedProcess:
     patch_runner_code = r"""
 import sys
@@ -389,6 +393,7 @@ from mmpdblib import cli, index_writers, schema as mmp_schema, index_algorithm
 
 _SKIP_FINALIZE = __SKIP_FINALIZE__
 _SKIP_ANALYZE = __SKIP_ANALYZE__
+_COMMIT_EVERY_FLUSHES = max(0, int(__COMMIT_EVERY_FLUSHES__))
 _DELTA_PAIR_IDS_FILE = os.environ.get("LEADOPT_MMP_DELTA_PAIR_IDS_FILE", "").strip()
 _DELTA_PAIR_IDS = set()
 if _DELTA_PAIR_IDS_FILE:
@@ -440,6 +445,28 @@ def _patched_end_skip_analyze(self, reporter):
     reporter.update("")
 
 index_writers.PostgresIndexWriter.create_schema = _patched_create_schema
+
+_orig_pg_start = index_writers.PostgresIndexWriter.start
+def _patched_pg_start(self, fragment_options, index_options):
+    self._leadopt_flush_commit_counter = 0
+    return _orig_pg_start(self, fragment_options, index_options)
+
+_orig_pg_flush = index_writers.PostgresIndexWriter.flush
+def _patched_pg_flush(self):
+    _orig_pg_flush(self)
+    if _COMMIT_EVERY_FLUSHES <= 0:
+        return
+    self._leadopt_flush_commit_counter = int(getattr(self, "_leadopt_flush_commit_counter", 0)) + 1
+    if self._leadopt_flush_commit_counter % _COMMIT_EVERY_FLUSHES != 0:
+        return
+    # Reset PostgreSQL transaction command counter periodically to avoid:
+    # "cannot have more than 2^32-2 commands in a transaction"
+    self.conn.execute("COMMIT")
+    self.conn.execute("BEGIN TRANSACTION")
+
+index_writers.PostgresIndexWriter.start = _patched_pg_start
+index_writers.PostgresIndexWriter.flush = _patched_pg_flush
+
 if _SKIP_FINALIZE:
     index_writers.PostgresIndexWriter.end = _patched_end_skip_finalize
 elif _SKIP_ANALYZE:
@@ -497,6 +524,9 @@ cli.main()
     ).replace(
         "__SKIP_ANALYZE__",
         "1" if skip_post_index_analyze_only else "0",
+    ).replace(
+        "__COMMIT_EVERY_FLUSHES__",
+        str(max(0, int(commit_every_flushes or 0))),
     )
     cmd = [sys.executable, "-c", patch_runner_code, *index_args]
     return subprocess.run(cmd, capture_output=True, text=True, env=env)
@@ -512,6 +542,27 @@ def _summarize_core_tables(rows: List[tuple[str, str]]) -> str:
     )
 
 
+def _resolve_index_commit_every_flushes(
+    requested_flushes: int,
+    *,
+    fragments_file: str = "",
+) -> tuple[int, bool]:
+    explicit = int(requested_flushes or 0)
+    if explicit > 0:
+        return explicit, False
+    size_bytes = 0
+    try:
+        token = str(fragments_file or "").strip()
+        if token and os.path.exists(token):
+            size_bytes = int(os.path.getsize(token) or 0)
+    except Exception:
+        size_bytes = 0
+    size_gib = max(0.0, float(size_bytes) / float(1024 ** 3))
+    auto_flushes = int(round(2.0 + 8.0 * math.log2(size_gib + 1.0)))
+    auto_flushes = max(1, min(64, auto_flushes))
+    return auto_flushes, True
+
+
 def _index_fragments_to_postgres(
     fragments_file: str,
     postgres_url: str,
@@ -524,11 +575,13 @@ def _index_fragments_to_postgres(
     index_maintenance_work_mem_mb: int = 0,
     index_work_mem_mb: int = 0,
     index_parallel_workers: int = 0,
+    index_commit_every_flushes: int = 0,
     skip_mmpdb_post_index_finalize: bool = False,
     skip_mmpdb_list_verify: bool = False,
     delta_pair_record_ids: Optional[Sequence[str]] = None,
     build_construct_tables: bool = True,
     build_constant_smiles_mol_index: bool = True,
+    detect_existing_core_tables: bool = True,
 ) -> bool:
     """Index an existing .fragdb file into PostgreSQL and run finalize steps."""
     logger = logging.getLogger(__name__)
@@ -539,16 +592,17 @@ def _index_fragments_to_postgres(
             return False
 
         _ensure_postgres_schema_exists(postgres_url, normalized_schema)
-        existing_core_tables = _find_mmpdb_core_tables(postgres_url)
-        if existing_core_tables:
-            logger.warning(
-                "Detected existing mmpdb core tables in database: %s",
-                _summarize_core_tables(existing_core_tables),
-            )
-            logger.warning(
-                "Applying schema-safe mmpdb index patch; only current schema '%s' tables will be replaced.",
-                normalized_schema,
-            )
+        if detect_existing_core_tables:
+            existing_core_tables = _find_mmpdb_core_tables(postgres_url)
+            if existing_core_tables:
+                logger.warning(
+                    "Detected existing mmpdb core tables in database: %s",
+                    _summarize_core_tables(existing_core_tables),
+                )
+                logger.warning(
+                    "Applying schema-safe mmpdb index patch; only current schema '%s' tables will be replaced.",
+                    normalized_schema,
+                )
         current_schema_tables = _find_mmpdb_core_tables_in_schema(postgres_url, normalized_schema)
         if current_schema_tables and not force_rebuild_schema:
             logger.error(
@@ -612,10 +666,20 @@ def _index_fragments_to_postgres(
             index_env["LEADOPT_MMP_DELTA_PAIR_IDS_FILE"] = delta_id_file
             logger.info("Applying delta-only pair filter for mmpdb index: delta_ids=%s", len(delta_ids))
         try:
+            safe_commit_every_flushes, is_auto_commit_flushes = _resolve_index_commit_every_flushes(
+                index_commit_every_flushes,
+                fragments_file=fragments_file,
+            )
+            logger.info(
+                "mmpdb index commit cadence: every %s flush(es)%s",
+                safe_commit_every_flushes,
+                " [auto]" if is_auto_commit_flushes else "",
+            )
             result = _run_mmpdb_index_with_schema_safe_patch(
                 index_args,
                 index_env,
                 skip_post_index_finalize=skip_mmpdb_post_index_finalize,
+                commit_every_flushes=safe_commit_every_flushes,
             )
         finally:
             if delta_id_file:
@@ -684,6 +748,7 @@ def create_mmp_database(
     index_maintenance_work_mem_mb: int = 0,
     index_work_mem_mb: int = 0,
     index_parallel_workers: int = 0,
+    index_commit_every_flushes: int = 0,
     build_construct_tables: bool = True,
     build_constant_smiles_mol_index: bool = True,
 ) -> bool:
@@ -738,6 +803,7 @@ def create_mmp_database(
             index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
             index_work_mem_mb=index_work_mem_mb,
             index_parallel_workers=index_parallel_workers,
+            index_commit_every_flushes=index_commit_every_flushes,
             build_construct_tables=build_construct_tables,
             build_constant_smiles_mol_index=build_constant_smiles_mol_index,
         )
@@ -1010,70 +1076,54 @@ def _enrich_attachment_schema_postgres(
 def _enrich_attachment_schema_postgres_incremental(
     cursor,
     schema: str,
-    *,
-    affected_constants: Sequence[str],
     force_recompute: bool = False,
+    *,
+    affected_constants: Optional[Sequence[str]] = None,
     enable_constant_smiles_mol_index: bool = True,
 ) -> None:
-    constants = sorted({str(item or "").strip() for item in affected_constants if str(item or "").strip()})
+    constants = sorted({str(item or "").strip() for item in (affected_constants or []) if str(item or "").strip()})
     if not constants:
+        _enrich_attachment_schema_postgres(
+            cursor,
+            schema,
+            force_recompute=force_recompute,
+            enable_constant_smiles_mol_index=enable_constant_smiles_mol_index,
+        )
         return
-    _ensure_postgres_attachment_columns(cursor, schema)
-    cursor.execute("DROP TABLE IF EXISTS tmp_inc_constants_for_attach")
+
+    if not _pg_column_exists(cursor, schema, "rule_smiles", "num_frags"):
+        cursor.execute("ALTER TABLE rule_smiles ADD COLUMN num_frags INTEGER")
+    if not _pg_column_exists(cursor, schema, "constant_smiles", "num_frags"):
+        cursor.execute("ALTER TABLE constant_smiles ADD COLUMN num_frags INTEGER")
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_smiles_num_frags ON rule_smiles(num_frags)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_smiles_num_frags_heavies ON rule_smiles(num_frags, num_heavies)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_constant_smiles_num_frags ON constant_smiles(num_frags)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pair_rule_env_constant ON pair(rule_environment_id, constant_id)")
+
+    cursor.execute("DROP TABLE IF EXISTS tmp_inc_attach_constants")
     cursor.execute(
         """
-        CREATE TEMP TABLE tmp_inc_constants_for_attach (
+        CREATE TEMP TABLE tmp_inc_attach_constants (
             smiles TEXT PRIMARY KEY
         ) ON COMMIT DROP
         """
     )
     cursor.executemany(
-        "INSERT INTO tmp_inc_constants_for_attach (smiles) VALUES (%s) ON CONFLICT DO NOTHING",
+        "INSERT INTO tmp_inc_attach_constants (smiles) VALUES (%s) ON CONFLICT DO NOTHING",
         [(value,) for value in constants],
     )
-    cursor.execute("DROP TABLE IF EXISTS tmp_inc_constants_for_attach_ids")
-    cursor.execute(
-        """
-        CREATE TEMP TABLE tmp_inc_constants_for_attach_ids AS
-        SELECT cs.id
-        FROM constant_smiles cs
-        INNER JOIN tmp_inc_constants_for_attach s
-                ON s.smiles = cs.smiles
-        """
-    )
-    cursor.execute(
-        """
-        UPDATE constant_smiles cs
-        SET num_frags = CASE
-            WHEN POSITION('[*:3]' IN cs.smiles) > 0 THEN 3
-            WHEN POSITION('[*:2]' IN cs.smiles) > 0 THEN 2
-            WHEN POSITION('[*:1]' IN cs.smiles) > 0 THEN 1
-            WHEN POSITION('*' IN cs.smiles) > 0 THEN CASE
-                WHEN (LENGTH(cs.smiles) - LENGTH(REPLACE(cs.smiles, '*', ''))) >= 3 THEN 3
-                WHEN (LENGTH(cs.smiles) - LENGTH(REPLACE(cs.smiles, '*', ''))) >= 2 THEN 2
-                ELSE 1
-            END
-            ELSE 0
-        END
-        WHERE cs.id IN (SELECT id FROM tmp_inc_constants_for_attach_ids)
-          AND (
-              %s
-              OR cs.num_frags IS NULL
-              OR cs.num_frags < 0
-              OR cs.num_frags > 3
-          )
-        """,
-        [bool(force_recompute)],
-    )
 
-    cursor.execute("DROP TABLE IF EXISTS tmp_inc_rule_smiles_for_attach_ids")
+    cursor.execute("DROP TABLE IF EXISTS tmp_inc_attach_rule_smiles")
     cursor.execute(
         """
-        CREATE TEMP TABLE tmp_inc_rule_smiles_for_attach_ids AS
+        CREATE TEMP TABLE tmp_inc_attach_rule_smiles AS
         SELECT DISTINCT r.from_smiles_id AS id
         FROM pair p
-        INNER JOIN tmp_inc_constants_for_attach_ids ci
-                ON ci.id = p.constant_id
+        INNER JOIN constant_smiles cs
+                ON cs.id = p.constant_id
+        INNER JOIN tmp_inc_attach_constants tc
+                ON tc.smiles = cs.smiles
         INNER JOIN rule_environment re
                 ON re.id = p.rule_environment_id
         INNER JOIN rule r
@@ -1081,61 +1131,81 @@ def _enrich_attachment_schema_postgres_incremental(
         UNION
         SELECT DISTINCT r.to_smiles_id AS id
         FROM pair p
-        INNER JOIN tmp_inc_constants_for_attach_ids ci
-                ON ci.id = p.constant_id
+        INNER JOIN constant_smiles cs
+                ON cs.id = p.constant_id
+        INNER JOIN tmp_inc_attach_constants tc
+                ON tc.smiles = cs.smiles
         INNER JOIN rule_environment re
                 ON re.id = p.rule_environment_id
         INNER JOIN rule r
                 ON r.id = re.rule_id
         """
     )
+
+    rule_predicate = (
+        ""
+        if force_recompute
+        else "AND (rs.num_frags IS NULL OR rs.num_frags < 1 OR rs.num_frags > 3)"
+    )
     cursor.execute(
-        """
+        f"""
         UPDATE rule_smiles rs
-        SET num_frags = CASE
-            WHEN POSITION('[*:3]' IN rs.smiles) > 0 THEN 3
-            WHEN POSITION('[*:2]' IN rs.smiles) > 0 THEN 2
-            WHEN POSITION('[*:1]' IN rs.smiles) > 0 THEN 1
-            WHEN POSITION('*' IN rs.smiles) > 0 THEN CASE
-                WHEN (LENGTH(rs.smiles) - LENGTH(REPLACE(rs.smiles, '*', ''))) >= 3 THEN 3
-                WHEN (LENGTH(rs.smiles) - LENGTH(REPLACE(rs.smiles, '*', ''))) >= 2 THEN 2
-                ELSE 1
-            END
-            ELSE 1
-        END
-        WHERE rs.id IN (SELECT id FROM tmp_inc_rule_smiles_for_attach_ids)
-          AND (
-              %s
-              OR rs.num_frags IS NULL
-              OR rs.num_frags < 1
-              OR rs.num_frags > 3
-          )
-        """,
-        [bool(force_recompute)],
+           SET num_frags = CASE
+               WHEN POSITION('[*:3]' IN rs.smiles) > 0 THEN 3
+               WHEN POSITION('[*:2]' IN rs.smiles) > 0 THEN 2
+               WHEN POSITION('[*:1]' IN rs.smiles) > 0 THEN 1
+               WHEN POSITION('*' IN rs.smiles) > 0 THEN CASE
+                   WHEN (LENGTH(rs.smiles) - LENGTH(REPLACE(rs.smiles, '*', ''))) >= 3 THEN 3
+                   WHEN (LENGTH(rs.smiles) - LENGTH(REPLACE(rs.smiles, '*', ''))) >= 2 THEN 2
+                   ELSE 1
+               END
+               ELSE 1
+           END
+         WHERE rs.id IN (SELECT id FROM tmp_inc_attach_rule_smiles)
+           {rule_predicate}
+        """
     )
 
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_smiles_num_frags ON rule_smiles(num_frags)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_smiles_num_frags_heavies ON rule_smiles(num_frags, num_heavies)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_constant_smiles_num_frags ON constant_smiles(num_frags)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pair_rule_env_constant ON pair(rule_environment_id, constant_id)")
+    constant_predicate = (
+        ""
+        if force_recompute
+        else "AND (cs.num_frags IS NULL OR cs.num_frags < 0 OR cs.num_frags > 3)"
+    )
+    cursor.execute(
+        f"""
+        UPDATE constant_smiles cs
+           SET num_frags = CASE
+               WHEN POSITION('[*:3]' IN cs.smiles) > 0 THEN 3
+               WHEN POSITION('[*:2]' IN cs.smiles) > 0 THEN 2
+               WHEN POSITION('[*:1]' IN cs.smiles) > 0 THEN 1
+               WHEN POSITION('*' IN cs.smiles) > 0 THEN CASE
+                   WHEN (LENGTH(cs.smiles) - LENGTH(REPLACE(cs.smiles, '*', ''))) >= 3 THEN 3
+                   WHEN (LENGTH(cs.smiles) - LENGTH(REPLACE(cs.smiles, '*', ''))) >= 2 THEN 2
+                   ELSE 1
+               END
+               ELSE 0
+           END
+         WHERE cs.smiles IN (SELECT smiles FROM tmp_inc_attach_constants)
+           {constant_predicate}
+        """
+    )
 
     if _pg_column_exists(cursor, schema, "rule_smiles", "smiles_mol"):
         cursor.execute(
             """
-            UPDATE rule_smiles
-            SET smiles_mol = mol_from_smiles(smiles)
-            WHERE id IN (SELECT id FROM tmp_inc_rule_smiles_for_attach_ids)
-              AND (smiles_mol IS NULL OR %s)
-            """,
-            [bool(force_recompute)],
+            UPDATE rule_smiles rs
+               SET smiles_mol = mol_from_smiles(rs.smiles)
+             WHERE rs.id IN (SELECT id FROM tmp_inc_attach_rule_smiles)
+               AND rs.smiles_mol IS NULL
+            """
         )
     else:
         cursor.execute("ALTER TABLE rule_smiles ADD COLUMN smiles_mol mol")
         cursor.execute(
             """
-            UPDATE rule_smiles
-            SET smiles_mol = mol_from_smiles(smiles)
-            WHERE id IN (SELECT id FROM tmp_inc_rule_smiles_for_attach_ids)
+            UPDATE rule_smiles rs
+               SET smiles_mol = mol_from_smiles(rs.smiles)
+             WHERE rs.id IN (SELECT id FROM tmp_inc_attach_rule_smiles)
             """
         )
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_smiles_smiles_mol ON rule_smiles USING gist(smiles_mol)")
@@ -1144,20 +1214,19 @@ def _enrich_attachment_schema_postgres_incremental(
         if _pg_column_exists(cursor, schema, "constant_smiles", "smiles_mol"):
             cursor.execute(
                 """
-                UPDATE constant_smiles
-                SET smiles_mol = mol_from_smiles(smiles)
-                WHERE id IN (SELECT id FROM tmp_inc_constants_for_attach_ids)
-                  AND (smiles_mol IS NULL OR %s)
-                """,
-                [bool(force_recompute)],
+                UPDATE constant_smiles cs
+                   SET smiles_mol = mol_from_smiles(cs.smiles)
+                 WHERE cs.smiles IN (SELECT smiles FROM tmp_inc_attach_constants)
+                   AND cs.smiles_mol IS NULL
+                """
             )
         else:
             cursor.execute("ALTER TABLE constant_smiles ADD COLUMN smiles_mol mol")
             cursor.execute(
                 """
-                UPDATE constant_smiles
-                SET smiles_mol = mol_from_smiles(smiles)
-                WHERE id IN (SELECT id FROM tmp_inc_constants_for_attach_ids)
+                UPDATE constant_smiles cs
+                   SET smiles_mol = mol_from_smiles(cs.smiles)
+                 WHERE cs.smiles IN (SELECT smiles FROM tmp_inc_attach_constants)
                 """
             )
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_constant_smiles_smiles_mol ON constant_smiles USING gist(smiles_mol)")
@@ -1216,245 +1285,24 @@ def _rebuild_construct_tables_postgres(cursor) -> None:
     cursor.execute("CREATE INDEX idx_to_construct_compound ON to_construct(compound_id)")
 
 
-def _refresh_construct_tables_postgres_for_constants(
-    cursor,
-    *,
-    affected_constants: Sequence[str],
-) -> None:
-    constants = sorted({str(item or "").strip() for item in affected_constants if str(item or "").strip()})
-    if not constants:
-        return
-    cursor.execute("SELECT to_regclass('from_construct'), to_regclass('to_construct')")
-    row = cursor.fetchone()
-    if not row or row[0] is None or row[1] is None:
-        _rebuild_construct_tables_postgres(cursor)
-        return
-
-    cursor.execute("DROP TABLE IF EXISTS tmp_inc_construct_constants")
-    cursor.execute(
-        """
-        CREATE TEMP TABLE tmp_inc_construct_constants (
-            smiles TEXT PRIMARY KEY
-        ) ON COMMIT DROP
-        """
-    )
-    cursor.executemany(
-        "INSERT INTO tmp_inc_construct_constants (smiles) VALUES (%s) ON CONFLICT DO NOTHING",
-        [(value,) for value in constants],
-    )
-    cursor.execute("DROP TABLE IF EXISTS tmp_inc_construct_pairs")
-    cursor.execute(
-        """
-        CREATE TEMP TABLE tmp_inc_construct_pairs (
-            pair_id INTEGER PRIMARY KEY
-        ) ON COMMIT DROP
-        """
-    )
-    cursor.execute(
-        """
-        INSERT INTO tmp_inc_construct_pairs (pair_id)
-        SELECT DISTINCT p.id AS pair_id
-        FROM pair p
-        INNER JOIN constant_smiles cs
-                ON cs.id = p.constant_id
-        INNER JOIN tmp_inc_construct_constants c
-                ON c.smiles = cs.smiles
-        """
-    )
-
-    cursor.execute(
-        """
-        DELETE FROM from_construct fc
-        WHERE EXISTS (
-                SELECT 1
-                FROM tmp_inc_construct_pairs tp
-                WHERE tp.pair_id = fc.pair_id
-            )
-           OR NOT EXISTS (
-                SELECT 1
-                FROM pair p
-                WHERE p.id = fc.pair_id
-           )
-        """
-    )
-    cursor.execute(
-        """
-        DELETE FROM to_construct tc
-        WHERE EXISTS (
-                SELECT 1
-                FROM tmp_inc_construct_pairs tp
-                WHERE tp.pair_id = tc.pair_id
-            )
-           OR NOT EXISTS (
-                SELECT 1
-                FROM pair p
-                WHERE p.id = tc.pair_id
-           )
-        """
-    )
-
-    cursor.execute("SELECT COALESCE(MAX(id), 0) FROM from_construct")
-    base_from_id = int(cursor.fetchone()[0] or 0)
-    cursor.execute(
-        """
-        WITH payload AS (
-            SELECT
-                p.id AS pair_id,
-                p.rule_environment_id AS rule_environment_id,
-                COALESCE(p.constant_id, -1) AS constant_id,
-                r.from_smiles_id AS rule_smiles_id,
-                p.compound1_id AS compound_id,
-                COALESCE(rs.num_frags, GREATEST(1, LENGTH(rs.smiles) - LENGTH(REPLACE(rs.smiles, '*', '')))) AS num_frags,
-                COALESCE(rs.num_heavies, 0) AS rule_smiles_num_heavies,
-                COALESCE(c.clean_num_heavies, 0) AS compound_num_heavies
-            FROM tmp_inc_construct_pairs tp
-            INNER JOIN pair p ON p.id = tp.pair_id
-            INNER JOIN rule_environment re ON re.id = p.rule_environment_id
-            INNER JOIN rule r ON r.id = re.rule_id
-            INNER JOIN rule_smiles rs ON rs.id = r.from_smiles_id
-            INNER JOIN compound c ON c.id = p.compound1_id
-            ORDER BY p.id
-        )
-        INSERT INTO from_construct (
-            id,
-            pair_id,
-            rule_environment_id,
-            constant_id,
-            rule_smiles_id,
-            compound_id,
-            num_frags,
-            rule_smiles_num_heavies,
-            compound_num_heavies
-        )
-        SELECT
-            %s + ROW_NUMBER() OVER (ORDER BY pair_id) AS id,
-            pair_id,
-            rule_environment_id,
-            constant_id,
-            rule_smiles_id,
-            compound_id,
-            num_frags,
-            rule_smiles_num_heavies,
-            compound_num_heavies
-        FROM payload
-        """,
-        [base_from_id],
-    )
-
-    cursor.execute("SELECT COALESCE(MAX(id), 0) FROM to_construct")
-    base_to_id = int(cursor.fetchone()[0] or 0)
-    cursor.execute(
-        """
-        WITH payload AS (
-            SELECT
-                p.id AS pair_id,
-                p.rule_environment_id AS rule_environment_id,
-                COALESCE(p.constant_id, -1) AS constant_id,
-                r.to_smiles_id AS rule_smiles_id,
-                p.compound2_id AS compound_id,
-                COALESCE(rs.num_frags, GREATEST(1, LENGTH(rs.smiles) - LENGTH(REPLACE(rs.smiles, '*', '')))) AS num_frags,
-                COALESCE(rs.num_heavies, 0) AS rule_smiles_num_heavies,
-                COALESCE(c.clean_num_heavies, 0) AS compound_num_heavies
-            FROM tmp_inc_construct_pairs tp
-            INNER JOIN pair p ON p.id = tp.pair_id
-            INNER JOIN rule_environment re ON re.id = p.rule_environment_id
-            INNER JOIN rule r ON r.id = re.rule_id
-            INNER JOIN rule_smiles rs ON rs.id = r.to_smiles_id
-            INNER JOIN compound c ON c.id = p.compound2_id
-            ORDER BY p.id
-        )
-        INSERT INTO to_construct (
-            id,
-            pair_id,
-            rule_environment_id,
-            constant_id,
-            rule_smiles_id,
-            compound_id,
-            num_frags,
-            rule_smiles_num_heavies,
-            compound_num_heavies
-        )
-        SELECT
-            %s + ROW_NUMBER() OVER (ORDER BY pair_id) AS id,
-            pair_id,
-            rule_environment_id,
-            constant_id,
-            rule_smiles_id,
-            compound_id,
-            num_frags,
-            rule_smiles_num_heavies,
-            compound_num_heavies
-        FROM payload
-        """,
-        [base_to_id],
-    )
-
-
 def _append_construct_tables_postgres_for_inserted_pairs(cursor) -> None:
-    cursor.execute("SELECT to_regclass('from_construct'), to_regclass('to_construct'), to_regclass('tmp_inc_inserted_pair_ids_all')")
-    row = cursor.fetchone()
-    if not row or row[0] is None or row[1] is None:
+    cursor.execute("SELECT to_regclass('tmp_inc_inserted_pair_ids_all')")
+    if cursor.fetchone()[0] is None:
+        return
+
+    cursor.execute("SELECT to_regclass('from_construct')")
+    has_from_construct = cursor.fetchone()[0] is not None
+    cursor.execute("SELECT to_regclass('to_construct')")
+    has_to_construct = cursor.fetchone()[0] is not None
+    if not has_from_construct or not has_to_construct:
         _rebuild_construct_tables_postgres(cursor)
         return
-    if row[2] is None:
-        return
-
-    cursor.execute("DROP TABLE IF EXISTS tmp_inc_construct_pairs")
-    cursor.execute(
-        """
-        CREATE TEMP TABLE tmp_inc_construct_pairs AS
-        SELECT DISTINCT p.id AS pair_id
-        FROM pair p
-        INNER JOIN tmp_inc_inserted_pair_ids_all i
-                ON i.pair_id = p.id
-        """
-    )
-    cursor.execute("SELECT COUNT(*) FROM tmp_inc_construct_pairs")
-    if int(cursor.fetchone()[0] or 0) <= 0:
-        return
 
     cursor.execute(
         """
-        DELETE FROM from_construct fc
-        WHERE EXISTS (
-            SELECT 1
-            FROM tmp_inc_construct_pairs tp
-            WHERE tp.pair_id = fc.pair_id
-        )
-        """
-    )
-    cursor.execute(
-        """
-        DELETE FROM to_construct tc
-        WHERE EXISTS (
-            SELECT 1
-            FROM tmp_inc_construct_pairs tp
-            WHERE tp.pair_id = tc.pair_id
-        )
-        """
-    )
-
-    cursor.execute("SELECT COALESCE(MAX(id), 0) FROM from_construct")
-    base_from_id = int(cursor.fetchone()[0] or 0)
-    cursor.execute(
-        """
-        WITH payload AS (
-            SELECT
-                p.id AS pair_id,
-                p.rule_environment_id AS rule_environment_id,
-                COALESCE(p.constant_id, -1) AS constant_id,
-                r.from_smiles_id AS rule_smiles_id,
-                p.compound1_id AS compound_id,
-                COALESCE(rs.num_frags, GREATEST(1, LENGTH(rs.smiles) - LENGTH(REPLACE(rs.smiles, '*', '')))) AS num_frags,
-                COALESCE(rs.num_heavies, 0) AS rule_smiles_num_heavies,
-                COALESCE(c.clean_num_heavies, 0) AS compound_num_heavies
-            FROM tmp_inc_construct_pairs tp
-            INNER JOIN pair p ON p.id = tp.pair_id
-            INNER JOIN rule_environment re ON re.id = p.rule_environment_id
-            INNER JOIN rule r ON r.id = re.rule_id
-            INNER JOIN rule_smiles rs ON rs.id = r.from_smiles_id
-            INNER JOIN compound c ON c.id = p.compound1_id
-            ORDER BY p.id
+        WITH base AS (
+            SELECT COALESCE(MAX(id), 0) AS max_id
+            FROM from_construct
         )
         INSERT INTO from_construct (
             id,
@@ -1468,41 +1316,37 @@ def _append_construct_tables_postgres_for_inserted_pairs(cursor) -> None:
             compound_num_heavies
         )
         SELECT
-            %s + ROW_NUMBER() OVER (ORDER BY pair_id) AS id,
-            pair_id,
-            rule_environment_id,
-            constant_id,
-            rule_smiles_id,
-            compound_id,
-            num_frags,
-            rule_smiles_num_heavies,
-            compound_num_heavies
-        FROM payload
-        """,
-        [base_from_id],
+            base.max_id + ROW_NUMBER() OVER (ORDER BY p.id) AS id,
+            p.id AS pair_id,
+            p.rule_environment_id AS rule_environment_id,
+            COALESCE(p.constant_id, -1) AS constant_id,
+            r.from_smiles_id AS rule_smiles_id,
+            p.compound1_id AS compound_id,
+            COALESCE(rs.num_frags, GREATEST(1, LENGTH(rs.smiles) - LENGTH(REPLACE(rs.smiles, '*', '')))) AS num_frags,
+            COALESCE(rs.num_heavies, 0) AS rule_smiles_num_heavies,
+            COALESCE(c.clean_num_heavies, 0) AS compound_num_heavies
+        FROM pair p
+        INNER JOIN tmp_inc_inserted_pair_ids_all pi
+                ON pi.pair_id = p.id
+        INNER JOIN rule_environment re
+                ON re.id = p.rule_environment_id
+        INNER JOIN rule r
+                ON r.id = re.rule_id
+        INNER JOIN rule_smiles rs
+                ON rs.id = r.from_smiles_id
+        INNER JOIN compound c
+                ON c.id = p.compound1_id
+        LEFT JOIN from_construct existing
+               ON existing.pair_id = p.id
+        CROSS JOIN base
+        WHERE existing.pair_id IS NULL
+        """
     )
-
-    cursor.execute("SELECT COALESCE(MAX(id), 0) FROM to_construct")
-    base_to_id = int(cursor.fetchone()[0] or 0)
     cursor.execute(
         """
-        WITH payload AS (
-            SELECT
-                p.id AS pair_id,
-                p.rule_environment_id AS rule_environment_id,
-                COALESCE(p.constant_id, -1) AS constant_id,
-                r.to_smiles_id AS rule_smiles_id,
-                p.compound2_id AS compound_id,
-                COALESCE(rs.num_frags, GREATEST(1, LENGTH(rs.smiles) - LENGTH(REPLACE(rs.smiles, '*', '')))) AS num_frags,
-                COALESCE(rs.num_heavies, 0) AS rule_smiles_num_heavies,
-                COALESCE(c.clean_num_heavies, 0) AS compound_num_heavies
-            FROM tmp_inc_construct_pairs tp
-            INNER JOIN pair p ON p.id = tp.pair_id
-            INNER JOIN rule_environment re ON re.id = p.rule_environment_id
-            INNER JOIN rule r ON r.id = re.rule_id
-            INNER JOIN rule_smiles rs ON rs.id = r.to_smiles_id
-            INNER JOIN compound c ON c.id = p.compound2_id
-            ORDER BY p.id
+        WITH base AS (
+            SELECT COALESCE(MAX(id), 0) AS max_id
+            FROM to_construct
         )
         INSERT INTO to_construct (
             id,
@@ -1516,19 +1360,34 @@ def _append_construct_tables_postgres_for_inserted_pairs(cursor) -> None:
             compound_num_heavies
         )
         SELECT
-            %s + ROW_NUMBER() OVER (ORDER BY pair_id) AS id,
-            pair_id,
-            rule_environment_id,
-            constant_id,
-            rule_smiles_id,
-            compound_id,
-            num_frags,
-            rule_smiles_num_heavies,
-            compound_num_heavies
-        FROM payload
-        """,
-        [base_to_id],
+            base.max_id + ROW_NUMBER() OVER (ORDER BY p.id) AS id,
+            p.id AS pair_id,
+            p.rule_environment_id AS rule_environment_id,
+            COALESCE(p.constant_id, -1) AS constant_id,
+            r.to_smiles_id AS rule_smiles_id,
+            p.compound2_id AS compound_id,
+            COALESCE(rs.num_frags, GREATEST(1, LENGTH(rs.smiles) - LENGTH(REPLACE(rs.smiles, '*', '')))) AS num_frags,
+            COALESCE(rs.num_heavies, 0) AS rule_smiles_num_heavies,
+            COALESCE(c.clean_num_heavies, 0) AS compound_num_heavies
+        FROM pair p
+        INNER JOIN tmp_inc_inserted_pair_ids_all pi
+                ON pi.pair_id = p.id
+        INNER JOIN rule_environment re
+                ON re.id = p.rule_environment_id
+        INNER JOIN rule r
+                ON r.id = re.rule_id
+        INNER JOIN rule_smiles rs
+                ON rs.id = r.to_smiles_id
+        INNER JOIN compound c
+                ON c.id = p.compound2_id
+        LEFT JOIN to_construct existing
+               ON existing.pair_id = p.id
+        CROSS JOIN base
+        WHERE existing.pair_id IS NULL
+        """
     )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_from_construct_pair ON from_construct(pair_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_to_construct_pair ON to_construct(pair_id)")
 
 
 def _normalize_property_batch_id(value: str) -> str:
@@ -2645,6 +2504,7 @@ def _build_rebuild_smiles_file_from_compound_state(
     schema: str,
     output_dir: str,
     file_tag: str,
+    include_pending_batches: bool = True,
 ) -> tuple[str, int]:
     normalized_schema = _validate_pg_schema(schema)
     os.makedirs(output_dir, exist_ok=True)
@@ -2655,34 +2515,60 @@ def _build_rebuild_smiles_file_from_compound_state(
         with conn.cursor() as cursor:
             _pg_set_search_path(cursor, normalized_schema)
         with conn.cursor(name=stream_name) as stream:
-            stream.execute(
-                f"""
-                WITH merged_source AS (
-                    SELECT clean_smiles, public_id, 0::BIGINT AS source_priority, 0::BIGINT AS source_seq
-                    FROM {COMPOUND_BATCH_BASE_TABLE}
-                    UNION ALL
-                    SELECT clean_smiles, public_id, 1::BIGINT AS source_priority, batch_seq AS source_seq
-                    FROM {COMPOUND_BATCH_ROWS_TABLE}
-                ),
-                ranked AS (
+            if include_pending_batches:
+                stream.execute(
+                    f"""
+                    WITH merged_source AS (
+                        SELECT clean_smiles, public_id, 0::BIGINT AS source_priority, 0::BIGINT AS source_seq
+                        FROM {COMPOUND_BATCH_BASE_TABLE}
+                        UNION ALL
+                        SELECT clean_smiles, public_id, 1::BIGINT AS source_priority, batch_seq AS source_seq
+                        FROM {COMPOUND_BATCH_ROWS_TABLE}
+                    ),
+                    ranked AS (
+                        SELECT
+                            clean_smiles,
+                            NULLIF(public_id, '') AS public_id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY clean_smiles
+                                ORDER BY source_priority DESC, source_seq DESC
+                            ) AS rn
+                        FROM merged_source
+                        WHERE clean_smiles IS NOT NULL AND clean_smiles <> ''
+                    )
                     SELECT
                         clean_smiles,
-                        NULLIF(public_id, '') AS public_id,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY clean_smiles
-                            ORDER BY source_priority DESC, source_seq DESC
-                        ) AS rn
-                    FROM merged_source
-                    WHERE clean_smiles IS NOT NULL AND clean_smiles <> ''
+                        COALESCE(public_id, 'CMPD_' || SUBSTRING(md5(clean_smiles), 1, 16)) AS public_id
+                    FROM ranked
+                    WHERE rn = 1
+                    ORDER BY clean_smiles
+                    """
                 )
-                SELECT
-                    clean_smiles,
-                    COALESCE(public_id, 'CMPD_' || SUBSTRING(md5(clean_smiles), 1, 16)) AS public_id
-                FROM ranked
-                WHERE rn = 1
-                ORDER BY clean_smiles
-                """
-            )
+            else:
+                stream.execute(
+                    """
+                    SELECT
+                        c.clean_smiles,
+                        COALESCE(NULLIF(c.public_id, ''), 'CMPD_' || SUBSTRING(md5(c.clean_smiles), 1, 16)) AS public_id
+                    FROM (
+                        SELECT
+                            clean_smiles,
+                            public_id,
+                            id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY clean_smiles
+                                ORDER BY
+                                    CASE WHEN COALESCE(public_id, '') <> '' THEN 0 ELSE 1 END,
+                                    id ASC
+                            ) AS rn
+                        FROM compound
+                        WHERE clean_smiles IS NOT NULL
+                          AND clean_smiles <> ''
+                    ) c
+                    WHERE c.rn = 1
+                    ORDER BY c.clean_smiles
+                    """
+                )
             with open(smiles_file, "w", encoding="utf-8") as handle:
                 handle.write("SMILES\tID\n")
                 for row in stream:
@@ -2752,405 +2638,454 @@ def _run_mmpdb_fragment(
     return True
 
 
-def _ensure_fragdb_normalized_smiles_index(fragdb_file: str) -> None:
-    if not fragdb_file or not os.path.exists(fragdb_file):
-        return
-    with sqlite3.connect(fragdb_file) as conn:
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA journal_mode = OFF")
-        cursor.execute("PRAGMA synchronous = OFF")
-        cursor.execute("CREATE INDEX IF NOT EXISTS record_on_normalized_smiles ON record(normalized_smiles)")
-        # Speeds delta pair-scope queries and key-scoped fragment filtering.
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS fragmentation_on_constant_key_record
-            ON fragmentation(constant_smiles, num_cuts, attachment_order, record_id)
-            """
-        )
-        conn.commit()
-
-
-def _append_fragdb_into_cache(cache_fragdb: str, delta_fragdb: str) -> bool:
+def _run_mmpdb_fragdb_constants(
+    fragdb_file: str,
+    output_file: str,
+) -> bool:
     logger = logging.getLogger(__name__)
-    if not os.path.exists(cache_fragdb):
+    cmd = [
+        sys.executable,
+        "-m",
+        "mmpdblib",
+        "fragdb_constants",
+        fragdb_file,
+        "-o",
+        output_file,
+    ]
+    logger.info("Running fragdb_constants: %s", " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        logger.error("fragdb_constants failed: %s", result.stderr)
+        if result.stdout:
+            logger.error("fragdb_constants stdout: %s", result.stdout[-1000:])
+        return False
+    return True
+
+
+def _load_constant_counts_from_constants_file(constants_file: str) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    if not constants_file or not os.path.exists(constants_file):
+        return counts
+    with open(constants_file, "r", encoding="utf-8") as handle:
+        for line_no, raw_line in enumerate(handle, start=1):
+            line = raw_line.rstrip("\n")
+            if not line:
+                continue
+            if line_no == 1 and line.lower().startswith("constant\t"):
+                continue
+            parts = line.split("\t")
+            constant = str(parts[0] or "").strip()
+            if not constant:
+                continue
+            raw_count = str(parts[1] if len(parts) > 1 else "1").strip()
+            try:
+                parsed_count = int(raw_count)
+            except Exception:
+                parsed_count = 1
+            if parsed_count < 1:
+                parsed_count = 1
+            previous = int(counts.get(constant) or 0)
+            if parsed_count > previous:
+                counts[constant] = parsed_count
+    return counts
+
+
+def _load_constant_smiles_from_constants_file(constants_file: str) -> List[str]:
+    counts = _load_constant_counts_from_constants_file(constants_file)
+    return sorted(counts.keys())
+
+
+def _write_constants_file(
+    constants_file: str,
+    constants: Sequence[str],
+    *,
+    counts: Optional[Dict[str, int]] = None,
+) -> int:
+    values = sorted({str(item or "").strip() for item in constants if str(item or "").strip()})
+    os.makedirs(os.path.dirname(constants_file) or ".", exist_ok=True)
+    count_map = counts or {}
+    with open(constants_file, "w", encoding="utf-8") as handle:
+        handle.write("constant\tN\n")
+        for token in values:
+            token_count = int(count_map.get(token) or 1)
+            if token_count < 1:
+                token_count = 1
+            handle.write(f"{token}\t{token_count}\n")
+    return len(values)
+
+
+def _run_mmpdb_fragdb_partition(
+    *,
+    cache_fragdb: str,
+    delta_fragdb: str,
+    constants_file: str,
+    output_fragdb: str,
+) -> bool:
+    logger = logging.getLogger(__name__)
+    os.makedirs(os.path.dirname(output_fragdb) or ".", exist_ok=True)
+    partition_template = f"{output_fragdb}.partition.{{i:04}}.fragdb"
+    cmd = [
+        sys.executable,
+        "-m",
+        "mmpdblib",
+        "fragdb_partition",
+        cache_fragdb,
+        delta_fragdb,
+        "-c",
+        constants_file,
+        "-n",
+        "1",
+        "-t",
+        partition_template,
+    ]
+    logger.info("Running fragdb_partition: %s", " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        logger.error("fragdb_partition failed: %s", result.stderr)
+        if result.stdout:
+            logger.error("fragdb_partition stdout: %s", result.stdout[-1000:])
+        return False
+
+    partition_files = sorted(glob.glob(f"{output_fragdb}.partition.*.fragdb"))
+    if not partition_files:
+        logger.error(
+            "fragdb_partition produced no output files for constants file: %s",
+            constants_file,
+        )
+        return False
+    first_partition = partition_files[0]
+    try:
+        if os.path.exists(output_fragdb):
+            os.remove(output_fragdb)
+        os.replace(first_partition, output_fragdb)
+    finally:
+        for extra_file in partition_files[1:]:
+            try:
+                os.remove(extra_file)
+            except Exception:
+                pass
+    return True
+
+
+def _append_delta_fragdb_into_cache(
+    *,
+    cache_fragdb: str,
+    delta_fragdb: str,
+) -> bool:
+    logger = logging.getLogger(__name__)
+    if not cache_fragdb or not os.path.exists(cache_fragdb):
+        return False
+    if not delta_fragdb or not os.path.exists(delta_fragdb):
+        return False
+    merged_file = f"{cache_fragdb}.merge_{datetime.utcnow().strftime('%Y%m%d_%H%M%S%f')}.fragdb"
+    cmd = [
+        sys.executable,
+        "-m",
+        "mmpdblib",
+        "fragdb_merge",
+        cache_fragdb,
+        delta_fragdb,
+        "-o",
+        merged_file,
+    ]
+    logger.info("Updating fragment cache by fragdb_merge: %s", " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        logger.warning("fragdb_merge cache update failed: %s", result.stderr)
+        if result.stdout:
+            logger.warning("fragdb_merge cache update stdout: %s", result.stdout[-1000:])
         try:
-            shutil.copy2(delta_fragdb, cache_fragdb)
-            _ensure_fragdb_normalized_smiles_index(cache_fragdb)
-            return True
-        except Exception as exc:
-            logger.error("Failed to initialize fragment cache %s from %s: %s", cache_fragdb, delta_fragdb, exc)
-            return False
-    if not os.path.exists(delta_fragdb):
-        logger.error("Delta fragdb file does not exist: %s", delta_fragdb)
+            if os.path.exists(merged_file):
+                os.remove(merged_file)
+        except Exception:
+            pass
         return False
     try:
-        with sqlite3.connect(cache_fragdb, timeout=30) as dst_conn, sqlite3.connect(delta_fragdb, timeout=30) as src_conn:
-            dst_cur = dst_conn.cursor()
-            src_cur = src_conn.cursor()
-            dst_cur.execute("PRAGMA journal_mode = OFF")
-            dst_cur.execute("PRAGMA synchronous = OFF")
-            dst_cur.execute("PRAGMA temp_store = MEMORY")
-            dst_cur.execute("PRAGMA busy_timeout = 20000")
-            dst_cur.execute("CREATE INDEX IF NOT EXISTS record_on_normalized_smiles ON record(normalized_smiles)")
-            dst_cur.execute(
-                """
-                CREATE INDEX IF NOT EXISTS fragmentation_on_constant_key_record
-                ON fragmentation(constant_smiles, num_cuts, attachment_order, record_id)
-                """
-            )
-
-            src_cur.execute(
-                """
-                SELECT id, title, input_smiles, num_normalized_heavies, normalized_smiles
-                FROM record
-                """
-            )
-            source_rows = src_cur.fetchall()
-            if not source_rows:
-                dst_conn.commit()
-                return True
-
-            src_id_to_smiles: Dict[int, str] = {}
-            src_unique_by_smiles: Dict[str, Tuple[str, str, int]] = {}
-            for row in source_rows:
-                src_id = int(row[0])
-                title = str(row[1] or "").strip()
-                input_smiles = str(row[2] or "").strip()
-                num_heavies = int(row[3] or 0)
-                normalized_smiles = str(row[4] or "").strip()
-                if not normalized_smiles:
-                    continue
-                src_id_to_smiles[src_id] = normalized_smiles
-                if normalized_smiles not in src_unique_by_smiles:
-                    src_unique_by_smiles[normalized_smiles] = (title, input_smiles, num_heavies)
-            if not src_unique_by_smiles:
-                dst_conn.commit()
-                return True
-
-            dst_cur.execute("DROP TABLE IF EXISTS tmp_inc_src_smiles")
-            dst_cur.execute("CREATE TEMP TABLE tmp_inc_src_smiles (normalized_smiles TEXT PRIMARY KEY)")
-            dst_cur.executemany(
-                "INSERT OR IGNORE INTO tmp_inc_src_smiles (normalized_smiles) VALUES (?)",
-                [(value,) for value in src_unique_by_smiles.keys()],
-            )
-            dst_cur.execute(
-                """
-                SELECT normalized_smiles, id
-                FROM record
-                WHERE normalized_smiles IN (SELECT normalized_smiles FROM tmp_inc_src_smiles)
-                """
-            )
-            existing_id_by_smiles = {str(row[0] or "").strip(): int(row[1]) for row in dst_cur.fetchall() if str(row[0] or "").strip()}
-
-            new_smiles = [value for value in src_unique_by_smiles.keys() if value not in existing_id_by_smiles]
-            new_id_by_smiles: Dict[str, int] = {}
-            if new_smiles:
-                dst_cur.execute("SELECT COALESCE(MAX(id), 0) FROM record")
-                next_record_id = int(dst_cur.fetchone()[0] or 0)
-                record_payload: List[Tuple[int, str, str, str, int]] = []
-                for token in sorted(new_smiles):
-                    next_record_id += 1
-                    title, input_smiles, num_heavies = src_unique_by_smiles[token]
-                    new_id_by_smiles[token] = next_record_id
-                    record_payload.append(
-                        (
-                            next_record_id,
-                            title,
-                            input_smiles,
-                            token,
-                            int(num_heavies),
-                        )
-                    )
-                dst_cur.executemany(
-                    """
-                    INSERT INTO record (id, title, input_smiles, normalized_smiles, num_normalized_heavies)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    record_payload,
-                )
-
-            mapped_id_by_smiles = dict(existing_id_by_smiles)
-            mapped_id_by_smiles.update(new_id_by_smiles)
-            new_src_record_ids = {
-                src_id
-                for src_id, smiles in src_id_to_smiles.items()
-                if smiles in new_id_by_smiles
-            }
-            if not new_src_record_ids:
-                dst_conn.commit()
-                return True
-
-            src_cur.execute(
-                """
-                SELECT
-                    record_id,
-                    num_cuts,
-                    enumeration_label,
-                    variable_num_heavies,
-                    variable_symmetry_class,
-                    variable_smiles,
-                    attachment_order,
-                    constant_num_heavies,
-                    constant_symmetry_class,
-                    constant_smiles,
-                    constant_with_H_smiles
-                FROM fragmentation
-                ORDER BY id
-                """
-            )
-            frag_rows = src_cur.fetchall()
-            if frag_rows:
-                dst_cur.execute("SELECT COALESCE(MAX(id), 0) FROM fragmentation")
-                next_frag_id = int(dst_cur.fetchone()[0] or 0)
-                frag_payload: List[Tuple[int, int, int, str, int, str, str, str, int, str, str, str]] = []
-                for row in frag_rows:
-                    src_record_id = int(row[0] or 0)
-                    if src_record_id not in new_src_record_ids:
-                        continue
-                    mapped_smiles = src_id_to_smiles.get(src_record_id, "")
-                    dst_record_id = int(mapped_id_by_smiles.get(mapped_smiles, 0))
-                    if dst_record_id <= 0:
-                        continue
-                    next_frag_id += 1
-                    frag_payload.append(
-                        (
-                            next_frag_id,
-                            dst_record_id,
-                            int(row[1] or 0),
-                            str(row[2] or ""),
-                            int(row[3] or 0),
-                            str(row[4] or ""),
-                            str(row[5] or ""),
-                            str(row[6] or ""),
-                            int(row[7] or 0),
-                            str(row[8] or ""),
-                            str(row[9] or ""),
-                            str(row[10] or ""),
-                        )
-                    )
-                if frag_payload:
-                    dst_cur.executemany(
-                        """
-                        INSERT INTO fragmentation (
-                            id,
-                            record_id,
-                            num_cuts,
-                            enumeration_label,
-                            variable_num_heavies,
-                            variable_symmetry_class,
-                            variable_smiles,
-                            attachment_order,
-                            constant_num_heavies,
-                            constant_symmetry_class,
-                            constant_smiles,
-                            constant_with_H_smiles
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        frag_payload,
-                    )
-            dst_conn.commit()
-        return True
+        os.replace(merged_file, cache_fragdb)
     except Exception as exc:
-        logger.error("Failed appending delta fragdb %s into cache %s: %s", delta_fragdb, cache_fragdb, exc)
+        logger.warning("Replacing cache fragdb failed: %s", exc)
+        try:
+            if os.path.exists(merged_file):
+                os.remove(merged_file)
+        except Exception:
+            pass
         return False
+    return True
 
 
-def _merge_fragdb_files(base_fragdb: str, delta_fragdb: str, merged_fragdb: str) -> bool:
-    if not os.path.exists(base_fragdb):
+def _fragment_cache_meta_file(cache_fragdb: str) -> str:
+    return f"{cache_fragdb}.meta.json"
+
+
+def _read_fragment_cache_meta(cache_fragdb: str) -> Optional[Dict[str, int]]:
+    meta_file = _fragment_cache_meta_file(cache_fragdb)
+    if not meta_file or not os.path.exists(meta_file):
+        return None
+    try:
+        with open(meta_file, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    output: Dict[str, int] = {}
+    for key in (
+        "meta_version",
+        "compound_count",
+        "compound_max_id",
+        "batch_count",
+        "batch_seq_max",
+        "batch_seq_sum",
+    ):
         try:
-            if os.path.abspath(delta_fragdb) == os.path.abspath(merged_fragdb):
-                return _append_fragdb_into_cache(merged_fragdb, delta_fragdb)
-            shutil.copy2(delta_fragdb, merged_fragdb)
-            _ensure_fragdb_normalized_smiles_index(merged_fragdb)
-            return True
-        except Exception as exc:
-            logging.getLogger(__name__).error(
-                "Failed initializing fragment cache %s from %s: %s",
-                merged_fragdb,
-                delta_fragdb,
-                exc,
-            )
-            return False
-    if os.path.abspath(base_fragdb) != os.path.abspath(merged_fragdb):
-        try:
-            shutil.copy2(base_fragdb, merged_fragdb)
-        except Exception as exc:
-            logging.getLogger(__name__).error(
-                "Failed copying cache %s to %s for merge: %s",
-                base_fragdb,
-                merged_fragdb,
-                exc,
-            )
-            return False
-        return _append_fragdb_into_cache(merged_fragdb, delta_fragdb)
-    return _append_fragdb_into_cache(base_fragdb, delta_fragdb)
-
-
-def _extract_constants_from_fragdb(fragdb_file: str) -> List[str]:
-    if not os.path.exists(fragdb_file):
-        return []
-    with sqlite3.connect(fragdb_file) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT DISTINCT constant_smiles
-            FROM fragmentation
-            WHERE constant_smiles IS NOT NULL
-              AND constant_smiles <> ''
-            ORDER BY constant_smiles
-            """
-        )
-        rows = cursor.fetchall()
-    return [str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()]
-
-
-def _extract_fragment_keys_from_fragdb(
-    fragdb_file: str,
-) -> List[Tuple[str, int, str]]:
-    if not os.path.exists(fragdb_file):
-        return []
-    with sqlite3.connect(fragdb_file) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT DISTINCT
-                constant_smiles,
-                COALESCE(num_cuts, 0) AS num_cuts,
-                COALESCE(attachment_order, '') AS attachment_order
-            FROM fragmentation
-            WHERE constant_smiles IS NOT NULL
-              AND constant_smiles <> ''
-            ORDER BY constant_smiles, num_cuts, attachment_order
-            """
-        )
-        rows = cursor.fetchall()
-    output: List[Tuple[str, int, str]] = []
-    for row in rows:
-        constant_smiles = str(row[0] or "").strip()
-        if not constant_smiles:
-            continue
-        output.append((constant_smiles, int(row[1] or 0), str(row[2] or "")))
+            output[key] = int(payload.get(key, 0) or 0)
+        except Exception:
+            output[key] = 0
     return output
 
 
-def _collect_candidate_smiles_from_fragdb_constants(
-    fragdb_file: str,
-    constants: Sequence[str],
-) -> List[str]:
-    constants_list = sorted({str(item or "").strip() for item in constants if str(item or "").strip()})
-    if not constants_list or not os.path.exists(fragdb_file):
-        return []
-    with sqlite3.connect(fragdb_file) as conn:
-        cursor = conn.cursor()
-        cursor.execute("CREATE TEMP TABLE tmp_inc_constants (constant_smiles TEXT PRIMARY KEY)")
-        cursor.executemany(
-            "INSERT OR IGNORE INTO tmp_inc_constants (constant_smiles) VALUES (?)",
-            [(value,) for value in constants_list],
-        )
-        cursor.execute(
-            """
-            SELECT DISTINCT r.normalized_smiles
-            FROM fragmentation f
-            INNER JOIN tmp_inc_constants c
-                    ON c.constant_smiles = f.constant_smiles
-            INNER JOIN record r
-                    ON r.id = f.record_id
-            WHERE r.normalized_smiles IS NOT NULL
-              AND r.normalized_smiles <> ''
-            ORDER BY r.normalized_smiles
-            """
-        )
-        rows = cursor.fetchall()
-    return [str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()]
-
-
-def _collect_fragdb_record_ids_for_smiles(
-    fragdb_file: str,
-    smiles_values: Sequence[str],
-) -> List[str]:
-    normalized_smiles = sorted({str(item or "").strip() for item in smiles_values if str(item or "").strip()})
-    if not normalized_smiles or not os.path.exists(fragdb_file):
-        return []
-    with sqlite3.connect(fragdb_file) as conn:
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA temp_store = MEMORY")
-        cursor.execute("CREATE TEMP TABLE tmp_inc_smiles (normalized_smiles TEXT PRIMARY KEY)")
-        cursor.executemany(
-            "INSERT OR IGNORE INTO tmp_inc_smiles (normalized_smiles) VALUES (?)",
-            [(value,) for value in normalized_smiles],
-        )
-        cursor.execute(
-            """
-            SELECT DISTINCT r.title
-            FROM record r
-            INNER JOIN tmp_inc_smiles s
-                    ON s.normalized_smiles = r.normalized_smiles
-            WHERE r.title IS NOT NULL
-              AND r.title <> ''
-            ORDER BY r.title
-            """
-        )
-        rows = cursor.fetchall()
-    return [str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()]
-
-
-def _estimate_constant_fragment_weights(
-    fragdb_file: str,
-    constants: Sequence[str],
+def _write_fragment_cache_meta(
+    cache_fragdb: str,
     *,
-    normalized_smiles_filter: Optional[Sequence[str]] = None,
+    signature: Dict[str, int],
+) -> bool:
+    logger = logging.getLogger(__name__)
+    meta_file = _fragment_cache_meta_file(cache_fragdb)
+    tmp_file = f"{meta_file}.tmp_{datetime.utcnow().strftime('%Y%m%d_%H%M%S%f')}"
+    payload = {
+        "meta_version": 1,
+        "compound_count": int(signature.get("compound_count", 0) or 0),
+        "compound_max_id": int(signature.get("compound_max_id", 0) or 0),
+        "batch_count": int(signature.get("batch_count", 0) or 0),
+        "batch_seq_max": int(signature.get("batch_seq_max", 0) or 0),
+        "batch_seq_sum": int(signature.get("batch_seq_sum", 0) or 0),
+    }
+    try:
+        os.makedirs(os.path.dirname(meta_file) or ".", exist_ok=True)
+        with open(tmp_file, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+        os.replace(tmp_file, meta_file)
+        return True
+    except Exception as exc:
+        logger.warning("Failed writing fragment cache metadata %s: %s", meta_file, exc)
+        try:
+            if os.path.exists(tmp_file):
+                os.remove(tmp_file)
+        except Exception:
+            pass
+        return False
+
+
+def _remove_fragment_cache_files(cache_fragdb: str, *, reason: str = "") -> None:
+    logger = logging.getLogger(__name__)
+    targets = [cache_fragdb, _fragment_cache_meta_file(cache_fragdb)]
+    for target in targets:
+        if not target or not os.path.exists(target):
+            continue
+        try:
+            os.remove(target)
+        except Exception as exc:
+            logger.warning("Failed removing fragment cache file %s: %s", target, exc)
+    if reason:
+        logger.info("Fragment cache invalidated: %s (%s)", cache_fragdb, reason)
+
+
+def _collect_compound_cache_signature(
+    postgres_url: str,
+    *,
+    schema: str,
 ) -> Dict[str, int]:
-    constants_list = sorted({str(item or "").strip() for item in constants if str(item or "").strip()})
-    if not constants_list or not os.path.exists(fragdb_file):
-        return {}
-    smiles_list = sorted(
-        {str(item or "").strip() for item in (normalized_smiles_filter or []) if str(item or "").strip()}
+    normalized_schema = _validate_pg_schema(schema)
+    compound_count = 0
+    compound_max_id = 0
+    batch_count = 0
+    batch_seq_max = 0
+    batch_seq_sum = 0
+    with psycopg.connect(postgres_url, autocommit=False) as conn:
+        with conn.cursor() as cursor:
+            _pg_set_search_path(cursor, normalized_schema)
+            cursor.execute("SELECT COUNT(*)::BIGINT, COALESCE(MAX(id), 0)::BIGINT FROM compound")
+            row = cursor.fetchone() or (0, 0)
+            compound_count = int(row[0] or 0)
+            compound_max_id = int(row[1] or 0)
+            cursor.execute(
+                f"""
+                SELECT
+                    COUNT(*)::BIGINT,
+                    COALESCE(MAX(batch_seq), 0)::BIGINT,
+                    COALESCE(SUM(batch_seq), 0)::BIGINT
+                FROM {COMPOUND_BATCH_HEADER_TABLE}
+                """
+            )
+            row = cursor.fetchone() or (0, 0, 0)
+            batch_count = int(row[0] or 0)
+            batch_seq_max = int(row[1] or 0)
+            batch_seq_sum = int(row[2] or 0)
+            conn.commit()
+    return {
+        "meta_version": 1,
+        "compound_count": compound_count,
+        "compound_max_id": compound_max_id,
+        "batch_count": batch_count,
+        "batch_seq_max": batch_seq_max,
+        "batch_seq_sum": batch_seq_sum,
+    }
+
+
+def _is_fragment_cache_meta_match(
+    *,
+    cache_fragdb: str,
+    signature: Dict[str, int],
+) -> bool:
+    meta = _read_fragment_cache_meta(cache_fragdb)
+    if not meta:
+        return False
+    keys = (
+        "meta_version",
+        "compound_count",
+        "compound_max_id",
+        "batch_count",
+        "batch_seq_max",
+        "batch_seq_sum",
     )
-    weights: Dict[str, int] = {}
-    with sqlite3.connect(fragdb_file) as conn:
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA temp_store = MEMORY")
-        cursor.execute("CREATE TEMP TABLE tmp_inc_constants (constant_smiles TEXT PRIMARY KEY)")
-        cursor.executemany(
-            "INSERT OR IGNORE INTO tmp_inc_constants (constant_smiles) VALUES (?)",
-            [(value,) for value in constants_list],
+    for key in keys:
+        if int(meta.get(key, 0) or 0) != int(signature.get(key, 0) or 0):
+            return False
+    return True
+
+
+def _sync_fragment_cache_meta_from_db(
+    postgres_url: str,
+    *,
+    schema: str,
+    cache_fragdb: str,
+) -> bool:
+    logger = logging.getLogger(__name__)
+    if not cache_fragdb or not os.path.exists(cache_fragdb):
+        return False
+    try:
+        signature = _collect_compound_cache_signature(postgres_url, schema=schema)
+    except Exception as exc:
+        logger.warning(
+            "Failed collecting fragment cache signature for schema '%s': %s",
+            schema,
+            exc,
         )
-        if smiles_list:
-            cursor.execute("CREATE TEMP TABLE tmp_inc_smiles (normalized_smiles TEXT PRIMARY KEY)")
+        return False
+    return _write_fragment_cache_meta(cache_fragdb, signature=signature)
+
+
+def _compute_clean_num_heavies_by_smiles(smiles_values: Sequence[str]) -> Dict[str, int]:
+    unique_smiles = sorted({str(item or "").strip() for item in smiles_values if str(item or "").strip()})
+    if not unique_smiles:
+        return {}
+    if not HAS_RDKIT_MMPDB or Chem is None:
+        return {}
+    output: Dict[str, int] = {}
+    for token in unique_smiles:
+        try:
+            mol = Chem.MolFromSmiles(token)
+        except Exception:
+            mol = None
+        if mol is None:
+            continue
+        output[token] = int(mol.GetNumHeavyAtoms())
+    return output
+
+
+def _load_constant_smiles_from_schema(
+    postgres_url: str,
+    *,
+    schema: str,
+) -> List[str]:
+    normalized_schema = _validate_pg_schema(schema)
+    with psycopg.connect(postgres_url, autocommit=False) as conn:
+        with conn.cursor() as cursor:
+            _pg_set_search_path(cursor, normalized_schema)
+            cursor.execute(
+                """
+                SELECT smiles
+                FROM constant_smiles
+                WHERE smiles IS NOT NULL
+                  AND smiles <> ''
+                ORDER BY smiles
+                """
+            )
+            rows = [str(row[0] or "").strip() for row in cursor.fetchall() if str(row[0] or "").strip()]
+            conn.commit()
+    return rows
+
+
+def _load_partner_smiles_for_constants(
+    postgres_url: str,
+    *,
+    schema: str,
+    constants: Sequence[str],
+    exclude_smiles: Optional[Sequence[str]] = None,
+) -> List[str]:
+    constants_list = sorted({str(item or "").strip() for item in constants if str(item or "").strip()})
+    if not constants_list:
+        return []
+    exclude_list = sorted({str(item or "").strip() for item in (exclude_smiles or []) if str(item or "").strip()})
+    normalized_schema = _validate_pg_schema(schema)
+    with psycopg.connect(postgres_url, autocommit=False) as conn:
+        with conn.cursor() as cursor:
+            _pg_set_search_path(cursor, normalized_schema)
+            cursor.execute("DROP TABLE IF EXISTS tmp_inc_constants")
+            cursor.execute(
+                """
+                CREATE TEMP TABLE tmp_inc_constants (
+                    smiles TEXT PRIMARY KEY
+                ) ON COMMIT DROP
+                """
+            )
             cursor.executemany(
-                "INSERT OR IGNORE INTO tmp_inc_smiles (normalized_smiles) VALUES (?)",
-                [(value,) for value in smiles_list],
+                "INSERT INTO tmp_inc_constants (smiles) VALUES (%s) ON CONFLICT DO NOTHING",
+                [(value,) for value in constants_list],
             )
+            cursor.execute("DROP TABLE IF EXISTS tmp_inc_exclude_smiles")
             cursor.execute(
                 """
-                SELECT f.constant_smiles, COUNT(*) AS n
-                FROM fragmentation f
-                INNER JOIN tmp_inc_constants c
-                        ON c.constant_smiles = f.constant_smiles
-                INNER JOIN record r
-                        ON r.id = f.record_id
-                INNER JOIN tmp_inc_smiles s
-                        ON s.normalized_smiles = r.normalized_smiles
-                GROUP BY f.constant_smiles
+                CREATE TEMP TABLE tmp_inc_exclude_smiles (
+                    clean_smiles TEXT PRIMARY KEY
+                ) ON COMMIT DROP
                 """
             )
-        else:
+            if exclude_list:
+                cursor.executemany(
+                    "INSERT INTO tmp_inc_exclude_smiles (clean_smiles) VALUES (%s) ON CONFLICT DO NOTHING",
+                    [(value,) for value in exclude_list],
+                )
             cursor.execute(
                 """
-                SELECT f.constant_smiles, COUNT(*) AS n
-                FROM fragmentation f
-                INNER JOIN tmp_inc_constants c
-                        ON c.constant_smiles = f.constant_smiles
-                GROUP BY f.constant_smiles
+                WITH touched_pairs AS (
+                    SELECT p.compound1_id, p.compound2_id
+                    FROM pair p
+                    INNER JOIN constant_smiles cs
+                            ON cs.id = p.constant_id
+                    INNER JOIN tmp_inc_constants tc
+                            ON tc.smiles = cs.smiles
+                ),
+                touched_compounds AS (
+                    SELECT compound1_id AS compound_id FROM touched_pairs
+                    UNION
+                    SELECT compound2_id AS compound_id FROM touched_pairs
+                )
+                SELECT DISTINCT c.clean_smiles
+                FROM touched_compounds t
+                INNER JOIN compound c
+                        ON c.id = t.compound_id
+                LEFT JOIN tmp_inc_exclude_smiles e
+                       ON e.clean_smiles = c.clean_smiles
+                WHERE c.clean_smiles IS NOT NULL
+                  AND c.clean_smiles <> ''
+                  AND e.clean_smiles IS NULL
+                ORDER BY c.clean_smiles
                 """
             )
-        for row in cursor.fetchall():
-            constant_smiles = str(row[0] or "").strip()
-            if not constant_smiles:
-                continue
-            weights[constant_smiles] = max(1, int(row[1] or 0))
-    return weights
+            rows = [str(row[0] or "").strip() for row in cursor.fetchall() if str(row[0] or "").strip()]
+            conn.commit()
+    return rows
 
 
 def _split_constants_into_shards(
@@ -3167,410 +3102,20 @@ def _split_constants_into_shards(
         return [unique_constants]
     shard_total = min(normalized_shards, len(unique_constants))
     weight_map = weights or {}
-    if not weight_map:
-        shard_size = max(1, (len(unique_constants) + shard_total - 1) // shard_total)
-        shards: List[List[str]] = []
-        for offset in range(0, len(unique_constants), shard_size):
-            chunk = unique_constants[offset: offset + shard_size]
-            if chunk:
-                shards.append(chunk)
-        return shards
-
-    shards = [[] for _ in range(shard_total)]
-    shard_weights = [0 for _ in range(shard_total)]
-    ordered_constants = sorted(
+    weighted_constants = sorted(
         unique_constants,
-        key=lambda token: (-max(1, int(weight_map.get(token, 1))), token),
+        key=lambda token: (-int(weight_map.get(token) or 1), token),
     )
-    for token in ordered_constants:
-        target_idx = min(
-            range(shard_total),
-            key=lambda idx: (shard_weights[idx], len(shards[idx]), idx),
-        )
-        token_weight = max(1, int(weight_map.get(token, 1)))
-        shards[target_idx].append(token)
-        shard_weights[target_idx] += token_weight
-    return [chunk for chunk in shards if chunk]
-
-
-def _filter_fragdb_by_constants(
-    source_fragdb: str,
-    output_fragdb: str,
-    constants: Sequence[str],
-    *,
-    normalized_smiles_filter: Optional[Sequence[str]] = None,
-    fragment_keys: Optional[Sequence[Tuple[str, int, str]]] = None,
-    delta_smiles_filter: Optional[Sequence[str]] = None,
-) -> Tuple[int, List[str]]:
-    constants_list = sorted({str(item or "").strip() for item in constants if str(item or "").strip()})
-    if not constants_list:
-        return 0, []
-    smiles_list = sorted(
-        {str(item or "").strip() for item in (normalized_smiles_filter or []) if str(item or "").strip()}
-    )
-    delta_smiles_list = sorted(
-        {str(item or "").strip() for item in (delta_smiles_filter or []) if str(item or "").strip()}
-    )
-    keys_payload = [
-        (
-            str(item[0] or "").strip(),
-            int(item[1] or 0),
-            str(item[2] or ""),
-        )
-        for item in (fragment_keys or [])
-        if str((item[0] if len(item) > 0 else "") or "").strip()
-    ]
-    if fragment_keys is not None and not keys_payload:
-        return 0, []
-    os.makedirs(os.path.dirname(output_fragdb) or ".", exist_ok=True)
-    if os.path.abspath(source_fragdb) == os.path.abspath(output_fragdb):
-        raise ValueError("source_fragdb and output_fragdb must be different files")
-    if os.path.exists(output_fragdb):
-        os.remove(output_fragdb)
-
-    delta_record_ids: List[str] = []
-    with sqlite3.connect(output_fragdb) as conn:
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA journal_mode = OFF")
-        cursor.execute("PRAGMA synchronous = OFF")
-        cursor.execute("PRAGMA temp_store = MEMORY")
-        cursor.execute("ATTACH DATABASE ? AS src", [source_fragdb])
-
-        for table_name in ("options", "record", "error_record", "fragmentation"):
-            cursor.execute(
-                "SELECT sql FROM src.sqlite_master WHERE type='table' AND name = ?",
-                [table_name],
-            )
-            row = cursor.fetchone()
-            if row and str(row[0] or "").strip():
-                cursor.execute(str(row[0]))
-
-        cursor.execute(
-            """
-            SELECT 1
-            FROM src.sqlite_master
-            WHERE type='table' AND name='options'
-            LIMIT 1
-            """
-        )
-        if cursor.fetchone() is not None:
-            cursor.execute("INSERT INTO options SELECT * FROM src.options")
-
-        cursor.execute("CREATE TEMP TABLE tmp_inc_constants (constant_smiles TEXT PRIMARY KEY)")
-        cursor.executemany(
-            "INSERT OR IGNORE INTO tmp_inc_constants (constant_smiles) VALUES (?)",
-            [(value,) for value in constants_list],
-        )
-        if keys_payload:
-            cursor.execute(
-                """
-                CREATE TEMP TABLE tmp_inc_fragment_keys (
-                    constant_smiles TEXT NOT NULL,
-                    num_cuts INTEGER NOT NULL,
-                    attachment_order TEXT NOT NULL,
-                    PRIMARY KEY (constant_smiles, num_cuts, attachment_order)
-                )
-                """
-            )
-            cursor.executemany(
-                """
-                INSERT OR IGNORE INTO tmp_inc_fragment_keys (constant_smiles, num_cuts, attachment_order)
-                VALUES (?, ?, ?)
-                """,
-                keys_payload,
-            )
-        if smiles_list:
-            cursor.execute("CREATE TEMP TABLE tmp_inc_smiles (normalized_smiles TEXT PRIMARY KEY)")
-            cursor.executemany(
-                "INSERT OR IGNORE INTO tmp_inc_smiles (normalized_smiles) VALUES (?)",
-                [(value,) for value in smiles_list],
-            )
-        if delta_smiles_list:
-            cursor.execute("CREATE TEMP TABLE tmp_inc_delta_smiles (normalized_smiles TEXT PRIMARY KEY)")
-            cursor.executemany(
-                "INSERT OR IGNORE INTO tmp_inc_delta_smiles (normalized_smiles) VALUES (?)",
-                [(value,) for value in delta_smiles_list],
-            )
-
-        cursor.execute("DROP TABLE IF EXISTS tmp_inc_record_ids")
-        if smiles_list:
-            if keys_payload:
-                cursor.execute(
-                    """
-                    CREATE TEMP TABLE tmp_inc_record_ids AS
-                    SELECT DISTINCT f.record_id AS record_id
-                    FROM src.fragmentation f
-                    INNER JOIN tmp_inc_constants c
-                            ON c.constant_smiles = f.constant_smiles
-                    INNER JOIN tmp_inc_fragment_keys k
-                            ON k.constant_smiles = f.constant_smiles
-                           AND k.num_cuts = f.num_cuts
-                           AND k.attachment_order = f.attachment_order
-                    INNER JOIN src.record r
-                            ON r.id = f.record_id
-                    INNER JOIN tmp_inc_smiles s
-                            ON s.normalized_smiles = r.normalized_smiles
-                    """
-                )
-            else:
-                cursor.execute(
-                    """
-                    CREATE TEMP TABLE tmp_inc_record_ids AS
-                    SELECT DISTINCT f.record_id AS record_id
-                    FROM src.fragmentation f
-                    INNER JOIN tmp_inc_constants c
-                            ON c.constant_smiles = f.constant_smiles
-                    INNER JOIN src.record r
-                            ON r.id = f.record_id
-                    INNER JOIN tmp_inc_smiles s
-                            ON s.normalized_smiles = r.normalized_smiles
-                    """
-                )
-        else:
-            if keys_payload:
-                cursor.execute(
-                    """
-                    CREATE TEMP TABLE tmp_inc_record_ids AS
-                    SELECT DISTINCT f.record_id AS record_id
-                    FROM src.fragmentation f
-                    INNER JOIN tmp_inc_constants c
-                            ON c.constant_smiles = f.constant_smiles
-                    INNER JOIN tmp_inc_fragment_keys k
-                            ON k.constant_smiles = f.constant_smiles
-                           AND k.num_cuts = f.num_cuts
-                           AND k.attachment_order = f.attachment_order
-                    """
-                )
-            else:
-                cursor.execute(
-                    """
-                    CREATE TEMP TABLE tmp_inc_record_ids AS
-                    SELECT DISTINCT f.record_id AS record_id
-                    FROM src.fragmentation f
-                    INNER JOIN tmp_inc_constants c
-                            ON c.constant_smiles = f.constant_smiles
-                    """
-                )
-        if delta_smiles_list:
-            cursor.execute(
-                """
-                SELECT DISTINCT r.title
-                FROM src.record r
-                INNER JOIN tmp_inc_record_ids t
-                        ON t.record_id = r.id
-                INNER JOIN tmp_inc_delta_smiles d
-                        ON d.normalized_smiles = r.normalized_smiles
-                WHERE r.title IS NOT NULL
-                  AND r.title <> ''
-                """
-            )
-            delta_record_ids = [
-                str(row[0] or "").strip()
-                for row in cursor.fetchall()
-                if str(row[0] or "").strip()
-            ]
-
-        cursor.execute(
-            """
-            INSERT INTO record
-            SELECT r.*
-            FROM src.record r
-            INNER JOIN tmp_inc_record_ids t
-                    ON t.record_id = r.id
-            """
-        )
-        cursor.execute(
-            """
-            SELECT 1
-            FROM src.sqlite_master
-            WHERE type='table' AND name='error_record'
-            LIMIT 1
-            """
-        )
-        if cursor.fetchone() is not None:
-            cursor.execute(
-                """
-                INSERT INTO error_record
-                SELECT e.*
-                FROM src.error_record e
-                INNER JOIN record r
-                        ON r.title = e.title
-                """
-            )
-        if keys_payload:
-            cursor.execute(
-                """
-                INSERT INTO fragmentation
-                SELECT f.*
-                FROM src.fragmentation f
-                INNER JOIN tmp_inc_record_ids t
-                        ON t.record_id = f.record_id
-                INNER JOIN tmp_inc_constants c
-                        ON c.constant_smiles = f.constant_smiles
-                INNER JOIN tmp_inc_fragment_keys k
-                        ON k.constant_smiles = f.constant_smiles
-                       AND k.num_cuts = f.num_cuts
-                       AND k.attachment_order = f.attachment_order
-                """
-            )
-        else:
-            cursor.execute(
-                """
-                INSERT INTO fragmentation
-                SELECT f.*
-                FROM src.fragmentation f
-                INNER JOIN tmp_inc_record_ids t
-                        ON t.record_id = f.record_id
-                INNER JOIN tmp_inc_constants c
-                        ON c.constant_smiles = f.constant_smiles
-                """
-            )
-        cursor.execute("SELECT COUNT(*) FROM fragmentation")
-        remaining_fragmentations = int(cursor.fetchone()[0])
-
-        try:
-            cursor.execute("DETACH DATABASE src")
-        except sqlite3.OperationalError:
-            # SQLite can keep transient locks for attached DB metadata; closing
-            # the connection releases it safely, so don't fail the incremental path.
-            pass
-        conn.commit()
-    return remaining_fragmentations, sorted(set(delta_record_ids))
-
-
-def _collect_delta_pair_matches(
-    cache_fragdb_file: str,
-    *,
-    delta_smiles: Sequence[str],
-    affected_constants: Sequence[str],
-    active_smiles: Optional[Sequence[str]] = None,
-) -> Tuple[List[str], List[Tuple[str, int, str]]]:
-    delta_values = sorted({str(item or "").strip() for item in delta_smiles if str(item or "").strip()})
-    constants_values = sorted({str(item or "").strip() for item in affected_constants if str(item or "").strip()})
-    active_values = sorted({str(item or "").strip() for item in (active_smiles or []) if str(item or "").strip()})
-    if not delta_values or not constants_values or not os.path.exists(cache_fragdb_file):
-        return [], []
-    with sqlite3.connect(cache_fragdb_file) as conn:
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA temp_store = MEMORY")
-        cursor.execute("CREATE TEMP TABLE tmp_inc_delta_smiles (smiles TEXT PRIMARY KEY)")
-        cursor.execute("CREATE TEMP TABLE tmp_inc_constants (constant_smiles TEXT PRIMARY KEY)")
-        cursor.executemany(
-            "INSERT OR IGNORE INTO tmp_inc_delta_smiles (smiles) VALUES (?)",
-            [(value,) for value in delta_values],
-        )
-        cursor.executemany(
-            "INSERT OR IGNORE INTO tmp_inc_constants (constant_smiles) VALUES (?)",
-            [(value,) for value in constants_values],
-        )
-        if active_values:
-            cursor.execute("CREATE TEMP TABLE tmp_inc_active_smiles (smiles TEXT PRIMARY KEY)")
-            cursor.executemany(
-                "INSERT OR IGNORE INTO tmp_inc_active_smiles (smiles) VALUES (?)",
-                [(value,) for value in active_values],
-            )
-            cursor.execute(
-                """
-                SELECT DISTINCT
-                    fd.constant_smiles,
-                    COALESCE(fd.num_cuts, 0) AS num_cuts,
-                    COALESCE(fd.attachment_order, '') AS attachment_order,
-                    ro.normalized_smiles
-                FROM fragmentation fd
-                INNER JOIN record rd
-                        ON rd.id = fd.record_id
-                INNER JOIN tmp_inc_delta_smiles td
-                        ON td.smiles = rd.normalized_smiles
-                INNER JOIN tmp_inc_constants c
-                        ON c.constant_smiles = fd.constant_smiles
-                INNER JOIN fragmentation fo
-                        ON fo.constant_smiles = fd.constant_smiles
-                       AND fo.num_cuts = fd.num_cuts
-                       AND fo.attachment_order = fd.attachment_order
-                INNER JOIN record ro
-                        ON ro.id = fo.record_id
-                INNER JOIN tmp_inc_active_smiles ta
-                        ON ta.smiles = ro.normalized_smiles
-                WHERE ro.normalized_smiles <> rd.normalized_smiles
-                  AND ro.normalized_smiles IS NOT NULL
-                  AND ro.normalized_smiles <> ''
-                """
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT DISTINCT
-                    fd.constant_smiles,
-                    COALESCE(fd.num_cuts, 0) AS num_cuts,
-                    COALESCE(fd.attachment_order, '') AS attachment_order,
-                    ro.normalized_smiles
-                FROM fragmentation fd
-                INNER JOIN record rd
-                        ON rd.id = fd.record_id
-                INNER JOIN tmp_inc_delta_smiles td
-                        ON td.smiles = rd.normalized_smiles
-                INNER JOIN tmp_inc_constants c
-                        ON c.constant_smiles = fd.constant_smiles
-                INNER JOIN fragmentation fo
-                        ON fo.constant_smiles = fd.constant_smiles
-                       AND fo.num_cuts = fd.num_cuts
-                       AND fo.attachment_order = fd.attachment_order
-                INNER JOIN record ro
-                        ON ro.id = fo.record_id
-                WHERE ro.normalized_smiles <> rd.normalized_smiles
-                  AND ro.normalized_smiles IS NOT NULL
-                  AND ro.normalized_smiles <> ''
-                """
-            )
-        rows = cursor.fetchall()
-
-    partner_smiles: set[str] = set()
-    fragment_keys: set[Tuple[str, int, str]] = set()
-    for row in rows:
-        constant_smiles = str(row[0] or "").strip()
-        if not constant_smiles:
-            continue
-        num_cuts = int(row[1] or 0)
-        attachment_order = str(row[2] or "")
-        partner = str(row[3] or "").strip()
-        if not partner:
-            continue
-        partner_smiles.add(partner)
-        fragment_keys.add((constant_smiles, num_cuts, attachment_order))
-    return sorted(partner_smiles), sorted(fragment_keys)
-
-
-def _load_fragdb_num_heavies_by_smiles(
-    fragdb_file: str,
-    smiles_values: Sequence[str],
-) -> Dict[str, int]:
-    smiles_list = sorted({str(item or "").strip() for item in smiles_values if str(item or "").strip()})
-    if not smiles_list or not os.path.exists(fragdb_file):
-        return {}
-    output: Dict[str, int] = {}
-    with sqlite3.connect(fragdb_file) as conn:
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA temp_store = MEMORY")
-        cursor.execute("CREATE TEMP TABLE tmp_inc_smiles (normalized_smiles TEXT PRIMARY KEY)")
-        cursor.executemany(
-            "INSERT OR IGNORE INTO tmp_inc_smiles (normalized_smiles) VALUES (?)",
-            [(value,) for value in smiles_list],
-        )
-        cursor.execute(
-            """
-            SELECT r.normalized_smiles, MAX(COALESCE(r.num_normalized_heavies, 0)) AS clean_num_heavies
-            FROM record r
-            INNER JOIN tmp_inc_smiles s
-                    ON s.normalized_smiles = r.normalized_smiles
-            GROUP BY r.normalized_smiles
-            """
-        )
-        for row in cursor.fetchall():
-            token = str(row[0] or "").strip()
-            if not token:
-                continue
-            output[token] = max(0, int(row[1] or 0))
-    return output
+    shards: List[List[str]] = [[] for _ in range(shard_total)]
+    shard_loads: List[int] = [0 for _ in range(shard_total)]
+    for token in weighted_constants:
+        token_weight = int(weight_map.get(token) or 1)
+        if token_weight < 1:
+            token_weight = 1
+        shard_idx = min(range(shard_total), key=lambda idx: (shard_loads[idx], idx))
+        shards[shard_idx].append(token)
+        shard_loads[shard_idx] += token_weight
+    return [sorted(chunk) for chunk in shards if chunk]
 
 
 def _load_active_compounds_for_smiles(
@@ -3655,14 +3200,28 @@ def _ensure_compound_fragment_cache(
 ) -> bool:
     logger = logging.getLogger(__name__)
     if os.path.exists(cache_file):
-        _ensure_fragdb_normalized_smiles_index(cache_file)
-        return True
+        try:
+            signature = _collect_compound_cache_signature(postgres_url, schema=schema)
+        except Exception as exc:
+            logger.error(
+                "Failed collecting fragment cache signature for schema '%s': %s",
+                schema,
+                exc,
+            )
+            return False
+        if _is_fragment_cache_meta_match(
+            cache_fragdb=cache_file,
+            signature=signature,
+        ):
+            return True
+        _remove_fragment_cache_files(cache_file, reason="metadata mismatch")
     file_tag = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     merged_smiles_file, merged_count = _build_rebuild_smiles_file_from_compound_state(
         postgres_url,
         schema=schema,
         output_dir=output_dir,
         file_tag=f"cache_seed_{file_tag}",
+        include_pending_batches=False,
     )
     if merged_count <= 0:
         logger.error("Cannot seed fragment cache for schema '%s': no active compounds.", schema)
@@ -3682,7 +3241,11 @@ def _ensure_compound_fragment_cache(
             cache_file="",
         )
         if ok:
-            _ensure_fragdb_normalized_smiles_index(cache_file)
+            _sync_fragment_cache_meta_from_db(
+                postgres_url,
+                schema=schema,
+                cache_fragdb=cache_file,
+            )
         return ok
     finally:
         try:
@@ -4183,6 +3746,7 @@ def _merge_incremental_temp_schema_into_target(
     align_sequences: bool = True,
 ) -> None:
     constants = sorted({str(item or "").strip() for item in affected_constants if str(item or "").strip()})
+    candidate_values = sorted({str(item or "").strip() for item in candidate_smiles if str(item or "").strip()})
     if not constants:
         return
     if align_sequences:
@@ -4212,6 +3776,19 @@ def _merge_incremental_temp_schema_into_target(
         "INSERT INTO tmp_inc_affected_constants (smiles) VALUES (%s) ON CONFLICT DO NOTHING",
         [(value,) for value in constants],
     )
+    cursor.execute("DROP TABLE IF EXISTS tmp_inc_merge_candidate_smiles")
+    cursor.execute(
+        """
+        CREATE TEMP TABLE tmp_inc_merge_candidate_smiles (
+            clean_smiles TEXT PRIMARY KEY
+        ) ON COMMIT DROP
+        """
+    )
+    if candidate_values:
+        cursor.executemany(
+            "INSERT INTO tmp_inc_merge_candidate_smiles (clean_smiles) VALUES (%s) ON CONFLICT DO NOTHING",
+            [(value,) for value in candidate_values],
+        )
 
     if replace_existing_pairs_for_constants:
         cursor.execute("DROP TABLE IF EXISTS tmp_inc_removed_rule_env_ids")
@@ -4291,11 +3868,24 @@ def _merge_incremental_temp_schema_into_target(
         cursor.execute(
             f"""
             CREATE TEMP TABLE tmp_inc_temp_used_compound_ids AS
-            SELECT DISTINCT p.compound1_id AS id
-            FROM {ts}.pair p
-            UNION
-            SELECT DISTINCT p.compound2_id AS id
-            FROM {ts}.pair p
+            WITH used_compounds AS (
+                SELECT DISTINCT p.compound1_id AS id
+                FROM {ts}.pair p
+                UNION
+                SELECT DISTINCT p.compound2_id AS id
+                FROM {ts}.pair p
+            ),
+            dedup_by_smiles AS (
+                SELECT
+                    c.clean_smiles,
+                    MIN(c.id) AS id
+                FROM {ts}.compound c
+                INNER JOIN used_compounds u
+                        ON u.id = c.id
+                GROUP BY c.clean_smiles
+            )
+            SELECT id
+            FROM dedup_by_smiles
             """
         )
         cursor.execute("DROP TABLE IF EXISTS tmp_inc_temp_used_rule_smiles_ids")
@@ -4362,6 +3952,24 @@ def _merge_incremental_temp_schema_into_target(
                 ORDER BY c0.id
                 LIMIT 1
             ) c ON TRUE
+            """
+        )
+        cursor.execute("DROP TABLE IF EXISTS tmp_inc_candidate_compound_ids")
+        cursor.execute(
+            """
+            CREATE TEMP TABLE tmp_inc_candidate_compound_ids (
+                id INTEGER PRIMARY KEY
+            ) ON COMMIT DROP
+            """
+        )
+        cursor.execute(
+            """
+            INSERT INTO tmp_inc_candidate_compound_ids (id)
+            SELECT DISTINCT c.id
+            FROM compound c
+            INNER JOIN tmp_inc_merge_candidate_smiles t
+                    ON t.clean_smiles = c.clean_smiles
+            ON CONFLICT DO NOTHING
             """
         )
         _logger = logging.getLogger(__name__)
@@ -4610,6 +4218,8 @@ def _merge_incremental_temp_schema_into_target(
                         ON mc2.temp_id = p.compound2_id
                 INNER JOIN tmp_map_constant mcs
                         ON mcs.temp_id = p.constant_id
+                WHERE mc1.main_id IN (SELECT id FROM tmp_inc_candidate_compound_ids)
+                   OR mc2.main_id IN (SELECT id FROM tmp_inc_candidate_compound_ids)
                 """
             )
             _logger.info(
@@ -4633,12 +4243,17 @@ def _merge_incremental_temp_schema_into_target(
                         ON mc2.temp_id = p.compound2_id
                 INNER JOIN tmp_map_constant mcs
                         ON mcs.temp_id = p.constant_id
+                LEFT JOIN tmp_inc_candidate_compound_ids cc1
+                       ON cc1.id = mc1.main_id
+                LEFT JOIN tmp_inc_candidate_compound_ids cc2
+                       ON cc2.id = mc2.main_id
                 LEFT JOIN pair existing
                        ON existing.rule_environment_id = mre.main_id
                       AND existing.compound1_id = mc1.main_id
                       AND existing.compound2_id = mc2.main_id
                       AND COALESCE(existing.constant_id, -1) = COALESCE(mcs.main_id, -1)
-                WHERE existing.id IS NULL
+                WHERE (cc1.id IS NOT NULL OR cc2.id IS NOT NULL)
+                  AND existing.id IS NULL
                 """
             )
         else:
@@ -4661,6 +4276,8 @@ def _merge_incremental_temp_schema_into_target(
                         ON mc2.temp_id = p.compound2_id
                 INNER JOIN tmp_map_constant mcs
                         ON mcs.temp_id = p.constant_id
+                WHERE mc1.main_id IN (SELECT id FROM tmp_inc_candidate_compound_ids)
+                   OR mc2.main_id IN (SELECT id FROM tmp_inc_candidate_compound_ids)
                 """
             )
             _append_candidate_pairs = int(cursor.fetchone()[0] or 0)
@@ -4676,11 +4293,16 @@ def _merge_incremental_temp_schema_into_target(
                         ON mc2.temp_id = p.compound2_id
                 INNER JOIN tmp_map_constant mcs
                         ON mcs.temp_id = p.constant_id
+                LEFT JOIN tmp_inc_candidate_compound_ids cc1
+                       ON cc1.id = mc1.main_id
+                LEFT JOIN tmp_inc_candidate_compound_ids cc2
+                       ON cc2.id = mc2.main_id
                 INNER JOIN pair existing
                         ON existing.rule_environment_id = mre.main_id
                        AND existing.compound1_id = mc1.main_id
                        AND existing.compound2_id = mc2.main_id
                        AND COALESCE(existing.constant_id, -1) = COALESCE(mcs.main_id, -1)
+                WHERE cc1.id IS NOT NULL OR cc2.id IS NOT NULL
                 """
             )
             _append_existing_pairs = int(cursor.fetchone()[0] or 0)
@@ -4707,12 +4329,17 @@ def _merge_incremental_temp_schema_into_target(
                             ON mc2.temp_id = p.compound2_id
                     INNER JOIN tmp_map_constant mcs
                             ON mcs.temp_id = p.constant_id
+                    LEFT JOIN tmp_inc_candidate_compound_ids cc1
+                           ON cc1.id = mc1.main_id
+                    LEFT JOIN tmp_inc_candidate_compound_ids cc2
+                           ON cc2.id = mc2.main_id
                     LEFT JOIN pair existing
                            ON existing.rule_environment_id = mre.main_id
                           AND existing.compound1_id = mc1.main_id
                           AND existing.compound2_id = mc2.main_id
                           AND COALESCE(existing.constant_id, -1) = COALESCE(mcs.main_id, -1)
-                    WHERE existing.id IS NULL
+                    WHERE (cc1.id IS NOT NULL OR cc2.id IS NOT NULL)
+                      AND existing.id IS NULL
                     RETURNING id AS pair_id, rule_environment_id
                 ),
                 _inserted_pair_ids AS (
@@ -4923,7 +4550,6 @@ def _incremental_add_compounds_without_reindex(
     *,
     schema: str,
     added_rows: Sequence[Tuple[str, str, str]],
-    delta_fragdb_file: str,
 ) -> Dict[str, int]:
     normalized_schema = _validate_pg_schema(schema)
     unique_rows: List[Tuple[str, str, str]] = []
@@ -4948,7 +4574,7 @@ def _incremental_add_compounds_without_reindex(
         return stats
 
     smiles_values = [item[0] for item in unique_rows]
-    heavies_map = _load_fragdb_num_heavies_by_smiles(delta_fragdb_file, smiles_values)
+    heavies_map = _compute_clean_num_heavies_by_smiles(smiles_values)
     payload = [
         (
             clean_smiles,
@@ -4963,6 +4589,8 @@ def _incremental_add_compounds_without_reindex(
             _pg_set_search_path(cursor, normalized_schema)
             _ensure_compound_batch_tables(cursor, seed_base_from_compound=True)
             _ensure_property_batch_tables(cursor, seed_base_from_compound_property=True)
+            # Incremental inserts must start from current max(id) after temp-schema merges.
+            _pg_align_id_sequence(cursor, "compound")
 
             cursor.execute("DROP TABLE IF EXISTS tmp_inc_add_rows")
             cursor.execute(
@@ -5178,6 +4806,7 @@ def _incremental_reindex_compound_delta(
     index_maintenance_work_mem_mb: int,
     index_work_mem_mb: int,
     index_parallel_workers: int,
+    index_commit_every_flushes: int,
     incremental_index_shards: int,
     incremental_index_jobs: int,
     build_construct_tables: bool,
@@ -5191,6 +4820,7 @@ def _incremental_reindex_compound_delta(
     if normalized_mode not in {"add", "delete"}:
         logger.error("Unsupported incremental delta mode: %s", delta_mode)
         return False
+    schema_fragment_cache_file = os.path.join(output_dir, f"{normalized_schema}_compound_state.cache.fragdb")
 
     unique_rows: List[Tuple[str, str, str]] = []
     seen_smiles: set[str] = set()
@@ -5226,22 +4856,22 @@ def _incremental_reindex_compound_delta(
             delete_stats["deleted_pairs"],
             delete_stats["affected_constants"],
         )
+        _remove_fragment_cache_files(
+            schema_fragment_cache_file,
+            reason=f"delta_mode={normalized_mode}",
+        )
         logger.info("Incremental index total elapsed=%.2fs", max(0.0, time.time() - t_total_start))
         return True
 
     os.makedirs(output_dir, exist_ok=True)
     file_tag = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    schema_fragment_cache_file = os.path.join(output_dir, f"{normalized_schema}_compound_state.cache.fragdb")
     delta_smiles_file = os.path.join(output_dir, f"{normalized_schema}_delta_{normalized_mode}_{file_tag}.smi")
     delta_fragdb_file = os.path.join(output_dir, f"{normalized_schema}_delta_{normalized_mode}_{file_tag}.fragdb")
-    candidate_fragdb_filtered_file = os.path.join(output_dir, f"{normalized_schema}_candidate_filtered_{normalized_mode}_{file_tag}.fragdb")
+    delta_constants_file = os.path.join(output_dir, f"{normalized_schema}_delta_{normalized_mode}_{file_tag}.constants.tsv")
+    candidate_smiles_file = os.path.join(output_dir, f"{normalized_schema}_candidate_{normalized_mode}_{file_tag}.smi")
+    candidate_fragdb_file = os.path.join(output_dir, f"{normalized_schema}_candidate_{normalized_mode}_{file_tag}.fragdb")
     temp_schemas_to_drop: List[str] = []
-
-    cleanup_files = [
-        delta_smiles_file,
-        delta_fragdb_file,
-        candidate_fragdb_filtered_file,
-    ]
+    cleanup_files = [delta_smiles_file, delta_fragdb_file, delta_constants_file, candidate_smiles_file, candidate_fragdb_file]
     try:
         t0 = time.time()
         if not _ensure_compound_fragment_cache(
@@ -5257,7 +4887,16 @@ def _incremental_reindex_compound_delta(
         logger.info("Incremental index phase cache_ready elapsed=%.2fs", max(0.0, time.time() - t0))
 
         t0 = time.time()
-        delta_count = _write_smiles_records_file(delta_smiles_file, unique_rows)
+        delta_fragment_rows = [
+            (
+                clean_smiles,
+                f"INCDELTA_{hashlib.md5(clean_smiles.encode('utf-8')).hexdigest()[:20]}",
+                input_smiles,
+            )
+            for clean_smiles, _public_id, input_smiles in unique_rows
+            if str(clean_smiles or "").strip()
+        ]
+        delta_count = _write_smiles_records_file(delta_smiles_file, delta_fragment_rows)
         if delta_count <= 0:
             logger.info("Delta SMILES set is empty; skipping incremental index.")
             return True
@@ -5271,374 +4910,174 @@ def _incremental_reindex_compound_delta(
             return False
         logger.info("Incremental index phase delta_fragment elapsed=%.2fs delta_rows=%s", max(0.0, time.time() - t0), delta_count)
 
-        affected_constants = _extract_constants_from_fragdb(delta_fragdb_file)
+        if not _run_mmpdb_fragdb_constants(
+            delta_fragdb_file,
+            delta_constants_file,
+        ):
+            return False
+
+        constant_counts = _load_constant_counts_from_constants_file(delta_constants_file)
+        affected_constants = sorted(constant_counts.keys())
         if not affected_constants:
             logger.info(
-                "Delta compounds generated no constants to reindex; mode=%s schema=%s",
+                "Delta compounds generated no constants from fragdb; mode=%s schema=%s",
                 normalized_mode,
                 normalized_schema,
             )
-            return True
-        delta_fragment_keys = _extract_fragment_keys_from_fragdb(delta_fragdb_file)
-        if not delta_fragment_keys:
+            t_fast = time.time()
+            fast_stats = _incremental_add_compounds_without_reindex(
+                postgres_url,
+                schema=normalized_schema,
+                added_rows=unique_rows,
+            )
             logger.info(
-                "Delta compounds generated no fragment keys to reindex; mode=%s schema=%s",
-                normalized_mode,
-                normalized_schema,
+                "Incremental add fast-path elapsed=%.2fs (no constants): added_smiles=%s inserted_compounds=%s updated_compounds=%s cp(updated=%s inserted=%s deleted=%s).",
+                max(0.0, time.time() - t_fast),
+                fast_stats["added_smiles"],
+                fast_stats["inserted_compounds"],
+                fast_stats["updated_compounds"],
+                fast_stats["cp_updated"],
+                fast_stats["cp_inserted"],
+                fast_stats["cp_deleted"],
             )
+            _sync_fragment_cache_meta_from_db(
+                postgres_url,
+                schema=normalized_schema,
+                cache_fragdb=schema_fragment_cache_file,
+            )
+            logger.info("Incremental index total elapsed=%.2fs", max(0.0, time.time() - t_total_start))
             return True
-
-        t0 = time.time()
-        if normalized_mode == "add":
-            if not _merge_fragdb_files(schema_fragment_cache_file, delta_fragdb_file, schema_fragment_cache_file):
-                return False
-        logger.info("Incremental index phase cache_merge elapsed=%.2fs", max(0.0, time.time() - t0))
-
         delta_smiles_values = [row[0] for row in unique_rows if str(row[0] or "").strip()]
-        t0 = time.time()
-        partner_scope_smiles, _ = _collect_delta_pair_matches(
-            schema_fragment_cache_file,
-            delta_smiles=delta_smiles_values,
-            affected_constants=affected_constants,
-        )
-        candidate_smiles = sorted(set(delta_smiles_values + partner_scope_smiles))
-        active_rows = _load_active_compounds_for_smiles(
+        sync_smiles_scope = sorted({str(item or "").strip() for item in delta_smiles_values if str(item or "").strip()})
+        sync_active_rows = _load_active_compounds_for_smiles(
             postgres_url,
             schema=normalized_schema,
-            smiles_values=candidate_smiles,
+            smiles_values=sync_smiles_scope,
         )
-        active_smiles_for_filter = [row[0] for row in active_rows if str(row[0] or "").strip()]
-        logger.info(
-            "Incremental index phase candidate_resolve elapsed=%.2fs affected_constants=%s scope_smiles=%s active_rows=%s",
-            max(0.0, time.time() - t0),
-            len(affected_constants),
-            len(candidate_smiles),
-            len(active_rows),
-        )
-        t_pair_probe = time.time()
-        active_partner_smiles, pair_potential_fragment_keys = _collect_delta_pair_matches(
-            schema_fragment_cache_file,
-            delta_smiles=delta_smiles_values,
-            affected_constants=affected_constants,
-            active_smiles=active_smiles_for_filter,
-        )
-        pair_potential_constants = sorted({token[0] for token in pair_potential_fragment_keys if token and token[0]})
-        logger.info(
-            "Incremental index phase pair_probe elapsed=%.2fs constants_with_pair_potential=%s/%s fragment_keys_with_pair_potential=%s active_partner_smiles=%s",
-            max(0.0, time.time() - t_pair_probe),
-            len(pair_potential_constants),
-            len(affected_constants),
-            len(pair_potential_fragment_keys),
-            len(active_partner_smiles),
-        )
-        constants_pruned = len(pair_potential_constants) < len(affected_constants)
-        if constants_pruned:
-            affected_constants = pair_potential_constants
-            logger.info(
-                "Incremental add pruned affected constants to pair-capable subset: %s",
-                len(affected_constants),
-            )
-        if not affected_constants:
-            t_fast = time.time()
-            fast_stats = _incremental_add_compounds_without_reindex(
-                postgres_url,
-                schema=normalized_schema,
-                added_rows=unique_rows,
-                delta_fragdb_file=delta_fragdb_file,
-            )
-            logger.info(
-                "Incremental add fast-path elapsed=%.2fs (no pair potential): added_smiles=%s inserted_compounds=%s updated_compounds=%s cp(updated=%s inserted=%s deleted=%s); pair unchanged by design.",
-                max(0.0, time.time() - t_fast),
-                fast_stats["added_smiles"],
-                fast_stats["inserted_compounds"],
-                fast_stats["updated_compounds"],
-                fast_stats["cp_updated"],
-                fast_stats["cp_inserted"],
-                fast_stats["cp_deleted"],
-            )
-            logger.info("Incremental index total elapsed=%.2fs", max(0.0, time.time() - t_total_start))
-            return True
-
-        t_restrict = time.time()
-        pair_key_set = {
-            (
-                str(item[0] or "").strip(),
-                int(item[1] or 0),
-                str(item[2] or ""),
-            )
-            for item in pair_potential_fragment_keys
-            if str((item[0] if len(item) > 0 else "") or "").strip()
-        }
-        if pair_key_set:
-            delta_fragment_keys = [
-                item for item in delta_fragment_keys
-                if (
-                    str(item[0] or "").strip(),
-                    int(item[1] or 0),
-                    str(item[2] or ""),
-                ) in pair_key_set
-            ]
-        else:
-            delta_fragment_keys = []
-        if not delta_fragment_keys:
-            t_fast = time.time()
-            fast_stats = _incremental_add_compounds_without_reindex(
-                postgres_url,
-                schema=normalized_schema,
-                added_rows=unique_rows,
-                delta_fragdb_file=delta_fragdb_file,
-            )
-            logger.info(
-                "Incremental add fast-path elapsed=%.2fs (no key-level pair potential): added_smiles=%s inserted_compounds=%s updated_compounds=%s cp(updated=%s inserted=%s deleted=%s); pair unchanged by design.",
-                max(0.0, time.time() - t_fast),
-                fast_stats["added_smiles"],
-                fast_stats["inserted_compounds"],
-                fast_stats["updated_compounds"],
-                fast_stats["cp_updated"],
-                fast_stats["cp_inserted"],
-                fast_stats["cp_deleted"],
-            )
-            logger.info("Incremental index total elapsed=%.2fs", max(0.0, time.time() - t_total_start))
-            return True
-        active_smiles_set = {str(item or "").strip() for item in active_smiles_for_filter if str(item or "").strip()}
-        active_delta_scope = [token for token in delta_smiles_values if token in active_smiles_set]
-        candidate_smiles = sorted(set(active_delta_scope + active_partner_smiles))
-        candidate_smiles_set = set(candidate_smiles)
-        active_rows = [
-            row for row in active_rows
-            if str((row[0] if len(row) > 0 else "") or "").strip() in candidate_smiles_set
-        ]
-        active_smiles_for_filter = [row[0] for row in active_rows if str(row[0] or "").strip()]
-        logger.info(
-            "Incremental index phase candidate_resolve_restrict elapsed=%.2fs affected_constants=%s candidate_smiles=%s active_rows=%s fragment_keys=%s",
-            max(0.0, time.time() - t_restrict),
-            len(affected_constants),
-            len(candidate_smiles),
-            len(active_rows),
-            len(delta_fragment_keys),
-        )
-        sync_smiles_scope = sorted({str(item or "").strip() for item in delta_smiles_values if str(item or "").strip()})
-        sync_scope_set = set(sync_smiles_scope)
-        sync_active_rows = [
-            row for row in active_rows
-            if str((row[0] if len(row) > 0 else "") or "").strip() in sync_scope_set
-        ]
-        if not sync_active_rows and sync_smiles_scope:
-            # Keep finalize/property refresh bounded to the delta compounds.
-            sync_active_rows = _load_active_compounds_for_smiles(
-                postgres_url,
-                schema=normalized_schema,
-                smiles_values=sync_smiles_scope,
-            )
-
-        requested_shards = max(1, int(incremental_index_shards or 1))
-        constant_weights: Dict[str, int] = {}
-        if requested_shards > 1:
-            t_weight = time.time()
-            constant_weights = _estimate_constant_fragment_weights(
-                schema_fragment_cache_file,
-                affected_constants,
-                normalized_smiles_filter=active_smiles_for_filter,
-            )
-            weighted_total = sum(max(1, int(constant_weights.get(token, 1))) for token in set(affected_constants))
-            logger.info(
-                "Incremental index phase shard_weight elapsed=%.2fs weighted_constants=%s weighted_total=%s",
-                max(0.0, time.time() - t_weight),
-                len(constant_weights),
-                weighted_total,
-            )
-        fragment_keys_by_constant: Dict[str, List[Tuple[str, int, str]]] = {}
-        for key in delta_fragment_keys:
-            constant_smiles = str((key[0] if len(key) > 0 else "") or "").strip()
-            if not constant_smiles:
-                continue
-            fragment_keys_by_constant.setdefault(constant_smiles, []).append(
-                (constant_smiles, int(key[1] or 0), str(key[2] or ""))
-            )
-        remaining_fragmentations = 0
-        unit_delta_ids: List[str] = []
-        if requested_shards <= 1:
-            t0 = time.time()
-            remaining_fragmentations, unit_delta_ids = _filter_fragdb_by_constants(
-                schema_fragment_cache_file,
-                candidate_fragdb_filtered_file,
-                affected_constants,
-                normalized_smiles_filter=active_smiles_for_filter,
-                fragment_keys=delta_fragment_keys,
-                delta_smiles_filter=delta_smiles_values,
-            )
-            logger.info(
-                "Incremental index phase cache_filter elapsed=%.2fs remaining_fragmentations=%s fragment_keys=%s delta_ids=%s",
-                max(0.0, time.time() - t0),
-                remaining_fragmentations,
-                len(delta_fragment_keys),
-                len(unit_delta_ids),
-            )
+        if not sync_active_rows:
+            logger.error("Failed loading active rows for incremental sync smiles set.")
+            return False
         shard_groups = _split_constants_into_shards(
             affected_constants,
-            requested_shards,
-            weights=constant_weights,
+            incremental_index_shards,
+            weights=constant_counts,
         )
-        if requested_shards > 1:
-            shard_weight_sums = [
-                sum(max(1, int(constant_weights.get(token, 1))) for token in group)
-                for group in shard_groups
-            ]
-            logger.info(
-                "Incremental index phase cache_filter skipped global pass (shard_mode=%s, shard_weights=%s).",
-                requested_shards,
-                ",".join(str(item) for item in shard_weight_sums),
-            )
-        shard_units: List[Dict[str, object]] = []
-        if len(shard_groups) <= 1:
-            shard_units.append(
-                {
-                    "constants": list(affected_constants),
-                    "fragdb": candidate_fragdb_filtered_file,
-                    "remaining": int(remaining_fragmentations),
-                    "weight": int(remaining_fragmentations),
-                    "delta_ids": unit_delta_ids,
-                    "schema": "",
-                }
-            )
-        else:
-            t_shard_prep = time.time()
-            for shard_idx, shard_constants in enumerate(shard_groups, start=1):
-                shard_fragdb_file = os.path.join(
-                    output_dir,
-                    f"{normalized_schema}_candidate_filtered_{normalized_mode}_{file_tag}_shard{shard_idx:03d}.fragdb",
-                )
-                cleanup_files.append(shard_fragdb_file)
-                shard_fragment_keys: List[Tuple[str, int, str]] = []
-                for token in shard_constants:
-                    shard_fragment_keys.extend(fragment_keys_by_constant.get(token, []))
-                shard_remaining, shard_delta_ids = _filter_fragdb_by_constants(
-                    schema_fragment_cache_file,
-                    shard_fragdb_file,
-                    shard_constants,
-                    normalized_smiles_filter=active_smiles_for_filter,
-                    fragment_keys=shard_fragment_keys,
-                    delta_smiles_filter=delta_smiles_values,
-                )
-                shard_units.append(
-                    {
-                        "constants": shard_constants,
-                        "fragdb": shard_fragdb_file,
-                        "remaining": int(shard_remaining),
-                        "weight": int(sum(max(1, int(constant_weights.get(token, 1))) for token in shard_constants)),
-                        "delta_ids": shard_delta_ids,
-                        "schema": "",
-                    }
-                )
-            shard_units.sort(
-                key=lambda unit: (
-                    -int(unit.get("weight") or 0),
-                    -int(unit.get("remaining") or 0),
-                )
-            )
-            logger.info(
-                "Incremental index phase shard_prepare elapsed=%.2fs shards=%s nonempty=%s",
-                max(0.0, time.time() - t_shard_prep),
-                len(shard_units),
-                sum(1 for unit in shard_units if int(unit["remaining"] or 0) > 0),
-            )
-
-        index_unit_indices: List[int] = []
-        for unit_idx, unit in enumerate(shard_units):
-            if int(unit.get("remaining") or 0) <= 0:
+        if not shard_groups:
+            shard_groups = [affected_constants]
+        shard_specs: List[Tuple[int, List[str], str, str, str]] = []
+        for shard_seq, shard_constants in enumerate(shard_groups, start=1):
+            constants_list = [str(token or "").strip() for token in shard_constants if str(token or "").strip()]
+            if not constants_list:
                 continue
-            shard_schema_name = _validate_pg_schema(
-                f"{normalized_schema[:16]}_inc_{datetime.utcnow().strftime('%H%M%S%f')}_{unit_idx + 1}"
+            shard_constants_file = os.path.join(
+                output_dir,
+                f"{normalized_schema}_delta_{normalized_mode}_{file_tag}.constants.s{shard_seq:04d}.tsv",
             )
-            unit["schema"] = shard_schema_name
-            temp_schemas_to_drop.append(shard_schema_name)
-            index_unit_indices.append(unit_idx)
-
-        if index_unit_indices:
-            t0 = time.time()
-            max_parallel_jobs = max(
-                1,
-                min(int(incremental_index_jobs or 1), len(index_unit_indices)),
+            shard_candidate_fragdb_file = os.path.join(
+                output_dir,
+                f"{normalized_schema}_candidate_{normalized_mode}_{file_tag}.s{shard_seq:04d}.fragdb",
             )
-            effective_maint_mb = (
-                max(1024, int(index_maintenance_work_mem_mb // max_parallel_jobs))
-                if int(index_maintenance_work_mem_mb or 0) > 0 and max_parallel_jobs > 1
-                else int(index_maintenance_work_mem_mb or 0)
+            shard_temp_schema = _validate_pg_schema(
+                f"{normalized_schema[:18]}_incs_{datetime.utcnow().strftime('%H%M%S%f')[-12:]}_{shard_seq:02d}"
             )
-            effective_work_mb = (
-                max(64, int(index_work_mem_mb // max_parallel_jobs))
-                if int(index_work_mem_mb or 0) > 0 and max_parallel_jobs > 1
-                else int(index_work_mem_mb or 0)
-            )
-            effective_parallel_workers = (
-                max(1, int(index_parallel_workers // max_parallel_jobs))
-                if int(index_parallel_workers or 0) > 0 and max_parallel_jobs > 1
-                else int(index_parallel_workers or 0)
-            )
-            logger.info(
-                "Incremental index shard mode: total_shards=%s active_shards=%s delta_filter_shards=%s parallel_jobs=%s maint_mem_mb=%s work_mem_mb=%s parallel_workers=%s",
-                len(shard_units),
-                len(index_unit_indices),
-                sum(1 for idx in index_unit_indices if len(list(shard_units[idx].get("delta_ids") or [])) > 0),
-                max_parallel_jobs,
-                effective_maint_mb,
-                effective_work_mb,
-                effective_parallel_workers,
-            )
-
-            def _run_single_shard_index(unit: Dict[str, object]) -> bool:
-                return _index_fragments_to_postgres(
-                    str(unit["fragdb"]),
-                    postgres_url,
-                    postgres_schema=str(unit["schema"]),
-                    force_rebuild_schema=True,
-                    properties_file=None,
-                    skip_attachment_enrichment=True,
-                    attachment_force_recompute=False,
-                    index_maintenance_work_mem_mb=effective_maint_mb,
-                    index_work_mem_mb=effective_work_mb,
-                    index_parallel_workers=effective_parallel_workers,
-                    skip_mmpdb_post_index_finalize=True,
-                    skip_mmpdb_list_verify=True,
-                    delta_pair_record_ids=list(unit.get("delta_ids") or []),
-                    build_construct_tables=False,
-                    build_constant_smiles_mol_index=False,
+            cleanup_files.extend([shard_constants_file, shard_candidate_fragdb_file])
+            temp_schemas_to_drop.append(shard_temp_schema)
+            shard_specs.append(
+                (
+                    shard_seq,
+                    constants_list,
+                    shard_constants_file,
+                    shard_candidate_fragdb_file,
+                    shard_temp_schema,
                 )
+            )
 
-            if max_parallel_jobs <= 1:
-                for unit_idx in index_unit_indices:
-                    if not _run_single_shard_index(shard_units[unit_idx]):
-                        return False
-            else:
-                with ThreadPoolExecutor(max_workers=max_parallel_jobs) as executor:
-                    future_map = {
-                        executor.submit(_run_single_shard_index, shard_units[unit_idx]): unit_idx
-                        for unit_idx in index_unit_indices
-                    }
-                    for future in as_completed(future_map):
-                        if not future.result():
-                            return False
-            logger.info("Incremental index phase temp_schema_index elapsed=%.2fs", max(0.0, time.time() - t0))
-        if not index_unit_indices:
-            t_fast = time.time()
-            fast_stats = _incremental_add_compounds_without_reindex(
+        def _prepare_incremental_shard(
+            spec: Tuple[int, List[str], str, str, str]
+        ) -> Tuple[int, bool, str]:
+            shard_seq, shard_constants, shard_constants_file, shard_candidate_fragdb_file, shard_temp_schema = spec
+            shard_constant_count = _write_constants_file(
+                shard_constants_file,
+                shard_constants,
+                counts=constant_counts,
+            )
+            if shard_constant_count <= 0:
+                return shard_seq, False, "empty constants"
+            if not _run_mmpdb_fragdb_partition(
+                cache_fragdb=schema_fragment_cache_file,
+                delta_fragdb=delta_fragdb_file,
+                constants_file=shard_constants_file,
+                output_fragdb=shard_candidate_fragdb_file,
+            ):
+                return shard_seq, False, "fragdb_partition failed"
+            ok = _index_fragments_to_postgres(
+                shard_candidate_fragdb_file,
                 postgres_url,
-                schema=normalized_schema,
-                added_rows=unique_rows,
-                delta_fragdb_file=delta_fragdb_file,
+                postgres_schema=shard_temp_schema,
+                force_rebuild_schema=True,
+                properties_file=None,
+                skip_attachment_enrichment=True,
+                attachment_force_recompute=False,
+                index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+                index_work_mem_mb=index_work_mem_mb,
+                index_parallel_workers=index_parallel_workers,
+                index_commit_every_flushes=index_commit_every_flushes,
+                skip_mmpdb_post_index_finalize=True,
+                skip_mmpdb_list_verify=True,
+                build_construct_tables=False,
+                build_constant_smiles_mol_index=False,
+                detect_existing_core_tables=False,
             )
+            if not ok:
+                return shard_seq, False, "index_fragments_to_postgres failed"
+            return shard_seq, True, ""
+
+        shard_prepare_errors: List[str] = []
+        jobs_requested = max(1, int(incremental_index_jobs or 1))
+        jobs_effective = min(jobs_requested, max(1, len(shard_specs)))
+        if jobs_effective > 1 and len(shard_specs) > 1:
             logger.info(
-                "Incremental add fast-path elapsed=%.2fs (no active shard after filtering): added_smiles=%s inserted_compounds=%s updated_compounds=%s cp(updated=%s inserted=%s deleted=%s).",
-                max(0.0, time.time() - t_fast),
-                fast_stats["added_smiles"],
-                fast_stats["inserted_compounds"],
-                fast_stats["updated_compounds"],
-                fast_stats["cp_updated"],
-                fast_stats["cp_inserted"],
-                fast_stats["cp_deleted"],
+                "Incremental shard indexing concurrency enabled: shards=%s jobs=%s",
+                len(shard_specs),
+                jobs_effective,
             )
-            logger.info("Incremental index total elapsed=%.2fs", max(0.0, time.time() - t_total_start))
-            return True
+            with ThreadPoolExecutor(max_workers=jobs_effective) as executor:
+                future_map = {
+                    executor.submit(_prepare_incremental_shard, spec): spec[0]
+                    for spec in shard_specs
+                }
+                for future in as_completed(future_map):
+                    shard_seq = future_map[future]
+                    try:
+                        seq, ok, reason = future.result()
+                    except Exception as exc:
+                        shard_prepare_errors.append(f"shard={shard_seq} exception={exc}")
+                        continue
+                    if not ok:
+                        shard_prepare_errors.append(f"shard={seq} reason={reason}")
+        else:
+            for spec in shard_specs:
+                seq, ok, reason = _prepare_incremental_shard(spec)
+                if not ok:
+                    shard_prepare_errors.append(f"shard={seq} reason={reason}")
+                    break
+
+        if shard_prepare_errors:
+            logger.error("Incremental shard preparation failed: %s", "; ".join(shard_prepare_errors))
+            return False
+        shard_sources: List[Tuple[str, List[str]]] = [
+            (spec[4], list(spec[1]))
+            for spec in sorted(shard_specs, key=lambda item: item[0])
+        ]
+        if not shard_sources:
+            logger.error("No shard candidate schemas were created for incremental add.")
+            return False
+        logger.info(
+            "Incremental index phase candidate_expand complete: affected_constants=%s shards=%s sync_smiles=%s",
+            len(affected_constants),
+            len(shard_sources),
+            len(sync_smiles_scope),
+        )
 
         t0 = time.time()
         with psycopg.connect(postgres_url, autocommit=False) as conn:
@@ -5646,35 +5085,14 @@ def _incremental_reindex_compound_delta(
                 _pg_set_search_path(cursor, normalized_schema)
                 _ensure_compound_batch_tables(cursor, seed_base_from_compound=True)
                 _ensure_property_batch_tables(cursor, seed_base_from_compound_property=True)
-                merge_unit_indices = [idx for idx in index_unit_indices if str(shard_units[idx].get("schema") or "").strip()]
                 cursor.execute("SELECT COUNT(*) FROM pair")
                 target_pairs_before_merge = int(cursor.fetchone()[0] or 0)
-                requires_constant_recount = False
-                for merge_seq, unit_idx in enumerate(merge_unit_indices):
-                    unit = shard_units[unit_idx]
-                    unit_delta_ids = list(unit.get("delta_ids") or [])
-                    replace_existing = (len(unit_delta_ids) == 0)
-                    if replace_existing:
-                        requires_constant_recount = True
-                    temp_schema_name = str(unit.get("schema") or "")
-                    cursor.execute(f"SELECT COUNT(*) FROM {temp_schema_name}.pair")
-                    temp_pairs = int(cursor.fetchone()[0] or 0)
-                    cursor.execute(f"SELECT COUNT(*) FROM {temp_schema_name}.compound")
-                    temp_compounds = int(cursor.fetchone()[0] or 0)
-                    logger.info(
-                        "Incremental merge shard[%s/%s]: temp_schema=%s temp_pairs=%s temp_compounds=%s delta_ids=%s replace_existing=%s",
-                        merge_seq + 1,
-                        len(merge_unit_indices),
-                        temp_schema_name,
-                        temp_pairs,
-                        temp_compounds,
-                        len(unit_delta_ids),
-                        replace_existing,
-                    )
+                for merge_seq, (temp_schema_name, shard_constants) in enumerate(shard_sources):
+                    replace_existing = False
                     _merge_incremental_temp_schema_into_target(
                         cursor,
                         temp_schema=temp_schema_name,
-                        affected_constants=list(unit.get("constants") or []),
+                        affected_constants=list(shard_constants),
                         candidate_smiles=sync_smiles_scope,
                         active_rows=sync_active_rows,
                         replace_existing_pairs_for_constants=replace_existing,
@@ -5686,7 +5104,7 @@ def _incremental_reindex_compound_delta(
                     affected_constants=affected_constants,
                     candidate_smiles=sync_smiles_scope,
                     active_rows=sync_active_rows,
-                    recount_constants=requires_constant_recount,
+                    recount_constants=False,
                 )
 
                 if not skip_attachment_enrichment:
@@ -5709,13 +5127,7 @@ def _incremental_reindex_compound_delta(
                     enable_constant_smiles_mol_index=build_constant_smiles_mol_index,
                 )
                 if build_construct_tables:
-                    if requires_constant_recount:
-                        _refresh_construct_tables_postgres_for_constants(
-                            cursor,
-                            affected_constants=affected_constants,
-                        )
-                    else:
-                        _append_construct_tables_postgres_for_inserted_pairs(cursor)
+                    _append_construct_tables_postgres_for_inserted_pairs(cursor)
                 _update_dataset_counts(cursor)
                 refresh_stats = _refresh_compound_property_for_smiles(
                     cursor,
@@ -5735,15 +5147,14 @@ def _incremental_reindex_compound_delta(
                     "rule_environment",
                     "compound_property",
                 ]
-                if requires_constant_recount:
-                    analyze_tables.extend(
-                        [
-                            "rule_environment_statistics",
-                            "rule",
-                            "rule_smiles",
-                            "constant_smiles",
-                        ]
-                    )
+                analyze_tables.extend(
+                    [
+                        "rule_environment_statistics",
+                        "rule",
+                        "rule_smiles",
+                        "constant_smiles",
+                    ]
+                )
                 if build_construct_tables:
                     analyze_tables.extend(["from_construct", "to_construct"])
                 for table_name in analyze_tables:
@@ -5752,17 +5163,31 @@ def _incremental_reindex_compound_delta(
         logger.info("Incremental index phase merge_finalize elapsed=%.2fs", max(0.0, time.time() - t0))
 
         logger.info(
-            "Incremental compound index succeeded for schema '%s' mode=%s: delta_compounds=%s affected_constants=%s candidate_smiles=%s sync_smiles=%s cp(updated=%s inserted=%s deleted=%s).",
+            "Incremental compound index succeeded for schema '%s' mode=%s: delta_compounds=%s affected_constants=%s sync_smiles=%s cp(updated=%s inserted=%s deleted=%s).",
             normalized_schema,
             normalized_mode,
             len(unique_rows),
             len(affected_constants),
-            len(candidate_smiles),
             len(sync_smiles_scope),
             refresh_stats["updated"],
             refresh_stats["inserted"],
             refresh_stats["deleted"],
         )
+        cache_append_ok = _append_delta_fragdb_into_cache(
+            cache_fragdb=schema_fragment_cache_file,
+            delta_fragdb=delta_fragdb_file,
+        )
+        if cache_append_ok:
+            _sync_fragment_cache_meta_from_db(
+                postgres_url,
+                schema=normalized_schema,
+                cache_fragdb=schema_fragment_cache_file,
+            )
+        else:
+            _remove_fragment_cache_files(
+                schema_fragment_cache_file,
+                reason="delta cache append failed",
+            )
         logger.info("Incremental index total elapsed=%.2fs", max(0.0, time.time() - t_total_start))
         return True
     except Exception as exc:
@@ -5807,6 +5232,7 @@ def import_compound_batch_postgres(
     index_maintenance_work_mem_mb: int = 1024,
     index_work_mem_mb: int = 128,
     index_parallel_workers: int = 4,
+    index_commit_every_flushes: int = 0,
     incremental_index_shards: int = 1,
     incremental_index_jobs: int = 1,
     build_construct_tables: bool = True,
@@ -5922,7 +5348,7 @@ def import_compound_batch_postgres(
                 inserted_rows = int(cursor.rowcount or 0)
                 conn.commit()
         logger.info(
-            "Imported compound batch '%s' into schema '%s': total=%s valid=%s dedup=%s new_unique=%s inserted=%s. Starting incremental index...",
+            "Imported compound batch '%s' into schema '%s': total=%s valid=%s dedup=%s new_unique=%s inserted=%s. Starting index sync...",
             normalized_batch_id,
             normalized_schema,
             parse_stats["total_rows"],
@@ -5943,6 +5369,7 @@ def import_compound_batch_postgres(
             index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
             index_work_mem_mb=index_work_mem_mb,
             index_parallel_workers=index_parallel_workers,
+            index_commit_every_flushes=index_commit_every_flushes,
             incremental_index_shards=incremental_index_shards,
             incremental_index_jobs=incremental_index_jobs,
             build_construct_tables=build_construct_tables,
@@ -5967,6 +5394,7 @@ def delete_compound_batch_postgres(
     index_maintenance_work_mem_mb: int = 1024,
     index_work_mem_mb: int = 128,
     index_parallel_workers: int = 4,
+    index_commit_every_flushes: int = 0,
     incremental_index_shards: int = 1,
     incremental_index_jobs: int = 1,
     build_construct_tables: bool = True,
@@ -6045,7 +5473,7 @@ def delete_compound_batch_postgres(
                 ]
                 conn.commit()
         logger.info(
-            "Deleted compound batch '%s' from schema '%s'. Starting incremental index (removed_structural=%s)...",
+            "Deleted compound batch '%s' from schema '%s'. Starting index sync (removed_structural=%s)...",
             normalized_batch_id,
             normalized_schema,
             len(removed_rows_payload),
@@ -6062,6 +5490,7 @@ def delete_compound_batch_postgres(
             index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
             index_work_mem_mb=index_work_mem_mb,
             index_parallel_workers=index_parallel_workers,
+            index_commit_every_flushes=index_commit_every_flushes,
             incremental_index_shards=incremental_index_shards,
             incremental_index_jobs=incremental_index_jobs,
             build_construct_tables=build_construct_tables,
@@ -6722,7 +6151,7 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
         args.pg_incremental_index_shards = 1
     if args.pg_incremental_index_jobs < 1:
         args.pg_incremental_index_jobs = 1
-    
+
     try:
         if not postgres_url:
             logger.error("--postgres_url is required (PostgreSQL-only runtime).")

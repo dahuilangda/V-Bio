@@ -3,10 +3,20 @@
 This package provides an engineered toolkit for MMP data lifecycle management on PostgreSQL:
 
 - schema build and index
-- incremental compound batch add/delete
+- compound batch add/delete (default incremental re-index path)
 - incremental property batch add/delete
 - registry management
 - verification and metrics collection
+- preflight check with row-level operation annotations for compound/property batch imports
+
+Behavior note:
+- `compound-import` / `compound-delete` default to incremental MMP re-index (no fallback to full rebuild).
+- You can tune shard count and concurrency with `--pg_incremental_index_shards` and `--pg_incremental_index_jobs`.
+- `--pg_index_commit_every_flushes` defaults to adaptive mode (`0`), so one command path works for both small and large `.fragdb`.
+- Incremental add computes affected constants from delta `.fragdb` and rebuilds candidate pairs via `fragdb_partition`, so newly added compounds can correctly grow pair counts.
+- Lifecycle state is deduplicated by `clean_smiles`; incremental validation should be compared against a rebuild of lifecycle state (not raw duplicated input rows).
+- `--pg_incremental_index_jobs` now runs shard prepare/index steps concurrently (merge remains transaction-serialized for correctness).
+- Incremental temp-shard indexing skips global core-table discovery scans to reduce metadata load on large multi-schema PostgreSQL instances.
 
 It wraps proven logic from `lead_optimization/mmp_lifecycle/engine.py` and
 `lead_optimization/mmp_database_registry.py` into a clean command surface.
@@ -31,6 +41,22 @@ python -m lead_optimization.mmp_lifecycle.run_mmp_lifecycle --help
 python -m lead_optimization.mmp_lifecycle.prepare_compound_batch_template --help
 python -m lead_optimization.mmp_lifecycle.prepare_property_batch_template --help
 python -m lead_optimization.mmp_lifecycle.collect_mmp_lifecycle_metrics --help
+```
+
+Preflight check examples (annotated operation table):
+
+```bash
+python -m lead_optimization.mmp_lifecycle check-compound-import \
+  --file lead_optimization/data/compound_batch.tsv \
+  --postgres_url 'postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp' \
+  --postgres_schema chembl_cyp3a4_herg \
+  --output_tsv lead_optimization/data/compound_batch_check.tsv
+
+python -m lead_optimization.mmp_lifecycle check-property-import \
+  --file lead_optimization/data/property_batch.tsv \
+  --postgres_url 'postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp' \
+  --postgres_schema chembl_cyp3a4_herg \
+  --output_tsv lead_optimization/data/property_batch_check.tsv
 ```
 
 ## 2) Runtime Environment
@@ -473,7 +499,7 @@ Use `registry-delete --drop_data` when you want registry + schema data removed t
 
 ## 6) Notes on Performance and Correctness
 
-- PostgreSQL-only path; no SQLite staging/runtime path is used.
+- Compound lifecycle defaults to incremental re-index path (no fallback to full rebuild).
 - Incremental compound updates use constant-scoped re-indexing and pair merge.
 - Recent fix ensures transformed constants from temp shard pairs are mapped/inserted,
   so valid new pairs are not dropped during merge.
