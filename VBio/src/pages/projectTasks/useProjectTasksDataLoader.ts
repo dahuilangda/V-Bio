@@ -5,6 +5,7 @@ import { getProjectById, listProjectTasksForList } from '../../api/supabaseLite'
 import { normalizeWorkflowKey } from '../../utils/workflows';
 import {
   hasLeadOptPredictionRuntime,
+  hasTaskSummaryMetrics,
   SILENT_CACHE_SYNC_WINDOW_MS,
   isProjectTaskRow,
   sanitizeTaskRows,
@@ -278,12 +279,21 @@ export function useProjectTasksDataLoader({
   const hasActiveRuntime = useMemo(
     () =>
       tasks.some(
-        (row) =>
-          isProjectTaskRow(row) &&
-          (
-            (Boolean(row.task_id) && (row.task_state === 'QUEUED' || row.task_state === 'RUNNING')) ||
-            hasLeadOptPredictionRuntime(row)
-          )
+        (row) => {
+          if (!isProjectTaskRow(row)) return false;
+          if (Boolean(row.task_id) && (row.task_state === 'QUEUED' || row.task_state === 'RUNNING')) return true;
+          if (hasLeadOptPredictionRuntime(row)) return true;
+          const confidence =
+            row.confidence && typeof row.confidence === 'object' && !Array.isArray(row.confidence)
+              ? (row.confidence as Record<string, unknown>)
+              : null;
+          const hasLeadOptSnapshot = Boolean(
+            confidence?.lead_opt_mmp &&
+              typeof confidence.lead_opt_mmp === 'object' &&
+              !Array.isArray(confidence.lead_opt_mmp)
+          );
+          return hasLeadOptSnapshot && row.task_state === 'SUCCESS' && !hasTaskSummaryMetrics(row);
+        }
       ),
     [tasks]
   );

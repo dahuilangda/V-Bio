@@ -12,7 +12,6 @@ interface RuntimeTaskLike {
 
 function hasLeadOptMmpOnlySnapshot(task: RuntimeTaskLike | null): boolean {
   if (!task) return false;
-  if (String(task.structure_name || '').trim().length > 0) return false;
   if (task.confidence && typeof task.confidence === 'object') {
     const leadOptMmp = (task.confidence as Record<string, unknown>).lead_opt_mmp;
     if (leadOptMmp && typeof leadOptMmp === 'object') return true;

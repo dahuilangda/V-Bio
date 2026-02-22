@@ -222,6 +222,23 @@ function buildQueuedPredictionRecord(taskId: string, backend: string): LeadOptPr
   };
 }
 
+function hasResolvedPredictionMetrics(record: LeadOptPredictionRecord | null | undefined): boolean {
+  if (!record) return false;
+  const pairIptm = typeof record.pairIptm === 'number' && Number.isFinite(record.pairIptm);
+  const pairPae = typeof record.pairPae === 'number' && Number.isFinite(record.pairPae);
+  const ligandPlddt = typeof record.ligandPlddt === 'number' && Number.isFinite(record.ligandPlddt);
+  const ligandAtomPlddts = Array.isArray(record.ligandAtomPlddts) && record.ligandAtomPlddts.length > 0;
+  return record.pairIptmResolved === true && (pairIptm || pairPae || ligandPlddt || ligandAtomPlddts);
+}
+
+function shouldHydratePredictionRecord(record: LeadOptPredictionRecord | null | undefined): boolean {
+  if (!record) return false;
+  if (String(record.state || '').toUpperCase() !== 'SUCCESS') return false;
+  const taskId = String(record.taskId || '').trim();
+  if (!taskId || taskId.startsWith('local:')) return false;
+  return !hasResolvedPredictionMetrics(record);
+}
+
 function isResultArchivePendingError(error: unknown): boolean {
   const message = String(error instanceof Error ? error.message : error || '').toLowerCase();
   if (!message) return false;
@@ -614,8 +631,10 @@ export function useLeadOptMmpQueryMachine({
   const queryResultCacheRef = useRef<Map<string, Record<string, unknown>>>(new Map());
   const predictionHydrationRetryCountRef = useRef<Record<string, number>>({});
   const predictionHydrationRetryTimerRef = useRef<Record<string, number>>({});
+  const predictionHydrationInFlightRef = useRef<Set<string>>(new Set());
   const referenceHydrationRetryCountRef = useRef<Record<string, number>>({});
   const referenceHydrationRetryTimerRef = useRef<Record<string, number>>({});
+  const referenceHydrationInFlightRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     return () => {
@@ -629,6 +648,8 @@ export function useLeadOptMmpQueryMachine({
       referenceHydrationRetryTimerRef.current = {};
       predictionHydrationRetryCountRef.current = {};
       referenceHydrationRetryCountRef.current = {};
+      predictionHydrationInFlightRef.current.clear();
+      referenceHydrationInFlightRef.current.clear();
     };
   }, []);
 
@@ -806,6 +827,210 @@ export function useLeadOptMmpQueryMachine({
       window.clearTimeout(timer);
     };
   }, [referencePredictionByBackend]);
+
+  useEffect(() => {
+    const hydrationEntries = Object.entries(predictionBySmiles)
+      .filter(([, record]) => shouldHydratePredictionRecord(record))
+      .filter(([smiles]) => !predictionHydrationInFlightRef.current.has(smiles))
+      .sort((a, b) => Number(a[1]?.updatedAt || 0) - Number(b[1]?.updatedAt || 0))
+      .slice(0, 3);
+    if (hydrationEntries.length === 0) return;
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        for (const [smiles, record] of hydrationEntries) {
+          if (cancelled) return;
+          const taskId = readText(record.taskId).trim();
+          if (!taskId || taskId.startsWith('local:')) continue;
+          if (predictionHydrationInFlightRef.current.has(smiles)) continue;
+          predictionHydrationInFlightRef.current.add(smiles);
+          try {
+            const blob = await downloadResultBlob(taskId, { mode: 'view' });
+            if (cancelled) return;
+            const parsed = await parseResultBundle(blob);
+            if (!parsed) continue;
+            const resultPayload = extractPredictionResultPayload(parsed, targetChain, ligandChain);
+            setPredictionBySmiles((prev) => {
+              const current = prev[smiles] || record;
+              if (!current) return prev;
+              return {
+                ...prev,
+                [smiles]: {
+                  ...current,
+                  state: 'SUCCESS',
+                  pairIptm: resultPayload.pairIptm,
+                  pairPae: resultPayload.pairPae,
+                  pairIptmResolved: true,
+                  ligandPlddt: resultPayload.ligandPlddt,
+                  ligandAtomPlddts: resultPayload.ligandAtomPlddts,
+                  ...(resultPayload.structureText.trim()
+                    ? {
+                        structureText: resultPayload.structureText,
+                        structureFormat: resultPayload.structureFormat,
+                        structureName: resultPayload.structureName
+                      }
+                    : {}),
+                  error: '',
+                  updatedAt: Date.now()
+                }
+              };
+            });
+            const retryTimer = predictionHydrationRetryTimerRef.current[smiles];
+            if (retryTimer) {
+              window.clearTimeout(retryTimer);
+              delete predictionHydrationRetryTimerRef.current[smiles];
+            }
+            delete predictionHydrationRetryCountRef.current[smiles];
+          } catch (error) {
+            if (isResultArchivePendingError(error)) {
+              const attempt = Number(predictionHydrationRetryCountRef.current[smiles] || 0) + 1;
+              predictionHydrationRetryCountRef.current[smiles] = attempt;
+              if (!predictionHydrationRetryTimerRef.current[smiles]) {
+                const delayMs = computeHydrationRetryDelayMs(attempt);
+                predictionHydrationRetryTimerRef.current[smiles] = window.setTimeout(() => {
+                  delete predictionHydrationRetryTimerRef.current[smiles];
+                  setPredictionBySmiles((prev) => {
+                    const current = prev[smiles];
+                    if (!current) return prev;
+                    return {
+                      ...prev,
+                      [smiles]: {
+                        ...current,
+                        updatedAt: Date.now()
+                      }
+                    };
+                  });
+                }, delayMs);
+              }
+              continue;
+            }
+            setPredictionBySmiles((prev) => {
+              const current = prev[smiles] || record;
+              if (!current) return prev;
+              return {
+                ...prev,
+                [smiles]: {
+                  ...current,
+                  error: readText(error instanceof Error ? error.message : error).trim() || current.error || '',
+                  updatedAt: Date.now()
+                }
+              };
+            });
+          } finally {
+            predictionHydrationInFlightRef.current.delete(smiles);
+          }
+        }
+      })();
+    }, 900);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [ligandChain, predictionBySmiles, targetChain]);
+
+  useEffect(() => {
+    const hydrationEntries = Object.entries(referencePredictionByBackend)
+      .filter(([, record]) => shouldHydratePredictionRecord(record))
+      .filter(([backendKey]) => !referenceHydrationInFlightRef.current.has(backendKey))
+      .sort((a, b) => Number(a[1]?.updatedAt || 0) - Number(b[1]?.updatedAt || 0))
+      .slice(0, 2);
+    if (hydrationEntries.length === 0) return;
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        for (const [backendKey, record] of hydrationEntries) {
+          if (cancelled) return;
+          const taskId = readText(record.taskId).trim();
+          if (!taskId || taskId.startsWith('local:')) continue;
+          if (referenceHydrationInFlightRef.current.has(backendKey)) continue;
+          referenceHydrationInFlightRef.current.add(backendKey);
+          try {
+            const blob = await downloadResultBlob(taskId, { mode: 'view' });
+            if (cancelled) return;
+            const parsed = await parseResultBundle(blob);
+            if (!parsed) continue;
+            const resultPayload = extractPredictionResultPayload(parsed, targetChain, ligandChain);
+            setReferencePredictionByBackend((prev) => {
+              const current = prev[backendKey] || record;
+              if (!current) return prev;
+              return {
+                ...prev,
+                [backendKey]: {
+                  ...current,
+                  state: 'SUCCESS',
+                  pairIptm: resultPayload.pairIptm,
+                  pairPae: resultPayload.pairPae,
+                  pairIptmResolved: true,
+                  ligandPlddt: resultPayload.ligandPlddt,
+                  ligandAtomPlddts: resultPayload.ligandAtomPlddts,
+                  ...(resultPayload.structureText.trim()
+                    ? {
+                        structureText: resultPayload.structureText,
+                        structureFormat: resultPayload.structureFormat,
+                        structureName: resultPayload.structureName
+                      }
+                    : {}),
+                  error: '',
+                  updatedAt: Date.now()
+                }
+              };
+            });
+            const retryTimer = referenceHydrationRetryTimerRef.current[backendKey];
+            if (retryTimer) {
+              window.clearTimeout(retryTimer);
+              delete referenceHydrationRetryTimerRef.current[backendKey];
+            }
+            delete referenceHydrationRetryCountRef.current[backendKey];
+          } catch (error) {
+            if (isResultArchivePendingError(error)) {
+              const attempt = Number(referenceHydrationRetryCountRef.current[backendKey] || 0) + 1;
+              referenceHydrationRetryCountRef.current[backendKey] = attempt;
+              if (!referenceHydrationRetryTimerRef.current[backendKey]) {
+                const delayMs = computeHydrationRetryDelayMs(attempt);
+                referenceHydrationRetryTimerRef.current[backendKey] = window.setTimeout(() => {
+                  delete referenceHydrationRetryTimerRef.current[backendKey];
+                  setReferencePredictionByBackend((prev) => {
+                    const current = prev[backendKey];
+                    if (!current) return prev;
+                    return {
+                      ...prev,
+                      [backendKey]: {
+                        ...current,
+                        updatedAt: Date.now()
+                      }
+                    };
+                  });
+                }, delayMs);
+              }
+              continue;
+            }
+            setReferencePredictionByBackend((prev) => {
+              const current = prev[backendKey] || record;
+              if (!current) return prev;
+              return {
+                ...prev,
+                [backendKey]: {
+                  ...current,
+                  error: readText(error instanceof Error ? error.message : error).trim() || current.error || '',
+                  updatedAt: Date.now()
+                }
+              };
+            });
+          } finally {
+            referenceHydrationInFlightRef.current.delete(backendKey);
+          }
+        }
+      })();
+    }, 900);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [ligandChain, referencePredictionByBackend, targetChain]);
 
   useEffect(() => {
     if (typeof onPredictionStateChange !== 'function') return;
