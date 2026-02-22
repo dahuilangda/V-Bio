@@ -70,6 +70,62 @@ function buildTaskRuntimeSignature(
     .join('\n');
 }
 
+const TASK_STATE_PRIORITY: Record<string, number> = {
+  DRAFT: 0,
+  QUEUED: 1,
+  RUNNING: 2,
+  SUCCESS: 3,
+  FAILURE: 3,
+  REVOKED: 3,
+};
+
+function taskStatePriority(value: unknown): number {
+  return TASK_STATE_PRIORITY[String(value || '').trim().toUpperCase()] ?? 0;
+}
+
+function mergeTaskRuntimeFields<
+  T extends {
+    task_id?: string | null;
+    task_state?: string | null;
+    status_text?: string | null;
+    error_text?: string | null;
+    completed_at?: string | null;
+    duration_seconds?: number | null;
+  },
+  U extends {
+  task_id?: string | null;
+  task_state?: string | null;
+  status_text?: string | null;
+  error_text?: string | null;
+  completed_at?: string | null;
+  duration_seconds?: number | null;
+}
+>(next: T, prev: U): T {
+  const nextTaskId = String(next.task_id || '').trim();
+  const prevTaskId = String(prev.task_id || '').trim();
+  if (!nextTaskId || !prevTaskId || nextTaskId !== prevTaskId) return next;
+  const nextPriority = taskStatePriority(next.task_state);
+  const prevPriority = taskStatePriority(prev.task_state);
+  if (prevPriority < nextPriority) return next;
+  if (prevPriority > nextPriority) {
+    return {
+      ...next,
+      task_state: prev.task_state,
+      status_text: prev.status_text,
+      error_text: prev.error_text,
+      completed_at: prev.completed_at || next.completed_at,
+      duration_seconds: prev.duration_seconds ?? next.duration_seconds
+    };
+  }
+  return {
+    ...next,
+    completed_at: next.completed_at || prev.completed_at,
+    duration_seconds: next.duration_seconds ?? prev.duration_seconds,
+    status_text: String(next.status_text || '').trim() || prev.status_text,
+    error_text: String(next.error_text || '').trim() || prev.error_text
+  };
+}
+
 export function useProjectDetailRuntimeContext() {
   const { projectId = '' } = useParams();
   const location = useLocation();
@@ -201,8 +257,14 @@ export function useProjectDetailRuntimeContext() {
             : await listProjectTasksCompact(projectIdValue);
         if (cancelled) return;
         const nextRows = sortProjectTasks(rowsRaw);
-        const nextSignature = buildTaskRuntimeSignature(nextRows);
-        setProjectTasks((prev) => (buildTaskRuntimeSignature(prev) === nextSignature ? prev : nextRows));
+        setProjectTasks((prev) => {
+          const mergedRows = nextRows.map((row) => {
+            const prevRow = prev.find((item) => item.id === row.id);
+            if (!prevRow) return row;
+            return mergeTaskRuntimeFields(row, prevRow);
+          });
+          return buildTaskRuntimeSignature(prev) === buildTaskRuntimeSignature(mergedRows) ? prev : mergedRows;
+        });
 
         const activeTaskId = String(project?.task_id || '').trim();
         if (!activeTaskId) return;
@@ -210,7 +272,8 @@ export function useProjectDetailRuntimeContext() {
         if (!activeRow) return;
         setProject((prev) => {
           if (!prev) return prev;
-          const rawTaskState = String(activeRow.task_state || '').trim().toUpperCase();
+          const mergedActiveRow = mergeTaskRuntimeFields(activeRow, prev);
+          const rawTaskState = String(mergedActiveRow.task_state || '').trim().toUpperCase();
           const nextTaskState = (
             rawTaskState === 'QUEUED' ||
             rawTaskState === 'RUNNING' ||
@@ -221,10 +284,10 @@ export function useProjectDetailRuntimeContext() {
               ? rawTaskState
               : prev.task_state
           ) as typeof prev.task_state;
-          const nextStatusText = String(activeRow.status_text || '').trim();
-          const nextErrorText = String(activeRow.error_text || '').trim();
-          const nextCompletedAt = activeRow.completed_at || null;
-          const nextDurationCandidate = Number(activeRow.duration_seconds);
+          const nextStatusText = String(mergedActiveRow.status_text || '').trim();
+          const nextErrorText = String(mergedActiveRow.error_text || '').trim();
+          const nextCompletedAt = mergedActiveRow.completed_at || null;
+          const nextDurationCandidate = Number(mergedActiveRow.duration_seconds);
           const nextDurationSeconds = Number.isFinite(nextDurationCandidate) ? nextDurationCandidate : null;
           if (
             prev.task_state === nextTaskState &&

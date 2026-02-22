@@ -13,6 +13,15 @@ import { normalizeWorkflowKey } from '../utils/workflows';
 
 const DEFAULT_TASK_TYPE = 'prediction';
 
+const TASK_STATE_PRIORITY: Record<string, number> = {
+  DRAFT: 0,
+  QUEUED: 1,
+  RUNNING: 2,
+  SUCCESS: 3,
+  FAILURE: 3,
+  REVOKED: 3
+};
+
 export interface CreateProjectInput {
   name: string;
   summary?: string;
@@ -37,6 +46,37 @@ function mapTaskState(raw: string): Project['task_state'] {
   if (normalized === 'PENDING' || normalized === 'RECEIVED' || normalized === 'RETRY') return 'QUEUED';
   if (normalized === 'STARTED' || normalized === 'RUNNING' || normalized === 'PROGRESS') return 'RUNNING';
   return 'QUEUED';
+}
+
+function taskStatePriority(value: unknown): number {
+  return TASK_STATE_PRIORITY[String(value || '').trim().toUpperCase()] ?? 0;
+}
+
+function mergeProjectRuntimeFields(next: Project, prev: Project | null): Project {
+  if (!prev) return next;
+  const nextTaskId = String(next.task_id || '').trim();
+  const prevTaskId = String(prev.task_id || '').trim();
+  if (!nextTaskId || !prevTaskId || nextTaskId !== prevTaskId) return next;
+  const nextPriority = taskStatePriority(next.task_state);
+  const prevPriority = taskStatePriority(prev.task_state);
+  if (prevPriority < nextPriority) return next;
+  if (prevPriority > nextPriority) {
+    return {
+      ...next,
+      task_state: prev.task_state,
+      status_text: prev.status_text,
+      error_text: prev.error_text,
+      completed_at: prev.completed_at || next.completed_at,
+      duration_seconds: prev.duration_seconds ?? next.duration_seconds
+    };
+  }
+  return {
+    ...next,
+    status_text: String(next.status_text || '').trim() || prev.status_text,
+    error_text: String(next.error_text || '').trim() || prev.error_text,
+    completed_at: next.completed_at || prev.completed_at,
+    duration_seconds: next.duration_seconds ?? prev.duration_seconds
+  };
 }
 
 function readStatusText(status: { info?: Record<string, unknown>; state: string }): string {
@@ -199,8 +239,10 @@ export function useProjects(session: Session | null) {
 
       if (!statusOnly) {
         setProjects((prev) => {
+          const prevById = new Map(prev.map((item) => [item.id, item] as const));
+          const mergedRows = rows.map((row) => mergeProjectRuntimeFields(row, prevById.get(row.id) || null));
           const countsByProjectId = new Map(prev.map((item) => [item.id, item.task_counts]));
-          return withFallbackCounts(rows, countsByProjectId);
+          return withFallbackCounts(mergedRows, countsByProjectId);
         });
       }
 
@@ -211,28 +253,29 @@ export function useProjects(session: Session | null) {
           prev.map((project) => {
             const next = rowById.get(project.id);
             if (!next) return project;
+            const mergedNext = mergeProjectRuntimeFields(next, project);
 
             if (
-              project.task_state === next.task_state &&
-              project.task_id === next.task_id &&
-              project.status_text === next.status_text &&
-              project.error_text === next.error_text &&
-              project.submitted_at === next.submitted_at &&
-              project.completed_at === next.completed_at &&
-              project.duration_seconds === next.duration_seconds
+              project.task_state === mergedNext.task_state &&
+              project.task_id === mergedNext.task_id &&
+              project.status_text === mergedNext.status_text &&
+              project.error_text === mergedNext.error_text &&
+              project.submitted_at === mergedNext.submitted_at &&
+              project.completed_at === mergedNext.completed_at &&
+              project.duration_seconds === mergedNext.duration_seconds
             ) {
               return project;
             }
 
             return {
               ...project,
-              task_state: next.task_state,
-              task_id: next.task_id,
-              status_text: next.status_text,
-              error_text: next.error_text,
-              submitted_at: next.submitted_at,
-              completed_at: next.completed_at,
-              duration_seconds: next.duration_seconds
+              task_state: mergedNext.task_state,
+              task_id: mergedNext.task_id,
+              status_text: mergedNext.status_text,
+              error_text: mergedNext.error_text,
+              submitted_at: mergedNext.submitted_at,
+              completed_at: mergedNext.completed_at,
+              duration_seconds: mergedNext.duration_seconds
             };
           })
         );

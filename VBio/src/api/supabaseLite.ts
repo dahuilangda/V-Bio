@@ -351,18 +351,41 @@ export async function listProjectTasksForList(projectId: string): Promise<Projec
     'created_at',
     'updated_at'
   ].join(',');
-  const rows = await request<Array<Partial<ProjectTask>>>('/project_tasks_list', undefined, {
-    select: selectFields,
-    project_id: `eq.${projectId}`,
-    order: 'created_at.desc'
+  const [rows, detailRows] = await Promise.all([
+    request<Array<Partial<ProjectTask>>>('/project_tasks_list', undefined, {
+      select: selectFields,
+      project_id: `eq.${projectId}`,
+      order: 'created_at.desc'
+    }),
+    request<Array<Partial<ProjectTask>>>('/project_tasks', undefined, {
+      select: 'id,components,affinity',
+      project_id: `eq.${projectId}`,
+      order: 'created_at.desc'
+    })
+  ]);
+  const detailById = new Map(
+    detailRows
+      .map((row) => [String(row.id || '').trim(), row] as const)
+      .filter(([id]) => Boolean(id))
+  );
+
+  const mergedRows = rows.map((row) => {
+    const detail = detailById.get(String(row.id || '').trim()) || {};
+    const affinity =
+      (detail as any).affinity && typeof (detail as any).affinity === 'object' && !Array.isArray((detail as any).affinity)
+        ? (detail as any).affinity
+        : {};
+    return {
+      ...row,
+      components: Array.isArray((detail as any).components) ? (detail as any).components : [],
+      affinity
+    };
   });
 
-  return rows.map((row) => ({
+  return mergedRows.map((row) => ({
     name: '',
     summary: '',
     protein_sequence: '',
-    affinity: {},
-    components: [],
     constraints: [],
     properties: {
       affinity: false,

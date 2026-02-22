@@ -130,49 +130,10 @@ function normalizeHighlightAtomIndices(atomIndices: number[]): number[] {
 }
 
 function injectAtomRingOverlay(svg: string, atomIndices: number[]): string {
+  // Keep highlighted atoms clean (no extra gray stroke ring).
   const normalized = normalizeHighlightAtomIndices(atomIndices);
   if (normalized.length === 0) return svg;
-  if (typeof DOMParser === 'undefined' || typeof XMLSerializer === 'undefined') return svg;
-  try {
-    const parser = new DOMParser();
-    const xml = parser.parseFromString(svg, 'image/svg+xml');
-    const svgRoot = xml.querySelector('svg');
-    if (!svgRoot) return svg;
-    for (const atomIdx of normalized) {
-      const nodes = Array.from(svgRoot.querySelectorAll(`ellipse.atom-${atomIdx}, circle.atom-${atomIdx}`));
-      for (const node of nodes) {
-        const ring = node.cloneNode(false) as Element;
-        ring.setAttribute('fill', 'none');
-        ring.setAttribute('fill-opacity', '0');
-        ring.setAttribute('stroke', 'rgba(102, 109, 118, 0.96)');
-        ring.setAttribute('stroke-width', '1.95');
-        ring.setAttribute('stroke-linecap', 'round');
-        ring.setAttribute('stroke-linejoin', 'round');
-        ring.setAttribute(
-          'style',
-          'fill:none !important; fill-opacity:0 !important; stroke:rgba(102,109,118,0.96) !important;'
-        );
-        ring.setAttribute('pointer-events', 'none');
-        const currentClass = String(node.getAttribute('class') || '').trim();
-        ring.setAttribute('class', `${currentClass} lead-opt-mod-ring`.trim());
-
-        const tag = String(node.tagName || '').toLowerCase();
-        if (tag === 'circle') {
-          const radius = Number.parseFloat(String(node.getAttribute('r') || '0'));
-          if (Number.isFinite(radius) && radius > 0) ring.setAttribute('r', String(radius + 1.25));
-        } else if (tag === 'ellipse') {
-          const rx = Number.parseFloat(String(node.getAttribute('rx') || '0'));
-          const ry = Number.parseFloat(String(node.getAttribute('ry') || '0'));
-          if (Number.isFinite(rx) && rx > 0) ring.setAttribute('rx', String(rx + 1.25));
-          if (Number.isFinite(ry) && ry > 0) ring.setAttribute('ry', String(ry + 1.25));
-        }
-        svgRoot.appendChild(ring);
-      }
-    }
-    return new XMLSerializer().serializeToString(xml);
-  } catch {
-    return svg;
-  }
+  return svg;
 }
 
 function injectReadabilityStyle(svg: string): string {

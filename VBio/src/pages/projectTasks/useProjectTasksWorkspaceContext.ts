@@ -85,19 +85,15 @@ export function useProjectTasksWorkspaceContext({
 
     const savedConfig = loadProjectInputConfig(project.id);
     const savedTarget = String(savedConfig?.properties?.target || '')
-      .trim()
-      .toUpperCase();
-    const savedLigand = String(savedConfig?.properties?.ligand || '')
-      .trim()
-      .toUpperCase();
+      .trim();
+    const savedLigand = String(savedConfig?.properties?.binder || savedConfig?.properties?.ligand || '')
+      .trim();
     const currentProps =
       currentTaskRow?.properties && typeof currentTaskRow.properties === 'object' ? currentTaskRow.properties : null;
     const currentTarget = String(currentProps?.target || '')
-      .trim()
-      .toUpperCase();
-    const currentLigand = String(currentProps?.ligand || '')
-      .trim()
-      .toUpperCase();
+      .trim();
+    const currentLigand = String(currentProps?.binder || currentProps?.ligand || '')
+      .trim();
 
     return {
       targetChainId: currentTarget || savedTarget || null,
@@ -112,7 +108,10 @@ export function useProjectTasksWorkspaceContext({
         typeof task.duration_seconds === 'number' && Number.isFinite(task.duration_seconds)
           ? task.duration_seconds
           : null;
-      const selection = resolveTaskSelectionContext(task, workspacePairPreference);
+      const resolvedWorkflow = resolveTaskWorkflowKey(task, project?.task_type || '');
+      const workflowKey =
+        resolvedWorkflow === 'affinity' || resolvedWorkflow === 'lead_optimization' ? resolvedWorkflow : 'prediction';
+      const selection = resolveTaskSelectionContext(task, workspacePairPreference, workflowKey);
       const ligandAtomPlddts = readTaskLigandAtomPlddts(task, selection.ligandChainId, selection.ligandComponentCount <= 1);
       const ligandResiduePlddtsRaw =
         selection.ligandSequence && isSequenceLigandType(selection.ligandSequenceType)
@@ -127,9 +126,6 @@ export function useProjectTasksWorkspaceContext({
       const ligandMeanPlddt = mean(ligandAtomPlddts);
       const ligandSequenceMeanPlddt = mean(ligandResiduePlddts);
       const plddt = metrics.plddt !== null ? metrics.plddt : ligandMeanPlddt ?? ligandSequenceMeanPlddt;
-      const resolvedWorkflow = resolveTaskWorkflowKey(task, project?.task_type || '');
-      const workflowKey =
-        resolvedWorkflow === 'affinity' || resolvedWorkflow === 'lead_optimization' ? resolvedWorkflow : 'prediction';
       const leadOpt = readLeadOptTaskSummary(task);
       const resolvedBucketCount =
         workflowKey === 'lead_optimization' && leadOpt

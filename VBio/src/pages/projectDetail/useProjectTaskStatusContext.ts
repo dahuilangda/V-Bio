@@ -43,7 +43,20 @@ export function useProjectTaskStatusContext({
     return projectTasks.find((item) => String(item.task_id || '').trim() === activeTaskId) || null;
   }, [project?.task_id, projectTasks]);
 
-  const statusContextTaskRow = requestedStatusTaskRow || activeStatusTaskRow;
+  const statusContextTaskRow = useMemo(() => {
+    if (!requestedStatusTaskRow) return activeStatusTaskRow;
+    if (!activeStatusTaskRow) return requestedStatusTaskRow;
+    const requestedTaskId = String(requestedStatusTaskRow.task_id || '').trim();
+    const activeTaskId = String(activeStatusTaskRow.task_id || '').trim();
+    if (!requestedTaskId || requestedTaskId !== activeTaskId) {
+      const activeState = String(activeStatusTaskRow.task_state || '').toUpperCase();
+      const requestedState = String(requestedStatusTaskRow.task_state || '').toUpperCase();
+      if ((activeState === 'QUEUED' || activeState === 'RUNNING') && requestedState !== 'QUEUED' && requestedState !== 'RUNNING') {
+        return activeStatusTaskRow;
+      }
+    }
+    return requestedStatusTaskRow;
+  }, [requestedStatusTaskRow, activeStatusTaskRow]);
   const displayTaskState: TaskState = statusContextTaskRow?.task_state || project?.task_state || 'DRAFT';
   const displaySubmittedAt = statusContextTaskRow?.submitted_at ?? project?.submitted_at ?? null;
   const displayCompletedAt = statusContextTaskRow?.completed_at ?? project?.completed_at ?? null;

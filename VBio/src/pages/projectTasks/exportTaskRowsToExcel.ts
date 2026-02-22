@@ -102,7 +102,7 @@ export async function exportTaskRowsToExcel({
     const row = filteredRows[i];
     const { metrics } = row;
     const task = authoritativeTaskMap.get(row.task.id) || row.task;
-    const selection = resolveTaskSelectionContext(task, workspacePairPreference);
+    const selection = resolveTaskSelectionContext(task, workspacePairPreference, row.workflowKey);
     const ligandSmiles = selection.ligandSmiles;
     const ligandIsSmiles = selection.ligandIsSmiles;
     const ligandAtomPlddts =

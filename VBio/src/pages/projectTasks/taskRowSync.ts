@@ -15,6 +15,7 @@ import {
   sanitizeTaskRows,
   sortProjectTasks
 } from './taskDataUtils';
+import { resolveTaskWorkflowKey } from './taskPresentation';
 
 function hasLeadOptMmpOnlySnapshot(task: ProjectTask): boolean {
   if (String(task.structure_name || '').trim().length > 0) return false;
@@ -138,7 +139,7 @@ export async function hydrateTaskMetricsFromResultRows(
       const taskId = String(row.task_id || '').trim();
       if (!taskId || row.task_state !== 'SUCCESS') return false;
       if (hasLeadOptMmpOnlySnapshot(row)) return false;
-      const selection = resolveTaskSelectionContext(row);
+      const selection = resolveTaskSelectionContext(row, undefined, resolveTaskWorkflowKey(row, projectRow.task_type || ''));
       const confidence =
         row.confidence && typeof row.confidence === 'object' && !Array.isArray(row.confidence)
           ? (row.confidence as Record<string, unknown>)

@@ -30,6 +30,82 @@ interface UseProjectTasksDataLoaderResult {
   loadData: (options?: LoadTaskDataOptions) => Promise<void>;
 }
 
+const TASK_STATE_PRIORITY: Record<string, number> = {
+  DRAFT: 0,
+  QUEUED: 1,
+  RUNNING: 2,
+  SUCCESS: 3,
+  FAILURE: 3,
+  REVOKED: 3,
+};
+
+function taskStatePriority(value: unknown): number {
+  return TASK_STATE_PRIORITY[String(value || '').trim().toUpperCase()] ?? 0;
+}
+
+function mergeTaskRuntimeFields(next: ProjectTask, prev: ProjectTask): ProjectTask {
+  const nextTaskId = String(next.task_id || '').trim();
+  const prevTaskId = String(prev.task_id || '').trim();
+  if (!nextTaskId || !prevTaskId || nextTaskId !== prevTaskId) return next;
+  const nextPriority = taskStatePriority(next.task_state);
+  const prevPriority = taskStatePriority(prev.task_state);
+  if (prevPriority < nextPriority) return next;
+  if (prevPriority > nextPriority) {
+    return {
+      ...next,
+      task_state: prev.task_state,
+      status_text: prev.status_text,
+      error_text: prev.error_text,
+      completed_at: prev.completed_at || next.completed_at,
+      duration_seconds:
+        prev.duration_seconds ?? next.duration_seconds
+    };
+  }
+  return {
+    ...next,
+    completed_at: next.completed_at || prev.completed_at,
+    duration_seconds: next.duration_seconds ?? prev.duration_seconds,
+    status_text: String(next.status_text || '').trim() || prev.status_text,
+    error_text: String(next.error_text || '').trim() || prev.error_text
+  };
+}
+
+function mergeTaskRowsWithLocal(nextRows: ProjectTask[], prevRows: ProjectTask[]): ProjectTask[] {
+  if (prevRows.length === 0 || nextRows.length === 0) return nextRows;
+  const prevById = new Map(prevRows.map((row) => [row.id, row] as const));
+  return nextRows.map((row) => {
+    const prev = prevById.get(row.id);
+    if (!prev) return row;
+    return mergeTaskRuntimeFields(row, prev);
+  });
+}
+
+function mergeProjectRuntimeFields(next: Project, prev: Project): Project {
+  const nextTaskId = String(next.task_id || '').trim();
+  const prevTaskId = String(prev.task_id || '').trim();
+  if (!nextTaskId || !prevTaskId || nextTaskId !== prevTaskId) return next;
+  const nextPriority = taskStatePriority(next.task_state);
+  const prevPriority = taskStatePriority(prev.task_state);
+  if (prevPriority < nextPriority) return next;
+  if (prevPriority > nextPriority) {
+    return {
+      ...next,
+      task_state: prev.task_state,
+      status_text: prev.status_text,
+      error_text: prev.error_text,
+      completed_at: prev.completed_at || next.completed_at,
+      duration_seconds: prev.duration_seconds ?? next.duration_seconds
+    };
+  }
+  return {
+    ...next,
+    completed_at: next.completed_at || prev.completed_at,
+    duration_seconds: next.duration_seconds ?? prev.duration_seconds,
+    status_text: String(next.status_text || '').trim() || prev.status_text,
+    error_text: String(next.error_text || '').trim() || prev.error_text
+  };
+}
+
 export function useProjectTasksDataLoader({
   projectId,
   sessionUserId,
@@ -134,9 +210,11 @@ export function useProjectTasksDataLoader({
 
         lastFullFetchTsRef.current = Date.now();
         const sortedTaskRows = sortProjectTasks(sanitizeTaskRows(taskRows));
+        const mergedProject = cachedProject ? mergeProjectRuntimeFields(projectRow, cachedProject) : projectRow;
+        const mergedRows = mergeTaskRowsWithLocal(sortedTaskRows, cachedTasks);
         if (loadSeqRef.current !== loadSeq) return;
-        setProject(projectRow);
-        setTasks(sanitizeTaskRows(sortedTaskRows));
+        setProject(mergedProject);
+        setTasks(sanitizeTaskRows(mergedRows));
 
         if (!preferBackendStatus) {
           return;
@@ -144,7 +222,7 @@ export function useProjectTasksDataLoader({
 
         void (async () => {
           try {
-            const synced = await syncRuntimeTasks(projectRow, sortedTaskRows);
+            const synced = await syncRuntimeTasks(mergedProject, mergedRows);
             if (loadSeqRef.current !== loadSeq) return;
             setProject(synced.project);
             setTasks(sanitizeTaskRows(synced.taskRows));

@@ -20,13 +20,25 @@ function normalizeTaskComponents(components: InputComponent[]): InputComponent[]
 
 const AFFINITY_TARGET_UPLOAD_COMPONENT_ID = '__affinity_target_upload__';
 const AFFINITY_LIGAND_UPLOAD_COMPONENT_ID = '__affinity_ligand_upload__';
+const LEADOPT_TARGET_UPLOAD_COMPONENT_ID = '__leadopt_target_upload__';
+const LEADOPT_LIGAND_UPLOAD_COMPONENT_ID = '__leadopt_ligand_upload__';
 
-function isAffinityUploadRawComponent(value: unknown): boolean {
-  if (!value || typeof value !== 'object') return false;
-  const component = value as Record<string, unknown>;
+type TaskLigandSourceWorkflow = 'prediction' | 'affinity' | 'lead_optimization' | 'auto';
+
+function normalizeTaskLigandSourceWorkflow(value: string | null | undefined): TaskLigandSourceWorkflow {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase();
+  if (normalized === 'prediction' || normalized === 'affinity' || normalized === 'lead_optimization') {
+    return normalized;
+  }
+  return 'auto';
+}
+
+function resolveAffinityUploadRole(component: Record<string, unknown>): 'target' | 'ligand' | null {
   const id = typeof component.id === 'string' ? component.id.trim() : '';
   if (id === AFFINITY_TARGET_UPLOAD_COMPONENT_ID || id === AFFINITY_LIGAND_UPLOAD_COMPONENT_ID) {
-    return true;
+    return id === AFFINITY_TARGET_UPLOAD_COMPONENT_ID ? 'target' : 'ligand';
   }
   const uploadMeta =
     component.affinityUpload && typeof component.affinityUpload === 'object'
@@ -35,101 +47,81 @@ function isAffinityUploadRawComponent(value: unknown): boolean {
         ? (component.affinity_upload as Record<string, unknown>)
         : null;
   const role = typeof uploadMeta?.role === 'string' ? uploadMeta.role.trim().toLowerCase() : '';
-  return role === 'target' || role === 'ligand';
+  if (role === 'target' || role === 'ligand') return role;
+  return null;
+}
+
+function resolveLeadOptUploadRole(component: Record<string, unknown>): 'target' | 'ligand' | null {
+  const id = typeof component.id === 'string' ? component.id.trim() : '';
+  if (id === LEADOPT_TARGET_UPLOAD_COMPONENT_ID || id === LEADOPT_LIGAND_UPLOAD_COMPONENT_ID) {
+    return id === LEADOPT_TARGET_UPLOAD_COMPONENT_ID ? 'target' : 'ligand';
+  }
+  const uploadMeta =
+    component.leadOptUpload && typeof component.leadOptUpload === 'object'
+      ? (component.leadOptUpload as Record<string, unknown>)
+      : component.lead_opt_upload && typeof component.lead_opt_upload === 'object'
+        ? (component.lead_opt_upload as Record<string, unknown>)
+        : null;
+  const role = typeof uploadMeta?.role === 'string' ? uploadMeta.role.trim().toLowerCase() : '';
+  if (role === 'target' || role === 'ligand') return role;
+  return null;
+}
+
+function normalizeTaskRawComponent(component: Record<string, unknown>): Record<string, unknown> | null {
+  const affinityUploadRole = resolveAffinityUploadRole(component);
+  if (affinityUploadRole === 'target') return null;
+  if (affinityUploadRole === 'ligand') {
+    const sequence = normalizeComponentSequence('ligand', typeof component.sequence === 'string' ? component.sequence : '');
+    if (!sequence) return null;
+    return {
+      ...component,
+      type: 'ligand',
+      inputMethod: 'jsme',
+      sequence,
+      affinityUpload: undefined,
+      affinity_upload: undefined
+    };
+  }
+
+  const leadOptUploadRole = resolveLeadOptUploadRole(component);
+  if (leadOptUploadRole === 'target') return null;
+  if (leadOptUploadRole === 'ligand') {
+    const sequence = normalizeComponentSequence('ligand', typeof component.sequence === 'string' ? component.sequence : '');
+    if (!sequence) return null;
+    return {
+      ...component,
+      type: 'ligand',
+      inputMethod: 'jsme',
+      sequence,
+      leadOptUpload: undefined,
+      lead_opt_upload: undefined
+    };
+  }
+  return component;
 }
 
 function readTaskComponents(task: ProjectTask): InputComponent[] {
-  const rawComponents = Array.isArray(task.components) ? (task.components as unknown[]) : [];
-  const filteredRawComponents = rawComponents.filter((component) => !isAffinityUploadRawComponent(component));
-  const components = filteredRawComponents.length > 0 ? normalizeTaskComponents(filteredRawComponents as InputComponent[]) : [];
-  if (components.length > 0) return components;
-
-  const fallback: InputComponent[] = [];
-  const proteinSequence = normalizeComponentSequence('protein', task.protein_sequence || '');
-  const ligandSmiles = normalizeComponentSequence('ligand', task.ligand_smiles || '');
-  if (proteinSequence) {
-    fallback.push({
-      id: 'task-protein-1',
-      type: 'protein',
-      numCopies: 1,
-      sequence: proteinSequence,
-      useMsa: true,
-      cyclic: false
-    });
-  }
-  if (ligandSmiles) {
-    fallback.push({
-      id: 'task-ligand-1',
-      type: 'ligand',
-      numCopies: 1,
-      sequence: ligandSmiles,
-      inputMethod: 'jsme'
-    });
-  }
-  return fallback;
-}
-
-function hasAffinityUploadComponent(task: ProjectTask): boolean {
-  const rawComponents = Array.isArray(task.components) ? (task.components as unknown[]) : [];
-  return rawComponents.some((component) => isAffinityUploadRawComponent(component));
+  const rawComponents = Array.isArray(task.components)
+    ? (task.components as unknown[])
+        .filter((component): component is Record<string, unknown> => Boolean(component && typeof component === 'object'))
+        .map((component) => normalizeTaskRawComponent(component))
+        .filter((component): component is Record<string, unknown> => component !== null)
+    : [];
+  const components = rawComponents.length > 0 ? normalizeTaskComponents(rawComponents as unknown as InputComponent[]) : [];
+  return components;
 }
 
 function readTaskPrimaryLigand(
-  task: ProjectTask,
   components: InputComponent[],
   preferredComponentId: string | null,
-  preferredLigandChainId: string | null = null
+  preferredLigandChainId: string | null = null,
+  strictPreferredLigand = false,
+  workflow: TaskLigandSourceWorkflow = 'auto'
 ): { smiles: string; isSmiles: boolean } {
-  const affinityUploadTask = hasAffinityUploadComponent(task);
-  const hasAtomLevelLigandConfidence = hasTaskLigandAtomPlddts(task, preferredLigandChainId, true);
-  const directLigand = normalizeComponentSequence('ligand', task.ligand_smiles || '');
-  const affinityData =
-    task.affinity && typeof task.affinity === 'object' && !Array.isArray(task.affinity)
-      ? (task.affinity as Record<string, unknown>)
-      : null;
-  const affinityLigand = normalizeComponentSequence(
-    'ligand',
-    readFirstNonEmptyStringMetric(affinityData, ['ligand_smiles', 'ligandSmiles', 'smiles', 'ligand.smiles'])
-  );
-  const affinityMapLigand = normalizeComponentSequence('ligand', readLigandSmilesFromMap(affinityData, preferredLigandChainId));
-  const confidenceData =
-    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
-      ? (task.confidence as Record<string, unknown>)
-      : null;
-  const confidenceLigand = normalizeComponentSequence(
-    'ligand',
-    readFirstNonEmptyStringMetric(confidenceData, ['ligand_smiles', 'ligandSmiles', 'smiles', 'ligand.smiles'])
-  );
-  const confidenceMapLigand = normalizeComponentSequence('ligand', readLigandSmilesFromMap(confidenceData, preferredLigandChainId));
+  const normalizedWorkflow = normalizeTaskLigandSourceWorkflow(workflow);
 
-  if (affinityUploadTask) {
-    if (confidenceLigand) return { smiles: confidenceLigand, isSmiles: true };
-    if (confidenceMapLigand) return { smiles: confidenceMapLigand, isSmiles: true };
-    if (affinityLigand) return { smiles: affinityLigand, isSmiles: true };
-    if (affinityMapLigand) return { smiles: affinityMapLigand, isSmiles: true };
-    if (directLigand) return { smiles: directLigand, isSmiles: true };
-  }
-
-  // When atom-level confidence exists, always bind 2D rendering to the aligned
-  // confidence/affinity SMILES first, otherwise atom colors and ordering can drift.
-  if (hasAtomLevelLigandConfidence) {
-    if (confidenceMapLigand) {
-      return { smiles: confidenceMapLigand, isSmiles: true };
-    }
-    if (confidenceLigand) {
-      return { smiles: confidenceLigand, isSmiles: true };
-    }
-    if (affinityMapLigand) {
-      return { smiles: affinityMapLigand, isSmiles: true };
-    }
-    if (affinityLigand) {
-      return { smiles: affinityLigand, isSmiles: true };
-    }
-    if (directLigand) {
-      return { smiles: directLigand, isSmiles: true };
-    }
-  }
-
+  // Respect explicit ligand component selection first (e.g. binding ligand = Comp2).
+  // Ligand View must reflect the exact user-selected component.
   if (preferredComponentId) {
     const selected = components.find((item) => item.id === preferredComponentId);
     const selectedValue =
@@ -142,33 +134,35 @@ function readTaskPrimaryLigand(
     }
   }
 
-  const ligand = components.find((item) => item.type === 'ligand' && normalizeComponentSequence('ligand', item.sequence));
-  if (ligand) {
-    const value = normalizeComponentSequence('ligand', ligand.sequence);
+  if (normalizedWorkflow === 'affinity' || normalizedWorkflow === 'lead_optimization') {
+    const uploadedLigand = components.find((item) => {
+      if (item.type !== 'ligand') return false;
+      if (!normalizeComponentSequence('ligand', item.sequence)) return false;
+      const raw = item as unknown as Record<string, unknown>;
+      if (normalizedWorkflow === 'affinity') {
+        return resolveAffinityUploadRole(raw) === 'ligand';
+      }
+      return resolveLeadOptUploadRole(raw) === 'ligand';
+    });
+    if (uploadedLigand) {
+      const value = normalizeComponentSequence('ligand', uploadedLigand.sequence);
+      return {
+        smiles: value,
+        isSmiles: uploadedLigand.inputMethod !== 'ccd'
+      };
+    }
     return {
-      smiles: value,
-      isSmiles: ligand.inputMethod !== 'ccd'
+      smiles: '',
+      isSmiles: false
     };
   }
 
-  if (directLigand) {
-    return { smiles: directLigand, isSmiles: true };
-  }
-
-  if (affinityLigand) {
-    return { smiles: affinityLigand, isSmiles: true };
-  }
-
-  if (affinityMapLigand) {
-    return { smiles: affinityMapLigand, isSmiles: true };
-  }
-
-  if (confidenceLigand) {
-    return { smiles: confidenceLigand, isSmiles: true };
-  }
-
-  if (confidenceMapLigand) {
-    return { smiles: confidenceMapLigand, isSmiles: true };
+  if (strictPreferredLigand && preferredLigandChainId) {
+    // Strict mode means the binding ligand must resolve from component selection.
+    return {
+      smiles: '',
+      isSmiles: false
+    };
   }
 
   return {
@@ -222,44 +216,6 @@ function readFirstNonEmptyStringMetric(data: Record<string, unknown> | null, pat
     const value = readObjectPath(data, path);
     if (typeof value === 'string' && value.trim()) {
       return value.trim();
-    }
-  }
-  return '';
-}
-
-function readLigandSmilesFromMap(data: Record<string, unknown> | null, preferredLigandChainId: string | null = null): string {
-  if (!data) return '';
-  const mapCandidates: unknown[] = [
-    readObjectPath(data, 'ligand_smiles_map'),
-    readObjectPath(data, 'ligand.smiles_map'),
-    readObjectPath(data, 'ligand.smilesMap')
-  ];
-  const preferredChain = normalizeChainKey(String(preferredLigandChainId || ''));
-  const modelChain = normalizeChainKey(readFirstNonEmptyStringMetric(data, ['model_ligand_chain_id']));
-  const requestedChain = normalizeChainKey(readFirstNonEmptyStringMetric(data, ['requested_ligand_chain_id', 'requested_ligand_chain']));
-  const preferredCandidates = [preferredChain, modelChain, requestedChain].filter(Boolean);
-  for (const mapValue of mapCandidates) {
-    if (!mapValue || typeof mapValue !== 'object' || Array.isArray(mapValue)) continue;
-    const entries = Object.entries(mapValue as Record<string, unknown>)
-      .map(([key, value]) => {
-        if (typeof value !== 'string') return null;
-        const next = value.trim();
-        if (!next) return null;
-        return { key: normalizeChainKey(key), value: next };
-      })
-      .filter((entry): entry is { key: string; value: string } => entry !== null);
-    if (entries.length === 0) continue;
-
-    for (const preferred of preferredCandidates) {
-      const matched = entries.find((entry) => {
-        const keyChain = entry.key.includes(':') ? entry.key.slice(0, entry.key.indexOf(':')).trim() : entry.key;
-        return chainKeysMatch(keyChain, preferred) || chainKeysMatch(preferred, keyChain);
-      });
-      if (matched?.value) return matched.value;
-    }
-
-    if (entries.length === 1) {
-      return entries[0].value;
     }
   }
   return '';
@@ -413,7 +369,13 @@ function readChainMeanPlddtForChain(confidence: Record<string, unknown>, chainId
   return value >= 0 && value <= 1 ? value * 100 : value;
 }
 
-function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: WorkspacePairPreference): TaskSelectionContext {
+function resolveTaskSelectionContext(
+  task: ProjectTask,
+  workspacePreference?: WorkspacePairPreference,
+  workflowHint: TaskLigandSourceWorkflow | string = 'auto'
+): TaskSelectionContext {
+  const workflow = normalizeTaskLigandSourceWorkflow(workflowHint);
+  const useBindingPreference = workflow === 'prediction' || workflow === 'auto';
   const taskProperties = task.properties && typeof task.properties === 'object' ? task.properties : null;
   const rawTarget = taskProperties && typeof taskProperties.target === 'string' ? taskProperties.target.trim() : '';
   const rawLigand = taskProperties && typeof taskProperties.ligand === 'string' ? taskProperties.ligand.trim() : '';
@@ -422,53 +384,36 @@ function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: Wo
     task.affinity && typeof task.affinity === 'object' && !Array.isArray(task.affinity)
       ? (task.affinity as Record<string, unknown>)
       : null;
-  const confidenceData =
-    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
-      ? (task.confidence as Record<string, unknown>)
-      : null;
   const affinityTargetHint = readFirstNonEmptyStringMetric(affinityData, [
     'requested_target_chain',
     'target_chain',
     'binder_chain'
   ]);
-  const affinityLigandHint = readFirstNonEmptyStringMetric(affinityData, [
-    'requested_ligand_chain',
-    'ligand_chain'
-  ]);
-  const affinityModelLigandHint = readFirstNonEmptyStringMetric(affinityData, [
-    'model_ligand_chain_id'
-  ]);
-  const confidenceModelLigandHint = readFirstNonEmptyStringMetric(confidenceData, [
-    'model_ligand_chain_id'
-  ]);
+  const confidenceData =
+    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
+      ? (task.confidence as Record<string, unknown>)
+      : null;
   const confidenceChainIds = readStringListMetric(confidenceData, ['chain_ids']);
   const preferredTarget = String(workspacePreference?.targetChainId || '')
     .trim();
-  const preferredLigand = String(workspacePreference?.ligandChainId || '')
-    .trim();
-  // Row-level task setting should win over workspace preference.
-  // For prediction workflows, "binding ligand" is represented by `binder`.
   const targetCandidate = rawTarget || affinityTargetHint || preferredTarget;
-  const ligandCandidate = rawBinder || rawLigand || affinityLigandHint || preferredLigand;
   const activeComponents = readTaskComponents(task).filter((item) => Boolean(item.sequence.trim()));
   const ligandComponentCount = activeComponents.filter((item) => item.type === 'ligand').length;
 
   if (activeComponents.length === 0) {
-    const ligand = readTaskPrimaryLigand(task, [], null, ligandCandidate || null);
     const fallbackChainIds = Array.from(
       new Set([
         ...splitChainTokens(targetCandidate),
-        ...splitChainTokens(ligandCandidate),
         ...confidenceChainIds
       ])
     );
     return {
       chainIds: fallbackChainIds,
       targetChainId: targetCandidate || null,
-      ligandChainId: ligandCandidate || null,
-      ligandSmiles: ligand.smiles,
-      ligandIsSmiles: ligand.isSmiles,
-      ligandComponentCount: ligand.smiles ? 1 : 0,
+      ligandChainId: null,
+      ligandSmiles: '',
+      ligandIsSmiles: false,
+      ligandComponentCount,
       ligandSequence: '',
       ligandSequenceType: null
     };
@@ -503,6 +448,14 @@ function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: Wo
     const raw = String(candidate || '').trim();
     if (!raw) return null;
     const normalized = raw.toUpperCase();
+    const byOrdinalMatch = raw.match(/^comp(?:onent)?\s*#?(\d+)$/i) || raw.match(/^#?(\d+)$/);
+    if (byOrdinalMatch) {
+      const ordinal = Number.parseInt(byOrdinalMatch[1], 10);
+      if (Number.isFinite(ordinal) && ordinal > 0) {
+        const byOrdinal = componentOptions[ordinal - 1];
+        if (byOrdinal?.chainId) return byOrdinal.chainId;
+      }
+    }
     const byKnownChain = chainIdByKey.get(normalizeChainKey(raw));
     if (byKnownChain) return byKnownChain;
     const byComponent = componentOptions.find((item) => item.componentId === raw);
@@ -518,99 +471,75 @@ function resolveTaskSelectionContext(task: ProjectTask, workspacePreference?: Wo
     }
     return null;
   };
-  const confidenceLigandHintCandidates: string[] = [];
-  const confidenceLigandId = confidenceData && typeof confidenceData.ligand_chain_id === 'string'
-    ? confidenceData.ligand_chain_id.trim()
-    : '';
-  if (confidenceLigandId) {
-    confidenceLigandHintCandidates.push(confidenceLigandId);
-  }
-  const confidenceLigandIds = confidenceData?.ligand_chain_ids;
-  if (Array.isArray(confidenceLigandIds)) {
-    for (const candidate of confidenceLigandIds) {
-      if (typeof candidate !== 'string' || !candidate.trim()) continue;
-      confidenceLigandHintCandidates.push(candidate.trim());
+  const resolveComponentFromCandidate = (
+    candidate: string,
+    options?: { allowAnyType?: boolean }
+  ): { componentId: string; chainId: string | null; type: InputComponent['type']; isSmiles: boolean } | null => {
+    const allowAnyType = Boolean(options?.allowAnyType);
+    const raw = String(candidate || '').trim();
+    if (!raw) return null;
+    const chainId = resolveChainFromCandidate(raw);
+    if (chainId) {
+      const byChain = componentOptions.find((item) => item.chainId === chainId);
+      if (byChain && (allowAnyType || byChain.type === 'ligand')) return byChain;
     }
-  }
-  const confidenceByChain = confidenceData?.ligand_atom_plddts_by_chain;
-  if (confidenceByChain && typeof confidenceByChain === 'object' && !Array.isArray(confidenceByChain)) {
-    for (const key of Object.keys(confidenceByChain as Record<string, unknown>)) {
-      if (!key.trim()) continue;
-      confidenceLigandHintCandidates.push(key.trim());
+    const byComponentId = componentOptions.find((item) => item.componentId === raw);
+    if (byComponentId && (allowAnyType || byComponentId.type === 'ligand')) return byComponentId;
+    return null;
+  };
+  const resolveWorkflowUploadLigandComponent = (
+    workflowType: 'affinity' | 'lead_optimization'
+  ): { componentId: string; chainId: string | null; type: InputComponent['type']; isSmiles: boolean } | null => {
+    for (const component of activeComponents) {
+      if (component.type !== 'ligand') continue;
+      if (!normalizeComponentSequence('ligand', component.sequence)) continue;
+      const raw = component as unknown as Record<string, unknown>;
+      const role =
+        workflowType === 'affinity' ? resolveAffinityUploadRole(raw) : resolveLeadOptUploadRole(raw);
+      if (role !== 'ligand') continue;
+      const option = componentOptions.find((item) => item.componentId === component.id) || null;
+      if (option) return option;
     }
-  }
-  const ligandHintKeys = new Set(
-    [
-      ...confidenceLigandHintCandidates,
-      ...splitChainTokens(rawBinder),
-      ...splitChainTokens(rawLigand),
-      ...splitChainTokens(affinityModelLigandHint),
-      ...splitChainTokens(confidenceModelLigandHint),
-      ...splitChainTokens(affinityLigandHint),
-      ...splitChainTokens(preferredLigand),
-      ...splitChainTokens(ligandCandidate)
-    ]
-      .map((item) => normalizeChainKey(item))
-      .filter(Boolean)
-  );
-  const fallbackTargetChainId =
-    componentOptions.find((item) => item.type !== 'ligand' && item.chainId)?.chainId || chainAssignments[0]?.[0] || null;
-  const normalizedFallbackTarget = fallbackTargetChainId ? resolveChainFromCandidate(fallbackTargetChainId) : null;
-  const inferredFallbackTarget =
-    chainIds.find((chainId) => !ligandHintKeys.has(normalizeChainKey(chainId))) ||
+    return null;
+  };
+  const targetChainId =
+    resolveChainFromCandidate(targetCandidate) ||
+    componentOptions.find((item) => item.type !== 'ligand' && item.chainId)?.chainId ||
+    chainAssignments[0]?.[0] ||
     chainIds[0] ||
     null;
-  const targetChainId = resolveChainFromCandidate(targetCandidate) || normalizedFallbackTarget || inferredFallbackTarget;
-  const targetComponentId = targetChainId ? chainToComponent.get(normalizeChainKey(targetChainId))?.id || null : null;
-  const candidateLigandOptions = componentOptions.filter((item) => {
-    if (!item.chainId) return false;
-    if (item.chainId === targetChainId) return false;
-    if (targetComponentId && item.componentId === targetComponentId) return false;
-    return true;
-  });
-  const defaultLigandOption =
-    candidateLigandOptions.find((item) => item.isSmiles) ||
-    componentOptions.find((item) => item.isSmiles && item.chainId) ||
-    candidateLigandOptions[0] ||
-    componentOptions.find((item) => Boolean(item.chainId)) ||
-    null;
-  const confidencePreferredLigandChainId = confidenceLigandHintCandidates
-    .map((candidate) => resolveChainFromCandidate(candidate))
-    .find((candidate): candidate is string => Boolean(candidate));
-  const preferredLigandChainId =
-    resolveChainFromCandidate(rawBinder) ||
-    resolveChainFromCandidate(rawLigand) ||
-    resolveChainFromCandidate(affinityModelLigandHint) ||
-    resolveChainFromCandidate(confidenceModelLigandHint) ||
-    resolveChainFromCandidate(affinityLigandHint) ||
-    resolveChainFromCandidate(preferredLigand) ||
-    resolveChainFromCandidate(ligandCandidate) ||
-    confidencePreferredLigandChainId ||
-    null;
-  const preferredLigandComponentId = preferredLigandChainId
-    ? chainToComponent.get(normalizeChainKey(preferredLigandChainId))?.id || null
+  const predictionBindingCandidates = [
+    ...splitChainTokens(rawBinder),
+    ...splitChainTokens(rawLigand)
+  ];
+  const selectedLigandOption = (() => {
+    if (useBindingPreference) {
+      for (const candidate of predictionBindingCandidates) {
+        const resolved = resolveComponentFromCandidate(candidate, { allowAnyType: true });
+        if (resolved) return resolved;
+      }
+      return null;
+    }
+    if (workflow === 'affinity') return resolveWorkflowUploadLigandComponent('affinity');
+    if (workflow === 'lead_optimization') return resolveWorkflowUploadLigandComponent('lead_optimization');
+    return null;
+  })();
+  const ligandChainId = selectedLigandOption?.chainId || null;
+  const selectedLigandComponent = selectedLigandOption
+    ? chainToComponent.get(normalizeChainKey(String(selectedLigandOption.chainId || ''))) ||
+      activeComponents.find((item) => item.id === selectedLigandOption.componentId) ||
+      null
     : null;
-  const inferredFallbackLigand =
-    chainIds.find((chainId) => chainId !== targetChainId && ligandHintKeys.has(normalizeChainKey(chainId))) ||
-    chainIds.find((chainId) => chainId !== targetChainId) ||
-    null;
-  const ligandChainId =
-    preferredLigandChainId &&
-    preferredLigandChainId !== targetChainId &&
-    preferredLigandComponentId &&
-    preferredLigandComponentId !== targetComponentId
-      ? preferredLigandChainId
-      : defaultLigandOption?.chainId || inferredFallbackLigand;
-  const selectedLigandComponent = ligandChainId ? chainToComponent.get(normalizeChainKey(ligandChainId)) || null : null;
-  const ligand =
+  let ligand =
     selectedLigandComponent?.type === 'ligand'
-      ? readTaskPrimaryLigand(task, activeComponents, selectedLigandComponent.id || null, ligandChainId)
-      : selectedLigandComponent
-        ? {
-            smiles: '',
-            isSmiles: false
-          }
-        : readTaskPrimaryLigand(task, activeComponents, null, ligandChainId);
+      ? readTaskPrimaryLigand(activeComponents, selectedLigandComponent.id || null, ligandChainId, true, workflow)
+      : {
+          smiles: '',
+          isSmiles: false
+        };
+  if (!selectedLigandComponent && (workflow === 'affinity' || workflow === 'lead_optimization')) {
+    ligand = readTaskPrimaryLigand(activeComponents, null, null, true, workflow);
+  }
   const ligandSequence =
     selectedLigandComponent && isSequenceLigandType(selectedLigandComponent.type)
       ? normalizeComponentSequence(selectedLigandComponent.type, selectedLigandComponent.sequence || '')

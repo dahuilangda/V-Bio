@@ -438,10 +438,12 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     if (!project || !draft) return;
     const taskId = String(payload.taskId || '').trim();
     if (!taskId) return;
+    const effectiveLeadOptLigandSmiles =
+      readText(payload.querySmiles).trim() || readText(leadOptPrimary.ligandSmiles).trim();
     const snapshotComponents = buildLeadOptUploadSnapshotComponents(
       draft.inputConfig.components,
       payload.referenceUploads,
-      payload.querySmiles || leadOptPrimary.ligandSmiles
+      effectiveLeadOptLigandSmiles
     );
     const queuedAt = new Date().toISOString();
     const selection = buildLeadOptSelectionFromPayload(payload.requestPayload || {}, {
@@ -460,7 +462,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       reuseTaskRowId: null,
       snapshotComponents,
       proteinSequenceOverride: leadOptPrimary.proteinSequence,
-      ligandSmilesOverride: payload.querySmiles || leadOptPrimary.ligandSmiles
+      ligandSmilesOverride: effectiveLeadOptLigandSmiles
     });
     leadOptMmpTaskRowMapRef.current[taskId] = draftTaskRow.id;
     leadOptActiveTaskRowIdRef.current = draftTaskRow.id;
@@ -802,21 +804,22 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
           ? readText(statusContextTaskRow?.id).trim()
           : '';
       const editableDraftRowId = contextDraftRowId;
-      const dedupeKey = `${project.id}|${editableDraftRowId}|${targetName}:${targetSize}|${ligandName}:${ligandSize}|${leadOptPrimary.ligandSmiles}`;
+      const effectiveLeadOptLigandSmiles = readText(leadOptPrimary.ligandSmiles).trim();
+      const dedupeKey = `${project.id}|${editableDraftRowId}|${targetName}:${targetSize}|${ligandName}:${ligandSize}|${effectiveLeadOptLigandSmiles}`;
       if (leadOptUploadPersistKeyRef.current === dedupeKey) return;
       leadOptUploadPersistKeyRef.current = dedupeKey;
 
       const snapshotComponents = buildLeadOptUploadSnapshotComponents(
         draft.inputConfig.components,
         uploads,
-        leadOptPrimary.ligandSmiles
+        effectiveLeadOptLigandSmiles
       );
 
       if (editableDraftRowId) {
         await patchTask(editableDraftRowId, {
           components: snapshotComponents,
           protein_sequence: leadOptPrimary.proteinSequence,
-          ligand_smiles: leadOptPrimary.ligandSmiles
+          ligand_smiles: effectiveLeadOptLigandSmiles
         });
       }
     },
