@@ -74,6 +74,16 @@ function toFiniteNumber(value: unknown): number | null {
   return numeric;
 }
 
+function readBooleanToken(value: unknown): boolean | null {
+  if (value === true) return true;
+  if (value === false) return false;
+  const token = readText(value).trim().toLowerCase();
+  if (!token) return null;
+  if (token === '1' || token === 'true' || token === 'yes' || token === 'on') return true;
+  if (token === '0' || token === 'false' || token === 'no' || token === 'off') return false;
+  return null;
+}
+
 function compactLeadOptPredictionRecord(value: LeadOptPredictionRecord): LeadOptPredictionRecord {
   return {
     taskId: readText(value.taskId).trim(),
@@ -140,6 +150,12 @@ function compactLeadOptCandidatesUiState(value: LeadOptCandidatesUiState): LeadO
     logpMax: readText(value.logpMax).trim(),
     tpsaMin: readText(value.tpsaMin).trim(),
     tpsaMax: readText(value.tpsaMax).trim(),
+    plddtMin: readText(value.plddtMin).trim(),
+    plddtMax: readText(value.plddtMax).trim(),
+    iptmMin: readText(value.iptmMin).trim(),
+    iptmMax: readText(value.iptmMax).trim(),
+    paeMin: readText(value.paeMin).trim(),
+    paeMax: readText(value.paeMax).trim(),
     structureSearchMode: value.structureSearchMode,
     structureSearchQuery: readText(value.structureSearchQuery).trim(),
     previewRenderMode: value.previewRenderMode
@@ -177,6 +193,17 @@ function buildLeadOptSelectionFromPayload(payload: Record<string, unknown>, cont
   const variableQueries = Array.from(
     new Set(variableItems.map((item) => readText(item.query).trim()).filter(Boolean))
   );
+  const groupedByEnvironmentValue = readBooleanToken(payload.grouped_by_environment);
+  const groupedByEnvironmentMode =
+    groupedByEnvironmentValue === true ? 'on' : groupedByEnvironmentValue === false ? 'off' : 'auto';
+  const propertyTargets = asRecord(payload.property_targets);
+  const queryProperty = readText(propertyTargets.property).trim();
+  const directionToken = readText(propertyTargets.direction).trim().toLowerCase();
+  const direction = directionToken === 'increase' || directionToken === 'decrease' ? directionToken : '';
+  const minPairsRaw = Number(payload.min_pairs);
+  const minPairs = Number.isFinite(minPairsRaw) ? Math.max(1, Math.floor(minPairsRaw)) : 1;
+  const envRadiusRaw = Number(payload.rule_env_radius);
+  const envRadius = Number.isFinite(envRadiusRaw) ? Math.max(0, Math.floor(envRadiusRaw)) : 1;
   return {
     query_smiles: readText(context.querySmiles).trim(),
     target_chain: readText(context.targetChain).trim(),
@@ -184,7 +211,12 @@ function buildLeadOptSelectionFromPayload(payload: Record<string, unknown>, cont
     selected_fragment_ids: selectedFragmentIds,
     selected_fragment_atom_indices: selectedFragmentAtomIndices,
     variable_queries: variableQueries,
-    variable_items: variableItems
+    variable_items: variableItems,
+    grouped_by_environment_mode: groupedByEnvironmentMode,
+    query_property: queryProperty,
+    direction,
+    min_pairs: minPairs,
+    env_radius: envRadius
   };
 }
 
@@ -521,6 +553,12 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       mmp_database_id: readText(queryResult.mmp_database_id).trim(),
       mmp_database_label: readText(queryResult.mmp_database_label).trim(),
       mmp_database_schema: readText(queryResult.mmp_database_schema).trim(),
+      property_targets: asRecord(queryResult.property_targets),
+      rule_env_radius: Number.isFinite(Number(queryResult.rule_env_radius)) ? Number(queryResult.rule_env_radius) : 1,
+      grouped_by_environment:
+        readBooleanToken(queryResult.grouped_by_environment) === null
+          ? undefined
+          : readBooleanToken(queryResult.grouped_by_environment),
       count: Number.isFinite(Number(queryResult.count)) ? Number(queryResult.count) : payload.transformCount,
       global_count: Number.isFinite(Number(queryResult.global_count)) ? Number(queryResult.global_count) : payload.transformCount,
       min_pairs: Number.isFinite(Number(queryResult.min_pairs)) ? Number(queryResult.min_pairs) : 1,
@@ -867,6 +905,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       ),
       ui_state: asRecord(leadOptMmp.ui_state),
       selection: asRecord(leadOptMmp.selection),
+      query_payload: asRecord(leadOptMmp.query_payload),
       target_chain: readText(leadOptMmp.target_chain).trim(),
       ligand_chain: readText(leadOptMmp.ligand_chain).trim()
     } as Record<string, unknown>;

@@ -200,6 +200,12 @@ export interface LeadOptCandidatesUiState {
   logpMax: string;
   tpsaMin: string;
   tpsaMax: string;
+  plddtMin: string;
+  plddtMax: string;
+  iptmMin: string;
+  iptmMax: string;
+  paeMin: string;
+  paeMax: string;
   structureSearchMode: CandidateStructureSearchMode;
   structureSearchQuery: string;
   previewRenderMode: CandidatePreviewRenderMode;
@@ -247,6 +253,12 @@ export function normalizeLeadOptCandidatesUiState(
     logpMax: readText(payload.logpMax ?? payload.logp_max).trim(),
     tpsaMin: readText(payload.tpsaMin ?? payload.tpsa_min).trim(),
     tpsaMax: readText(payload.tpsaMax ?? payload.tpsa_max).trim(),
+    plddtMin: readText(payload.plddtMin ?? payload.plddt_min).trim(),
+    plddtMax: readText(payload.plddtMax ?? payload.plddt_max).trim(),
+    iptmMin: readText(payload.iptmMin ?? payload.iptm_min).trim(),
+    iptmMax: readText(payload.iptmMax ?? payload.iptm_max).trim(),
+    paeMin: readText(payload.paeMin ?? payload.pae_min).trim(),
+    paeMax: readText(payload.paeMax ?? payload.pae_max).trim(),
     structureSearchMode: normalizeStructureSearchMode(payload.structureSearchMode ?? payload.structure_search_mode),
     structureSearchQuery: readText(payload.structureSearchQuery ?? payload.structure_search_query).trim(),
     previewRenderMode: normalizePreviewRenderMode(payload.previewRenderMode ?? payload.preview_render_mode)
@@ -264,6 +276,12 @@ export function buildLeadOptCandidatesUiStateSignature(value: LeadOptCandidatesU
     readText(value.logpMax).trim(),
     readText(value.tpsaMin).trim(),
     readText(value.tpsaMax).trim(),
+    readText(value.plddtMin).trim(),
+    readText(value.plddtMax).trim(),
+    readText(value.iptmMin).trim(),
+    readText(value.iptmMax).trim(),
+    readText(value.paeMin).trim(),
+    readText(value.paeMax).trim(),
     normalizeStructureSearchMode(value.structureSearchMode),
     readText(value.structureSearchQuery).trim(),
     normalizePreviewRenderMode(value.previewRenderMode)
@@ -336,6 +354,12 @@ export function LeadOptCandidatesPanel({
   const [logpMax, setLogpMax] = useState(normalizedInitialUiState.logpMax);
   const [tpsaMin, setTpsaMin] = useState(normalizedInitialUiState.tpsaMin);
   const [tpsaMax, setTpsaMax] = useState(normalizedInitialUiState.tpsaMax);
+  const [plddtMin, setPlddtMin] = useState(normalizedInitialUiState.plddtMin);
+  const [plddtMax, setPlddtMax] = useState(normalizedInitialUiState.plddtMax);
+  const [iptmMin, setIptmMin] = useState(normalizedInitialUiState.iptmMin);
+  const [iptmMax, setIptmMax] = useState(normalizedInitialUiState.iptmMax);
+  const [paeMin, setPaeMin] = useState(normalizedInitialUiState.paeMin);
+  const [paeMax, setPaeMax] = useState(normalizedInitialUiState.paeMax);
   const [structureSearchMode, setStructureSearchMode] = useState<CandidateStructureSearchMode>(
     normalizedInitialUiState.structureSearchMode
   );
@@ -366,6 +390,12 @@ export function LeadOptCandidatesPanel({
     logpMax: readText(overrides?.logpMax ?? logpMax).trim(),
     tpsaMin: readText(overrides?.tpsaMin ?? tpsaMin).trim(),
     tpsaMax: readText(overrides?.tpsaMax ?? tpsaMax).trim(),
+    plddtMin: readText(overrides?.plddtMin ?? plddtMin).trim(),
+    plddtMax: readText(overrides?.plddtMax ?? plddtMax).trim(),
+    iptmMin: readText(overrides?.iptmMin ?? iptmMin).trim(),
+    iptmMax: readText(overrides?.iptmMax ?? iptmMax).trim(),
+    paeMin: readText(overrides?.paeMin ?? paeMin).trim(),
+    paeMax: readText(overrides?.paeMax ?? paeMax).trim(),
     structureSearchMode: normalizeStructureSearchMode(overrides?.structureSearchMode ?? structureSearchMode),
     structureSearchQuery: readText(overrides?.structureSearchQuery ?? structureSearchQuery).trim(),
     previewRenderMode: normalizePreviewRenderMode(overrides?.previewRenderMode ?? previewRenderMode)
@@ -400,6 +430,12 @@ export function LeadOptCandidatesPanel({
     setLogpMax(normalizedInitialUiState.logpMax);
     setTpsaMin(normalizedInitialUiState.tpsaMin);
     setTpsaMax(normalizedInitialUiState.tpsaMax);
+    setPlddtMin(normalizedInitialUiState.plddtMin);
+    setPlddtMax(normalizedInitialUiState.plddtMax);
+    setIptmMin(normalizedInitialUiState.iptmMin);
+    setIptmMax(normalizedInitialUiState.iptmMax);
+    setPaeMin(normalizedInitialUiState.paeMin);
+    setPaeMax(normalizedInitialUiState.paeMax);
     setStructureSearchMode(normalizedInitialUiState.structureSearchMode);
     setStructureSearchQuery(normalizedInitialUiState.structureSearchQuery);
     setPreviewRenderMode(normalizedInitialUiState.previewRenderMode);
@@ -433,6 +469,12 @@ export function LeadOptCandidatesPanel({
     mwMax,
     mwMin,
     onUiStateChange,
+    paeMax,
+    paeMin,
+    plddtMax,
+    plddtMin,
+    iptmMax,
+    iptmMin,
     selectedBackend,
     showAdvanced,
     stateFilter,
@@ -574,25 +616,49 @@ export function LeadOptCandidatesPanel({
     const logpMaxValue = parseOptionalNumber(logpMax);
     const tpsaMinValue = parseOptionalNumber(tpsaMin);
     const tpsaMaxValue = parseOptionalNumber(tpsaMax);
+    const plddtMinValue = parseOptionalNumber(plddtMin);
+    const plddtMaxValue = parseOptionalNumber(plddtMax);
+    const iptmMinValue = parseOptionalNumber(iptmMin);
+    const iptmMaxValue = parseOptionalNumber(iptmMax);
+    const paeMinValue = parseOptionalNumber(paeMin);
+    const paeMaxValue = parseOptionalNumber(paeMax);
     if (
       mwMinValue !== null ||
       mwMaxValue !== null ||
       logpMinValue !== null ||
       logpMaxValue !== null ||
       tpsaMinValue !== null ||
-      tpsaMaxValue !== null
+      tpsaMaxValue !== null ||
+      plddtMinValue !== null ||
+      plddtMaxValue !== null ||
+      iptmMinValue !== null ||
+      iptmMaxValue !== null ||
+      paeMinValue !== null ||
+      paeMaxValue !== null
     ) {
       filtered = filtered.filter((row) => {
+        const smiles = readText(row.smiles).trim();
         const properties = (row.properties as Record<string, unknown>) || {};
         const mw = readNumberOrNull(properties.molecular_weight);
         const logp = readNumberOrNull(properties.logp);
         const tpsa = readNumberOrNull(properties.tpsa);
+        const prediction = predictionForBackend(smiles);
+        const predictionState = normalizeState(prediction?.state);
+        const plddt = predictionState === 'SUCCESS' ? readNumberOrNull(prediction?.ligandPlddt) : null;
+        const iptm = predictionState === 'SUCCESS' ? readNumberOrNull(prediction?.pairIptm) : null;
+        const pae = predictionState === 'SUCCESS' ? readNumberOrNull(prediction?.pairPae) : null;
         if (mwMinValue !== null && (mw === null || mw < mwMinValue)) return false;
         if (mwMaxValue !== null && (mw === null || mw > mwMaxValue)) return false;
         if (logpMinValue !== null && (logp === null || logp < logpMinValue)) return false;
         if (logpMaxValue !== null && (logp === null || logp > logpMaxValue)) return false;
         if (tpsaMinValue !== null && (tpsa === null || tpsa < tpsaMinValue)) return false;
         if (tpsaMaxValue !== null && (tpsa === null || tpsa > tpsaMaxValue)) return false;
+        if (plddtMinValue !== null && (plddt === null || plddt < plddtMinValue)) return false;
+        if (plddtMaxValue !== null && (plddt === null || plddt > plddtMaxValue)) return false;
+        if (iptmMinValue !== null && (iptm === null || iptm < iptmMinValue)) return false;
+        if (iptmMaxValue !== null && (iptm === null || iptm > iptmMaxValue)) return false;
+        if (paeMinValue !== null && (pae === null || pae < paeMinValue)) return false;
+        if (paeMaxValue !== null && (pae === null || pae > paeMaxValue)) return false;
         return true;
       });
     }
@@ -603,7 +669,13 @@ export function LeadOptCandidatesPanel({
     logpMin,
     mwMax,
     mwMin,
+    paeMax,
+    paeMin,
     cardMode,
+    plddtMax,
+    plddtMin,
+    iptmMax,
+    iptmMin,
     predictionBySmiles,
     selectedBackendKey,
     stateFilter,
@@ -637,12 +709,6 @@ export function LeadOptCandidatesPanel({
   const referencePlddt = referencePredictionState === 'SUCCESS' ? referencePrediction?.ligandPlddt ?? null : null;
   const referenceIptm = referencePredictionState === 'SUCCESS' ? referencePrediction?.pairIptm ?? null : null;
   const referencePae = referencePredictionState === 'SUCCESS' ? referencePrediction?.pairPae ?? null : null;
-  const sliderMwMin = Math.max(100, Math.min(800, parseOptionalNumber(mwMin) ?? 100));
-  const sliderMwMax = Math.max(sliderMwMin, Math.min(800, parseOptionalNumber(mwMax) ?? 800));
-  const sliderLogpMin = Math.max(-2, Math.min(8, parseOptionalNumber(logpMin) ?? -2));
-  const sliderLogpMax = Math.max(sliderLogpMin, Math.min(8, parseOptionalNumber(logpMax) ?? 8));
-  const sliderTpsaMin = Math.max(0, Math.min(220, parseOptionalNumber(tpsaMin) ?? 0));
-  const sliderTpsaMax = Math.max(sliderTpsaMin, Math.min(220, parseOptionalNumber(tpsaMax) ?? 220));
 
   useEffect(() => {
     setPageInput(String(clampedPage));
@@ -704,6 +770,18 @@ export function LeadOptCandidatesPanel({
         });
     }
   }, [cardMode, cardRows, onEnsurePredictionResult, pageRows, predictionBySmiles, previewRenderMode, selectedBackendKey]);
+
+  const physchemFilterFields = [
+    { label: 'MW', min: mwMin, max: mwMax, setMin: setMwMin, setMax: setMwMax, minPlaceholder: '250', maxPlaceholder: '550' },
+    { label: 'LogP', min: logpMin, max: logpMax, setMin: setLogpMin, setMax: setLogpMax, minPlaceholder: '0.0', maxPlaceholder: '5.0' },
+    { label: 'TPSA', min: tpsaMin, max: tpsaMax, setMin: setTpsaMin, setMax: setTpsaMax, minPlaceholder: '20', maxPlaceholder: '140' }
+  ];
+
+  const confidenceFilterFields = [
+    { label: 'pLDDT', min: plddtMin, max: plddtMax, setMin: setPlddtMin, setMax: setPlddtMax, minPlaceholder: '70', maxPlaceholder: '100' },
+    { label: 'ipTM', min: iptmMin, max: iptmMax, setMin: setIptmMin, setMax: setIptmMax, minPlaceholder: '0.55', maxPlaceholder: '1.00' },
+    { label: 'PAE', min: paeMin, max: paeMax, setMin: setPaeMin, setMax: setPaeMax, minPlaceholder: '0', maxPlaceholder: '15' }
+  ];
 
   const renderPredictAction = (
     smiles: string,
@@ -842,157 +920,145 @@ export function LeadOptCandidatesPanel({
       {showAdvanced ? (
         <div className="lead-opt-candidate-advanced">
           <div className="lead-opt-candidate-advanced-head">
-            <span>Structure Query</span>
-            <div className="task-structure-mode-switch" role="tablist" aria-label="Structure search mode">
+            <div className="lead-opt-candidate-advanced-title">Advanced Filters</div>
+            <div className="lead-opt-candidate-advanced-head-actions">
+              <div className="task-structure-mode-switch" role="tablist" aria-label="Structure search mode">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={structureSearchMode === 'exact'}
+                  className={`task-structure-mode-btn ${structureSearchMode === 'exact' ? 'active' : ''}`}
+                  onClick={() => setStructureSearchMode('exact')}
+                >
+                  Exact
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={structureSearchMode === 'substructure'}
+                  className={`task-structure-mode-btn ${structureSearchMode === 'substructure' ? 'active' : ''}`}
+                  onClick={() => setStructureSearchMode('substructure')}
+                >
+                  Substructure
+                </button>
+              </div>
               <button
                 type="button"
-                role="tab"
-                aria-selected={structureSearchMode === 'exact'}
-                className={`task-structure-mode-btn ${structureSearchMode === 'exact' ? 'active' : ''}`}
-                onClick={() => setStructureSearchMode('exact')}
+                className="btn btn-ghost btn-compact lead-opt-advanced-reset-btn"
+                onClick={() => {
+                  setStructureSearchMode('exact');
+                  setStructureSearchQuery('');
+                  setDebouncedStructureSearchQuery('');
+                  setStructureSearchMatches({});
+                  setStructureSearchError(null);
+                  setMwMin('');
+                  setMwMax('');
+                  setLogpMin('');
+                  setLogpMax('');
+                  setTpsaMin('');
+                  setTpsaMax('');
+                  setPlddtMin('');
+                  setPlddtMax('');
+                  setIptmMin('');
+                  setIptmMax('');
+                  setPaeMin('');
+                  setPaeMax('');
+                  setPage(1);
+                  setPageInput('1');
+                  emitUiStateNow({
+                    structureSearchMode: 'exact',
+                    structureSearchQuery: '',
+                    mwMin: '',
+                    mwMax: '',
+                    logpMin: '',
+                    logpMax: '',
+                    tpsaMin: '',
+                    tpsaMax: '',
+                    plddtMin: '',
+                    plddtMax: '',
+                    iptmMin: '',
+                    iptmMax: '',
+                    paeMin: '',
+                    paeMax: ''
+                  });
+                }}
+                title="Reset advanced filters"
               >
-                Exact
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={structureSearchMode === 'substructure'}
-                className={`task-structure-mode-btn ${structureSearchMode === 'substructure' ? 'active' : ''}`}
-                onClick={() => setStructureSearchMode('substructure')}
-              >
-                Substructure
+                Reset
               </button>
             </div>
           </div>
-          <div className="jsme-editor-container task-structure-jsme-shell">
-            <JSMEEditor smiles={structureSearchQuery} onSmilesChange={setStructureSearchQuery} height={360} />
-          </div>
-          <div className={`task-structure-query-status ${structureSearchError ? 'is-error' : ''}`}>
-            {structureSearchLoading
-              ? 'Searching...'
-              : structureSearchError
-                ? 'Invalid query'
-                : structureSearchQuery.trim()
-                  ? `Matched ${matchedCount}`
-                  : 'Draw query'}
-          </div>
-          <div className="lead-opt-slider-grid">
-            <div className="lead-opt-slider-card">
-              <div className="lead-opt-slider-head">
-                <span>MW</span>
-                <span>{sliderMwMin.toFixed(0)} - {sliderMwMax.toFixed(0)}</span>
-              </div>
-              <div className="lead-opt-slider-row">
-                <input
-                  type="range"
-                  min={100}
-                  max={800}
-                  step={1}
-                  value={sliderMwMin}
-                  onChange={(event) => {
-                    const next = Number(event.target.value);
-                    setMwMin(String(Math.min(next, sliderMwMax)));
-                  }}
-                />
-                <input
-                  type="range"
-                  min={100}
-                  max={800}
-                  step={1}
-                  value={sliderMwMax}
-                  onChange={(event) => {
-                    const next = Number(event.target.value);
-                    setMwMax(String(Math.max(next, sliderMwMin)));
-                  }}
-                />
+          <div className="lead-opt-candidate-advanced-body">
+            <div className="lead-opt-candidate-advanced-left">
+              <div className="jsme-editor-container task-structure-jsme-shell">
+                <JSMEEditor smiles={structureSearchQuery} onSmilesChange={setStructureSearchQuery} height={360} />
               </div>
             </div>
-            <div className="lead-opt-slider-card">
-              <div className="lead-opt-slider-head">
-                <span>LogP</span>
-                <span>{sliderLogpMin.toFixed(1)} - {sliderLogpMax.toFixed(1)}</span>
+            <div className="lead-opt-candidate-advanced-right">
+              <div className={`task-structure-query-status ${structureSearchError ? 'is-error' : ''}`}>
+                {structureSearchLoading
+                  ? 'Searching...'
+                  : structureSearchError
+                    ? 'Invalid query'
+                    : structureSearchQuery.trim()
+                      ? `Matched ${matchedCount}`
+                      : 'Draw query'}
               </div>
-              <div className="lead-opt-slider-row">
-                <input
-                  type="range"
-                  min={-2}
-                  max={8}
-                  step={0.1}
-                  value={sliderLogpMin}
-                  onChange={(event) => {
-                    const next = Number(event.target.value);
-                    setLogpMin(String(Math.min(next, sliderLogpMax).toFixed(1)));
-                  }}
-                />
-                <input
-                  type="range"
-                  min={-2}
-                  max={8}
-                  step={0.1}
-                  value={sliderLogpMax}
-                  onChange={(event) => {
-                    const next = Number(event.target.value);
-                    setLogpMax(String(Math.max(next, sliderLogpMin).toFixed(1)));
-                  }}
-                />
+              <div className="lead-opt-advanced-group">
+                <div className="lead-opt-advanced-group-title">Physchem</div>
+                <div className="lead-opt-advanced-field-grid">
+                  {physchemFilterFields.map((field) => (
+                    <div key={field.label} className="lead-opt-advanced-field-row">
+                      <span className="lead-opt-advanced-field-label">{field.label}</span>
+                      <input
+                        className="lead-opt-advanced-input"
+                        value={field.min}
+                        onChange={(event) => field.setMin(event.target.value)}
+                        placeholder={field.minPlaceholder}
+                        inputMode="decimal"
+                        aria-label={`${field.label} minimum`}
+                      />
+                      <span className="lead-opt-advanced-sep">to</span>
+                      <input
+                        className="lead-opt-advanced-input"
+                        value={field.max}
+                        onChange={(event) => field.setMax(event.target.value)}
+                        placeholder={field.maxPlaceholder}
+                        inputMode="decimal"
+                        aria-label={`${field.label} maximum`}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="lead-opt-advanced-group">
+                <div className="lead-opt-advanced-group-title">Model Confidence</div>
+                <div className="lead-opt-advanced-field-grid">
+                  {confidenceFilterFields.map((field) => (
+                    <div key={field.label} className="lead-opt-advanced-field-row">
+                      <span className="lead-opt-advanced-field-label">{field.label}</span>
+                      <input
+                        className="lead-opt-advanced-input"
+                        value={field.min}
+                        onChange={(event) => field.setMin(event.target.value)}
+                        placeholder={field.minPlaceholder}
+                        inputMode="decimal"
+                        aria-label={`${field.label} minimum`}
+                      />
+                      <span className="lead-opt-advanced-sep">to</span>
+                      <input
+                        className="lead-opt-advanced-input"
+                        value={field.max}
+                        onChange={(event) => field.setMax(event.target.value)}
+                        placeholder={field.maxPlaceholder}
+                        inputMode="decimal"
+                        aria-label={`${field.label} maximum`}
+                      />
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
-            <div className="lead-opt-slider-card">
-              <div className="lead-opt-slider-head">
-                <span>TPSA</span>
-                <span>{sliderTpsaMin.toFixed(0)} - {sliderTpsaMax.toFixed(0)}</span>
-              </div>
-              <div className="lead-opt-slider-row">
-                <input
-                  type="range"
-                  min={0}
-                  max={220}
-                  step={1}
-                  value={sliderTpsaMin}
-                  onChange={(event) => {
-                    const next = Number(event.target.value);
-                    setTpsaMin(String(Math.min(next, sliderTpsaMax)));
-                  }}
-                />
-                <input
-                  type="range"
-                  min={0}
-                  max={220}
-                  step={1}
-                  value={sliderTpsaMax}
-                  onChange={(event) => {
-                    const next = Number(event.target.value);
-                    setTpsaMax(String(Math.max(next, sliderTpsaMin)));
-                  }}
-                />
-              </div>
-            </div>
-          </div>
-          <div className="lead-opt-range-grid">
-            <label>
-              MW min
-              <input value={mwMin} onChange={(event) => setMwMin(event.target.value)} placeholder="280" />
-            </label>
-            <label>
-              MW max
-              <input value={mwMax} onChange={(event) => setMwMax(event.target.value)} placeholder="520" />
-            </label>
-            <label>
-              LogP min
-              <input value={logpMin} onChange={(event) => setLogpMin(event.target.value)} placeholder="1.0" />
-            </label>
-            <label>
-              LogP max
-              <input value={logpMax} onChange={(event) => setLogpMax(event.target.value)} placeholder="4.5" />
-            </label>
-            <label>
-              TPSA min
-              <input value={tpsaMin} onChange={(event) => setTpsaMin(event.target.value)} placeholder="40" />
-            </label>
-            <label>
-              TPSA max
-              <input value={tpsaMax} onChange={(event) => setTpsaMax(event.target.value)} placeholder="120" />
-            </label>
           </div>
         </div>
       ) : null}

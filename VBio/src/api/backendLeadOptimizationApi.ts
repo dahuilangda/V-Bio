@@ -72,6 +72,8 @@ export interface LeadOptMmpQueryResponse {
   state?: string;
   query_id: string;
   query_mode: string;
+  aggregation_type?: 'individual_transforms' | 'group_by_fragment' | string;
+  grouped_by_environment?: boolean;
   mmp_database_id?: string;
   mmp_database_label?: string;
   mmp_database_schema?: string;

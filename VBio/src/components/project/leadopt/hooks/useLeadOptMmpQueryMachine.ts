@@ -15,6 +15,7 @@ import { readFirstFiniteMetric, readObjectPath, readPairIptmForChains } from '..
 import type { ParsedResultBundle } from '../../../../types/models';
 import type {
   LeadOptDirection as Direction,
+  LeadOptGroupedByEnvironment as GroupedByEnvironmentMode,
   LeadOptQueryMode as QueryMode,
   LeadOptQueryProperty as QueryProperty,
   LeadOptVariableMode as VariableMode
@@ -36,6 +37,7 @@ interface RunMmpQueryInput {
   queryProperty: QueryProperty;
   mmpDatabaseId: string;
   queryMode: QueryMode;
+  groupedByEnvironment: GroupedByEnvironmentMode;
   minPairs: number;
   envRadius: number;
   onTaskQueued?: (payload: { taskId: string; requestPayload: Record<string, unknown> }) => void | Promise<void>;
@@ -268,6 +270,16 @@ function readNumber(value: unknown): number {
     if (Number.isFinite(parsed)) return parsed;
   }
   return 0;
+}
+
+function readBoolean(value: unknown, fallback = false): boolean {
+  if (value === true) return true;
+  if (value === false) return false;
+  const token = String(value || '').trim().toLowerCase();
+  if (!token) return fallback;
+  if (token === '1' || token === 'true' || token === 'yes' || token === 'on') return true;
+  if (token === '0' || token === 'false' || token === 'no' || token === 'off') return false;
+  return fallback;
 }
 
 function formatMetric(value: unknown, digits = 2): string {
@@ -1125,6 +1137,7 @@ export function useLeadOptMmpQueryMachine({
       queryProperty,
       mmpDatabaseId,
       queryMode,
+      groupedByEnvironment,
       minPairs,
       envRadius,
       onTaskQueued,
@@ -1153,6 +1166,15 @@ export function useLeadOptMmpQueryMachine({
       try {
         const selectedProperty = readText(queryProperty).trim();
         const selectedDirection = readText(direction).trim();
+        const aggregationType = queryMode === 'many-to-many' ? 'group_by_fragment' : 'individual_transforms';
+        const groupedByEnvironmentFlag =
+          queryMode !== 'many-to-many'
+            ? undefined
+            : groupedByEnvironment === 'on'
+              ? true
+              : groupedByEnvironment === 'off'
+                ? false
+                : undefined;
         const propertyTargets: Record<string, unknown> = {};
         if (selectedProperty) {
           propertyTargets.property = selectedProperty;
@@ -1170,9 +1192,11 @@ export function useLeadOptMmpQueryMachine({
           property_targets: propertyTargets,
           mmp_database_id: mmpDatabaseId,
           query_mode: queryMode,
+          aggregation_type: aggregationType,
+          ...(groupedByEnvironmentFlag === undefined ? {} : { grouped_by_environment: groupedByEnvironmentFlag }),
           min_pairs: minPairs,
           rule_env_radius: envRadius,
-          max_results: 300
+          max_results: queryMode === 'many-to-many' ? 600 : 400
         } as Record<string, unknown>;
         const response = await queryLeadOptimizationMmp(requestPayload, {
           onEnqueued: async (taskId) => {
@@ -1194,6 +1218,9 @@ export function useLeadOptMmpQueryMachine({
         const nextClusters = Array.isArray(response.clusters)
           ? (response.clusters as Array<Record<string, unknown>>)
           : [];
+        const responseRecord = asRecord(response);
+        const responseAggregationType = readText(responseRecord.aggregation_type).trim() || aggregationType;
+        const responseGroupedByEnvironment = readBoolean(responseRecord.grouped_by_environment, false);
         const nextQueryId = readText(response.query_id);
         setQueryId(nextQueryId);
         setActiveQueryMode(queryMode);
@@ -1210,10 +1237,13 @@ export function useLeadOptMmpQueryMachine({
         setEnumeratedCandidates([]);
         setPredictionBySmiles({});
         if (nextQueryId) {
-          const responseRecord = asRecord(response);
           const cachePayload = {
             query_id: nextQueryId,
             query_mode: readText(response.query_mode),
+            aggregation_type: responseAggregationType,
+            grouped_by_environment: responseGroupedByEnvironment,
+            property_targets: propertyTargets,
+            rule_env_radius: Math.max(0, envRadius),
             mmp_database_id: readText(response.mmp_database_id),
             mmp_database_label: readText(response.mmp_database_label),
             mmp_database_schema: readText(response.mmp_database_schema),
@@ -1245,7 +1275,7 @@ export function useLeadOptMmpQueryMachine({
             const enumerate = await enumerateLeadOptimizationMmp({
               query_id: nextQueryId,
               property_constraints: {},
-              max_candidates: 240
+              max_candidates: 360
             });
             const rows = Array.isArray(enumerate.candidates)
               ? (enumerate.candidates as Array<Record<string, unknown>>)
@@ -1260,6 +1290,10 @@ export function useLeadOptMmpQueryMachine({
         const persistedQueryResult = {
           query_id: nextQueryId,
           query_mode: queryMode,
+          aggregation_type: responseAggregationType,
+          grouped_by_environment: responseGroupedByEnvironment,
+          property_targets: propertyTargets,
+          rule_env_radius: Math.max(0, envRadius),
           mmp_database_id: readText(response.mmp_database_id),
           mmp_database_label: readText(response.mmp_database_label),
           mmp_database_schema: readText(response.mmp_database_schema),
@@ -1315,6 +1349,7 @@ export function useLeadOptMmpQueryMachine({
       onError(null);
       try {
         const queryResult = await fetchLeadOptimizationMmpQueryResult(normalizedId);
+        const queryResultRecord = asRecord(queryResult);
         const nextTransforms = Array.isArray(queryResult.transforms)
           ? (queryResult.transforms as Array<Record<string, unknown>>)
           : [];
@@ -1325,18 +1360,42 @@ export function useLeadOptMmpQueryMachine({
           : [];
         setClusters(nextClusters);
         setQueryId(normalizedId);
-        setActiveQueryMode(readText(queryResult.query_mode) === 'many-to-many' ? 'many-to-many' : 'one-to-many');
+        const nextMode = readText(queryResult.query_mode) === 'many-to-many' ? 'many-to-many' : 'one-to-many';
+        setActiveQueryMode(nextMode);
+        const responseAggregationType =
+          readText(queryResultRecord.aggregation_type).trim() || (nextMode === 'many-to-many' ? 'group_by_fragment' : 'individual_transforms');
+        const responseGroupedByEnvironment = readBoolean(queryResultRecord.grouped_by_environment, false);
+        const savedGroupBy = readText(queryResultRecord.cluster_group_by).toLowerCase();
+        const nextGroupBy = savedGroupBy === 'from' || savedGroupBy === 'rule_env_radius' ? savedGroupBy : 'to';
+        setClusterGroupBy(nextGroupBy as ClusterGroupBy);
         setTransforms(nextTransforms);
         setGlobalCount(readNumber(queryResult.global_count));
         setQueryStats((queryResult.stats as Record<string, unknown>) || {});
         setActiveTransformId('');
         setActiveEvidence(null);
         clearSelections();
+        queryResultCacheRef.current.set(normalizedId, {
+          query_id: normalizedId,
+          query_mode: nextMode,
+          aggregation_type: responseAggregationType,
+          grouped_by_environment: responseGroupedByEnvironment,
+          mmp_database_id: readText(queryResult.mmp_database_id),
+          mmp_database_label: readText(queryResult.mmp_database_label),
+          mmp_database_schema: readText(queryResult.mmp_database_schema),
+          transforms: nextTransforms,
+          global_transforms: Array.isArray(queryResult.global_transforms) ? queryResult.global_transforms : nextTransforms,
+          clusters: nextClusters,
+          count: readNumber(queryResult.count),
+          global_count: readNumber(queryResult.global_count),
+          min_pairs: nextMinPairs,
+          cluster_group_by: nextGroupBy,
+          stats: (queryResult.stats as Record<string, unknown>) || {}
+        });
 
         const enumerate = await enumerateLeadOptimizationMmp({
           query_id: normalizedId,
           property_constraints: {},
-          max_candidates: 240
+          max_candidates: 360
         });
         const nextCandidates = Array.isArray(enumerate.candidates)
           ? (enumerate.candidates as Array<Record<string, unknown>>)
@@ -1962,6 +2021,9 @@ export function useLeadOptMmpQueryMachine({
 
     setQueryId(nextQueryId);
     const nextMode = readText(queryResult.query_mode).toLowerCase() === 'many-to-many' ? 'many-to-many' : 'one-to-many';
+    const nextAggregationType =
+      readText(queryResult.aggregation_type).trim() || (nextMode === 'many-to-many' ? 'group_by_fragment' : 'individual_transforms');
+    const nextGroupedByEnvironment = readBoolean(queryResult.grouped_by_environment, false);
     setActiveQueryMode(nextMode);
     const nextMinPairs = Math.max(1, readNumber(queryResult.min_pairs || 1));
     setQueryMinPairs(nextMinPairs);
@@ -1984,6 +2046,8 @@ export function useLeadOptMmpQueryMachine({
     queryResultCacheRef.current.set(nextQueryId, {
       query_id: nextQueryId,
       query_mode: nextMode,
+      aggregation_type: nextAggregationType,
+      grouped_by_environment: nextGroupedByEnvironment,
       mmp_database_id: readText(queryResult.mmp_database_id),
       mmp_database_label: readText(queryResult.mmp_database_label),
       mmp_database_schema: readText(queryResult.mmp_database_schema),

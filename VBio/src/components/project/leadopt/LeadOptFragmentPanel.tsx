@@ -1,6 +1,7 @@
 import { LigandFragmentSketcher, type LigandFragmentItem } from '../LigandFragmentSketcher';
 import type {
   LeadOptDirection,
+  LeadOptGroupedByEnvironment,
   LeadOptQueryProperty,
 } from './hooks/useLeadOptMmpQueryForm';
 
@@ -15,6 +16,7 @@ interface LeadOptFragmentPanelProps {
   onClearFragmentSelection: () => void;
   direction: LeadOptDirection;
   queryProperty: LeadOptQueryProperty;
+  groupedByEnvironment: LeadOptGroupedByEnvironment;
   selectedDatabaseId: string;
   databaseOptions: Array<{ id: string; label: string }>;
   propertyOptions: Array<{ value: string; label: string }>;
@@ -22,6 +24,7 @@ interface LeadOptFragmentPanelProps {
   minPairs: number;
   onDirectionChange: (value: LeadOptDirection) => void;
   onQueryPropertyChange: (value: LeadOptQueryProperty) => void;
+  onGroupedByEnvironmentChange: (value: LeadOptGroupedByEnvironment) => void;
   onDatabaseIdChange: (value: string) => void;
   onEnvRadiusChange: (value: number) => void;
   onMinPairsChange: (value: number) => void;
@@ -38,6 +41,7 @@ export function LeadOptFragmentPanel({
   onClearFragmentSelection,
   direction,
   queryProperty,
+  groupedByEnvironment,
   selectedDatabaseId,
   databaseOptions,
   propertyOptions,
@@ -45,6 +49,7 @@ export function LeadOptFragmentPanel({
   minPairs,
   onDirectionChange,
   onQueryPropertyChange,
+  onGroupedByEnvironmentChange,
   onDatabaseIdChange,
   onEnvRadiusChange,
   onMinPairsChange
@@ -119,6 +124,17 @@ export function LeadOptFragmentPanel({
             value={envRadius}
             onChange={(e) => onEnvRadiusChange(Math.max(0, Math.min(6, Number(e.target.value) || 0)))}
           />
+        </label>
+        <label className="field lead-opt-build-field lead-opt-build-field--group">
+          <span>Env grouping</span>
+          <select
+            value={groupedByEnvironment}
+            onChange={(e) => onGroupedByEnvironmentChange(e.target.value as LeadOptGroupedByEnvironment)}
+          >
+            <option value="auto">Auto</option>
+            <option value="on">On</option>
+            <option value="off">Off</option>
+          </select>
         </label>
       </div>
     </section>

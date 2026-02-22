@@ -137,6 +137,24 @@ def _select_target_chain_for_template(
     return requested or "A"
 
 
+def _normalize_aggregation_type(raw: Any, *, query_mode: str) -> str:
+    token = str(raw or "").strip().lower()
+    if token in {"individual_transforms", "group_by_fragment"}:
+        return token
+    return "group_by_fragment" if str(query_mode or "").strip().lower() == "many-to-many" else "individual_transforms"
+
+
+def _normalize_boolean(raw: Any, default: bool = False) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    token = str(raw or "").strip().lower()
+    if token in {"1", "true", "yes", "on"}:
+        return True
+    if token in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
 def register_lead_opt_mmp_routes(
     app,
     *,
@@ -322,12 +340,17 @@ def register_lead_opt_mmp_routes(
         cached_payload = get_cached_mmp_query_payload(cached_query_id) if cached_query_id else None
         if cached_payload:
             payload = cached_payload
+            query_mode = str(payload.get('query_mode') or 'one-to-many')
+            aggregation_type = _normalize_aggregation_type(payload.get('aggregation_type'), query_mode=query_mode)
+            grouped_by_environment = _normalize_boolean(payload.get('grouped_by_environment'), False)
             return jsonify({
                 'task_id': task_id,
                 'state': 'SUCCESS',
                 'result': {
                     'query_id': cached_query_id,
-                    'query_mode': payload.get('query_mode', 'one-to-many'),
+                    'query_mode': query_mode,
+                    'aggregation_type': aggregation_type,
+                    'grouped_by_environment': grouped_by_environment,
                     'mmp_database_id': payload.get('mmp_database_id', ''),
                     'mmp_database_label': payload.get('mmp_database_label', ''),
                     'mmp_database_schema': payload.get('mmp_database_schema', ''),
@@ -377,6 +400,9 @@ def register_lead_opt_mmp_routes(
             group_by = 'to'
         min_pairs = max(1, int(payload.get('min_pairs') or 1))
         direction = str(query_payload.get('direction') or 'increase')
+        query_mode = str(query_payload.get('query_mode') or 'one-to-many')
+        aggregation_type = _normalize_aggregation_type(query_payload.get('aggregation_type'), query_mode=query_mode)
+        grouped_by_environment = _normalize_boolean(query_payload.get('grouped_by_environment'), False)
         clusters = build_mmp_clusters(
             query_payload.get('transforms', []),
             group_by=group_by,
@@ -386,6 +412,8 @@ def register_lead_opt_mmp_routes(
         return jsonify({
             'query_id': query_id,
             'group_by': group_by,
+            'aggregation_type': aggregation_type,
+            'grouped_by_environment': grouped_by_environment,
             'min_pairs': min_pairs,
             'clusters': clusters,
         })
@@ -406,9 +434,14 @@ def register_lead_opt_mmp_routes(
             else transforms
         )
         clusters = query_payload.get('clusters', []) if isinstance(query_payload.get('clusters'), list) else []
+        query_mode = str(query_payload.get('query_mode') or 'one-to-many')
+        aggregation_type = _normalize_aggregation_type(query_payload.get('aggregation_type'), query_mode=query_mode)
+        grouped_by_environment = _normalize_boolean(query_payload.get('grouped_by_environment'), False)
         return jsonify({
             'query_id': query_key,
-            'query_mode': str(query_payload.get('query_mode') or 'one-to-many'),
+            'query_mode': query_mode,
+            'aggregation_type': aggregation_type,
+            'grouped_by_environment': grouped_by_environment,
             'mmp_database_id': str(query_payload.get('mmp_database_id') or ''),
             'mmp_database_label': str(query_payload.get('mmp_database_label') or ''),
             'mmp_database_schema': str(query_payload.get('mmp_database_schema') or ''),

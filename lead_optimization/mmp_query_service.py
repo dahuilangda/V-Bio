@@ -1813,10 +1813,18 @@ def _generate_query_specific_final_smiles(
     label_mapping = _build_attachment_label_mapping(from_text, query_variable_smiles)
     if not label_mapping:
         return {}
+    relabeled_from = _relabel_attachment_fragment(from_text, label_mapping)
+    if not relabeled_from:
+        return {}
     relabeled_to = _relabel_attachment_fragment(to_text, label_mapping)
     if not relabeled_to:
         return {}
-    return _stitch_scaffold_and_replacement(scaffold_smiles, relabeled_to)
+    stitched = _stitch_scaffold_and_replacement(scaffold_smiles, relabeled_to)
+    if not stitched:
+        return {}
+    stitched["from_smiles_env"] = f"{relabeled_from}||{scaffold_smiles}"
+    stitched["to_smiles_env"] = f"{relabeled_to}||{scaffold_smiles}"
+    return stitched
 
 
 def _apply_variable_constant_filters_to_rows(
@@ -1863,7 +1871,12 @@ def _percentile(values: List[float], p: float) -> float:
     return ordered[lo] * (1.0 - weight) + ordered[hi] * weight
 
 
-def _aggregate_mmp_transforms(rows: List[Dict[str, Any]], direction: str = "increase") -> List[Dict[str, Any]]:
+def _aggregate_mmp_transforms(
+    rows: List[Dict[str, Any]],
+    *,
+    direction: str = "increase",
+    aggregation_type: str = "individual_transforms",
+) -> List[Dict[str, Any]]:
     grouped: Dict[str, Dict[str, Any]] = {}
     for row in rows:
         transform_id = str(row.get("transform_id") or "").strip()
@@ -1876,17 +1889,51 @@ def _aggregate_mmp_transforms(rows: List[Dict[str, Any]], direction: str = "incr
                 "from_smiles": row.get("from_smiles", ""),
                 "to_smiles": row.get("to_smiles", ""),
                 "to_highlight_smiles": row.get("to_highlight_smiles", ""),
+                "from_smiles_env": row.get("from_smiles_env", ""),
+                "to_smiles_env": row.get("to_smiles_env", ""),
+                "rule_id": int(row.get("rule_id", 0) or 0),
                 "from_num_frags": int(row.get("from_num_frags", 0) or max(1, str(row.get("from_smiles", "")).count("*"))),
                 "to_num_frags": int(row.get("to_num_frags", 0) or max(1, str(row.get("to_smiles", "")).count("*"))),
                 "constant_smiles": row.get("constant_smiles", ""),
                 "rule_env_radius": row.get("rule_env_radius", 0),
                 "_n_pairs_values": [],
                 "_deltas": [],
+                "_n_pairs_without_raw": [],
+                "_deltas_without_raw": [],
+                "_raw_transform_ids": set(),
+                "_raw_pair_count_by_id": {},
+                "_raw_median_delta_by_id": {},
+                "_rule_ids": set(),
+                "_from_smiles_set": set(),
+                "_from_smiles_env_set": set(),
                 "examples": [],
             },
         )
-        entry["_n_pairs_values"].append(int(row.get("n_pairs", 1) or 1))
-        entry["_deltas"].append(float(row.get("median_delta", 0.0) or 0.0))
+        n_pairs_value = int(row.get("n_pairs", 1) or 1)
+        median_delta_value = float(row.get("median_delta", 0.0) or 0.0)
+        entry["_n_pairs_values"].append(n_pairs_value)
+        entry["_deltas"].append(median_delta_value)
+        raw_transform_id = str(row.get("raw_transform_id") or "").strip()
+        if raw_transform_id:
+            entry["_raw_transform_ids"].add(raw_transform_id)
+            raw_pair_count_by_id = entry["_raw_pair_count_by_id"]
+            previous_pair_count = int(raw_pair_count_by_id.get(raw_transform_id, 0) or 0)
+            raw_pair_count_by_id[raw_transform_id] = max(previous_pair_count, n_pairs_value)
+            raw_median_delta_by_id = entry["_raw_median_delta_by_id"]
+            if raw_transform_id not in raw_median_delta_by_id:
+                raw_median_delta_by_id[raw_transform_id] = median_delta_value
+        else:
+            entry["_n_pairs_without_raw"].append(n_pairs_value)
+            entry["_deltas_without_raw"].append(median_delta_value)
+        rule_id_value = int(row.get("rule_id", 0) or 0)
+        if rule_id_value:
+            entry["_rule_ids"].add(rule_id_value)
+        from_smiles_token = str(row.get("from_smiles") or "").strip()
+        if from_smiles_token:
+            entry["_from_smiles_set"].add(from_smiles_token)
+        from_smiles_env_token = str(row.get("from_smiles_env") or "").strip()
+        if from_smiles_env_token:
+            entry["_from_smiles_env_set"].add(from_smiles_env_token)
         if len(entry["examples"]) < 5:
             entry["examples"].append(row.get("final_smiles", ""))
 
@@ -1894,30 +1941,74 @@ def _aggregate_mmp_transforms(rows: List[Dict[str, Any]], direction: str = "incr
     for entry in grouped.values():
         n_pairs_values = entry.pop("_n_pairs_values", [])
         deltas = entry.pop("_deltas", [])
-        n_pairs = max(n_pairs_values) if n_pairs_values else 0
-        median_delta = _percentile(deltas, 0.5)
-        q1 = _percentile(deltas, 0.25)
-        q3 = _percentile(deltas, 0.75)
+        n_pairs_without_raw = entry.pop("_n_pairs_without_raw", [])
+        deltas_without_raw = entry.pop("_deltas_without_raw", [])
+        raw_transform_ids = sorted(str(item) for item in entry.pop("_raw_transform_ids", set()) if str(item))
+        raw_pair_count_by_id = {
+            str(k): int(v or 0)
+            for k, v in entry.pop("_raw_pair_count_by_id", {}).items()
+            if str(k)
+        }
+        raw_median_delta_by_id = {
+            str(k): float(v or 0.0)
+            for k, v in entry.pop("_raw_median_delta_by_id", {}).items()
+            if str(k)
+        }
+        rule_id_array = sorted(int(v) for v in entry.pop("_rule_ids", set()) if int(v or 0) != 0)
+        from_smiles_values = sorted(str(item) for item in entry.pop("_from_smiles_set", set()) if str(item))
+        from_smiles_env_values = sorted(str(item) for item in entry.pop("_from_smiles_env_set", set()) if str(item))
+        if raw_pair_count_by_id:
+            if aggregation_type == "group_by_fragment":
+                n_pairs = int(sum(raw_pair_count_by_id.values()) + sum(int(v or 0) for v in n_pairs_without_raw))
+            else:
+                n_pairs = int(max([max(raw_pair_count_by_id.values())] + [int(v or 0) for v in n_pairs_without_raw]))
+        else:
+            n_pairs = max(n_pairs_values) if n_pairs_values else 0
+        delta_values = list(raw_median_delta_by_id.values()) + [float(v or 0.0) for v in deltas_without_raw]
+        if not delta_values:
+            delta_values = [float(v or 0.0) for v in deltas]
+        median_delta = _percentile(delta_values, 0.5)
+        q1 = _percentile(delta_values, 0.25)
+        q3 = _percentile(delta_values, 0.75)
         iqr = q3 - q1
-        if deltas:
-            mean_delta = sum(deltas) / len(deltas)
-            std = (sum((value - mean_delta) ** 2 for value in deltas) / len(deltas)) ** 0.5
+        if delta_values:
+            mean_delta = sum(delta_values) / len(delta_values)
+            std = (sum((value - mean_delta) ** 2 for value in delta_values) / len(delta_values)) ** 0.5
         else:
             std = 0.0
-        improved = sum(1 for value in deltas if (value < 0 if direction == "decrease" else value > 0))
-        directionality = (improved / len(deltas)) if deltas else 0.0
+        improved = sum(1 for value in delta_values if (value < 0 if direction == "decrease" else value > 0))
+        directionality = (improved / len(delta_values)) if delta_values else 0.0
+        percent_improved = (100.0 * improved / len(delta_values)) if delta_values else 0.0
         evidence_strength = (n_pairs / (1.0 + abs(std) + abs(iqr))) if n_pairs > 0 else 0.0
-        transforms.append(
-            {
-                **entry,
-                "n_pairs": n_pairs,
-                "median_delta": median_delta,
-                "iqr": iqr,
-                "std": std,
-                "directionality": directionality,
-                "evidence_strength": evidence_strength,
-            }
-        )
+        row_payload = {
+            **entry,
+            "aggregation_type": aggregation_type,
+            "n_pairs": n_pairs,
+            "pair_count": n_pairs,
+            "median_delta": median_delta,
+            "iqr": iqr,
+            "std": std,
+            "directionality": directionality,
+            "percent_improved": percent_improved,
+            "%improved": percent_improved,
+            "evidence_strength": evidence_strength,
+        }
+        if aggregation_type == "group_by_fragment":
+            if from_smiles_values:
+                row_payload["from_smiles_array"] = from_smiles_values
+                row_payload["from_smiles"] = from_smiles_values[0]
+            if from_smiles_env_values:
+                row_payload["from_smiles_env_array"] = from_smiles_env_values
+            if raw_transform_ids:
+                row_payload["raw_transform_ids"] = raw_transform_ids
+                row_payload["transform_count"] = len(raw_transform_ids)
+            if rule_id_array:
+                row_payload["rule_id_array"] = rule_id_array
+            to_smiles_env = str(entry.get("to_smiles_env") or "").strip()
+            row_payload["grouped_by_environment"] = bool(to_smiles_env)
+            if to_smiles_env:
+                row_payload["to_smiles_env"] = to_smiles_env
+        transforms.append(row_payload)
 
     transforms.sort(key=lambda item: (item.get("evidence_strength", 0.0), item.get("n_pairs", 0)), reverse=True)
     return transforms
@@ -1973,6 +2064,8 @@ def _build_rows_from_candidates(
     max_results: int,
     db_property_name: str,
     compound_property_values: Dict[int, float],
+    aggregation_type: str,
+    grouped_by_environment: bool,
 ) -> List[Dict[str, Any]]:
     if not query_contexts:
         return []
@@ -2032,8 +2125,20 @@ def _build_rows_from_candidates(
         n_pairs = max(1, n_pairs)
 
         constant_smiles = str(query_context.get("scaffold_smiles") or "")
-        transform_key = f"{from_smiles}>>{to_smiles}||{constant_smiles}"
-        transform_id = hashlib.sha1(transform_key.encode("utf-8")).hexdigest()[:16]
+        raw_transform_key = f"{from_smiles}>>{to_smiles}||{constant_smiles}"
+        raw_transform_id = hashlib.sha1(raw_transform_key.encode("utf-8")).hexdigest()[:16]
+        from_smiles_env = str(stitched.get("from_smiles_env") or "").strip() if grouped_by_environment else ""
+        to_smiles_env = str(stitched.get("to_smiles_env") or "").strip() if grouped_by_environment else ""
+        if grouped_by_environment and (not from_smiles_env or not to_smiles_env):
+            continue
+        if aggregation_type == "group_by_fragment":
+            if grouped_by_environment:
+                group_transform_key = f"group_by_fragment_env||to_env={to_smiles_env}"
+            else:
+                group_transform_key = f"group_by_fragment||to={to_smiles}"
+            transform_id = hashlib.sha1(group_transform_key.encode("utf-8")).hexdigest()[:16]
+        else:
+            transform_id = raw_transform_id
         dedupe_key = "||".join(
             [
                 final_smiles,
@@ -2072,6 +2177,8 @@ def _build_rows_from_candidates(
 
         row = {
             "transform_id": transform_id,
+            "raw_transform_id": raw_transform_id,
+            "aggregation_type": aggregation_type,
             "rule_environment_id": env_id,
             "rule_id": int(candidate.get("rule_id", 0) or 0),
             "input_smiles": query_mol,
@@ -2083,6 +2190,9 @@ def _build_rows_from_candidates(
             "from_num_frags": int(candidate.get("from_num_frags", 0) or max(1, from_smiles.count("*"))),
             "to_num_frags": int(candidate.get("to_num_frags", 0) or max(1, to_smiles.count("*"))),
             "constant_smiles": constant_smiles,
+            "from_smiles_env": from_smiles_env,
+            "to_smiles_env": to_smiles_env,
+            "grouped_by_environment": grouped_by_environment,
             "n_pairs": n_pairs,
             "median_delta": median_delta,
             "selected_property": requested_property if selected_property_value is not None else "",
@@ -2112,6 +2222,40 @@ def _normalize_env_radius(raw: Any) -> Optional[int]:
     return None
 
 
+def _normalize_bool(raw: Any) -> Optional[bool]:
+    if isinstance(raw, bool):
+        return raw
+    token = str(raw or "").strip().lower()
+    if not token:
+        return None
+    if token in {"1", "true", "yes", "on"}:
+        return True
+    if token in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _normalize_aggregation_type(raw: Any, *, query_mode: str) -> str:
+    token = str(raw or "").strip().lower()
+    if token in {"individual_transforms", "group_by_fragment"}:
+        return token
+    return "group_by_fragment" if str(query_mode or "").strip().lower() == "many-to-many" else "individual_transforms"
+
+
+def _resolve_grouped_by_environment(
+    raw: Any,
+    *,
+    aggregation_type: str,
+    query_contexts: List[Dict[str, Any]],
+) -> bool:
+    explicit = _normalize_bool(raw)
+    if explicit is not None:
+        return bool(explicit and aggregation_type == "group_by_fragment")
+    if aggregation_type != "group_by_fragment":
+        return False
+    return any(int(context.get("attachment_count") or 0) > 1 for context in query_contexts)
+
+
 def run_mmp_query(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("mmp_query payload must be a JSON object.")
@@ -2124,6 +2268,7 @@ def run_mmp_query(payload: Dict[str, Any]) -> Dict[str, Any]:
     query_mode = str(payload.get("query_mode") or "one-to-many").strip().lower()
     if query_mode not in {"one-to-many", "many-to-many"}:
         query_mode = "one-to-many"
+    aggregation_type = _normalize_aggregation_type(payload.get("aggregation_type"), query_mode=query_mode)
 
     variable_spec = normalize_variable_spec(payload.get("variable_spec"))
     query_contexts = _build_query_replacement_contexts(raw_query_mol or query_mol, variable_spec)
@@ -2146,12 +2291,18 @@ def run_mmp_query(payload: Dict[str, Any]) -> Dict[str, Any]:
         if str((item or {}).get("fragment_id") or "").strip()
     ]
     variable_num_frags = sorted({max(1, str(query or "").count("*")) for query in variable_queries})
+    grouped_by_environment = _resolve_grouped_by_environment(
+        payload.get("grouped_by_environment"),
+        aggregation_type=aggregation_type,
+        query_contexts=query_contexts,
+    )
     logger.info(
-        "Lead-opt MMP variable resolved: mode=%s fragments=%s contexts=%s num_frags=%s queries=%s",
+        "Lead-opt MMP variable resolved: mode=%s fragments=%s contexts=%s num_frags=%s grouped_by_environment=%s queries=%s",
         variable_mode,
         selected_fragments[:6],
         len(query_contexts),
         variable_num_frags,
+        grouped_by_environment,
         variable_queries[:6],
     )
 
@@ -2247,6 +2398,8 @@ def run_mmp_query(payload: Dict[str, Any]) -> Dict[str, Any]:
             return {
                 "query_mol": query_mol,
                 "query_mode": query_mode,
+                "aggregation_type": aggregation_type,
+                "grouped_by_environment": grouped_by_environment,
                 "variable_spec": variable_spec,
                 "constant_spec": constant_spec,
                 "property_targets": property_targets,
@@ -2272,6 +2425,8 @@ def run_mmp_query(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "query_contexts": len(query_contexts),
                     "resolved_db_property": resolved_db_property,
                     "matched_variable_mode": variable_mode,
+                    "aggregation_type": aggregation_type,
+                    "grouped_by_environment": grouped_by_environment,
                     "rule_smiles_has_num_frags": has_num_frags,
                     "constant_smiles_has_num_frags": has_constant_num_frags,
                     "engine": engine_name,
@@ -2314,6 +2469,8 @@ def run_mmp_query(payload: Dict[str, Any]) -> Dict[str, Any]:
             max_results=max_results,
             db_property_name=resolved_db_property,
             compound_property_values=compound_property_values,
+            aggregation_type=aggregation_type,
+            grouped_by_environment=grouped_by_environment,
         )
         if candidates and not rows:
             raise ValueError(
@@ -2324,11 +2481,19 @@ def run_mmp_query(payload: Dict[str, Any]) -> Dict[str, Any]:
         conn.close()
 
     filtered_rows = _apply_variable_constant_filters_to_rows(rows, constant_query=constant_query)
-    global_transforms = _aggregate_mmp_transforms(filtered_rows, direction=direction)
+    global_transforms = _aggregate_mmp_transforms(
+        filtered_rows,
+        direction=direction,
+        aggregation_type=aggregation_type,
+    )
     env_rows = filtered_rows
     if env_radius is not None:
         env_rows = [row for row in filtered_rows if int(row.get("rule_env_radius", 0) or 0) <= env_radius]
-    transforms = _aggregate_mmp_transforms(env_rows, direction=direction)
+    transforms = _aggregate_mmp_transforms(
+        env_rows,
+        direction=direction,
+        aggregation_type=aggregation_type,
+    )
     clusters = _build_mmp_clusters(
         transforms,
         group_by="to" if query_mode == "many-to-many" else "to",
@@ -2347,6 +2512,8 @@ def run_mmp_query(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "query_mol": query_mol,
         "query_mode": query_mode,
+        "aggregation_type": aggregation_type,
+        "grouped_by_environment": grouped_by_environment,
         "variable_spec": variable_spec,
         "constant_spec": constant_spec,
         "property_targets": property_targets,
@@ -2374,6 +2541,8 @@ def run_mmp_query(payload: Dict[str, Any]) -> Dict[str, Any]:
             "query_contexts": len(query_contexts),
             "resolved_db_property": resolved_db_property,
             "matched_variable_mode": variable_mode,
+            "aggregation_type": aggregation_type,
+            "grouped_by_environment": grouped_by_environment,
             "rule_smiles_has_num_frags": has_num_frags,
             "constant_smiles_has_num_frags": has_constant_num_frags,
             "db_path": db_log_label,

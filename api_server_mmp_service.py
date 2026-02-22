@@ -256,6 +256,20 @@ class LeadOptMmpService:
         clusters = clusters if isinstance(clusters, list) else []
 
         query_mode = str(result_payload.get('query_mode') or 'one-to-many').strip().lower()
+        aggregation_type = str(result_payload.get('aggregation_type') or '').strip().lower()
+        if aggregation_type not in {'individual_transforms', 'group_by_fragment'}:
+            aggregation_type = 'group_by_fragment' if query_mode == 'many-to-many' else 'individual_transforms'
+        grouped_by_environment_raw = result_payload.get('grouped_by_environment')
+        if isinstance(grouped_by_environment_raw, bool):
+            grouped_by_environment = grouped_by_environment_raw
+        else:
+            token = str(grouped_by_environment_raw or '').strip().lower()
+            if token in {'1', 'true', 'yes', 'on'}:
+                grouped_by_environment = True
+            elif token in {'0', 'false', 'no', 'off'}:
+                grouped_by_environment = False
+            else:
+                grouped_by_environment = False
         variable_spec = self.safe_json_object(result_payload.get('variable_spec'))
         constant_spec = self.safe_json_object(result_payload.get('constant_spec'))
         property_targets = self.safe_json_object(result_payload.get('property_targets'))
@@ -275,6 +289,8 @@ class LeadOptMmpService:
             'query_id': query_id,
             'query_mol': str(result_payload.get('query_mol') or ''),
             'query_mode': query_mode,
+            'aggregation_type': aggregation_type,
+            'grouped_by_environment': grouped_by_environment,
             'mmp_database_id': str(result_payload.get('mmp_database_id') or ''),
             'mmp_database_label': str(result_payload.get('mmp_database_label') or ''),
             'mmp_database_schema': str(result_payload.get('mmp_database_schema') or ''),
@@ -319,6 +335,8 @@ class LeadOptMmpService:
         return {
             'query_id': query_id,
             'query_mode': query_mode,
+            'aggregation_type': aggregation_type,
+            'grouped_by_environment': grouped_by_environment,
             'mmp_database_id': str(result_payload.get('mmp_database_id') or ''),
             'mmp_database_label': str(result_payload.get('mmp_database_label') or ''),
             'mmp_database_schema': str(result_payload.get('mmp_database_schema') or ''),

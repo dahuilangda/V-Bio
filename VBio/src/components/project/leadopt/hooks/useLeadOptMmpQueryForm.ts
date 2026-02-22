@@ -6,6 +6,7 @@ export type LeadOptDirection = 'increase' | 'decrease' | '';
 export type LeadOptVariableMode = 'substructure' | 'exact';
 export type LeadOptQueryMode = 'one-to-many' | 'many-to-many';
 export type LeadOptQueryProperty = string;
+export type LeadOptGroupedByEnvironment = 'auto' | 'on' | 'off';
 
 export interface LeadOptVariableItemInput {
   query: string;
@@ -25,6 +26,7 @@ export function useLeadOptMmpQueryForm({ onError }: UseLeadOptMmpQueryFormParams
   const [queryMode, setQueryMode] = useState<LeadOptQueryMode>('one-to-many');
   const [direction, setDirection] = useState<LeadOptDirection>('');
   const [queryProperty, setQueryProperty] = useState<LeadOptQueryProperty>('');
+  const [groupedByEnvironment, setGroupedByEnvironment] = useState<LeadOptGroupedByEnvironment>('auto');
   const [envRadius, setEnvRadius] = useState(1);
   const [minPairs, setMinPairs] = useState(1);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -110,6 +112,8 @@ export function useLeadOptMmpQueryForm({ onError }: UseLeadOptMmpQueryFormParams
     setDirection,
     queryProperty,
     setQueryProperty,
+    groupedByEnvironment,
+    setGroupedByEnvironment,
     envRadius,
     setEnvRadius,
     minPairs,

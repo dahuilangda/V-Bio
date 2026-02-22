@@ -407,11 +407,60 @@ export function LeadOptimizationWorkspace({
     const queryResult = (snapshot.query_result && typeof snapshot.query_result === 'object')
       ? (snapshot.query_result as Record<string, unknown>)
       : null;
+    const selection = (snapshot.selection && typeof snapshot.selection === 'object')
+      ? (snapshot.selection as Record<string, unknown>)
+      : null;
+    const queryPayload = (snapshot.query_payload && typeof snapshot.query_payload === 'object')
+      ? (snapshot.query_payload as Record<string, unknown>)
+      : null;
+    const selectionProperty = readText(selection?.query_property).trim();
+    const queryResultProperty = readText(asRecord(queryResult?.property_targets).property).trim();
+    const queryPayloadProperty = readText(asRecord(queryPayload?.property_targets).property).trim();
+    const savedProperty = selectionProperty || queryResultProperty || queryPayloadProperty;
+    queryForm.setQueryProperty(savedProperty);
+    const selectionDirectionToken = readText(selection?.direction).trim().toLowerCase();
+    const queryResultDirectionToken = readText(asRecord(queryResult?.property_targets).direction).trim().toLowerCase();
+    const queryPayloadDirectionToken = readText(asRecord(queryPayload?.property_targets).direction).trim().toLowerCase();
+    const savedDirectionToken = selectionDirectionToken || queryResultDirectionToken || queryPayloadDirectionToken;
+    const savedDirection: '' | 'increase' | 'decrease' =
+      savedDirectionToken === 'increase' || savedDirectionToken === 'decrease' ? savedDirectionToken : '';
+    queryForm.setDirection(savedProperty ? savedDirection : '');
+    const savedMinPairsRaw = Number(selection?.min_pairs ?? queryResult?.min_pairs ?? queryPayload?.min_pairs ?? 1);
+    const savedMinPairs = Number.isFinite(savedMinPairsRaw) ? Math.max(1, Math.floor(savedMinPairsRaw)) : 1;
+    queryForm.setMinPairs(savedMinPairs);
+    const savedEnvRadiusRaw = Number(
+      selection?.env_radius ?? queryResult?.rule_env_radius ?? queryPayload?.rule_env_radius ?? 1
+    );
+    const savedEnvRadius = Number.isFinite(savedEnvRadiusRaw) ? Math.max(0, Math.min(6, Math.floor(savedEnvRadiusRaw))) : 1;
+    queryForm.setEnvRadius(savedEnvRadius);
+    const savedGroupingMode = readText(selection?.grouped_by_environment_mode).trim().toLowerCase();
+    const groupedByEnvironmentToken =
+      savedGroupingMode ||
+      (() => {
+        const fromQueryResult = queryResult ? queryResult.grouped_by_environment : undefined;
+        const fromPayload = queryPayload ? queryPayload.grouped_by_environment : undefined;
+        if (fromQueryResult === true || readText(fromQueryResult).trim().toLowerCase() === 'true') return 'on';
+        if (fromQueryResult === false || readText(fromQueryResult).trim().toLowerCase() === 'false') return 'off';
+        if (fromPayload === true || readText(fromPayload).trim().toLowerCase() === 'true') return 'on';
+        if (fromPayload === false || readText(fromPayload).trim().toLowerCase() === 'false') return 'off';
+        return '';
+      })();
+    const normalizedGroupingMode: 'auto' | 'on' | 'off' =
+      groupedByEnvironmentToken === 'on' || groupedByEnvironmentToken === 'off' ? groupedByEnvironmentToken : 'auto';
+    queryForm.setGroupedByEnvironment(normalizedGroupingMode);
     const snapshotDbId = readText(queryResult?.mmp_database_id).trim();
     if (!snapshotDbId) return;
     if (!databaseOptions.some((item) => readText(item.id).trim() === snapshotDbId)) return;
     setSelectedDatabaseId(snapshotDbId);
-  }, [databaseOptions, initialMmpSnapshot]);
+  }, [
+    databaseOptions,
+    initialMmpSnapshot,
+    queryForm.setDirection,
+    queryForm.setEnvRadius,
+    queryForm.setGroupedByEnvironment,
+    queryForm.setMinPairs,
+    queryForm.setQueryProperty
+  ]);
 
   const applyDatabaseCatalog = useCallback(
     (catalog: { default_database_id?: string; databases?: LeadOptMmpDatabaseItem[] }) => {
@@ -701,6 +750,7 @@ export function LeadOptimizationWorkspace({
       queryProperty: queryForm.queryProperty,
       mmpDatabaseId: selectedDatabaseId,
       queryMode: queryForm.queryMode,
+      groupedByEnvironment: queryForm.groupedByEnvironment,
       minPairs: queryForm.minPairs,
       envRadius: queryForm.envRadius,
       onTaskQueued:
@@ -735,6 +785,7 @@ export function LeadOptimizationWorkspace({
     queryForm.constantQuery,
     queryForm.direction,
     queryForm.envRadius,
+    queryForm.groupedByEnvironment,
     queryForm.minPairs,
     queryForm.queryMode,
     queryForm.queryProperty,
@@ -939,6 +990,7 @@ export function LeadOptimizationWorkspace({
             onClearFragmentSelection={reference.clearFragmentSelection}
             direction={queryForm.direction}
             queryProperty={queryForm.queryProperty}
+            groupedByEnvironment={queryForm.groupedByEnvironment}
             selectedDatabaseId={selectedDatabaseId}
             databaseOptions={dbSelectOptions}
             propertyOptions={propertyOptions}
@@ -946,6 +998,7 @@ export function LeadOptimizationWorkspace({
             minPairs={queryForm.minPairs}
             onDirectionChange={queryForm.setDirection}
             onQueryPropertyChange={queryForm.setQueryProperty}
+            onGroupedByEnvironmentChange={queryForm.setGroupedByEnvironment}
             onDatabaseIdChange={setSelectedDatabaseId}
             onEnvRadiusChange={queryForm.setEnvRadius}
             onMinPairsChange={queryForm.setMinPairs}
