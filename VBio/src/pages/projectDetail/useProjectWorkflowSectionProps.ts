@@ -273,6 +273,7 @@ export function useProjectWorkflowSectionProps({
   const affinityWorkflowSectionProps = buildAffinityWorkflowSectionProps({
     canEdit,
     submitting,
+    backend,
     targetFileName: affinityTargetFileName,
     ligandFileName: affinityLigandFileName,
     ligandSmiles: affinityLigandSmiles,
@@ -296,6 +297,7 @@ export function useProjectWorkflowSectionProps({
     onLigandFileChange: onAffinityLigandFileChange,
     onUseMsaChange: onAffinityUseMsaChange,
     onConfidenceOnlyChange: onAffinityConfidenceOnlyChange,
+    onBackendChange,
     onLigandSmilesChange: setAffinityLigandSmiles,
     onResizerPointerDown: onResultsResizerPointerDown,
     onResizerKeyDown: onResultsResizerKeyDown

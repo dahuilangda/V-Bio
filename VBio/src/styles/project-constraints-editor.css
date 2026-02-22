@@ -41,8 +41,16 @@
 }
 
 .constraint-nav-bar {
-  display: grid;
-  gap: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.constraint-nav-title-group {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .constraint-nav-controls {
@@ -50,6 +58,7 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
+  flex: 0 0 auto;
 }
 
 .constraint-nav-title-row h3 {
@@ -61,6 +70,25 @@
   display: inline-flex;
   align-items: baseline;
   gap: 8px;
+}
+
+.constraint-nav-title-row-inline {
+  flex-wrap: nowrap;
+  gap: 10px;
+  min-width: 0;
+}
+
+.constraint-nav-pick-hint {
+  line-height: 1.3;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.constraint-nav-picked {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .constraint-nav-counter {
@@ -157,6 +185,7 @@
 .constraint-viewer-panel {
   position: sticky;
   top: 86px;
+  display: grid;
   gap: 8px;
 }
 
@@ -166,7 +195,9 @@
 }
 
 .constraint-editor-panel {
-  padding: 10px;
+  display: grid;
+  gap: 8px;
+  padding: 0;
   min-width: 0;
 }
 

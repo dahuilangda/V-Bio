@@ -180,9 +180,7 @@ export function useWorkspaceAffinitySelection(
   const affinityEnableDisabledReason = useMemo(() => {
     if (!selectedWorkspaceTarget.chainId) return 'Choose a target component first.';
     if (!selectedWorkspaceLigand.chainId) return 'Choose a ligand component first.';
-    if (!selectedWorkspaceLigandOption?.isSmallMolecule) {
-      return 'Affinity compute requires a small-molecule ligand (SMILES/JSME). Pair ipTM and selected-chain pLDDT are still available.';
-    }
+    if (!selectedWorkspaceLigandOption?.isSmallMolecule) return '';
     return '';
   }, [selectedWorkspaceLigand.chainId, selectedWorkspaceLigandOption?.isSmallMolecule, selectedWorkspaceTarget.chainId]);
 

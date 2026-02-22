@@ -95,6 +95,9 @@ export function PredictionConstraintsWorkspace({
   disabled
 }: PredictionConstraintsWorkspaceProps) {
   if (!visible) return null;
+  const pickModeHint = constraintPickModeEnabled
+    ? 'Pick Mode is on: left click in Mol* to auto-fill the selected constraint.'
+    : 'Enable Pick Mode to start selecting residues from Mol*.';
 
   return (
     <div
@@ -102,13 +105,17 @@ export function PredictionConstraintsWorkspace({
       className={`constraint-workspace resizable ${isConstraintsResizing ? 'is-resizing' : ''}`}
       style={constraintsGridStyle}
     >
-      <section className="panel subtle constraint-viewer-panel">
+      <section className="constraint-viewer-panel">
         <div className="constraint-nav-bar">
-          <div className="constraint-nav-title-row">
-            <h3>Constraint Picker</h3>
-            <span className="muted small constraint-nav-counter">
-              {constraintCount === 0 ? 'No constraints' : `${activeConstraintIndex >= 0 ? activeConstraintIndex + 1 : 0}/${constraintCount}`}
-            </span>
+          <div className="constraint-nav-title-group">
+            <div className="constraint-nav-title-row constraint-nav-title-row-inline">
+              <h3>Constraint Picker</h3>
+              <span className="muted small constraint-nav-counter">
+                {constraintCount === 0 ? 'No constraints' : `${activeConstraintIndex >= 0 ? activeConstraintIndex + 1 : 0}/${constraintCount}`}
+              </span>
+              <span className="muted small constraint-nav-pick-hint">{pickModeHint}</span>
+              {pickedResidue && <span className="muted small constraint-nav-picked">Picked: {pickedResidue.chainId}:{pickedResidue.residue}</span>}
+            </div>
           </div>
           <div className="constraint-nav-controls">
             {constraintTemplateOptions && constraintTemplateOptions.length > 0 && (
@@ -148,14 +155,6 @@ export function PredictionConstraintsWorkspace({
             </div>
           </div>
         </div>
-        <div className="row between">
-          <span className="muted small">
-            {constraintPickModeEnabled
-              ? 'Pick Mode is on: left click in Mol* to auto-fill the selected constraint.'
-              : 'Enable Pick Mode to start selecting residues from Mol*.'}
-          </span>
-          {pickedResidue && <span className="muted small">Picked: {pickedResidue.chainId}:{pickedResidue.residue}</span>}
-        </div>
         {hasConstraintStructure ? (
           <MolstarViewer
             key={`constraint-viewer-${selectedTemplatePreview?.componentId || 'none'}-${selectedTemplatePreview?.chainId || 'none'}`}
@@ -193,7 +192,7 @@ export function PredictionConstraintsWorkspace({
       />
 
       <section
-        className="panel subtle constraint-editor-panel"
+        className="constraint-editor-panel"
         onClick={(event) => {
           if (event.target === event.currentTarget) {
             onClearConstraintSelection();

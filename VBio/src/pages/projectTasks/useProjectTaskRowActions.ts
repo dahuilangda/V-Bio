@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 import type { Project, ProjectTask } from '../../types/models';
-import { deleteProjectTask, updateProject, updateProjectTask } from '../../api/supabaseLite';
+import { deleteProjectTask, getProjectTaskById, updateProject, updateProjectTask } from '../../api/supabaseLite';
 import {
   isProjectTaskRow,
   sanitizeTaskRows,
@@ -31,6 +31,10 @@ interface UseProjectTaskRowActionsResult {
   removeTask: (task: ProjectTask) => Promise<void>;
 }
 
+function hasObjectContent(value: unknown): boolean {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length > 0);
+}
+
 export function useProjectTaskRowActions({
   project,
   navigate,
@@ -49,7 +53,8 @@ export function useProjectTaskRowActions({
     setOpeningTaskId(task.id);
     setError(null);
     try {
-      if (!String(task.task_id || '').trim()) {
+      const runtimeTaskId = String(task.task_id || '').trim();
+      if (!runtimeTaskId) {
         const query = new URLSearchParams({
           tab: 'components',
           task_row_id: task.id
@@ -57,28 +62,35 @@ export function useProjectTaskRowActions({
         navigate(`/projects/${project.id}?${query}`);
         return;
       }
+      let taskForOpen = task;
+      if (!hasObjectContent(task.affinity)) {
+        const hydrated = await getProjectTaskById(task.id);
+        if (isProjectTaskRow(hydrated)) {
+          taskForOpen = { ...task, ...hydrated };
+        }
+      }
       const nextAffinity =
-        task.affinity && typeof task.affinity === 'object' && Object.keys(task.affinity).length > 0
-          ? task.affinity
+        hasObjectContent(taskForOpen.affinity)
+          ? taskForOpen.affinity
           : project.affinity || {};
       await updateProject(project.id, {
-        task_id: task.task_id,
-        task_state: task.task_state,
-        status_text: task.status_text || '',
-        error_text: task.error_text || '',
-        submitted_at: task.submitted_at,
-        completed_at: task.completed_at,
-        duration_seconds: task.duration_seconds,
-        confidence: task.confidence || {},
+        task_id: taskForOpen.task_id,
+        task_state: taskForOpen.task_state,
+        status_text: taskForOpen.status_text || '',
+        error_text: taskForOpen.error_text || '',
+        submitted_at: taskForOpen.submitted_at,
+        completed_at: taskForOpen.completed_at,
+        duration_seconds: taskForOpen.duration_seconds,
+        confidence: taskForOpen.confidence || {},
         affinity: nextAffinity,
-        structure_name: task.structure_name || '',
-        backend: task.backend || project.backend
+        structure_name: taskForOpen.structure_name || '',
+        backend: taskForOpen.backend || project.backend
       });
       const hasTaskResult = Boolean(
-        task.task_state === 'SUCCESS' &&
-          (String(task.structure_name || '').trim() ||
-            (task.confidence && typeof task.confidence === 'object' && Object.keys(task.confidence).length > 0) ||
-            (task.affinity && typeof task.affinity === 'object' && Object.keys(task.affinity).length > 0))
+        taskForOpen.task_state === 'SUCCESS' &&
+          (String(taskForOpen.structure_name || '').trim() ||
+            hasObjectContent(taskForOpen.confidence) ||
+            hasObjectContent(taskForOpen.affinity))
       );
       if (hasTaskResult) {
         navigate(`/projects/${project.id}?tab=results`);

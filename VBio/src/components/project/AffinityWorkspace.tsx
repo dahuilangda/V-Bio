@@ -20,6 +20,7 @@ export interface AffinitySignalCard {
 interface AffinityBasicsWorkspaceProps {
   canEdit: boolean;
   submitting: boolean;
+  backend: string;
   targetFileName: string;
   ligandFileName: string;
   ligandSmiles: string;
@@ -39,6 +40,7 @@ interface AffinityBasicsWorkspaceProps {
   onLigandFileChange: (file: File | null) => void;
   onUseMsaChange: (checked: boolean) => void;
   onConfidenceOnlyChange: (checked: boolean) => void;
+  onBackendChange: (backend: string) => void;
   onLigandSmilesChange: (smiles: string) => void;
   onResizerPointerDown: (event: PointerEvent<HTMLDivElement>) => void;
   onResizerKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
@@ -47,6 +49,7 @@ interface AffinityBasicsWorkspaceProps {
 export function AffinityBasicsWorkspace({
   canEdit,
   submitting,
+  backend,
   targetFileName,
   ligandFileName,
   ligandSmiles,
@@ -66,12 +69,13 @@ export function AffinityBasicsWorkspace({
   onLigandFileChange,
   onUseMsaChange,
   onConfidenceOnlyChange,
+  onBackendChange,
   onLigandSmilesChange,
   onResizerPointerDown,
   onResizerKeyDown
 }: AffinityBasicsWorkspaceProps) {
   return (
-    <section className="panel subtle affinity-basics-panel">
+    <section className="affinity-basics-panel">
       <div className="affinity-basics-controls">
         <label className="field affinity-upload-field">
           <span className="affinity-field-title">
@@ -81,6 +85,7 @@ export function AffinityBasicsWorkspace({
           </span>
           <input
             type="file"
+            className="file-input-unified"
             accept=".pdb,.ent,.cif,.mmcif"
             disabled={!canEdit || submitting}
             onClick={(event) => {
@@ -98,6 +103,7 @@ export function AffinityBasicsWorkspace({
           </span>
           <input
             type="file"
+            className="file-input-unified"
             accept=".sdf,.sd,.mol2,.mol,.pdb,.ent,.cif,.mmcif"
             disabled={!canEdit || submitting}
             onClick={(event) => {
@@ -107,6 +113,18 @@ export function AffinityBasicsWorkspace({
           />
         </label>
         <div className="affinity-basics-inline-options">
+          <label className="field affinity-inline-field">
+            <span className="affinity-field-title">Backend</span>
+            <select
+              value={backend}
+              disabled={!canEdit || submitting}
+              onChange={(event) => onBackendChange(event.target.value)}
+            >
+              <option value="boltz">Boltz-2</option>
+              <option value="protenix">Protenix2Score</option>
+            </select>
+          </label>
+
           <label className="switch-field affinity-inline-toggle">
             <input
               type="checkbox"
@@ -137,11 +155,7 @@ export function AffinityBasicsWorkspace({
       {confidenceOnlyHint.trim() ? <div className="muted small affinity-toggles-hint">{confidenceOnlyHint}</div> : null}
 
       <div ref={resultsGridRef} className={`results-grid ${isResultsResizing ? 'is-resizing' : ''}`} style={resultsGridStyle}>
-        <section className="panel structure-panel">
-          <h2 className="affinity-section-title">
-            <Eye size={15} />
-            Preview
-          </h2>
+        <section className="structure-panel">
           {previewTargetStructureText ? (
             <MolstarViewer
               structureText={previewTargetStructureText}
@@ -165,11 +179,7 @@ export function AffinityBasicsWorkspace({
           onKeyDown={onResizerKeyDown}
         />
 
-        <aside className="panel info-panel">
-          <h2 className="affinity-section-title">
-            <FlaskConical size={15} />
-            Ligand
-          </h2>
+        <aside className="info-panel">
           <section className="result-aside-block result-aside-block-ligand">
             <div className="jsme-editor-container affinity-jsme-shell">
               <JSMEEditor smiles={ligandEditorInput} onSmilesChange={onLigandSmilesChange} height={336} />
@@ -234,11 +244,7 @@ export function AffinityResultsWorkspace({
   return (
     <>
       <div ref={resultsGridRef} className={`results-grid ${isResultsResizing ? 'is-resizing' : ''}`} style={resultsGridStyle}>
-        <section className="panel structure-panel">
-          <h2 className="affinity-section-title">
-            <Eye size={15} />
-            Complex
-          </h2>
+        <section className="structure-panel">
           {hasStructure ? (
             <MolstarViewer
               structureText={structureText}
@@ -261,11 +267,7 @@ export function AffinityResultsWorkspace({
           onKeyDown={onResizerKeyDown}
         />
 
-        <aside className="panel info-panel">
-          <h2 className="affinity-section-title">
-            <FlaskConical size={15} />
-            Ligand
-          </h2>
+        <aside className="info-panel">
           <section className="result-aside-block result-aside-block-ligand">
             <div className="ligand-preview-panel">
               <Ligand2DPreview

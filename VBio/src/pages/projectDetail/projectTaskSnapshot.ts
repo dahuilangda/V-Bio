@@ -6,6 +6,7 @@ import {
   normalizeComponentSequence,
   normalizeInputComponents,
 } from '../../utils/projectInputs';
+import { normalizeWorkflowKey } from '../../utils/workflows';
 
 export const AFFINITY_TARGET_UPLOAD_COMPONENT_ID = '__affinity_target_upload__';
 export const AFFINITY_LIGAND_UPLOAD_COMPONENT_ID = '__affinity_ligand_upload__';
@@ -30,7 +31,7 @@ function normalizeComponents(components: InputComponent[]): InputComponent[] {
 
 export function defaultConfigFromProject(project: Project): ProjectInputConfig {
   const config = buildDefaultInputConfig();
-  if (project.task_type === 'affinity') {
+  if (normalizeWorkflowKey(project.task_type) === 'affinity') {
     config.components = [createInputComponent('protein')];
     return config;
   }

@@ -650,6 +650,53 @@ select {
   font-size: var(--text-md);
 }
 
+.file-input-unified {
+  box-sizing: border-box;
+  height: 38px;
+  min-height: 38px;
+  line-height: 36px;
+  padding: 0 10px;
+  font-size: var(--text-sm);
+}
+
+.file-input-unified::file-selector-button {
+  box-sizing: border-box;
+  height: 100%;
+  margin: 0 10px 0 -10px;
+  border: 0;
+  border-right: 1px solid #d5e2db;
+  border-radius: 9px 0 0 9px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: normal;
+  background: #f5faf7;
+  color: #2f4f40;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.file-input-unified::-webkit-file-upload-button {
+  box-sizing: border-box;
+  height: 100%;
+  margin: 0 10px 0 -10px;
+  border: 0;
+  border-right: 1px solid #d5e2db;
+  border-radius: 9px 0 0 9px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: normal;
+  background: #f5faf7;
+  color: #2f4f40;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
 select {
   appearance: none;
   -webkit-appearance: none;

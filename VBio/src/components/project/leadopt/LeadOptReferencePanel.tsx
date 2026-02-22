@@ -64,6 +64,7 @@ export function LeadOptReferencePanel({
           <span>Target (PDB/CIF)</span>
           <input
             type="file"
+            className="file-input-unified"
             accept=".pdb,.cif,.mmcif,.ent"
             onChange={async (event) => {
               const nextTarget = event.target.files?.[0] || null;
@@ -76,6 +77,7 @@ export function LeadOptReferencePanel({
           <span>Ligand (SDF/MOL2/PDB/CIF)</span>
           <input
             type="file"
+            className="file-input-unified"
             accept=".sdf,.sd,.mol2,.mol,.pdb,.ent,.cif,.mmcif"
             onChange={async (event) => {
               const nextLigand = event.target.files?.[0] || null;

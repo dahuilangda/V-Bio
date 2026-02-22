@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import type { Project, ProjectTask } from '../../types/models';
 import { getProjectById, listProjectTasksForList } from '../../api/supabaseLite';
+import { normalizeWorkflowKey } from '../../utils/workflows';
 import {
   hasLeadOptPredictionRuntime,
   SILENT_CACHE_SYNC_WINDOW_MS,
@@ -200,13 +201,16 @@ export function useProjectTasksDataLoader({
           return;
         }
 
-        const [projectRow, taskRows] = await Promise.all([getProjectById(projectId), listProjectTasksForList(projectId)]);
+        const projectRow = await getProjectById(projectId);
         if (!projectRow || projectRow.deleted_at) {
           throw new Error('Project not found or already deleted.');
         }
         if (sessionUserId && projectRow.user_id !== sessionUserId) {
           throw new Error('You do not have permission to access this project.');
         }
+        const workflowKey = normalizeWorkflowKey(projectRow.task_type);
+        const includeComponentsForList = workflowKey === 'prediction';
+        const taskRows = await listProjectTasksForList(projectId, { includeComponents: includeComponentsForList });
 
         lastFullFetchTsRef.current = Date.now();
         const sortedTaskRows = sortProjectTasks(sanitizeTaskRows(taskRows));

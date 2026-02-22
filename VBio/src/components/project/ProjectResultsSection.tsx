@@ -76,9 +76,7 @@ export function ProjectResultsSection({
     return (
       <>
         <div ref={resultsGridRef} className={`results-grid ${isResultsResizing ? 'is-resizing' : ''}`} style={resultsGridStyle}>
-          <section className="panel structure-panel">
-            <h2>Structure Viewer</h2>
-
+          <section className="structure-panel">
             <MolstarViewer
               structureText={displayStructureText}
               format={displayStructureFormat}
@@ -99,9 +97,7 @@ export function ProjectResultsSection({
             onKeyDown={onResizerKeyDown}
           />
 
-          <aside className="panel info-panel">
-            <h2>Overview</h2>
-
+          <aside className="info-panel">
             <section className="result-aside-block result-aside-block-ligand">
               <div className="result-aside-title">Ligand</div>
               <div className="ligand-preview-panel">{predictionLigandPreview}</div>

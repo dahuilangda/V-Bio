@@ -342,6 +342,7 @@ export function ComponentInputEditor({
                       <span>Protein Structure (optional)</span>
                       <input
                         type="file"
+                        className="file-input-unified"
                         accept=".pdb,.cif,.mmcif"
                         disabled={disabled}
                         onChange={(e) => void handleProteinTemplateUpload(comp.id, e.target.files?.[0] || null)}

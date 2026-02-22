@@ -225,7 +225,9 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
         backend: nextDraft.backend,
         use_msa: nextDraft.use_msa,
         color_mode: nextDraft.color_mode,
-        status_text: 'Draft saved'
+        status_text: 'Draft saved',
+        protein_sequence: '',
+        ligand_smiles: storedLigandSmiles
       });
     } catch (draftPersistError) {
       persistenceWarnings.push(
@@ -300,6 +302,8 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
       status_text: 'Task submitted and waiting in queue',
       error_text: '',
       backend: activeAffinityBackend,
+      protein_sequence: '',
+      ligand_smiles: storedLigandSmiles,
       submitted_at: queuedAt,
       completed_at: null,
       duration_seconds: null

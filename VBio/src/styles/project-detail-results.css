@@ -70,7 +70,8 @@
 
 .structure-panel {
   height: 100%;
-  grid-template-rows: auto 1fr auto;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 8px;
   min-width: 0;
 }
@@ -132,6 +133,7 @@
 
 .info-panel {
   height: 100%;
+  display: grid;
   gap: 10px;
   align-content: start;
   min-width: 280px;

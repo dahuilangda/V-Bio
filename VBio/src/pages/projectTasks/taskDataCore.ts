@@ -235,6 +235,90 @@ function readStringListMetric(data: Record<string, unknown> | null, paths: strin
   return [];
 }
 
+function readLigandSmilesFromMap(data: Record<string, unknown> | null, preferredLigandChainId: string | null): string {
+  if (!data) return '';
+  const mapCandidates: unknown[] = [
+    readObjectPath(data, 'ligand_smiles_map'),
+    readObjectPath(data, 'ligand.smiles_map'),
+    readObjectPath(data, 'ligand.smilesMap')
+  ];
+  const preferredChain = normalizeChainKey(String(preferredLigandChainId || ''));
+
+  for (const mapValue of mapCandidates) {
+    if (!mapValue || typeof mapValue !== 'object' || Array.isArray(mapValue)) continue;
+    const entries = Object.entries(mapValue as Record<string, unknown>)
+      .map(([key, value]) => {
+        if (typeof value !== 'string') return null;
+        const normalizedValue = normalizeComponentSequence('ligand', value);
+        if (!normalizedValue) return null;
+        const keyText = String(key || '').trim();
+        return {
+          key: keyText,
+          keyChain: normalizeChainKey(keyText.includes(':') ? keyText.slice(0, keyText.indexOf(':')) : keyText),
+          value: normalizedValue
+        };
+      })
+      .filter((item): item is { key: string; keyChain: string; value: string } => item !== null);
+    if (entries.length === 0) continue;
+
+    if (preferredChain) {
+      const matched = entries.find((item) => item.keyChain === preferredChain);
+      if (matched) return matched.value;
+    }
+
+    if (entries.length === 1) return entries[0].value;
+    return entries[0].value;
+  }
+
+  return '';
+}
+
+function readTaskLigandSmilesHint(task: ProjectTask, preferredLigandChainId: string | null = null): string {
+  const taskLigandSmiles = normalizeComponentSequence('ligand', String(task.ligand_smiles || ''));
+  if (taskLigandSmiles) return taskLigandSmiles;
+
+  const confidenceData =
+    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
+      ? (task.confidence as Record<string, unknown>)
+      : null;
+  const affinityData =
+    task.affinity && typeof task.affinity === 'object' && !Array.isArray(task.affinity)
+      ? (task.affinity as Record<string, unknown>)
+      : null;
+
+  const directConfidenceSmiles = normalizeComponentSequence(
+    'ligand',
+    readFirstNonEmptyStringMetric(confidenceData, [
+      'ligand_smiles',
+      'ligand.smiles',
+      'ligandSmiles',
+      'request.ligand_smiles',
+      'inputs.ligand_smiles'
+    ])
+  );
+  if (directConfidenceSmiles) return directConfidenceSmiles;
+
+  const mappedConfidenceSmiles = normalizeComponentSequence(
+    'ligand',
+    readLigandSmilesFromMap(confidenceData, preferredLigandChainId)
+  );
+  if (mappedConfidenceSmiles) return mappedConfidenceSmiles;
+
+  const directAffinitySmiles = normalizeComponentSequence(
+    'ligand',
+    readFirstNonEmptyStringMetric(affinityData, [
+      'ligand_smiles',
+      'ligand.smiles',
+      'ligandSmiles',
+      'request.ligand_smiles',
+      'inputs.ligand_smiles'
+    ])
+  );
+  if (directAffinitySmiles) return directAffinitySmiles;
+
+  return normalizeComponentSequence('ligand', readLigandSmilesFromMap(affinityData, preferredLigandChainId));
+}
+
 function splitChainTokens(value: string): string[] {
   return String(value || '')
     .split(',')
@@ -375,6 +459,8 @@ function resolveTaskSelectionContext(
   workflowHint: TaskLigandSourceWorkflow | string = 'auto'
 ): TaskSelectionContext {
   const workflow = normalizeTaskLigandSourceWorkflow(workflowHint);
+  const preferTaskSmilesLigand = workflow === 'affinity' || workflow === 'lead_optimization';
+  const taskLigandSmiles = readTaskLigandSmilesHint(task, workspacePreference?.ligandChainId || null);
   const useBindingPreference = workflow === 'prediction' || workflow === 'auto';
   const taskProperties = task.properties && typeof task.properties === 'object' ? task.properties : null;
   const rawTarget = taskProperties && typeof taskProperties.target === 'string' ? taskProperties.target.trim() : '';
@@ -411,8 +497,8 @@ function resolveTaskSelectionContext(
       chainIds: fallbackChainIds,
       targetChainId: targetCandidate || null,
       ligandChainId: null,
-      ligandSmiles: '',
-      ligandIsSmiles: false,
+      ligandSmiles: preferTaskSmilesLigand ? taskLigandSmiles : '',
+      ligandIsSmiles: preferTaskSmilesLigand ? Boolean(taskLigandSmiles) : false,
       ligandComponentCount,
       ligandSequence: '',
       ligandSequenceType: null
@@ -540,11 +626,20 @@ function resolveTaskSelectionContext(
   if (!selectedLigandComponent && (workflow === 'affinity' || workflow === 'lead_optimization')) {
     ligand = readTaskPrimaryLigand(activeComponents, null, null, true, workflow);
   }
+  const resolvedTaskLigandSmiles = preferTaskSmilesLigand
+    ? readTaskLigandSmilesHint(task, ligandChainId || workspacePreference?.ligandChainId || null) || taskLigandSmiles
+    : '';
+  if (preferTaskSmilesLigand && resolvedTaskLigandSmiles) {
+    ligand = {
+      smiles: resolvedTaskLigandSmiles,
+      isSmiles: true
+    };
+  }
   const ligandSequence =
-    selectedLigandComponent && isSequenceLigandType(selectedLigandComponent.type)
+    !preferTaskSmilesLigand && selectedLigandComponent && isSequenceLigandType(selectedLigandComponent.type)
       ? normalizeComponentSequence(selectedLigandComponent.type, selectedLigandComponent.sequence || '')
       : '';
-  const ligandSequenceType = selectedLigandComponent?.type || null;
+  const ligandSequenceType = preferTaskSmilesLigand ? null : selectedLigandComponent?.type || null;
 
   return {
     chainIds,

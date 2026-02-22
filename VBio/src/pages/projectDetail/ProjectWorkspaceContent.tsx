@@ -48,6 +48,10 @@ export function ProjectWorkspaceContent({
 }: ProjectWorkspaceContentProps) {
   const showLeadOptWorkspace = isLeadOptimizationWorkflow && (workspaceTab === 'components' || workspaceTab === 'results');
   const showNativeResults = workspaceTab === 'results' && !isLeadOptimizationWorkflow;
+  const showFlatPredictionWorkspace =
+    isPredictionWorkflow && (workspaceTab === 'components' || workspaceTab === 'constraints');
+  const showFlatAffinityWorkspace = isAffinityWorkflow && workspaceTab === 'components';
+  const showFlatWorkspace = showFlatPredictionWorkspace || showFlatAffinityWorkspace;
 
   if (showLeadOptWorkspace) {
     return (
@@ -72,7 +76,18 @@ export function ProjectWorkspaceContent({
     <div className="workspace-content">
       {showNativeResults && <ProjectResultsSection {...projectResultsSectionProps} />}
 
-      {(workspaceTab !== 'results' || isLeadOptimizationWorkflow) && (
+      {showFlatWorkspace && (
+        <form className="form-grid" onSubmit={onSaveDraft}>
+          {showFlatPredictionWorkspace && <PredictionWorkflowSection visible {...predictionSectionProps} />}
+          {showFlatAffinityWorkspace && <AffinityWorkflowSection visible {...affinitySectionProps} />}
+          <WorkflowRuntimeSettingsSection
+            visible={showFlatPredictionWorkspace && workspaceTab === 'components' && !isLeadOptimizationWorkflow}
+            {...runtimeSettingsProps}
+          />
+        </form>
+      )}
+
+      {!showFlatWorkspace && (workspaceTab !== 'results' || isLeadOptimizationWorkflow) && (
         <section className="panel inputs-panel">
           {showWorkspaceTitle ? <h2>{workspaceTitle}</h2> : null}
 

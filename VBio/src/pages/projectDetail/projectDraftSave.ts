@@ -120,11 +120,9 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
     use_msa: hasMsa,
     color_mode: draft.color_mode,
     status_text: 'Draft saved',
+    protein_sequence: storedProteinSequence,
+    ligand_smiles: storedLigandSmiles,
   };
-  if (workflowDef.key !== 'affinity') {
-    projectPatch.protein_sequence = storedProteinSequence;
-    projectPatch.ligand_smiles = storedLigandSmiles;
-  }
   const next = await patch(projectPatch);
 
   if (!next) return;

@@ -74,14 +74,6 @@
   background: #f5f6f9;
 }
 
-.protein-template-upload input[type='file'] {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: #fff;
-  padding: 8px 10px;
-  font-size: var(--text-sm);
-}
-
 .template-upload-meta {
   margin-top: 6px;
   display: flex;
@@ -286,4 +278,3 @@
 .ligand-live-props.align-bottom {
   margin-top: auto;
 }
-

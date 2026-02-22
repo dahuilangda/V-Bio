@@ -5,6 +5,7 @@ export interface AffinityWorkflowSectionProps {
   visible: boolean;
   canEdit: boolean;
   submitting: boolean;
+  backend: string;
   targetFileName: string;
   ligandFileName: string;
   ligandSmiles: string;
@@ -24,6 +25,7 @@ export interface AffinityWorkflowSectionProps {
   onLigandFileChange: (file: File | null) => void;
   onUseMsaChange: (value: boolean) => void;
   onConfidenceOnlyChange: (value: boolean) => void;
+  onBackendChange: (backend: string) => void;
   onLigandSmilesChange: (value: string) => void;
   onResizerPointerDown: (event: PointerEvent<HTMLDivElement>) => void;
   onResizerKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
@@ -33,6 +35,7 @@ export function AffinityWorkflowSection({
   visible,
   canEdit,
   submitting,
+  backend,
   targetFileName,
   ligandFileName,
   ligandSmiles,
@@ -52,6 +55,7 @@ export function AffinityWorkflowSection({
   onLigandFileChange,
   onUseMsaChange,
   onConfidenceOnlyChange,
+  onBackendChange,
   onLigandSmilesChange,
   onResizerPointerDown,
   onResizerKeyDown
@@ -62,6 +66,7 @@ export function AffinityWorkflowSection({
     <AffinityBasicsWorkspace
       canEdit={canEdit}
       submitting={submitting}
+      backend={backend}
       targetFileName={targetFileName}
       ligandFileName={ligandFileName}
       ligandSmiles={ligandSmiles}
@@ -81,6 +86,7 @@ export function AffinityWorkflowSection({
       onLigandFileChange={onLigandFileChange}
       onUseMsaChange={onUseMsaChange}
       onConfidenceOnlyChange={onConfidenceOnlyChange}
+      onBackendChange={onBackendChange}
       onLigandSmilesChange={onLigandSmilesChange}
       onResizerPointerDown={onResizerPointerDown}
       onResizerKeyDown={onResizerKeyDown}

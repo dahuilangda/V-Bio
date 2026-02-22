@@ -1,13 +1,16 @@
 .component-sidebar {
   position: sticky;
   top: 86px;
+  display: grid;
   gap: 6px;
+  align-content: start;
+  min-width: 0;
 }
 
 .component-sidebar-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 8px;
 }
 
@@ -291,4 +294,3 @@
     animation: none;
   }
 }
-

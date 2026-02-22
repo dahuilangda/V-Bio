@@ -98,9 +98,8 @@ export function PredictionComponentsSidebar({
   if (!visible) return null;
 
   return (
-    <aside className="panel subtle component-sidebar">
+    <aside className="component-sidebar">
       <div className="component-sidebar-head">
-        <h3>Workspace</h3>
         <div className="component-sidebar-head-meta">
           <span className="component-count-chip">{components.length} items</span>
           <span className={`component-readiness-chip ${hasIncompleteComponents ? 'incomplete' : 'complete'}`}>
@@ -259,7 +258,9 @@ export function PredictionComponentsSidebar({
             </select>
           </label>
         </div>
-        {!canEnableAffinityFromWorkspace && <div className="component-sidebar-empty muted small">{affinityEnableDisabledReason}</div>}
+        {!canEnableAffinityFromWorkspace && affinityEnableDisabledReason.trim() && (
+          <div className="component-sidebar-empty muted small">{affinityEnableDisabledReason}</div>
+        )}
       </section>
 
       <div className="component-sidebar-note muted small">Click items to jump to the target editor block.</div>
