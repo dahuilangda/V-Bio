@@ -221,12 +221,12 @@ function normalizePreviewRenderMode(value: unknown): CandidatePreviewRenderMode 
   return String(value || '').trim().toLowerCase() === 'fragment' ? 'fragment' : 'confidence';
 }
 
-function normalizeBoolean(value: unknown, fallback = false): boolean {
+function normalizeBoolean(value: unknown, defaultValue = false): boolean {
   if (typeof value === 'boolean') return value;
   const token = String(value || '').trim().toLowerCase();
   if (token === 'true' || token === '1' || token === 'yes') return true;
   if (token === 'false' || token === '0' || token === 'no') return false;
-  return fallback;
+  return defaultValue;
 }
 
 export function normalizeLeadOptCandidatesUiState(
@@ -709,30 +709,36 @@ export function LeadOptCandidatesPanel({
     smiles: string,
     predictionState: 'SUCCESS' | 'RUNNING' | 'FAILURE' | 'QUEUED' | 'UNSCORED'
   ) => {
-    if (predictionState === 'RUNNING') {
-      return (
-        <button type="button" className="lead-opt-row-action-btn" disabled title="Running" aria-label="Running">
-          <Loader2 size={14} className="spinning" />
-        </button>
-      );
-    }
-    if (predictionState === 'QUEUED') {
-      return (
-        <button type="button" className="lead-opt-row-action-btn" disabled title="Queued" aria-label="Queued">
-          <Clock3 size={14} />
-        </button>
-      );
-    }
+    const isRunning = predictionState === 'RUNNING';
+    const isQueued = predictionState === 'QUEUED';
+    const isPending = isRunning || isQueued;
+    const isActionDisabled = isPending || loading || !referenceReady || !smiles;
+    const buttonClass = [
+      'lead-opt-row-action-btn',
+      !isPending ? 'lead-opt-row-action-btn-primary' : '',
+      isRunning ? 'lead-opt-row-action-btn--running' : '',
+      isQueued ? 'lead-opt-row-action-btn--queued' : ''
+    ]
+      .filter(Boolean)
+      .join(' ');
+    const title = isRunning
+      ? 'Running'
+      : isQueued
+        ? 'Queued'
+        : referenceReady
+          ? 'Run structure prediction'
+          : 'Upload reference first';
+    const ariaLabel = isRunning ? 'Running' : isQueued ? 'Queued' : 'Run structure prediction';
     return (
       <button
         type="button"
-        className="lead-opt-row-action-btn lead-opt-row-action-btn-primary"
-        onClick={() => onRunPredictCandidate(smiles, selectedBackendKey)}
-        disabled={loading || !referenceReady || !smiles}
-        title={referenceReady ? 'Run structure prediction' : 'Upload reference first'}
-        aria-label="Run structure prediction"
+        className={buttonClass}
+        onClick={isPending ? undefined : () => onRunPredictCandidate(smiles, selectedBackendKey)}
+        disabled={isActionDisabled}
+        title={title}
+        aria-label={ariaLabel}
       >
-        <Play size={14} />
+        {isRunning ? <Loader2 size={14} className="spinning" /> : isQueued ? <Clock3 size={14} /> : <Play size={14} />}
       </button>
     );
   };

@@ -53,6 +53,27 @@ function hasFiniteMetric(value: unknown): boolean {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
+function readErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error || 'unknown error');
+}
+
+async function persistProjectTaskPatch(task: ProjectTask, patch: Partial<ProjectTask>): Promise<ProjectTask> {
+  const patchedTask = await updateProjectTask(task.id, patch);
+  if (!isProjectTaskRow(patchedTask)) {
+    throw new Error(`updateProjectTask returned invalid row for task row ${task.id}`);
+  }
+  return patchedTask;
+}
+
+async function persistProjectPatch(project: Project, patch: Partial<Project>): Promise<Project> {
+  const patchedProject = await updateProject(project.id, patch);
+  if (!isProjectRow(patchedProject)) {
+    throw new Error(`updateProject returned invalid row for project ${project.id}`);
+  }
+  return patchedProject;
+}
+
 function deriveLeadOptRuntimeState(summary: LeadOptTaskSummary): {
   taskState: ProjectTask['task_state'];
   statusText: string;
@@ -499,14 +520,17 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
       Boolean(mergedConfidencePatch) ||
       Boolean(mergedStructureNamePatch);
     if (!taskNeedsPatch) continue;
-
-    const fallbackTask: ProjectTask = {
-      ...workingRow,
-      ...taskPatch
-    };
-    const patchedTask = await updateProjectTask(workingRow.id, taskPatch).catch(() => fallbackTask);
-    const nextTask = isProjectTaskRow(patchedTask) ? patchedTask : fallbackTask;
-    nextTaskRows = nextTaskRows.map((item) => (item.id === workingRow.id ? nextTask : item));
+    try {
+      const nextTask = await persistProjectTaskPatch(workingRow, taskPatch);
+      nextTaskRows = nextTaskRows.map((item) => (item.id === workingRow.id ? nextTask : item));
+    } catch (error) {
+      console.error('[taskRowSync] Failed to persist lead-opt task patch.', {
+        taskRowId: workingRow.id,
+        taskId: workingRow.task_id,
+        error: readErrorMessage(error)
+      });
+      continue;
+    }
 
     if (nextProject.task_id === workingRow.task_id) {
       const projectPatch: Partial<Project> = {
@@ -522,12 +546,15 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
       if (mergedStructureNamePatch) {
         projectPatch.structure_name = mergedStructureNamePatch;
       }
-      const fallbackProject: Project = {
-        ...nextProject,
-        ...projectPatch
-      };
-      const patchedProject = await updateProject(nextProject.id, projectPatch).catch(() => fallbackProject);
-      nextProject = isProjectRow(patchedProject) ? patchedProject : fallbackProject;
+      try {
+        nextProject = await persistProjectPatch(nextProject, projectPatch);
+      } catch (error) {
+        console.error('[taskRowSync] Failed to persist lead-opt project patch.', {
+          projectId: nextProject.id,
+          taskId: workingRow.task_id,
+          error: readErrorMessage(error)
+        });
+      }
     }
   }
 
@@ -580,13 +607,17 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
         completed_at: completedAt,
         duration_seconds: durationSeconds
       };
-      const fallbackTask: ProjectTask = {
-        ...runtimeTask,
-        ...taskPatch
-      };
-      const patchedTask = await updateProjectTask(runtimeTask.id, taskPatch).catch(() => fallbackTask);
-      const nextTask = isProjectTaskRow(patchedTask) ? patchedTask : fallbackTask;
-      nextTaskRows = nextTaskRows.map((row) => (row.id === runtimeTask.id ? nextTask : row));
+      try {
+        const nextTask = await persistProjectTaskPatch(runtimeTask, taskPatch);
+        nextTaskRows = nextTaskRows.map((row) => (row.id === runtimeTask.id ? nextTask : row));
+      } catch (error) {
+        console.error('[taskRowSync] Failed to persist runtime task patch.', {
+          taskRowId: runtimeTask.id,
+          taskId: runtimeTask.task_id,
+          error: readErrorMessage(error)
+        });
+        continue;
+      }
     }
 
     if (nextProject.task_id === runtimeTask.task_id) {
@@ -604,12 +635,15 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
           completed_at: completedAt,
           duration_seconds: durationSeconds
         };
-        const fallbackProject: Project = {
-          ...nextProject,
-          ...projectPatch
-        };
-        const patchedProject = await updateProject(nextProject.id, projectPatch).catch(() => fallbackProject);
-        nextProject = isProjectRow(patchedProject) ? patchedProject : fallbackProject;
+        try {
+          nextProject = await persistProjectPatch(nextProject, projectPatch);
+        } catch (error) {
+          console.error('[taskRowSync] Failed to persist runtime project patch.', {
+            projectId: nextProject.id,
+            taskId: runtimeTask.task_id,
+            error: readErrorMessage(error)
+          });
+        }
       }
     }
   }
@@ -705,12 +739,17 @@ export async function hydrateTaskMetricsFromResultRows(
         affinity: parsed.affinity || {},
         structure_name: parsed.structureName || task.structure_name || ''
       };
-      const fallbackTask: ProjectTask = {
-        ...task,
-        ...taskPatch
-      };
-      const patchedTask = await updateProjectTask(task.id, taskPatch).catch(() => fallbackTask);
-      const nextTask = isProjectTaskRow(patchedTask) ? patchedTask : fallbackTask;
+      let nextTask: ProjectTask;
+      try {
+        nextTask = await persistProjectTaskPatch(task, taskPatch);
+      } catch (error) {
+        console.error('[taskRowSync] Failed to persist hydrated task metrics.', {
+          taskRowId: task.id,
+          taskId,
+          error: readErrorMessage(error)
+        });
+        continue;
+      }
       nextTaskRows = nextTaskRows.map((row) => (row.id === task.id ? nextTask : row));
 
       if (nextProject.task_id === taskId) {
@@ -719,12 +758,15 @@ export async function hydrateTaskMetricsFromResultRows(
           affinity: taskPatch.affinity || {},
           structure_name: taskPatch.structure_name || ''
         };
-        const fallbackProject: Project = {
-          ...nextProject,
-          ...projectPatch
-        };
-        const patchedProject = await updateProject(nextProject.id, projectPatch).catch(() => fallbackProject);
-        nextProject = isProjectRow(patchedProject) ? patchedProject : fallbackProject;
+        try {
+          nextProject = await persistProjectPatch(nextProject, projectPatch);
+        } catch (error) {
+          console.error('[taskRowSync] Failed to persist hydrated project metrics.', {
+            projectId: nextProject.id,
+            taskId,
+            error: readErrorMessage(error)
+          });
+        }
       }
 
       resultHydrationDoneRef.current.add(taskId);

@@ -428,8 +428,8 @@ function readPairValueFromNumericMap(
 
   if (keys.length === 2) {
     const [first, second] = keys.sort((a, b) => Number(a) - Number(b));
-    const fallback = readPairValueFromNestedMap(byChain, first, second);
-    if (fallback !== null) return fallback;
+    const inferredPairValue = readPairValueFromNestedMap(byChain, first, second);
+    if (inferredPairValue !== null) return inferredPairValue;
   }
   return null;
 }
@@ -721,7 +721,15 @@ export function useLeadOptMmpQueryMachine({
             if (runtimeState !== 'QUEUED' && runtimeState !== 'RUNNING') continue;
             setPredictionBySmiles((prev) => {
               const current = prev[smiles] || record;
-              if (String(current.state || '').toUpperCase() === runtimeState) return prev;
+              if (String(current.state || '').toUpperCase() === runtimeState) {
+                return {
+                  ...prev,
+                  [smiles]: {
+                    ...current,
+                    updatedAt: Date.now()
+                  }
+                };
+              }
               return {
                 ...prev,
                 [smiles]: {
@@ -732,7 +740,19 @@ export function useLeadOptMmpQueryMachine({
               };
             });
           } catch {
-            // transient errors will retry on next cycle
+            // On transient status errors, still bump timestamp so polling can rotate
+            // through other queued/running records instead of starving after the first slice.
+            setPredictionBySmiles((prev) => {
+              const current = prev[smiles] || record;
+              if (!current) return prev;
+              return {
+                ...prev,
+                [smiles]: {
+                  ...current,
+                  updatedAt: Date.now()
+                }
+              };
+            });
           }
         }
       })();
@@ -805,7 +825,15 @@ export function useLeadOptMmpQueryMachine({
             if (runtimeState !== 'QUEUED' && runtimeState !== 'RUNNING') continue;
             setReferencePredictionByBackend((prev) => {
               const current = prev[backendKey] || record;
-              if (String(current.state || '').toUpperCase() === runtimeState) return prev;
+              if (String(current.state || '').toUpperCase() === runtimeState) {
+                return {
+                  ...prev,
+                  [backendKey]: {
+                    ...current,
+                    updatedAt: Date.now()
+                  }
+                };
+              }
               return {
                 ...prev,
                 [backendKey]: {
@@ -816,7 +844,18 @@ export function useLeadOptMmpQueryMachine({
               };
             });
           } catch {
-            // transient errors will retry on next cycle
+            // Same rotation strategy for reference predictions.
+            setReferencePredictionByBackend((prev) => {
+              const current = prev[backendKey] || record;
+              if (!current) return prev;
+              return {
+                ...prev,
+                [backendKey]: {
+                  ...current,
+                  updatedAt: Date.now()
+                }
+              };
+            });
           }
         }
       })();

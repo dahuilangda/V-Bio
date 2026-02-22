@@ -211,7 +211,7 @@ export function useLeadOptReferenceFragment({
   const [previewStructureFormat, setPreviewStructureFormat] = useState<'cif' | 'pdb'>('cif');
   const [previewOverlayStructureText, setPreviewOverlayStructureText] = useState('');
   const [previewOverlayStructureFormat, setPreviewOverlayStructureFormat] = useState<'cif' | 'pdb'>('cif');
-  const [referenceLigandSmilesFallback, setReferenceLigandSmilesFallback] = useState('');
+  const [referenceLigandSmilesResolved, setReferenceLigandSmilesResolved] = useState('');
   const [fragmentSourceSmiles, setFragmentSourceSmiles] = useState('');
 
   const [fragments, setFragments] = useState<LigandFragmentItem[]>([]);
@@ -227,8 +227,8 @@ export function useLeadOptReferenceFragment({
   const effectiveLigandSmiles = useMemo(() => {
     const primary = ligandSmiles.trim();
     if (primary) return primary;
-    return referenceLigandSmilesFallback.trim();
-  }, [ligandSmiles, referenceLigandSmilesFallback]);
+    return referenceLigandSmilesResolved.trim();
+  }, [ligandSmiles, referenceLigandSmilesResolved]);
 
   const uploadHydrationKey = useMemo(() => {
     const targetName = String(persistedUploads?.target?.fileName || '').trim();
@@ -241,7 +241,7 @@ export function useLeadOptReferenceFragment({
   useEffect(() => {
     const next = ligandSmiles.trim();
     if (!next) return;
-    setReferenceLigandSmilesFallback(next);
+    setReferenceLigandSmilesResolved(next);
   }, [ligandSmiles]);
 
   useEffect(() => {
@@ -517,10 +517,10 @@ export function useLeadOptReferenceFragment({
     const recommendedIds = Array.isArray(response.recommended_variable_fragment_ids)
       ? response.recommended_variable_fragment_ids.map((id) => readText(id)).filter(Boolean)
       : [];
-    const fallbackId = pickReasonableDefaultFragment(nextFragments);
+    const defaultFragmentId = pickReasonableDefaultFragment(nextFragments);
     const defaultIds = uniqueFragmentIds([
       ...recommendedIds.slice(0, 1),
-      fallbackId,
+      defaultFragmentId,
       nextFragments[0]?.fragment_id || ''
     ]).slice(0, 1);
     const firstRecommended = defaultIds[0] || '';
@@ -627,7 +627,7 @@ export function useLeadOptReferenceFragment({
       setReferenceReady(true);
 
       const referenceSmiles = readText(response.ligand_smiles).trim();
-      if (referenceSmiles) setReferenceLigandSmilesFallback(referenceSmiles);
+      if (referenceSmiles) setReferenceLigandSmilesResolved(referenceSmiles);
       const nextSmiles = referenceSmiles || effectiveLigandSmiles;
       if (referenceSmiles && referenceSmiles !== ligandSmiles.trim()) {
         onLigandSmilesChange(referenceSmiles);
