@@ -1,5 +1,9 @@
 import { API_HEADERS, requestBackend } from './backendClient';
 
+const LIFECYCLE_CHECK_TIMEOUT_MS = 3 * 60 * 1000;
+const LIFECYCLE_APPLY_TIMEOUT_MS = 15 * 60 * 1000;
+const LIFECYCLE_ROLLBACK_TIMEOUT_MS = 10 * 60 * 1000;
+
 export interface MmpLifecycleDatabaseItem {
   id: string;
   label: string;
@@ -523,7 +527,7 @@ export async function checkMmpLifecycleBatch(
       Accept: 'application/json'
     },
     body: JSON.stringify(payload)
-  });
+  }, LIFECYCLE_CHECK_TIMEOUT_MS);
   return (await parseJsonOrError(res, 'Failed to check lifecycle batch')) as Record<string, unknown>;
 }
 
@@ -540,7 +544,7 @@ export async function applyMmpLifecycleBatch(
       Accept: 'application/json'
     },
     body: JSON.stringify(payload || {})
-  });
+  }, LIFECYCLE_APPLY_TIMEOUT_MS);
   return (await parseJsonOrError(res, 'Failed to apply lifecycle batch')) as Record<string, unknown>;
 }
 
@@ -557,7 +561,7 @@ export async function rollbackMmpLifecycleBatch(
       Accept: 'application/json'
     },
     body: JSON.stringify(payload || {})
-  });
+  }, LIFECYCLE_ROLLBACK_TIMEOUT_MS);
   return (await parseJsonOrError(res, 'Failed to rollback lifecycle batch')) as Record<string, unknown>;
 }
 

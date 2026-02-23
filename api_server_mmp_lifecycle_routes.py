@@ -62,6 +62,14 @@ def _read_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _is_missing_cell_value(value: Any) -> bool:
+    token = _read_text(value)
+    if not token:
+        return True
+    token_upper = token.upper()
+    return token_upper in {"*", "NA", "N/A", "NAN", "NULL", "NONE", "-"}
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -302,13 +310,14 @@ def _build_compounds_preview(path: str, *, max_rows: int) -> Dict[str, Any]:
                 if not name:
                     continue
                 value = values[idx] if idx < len(values) else ""
-                bucket[name] = value
-                if not value:
+                normalized_value = "" if _is_missing_cell_value(value) else value
+                bucket[name] = normalized_value
+                if _is_missing_cell_value(normalized_value):
                     continue
                 has_any = True
                 column_non_empty_counts[name] = int(column_non_empty_counts.get(name) or 0) + 1
                 try:
-                    numeric = float(value)
+                    numeric = float(normalized_value)
                 except Exception:
                     numeric = None
                 if numeric is not None and math.isfinite(numeric):
@@ -330,6 +339,34 @@ def _build_compounds_preview(path: str, *, max_rows: int) -> Dict[str, Any]:
         "column_numeric_counts": column_numeric_counts,
         "column_positive_numeric_counts": column_positive_numeric_counts,
     }
+
+
+def _resolve_batch_file_path(
+    *,
+    store: MmpLifecycleAdminStore,
+    batch_id: str,
+    file_meta: Dict[str, Any],
+) -> str:
+    batch_token = _read_text(batch_id)
+    meta = _safe_json_object(file_meta)
+
+    direct_path = _read_text(meta.get("path"))
+    if direct_path and os.path.exists(direct_path):
+        return direct_path
+
+    rel_path = _read_text(meta.get("path_rel"))
+    if rel_path:
+        candidate = (Path(str(store.root_dir)) / rel_path).resolve()
+        if os.path.exists(candidate):
+            return str(candidate)
+
+    stored_name = Path(_read_text(meta.get("stored_name"))).name
+    if batch_token and stored_name:
+        candidate = Path(str(store.batch_upload_dir)) / batch_token / stored_name
+        if os.path.exists(candidate):
+            return str(candidate)
+
+    return direct_path
 
 
 def _resolve_database_target(database_id: str) -> Tuple[Dict[str, Any], PostgresTarget]:
@@ -520,13 +557,15 @@ def _build_property_import_from_experiments(
     *,
     logger,
     target: PostgresTarget,
+    store: MmpLifecycleAdminStore,
     batch: Dict[str, Any],
     database_id: str,
     mappings: List[Dict[str, Any]],
     row_limit: int,
 ) -> Dict[str, Any]:
+    batch_id = _read_text(batch.get("id"))
     experiments_file = _safe_json_object(_safe_json_object(batch.get("files")).get("experiments"))
-    source_path = str(experiments_file.get("path") or "").strip()
+    source_path = _resolve_batch_file_path(store=store, batch_id=batch_id, file_meta=experiments_file)
     if not source_path or not os.path.exists(source_path):
         raise ValueError("Experiment file is missing. Upload experiments first.")
 
@@ -593,6 +632,12 @@ def _build_property_import_from_experiments(
             raw_smiles = _read_text((row or {}).get(smiles_col))
             source_property = _read_text((row or {}).get(source_property_col))
             value_raw = _read_text((row or {}).get(value_col))
+            if _is_missing_cell_value(raw_smiles):
+                raw_smiles = ""
+            if _is_missing_cell_value(source_property):
+                source_property = ""
+            if _is_missing_cell_value(value_raw):
+                value_raw = ""
             method_value = _read_text((row or {}).get(method_col)) if method_col else ""
             notes_value = _read_text((row or {}).get(notes_col)) if notes_col else ""
 
@@ -813,7 +858,7 @@ def _build_property_import_from_experiments(
         bucket = rows_by_smiles.setdefault(smiles, {})
         bucket[prop_name] = value
 
-    generated_dir = Path(str(experiments_file.get("path") or "")).resolve().parent / "generated"
+    generated_dir = Path(source_path).resolve().parent / "generated"
     generated_dir.mkdir(parents=True, exist_ok=True)
     generated_path = generated_dir / f"property_import_{database_id or 'db'}.tsv"
 
@@ -1218,7 +1263,9 @@ def register_mmp_lifecycle_admin_routes(
             batch = store.get_batch(batch_id)
             files = _safe_json_object(batch.get("files"))
             compounds_meta = _safe_json_object(files.get("compounds"))
-            source_path = _read_text(compounds_meta.get("path"))
+            source_path = _resolve_batch_file_path(store=store, batch_id=batch_id, file_meta=compounds_meta)
+            if not source_path or not os.path.exists(source_path):
+                return jsonify({"error": "Saved compound file is missing on server. Please re-upload compounds."}), 404
             row_limit = max(1, min(2000, int(request.args.get("max_rows") or 500)))
             preview = _build_compounds_preview(source_path, max_rows=row_limit)
             return jsonify(
@@ -1690,7 +1737,7 @@ def register_mmp_lifecycle_admin_routes(
 
             compound_check = None
             if compounds_file:
-                structures_path = _read_text(compounds_file.get("path"))
+                structures_path = _resolve_batch_file_path(store=store, batch_id=batch_id, file_meta=compounds_file)
                 if structures_path and os.path.exists(structures_path):
                     compound_cfg = _safe_json_object(compounds_file.get("column_config"))
                     raw_compound = check_service.preview_compound_import(
@@ -1714,6 +1761,7 @@ def register_mmp_lifecycle_admin_routes(
                 experiment_check = _build_property_import_from_experiments(
                     logger=logger,
                     target=target,
+                    store=store,
                     batch=batch,
                     database_id=database_id,
                     mappings=mappings,
@@ -1804,19 +1852,15 @@ def register_mmp_lifecycle_admin_routes(
             experiments_file = _safe_json_object(files.get("experiments"))
             import_compounds = bool(payload.get("import_compounds", True)) and bool(compounds_file)
             import_experiments = bool(payload.get("import_experiments", True)) and bool(experiments_file)
-            status_token = _read_text(batch.get("status")).lower() or "draft"
-
             if _read_text(batch.get("selected_database_id")) != database_id:
-                return jsonify({"error": "Selected database changed. Save batch and rerun check before apply."}), 400
-            if status_token != "approved":
-                return jsonify({"error": f"Batch status must be approved before apply. Current status: {status_token}."}), 400
+                batch = store.update_batch(batch_id, {"selected_database_id": database_id})
 
             if not import_compounds and not import_experiments:
                 return jsonify({"error": "Nothing to apply. Upload compounds and/or experiments first."}), 400
 
             last_check = _safe_json_object(batch.get("last_check"))
             check_policy = _normalize_check_policy(_safe_json_object(payload.get("check_policy") or last_check.get("check_policy")))
-            check_policy["require_approved_status"] = True
+            check_policy["require_approved_status"] = False
             check_gate = _build_check_gate(
                 batch=batch,
                 database_id=database_id,
@@ -1824,13 +1868,6 @@ def register_mmp_lifecycle_admin_routes(
                 import_experiments=import_experiments,
                 policy=check_policy,
             )
-            if not bool(check_gate.get("passed")):
-                return jsonify(
-                    {
-                        "error": "Check gate failed. Resolve data quality issues and rerun check/approval before apply.",
-                        "check_gate": check_gate,
-                    }
-                ), 400
 
             pending_sync_result = _apply_pending_property_sync(database_id, target)
 
@@ -1846,7 +1883,7 @@ def register_mmp_lifecycle_admin_routes(
             compound_options = _extract_compound_import_options(payload)
 
             if import_compounds:
-                structures_path = _read_text(compounds_file.get("path"))
+                structures_path = _resolve_batch_file_path(store=store, batch_id=batch_id, file_meta=compounds_file)
                 if not structures_path or not os.path.exists(structures_path):
                     return jsonify({"error": "Compound file not found for batch."}), 400
                 compound_cfg = _safe_json_object(compounds_file.get("column_config"))
@@ -1881,6 +1918,7 @@ def register_mmp_lifecycle_admin_routes(
                 experiment_check = _build_property_import_from_experiments(
                     logger=logger,
                     target=target,
+                    store=store,
                     batch=batch,
                     database_id=database_id,
                     mappings=mappings,

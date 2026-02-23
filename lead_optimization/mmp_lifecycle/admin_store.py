@@ -591,11 +591,13 @@ class MmpLifecycleAdminStore:
             handle.write(body)
 
         metadata = {
+            "batch_id": token,
             "stored_name": write_name,
             "original_name": safe_name,
             "size": int(len(body)),
             "uploaded_at": _utc_now_iso(),
             "path": str(target_path),
+            "path_rel": str(target_path.relative_to(self.root_dir)),
             "column_config": column_config or {},
         }
 
@@ -1297,7 +1299,14 @@ class MmpLifecycleAdminStore:
                     continue
                 family = _canonical_property_family(source)
                 preferred = str(preferred_property_by_family.get(family) or "").strip()
-                if preferred and source.lower() != preferred.lower():
+                mapping_id = str(row.get("id") or "").strip()
+                mapping_notes = str(row.get("notes") or "").strip().lower()
+                auto_generated = mapping_id.startswith("map_auto_") or mapping_notes in {
+                    "method-bound mapping.",
+                    "method bound mapping.",
+                    "optional",
+                }
+                if preferred and source.lower() != preferred.lower() and auto_generated:
                     removed_mappings += 1
                     changed = True
                     continue

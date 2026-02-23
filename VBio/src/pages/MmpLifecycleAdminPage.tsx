@@ -1,5 +1,5 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { Activity, ArrowLeft, CheckCircle2, ChevronRight, Database, Filter, FlaskConical, Link2, ListChecks, Pencil, Plus, RotateCcw, Save, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, X } from 'lucide-react';
+import { Activity, ArrowLeft, CheckCircle2, Database, Filter, FlaskConical, Link2, ListChecks, Pencil, Plus, RotateCcw, Save, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, X } from 'lucide-react';
 import {
   applyMmpLifecycleBatch,
   clearMmpLifecycleExperiments,
@@ -10,15 +10,12 @@ import {
   deleteMmpLifecycleMethod,
   fetchMmpLifecycleCompoundsPreview,
   fetchMmpLifecycleDatabaseSyncQueue,
-  fetchMmpLifecycleMetrics,
   fetchMmpLifecycleOverview,
   fetchMmpLifecycleDatabaseProperties,
   fetchMmpLifecyclePropertyMappings,
   patchMmpLifecycleBatch,
   patchMmpLifecycleMethod,
-  rollbackMmpLifecycleBatch,
   saveMmpLifecyclePropertyMappings,
-  transitionMmpLifecycleBatchStatus,
   uploadMmpLifecycleCompounds,
   uploadMmpLifecycleExperiments,
   type MmpLifecycleBatch,
@@ -46,6 +43,13 @@ function readText(value: unknown): string {
   return String(value).trim();
 }
 
+function isMissingCellToken(value: unknown): boolean {
+  const token = readText(value);
+  if (!token) return true;
+  const upper = token.toUpperCase();
+  return upper === '*' || upper === 'NA' || upper === 'N/A' || upper === 'NAN' || upper === 'NULL' || upper === 'NONE' || upper === '-';
+}
+
 function readNumber(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string') {
@@ -70,32 +74,44 @@ interface MethodFormErrors {
   output_property: boolean;
 }
 
-interface CheckPolicyDraft {
-  max_compound_invalid_smiles_rows: number;
-  max_experiment_invalid_rows: number;
-  max_unmapped_property_rows: number;
-  max_unmatched_compound_rows: number;
+interface CheckOverview {
+  compoundTotalRows: number;
+  compoundAnnotatedRows: number;
+  compoundReindexRows: number;
+  experimentTotalRows: number;
+  experimentImportableRows: number;
+  experimentUpdateRows: number;
+  experimentInsertRows: number;
+  experimentNoopRows: number;
+  experimentUnmappedRows: number;
+  experimentUnmatchedRows: number;
+  experimentInvalidRows: number;
 }
+
+type BatchApplyRuntimePhase = 'queue' | 'running' | 'failed';
 
 type BatchSortKey = 'updated_at' | 'name' | 'status' | 'selected_database_id';
 type SortDirection = 'asc' | 'desc';
 
-const DEFAULT_CHECK_POLICY: CheckPolicyDraft = {
-  max_compound_invalid_smiles_rows: 0,
-  max_experiment_invalid_rows: 0,
-  max_unmapped_property_rows: 0,
-  max_unmatched_compound_rows: 0,
-};
-
-type FlowStep = 'batch' | 'upload' | 'mapping' | 'qa' | 'apply';
+type FlowStep = 'batch' | 'upload' | 'mapping' | 'qa';
 
 const FLOW_STEPS: Array<{ key: FlowStep; label: string }> = [
   { key: 'batch', label: 'Batch' },
   { key: 'upload', label: 'Upload' },
   { key: 'mapping', label: 'Mapping' },
   { key: 'qa', label: 'Check' },
-  { key: 'apply', label: 'Apply' },
 ];
+
+const BULK_APPLY_RELAXED_POLICY: Record<string, unknown> = {
+  max_compound_invalid_smiles_rows: 1_000_000_000,
+  max_experiment_invalid_rows: 1_000_000_000,
+  max_unmapped_property_rows: 1_000_000_000,
+  max_unmatched_compound_rows: 1_000_000_000,
+  require_check_for_selected_database: false,
+  require_approved_status: false,
+  require_importable_experiment_rows: false,
+  require_importable_compound_rows: false,
+};
 
 const UPLOAD_PREVIEW_ROW_CAP = 500;
 const UPLOAD_PREVIEW_PAGE_SIZE = 8;
@@ -134,6 +150,34 @@ function summarizeCount(value: unknown): string {
   const num = readNumber(value);
   if (num === null) return '-';
   return Math.trunc(num).toLocaleString();
+}
+
+function asNonNegativeInt(value: unknown): number {
+  const num = readNumber(value);
+  if (num === null) return 0;
+  return Math.max(0, Math.trunc(num));
+}
+
+function readActionCount(summary: Record<string, unknown>, action: string): number {
+  return asNonNegativeInt(asRecord(summary.action_counts)[action]);
+}
+
+function buildCheckOverview(compoundSummary: Record<string, unknown>, experimentSummary: Record<string, unknown>): CheckOverview {
+  return {
+    compoundTotalRows: asNonNegativeInt(compoundSummary.total_rows),
+    compoundAnnotatedRows: asNonNegativeInt(compoundSummary.annotated_rows),
+    compoundReindexRows: asNonNegativeInt(compoundSummary.reindex_rows),
+    experimentTotalRows: asNonNegativeInt(experimentSummary.rows_total),
+    experimentImportableRows: asNonNegativeInt(experimentSummary.rows_will_import),
+    experimentUpdateRows: readActionCount(experimentSummary, 'UPDATE_COMPOUND_PROPERTY'),
+    experimentInsertRows:
+      readActionCount(experimentSummary, 'INSERT_PROPERTY_NAME_AND_COMPOUND_PROPERTY') +
+      readActionCount(experimentSummary, 'INSERT_COMPOUND_PROPERTY'),
+    experimentNoopRows: readActionCount(experimentSummary, 'NOOP_VALUE_UNCHANGED'),
+    experimentUnmappedRows: asNonNegativeInt(experimentSummary.rows_unmapped),
+    experimentUnmatchedRows: asNonNegativeInt(experimentSummary.rows_unmatched_compound),
+    experimentInvalidRows: asNonNegativeInt(experimentSummary.rows_invalid),
+  };
 }
 
 function getDatabaseBuildState(item: MmpLifecycleDatabaseItem): 'ready' | 'building' {
@@ -490,16 +534,9 @@ export function MmpLifecycleAdminPage() {
   const [mappingRows, setMappingRows] = useState<MappingDraft[]>([]);
 
   const [checkResult, setCheckResult] = useState<Record<string, unknown> | null>(null);
-  const [applyResult, setApplyResult] = useState<Record<string, unknown> | null>(null);
-  const [rollbackResult, setRollbackResult] = useState<Record<string, unknown> | null>(null);
-
-  const [importCompounds, setImportCompounds] = useState(true);
-  const [importExperiments, setImportExperiments] = useState(true);
-  const [rollbackCompounds, setRollbackCompounds] = useState(true);
-  const [rollbackExperiments, setRollbackExperiments] = useState(true);
-  const [selectedApplyId, setSelectedApplyId] = useState('');
-  const [statusNote, setStatusNote] = useState('');
-  const [checkPolicy, setCheckPolicy] = useState<CheckPolicyDraft>(DEFAULT_CHECK_POLICY);
+  const [selectedBatchIds, setSelectedBatchIds] = useState<string[]>([]);
+  const [bulkApplyRunning, setBulkApplyRunning] = useState(false);
+  const [batchApplyRuntimeById, setBatchApplyRuntimeById] = useState<Record<string, { phase: BatchApplyRuntimePhase; message: string }>>({});
   const [flowStep, setFlowStep] = useState<FlowStep>('batch');
   const [viewMode, setViewMode] = useState<'list' | 'detail'>('list');
   const [createBatchModalOpen, setCreateBatchModalOpen] = useState(false);
@@ -511,8 +548,6 @@ export function MmpLifecycleAdminPage() {
   const [batchSortKey, setBatchSortKey] = useState<BatchSortKey>('updated_at');
   const [batchSortDirection, setBatchSortDirection] = useState<SortDirection>('desc');
 
-  const [metricsLoading, setMetricsLoading] = useState(false);
-  const [metricsResult, setMetricsResult] = useState<Record<string, unknown> | null>(null);
   const [methodEditorOpen, setMethodEditorOpen] = useState(false);
   const [assayMethodDatabaseId, setAssayMethodDatabaseId] = useState('');
   const [assayDatabasePropertyNames, setAssayDatabasePropertyNames] = useState<string[]>([]);
@@ -650,11 +685,6 @@ export function MmpLifecycleAdminPage() {
     [batches, selectedBatchId]
   );
 
-  const applyHistory = useMemo(() => {
-    if (!selectedBatch) return [];
-    return asArray(selectedBatch.apply_history).map((item) => asRecord(item));
-  }, [selectedBatch]);
-
   const compoundFileMeta = asRecord(asRecord(selectedBatch?.files).compounds);
   const experimentFileMeta = asRecord(asRecord(selectedBatch?.files).experiments);
 
@@ -669,9 +699,6 @@ export function MmpLifecycleAdminPage() {
       setActivityColumns([]);
       setActivityMethodMap({});
       setActivityTransformMap({});
-      setSelectedApplyId('');
-      setStatusNote('');
-      setCheckPolicy(DEFAULT_CHECK_POLICY);
       return;
     }
     setBatchName(readText(selectedBatch.name));
@@ -707,24 +734,10 @@ export function MmpLifecycleAdminPage() {
       normalizedTransformMap[col] = transform;
     }
     setActivityTransformMap(normalizedTransformMap);
-
-    const latestApply = applyHistory.length > 0 ? readText(applyHistory[applyHistory.length - 1].apply_id) : '';
-    setSelectedApplyId(latestApply);
-    setStatusNote('');
-    const policy = asRecord(asRecord(selectedBatch.last_check).check_policy);
-    setCheckPolicy({
-      max_compound_invalid_smiles_rows: Math.max(0, Math.trunc(readNumber(policy.max_compound_invalid_smiles_rows) || 0)),
-      max_experiment_invalid_rows: Math.max(0, Math.trunc(readNumber(policy.max_experiment_invalid_rows) || 0)),
-      max_unmapped_property_rows: Math.max(0, Math.trunc(readNumber(policy.max_unmapped_property_rows) || 0)),
-      max_unmatched_compound_rows: Math.max(0, Math.trunc(readNumber(policy.max_unmatched_compound_rows) || 0)),
-    });
-  }, [selectedBatch, compoundFileMeta.column_config, experimentFileMeta.column_config, applyHistory]);
+  }, [selectedBatch, compoundFileMeta.column_config, experimentFileMeta.column_config]);
 
   useEffect(() => {
     setCheckResult(null);
-    setApplyResult(null);
-    setRollbackResult(null);
-    setMetricsResult(null);
     setUploadFile(null);
     setUploadHeaderOptions([]);
     setUploadPreviewRows([]);
@@ -880,7 +893,7 @@ export function MmpLifecycleAdminPage() {
         const key = readText(header);
         if (!key) return;
         const token = readText(rawValue);
-        if (!token) return;
+        if (isMissingCellToken(token)) return;
         columnNonEmptyCounts[key] = (columnNonEmptyCounts[key] || 0) + 1;
         const numeric = Number(token);
         if (Number.isFinite(numeric)) {
@@ -918,7 +931,7 @@ export function MmpLifecycleAdminPage() {
             const value = (row.getCell(colNo).text || readText(row.getCell(colNo).value)).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
             bucket[header] = value;
             accumulateColumnStats(header, value);
-            if (value.trim()) hasAnyValue = true;
+            if (!isMissingCellToken(value)) hasAnyValue = true;
           }
           if (hasAnyValue) {
             totalRows += 1;
@@ -959,7 +972,7 @@ export function MmpLifecycleAdminPage() {
           const value = readText(cells[colNo] || '');
           bucket[header] = value;
           accumulateColumnStats(header, value);
-          if (value) hasAnyValue = true;
+          if (!isMissingCellToken(value)) hasAnyValue = true;
         }
         if (hasAnyValue) {
           totalRows += 1;
@@ -1013,9 +1026,13 @@ export function MmpLifecycleAdminPage() {
   useEffect(() => {
     const batchId = readText(selectedBatch?.id);
     const compoundsPath = readText(compoundFileMeta.path);
+    const compoundsPathRel = readText(compoundFileMeta.path_rel);
+    const compoundsStoredName = readText(compoundFileMeta.stored_name);
+    const compoundsOriginalName = readText(compoundFileMeta.original_name);
     const compoundsUploadedAt = readText(compoundFileMeta.uploaded_at);
-    if (!batchId || !compoundsPath || uploadFile) return;
-    const signature = `${batchId}:${compoundsPath}:${compoundsUploadedAt}`;
+    const hasSavedMeta = Boolean(compoundsPath || compoundsPathRel || compoundsStoredName || compoundsOriginalName || compoundsUploadedAt);
+    if (!batchId || !hasSavedMeta || uploadFile) return;
+    const signature = `${batchId}:${compoundsPath}:${compoundsPathRel}:${compoundsStoredName}:${compoundsOriginalName}:${compoundsUploadedAt}`;
     if (savedCompoundsPreviewSignatureRef.current === signature) return;
     savedCompoundsPreviewSignatureRef.current = signature;
     let cancelled = false;
@@ -1038,13 +1055,22 @@ export function MmpLifecycleAdminPage() {
         savedCompoundsPreviewSignatureRef.current = '';
         setError(err instanceof Error ? err.message : 'Failed to load saved file preview.');
       } finally {
-        if (!cancelled) setUploadParsing(false);
+        setUploadParsing(false);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [selectedBatch, compoundFileMeta.path, compoundFileMeta.uploaded_at, uploadFile, applyUploadPreviewTable]);
+  }, [
+    selectedBatchId,
+    compoundFileMeta.path,
+    compoundFileMeta.path_rel,
+    compoundFileMeta.stored_name,
+    compoundFileMeta.original_name,
+    compoundFileMeta.uploaded_at,
+    uploadFile,
+    applyUploadPreviewTable,
+  ]);
 
   const addActivityPair = () => {
     const selected = new Set(activityColumns.map((item) => readText(item)));
@@ -1159,7 +1185,7 @@ export function MmpLifecycleAdminPage() {
             const smiles = readText(sourceRow[structureCol]);
             for (const activityColumn of effectiveActivityColumns) {
               const value = readText(sourceRow[activityColumn]);
-              if (!value) continue;
+              if (isMissingCellToken(value)) continue;
               const transform = transformByActivity[activityColumn];
               let transformedValue = value;
               if (transform !== 'none') {
@@ -1200,6 +1226,9 @@ export function MmpLifecycleAdminPage() {
               }, {}),
             });
             mergeBatch(uploadedExperiments);
+          } else if (hadExistingExperiments) {
+            const cleared = await clearMmpLifecycleExperiments(batchId);
+            mergeBatch(cleared);
           }
         } else if (hadExistingExperiments) {
           const cleared = await clearMmpLifecycleExperiments(batchId);
@@ -1480,6 +1509,43 @@ export function MmpLifecycleAdminPage() {
         }));
         const normalized = normalizeMappingRowsWithMethods(rows, normalizedMethods);
         setMappingRows(dedupeMappingRows(normalized));
+        const manualPairSources = dedupeColumns(
+          normalized
+            .filter((row) => readText(row.notes).toLowerCase() === 'activity pair mapping.')
+            .map((row) => readText(row.source_property))
+            .filter(Boolean)
+        );
+        if (manualPairSources.length > 0) {
+          setActivityColumns((prev) => {
+            const next = dedupeColumns([...prev, ...manualPairSources]);
+            const unchanged = prev.length === next.length && prev.every((item, index) => item === next[index]);
+            return unchanged ? prev : next;
+          });
+        }
+        const methodBySource = new Map<string, string>();
+        for (const row of normalized) {
+          const source = readText(row.source_property).toLowerCase();
+          const methodId = readText(row.method_id);
+          if (!source || !methodId || methodBySource.has(source)) continue;
+          methodBySource.set(source, methodId);
+        }
+        if (methodBySource.size > 0) {
+          setActivityMethodMap((prev) => {
+            const next: Record<string, string> = { ...prev };
+            let changed = false;
+            const targetColumns = dedupeColumns([...activityColumns, ...manualPairSources]);
+            for (const col of targetColumns) {
+              const token = readText(col);
+              if (!token) continue;
+              if (readText(next[token])) continue;
+              const mapped = readText(methodBySource.get(token.toLowerCase()) || '');
+              if (!mapped) continue;
+              next[token] = mapped;
+              changed = true;
+            }
+            return changed ? next : prev;
+          });
+        }
       } catch (err) {
         if (cancelled) return;
         setError(err instanceof Error ? err.message : 'Failed to load property mapping context.');
@@ -1526,6 +1592,7 @@ export function MmpLifecycleAdminPage() {
     try {
       const preservedRows = dedupeMappingRows(normalizeMappingRowsWithMethods(mappingRows, methods));
       const selectedActivityColumns = dedupeColumns(activityColumns.map((item) => readText(item)).filter(Boolean));
+      const selectedSourceSet = new Set(selectedActivityColumns.map((item) => item.toLowerCase()));
       const missingMethodColumns: string[] = [];
       const pairRows: MappingDraft[] = [];
       for (const sourceProperty of selectedActivityColumns) {
@@ -1542,15 +1609,22 @@ export function MmpLifecycleAdminPage() {
           mmp_property: mmpProperty,
           method_id: methodId,
           value_transform: 'none',
-          notes: readText(existing?.notes) || 'Activity pair mapping.',
+          notes: 'Activity pair mapping.',
         });
       }
       if (missingMethodColumns.length > 0) {
         throw new Error(`Assign method for activity columns: ${missingMethodColumns.join(', ')}`);
       }
+      const preservedRowsAfterDelete = preservedRows.filter((row) => {
+        const note = readText(row.notes).toLowerCase();
+        if (note === 'activity pair mapping.') {
+          return selectedSourceSet.has(readText(row.source_property).toLowerCase());
+        }
+        return true;
+      });
       const pairSourceSet = new Set(pairRows.map((row) => readText(row.source_property).toLowerCase()));
       const mergedRows = dedupeMappingRows([
-        ...preservedRows.filter((row) => !pairSourceSet.has(readText(row.source_property).toLowerCase())),
+        ...preservedRowsAfterDelete.filter((row) => !pairSourceSet.has(readText(row.source_property).toLowerCase())),
         ...pairRows,
       ]);
 
@@ -1604,7 +1678,7 @@ export function MmpLifecycleAdminPage() {
       const payload = await checkMmpLifecycleBatch(readText(selectedBatch.id), {
         database_id: dbId,
         row_limit: 400,
-        check_policy: { ...checkPolicy } as Record<string, unknown>,
+        check_policy: { ...BULK_APPLY_RELAXED_POLICY } as Record<string, unknown>,
       });
       setCheckResult(payload);
       const nextBatch = asRecord(payload.batch);
@@ -1618,126 +1692,105 @@ export function MmpLifecycleAdminPage() {
     }
   };
 
-  const runApply = async () => {
-    if (!selectedBatch) return;
-    const dbId = batchDatabaseId.trim();
-    if (!dbId) {
-      setError('Choose target MMP database before apply.');
+  const runBulkApplyFromList = async () => {
+    const targetIds = selectedBatchIds.filter(Boolean);
+    if (targetIds.length === 0) {
+      setError('Select at least one batch first.');
       return;
     }
-    setSaving(true);
-    setError(null);
-    try {
-      const payload = await applyMmpLifecycleBatch(readText(selectedBatch.id), {
-        database_id: dbId,
-        import_compounds: importCompounds,
-        import_experiments: importExperiments,
-        check_policy: { ...checkPolicy } as Record<string, unknown>,
-      });
-      setApplyResult(payload);
-      const nextBatch = asRecord(payload.batch);
-      if (nextBatch && Object.keys(nextBatch).length > 0) {
-        mergeBatch(nextBatch as unknown as MmpLifecycleBatch);
-      }
-      await loadOverview();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to apply batch.');
-    } finally {
-      setSaving(false);
-    }
-  };
 
-  const transitionStatus = async (action: 'review' | 'approve' | 'reject' | 'reopen') => {
-    if (!selectedBatch) return;
+    const batchById = new Map<string, MmpLifecycleBatch>();
+    for (const batch of batches) {
+      const id = readText(batch.id);
+      if (!id) continue;
+      batchById.set(id, batch);
+    }
+    const runnableIds = targetIds.filter((id) => batchById.has(id));
+    if (runnableIds.length === 0) {
+      setError('Selected batches are no longer available.');
+      return;
+    }
+
     setSaving(true);
+    setBulkApplyRunning(true);
     setError(null);
+    setBatchApplyRuntimeById((prev) => {
+      const next = { ...prev };
+      for (const batchId of runnableIds) {
+        next[batchId] = { phase: 'queue', message: '' };
+      }
+      return next;
+    });
+    let failedCount = 0;
+    let firstFailureMessage = '';
     try {
-      if (action === 'reject' && !statusNote.trim()) {
-        throw new Error('Reject requires a note for traceability.');
-      }
-      const payload = await transitionMmpLifecycleBatchStatus(readText(selectedBatch.id), {
-        action,
-        database_id: batchDatabaseId.trim(),
-        note: statusNote.trim(),
-      });
-      const nextBatch = asRecord(payload.batch);
-      if (nextBatch && Object.keys(nextBatch).length > 0) {
-        mergeBatch(nextBatch as unknown as MmpLifecycleBatch);
-      }
-      const gate = asRecord(payload.check_gate);
-      if (gate && Object.keys(gate).length > 0) {
-        setCheckResult((prev) => ({
-          ...asRecord(prev),
-          check_gate: gate,
+      for (const batchId of runnableIds) {
+        const batch = batchById.get(batchId);
+        if (!batch) continue;
+        const databaseId = readText(batch.selected_database_id);
+        setBatchApplyRuntimeById((prev) => ({
+          ...prev,
+          [batchId]: { phase: 'running', message: '' },
         }));
-      }
-      setStatusNote('');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to transition batch status.');
-    } finally {
-      setSaving(false);
-    }
-  };
+        if (!databaseId) {
+          const message = 'Missing target database.';
+          failedCount += 1;
+          if (!firstFailureMessage) firstFailureMessage = message;
+          setBatchApplyRuntimeById((prev) => ({
+            ...prev,
+            [batchId]: { phase: 'failed', message },
+          }));
+          continue;
+        }
 
-  const runRollback = async () => {
-    if (!selectedBatch) return;
-    const dbId = batchDatabaseId.trim();
-    if (!dbId) {
-      setError('Choose target MMP database before rollback.');
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    try {
-      const payload = await rollbackMmpLifecycleBatch(readText(selectedBatch.id), {
-        database_id: dbId,
-        apply_id: selectedApplyId,
-        rollback_compounds: rollbackCompounds,
-        rollback_experiments: rollbackExperiments,
-      });
-      setRollbackResult(payload);
-      const nextBatch = asRecord(payload.batch);
-      if (nextBatch && Object.keys(nextBatch).length > 0) {
-        mergeBatch(nextBatch as unknown as MmpLifecycleBatch);
+        try {
+          const checkPayload = await checkMmpLifecycleBatch(batchId, {
+            database_id: databaseId,
+            row_limit: 200,
+            check_policy: { ...BULK_APPLY_RELAXED_POLICY } as Record<string, unknown>,
+          });
+          const checkBatch = asRecord(checkPayload.batch);
+          if (Object.keys(checkBatch).length > 0) {
+            mergeBatch(checkBatch as unknown as MmpLifecycleBatch);
+          }
+
+          const applyPayload = await applyMmpLifecycleBatch(batchId, {
+            database_id: databaseId,
+            import_compounds: true,
+            import_experiments: true,
+            check_policy: { ...BULK_APPLY_RELAXED_POLICY } as Record<string, unknown>,
+          });
+          const appliedBatch = asRecord(applyPayload.batch);
+          if (Object.keys(appliedBatch).length > 0) {
+            mergeBatch(appliedBatch as unknown as MmpLifecycleBatch);
+          }
+          setBatchApplyRuntimeById((prev) => {
+            const next = { ...prev };
+            delete next[batchId];
+            return next;
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'Failed to apply batch.';
+          failedCount += 1;
+          if (!firstFailureMessage) firstFailureMessage = message;
+          setBatchApplyRuntimeById((prev) => ({
+            ...prev,
+            [batchId]: { phase: 'failed', message },
+          }));
+        }
+      }
+
+      if (failedCount > 0) {
+        setError(`${failedCount}/${runnableIds.length} batch apply failed. ${firstFailureMessage}`);
       }
       await loadOverview();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to rollback batch.');
+      setSelectedBatchIds([]);
     } finally {
+      setBulkApplyRunning(false);
       setSaving(false);
     }
   };
 
-  const loadMetrics = async () => {
-    const dbId = batchDatabaseId.trim();
-    if (!dbId) {
-      setError('Choose target MMP database first.');
-      return;
-    }
-    setMetricsLoading(true);
-    setError(null);
-    try {
-      const payload = await fetchMmpLifecycleMetrics(dbId, 12);
-      setMetricsResult(payload);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch schema metrics.');
-    } finally {
-      setMetricsLoading(false);
-    }
-  };
-
-  const checkCompoundRows = asArray(asRecord(checkResult).compound_check ? asRecord(asRecord(checkResult).compound_check).rows : []).map(
-    (row) => asRecord(row)
-  );
-  const checkExperimentRows = asArray(
-    asRecord(checkResult).experiment_check ? asRecord(asRecord(checkResult).experiment_check).rows : []
-  ).map((row) => asRecord(row));
-  const checkCompoundSummary = asRecord(asRecord(asRecord(checkResult).compound_check).summary);
-  const checkExperimentSummary = asRecord(asRecord(asRecord(checkResult).experiment_check).summary);
-  const checkSummary = asRecord(asRecord(checkResult).summary);
-
-  const metricsDataset = asRecord(metricsResult ? asRecord(metricsResult).dataset : {});
-  const metricsRecentCompounds = asArray(asRecord(metricsResult).recent_compound_batches).map((row) => asRecord(row));
   const selectedBatchStatus = selectedBatch ? readText(selectedBatch.status).toLowerCase() || 'draft' : '-';
   const batchLastCheck = asRecord(selectedBatch?.last_check);
   const runtimeCheckGate = (() => {
@@ -1747,18 +1800,17 @@ export function MmpLifecycleAdminPage() {
   })();
   const gatePass = runtimeCheckGate.passed === true;
   const gateReasons = asArray(runtimeCheckGate.reasons).map((item) => readText(item)).filter(Boolean);
-  const hasChecked = Boolean(readText(batchLastCheck.checked_at));
-  const canReview =
-    hasChecked && (selectedBatchStatus === 'checked' || selectedBatchStatus === 'reviewed' || selectedBatchStatus === 'approved');
-  const canApprove =
-    hasChecked &&
-    gatePass &&
-    (selectedBatchStatus === 'checked' || selectedBatchStatus === 'reviewed' || selectedBatchStatus === 'approved');
-  const canReject =
-    hasChecked &&
-    (selectedBatchStatus === 'checked' || selectedBatchStatus === 'reviewed' || selectedBatchStatus === 'approved' || selectedBatchStatus === 'rejected');
-  const canApply = selectedBatchStatus === 'approved' && gatePass && Boolean(batchDatabaseId.trim());
-  const statusHistory = asArray(selectedBatch?.status_history).map((item) => asRecord(item));
+  const runtimeCompoundSummary = (() => {
+    const fromCheck = asRecord(asRecord(asRecord(checkResult).compound_check).summary);
+    if (Object.keys(fromCheck).length > 0) return fromCheck;
+    return asRecord(batchLastCheck.compound_summary);
+  })();
+  const runtimeExperimentSummary = (() => {
+    const fromCheck = asRecord(asRecord(asRecord(checkResult).experiment_check).summary);
+    if (Object.keys(fromCheck).length > 0) return fromCheck;
+    return asRecord(batchLastCheck.experiment_summary);
+  })();
+  const runtimeCheckOverview = buildCheckOverview(runtimeCompoundSummary, runtimeExperimentSummary);
   const flowStepIndex = Math.max(0, FLOW_STEPS.findIndex((item) => item.key === flowStep));
   const selectedBatchStatusToken = selectedBatchStatus.replace(/_/g, '-');
   const selectedBatchStatusLabel = selectedBatchStatusToken.replace(/-/g, ' ');
@@ -1787,6 +1839,11 @@ export function MmpLifecycleAdminPage() {
     const start = (uploadPreviewCurrentPage - 1) * UPLOAD_PREVIEW_PAGE_SIZE;
     return uploadPreviewRows.slice(start, start + UPLOAD_PREVIEW_PAGE_SIZE);
   }, [uploadPreviewRows, uploadPreviewCurrentPage]);
+  const savedCompoundsFilePath = readText(compoundFileMeta.path);
+  const savedCompoundsFilePathRel = readText(compoundFileMeta.path_rel);
+  const savedCompoundsFileName = readText(compoundFileMeta.original_name || compoundFileMeta.stored_name);
+  const activeCompoundsFileName = uploadFile ? uploadFile.name : (savedCompoundsFileName || 'No file');
+  const hasSavedCompoundsFile = Boolean(savedCompoundsFilePath || savedCompoundsFilePathRel || savedCompoundsFileName);
   const hasRegisteredAssayMethod = methods.length > 0;
   const methodNameById = useMemo(() => {
     const map = new Map<string, string>();
@@ -2036,6 +2093,67 @@ export function MmpLifecycleAdminPage() {
     });
     return rows;
   }, [batches, batchQuery, batchStatusFilter, batchDatabaseFilter, batchSortKey, batchSortDirection, getBatchAssayMetadata, databaseById]);
+  const filteredBatchIds = useMemo(
+    () => filteredBatches.map((item) => readText(item.id)).filter(Boolean),
+    [filteredBatches]
+  );
+  useEffect(() => {
+    const validIds = new Set(batches.map((item) => readText(item.id)).filter(Boolean));
+    setBatchApplyRuntimeById((prev) => {
+      const next: Record<string, { phase: BatchApplyRuntimePhase; message: string }> = {};
+      for (const [batchId, runtime] of Object.entries(prev)) {
+        if (!validIds.has(batchId)) continue;
+        next[batchId] = runtime;
+      }
+      const sameKeys =
+        Object.keys(next).length === Object.keys(prev).length &&
+        Object.keys(next).every((key) => {
+          const left = prev[key];
+          const right = next[key];
+          return left?.phase === right?.phase && left?.message === right?.message;
+        });
+      return sameKeys ? prev : next;
+    });
+  }, [batches]);
+  const allFilteredSelected =
+    filteredBatchIds.length > 0 && filteredBatchIds.every((id) => selectedBatchIds.includes(id));
+  const selectedCount = selectedBatchIds.length;
+  const runtimeQueueCount = useMemo(
+    () => Object.values(batchApplyRuntimeById).filter((item) => item.phase === 'queue').length,
+    [batchApplyRuntimeById]
+  );
+  const runtimeRunningCount = useMemo(
+    () => Object.values(batchApplyRuntimeById).filter((item) => item.phase === 'running').length,
+    [batchApplyRuntimeById]
+  );
+  useEffect(() => {
+    const visible = new Set(filteredBatchIds);
+    setSelectedBatchIds((prev) => {
+      const next = prev.filter((id) => visible.has(id));
+      if (next.length === prev.length && next.every((id, index) => id === prev[index])) {
+        return prev;
+      }
+      return next;
+    });
+  }, [filteredBatchIds]);
+  const toggleBatchSelection = useCallback((batchIdRaw: string, checked: boolean) => {
+    const batchId = readText(batchIdRaw);
+    if (!batchId) return;
+    setSelectedBatchIds((prev) => {
+      if (checked) {
+        if (prev.includes(batchId)) return prev;
+        return [...prev, batchId];
+      }
+      return prev.filter((id) => id !== batchId);
+    });
+  }, []);
+  const toggleSelectAllFiltered = useCallback((checked: boolean) => {
+    if (!checked) {
+      setSelectedBatchIds([]);
+      return;
+    }
+    setSelectedBatchIds(filteredBatchIds);
+  }, [filteredBatchIds]);
   const openBatchDetail = (batchId: string) => {
     const id = readText(batchId);
     if (!id) return;
@@ -2265,6 +2383,18 @@ export function MmpLifecycleAdminPage() {
               </label>
             </div>
             <div className="project-toolbar-meta project-toolbar-meta-rich">
+              {runtimeQueueCount > 0 ? <span className="meta-chip">Queue {runtimeQueueCount}</span> : null}
+              {runtimeRunningCount > 0 ? <span className="meta-chip">Running {runtimeRunningCount}</span> : null}
+              <button
+                className="btn btn-primary btn-compact"
+                type="button"
+                onClick={() => void runBulkApplyFromList()}
+                disabled={saving || bulkApplyRunning || selectedCount <= 0}
+                title={selectedCount > 0 ? `Apply ${selectedCount} selected batch(es)` : 'Select batches first'}
+              >
+                <CheckCircle2 size={14} />
+                {bulkApplyRunning ? 'Applying...' : `Apply Selected (${selectedCount})`}
+              </button>
               <button
                 className="icon-btn"
                 type="button"
@@ -2285,6 +2415,7 @@ export function MmpLifecycleAdminPage() {
           <div className="table-wrap project-table-wrap task-table-wrap">
             <table className="table project-table task-table task-table--leadopt mmp-life-batch-table">
               <colgroup>
+                <col className="mmp-life-col-select" />
                 <col className="mmp-life-col-batch" />
                 <col className="mmp-life-col-status" />
                 <col className="mmp-life-col-database" />
@@ -2296,6 +2427,14 @@ export function MmpLifecycleAdminPage() {
               </colgroup>
               <thead>
                 <tr>
+                  <th className="mmp-life-select-head">
+                    <input
+                      type="checkbox"
+                      checked={allFilteredSelected}
+                      onChange={(event) => toggleSelectAllFiltered(event.target.checked)}
+                      aria-label="Select all visible batches"
+                    />
+                  </th>
                   <th><span className="project-th">Batch</span></th>
                   <th><span className="project-th">Status</span></th>
                   <th><span className="project-th">Database</span></th>
@@ -2309,18 +2448,26 @@ export function MmpLifecycleAdminPage() {
               <tbody>
                 {batches.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="muted">No batch yet.</td>
+                    <td colSpan={9} className="muted">No batch yet.</td>
                   </tr>
                 ) : filteredBatches.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="muted">No batch matches current filters.</td>
+                    <td colSpan={9} className="muted">No batch matches current filters.</td>
                   </tr>
                 ) : (
                   filteredBatches.map((item) => {
                     const id = readText(item.id);
                     const files = asRecord(item.files);
-                    const statusRaw = readText(item.status).toLowerCase();
-                    const statusToken = statusRaw.replace(/_/g, '-');
+                    const runtime = batchApplyRuntimeById[id];
+                    const statusRaw = runtime?.phase || readText(item.status).toLowerCase();
+                    const statusToken = statusRaw.replace(/_/g, '-').replace('queue', 'queued');
+                    const statusLabel = runtime?.phase === 'queue'
+                      ? 'queue'
+                      : runtime?.phase === 'running'
+                        ? 'running'
+                        : runtime?.phase === 'failed'
+                          ? 'failed'
+                          : (readText(item.status) || '-');
                     const fileSummary = `${asRecord(files.compounds).path ? 'compounds ' : ''}${asRecord(files.experiments).path ? 'experiments' : ''}`.trim() || '-';
                     const dbId = readText(item.selected_database_id);
                     const dbMeta = databaseById.get(dbId);
@@ -2339,8 +2486,17 @@ export function MmpLifecycleAdminPage() {
                     const methodPrimary = methodList.length > 0
                       ? `${methodList[0]}${methodList.length > 1 ? ` +${methodList.length - 1}` : ''}`
                       : '-';
+                    const checked = selectedBatchIds.includes(id);
                     return (
                       <tr key={id}>
+                        <td className="mmp-life-select-cell">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(event) => toggleBatchSelection(id, event.target.checked)}
+                            aria-label={`Select batch ${readText(item.name) || id || '-'}`}
+                          />
+                        </td>
                         <td className="task-col-submitted">
                           <div className="task-submitted-cell">
                             <div className="task-submitted-title">{readText(item.name) || '-'}</div>
@@ -2348,14 +2504,16 @@ export function MmpLifecycleAdminPage() {
                           </div>
                         </td>
                         <td className="mmp-life-status-cell">
-                          <span className={`task-state-chip ${statusToken || 'draft'}`}>{readText(item.status) || '-'}</span>
+                          <span className={`task-state-chip ${statusToken || 'draft'}`} title={readText(runtime?.message)}>
+                            {statusLabel}
+                          </span>
                         </td>
                         <td className="mmp-life-db-cell">
                           <div className="mmp-life-db-primary">{dbLabel}</div>
                           <div className="mmp-life-db-meta">
                             <span>{readText(dbMeta?.schema) || dbId || '-'}</span>
                             <span>{dbState === 'ready' ? 'Ready' : 'Building'}</span>
-                            <span>{dbPendingSync > 0 ? `Pending Sync ${summarizeCount(dbPendingSync)}` : 'Synced'}</span>
+                            {dbPendingSync > 0 ? <span>{`Pending Sync ${summarizeCount(dbPendingSync)}`}</span> : null}
                           </div>
                         </td>
                         <td className="mmp-life-num-cell">{compoundCount === null ? '-' : summarizeCount(compoundCount)}</td>
@@ -2420,7 +2578,6 @@ export function MmpLifecycleAdminPage() {
                   {item.key === 'upload' ? <Upload size={13} /> : null}
                   {item.key === 'mapping' ? <ListChecks size={13} /> : null}
                   {item.key === 'qa' ? <ShieldCheck size={13} /> : null}
-                  {item.key === 'apply' ? <RotateCcw size={13} /> : null}
                 </span>
               </button>
             ))}
@@ -2518,7 +2675,7 @@ export function MmpLifecycleAdminPage() {
                         </div>
                         <div className="project-compact-meta mmp-life-upload-meta">
                           <span className="meta-chip">Cols {uploadHeaderOptions.length}</span>
-                          <span className="meta-chip">{uploadFile ? uploadFile.name : 'No file'}</span>
+                          <span className="meta-chip">{activeCompoundsFileName}</span>
                           <span className="meta-chip">Act {activityColumns.length}</span>
                         </div>
                       </div>
@@ -2676,7 +2833,11 @@ export function MmpLifecycleAdminPage() {
                             {autoUploadStatus === 'idle' || autoUploadStatus === 'pending' || autoUploadStatus === 'uploading' ? <Upload size={14} /> : null}
                           </span>
                           <span className="mmp-life-upload-auto-text">
-                            {autoUploadStatusText || (uploadFile ? 'Waiting for auto upload.' : 'Choose a file to start.')}
+                            {autoUploadStatusText || (
+                              uploadFile
+                                ? 'Waiting for auto upload.'
+                                : (hasSavedCompoundsFile ? `Using saved file: ${activeCompoundsFileName}` : 'Choose a file to start.')
+                            )}
                           </span>
                         </div>
                       </section>
@@ -2728,7 +2889,9 @@ export function MmpLifecycleAdminPage() {
                       </div>
                       {uploadPreviewRows.length === 0 ? (
                         <div className="mmp-life-upload-preview-empty muted small">
-                          No saved preview. Select a file or upload once.
+                          {uploadParsing
+                            ? 'Loading saved preview...'
+                            : (hasSavedCompoundsFile ? 'Saved file exists but preview is unavailable. Re-upload or retry.' : 'No saved preview. Select a file or upload once.')}
                         </div>
                       ) : (
                         <div className="table-wrap">
@@ -2759,7 +2922,8 @@ export function MmpLifecycleAdminPage() {
                                       )}
                                     </td>
                                     {uploadPreviewColumns.map((col) => {
-                                      const value = readText(row[col]) || '-';
+                                      const rawValue = readText(row[col]);
+                                      const value = isMissingCellToken(rawValue) ? '-' : rawValue;
                                       const className = col === uploadPreviewSmilesColumn
                                         ? 'mmp-life-mono mmp-life-upload-cell-smiles'
                                         : 'mmp-life-mono';
@@ -2787,148 +2951,129 @@ export function MmpLifecycleAdminPage() {
                 <div className="toolbar">
                   <h2><ListChecks size={16} /> 3. Property Mapping</h2>
                 </div>
-                <section className="panel subtle mmp-life-map-section">
-                  <h4>Structure & Activity Mapping</h4>
-                  <div className="mmp-life-map-structure-row">
-                    <span className="mmp-life-conversion-title">
-                      <Link2 size={13} />
-                      <span>Structure</span>
-                    </span>
-                    <label className="mmp-life-conversion-select-wrap" aria-label="Structure column">
-                      <select value={structureColumn} onChange={(event) => setStructureColumn(event.target.value)}>
-                        <option value="">Select column</option>
-                        {uploadColumnOptions.map((name) => (
-                          <option key={`mapping-structure-${name}`} value={name}>{name}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <span className="mmp-life-conversion-target" title="Target field">
-                      <ChevronRight size={13} />
-                      <span>compounds.smiles</span>
-                    </span>
+                <section className="panel subtle mmp-life-activity-method-map">
+                  <div className="toolbar">
+                    <h4>
+                      <Activity size={13} />
+                      <span>Activity-Method Pairs</span>
+                    </h4>
+                    <button className="btn btn-ghost btn-compact" type="button" onClick={addActivityPair}>
+                      <Plus size={14} />
+                      Add Pair
+                    </button>
                   </div>
-                  <section className="mmp-life-activity-method-map">
-                    <div className="toolbar">
-                      <h4>Activity-Method Pairs</h4>
-                      <button className="btn btn-ghost btn-compact" type="button" onClick={addActivityPair}>
-                        <Plus size={14} />
-                        Add Pair
-                      </button>
+                  <div className="project-compact-meta mmp-life-upload-meta">
+                    <span className="meta-chip">
+                      <Link2 size={12} />
+                      {' '}
+                      {structureColumn || 'No structure'}
+                    </span>
+                    <span className="meta-chip">Pairs {activityColumns.length}</span>
+                    <span className="meta-chip">Methods {methods.length}</span>
+                  </div>
+                  {activityColumns.length === 0 ? (
+                    <div className="muted small">No activity pair configured.</div>
+                  ) : (
+                    <div className="table-wrap">
+                      <table className="table mmp-life-pairs-table mmp-life-pairs-table--mapping">
+                        <colgroup>
+                          <col className="mmp-life-col-activity" />
+                          <col className="mmp-life-col-method" />
+                          <col className="mmp-life-col-output" />
+                          <col className="mmp-life-col-actions" />
+                        </colgroup>
+                        <thead>
+                          <tr>
+                            <th>Activity Column</th>
+                            <th className="mmp-life-col-assay-method">
+                              <div className="mmp-life-assay-method-head">
+                                <span>Method</span>
+                                {!hasRegisteredAssayMethod ? (
+                                  <button
+                                    className="btn btn-ghost btn-compact"
+                                    type="button"
+                                    onClick={openAssayMethodsModal}
+                                  >
+                                    <ListChecks size={14} />
+                                    Register
+                                  </button>
+                                ) : null}
+                              </div>
+                            </th>
+                            <th>Output Property</th>
+                            <th>Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {activityColumns.map((activityCol, idx) => {
+                            const occupied = new Set(activityColumns.filter((_, rowIdx) => rowIdx !== idx));
+                            const structureToken = readText(structureColumn);
+                            return (
+                              <tr key={`activity-method-${activityCol}-${idx}`}>
+                                <td>
+                                  <select
+                                    className="mmp-life-activity-col-select"
+                                    value={activityCol}
+                                    onChange={(event) => updateActivityPairColumn(activityCol, event.target.value)}
+                                  >
+                                    <option value="">Select column</option>
+                                    {uploadColumnOptions
+                                      .filter((name) => {
+                                        if (name === activityCol) return true;
+                                        if (occupied.has(name)) return false;
+                                        if (name === structureToken) return false;
+                                        return true;
+                                      })
+                                      .map((name) => (
+                                        <option key={`pair-col-${idx}-${name}`} value={name}>{name}</option>
+                                      ))}
+                                  </select>
+                                </td>
+                                <td className="mmp-life-cell-assay-method">
+                                  <select
+                                    className="mmp-life-assay-method-select"
+                                    value={readText(activityMethodMap[activityCol])}
+                                    onChange={(event) => {
+                                      const nextMethodId = readText(event.target.value);
+                                      setActivityMethodMap((prev) => ({
+                                        ...prev,
+                                        [activityCol]: nextMethodId,
+                                      }));
+                                    }}
+                                    disabled={!hasRegisteredAssayMethod}
+                                  >
+                                    <option value="">{hasRegisteredAssayMethod ? 'None' : 'Register methods first'}</option>
+                                    {methods.map((method) => {
+                                      const methodId = readText(method.id);
+                                      const labelToken = readText(method.key || method.name || method.id);
+                                      const shortLabel = labelToken.length > 22 ? `${labelToken.slice(0, 22)}...` : labelToken;
+                                      return (
+                                        <option key={methodId} value={methodId}>
+                                          {shortLabel}
+                                        </option>
+                                      );
+                                    })}
+                                  </select>
+                                </td>
+                                <td>{activityPairChips[idx]?.outputProperty || '-'}</td>
+                                <td>
+                                  <button
+                                    className="icon-btn danger"
+                                    type="button"
+                                    title="Remove pair"
+                                    aria-label="Remove pair"
+                                    onClick={() => removeActivityPair(activityCol)}
+                                  >
+                                    <Trash2 size={14} />
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
                     </div>
-                    <div className="muted small">
-                      One activity column maps to one assay method.
-                    </div>
-                    <div className="mmp-life-upload-selected-columns mmp-life-upload-selected-columns-inline">
-                      {activityPairChips.length === 0 ? (
-                        <span className="meta-chip">No activity pair configured</span>
-                      ) : (
-                        activityPairChips.map((item) => (
-                          <span key={`pair-chip-${item.column}`} className="meta-chip">
-                            {item.column}
-                            {item.outputProperty ? ` · ${item.outputProperty}` : ' · No output'}
-                          </span>
-                        ))
-                      )}
-                    </div>
-                    {activityColumns.length === 0 ? (
-                      <div className="muted small">No activity pair configured.</div>
-                    ) : (
-                      <div className="table-wrap">
-                        <table className="table mmp-life-pairs-table">
-                          <thead>
-                            <tr>
-                              <th>Activity Column</th>
-                              <th className="mmp-life-col-assay-method">
-                                <div className="mmp-life-assay-method-head">
-                                  <span>Method</span>
-                                  {!hasRegisteredAssayMethod ? (
-                                    <button
-                                      className="btn btn-ghost btn-compact"
-                                      type="button"
-                                      onClick={openAssayMethodsModal}
-                                    >
-                                      <ListChecks size={14} />
-                                      Register
-                                    </button>
-                                  ) : null}
-                                </div>
-                              </th>
-                              <th>Output Property</th>
-                              <th>Actions</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {activityColumns.map((activityCol, idx) => {
-                              const occupied = new Set(activityColumns.filter((_, rowIdx) => rowIdx !== idx));
-                              const structureToken = readText(structureColumn);
-                              return (
-                                <tr key={`activity-method-${activityCol}-${idx}`}>
-                                  <td>
-                                    <select
-                                      value={activityCol}
-                                      onChange={(event) => updateActivityPairColumn(activityCol, event.target.value)}
-                                    >
-                                      <option value="">Select column</option>
-                                      {uploadColumnOptions
-                                        .filter((name) => {
-                                          if (name === activityCol) return true;
-                                          if (occupied.has(name)) return false;
-                                          if (name === structureToken) return false;
-                                          return true;
-                                        })
-                                        .map((name) => (
-                                          <option key={`pair-col-${idx}-${name}`} value={name}>{name}</option>
-                                        ))}
-                                    </select>
-                                  </td>
-                                  <td className="mmp-life-cell-assay-method">
-                                    <select
-                                      className="mmp-life-assay-method-select"
-                                      value={readText(activityMethodMap[activityCol])}
-                                      onChange={(event) => {
-                                        const nextMethodId = readText(event.target.value);
-                                        setActivityMethodMap((prev) => ({
-                                          ...prev,
-                                          [activityCol]: nextMethodId,
-                                        }));
-                                      }}
-                                      disabled={!hasRegisteredAssayMethod}
-                                    >
-                                      <option value="">{hasRegisteredAssayMethod ? 'None' : 'Register methods first'}</option>
-                                      {methods.map((method) => {
-                                        const methodId = readText(method.id);
-                                        const labelToken = readText(method.key || method.name || method.id);
-                                        const shortLabel = labelToken.length > 22 ? `${labelToken.slice(0, 22)}...` : labelToken;
-                                        return (
-                                          <option key={methodId} value={methodId}>
-                                            {shortLabel}
-                                          </option>
-                                        );
-                                      })}
-                                    </select>
-                                  </td>
-                                  <td>
-                                    {activityPairChips[idx]?.outputProperty || '-'}
-                                  </td>
-                                  <td>
-                                    <button
-                                      className="icon-btn danger"
-                                      type="button"
-                                      title="Remove pair"
-                                      aria-label="Remove pair"
-                                      onClick={() => removeActivityPair(activityCol)}
-                                    >
-                                      <Trash2 size={14} />
-                                    </button>
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </section>
+                  )}
                 </section>
                 <div className="mmp-life-upload-actions">
                   <div className="mmp-life-upload-actions-note">
@@ -2945,388 +3090,81 @@ export function MmpLifecycleAdminPage() {
             ) : null}
 
             {flowStep === 'qa' && selectedBatch ? (
-                <>
-                  <section className="panel">
-                    <div className="toolbar">
-                      <h2><ListChecks size={16} /> 4. Quality Gate</h2>
-                    </div>
-                    <div className="mmp-life-status-row">
-                      <span className="badge">Status: {selectedBatchStatus}</span>
-                      <span className={`badge ${gatePass ? 'is-good' : 'is-bad'}`}>
-                        Gate: {gatePass ? 'PASS' : 'BLOCKED'}
-                      </span>
-                      <span className="muted small">Checked at: {formatDateTime(readText(batchLastCheck.checked_at))}</span>
-                    </div>
-                    {gateReasons.length > 0 ? (
-                      <div className="alert warning">
-                        {gateReasons.join(' ')}
+              <>
+                <section className="panel">
+                  <div className="toolbar">
+                    <h2><ShieldCheck size={16} /> 4. Check</h2>
+                    <button className="btn btn-primary btn-compact" type="button" onClick={runCheck} disabled={saving || !batchDatabaseId.trim()}>
+                      <CheckCircle2 size={14} />
+                      {saving ? 'Checking...' : 'Run Check'}
+                    </button>
+                  </div>
+                  <div className="mmp-life-status-row">
+                    <span className="badge">Status: {selectedBatchStatus}</span>
+                    <span className={`badge ${gatePass ? 'is-good' : 'is-bad'}`}>
+                      Gate: {gatePass ? 'PASS' : 'WARN'}
+                    </span>
+                    <span className="muted small">Checked at: {formatDateTime(readText(batchLastCheck.checked_at))}</span>
+                  </div>
+                  {gateReasons.length > 0 ? (
+                    <div className="alert warning">{gateReasons.join(' ')}</div>
+                  ) : null}
+                  <div className="mmp-life-check-layout">
+                    <section className="panel subtle mmp-life-check-card">
+                      <div className="mmp-life-check-card-head">
+                        <h3>Compounds</h3>
+                        <span className="badge">Upsert {summarizeCount(runtimeCheckOverview.compoundAnnotatedRows)}</span>
                       </div>
-                    ) : null}
-
-                    <div className="mmp-life-mini-grid">
-                      <label className="field">
-                        <span>Max compound invalid SMILES rows</span>
-                        <input
-                          type="number"
-                          min={0}
-                          step={1}
-                          value={checkPolicy.max_compound_invalid_smiles_rows}
-                          onChange={(event) =>
-                            setCheckPolicy((prev) => ({
-                              ...prev,
-                              max_compound_invalid_smiles_rows: Math.max(0, Math.trunc(Number(event.target.value) || 0)),
-                            }))
-                          }
-                        />
-                      </label>
-                      <label className="field">
-                        <span>Max experiment invalid rows</span>
-                        <input
-                          type="number"
-                          min={0}
-                          step={1}
-                          value={checkPolicy.max_experiment_invalid_rows}
-                          onChange={(event) =>
-                            setCheckPolicy((prev) => ({
-                              ...prev,
-                              max_experiment_invalid_rows: Math.max(0, Math.trunc(Number(event.target.value) || 0)),
-                            }))
-                          }
-                        />
-                      </label>
-                      <label className="field">
-                        <span>Max unmapped property rows</span>
-                        <input
-                          type="number"
-                          min={0}
-                          step={1}
-                          value={checkPolicy.max_unmapped_property_rows}
-                          onChange={(event) =>
-                            setCheckPolicy((prev) => ({
-                              ...prev,
-                              max_unmapped_property_rows: Math.max(0, Math.trunc(Number(event.target.value) || 0)),
-                            }))
-                          }
-                        />
-                      </label>
-                      <label className="field">
-                        <span>Max unmatched compound rows</span>
-                        <input
-                          type="number"
-                          min={0}
-                          step={1}
-                          value={checkPolicy.max_unmatched_compound_rows}
-                          onChange={(event) =>
-                            setCheckPolicy((prev) => ({
-                              ...prev,
-                              max_unmatched_compound_rows: Math.max(0, Math.trunc(Number(event.target.value) || 0)),
-                            }))
-                          }
-                        />
-                      </label>
-                    </div>
-
-                    <label className="field">
-                      <span>Review / approval note</span>
-                      <input
-                        value={statusNote}
-                        onChange={(event) => setStatusNote(event.target.value)}
-                        placeholder="Optional for review/approve; required for reject"
-                      />
-                    </label>
-
-                    <div className="mmp-life-run-row">
-                      <button className="btn btn-ghost" type="button" onClick={runCheck} disabled={saving || !batchDatabaseId.trim()}>
-                        Run Check
-                      </button>
-                      <button
-                        className="btn btn-ghost"
-                        type="button"
-                        onClick={() => void transitionStatus('review')}
-                        disabled={saving || !canReview}
-                      >
-                        <CheckCircle2 size={14} />
-                        Mark Reviewed
-                      </button>
-                      <button
-                        className="btn btn-ghost"
-                        type="button"
-                        onClick={() => void transitionStatus('approve')}
-                        disabled={saving || !canApprove}
-                      >
-                        <ShieldCheck size={14} />
-                        Approve
-                      </button>
-                      <button
-                        className="btn btn-ghost"
-                        type="button"
-                        onClick={() => void transitionStatus('reject')}
-                        disabled={saving || !canReject}
-                      >
-                        Reject
-                      </button>
-                      <button
-                        className="btn btn-ghost"
-                        type="button"
-                        onClick={() => void transitionStatus('reopen')}
-                        disabled={saving}
-                      >
-                        Reopen Draft
-                      </button>
-                    </div>
-                  </section>
-
-                  <section className="panel">
-                    <div className="toolbar">
-                      <h2><ListChecks size={16} /> Check Preview</h2>
-                    </div>
-                    {!checkResult ? (
-                      <div className="muted">Run check to see row-level annotations.</div>
-                    ) : (
-                      <>
-                        <div className="project-compact-meta">
-                          <span className="meta-chip">Compound invalid SMILES: {summarizeCount(checkCompoundSummary.invalid_smiles_rows)}</span>
-                          <span className="meta-chip">Compound importable: {summarizeCount(checkCompoundSummary.annotated_rows)}</span>
-                          <span className="meta-chip">Experiment invalid: {summarizeCount(checkExperimentSummary.rows_invalid)}</span>
-                          <span className="meta-chip">Experiment importable: {summarizeCount(checkExperimentSummary.rows_will_import)}</span>
-                          <span className="meta-chip">Has assay file: {checkSummary.has_experiment_file ? 'Yes' : 'No'}</span>
-                        </div>
-                        <div className="mmp-life-check-grid">
-                          <div className="panel subtle">
-                          <h3>Compound Annotation</h3>
-                          <div className="muted small">
-                            Rows: {summarizeCount(asRecord(asRecord(checkResult).compound_check).total_rows)}
-                          </div>
-                          <div className="table-wrap">
-                            <table className="table">
-                              <thead>
-                                <tr>
-                                  <th>Line</th>
-                                  <th>SMILES</th>
-                                  <th>Action</th>
-                                  <th>Note</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {checkCompoundRows.length === 0 ? (
-                                  <tr>
-                                    <td colSpan={4} className="muted">No compound annotations.</td>
-                                  </tr>
-                                ) : (
-                                  checkCompoundRows.map((row) => (
-                                    <tr key={`cmp-${readText(row.line_no)}-${readText(row.clean_smiles)}`}>
-                                      <td>{readText(row.line_no)}</td>
-                                      <td className="mmp-life-mono">{readText(row.clean_smiles) || '-'}</td>
-                                      <td>{readText(row.action) || '-'}</td>
-                                      <td>{readText(row.note) || '-'}</td>
-                                    </tr>
-                                  ))
-                                )}
-                              </tbody>
-                            </table>
-                          </div>
-                          </div>
-                          <div className="panel subtle">
-                          <h3>Experiment Annotation</h3>
-                          <div className="muted small">
-                            Rows: {summarizeCount(asRecord(asRecord(checkResult).experiment_check).total_rows)}
-                          </div>
-                          <div className="table-wrap">
-                            <table className="table">
-                              <thead>
-                                <tr>
-                                  <th>Line</th>
-                                  <th>Source Prop</th>
-                                  <th>MMP Prop</th>
-                                  <th>Action</th>
-                                  <th>Note</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {checkExperimentRows.length === 0 ? (
-                                  <tr>
-                                    <td colSpan={5} className="muted">No experiment annotations.</td>
-                                  </tr>
-                                ) : (
-                                  checkExperimentRows.map((row) => (
-                                    <tr key={`exp-${readText(row.line_no)}-${readText(row.source_property)}`}>
-                                      <td>{readText(row.line_no)}</td>
-                                      <td>{readText(row.source_property) || '-'}</td>
-                                      <td>{readText(row.mapped_property) || '-'}</td>
-                                      <td>{readText(row.action) || '-'}</td>
-                                      <td>{readText(row.note) || '-'}</td>
-                                    </tr>
-                                  ))
-                                )}
-                              </tbody>
-                            </table>
-                          </div>
-                          </div>
-                        </div>
-                      </>
-                    )}
-                  </section>
-
-                  <section className="panel">
-                    <h2>Status History</h2>
-                    <div className="table-wrap">
-                      <table className="table">
-                        <thead>
-                          <tr>
-                            <th>At</th>
-                            <th>Status</th>
-                            <th>Event</th>
-                            <th>Note</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {statusHistory.length === 0 ? (
-                            <tr>
-                              <td colSpan={4} className="muted">No status history.</td>
-                            </tr>
-                          ) : (
-                            statusHistory
-                              .slice()
-                              .reverse()
-                              .map((item, index) => (
-                                <tr key={`${readText(item.at)}-${index}`}>
-                                  <td>{formatDateTime(readText(item.at))}</td>
-                                  <td>{readText(item.status) || '-'}</td>
-                                  <td>{readText(item.event) || '-'}</td>
-                                  <td>{readText(item.note) || '-'}</td>
-                                </tr>
-                              ))
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </section>
-                </>
-              ) : null}
-
-            {flowStep === 'apply' && selectedBatch ? (
-                <>
-                  <section className="panel">
-                    <div className="toolbar">
-                      <h2><ListChecks size={16} /> 5. Apply / Rollback</h2>
-                    </div>
-                    <div className="mmp-life-status-row">
-                      <span className="badge">Status: {selectedBatchStatus}</span>
-                      <span className={`badge ${gatePass ? 'is-good' : 'is-bad'}`}>
-                        Gate: {gatePass ? 'PASS' : 'BLOCKED'}
-                      </span>
-                    </div>
-                    {gateReasons.length > 0 ? (
-                      <div className="alert warning">{gateReasons.join(' ')}</div>
-                    ) : null}
-                    <div className="mmp-life-run-row">
-                      <label className="switch-field">
-                        <input type="checkbox" checked={importCompounds} onChange={(event) => setImportCompounds(event.target.checked)} />
-                        <span>Import compounds</span>
-                      </label>
-                      <label className="switch-field">
-                        <input type="checkbox" checked={importExperiments} onChange={(event) => setImportExperiments(event.target.checked)} />
-                        <span>Import experiments</span>
-                      </label>
-                      <button className="btn btn-primary" type="button" onClick={runApply} disabled={saving || !canApply}>
-                        Apply Incremental Update
-                      </button>
-                    </div>
-                    <div className="mmp-life-run-row">
-                      <select value={selectedApplyId} onChange={(event) => setSelectedApplyId(event.target.value)}>
-                        <option value="">Latest apply record</option>
-                        {applyHistory.map((item) => {
-                          const applyId = readText(item.apply_id);
-                          const batchRef = readText(item.import_batch_id);
-                          const appliedAt = formatDateTime(readText(item.applied_at));
-                          return (
-                            <option key={applyId || `${batchRef}-${appliedAt}`} value={applyId}>
-                              {applyId || batchRef} · {appliedAt}
-                            </option>
-                          );
-                        })}
-                      </select>
-                      <label className="switch-field">
-                        <input type="checkbox" checked={rollbackCompounds} onChange={(event) => setRollbackCompounds(event.target.checked)} />
-                        <span>Rollback compounds</span>
-                      </label>
-                      <label className="switch-field">
-                        <input type="checkbox" checked={rollbackExperiments} onChange={(event) => setRollbackExperiments(event.target.checked)} />
-                        <span>Rollback experiments</span>
-                      </label>
-                      <button className="btn btn-ghost" type="button" onClick={runRollback} disabled={saving || !batchDatabaseId.trim()}>
-                        <RotateCcw size={14} />
-                        Rollback
-                      </button>
-                    </div>
-                    {applyResult || rollbackResult ? (
-                      <div className="project-compact-meta">
-                        {applyResult ? (
-                          <span className="meta-chip">
-                            Latest apply delta: compounds {summarizeCount(asRecord(asRecord(applyResult).delta).compounds)}, pairs {summarizeCount(asRecord(asRecord(applyResult).delta).pairs)}
-                          </span>
-                        ) : null}
-                        {rollbackResult ? (
-                          <span className="meta-chip">
-                            Latest rollback delta: compounds {summarizeCount(asRecord(asRecord(rollbackResult).delta).compounds)}, pairs {summarizeCount(asRecord(asRecord(rollbackResult).delta).pairs)}
-                          </span>
-                        ) : null}
+                      <div className="mmp-life-check-main-stat">
+                        <strong>{summarizeCount(runtimeCheckOverview.compoundTotalRows)}</strong>
+                        <span>Total Rows</span>
                       </div>
-                    ) : null}
-                  </section>
-
-                  <section className="panel">
-                    <div className="toolbar">
-                      <h2><Database size={16} /> Schema Metrics</h2>
-                      <button className="btn btn-ghost btn-compact" type="button" onClick={loadMetrics} disabled={metricsLoading || !batchDatabaseId.trim()}>
-                        {metricsLoading ? 'Loading...' : 'Reload Metrics'}
-                      </button>
-                    </div>
-                    {!metricsResult ? (
-                      <div className="muted">Load metrics to verify schema health before/after updates.</div>
-                    ) : (
-                      <>
-                        <div className="mmp-life-metrics-row">
-                          <span>Compounds: <strong>{summarizeCount(metricsDataset.compounds)}</strong></span>
-                          <span>Rules: <strong>{summarizeCount(metricsDataset.rules)}</strong></span>
-                          <span>Pairs: <strong>{summarizeCount(metricsDataset.pairs)}</strong></span>
-                          <span>Rule envs: <strong>{summarizeCount(metricsDataset.rule_environments)}</strong></span>
+                      <div className="mmp-life-check-sub-stats">
+                        <div className="mmp-life-check-sub-stat">
+                          <span>Need Reindex</span>
+                          <strong>{summarizeCount(runtimeCheckOverview.compoundReindexRows)}</strong>
                         </div>
-                        <div className="table-wrap">
-                          <table className="table">
-                            <thead>
-                              <tr>
-                                <th>Recent Compound Batch</th>
-                                <th>Total</th>
-                                <th>Valid</th>
-                                <th>New Unique</th>
-                                <th>Imported At</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {metricsRecentCompounds.length === 0 ? (
-                                <tr>
-                                  <td colSpan={5} className="muted">No recent compound batch history.</td>
-                                </tr>
-                              ) : (
-                                metricsRecentCompounds.map((item) => (
-                                  <tr key={readText(item.batch_id) || `${readText(item.source_file)}-${readText(item.imported_at)}`}>
-                                    <td>{readText(item.batch_id) || '-'}</td>
-                                    <td>{summarizeCount(item.total_rows)}</td>
-                                    <td>{summarizeCount(item.valid_rows)}</td>
-                                    <td>{summarizeCount(item.new_unique_rows)}</td>
-                                    <td>{formatDateTime(readText(item.imported_at))}</td>
-                                  </tr>
-                                ))
-                              )}
-                            </tbody>
-                          </table>
+                        <div className="mmp-life-check-sub-stat">
+                          <span>No Reindex</span>
+                          <strong>{summarizeCount(Math.max(0, runtimeCheckOverview.compoundAnnotatedRows - runtimeCheckOverview.compoundReindexRows))}</strong>
                         </div>
-                      </>
-                    )}
-                  </section>
-                </>
-              ) : null}
+                      </div>
+                    </section>
+                    <section className="panel subtle mmp-life-check-card">
+                      <div className="mmp-life-check-card-head">
+                        <h3>Experiments</h3>
+                        <span className="badge">Import {summarizeCount(runtimeCheckOverview.experimentImportableRows)}</span>
+                      </div>
+                      <div className="mmp-life-check-main-stat">
+                        <strong>{summarizeCount(runtimeCheckOverview.experimentTotalRows)}</strong>
+                        <span>Total Rows</span>
+                      </div>
+                      <div className="mmp-life-check-sub-stats mmp-life-check-sub-stats-4">
+                        <div className="mmp-life-check-sub-stat">
+                          <span>Update</span>
+                          <strong>{summarizeCount(runtimeCheckOverview.experimentUpdateRows)}</strong>
+                        </div>
+                        <div className="mmp-life-check-sub-stat">
+                          <span>Insert</span>
+                          <strong>{summarizeCount(runtimeCheckOverview.experimentInsertRows)}</strong>
+                        </div>
+                        <div className="mmp-life-check-sub-stat">
+                          <span>Unchanged</span>
+                          <strong>{summarizeCount(runtimeCheckOverview.experimentNoopRows)}</strong>
+                        </div>
+                        <div className="mmp-life-check-sub-stat">
+                          <span>Invalid</span>
+                          <strong>{summarizeCount(runtimeCheckOverview.experimentInvalidRows)}</strong>
+                        </div>
+                      </div>
+                      <div className="mmp-life-check-footnote">
+                        Unmapped {summarizeCount(runtimeCheckOverview.experimentUnmappedRows)} · Unmatched {summarizeCount(runtimeCheckOverview.experimentUnmatchedRows)}
+                      </div>
+                    </section>
+                  </div>
+                </section>
+              </>
+            ) : null}
         </div>
       </div>
       )}

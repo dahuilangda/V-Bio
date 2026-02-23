@@ -828,7 +828,44 @@
 }
 
 .mmp-life-assay-method-select {
-  max-width: 176px;
+  max-width: none;
+  min-height: 32px;
+  height: 32px;
+  line-height: 32px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.mmp-life-pairs-table--mapping {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.mmp-life-pairs-table--mapping col.mmp-life-col-activity {
+  width: 34%;
+}
+
+.mmp-life-pairs-table--mapping col.mmp-life-col-method {
+  width: 34%;
+}
+
+.mmp-life-pairs-table--mapping col.mmp-life-col-output {
+  width: 22%;
+}
+
+.mmp-life-pairs-table--mapping col.mmp-life-col-actions {
+  width: 10%;
+}
+
+.mmp-life-pairs-table--mapping .mmp-life-activity-col-select,
+.mmp-life-pairs-table--mapping .mmp-life-assay-method-select {
+  width: 100%;
+}
+
+.mmp-life-pairs-table--mapping td:nth-child(3) {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .mmp-life-pairs-table th,
@@ -1135,12 +1172,17 @@
 }
 
 .mmp-life-batch-table {
-  min-width: 1240px;
+  width: 100%;
+  min-width: 1280px;
   table-layout: fixed;
 }
 
+.mmp-life-batch-table .mmp-life-col-select {
+  width: 4%;
+}
+
 .mmp-life-batch-table .mmp-life-col-batch {
-  width: 22%;
+  width: 21%;
 }
 
 .mmp-life-batch-table .mmp-life-col-status {
@@ -1148,7 +1190,7 @@
 }
 
 .mmp-life-batch-table .mmp-life-col-database {
-  width: 16%;
+  width: 17%;
 }
 
 .mmp-life-batch-table .mmp-life-col-compounds {
@@ -1160,7 +1202,7 @@
 }
 
 .mmp-life-batch-table .mmp-life-col-files {
-  width: 12%;
+  width: 10%;
 }
 
 .mmp-life-batch-table .mmp-life-col-updated {
@@ -1168,7 +1210,7 @@
 }
 
 .mmp-life-batch-table .mmp-life-col-actions {
-  width: 10%;
+  width: 8%;
 }
 
 .mmp-life-db-cell {
@@ -1237,16 +1279,123 @@
   flex-wrap: nowrap;
 }
 
+.mmp-life-select-head,
+.mmp-life-select-cell {
+  text-align: center;
+}
+
+.mmp-life-batch-table input[type='checkbox'] {
+  width: 14px;
+  height: 14px;
+}
+
+.mmp-life-bulk-apply-summary {
+  margin-bottom: 8px;
+}
+
+.mmp-life-bulk-apply-table th,
+.mmp-life-bulk-apply-table td {
+  vertical-align: top;
+}
+
+.mmp-life-result-ok {
+  color: #1f5f3f;
+}
+
+.mmp-life-result-error {
+  color: #9b2f2f;
+}
+
+.mmp-life-check-layout {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.mmp-life-check-card {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.mmp-life-check-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mmp-life-check-card-head h3 {
+  margin: 0;
+}
+
+.mmp-life-check-main-stat {
+  border: 1px solid #d4e5db;
+  border-radius: 10px;
+  background: #f7fcf9;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.mmp-life-check-main-stat strong {
+  font-size: 24px;
+  line-height: 1.05;
+  color: #173f2f;
+  font-variant-numeric: tabular-nums;
+}
+
+.mmp-life-check-main-stat span {
+  font-size: var(--text-2xs);
+  color: #5a7064;
+}
+
+.mmp-life-check-sub-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.mmp-life-check-sub-stats-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.mmp-life-check-sub-stat {
+  border: 1px solid #d9e8df;
+  border-radius: 9px;
+  background: #fff;
+  padding: 8px 10px;
+  display: grid;
+  gap: 3px;
+}
+
+.mmp-life-check-sub-stat span {
+  font-size: var(--text-2xs);
+  color: #617669;
+}
+
+.mmp-life-check-sub-stat strong {
+  font-size: var(--text-sm);
+  color: #163c2c;
+  font-variant-numeric: tabular-nums;
+}
+
+.mmp-life-check-footnote {
+  font-size: var(--text-2xs);
+  color: #5f7769;
+}
+
 .mmp-life-actions-head,
 .mmp-life-actions-cell {
-  position: sticky;
-  right: 0;
-  background: #fff;
-  z-index: 2;
+  position: static;
 }
 
 .mmp-life-actions-head {
-  z-index: 3;
+  background: #f5faf7;
+}
+
+.mmp-life-batch-table tbody tr:hover .mmp-life-actions-cell {
+  background: #f8fcf9;
 }
 
 .mmp-life-modal-head {
@@ -1385,6 +1534,24 @@
   background: #e8f5ec;
 }
 
+.task-state-chip.queued {
+  color: #2f556f;
+  border-color: #b8cfdf;
+  background: #edf5fb;
+}
+
+.task-state-chip.running {
+  color: #5f4e18;
+  border-color: #e3d4a2;
+  background: #fff9e8;
+}
+
+.task-state-chip.failed {
+  color: #8b2d2d;
+  border-color: #e1b2b2;
+  background: #fdefef;
+}
+
 .task-state-chip.rolled-back {
   color: #5d4f66;
   border-color: #c9bdd0;
@@ -1430,6 +1597,14 @@
   .mmp-life-check-grid,
   .mmp-life-mini-grid {
     grid-template-columns: 1fr;
+  }
+
+  .mmp-life-check-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .mmp-life-check-sub-stats-4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .mmp-life-upload-actions {
@@ -1519,14 +1694,24 @@
 /* Override generic task-table responsive hiding; MMP batch list keeps Updated/Actions visible. */
 @media (max-width: 1460px) {
   .mmp-life-batch-table th:nth-child(7),
-  .mmp-life-batch-table td:nth-child(7) {
+  .mmp-life-batch-table td:nth-child(7),
+  .mmp-life-batch-table th:nth-child(8),
+  .mmp-life-batch-table td:nth-child(8),
+  .mmp-life-batch-table th:nth-child(9),
+  .mmp-life-batch-table td:nth-child(9) {
     display: table-cell !important;
   }
 }
 
 @media (max-width: 1300px) {
+  .mmp-life-batch-table th:nth-child(7),
+  .mmp-life-batch-table td:nth-child(7),
   .mmp-life-batch-table th:nth-child(8),
   .mmp-life-batch-table td:nth-child(8) {
+    display: table-cell !important;
+  }
+  .mmp-life-batch-table th:nth-child(9),
+  .mmp-life-batch-table td:nth-child(9) {
     display: table-cell !important;
   }
 }
