@@ -21,6 +21,7 @@ from api_server_admin_routes import register_admin_routes
 from api_server_task_routes import register_task_routes
 from api_server_affinity_routes import register_affinity_routes
 from api_server_lead_opt_mmp_routes import register_lead_opt_mmp_routes
+from api_server_mmp_lifecycle_routes import register_mmp_lifecycle_admin_routes
 from api_server_lead_opt_routes import register_lead_opt_routes
 from api_server_prediction_routes import register_prediction_routes
 from api_server_result_archive import ResultArchiveService
@@ -266,6 +267,12 @@ register_admin_routes(
     logger=logger,
     task_monitor=task_monitor,
     get_gpu_status_fn=get_gpu_status,
+)
+
+register_mmp_lifecycle_admin_routes(
+    app,
+    require_api_token=require_api_token,
+    logger=logger,
 )
 
 

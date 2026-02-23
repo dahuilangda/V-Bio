@@ -11,8 +11,11 @@ export async function fetchWithTimeout(url: string, init: RequestInit = {}, time
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    const method = String(init.method || 'GET').toUpperCase();
+    const cacheMode: RequestCache | undefined = init.cache ?? (method === 'GET' ? 'no-store' : undefined);
     return await fetch(url, {
       ...init,
+      ...(cacheMode ? { cache: cacheMode } : {}),
       signal: controller.signal
     });
   } catch (error) {

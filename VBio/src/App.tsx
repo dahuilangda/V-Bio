@@ -10,6 +10,7 @@ const ProjectDetailPage = lazy(() => import('./pages/ProjectDetailPage').then((m
 const ProjectTasksPage = lazy(() => import('./pages/ProjectTasksPage').then((m) => ({ default: m.ProjectTasksPage })));
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
 const UsersPage = lazy(() => import('./pages/UsersPage').then((m) => ({ default: m.UsersPage })));
+const MmpLifecycleAdminPage = lazy(() => import('./pages/MmpLifecycleAdminPage').then((m) => ({ default: m.MmpLifecycleAdminPage })));
 
 function ShellPage({ children }: { children: JSX.Element }) {
   return <AppShell>{children}</AppShell>;
@@ -105,6 +106,18 @@ export default function App() {
             <ShellPage>
               <Suspense fallback={<PageLoading />}>
                 <UsersPage />
+              </Suspense>
+            </ShellPage>
+          </AdminRoute>
+        }
+      />
+      <Route
+        path="/admin/mmp-lifecycle"
+        element={
+          <AdminRoute>
+            <ShellPage>
+              <Suspense fallback={<PageLoading />}>
+                <MmpLifecycleAdminPage />
               </Suspense>
             </ShellPage>
           </AdminRoute>

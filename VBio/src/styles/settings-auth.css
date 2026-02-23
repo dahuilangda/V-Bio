@@ -294,3 +294,1239 @@
 .auth-footer a:hover {
   text-decoration: underline;
 }
+
+.mmp-life-page {
+  max-width: 1680px;
+}
+
+.mmp-life-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.mmp-life-sidebar {
+  position: sticky;
+  top: 76px;
+  max-height: calc(100vh - 96px);
+  overflow: auto;
+}
+
+.mmp-life-create-form {
+  padding-bottom: 8px;
+  border-bottom: 1px solid #dce6df;
+}
+
+.mmp-life-batch-list {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.mmp-life-batch-item {
+  width: 100%;
+  border: 1px solid #d7e2dc;
+  border-radius: 10px;
+  background: #f9fcfa;
+  color: #21392d;
+  display: grid;
+  gap: 3px;
+  align-content: start;
+  text-align: left;
+  padding: 9px 10px;
+  cursor: pointer;
+}
+
+.mmp-life-batch-item:hover {
+  border-color: #c4d7cc;
+  background: #f3f9f5;
+}
+
+.mmp-life-batch-item.active {
+  border-color: #96baa5;
+  background: #eaf4ee;
+}
+
+.mmp-life-batch-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mmp-life-batch-item-head strong {
+  font-size: var(--text-sm);
+  line-height: 1.2;
+}
+
+.mmp-life-batch-item-meta {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mmp-life-main {
+  grid-template-columns: 36px minmax(0, 1fr);
+  column-gap: 0;
+  row-gap: 0;
+}
+
+.mmp-life-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mmp-life-header-status {
+  margin-top: 4px;
+}
+
+.mmp-life-head-pill {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 10px;
+  line-height: 1.2;
+}
+
+.mmp-life-header-circle-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid #c7d9cf;
+  background: #f8fcfa;
+  color: #244737;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease, color 0.14s ease;
+}
+
+.mmp-life-header-circle-btn:hover {
+  border-color: #98b7a7;
+  background: #eef6f1;
+  box-shadow: 0 6px 16px rgba(20, 45, 34, 0.12);
+}
+
+.mmp-life-header-circle-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.mmp-life-header-circle-btn-primary {
+  border-color: #2d5d48;
+  background: linear-gradient(180deg, #2a654f 0%, #245a46 100%);
+  color: #fff;
+}
+
+.mmp-life-header-circle-btn-primary:hover {
+  border-color: #295642;
+  background: linear-gradient(180deg, #34765d 0%, #2a634d 100%);
+}
+
+.mmp-life-workspace-stepper {
+  position: sticky;
+  top: 76px;
+  width: 36px;
+  margin-left: 0;
+}
+
+.mmp-life-flow-panel {
+  gap: 10px;
+}
+
+.mmp-life-flow-guide {
+  margin: 0;
+}
+
+.mmp-life-flow-head {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.mmp-life-batch-switch-field {
+  min-width: 0;
+}
+
+.mmp-life-workspace-stepper .workspace-step.done .workspace-step-dot {
+  border-color: #a8c8b8;
+  background: #edf6f1;
+  color: #2d5b45;
+}
+
+.mmp-life-workspace-stepper .workspace-step.active .workspace-step-dot {
+  border-color: #6a9b80;
+  background: #e7f2eb;
+}
+
+.mmp-life-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mmp-life-upload-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  align-items: start;
+}
+
+.mmp-life-upload-map-card {
+  gap: 10px;
+}
+
+.mmp-life-upload-file-card {
+  gap: 8px;
+  padding: 8px;
+}
+
+.mmp-life-upload-form {
+  display: grid;
+  gap: 10px;
+}
+
+.mmp-life-upload-file-head {
+  display: grid;
+  gap: 5px;
+}
+
+.mmp-life-upload-file-field {
+  display: grid;
+  gap: 0;
+}
+
+.mmp-life-upload-meta {
+  margin-top: -1px;
+}
+
+.mmp-life-upload-left-stack {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+
+.mmp-life-upload-resizable {
+  --mmp-life-upload-left-width: 44%;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(300px, var(--mmp-life-upload-left-width)) 10px minmax(420px, 1fr);
+  align-items: stretch;
+  width: 100%;
+}
+
+.mmp-life-upload-pane {
+  min-width: 0;
+  align-content: start;
+}
+
+.mmp-life-upload-resizable .panel-resizer {
+  position: relative;
+  width: 10px;
+  min-width: 10px;
+  border: 0;
+  align-self: stretch;
+  min-height: 100%;
+  background: transparent;
+  cursor: col-resize;
+  opacity: 0.72;
+  transition: opacity 0.16s ease;
+  touch-action: none;
+}
+
+.mmp-life-upload-resizable .panel-resizer::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 12px;
+  bottom: 12px;
+  width: 1px;
+  transform: translateX(-50%);
+  background: rgba(138, 161, 148, 0.34);
+  border-radius: 999px;
+  transition: width 0.16s ease, background 0.16s ease;
+}
+
+.mmp-life-upload-resizable .panel-resizer:hover,
+.mmp-life-upload-resizable .panel-resizer.dragging,
+.mmp-life-upload-resizable.is-resizing .panel-resizer {
+  opacity: 1;
+}
+
+.mmp-life-upload-resizable .panel-resizer:hover::after,
+.mmp-life-upload-resizable .panel-resizer.dragging::after,
+.mmp-life-upload-resizable.is-resizing .panel-resizer::after {
+  width: 2px;
+  background: rgba(112, 141, 126, 0.55);
+}
+
+.mmp-life-upload-resizable .panel-resizer:focus-visible {
+  outline: 1px solid rgba(108, 137, 122, 0.56);
+  outline-offset: 1px;
+}
+
+.mmp-life-upload-preview-empty {
+  border: 1px dashed #d7e3db;
+  border-radius: 10px;
+  background: #f9fcfa;
+  padding: 12px;
+}
+
+.mmp-life-upload-map-card h3 {
+  margin: 0;
+}
+
+.mmp-life-upload-map-card h4 {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: #1f4233;
+}
+
+.mmp-life-upload-map-card > .toolbar {
+  align-items: center;
+}
+
+.mmp-life-upload-map-card select[multiple] {
+  min-height: 130px;
+  background-image: none;
+  padding-right: 12px;
+}
+
+.mmp-life-map-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.mmp-life-map-section {
+  gap: 4px;
+  padding: 5px 6px;
+  border: 1px solid #d9e5dd;
+  border-radius: 10px;
+  background: #f8fcf9;
+}
+
+.mmp-life-map-section > h4 {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.2;
+}
+
+.mmp-life-conversion-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.mmp-life-conversion-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: #234536;
+}
+
+.mmp-life-conversion-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mmp-life-structure-card {
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid #e0e9e3;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.mmp-life-structure-head {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  min-height: 22px;
+}
+
+.mmp-life-structure-row {
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-start;
+}
+
+.mmp-life-structure-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #cbddd2;
+  border-radius: 999px;
+  background: #f3f9f5;
+  color: #2c4d3e;
+  padding: 3px 8px;
+  font-size: var(--text-2xs);
+  white-space: nowrap;
+}
+
+.mmp-life-structure-select-wrap {
+  width: min(100%, 236px);
+  min-width: 0;
+}
+
+.mmp-life-structure-row .mmp-life-conversion-select-wrap > select {
+  min-height: 32px;
+  height: 32px;
+  line-height: 32px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.mmp-life-structure-row .icon-btn {
+  min-width: 32px;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  padding: 0;
+}
+
+.mmp-life-map-structure-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+.mmp-life-conversion-shell {
+  margin: 0;
+}
+
+.mmp-life-conversion-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #d6e3db;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #2c4d3e;
+  padding: 4px 8px;
+  font-size: var(--text-2xs);
+  white-space: nowrap;
+}
+
+.mmp-life-conversion-target {
+  background: #f3f9f5;
+  border-color: #cbddd2;
+}
+
+.mmp-life-conversion-select-wrap {
+  min-width: 0;
+  flex: 1;
+}
+
+.mmp-life-conversion-select-wrap > select {
+  min-width: 0;
+  width: 100%;
+}
+
+.mmp-life-field-invalid input,
+.mmp-life-field-invalid select {
+  border-color: #d66b6b;
+  background: #fff9f9;
+}
+
+.mmp-life-field-error {
+  font-size: var(--text-xs);
+  color: #b33b3b;
+  line-height: 1.3;
+}
+
+.mmp-life-upload-selected-columns {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mmp-life-upload-selected-columns-inline {
+  margin-top: 2px;
+}
+
+.mmp-life-activity-method-map {
+  gap: 4px;
+  border: 1px solid #e0e9e3;
+  border-radius: 10px;
+  background: #fff;
+  padding: 6px;
+}
+
+.mmp-life-activity-method-map .toolbar {
+  align-items: center;
+}
+
+.mmp-life-activity-method-map .toolbar h4 {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--text-xs);
+  color: #234536;
+}
+
+.mmp-life-conversion-stats {
+  display: grid;
+  gap: 4px;
+  margin-top: 1px;
+  border: 1px solid #e0e9e3;
+  border-radius: 10px;
+  background: #fff;
+  padding: 6px;
+}
+
+.mmp-life-conversion-stats-head {
+  padding-left: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #234536;
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.mmp-life-activity-method-map h3 {
+  margin: 0;
+}
+
+.mmp-life-assay-method-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mmp-life-assay-method-head .btn.btn-compact {
+  padding: 4px 8px;
+  font-size: var(--text-2xs);
+}
+
+.mmp-life-pairs-table .mmp-life-col-assay-method {
+  width: 176px;
+}
+
+.mmp-life-pairs-table .mmp-life-cell-assay-method {
+  max-width: 176px;
+}
+
+.mmp-life-assay-method-select {
+  max-width: 176px;
+}
+
+.mmp-life-pairs-table th,
+.mmp-life-pairs-table td {
+  padding: 5px 6px;
+  font-size: var(--text-2xs);
+}
+
+.mmp-life-activity-col-select,
+.mmp-life-activity-transform-select {
+  width: min(100%, 208px);
+  min-height: 32px;
+  height: 32px;
+  line-height: 32px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.mmp-life-upload-actions {
+  margin-top: 4px;
+  border-top: 1px solid #dce8df;
+  padding-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.mmp-life-upload-actions-note {
+  min-width: 0;
+  flex: 1;
+}
+
+.mmp-life-upload-actions-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mmp-life-upload-preview-card {
+  gap: 5px;
+  padding: 8px;
+}
+
+.mmp-life-upload-preview-card > .toolbar {
+  justify-content: flex-start;
+}
+
+.mmp-life-upload-preview-card .mmp-life-run-row {
+  justify-content: flex-start;
+}
+
+.mmp-life-preview-head-row {
+  width: 100%;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.mmp-life-preview-head-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.mmp-life-preview-head-page {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-wrap: nowrap;
+}
+
+.mmp-life-preview-head-row .meta-chip {
+  min-height: 24px;
+  padding: 2px 8px;
+  font-size: var(--text-2xs);
+  display: inline-flex;
+  align-items: center;
+}
+
+.mmp-life-preview-page-btn {
+  min-width: 24px;
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.mmp-life-upload-preview-table th,
+.mmp-life-upload-preview-table td {
+  vertical-align: top;
+  padding: 5px 6px;
+  font-size: var(--text-2xs);
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.28;
+}
+
+.mmp-life-upload-preview-2d {
+  min-width: 164px;
+  width: 164px;
+}
+
+.mmp-life-upload-preview-table .ligand-preview-svg-wrap {
+  width: 152px;
+  min-height: 96px;
+}
+
+.mmp-life-upload-preview-table .ligand-preview-svg {
+  width: 152px;
+  min-height: 96px;
+}
+
+.mmp-life-upload-stats-table .mmp-life-mono {
+  font-size: var(--text-xs);
+}
+
+.mmp-life-upload-stats-table td,
+.mmp-life-upload-stats-table th {
+  padding: 5px 6px;
+  font-size: var(--text-2xs);
+  white-space: nowrap;
+}
+
+.mmp-life-upload-col-smiles,
+.mmp-life-upload-cell-smiles {
+  max-width: 220px;
+}
+
+.mmp-life-upload-cell-smiles {
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.mmp-life-upload-auto-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid #d5e2da;
+  border-radius: 9px;
+  background: #f8fcfa;
+  font-size: var(--text-2xs);
+  color: #2d4d3e;
+}
+
+.mmp-life-upload-auto-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: #4d6f5f;
+}
+
+.mmp-life-upload-auto-text {
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.mmp-life-upload-auto-state.is-uploading {
+  border-color: #bfd3c8;
+  background: #f3f9f5;
+}
+
+.mmp-life-upload-auto-state.is-success {
+  border-color: #bdd9c8;
+  background: #ecf7f0;
+}
+
+.mmp-life-upload-auto-state.is-success .mmp-life-upload-auto-icon {
+  color: #2f7650;
+}
+
+.mmp-life-upload-auto-state.is-error {
+  border-color: #e0b8b8;
+  background: #fff5f5;
+}
+
+.mmp-life-upload-auto-state.is-error .mmp-life-upload-auto-icon {
+  color: #b44f4f;
+}
+
+.mmp-life-btn-soft {
+  border: 1px solid #c7d7cd;
+  background: #f4faf6;
+  color: #274b3b;
+}
+
+.mmp-life-btn-soft:hover {
+  background: #ebf5ee;
+  border-color: #aec6b8;
+}
+
+.mmp-life-btn-strong {
+  min-width: 136px;
+}
+
+.mmp-life-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.mmp-life-middle-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.mmp-life-run-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.mmp-life-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.badge.is-good {
+  background: #e8f5ec;
+  color: #1f5f3f;
+  border-color: #b9ddc7;
+}
+
+.badge.is-bad {
+  background: #fff0f0;
+  color: #8d2b2b;
+  border-color: #e7c5c5;
+}
+
+.mmp-life-check-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mmp-life-metrics-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.mmp-life-mono {
+  font-family: 'IBM Plex Mono', 'SFMono-Regular', Menlo, monospace;
+  font-size: var(--text-xs);
+}
+
+.mmp-life-list-toolbar {
+  margin-bottom: 8px;
+  align-items: center;
+}
+
+.mmp-life-list-toolbar .project-toolbar-filters {
+  align-items: center;
+}
+
+.mmp-life-list-toolbar .project-filter-field-search {
+  display: inline-flex;
+  align-items: center;
+}
+
+.mmp-life-list-toolbar .search-input {
+  min-height: 40px;
+}
+
+.mmp-life-list-toolbar .project-toolbar-meta {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  line-height: 1;
+}
+
+.mmp-life-list-toolbar .project-toolbar-meta-rich {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  min-height: 40px;
+}
+
+.mmp-life-list-toolbar .icon-btn {
+  min-width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  padding: 0;
+  margin: 0;
+}
+
+.mmp-life-table-meta {
+  margin-bottom: 8px;
+}
+
+.mmp-life-batch-table {
+  min-width: 1240px;
+  table-layout: fixed;
+}
+
+.mmp-life-batch-table .mmp-life-col-batch {
+  width: 22%;
+}
+
+.mmp-life-batch-table .mmp-life-col-status {
+  width: 10%;
+}
+
+.mmp-life-batch-table .mmp-life-col-database {
+  width: 16%;
+}
+
+.mmp-life-batch-table .mmp-life-col-compounds {
+  width: 8%;
+}
+
+.mmp-life-batch-table .mmp-life-col-assays {
+  width: 12%;
+}
+
+.mmp-life-batch-table .mmp-life-col-files {
+  width: 12%;
+}
+
+.mmp-life-batch-table .mmp-life-col-updated {
+  width: 10%;
+}
+
+.mmp-life-batch-table .mmp-life-col-actions {
+  width: 10%;
+}
+
+.mmp-life-db-cell {
+  min-width: 0;
+}
+
+.mmp-life-db-primary {
+  color: #173f2f;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.mmp-life-db-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+  font-size: var(--text-2xs);
+  color: #5f7769;
+}
+
+.mmp-life-num-cell {
+  font-variant-numeric: tabular-nums;
+}
+
+.mmp-life-assay-cell {
+  min-width: 0;
+}
+
+.mmp-life-assay-primary {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: #173f2f;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mmp-life-assay-meta {
+  margin-top: 2px;
+  font-size: var(--text-2xs);
+  color: #5f7769;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mmp-life-status-cell,
+.mmp-life-updated-cell,
+.mmp-life-num-cell {
+  text-align: center;
+}
+
+.mmp-life-files-cell {
+  color: #466557;
+}
+
+.mmp-life-actions-cell {
+  overflow: visible !important;
+}
+
+.mmp-life-actions-cell .mmp-life-run-row {
+  justify-content: flex-start;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+
+.mmp-life-actions-head,
+.mmp-life-actions-cell {
+  position: sticky;
+  right: 0;
+  background: #fff;
+  z-index: 2;
+}
+
+.mmp-life-actions-head {
+  z-index: 3;
+}
+
+.mmp-life-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.mmp-life-modal-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mmp-life-modal-head h2 {
+  margin: 0;
+  font-size: var(--text-xl);
+}
+
+.mmp-life-method-editor-card {
+  margin-bottom: 10px;
+}
+
+.mmp-life-method-scope-card {
+  margin-bottom: 10px;
+}
+
+.mmp-life-method-scope-inline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.mmp-life-method-scope-db {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 340px;
+  margin: 0;
+}
+
+.mmp-life-method-scope-db > span {
+  font-size: var(--text-xs);
+  color: #587064;
+  white-space: nowrap;
+}
+
+.mmp-life-method-scope-db > select {
+  min-width: 230px;
+  max-width: 420px;
+}
+
+.mmp-life-method-scope-select {
+  height: 32px;
+  min-height: 32px;
+  line-height: 32px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.mmp-life-method-scope-meta {
+  flex: 1;
+  text-align: right;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mmp-life-method-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mmp-life-method-actions-cell {
+  white-space: nowrap;
+}
+
+.mmp-life-method-actions-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mmp-life-create-modal {
+  width: min(520px, calc(100vw - 28px));
+}
+
+.mmp-life-db-modal {
+  width: min(1200px, calc(100vw - 28px));
+}
+
+.mmp-life-assay-modal {
+  width: min(980px, calc(100vw - 28px));
+}
+
+.mmp-life-db-modal .settings-admin-panel {
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.task-state-chip.checked {
+  color: #2a566f;
+  border-color: #a8c3d3;
+  background: #ecf5fb;
+}
+
+.task-state-chip.reviewed {
+  color: #3d5d73;
+  border-color: #b5c9d6;
+  background: #eff6fa;
+}
+
+.task-state-chip.approved {
+  color: #1d5b3f;
+  border-color: #8fc2a9;
+  background: #e5f5ec;
+}
+
+.task-state-chip.rejected {
+  color: #8a2626;
+  border-color: #e1a7a7;
+  background: #fdeeee;
+}
+
+.task-state-chip.applied {
+  color: #1f5f3f;
+  border-color: #9ac9ae;
+  background: #e8f5ec;
+}
+
+.task-state-chip.rolled-back {
+  color: #5d4f66;
+  border-color: #c9bdd0;
+  background: #f3eef6;
+}
+
+@media (max-width: 1320px) {
+  .mmp-life-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .mmp-life-sidebar {
+    position: static;
+    max-height: none;
+  }
+
+  .mmp-life-main {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .mmp-life-workspace-stepper {
+    position: static;
+    width: auto;
+    margin-left: 0;
+  }
+
+  .mmp-life-batch-table {
+    min-width: 860px;
+  }
+}
+
+@media (max-width: 1080px) {
+  .mmp-life-flow-head {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .mmp-life-meta-grid,
+  .mmp-life-upload-grid,
+  .mmp-life-map-grid,
+  .mmp-life-middle-grid,
+  .mmp-life-check-grid,
+  .mmp-life-mini-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .mmp-life-upload-actions {
+    align-items: stretch;
+  }
+
+  .mmp-life-upload-actions-note {
+    min-width: 0;
+  }
+
+  .mmp-life-upload-actions-buttons {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .mmp-life-upload-resizable {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .mmp-life-conversion-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .mmp-life-structure-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .mmp-life-structure-select-wrap {
+    width: 100%;
+  }
+
+  .mmp-life-activity-col-select,
+  .mmp-life-activity-transform-select {
+    width: 100%;
+  }
+
+  .mmp-life-map-structure-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .mmp-life-preview-head-row {
+    justify-content: flex-start;
+    gap: 8px;
+  }
+
+  .mmp-life-preview-head-page {
+    margin-left: 0;
+  }
+
+  .mmp-life-conversion-target {
+    justify-content: center;
+  }
+
+  .mmp-life-upload-resizable .panel-resizer {
+    display: none;
+  }
+
+  .mmp-life-header-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .mmp-life-method-scope-inline {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .mmp-life-method-scope-db {
+    min-width: 0;
+  }
+
+  .mmp-life-method-scope-db > select {
+    min-width: 0;
+    max-width: none;
+    width: 100%;
+  }
+
+  .mmp-life-method-scope-meta {
+    text-align: left;
+  }
+}
+
+/* Override generic task-table responsive hiding; MMP batch list keeps Updated/Actions visible. */
+@media (max-width: 1460px) {
+  .mmp-life-batch-table th:nth-child(7),
+  .mmp-life-batch-table td:nth-child(7) {
+    display: table-cell !important;
+  }
+}
+
+@media (max-width: 1300px) {
+  .mmp-life-batch-table th:nth-child(8),
+  .mmp-life-batch-table td:nth-child(8) {
+    display: table-cell !important;
+  }
+}

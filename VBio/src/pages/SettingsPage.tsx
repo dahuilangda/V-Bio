@@ -5,11 +5,9 @@ import { useAuth } from '../hooks/useAuth';
 import { findUserByUsername, updateUser } from '../api/supabaseLite';
 import { hashPassword } from '../utils/crypto';
 import { getAvatarOverride, setAvatarOverride } from '../utils/profilePrefs';
-import { MmpDatabaseAdminPanel } from '../components/admin/MmpDatabaseAdminPanel';
 
 export function SettingsPage() {
   const { session, refreshSession } = useAuth();
-  const isAdmin = Boolean(session?.isAdmin);
 
   const [user, setUser] = useState<AppUser | null>(null);
   const [loading, setLoading] = useState(false);
@@ -236,8 +234,6 @@ export function SettingsPage() {
           </form>
         </section>
       </div>
-
-      {isAdmin ? <MmpDatabaseAdminPanel compact /> : null}
     </div>
   );
 }

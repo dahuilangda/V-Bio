@@ -85,6 +85,7 @@ VBio/.run/
 lead_optimization/postgres/.env
 lead_optimization/postgres/data/
 lead_optimization/data/mmp_query_cache/
+lead_optimization/data/mmp_lifecycle_admin/
 lead_optimization/data/chembl_*
 lead_optimization/data/.mmp_staging.db
 lead_optimization/data/*.db

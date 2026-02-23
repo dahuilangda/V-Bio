@@ -148,10 +148,12 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
 
   return (
     <section className="panel settings-admin-panel">
-      <div className="settings-panel-head">
-        <h2>Lead Opt Databases</h2>
-        {!compact ? <p className="muted">Global catalog. Create/import from CLI only.</p> : null}
-      </div>
+      {!compact ? (
+        <div className="settings-panel-head">
+          <h2>Lead Opt Databases</h2>
+          <p className="muted">Global catalog. Create/import from CLI only.</p>
+        </div>
+      ) : null}
 
       {error ? <div className="alert error">{error}</div> : null}
       {success ? <div className="alert success">{success}</div> : null}

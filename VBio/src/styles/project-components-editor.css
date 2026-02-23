@@ -206,6 +206,24 @@
   font-size: var(--text-sm);
 }
 
+/* Keep unified file input vertically centered inside component cards. */
+.component-card input.file-input-unified {
+  box-sizing: border-box;
+  height: 38px;
+  min-height: 38px;
+  line-height: 36px;
+  padding: 0 10px;
+  font-size: var(--text-sm);
+}
+
+.component-card input.file-input-unified::file-selector-button,
+.component-card input.file-input-unified::-webkit-file-upload-button {
+  height: 100%;
+  margin: 0 10px 0 -10px;
+  padding: 0 12px;
+  border-radius: 9px 0 0 9px;
+}
+
 .component-card textarea {
   padding: 8px 10px;
   font-size: var(--text-sm);

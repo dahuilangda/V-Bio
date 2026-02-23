@@ -26,6 +26,42 @@ export type {
   LeadOptReferencePreviewResponse
 } from './backendLeadOptimizationApi';
 
+export {
+  applyMmpLifecycleBatch,
+  clearMmpLifecycleExperiments,
+  checkMmpLifecycleBatch,
+  createMmpLifecycleBatch,
+  createMmpLifecycleMethod,
+  deleteMmpLifecycleBatch,
+  deleteMmpLifecycleMethod,
+  fetchMmpLifecycleDatabaseSyncQueue,
+  fetchMmpLifecycleCompoundsPreview,
+  fetchMmpLifecycleDatabaseProperties,
+  fetchMmpLifecycleMethodUsage,
+  fetchMmpLifecycleMethods,
+  fetchMmpLifecycleMetrics,
+  fetchMmpLifecycleOverview,
+  fetchMmpLifecyclePropertyMappings,
+  patchMmpLifecycleBatch,
+  patchMmpLifecycleMethod,
+  rollbackMmpLifecycleBatch,
+  saveMmpLifecyclePropertyMappings,
+  transitionMmpLifecycleBatchStatus,
+  uploadMmpLifecycleCompounds,
+  uploadMmpLifecycleExperiments,
+} from './backendMmpLifecycleAdminApi';
+export type {
+  MmpLifecycleBatch,
+  MmpLifecycleBatchFileMeta,
+  MmpLifecycleCompoundsPreview,
+  MmpLifecycleDatabaseItem,
+  MmpLifecycleMethod,
+  MmpLifecycleMethodUsage,
+  MmpLifecycleOverviewResponse,
+  MmpLifecyclePendingDatabaseSync,
+  MmpLifecyclePropertyMapping,
+} from './backendMmpLifecycleAdminApi';
+
 export { previewAffinityComplex, submitAffinityScoring } from './backendAffinityApi';
 
 export { downloadResultBlob, getTaskStatus, terminateTask } from './backendTaskApi';

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, useNavigate } from 'react-router-dom';
-import { ChevronDown, FlaskConical, FolderKanban, LogOut, Settings, Users } from 'lucide-react';
+import { ChevronDown, Database, FlaskConical, FolderKanban, LogOut, Settings, Users } from 'lucide-react';
 import { useAuth } from '../../hooks/useAuth';
 import { getAvatarOverride } from '../../utils/profilePrefs';
 
@@ -50,6 +50,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <NavLink to="/users" className="top-link">
               <Users size={16} />
               <span>Users</span>
+            </NavLink>
+          )}
+          {session?.isAdmin && (
+            <NavLink to="/admin/mmp-lifecycle" className="top-link">
+              <Database size={16} />
+              <span>MMP Lifecycle</span>
             </NavLink>
           )}
         </div>
