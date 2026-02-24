@@ -892,7 +892,7 @@ export function LeadOptCandidatesPanel({
                 }}
                 title="Color by model confidence"
               >
-                Confidence
+                AF
               </button>
               <button
                 type="button"
@@ -904,9 +904,9 @@ export function LeadOptCandidatesPanel({
                   onPreviewRenderModeChange?.('fragment');
                   emitUiStateNow({ previewRenderMode: 'fragment' });
                 }}
-                title="Highlight modified fragment"
+                title="Use standard fragment emphasis"
               >
-                Fragment
+                Std
               </button>
             </div>
             <button

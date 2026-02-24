@@ -136,14 +136,6 @@ export function useMolstarFocus({
         }
         return true;
       };
-      if (tryFocusLikelyLigand(viewer)) {
-        const likelyLigandLoci =
-          viewer?.plugin?.managers?.structure?.focus?.current?.loci ??
-          viewer?.plugin?.managers?.structure?.focus?.current?.current?.loci;
-        if (likelyLigandLoci) {
-          return applyFocusLoci(likelyLigandLoci);
-        }
-      }
       const preferredChain = String(ligandFocusChainId || '').trim();
       const parsedAnchor =
         inferLigandAnchor(structureText, format, preferredChain) ||
@@ -152,9 +144,19 @@ export function useMolstarFocus({
           overlayFormat === 'pdb' ? 'pdb' : format,
           preferredChain
         );
-      if (!parsedAnchor) return false;
-      const loci = buildResidueLoci(viewer, parsedAnchor.chain, parsedAnchor.residue);
-      return applyFocusLoci(loci);
+      if (parsedAnchor) {
+        const loci = buildResidueLoci(viewer, parsedAnchor.chain, parsedAnchor.residue);
+        if (applyFocusLoci(loci)) return true;
+      }
+      if (tryFocusLikelyLigand(viewer)) {
+        const likelyLigandLoci =
+          viewer?.plugin?.managers?.structure?.focus?.current?.loci ??
+          viewer?.plugin?.managers?.structure?.focus?.current?.current?.loci;
+        if (likelyLigandLoci) {
+          return applyFocusLoci(likelyLigandLoci);
+        }
+      }
+      return false;
     },
     [format, ligandFocusChainId, overlayFormat, overlayStructureText, structureText]
   );

@@ -76,6 +76,67 @@
   min-width: 0;
 }
 
+.structure-panel--prediction {
+  grid-template-rows: auto auto;
+  align-content: start;
+}
+
+.structure-panel--results-compact {
+  grid-template-rows: auto auto;
+  align-content: start;
+}
+
+.structure-panel .molstar-host + .legend-row {
+  margin-top: 2px;
+}
+
+.prediction-render-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid #d4dee4;
+  border-radius: 9px;
+  background: #f7fafc;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+  justify-self: end;
+  width: fit-content;
+  max-width: 100%;
+  margin-left: auto;
+}
+
+.prediction-render-mode-btn {
+  min-width: 0;
+  height: 24px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: #4b5d69;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.prediction-render-mode-btn:hover {
+  background: #edf3f6;
+  color: #334653;
+}
+
+.prediction-render-mode-btn.active {
+  color: #1f303b;
+  background: #ffffff;
+  border-color: #ccd7df;
+  box-shadow: 0 1px 2px rgba(31, 48, 59, 0.08);
+}
+
+.prediction-render-mode-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(83, 114, 136, 0.2);
+}
+
 .results-resizer,
 .panel-resizer {
   position: relative;
@@ -176,6 +237,12 @@
   font-weight: 600;
   color: #455c51;
   letter-spacing: 0.2px;
+}
+
+.result-aside-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .task-row-action-btn {

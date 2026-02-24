@@ -2047,11 +2047,11 @@
 }
 
 .lead-opt-render-mode-btn {
-  min-width: 74px;
+  min-width: 0;
   height: 26px;
   border: 1px solid transparent;
   border-radius: 7px;
-  padding: 0 10px;
+  padding: 0 8px;
   background: transparent;
   color: #4b5d69;
   font-size: 12px;

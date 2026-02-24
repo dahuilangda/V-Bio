@@ -1,4 +1,4 @@
-import type { KeyboardEvent, PointerEvent, ReactNode, RefObject } from 'react';
+import { useEffect, useMemo, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
 import { AffinityResultsWorkspace } from './AffinityWorkspace';
 import type { AffinitySignalCard, ResultsGridStyle } from './AffinityWorkspace';
 import { LigandPropertyGrid } from './LigandPropertyGrid';
@@ -59,7 +59,6 @@ export function ProjectResultsSection({
   displayStructureText,
   displayStructureFormat,
   displayStructureColorMode,
-  displayStructureName,
   confidenceBackend,
   projectBackend,
   predictionLigandPreview,
@@ -72,19 +71,36 @@ export function ProjectResultsSection({
   affinityLigandAtomPlddts,
   affinityLigandConfidenceHint
 }: ProjectResultsSectionProps) {
+  const initialPredictionColorMode = useMemo<'default' | 'alphafold'>(
+    () => (displayStructureColorMode === 'alphafold' ? 'alphafold' : 'default'),
+    [displayStructureColorMode]
+  );
+  const [predictionViewerColorMode, setPredictionViewerColorMode] = useState<'default' | 'alphafold'>(
+    initialPredictionColorMode
+  );
+
+  useEffect(() => {
+    setPredictionViewerColorMode(initialPredictionColorMode);
+  }, [initialPredictionColorMode, projectTaskId]);
+
   if (isPredictionWorkflow) {
     return (
       <>
         <div ref={resultsGridRef} className={`results-grid ${isResultsResizing ? 'is-resizing' : ''}`} style={resultsGridStyle}>
-          <section className="structure-panel">
+          <section className="structure-panel structure-panel--prediction">
             <MolstarViewer
+              key={`prediction-results-viewer:${projectTaskId || '-'}:${predictionViewerColorMode}:${selectedResultLigandChainId || '-'}`}
               structureText={displayStructureText}
               format={displayStructureFormat}
-              colorMode={displayStructureColorMode}
+              colorMode={predictionViewerColorMode}
               confidenceBackend={confidenceBackend || projectBackend}
+              scenePreset="lead_opt"
+              leadOptStyleVariant="results"
+              ligandFocusChainId={selectedResultLigandChainId || ''}
+              interactionGranularity="element"
+              suppressAutoFocus={false}
+              showSequence={false}
             />
-
-            <span className="muted small">Current structure file: {displayStructureName}</span>
           </section>
 
           <div
@@ -99,7 +115,35 @@ export function ProjectResultsSection({
 
           <aside className="info-panel">
             <section className="result-aside-block result-aside-block-ligand">
-              <div className="result-aside-title">Ligand</div>
+              <div className="result-aside-head">
+                <div className="result-aside-title">Ligand</div>
+                <div className="prediction-render-mode-switch" role="tablist" aria-label="3D color mode">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={predictionViewerColorMode === 'alphafold'}
+                    className={`prediction-render-mode-btn ${
+                      predictionViewerColorMode === 'alphafold' ? 'active' : ''
+                    }`}
+                    onClick={() => setPredictionViewerColorMode('alphafold')}
+                    title="Color structure by model confidence"
+                  >
+                    AF
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={predictionViewerColorMode === 'default'}
+                    className={`prediction-render-mode-btn ${
+                      predictionViewerColorMode === 'default' ? 'active' : ''
+                    }`}
+                    onClick={() => setPredictionViewerColorMode('default')}
+                    title="Use standard element colors"
+                  >
+                    Std
+                  </button>
+                </div>
+              </div>
               <div className="ligand-preview-panel">{predictionLigandPreview}</div>
               {predictionLigandRadarSmiles ? <LigandPropertyGrid smiles={predictionLigandRadarSmiles} variant="radar" /> : null}
             </section>

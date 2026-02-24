@@ -1,4 +1,4 @@
-import type { CSSProperties, KeyboardEvent, PointerEvent, RefObject } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
 import { CircleCheck, Dna, Eye, FlaskConical, Target } from 'lucide-react';
 import { MolstarViewer } from './MolstarViewer';
 import { JSMEEditor } from './JSMEEditor';
@@ -241,16 +241,33 @@ export function AffinityResultsWorkspace({
   onResizerPointerDown,
   onResizerKeyDown
 }: AffinityResultsWorkspaceProps) {
+  const initialViewerColorMode = useMemo<'default' | 'alphafold'>(
+    () => (colorMode === 'alphafold' ? 'alphafold' : 'default'),
+    [colorMode]
+  );
+  const [viewerColorMode, setViewerColorMode] = useState<'default' | 'alphafold'>(initialViewerColorMode);
+
+  useEffect(() => {
+    setViewerColorMode(initialViewerColorMode);
+  }, [initialViewerColorMode, structureText]);
+
   return (
     <>
       <div ref={resultsGridRef} className={`results-grid ${isResultsResizing ? 'is-resizing' : ''}`} style={resultsGridStyle}>
-        <section className="structure-panel">
+        <section className="structure-panel structure-panel--results-compact">
           {hasStructure ? (
             <MolstarViewer
+              key={`affinity-results-viewer:${viewerColorMode}:${selectedLigandChainId || '-'}:${selectedTargetChainId || '-'}`}
               structureText={structureText}
               format={structureFormat}
-              colorMode={colorMode}
+              colorMode={viewerColorMode}
               confidenceBackend={confidenceBackend || projectBackend}
+              scenePreset="lead_opt"
+              leadOptStyleVariant="results"
+              ligandFocusChainId={selectedLigandChainId || ''}
+              interactionGranularity="element"
+              suppressAutoFocus={false}
+              showSequence={false}
             />
           ) : (
             <div className="ligand-preview-empty">Upload target file in Basics.</div>
@@ -269,6 +286,31 @@ export function AffinityResultsWorkspace({
 
         <aside className="info-panel">
           <section className="result-aside-block result-aside-block-ligand">
+            <div className="result-aside-head">
+              <div className="result-aside-title">Ligand</div>
+              <div className="prediction-render-mode-switch" role="tablist" aria-label="3D color mode">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={viewerColorMode === 'alphafold'}
+                  className={`prediction-render-mode-btn ${viewerColorMode === 'alphafold' ? 'active' : ''}`}
+                  onClick={() => setViewerColorMode('alphafold')}
+                  title="Color structure by model confidence"
+                >
+                  AF
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={viewerColorMode === 'default'}
+                  className={`prediction-render-mode-btn ${viewerColorMode === 'default' ? 'active' : ''}`}
+                  onClick={() => setViewerColorMode('default')}
+                  title="Use standard element colors"
+                >
+                  Std
+                </button>
+              </div>
+            </div>
             <div className="ligand-preview-panel">
               <Ligand2DPreview
                 smiles={ligandSmiles}

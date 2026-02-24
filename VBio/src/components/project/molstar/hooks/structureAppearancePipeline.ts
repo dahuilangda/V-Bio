@@ -162,5 +162,7 @@ export async function applyStructureAppearancePipeline({
   }
   if (resolvedColorMode === 'alphafold') {
     await tryApplyAlphaFoldTheme(viewer, confidenceBackend);
+    return;
   }
+  await tryApplyElementSymbolThemeToCurrentScene(viewer);
 }
