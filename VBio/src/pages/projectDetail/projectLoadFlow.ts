@@ -63,10 +63,15 @@ export async function loadProjectFlow(params: {
 
   const activeTaskId = (next.task_id || '').trim();
   const workflowDef = getWorkflowDefinition(next.task_type);
-  const taskRowsBase = sortProjectTasks(
-    await (workflowDef.key === 'lead_optimization' ? listProjectTasksForList(next.id) : listProjectTasksCompact(next.id))
-  );
   const query = new URLSearchParams(locationSearch);
+  const requestedTab = String(query.get('tab') || '').trim().toLowerCase();
+  const shouldIncludeTaskComponents =
+    workflowDef.key !== 'lead_optimization' || (requestedTab !== 'results' && requestedTab !== 'basics');
+  const taskRowsBase = sortProjectTasks(
+    await (workflowDef.key === 'lead_optimization'
+      ? listProjectTasksForList(next.id, { includeComponents: shouldIncludeTaskComponents })
+      : listProjectTasksCompact(next.id))
+  );
 
   const {
     taskRows,

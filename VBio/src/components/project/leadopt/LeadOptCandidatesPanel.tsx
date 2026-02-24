@@ -292,8 +292,8 @@ const TABLE_CANDIDATE_2D_WIDTH = 288;
 const CARD_CANDIDATE_2D_WIDTH = 190;
 const CARD_PREVIEW_2D_HEIGHT = 166;
 const PREVIEW_2D_HEIGHT = 138;
-const CONFIDENCE_HYDRATION_MAX_PER_TICK = 4;
 const CONFIDENCE_HYDRATION_COOLDOWN_MS = 1800;
+const CONFIDENCE_HYDRATION_GLOBAL_COOLDOWN_MS = 1200;
 
 interface LeadOptCandidatesPanelProps {
   sectionId?: string;
@@ -374,6 +374,7 @@ export function LeadOptCandidatesPanel({
   const cardLoadMoreRef = useRef<HTMLDivElement | null>(null);
   const confidenceHydrationInFlightRef = useRef<Record<string, boolean>>({});
   const confidenceHydrationAttemptAtRef = useRef<Record<string, number>>({});
+  const confidenceHydrationLastGlobalAtRef = useRef(0);
   const uiStateHydrationSignatureRef = useRef('');
   const uiStateEmitSignatureRef = useRef('');
   const selectedBackendKey = normalizeBackend(selectedBackend);
@@ -740,36 +741,40 @@ export function LeadOptCandidatesPanel({
   }, [CARD_BATCH_SIZE, cardMode, hasMoreCardRows, renderedRows.length]);
 
   useEffect(() => {
-    if (previewRenderMode !== 'confidence') return;
     if (typeof onEnsurePredictionResult !== 'function') return;
     const visibleRows = cardMode ? cardRows : pageRows;
     if (visibleRows.length === 0) return;
     const now = Date.now();
-    const pendingHydrationSmiles: string[] = [];
-    for (const row of visibleRows) {
-      const smiles = readText(row.smiles).trim();
-      if (!smiles) continue;
-      const record = predictionForBackend(smiles);
-      if (!record || normalizeState(record.state) !== 'SUCCESS') continue;
-      if ((record.ligandAtomPlddts || []).length > 0) continue;
-      if (confidenceHydrationInFlightRef.current[smiles]) continue;
-      const lastAttempt = Number(confidenceHydrationAttemptAtRef.current[smiles] || 0);
-      if (now - lastAttempt < CONFIDENCE_HYDRATION_COOLDOWN_MS) continue;
-      pendingHydrationSmiles.push(smiles);
-      if (pendingHydrationSmiles.length >= CONFIDENCE_HYDRATION_MAX_PER_TICK) break;
-    }
-    if (pendingHydrationSmiles.length === 0) return;
-    for (const smiles of pendingHydrationSmiles) {
-      confidenceHydrationInFlightRef.current[smiles] = true;
-      confidenceHydrationAttemptAtRef.current[smiles] = now;
-      void onEnsurePredictionResult(smiles)
-        .catch(() => null)
-        .finally(() => {
-          delete confidenceHydrationInFlightRef.current[smiles];
-          confidenceHydrationAttemptAtRef.current[smiles] = Date.now();
-        });
-    }
-  }, [cardMode, cardRows, onEnsurePredictionResult, pageRows, predictionBySmiles, previewRenderMode, selectedBackendKey]);
+    if (now - confidenceHydrationLastGlobalAtRef.current < CONFIDENCE_HYDRATION_GLOBAL_COOLDOWN_MS) return;
+
+    const pendingSmiles = visibleRows
+      .map((row) => readText(row.smiles).trim())
+      .filter(Boolean)
+      .filter((smiles) => {
+        const record = predictionForBackend(smiles);
+        if (!record || normalizeState(record.state) !== 'SUCCESS') return false;
+        if ((record.ligandAtomPlddts || []).length > 0) return false;
+        if (confidenceHydrationInFlightRef.current[smiles]) return false;
+        const lastAttempt = Number(confidenceHydrationAttemptAtRef.current[smiles] || 0);
+        return now - lastAttempt >= CONFIDENCE_HYDRATION_COOLDOWN_MS;
+      });
+    if (pendingSmiles.length === 0) return;
+
+    const activeSmilesKey = readText(activeSmiles).trim();
+    const targetSmiles =
+      activeSmilesKey && pendingSmiles.includes(activeSmilesKey) ? activeSmilesKey : pendingSmiles[0];
+    if (!targetSmiles) return;
+
+    confidenceHydrationLastGlobalAtRef.current = now;
+    confidenceHydrationInFlightRef.current[targetSmiles] = true;
+    confidenceHydrationAttemptAtRef.current[targetSmiles] = now;
+    void onEnsurePredictionResult(targetSmiles)
+      .catch(() => null)
+      .finally(() => {
+        delete confidenceHydrationInFlightRef.current[targetSmiles];
+        confidenceHydrationAttemptAtRef.current[targetSmiles] = Date.now();
+      });
+  }, [activeSmiles, cardMode, cardRows, onEnsurePredictionResult, pageRows, predictionBySmiles, selectedBackendKey]);
 
   const physchemFilterFields = [
     { label: 'MW', min: mwMin, max: mwMax, setMin: setMwMin, setMax: setMwMax, minPlaceholder: '250', maxPlaceholder: '550' },

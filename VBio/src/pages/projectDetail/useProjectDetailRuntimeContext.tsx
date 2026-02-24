@@ -253,7 +253,7 @@ export function useProjectDetailRuntimeContext() {
       try {
         const rowsRaw =
           workflowKey === 'lead_optimization'
-            ? await listProjectTasksForList(projectIdValue)
+            ? await listProjectTasksForList(projectIdValue, { includeComponents: false })
             : await listProjectTasksCompact(projectIdValue);
         if (cancelled) return;
         const nextRows = sortProjectTasks(rowsRaw);

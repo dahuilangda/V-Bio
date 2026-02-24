@@ -411,7 +411,7 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
   const leadOptRows = safeTaskRows.filter((row) => {
     if (!Boolean(row.task_id)) return false;
     if (!readLeadOptTaskSummary(row)) return false;
-    return row.task_state === 'QUEUED' || row.task_state === 'RUNNING' || !hasTaskSummaryMetrics(row);
+    return row.task_state === 'QUEUED' || row.task_state === 'RUNNING';
   });
   for (const row of leadOptRows) {
     const baseSummary = readLeadOptTaskSummary(row);

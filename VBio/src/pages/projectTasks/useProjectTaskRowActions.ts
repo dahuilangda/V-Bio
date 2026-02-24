@@ -3,6 +3,7 @@ import type { Dispatch, SetStateAction } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 import type { Project, ProjectTask } from '../../types/models';
 import { deleteProjectTask, getProjectTaskById, updateProject, updateProjectTask } from '../../api/supabaseLite';
+import { getWorkflowDefinition } from '../../utils/workflows';
 import {
   isProjectTaskRow,
   sanitizeTaskRows,
@@ -54,6 +55,7 @@ export function useProjectTaskRowActions({
     setError(null);
     try {
       const runtimeTaskId = String(task.task_id || '').trim();
+      const workflowKey = getWorkflowDefinition(project.task_type).key;
       if (!runtimeTaskId) {
         const query = new URLSearchParams({
           tab: 'components',
@@ -63,7 +65,8 @@ export function useProjectTaskRowActions({
         return;
       }
       let taskForOpen = task;
-      if (!hasObjectContent(task.affinity)) {
+      const shouldHydrateTaskRowForOpen = workflowKey !== 'lead_optimization' && !hasObjectContent(task.affinity);
+      if (shouldHydrateTaskRowForOpen) {
         const hydrated = await getProjectTaskById(task.id);
         if (isProjectTaskRow(hydrated)) {
           taskForOpen = { ...task, ...hydrated };
@@ -86,13 +89,15 @@ export function useProjectTaskRowActions({
         structure_name: taskForOpen.structure_name || '',
         backend: taskForOpen.backend || project.backend
       });
+      const isCompletedLeadOptTask =
+        workflowKey === 'lead_optimization' && String(taskForOpen.task_state || '').toUpperCase() === 'SUCCESS';
       const hasTaskResult = Boolean(
         taskForOpen.task_state === 'SUCCESS' &&
           (String(taskForOpen.structure_name || '').trim() ||
             hasObjectContent(taskForOpen.confidence) ||
             hasObjectContent(taskForOpen.affinity))
       );
-      if (hasTaskResult) {
+      if (isCompletedLeadOptTask || hasTaskResult) {
         navigate(`/projects/${project.id}?tab=results`);
       } else {
         const query = new URLSearchParams({

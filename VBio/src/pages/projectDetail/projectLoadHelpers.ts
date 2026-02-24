@@ -34,6 +34,7 @@ export async function resolveTaskSnapshotContext(params: {
     requestedTaskRowId && requestedTaskRowId.trim()
       ? taskRowsBase.find((item) => String(item.id || '').trim() === requestedTaskRowId.trim()) || null
       : null;
+  const requestedTab = String(query.get('tab') || '').trim().toLowerCase();
 
   const snapshotSourceTaskRowBase = requestNewTask ? null : requestedTaskRow || activeTaskRow;
   const latestDraftTask = requestNewTask
@@ -48,7 +49,11 @@ export async function resolveTaskSnapshotContext(params: {
   const snapshotTaskRowId = snapshotSourceTaskRowBase?.id || latestDraftTask?.id || null;
   const shouldLoadSnapshotDetail = Boolean(
     snapshotTaskRowId &&
-      (workflowKey === 'prediction' || workflowKey === 'affinity' || workflowKey === 'lead_optimization')
+      (
+        workflowKey === 'prediction' ||
+        workflowKey === 'affinity' ||
+        (workflowKey === 'lead_optimization' && requestedTab !== 'results' && requestedTab !== 'basics')
+      )
   );
   const snapshotSourceTaskRowDetail = shouldLoadSnapshotDetail && snapshotTaskRowId
     ? await getProjectTaskById(snapshotTaskRowId)

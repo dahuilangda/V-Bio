@@ -94,6 +94,7 @@ type PredictionState = 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE';
 type ClusterGroupBy = 'to' | 'from' | 'rule_env_radius';
 const RESULT_HYDRATION_RETRY_BASE_MS = 1200;
 const RESULT_HYDRATION_RETRY_MAX_MS = 10000;
+const ENABLE_BACKGROUND_RESULT_HYDRATION = false;
 
 export interface LeadOptPredictionRecord {
   taskId: string;
@@ -637,6 +638,7 @@ export function useLeadOptMmpQueryMachine({
   const [mmpRunVersion, setMmpRunVersion] = useState(0);
   const [predictionBySmiles, setPredictionBySmiles] = useState<Record<string, LeadOptPredictionRecord>>({});
   const [referencePredictionByBackend, setReferencePredictionByBackend] = useState<Record<string, LeadOptPredictionRecord>>({});
+  const [runtimeStatusPollingEnabled, setRuntimeStatusPollingEnabled] = useState(false);
 
   const mmpQueryInFlightRef = useRef(false);
   const lastMmpQueryAtRef = useRef(0);
@@ -673,6 +675,7 @@ export function useLeadOptMmpQueryMachine({
   }, []);
 
   useEffect(() => {
+    if (!runtimeStatusPollingEnabled) return;
     const pendingEntries = Object.entries(predictionBySmiles)
       .filter(([, record]) => {
         const state = String(record.state || '').toUpperCase();
@@ -774,9 +777,10 @@ export function useLeadOptMmpQueryMachine({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [ligandChain, predictionBySmiles, targetChain]);
+  }, [ligandChain, predictionBySmiles, runtimeStatusPollingEnabled, targetChain]);
 
   useEffect(() => {
+    if (!runtimeStatusPollingEnabled) return;
     const pendingEntries = Object.entries(referencePredictionByBackend)
       .filter(([, record]) => {
         const state = String(record.state || '').toUpperCase();
@@ -877,9 +881,10 @@ export function useLeadOptMmpQueryMachine({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [referencePredictionByBackend]);
+  }, [referencePredictionByBackend, runtimeStatusPollingEnabled]);
 
   useEffect(() => {
+    if (!ENABLE_BACKGROUND_RESULT_HYDRATION) return;
     const hydrationEntries = Object.entries(predictionBySmiles)
       .filter(([, record]) => shouldHydratePredictionRecord(record))
       .filter(([smiles]) => !predictionHydrationInFlightRef.current.has(smiles))
@@ -982,6 +987,7 @@ export function useLeadOptMmpQueryMachine({
   }, [ligandChain, predictionBySmiles, targetChain]);
 
   useEffect(() => {
+    if (!ENABLE_BACKGROUND_RESULT_HYDRATION) return;
     const hydrationEntries = Object.entries(referencePredictionByBackend)
       .filter(([, record]) => shouldHydratePredictionRecord(record))
       .filter(([backendKey]) => !referenceHydrationInFlightRef.current.has(backendKey))
@@ -1236,6 +1242,7 @@ export function useLeadOptMmpQueryMachine({
         clearSelections();
         setEnumeratedCandidates([]);
         setPredictionBySmiles({});
+        setRuntimeStatusPollingEnabled(false);
         if (nextQueryId) {
           const cachePayload = {
             query_id: nextQueryId,
@@ -1594,6 +1601,7 @@ export function useLeadOptMmpQueryMachine({
             ...buildQueuedPredictionRecord(taskId, selectedBackend)
           }
         }));
+        setRuntimeStatusPollingEnabled(true);
       } catch (e) {
         const normalizedSmiles = String(candidateSmiles || '').trim();
         const previousRecord = predictionBySmiles[normalizedSmiles];
@@ -1677,6 +1685,7 @@ export function useLeadOptMmpQueryMachine({
             ...buildQueuedPredictionRecord(taskId, selectedBackend)
           }
         }));
+        setRuntimeStatusPollingEnabled(true);
       } catch (error) {
         setReferencePredictionByBackend((prev) => {
           const current = prev[selectedBackend];
@@ -1754,6 +1763,7 @@ export function useLeadOptMmpQueryMachine({
                 ...buildQueuedPredictionRecord(taskId, selectedBackend)
               }
             }));
+            setRuntimeStatusPollingEnabled(true);
           } catch (_error) {
             failure += 1;
             setPredictionBySmiles((prev) => {
@@ -2042,6 +2052,9 @@ export function useLeadOptMmpQueryMachine({
     setSelectedClusterIds([]);
     setPredictionBySmiles(nextPredictions);
     setReferencePredictionByBackend(nextReferenceByBackend);
+    // Keep runtime polling armed after snapshot hydration. The pollers themselves
+    // only call status API for QUEUED/RUNNING records with real task IDs.
+    setRuntimeStatusPollingEnabled(true);
     setQueryNotice(`Loaded saved MMP rows (${nextCandidates.length}).`);
     queryResultCacheRef.current.set(nextQueryId, {
       query_id: nextQueryId,

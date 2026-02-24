@@ -1,5 +1,6 @@
 import {
   clearStructureComponents,
+  tryApplyElementSymbolThemeToCurrentScene,
   tryApplyLeadOptSceneStyle,
   tryApplyLeadOptResultsInteractionTheme,
   tryApplyAlphaFoldTheme,
@@ -49,6 +50,19 @@ function trySetElementSymbolStyle(viewer: any) {
   }
 }
 
+function clearMolstarFocusState(viewer: any) {
+  try {
+    viewer?.plugin?.managers?.structure?.focus?.clear?.();
+  } catch {
+    // no-op
+  }
+  try {
+    viewer?.plugin?.managers?.interactivity?.lociHighlights?.clearHighlights?.();
+  } catch {
+    // no-op
+  }
+}
+
 export async function applyStructureAppearancePipeline({
   viewer,
   colorMode,
@@ -87,6 +101,12 @@ export async function applyStructureAppearancePipeline({
       if (!isRequestCurrent()) return;
       if (!suppressAutoFocus) {
         focusLigandAnchor(viewer);
+        if (resolvedColorMode !== 'alphafold') {
+          // Focus selection can create transient interaction sticks; clear them in fragment mode.
+          clearMolstarFocusState(viewer);
+          await tryApplyElementSymbolThemeToCurrentScene(viewer);
+          if (!isRequestCurrent()) return;
+        }
       }
       return;
     }

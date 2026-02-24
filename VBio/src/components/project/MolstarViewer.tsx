@@ -4,6 +4,7 @@ import { applyMolstarHighlights } from './molstar/highlight';
 import { useMolstarBootstrap } from './molstar/hooks/useMolstarBootstrap';
 import { useMolstarFocus } from './molstar/hooks/useMolstarFocus';
 import { useMolstarStructureTheme } from './molstar/hooks/useMolstarStructureTheme';
+import { tryApplyElementSymbolThemeToCurrentScene } from './molstar/theme';
 import type { MolstarAtomHighlight, MolstarResidueHighlight, MolstarResiduePick } from './molstar/types';
 
 interface MolstarViewerProps {
@@ -124,11 +125,39 @@ export function MolstarViewer({
   useEffect(() => {
     if (!ready || !viewerRef.current || !structureText.trim()) return;
     if (scenePreset !== 'lead_opt' || suppressAutoFocus) return;
+    let cancelled = false;
     const timer = window.setTimeout(() => {
-      focusLigandAnchor(viewerRef.current);
+      const viewer = viewerRef.current;
+      if (!viewer || cancelled) return;
+      focusLigandAnchor(viewer);
+      const shouldForceElementTheme = leadOptStyleVariant === 'results' && colorMode !== 'alphafold';
+      if (!shouldForceElementTheme) return;
+      // Focus may create transient interaction sticks after theme pipeline.
+      // Re-apply element-symbol so fragment mode never falls back to AF colors.
+      void tryApplyElementSymbolThemeToCurrentScene(viewer).catch(() => null);
+      const recolorTimer = window.setTimeout(() => {
+        if (cancelled || !viewerRef.current) return;
+        void tryApplyElementSymbolThemeToCurrentScene(viewerRef.current).catch(() => null);
+      }, 180);
+      if (cancelled) {
+        window.clearTimeout(recolorTimer);
+      }
     }, 120);
-    return () => window.clearTimeout(timer);
-  }, [focusLigandAnchor, ready, scenePreset, structureReadyVersion, structureText, suppressAutoFocus, viewerRef]);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    colorMode,
+    focusLigandAnchor,
+    leadOptStyleVariant,
+    ready,
+    scenePreset,
+    structureReadyVersion,
+    structureText,
+    suppressAutoFocus,
+    viewerRef
+  ]);
 
   if (error) {
     return <div className="alert error">{error}</div>;

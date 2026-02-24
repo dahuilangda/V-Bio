@@ -418,6 +418,56 @@ export async function tryApplyLeadOptResultsInteractionTheme(viewer: any): Promi
   await updateThemeTargetsWithVariants(manager, components, structures, buildBaseElementSymbolThemeVariants());
 }
 
+export async function tryApplyElementSymbolThemeToCurrentScene(viewer: any): Promise<void> {
+  const plugin = viewer?.plugin;
+  const manager = plugin?.managers?.structure?.component;
+  const hasManagerTheme = typeof manager?.updateRepresentationsTheme === 'function';
+  const structures = await waitForStructureEntries(viewer);
+
+  if (typeof viewer?.setStyle === 'function') {
+    try {
+      viewer.setStyle({ theme: 'element-symbol' });
+    } catch {
+      // no-op
+    }
+  }
+
+  if (!hasManagerTheme) return;
+
+  const components = collectStructureComponents(viewer);
+  if (components.length === 0 && structures.length === 0) return;
+
+  const payloads = buildBaseElementSymbolThemeVariants();
+  let lastError: unknown = null;
+  for (const payload of payloads) {
+    let applied = false;
+
+    if (components.length > 0) {
+      try {
+        await updateComponentsTheme(manager, components, payload);
+        applied = true;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    if (Array.isArray(structures) && structures.length > 0) {
+      try {
+        await manager.updateRepresentationsTheme(structures, payload);
+        applied = true;
+      } catch (error) {
+        if (!applied) {
+          lastError = error;
+        }
+      }
+    }
+
+    if (applied) return;
+  }
+
+  if (lastError) throw lastError;
+}
+
 export function tryFocusLikelyLigand(viewer: any): boolean {
   const focusManager = viewer?.plugin?.managers?.structure?.focus;
   if (!focusManager?.setFromLoci) return false;
