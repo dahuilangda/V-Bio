@@ -3189,32 +3189,16 @@ def _collect_compound_cache_signature(
     schema: str,
 ) -> Dict[str, int]:
     normalized_schema = _validate_pg_schema(schema)
-    compound_count = 0
+    compound_count = -1
     compound_max_id = 0
+    require_exact_count = _env_bool("LEADOPT_MMP_CACHE_SIGNATURE_REQUIRE_EXACT_COUNT", False)
     with psycopg.connect(postgres_url, autocommit=False) as conn:
         with conn.cursor() as cursor:
             _pg_set_search_path(cursor, normalized_schema)
-            # Prefer cached dataset summary to avoid a full compound COUNT(*) on every incremental run.
-            dataset_compound_count = 0
-            try:
-                cursor.execute(
-                    """
-                    SELECT COALESCE(num_compounds, 0)::BIGINT
-                    FROM dataset
-                    ORDER BY id
-                    LIMIT 1
-                    """
-                )
-                row = cursor.fetchone()
-                dataset_compound_count = int((row or [0])[0] or 0)
-            except Exception:
-                dataset_compound_count = 0
             cursor.execute("SELECT COALESCE(MAX(id), 0)::BIGINT FROM compound")
             row = cursor.fetchone() or (0,)
             compound_max_id = int(row[0] or 0)
-            if dataset_compound_count > 0:
-                compound_count = dataset_compound_count
-            else:
+            if require_exact_count:
                 cursor.execute("SELECT COUNT(*)::BIGINT FROM compound")
                 row = cursor.fetchone() or (0,)
                 compound_count = int(row[0] or 0)
@@ -3234,14 +3218,15 @@ def _is_fragment_cache_meta_match(
     meta = _read_fragment_cache_meta(cache_fragdb)
     if not meta:
         return False
-    keys = (
-        "meta_version",
-        "compound_count",
-        "compound_max_id",
-    )
-    for key in keys:
-        if int(meta.get(key, 0) or 0) != int(signature.get(key, 0) or 0):
-            return False
+    if int(meta.get("meta_version", 0) or 0) != int(signature.get("meta_version", 0) or 0):
+        return False
+    if int(meta.get("compound_max_id", 0) or 0) != int(signature.get("compound_max_id", 0) or 0):
+        return False
+    meta_count = int(meta.get("compound_count", -1) or -1)
+    sig_count = int(signature.get("compound_count", -1) or -1)
+    # Allow unknown count (-1) to keep incremental runtime independent of total dataset size.
+    if meta_count > 0 and sig_count > 0 and meta_count != sig_count:
+        return False
     return True
 
 
@@ -4208,6 +4193,13 @@ def _merge_incremental_temp_schema_into_target(
     _logger = logging.getLogger(__name__)
     constants = sorted({str(item or "").strip() for item in affected_constants if str(item or "").strip()})
     candidate_values = sorted({str(item or "").strip() for item in candidate_smiles if str(item or "").strip()})
+    active_smiles = sorted(
+        {
+            str((row[0] if len(row) > 0 else "") or "").strip()
+            for row in active_rows
+            if str((row[0] if len(row) > 0 else "") or "").strip()
+        }
+    )
     if not constants:
         return
     if align_sequences:
@@ -4254,6 +4246,20 @@ def _merge_incremental_temp_schema_into_target(
             cursor,
             "COPY tmp_inc_merge_candidate_smiles (clean_smiles) FROM STDIN",
             [(value,) for value in candidate_values],
+        )
+    cursor.execute("DROP TABLE IF EXISTS tmp_inc_merge_active_smiles")
+    cursor.execute(
+        """
+        CREATE TEMP TABLE tmp_inc_merge_active_smiles (
+            clean_smiles TEXT PRIMARY KEY
+        ) ON COMMIT DROP
+        """
+    )
+    if active_smiles:
+        _copy_rows(
+            cursor,
+            "COPY tmp_inc_merge_active_smiles (clean_smiles) FROM STDIN",
+            [(value,) for value in active_smiles],
         )
 
     if replace_existing_pairs_for_constants:
@@ -4398,7 +4404,10 @@ def _merge_incremental_temp_schema_into_target(
                     ON u.id = t.id
             LEFT JOIN compound c
                    ON c.clean_smiles = t.clean_smiles
+            LEFT JOIN tmp_inc_merge_active_smiles act
+                   ON act.clean_smiles = t.clean_smiles
             WHERE c.id IS NULL
+              AND act.clean_smiles IS NOT NULL
             """
         )
         cursor.execute("DROP TABLE IF EXISTS tmp_map_compound")
@@ -5240,21 +5249,50 @@ def _incremental_delete_compounds_without_reindex(
                         ON cs.id = t.constant_id
                 """
             )
+            cursor.execute("DROP TABLE IF EXISTS tmp_inc_deleted_pair_ids")
             cursor.execute(
                 """
-                DELETE FROM pair p
+                CREATE TEMP TABLE tmp_inc_deleted_pair_ids (
+                    pair_id INTEGER PRIMARY KEY
+                ) ON COMMIT DROP
+                """
+            )
+            cursor.execute(
+                """
+                INSERT INTO tmp_inc_deleted_pair_ids (pair_id)
+                SELECT p.id
+                FROM pair p
                 WHERE p.compound1_id IN (SELECT id FROM tmp_inc_removed_compounds)
+                   OR p.compound2_id IN (SELECT id FROM tmp_inc_removed_compounds)
+                ON CONFLICT DO NOTHING
                 """
             )
-            deleted_pairs_c1 = int(cursor.rowcount or 0)
+            cursor.execute("SELECT COUNT(*) FROM tmp_inc_deleted_pair_ids")
+            stats["deleted_pairs"] = int((cursor.fetchone() or [0])[0] or 0)
             cursor.execute(
                 """
                 DELETE FROM pair p
-                WHERE p.compound2_id IN (SELECT id FROM tmp_inc_removed_compounds)
+                WHERE p.id IN (SELECT pair_id FROM tmp_inc_deleted_pair_ids)
                 """
             )
-            deleted_pairs_c2 = int(cursor.rowcount or 0)
-            stats["deleted_pairs"] = deleted_pairs_c1 + deleted_pairs_c2
+            cursor.execute("SELECT to_regclass('from_construct')")
+            has_from_construct = cursor.fetchone()[0] is not None
+            cursor.execute("SELECT to_regclass('to_construct')")
+            has_to_construct = cursor.fetchone()[0] is not None
+            if has_from_construct:
+                cursor.execute(
+                    """
+                    DELETE FROM from_construct fc
+                    WHERE fc.pair_id IN (SELECT pair_id FROM tmp_inc_deleted_pair_ids)
+                    """
+                )
+            if has_to_construct:
+                cursor.execute(
+                    """
+                    DELETE FROM to_construct tc
+                    WHERE tc.pair_id IN (SELECT pair_id FROM tmp_inc_deleted_pair_ids)
+                    """
+                )
 
             cursor.execute(
                 """
@@ -5296,19 +5334,25 @@ def _incremental_delete_compounds_without_reindex(
                     "compound_property",
                 ):
                     cursor.execute(f"ANALYZE {table_name}")
+                if has_from_construct:
+                    cursor.execute("ANALYZE from_construct")
+                if has_to_construct:
+                    cursor.execute("ANALYZE to_construct")
             else:
-                _maybe_auto_analyze_incremental_tables(
-                    cursor,
-                    [
-                        "compound",
-                        "pair",
-                        "rule_environment",
-                        "rule",
-                        "rule_smiles",
-                        "constant_smiles",
-                        "compound_property",
-                    ],
-                )
+                auto_tables = [
+                    "compound",
+                    "pair",
+                    "rule_environment",
+                    "rule",
+                    "rule_smiles",
+                    "constant_smiles",
+                    "compound_property",
+                ]
+                if has_from_construct:
+                    auto_tables.append("from_construct")
+                if has_to_construct:
+                    auto_tables.append("to_construct")
+                _maybe_auto_analyze_incremental_tables(cursor, auto_tables)
             conn.commit()
     return stats
 
@@ -5400,9 +5444,12 @@ def _incremental_reindex_compound_delta(
             delete_stats["deleted_pairs"],
             delete_stats["affected_constants"],
         )
-        _remove_fragment_cache_files(
-            schema_fragment_cache_file,
-            reason=f"delta_mode={normalized_mode}",
+        # Keep the cache to avoid full reseed cost after rollback/delete.
+        # Merge step filters non-active compounds, so stale cache entries cannot be re-materialized.
+        _sync_fragment_cache_meta_from_db(
+            postgres_url,
+            schema=normalized_schema,
+            cache_fragdb=schema_fragment_cache_file,
         )
         logger.info("Incremental index total elapsed=%.2fs", max(0.0, time.time() - t_total_start))
         return True

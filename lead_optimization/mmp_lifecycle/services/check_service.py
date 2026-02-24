@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import math
 from typing import Any, Dict, List
 
 try:
@@ -18,13 +19,13 @@ def _ensure_psycopg() -> None:
         raise RuntimeError("psycopg is required for check operations (pip install psycopg[binary]).")
 
 
-def _float_equal(left: Any, right: Any, *, eps: float = 1e-12) -> bool:
+def _float_equal(left: Any, right: Any, *, eps: float = 1e-6) -> bool:
     try:
         lv = float(left)
         rv = float(right)
     except Exception:
         return False
-    return abs(lv - rv) <= eps
+    return math.isclose(lv, rv, rel_tol=1e-9, abs_tol=eps)
 
 
 def _count_actions(rows: List[Dict[str, Any]], key: str = "action") -> Dict[str, int]:

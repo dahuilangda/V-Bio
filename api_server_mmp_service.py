@@ -33,6 +33,16 @@ class LeadOptMmpService:
         self.query_prefix = 'lead_opt:mmp:query:'
         self.async_map_prefix = 'lead_opt:mmp:task_query:'
         self.transform_map_prefix = 'lead_opt:mmp:transform_query:'
+        self.disk_cache_max_files = max(200, int(os.getenv('LEAD_OPT_MMP_QUERY_DISK_CACHE_MAX_FILES', '5000') or 5000))
+        self.disk_cache_max_age_seconds = max(
+            3600,
+            int(os.getenv('LEAD_OPT_MMP_QUERY_DISK_CACHE_MAX_AGE_SECONDS', str(cache_ttl_seconds * 6)) or (cache_ttl_seconds * 6)),
+        )
+        self.disk_cache_cleanup_interval_seconds = max(
+            30,
+            int(os.getenv('LEAD_OPT_MMP_QUERY_DISK_CACHE_CLEANUP_INTERVAL_SECONDS', '120') or 120),
+        )
+        self._last_disk_cleanup_at = 0.0
         root_dir = str(mmp_query_cache_dir or '').strip()
         if root_dir:
             root = Path(root_dir).expanduser()
@@ -66,6 +76,47 @@ class LeadOptMmpService:
         ]
         for transform_id in expired_transform_ids:
             self.evidence_cache.pop(transform_id, None)
+        self._cleanup_disk_cache(now=now)
+
+    def _cleanup_disk_cache(self, *, now: Optional[float] = None) -> None:
+        if self.disk_query_dir is None and self.disk_task_dir is None and self.disk_transform_dir is None:
+            return
+        current = float(now if isinstance(now, (int, float)) else time.time())
+        if (current - float(self._last_disk_cleanup_at or 0.0)) < float(self.disk_cache_cleanup_interval_seconds):
+            return
+        self._last_disk_cleanup_at = current
+        cutoff = current - float(self.disk_cache_max_age_seconds)
+        targets = [self.disk_query_dir, self.disk_task_dir, self.disk_transform_dir]
+        for target in targets:
+            if target is None:
+                continue
+            try:
+                files = [path for path in target.glob('*.json') if path.is_file()]
+            except Exception as exc:
+                self.logger.warning('Failed to enumerate disk cache dir=%s: %s', target, exc)
+                continue
+            retained: List[Tuple[float, Path]] = []
+            for path in files:
+                try:
+                    mtime = float(path.stat().st_mtime)
+                except Exception:
+                    mtime = current
+                if mtime < cutoff:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    continue
+                retained.append((mtime, path))
+            if len(retained) <= self.disk_cache_max_files:
+                continue
+            retained.sort(key=lambda item: item[0])
+            overflow = len(retained) - self.disk_cache_max_files
+            for _, path in retained[:overflow]:
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def _query_cache_key(self, query_id: str) -> str:
         return f'{self.query_prefix}{query_id}'

@@ -376,6 +376,19 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mmp-life-header-inline-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mmp-life-header-divider {
+  width: 1px;
+  height: 22px;
+  background: #dbe6df;
 }
 
 .mmp-life-header-status {
@@ -836,6 +849,16 @@
   padding-bottom: 0;
 }
 
+.mmp-life-assay-method-select.is-missing {
+  border-color: #d66b6b;
+  background: #fff9f9;
+}
+
+.mmp-life-upload-cell-transformed {
+  color: #0d5f3f;
+  font-weight: 600;
+}
+
 .mmp-life-pairs-table--mapping {
   width: 100%;
   table-layout: fixed;
@@ -876,7 +899,8 @@
 
 .mmp-life-activity-col-select,
 .mmp-life-activity-transform-select {
-  width: min(100%, 208px);
+  width: 100%;
+  min-width: 0;
   min-height: 32px;
   height: 32px;
   line-height: 32px;
@@ -1561,6 +1585,12 @@
   color: #5f4e18;
   border-color: #e3d4a2;
   background: #fff9e8;
+}
+
+.task-state-chip.deleting {
+  color: #5a3a1c;
+  border-color: #e3c7a2;
+  background: #fff4e8;
 }
 
 .task-state-chip.failed {

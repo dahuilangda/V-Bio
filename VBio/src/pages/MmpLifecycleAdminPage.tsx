@@ -1,5 +1,5 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { Activity, ArrowLeft, CheckCircle2, Database, Filter, FlaskConical, Link2, ListChecks, Pencil, Plus, RotateCcw, Save, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, X } from 'lucide-react';
+import { Activity, ArrowLeft, CheckCircle2, Database, Filter, Link2, ListChecks, Pencil, Plus, RotateCcw, Save, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, X } from 'lucide-react';
 import {
   applyMmpLifecycleBatch,
   clearMmpLifecycleExperiments,
@@ -10,17 +10,21 @@ import {
   deleteMmpLifecycleMethod,
   fetchMmpLifecycleCompoundsPreview,
   fetchMmpLifecycleDatabaseSyncQueue,
+  fetchMmpLifecycleMethodUsage,
   fetchMmpLifecycleOverview,
   fetchMmpLifecycleDatabaseProperties,
   fetchMmpLifecyclePropertyMappings,
+  materializeMmpLifecycleExperimentsFromCompounds,
   patchMmpLifecycleBatch,
   patchMmpLifecycleMethod,
   saveMmpLifecyclePropertyMappings,
   uploadMmpLifecycleCompounds,
   uploadMmpLifecycleExperiments,
   type MmpLifecycleBatch,
+  type MmpLifecycleDatabaseOperationLock,
   type MmpLifecycleDatabaseItem,
   type MmpLifecycleMethod,
+  type MmpLifecycleMethodUsage,
   type MmpLifecyclePendingDatabaseSync,
 } from '../api/backendApi';
 import { formatDateTime } from '../utils/date';
@@ -28,6 +32,7 @@ import { useAuth } from '../hooks/useAuth';
 import { MmpDatabaseAdminPanel } from '../components/admin/MmpDatabaseAdminPanel';
 import { MemoLigand2DPreview } from '../components/project/Ligand2DPreview';
 import { useResizablePane } from './projectDetail/useResizablePane';
+import { RunPlayIcon } from './projectDetail/RunPlayIcon';
 import '../styles/project-tasks.css';
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -121,7 +126,9 @@ type ActivityTransform =
   | 'to_ic50_nm_from_pic50'
   | 'to_ic50_um_from_pic50'
   | 'log10'
-  | 'neg_log10';
+  | 'neg_log10'
+  | 'from_log10'
+  | 'from_neg_log10';
 
 const ASSAY_CATEGORY_OPTIONS = [
   'Binding',
@@ -142,58 +149,14 @@ const ACTIVITY_TRANSFORM_OPTIONS: Array<{ value: ActivityTransform; label: strin
   { value: 'to_ic50_um_from_pic50', label: 'pIC50 -> uM' },
   { value: 'log10', label: 'log10(x)' },
   { value: 'neg_log10', label: '-log10(x)' },
+  { value: 'from_log10', label: '10^x (from log10)' },
+  { value: 'from_neg_log10', label: '10^-x (from -log10)' },
 ];
 
 function summarizeCount(value: unknown): string {
   const num = readNumber(value);
   if (num === null) return '-';
   return Math.trunc(num).toLocaleString();
-}
-
-const APPLY_STAGE_ORDER = ['preflight', 'pending_sync', 'import_compounds', 'prepare_experiments', 'import_experiments', 'finalize', 'total'];
-const APPLY_STAGE_LABEL: Record<string, string> = {
-  preflight: 'prep',
-  pending_sync: 'sync',
-  import_compounds: 'cmpd',
-  prepare_experiments: 'prep-exp',
-  import_experiments: 'exp',
-  finalize: 'final',
-  total: 'total',
-};
-
-function formatDurationSeconds(value: number): string {
-  if (!Number.isFinite(value) || value < 0) return '';
-  if (value < 1) return `${value.toFixed(2)}s`;
-  if (value < 10) return `${value.toFixed(1)}s`;
-  return `${Math.round(value)}s`;
-}
-
-function summarizeApplyRuntimeTimings(value: unknown): string {
-  const source = asRecord(value);
-  const entries: Array<{ key: string; seconds: number }> = [];
-  for (const [rawKey, rawValue] of Object.entries(source)) {
-    const key = readText(rawKey);
-    if (!key) continue;
-    const seconds = readNumber(rawValue);
-    if (seconds === null || seconds <= 0) continue;
-    entries.push({ key, seconds });
-  }
-  if (entries.length === 0) return '';
-  entries.sort((left, right) => {
-    const li = APPLY_STAGE_ORDER.indexOf(left.key);
-    const ri = APPLY_STAGE_ORDER.indexOf(right.key);
-    const lrank = li >= 0 ? li : APPLY_STAGE_ORDER.length + 1;
-    const rrank = ri >= 0 ? ri : APPLY_STAGE_ORDER.length + 1;
-    if (lrank !== rrank) return lrank - rrank;
-    return left.key.localeCompare(right.key);
-  });
-  const total = entries.find((item) => item.key === 'total');
-  const picked = entries.filter((item) => item.key !== 'total').slice(0, 3);
-  const parts = picked.map((item) => `${APPLY_STAGE_LABEL[item.key] || item.key} ${formatDurationSeconds(item.seconds)}`).filter(Boolean);
-  if (total) {
-    parts.push(`${APPLY_STAGE_LABEL.total} ${formatDurationSeconds(total.seconds)}`);
-  }
-  return parts.join(' · ');
 }
 
 function asNonNegativeInt(value: unknown): number {
@@ -404,18 +367,71 @@ function normalizeActivityTransform(value: string): ActivityTransform {
   return 'none';
 }
 
+function readBatchActivityConfig(batch: MmpLifecycleBatch | null): {
+  structureColumn: string;
+  activityColumns: string[];
+  activityMethodMap: Record<string, string>;
+  activityTransformMap: Record<string, ActivityTransform>;
+} {
+  if (!batch) {
+    return {
+      structureColumn: '',
+      activityColumns: [],
+      activityMethodMap: {},
+      activityTransformMap: {},
+    };
+  }
+  const files = asRecord(batch.files);
+  const compoundsCfg = asRecord(asRecord(files.compounds).column_config);
+  const experimentsCfg = asRecord(asRecord(files.experiments).column_config);
+
+  const structureColumn = readText(compoundsCfg.smiles_column);
+  const activityColumns = parseConfiguredColumns(experimentsCfg.activity_columns);
+
+  const rawMethodMap = asRecord(experimentsCfg.activity_method_map);
+  const activityMethodMap: Record<string, string> = {};
+  for (const [activityCol, methodId] of Object.entries(rawMethodMap)) {
+    const col = readText(activityCol);
+    const mid = readText(methodId);
+    if (!col || !mid) continue;
+    activityMethodMap[col] = mid;
+  }
+  const legacyMethodId = readText(experimentsCfg.assay_method_id);
+  if (legacyMethodId) {
+    for (const col of activityColumns) {
+      if (!activityMethodMap[col]) activityMethodMap[col] = legacyMethodId;
+    }
+  }
+
+  const rawTransformMap = asRecord(experimentsCfg.activity_transform_map);
+  const activityTransformMap: Record<string, ActivityTransform> = {};
+  for (const col of activityColumns) {
+    activityTransformMap[col] = normalizeActivityTransform(rawTransformMap[col] as string);
+  }
+  return {
+    structureColumn,
+    activityColumns,
+    activityMethodMap,
+    activityTransformMap,
+  };
+}
+
 function buildUploadExecutionSignature(
   batchId: string,
   file: File,
   structureCol: string,
   activityColumns: string[],
   activityTransformMap: Record<string, ActivityTransform>,
+  activityMethodMap: Record<string, string>,
 ): string {
   const normalizedBatchId = readText(batchId);
   const normalizedStructure = readText(structureCol);
   const normalizedColumns = Array.from(new Set(activityColumns.map((item) => readText(item)).filter(Boolean))).sort();
   const transformToken = normalizedColumns
     .map((col) => `${col}:${normalizeActivityTransform(activityTransformMap[col] || 'none')}`)
+    .join('|');
+  const methodToken = normalizedColumns
+    .map((col) => `${col}:${readText(activityMethodMap[col])}`)
     .join('|');
   return [
     normalizedBatchId,
@@ -424,6 +440,7 @@ function buildUploadExecutionSignature(
     String(file.lastModified),
     normalizedStructure,
     transformToken,
+    methodToken,
   ].join('::');
 }
 
@@ -433,7 +450,10 @@ function transformActivityValue(raw: string, transform: ActivityTransform): numb
     throw new Error(`Value "${raw}" is not numeric.`);
   }
   if (transform === 'none') return parsed;
-  if (parsed <= 0) {
+  if (
+    (transform === 'to_pic50_from_nm' || transform === 'to_pic50_from_um' || transform === 'log10' || transform === 'neg_log10')
+    && parsed <= 0
+  ) {
     throw new Error(`Value "${raw}" must be > 0 for transform "${transform}".`);
   }
   if (transform === 'to_pic50_from_nm') return 9 - Math.log10(parsed);
@@ -441,7 +461,9 @@ function transformActivityValue(raw: string, transform: ActivityTransform): numb
   if (transform === 'to_ic50_nm_from_pic50') return 10 ** (9 - parsed);
   if (transform === 'to_ic50_um_from_pic50') return 10 ** (6 - parsed);
   if (transform === 'log10') return Math.log10(parsed);
-  return -Math.log10(parsed);
+  if (transform === 'neg_log10') return -Math.log10(parsed);
+  if (transform === 'from_log10') return 10 ** parsed;
+  return 10 ** (-parsed);
 }
 
 function inferDisplayUnit(
@@ -531,10 +553,6 @@ export function MmpLifecycleAdminPage() {
 
   const [selectedBatchId, setSelectedBatchId] = useState('');
 
-  const [newBatchName, setNewBatchName] = useState('');
-  const [newBatchDescription, setNewBatchDescription] = useState('');
-  const [newBatchNotes, setNewBatchNotes] = useState('');
-
   const [batchName, setBatchName] = useState('');
   const [batchDescription, setBatchDescription] = useState('');
   const [batchNotes, setBatchNotes] = useState('');
@@ -582,7 +600,6 @@ export function MmpLifecycleAdminPage() {
   const [bulkApplyRunning, setBulkApplyRunning] = useState(false);
   const [flowStep, setFlowStep] = useState<FlowStep>('batch');
   const [viewMode, setViewMode] = useState<'list' | 'detail'>('list');
-  const [createBatchModalOpen, setCreateBatchModalOpen] = useState(false);
   const [databaseAdminModalOpen, setDatabaseAdminModalOpen] = useState(false);
   const [assayMethodModalOpen, setAssayMethodModalOpen] = useState(false);
   const [batchQuery, setBatchQuery] = useState('');
@@ -595,9 +612,12 @@ export function MmpLifecycleAdminPage() {
   const [assayMethodDatabaseId, setAssayMethodDatabaseId] = useState('');
   const [assayDatabasePropertyNames, setAssayDatabasePropertyNames] = useState<string[]>([]);
   const [assayBoundMethodIds, setAssayBoundMethodIds] = useState<string[]>([]);
+  const [assayMethodUsageRows, setAssayMethodUsageRows] = useState<MmpLifecycleMethodUsage[]>([]);
   const [assayMethodDisplayTransformById, setAssayMethodDisplayTransformById] = useState<Record<string, ActivityTransform>>({});
   const [pendingSyncByDatabase, setPendingSyncByDatabase] = useState<Record<string, number>>({});
   const [pendingDatabaseSyncRows, setPendingDatabaseSyncRows] = useState<MmpLifecyclePendingDatabaseSync[]>([]);
+  const [databaseOperationLocks, setDatabaseOperationLocks] = useState<MmpLifecycleDatabaseOperationLock[]>([]);
+  const [busyOperationsByDatabase, setBusyOperationsByDatabase] = useState<Record<string, number>>({});
   const {
     mainWidth: uploadConfigPanelWidth,
     isResizing: isUploadWorkspaceResizing,
@@ -635,6 +655,12 @@ export function MmpLifecycleAdminPage() {
       setPendingSyncByDatabase(
         overview.pending_sync_by_database && typeof overview.pending_sync_by_database === 'object'
           ? (overview.pending_sync_by_database as Record<string, number>)
+          : {}
+      );
+      setDatabaseOperationLocks(Array.isArray(overview.database_operation_locks) ? overview.database_operation_locks : []);
+      setBusyOperationsByDatabase(
+        overview.busy_operations_by_database && typeof overview.busy_operations_by_database === 'object'
+          ? (overview.busy_operations_by_database as Record<string, number>)
           : {}
       );
       setSelectedBatchId((prev) => {
@@ -726,6 +752,20 @@ export function MmpLifecycleAdminPage() {
     }
   }, []);
 
+  const loadAssayMethodUsage = useCallback(async (databaseIdRaw: string) => {
+    const databaseId = readText(databaseIdRaw);
+    if (!databaseId) {
+      setAssayMethodUsageRows([]);
+      return;
+    }
+    try {
+      const rows = await fetchMmpLifecycleMethodUsage({ database_id: databaseId });
+      setAssayMethodUsageRows(Array.isArray(rows) ? rows : []);
+    } catch {
+      setAssayMethodUsageRows([]);
+    }
+  }, []);
+
   useEffect(() => {
     void loadOverview();
   }, [loadOverview]);
@@ -736,9 +776,65 @@ export function MmpLifecycleAdminPage() {
         const runtime = asRecord(item.apply_runtime);
         const phase = readText(runtime.phase).toLowerCase();
         const status = readText(item.status).toLowerCase();
-        return phase === 'queued' || phase === 'queue' || phase === 'running' || status === 'queued' || status === 'running';
+        return (
+          phase === 'queued'
+          || phase === 'queue'
+          || phase === 'running'
+          || phase === 'deleting'
+          || status === 'queued'
+          || status === 'running'
+          || status === 'deleting'
+        );
       }),
     [batches]
+  );
+
+  const applyingByDatabase = useMemo(() => {
+    const output: Record<string, number> = {};
+    for (const item of batches) {
+      const runtime = asRecord(item.apply_runtime);
+      const phase = readText(runtime.phase).toLowerCase();
+      const status = readText(item.status).toLowerCase();
+      const active =
+        phase === 'queued'
+        || phase === 'queue'
+        || phase === 'running'
+        || phase === 'deleting'
+        || status === 'queued'
+        || status === 'running'
+        || status === 'deleting';
+      if (!active) continue;
+      const dbId = readText(runtime.database_id || item.selected_database_id);
+      if (!dbId) continue;
+      output[dbId] = Number(output[dbId] || 0) + 1;
+    }
+    return output;
+  }, [batches]);
+
+  const lockedByDatabase = useMemo(() => {
+    const output: Record<string, number> = {};
+    for (const row of databaseOperationLocks) {
+      const status = readText(row.status).toLowerCase();
+      if (status && status !== 'active') continue;
+      const dbId = readText(row.database_id);
+      if (!dbId) continue;
+      output[dbId] = Number(output[dbId] || 0) + 1;
+    }
+    for (const [dbId, countRaw] of Object.entries(busyOperationsByDatabase)) {
+      const count = Number(countRaw || 0);
+      if (!dbId || count <= 0) continue;
+      output[dbId] = Math.max(Number(output[dbId] || 0), count);
+    }
+    return output;
+  }, [databaseOperationLocks, busyOperationsByDatabase]);
+
+  const isDatabaseBusy = useCallback(
+    (databaseIdRaw: string): boolean => {
+      const dbId = readText(databaseIdRaw);
+      if (!dbId) return false;
+      return Number(applyingByDatabase[dbId] || 0) > 0 || Number(lockedByDatabase[dbId] || 0) > 0;
+    },
+    [applyingByDatabase, lockedByDatabase]
   );
 
   useEffect(() => {
@@ -755,7 +851,6 @@ export function MmpLifecycleAdminPage() {
   );
 
   const compoundFileMeta = asRecord(asRecord(selectedBatch?.files).compounds);
-  const experimentFileMeta = asRecord(asRecord(selectedBatch?.files).experiments);
 
   useEffect(() => {
     if (!selectedBatch) {
@@ -764,46 +859,23 @@ export function MmpLifecycleAdminPage() {
       setBatchNotes('');
       setBatchDatabaseId('');
       setFlowStep('batch');
-      setStructureColumn('');
-      setActivityColumns([]);
-      setActivityMethodMap({});
-      setActivityTransformMap({});
+      const emptyConfig = readBatchActivityConfig(null);
+      setStructureColumn(emptyConfig.structureColumn);
+      setActivityColumns(emptyConfig.activityColumns);
+      setActivityMethodMap(emptyConfig.activityMethodMap);
+      setActivityTransformMap(emptyConfig.activityTransformMap);
       return;
     }
     setBatchName(readText(selectedBatch.name));
     setBatchDescription(readText(selectedBatch.description));
     setBatchNotes(readText(selectedBatch.notes));
     setBatchDatabaseId(readText(selectedBatch.selected_database_id));
-
-    const compoundsCfg = asRecord(compoundFileMeta.column_config);
-    setStructureColumn(readText(compoundsCfg.smiles_column));
-
-    const experimentsCfg = asRecord(experimentFileMeta.column_config);
-    const configuredActivities = parseConfiguredColumns(experimentsCfg.activity_columns);
-    setActivityColumns(configuredActivities);
-    const rawMethodMap = asRecord(experimentsCfg.activity_method_map);
-    const normalizedMethodMap: Record<string, string> = {};
-    for (const [activityCol, methodId] of Object.entries(rawMethodMap)) {
-      const col = readText(activityCol);
-      const mid = readText(methodId);
-      if (!col || !mid) continue;
-      normalizedMethodMap[col] = mid;
-    }
-    const legacyMethodId = readText(experimentsCfg.assay_method_id);
-    if (legacyMethodId) {
-      for (const col of configuredActivities) {
-        if (!normalizedMethodMap[col]) normalizedMethodMap[col] = legacyMethodId;
-      }
-    }
-    setActivityMethodMap(normalizedMethodMap);
-    const rawTransformMap = asRecord(experimentsCfg.activity_transform_map);
-    const normalizedTransformMap: Record<string, ActivityTransform> = {};
-    for (const col of configuredActivities) {
-      const transform = normalizeActivityTransform(rawTransformMap[col] as string);
-      normalizedTransformMap[col] = transform;
-    }
-    setActivityTransformMap(normalizedTransformMap);
-  }, [selectedBatch, compoundFileMeta.column_config, experimentFileMeta.column_config]);
+    const batchConfig = readBatchActivityConfig(selectedBatch);
+    setStructureColumn(batchConfig.structureColumn);
+    setActivityColumns(batchConfig.activityColumns);
+    setActivityMethodMap(batchConfig.activityMethodMap);
+    setActivityTransformMap(batchConfig.activityTransformMap);
+  }, [selectedBatch]);
 
   useEffect(() => {
     setCheckResult(null);
@@ -885,31 +957,42 @@ export function MmpLifecycleAdminPage() {
     if (nextId) setSelectedBatchId(nextId);
   }, []);
 
-  const createBatch = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!newBatchName.trim()) {
-      setError('Batch name is required.');
-      return;
+  const hasBatchBeenApplied = useCallback((batch: MmpLifecycleBatch | null): boolean => {
+    if (!batch) return false;
+    const status = readText(batch.status).toLowerCase();
+    const inlineCount = Array.isArray(batch.apply_history) ? batch.apply_history.length : 0;
+    const summaryCount = asNonNegativeInt((batch as unknown as Record<string, unknown>).apply_history_count);
+    return inlineCount > 0 || summaryCount > 0 || status === 'applied' || status === 'rolled_back';
+  }, []);
+
+  const ensureEditableBatchForMutation = useCallback(async (): Promise<MmpLifecycleBatch | null> => {
+    if (!selectedBatch) return null;
+    const runtime = asRecord(selectedBatch.apply_runtime);
+    const phase = readText(runtime.phase).toLowerCase();
+    if (phase === 'queued' || phase === 'queue' || phase === 'running' || phase === 'deleting') {
+      throw new Error('Current batch is running. Wait for completion before editing.');
     }
-    setSaving(true);
-    setError(null);
-    try {
-      const batch = await createMmpLifecycleBatch({
-        name: newBatchName.trim(),
-        description: newBatchDescription.trim(),
-        notes: newBatchNotes.trim(),
-      });
-      mergeBatch(batch);
-      setNewBatchName('');
-      setNewBatchDescription('');
-      setNewBatchNotes('');
-      setCreateBatchModalOpen(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create batch.');
-    } finally {
-      setSaving(false);
+    if (!hasBatchBeenApplied(selectedBatch)) {
+      return selectedBatch;
     }
-  };
+
+    const sourceId = readText(selectedBatch.id);
+    const sourceName = readText(selectedBatch.name) || sourceId || 'batch';
+    const forkName = `${sourceName} (edit ${new Date().toISOString().slice(0, 16).replace('T', ' ')})`;
+    const sourceNotes = readText(selectedBatch.notes);
+    const lineage = `Forked from ${sourceId} after apply.`;
+    const forked = await createMmpLifecycleBatch({
+      name: forkName,
+      description: readText(selectedBatch.description),
+      notes: sourceNotes ? `${sourceNotes}\n${lineage}` : lineage,
+      selected_database_id: readText(selectedBatch.selected_database_id || batchDatabaseId),
+      clone_from_batch_id: sourceId,
+      clone_uploaded_files: true,
+    });
+    mergeBatch(forked);
+    setCheckResult(null);
+    return forked;
+  }, [selectedBatch, hasBatchBeenApplied, batchDatabaseId, mergeBatch]);
 
   const saveBatchMeta = async () => {
     if (!selectedBatch) return;
@@ -930,18 +1013,39 @@ export function MmpLifecycleAdminPage() {
     }
   };
 
+  const resetBatchMetaDraft = useCallback(() => {
+    if (!selectedBatch) return;
+    setError(null);
+    setBatchName(readText(selectedBatch.name));
+    setBatchDescription(readText(selectedBatch.description));
+    setBatchNotes(readText(selectedBatch.notes));
+    setBatchDatabaseId(readText(selectedBatch.selected_database_id));
+  }, [selectedBatch]);
+
   const removeBatch = async (batchId?: string) => {
     const id = readText(batchId || selectedBatch?.id);
     if (!id) return;
-    if (!window.confirm(`Delete lifecycle batch "${id}"?`)) return;
+    if (!window.confirm(`Delete lifecycle batch "${id}"? This will queue database cleanup first, and the row will disappear only after cleanup succeeds.`)) return;
     setSaving(true);
     setError(null);
     try {
-      await deleteMmpLifecycleBatch(id);
-      setBatches((prev) => prev.filter((item) => readText(item.id) !== id));
-      if (selectedBatchId === id) {
-        setSelectedBatchId('');
-        setViewMode('list');
+      const result = asRecord(await deleteMmpLifecycleBatch(id));
+      const queuedBatch = asRecord(result.batch);
+      if (Object.keys(queuedBatch).length > 0) {
+        setBatches((prev) => {
+          const index = prev.findIndex((item) => readText(item.id) === id);
+          if (index < 0) return prev;
+          const next = [...prev];
+          next[index] = queuedBatch as unknown as MmpLifecycleBatch;
+          return next;
+        });
+        await loadOverview({ silent: true });
+      } else {
+        setBatches((prev) => prev.filter((item) => readText(item.id) !== id));
+        if (selectedBatchId === id) {
+          setSelectedBatchId('');
+          setViewMode('list');
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete batch.');
@@ -1213,12 +1317,16 @@ export function MmpLifecycleAdminPage() {
       if (!selectedBatch) {
         throw new Error('Select one lifecycle batch first.');
       }
+      const editableBatch = await ensureEditableBatchForMutation();
+      if (!editableBatch) {
+        throw new Error('No editable batch available.');
+      }
       const structureCol = readText(structureColRaw);
       if (!structureCol) {
         throw new Error('Select structure column first.');
       }
       const selectedActivityColumns = Array.from(new Set(activityColumnsRaw.map((item) => readText(item)).filter(Boolean)));
-      const hadExistingExperiments = Boolean(asRecord(asRecord(selectedBatch.files).experiments).path);
+      const hadExistingExperiments = Boolean(asRecord(asRecord(editableBatch.files).experiments).path);
       setSaving(true);
       setError(null);
       try {
@@ -1233,7 +1341,7 @@ export function MmpLifecycleAdminPage() {
         }
 
         const compoundsFile = buildTsvFile(file.name, parsed.headers, parsed.rows, '_compounds');
-        const batchId = readText(selectedBatch.id);
+        const batchId = readText(editableBatch.id);
         if (!batchId) {
           throw new Error('Selected lifecycle batch is missing id.');
         }
@@ -1325,7 +1433,7 @@ export function MmpLifecycleAdminPage() {
         setSaving(false);
       }
     },
-    [selectedBatch, parseUploadTable, buildTsvFile, mergeBatch, activityMethodMap, methods]
+    [selectedBatch, ensureEditableBatchForMutation, parseUploadTable, buildTsvFile, mergeBatch, activityMethodMap, methods]
   );
 
   const onUploadFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -1400,6 +1508,35 @@ export function MmpLifecycleAdminPage() {
     }
   };
 
+  const resetUploadDraft = useCallback(() => {
+    if (!selectedBatch) return;
+    const batchConfig = readBatchActivityConfig(selectedBatch);
+    setError(null);
+    setUploadFile(null);
+    setUploadHeaderOptions([]);
+    setUploadPreviewRows([]);
+    setUploadPreviewTotalRows(0);
+    setUploadPreviewTruncated(false);
+    setUploadPreviewPage(1);
+    setUploadPreviewColumnNonEmptyCounts({});
+    setUploadPreviewColumnNumericCounts({});
+    setUploadPreviewColumnPositiveCounts({});
+    setStructureColumn(batchConfig.structureColumn);
+    setActivityColumns(batchConfig.activityColumns);
+    setActivityMethodMap(batchConfig.activityMethodMap);
+    setActivityTransformMap(batchConfig.activityTransformMap);
+    setAutoUploadTrigger(0);
+    setAutoUploadStatus('idle');
+    setAutoUploadStatusText('');
+    autoUploadLastSignatureRef.current = '';
+    savedCompoundsPreviewSignatureRef.current = '';
+  }, [selectedBatch]);
+
+  const resetCheckDraft = useCallback(() => {
+    setError(null);
+    setCheckResult(null);
+  }, []);
+
   const resetMethodEditorDraft = useCallback(() => {
     setEditingMethodId('');
     setMethodKey('');
@@ -1427,6 +1564,18 @@ export function MmpLifecycleAdminPage() {
     }
     setMethodFormErrors({ key: false, name: false, output_property: false });
     setMethodFormMessage(null);
+    const selectedDbId = readText(assayMethodDatabaseId);
+    if (selectedDbId) {
+      const dbMeta = databaseById.get(selectedDbId);
+      if (!dbMeta || getDatabaseBuildState(dbMeta) !== 'ready') {
+        setMethodFormMessage('Target database is still building. Please wait before updating methods.');
+        return;
+      }
+      if (isDatabaseBusy(selectedDbId)) {
+        setMethodFormMessage('Target database is busy with another update. Try again after current task finishes.');
+        return;
+      }
+    }
     setSaving(true);
     try {
       const normalizedDisplayTransform = normalizeActivityTransform(methodDisplayTransform || 'none');
@@ -1451,6 +1600,7 @@ export function MmpLifecycleAdminPage() {
       await loadOverview();
       await loadAssayDatabaseMethodBindings(assayMethodDatabaseId);
       await loadAssayDatabaseProperties(assayMethodDatabaseId);
+      await loadAssayMethodUsage(assayMethodDatabaseId);
       await loadPendingSyncSummary(assayMethodDatabaseId);
       resetMethodEditorDraft();
       setMethodEditorOpen(false);
@@ -1466,6 +1616,15 @@ export function MmpLifecycleAdminPage() {
     const selectedDbId = readText(assayMethodDatabaseId);
     if (!selectedDbId) {
       setError('Select a target database in Assay Methods before deleting.');
+      return;
+    }
+    const selectedDbMeta = databaseById.get(selectedDbId);
+    if (!selectedDbMeta || getDatabaseBuildState(selectedDbMeta) !== 'ready') {
+      setError('Target database is still building. Please wait before deleting methods.');
+      return;
+    }
+    if (isDatabaseBusy(selectedDbId)) {
+      setError('Target database is busy with another update. Try again after current task finishes.');
       return;
     }
     const method = methods.find((item) => readText(item.id) === methodId);
@@ -1497,6 +1656,7 @@ export function MmpLifecycleAdminPage() {
       }
       void loadAssayDatabaseMethodBindings(selectedDbId);
       void loadAssayDatabaseProperties(selectedDbId);
+      void loadAssayMethodUsage(selectedDbId);
       void loadPendingSyncSummary(selectedDbId);
       setMappingRows((prev) =>
         prev.map((row) => (row.method_id === methodId ? { ...row, method_id: '', value_transform: 'none' } : row))
@@ -1514,7 +1674,7 @@ export function MmpLifecycleAdminPage() {
   const startEditMethod = (method: MmpLifecycleMethod) => {
     const methodId = readText(method.id);
     const dbDisplayTransform = normalizeActivityTransform(
-      readText(assayMethodDisplayTransformById[methodId] || method.display_transform || 'none')
+      readText(method.display_transform || assayMethodDisplayTransformById[methodId] || 'none')
     );
     setEditingMethodId(methodId);
     setMethodKey(readText(method.key));
@@ -1629,27 +1789,38 @@ export function MmpLifecycleAdminPage() {
     });
   }, [methods]);
 
-  const saveMappings = async () => {
+  const saveMappings = async (options?: { silent?: boolean }): Promise<boolean> => {
+    const silent = options?.silent === true;
+    const editableBatch = await ensureEditableBatchForMutation();
+    if (!editableBatch) return false;
     const dbId = batchDatabaseId.trim();
     if (!dbId) {
-      setError('Choose target MMP database before saving mappings.');
-      return;
+      if (!silent) setError('Choose target MMP database before saving mappings.');
+      return false;
+    }
+    const dbMeta = databaseById.get(dbId);
+    if (!dbMeta || getDatabaseBuildState(dbMeta) !== 'ready') {
+      if (!silent) setError('Target database is still building. Please wait before saving mappings.');
+      return false;
+    }
+    if (isDatabaseBusy(dbId)) {
+      if (!silent) setError('Target database is busy with another update. Try again after current task finishes.');
+      return false;
     }
     setSaving(true);
-    setError(null);
+    if (!silent) setError(null);
     try {
       const preservedRows = dedupeMappingRows(normalizeMappingRowsWithMethods(mappingRows, methods));
       const selectedActivityColumns = dedupeColumns(activityColumns.map((item) => readText(item)).filter(Boolean));
-      const selectedSourceSet = new Set(selectedActivityColumns.map((item) => item.toLowerCase()));
-      const missingMethodColumns: string[] = [];
+      const mappedActivityColumns: string[] = [];
       const pairRows: MappingDraft[] = [];
       for (const sourceProperty of selectedActivityColumns) {
         const methodId = readText(activityMethodMap[sourceProperty]);
         const mmpProperty = readText(methodOutputPropertyById.get(methodId) || '');
         if (!methodId || !mmpProperty) {
-          missingMethodColumns.push(sourceProperty);
           continue;
         }
+        mappedActivityColumns.push(sourceProperty);
         const existing = preservedRows.find((row) => readText(row.source_property).toLowerCase() === sourceProperty.toLowerCase());
         pairRows.push({
           id: readText(existing?.id),
@@ -1660,9 +1831,7 @@ export function MmpLifecycleAdminPage() {
           notes: 'Activity pair mapping.',
         });
       }
-      if (missingMethodColumns.length > 0) {
-        throw new Error(`Assign method for activity columns: ${missingMethodColumns.join(', ')}`);
-      }
+      const selectedSourceSet = new Set(mappedActivityColumns.map((item) => item.toLowerCase()));
       const preservedRowsAfterDelete = preservedRows.filter((row) => {
         const note = readText(row.notes).toLowerCase();
         if (note === 'activity pair mapping.') {
@@ -1702,39 +1871,250 @@ export function MmpLifecycleAdminPage() {
           )
         )
       );
+      if (mappedActivityColumns.length > 0) {
+        const batchId = readText(editableBatch.id);
+        if (batchId) {
+          const materialized = await materializeMmpLifecycleExperimentsFromCompounds(batchId, {
+            smiles_column: readText(structureColumn),
+            activity_columns: mappedActivityColumns,
+            activity_method_map: mappedActivityColumns.reduce<Record<string, string>>((acc, col) => {
+              const methodId = readText(activityMethodMap[col]);
+              if (methodId) acc[col] = methodId;
+              return acc;
+            }, {}),
+            activity_transform_map: mappedActivityColumns.reduce<Record<string, string>>((acc, col) => {
+              const transform = normalizeActivityTransform(activityTransformMap[col] || 'none');
+              if (transform !== 'none') acc[col] = transform;
+              return acc;
+            }, {}),
+            activity_output_property_map: mappedActivityColumns.reduce<Record<string, string>>((acc, col) => {
+              acc[col] = readText(methodOutputPropertyById.get(readText(activityMethodMap[col])) || col);
+              return acc;
+            }, {}),
+          });
+          mergeBatch(materialized);
+        }
+      }
+      return true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save property mappings.');
+      if (!silent) {
+        setError(err instanceof Error ? err.message : 'Failed to save property mappings.');
+      }
+      return false;
     } finally {
       setSaving(false);
     }
   };
 
-  const runCheck = async () => {
+  const resetMappingDraft = async () => {
+    if (!selectedBatch) return;
+    const dbId = readText(batchDatabaseId || selectedBatch.selected_database_id);
+    const batchConfig = readBatchActivityConfig(selectedBatch);
+    setError(null);
+    setSaving(true);
+    try {
+      setStructureColumn(batchConfig.structureColumn);
+      if (!dbId) {
+        setActivityColumns(batchConfig.activityColumns);
+        setActivityMethodMap(batchConfig.activityMethodMap);
+        setActivityTransformMap(batchConfig.activityTransformMap);
+        setMappingRows([]);
+        return;
+      }
+      const mappings = await fetchMmpLifecyclePropertyMappings(dbId);
+      const normalizedMethods = dedupeLifecycleMethods(methods);
+      const rows: MappingDraft[] = mappings.map((item) => ({
+        id: readText(item.id),
+        source_property: readText(item.source_property),
+        mmp_property: readText(item.mmp_property),
+        method_id: readText(item.method_id),
+        value_transform: normalizeActivityTransform(readText(item.value_transform || 'none')),
+        notes: readText(item.notes),
+      }));
+      const normalizedRows = normalizeMappingRowsWithMethods(rows, normalizedMethods);
+      const dedupedRows = dedupeMappingRows(normalizedRows);
+      const manualPairSources = dedupeColumns(
+        normalizedRows
+          .filter((row) => readText(row.notes).toLowerCase() === 'activity pair mapping.')
+          .map((row) => readText(row.source_property))
+          .filter(Boolean)
+      );
+      const nextActivityColumns = dedupeColumns([...batchConfig.activityColumns, ...manualPairSources]);
+      const nextMethodMap: Record<string, string> = { ...batchConfig.activityMethodMap };
+      const methodBySource = new Map<string, string>();
+      for (const row of normalizedRows) {
+        const source = readText(row.source_property).toLowerCase();
+        const methodId = readText(row.method_id);
+        if (!source || !methodId || methodBySource.has(source)) continue;
+        methodBySource.set(source, methodId);
+      }
+      for (const col of nextActivityColumns) {
+        const token = readText(col);
+        if (!token || readText(nextMethodMap[token])) continue;
+        const mapped = readText(methodBySource.get(token.toLowerCase()) || '');
+        if (!mapped) continue;
+        nextMethodMap[token] = mapped;
+      }
+
+      setActivityColumns(nextActivityColumns);
+      setActivityMethodMap(nextMethodMap);
+      setActivityTransformMap(batchConfig.activityTransformMap);
+      setMappingRows(dedupedRows);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to reset property mappings.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const prepareBatchForCheckApply = useCallback(async (dbId: string): Promise<MmpLifecycleBatch | null> => {
+    const editableBatch = await ensureEditableBatchForMutation();
+    if (!editableBatch) return null;
+    let workingBatch = editableBatch;
+    const methodOutputById = new Map<string, string>();
+    for (const method of methods) {
+      const methodId = readText(method.id);
+      if (!methodId) continue;
+      methodOutputById.set(methodId, readText(method.output_property));
+    }
+    const patchPayload: Record<string, unknown> = {};
+    if (readText(workingBatch.name) !== batchName.trim()) patchPayload.name = batchName.trim();
+    if (readText(workingBatch.description) !== batchDescription.trim()) patchPayload.description = batchDescription.trim();
+    if (readText(workingBatch.notes) !== batchNotes.trim()) patchPayload.notes = batchNotes.trim();
+    if (readText(workingBatch.selected_database_id) !== dbId) patchPayload.selected_database_id = dbId;
+    if (Object.keys(patchPayload).length > 0) {
+      const patched = await patchMmpLifecycleBatch(readText(workingBatch.id), patchPayload);
+      mergeBatch(patched);
+      workingBatch = patched;
+    }
+    const runMappedActivityColumns = dedupeColumns(activityColumns.map((item) => readText(item)).filter(Boolean))
+      .filter((sourceProperty) => {
+        const methodId = readText(activityMethodMap[sourceProperty]);
+        const mmpProperty = readText(methodOutputById.get(methodId) || '');
+        return Boolean(methodId && mmpProperty);
+      });
+    if (runMappedActivityColumns.length > 0) {
+      const materialized = await materializeMmpLifecycleExperimentsFromCompounds(readText(workingBatch.id), {
+        smiles_column: readText(structureColumn),
+        activity_columns: runMappedActivityColumns,
+        activity_method_map: runMappedActivityColumns.reduce<Record<string, string>>((acc, col) => {
+          const methodId = readText(activityMethodMap[col]);
+          if (methodId) acc[col] = methodId;
+          return acc;
+        }, {}),
+        activity_transform_map: runMappedActivityColumns.reduce<Record<string, string>>((acc, col) => {
+          const transform = normalizeActivityTransform(activityTransformMap[col] || 'none');
+          if (transform !== 'none') acc[col] = transform;
+          return acc;
+        }, {}),
+        activity_output_property_map: runMappedActivityColumns.reduce<Record<string, string>>((acc, col) => {
+          acc[col] = readText(methodOutputById.get(readText(activityMethodMap[col])) || col);
+          return acc;
+        }, {}),
+      });
+      mergeBatch(materialized);
+      workingBatch = materialized;
+    }
+    return workingBatch;
+  }, [
+    ensureEditableBatchForMutation,
+    batchName,
+    batchDescription,
+    batchNotes,
+    activityColumns,
+    activityMethodMap,
+    activityTransformMap,
+    methods,
+    structureColumn,
+    mergeBatch,
+  ]);
+
+  const runCheckOnly = async () => {
     if (!selectedBatch) return;
     const dbId = batchDatabaseId.trim();
     if (!dbId) {
       setError('Choose target MMP database before check.');
       return;
     }
+    const dbMeta = databaseById.get(dbId);
+    if (!dbMeta || getDatabaseBuildState(dbMeta) !== 'ready') {
+      setError('Target database is still building. Please wait before check.');
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      if (readText(selectedBatch.selected_database_id) !== dbId) {
-        const patched = await patchMmpLifecycleBatch(readText(selectedBatch.id), { selected_database_id: dbId });
-        mergeBatch(patched);
-      }
-      const payload = await checkMmpLifecycleBatch(readText(selectedBatch.id), {
+      const workingBatch = await prepareBatchForCheckApply(dbId);
+      if (!workingBatch) return;
+      const checkPayload = await checkMmpLifecycleBatch(readText(workingBatch.id), {
         database_id: dbId,
         row_limit: 400,
         check_policy: { ...BULK_APPLY_RELAXED_POLICY } as Record<string, unknown>,
       });
-      setCheckResult(payload);
-      const nextBatch = asRecord(payload.batch);
-      if (nextBatch && Object.keys(nextBatch).length > 0) {
-        mergeBatch(nextBatch as unknown as MmpLifecycleBatch);
+      setCheckResult(checkPayload);
+      const checkedBatch = asRecord(checkPayload.batch);
+      if (Object.keys(checkedBatch).length > 0) {
+        mergeBatch(checkedBatch as unknown as MmpLifecycleBatch);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to run batch check.');
+      setError(err instanceof Error ? err.message : 'Failed to run check.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const runCheckAndApply = async () => {
+    if (!selectedBatch) return;
+    const dbId = batchDatabaseId.trim();
+    if (!dbId) {
+      setError('Choose target MMP database before run.');
+      return;
+    }
+    const dbMeta = databaseById.get(dbId);
+    if (!dbMeta || getDatabaseBuildState(dbMeta) !== 'ready') {
+      setError('Target database is still building. Please wait before run.');
+      return;
+    }
+    if (isDatabaseBusy(dbId)) {
+      setError('Target database is busy with another update. Try again after current task finishes.');
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const workingBatch = await prepareBatchForCheckApply(dbId);
+      if (!workingBatch) return;
+      const checkPayload = await checkMmpLifecycleBatch(readText(workingBatch.id), {
+        database_id: dbId,
+        row_limit: 400,
+        check_policy: { ...BULK_APPLY_RELAXED_POLICY } as Record<string, unknown>,
+      });
+      setCheckResult(checkPayload);
+      const checkedBatch = asRecord(checkPayload.batch);
+      if (Object.keys(checkedBatch).length > 0) {
+        mergeBatch(checkedBatch as unknown as MmpLifecycleBatch);
+      }
+      const gate = asRecord(checkPayload.check_gate);
+      const passed = gate.passed === true;
+      if (!passed) {
+        const reasons = asArray(gate.reasons).map((item) => readText(item)).filter(Boolean);
+        setError(reasons.length > 0 ? reasons.join(' ') : 'Check gate blocked. Fix issues then run again.');
+        return;
+      }
+      const applyPayload = await applyMmpLifecycleBatch(readText(workingBatch.id), {
+        async: true,
+        database_id: dbId,
+        import_compounds: true,
+        import_experiments: true,
+        check_policy: { ...BULK_APPLY_RELAXED_POLICY } as Record<string, unknown>,
+      });
+      const appliedBatch = asRecord(applyPayload.batch);
+      if (Object.keys(appliedBatch).length > 0) {
+        mergeBatch(appliedBatch as unknown as MmpLifecycleBatch);
+      }
+      await loadOverview({ silent: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to run check + apply.');
     } finally {
       setSaving(false);
     }
@@ -1764,6 +2144,7 @@ export function MmpLifecycleAdminPage() {
     setError(null);
     let failedCount = 0;
     let firstFailureMessage = '';
+    const reservedDatabaseIds = new Set<string>();
     try {
       const pushFailure = (batch: MmpLifecycleBatch | undefined, batchId: string, message: string) => {
         failedCount += 1;
@@ -1778,6 +2159,20 @@ export function MmpLifecycleAdminPage() {
           pushFailure(batch, batchId, 'Missing target database.');
           return;
         }
+        if (reservedDatabaseIds.has(databaseId)) {
+          pushFailure(batch, batchId, 'Target database is already queued in this apply run.');
+          return;
+        }
+        const dbMeta = databaseById.get(databaseId);
+        if (!dbMeta || getDatabaseBuildState(dbMeta) !== 'ready') {
+          pushFailure(batch, batchId, 'Target database is still building.');
+          return;
+        }
+        if (isDatabaseBusy(databaseId)) {
+          pushFailure(batch, batchId, 'Target database is busy with another update.');
+          return;
+        }
+        reservedDatabaseIds.add(databaseId);
 
         try {
           const applyPayload = await applyMmpLifecycleBatch(batchId, {
@@ -1798,7 +2193,7 @@ export function MmpLifecycleAdminPage() {
       };
 
       const queue = [...runnableIds];
-      const maxConcurrency = Math.min(4, queue.length);
+      const maxConcurrency = 1;
       await Promise.all(
         Array.from({ length: maxConcurrency }, async () => {
           while (queue.length > 0) {
@@ -1820,7 +2215,46 @@ export function MmpLifecycleAdminPage() {
     }
   };
 
+  const resetBatchListView = useCallback(() => {
+    setError(null);
+    setBatchQuery('');
+    setBatchStatusFilter('all');
+    setBatchDatabaseFilter('all');
+    setBatchSortKey('updated_at');
+    setBatchSortDirection('desc');
+    setSelectedBatchIds([]);
+  }, []);
+
+  const createBatchFromHeader = async () => {
+    const seed = `Batch ${new Date().toISOString().slice(0, 19).replace('T', ' ')}`;
+    const typed = window.prompt('Batch name', seed);
+    if (typed === null) return;
+    const name = typed.trim() || seed;
+    setSaving(true);
+    setError(null);
+    try {
+      const batch = await createMmpLifecycleBatch({
+        name,
+        description: '',
+        notes: '',
+      });
+      mergeBatch(batch);
+      setViewMode('detail');
+      setFlowStep('batch');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create batch.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const selectedBatchStatus = selectedBatch ? readText(selectedBatch.status).toLowerCase() || 'draft' : '-';
+  const selectedBatchApplyHistoryCount = useMemo(() => {
+    if (!selectedBatch) return 0;
+    const inlineCount = Array.isArray(selectedBatch.apply_history) ? selectedBatch.apply_history.length : 0;
+    const summaryCount = asNonNegativeInt((selectedBatch as unknown as Record<string, unknown>).apply_history_count);
+    return Math.max(inlineCount, summaryCount);
+  }, [selectedBatch]);
   const batchLastCheck = asRecord(selectedBatch?.last_check);
   const runtimeCheckGate = (() => {
     const fromCheck = asRecord(asRecord(checkResult).check_gate);
@@ -1987,7 +2421,8 @@ export function MmpLifecycleAdminPage() {
       uploadFile,
       structureToken,
       selectedActivityColumns,
-      activityTransformMap
+      activityTransformMap,
+      activityMethodMap
     );
     if (autoUploadLastSignatureRef.current === signature) return;
     autoUploadLastSignatureRef.current = signature;
@@ -2019,8 +2454,18 @@ export function MmpLifecycleAdminPage() {
     structureColumn,
     activityColumns,
     activityTransformMap,
+    activityMethodMap,
     executeUnifiedUpload,
   ]);
+  const activityTransformByColumn = useMemo(() => {
+    const byColumn = new Map<string, ActivityTransform>();
+    for (const col of activityColumns) {
+      const token = readText(col);
+      if (!token) continue;
+      byColumn.set(token, normalizeActivityTransform(activityTransformMap[token] || 'none'));
+    }
+    return byColumn;
+  }, [activityColumns, activityTransformMap]);
   const activityPairChips = useMemo(() => {
     return activityColumns.map((activityCol) => {
       const methodId = readText(activityMethodMap[activityCol]);
@@ -2041,6 +2486,32 @@ export function MmpLifecycleAdminPage() {
     }
     return map;
   }, [databases]);
+  const mappingSaveBlockReason = useMemo(() => {
+    const dbId = readText(batchDatabaseId);
+    if (!dbId) return 'Choose target MMP database before saving mappings';
+    const dbMeta = databaseById.get(dbId);
+    if (!dbMeta || getDatabaseBuildState(dbMeta) !== 'ready') {
+      return 'Target database is still building';
+    }
+    if (isDatabaseBusy(dbId)) {
+      return 'Target database is busy with another update';
+    }
+    return '';
+  }, [batchDatabaseId, databaseById, isDatabaseBusy]);
+  const mappingSaveBlocked = Boolean(mappingSaveBlockReason);
+  const activityColumnsMissingMethod = useMemo(() => {
+    const missing = new Set<string>();
+    for (const item of activityColumns) {
+      const sourceProperty = readText(item);
+      if (!sourceProperty) continue;
+      const methodId = readText(activityMethodMap[sourceProperty]);
+      const outputProperty = readText(methodOutputPropertyById.get(methodId) || '');
+      if (!methodId || !outputProperty) {
+        missing.add(sourceProperty.toLowerCase());
+      }
+    }
+    return missing;
+  }, [activityColumns, activityMethodMap, methodOutputPropertyById]);
   const getBatchAssayMetadata = useCallback((batch: MmpLifecycleBatch) => {
     const files = asRecord(batch.files);
     const experimentCfg = asRecord(asRecord(files.experiments).column_config);
@@ -2129,6 +2600,30 @@ export function MmpLifecycleAdminPage() {
   const allFilteredSelected =
     filteredBatchIds.length > 0 && filteredBatchIds.every((id) => selectedBatchIds.includes(id));
   const selectedCount = selectedBatchIds.length;
+  const bulkApplyBlockReason = useMemo(() => {
+    if (selectedCount <= 0) return 'Select batches first';
+    const batchById = new Map<string, MmpLifecycleBatch>();
+    for (const item of batches) {
+      const id = readText(item.id);
+      if (!id) continue;
+      batchById.set(id, item);
+    }
+    for (const batchId of selectedBatchIds) {
+      const batch = batchById.get(batchId);
+      if (!batch) continue;
+      const databaseId = readText(batch.selected_database_id);
+      if (!databaseId) return `Batch "${readText(batch.name) || batchId}" is missing target database`;
+      const dbMeta = databaseById.get(databaseId);
+      if (!dbMeta || getDatabaseBuildState(dbMeta) !== 'ready') {
+        return `Database for "${readText(batch.name) || batchId}" is still building`;
+      }
+      if (isDatabaseBusy(databaseId)) {
+        return `Database for "${readText(batch.name) || batchId}" is busy with another update`;
+      }
+    }
+    return '';
+  }, [selectedCount, batches, selectedBatchIds, databaseById, isDatabaseBusy]);
+  const bulkApplyBlocked = Boolean(bulkApplyBlockReason);
   useEffect(() => {
     const visible = new Set(filteredBatchIds);
     setSelectedBatchIds((prev) => {
@@ -2173,6 +2668,7 @@ export function MmpLifecycleAdminPage() {
     setAssayMethodDatabaseId(candidateDbId);
     void loadAssayDatabaseProperties(candidateDbId);
     void loadAssayDatabaseMethodBindings(candidateDbId);
+    void loadAssayMethodUsage(candidateDbId);
     void loadPendingSyncSummary(candidateDbId);
     setAssayMethodModalOpen(true);
   };
@@ -2182,6 +2678,7 @@ export function MmpLifecycleAdminPage() {
     setAssayMethodDatabaseId('');
     setAssayDatabasePropertyNames([]);
     setAssayBoundMethodIds([]);
+    setAssayMethodUsageRows([]);
     setAssayMethodDisplayTransformById({});
     setAssayMethodModalOpen(false);
   };
@@ -2241,12 +2738,75 @@ export function MmpLifecycleAdminPage() {
       });
   }, [assayMethodDatabaseId, assayBoundMethodIds, assayDatabasePropertyNames, selectedAssayDatabasePendingProperties, methods]);
 
+  const assayMethodDataCountById = useMemo(() => {
+    const dbId = readText(assayMethodDatabaseId);
+    const output = new Map<string, number>();
+    if (!dbId) return output;
+    for (const item of assayMethodUsageRows) {
+      const rowDbId = readText(item.database_id);
+      if (rowDbId !== dbId) continue;
+      const methodId = readText(item.method_id);
+      const count = readNumber(item.data_count);
+      if (!methodId || count === null) continue;
+      output.set(methodId, Math.max(0, Math.trunc(count)));
+    }
+    return output;
+  }, [assayMethodDatabaseId, assayMethodUsageRows]);
+
   const assayPropertySummaryText = useMemo(() => {
     if (assayDatabasePropertyNames.length === 0) return '-';
     const head = assayDatabasePropertyNames.slice(0, 3);
     const extra = assayDatabasePropertyNames.length - head.length;
     return extra > 0 ? `${head.join(' · ')} +${extra}` : head.join(' · ');
   }, [assayDatabasePropertyNames]);
+  const runActionBlockReason = useMemo(() => {
+    const dbId = readText(batchDatabaseId);
+    if (!viewMode || viewMode !== 'detail') return 'Open one batch first';
+    if (!selectedBatch) return 'Open one batch first';
+    if (!dbId) return 'Choose target MMP database first';
+    const dbMeta = databaseById.get(dbId);
+    if (!dbMeta || getDatabaseBuildState(dbMeta) !== 'ready') {
+      return 'Target database is still building';
+    }
+    if (isDatabaseBusy(dbId)) {
+      return 'Target database is busy with another update';
+    }
+    return '';
+  }, [viewMode, selectedBatch, batchDatabaseId, databaseById, isDatabaseBusy]);
+  const runActionBlocked = Boolean(runActionBlockReason);
+  const checkActionBlockReason = useMemo(() => {
+    const dbId = readText(batchDatabaseId);
+    if (!viewMode || viewMode !== 'detail') return 'Open one batch first';
+    if (!selectedBatch) return 'Open one batch first';
+    if (!dbId) return 'Choose target MMP database first';
+    const dbMeta = databaseById.get(dbId);
+    if (!dbMeta || getDatabaseBuildState(dbMeta) !== 'ready') {
+      return 'Target database is still building';
+    }
+    return '';
+  }, [viewMode, selectedBatch, batchDatabaseId, databaseById]);
+  const checkActionBlocked = Boolean(checkActionBlockReason);
+  const uploadSaveBlockReason = useMemo(() => {
+    if (!selectedBatch) return 'Select one lifecycle batch first';
+    if (!uploadFile) return 'Select file in left upload panel';
+    if (uploadParsing) return 'Parsing upload file';
+    if (saving || autoUploadStatus === 'uploading') return 'Upload is running';
+    if (!isUploadConfigComplete) return uploadConfigIssues[0] || 'Adjust upload configuration first';
+    return '';
+  }, [selectedBatch, uploadFile, uploadParsing, saving, autoUploadStatus, isUploadConfigComplete, uploadConfigIssues]);
+  const uploadSaveBlocked = Boolean(uploadSaveBlockReason);
+  const saveUploadDraft = useCallback(() => {
+    if (uploadSaveBlocked) {
+      if (uploadSaveBlockReason) setError(uploadSaveBlockReason);
+      return;
+    }
+    setError(null);
+    setAutoUploadStatus('pending');
+    setAutoUploadStatusText('Manual save queued...');
+    setAutoUploadTrigger((prev) => prev + 1);
+  }, [uploadSaveBlocked, uploadSaveBlockReason]);
+  const showHeaderStepActions = viewMode === 'detail' && Boolean(selectedBatch);
+  const showListHeaderActions = viewMode === 'list';
 
   return (
     <div className="page-grid mmp-life-page">
@@ -2259,6 +2819,7 @@ export function MmpLifecycleAdminPage() {
               <span className={`task-state-chip mmp-life-head-pill ${selectedBatchStatusToken || 'draft'}`}>{selectedBatchStatusLabel || '-'}</span>
               <span className={`badge mmp-life-head-pill ${gatePass ? 'is-good' : 'is-bad'}`}>Gate: {gatePass ? 'PASS' : 'BLOCKED'}</span>
               <span className="meta-chip mmp-life-head-pill">Checked: {formatDateTime(readText(batchLastCheck.checked_at))}</span>
+              <span className="meta-chip mmp-life-head-pill">Applied: {summarizeCount(selectedBatchApplyHistoryCount)}</span>
             </div>
           ) : null}
         </div>
@@ -2274,16 +2835,165 @@ export function MmpLifecycleAdminPage() {
               <ArrowLeft size={14} />
             </button>
           ) : null}
-          <button
-            className="mmp-life-header-circle-btn mmp-life-header-circle-btn-primary"
-            type="button"
-            title="Create batch"
-            aria-label="Create batch"
-            onClick={() => setCreateBatchModalOpen(true)}
-            disabled={saving}
-          >
-            <Plus size={14} />
-          </button>
+          {showHeaderStepActions && flowStep === 'batch' ? (
+            <div className="mmp-life-header-inline-actions">
+              <button
+                className="mmp-life-header-circle-btn mmp-life-header-circle-btn-primary"
+                type="button"
+                onClick={saveBatchMeta}
+                disabled={saving}
+                title="Save batch metadata"
+                aria-label="Save batch metadata"
+              >
+                <Save size={14} />
+              </button>
+              <button
+                className="mmp-life-header-circle-btn"
+                type="button"
+                onClick={resetBatchMetaDraft}
+                disabled={saving}
+                title="Reset batch metadata draft"
+                aria-label="Reset batch metadata draft"
+              >
+                <RotateCcw size={14} />
+              </button>
+            </div>
+          ) : null}
+          {showHeaderStepActions && flowStep === 'upload' ? (
+            <div className="mmp-life-header-inline-actions">
+              <button
+                className="mmp-life-header-circle-btn mmp-life-header-circle-btn-primary"
+                type="button"
+                onClick={saveUploadDraft}
+                disabled={uploadSaveBlocked}
+                title={uploadSaveBlockReason || 'Save upload draft'}
+                aria-label={uploadSaveBlockReason || 'Save upload draft'}
+              >
+                <Save size={14} />
+              </button>
+              <button
+                className="mmp-life-header-circle-btn"
+                type="button"
+                onClick={resetUploadDraft}
+                disabled={saving || uploadParsing}
+                title="Reset upload draft to saved batch state"
+                aria-label="Reset upload draft to saved batch state"
+              >
+                <RotateCcw size={14} />
+              </button>
+            </div>
+          ) : null}
+          {showHeaderStepActions && flowStep === 'mapping' ? (
+            <div className="mmp-life-header-inline-actions">
+              <button
+                className="mmp-life-header-circle-btn mmp-life-header-circle-btn-primary"
+                type="button"
+                onClick={() => void saveMappings()}
+                disabled={saving || mappingSaveBlocked}
+                title={mappingSaveBlocked ? mappingSaveBlockReason : 'Save mapping rules'}
+                aria-label="Save mapping rules"
+              >
+                <Save size={14} />
+              </button>
+              <button
+                className="mmp-life-header-circle-btn"
+                type="button"
+                onClick={() => void resetMappingDraft()}
+                disabled={saving}
+                title="Reset to saved batch mapping"
+                aria-label="Reset to saved batch mapping"
+              >
+                <RotateCcw size={14} />
+              </button>
+            </div>
+          ) : null}
+          {showHeaderStepActions && flowStep === 'qa' ? (
+            <div className="mmp-life-header-inline-actions">
+              <button
+                className="mmp-life-header-circle-btn"
+                type="button"
+                onClick={() => void runCheckOnly()}
+                disabled={saving || checkActionBlocked}
+                title={checkActionBlockReason || 'Run check only (no database write)'}
+                aria-label={checkActionBlockReason || 'Run check only (no database write)'}
+              >
+                <ShieldCheck size={14} />
+              </button>
+              <button
+                className="mmp-life-header-circle-btn mmp-life-header-circle-btn-primary"
+                type="button"
+                onClick={() => void runCheckAndApply()}
+                disabled={saving || runActionBlocked}
+                title={runActionBlockReason || 'Apply (auto check + apply)'}
+                aria-label={runActionBlockReason || 'Apply (auto check + apply)'}
+              >
+                <RunPlayIcon size={14} />
+              </button>
+              <button
+                className="mmp-life-header-circle-btn"
+                type="button"
+                onClick={resetCheckDraft}
+                disabled={saving}
+                title="Reset check panel to saved batch summary"
+                aria-label="Reset check panel to saved batch summary"
+              >
+                <RotateCcw size={14} />
+              </button>
+            </div>
+          ) : null}
+          {showHeaderStepActions && flowStep !== 'qa' ? (
+            <button
+              className="mmp-life-header-circle-btn mmp-life-header-circle-btn-primary"
+              type="button"
+              onClick={() => void runCheckAndApply()}
+              disabled={saving || runActionBlocked}
+              title={runActionBlockReason || 'Run (check + apply)'}
+              aria-label={runActionBlockReason || 'Run (check + apply)'}
+            >
+              <RunPlayIcon size={14} />
+            </button>
+          ) : null}
+          {showListHeaderActions ? (
+            <div className="mmp-life-header-inline-actions">
+              <button
+                className="mmp-life-header-circle-btn mmp-life-header-circle-btn-primary"
+                type="button"
+                onClick={() => void runBulkApplyFromList()}
+                disabled={saving || bulkApplyRunning || selectedCount <= 0 || bulkApplyBlocked}
+                title={
+                  bulkApplyBlocked
+                    ? bulkApplyBlockReason
+                    : selectedCount > 0
+                      ? `Apply Selected (${selectedCount})`
+                      : 'Select batches first'
+                }
+                aria-label={bulkApplyRunning ? 'Applying selected batches' : `Apply Selected (${selectedCount})`}
+              >
+                <CheckCircle2 size={14} />
+              </button>
+              <button
+                className="mmp-life-header-circle-btn"
+                type="button"
+                onClick={resetBatchListView}
+                disabled={saving || bulkApplyRunning}
+                title="Reset list filters and selections"
+                aria-label="Reset list filters and selections"
+              >
+                <RotateCcw size={14} />
+              </button>
+              <button
+                className="mmp-life-header-circle-btn"
+                type="button"
+                onClick={() => void createBatchFromHeader()}
+                disabled={saving || bulkApplyRunning}
+                title="Create batch"
+                aria-label="Create batch"
+              >
+                <Plus size={14} />
+              </button>
+            </div>
+          ) : null}
+          {(showHeaderStepActions || showListHeaderActions) ? <span className="mmp-life-header-divider" aria-hidden="true" /> : null}
           <button
             className="mmp-life-header-circle-btn"
             type="button"
@@ -2386,31 +3096,8 @@ export function MmpLifecycleAdminPage() {
               </label>
             </div>
             <div className="project-toolbar-meta project-toolbar-meta-rich">
-              <button
-                className="btn btn-primary btn-compact"
-                type="button"
-                onClick={() => void runBulkApplyFromList()}
-                disabled={saving || bulkApplyRunning || selectedCount <= 0}
-                title={selectedCount > 0 ? `Apply ${selectedCount} selected batch(es)` : 'Select batches first'}
-              >
-                <CheckCircle2 size={14} />
-                {bulkApplyRunning ? 'Applying...' : `Apply Selected (${selectedCount})`}
-              </button>
-              <button
-                className="icon-btn"
-                type="button"
-                title="Reset filters"
-                aria-label="Reset filters"
-                onClick={() => {
-                  setBatchQuery('');
-                  setBatchStatusFilter('all');
-                  setBatchDatabaseFilter('all');
-                  setBatchSortKey('updated_at');
-                  setBatchSortDirection('desc');
-                }}
-              >
-                <RotateCcw size={14} />
-              </button>
+              <span className="meta-chip">Selected {selectedCount}</span>
+              <span className="meta-chip">Visible {filteredBatches.length}</span>
             </div>
           </div>
           <div className="table-wrap project-table-wrap task-table-wrap">
@@ -2462,20 +3149,11 @@ export function MmpLifecycleAdminPage() {
                     const runtime = asRecord(item.apply_runtime);
                     const runtimePhaseRaw = readText(runtime.phase).toLowerCase();
                     const runtimePhase = runtimePhaseRaw === 'queue' ? 'queued' : runtimePhaseRaw;
-                    const runtimeStage = readText(runtime.stage).toLowerCase();
                     const statusRaw = runtimePhase || readText(item.status).toLowerCase();
                     const statusToken = statusRaw.replace(/_/g, '-').replace('queue', 'queued');
-                    const statusLabel =
-                      runtimePhase === 'running' && runtimeStage
-                        ? `running · ${runtimeStage}`
-                        : (runtimePhase || readText(item.status) || '-');
+                    const statusLabel = runtimePhase || readText(item.status) || '-';
                     const runtimeMessage = readText(runtime.error || runtime.message || item.last_error);
-                    const runtimeTimingSummary = summarizeApplyRuntimeTimings(runtime.timings_s);
-                    const applyHistory = Array.isArray(item.apply_history) ? item.apply_history : [];
-                    const latestApply = applyHistory.length > 0 ? asRecord(applyHistory[applyHistory.length - 1]) : {};
-                    const latestApplyTimingSummary = summarizeApplyRuntimeTimings(latestApply.timings_s);
-                    const statusTimingSummary = runtimeTimingSummary || (statusRaw === 'applied' ? latestApplyTimingSummary : '');
-                    const runtimeTitle = [runtimeMessage, statusTimingSummary].filter(Boolean).join('\n');
+                    const runtimeTitle = runtimeMessage || '';
                     const fileSummary = `${asRecord(files.compounds).path ? 'compounds ' : ''}${asRecord(files.experiments).path ? 'experiments' : ''}`.trim() || '-';
                     const dbId = readText(item.selected_database_id);
                     const dbMeta = databaseById.get(dbId);
@@ -2516,10 +3194,10 @@ export function MmpLifecycleAdminPage() {
                             <span className={`task-state-chip ${statusToken || 'draft'}`} title={runtimeTitle}>
                               {statusLabel}
                             </span>
-                            {statusTimingSummary ? (
-                              <div className="mmp-life-status-meta" title={runtimeTitle}>
-                                {statusTimingSummary}
-                              </div>
+                            {runtimeMessage ? (
+                              <span className="mmp-life-status-meta" title={runtimeMessage}>
+                                {runtimeMessage}
+                              </span>
                             ) : null}
                           </div>
                         </td>
@@ -2608,29 +3286,8 @@ export function MmpLifecycleAdminPage() {
             {flowStep === 'batch' && selectedBatch ? (
               <section className="panel">
                 <div className="toolbar">
-                  <h2><FlaskConical size={16} /> 1. Batch Setup</h2>
-                  <div className="mmp-life-run-row">
-                    <button
-                      className="mmp-life-header-circle-btn"
-                      type="button"
-                      title="Save batch metadata"
-                      aria-label="Save batch metadata"
-                      onClick={saveBatchMeta}
-                      disabled={saving}
-                    >
-                      <Save size={14} />
-                    </button>
-                    <button
-                      className="mmp-life-header-circle-btn"
-                      type="button"
-                      title="Delete batch"
-                      aria-label="Delete batch"
-                      onClick={() => void removeBatch(readText(selectedBatch.id))}
-                      disabled={saving}
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
+                  <span />
+                  <span />
                 </div>
                 <section className="panel subtle">
                   <h3>Batch Metadata</h3>
@@ -2669,7 +3326,6 @@ export function MmpLifecycleAdminPage() {
 
             {flowStep === 'upload' && selectedBatch ? (
               <section className="panel">
-                <h2><Upload size={16} /> 2. Upload Data</h2>
                 <div className="mmp-life-upload-form">
                   <div
                     ref={uploadWorkspaceRef}
@@ -2851,7 +3507,7 @@ export function MmpLifecycleAdminPage() {
                             {autoUploadStatusText || (
                               uploadFile
                                 ? 'Waiting for auto upload.'
-                                : (hasSavedCompoundsFile ? `Using saved file: ${activeCompoundsFileName}` : 'Choose a file to start.')
+                                : (hasSavedCompoundsFile ? `Using saved file: ${activeCompoundsFileName}` : 'Ready for file upload.')
                             )}
                           </span>
                         </div>
@@ -2938,12 +3594,25 @@ export function MmpLifecycleAdminPage() {
                                     </td>
                                     {uploadPreviewColumns.map((col) => {
                                       const rawValue = readText(row[col]);
-                                      const value = isMissingCellToken(rawValue) ? '-' : rawValue;
-                                      const className = col === uploadPreviewSmilesColumn
-                                        ? 'mmp-life-mono mmp-life-upload-cell-smiles'
-                                        : 'mmp-life-mono';
+                                      let value = isMissingCellToken(rawValue) ? '-' : rawValue;
+                                      const transform = activityTransformByColumn.get(col) || 'none';
+                                      let transformed = false;
+                                      if (value !== '-' && transform !== 'none') {
+                                        try {
+                                          const output = transformActivityValue(rawValue, transform);
+                                          if (Number.isFinite(output)) {
+                                            value = String(output);
+                                            transformed = true;
+                                          }
+                                        } catch {
+                                          // Keep raw preview if conversion fails for this cell.
+                                        }
+                                      }
+                                      const classNameParts = ['mmp-life-mono'];
+                                      if (col === uploadPreviewSmilesColumn) classNameParts.push('mmp-life-upload-cell-smiles');
+                                      if (transformed) classNameParts.push('mmp-life-upload-cell-transformed');
                                       return (
-                                        <td key={`preview-val-${uploadPreviewCurrentPage}-${idx}-${col}`} className={className}>
+                                        <td key={`preview-val-${uploadPreviewCurrentPage}-${idx}-${col}`} className={classNameParts.join(' ')}>
                                           {value}
                                         </td>
                                       );
@@ -2964,7 +3633,8 @@ export function MmpLifecycleAdminPage() {
             {flowStep === 'mapping' && selectedBatch ? (
               <section className="panel">
                 <div className="toolbar">
-                  <h2><ListChecks size={16} /> 3. Property Mapping</h2>
+                  <span />
+                  <span />
                 </div>
                 <section className="panel subtle mmp-life-activity-method-map">
                   <div className="toolbar">
@@ -3023,6 +3693,7 @@ export function MmpLifecycleAdminPage() {
                           {activityColumns.map((activityCol, idx) => {
                             const occupied = new Set(activityColumns.filter((_, rowIdx) => rowIdx !== idx));
                             const structureToken = readText(structureColumn);
+                            const isMethodMissing = activityColumnsMissingMethod.has(readText(activityCol).toLowerCase());
                             return (
                               <tr key={`activity-method-${activityCol}-${idx}`}>
                                 <td>
@@ -3046,7 +3717,7 @@ export function MmpLifecycleAdminPage() {
                                 </td>
                                 <td className="mmp-life-cell-assay-method">
                                   <select
-                                    className="mmp-life-assay-method-select"
+                                    className={`mmp-life-assay-method-select${isMethodMissing ? ' is-missing' : ''}`}
                                     value={readText(activityMethodMap[activityCol])}
                                     onChange={(event) => {
                                       const nextMethodId = readText(event.target.value);
@@ -3056,6 +3727,7 @@ export function MmpLifecycleAdminPage() {
                                       }));
                                     }}
                                     disabled={!hasRegisteredAssayMethod}
+                                    title={isMethodMissing ? 'Assign assay method for this activity column' : ''}
                                   >
                                     <option value="">{hasRegisteredAssayMethod ? 'None' : 'Register methods first'}</option>
                                     {methods.map((method) => {
@@ -3092,13 +3764,11 @@ export function MmpLifecycleAdminPage() {
                 </section>
                 <div className="mmp-life-upload-actions">
                   <div className="mmp-life-upload-actions-note">
-                    <span className="muted small">Mapping rules come from Activity-Method pairs above (auto-deduped by source property).</span>
-                  </div>
-                  <div className="mmp-life-upload-actions-buttons">
-                    <button className="btn btn-primary mmp-life-btn-strong" type="button" onClick={saveMappings} disabled={saving || !batchDatabaseId.trim()}>
-                      <Save size={14} />
-                      Save Mapping Rules
-                    </button>
+                    <span className="muted small">
+                      {activityColumnsMissingMethod.size > 0
+                        ? 'Assign methods in highlighted rows before saving.'
+                        : 'Click Save to persist mapping rules.'}
+                    </span>
                   </div>
                 </div>
               </section>
@@ -3107,24 +3777,19 @@ export function MmpLifecycleAdminPage() {
             {flowStep === 'qa' && selectedBatch ? (
               <>
                 <section className="panel">
-                  <div className="toolbar">
-                    <h2><ShieldCheck size={16} /> 4. Check</h2>
-                    <button className="btn btn-primary btn-compact" type="button" onClick={runCheck} disabled={saving || !batchDatabaseId.trim()}>
-                      <CheckCircle2 size={14} />
-                      {saving ? 'Checking...' : 'Run Check'}
-                    </button>
+                <div className="toolbar">
+                  <span />
+                  <span />
+                </div>
+                {selectedBatchApplyHistoryCount <= 0 ? (
+                  <div className="muted small">
+                    Check is dry-run only. Use Apply to persist assays into database.
                   </div>
-                  <div className="mmp-life-status-row">
-                    <span className="badge">Status: {selectedBatchStatus}</span>
-                    <span className={`badge ${gatePass ? 'is-good' : 'is-bad'}`}>
-                      Gate: {gatePass ? 'PASS' : 'WARN'}
-                    </span>
-                    <span className="muted small">Checked at: {formatDateTime(readText(batchLastCheck.checked_at))}</span>
-                  </div>
-                  {gateReasons.length > 0 ? (
-                    <div className="alert warning">{gateReasons.join(' ')}</div>
-                  ) : null}
-                  <div className="mmp-life-check-layout">
+                ) : null}
+                {gateReasons.length > 0 ? (
+                  <div className="alert warning">{gateReasons.join(' ')}</div>
+                ) : null}
+                <div className="mmp-life-check-layout">
                     <section className="panel subtle mmp-life-check-card">
                       <div className="mmp-life-check-card-head">
                         <h3>Compounds</h3>
@@ -3148,7 +3813,7 @@ export function MmpLifecycleAdminPage() {
                     <section className="panel subtle mmp-life-check-card">
                       <div className="mmp-life-check-card-head">
                         <h3>Experiments</h3>
-                        <span className="badge">Import {summarizeCount(runtimeCheckOverview.experimentImportableRows)}</span>
+                        <span className="badge">Will Import {summarizeCount(runtimeCheckOverview.experimentImportableRows)}</span>
                       </div>
                       <div className="mmp-life-check-main-stat">
                         <strong>{summarizeCount(runtimeCheckOverview.experimentTotalRows)}</strong>
@@ -3183,39 +3848,6 @@ export function MmpLifecycleAdminPage() {
         </div>
       </div>
       )}
-
-      {createBatchModalOpen ? (
-        <div className="modal-mask" onClick={() => setCreateBatchModalOpen(false)}>
-          <div className="modal mmp-life-create-modal" onClick={(event) => event.stopPropagation()}>
-            <div className="mmp-life-modal-head">
-              <h2>Create Batch</h2>
-              <button className="icon-btn" type="button" onClick={() => setCreateBatchModalOpen(false)} aria-label="Close create batch dialog">
-                <X size={14} />
-              </button>
-            </div>
-            <form className="form-grid" onSubmit={createBatch}>
-              <label className="field">
-                <span>Batch name</span>
-                <input value={newBatchName} onChange={(event) => setNewBatchName(event.target.value)} placeholder="e.g. 2026Q1 HTS" required />
-              </label>
-              <label className="field">
-                <span>Description</span>
-                <input value={newBatchDescription} onChange={(event) => setNewBatchDescription(event.target.value)} placeholder="Optional" />
-              </label>
-              <label className="field">
-                <span>Notes</span>
-                <input value={newBatchNotes} onChange={(event) => setNewBatchNotes(event.target.value)} placeholder="Optional" />
-              </label>
-              <div className="row end">
-                <button className="btn btn-primary" type="submit" disabled={saving}>
-                  <Plus size={14} />
-                  Create Batch
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      ) : null}
 
       {databaseAdminModalOpen ? (
         <div className="modal-mask" onClick={() => setDatabaseAdminModalOpen(false)}>
@@ -3269,6 +3901,7 @@ export function MmpLifecycleAdminPage() {
                     setAssayMethodDatabaseId(nextDbId);
                     void loadAssayDatabaseProperties(nextDbId);
                     void loadAssayDatabaseMethodBindings(nextDbId);
+                    void loadAssayMethodUsage(nextDbId);
                     void loadPendingSyncSummary(nextDbId);
                   }}
                 >
@@ -3384,6 +4017,7 @@ export function MmpLifecycleAdminPage() {
                     <th>Key</th>
                     <th>Name</th>
                     <th>Output Property</th>
+                    <th>Data Rows</th>
                     <th>Stored Unit</th>
                     <th>Display Transform</th>
                     <th>Category</th>
@@ -3393,13 +4027,14 @@ export function MmpLifecycleAdminPage() {
                 <tbody>
                   {assayMethodsForSelectedDatabase.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="muted">No assay method for selected database.</td>
+                      <td colSpan={8} className="muted">No assay method for selected database.</td>
                     </tr>
                   ) : (
                     assayMethodsForSelectedDatabase.map((item) => {
                       const id = readText(item.id);
+                      const dataCount = assayMethodDataCountById.get(id);
                       const effectiveDisplayTransform = normalizeActivityTransform(
-                        readText(assayMethodDisplayTransformById[id] || item.display_transform || 'none')
+                        readText(item.display_transform || assayMethodDisplayTransformById[id] || 'none')
                       );
                       const displayLabel = ACTIVITY_TRANSFORM_OPTIONS.find(
                         (option) => option.value === effectiveDisplayTransform
@@ -3415,6 +4050,7 @@ export function MmpLifecycleAdminPage() {
                           <td>{readText(item.key) || '-'}</td>
                           <td>{readText(item.name) || '-'}</td>
                           <td>{readText(item.output_property) || '-'}</td>
+                          <td>{dataCount === undefined ? '-' : summarizeCount(dataCount)}</td>
                           <td>{storedUnitText}</td>
                           <td>{displayLabel}</td>
                           <td>{readText(item.category) || '-'}</td>

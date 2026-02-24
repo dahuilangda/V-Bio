@@ -116,6 +116,15 @@ def _read_text_field(payload: Dict[str, Any], *keys: str, fallback: str = "") ->
     return str(fallback or "").strip()
 
 
+def _to_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    token = str(value or "").strip().lower()
+    if not token:
+        return bool(default)
+    return token in {"1", "true", "yes", "on", "y", "t"}
+
+
 def _score_method_row(row: Dict[str, Any]) -> int:
     fields = (
         "key",
@@ -167,6 +176,19 @@ def _is_preferred_method_row(candidate: Dict[str, Any], current: Dict[str, Any])
     return candidate_id < current_id
 
 
+def _env_int(name: str, default: int, *, minimum: int = 0, maximum: int = 1_000_000) -> int:
+    raw = str(os.getenv(name, "")).strip()
+    try:
+        value = int(raw) if raw else int(default)
+    except Exception:
+        value = int(default)
+    if value < minimum:
+        return minimum
+    if value > maximum:
+        return maximum
+    return value
+
+
 class MmpLifecycleAdminStore:
     """File-backed state for MMP lifecycle admin workflows.
 
@@ -180,6 +202,66 @@ class MmpLifecycleAdminStore:
         self.root_dir = resolved_root
         self.state_file = self.root_dir / "state.json"
         self.batch_upload_dir = self.root_dir / "uploads"
+        self._status_history_limit = _env_int(
+            "LEAD_OPT_MMP_LIFECYCLE_STATUS_HISTORY_LIMIT",
+            120,
+            minimum=10,
+            maximum=20_000,
+        )
+        self._apply_history_limit = _env_int(
+            "LEAD_OPT_MMP_LIFECYCLE_APPLY_HISTORY_LIMIT",
+            80,
+            minimum=10,
+            maximum=20_000,
+        )
+        self._rollback_history_limit = _env_int(
+            "LEAD_OPT_MMP_LIFECYCLE_ROLLBACK_HISTORY_LIMIT",
+            80,
+            minimum=10,
+            maximum=20_000,
+        )
+        self._pending_sync_keep_applied = _env_int(
+            "LEAD_OPT_MMP_LIFECYCLE_PENDING_SYNC_KEEP_APPLIED",
+            200,
+            minimum=0,
+            maximum=100_000,
+        )
+        self._pending_sync_keep_failed = _env_int(
+            "LEAD_OPT_MMP_LIFECYCLE_PENDING_SYNC_KEEP_FAILED",
+            100,
+            minimum=0,
+            maximum=100_000,
+        )
+        self._pending_sync_keep_other = _env_int(
+            "LEAD_OPT_MMP_LIFECYCLE_PENDING_SYNC_KEEP_OTHER",
+            100,
+            minimum=0,
+            maximum=100_000,
+        )
+        self._error_text_max_len = _env_int(
+            "LEAD_OPT_MMP_LIFECYCLE_ERROR_TEXT_MAX_LEN",
+            2000,
+            minimum=256,
+            maximum=200_000,
+        )
+        self._sync_result_max_chars = _env_int(
+            "LEAD_OPT_MMP_LIFECYCLE_SYNC_RESULT_MAX_CHARS",
+            8000,
+            minimum=512,
+            maximum=500_000,
+        )
+        self._db_lock_history_limit = _env_int(
+            "LEAD_OPT_MMP_LIFECYCLE_DB_LOCK_HISTORY_LIMIT",
+            200,
+            minimum=20,
+            maximum=100_000,
+        )
+        self._db_lock_max_age_seconds = _env_int(
+            "LEAD_OPT_MMP_LIFECYCLE_DB_LOCK_MAX_AGE_SECONDS",
+            12 * 3600,
+            minimum=60,
+            maximum=7 * 24 * 3600,
+        )
         self._lock = threading.Lock()
         self.root_dir.mkdir(parents=True, exist_ok=True)
         self.batch_upload_dir.mkdir(parents=True, exist_ok=True)
@@ -194,6 +276,7 @@ class MmpLifecycleAdminStore:
             "methods": [],
             "property_mappings": [],
             "pending_database_sync": [],
+            "database_operation_locks": [],
             "batches": [],
         }
 
@@ -213,20 +296,29 @@ class MmpLifecycleAdminStore:
                 base["property_mappings"] = []
             if not isinstance(base.get("pending_database_sync"), list):
                 base["pending_database_sync"] = []
+            if not isinstance(base.get("database_operation_locks"), list):
+                base["database_operation_locks"] = []
             if not isinstance(base.get("batches"), list):
                 base["batches"] = []
             original_methods = json.dumps(base.get("methods", []), sort_keys=True, ensure_ascii=False)
             original_mappings = json.dumps(base.get("property_mappings", []), sort_keys=True, ensure_ascii=False)
+            original_pending_sync = json.dumps(base.get("pending_database_sync", []), sort_keys=True, ensure_ascii=False)
+            original_db_locks = json.dumps(base.get("database_operation_locks", []), sort_keys=True, ensure_ascii=False)
             original_batches = json.dumps(base.get("batches", []), sort_keys=True, ensure_ascii=False)
             normalized_methods, method_aliases = self._normalize_method_collection_with_aliases(base.get("methods"))
             base["methods"] = normalized_methods
             self._apply_method_aliases_to_state(base, method_aliases)
+            self._sanitize_state_inplace(base)
             normalized_methods_dump = json.dumps(base.get("methods", []), sort_keys=True, ensure_ascii=False)
             normalized_mappings_dump = json.dumps(base.get("property_mappings", []), sort_keys=True, ensure_ascii=False)
+            normalized_pending_sync_dump = json.dumps(base.get("pending_database_sync", []), sort_keys=True, ensure_ascii=False)
+            normalized_db_locks_dump = json.dumps(base.get("database_operation_locks", []), sort_keys=True, ensure_ascii=False)
             normalized_batches_dump = json.dumps(base.get("batches", []), sort_keys=True, ensure_ascii=False)
             if (
                 normalized_methods_dump != original_methods
                 or normalized_mappings_dump != original_mappings
+                or normalized_pending_sync_dump != original_pending_sync
+                or normalized_db_locks_dump != original_db_locks
                 or normalized_batches_dump != original_batches
             ):
                 base["updated_at"] = _utc_now_iso()
@@ -236,8 +328,167 @@ class MmpLifecycleAdminStore:
             return self._empty_state()
 
     def _write_state(self, state: Dict[str, Any]) -> None:
+        self._sanitize_state_inplace(state)
         state["updated_at"] = _utc_now_iso()
         _atomic_json_write(self.state_file, state)
+
+    @staticmethod
+    def _tail_list(value: Any, *, limit: int) -> List[Any]:
+        if not isinstance(value, list):
+            return []
+        rows = list(value)
+        if limit <= 0:
+            return []
+        if len(rows) <= limit:
+            return rows
+        return rows[-limit:]
+
+    def _truncate_text(self, value: Any, *, limit: int = 0) -> str:
+        text = str(value or "")
+        max_len = int(limit or self._error_text_max_len)
+        if len(text) <= max_len:
+            return text
+        return text[:max_len]
+
+    def _normalize_sync_result_payload(self, result: Any) -> Dict[str, Any]:
+        payload = dict(result or {}) if isinstance(result, dict) else {}
+        try:
+            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            return {}
+        if len(encoded) <= self._sync_result_max_chars:
+            return payload
+        return {
+            "truncated": True,
+            "size": len(encoded),
+            "preview": encoded[: self._sync_result_max_chars],
+        }
+
+    def _sanitize_pending_database_sync_rows(self, rows: Any) -> List[Dict[str, Any]]:
+        pending: List[Dict[str, Any]] = []
+        applied: List[Dict[str, Any]] = []
+        failed: List[Dict[str, Any]] = []
+        other: List[Dict[str, Any]] = []
+        for item in rows if isinstance(rows, list) else []:
+            if not isinstance(item, dict):
+                continue
+            row = dict(item)
+            row["error"] = self._truncate_text(row.get("error"))
+            row["result"] = self._normalize_sync_result_payload(row.get("result"))
+            status = str(row.get("status") or "pending").strip().lower() or "pending"
+            row["status"] = status
+            if status == "pending":
+                pending.append(row)
+            elif status == "applied":
+                applied.append(row)
+            elif status == "failed":
+                failed.append(row)
+            else:
+                other.append(row)
+
+        def _sort_desc(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            entries.sort(
+                key=lambda item: (
+                    str(item.get("updated_at") or item.get("created_at") or ""),
+                    str(item.get("id") or ""),
+                ),
+                reverse=True,
+            )
+            return entries
+
+        applied = _sort_desc(applied)[: self._pending_sync_keep_applied]
+        failed = _sort_desc(failed)[: self._pending_sync_keep_failed]
+        other = _sort_desc(other)[: self._pending_sync_keep_other]
+
+        merged = pending + applied + failed + other
+        merged.sort(
+            key=lambda item: (
+                str(item.get("created_at") or ""),
+                str(item.get("id") or ""),
+            )
+        )
+        return merged
+
+    @staticmethod
+    def _parse_utc_iso(value: Any) -> Optional[datetime]:
+        token = str(value or "").strip()
+        if not token:
+            return None
+        try:
+            return datetime.strptime(token, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+
+    def _sanitize_database_operation_locks(self, rows: Any) -> List[Dict[str, Any]]:
+        now_dt = datetime.now(timezone.utc)
+        active_rows: List[Dict[str, Any]] = []
+        historical_rows: List[Dict[str, Any]] = []
+        for item in rows if isinstance(rows, list) else []:
+            if not isinstance(item, dict):
+                continue
+            row = dict(item)
+            row_id = str(row.get("id") or "").strip()
+            db_id = str(row.get("database_id") or "").strip()
+            operation = str(row.get("operation") or "").strip().lower()
+            if not row_id or not db_id or not operation:
+                continue
+            status = str(row.get("status") or "active").strip().lower() or "active"
+            created_at = str(row.get("created_at") or "")
+            updated_at = str(row.get("updated_at") or created_at)
+            released_at = str(row.get("released_at") or "")
+            entry = {
+                "id": row_id,
+                "database_id": db_id,
+                "operation": operation,
+                "batch_id": str(row.get("batch_id") or "").strip(),
+                "task_id": str(row.get("task_id") or "").strip(),
+                "note": self._truncate_text(row.get("note"), limit=512),
+                "status": status,
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "released_at": released_at,
+                "error": self._truncate_text(row.get("error")),
+            }
+            is_active = status == "active" and not released_at
+            if is_active:
+                created_dt = self._parse_utc_iso(created_at)
+                if created_dt is not None and (now_dt - created_dt).total_seconds() > float(self._db_lock_max_age_seconds):
+                    entry["status"] = "expired"
+                    entry["released_at"] = _utc_now_iso()
+                    entry["updated_at"] = entry["released_at"]
+                    is_active = False
+            if is_active:
+                active_rows.append(entry)
+            else:
+                historical_rows.append(entry)
+        active_rows.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")))
+        historical_rows.sort(
+            key=lambda item: (str(item.get("updated_at") or item.get("created_at") or ""), str(item.get("id") or "")),
+            reverse=True,
+        )
+        historical_rows = historical_rows[: self._db_lock_history_limit]
+        merged = active_rows + list(reversed(historical_rows))
+        return merged
+
+    def _sanitize_state_inplace(self, state: Dict[str, Any]) -> None:
+        state["pending_database_sync"] = self._sanitize_pending_database_sync_rows(state.get("pending_database_sync"))
+        state["database_operation_locks"] = self._sanitize_database_operation_locks(state.get("database_operation_locks"))
+        next_batches: List[Dict[str, Any]] = []
+        for item in state.get("batches", []) if isinstance(state.get("batches"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            row = dict(item)
+            row["status_history"] = self._tail_list(row.get("status_history"), limit=self._status_history_limit)
+            row["apply_history"] = self._tail_list(row.get("apply_history"), limit=self._apply_history_limit)
+            row["rollback_history"] = self._tail_list(row.get("rollback_history"), limit=self._rollback_history_limit)
+            row["last_error"] = self._truncate_text(row.get("last_error"))
+            runtime = dict(row.get("apply_runtime") or {}) if isinstance(row.get("apply_runtime"), dict) else None
+            if runtime is not None:
+                runtime["message"] = self._truncate_text(runtime.get("message"))
+                runtime["error"] = self._truncate_text(runtime.get("error"))
+            row["apply_runtime"] = runtime
+            next_batches.append(row)
+        state["batches"] = next_batches
 
     @staticmethod
     def _normalize_method_row(raw: Dict[str, Any], *, default_now: str = "") -> Dict[str, Any]:
@@ -436,21 +687,49 @@ class MmpLifecycleAdminStore:
     @staticmethod
     def _append_status_history(row: Dict[str, Any], *, status: str, event: str, note: str = "") -> Dict[str, Any]:
         history = list(row.get("status_history") or [])
-        history.append(
-            {
-                "at": _utc_now_iso(),
-                "status": str(status or "").strip().lower(),
-                "event": str(event or "").strip().lower(),
-                "note": str(note or "").strip(),
-            }
-        )
+        entry = {
+            "at": _utc_now_iso(),
+            "status": str(status or "").strip().lower(),
+            "event": str(event or "").strip().lower(),
+            "note": str(note or "").strip(),
+        }
+        if history and isinstance(history[-1], dict):
+            last = history[-1]
+            if (
+                str(last.get("status") or "").strip().lower() == entry["status"]
+                and str(last.get("event") or "").strip().lower() == entry["event"]
+                and str(last.get("note") or "").strip() == entry["note"]
+            ):
+                last["at"] = entry["at"]
+                history[-1] = last
+                row["status_history"] = history
+                return row
+        history.append(entry)
         row["status_history"] = history
         return row
 
-    def list_batches(self) -> List[Dict[str, Any]]:
+    def _batch_summary_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(row or {})
+        status_history = list(payload.get("status_history") or []) if isinstance(payload.get("status_history"), list) else []
+        apply_history = list(payload.get("apply_history") or []) if isinstance(payload.get("apply_history"), list) else []
+        rollback_history = (
+            list(payload.get("rollback_history") or []) if isinstance(payload.get("rollback_history"), list) else []
+        )
+        payload["status_history_count"] = len(status_history)
+        payload["apply_history_count"] = len(apply_history)
+        payload["rollback_history_count"] = len(rollback_history)
+        payload["status_history"] = []
+        payload["apply_history"] = self._tail_list(apply_history, limit=1)
+        payload["rollback_history"] = self._tail_list(rollback_history, limit=1)
+        return payload
+
+    def list_batches(self, *, summary: bool = False) -> List[Dict[str, Any]]:
         with self._lock:
             state = self._read_state()
-            rows = [dict(item) for item in state.get("batches", []) if isinstance(item, dict)]
+            if summary:
+                rows = [self._batch_summary_row(item) for item in state.get("batches", []) if isinstance(item, dict)]
+            else:
+                rows = [dict(item) for item in state.get("batches", []) if isinstance(item, dict)]
         rows.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
         return rows
 
@@ -467,6 +746,70 @@ class MmpLifecycleAdminStore:
                     return dict(item)
         raise ValueError(f"Batch '{token}' not found")
 
+    def _resolve_saved_batch_file_path(self, batch_id: str, file_meta: Dict[str, Any]) -> Optional[Path]:
+        meta = dict(file_meta or {}) if isinstance(file_meta, dict) else {}
+        direct_path = str(meta.get("path") or "").strip()
+        if direct_path:
+            path_obj = Path(direct_path)
+            if path_obj.exists():
+                return path_obj
+        rel_path = str(meta.get("path_rel") or "").strip()
+        if rel_path:
+            path_obj = self.root_dir / rel_path
+            if path_obj.exists():
+                return path_obj
+        stored_name = str(meta.get("stored_name") or "").strip()
+        if batch_id and stored_name:
+            path_obj = self.batch_upload_dir / batch_id / stored_name
+            if path_obj.exists():
+                return path_obj
+        return None
+
+    def _clone_uploaded_files_from_batch(
+        self,
+        *,
+        source_batch: Dict[str, Any],
+        source_batch_id: str,
+        target_batch_id: str,
+    ) -> Dict[str, Any]:
+        files = dict(source_batch.get("files") or {}) if isinstance(source_batch.get("files"), dict) else {}
+        target_dir = self.batch_upload_dir / target_batch_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        cloned_files: Dict[str, Any] = {
+            "compounds": None,
+            "experiments": None,
+            "generated_property_import": None,
+        }
+        now = _utc_now_iso()
+        for kind in ("compounds", "experiments"):
+            source_meta = dict(files.get(kind) or {}) if isinstance(files.get(kind), dict) else {}
+            if not source_meta:
+                continue
+            source_path = self._resolve_saved_batch_file_path(source_batch_id, source_meta)
+            if source_path is None:
+                raise ValueError(
+                    f"Cannot clone batch '{source_batch_id}': missing saved {kind} file. Please re-upload and retry."
+                )
+            suffix = source_path.suffix or Path(str(source_meta.get("stored_name") or f"{kind}.tsv")).suffix or ".tsv"
+            stored_name = f"{kind}{suffix}"
+            target_path = target_dir / stored_name
+            shutil.copy2(source_path, target_path)
+            try:
+                path_rel = str(target_path.relative_to(self.root_dir))
+            except Exception:
+                path_rel = ""
+            cloned_files[kind] = {
+                "batch_id": target_batch_id,
+                "stored_name": stored_name,
+                "original_name": str(source_meta.get("original_name") or source_meta.get("stored_name") or stored_name),
+                "size": int(target_path.stat().st_size),
+                "uploaded_at": now,
+                "path": str(target_path),
+                "path_rel": path_rel,
+                "column_config": dict(source_meta.get("column_config") or {}),
+            }
+        return cloned_files
+
     def create_batch(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         raw = payload if isinstance(payload, dict) else {}
         patch = self._normalize_batch_payload(raw, for_update=False)
@@ -474,6 +817,8 @@ class MmpLifecycleAdminStore:
         if not name:
             raise ValueError("batch name is required")
         batch_id = _normalize_batch_id(str(raw.get("id") or "").strip())
+        clone_from_batch_id = str(raw.get("clone_from_batch_id") or "").strip()
+        clone_uploaded_files = _to_bool(raw.get("clone_uploaded_files"), default=True)
         now = _utc_now_iso()
         entry = {
             "id": batch_id,
@@ -482,6 +827,7 @@ class MmpLifecycleAdminStore:
             "notes": str(patch.get("notes") or ""),
             "status": "draft",
             "selected_database_id": str(patch.get("selected_database_id") or ""),
+            "source_batch_id": clone_from_batch_id,
             "created_at": now,
             "updated_at": now,
             "files": {
@@ -502,7 +848,7 @@ class MmpLifecycleAdminStore:
                     "at": now,
                     "status": "draft",
                     "event": "created",
-                    "note": "",
+                    "note": (f"forked from {clone_from_batch_id}" if clone_from_batch_id else ""),
                 }
             ],
         }
@@ -511,9 +857,26 @@ class MmpLifecycleAdminStore:
             for item in state.get("batches", []):
                 if str((item or {}).get("id") or "").strip() == batch_id:
                     raise ValueError(f"Batch '{batch_id}' already exists")
+            if clone_from_batch_id and clone_uploaded_files:
+                source_batch = next(
+                    (
+                        dict(item)
+                        for item in state.get("batches", [])
+                        if isinstance(item, dict) and str(item.get("id") or "").strip() == clone_from_batch_id
+                    ),
+                    None,
+                )
+                if source_batch is None:
+                    raise ValueError(f"Source batch '{clone_from_batch_id}' not found for clone")
+                entry["files"] = self._clone_uploaded_files_from_batch(
+                    source_batch=source_batch,
+                    source_batch_id=clone_from_batch_id,
+                    target_batch_id=batch_id,
+                )
             state["batches"].append(entry)
             self._write_state(state)
-        (self.batch_upload_dir / batch_id).mkdir(parents=True, exist_ok=True)
+        if not (clone_from_batch_id and clone_uploaded_files):
+            (self.batch_upload_dir / batch_id).mkdir(parents=True, exist_ok=True)
         return entry
 
     def update_batch(self, batch_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -527,25 +890,8 @@ class MmpLifecycleAdminStore:
                 if str((item or {}).get("id") or "").strip() != token:
                     continue
                 row = dict(item)
-                before_database_id = str(row.get("selected_database_id") or "").strip()
                 for key, value in patch.items():
                     row[key] = value
-                if "selected_database_id" in patch:
-                    next_database_id = str(patch.get("selected_database_id") or "").strip()
-                    if next_database_id != before_database_id:
-                        row["status"] = "draft"
-                        row["apply_runtime"] = None
-                        row["last_error"] = ""
-                        row["last_check"] = None
-                        row["review"] = None
-                        row["approval"] = None
-                        row["rejection"] = None
-                        row = self._append_status_history(
-                            row,
-                            status="draft",
-                            event="database_changed",
-                            note=f"{before_database_id} -> {next_database_id}",
-                        )
                 row["updated_at"] = _utc_now_iso()
                 state["batches"][index] = row
                 self._write_state(state)
@@ -793,6 +1139,20 @@ class MmpLifecycleAdminStore:
         now = _utc_now_iso()
         with self._lock:
             state = self._read_state()
+            db_token = str(database_id or "").strip()
+            if db_token:
+                for item in state.get("batches", []):
+                    row_existing = dict(item or {})
+                    existing_batch_id = str(row_existing.get("id") or "").strip()
+                    if not existing_batch_id or existing_batch_id == token:
+                        continue
+                    runtime_existing = dict(row_existing.get("apply_runtime") or {})
+                    phase = str(runtime_existing.get("phase") or "").strip().lower()
+                    runtime_db = str(runtime_existing.get("database_id") or row_existing.get("selected_database_id") or "").strip()
+                    if runtime_db == db_token and phase in {"queued", "running"}:
+                        raise ValueError(
+                            f"Database '{db_token}' is already applying in batch '{existing_batch_id}'."
+                        )
             for index, item in enumerate(state.get("batches", [])):
                 if str((item or {}).get("id") or "").strip() != token:
                     continue
@@ -920,7 +1280,7 @@ class MmpLifecycleAdminStore:
     def mark_apply_failed(self, batch_id: str, *, task_id: str, error: str) -> Dict[str, Any]:
         token = str(batch_id or "").strip()
         task_token = str(task_id or "").strip()
-        error_text = str(error or "").strip()
+        error_text = self._truncate_text(error)
         if not token or not task_token:
             raise ValueError("batch_id and task_id are required")
         now = _utc_now_iso()
@@ -949,6 +1309,130 @@ class MmpLifecycleAdminStore:
                 row["apply_runtime"] = runtime
                 row["last_error"] = error_text
                 row = self._append_status_history(row, status="failed", event="apply_failed", note=error_text[:240])
+                row["updated_at"] = now
+                state["batches"][index] = row
+                self._write_state(state)
+                return row
+        raise ValueError(f"Batch '{token}' not found")
+
+    def mark_delete_queued(
+        self,
+        batch_id: str,
+        *,
+        task_id: str,
+        database_id: str = "",
+        import_batch_id: str = "",
+        rollback_compounds: bool = False,
+        rollback_experiments: bool = False,
+    ) -> Dict[str, Any]:
+        token = str(batch_id or "").strip()
+        task_token = str(task_id or "").strip()
+        if not token or not task_token:
+            raise ValueError("batch_id and task_id are required")
+        now = _utc_now_iso()
+        with self._lock:
+            state = self._read_state()
+            for index, item in enumerate(state.get("batches", [])):
+                if str((item or {}).get("id") or "").strip() != token:
+                    continue
+                row = dict(item)
+                row["status"] = "deleting"
+                row["apply_runtime"] = {
+                    "task_id": task_token,
+                    "operation": "delete",
+                    "phase": "deleting",
+                    "stage": "queued",
+                    "message": "Delete queued",
+                    "database_id": str(database_id or "").strip(),
+                    "import_batch_id": str(import_batch_id or "").strip(),
+                    "rollback_compounds": bool(rollback_compounds),
+                    "rollback_experiments": bool(rollback_experiments),
+                    "queued_at": now,
+                    "started_at": "",
+                    "finished_at": "",
+                    "updated_at": now,
+                    "error": "",
+                }
+                row["last_error"] = ""
+                row = self._append_status_history(row, status="deleting", event="delete_queued", note=task_token)
+                row["updated_at"] = now
+                state["batches"][index] = row
+                self._write_state(state)
+                return row
+        raise ValueError(f"Batch '{token}' not found")
+
+    def mark_delete_running(self, batch_id: str, *, task_id: str, stage: str = "", message: str = "") -> Dict[str, Any]:
+        token = str(batch_id or "").strip()
+        task_token = str(task_id or "").strip()
+        if not token or not task_token:
+            raise ValueError("batch_id and task_id are required")
+        now = _utc_now_iso()
+        stage_token = str(stage or "").strip() or "running"
+        message_token = str(message or "").strip() or "Deleting"
+        with self._lock:
+            state = self._read_state()
+            for index, item in enumerate(state.get("batches", [])):
+                if str((item or {}).get("id") or "").strip() != token:
+                    continue
+                row = dict(item)
+                runtime = dict(row.get("apply_runtime") or {})
+                current_task = str(runtime.get("task_id") or "").strip()
+                if current_task and current_task != task_token:
+                    raise ValueError(f"Batch '{token}' has another active task")
+                runtime["task_id"] = task_token
+                runtime["operation"] = "delete"
+                runtime["phase"] = "deleting"
+                runtime["stage"] = stage_token
+                runtime["message"] = message_token
+                if not str(runtime.get("queued_at") or "").strip():
+                    runtime["queued_at"] = now
+                if not str(runtime.get("started_at") or "").strip():
+                    runtime["started_at"] = now
+                runtime["finished_at"] = ""
+                runtime["updated_at"] = now
+                runtime["error"] = ""
+                row["status"] = "deleting"
+                row["apply_runtime"] = runtime
+                row["last_error"] = ""
+                row["updated_at"] = now
+                state["batches"][index] = row
+                self._write_state(state)
+                return row
+        raise ValueError(f"Batch '{token}' not found")
+
+    def mark_delete_failed(self, batch_id: str, *, task_id: str, error: str) -> Dict[str, Any]:
+        token = str(batch_id or "").strip()
+        task_token = str(task_id or "").strip()
+        error_text = self._truncate_text(error)
+        if not token or not task_token:
+            raise ValueError("batch_id and task_id are required")
+        now = _utc_now_iso()
+        with self._lock:
+            state = self._read_state()
+            for index, item in enumerate(state.get("batches", [])):
+                if str((item or {}).get("id") or "").strip() != token:
+                    continue
+                row = dict(item)
+                runtime = dict(row.get("apply_runtime") or {})
+                current_task = str(runtime.get("task_id") or "").strip()
+                if current_task and current_task != task_token:
+                    raise ValueError(f"Batch '{token}' has another active task")
+                runtime["task_id"] = task_token
+                runtime["operation"] = "delete"
+                runtime["phase"] = "failed"
+                runtime["stage"] = "delete_failed"
+                runtime["message"] = error_text
+                if not str(runtime.get("queued_at") or "").strip():
+                    runtime["queued_at"] = now
+                if not str(runtime.get("started_at") or "").strip():
+                    runtime["started_at"] = now
+                runtime["finished_at"] = now
+                runtime["updated_at"] = now
+                runtime["error"] = error_text
+                row["status"] = "failed"
+                row["apply_runtime"] = runtime
+                row["last_error"] = error_text
+                row = self._append_status_history(row, status="failed", event="delete_failed", note=error_text[:240])
                 row["updated_at"] = now
                 state["batches"][index] = row
                 self._write_state(state)
@@ -1229,6 +1713,117 @@ class MmpLifecycleAdminStore:
         filtered.sort(key=lambda item: str(item.get("created_at") or ""))
         return filtered
 
+    def list_database_operation_locks(
+        self,
+        *,
+        database_id: str = "",
+        active_only: bool = True,
+    ) -> List[Dict[str, Any]]:
+        db_token = str(database_id or "").strip()
+        with self._lock:
+            state = self._read_state()
+            rows = [dict(item) for item in state.get("database_operation_locks", []) if isinstance(item, dict)]
+        filtered: List[Dict[str, Any]] = []
+        for item in rows:
+            row = dict(item)
+            if db_token and str(row.get("database_id") or "").strip() != db_token:
+                continue
+            status = str(row.get("status") or "").strip().lower()
+            if active_only and status != "active":
+                continue
+            filtered.append(row)
+        filtered.sort(
+            key=lambda item: (
+                str(item.get("created_at") or ""),
+                str(item.get("id") or ""),
+            )
+        )
+        return filtered
+
+    def acquire_database_operation_lock(
+        self,
+        *,
+        database_id: str,
+        operation: str,
+        batch_id: str = "",
+        task_id: str = "",
+        note: str = "",
+    ) -> Dict[str, Any]:
+        db_token = str(database_id or "").strip()
+        op_token = str(operation or "").strip().lower() or "update"
+        if not db_token:
+            raise ValueError("database_id is required")
+        now = _utc_now_iso()
+        with self._lock:
+            state = self._read_state()
+            locks = [dict(item) for item in state.get("database_operation_locks", []) if isinstance(item, dict)]
+            for row in locks:
+                if str(row.get("status") or "").strip().lower() != "active":
+                    continue
+                if str(row.get("database_id") or "").strip() != db_token:
+                    continue
+                holder_op = str(row.get("operation") or "").strip().lower() or "update"
+                holder_batch = str(row.get("batch_id") or "").strip()
+                holder_task = str(row.get("task_id") or "").strip()
+                holder_token = holder_task or holder_batch or str(row.get("id") or "").strip()
+                raise ValueError(
+                    f"Database '{db_token}' is busy with {holder_op} ({holder_token})."
+                )
+            entry = {
+                "id": f"dblock_{uuid.uuid4().hex[:12]}",
+                "database_id": db_token,
+                "operation": op_token,
+                "batch_id": str(batch_id or "").strip(),
+                "task_id": str(task_id or "").strip(),
+                "note": self._truncate_text(note, limit=512),
+                "status": "active",
+                "created_at": now,
+                "updated_at": now,
+                "released_at": "",
+                "error": "",
+            }
+            locks.append(entry)
+            state["database_operation_locks"] = locks
+            self._write_state(state)
+            return entry
+
+    def release_database_operation_lock(
+        self,
+        lock_id: str,
+        *,
+        status: str = "released",
+        error: str = "",
+    ) -> Dict[str, Any]:
+        token = str(lock_id or "").strip()
+        if not token:
+            raise ValueError("lock_id is required")
+        status_token = str(status or "released").strip().lower()
+        if status_token not in {"released", "failed", "expired", "canceled"}:
+            status_token = "released"
+        now = _utc_now_iso()
+        err = self._truncate_text(error)
+        with self._lock:
+            state = self._read_state()
+            locks = [dict(item) for item in state.get("database_operation_locks", []) if isinstance(item, dict)]
+            for index, item in enumerate(locks):
+                if str(item.get("id") or "").strip() != token:
+                    continue
+                row = dict(item)
+                current_status = str(row.get("status") or "").strip().lower()
+                if current_status == "active":
+                    row["status"] = status_token
+                    row["updated_at"] = now
+                    row["released_at"] = now
+                    if err:
+                        row["error"] = err
+                elif err and not str(row.get("error") or "").strip():
+                    row["error"] = err
+                locks[index] = row
+                state["database_operation_locks"] = locks
+                self._write_state(state)
+                return row
+        raise ValueError(f"Database operation lock '{token}' not found")
+
     def enqueue_database_sync(
         self,
         *,
@@ -1302,7 +1897,7 @@ class MmpLifecycleAdminStore:
                 row["status"] = "applied"
                 row["updated_at"] = now
                 row["applied_at"] = now
-                row["result"] = dict(result or {})
+                row["result"] = self._normalize_sync_result_payload(result)
                 row["error"] = ""
                 queue[index] = row
                 state["pending_database_sync"] = queue
@@ -1315,7 +1910,7 @@ class MmpLifecycleAdminStore:
         if not token:
             raise ValueError("entry_id is required")
         now = _utc_now_iso()
-        err = str(error or "").strip()
+        err = self._truncate_text(error)
         with self._lock:
             state = self._read_state()
             queue = [dict(item) for item in state.get("pending_database_sync", []) if isinstance(item, dict)]

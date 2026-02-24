@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import math
 import os
@@ -9,6 +10,7 @@ import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -36,13 +38,13 @@ def _safe_json_object(payload: Any) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _float_equal(left: Any, right: Any, *, eps: float = 1e-12) -> bool:
+def _float_equal(left: Any, right: Any, *, eps: float = 1e-6) -> bool:
     try:
         lv = float(left)
         rv = float(right)
     except Exception:
         return False
-    return abs(lv - rv) <= eps
+    return math.isclose(lv, rv, rel_tol=1e-9, abs_tol=eps)
 
 
 def _chunked(items: List[str], size: int = 1000) -> Iterable[List[str]]:
@@ -191,6 +193,15 @@ def _to_bool(value: Any, default: bool) -> bool:
     if token in {"0", "false", "no", "off"}:
         return False
     return bool(default)
+
+
+def _value_error_http_status(exc: Exception, *, default_status: int = 400) -> int:
+    message = _read_text(exc).lower()
+    if "still building" in message:
+        return 409
+    if "is busy with" in message:
+        return 409
+    return int(default_status)
 
 
 def _normalize_check_policy(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -431,6 +442,55 @@ def _build_compounds_preview(path: str, *, max_rows: int) -> Dict[str, Any]:
     }
 
 
+def _collect_batch_compound_smiles_for_candidates(
+    *,
+    store: MmpLifecycleAdminStore,
+    batch: Dict[str, Any],
+    candidate_smiles: List[str],
+) -> set[str]:
+    batch_id = _read_text(batch.get("id"))
+    files = _safe_json_object(batch.get("files"))
+    compounds_meta = _safe_json_object(files.get("compounds"))
+    source_path = _resolve_batch_file_path(store=store, batch_id=batch_id, file_meta=compounds_meta)
+    if not source_path or not os.path.exists(source_path):
+        return set()
+
+    candidate_set = {str(item or "").strip() for item in candidate_smiles if str(item or "").strip()}
+    if not candidate_set:
+        return set()
+
+    column_config = _safe_json_object(compounds_meta.get("column_config"))
+    delimiter = _detect_delimiter(source_path)
+    matched_smiles: set[str] = set()
+    canonical_smiles_cache: Dict[str, str] = {}
+
+    with open(source_path, "r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter=delimiter)
+        headers = [_read_text(item) for item in (reader.fieldnames or []) if _read_text(item)]
+        if not headers:
+            return set()
+        smiles_col = _pick_column(
+            headers,
+            _read_text(column_config.get("smiles_column")),
+            ["smiles", "clean_smiles", "canonical_smiles", "molecule_smiles", "mol_smiles", "structure", "smi"],
+        )
+        if not smiles_col:
+            return set()
+        for row in reader:
+            raw_smiles = _read_text((row or {}).get(smiles_col))
+            if _is_missing_cell_value(raw_smiles):
+                continue
+            clean_smiles = _canonicalize_smiles_with_cache(raw_smiles, canonical_smiles_cache)
+            if not clean_smiles:
+                continue
+            if clean_smiles not in candidate_set:
+                continue
+            matched_smiles.add(clean_smiles)
+            if len(matched_smiles) >= len(candidate_set):
+                break
+    return matched_smiles
+
+
 def _resolve_batch_file_path(
     *,
     store: MmpLifecycleAdminStore,
@@ -467,6 +527,28 @@ def _resolve_database_target(database_id: str) -> Tuple[Dict[str, Any], Postgres
     return selected, target
 
 
+def _resolve_catalog_database(database_id: str, *, include_stats: bool = False) -> Dict[str, Any]:
+    token = _read_text(database_id)
+    if not token:
+        raise ValueError("database_id is required.")
+    catalog = _filter_lifecycle_catalog_databases(
+        mmp_database_registry.get_mmp_database_catalog(include_hidden=True, include_stats=include_stats)
+    )
+    for item in catalog.get("databases", []) if isinstance(catalog, dict) else []:
+        row = _safe_json_object(item)
+        if _read_text(row.get("id")) == token:
+            return row
+    raise ValueError(f"MMP database '{token}' is not found.")
+
+
+def _is_database_ready_for_update(database_entry: Dict[str, Any]) -> bool:
+    stats = _safe_json_object(database_entry.get("stats"))
+    compounds = stats.get("compounds")
+    rules = stats.get("rules")
+    pairs = stats.get("pairs")
+    return compounds is not None and rules is not None and pairs is not None
+
+
 def _extract_database_property_names(database_entry: Dict[str, Any]) -> List[str]:
     rows = database_entry.get("properties") if isinstance(database_entry, dict) else []
     output: List[str] = []
@@ -486,60 +568,57 @@ def _extract_database_property_names(database_entry: Dict[str, Any]) -> List[str
     return output
 
 
-def _sync_assay_methods_for_database(store: MmpLifecycleAdminStore, database_entry: Dict[str, Any]) -> Dict[str, Any]:
+def _sync_assay_methods_for_database(
+    store: MmpLifecycleAdminStore,
+    database_entry: Dict[str, Any],
+    *,
+    allow_auto_queue_updates: bool = False,
+) -> Dict[str, Any]:
     db_id = _read_text(database_entry.get("id"))
     if not db_id:
         return {"database_id": "", "changed": False}
     property_names = _extract_database_property_names(database_entry)
 
     # Auto-reconcile legacy property aliases to current assay method output names.
-    # This keeps DB catalog properties aligned with Assay Methods without requiring
-    # users to manually trigger method edits after each deployment.
-    try:
-        methods_for_db = []
-        for item in store.list_methods():
-            row = _safe_json_object(item)
-            reference = _read_text(row.get("reference"))
-            if reference and reference != db_id:
-                continue
-            output_prop = _read_text(row.get("output_property"))
-            if not output_prop:
-                continue
-            methods_for_db.append(row)
-        methods_for_db.sort(key=lambda row: _read_text(row.get("updated_at")), reverse=True)
-        methods_for_db.sort(key=lambda row: 0 if not _read_text(row.get("id")).startswith("method_auto_") else 1)
+    # This mutates admin state (queue entries), so it is disabled for read-only routes.
+    if allow_auto_queue_updates:
+        try:
+            methods_for_db = []
+            for item in store.list_methods():
+                row = _safe_json_object(item)
+                reference = _read_text(row.get("reference"))
+                if reference and reference != db_id:
+                    continue
+                output_prop = _read_text(row.get("output_property"))
+                if not output_prop:
+                    continue
+                methods_for_db.append(row)
+            methods_for_db.sort(key=lambda row: _read_text(row.get("updated_at")), reverse=True)
+            methods_for_db.sort(key=lambda row: 0 if not _read_text(row.get("id")).startswith("method_auto_") else 1)
 
-        desired_output_by_family: Dict[str, str] = {}
-        for row in methods_for_db:
-            output_prop = _read_text(row.get("output_property"))
-            family = _canonical_property_family(output_prop)
-            if not family or family in desired_output_by_family:
-                continue
-            desired_output_by_family[family] = output_prop
+            desired_output_by_family: Dict[str, str] = {}
+            for row in methods_for_db:
+                output_prop = _read_text(row.get("output_property"))
+                family = _canonical_property_family(output_prop)
+                if not family or family in desired_output_by_family:
+                    continue
+                desired_output_by_family[family] = output_prop
 
-        queued_auto_renames = 0
-        for _, desired_output in desired_output_by_family.items():
-            if any(_read_text(item).lower() == desired_output.lower() for item in property_names):
-                continue
-            alias_source = _pick_family_alias_rename_source(property_names, desired_output)
-            if not alias_source:
-                continue
-            store.enqueue_database_sync(
-                database_id=db_id,
-                operation="rename_property",
-                payload={"old_name": alias_source, "new_name": desired_output},
-                dedupe_key=f"rename_property:{alias_source.lower()}->{desired_output.lower()}",
-            )
-            queued_auto_renames += 1
-
-        if queued_auto_renames > 0:
-            _, target = _resolve_database_target(db_id)
-            _apply_pending_property_sync(db_id, target)
-            refreshed, _ = _resolve_database_target(db_id)
-            property_names = _extract_database_property_names(refreshed)
-    except Exception:
-        # Sync should remain resilient; failed auto-reconcile should not block UI/API.
-        pass
+            for _, desired_output in desired_output_by_family.items():
+                if any(_read_text(item).lower() == desired_output.lower() for item in property_names):
+                    continue
+                alias_source = _pick_family_alias_rename_source(property_names, desired_output)
+                if not alias_source:
+                    continue
+                store.enqueue_database_sync(
+                    database_id=db_id,
+                    operation="rename_property",
+                    payload={"old_name": alias_source, "new_name": desired_output},
+                    dedupe_key=f"rename_property:{alias_source.lower()}->{desired_output.lower()}",
+                )
+        except Exception:
+            # Sync should remain resilient; failed auto-reconcile should not block UI/API.
+            pass
 
     pending_rows = store.list_pending_database_sync(database_id=db_id, pending_only=True)
     if pending_rows:
@@ -605,7 +684,43 @@ def _sync_assay_methods_for_catalog(store: MmpLifecycleAdminStore, catalog: Dict
         _sync_assay_methods_for_database(store, item)
 
 
-def _extract_compound_import_options(payload: Dict[str, Any]) -> Dict[str, Any]:
+@dataclass(frozen=True)
+class CompoundImportOptions:
+    output_dir: str
+    max_heavy_atoms: int
+    skip_attachment_enrichment: bool
+    attachment_force_recompute: bool
+    fragment_jobs: int
+    index_maintenance_work_mem_mb: int
+    index_work_mem_mb: int
+    index_parallel_workers: int
+    index_commit_every_flushes: int
+    incremental_index_shards: int
+    incremental_index_jobs: int
+    skip_incremental_analyze: bool
+    build_construct_tables: bool
+    build_constant_smiles_mol_index: bool
+
+    def to_setup_kwargs(self) -> Dict[str, Any]:
+        return {
+            "output_dir": self.output_dir,
+            "max_heavy_atoms": self.max_heavy_atoms,
+            "skip_attachment_enrichment": self.skip_attachment_enrichment,
+            "attachment_force_recompute": self.attachment_force_recompute,
+            "fragment_jobs": self.fragment_jobs,
+            "index_maintenance_work_mem_mb": self.index_maintenance_work_mem_mb,
+            "index_work_mem_mb": self.index_work_mem_mb,
+            "index_parallel_workers": self.index_parallel_workers,
+            "index_commit_every_flushes": self.index_commit_every_flushes,
+            "incremental_index_shards": self.incremental_index_shards,
+            "incremental_index_jobs": self.incremental_index_jobs,
+            "skip_incremental_analyze": self.skip_incremental_analyze,
+            "build_construct_tables": self.build_construct_tables,
+            "build_constant_smiles_mol_index": self.build_constant_smiles_mol_index,
+        }
+
+
+def _extract_compound_import_options(payload: Dict[str, Any]) -> CompoundImportOptions:
     cpu_count = max(1, int(os.cpu_count() or 1))
     auto_incremental_shards = max(1, min(8, cpu_count // 2))
     auto_incremental_jobs = max(1, min(auto_incremental_shards, cpu_count // 4 if cpu_count >= 4 else 1))
@@ -644,22 +759,22 @@ def _extract_compound_import_options(payload: Dict[str, Any]) -> Dict[str, Any]:
     if incremental_jobs > incremental_shards:
         incremental_jobs = incremental_shards
 
-    return {
-        "output_dir": str(payload.get("output_dir") or "lead_optimization/data").strip() or "lead_optimization/data",
-        "max_heavy_atoms": _to_int("max_heavy_atoms", 50),
-        "skip_attachment_enrichment": _to_bool("skip_attachment_enrichment", False),
-        "attachment_force_recompute": _to_bool("attachment_force_recompute", False),
-        "fragment_jobs": _to_int("fragment_jobs", 8),
-        "index_maintenance_work_mem_mb": _to_int("pg_index_maintenance_work_mem_mb", 2048),
-        "index_work_mem_mb": _to_int("pg_index_work_mem_mb", 64),
-        "index_parallel_workers": _to_int("pg_index_parallel_workers", 2),
-        "index_commit_every_flushes": _to_int("pg_index_commit_every_flushes", 1),
-        "incremental_index_shards": incremental_shards,
-        "incremental_index_jobs": incremental_jobs,
-        "skip_incremental_analyze": _to_bool("pg_skip_incremental_analyze", True),
-        "build_construct_tables": not _to_bool("pg_skip_construct_tables", False),
-        "build_constant_smiles_mol_index": not _to_bool("pg_skip_constant_smiles_mol_index", False),
-    }
+    return CompoundImportOptions(
+        output_dir=str(payload.get("output_dir") or "lead_optimization/data").strip() or "lead_optimization/data",
+        max_heavy_atoms=_to_int("max_heavy_atoms", 50),
+        skip_attachment_enrichment=_to_bool("skip_attachment_enrichment", False),
+        attachment_force_recompute=_to_bool("attachment_force_recompute", False),
+        fragment_jobs=_to_int("fragment_jobs", 8),
+        index_maintenance_work_mem_mb=_to_int("pg_index_maintenance_work_mem_mb", 2048),
+        index_work_mem_mb=_to_int("pg_index_work_mem_mb", 64),
+        index_parallel_workers=_to_int("pg_index_parallel_workers", 2),
+        index_commit_every_flushes=_to_int("pg_index_commit_every_flushes", 1),
+        incremental_index_shards=incremental_shards,
+        incremental_index_jobs=incremental_jobs,
+        skip_incremental_analyze=_to_bool("pg_skip_incremental_analyze", True),
+        build_construct_tables=not _to_bool("pg_skip_construct_tables", False),
+        build_constant_smiles_mol_index=not _to_bool("pg_skip_constant_smiles_mol_index", False),
+    )
 
 
 def _canonicalize_smiles(raw: str) -> str:
@@ -667,6 +782,27 @@ def _canonicalize_smiles(raw: str) -> str:
         return str(legacy_engine._canonicalize_smiles_for_lookup(raw, canonicalize=True) or "").strip()
     except Exception:
         return ""
+
+
+def _dataset_stats_payload(stats: verify_service.DatasetStats) -> Dict[str, int]:
+    return {
+        "compounds": int(stats.compounds),
+        "rules": int(stats.rules),
+        "pairs": int(stats.pairs),
+        "rule_environments": int(stats.rule_environments),
+    }
+
+
+def _dataset_delta_payload(
+    before: verify_service.DatasetStats,
+    after: verify_service.DatasetStats,
+) -> Dict[str, int]:
+    return {
+        "compounds": int(after.compounds - before.compounds),
+        "rules": int(after.rules - before.rules),
+        "pairs": int(after.pairs - before.pairs),
+        "rule_environments": int(after.rule_environments - before.rule_environments),
+    }
 
 
 def _normalize_value_transform(value: Any) -> str:
@@ -679,6 +815,8 @@ def _normalize_value_transform(value: Any) -> str:
         "to_ic50_um_from_pic50",
         "log10",
         "neg_log10",
+        "from_log10",
+        "from_neg_log10",
     }
     return token if token in allowed else "none"
 
@@ -688,7 +826,7 @@ def _apply_value_transform(value: float, transform: str) -> float:
     numeric = float(value)
     if op == "none":
         return numeric
-    if numeric <= 0:
+    if op in {"to_pic50_from_nm", "to_pic50_from_um", "log10", "neg_log10"} and numeric <= 0:
         raise ValueError(f"value must be > 0 for transform '{op}'")
     if op == "to_pic50_from_nm":
         return 9.0 - float(math.log10(numeric))
@@ -700,7 +838,11 @@ def _apply_value_transform(value: float, transform: str) -> float:
         return float(10.0 ** (6.0 - numeric))
     if op == "log10":
         return float(math.log10(numeric))
-    return float(-math.log10(numeric))
+    if op == "neg_log10":
+        return float(-math.log10(numeric))
+    if op == "from_log10":
+        return float(10.0 ** numeric)
+    return float(10.0 ** (-numeric))
 
 
 def _canonicalize_smiles_with_cache(raw_smiles: str, cache: Dict[str, str]) -> str:
@@ -1058,6 +1200,7 @@ def _build_property_import_from_experiments(
     database_id: str,
     mappings: List[Dict[str, Any]],
     row_limit: int,
+    allow_batch_compound_match: bool = True,
 ) -> Dict[str, Any]:
     batch_id = _read_text(batch.get("id"))
     experiments_file = _safe_json_object(_safe_json_object(batch.get("files")).get("experiments"))
@@ -1190,6 +1333,11 @@ def _build_property_import_from_experiments(
     ]
     candidate_smiles = sorted({str(row.get("clean_smiles") or "") for row in candidate_rows if str(row.get("clean_smiles") or "")})
     candidate_props = sorted({str(row.get("mapped_property") or "") for row in candidate_rows if str(row.get("mapped_property") or "")})
+    batch_compound_smiles = _collect_batch_compound_smiles_for_candidates(
+        store=store,
+        batch=batch,
+        candidate_smiles=candidate_smiles,
+    )
 
     compound_ids: Dict[str, int] = {}
     property_name_ids: Dict[str, int] = {}
@@ -1258,6 +1406,7 @@ def _build_property_import_from_experiments(
         will_import = False
         note = ""
         in_compound_table = False
+        in_compound_batch_file = False
         property_name_exists = False
         existing_value: Optional[float] = None
 
@@ -1280,7 +1429,9 @@ def _build_property_import_from_experiments(
             action = "SKIP_SHADOWED_DUPLICATE"
             note = "Same (SMILES, mapped_property) appears later; latest row will be applied."
         else:
-            in_compound_table = clean_smiles in compound_ids
+            in_compound_db = clean_smiles in compound_ids
+            in_compound_batch_file = clean_smiles in batch_compound_smiles
+            in_compound_table = in_compound_db or (allow_batch_compound_match and in_compound_batch_file)
             property_name_exists = mapped_property in property_name_ids
             existing_value = existing_values.get((clean_smiles, mapped_property))
 
@@ -1290,11 +1441,19 @@ def _build_property_import_from_experiments(
             elif not property_name_exists:
                 action = "INSERT_PROPERTY_NAME_AND_COMPOUND_PROPERTY"
                 will_import = True
-                note = "Property will be created and value inserted for this compound."
+                note = (
+                    "Property will be created and value inserted for this compound."
+                    if in_compound_db
+                    else "Compound is from current upload batch; property will be created and value inserted after compound import."
+                )
             elif existing_value is None:
                 action = "INSERT_COMPOUND_PROPERTY"
                 will_import = True
-                note = "No existing compound_property row; will insert."
+                note = (
+                    "No existing compound_property row; will insert."
+                    if in_compound_db
+                    else "Compound is from current upload batch; value will be inserted after compound import."
+                )
             elif _float_equal(existing_value, incoming_value):
                 action = "NOOP_VALUE_UNCHANGED"
                 will_import = True
@@ -1327,6 +1486,7 @@ def _build_property_import_from_experiments(
             "action": action,
             "will_import": bool(will_import),
             "in_compound_table": bool(in_compound_table),
+            "in_compound_batch_file": bool(in_compound_batch_file),
             "property_name_exists": bool(property_name_exists),
             "existing_value": existing_value,
             "note": note,
@@ -1399,6 +1559,7 @@ def _build_property_import_from_experiments(
         "rows_will_import": sum(1 for row in output_rows if bool(row.get("will_import"))),
         "rows_unmapped": sum(1 for row in output_rows if _read_text(row.get("action")) == "SKIP_UNMAPPED_PROPERTY"),
         "rows_unmatched_compound": sum(1 for row in output_rows if _read_text(row.get("action")) == "SKIP_UNMATCHED_COMPOUND"),
+        "rows_matched_by_batch_compounds": sum(1 for row in output_rows if bool(row.get("in_compound_batch_file"))),
         "rows_invalid": sum(
             1
             for row in output_rows
@@ -1433,6 +1594,7 @@ def _build_property_import_from_experiments(
         "action",
         "will_import",
         "in_compound_table",
+        "in_compound_batch_file",
         "property_name_exists",
         "existing_value",
         "note",
@@ -1469,6 +1631,42 @@ def register_mmp_lifecycle_admin_routes(
     store = MmpLifecycleAdminStore()
     apply_workers = max(1, int(os.getenv("LEAD_OPT_MMP_LIFECYCLE_APPLY_WORKERS", "1") or 1))
     apply_executor = ThreadPoolExecutor(max_workers=apply_workers, thread_name_prefix="mmp_lifecycle_apply")
+
+    def _assert_database_ready_for_update(database_id: str) -> Dict[str, Any]:
+        db_entry = _resolve_catalog_database(database_id, include_stats=True)
+        if not _is_database_ready_for_update(db_entry):
+            label = _read_text(db_entry.get("label") or db_entry.get("schema") or db_entry.get("id") or database_id)
+            raise ValueError(f"Database '{label}' is still building. Please wait until it is ready.")
+        return db_entry
+
+    def _acquire_database_update_lock(
+        *,
+        database_id: str,
+        operation: str,
+        batch_id: str = "",
+        task_id: str = "",
+        note: str = "",
+    ) -> Dict[str, Any]:
+        return store.acquire_database_operation_lock(
+            database_id=_read_text(database_id),
+            operation=_read_text(operation),
+            batch_id=_read_text(batch_id),
+            task_id=_read_text(task_id),
+            note=_read_text(note),
+        )
+
+    def _release_database_update_lock(lock_id: str, *, failed: bool = False, error: str = "") -> None:
+        token = _read_text(lock_id)
+        if not token:
+            return
+        try:
+            store.release_database_operation_lock(
+                token,
+                status="failed" if failed else "released",
+                error=_read_text(error),
+            )
+        except Exception as exc:
+            logger.warning("Failed releasing database operation lock %s: %s", token, exc)
 
     def _apply_batch_sync(batch_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         payload_obj = _safe_json_object(payload)
@@ -1507,7 +1705,7 @@ def register_mmp_lifecycle_admin_routes(
 
         _start_stage("preflight", "Preparing batch")
         selected, target = _resolve_database_target(database_id)
-        _sync_assay_methods_for_database(store, selected)
+        _sync_assay_methods_for_database(store, selected, allow_auto_queue_updates=True)
         files = _safe_json_object(batch.get("files"))
         compounds_file = _safe_json_object(files.get("compounds"))
         experiments_file = _safe_json_object(files.get("experiments"))
@@ -1577,7 +1775,7 @@ def register_mmp_lifecycle_admin_routes(
             if not structures_path or not os.path.exists(structures_path):
                 raise ValueError("Compound file not found for batch.")
             compound_cfg = _safe_json_object(compounds_file.get("column_config"))
-            compound_ok = setup_service.import_compound_batch(
+            compound_ok, compound_error = setup_service.import_compound_batch_with_diagnostics(
                 target,
                 structures_file=structures_path,
                 batch_id=import_batch_id,
@@ -1586,23 +1784,21 @@ def register_mmp_lifecycle_admin_routes(
                 smiles_column=_read_text(compound_cfg.get("smiles_column")),
                 id_column=_read_text(compound_cfg.get("id_column")),
                 canonicalize_smiles=True,
-                output_dir=compound_options["output_dir"],
-                max_heavy_atoms=compound_options["max_heavy_atoms"],
-                skip_attachment_enrichment=compound_options["skip_attachment_enrichment"],
-                attachment_force_recompute=compound_options["attachment_force_recompute"],
-                fragment_jobs=compound_options["fragment_jobs"],
-                index_maintenance_work_mem_mb=compound_options["index_maintenance_work_mem_mb"],
-                index_work_mem_mb=compound_options["index_work_mem_mb"],
-                index_parallel_workers=compound_options["index_parallel_workers"],
-                index_commit_every_flushes=compound_options["index_commit_every_flushes"],
-                incremental_index_shards=compound_options["incremental_index_shards"],
-                incremental_index_jobs=compound_options["incremental_index_jobs"],
-                skip_incremental_analyze=compound_options["skip_incremental_analyze"],
-                build_construct_tables=compound_options["build_construct_tables"],
-                build_constant_smiles_mol_index=compound_options["build_constant_smiles_mol_index"],
+                **compound_options.to_setup_kwargs(),
                 overwrite_existing_batch=True,
             )
             if not compound_ok:
+                detail = _read_text(compound_error)
+                if not detail:
+                    detail = _read_text(
+                        setup_service.get_compound_import_failure_diagnostic(
+                            target,
+                            structures_file=structures_path,
+                            output_dir=compound_options.output_dir,
+                        )
+                    )
+                if detail:
+                    raise RuntimeError(f"Compound incremental import failed: {detail}")
                 raise RuntimeError("Compound incremental import failed")
             _finish_stage("import_compounds")
 
@@ -1695,6 +1891,9 @@ def register_mmp_lifecycle_admin_routes(
 
         _start_stage("finalize", "Finalizing apply")
         after = verify_service.fetch_dataset_stats(target)
+        before_payload = _dataset_stats_payload(before)
+        after_payload = _dataset_stats_payload(after)
+        delta_payload = _dataset_delta_payload(before, after)
         apply_id = f"apply_{uuid.uuid4().hex[:12]}"
         _finish_stage("finalize")
         timings_s["total"] = sum(value for value in timings_s.values())
@@ -1715,24 +1914,9 @@ def register_mmp_lifecycle_admin_routes(
                 "generated_property_file": generated_property_meta,
                 "timings_s": timings_s,
                 "pending_database_sync": pending_sync_result,
-                "before": {
-                    "compounds": before.compounds,
-                    "rules": before.rules,
-                    "pairs": before.pairs,
-                    "rule_environments": before.rule_environments,
-                },
-                "after": {
-                    "compounds": after.compounds,
-                    "rules": after.rules,
-                    "pairs": after.pairs,
-                    "rule_environments": after.rule_environments,
-                },
-                "delta": {
-                    "compounds": after.compounds - before.compounds,
-                    "rules": after.rules - before.rules,
-                    "pairs": after.pairs - before.pairs,
-                    "rule_environments": after.rule_environments - before.rule_environments,
-                },
+                "before": before_payload,
+                "after": after_payload,
+                "delta": delta_payload,
             },
         )
         if _read_text(updated_batch.get("selected_database_id")) != database_id:
@@ -1754,24 +1938,9 @@ def register_mmp_lifecycle_admin_routes(
             "compounds_skipped_reason": compounds_skipped_reason,
             "experiments_skipped_reason": experiments_skipped_reason,
             "timings_s": timings_s,
-            "before": {
-                "compounds": before.compounds,
-                "rules": before.rules,
-                "pairs": before.pairs,
-                "rule_environments": before.rule_environments,
-            },
-            "after": {
-                "compounds": after.compounds,
-                "rules": after.rules,
-                "pairs": after.pairs,
-                "rule_environments": after.rule_environments,
-            },
-            "delta": {
-                "compounds": after.compounds - before.compounds,
-                "rules": after.rules - before.rules,
-                "pairs": after.pairs - before.pairs,
-                "rule_environments": after.rule_environments - before.rule_environments,
-            },
+            "before": before_payload,
+            "after": after_payload,
+            "delta": delta_payload,
         }
 
     @app.route('/api/admin/lead_optimization/mmp_lifecycle/overview', methods=['GET'])
@@ -1806,14 +1975,30 @@ def register_mmp_lifecycle_admin_routes(
                     for item in pending_rows
                     if _read_text(_safe_json_object(item).get("database_id")) in allowed_database_ids
                 ]
+            active_db_locks = store.list_database_operation_locks(active_only=True)
+            if allowed_database_ids:
+                active_db_locks = [
+                    _safe_json_object(item)
+                    for item in active_db_locks
+                    if _read_text(_safe_json_object(item).get("database_id")) in allowed_database_ids
+                ]
+            busy_operations_by_database: Dict[str, int] = {}
+            for item in active_db_locks:
+                row = _safe_json_object(item)
+                db_id = _read_text(row.get("database_id"))
+                if not db_id:
+                    continue
+                busy_operations_by_database[db_id] = int(busy_operations_by_database.get(db_id, 0)) + 1
             return jsonify(
                 {
                     "databases": catalog.get("databases", []),
                     "default_database_id": catalog.get("default_database_id", ""),
                     "methods": store.list_methods(),
-                    "batches": store.list_batches(),
+                    "batches": store.list_batches(summary=True),
                     "pending_database_sync": pending_rows,
                     "pending_sync_by_database": pending_sync_by_database,
+                    "database_operation_locks": active_db_locks,
+                    "busy_operations_by_database": busy_operations_by_database,
                     "updated_at": catalog.get("generated_at") if isinstance(catalog, dict) else "",
                 }
             )
@@ -1850,8 +2035,9 @@ def register_mmp_lifecycle_admin_routes(
     @app.route('/api/admin/lead_optimization/mmp_lifecycle/batches', methods=['GET'])
     @require_api_token
     def mmp_lifecycle_list_batches():
+        include_full_history = _to_bool(request.args.get("include_full_history"), False)
         try:
-            return jsonify({"batches": store.list_batches()})
+            return jsonify({"batches": store.list_batches(summary=(not include_full_history))})
         except Exception as exc:
             logger.exception('Failed to list lifecycle batches: %s', exc)
             return jsonify({'error': f'Failed to list batches: {exc}'}), 500
@@ -1866,7 +2052,7 @@ def register_mmp_lifecycle_admin_routes(
             batch = store.create_batch(payload)
             return jsonify({"batch": batch}), 201
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": str(exc)}), _value_error_http_status(exc)
         except Exception as exc:
             logger.exception('Failed to create lifecycle batch: %s', exc)
             return jsonify({'error': f'Failed to create batch: {exc}'}), 500
@@ -1892,7 +2078,7 @@ def register_mmp_lifecycle_admin_routes(
             batch = store.update_batch(batch_id, payload)
             return jsonify({"batch": batch})
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": str(exc)}), _value_error_http_status(exc)
         except Exception as exc:
             logger.exception('Failed to update lifecycle batch %s: %s', batch_id, exc)
             return jsonify({'error': f'Failed to update batch: {exc}'}), 500
@@ -1932,7 +2118,7 @@ def register_mmp_lifecycle_admin_routes(
                 }
             )
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": str(exc)}), _value_error_http_status(exc)
         except Exception as exc:
             logger.exception('Failed to transition lifecycle batch status %s: %s', batch_id, exc)
             return jsonify({'error': f'Failed to transition batch status: {exc}'}), 500
@@ -1940,9 +2126,150 @@ def register_mmp_lifecycle_admin_routes(
     @app.route('/api/admin/lead_optimization/mmp_lifecycle/batches/<batch_id>', methods=['DELETE'])
     @require_api_token
     def mmp_lifecycle_delete_batch(batch_id: str):
+        payload = _safe_json_object(request.get_json(silent=True) or {})
+        lock_id = ""
         try:
-            store.delete_batch(batch_id)
-            return jsonify({"ok": True})
+            batch = store.get_batch(batch_id)
+            current_runtime = _safe_json_object(batch.get("apply_runtime"))
+            current_phase = _read_text(current_runtime.get("phase")).lower()
+            if current_phase in {"queued", "running", "deleting"}:
+                return jsonify({"error": f"Batch has an active task. Current phase: {current_phase}."}), 409
+
+            apply_history = batch.get("apply_history") if isinstance(batch.get("apply_history"), list) else []
+            requested_apply_id = _read_text(payload.get("apply_id"))
+            requested_database_id = _read_text(payload.get("database_id") or batch.get("selected_database_id"))
+
+            selected_apply: Optional[Dict[str, Any]] = None
+            for item in reversed(apply_history):
+                row = _safe_json_object(item)
+                apply_id = _read_text(row.get("apply_id"))
+                apply_db_id = _read_text(row.get("database_id"))
+                if requested_apply_id and apply_id != requested_apply_id:
+                    continue
+                if requested_database_id and apply_db_id and apply_db_id != requested_database_id:
+                    continue
+                selected_apply = row
+                break
+
+            if requested_apply_id and not selected_apply:
+                return jsonify({"error": "Requested apply_id not found in batch apply history."}), 400
+
+            database_id = _read_text(
+                payload.get("database_id")
+                or (selected_apply or {}).get("database_id")
+                or batch.get("selected_database_id")
+            )
+            import_batch_id = _read_text((selected_apply or {}).get("import_batch_id") or batch_id)
+            rollback_compounds = bool(payload.get("rollback_compounds", True)) and bool(
+                (selected_apply or {}).get("import_compounds")
+            )
+            rollback_experiments = bool(payload.get("rollback_experiments", True)) and bool(
+                (selected_apply or {}).get("import_experiments")
+            )
+            cleanup_required = bool(selected_apply) and bool(rollback_compounds or rollback_experiments)
+
+            if cleanup_required:
+                if not database_id:
+                    return jsonify({"error": "database_id is required for database cleanup delete."}), 400
+                _assert_database_ready_for_update(database_id)
+                try:
+                    lock_row = _acquire_database_update_lock(
+                        database_id=database_id,
+                        operation="delete_batch",
+                        batch_id=batch_id,
+                        note="delete_with_db_cleanup",
+                    )
+                except ValueError as exc:
+                    return jsonify({"error": str(exc)}), 409
+                lock_id = _read_text(lock_row.get("id"))
+
+            task_id = f"delete_task_{uuid.uuid4().hex[:12]}"
+            queued_batch = store.mark_delete_queued(
+                batch_id,
+                task_id=task_id,
+                database_id=database_id,
+                import_batch_id=import_batch_id,
+                rollback_compounds=rollback_compounds,
+                rollback_experiments=rollback_experiments,
+            )
+
+            worker_payload = dict(payload)
+            worker_payload["database_id"] = database_id
+            worker_payload["import_batch_id"] = import_batch_id
+            worker_payload["rollback_compounds"] = bool(rollback_compounds)
+            worker_payload["rollback_experiments"] = bool(rollback_experiments)
+
+            def _run_delete_task() -> None:
+                lock_failed = False
+                lock_error = ""
+                try:
+                    store.mark_delete_running(batch_id, task_id=task_id, stage="preflight", message="Deleting batch")
+                    if cleanup_required:
+                        _, target = _resolve_database_target(database_id)
+                        if bool(worker_payload.get("rollback_experiments")):
+                            store.mark_delete_running(
+                                batch_id,
+                                task_id=task_id,
+                                stage="delete_experiments",
+                                message="Deleting experiment batch",
+                            )
+                            property_deleted = setup_service.delete_property_batch(
+                                target,
+                                batch_id=import_batch_id,
+                            )
+                            if not property_deleted:
+                                raise RuntimeError("Property batch cleanup failed while deleting batch.")
+                        if bool(worker_payload.get("rollback_compounds")):
+                            store.mark_delete_running(
+                                batch_id,
+                                task_id=task_id,
+                                stage="delete_compounds",
+                                message="Deleting compound batch",
+                            )
+                            compound_options = _extract_compound_import_options(worker_payload)
+                            compound_deleted = setup_service.delete_compound_batch(
+                                target,
+                                batch_id=import_batch_id,
+                                **compound_options.to_setup_kwargs(),
+                            )
+                            if not compound_deleted:
+                                raise RuntimeError("Compound batch cleanup failed while deleting batch.")
+                    store.mark_delete_running(batch_id, task_id=task_id, stage="finalize", message="Finalizing delete")
+                    store.delete_batch(batch_id)
+                    logger.info("Lifecycle batch deleted: batch=%s task=%s", batch_id, task_id)
+                except Exception as exc:
+                    err_text = str(exc or "delete failed")
+                    lock_failed = True
+                    lock_error = err_text
+                    logger.exception("Lifecycle batch delete failed: batch=%s task=%s err=%s", batch_id, task_id, err_text)
+                    try:
+                        store.mark_delete_failed(batch_id, task_id=task_id, error=err_text)
+                    except Exception:
+                        logger.exception("Failed marking lifecycle batch delete as failed: batch=%s task=%s", batch_id, task_id)
+                finally:
+                    if lock_id:
+                        _release_database_update_lock(lock_id, failed=lock_failed, error=lock_error)
+
+            try:
+                apply_executor.submit(_run_delete_task)
+            except Exception as exc:
+                if lock_id:
+                    _release_database_update_lock(lock_id, failed=True, error=str(exc))
+                    lock_id = ""
+                store.mark_delete_failed(batch_id, task_id=task_id, error=f"Failed to submit delete task: {exc}")
+                raise RuntimeError(f"Failed to enqueue delete task: {exc}") from exc
+
+            return jsonify(
+                {
+                    "queued": True,
+                    "task_id": task_id,
+                    "database_lock_id": lock_id,
+                    "batch": queued_batch,
+                    "cleanup_required": cleanup_required,
+                    "rollback_compounds": bool(rollback_compounds),
+                    "rollback_experiments": bool(rollback_experiments),
+                }
+            )
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 404
         except Exception as exc:
@@ -1972,7 +2299,7 @@ def register_mmp_lifecycle_admin_routes(
             )
             return jsonify({"batch": batch})
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": str(exc)}), _value_error_http_status(exc)
         except Exception as exc:
             logger.exception('Failed to upload compound file for batch %s: %s', batch_id, exc)
             return jsonify({'error': f'Failed to upload compounds: {exc}'}), 500
@@ -2071,7 +2398,7 @@ def register_mmp_lifecycle_admin_routes(
             )
             return jsonify({"batch": batch})
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": str(exc)}), _value_error_http_status(exc)
         except Exception as exc:
             logger.exception('Failed to upload experiment file for batch %s: %s', batch_id, exc)
             return jsonify({'error': f'Failed to upload experiments: {exc}'}), 500
@@ -2083,10 +2410,189 @@ def register_mmp_lifecycle_admin_routes(
             batch = store.clear_batch_file(batch_id, file_kind="experiments")
             return jsonify({"batch": batch})
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": str(exc)}), _value_error_http_status(exc)
         except Exception as exc:
             logger.exception('Failed to clear experiment file for batch %s: %s', batch_id, exc)
             return jsonify({'error': f'Failed to clear experiments: {exc}'}), 500
+
+    @app.route('/api/admin/lead_optimization/mmp_lifecycle/batches/<batch_id>/materialize_experiments_from_compounds', methods=['POST'])
+    @require_api_token
+    def mmp_lifecycle_materialize_experiments_from_compounds(batch_id: str):
+        try:
+            payload = _safe_json_object(request.get_json(silent=True) or {})
+            batch = store.get_batch(batch_id)
+            files = _safe_json_object(batch.get("files"))
+            compounds_meta = _safe_json_object(files.get("compounds"))
+            source_path = _resolve_batch_file_path(store=store, batch_id=batch_id, file_meta=compounds_meta)
+            if not source_path or not os.path.exists(source_path):
+                return jsonify({"error": "Saved compound file is missing on server. Please re-upload compounds."}), 400
+
+            compounds_cfg = _safe_json_object(compounds_meta.get("column_config"))
+            requested_smiles_col = _read_text(payload.get("smiles_column") or compounds_cfg.get("smiles_column"))
+            raw_activity_cols = payload.get("activity_columns")
+            activity_columns = [
+                _read_text(item)
+                for item in (raw_activity_cols if isinstance(raw_activity_cols, list) else [])
+                if _read_text(item)
+            ]
+            raw_method_map = _safe_json_object(payload.get("activity_method_map"))
+            raw_transform_map = _safe_json_object(payload.get("activity_transform_map"))
+            raw_output_map = _safe_json_object(payload.get("activity_output_property_map"))
+            if not activity_columns:
+                seeded = list(raw_output_map.keys()) + list(raw_method_map.keys()) + list(raw_transform_map.keys())
+                activity_columns = [_read_text(item) for item in seeded if _read_text(item)]
+            if not activity_columns:
+                return jsonify({"error": "activity_columns is required to materialize experiments."}), 400
+
+            deduped_activity_cols: List[str] = []
+            seen_cols: set[str] = set()
+            for col in activity_columns:
+                key = col.lower()
+                if not key or key in seen_cols:
+                    continue
+                seen_cols.add(key)
+                deduped_activity_cols.append(col)
+
+            method_map_by_key: Dict[str, str] = {}
+            for raw_key, raw_value in raw_method_map.items():
+                source_key = _read_text(raw_key).lower()
+                method_id = _read_text(raw_value)
+                if source_key and method_id:
+                    method_map_by_key[source_key] = method_id
+            transform_map_by_key: Dict[str, str] = {}
+            for raw_key, raw_value in raw_transform_map.items():
+                source_key = _read_text(raw_key).lower()
+                if not source_key:
+                    continue
+                transform_map_by_key[source_key] = _normalize_value_transform(raw_value)
+            output_map_by_key: Dict[str, str] = {}
+            for raw_key, raw_value in raw_output_map.items():
+                source_key = _read_text(raw_key).lower()
+                prop_name = _read_text(raw_value)
+                if source_key and prop_name:
+                    output_map_by_key[source_key] = prop_name
+
+            delimiter = _detect_delimiter(source_path)
+            all_headers: List[str] = []
+            resolved_smiles_col = ""
+            resolved_activity_cols: List[str] = []
+            rows_total = 0
+            rows_emitted = 0
+            rows_invalid_value = 0
+            rows_transformed = 0
+
+            content = io.StringIO()
+            writer = csv.writer(content, delimiter="\t", lineterminator="\n")
+            writer.writerow(["smiles", "source_property", "value"])
+
+            with open(source_path, "r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+                reader = csv.DictReader(handle, delimiter=delimiter)
+                all_headers = [_read_text(item) for item in list(reader.fieldnames or []) if _read_text(item)]
+                if not all_headers:
+                    return jsonify({"error": "Saved compound file has no header row."}), 400
+
+                resolved_smiles_col = _pick_column(
+                    all_headers,
+                    requested_smiles_col,
+                    ["smiles", "canonical_smiles", "mol_smiles", "structure", "smi"],
+                )
+                if not resolved_smiles_col:
+                    return jsonify({"error": "Cannot resolve smiles_column from saved compounds file."}), 400
+
+                header_by_key: Dict[str, str] = {}
+                for header in all_headers:
+                    key = _read_text(header).lower()
+                    if key and key not in header_by_key:
+                        header_by_key[key] = header
+                for col in deduped_activity_cols:
+                    resolved = header_by_key.get(col.lower())
+                    if resolved and resolved not in resolved_activity_cols:
+                        resolved_activity_cols.append(resolved)
+                if not resolved_activity_cols:
+                    return jsonify({"error": "None of activity_columns exists in saved compounds file headers."}), 400
+
+                for raw_row in reader:
+                    row = raw_row or {}
+                    smiles_value = _read_text(row.get(resolved_smiles_col))
+                    if _is_missing_cell_value(smiles_value):
+                        continue
+                    for source_col in resolved_activity_cols:
+                        raw_value = _read_text(row.get(source_col))
+                        if _is_missing_cell_value(raw_value):
+                            continue
+                        rows_total += 1
+                        try:
+                            numeric_value = float(raw_value)
+                        except Exception:
+                            rows_invalid_value += 1
+                            continue
+                        transform = _normalize_value_transform(transform_map_by_key.get(source_col.lower()))
+                        incoming_value = numeric_value
+                        if transform != "none":
+                            try:
+                                incoming_value = _apply_value_transform(numeric_value, transform)
+                                rows_transformed += 1
+                            except Exception:
+                                rows_invalid_value += 1
+                                continue
+                        writer.writerow([smiles_value, source_col, f"{float(incoming_value):.12g}"])
+                        rows_emitted += 1
+
+            activity_method_map = {
+                col: _read_text(method_map_by_key.get(col.lower()))
+                for col in resolved_activity_cols
+                if _read_text(method_map_by_key.get(col.lower()))
+            }
+            activity_transform_map = {
+                col: _normalize_value_transform(transform_map_by_key.get(col.lower()))
+                for col in resolved_activity_cols
+                if _normalize_value_transform(transform_map_by_key.get(col.lower())) != "none"
+            }
+            activity_output_property_map = {
+                col: _read_text(output_map_by_key.get(col.lower()) or col)
+                for col in resolved_activity_cols
+            }
+            column_config = {
+                "smiles_column": "smiles",
+                "property_column": "source_property",
+                "value_column": "value",
+                "method_column": "",
+                "notes_column": "",
+                "activity_columns": resolved_activity_cols,
+                "activity_method_map": activity_method_map,
+                "activity_transform_map": activity_transform_map,
+                "activity_output_property_map": activity_output_property_map,
+                "assay_method_id": "",
+                "assay_method_key": "",
+                "source_notes_column": "",
+            }
+            body = content.getvalue().encode("utf-8")
+            updated_batch = store.attach_batch_file(
+                batch_id,
+                file_kind="experiments",
+                source_filename="experiments_from_compounds.tsv",
+                body=body,
+                column_config=column_config,
+            )
+            return jsonify(
+                {
+                    "batch": updated_batch,
+                    "summary": {
+                        "source_headers": all_headers,
+                        "smiles_column": resolved_smiles_col,
+                        "activity_columns": resolved_activity_cols,
+                        "rows_total": rows_total,
+                        "rows_emitted": rows_emitted,
+                        "rows_invalid_value": rows_invalid_value,
+                        "rows_transformed": rows_transformed,
+                    },
+                }
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), _value_error_http_status(exc)
+        except Exception as exc:
+            logger.exception('Failed to materialize experiments from compounds for batch %s: %s', batch_id, exc)
+            return jsonify({'error': f'Failed to materialize experiments from compounds: {exc}'}), 500
 
     @app.route('/api/admin/lead_optimization/mmp_lifecycle/batches/<batch_id>/preview_compounds', methods=['GET'])
     @require_api_token
@@ -2109,7 +2615,7 @@ def register_mmp_lifecycle_admin_routes(
                 }
             )
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": str(exc)}), _value_error_http_status(exc)
         except Exception as exc:
             logger.exception('Failed to preview compounds file for batch %s: %s', batch_id, exc)
             return jsonify({'error': f'Failed to preview compounds file: {exc}'}), 500
@@ -2238,56 +2744,75 @@ def register_mmp_lifecycle_admin_routes(
             dedupe_key=_read_text(dedupe_key),
         )
 
-    def _apply_pending_property_sync(database_id: str, target: PostgresTarget) -> Dict[str, Any]:
+    def _apply_pending_property_sync(
+        database_id: str,
+        target: PostgresTarget,
+        *,
+        require_lock: bool = False,
+        lock_context: str = "",
+    ) -> Dict[str, Any]:
         db_token = _read_text(database_id)
         pending_rows = store.list_pending_database_sync(database_id=db_token, pending_only=True)
         if not pending_rows:
             return {"database_id": db_token, "total": 0, "applied": 0, "entries": []}
+        lock_id = ""
+        if require_lock:
+            lock_note = lock_context or "property_sync"
+            lock_row = _acquire_database_update_lock(
+                database_id=db_token,
+                operation="property_sync",
+                note=lock_note,
+            )
+            lock_id = _read_text(lock_row.get("id"))
         applied_entries: List[Dict[str, Any]] = []
-        for item in pending_rows:
-            row = _safe_json_object(item)
-            entry_id = _read_text(row.get("id"))
-            operation = _read_text(row.get("operation")).lower()
-            payload = _safe_json_object(row.get("payload"))
-            try:
-                if operation == "ensure_property":
-                    result = property_admin_service.ensure_property_name(
-                        target,
-                        property_name=_read_text(payload.get("property_name")),
+        try:
+            for item in pending_rows:
+                row = _safe_json_object(item)
+                entry_id = _read_text(row.get("id"))
+                operation = _read_text(row.get("operation")).lower()
+                payload = _safe_json_object(row.get("payload"))
+                try:
+                    if operation == "ensure_property":
+                        result = property_admin_service.ensure_property_name(
+                            target,
+                            property_name=_read_text(payload.get("property_name")),
+                        )
+                    elif operation == "rename_property":
+                        result = property_admin_service.rename_property_name(
+                            target,
+                            old_name=_read_text(payload.get("old_name")),
+                            new_name=_read_text(payload.get("new_name")),
+                        )
+                    elif operation == "purge_property":
+                        result = property_admin_service.purge_property_name(
+                            target,
+                            property_name=_read_text(payload.get("property_name")),
+                        )
+                    else:
+                        raise ValueError(f"Unsupported pending sync operation: {operation}")
+                    store.mark_database_sync_applied(entry_id, result={"operation": operation, **_safe_json_object(result)})
+                    applied_entries.append(
+                        {
+                            "id": entry_id,
+                            "operation": operation,
+                            "payload": payload,
+                            "result": result,
+                        }
                     )
-                elif operation == "rename_property":
-                    result = property_admin_service.rename_property_name(
-                        target,
-                        old_name=_read_text(payload.get("old_name")),
-                        new_name=_read_text(payload.get("new_name")),
-                    )
-                elif operation == "purge_property":
-                    result = property_admin_service.purge_property_name(
-                        target,
-                        property_name=_read_text(payload.get("property_name")),
-                    )
-                else:
-                    raise ValueError(f"Unsupported pending sync operation: {operation}")
-                store.mark_database_sync_applied(entry_id, result={"operation": operation, **_safe_json_object(result)})
-                applied_entries.append(
-                    {
-                        "id": entry_id,
-                        "operation": operation,
-                        "payload": payload,
-                        "result": result,
-                    }
-                )
-            except Exception as exc:
-                store.mark_database_sync_failed(entry_id, error=str(exc))
-                raise RuntimeError(
-                    f"Failed to apply pending sync operation '{operation}' for database '{db_token}': {exc}"
-                ) from exc
-        return {
-            "database_id": db_token,
-            "total": len(pending_rows),
-            "applied": len(applied_entries),
-            "entries": applied_entries,
-        }
+                except Exception as exc:
+                    store.mark_database_sync_failed(entry_id, error=str(exc))
+                    raise RuntimeError(
+                        f"Failed to apply pending sync operation '{operation}' for database '{db_token}': {exc}"
+                    ) from exc
+            return {
+                "database_id": db_token,
+                "total": len(pending_rows),
+                "applied": len(applied_entries),
+                "entries": applied_entries,
+            }
+        finally:
+            if lock_id:
+                _release_database_update_lock(lock_id)
 
     @app.route('/api/admin/lead_optimization/mmp_lifecycle/experiment_methods', methods=['GET'])
     @require_api_token
@@ -2306,6 +2831,7 @@ def register_mmp_lifecycle_admin_routes(
     @require_api_token
     def mmp_lifecycle_method_usage():
         try:
+            requested_database_id = _read_text(request.args.get("database_id"))
             catalog = _filter_lifecycle_catalog_databases(
                 mmp_database_registry.get_mmp_database_catalog(include_hidden=True, include_stats=False)
             )
@@ -2317,17 +2843,83 @@ def register_mmp_lifecycle_admin_routes(
                 if not db_id:
                     continue
                 database_by_id[db_id] = row
+            methods = store.list_methods()
+            method_by_id: Dict[str, Dict[str, Any]] = {}
+            for item in methods:
+                row = _safe_json_object(item)
+                method_id = _read_text(row.get("id"))
+                if method_id:
+                    method_by_id[method_id] = row
+
             usage_rows = store.list_method_usage_rows()
+            if requested_database_id:
+                usage_rows = [
+                    item
+                    for item in usage_rows
+                    if _read_text(_safe_json_object(item).get("database_id")) == requested_database_id
+                ]
+
+            properties_by_database: Dict[str, List[str]] = {}
+            for item in usage_rows:
+                row = _safe_json_object(item)
+                db_id = _read_text(row.get("database_id"))
+                method_id = _read_text(row.get("method_id"))
+                if not db_id or not method_id:
+                    continue
+                method_row = _safe_json_object(method_by_id.get(method_id))
+                output_property = _read_text(method_row.get("output_property"))
+                if not output_property:
+                    continue
+                bucket = properties_by_database.setdefault(db_id, [])
+                if output_property not in bucket:
+                    bucket.append(output_property)
+
+            property_counts_by_database: Dict[str, Dict[str, int]] = {}
+            counted_databases: set[str] = set()
+            if psycopg is not None:
+                for db_id, property_names in properties_by_database.items():
+                    if not property_names:
+                        continue
+                    try:
+                        _, target = _resolve_database_target(db_id)
+                        with psycopg.connect(target.url, autocommit=True) as conn:
+                            with conn.cursor() as cursor:
+                                cursor.execute(f'SET search_path TO "{target.schema}", public')
+                                cursor.execute(
+                                    """
+                                    SELECT pn.name, COUNT(*)::BIGINT
+                                    FROM compound_property cp
+                                    INNER JOIN property_name pn ON pn.id = cp.property_name_id
+                                    WHERE pn.name = ANY(%s)
+                                    GROUP BY pn.name
+                                    """,
+                                    [property_names],
+                                )
+                                counts: Dict[str, int] = {}
+                                for prop_name, row_count in cursor.fetchall():
+                                    counts[_read_text(prop_name)] = int(row_count or 0)
+                                property_counts_by_database[db_id] = counts
+                                counted_databases.add(db_id)
+                    except Exception as exc:
+                        logger.warning("Failed counting assay method usage rows for database %s: %s", db_id, exc)
+
             enriched: List[Dict[str, Any]] = []
             for item in usage_rows:
                 row = _safe_json_object(item)
                 db_id = _read_text(row.get("database_id"))
+                method_id = _read_text(row.get("method_id"))
+                method_row = _safe_json_object(method_by_id.get(method_id))
+                output_property = _read_text(method_row.get("output_property"))
+                data_count = None
+                if db_id and output_property and db_id in counted_databases:
+                    data_count = int(_safe_json_object(property_counts_by_database.get(db_id)).get(output_property) or 0)
                 db = _safe_json_object(database_by_id.get(db_id)) if db_id else {}
                 enriched.append(
                     {
                         **row,
                         "database_label": _read_text(db.get("label") or db.get("schema") or db_id),
                         "database_schema": _read_text(db.get("schema")),
+                        "data_count": data_count,
                     }
                 )
             return jsonify({"usage": enriched})
@@ -2341,11 +2933,19 @@ def register_mmp_lifecycle_admin_routes(
         payload = request.get_json(silent=True) or {}
         if not isinstance(payload, dict):
             return jsonify({'error': 'payload must be a JSON object.'}), 400
+        lock_id = ""
         try:
             database_id = _read_text(payload.get("database_id"))
             next_payload = dict(payload)
             if database_id:
                 next_payload["reference"] = database_id
+                _assert_database_ready_for_update(database_id)
+                lock_row = _acquire_database_update_lock(
+                    database_id=database_id,
+                    operation="method_create",
+                    note="method_create_sync",
+                )
+                lock_id = _read_text(lock_row.get("id"))
             method = store.upsert_method(next_payload)
             mapping_sync: List[Dict[str, Any]] | None = None
             queued_sync: Dict[str, Any] | None = None
@@ -2378,7 +2978,11 @@ def register_mmp_lifecycle_admin_routes(
                         payload={"property_name": prop_name},
                         dedupe_key=f"ensure_property:{prop_name.lower()}",
                     )
-                applied_sync = _apply_pending_property_sync(database_id, target)
+                applied_sync = _apply_pending_property_sync(
+                    database_id,
+                    target,
+                    require_lock=False,
+                )
             return jsonify(
                 {
                     "method": method,
@@ -2389,10 +2993,13 @@ def register_mmp_lifecycle_admin_routes(
                 }
             ), 201
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": str(exc)}), _value_error_http_status(exc)
         except Exception as exc:
             logger.exception('Failed to create experiment method: %s', exc)
             return jsonify({'error': f'Failed to create experiment method: {exc}'}), 500
+        finally:
+            if lock_id:
+                _release_database_update_lock(lock_id)
 
     @app.route('/api/admin/lead_optimization/mmp_lifecycle/experiment_methods/<method_id>', methods=['PATCH'])
     @require_api_token
@@ -2400,12 +3007,20 @@ def register_mmp_lifecycle_admin_routes(
         payload = request.get_json(silent=True) or {}
         if not isinstance(payload, dict):
             return jsonify({'error': 'payload must be a JSON object.'}), 400
+        lock_id = ""
         try:
             previous = _find_method_or_raise(method_id)
             database_id = _read_text(payload.get("database_id") or previous.get("reference"))
             next_payload = dict(payload)
             if database_id:
                 next_payload["reference"] = database_id
+                _assert_database_ready_for_update(database_id)
+                lock_row = _acquire_database_update_lock(
+                    database_id=database_id,
+                    operation="method_update",
+                    note="method_update_sync",
+                )
+                lock_id = _read_text(lock_row.get("id"))
             method = store.upsert_method(next_payload, method_id=method_id)
             mapping_sync: List[Dict[str, Any]] | None = None
             queued_sync: Dict[str, Any] | None = None
@@ -2448,7 +3063,11 @@ def register_mmp_lifecycle_admin_routes(
                     value_transform=_normalize_value_transform(method.get("display_transform")),
                     notes="Method-bound mapping.",
                 )
-                applied_sync = _apply_pending_property_sync(database_id, target)
+                applied_sync = _apply_pending_property_sync(
+                    database_id,
+                    target,
+                    require_lock=False,
+                )
             return jsonify(
                 {
                     "method": method,
@@ -2459,14 +3078,18 @@ def register_mmp_lifecycle_admin_routes(
                 }
             )
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": str(exc)}), _value_error_http_status(exc)
         except Exception as exc:
             logger.exception('Failed to update experiment method %s: %s', method_id, exc)
             return jsonify({'error': f'Failed to update experiment method: {exc}'}), 500
+        finally:
+            if lock_id:
+                _release_database_update_lock(lock_id)
 
     @app.route('/api/admin/lead_optimization/mmp_lifecycle/experiment_methods/<method_id>', methods=['DELETE'])
     @require_api_token
     def mmp_lifecycle_delete_method(method_id: str):
+        lock_id = ""
         try:
             method = _find_method_or_raise(method_id)
             payload = request.get_json(silent=True) or {}
@@ -2477,6 +3100,13 @@ def register_mmp_lifecycle_admin_routes(
             if database_id:
                 if not purge_database_data:
                     return jsonify({"error": "purge_database_data=true is required for database-scoped method deletion."}), 400
+                _assert_database_ready_for_update(database_id)
+                lock_row = _acquire_database_update_lock(
+                    database_id=database_id,
+                    operation="method_delete",
+                    note="method_delete_queue_purge",
+                )
+                lock_id = _read_text(lock_row.get("id"))
                 selected, target = _resolve_database_target(database_id)
                 _sync_assay_methods_for_database(store, selected)
                 output_property = _read_text(method.get("output_property"))
@@ -2527,11 +3157,18 @@ def register_mmp_lifecycle_admin_routes(
             store.delete_method(method_id)
             return jsonify({"ok": True, "deleted_method": True})
         except ValueError as exc:
-            status = 404 if "not found" in str(exc).lower() else 400
+            message = _read_text(exc).lower()
+            if "not found" in message:
+                status = 404
+            else:
+                status = _value_error_http_status(exc)
             return jsonify({"error": str(exc)}), status
         except Exception as exc:
             logger.exception('Failed to delete experiment method %s: %s', method_id, exc)
             return jsonify({'error': f'Failed to delete experiment method: {exc}'}), 500
+        finally:
+            if lock_id:
+                _release_database_update_lock(lock_id)
 
     @app.route('/api/admin/lead_optimization/mmp_lifecycle/property_mappings', methods=['GET'])
     @require_api_token
@@ -2554,14 +3191,25 @@ def register_mmp_lifecycle_admin_routes(
         if not isinstance(payload, dict):
             return jsonify({'error': 'payload must be a JSON object.'}), 400
         mappings = payload.get("mappings") if isinstance(payload.get("mappings"), list) else []
+        lock_id = ""
         try:
+            _assert_database_ready_for_update(database_id)
+            lock_row = _acquire_database_update_lock(
+                database_id=database_id,
+                operation="mapping_update",
+                note="mapping_replace",
+            )
+            lock_id = _read_text(lock_row.get("id"))
             rows = store.replace_property_mappings(database_id, mappings)
             return jsonify({"database_id": database_id, "mappings": rows})
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": str(exc)}), _value_error_http_status(exc)
         except Exception as exc:
             logger.exception('Failed to replace property mappings for %s: %s', database_id, exc)
             return jsonify({'error': f'Failed to save property mappings: {exc}'}), 500
+        finally:
+            if lock_id:
+                _release_database_update_lock(lock_id)
 
     @app.route('/api/admin/lead_optimization/mmp_lifecycle/database_properties/<database_id>', methods=['GET'])
     @require_api_token
@@ -2622,6 +3270,11 @@ def register_mmp_lifecycle_admin_routes(
             experiment_check = None
             if experiments_file:
                 mappings = store.list_property_mappings(database_id=database_id)
+                compound_summary = _safe_json_object(_safe_json_object(compound_check).get("summary"))
+                # Keep check behavior aligned with apply preflight:
+                # when no compound delta exists, apply skips compound import, so
+                # experiment rows should only match compounds already in DB.
+                allow_batch_compound_match = _to_nonneg_int(compound_summary.get("reindex_rows"), 0) > 0
                 experiment_check = _build_property_import_from_experiments(
                     logger=logger,
                     target=target,
@@ -2630,6 +3283,7 @@ def register_mmp_lifecycle_admin_routes(
                     database_id=database_id,
                     mappings=mappings,
                     row_limit=row_limit,
+                    allow_batch_compound_match=allow_batch_compound_match,
                 )
                 generated = _safe_json_object(experiment_check.get("generated_property_file"))
                 path = _read_text(generated.get("path"))
@@ -2705,9 +3359,6 @@ def register_mmp_lifecycle_admin_routes(
         payload = _safe_json_object(request.get_json(silent=True) or {})
         try:
             async_requested = _to_bool(payload.get("async"), True)
-            if not async_requested:
-                return jsonify(_apply_batch_sync(batch_id, payload))
-
             batch = store.get_batch(batch_id)
             current_runtime = _safe_json_object(batch.get("apply_runtime"))
             current_phase = _read_text(current_runtime.get("phase")).lower()
@@ -2717,6 +3368,7 @@ def register_mmp_lifecycle_admin_routes(
             database_id = _read_text(payload.get("database_id") or batch.get("selected_database_id"))
             if not database_id:
                 return jsonify({"error": "database_id is required."}), 400
+            _assert_database_ready_for_update(database_id)
             selected, _ = _resolve_database_target(database_id)
             _sync_assay_methods_for_database(store, selected)
             files = _safe_json_object(batch.get("files"))
@@ -2730,15 +3382,60 @@ def register_mmp_lifecycle_admin_routes(
                 batch = store.update_batch(batch_id, {"selected_database_id": database_id})
             import_batch_id = _read_text(payload.get("import_batch_id")) or _read_text(batch.get("id"))
 
+            if not async_requested:
+                sync_task_id = f"apply_sync_{uuid.uuid4().hex[:10]}"
+                try:
+                    lock_row = _acquire_database_update_lock(
+                        database_id=database_id,
+                        operation="apply",
+                        batch_id=batch_id,
+                        task_id=sync_task_id,
+                        note="sync_apply",
+                    )
+                except ValueError as exc:
+                    return jsonify({"error": str(exc)}), 409
+                lock_id = _read_text(lock_row.get("id"))
+                worker_payload = dict(payload)
+                worker_payload["database_id"] = database_id
+                worker_payload["import_compounds"] = bool(import_compounds)
+                worker_payload["import_experiments"] = bool(import_experiments)
+                worker_payload["import_batch_id"] = import_batch_id
+                worker_payload["async"] = False
+                worker_payload["task_id"] = sync_task_id
+                try:
+                    return jsonify(_apply_batch_sync(batch_id, worker_payload))
+                except Exception as exc:
+                    _release_database_update_lock(lock_id, failed=True, error=str(exc))
+                    lock_id = ""
+                    raise
+                finally:
+                    if lock_id:
+                        _release_database_update_lock(lock_id)
+
             task_id = f"apply_task_{uuid.uuid4().hex[:12]}"
-            queued_batch = store.mark_apply_queued(
-                batch_id,
-                task_id=task_id,
-                database_id=database_id,
-                import_batch_id=import_batch_id,
-                import_compounds=bool(import_compounds),
-                import_experiments=bool(import_experiments),
-            )
+            try:
+                lock_row = _acquire_database_update_lock(
+                    database_id=database_id,
+                    operation="apply",
+                    batch_id=batch_id,
+                    task_id=task_id,
+                    note="async_apply",
+                )
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 409
+            lock_id = _read_text(lock_row.get("id"))
+            try:
+                queued_batch = store.mark_apply_queued(
+                    batch_id,
+                    task_id=task_id,
+                    database_id=database_id,
+                    import_batch_id=import_batch_id,
+                    import_compounds=bool(import_compounds),
+                    import_experiments=bool(import_experiments),
+                )
+            except Exception:
+                _release_database_update_lock(lock_id, failed=True, error="failed to queue apply task")
+                raise
 
             worker_payload = dict(payload)
             worker_payload["database_id"] = database_id
@@ -2749,6 +3446,8 @@ def register_mmp_lifecycle_admin_routes(
             worker_payload["task_id"] = task_id
 
             def _run_apply_task() -> None:
+                lock_failed = False
+                lock_error = ""
                 try:
                     store.mark_apply_running(batch_id, task_id=task_id)
                 except Exception as exc:
@@ -2758,15 +3457,20 @@ def register_mmp_lifecycle_admin_routes(
                     logger.info("Lifecycle batch apply finished: batch=%s task=%s", batch_id, task_id)
                 except Exception as exc:
                     err_text = str(exc or "apply failed")
+                    lock_failed = True
+                    lock_error = err_text
                     logger.exception("Lifecycle batch apply failed: batch=%s task=%s err=%s", batch_id, task_id, err_text)
                     try:
                         store.mark_apply_failed(batch_id, task_id=task_id, error=err_text)
                     except Exception:
                         logger.exception("Failed marking lifecycle batch apply task as failed: batch=%s task=%s", batch_id, task_id)
+                finally:
+                    _release_database_update_lock(lock_id, failed=lock_failed, error=lock_error)
 
             try:
                 apply_executor.submit(_run_apply_task)
             except Exception as exc:
+                _release_database_update_lock(lock_id, failed=True, error=str(exc))
                 store.mark_apply_failed(batch_id, task_id=task_id, error=f"Failed to submit apply task: {exc}")
                 raise RuntimeError(f"Failed to enqueue apply task: {exc}") from exc
 
@@ -2775,13 +3479,14 @@ def register_mmp_lifecycle_admin_routes(
                     {
                         "queued": True,
                         "task_id": task_id,
+                        "database_lock_id": lock_id,
                         "batch": queued_batch,
                     }
                 ),
                 202,
             )
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": str(exc)}), _value_error_http_status(exc)
         except Exception as exc:
             logger.exception('Failed to apply lifecycle batch %s: %s', batch_id, exc)
             return jsonify({'error': f'Failed to apply batch: {exc}'}), 500
@@ -2790,11 +3495,27 @@ def register_mmp_lifecycle_admin_routes(
     @require_api_token
     def mmp_lifecycle_rollback_batch(batch_id: str):
         payload = _safe_json_object(request.get_json(silent=True) or {})
+        lock_id = ""
         try:
             batch = store.get_batch(batch_id)
+            current_runtime = _safe_json_object(batch.get("apply_runtime"))
+            current_phase = _read_text(current_runtime.get("phase")).lower()
+            if current_phase in {"queued", "running"}:
+                return jsonify({"error": f"Batch is currently applying. Current phase: {current_phase}."}), 409
             database_id = _read_text(payload.get("database_id") or batch.get("selected_database_id"))
             if not database_id:
                 return jsonify({"error": "database_id is required."}), 400
+            _assert_database_ready_for_update(database_id)
+            try:
+                lock_row = _acquire_database_update_lock(
+                    database_id=database_id,
+                    operation="rollback",
+                    batch_id=batch_id,
+                    note="rollback",
+                )
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 409
+            lock_id = _read_text(lock_row.get("id"))
             _, target = _resolve_database_target(database_id)
             apply_history = batch.get("apply_history") if isinstance(batch.get("apply_history"), list) else []
             requested_apply_id = _read_text(payload.get("apply_id"))
@@ -2830,25 +3551,15 @@ def register_mmp_lifecycle_admin_routes(
                 compound_deleted = setup_service.delete_compound_batch(
                     target,
                     batch_id=import_batch_id,
-                    output_dir=compound_options["output_dir"],
-                    max_heavy_atoms=compound_options["max_heavy_atoms"],
-                    skip_attachment_enrichment=compound_options["skip_attachment_enrichment"],
-                    attachment_force_recompute=compound_options["attachment_force_recompute"],
-                    fragment_jobs=compound_options["fragment_jobs"],
-                    index_maintenance_work_mem_mb=compound_options["index_maintenance_work_mem_mb"],
-                    index_work_mem_mb=compound_options["index_work_mem_mb"],
-                    index_parallel_workers=compound_options["index_parallel_workers"],
-                    index_commit_every_flushes=compound_options["index_commit_every_flushes"],
-                    incremental_index_shards=compound_options["incremental_index_shards"],
-                    incremental_index_jobs=compound_options["incremental_index_jobs"],
-                    skip_incremental_analyze=compound_options["skip_incremental_analyze"],
-                    build_construct_tables=compound_options["build_construct_tables"],
-                    build_constant_smiles_mol_index=compound_options["build_constant_smiles_mol_index"],
+                    **compound_options.to_setup_kwargs(),
                 )
                 if not compound_deleted:
                     raise RuntimeError("Compound batch rollback failed")
 
             after = verify_service.fetch_dataset_stats(target)
+            before_payload = _dataset_stats_payload(before)
+            after_payload = _dataset_stats_payload(after)
+            delta_payload = _dataset_delta_payload(before, after)
             updated_batch = store.append_rollback_history(
                 batch_id,
                 {
@@ -2859,24 +3570,9 @@ def register_mmp_lifecycle_admin_routes(
                     "rollback_experiments": rollback_experiments,
                     "compound_deleted": compound_deleted,
                     "property_deleted": property_deleted,
-                    "before": {
-                        "compounds": before.compounds,
-                        "rules": before.rules,
-                        "pairs": before.pairs,
-                        "rule_environments": before.rule_environments,
-                    },
-                    "after": {
-                        "compounds": after.compounds,
-                        "rules": after.rules,
-                        "pairs": after.pairs,
-                        "rule_environments": after.rule_environments,
-                    },
-                    "delta": {
-                        "compounds": after.compounds - before.compounds,
-                        "rules": after.rules - before.rules,
-                        "pairs": after.pairs - before.pairs,
-                        "rule_environments": after.rule_environments - before.rule_environments,
-                    },
+                    "before": before_payload,
+                    "after": after_payload,
+                    "delta": delta_payload,
                 },
             )
 
@@ -2888,31 +3584,22 @@ def register_mmp_lifecycle_admin_routes(
                     "import_batch_id": import_batch_id,
                     "rollback_compounds": rollback_compounds,
                     "rollback_experiments": rollback_experiments,
-                    "before": {
-                        "compounds": before.compounds,
-                        "rules": before.rules,
-                        "pairs": before.pairs,
-                        "rule_environments": before.rule_environments,
-                    },
-                    "after": {
-                        "compounds": after.compounds,
-                        "rules": after.rules,
-                        "pairs": after.pairs,
-                        "rule_environments": after.rule_environments,
-                    },
-                    "delta": {
-                        "compounds": after.compounds - before.compounds,
-                        "rules": after.rules - before.rules,
-                        "pairs": after.pairs - before.pairs,
-                        "rule_environments": after.rule_environments - before.rule_environments,
-                    },
+                    "before": before_payload,
+                    "after": after_payload,
+                    "delta": delta_payload,
                 }
             )
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": str(exc)}), _value_error_http_status(exc)
         except Exception as exc:
+            if lock_id:
+                _release_database_update_lock(lock_id, failed=True, error=str(exc))
+                lock_id = ""
             logger.exception('Failed to rollback lifecycle batch %s: %s', batch_id, exc)
             return jsonify({'error': f'Failed to rollback batch: {exc}'}), 500
+        finally:
+            if lock_id:
+                _release_database_update_lock(lock_id)
 
     @app.route('/api/admin/lead_optimization/mmp_lifecycle/metrics/<database_id>', methods=['GET'])
     @require_api_token
@@ -2927,6 +3614,25 @@ def register_mmp_lifecycle_admin_routes(
         except Exception as exc:
             logger.exception('Failed to fetch lifecycle metrics for %s: %s', database_id, exc)
             return jsonify({'error': f'Failed to fetch schema metrics: {exc}'}), 500
+
+    @app.route('/api/admin/lead_optimization/mmp_lifecycle/metrics/<database_id>/integrity', methods=['GET'])
+    @require_api_token
+    def mmp_lifecycle_schema_integrity(database_id: str):
+        include_duplicate_scan = str(request.args.get("include_duplicate_scan") or "").strip().lower() in {"1", "true", "yes", "on"}
+        try:
+            _, target = _resolve_database_target(database_id)
+            issues = verify_service.fetch_incremental_integrity_issues(
+                target,
+                include_duplicate_pair_scan=include_duplicate_scan,
+            )
+            issues["database_id"] = database_id
+            issues["include_duplicate_scan"] = bool(include_duplicate_scan)
+            return jsonify(issues)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            logger.exception('Failed to fetch lifecycle integrity metrics for %s: %s', database_id, exc)
+            return jsonify({'error': f'Failed to fetch lifecycle integrity metrics: {exc}'}), 500
 
 
 __all__ = ["register_mmp_lifecycle_admin_routes"]

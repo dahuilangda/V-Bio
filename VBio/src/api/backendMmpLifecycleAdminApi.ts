@@ -74,6 +74,7 @@ export interface MmpLifecycleMethodUsage {
   mapping_count?: number;
   source_property_count?: number;
   source_properties?: string[];
+  data_count?: number;
 }
 
 export interface MmpLifecyclePropertyMapping {
@@ -101,6 +102,20 @@ export interface MmpLifecyclePendingDatabaseSync {
   error?: string;
 }
 
+export interface MmpLifecycleDatabaseOperationLock {
+  id: string;
+  database_id: string;
+  operation: string;
+  batch_id?: string;
+  task_id?: string;
+  note?: string;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+  released_at?: string;
+  error?: string;
+}
+
 export interface MmpLifecycleCompoundsPreview {
   batch_id: string;
   original_name?: string;
@@ -121,6 +136,8 @@ export interface MmpLifecycleOverviewResponse {
   batches: MmpLifecycleBatch[];
   pending_database_sync?: MmpLifecyclePendingDatabaseSync[];
   pending_sync_by_database?: Record<string, number>;
+  database_operation_locks?: MmpLifecycleDatabaseOperationLock[];
+  busy_operations_by_database?: Record<string, number>;
   updated_at?: string;
 }
 
@@ -153,6 +170,8 @@ export async function createMmpLifecycleBatch(payload: {
   description?: string;
   notes?: string;
   selected_database_id?: string;
+  clone_from_batch_id?: string;
+  clone_uploaded_files?: boolean;
 }): Promise<MmpLifecycleBatch> {
   const res = await requestBackend('/api/admin/lead_optimization/mmp_lifecycle/batches', {
     method: 'POST',
@@ -203,7 +222,7 @@ export async function transitionMmpLifecycleBatchStatus(
   return (await parseJsonOrError(res, 'Failed to transition lifecycle batch status')) as Record<string, unknown>;
 }
 
-export async function deleteMmpLifecycleBatch(batchId: string): Promise<void> {
+export async function deleteMmpLifecycleBatch(batchId: string): Promise<Record<string, unknown>> {
   const safeId = encodeURIComponent(String(batchId || '').trim());
   const res = await requestBackend(`/api/admin/lead_optimization/mmp_lifecycle/batches/${safeId}`, {
     method: 'DELETE',
@@ -212,7 +231,7 @@ export async function deleteMmpLifecycleBatch(batchId: string): Promise<void> {
       Accept: 'application/json'
     }
   });
-  await parseJsonOrError(res, 'Failed to delete lifecycle batch');
+  return (await parseJsonOrError(res, 'Failed to delete lifecycle batch')) as Record<string, unknown>;
 }
 
 export async function uploadMmpLifecycleCompounds(
@@ -306,6 +325,33 @@ export async function clearMmpLifecycleExperiments(batchId: string): Promise<Mmp
   return (data.batch || {}) as MmpLifecycleBatch;
 }
 
+export async function materializeMmpLifecycleExperimentsFromCompounds(
+  batchId: string,
+  payload: {
+    smiles_column?: string;
+    activity_columns?: string[];
+    activity_method_map?: Record<string, string>;
+    activity_transform_map?: Record<string, string>;
+    activity_output_property_map?: Record<string, string>;
+  }
+): Promise<MmpLifecycleBatch> {
+  const safeId = encodeURIComponent(String(batchId || '').trim());
+  const res = await requestBackend(
+    `/api/admin/lead_optimization/mmp_lifecycle/batches/${safeId}/materialize_experiments_from_compounds`,
+    {
+      method: 'POST',
+      headers: {
+        ...API_HEADERS,
+        'Content-Type': 'application/json',
+        Accept: 'application/json'
+      },
+      body: JSON.stringify(payload || {})
+    }
+  );
+  const data = await parseJsonOrError(res, 'Failed to materialize experiments from compounds');
+  return (data.batch || {}) as MmpLifecycleBatch;
+}
+
 export async function fetchMmpLifecycleCompoundsPreview(
   batchId: string,
   options?: { max_rows?: number }
@@ -358,8 +404,14 @@ export async function fetchMmpLifecycleMethods(): Promise<MmpLifecycleMethod[]> 
   return Array.isArray(data.methods) ? (data.methods as MmpLifecycleMethod[]) : [];
 }
 
-export async function fetchMmpLifecycleMethodUsage(): Promise<MmpLifecycleMethodUsage[]> {
-  const res = await requestBackend('/api/admin/lead_optimization/mmp_lifecycle/experiment_methods/usage', {
+export async function fetchMmpLifecycleMethodUsage(options?: {
+  database_id?: string;
+}): Promise<MmpLifecycleMethodUsage[]> {
+  const search = new URLSearchParams();
+  const databaseId = String(options?.database_id || '').trim();
+  if (databaseId) search.set('database_id', databaseId);
+  const suffix = search.toString() ? `?${search.toString()}` : '';
+  const res = await requestBackend(`/api/admin/lead_optimization/mmp_lifecycle/experiment_methods/usage${suffix}`, {
     method: 'GET',
     headers: {
       ...API_HEADERS,
