@@ -30,6 +30,8 @@ export interface MmpLifecycleBatch {
   description?: string;
   notes?: string;
   status?: string;
+  apply_runtime?: Record<string, unknown> | null;
+  last_error?: string;
   selected_database_id?: string;
   created_at?: string;
   updated_at?: string;

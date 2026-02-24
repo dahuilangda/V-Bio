@@ -94,6 +94,7 @@ def import_property_batch(
     batch_notes: str = "",
     smiles_column: str = "",
     canonicalize_smiles: bool = True,
+    overwrite_existing_batch: bool = False,
 ) -> bool:
     return legacy.import_property_batch_postgres(
         target.url,
@@ -104,6 +105,7 @@ def import_property_batch(
         batch_notes=batch_notes,
         smiles_column=smiles_column,
         canonicalize_smiles=canonicalize_smiles,
+        overwrite_existing_batch=overwrite_existing_batch,
     )
 
 
@@ -138,6 +140,8 @@ def import_compound_batch(
     incremental_index_jobs: int = 1,
     build_construct_tables: bool = True,
     build_constant_smiles_mol_index: bool = True,
+    skip_incremental_analyze: bool = False,
+    overwrite_existing_batch: bool = False,
 ) -> bool:
     return legacy.import_compound_batch_postgres(
         target.url,
@@ -162,6 +166,8 @@ def import_compound_batch(
         incremental_index_jobs=incremental_index_jobs,
         build_construct_tables=build_construct_tables,
         build_constant_smiles_mol_index=build_constant_smiles_mol_index,
+        skip_incremental_analyze=skip_incremental_analyze,
+        overwrite_existing_batch=overwrite_existing_batch,
     )
 
 
@@ -182,6 +188,7 @@ def delete_compound_batch(
     incremental_index_jobs: int = 1,
     build_construct_tables: bool = True,
     build_constant_smiles_mol_index: bool = True,
+    skip_incremental_analyze: bool = False,
 ) -> bool:
     return legacy.delete_compound_batch_postgres(
         target.url,
@@ -200,6 +207,7 @@ def delete_compound_batch(
         incremental_index_jobs=incremental_index_jobs,
         build_construct_tables=build_construct_tables,
         build_constant_smiles_mol_index=build_constant_smiles_mol_index,
+        skip_incremental_analyze=skip_incremental_analyze,
     )
 
 

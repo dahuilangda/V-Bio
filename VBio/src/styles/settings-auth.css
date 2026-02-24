@@ -367,7 +367,7 @@
 }
 
 .mmp-life-main {
-  grid-template-columns: 36px minmax(0, 1fr);
+  grid-template-columns: 0 minmax(0, 1fr);
   column-gap: 0;
   row-gap: 0;
 }
@@ -432,7 +432,7 @@
   position: sticky;
   top: 76px;
   width: 36px;
-  margin-left: 0;
+  margin-left: calc(-1 * min(78px, max(36px, ((100vw - 1480px) / 2) + 18px)));
 }
 
 .mmp-life-flow-panel {
@@ -1263,6 +1263,23 @@
 .mmp-life-updated-cell,
 .mmp-life-num-cell {
   text-align: center;
+}
+
+.mmp-life-status-wrap {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+}
+
+.mmp-life-status-meta {
+  max-width: 100%;
+  font-size: var(--text-2xs);
+  color: #5f7769;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .mmp-life-files-cell {

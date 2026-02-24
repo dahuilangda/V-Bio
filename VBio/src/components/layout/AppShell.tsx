@@ -47,7 +47,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <span>Projects</span>
           </NavLink>
           {session?.isAdmin && (
-            <NavLink to="/users" className="top-link">
+            <NavLink to="/admin/users" className="top-link">
               <Users size={16} />
               <span>Users</span>
             </NavLink>

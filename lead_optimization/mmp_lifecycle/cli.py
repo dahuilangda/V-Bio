@@ -338,12 +338,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_build.add_argument("--force", action="store_true")
     p_build.add_argument("--keep_fragdb", action="store_true")
     p_build.add_argument("--fragment_jobs", default=8, type=int)
-    p_build.add_argument("--pg_index_maintenance_work_mem_mb", default=1024, type=int)
-    p_build.add_argument("--pg_index_work_mem_mb", default=128, type=int)
-    p_build.add_argument("--pg_index_parallel_workers", default=4, type=int)
+    p_build.add_argument("--pg_index_maintenance_work_mem_mb", default=2048, type=int)
+    p_build.add_argument("--pg_index_work_mem_mb", default=64, type=int)
+    p_build.add_argument("--pg_index_parallel_workers", default=2, type=int)
     p_build.add_argument(
         "--pg_index_commit_every_flushes",
-        default=0,
+        default=1,
         type=int,
         help="Commit cadence for mmpdb index flushes (<=0: auto-adaptive).",
     )
@@ -359,12 +359,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_index.add_argument("--skip_attachment_enrichment", action="store_true")
     p_index.add_argument("--attachment_force_recompute", action="store_true")
     p_index.add_argument("--force", action="store_true")
-    p_index.add_argument("--pg_index_maintenance_work_mem_mb", default=1024, type=int)
-    p_index.add_argument("--pg_index_work_mem_mb", default=128, type=int)
-    p_index.add_argument("--pg_index_parallel_workers", default=4, type=int)
+    p_index.add_argument("--pg_index_maintenance_work_mem_mb", default=2048, type=int)
+    p_index.add_argument("--pg_index_work_mem_mb", default=64, type=int)
+    p_index.add_argument("--pg_index_parallel_workers", default=2, type=int)
     p_index.add_argument(
         "--pg_index_commit_every_flushes",
-        default=0,
+        default=1,
         type=int,
         help="Commit cadence for mmpdb index flushes (<=0: auto-adaptive).",
     )
@@ -405,12 +405,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_cmp_import.add_argument("--skip_attachment_enrichment", action="store_true")
     p_cmp_import.add_argument("--attachment_force_recompute", action="store_true")
     p_cmp_import.add_argument("--fragment_jobs", default=8, type=int)
-    p_cmp_import.add_argument("--pg_index_maintenance_work_mem_mb", default=1024, type=int)
-    p_cmp_import.add_argument("--pg_index_work_mem_mb", default=128, type=int)
-    p_cmp_import.add_argument("--pg_index_parallel_workers", default=4, type=int)
+    p_cmp_import.add_argument("--pg_index_maintenance_work_mem_mb", default=2048, type=int)
+    p_cmp_import.add_argument("--pg_index_work_mem_mb", default=64, type=int)
+    p_cmp_import.add_argument("--pg_index_parallel_workers", default=2, type=int)
     p_cmp_import.add_argument(
         "--pg_index_commit_every_flushes",
-        default=0,
+        default=1,
         type=int,
         help="Commit cadence for mmpdb index flushes (<=0: auto-adaptive).",
     )
@@ -429,12 +429,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_cmp_delete.add_argument("--skip_attachment_enrichment", action="store_true")
     p_cmp_delete.add_argument("--attachment_force_recompute", action="store_true")
     p_cmp_delete.add_argument("--fragment_jobs", default=8, type=int)
-    p_cmp_delete.add_argument("--pg_index_maintenance_work_mem_mb", default=1024, type=int)
-    p_cmp_delete.add_argument("--pg_index_work_mem_mb", default=128, type=int)
-    p_cmp_delete.add_argument("--pg_index_parallel_workers", default=4, type=int)
+    p_cmp_delete.add_argument("--pg_index_maintenance_work_mem_mb", default=2048, type=int)
+    p_cmp_delete.add_argument("--pg_index_work_mem_mb", default=64, type=int)
+    p_cmp_delete.add_argument("--pg_index_parallel_workers", default=2, type=int)
     p_cmp_delete.add_argument(
         "--pg_index_commit_every_flushes",
-        default=0,
+        default=1,
         type=int,
         help="Commit cadence for mmpdb index flushes (<=0: auto-adaptive).",
     )

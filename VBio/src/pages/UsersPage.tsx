@@ -4,7 +4,6 @@ import type { AppUser } from '../types/models';
 import { hashPassword } from '../utils/crypto';
 import { formatDateTime } from '../utils/date';
 import { insertUser, listUsers, updateUser } from '../api/supabaseLite';
-import { MmpDatabaseAdminPanel } from '../components/admin/MmpDatabaseAdminPanel';
 
 export function UsersPage() {
   const [users, setUsers] = useState<AppUser[]>([]);
@@ -181,7 +180,6 @@ export function UsersPage() {
         )}
       </section>
 
-      <MmpDatabaseAdminPanel />
     </div>
   );
 }

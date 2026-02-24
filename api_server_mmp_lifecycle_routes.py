@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import os
 import re
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -60,6 +63,93 @@ def _read_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+_LIFECYCLE_TRANSIENT_SCHEMA_RE = re.compile(r"_incs_[0-9]{8,}_[0-9]{2}$", re.IGNORECASE)
+
+
+def _is_lifecycle_transient_database_entry(item: Dict[str, Any]) -> bool:
+    row = _safe_json_object(item)
+    schema = _read_text(row.get("schema")).lower()
+    label = _read_text(row.get("label")).lower()
+    # Incremental shard schemas are runtime temp artifacts, e.g.:
+    # chembl36_full_incs_091824663380_01
+    return bool(_LIFECYCLE_TRANSIENT_SCHEMA_RE.search(schema or label))
+
+
+def _filter_lifecycle_catalog_databases(catalog: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(catalog or {}) if isinstance(catalog, dict) else {}
+    databases = [
+        _safe_json_object(item)
+        for item in (payload.get("databases") or [])
+        if isinstance(item, dict) and not _is_lifecycle_transient_database_entry(item)
+    ]
+    payload["databases"] = databases
+    default_id = _read_text(payload.get("default_database_id"))
+    if default_id and not any(_read_text(item.get("id")) == default_id for item in databases):
+        payload["default_database_id"] = _read_text(databases[0].get("id")) if databases else ""
+    return payload
+
+
+def _normalize_property_token(raw: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _read_text(raw).lower())
+
+
+def _canonical_property_family(raw: Any) -> str:
+    token = _read_text(raw).lower()
+    if not token:
+        return ""
+    compact = token.replace(" ", "").replace("-", "_")
+    matcher = re.match(
+        r"^(?:p?ic50|ic50_(?:nm|um)|ki|kd|ec50|ac50|log10|neglog10|neg_log10)\((.+)\)$",
+        compact,
+    )
+    if matcher:
+        compact = matcher.group(1)
+    compact = re.sub(
+        r"^(?:p?ic50|ic50_(?:nm|um)|ki|kd|ec50|ac50|log10|neglog10|neg_log10)[_]+",
+        "",
+        compact,
+    )
+    compact = re.sub(
+        r"[_]+(?:p?ic50|ic50_(?:nm|um)|ki|kd|ec50|ac50|log10|neglog10|neg_log10)$",
+        "",
+        compact,
+    )
+    compact = re.sub(r"\((?:um|nm|mm|pm|fm)\)$", "", compact)
+    compact = re.sub(r"[_]+(?:um|nm|mm|pm|fm)$", "", compact)
+    compact = re.sub(r"^(?:um|nm|mm|pm|fm)[_]+", "", compact)
+    normalized = _normalize_property_token(compact)
+    if normalized:
+        return normalized
+    return _normalize_property_token(token)
+
+
+def _pick_family_alias_rename_source(property_names: List[str], target_property: str) -> str:
+    target = _read_text(target_property)
+    if not target:
+        return ""
+    family = _canonical_property_family(target)
+    if not family:
+        return ""
+    candidates = [
+        _read_text(item)
+        for item in property_names
+        if _read_text(item)
+        and _read_text(item).lower() != target.lower()
+        and _canonical_property_family(item) == family
+    ]
+    unique: List[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    if len(unique) == 1:
+        return unique[0]
+    return ""
 
 
 def _is_missing_cell_value(value: Any) -> bool:
@@ -401,6 +491,56 @@ def _sync_assay_methods_for_database(store: MmpLifecycleAdminStore, database_ent
     if not db_id:
         return {"database_id": "", "changed": False}
     property_names = _extract_database_property_names(database_entry)
+
+    # Auto-reconcile legacy property aliases to current assay method output names.
+    # This keeps DB catalog properties aligned with Assay Methods without requiring
+    # users to manually trigger method edits after each deployment.
+    try:
+        methods_for_db = []
+        for item in store.list_methods():
+            row = _safe_json_object(item)
+            reference = _read_text(row.get("reference"))
+            if reference and reference != db_id:
+                continue
+            output_prop = _read_text(row.get("output_property"))
+            if not output_prop:
+                continue
+            methods_for_db.append(row)
+        methods_for_db.sort(key=lambda row: _read_text(row.get("updated_at")), reverse=True)
+        methods_for_db.sort(key=lambda row: 0 if not _read_text(row.get("id")).startswith("method_auto_") else 1)
+
+        desired_output_by_family: Dict[str, str] = {}
+        for row in methods_for_db:
+            output_prop = _read_text(row.get("output_property"))
+            family = _canonical_property_family(output_prop)
+            if not family or family in desired_output_by_family:
+                continue
+            desired_output_by_family[family] = output_prop
+
+        queued_auto_renames = 0
+        for _, desired_output in desired_output_by_family.items():
+            if any(_read_text(item).lower() == desired_output.lower() for item in property_names):
+                continue
+            alias_source = _pick_family_alias_rename_source(property_names, desired_output)
+            if not alias_source:
+                continue
+            store.enqueue_database_sync(
+                database_id=db_id,
+                operation="rename_property",
+                payload={"old_name": alias_source, "new_name": desired_output},
+                dedupe_key=f"rename_property:{alias_source.lower()}->{desired_output.lower()}",
+            )
+            queued_auto_renames += 1
+
+        if queued_auto_renames > 0:
+            _, target = _resolve_database_target(db_id)
+            _apply_pending_property_sync(db_id, target)
+            refreshed, _ = _resolve_database_target(db_id)
+            property_names = _extract_database_property_names(refreshed)
+    except Exception:
+        # Sync should remain resilient; failed auto-reconcile should not block UI/API.
+        pass
+
     pending_rows = store.list_pending_database_sync(database_id=db_id, pending_only=True)
     if pending_rows:
         normalized_names: List[str] = []
@@ -466,6 +606,10 @@ def _sync_assay_methods_for_catalog(store: MmpLifecycleAdminStore, catalog: Dict
 
 
 def _extract_compound_import_options(payload: Dict[str, Any]) -> Dict[str, Any]:
+    cpu_count = max(1, int(os.cpu_count() or 1))
+    auto_incremental_shards = max(1, min(8, cpu_count // 2))
+    auto_incremental_jobs = max(1, min(auto_incremental_shards, cpu_count // 4 if cpu_count >= 4 else 1))
+
     def _to_int(key: str, default: int) -> int:
         value = payload.get(key)
         try:
@@ -495,18 +639,24 @@ def _extract_compound_import_options(payload: Dict[str, Any]) -> Dict[str, Any]:
             return False
         return default
 
+    incremental_shards = _to_int("pg_incremental_index_shards", auto_incremental_shards)
+    incremental_jobs = _to_int("pg_incremental_index_jobs", auto_incremental_jobs)
+    if incremental_jobs > incremental_shards:
+        incremental_jobs = incremental_shards
+
     return {
         "output_dir": str(payload.get("output_dir") or "lead_optimization/data").strip() or "lead_optimization/data",
         "max_heavy_atoms": _to_int("max_heavy_atoms", 50),
         "skip_attachment_enrichment": _to_bool("skip_attachment_enrichment", False),
         "attachment_force_recompute": _to_bool("attachment_force_recompute", False),
         "fragment_jobs": _to_int("fragment_jobs", 8),
-        "index_maintenance_work_mem_mb": _to_int("pg_index_maintenance_work_mem_mb", 1024),
-        "index_work_mem_mb": _to_int("pg_index_work_mem_mb", 128),
-        "index_parallel_workers": _to_int("pg_index_parallel_workers", 4),
-        "index_commit_every_flushes": _to_int("pg_index_commit_every_flushes", 0),
-        "incremental_index_shards": _to_int("pg_incremental_index_shards", 1),
-        "incremental_index_jobs": _to_int("pg_incremental_index_jobs", 1),
+        "index_maintenance_work_mem_mb": _to_int("pg_index_maintenance_work_mem_mb", 2048),
+        "index_work_mem_mb": _to_int("pg_index_work_mem_mb", 64),
+        "index_parallel_workers": _to_int("pg_index_parallel_workers", 2),
+        "index_commit_every_flushes": _to_int("pg_index_commit_every_flushes", 1),
+        "incremental_index_shards": incremental_shards,
+        "incremental_index_jobs": incremental_jobs,
+        "skip_incremental_analyze": _to_bool("pg_skip_incremental_analyze", True),
         "build_construct_tables": not _to_bool("pg_skip_construct_tables", False),
         "build_constant_smiles_mol_index": not _to_bool("pg_skip_constant_smiles_mol_index", False),
     }
@@ -551,6 +701,352 @@ def _apply_value_transform(value: float, transform: str) -> float:
     if op == "log10":
         return float(math.log10(numeric))
     return float(-math.log10(numeric))
+
+
+def _canonicalize_smiles_with_cache(raw_smiles: str, cache: Dict[str, str]) -> str:
+    token = _read_text(raw_smiles)
+    if not token:
+        return ""
+    hit = cache.get(token)
+    if hit is not None:
+        return hit
+    clean = _canonicalize_smiles(token)
+    cache[token] = clean
+    return clean
+
+
+def _collect_effective_experiment_mappings(
+    *,
+    column_config: Dict[str, Any],
+    mappings: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen_sources: set[str] = set()
+
+    for item in mappings:
+        row = _safe_json_object(item)
+        source_property = _read_text(row.get("source_property"))
+        mmp_property = _read_text(row.get("mmp_property"))
+        if not source_property or not mmp_property:
+            continue
+        source_key = source_property.lower()
+        if source_key in seen_sources:
+            continue
+        seen_sources.add(source_key)
+        next_row = dict(row)
+        next_row["source_property"] = source_property
+        next_row["mmp_property"] = mmp_property
+        next_row["value_transform"] = _normalize_value_transform(row.get("value_transform"))
+        merged.append(next_row)
+
+    activity_transform_map = _safe_json_object(column_config.get("activity_transform_map"))
+    activity_output_property_map = _safe_json_object(column_config.get("activity_output_property_map"))
+    activity_method_map = _safe_json_object(column_config.get("activity_method_map"))
+    activity_columns = [
+        _read_text(item)
+        for item in list(column_config.get("activity_columns") or [])
+        if _read_text(item)
+    ]
+
+    source_label_by_key: Dict[str, str] = {}
+    for source in activity_columns:
+        source_key = source.lower()
+        if source_key and source_key not in source_label_by_key:
+            source_label_by_key[source_key] = source
+    for raw_source in activity_output_property_map.keys():
+        source = _read_text(raw_source)
+        source_key = source.lower()
+        if source_key and source_key not in source_label_by_key:
+            source_label_by_key[source_key] = source
+
+    normalized_output_by_source: Dict[str, str] = {}
+    for raw_source, raw_target in activity_output_property_map.items():
+        source_key = _read_text(raw_source).lower()
+        target = _read_text(raw_target)
+        if not source_key or not target:
+            continue
+        normalized_output_by_source[source_key] = target
+
+    normalized_method_by_source: Dict[str, str] = {}
+    for raw_source, raw_method in activity_method_map.items():
+        source_key = _read_text(raw_source).lower()
+        method_id = _read_text(raw_method)
+        if not source_key or not method_id:
+            continue
+        normalized_method_by_source[source_key] = method_id
+
+    normalized_transform_by_source: Dict[str, str] = {}
+    for raw_source, raw_transform in activity_transform_map.items():
+        source_key = _read_text(raw_source).lower()
+        if not source_key:
+            continue
+        normalized_transform_by_source[source_key] = _normalize_value_transform(raw_transform)
+
+    for source_key, source_label in source_label_by_key.items():
+        if not source_key or source_key in seen_sources:
+            continue
+        mapped_property = _read_text(normalized_output_by_source.get(source_key) or source_label)
+        if not mapped_property:
+            continue
+        seen_sources.add(source_key)
+        merged.append(
+            {
+                "source_property": source_label,
+                "mmp_property": mapped_property,
+                "method_id": _read_text(normalized_method_by_source.get(source_key)),
+                "value_transform": _normalize_value_transform(normalized_transform_by_source.get(source_key)),
+                "notes": "Batch activity mapping.",
+            }
+        )
+
+    return merged
+
+
+def _compute_experiment_property_import_source_signature(
+    *,
+    batch: Dict[str, Any],
+    database_id: str,
+    mappings: List[Dict[str, Any]],
+) -> str:
+    files = _safe_json_object(batch.get("files"))
+    experiments_file = _safe_json_object(files.get("experiments"))
+    column_config = _safe_json_object(experiments_file.get("column_config"))
+    effective_mappings = _collect_effective_experiment_mappings(
+        column_config=column_config,
+        mappings=mappings,
+    )
+
+    normalized_transform_map: Dict[str, str] = {}
+    for row in effective_mappings:
+        source_key = _read_text(row.get("source_property")).lower()
+        if not source_key:
+            continue
+        normalized_transform_map[source_key] = _normalize_value_transform(row.get("value_transform"))
+
+    signature_payload = {
+        "version": 1,
+        "database_id": _read_text(database_id),
+        "experiments_file": {
+            "stored_name": _read_text(experiments_file.get("stored_name")),
+            "original_name": _read_text(experiments_file.get("original_name")),
+            "size": int(experiments_file.get("size") or 0),
+            "uploaded_at": _read_text(experiments_file.get("uploaded_at")),
+        },
+        "column_config": {
+            "smiles_column": _read_text(column_config.get("smiles_column")),
+            "property_column": _read_text(column_config.get("property_column")),
+            "value_column": _read_text(column_config.get("value_column")),
+            "activity_transform_map": normalized_transform_map,
+        },
+        "mappings": [
+            {
+                "source_property": _read_text(row.get("source_property")),
+                "mmp_property": _read_text(row.get("mmp_property")),
+                "method_id": _read_text(row.get("method_id")),
+                "value_transform": _normalize_value_transform(row.get("value_transform")),
+            }
+            for row in sorted(
+                effective_mappings,
+                key=lambda item: _read_text(_safe_json_object(item).get("source_property")).lower(),
+            )
+        ],
+    }
+    encoded = json.dumps(signature_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha1(encoded).hexdigest()
+
+
+def _build_property_import_file_from_experiments_fast(
+    *,
+    logger,
+    store: MmpLifecycleAdminStore,
+    batch: Dict[str, Any],
+    database_id: str,
+    mappings: List[Dict[str, Any]],
+    source_signature: str = "",
+) -> Dict[str, Any]:
+    batch_id = _read_text(batch.get("id"))
+    experiments_file = _safe_json_object(_safe_json_object(batch.get("files")).get("experiments"))
+    source_path = _resolve_batch_file_path(store=store, batch_id=batch_id, file_meta=experiments_file)
+    if not source_path or not os.path.exists(source_path):
+        raise ValueError("Experiment file is missing. Upload experiments first.")
+
+    column_config = _safe_json_object(experiments_file.get("column_config"))
+    delimiter = _detect_delimiter(source_path)
+
+    mapping_by_source: Dict[str, Dict[str, Any]] = {}
+    effective_mappings = _collect_effective_experiment_mappings(
+        column_config=column_config,
+        mappings=mappings,
+    )
+    for item in effective_mappings:
+        key = _read_text(_safe_json_object(item).get("source_property")).lower()
+        if key and key not in mapping_by_source:
+            mapping_by_source[key] = _safe_json_object(item)
+    source_plan_by_key: Dict[str, Tuple[str, str]] = {}
+    for source_key, mapping in mapping_by_source.items():
+        mapped_property = _read_text((mapping or {}).get("mmp_property"))
+        if not mapped_property:
+            continue
+        source_plan_by_key[source_key] = (mapped_property, _normalize_value_transform((mapping or {}).get("value_transform")))
+
+    rows_by_smiles: Dict[str, Dict[str, float]] = {}
+    property_names: List[str] = []
+    property_set: set[str] = set()
+    rows_total = 0
+    rows_mapped = 0
+    rows_invalid = 0
+    rows_unmapped = 0
+    duplicate_shadowed = 0
+    canonical_smiles_cache: Dict[str, str] = {}
+
+    with open(source_path, "r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+        reader = csv.reader(handle, delimiter=delimiter)
+        headers: List[str] = []
+        header_line_no = 1
+        for header_line_no, raw_row in enumerate(reader, start=1):
+            candidate = [_read_text(item) for item in raw_row]
+            if any(candidate):
+                headers = candidate
+                break
+        if not headers:
+            raise ValueError(f"Experiment file has no header: {source_path}")
+
+        resolved_headers = [name for name in headers if name]
+        smiles_col = _pick_column(
+            resolved_headers,
+            _read_text(column_config.get("smiles_column")),
+            ["smiles", "clean_smiles", "canonical_smiles", "molecule_smiles"],
+        )
+        source_property_col = _pick_column(
+            resolved_headers,
+            _read_text(column_config.get("property_column")),
+            ["property", "property_name", "endpoint", "assay_property", "activity_type", "readout"],
+        )
+        value_col = _pick_column(
+            resolved_headers,
+            _read_text(column_config.get("value_column")),
+            ["value", "activity_value", "result", "measurement", "numeric_value"],
+        )
+
+        def _find_column_index(column_name: str) -> int:
+            token = _read_text(column_name)
+            if not token:
+                return -1
+            for idx, header in enumerate(headers):
+                if _read_text(header) == token:
+                    return idx
+            return -1
+
+        smiles_idx = _find_column_index(smiles_col)
+        source_property_idx = _find_column_index(source_property_col)
+        value_idx = _find_column_index(value_col)
+
+        if smiles_idx < 0:
+            raise ValueError("Cannot resolve SMILES column from experiment file.")
+        if source_property_idx < 0:
+            raise ValueError("Cannot resolve source property column from experiment file.")
+        if value_idx < 0:
+            raise ValueError("Cannot resolve numeric value column from experiment file.")
+
+        for line_no, row in enumerate(reader, start=header_line_no + 1):
+            rows_total += 1
+            raw_smiles = _read_text(row[smiles_idx] if smiles_idx < len(row) else "")
+            source_property = _read_text(row[source_property_idx] if source_property_idx < len(row) else "")
+            value_raw = _read_text(row[value_idx] if value_idx < len(row) else "")
+            if _is_missing_cell_value(raw_smiles):
+                raw_smiles = ""
+            if _is_missing_cell_value(source_property):
+                source_property = ""
+            if _is_missing_cell_value(value_raw):
+                value_raw = ""
+            if not raw_smiles or not source_property or not value_raw:
+                rows_invalid += 1
+                continue
+
+            plan = source_plan_by_key.get(source_property.lower())
+            if not plan:
+                rows_unmapped += 1
+                continue
+            mapped_property, value_transform = plan
+
+            try:
+                source_value = float(value_raw)
+            except Exception:
+                rows_invalid += 1
+                continue
+            if value_transform == "none":
+                incoming_value = float(source_value)
+            else:
+                try:
+                    incoming_value = _apply_value_transform(source_value, value_transform)
+                except Exception:
+                    rows_invalid += 1
+                    continue
+
+            clean_smiles = _canonicalize_smiles_with_cache(raw_smiles, canonical_smiles_cache)
+            if not clean_smiles:
+                rows_invalid += 1
+                continue
+
+            rows_mapped += 1
+            bucket = rows_by_smiles.setdefault(clean_smiles, {})
+            if mapped_property in bucket:
+                duplicate_shadowed += 1
+            bucket[mapped_property] = float(incoming_value)
+            if mapped_property not in property_set:
+                property_set.add(mapped_property)
+                property_names.append(mapped_property)
+
+    generated_dir = Path(source_path).resolve().parent / "generated"
+    generated_dir.mkdir(parents=True, exist_ok=True)
+    generated_path = generated_dir / f"property_import_{database_id or 'db'}.tsv"
+    fieldnames = ["smiles"] + sorted(property_names)
+    with open(generated_path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for smiles, row_values in rows_by_smiles.items():
+            output = {"smiles": smiles}
+            for property_name in fieldnames[1:]:
+                if property_name in row_values:
+                    output[property_name] = row_values[property_name]
+            writer.writerow(output)
+
+    generated_size = int(generated_path.stat().st_size) if generated_path.exists() else 0
+    signature = _read_text(source_signature) or _compute_experiment_property_import_source_signature(
+        batch=batch,
+        database_id=database_id,
+        mappings=mappings,
+    )
+    generated_property_file = {
+        "path": str(generated_path),
+        "size": generated_size,
+        "row_count": len(rows_by_smiles),
+        "property_count": len(property_names),
+        "database_id": database_id,
+        "source_signature": signature,
+    }
+    logger.info(
+        "Lifecycle experiment apply prepare batch=%s db=%s rows=%s mapped=%s deduped=%s unmapped=%s invalid=%s duplicates=%s",
+        batch_id,
+        database_id,
+        rows_total,
+        rows_mapped,
+        sum(len(bucket) for bucket in rows_by_smiles.values()),
+        rows_unmapped,
+        rows_invalid,
+        duplicate_shadowed,
+    )
+    return {
+        "summary": {
+            "rows_total": rows_total,
+            "rows_mapped": rows_mapped,
+            "rows_will_import": sum(len(bucket) for bucket in rows_by_smiles.values()),
+            "rows_unmapped": rows_unmapped,
+            "rows_invalid": rows_invalid,
+            "rows_shadowed_duplicate": duplicate_shadowed,
+        },
+        "generated_property_file": generated_property_file,
+    }
 
 
 def _build_property_import_from_experiments(
@@ -612,21 +1108,19 @@ def _build_property_import_from_experiments(
             raise ValueError("Cannot resolve numeric value column from experiment file.")
 
         mapping_by_source: Dict[str, Dict[str, Any]] = {}
-        for item in mappings:
-            key = _read_text(item.get("source_property")).lower()
+        effective_mappings = _collect_effective_experiment_mappings(
+            column_config=column_config,
+            mappings=mappings,
+        )
+        for item in effective_mappings:
+            key = _read_text(_safe_json_object(item).get("source_property")).lower()
             if key and key not in mapping_by_source:
-                mapping_by_source[key] = item
-        raw_upload_transform_map = _safe_json_object(column_config.get("activity_transform_map"))
-        upload_transform_by_source: Dict[str, str] = {}
-        for key, value in raw_upload_transform_map.items():
-            source_key = _read_text(key).lower()
-            if not source_key:
-                continue
-            upload_transform_by_source[source_key] = _normalize_value_transform(value)
+                mapping_by_source[key] = _safe_json_object(item)
 
         parsed_rows: List[Dict[str, Any]] = []
         duplicate_counts: Dict[str, int] = {}
         latest_line_by_key: Dict[str, int] = {}
+        canonical_smiles_cache: Dict[str, str] = {}
 
         for line_no, row in enumerate(reader, start=2):
             raw_smiles = _read_text((row or {}).get(smiles_col))
@@ -641,19 +1135,26 @@ def _build_property_import_from_experiments(
             method_value = _read_text((row or {}).get(method_col)) if method_col else ""
             notes_value = _read_text((row or {}).get(notes_col)) if notes_col else ""
 
-            clean_smiles = _canonicalize_smiles(raw_smiles) if raw_smiles else ""
+            mapping = mapping_by_source.get(source_property.lower()) if source_property else None
+            mapped_property = _read_text((mapping or {}).get("mmp_property"))
+            mapping_method_id = _read_text((mapping or {}).get("method_id"))
+            mapping_notes = _read_text((mapping or {}).get("notes"))
+            upload_transform = (
+                _normalize_value_transform((mapping or {}).get("value_transform"))
+                if source_property and mapping
+                else "none"
+            )
+
             value_parsed: Optional[float] = None
-            if value_raw:
+            if value_raw and mapped_property:
                 try:
                     value_parsed = float(value_raw)
                 except Exception:
                     value_parsed = None
 
-            mapping = mapping_by_source.get(source_property.lower()) if source_property else None
-            mapped_property = _read_text((mapping or {}).get("mmp_property"))
-            mapping_method_id = _read_text((mapping or {}).get("method_id"))
-            mapping_notes = _read_text((mapping or {}).get("notes"))
-            upload_transform = upload_transform_by_source.get(source_property.lower(), "none") if source_property else "none"
+            clean_smiles = ""
+            if raw_smiles and mapped_property and (value_parsed is not None):
+                clean_smiles = _canonicalize_smiles_with_cache(raw_smiles, canonical_smiles_cache)
 
             incoming_value = value_parsed
 
@@ -763,9 +1264,6 @@ def _build_property_import_from_experiments(
         if not raw_smiles:
             action = "SKIP_EMPTY_SMILES"
             note = "SMILES is empty."
-        elif not clean_smiles:
-            action = "SKIP_INVALID_SMILES"
-            note = "SMILES cannot be canonicalized by RDKit."
         elif not source_property:
             action = "SKIP_EMPTY_PROPERTY"
             note = "Source property is empty."
@@ -775,6 +1273,9 @@ def _build_property_import_from_experiments(
         elif incoming_value is None:
             action = "SKIP_INVALID_VALUE"
             note = "Numeric value is missing or invalid."
+        elif not clean_smiles:
+            action = "SKIP_INVALID_SMILES"
+            note = "SMILES cannot be canonicalized by RDKit."
         elif dedupe_key and int(latest_line_by_key.get(dedupe_key) or 0) != line_no:
             action = "SKIP_SHADOWED_DUPLICATE"
             note = "Same (SMILES, mapped_property) appears later; latest row will be applied."
@@ -885,6 +1386,12 @@ def _build_property_import_from_experiments(
             canonicalize_smiles=False,
         )
 
+    source_signature = _compute_experiment_property_import_source_signature(
+        batch=batch,
+        database_id=database_id,
+        mappings=mappings,
+    )
+
     summary = {
         "rows_total": len(output_rows),
         "rows_preview": min(max(1, int(row_limit or 200)), len(output_rows)),
@@ -905,6 +1412,7 @@ def _build_property_import_from_experiments(
             "row_count": len(rows_by_smiles),
             "property_count": len(property_names),
             "database_id": database_id,
+            "source_signature": source_signature,
         },
     }
 
@@ -959,21 +1467,345 @@ def register_mmp_lifecycle_admin_routes(
     logger,
 ) -> None:
     store = MmpLifecycleAdminStore()
+    apply_workers = max(1, int(os.getenv("LEAD_OPT_MMP_LIFECYCLE_APPLY_WORKERS", "1") or 1))
+    apply_executor = ThreadPoolExecutor(max_workers=apply_workers, thread_name_prefix="mmp_lifecycle_apply")
+
+    def _apply_batch_sync(batch_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        payload_obj = _safe_json_object(payload)
+        task_id = _read_text(payload_obj.get("task_id"))
+        timings_s: Dict[str, float] = {}
+        stage_starts: Dict[str, float] = {}
+
+        def _mark_progress(stage: str, message: str = "") -> None:
+            if not task_id:
+                return
+            try:
+                store.mark_apply_progress(
+                    batch_id,
+                    task_id=task_id,
+                    stage=stage,
+                    message=message,
+                    timings_s=timings_s,
+                )
+            except Exception as exc:
+                logger.warning("Failed to update apply progress: batch=%s task=%s stage=%s err=%s", batch_id, task_id, stage, exc)
+
+        def _start_stage(stage: str, message: str) -> None:
+            stage_starts[stage] = time.perf_counter()
+            _mark_progress(stage, message)
+
+        def _finish_stage(stage: str) -> None:
+            started = stage_starts.get(stage)
+            if started is None:
+                return
+            timings_s[stage] = max(0.0, time.perf_counter() - started)
+
+        batch = store.get_batch(batch_id)
+        database_id = _read_text(payload_obj.get("database_id") or batch.get("selected_database_id"))
+        if not database_id:
+            raise ValueError("database_id is required.")
+
+        _start_stage("preflight", "Preparing batch")
+        selected, target = _resolve_database_target(database_id)
+        _sync_assay_methods_for_database(store, selected)
+        files = _safe_json_object(batch.get("files"))
+        compounds_file = _safe_json_object(files.get("compounds"))
+        experiments_file = _safe_json_object(files.get("experiments"))
+        import_compounds = bool(payload_obj.get("import_compounds", True)) and bool(compounds_file)
+        import_experiments = bool(payload_obj.get("import_experiments", True)) and bool(experiments_file)
+        if _read_text(batch.get("selected_database_id")) != database_id:
+            batch = store.update_batch(batch_id, {"selected_database_id": database_id})
+
+        if not import_compounds and not import_experiments:
+            raise ValueError("Nothing to apply. Upload compounds and/or experiments first.")
+
+        last_check = _safe_json_object(batch.get("last_check"))
+        check_policy = _normalize_check_policy(_safe_json_object(payload_obj.get("check_policy") or last_check.get("check_policy")))
+        check_policy["require_approved_status"] = False
+        check_gate = _build_check_gate(
+            batch=batch,
+            database_id=database_id,
+            import_compounds=import_compounds,
+            import_experiments=import_experiments,
+            policy=check_policy,
+        )
+        _finish_stage("preflight")
+
+        _start_stage("pending_sync", "Applying pending property sync")
+        pending_sync_result = _apply_pending_property_sync(database_id, target)
+        _finish_stage("pending_sync")
+
+        import_batch_id = _read_text(payload_obj.get("import_batch_id")) or _read_text(batch.get("id"))
+        import_label = _read_text(payload_obj.get("import_label") or batch.get("name"))
+        import_notes = _read_text(payload_obj.get("import_notes") or batch.get("notes"))
+
+        before = verify_service.fetch_dataset_stats(target)
+        compound_ok = None
+        property_ok = None
+        generated_property_meta: Dict[str, Any] = {}
+        compounds_skipped_reason = ""
+
+        compound_options = _extract_compound_import_options(payload_obj)
+        compound_summary = _safe_json_object(last_check.get("compound_summary"))
+        checked_database_id = _read_text(last_check.get("database_id"))
+        checked_at = _read_text(last_check.get("checked_at"))
+        checked_at_dt = _parse_utc_iso(checked_at)
+        compounds_uploaded_at_dt = _parse_utc_iso(_safe_json_object(compounds_file).get("uploaded_at"))
+        check_is_current_for_compounds = bool(
+            checked_at_dt
+            and compounds_uploaded_at_dt
+            and compounds_uploaded_at_dt <= checked_at_dt
+            and checked_database_id == database_id
+        )
+
+        if import_compounds and check_is_current_for_compounds:
+            reindex_rows = _to_nonneg_int(compound_summary.get("reindex_rows"), 0)
+            if reindex_rows <= 0:
+                compounds_skipped_reason = "No structural compound delta detected in latest check; skipped compound import."
+                logger.info(
+                    "Lifecycle apply skipped compounds import: batch=%s db=%s reason=%s",
+                    batch_id,
+                    database_id,
+                    compounds_skipped_reason,
+                )
+                import_compounds = False
+                _mark_progress("preflight", "No structural compound delta; skipped compound import")
+
+        if import_compounds:
+            _start_stage("import_compounds", "Importing compounds")
+            structures_path = _resolve_batch_file_path(store=store, batch_id=batch_id, file_meta=compounds_file)
+            if not structures_path or not os.path.exists(structures_path):
+                raise ValueError("Compound file not found for batch.")
+            compound_cfg = _safe_json_object(compounds_file.get("column_config"))
+            compound_ok = setup_service.import_compound_batch(
+                target,
+                structures_file=structures_path,
+                batch_id=import_batch_id,
+                batch_label=import_label,
+                batch_notes=import_notes,
+                smiles_column=_read_text(compound_cfg.get("smiles_column")),
+                id_column=_read_text(compound_cfg.get("id_column")),
+                canonicalize_smiles=True,
+                output_dir=compound_options["output_dir"],
+                max_heavy_atoms=compound_options["max_heavy_atoms"],
+                skip_attachment_enrichment=compound_options["skip_attachment_enrichment"],
+                attachment_force_recompute=compound_options["attachment_force_recompute"],
+                fragment_jobs=compound_options["fragment_jobs"],
+                index_maintenance_work_mem_mb=compound_options["index_maintenance_work_mem_mb"],
+                index_work_mem_mb=compound_options["index_work_mem_mb"],
+                index_parallel_workers=compound_options["index_parallel_workers"],
+                index_commit_every_flushes=compound_options["index_commit_every_flushes"],
+                incremental_index_shards=compound_options["incremental_index_shards"],
+                incremental_index_jobs=compound_options["incremental_index_jobs"],
+                skip_incremental_analyze=compound_options["skip_incremental_analyze"],
+                build_construct_tables=compound_options["build_construct_tables"],
+                build_constant_smiles_mol_index=compound_options["build_constant_smiles_mol_index"],
+                overwrite_existing_batch=True,
+            )
+            if not compound_ok:
+                raise RuntimeError("Compound incremental import failed")
+            _finish_stage("import_compounds")
+
+        experiments_skipped_reason = ""
+        if import_experiments:
+            _start_stage("prepare_experiments", "Preparing experiment property file")
+            mappings = store.list_property_mappings(database_id=database_id)
+            source_signature = _compute_experiment_property_import_source_signature(
+                batch=batch,
+                database_id=database_id,
+                mappings=mappings,
+            )
+            generated_file_meta = _safe_json_object(_safe_json_object(batch.get("files")).get("generated_property_import"))
+            cached_generated_path = _resolve_batch_file_path(store=store, batch_id=batch_id, file_meta=generated_file_meta)
+            cached_signature = _read_text(generated_file_meta.get("source_signature"))
+            cached_database_id = _read_text(generated_file_meta.get("database_id"))
+            cached_row_count = int(generated_file_meta.get("row_count") or 0)
+            cached_property_count = int(generated_file_meta.get("property_count") or 0)
+
+            if (
+                cached_generated_path
+                and os.path.exists(cached_generated_path)
+                and cached_database_id == database_id
+                and cached_signature
+                and cached_signature == source_signature
+                and cached_row_count > 0
+                and cached_property_count > 0
+            ):
+                generated_property_meta = {
+                    "path": cached_generated_path,
+                    "size": int(os.path.getsize(cached_generated_path)),
+                    "row_count": cached_row_count,
+                    "property_count": cached_property_count,
+                    "database_id": database_id,
+                    "source_signature": source_signature,
+                }
+                generated_path = cached_generated_path
+                logger.info(
+                    "Lifecycle apply reused cached generated property file: batch=%s db=%s rows=%s properties=%s",
+                    batch_id,
+                    database_id,
+                    cached_row_count,
+                    cached_property_count,
+                )
+                _mark_progress("prepare_experiments", "Reused generated property file")
+            else:
+                generated_build = _build_property_import_file_from_experiments_fast(
+                    logger=logger,
+                    store=store,
+                    batch=batch,
+                    database_id=database_id,
+                    mappings=mappings,
+                    source_signature=source_signature,
+                )
+                generated_property_meta = _safe_json_object(generated_build.get("generated_property_file"))
+                generated_path = _read_text(generated_property_meta.get("path"))
+                store.set_generated_property_import_file(batch_id, generated_path, generated_property_meta)
+            _finish_stage("prepare_experiments")
+
+            if not generated_path or not os.path.exists(generated_path):
+                raise RuntimeError("Generated property import file is missing")
+            if int(generated_property_meta.get("row_count") or 0) <= 0 or int(generated_property_meta.get("property_count") or 0) <= 0:
+                experiments_skipped_reason = (
+                    "No mapped experiment rows are ready for import; skipped experiment import for this apply."
+                )
+                logger.info(
+                    "Lifecycle apply skipped experiment import: batch=%s db=%s reason=%s",
+                    batch_id,
+                    database_id,
+                    experiments_skipped_reason,
+                )
+                _mark_progress("prepare_experiments", "No mapped experiment rows; skipped experiment import")
+                import_experiments = False
+
+            if import_experiments:
+                _start_stage("import_experiments", "Importing experiments")
+                property_ok = setup_service.import_property_batch(
+                    target,
+                    property_file=generated_path,
+                    batch_id=import_batch_id,
+                    batch_label=import_label,
+                    batch_notes=import_notes,
+                    smiles_column="smiles",
+                    canonicalize_smiles=False,
+                    overwrite_existing_batch=True,
+                )
+                if not property_ok:
+                    raise RuntimeError("Property incremental import failed")
+                _finish_stage("import_experiments")
+
+        _start_stage("finalize", "Finalizing apply")
+        after = verify_service.fetch_dataset_stats(target)
+        apply_id = f"apply_{uuid.uuid4().hex[:12]}"
+        _finish_stage("finalize")
+        timings_s["total"] = sum(value for value in timings_s.values())
+        updated_batch = store.append_apply_history(
+            batch_id,
+            {
+                "apply_id": apply_id,
+                "database_id": database_id,
+                "database_label": _read_text(selected.get("label") or selected.get("schema") or database_id),
+                "database_schema": _read_text(selected.get("schema")),
+                "import_batch_id": import_batch_id,
+                "import_compounds": bool(import_compounds),
+                "import_experiments": bool(import_experiments),
+                "compound_ok": bool(compound_ok) if compound_ok is not None else None,
+                "property_ok": bool(property_ok) if property_ok is not None else None,
+                "compounds_skipped_reason": compounds_skipped_reason,
+                "experiments_skipped_reason": experiments_skipped_reason,
+                "generated_property_file": generated_property_meta,
+                "timings_s": timings_s,
+                "pending_database_sync": pending_sync_result,
+                "before": {
+                    "compounds": before.compounds,
+                    "rules": before.rules,
+                    "pairs": before.pairs,
+                    "rule_environments": before.rule_environments,
+                },
+                "after": {
+                    "compounds": after.compounds,
+                    "rules": after.rules,
+                    "pairs": after.pairs,
+                    "rule_environments": after.rule_environments,
+                },
+                "delta": {
+                    "compounds": after.compounds - before.compounds,
+                    "rules": after.rules - before.rules,
+                    "pairs": after.pairs - before.pairs,
+                    "rule_environments": after.rule_environments - before.rule_environments,
+                },
+            },
+        )
+        if _read_text(updated_batch.get("selected_database_id")) != database_id:
+            updated_batch = store.update_batch(batch_id, {"selected_database_id": database_id})
+
+        return {
+            "batch": updated_batch,
+            "apply_id": apply_id,
+            "check_gate": check_gate,
+            "pending_database_sync": pending_sync_result,
+            "database": {
+                "id": _read_text(selected.get("id") or database_id),
+                "label": _read_text(selected.get("label") or selected.get("schema") or database_id),
+                "schema": _read_text(selected.get("schema")),
+            },
+            "import_batch_id": import_batch_id,
+            "import_compounds": bool(import_compounds),
+            "import_experiments": bool(import_experiments),
+            "compounds_skipped_reason": compounds_skipped_reason,
+            "experiments_skipped_reason": experiments_skipped_reason,
+            "timings_s": timings_s,
+            "before": {
+                "compounds": before.compounds,
+                "rules": before.rules,
+                "pairs": before.pairs,
+                "rule_environments": before.rule_environments,
+            },
+            "after": {
+                "compounds": after.compounds,
+                "rules": after.rules,
+                "pairs": after.pairs,
+                "rule_environments": after.rule_environments,
+            },
+            "delta": {
+                "compounds": after.compounds - before.compounds,
+                "rules": after.rules - before.rules,
+                "pairs": after.pairs - before.pairs,
+                "rule_environments": after.rule_environments - before.rule_environments,
+            },
+        }
 
     @app.route('/api/admin/lead_optimization/mmp_lifecycle/overview', methods=['GET'])
     @require_api_token
     def mmp_lifecycle_overview():
         try:
-            catalog = mmp_database_registry.get_mmp_database_catalog(include_hidden=True, include_stats=True)
+            catalog = _filter_lifecycle_catalog_databases(
+                mmp_database_registry.get_mmp_database_catalog(include_hidden=True, include_stats=True)
+            )
             _sync_assay_methods_for_catalog(store, catalog)
+            catalog = _filter_lifecycle_catalog_databases(
+                mmp_database_registry.get_mmp_database_catalog(include_hidden=True, include_stats=True)
+            )
             pending_rows = store.list_pending_database_sync(pending_only=True)
+            allowed_database_ids = {
+                _read_text(item.get("id"))
+                for item in catalog.get("databases", [])
+                if isinstance(item, dict) and _read_text(item.get("id"))
+            }
             pending_sync_by_database: Dict[str, int] = {}
             for item in pending_rows:
                 row = _safe_json_object(item)
                 db_id = _read_text(row.get("database_id"))
                 if not db_id:
                     continue
+                if allowed_database_ids and db_id not in allowed_database_ids:
+                    continue
                 pending_sync_by_database[db_id] = int(pending_sync_by_database.get(db_id, 0)) + 1
+            if allowed_database_ids:
+                pending_rows = [
+                    _safe_json_object(item)
+                    for item in pending_rows
+                    if _read_text(_safe_json_object(item).get("database_id")) in allowed_database_ids
+                ]
             return jsonify(
                 {
                     "databases": catalog.get("databases", []),
@@ -1461,7 +2293,9 @@ def register_mmp_lifecycle_admin_routes(
     @require_api_token
     def mmp_lifecycle_list_methods():
         try:
-            catalog = mmp_database_registry.get_mmp_database_catalog(include_hidden=True, include_stats=False)
+            catalog = _filter_lifecycle_catalog_databases(
+                mmp_database_registry.get_mmp_database_catalog(include_hidden=True, include_stats=False)
+            )
             _sync_assay_methods_for_catalog(store, catalog)
             return jsonify({"methods": store.list_methods()})
         except Exception as exc:
@@ -1472,7 +2306,9 @@ def register_mmp_lifecycle_admin_routes(
     @require_api_token
     def mmp_lifecycle_method_usage():
         try:
-            catalog = mmp_database_registry.get_mmp_database_catalog(include_hidden=True, include_stats=False)
+            catalog = _filter_lifecycle_catalog_databases(
+                mmp_database_registry.get_mmp_database_catalog(include_hidden=True, include_stats=False)
+            )
             _sync_assay_methods_for_catalog(store, catalog)
             database_by_id: Dict[str, Dict[str, Any]] = {}
             for item in catalog.get("databases", []) if isinstance(catalog, dict) else []:
@@ -1513,29 +2349,42 @@ def register_mmp_lifecycle_admin_routes(
             method = store.upsert_method(next_payload)
             mapping_sync: List[Dict[str, Any]] | None = None
             queued_sync: Dict[str, Any] | None = None
+            applied_sync: Dict[str, Any] | None = None
             if database_id:
-                selected, _ = _resolve_database_target(database_id)
+                selected, target = _resolve_database_target(database_id)
                 _sync_assay_methods_for_database(store, selected)
                 mapping_sync = _upsert_method_mapping_for_database(
                     database_id=database_id,
                     method_id=_read_text(method.get("id")),
-                    source_property=_read_text(method.get("output_property")),
+                    source_property=_read_text(method.get("key") or method.get("output_property")),
                     mmp_property=_read_text(method.get("output_property")),
                     value_transform=_normalize_value_transform(method.get("display_transform")),
                     notes="Method-bound mapping.",
                 )
                 prop_name = _read_text(method.get("output_property"))
-                queued_sync = _enqueue_property_sync(
-                    database_id=database_id,
-                    operation="ensure_property",
-                    payload={"property_name": prop_name},
-                    dedupe_key=f"ensure_property:{prop_name.lower()}",
-                )
+                discovered_props = _extract_database_property_names(selected)
+                alias_rename_source = _pick_family_alias_rename_source(discovered_props, prop_name)
+                if alias_rename_source:
+                    queued_sync = _enqueue_property_sync(
+                        database_id=database_id,
+                        operation="rename_property",
+                        payload={"old_name": alias_rename_source, "new_name": prop_name},
+                        dedupe_key=f"rename_property:{alias_rename_source.lower()}->{prop_name.lower()}",
+                    )
+                else:
+                    queued_sync = _enqueue_property_sync(
+                        database_id=database_id,
+                        operation="ensure_property",
+                        payload={"property_name": prop_name},
+                        dedupe_key=f"ensure_property:{prop_name.lower()}",
+                    )
+                applied_sync = _apply_pending_property_sync(database_id, target)
             return jsonify(
                 {
                     "method": method,
                     "database_id": database_id,
                     "queued_sync": queued_sync,
+                    "applied_sync": applied_sync,
                     "mapping_sync_count": len(mapping_sync or []),
                 }
             ), 201
@@ -1560,16 +2409,28 @@ def register_mmp_lifecycle_admin_routes(
             method = store.upsert_method(next_payload, method_id=method_id)
             mapping_sync: List[Dict[str, Any]] | None = None
             queued_sync: Dict[str, Any] | None = None
+            applied_sync: Dict[str, Any] | None = None
             if database_id:
-                selected, _ = _resolve_database_target(database_id)
+                selected, target = _resolve_database_target(database_id)
                 old_prop = _read_text(previous.get("output_property"))
                 new_prop = _read_text(method.get("output_property"))
+                discovered_props = _extract_database_property_names(selected)
+                direct_old_exists = old_prop and any(old_prop.lower() == item.lower() for item in discovered_props)
+                alias_rename_source = _pick_family_alias_rename_source(discovered_props, new_prop)
                 if old_prop and new_prop and old_prop.lower() != new_prop.lower():
+                    rename_from = old_prop if direct_old_exists else (alias_rename_source or old_prop)
                     queued_sync = _enqueue_property_sync(
                         database_id=database_id,
                         operation="rename_property",
-                        payload={"old_name": old_prop, "new_name": new_prop},
-                        dedupe_key=f"rename_property:{old_prop.lower()}->{new_prop.lower()}",
+                        payload={"old_name": rename_from, "new_name": new_prop},
+                        dedupe_key=f"rename_property:{rename_from.lower()}->{new_prop.lower()}",
+                    )
+                elif alias_rename_source:
+                    queued_sync = _enqueue_property_sync(
+                        database_id=database_id,
+                        operation="rename_property",
+                        payload={"old_name": alias_rename_source, "new_name": new_prop},
+                        dedupe_key=f"rename_property:{alias_rename_source.lower()}->{new_prop.lower()}",
                     )
                 else:
                     queued_sync = _enqueue_property_sync(
@@ -1582,16 +2443,18 @@ def register_mmp_lifecycle_admin_routes(
                 mapping_sync = _upsert_method_mapping_for_database(
                     database_id=database_id,
                     method_id=_read_text(method.get("id")),
-                    source_property=new_prop,
+                    source_property=_read_text(method.get("key") or new_prop),
                     mmp_property=new_prop,
                     value_transform=_normalize_value_transform(method.get("display_transform")),
                     notes="Method-bound mapping.",
                 )
+                applied_sync = _apply_pending_property_sync(database_id, target)
             return jsonify(
                 {
                     "method": method,
                     "database_id": database_id,
                     "queued_sync": queued_sync,
+                    "applied_sync": applied_sync,
                     "mapping_sync_count": len(mapping_sync or []),
                 }
             )
@@ -1706,7 +2569,8 @@ def register_mmp_lifecycle_admin_routes(
         try:
             selected, _ = _resolve_database_target(database_id)
             _sync_assay_methods_for_database(store, selected)
-            properties = selected.get("properties") if isinstance(selected.get("properties"), list) else []
+            refreshed, _ = _resolve_database_target(database_id)
+            properties = refreshed.get("properties") if isinstance(refreshed.get("properties"), list) else []
             return jsonify({"database_id": database_id, "properties": properties})
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
@@ -1840,184 +2704,81 @@ def register_mmp_lifecycle_admin_routes(
     def mmp_lifecycle_apply_batch(batch_id: str):
         payload = _safe_json_object(request.get_json(silent=True) or {})
         try:
+            async_requested = _to_bool(payload.get("async"), True)
+            if not async_requested:
+                return jsonify(_apply_batch_sync(batch_id, payload))
+
             batch = store.get_batch(batch_id)
+            current_runtime = _safe_json_object(batch.get("apply_runtime"))
+            current_phase = _read_text(current_runtime.get("phase")).lower()
+            if current_phase in {"queued", "running"}:
+                return jsonify({"error": f"Batch is already applying. Current phase: {current_phase}."}), 409
+
             database_id = _read_text(payload.get("database_id") or batch.get("selected_database_id"))
             if not database_id:
                 return jsonify({"error": "database_id is required."}), 400
-
-            selected, target = _resolve_database_target(database_id)
+            selected, _ = _resolve_database_target(database_id)
             _sync_assay_methods_for_database(store, selected)
             files = _safe_json_object(batch.get("files"))
             compounds_file = _safe_json_object(files.get("compounds"))
             experiments_file = _safe_json_object(files.get("experiments"))
             import_compounds = bool(payload.get("import_compounds", True)) and bool(compounds_file)
             import_experiments = bool(payload.get("import_experiments", True)) and bool(experiments_file)
-            if _read_text(batch.get("selected_database_id")) != database_id:
-                batch = store.update_batch(batch_id, {"selected_database_id": database_id})
-
             if not import_compounds and not import_experiments:
                 return jsonify({"error": "Nothing to apply. Upload compounds and/or experiments first."}), 400
-
-            last_check = _safe_json_object(batch.get("last_check"))
-            check_policy = _normalize_check_policy(_safe_json_object(payload.get("check_policy") or last_check.get("check_policy")))
-            check_policy["require_approved_status"] = False
-            check_gate = _build_check_gate(
-                batch=batch,
-                database_id=database_id,
-                import_compounds=import_compounds,
-                import_experiments=import_experiments,
-                policy=check_policy,
-            )
-
-            pending_sync_result = _apply_pending_property_sync(database_id, target)
-
+            if _read_text(batch.get("selected_database_id")) != database_id:
+                batch = store.update_batch(batch_id, {"selected_database_id": database_id})
             import_batch_id = _read_text(payload.get("import_batch_id")) or _read_text(batch.get("id"))
-            import_label = _read_text(payload.get("import_label") or batch.get("name"))
-            import_notes = _read_text(payload.get("import_notes") or batch.get("notes"))
 
-            before = verify_service.fetch_dataset_stats(target)
-            compound_ok = None
-            property_ok = None
-            generated_property_meta: Dict[str, Any] = {}
-
-            compound_options = _extract_compound_import_options(payload)
-
-            if import_compounds:
-                structures_path = _resolve_batch_file_path(store=store, batch_id=batch_id, file_meta=compounds_file)
-                if not structures_path or not os.path.exists(structures_path):
-                    return jsonify({"error": "Compound file not found for batch."}), 400
-                compound_cfg = _safe_json_object(compounds_file.get("column_config"))
-                compound_ok = setup_service.import_compound_batch(
-                    target,
-                    structures_file=structures_path,
-                    batch_id=import_batch_id,
-                    batch_label=import_label,
-                    batch_notes=import_notes,
-                    smiles_column=_read_text(compound_cfg.get("smiles_column")),
-                    id_column=_read_text(compound_cfg.get("id_column")),
-                    canonicalize_smiles=True,
-                    output_dir=compound_options["output_dir"],
-                    max_heavy_atoms=compound_options["max_heavy_atoms"],
-                    skip_attachment_enrichment=compound_options["skip_attachment_enrichment"],
-                    attachment_force_recompute=compound_options["attachment_force_recompute"],
-                    fragment_jobs=compound_options["fragment_jobs"],
-                    index_maintenance_work_mem_mb=compound_options["index_maintenance_work_mem_mb"],
-                    index_work_mem_mb=compound_options["index_work_mem_mb"],
-                    index_parallel_workers=compound_options["index_parallel_workers"],
-                    index_commit_every_flushes=compound_options["index_commit_every_flushes"],
-                    incremental_index_shards=compound_options["incremental_index_shards"],
-                    incremental_index_jobs=compound_options["incremental_index_jobs"],
-                    build_construct_tables=compound_options["build_construct_tables"],
-                    build_constant_smiles_mol_index=compound_options["build_constant_smiles_mol_index"],
-                )
-                if not compound_ok:
-                    raise RuntimeError("Compound incremental import failed")
-
-            if import_experiments:
-                mappings = store.list_property_mappings(database_id=database_id)
-                experiment_check = _build_property_import_from_experiments(
-                    logger=logger,
-                    target=target,
-                    store=store,
-                    batch=batch,
-                    database_id=database_id,
-                    mappings=mappings,
-                    row_limit=100,
-                )
-                generated_property_meta = _safe_json_object(experiment_check.get("generated_property_file"))
-                generated_path = _read_text(generated_property_meta.get("path"))
-                if not generated_path or not os.path.exists(generated_path):
-                    raise RuntimeError("Generated property import file is missing")
-                if int(generated_property_meta.get("row_count") or 0) <= 0 or int(generated_property_meta.get("property_count") or 0) <= 0:
-                    raise ValueError(
-                        "No mapped experiment rows are ready for import. Configure property mappings and rerun check first."
-                    )
-                store.set_generated_property_import_file(batch_id, generated_path, generated_property_meta)
-
-                property_ok = setup_service.import_property_batch(
-                    target,
-                    property_file=generated_path,
-                    batch_id=import_batch_id,
-                    batch_label=import_label,
-                    batch_notes=import_notes,
-                    smiles_column="smiles",
-                    canonicalize_smiles=False,
-                )
-                if not property_ok:
-                    raise RuntimeError("Property incremental import failed")
-
-            after = verify_service.fetch_dataset_stats(target)
-            apply_id = f"apply_{uuid.uuid4().hex[:12]}"
-            updated_batch = store.append_apply_history(
+            task_id = f"apply_task_{uuid.uuid4().hex[:12]}"
+            queued_batch = store.mark_apply_queued(
                 batch_id,
-                {
-                    "apply_id": apply_id,
-                    "database_id": database_id,
-                    "database_label": _read_text(selected.get("label") or selected.get("schema") or database_id),
-                    "database_schema": _read_text(selected.get("schema")),
-                    "import_batch_id": import_batch_id,
-                    "import_compounds": bool(import_compounds),
-                    "import_experiments": bool(import_experiments),
-                    "compound_ok": bool(compound_ok) if compound_ok is not None else None,
-                    "property_ok": bool(property_ok) if property_ok is not None else None,
-                    "generated_property_file": generated_property_meta,
-                    "pending_database_sync": pending_sync_result,
-                    "before": {
-                        "compounds": before.compounds,
-                        "rules": before.rules,
-                        "pairs": before.pairs,
-                        "rule_environments": before.rule_environments,
-                    },
-                    "after": {
-                        "compounds": after.compounds,
-                        "rules": after.rules,
-                        "pairs": after.pairs,
-                        "rule_environments": after.rule_environments,
-                    },
-                    "delta": {
-                        "compounds": after.compounds - before.compounds,
-                        "rules": after.rules - before.rules,
-                        "pairs": after.pairs - before.pairs,
-                        "rule_environments": after.rule_environments - before.rule_environments,
-                    },
-                },
+                task_id=task_id,
+                database_id=database_id,
+                import_batch_id=import_batch_id,
+                import_compounds=bool(import_compounds),
+                import_experiments=bool(import_experiments),
             )
-            if _read_text(updated_batch.get("selected_database_id")) != database_id:
-                updated_batch = store.update_batch(batch_id, {"selected_database_id": database_id})
 
-            return jsonify(
-                {
-                    "batch": updated_batch,
-                    "apply_id": apply_id,
-                    "check_gate": check_gate,
-                    "pending_database_sync": pending_sync_result,
-                    "database": {
-                        "id": _read_text(selected.get("id") or database_id),
-                        "label": _read_text(selected.get("label") or selected.get("schema") or database_id),
-                        "schema": _read_text(selected.get("schema")),
-                    },
-                    "import_batch_id": import_batch_id,
-                    "import_compounds": bool(import_compounds),
-                    "import_experiments": bool(import_experiments),
-                    "before": {
-                        "compounds": before.compounds,
-                        "rules": before.rules,
-                        "pairs": before.pairs,
-                        "rule_environments": before.rule_environments,
-                    },
-                    "after": {
-                        "compounds": after.compounds,
-                        "rules": after.rules,
-                        "pairs": after.pairs,
-                        "rule_environments": after.rule_environments,
-                    },
-                    "delta": {
-                        "compounds": after.compounds - before.compounds,
-                        "rules": after.rules - before.rules,
-                        "pairs": after.pairs - before.pairs,
-                        "rule_environments": after.rule_environments - before.rule_environments,
-                    },
-                }
+            worker_payload = dict(payload)
+            worker_payload["database_id"] = database_id
+            worker_payload["import_compounds"] = bool(import_compounds)
+            worker_payload["import_experiments"] = bool(import_experiments)
+            worker_payload["import_batch_id"] = import_batch_id
+            worker_payload["async"] = False
+            worker_payload["task_id"] = task_id
+
+            def _run_apply_task() -> None:
+                try:
+                    store.mark_apply_running(batch_id, task_id=task_id)
+                except Exception as exc:
+                    logger.warning("Failed marking batch running for task %s: %s", task_id, exc)
+                try:
+                    _apply_batch_sync(batch_id, worker_payload)
+                    logger.info("Lifecycle batch apply finished: batch=%s task=%s", batch_id, task_id)
+                except Exception as exc:
+                    err_text = str(exc or "apply failed")
+                    logger.exception("Lifecycle batch apply failed: batch=%s task=%s err=%s", batch_id, task_id, err_text)
+                    try:
+                        store.mark_apply_failed(batch_id, task_id=task_id, error=err_text)
+                    except Exception:
+                        logger.exception("Failed marking lifecycle batch apply task as failed: batch=%s task=%s", batch_id, task_id)
+
+            try:
+                apply_executor.submit(_run_apply_task)
+            except Exception as exc:
+                store.mark_apply_failed(batch_id, task_id=task_id, error=f"Failed to submit apply task: {exc}")
+                raise RuntimeError(f"Failed to enqueue apply task: {exc}") from exc
+
+            return (
+                jsonify(
+                    {
+                        "queued": True,
+                        "task_id": task_id,
+                        "batch": queued_batch,
+                    }
+                ),
+                202,
             )
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
@@ -2080,6 +2841,7 @@ def register_mmp_lifecycle_admin_routes(
                     index_commit_every_flushes=compound_options["index_commit_every_flushes"],
                     incremental_index_shards=compound_options["incremental_index_shards"],
                     incremental_index_jobs=compound_options["incremental_index_jobs"],
+                    skip_incremental_analyze=compound_options["skip_incremental_analyze"],
                     build_construct_tables=compound_options["build_construct_tables"],
                     build_constant_smiles_mol_index=compound_options["build_constant_smiles_mol_index"],
                 )

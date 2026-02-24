@@ -21,6 +21,21 @@ def _table_exists(cursor: Any, table_name: str) -> bool:
     return bool(row and row[0] is not None)
 
 
+def _column_exists(cursor: Any, table_name: str, column_name: str) -> bool:
+    cursor.execute(
+        """
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = %s
+          AND column_name = %s
+        LIMIT 1
+        """,
+        [str(table_name or "").strip(), str(column_name or "").strip()],
+    )
+    return bool(cursor.fetchone())
+
+
 def ensure_property_name(target: PostgresTarget, *, property_name: str) -> Dict[str, Any]:
     _ensure_psycopg()
     token = str(property_name or "").strip()
@@ -144,6 +159,16 @@ def rename_property_name(target: PostgresTarget, *, old_name: str, new_name: str
                 return {"old_name": old_token, "new_name": new_token, "changed": True, "mode": "created_new"}
             if old_id and not new_id:
                 cursor.execute("UPDATE property_name SET name = %s WHERE id = %s", [new_token, old_id])
+                if _column_exists(cursor, "property_name", "display_name"):
+                    cursor.execute(
+                        """
+                        UPDATE property_name
+                        SET display_name = %s
+                        WHERE id = %s
+                          AND (display_name IS NULL OR display_name = '' OR display_name = %s)
+                        """,
+                        [new_token, old_id, old_token],
+                    )
                 if _table_exists(cursor, "leadopt_property_base"):
                     cursor.execute("UPDATE leadopt_property_base SET property_name = %s WHERE property_name = %s", [new_token, old_token])
                 if _table_exists(cursor, "leadopt_property_batch_rows"):
@@ -154,6 +179,16 @@ def rename_property_name(target: PostgresTarget, *, old_name: str, new_name: str
                 conn.commit()
                 return {"old_name": old_token, "new_name": new_token, "changed": True, "mode": "renamed"}
             if old_id and new_id:
+                if _column_exists(cursor, "property_name", "display_name"):
+                    cursor.execute(
+                        """
+                        UPDATE property_name
+                        SET display_name = %s
+                        WHERE id = %s
+                          AND (display_name IS NULL OR display_name = '' OR display_name = %s OR display_name = %s)
+                        """,
+                        [new_token, new_id, old_token, new_token],
+                    )
                 cursor.execute(
                     """
                     DELETE FROM compound_property old_cp
@@ -191,4 +226,3 @@ def rename_property_name(target: PostgresTarget, *, old_name: str, new_name: str
                 return {"old_name": old_token, "new_name": new_token, "changed": True, "mode": "merged"}
             conn.commit()
             return {"old_name": old_token, "new_name": new_token, "changed": False}
-

@@ -12,7 +12,7 @@ This package provides an engineered toolkit for MMP data lifecycle management on
 Behavior note:
 - `compound-import` / `compound-delete` default to incremental MMP re-index (no fallback to full rebuild).
 - You can tune shard count and concurrency with `--pg_incremental_index_shards` and `--pg_incremental_index_jobs`.
-- `--pg_index_commit_every_flushes` defaults to adaptive mode (`0`), so one command path works for both small and large `.fragdb`.
+- `--pg_index_commit_every_flushes` defaults to `1` (safer commit cadence on large runs); set `<=0` to use adaptive mode.
 - Incremental add computes affected constants from delta `.fragdb` and rebuilds candidate pairs via `fragdb_partition`, so newly added compounds can correctly grow pair counts.
 - Lifecycle state is deduplicated by `clean_smiles`; incremental validation should be compared against a rebuild of lifecycle state (not raw duplicated input rows).
 - `--pg_incremental_index_jobs` now runs shard prepare/index steps concurrently (merge remains transaction-serialized for correctness).

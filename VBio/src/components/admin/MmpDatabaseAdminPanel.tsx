@@ -138,7 +138,7 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
     const seen = new Set<string>();
     const rows: string[] = [];
     for (const item of items) {
-      const name = String(item.display_name || item.label || item.name || '').trim();
+      const name = String(item.name || item.label || item.display_name || '').trim();
       if (!name || seen.has(name)) continue;
       seen.add(name);
       rows.push(name);

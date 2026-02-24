@@ -9,7 +9,6 @@ Enhanced with ChEMBL data download capabilities
 import argparse
 import csv
 import glob
-import hashlib
 import json
 import math
 import os
@@ -22,7 +21,7 @@ import time
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
     from rdkit import Chem
@@ -77,6 +76,95 @@ PROPERTY_BATCH_MISSING_TOKENS = {"", "*", "na", "n/a", "nan", "null", "none", "-
 COMPOUND_BATCH_BASE_TABLE = "leadopt_compound_base"
 COMPOUND_BATCH_HEADER_TABLE = "leadopt_compound_batches"
 COMPOUND_BATCH_ROWS_TABLE = "leadopt_compound_batch_rows"
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "")).strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "t", "yes", "y", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = str(os.getenv(name, "")).strip()
+    if not raw:
+        return int(default)
+    try:
+        return int(raw)
+    except Exception:
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.getenv(name, "")).strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
+def _guard_large_index_auto_build(*, pair_rows_est: int, missing_indexes: Sequence[str], guard_label: str) -> None:
+    if not missing_indexes:
+        return
+    allow_large_auto_build = _env_bool("MMP_LIFECYCLE_ALLOW_LARGE_INDEX_AUTO_BUILD", default=False)
+    large_pair_threshold = max(1, _env_int("MMP_LIFECYCLE_LARGE_PAIR_THRESHOLD", 100_000_000))
+    if pair_rows_est >= large_pair_threshold and not allow_large_auto_build:
+        missing_text = ", ".join(sorted({str(i) for i in missing_indexes if str(i)}))
+        raise RuntimeError(
+            f"{guard_label}: missing lookup indexes on large pair table (rows~{pair_rows_est}): {missing_text}. "
+            "Set MMP_LIFECYCLE_ALLOW_LARGE_INDEX_AUTO_BUILD=1 for one-time online build, "
+            "or run offline index maintenance first."
+        )
+
+
+def _current_schema_index_names(cursor) -> set[str]:
+    cursor.execute(
+        """
+        SELECT indexname
+        FROM pg_indexes
+        WHERE schemaname = current_schema()
+        """
+    )
+    return {str(row[0] or "").strip() for row in cursor.fetchall() if str(row[0] or "").strip()}
+
+
+def _estimate_current_schema_table_rows(cursor, table_name: str) -> int:
+    token = str(table_name or "").strip()
+    if not token:
+        return 0
+    cursor.execute(
+        """
+        SELECT COALESCE(c.reltuples, 0)::BIGINT
+        FROM pg_class c
+        WHERE c.oid = to_regclass(%s)
+        """,
+        [token],
+    )
+    row = cursor.fetchone()
+    return max(0, int((row or [0])[0] or 0))
+
+
+def _ensure_named_indexes(cursor, named_statements: Sequence[Tuple[str, str]], *, existing_indexes: Optional[set[str]] = None) -> set[str]:
+    names = set(existing_indexes or set())
+    if not names:
+        names = _current_schema_index_names(cursor)
+    for index_name, statement in named_statements:
+        token = str(index_name or "").strip()
+        if not token or token in names:
+            continue
+        cursor.execute(statement)
+        names.add(token)
+    return names
+
+
+def _copy_rows(cursor, copy_sql: str, rows: Sequence[Tuple[object, ...]]) -> None:
+    if not rows:
+        return
+    with cursor.copy(copy_sql) as copy:
+        for row in rows:
+            copy.write_row(row)
 
 
 def _is_postgres_dsn(value: str) -> bool:
@@ -558,9 +646,32 @@ def _resolve_index_commit_every_flushes(
     except Exception:
         size_bytes = 0
     size_gib = max(0.0, float(size_bytes) / float(1024 ** 3))
-    auto_flushes = int(round(2.0 + 8.0 * math.log2(size_gib + 1.0)))
-    auto_flushes = max(1, min(64, auto_flushes))
+    # Larger fragdb should commit *more frequently* to keep transactions/WAL bounded.
+    if size_gib >= 8.0:
+        auto_flushes = 1
+    elif size_gib >= 2.0:
+        auto_flushes = 2
+    elif size_gib >= 0.5:
+        auto_flushes = 4
+    else:
+        auto_flushes = 8
     return auto_flushes, True
+
+
+def _normalize_index_runtime_tuning(
+    *,
+    maintenance_work_mem_mb: int,
+    work_mem_mb: int,
+    parallel_workers: int,
+) -> tuple[int, int, int]:
+    cpu_cap = max(1, int(os.cpu_count() or 8))
+    max_maintenance_mb = max(128, _env_int("MMP_LIFECYCLE_MAX_INDEX_MAINTENANCE_WORK_MEM_MB", 8192))
+    max_work_mb = max(16, _env_int("MMP_LIFECYCLE_MAX_INDEX_WORK_MEM_MB", 512))
+    max_parallel = max(1, _env_int("MMP_LIFECYCLE_MAX_INDEX_PARALLEL_WORKERS", min(8, cpu_cap)))
+    norm_maintenance = max(0, min(int(maintenance_work_mem_mb or 0), max_maintenance_mb))
+    norm_work = max(0, min(int(work_mem_mb or 0), max_work_mb))
+    norm_parallel = max(0, min(int(parallel_workers or 0), max_parallel))
+    return norm_maintenance, norm_work, norm_parallel
 
 
 def _index_fragments_to_postgres(
@@ -635,14 +746,37 @@ def _index_fragments_to_postgres(
             index_args.extend(["--properties", properties_file])
 
         # Let mmpdb index session inherit memory/parallel/search_path tuning through libpq.
+        tuned_maintenance_mb, tuned_work_mb, tuned_parallel_workers = _normalize_index_runtime_tuning(
+            maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+            work_mem_mb=index_work_mem_mb,
+            parallel_workers=index_parallel_workers,
+        )
+        if tuned_maintenance_mb != int(index_maintenance_work_mem_mb or 0):
+            logger.warning(
+                "Clamped maintenance_work_mem for mmpdb index: requested=%sMB effective=%sMB",
+                int(index_maintenance_work_mem_mb or 0),
+                tuned_maintenance_mb,
+            )
+        if tuned_work_mb != int(index_work_mem_mb or 0):
+            logger.warning(
+                "Clamped work_mem for mmpdb index: requested=%sMB effective=%sMB",
+                int(index_work_mem_mb or 0),
+                tuned_work_mb,
+            )
+        if tuned_parallel_workers != int(index_parallel_workers or 0):
+            logger.warning(
+                "Clamped max_parallel_maintenance_workers for mmpdb index: requested=%s effective=%s",
+                int(index_parallel_workers or 0),
+                tuned_parallel_workers,
+            )
         index_env = os.environ.copy()
         index_pgoptions: List[str] = [f"-c search_path={normalized_schema},public"]
-        if int(index_maintenance_work_mem_mb or 0) > 0:
-            index_pgoptions.append(f"-c maintenance_work_mem={int(index_maintenance_work_mem_mb)}MB")
-        if int(index_work_mem_mb or 0) > 0:
-            index_pgoptions.append(f"-c work_mem={int(index_work_mem_mb)}MB")
-        if int(index_parallel_workers or 0) > 0:
-            index_pgoptions.append(f"-c max_parallel_maintenance_workers={int(index_parallel_workers)}")
+        if tuned_maintenance_mb > 0:
+            index_pgoptions.append(f"-c maintenance_work_mem={tuned_maintenance_mb}MB")
+        if tuned_work_mb > 0:
+            index_pgoptions.append(f"-c work_mem={tuned_work_mb}MB")
+        if tuned_parallel_workers > 0:
+            index_pgoptions.append(f"-c max_parallel_maintenance_workers={tuned_parallel_workers}")
         if index_pgoptions:
             existing_pgoptions = str(index_env.get("PGOPTIONS", "") or "").strip()
             merged_pgoptions = " ".join(index_pgoptions)
@@ -692,6 +826,14 @@ def _index_fragments_to_postgres(
         if result.returncode != 0:
             logger.error(f"Index creation failed: {result.stderr}")
             logger.error(f"Index stdout: {result.stdout}")
+            stderr_text = str(result.stderr or "")
+            if "server closed the connection unexpectedly" in stderr_text.lower():
+                logger.error(
+                    "mmpdb index lost PostgreSQL connection unexpectedly. "
+                    "Likely backend restart/termination under heavy write pressure. "
+                    "Try lower pg_index_* settings, keep concurrent batch jobs minimal, "
+                    "and increase PostgreSQL WAL capacity (max_wal_size)."
+                )
             logger.info(f"Fragments file kept for debugging: {fragments_file}")
             return False
 
@@ -913,8 +1055,9 @@ def _pg_align_id_sequence(cursor, table_name: str) -> None:
     seq_name = cursor.fetchone()[0]
     if not seq_name:
         return
-    cursor.execute(f"SELECT COALESCE(MAX(id), 0) FROM {token}")
-    max_id = int(cursor.fetchone()[0] or 0)
+    cursor.execute(f"SELECT id FROM {token} ORDER BY id DESC LIMIT 1")
+    row = cursor.fetchone()
+    max_id = int((row or [0])[0] or 0)
     if max_id > 0:
         cursor.execute("SELECT setval(%s, %s, true)", [seq_name, max_id])
     else:
@@ -963,24 +1106,37 @@ def _create_postgres_core_indexes(
     *,
     enable_constant_smiles_mol_index: bool = True,
 ) -> None:
-    index_statements = [
-        "CREATE INDEX IF NOT EXISTS idx_compound_public_id ON compound(public_id)",
-        "CREATE INDEX IF NOT EXISTS idx_compound_clean_smiles ON compound(clean_smiles)",
-        "CREATE INDEX IF NOT EXISTS idx_rule_from_to ON rule(from_smiles_id, to_smiles_id)",
-        "CREATE INDEX IF NOT EXISTS idx_rule_environment_rule_radius ON rule_environment(rule_id, radius)",
-        "CREATE INDEX IF NOT EXISTS idx_pair_rule_env ON pair(rule_environment_id)",
-        "CREATE INDEX IF NOT EXISTS idx_pair_constant ON pair(constant_id)",
-        "CREATE INDEX IF NOT EXISTS idx_prop_name_name ON property_name(name)",
-        "CREATE INDEX IF NOT EXISTS idx_compound_prop_compound_prop ON compound_property(compound_id, property_name_id)",
-        "CREATE INDEX IF NOT EXISTS idx_rule_env_stats_prop ON rule_environment_statistics(rule_environment_id, property_name_id)",
+    index_statements: List[Tuple[str, str]] = [
+        ("idx_compound_public_id", "CREATE INDEX IF NOT EXISTS idx_compound_public_id ON compound(public_id)"),
+        ("idx_compound_clean_smiles", "CREATE INDEX IF NOT EXISTS idx_compound_clean_smiles ON compound(clean_smiles)"),
+        ("idx_constant_smiles_smiles", "CREATE INDEX IF NOT EXISTS idx_constant_smiles_smiles ON constant_smiles(smiles)"),
+        ("idx_rule_from_to", "CREATE INDEX IF NOT EXISTS idx_rule_from_to ON rule(from_smiles_id, to_smiles_id)"),
+        ("idx_rule_environment_rule_radius", "CREATE INDEX IF NOT EXISTS idx_rule_environment_rule_radius ON rule_environment(rule_id, radius)"),
+        ("idx_rule_environment_lookup", "CREATE INDEX IF NOT EXISTS idx_rule_environment_lookup ON rule_environment(rule_id, environment_fingerprint_id, radius)"),
+        ("idx_env_fp_lookup", "CREATE INDEX IF NOT EXISTS idx_env_fp_lookup ON environment_fingerprint(smarts, pseudosmiles, parent_smarts)"),
+        ("idx_pair_rule_env", "CREATE INDEX IF NOT EXISTS idx_pair_rule_env ON pair(rule_environment_id)"),
+        ("idx_pair_constant", "CREATE INDEX IF NOT EXISTS idx_pair_constant ON pair(constant_id)"),
+        ("idx_pair_compound1", "CREATE INDEX IF NOT EXISTS idx_pair_compound1 ON pair(compound1_id)"),
+        ("idx_pair_compound2", "CREATE INDEX IF NOT EXISTS idx_pair_compound2 ON pair(compound2_id)"),
+        ("idx_pair_lookup_exact", "CREATE INDEX IF NOT EXISTS idx_pair_lookup_exact ON pair(rule_environment_id, compound1_id, compound2_id, constant_id)"),
+        ("idx_prop_name_name", "CREATE INDEX IF NOT EXISTS idx_prop_name_name ON property_name(name)"),
+        ("idx_compound_prop_compound_prop", "CREATE INDEX IF NOT EXISTS idx_compound_prop_compound_prop ON compound_property(compound_id, property_name_id)"),
+        ("idx_rule_env_stats_prop", "CREATE INDEX IF NOT EXISTS idx_rule_env_stats_prop ON rule_environment_statistics(rule_environment_id, property_name_id)"),
     ]
-    for statement in index_statements:
-        cursor.execute(statement)
+    existing = _ensure_named_indexes(cursor, index_statements)
 
     if _pg_column_exists(cursor, schema, "rule_smiles", "smiles_mol"):
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_smiles_smiles_mol ON rule_smiles USING gist(smiles_mol)")
+        existing = _ensure_named_indexes(
+            cursor,
+            [("idx_rule_smiles_smiles_mol", "CREATE INDEX IF NOT EXISTS idx_rule_smiles_smiles_mol ON rule_smiles USING gist(smiles_mol)")],
+            existing_indexes=existing,
+        )
     if enable_constant_smiles_mol_index and _pg_column_exists(cursor, schema, "constant_smiles", "smiles_mol"):
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_constant_smiles_smiles_mol ON constant_smiles USING gist(smiles_mol)")
+        _ensure_named_indexes(
+            cursor,
+            [("idx_constant_smiles_smiles_mol", "CREATE INDEX IF NOT EXISTS idx_constant_smiles_smiles_mol ON constant_smiles USING gist(smiles_mol)")],
+            existing_indexes=existing,
+        )
 
 
 def _apply_postgres_build_tuning(
@@ -1052,10 +1208,15 @@ def _enrich_attachment_schema_postgres(
         """
     )
 
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_smiles_num_frags ON rule_smiles(num_frags)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_smiles_num_frags_heavies ON rule_smiles(num_frags, num_heavies)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_constant_smiles_num_frags ON constant_smiles(num_frags)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pair_rule_env_constant ON pair(rule_environment_id, constant_id)")
+    existing_indexes = _ensure_named_indexes(
+        cursor,
+        [
+            ("idx_rule_smiles_num_frags", "CREATE INDEX IF NOT EXISTS idx_rule_smiles_num_frags ON rule_smiles(num_frags)"),
+            ("idx_rule_smiles_num_frags_heavies", "CREATE INDEX IF NOT EXISTS idx_rule_smiles_num_frags_heavies ON rule_smiles(num_frags, num_heavies)"),
+            ("idx_constant_smiles_num_frags", "CREATE INDEX IF NOT EXISTS idx_constant_smiles_num_frags ON constant_smiles(num_frags)"),
+            ("idx_pair_rule_env_constant", "CREATE INDEX IF NOT EXISTS idx_pair_rule_env_constant ON pair(rule_environment_id, constant_id)"),
+        ],
+    )
 
     if _pg_column_exists(cursor, schema, "rule_smiles", "smiles_mol"):
         cursor.execute("UPDATE rule_smiles SET smiles_mol = mol_from_smiles(smiles) WHERE smiles_mol IS NULL")
@@ -1063,14 +1224,22 @@ def _enrich_attachment_schema_postgres(
         cursor.execute("ALTER TABLE rule_smiles ADD COLUMN smiles_mol mol")
         cursor.execute("UPDATE rule_smiles SET smiles_mol = mol_from_smiles(smiles)")
 
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_smiles_smiles_mol ON rule_smiles USING gist(smiles_mol)")
+    existing_indexes = _ensure_named_indexes(
+        cursor,
+        [("idx_rule_smiles_smiles_mol", "CREATE INDEX IF NOT EXISTS idx_rule_smiles_smiles_mol ON rule_smiles USING gist(smiles_mol)")],
+        existing_indexes=existing_indexes,
+    )
     if enable_constant_smiles_mol_index:
         if _pg_column_exists(cursor, schema, "constant_smiles", "smiles_mol"):
             cursor.execute("UPDATE constant_smiles SET smiles_mol = mol_from_smiles(smiles) WHERE smiles_mol IS NULL")
         else:
             cursor.execute("ALTER TABLE constant_smiles ADD COLUMN smiles_mol mol")
             cursor.execute("UPDATE constant_smiles SET smiles_mol = mol_from_smiles(smiles)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_constant_smiles_smiles_mol ON constant_smiles USING gist(smiles_mol)")
+        _ensure_named_indexes(
+            cursor,
+            [("idx_constant_smiles_smiles_mol", "CREATE INDEX IF NOT EXISTS idx_constant_smiles_smiles_mol ON constant_smiles USING gist(smiles_mol)")],
+            existing_indexes=existing_indexes,
+        )
 
 
 def _enrich_attachment_schema_postgres_incremental(
@@ -1096,10 +1265,15 @@ def _enrich_attachment_schema_postgres_incremental(
     if not _pg_column_exists(cursor, schema, "constant_smiles", "num_frags"):
         cursor.execute("ALTER TABLE constant_smiles ADD COLUMN num_frags INTEGER")
 
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_smiles_num_frags ON rule_smiles(num_frags)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_smiles_num_frags_heavies ON rule_smiles(num_frags, num_heavies)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_constant_smiles_num_frags ON constant_smiles(num_frags)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pair_rule_env_constant ON pair(rule_environment_id, constant_id)")
+    existing_indexes = _ensure_named_indexes(
+        cursor,
+        [
+            ("idx_rule_smiles_num_frags", "CREATE INDEX IF NOT EXISTS idx_rule_smiles_num_frags ON rule_smiles(num_frags)"),
+            ("idx_rule_smiles_num_frags_heavies", "CREATE INDEX IF NOT EXISTS idx_rule_smiles_num_frags_heavies ON rule_smiles(num_frags, num_heavies)"),
+            ("idx_constant_smiles_num_frags", "CREATE INDEX IF NOT EXISTS idx_constant_smiles_num_frags ON constant_smiles(num_frags)"),
+            ("idx_pair_rule_env_constant", "CREATE INDEX IF NOT EXISTS idx_pair_rule_env_constant ON pair(rule_environment_id, constant_id)"),
+        ],
+    )
 
     cursor.execute("DROP TABLE IF EXISTS tmp_inc_attach_constants")
     cursor.execute(
@@ -1109,8 +1283,9 @@ def _enrich_attachment_schema_postgres_incremental(
         ) ON COMMIT DROP
         """
     )
-    cursor.executemany(
-        "INSERT INTO tmp_inc_attach_constants (smiles) VALUES (%s) ON CONFLICT DO NOTHING",
+    _copy_rows(
+        cursor,
+        "COPY tmp_inc_attach_constants (smiles) FROM STDIN",
         [(value,) for value in constants],
     )
 
@@ -1208,7 +1383,11 @@ def _enrich_attachment_schema_postgres_incremental(
              WHERE rs.id IN (SELECT id FROM tmp_inc_attach_rule_smiles)
             """
         )
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rule_smiles_smiles_mol ON rule_smiles USING gist(smiles_mol)")
+    existing_indexes = _ensure_named_indexes(
+        cursor,
+        [("idx_rule_smiles_smiles_mol", "CREATE INDEX IF NOT EXISTS idx_rule_smiles_smiles_mol ON rule_smiles USING gist(smiles_mol)")],
+        existing_indexes=existing_indexes,
+    )
 
     if enable_constant_smiles_mol_index:
         if _pg_column_exists(cursor, schema, "constant_smiles", "smiles_mol"):
@@ -1229,7 +1408,11 @@ def _enrich_attachment_schema_postgres_incremental(
                  WHERE cs.smiles IN (SELECT smiles FROM tmp_inc_attach_constants)
                 """
             )
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_constant_smiles_smiles_mol ON constant_smiles USING gist(smiles_mol)")
+        _ensure_named_indexes(
+            cursor,
+            [("idx_constant_smiles_smiles_mol", "CREATE INDEX IF NOT EXISTS idx_constant_smiles_smiles_mol ON constant_smiles USING gist(smiles_mol)")],
+            existing_indexes=existing_indexes,
+        )
 
 
 def _rebuild_construct_tables_postgres(cursor) -> None:
@@ -1769,6 +1952,14 @@ def _load_property_batch_temp_table(
     invalid_smiles_rows = 0
     value_rows = 0
     buffer: List[tuple[int, str, str, float]] = []
+    def _flush_property_rows(rows: List[tuple[int, str, str, float]]) -> None:
+        if not rows:
+            return
+        with cursor.copy(
+            "COPY tmp_property_upload (line_no, clean_smiles, property_name, value) FROM STDIN"
+        ) as copy:
+            for item in rows:
+                copy.write_row(item)
 
     with open(property_file, "r", encoding="utf-8") as handle:
         reader = csv.DictReader(handle, delimiter=delimiter)
@@ -1803,25 +1994,12 @@ def _load_property_batch_temp_table(
                 buffer.append((line_no, clean_smiles, property_name, value))
                 value_rows += 1
             if len(buffer) >= max(100, int(insert_batch_size)):
-                cursor.executemany(
-                    """
-                    INSERT INTO tmp_property_upload (line_no, clean_smiles, property_name, value)
-                    VALUES (%s, %s, %s, %s)
-                    """,
-                    buffer,
-                )
+                _flush_property_rows(buffer)
                 buffer = []
         if buffer:
-            cursor.executemany(
-                """
-                INSERT INTO tmp_property_upload (line_no, clean_smiles, property_name, value)
-                VALUES (%s, %s, %s, %s)
-                """,
-                buffer,
-            )
+            _flush_property_rows(buffer)
 
-    cursor.execute("SELECT COUNT(*) FROM tmp_property_upload")
-    staged_values = int(cursor.fetchone()[0])
+    staged_values = int(value_rows)
     cursor.execute("DROP TABLE IF EXISTS tmp_property_upload_dedup")
     cursor.execute(
         """
@@ -1842,8 +2020,10 @@ def _load_property_batch_temp_table(
         WHERE rn = 1
         """
     )
-    cursor.execute("SELECT COUNT(*) FROM tmp_property_upload_dedup")
-    dedup_rows = int(cursor.fetchone()[0])
+    dedup_rows = int(cursor.rowcount or 0)
+    if dedup_rows <= 0:
+        cursor.execute("SELECT COUNT(*) FROM tmp_property_upload_dedup")
+        dedup_rows = int(cursor.fetchone()[0])
     return {
         "total_rows": total_rows,
         "parsed_rows": parsed_rows,
@@ -1919,6 +2099,7 @@ def _refresh_compound_property_for_touched_keys(cursor) -> Dict[str, int]:
          WHERE cp.compound_id = r.compound_id
            AND cp.property_name_id = r.property_name_id
            AND r.resolved_value IS NOT NULL
+           AND cp.value IS DISTINCT FROM r.resolved_value
         """
     )
     updated = int(cursor.rowcount or 0)
@@ -1927,11 +2108,13 @@ def _refresh_compound_property_for_touched_keys(cursor) -> Dict[str, int]:
         INSERT INTO compound_property (compound_id, property_name_id, value)
         SELECT r.compound_id, r.property_name_id, r.resolved_value
           FROM tmp_property_resolved_ids r
-          LEFT JOIN compound_property cp
-            ON cp.compound_id = r.compound_id
-           AND cp.property_name_id = r.property_name_id
-         WHERE cp.compound_id IS NULL
-           AND r.resolved_value IS NOT NULL
+         WHERE r.resolved_value IS NOT NULL
+           AND NOT EXISTS (
+                SELECT 1
+                FROM compound_property cp
+                WHERE cp.compound_id = r.compound_id
+                  AND cp.property_name_id = r.property_name_id
+            )
         """
     )
     inserted = int(cursor.rowcount or 0)
@@ -1973,8 +2156,9 @@ def _refresh_compound_property_for_smiles(cursor, smiles_values: Sequence[str]) 
         ) ON COMMIT DROP
         """
     )
-    cursor.executemany(
-        "INSERT INTO tmp_property_smiles_filter (clean_smiles) VALUES (%s) ON CONFLICT DO NOTHING",
+    _copy_rows(
+        cursor,
+        "COPY tmp_property_smiles_filter (clean_smiles) FROM STDIN",
         [(value,) for value in normalized_smiles],
     )
     cursor.execute("DROP TABLE IF EXISTS tmp_property_touched")
@@ -2006,6 +2190,7 @@ def import_property_batch_postgres(
     smiles_column: str = "",
     canonicalize_smiles: bool = True,
     insert_batch_size: int = 5000,
+    overwrite_existing_batch: bool = False,
 ) -> bool:
     logger = logging.getLogger(__name__)
     if not HAS_PSYCOPG:
@@ -2029,13 +2214,27 @@ def import_property_batch_postgres(
                     [normalized_batch_id],
                 )
                 if cursor.fetchone() is not None:
-                    logger.error(
-                        "Batch id '%s' already exists in schema '%s'. Please use a new --property_batch_id.",
+                    if not overwrite_existing_batch:
+                        logger.error(
+                            "Batch id '%s' already exists in schema '%s'. Please use a new --property_batch_id.",
+                            normalized_batch_id,
+                            normalized_schema,
+                        )
+                        conn.rollback()
+                        return False
+                    logger.warning(
+                        "Property batch id '%s' already exists in schema '%s'; replacing existing rows for retry.",
                         normalized_batch_id,
                         normalized_schema,
                     )
-                    conn.rollback()
-                    return False
+                    cursor.execute(
+                        f"DELETE FROM {PROPERTY_BATCH_ROWS_TABLE} WHERE batch_id = %s",
+                        [normalized_batch_id],
+                    )
+                    cursor.execute(
+                        f"DELETE FROM {PROPERTY_BATCH_HEADER_TABLE} WHERE batch_id = %s",
+                        [normalized_batch_id],
+                    )
 
                 parse_stats = _load_property_batch_temp_table(
                     cursor,
@@ -2075,20 +2274,7 @@ def import_property_batch_postgres(
                 )
                 batch_seq = int(cursor.fetchone()[0])
 
-                cursor.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM tmp_property_upload_dedup d
-                    WHERE EXISTS (
-                        SELECT 1
-                        FROM compound c
-                        WHERE c.clean_smiles = d.clean_smiles
-                    )
-                    """
-                )
-                matched_rows = int(cursor.fetchone()[0])
                 total_rows = int(parse_stats["dedup_rows"])
-                unmatched_rows = max(0, total_rows - matched_rows)
 
                 cursor.execute(
                     f"""
@@ -2110,6 +2296,8 @@ def import_property_batch_postgres(
                     [normalized_batch_id, batch_seq],
                 )
                 inserted_batch_rows = int(cursor.rowcount or 0)
+                matched_rows = inserted_batch_rows
+                unmatched_rows = max(0, total_rows - matched_rows)
 
                 cursor.execute("DROP TABLE IF EXISTS tmp_property_touched")
                 cursor.execute(
@@ -2121,8 +2309,7 @@ def import_property_batch_postgres(
                     """,
                     [normalized_batch_id],
                 )
-                cursor.execute("SELECT COUNT(*) FROM tmp_property_touched")
-                touched_pairs = int(cursor.fetchone()[0])
+                touched_pairs = max(0, int(cursor.rowcount or 0))
                 refresh_stats = _refresh_compound_property_for_touched_keys(cursor)
 
                 cursor.execute(
@@ -2211,8 +2398,7 @@ def delete_property_batch_postgres(
                     """,
                     [normalized_batch_id],
                 )
-                cursor.execute("SELECT COUNT(*) FROM tmp_property_touched")
-                touched_pairs = int(cursor.fetchone()[0])
+                touched_pairs = max(0, int(cursor.rowcount or 0))
 
                 cursor.execute(
                     f"DELETE FROM {PROPERTY_BATCH_HEADER_TABLE} WHERE batch_id = %s",
@@ -2425,6 +2611,15 @@ def _load_compound_batch_temp_table(
     valid_rows = 0
     invalid_smiles_rows = 0
     buffer: List[tuple[int, str, str, str]] = []
+    def _flush_upload_buffer(rows: List[tuple[int, str, str, str]]) -> None:
+        if not rows:
+            return
+        with cursor.copy(
+            "COPY tmp_compound_upload (line_no, input_smiles, clean_smiles, public_id) FROM STDIN"
+        ) as copy:
+            for item in rows:
+                copy.write_row(item)
+
     with open(structures_file, "r", encoding="utf-8") as handle:
         reader = csv.DictReader(handle, delimiter=delimiter)
         headers = [str(h or "").strip() for h in (reader.fieldnames or [])]
@@ -2449,22 +2644,10 @@ def _load_compound_batch_temp_table(
             buffer.append((line_no, raw_smiles, clean_smiles, raw_public_id))
             valid_rows += 1
             if len(buffer) >= max(100, int(insert_batch_size)):
-                cursor.executemany(
-                    """
-                    INSERT INTO tmp_compound_upload (line_no, input_smiles, clean_smiles, public_id)
-                    VALUES (%s, %s, %s, %s)
-                    """,
-                    buffer,
-                )
+                _flush_upload_buffer(buffer)
                 buffer = []
         if buffer:
-            cursor.executemany(
-                """
-                INSERT INTO tmp_compound_upload (line_no, input_smiles, clean_smiles, public_id)
-                VALUES (%s, %s, %s, %s)
-                """,
-                buffer,
-            )
+            _flush_upload_buffer(buffer)
     cursor.execute("DROP TABLE IF EXISTS tmp_compound_upload_dedup")
     cursor.execute(
         """
@@ -2496,6 +2679,121 @@ def _load_compound_batch_temp_table(
         "invalid_smiles_rows": invalid_smiles_rows,
         "dedup_rows": dedup_rows,
     }
+
+
+def _schema_has_any_compounds(cursor) -> bool:
+    try:
+        cursor.execute("SELECT EXISTS (SELECT 1 FROM compound LIMIT 1)")
+        row = cursor.fetchone()
+        return bool((row or [False])[0])
+    except Exception:
+        return False
+
+
+def _export_smiles_file_from_temp_compound_table(
+    cursor,
+    *,
+    source_table: str,
+    output_file: str,
+) -> int:
+    total_rows = 0
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
+    cursor.execute(
+        f"""
+        SELECT
+            clean_smiles,
+            COALESCE(NULLIF(public_id, ''), 'CMPD_' || SUBSTRING(md5(clean_smiles), 1, 16)) AS public_id
+        FROM {source_table}
+        WHERE clean_smiles IS NOT NULL
+          AND clean_smiles <> ''
+        """
+    )
+    with open(output_file, "w", encoding="utf-8") as handle:
+        handle.write("SMILES\tID\n")
+        while True:
+            rows = cursor.fetchmany(10000)
+            if not rows:
+                break
+            for row in rows:
+                smiles = str((row[0] if len(row) > 0 else "") or "").strip()
+                public_id = str((row[1] if len(row) > 1 else "") or "").strip()
+                if not smiles:
+                    continue
+                if not public_id:
+                    public_id = f"CMPD_{total_rows + 1:09d}"
+                handle.write(f"{smiles}\t{public_id}\n")
+                total_rows += 1
+    return total_rows
+
+
+def _bootstrap_rebuild_index_from_smiles_file(
+    postgres_url: str,
+    *,
+    schema: str,
+    smiles_file: str,
+    output_dir: str,
+    max_heavy_atoms: int,
+    skip_attachment_enrichment: bool,
+    attachment_force_recompute: bool,
+    fragment_jobs: int,
+    index_maintenance_work_mem_mb: int,
+    index_work_mem_mb: int,
+    index_parallel_workers: int,
+    index_commit_every_flushes: int,
+    build_construct_tables: bool,
+    build_constant_smiles_mol_index: bool,
+) -> bool:
+    logger = logging.getLogger(__name__)
+    normalized_schema = _validate_pg_schema(schema)
+    os.makedirs(output_dir, exist_ok=True)
+    file_tag = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    bootstrap_fragdb = os.path.join(output_dir, f"{normalized_schema}_bootstrap_{file_tag}.fragdb")
+    schema_fragment_cache_file = os.path.join(output_dir, f"{normalized_schema}_compound_state.cache.fragdb")
+    try:
+        cache_arg = schema_fragment_cache_file if os.path.exists(schema_fragment_cache_file) else ""
+        if not _run_mmpdb_fragment(
+            smiles_file,
+            bootstrap_fragdb,
+            max_heavy_atoms=max_heavy_atoms,
+            fragment_jobs=fragment_jobs,
+            cache_file=cache_arg,
+        ):
+            return False
+        ok = _index_fragments_to_postgres(
+            bootstrap_fragdb,
+            postgres_url,
+            postgres_schema=normalized_schema,
+            force_rebuild_schema=True,
+            properties_file=None,
+            skip_attachment_enrichment=skip_attachment_enrichment,
+            attachment_force_recompute=attachment_force_recompute,
+            index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+            index_work_mem_mb=index_work_mem_mb,
+            index_parallel_workers=index_parallel_workers,
+            index_commit_every_flushes=index_commit_every_flushes,
+            build_construct_tables=build_construct_tables,
+            build_constant_smiles_mol_index=build_constant_smiles_mol_index,
+            detect_existing_core_tables=False,
+        )
+        if not ok:
+            return False
+        try:
+            if os.path.abspath(bootstrap_fragdb) != os.path.abspath(schema_fragment_cache_file):
+                shutil.copy2(bootstrap_fragdb, schema_fragment_cache_file)
+            _sync_fragment_cache_meta_from_db(
+                postgres_url,
+                schema=normalized_schema,
+                cache_fragdb=schema_fragment_cache_file,
+            )
+        except Exception as exc:
+            logger.warning("Failed updating bootstrap fragment cache for schema '%s': %s", normalized_schema, exc)
+        return True
+    finally:
+        try:
+            if os.path.exists(bootstrap_fragdb):
+                os.remove(bootstrap_fragdb)
+        except Exception:
+            pass
 
 
 def _build_rebuild_smiles_file_from_compound_state(
@@ -2541,7 +2839,6 @@ def _build_rebuild_smiles_file_from_compound_state(
                         COALESCE(public_id, 'CMPD_' || SUBSTRING(md5(clean_smiles), 1, 16)) AS public_id
                     FROM ranked
                     WHERE rn = 1
-                    ORDER BY clean_smiles
                     """
                 )
             else:
@@ -2566,7 +2863,6 @@ def _build_rebuild_smiles_file_from_compound_state(
                           AND clean_smiles <> ''
                     ) c
                     WHERE c.rn = 1
-                    ORDER BY c.clean_smiles
                     """
                 )
             with open(smiles_file, "w", encoding="utf-8") as handle:
@@ -2584,7 +2880,7 @@ def _build_rebuild_smiles_file_from_compound_state(
     return smiles_file, total_rows
 
 
-def _write_smiles_records_file(file_path: str, rows: Sequence[Tuple[str, str, str]]) -> int:
+def _write_smiles_records_file(file_path: str, rows: Iterable[Tuple[str, str, str]]) -> int:
     os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
     total = 0
     with open(file_path, "w", encoding="utf-8") as handle:
@@ -2856,9 +3152,6 @@ def _write_fragment_cache_meta(
         "meta_version": 1,
         "compound_count": int(signature.get("compound_count", 0) or 0),
         "compound_max_id": int(signature.get("compound_max_id", 0) or 0),
-        "batch_count": int(signature.get("batch_count", 0) or 0),
-        "batch_seq_max": int(signature.get("batch_seq_max", 0) or 0),
-        "batch_seq_sum": int(signature.get("batch_seq_sum", 0) or 0),
     }
     try:
         os.makedirs(os.path.dirname(meta_file) or ".", exist_ok=True)
@@ -2898,37 +3191,38 @@ def _collect_compound_cache_signature(
     normalized_schema = _validate_pg_schema(schema)
     compound_count = 0
     compound_max_id = 0
-    batch_count = 0
-    batch_seq_max = 0
-    batch_seq_sum = 0
     with psycopg.connect(postgres_url, autocommit=False) as conn:
         with conn.cursor() as cursor:
             _pg_set_search_path(cursor, normalized_schema)
-            cursor.execute("SELECT COUNT(*)::BIGINT, COALESCE(MAX(id), 0)::BIGINT FROM compound")
-            row = cursor.fetchone() or (0, 0)
-            compound_count = int(row[0] or 0)
-            compound_max_id = int(row[1] or 0)
-            cursor.execute(
-                f"""
-                SELECT
-                    COUNT(*)::BIGINT,
-                    COALESCE(MAX(batch_seq), 0)::BIGINT,
-                    COALESCE(SUM(batch_seq), 0)::BIGINT
-                FROM {COMPOUND_BATCH_HEADER_TABLE}
-                """
-            )
-            row = cursor.fetchone() or (0, 0, 0)
-            batch_count = int(row[0] or 0)
-            batch_seq_max = int(row[1] or 0)
-            batch_seq_sum = int(row[2] or 0)
+            # Prefer cached dataset summary to avoid a full compound COUNT(*) on every incremental run.
+            dataset_compound_count = 0
+            try:
+                cursor.execute(
+                    """
+                    SELECT COALESCE(num_compounds, 0)::BIGINT
+                    FROM dataset
+                    ORDER BY id
+                    LIMIT 1
+                    """
+                )
+                row = cursor.fetchone()
+                dataset_compound_count = int((row or [0])[0] or 0)
+            except Exception:
+                dataset_compound_count = 0
+            cursor.execute("SELECT COALESCE(MAX(id), 0)::BIGINT FROM compound")
+            row = cursor.fetchone() or (0,)
+            compound_max_id = int(row[0] or 0)
+            if dataset_compound_count > 0:
+                compound_count = dataset_compound_count
+            else:
+                cursor.execute("SELECT COUNT(*)::BIGINT FROM compound")
+                row = cursor.fetchone() or (0,)
+                compound_count = int(row[0] or 0)
             conn.commit()
     return {
         "meta_version": 1,
         "compound_count": compound_count,
         "compound_max_id": compound_max_id,
-        "batch_count": batch_count,
-        "batch_seq_max": batch_seq_max,
-        "batch_seq_sum": batch_seq_sum,
     }
 
 
@@ -2944,9 +3238,6 @@ def _is_fragment_cache_meta_match(
         "meta_version",
         "compound_count",
         "compound_max_id",
-        "batch_count",
-        "batch_seq_max",
-        "batch_seq_sum",
     )
     for key in keys:
         if int(meta.get(key, 0) or 0) != int(signature.get(key, 0) or 0):
@@ -3039,8 +3330,9 @@ def _load_partner_smiles_for_constants(
                 ) ON COMMIT DROP
                 """
             )
-            cursor.executemany(
-                "INSERT INTO tmp_inc_constants (smiles) VALUES (%s) ON CONFLICT DO NOTHING",
+            _copy_rows(
+                cursor,
+                "COPY tmp_inc_constants (smiles) FROM STDIN",
                 [(value,) for value in constants_list],
             )
             cursor.execute("DROP TABLE IF EXISTS tmp_inc_exclude_smiles")
@@ -3052,8 +3344,9 @@ def _load_partner_smiles_for_constants(
                 """
             )
             if exclude_list:
-                cursor.executemany(
-                    "INSERT INTO tmp_inc_exclude_smiles (clean_smiles) VALUES (%s) ON CONFLICT DO NOTHING",
+                _copy_rows(
+                    cursor,
+                    "COPY tmp_inc_exclude_smiles (clean_smiles) FROM STDIN",
                     [(value,) for value in exclude_list],
                 )
             cursor.execute(
@@ -3124,7 +3417,14 @@ def _load_active_compounds_for_smiles(
     schema: str,
     smiles_values: Sequence[str],
 ) -> List[Tuple[str, str, str]]:
-    unique_smiles = sorted({str(item or "").strip() for item in smiles_values if str(item or "").strip()})
+    unique_smiles: List[str] = []
+    seen_smiles: set[str] = set()
+    for item in smiles_values:
+        token = str(item or "").strip()
+        if not token or token in seen_smiles:
+            continue
+        seen_smiles.add(token)
+        unique_smiles.append(token)
     if not unique_smiles:
         return []
     normalized_schema = _validate_pg_schema(schema)
@@ -3140,18 +3440,33 @@ def _load_active_compounds_for_smiles(
                 ) ON COMMIT DROP
                 """
             )
-            cursor.executemany(
-                "INSERT INTO tmp_inc_smiles_filter (clean_smiles) VALUES (%s) ON CONFLICT DO NOTHING",
-                [(value,) for value in unique_smiles],
-            )
+            with cursor.copy(
+                "COPY tmp_inc_smiles_filter (clean_smiles) FROM STDIN"
+            ) as copy:
+                for value in unique_smiles:
+                    copy.write_row((value,))
             cursor.execute(
                 f"""
                 WITH merged_source AS (
-                    SELECT clean_smiles, public_id, input_smiles, 0::BIGINT AS source_priority, 0::BIGINT AS source_seq
-                    FROM {COMPOUND_BATCH_BASE_TABLE}
+                    SELECT
+                        b.clean_smiles,
+                        b.public_id,
+                        b.input_smiles,
+                        0::BIGINT AS source_priority,
+                        0::BIGINT AS source_seq
+                    FROM {COMPOUND_BATCH_BASE_TABLE} b
+                    INNER JOIN tmp_inc_smiles_filter f
+                            ON f.clean_smiles = b.clean_smiles
                     UNION ALL
-                    SELECT clean_smiles, public_id, input_smiles, 1::BIGINT AS source_priority, batch_seq AS source_seq
-                    FROM {COMPOUND_BATCH_ROWS_TABLE}
+                    SELECT
+                        r.clean_smiles,
+                        r.public_id,
+                        r.input_smiles,
+                        1::BIGINT AS source_priority,
+                        r.batch_seq AS source_seq
+                    FROM {COMPOUND_BATCH_ROWS_TABLE} r
+                    INNER JOIN tmp_inc_smiles_filter f
+                            ON f.clean_smiles = r.clean_smiles
                 ),
                 ranked AS (
                     SELECT
@@ -3171,8 +3486,6 @@ def _load_active_compounds_for_smiles(
                     COALESCE(r.public_id, 'CMPD_' || SUBSTRING(md5(r.clean_smiles), 1, 16)) AS public_id,
                     COALESCE(r.input_smiles, r.clean_smiles) AS input_smiles
                 FROM ranked r
-                INNER JOIN tmp_inc_smiles_filter f
-                        ON f.clean_smiles = r.clean_smiles
                 WHERE r.rn = 1
                 ORDER BY r.clean_smiles
                 """
@@ -3199,6 +3512,7 @@ def _ensure_compound_fragment_cache(
     fragment_jobs: int,
 ) -> bool:
     logger = logging.getLogger(__name__)
+    allow_cache_reseed = _env_bool("LEADOPT_MMP_ALLOW_CACHE_RESEED", False)
     if os.path.exists(cache_file):
         try:
             signature = _collect_compound_cache_signature(postgres_url, schema=schema)
@@ -3214,7 +3528,21 @@ def _ensure_compound_fragment_cache(
             signature=signature,
         ):
             return True
+        if not allow_cache_reseed:
+            logger.error(
+                "Fragment cache metadata mismatch for schema '%s' and strict incremental mode is enabled. "
+                "Refusing full-cache reseed to keep batch runtime independent of total library size.",
+                schema,
+            )
+            return False
         _remove_fragment_cache_files(cache_file, reason="metadata mismatch")
+    elif not allow_cache_reseed:
+        logger.error(
+            "Fragment cache file is missing for schema '%s' and strict incremental mode is enabled. "
+            "Refusing full-cache reseed to keep batch runtime independent of total library size.",
+            schema,
+        )
+        return False
     file_tag = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     merged_smiles_file, merged_count = _build_rebuild_smiles_file_from_compound_state(
         postgres_url,
@@ -3290,8 +3618,9 @@ def _sync_candidate_compounds_from_active_rows(
         """
     )
     if candidate_values:
-        cursor.executemany(
-            "INSERT INTO tmp_inc_candidate_smiles (clean_smiles) VALUES (%s) ON CONFLICT DO NOTHING",
+        _copy_rows(
+            cursor,
+            "COPY tmp_inc_candidate_smiles (clean_smiles) FROM STDIN",
             [(value,) for value in candidate_values],
         )
 
@@ -3306,14 +3635,9 @@ def _sync_candidate_compounds_from_active_rows(
         """
     )
     if active_values:
-        cursor.executemany(
-            """
-            INSERT INTO tmp_inc_active_compounds (clean_smiles, public_id, input_smiles)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (clean_smiles) DO UPDATE
-              SET public_id = EXCLUDED.public_id,
-                  input_smiles = EXCLUDED.input_smiles
-            """,
+        _copy_rows(
+            cursor,
+            "COPY tmp_inc_active_compounds (clean_smiles, public_id, input_smiles) FROM STDIN",
             active_values,
         )
 
@@ -3324,6 +3648,7 @@ def _sync_candidate_compounds_from_active_rows(
           FROM tmp_inc_active_compounds a
          WHERE c.clean_smiles = a.clean_smiles
            AND COALESCE(NULLIF(a.input_smiles, ''), '') <> ''
+           AND c.input_smiles IS DISTINCT FROM a.input_smiles
         """
     )
     cursor.execute(
@@ -3333,6 +3658,7 @@ def _sync_candidate_compounds_from_active_rows(
           FROM tmp_inc_active_compounds a
          WHERE c.clean_smiles = a.clean_smiles
            AND a.public_id <> ''
+           AND c.public_id IS DISTINCT FROM a.public_id
            AND NOT EXISTS (
                 SELECT 1
                 FROM compound c2
@@ -3342,46 +3668,48 @@ def _sync_candidate_compounds_from_active_rows(
         """
     )
 
+    cursor.execute("DROP TABLE IF EXISTS tmp_inc_obsolete_compound_ids")
     cursor.execute(
         """
-        DELETE FROM compound_property cp
-        USING compound c
-        WHERE cp.compound_id = c.id
-          AND EXISTS (
-                SELECT 1
-                FROM tmp_inc_candidate_smiles t
-                WHERE t.clean_smiles = c.clean_smiles
-            )
+        CREATE TEMP TABLE tmp_inc_obsolete_compound_ids (
+            id INTEGER PRIMARY KEY
+        ) ON COMMIT DROP
+        """
+    )
+    cursor.execute(
+        """
+        INSERT INTO tmp_inc_obsolete_compound_ids (id)
+        SELECT c.id
+        FROM compound c
+        INNER JOIN tmp_inc_candidate_smiles t
+                ON t.clean_smiles = c.clean_smiles
+        LEFT JOIN tmp_inc_active_compounds a
+               ON a.clean_smiles = c.clean_smiles
+        WHERE a.clean_smiles IS NULL
           AND NOT EXISTS (
                 SELECT 1
-                FROM tmp_inc_active_compounds a
-                WHERE a.clean_smiles = c.clean_smiles
+                FROM pair p
+                WHERE p.compound1_id = c.id
             )
           AND NOT EXISTS (
                 SELECT 1
                 FROM pair p
-                WHERE p.compound1_id = c.id OR p.compound2_id = c.id
+                WHERE p.compound2_id = c.id
             )
+        ON CONFLICT DO NOTHING
+        """
+    )
+
+    cursor.execute(
+        """
+        DELETE FROM compound_property cp
+        WHERE cp.compound_id IN (SELECT id FROM tmp_inc_obsolete_compound_ids)
         """
     )
     cursor.execute(
         """
         DELETE FROM compound c
-        WHERE EXISTS (
-                SELECT 1
-                FROM tmp_inc_candidate_smiles t
-                WHERE t.clean_smiles = c.clean_smiles
-            )
-          AND NOT EXISTS (
-                SELECT 1
-                FROM tmp_inc_active_compounds a
-                WHERE a.clean_smiles = c.clean_smiles
-            )
-          AND NOT EXISTS (
-                SELECT 1
-                FROM pair p
-                WHERE p.compound1_id = c.id OR p.compound2_id = c.id
-            )
+        WHERE c.id IN (SELECT id FROM tmp_inc_obsolete_compound_ids)
         """
     )
 
@@ -3433,7 +3761,12 @@ def _cleanup_orphan_mmp_rows(cursor) -> None:
         WHERE NOT EXISTS (
             SELECT 1
             FROM rule r
-            WHERE r.from_smiles_id = rs.id OR r.to_smiles_id = rs.id
+            WHERE r.from_smiles_id = rs.id
+        )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM rule r
+            WHERE r.to_smiles_id = rs.id
         )
         """
     )
@@ -3471,8 +3804,9 @@ def _cleanup_orphan_mmp_rows_for_constants(cursor, *, affected_constants: Sequen
         ) ON COMMIT DROP
         """
     )
-    cursor.executemany(
-        "INSERT INTO tmp_inc_cleanup_constants (smiles) VALUES (%s) ON CONFLICT DO NOTHING",
+    _copy_rows(
+        cursor,
+        "COPY tmp_inc_cleanup_constants (smiles) FROM STDIN",
         [(value,) for value in constants],
     )
 
@@ -3593,7 +3927,12 @@ def _cleanup_orphan_mmp_rows_for_constants(cursor, *, affected_constants: Sequen
           AND NOT EXISTS (
                 SELECT 1
                 FROM rule r
-                WHERE r.from_smiles_id = rs.id OR r.to_smiles_id = rs.id
+                WHERE r.from_smiles_id = rs.id
+            )
+          AND NOT EXISTS (
+                SELECT 1
+                FROM rule r
+                WHERE r.to_smiles_id = rs.id
             )
         """
     )
@@ -3630,8 +3969,9 @@ def _update_rule_environment_counts_for_constants(cursor, *, affected_constants:
         ) ON COMMIT DROP
         """
     )
-    cursor.executemany(
-        "INSERT INTO tmp_inc_recount_constants (smiles) VALUES (%s) ON CONFLICT DO NOTHING",
+    _copy_rows(
+        cursor,
+        "COPY tmp_inc_recount_constants (smiles) FROM STDIN",
         [(value,) for value in constants],
     )
     cursor.execute(
@@ -3710,6 +4050,125 @@ def _update_dataset_counts(cursor) -> None:
     )
 
 
+def _ensure_pair_compound_lookup_indexes(cursor) -> None:
+    statements: List[Tuple[str, str]] = [
+        ("idx_pair_compound1", "CREATE INDEX IF NOT EXISTS idx_pair_compound1 ON pair(compound1_id)"),
+        ("idx_pair_compound2", "CREATE INDEX IF NOT EXISTS idx_pair_compound2 ON pair(compound2_id)"),
+    ]
+    existing = _current_schema_index_names(cursor)
+    missing = [name for name, _ in statements if name not in existing]
+    if missing:
+        _guard_large_index_auto_build(
+            pair_rows_est=_estimate_current_schema_table_rows(cursor, "pair"),
+            missing_indexes=missing,
+            guard_label="pair lookup indexes",
+        )
+    _ensure_named_indexes(cursor, statements, existing_indexes=existing)
+
+
+def _ensure_incremental_lookup_indexes(cursor) -> None:
+    statements: List[Tuple[str, str]] = [
+        ("idx_compound_clean_smiles", "CREATE INDEX IF NOT EXISTS idx_compound_clean_smiles ON compound(clean_smiles)"),
+        ("idx_rule_from_to", "CREATE INDEX IF NOT EXISTS idx_rule_from_to ON rule(from_smiles_id, to_smiles_id)"),
+        ("idx_constant_smiles_smiles", "CREATE INDEX IF NOT EXISTS idx_constant_smiles_smiles ON constant_smiles(smiles)"),
+        ("idx_env_fp_lookup", "CREATE INDEX IF NOT EXISTS idx_env_fp_lookup ON environment_fingerprint(smarts, pseudosmiles, parent_smarts)"),
+        ("idx_rule_environment_lookup", "CREATE INDEX IF NOT EXISTS idx_rule_environment_lookup ON rule_environment(rule_id, environment_fingerprint_id, radius)"),
+        ("idx_pair_lookup_exact", "CREATE INDEX IF NOT EXISTS idx_pair_lookup_exact ON pair(rule_environment_id, compound1_id, compound2_id, constant_id)"),
+        ("idx_pair_compound1", "CREATE INDEX IF NOT EXISTS idx_pair_compound1 ON pair(compound1_id)"),
+        ("idx_pair_compound2", "CREATE INDEX IF NOT EXISTS idx_pair_compound2 ON pair(compound2_id)"),
+    ]
+    existing = _current_schema_index_names(cursor)
+    missing = [name for name, _ in statements if name not in existing]
+    if missing:
+        _guard_large_index_auto_build(
+            pair_rows_est=_estimate_current_schema_table_rows(cursor, "pair"),
+            missing_indexes=missing,
+            guard_label="incremental lookup indexes",
+        )
+    _ensure_named_indexes(cursor, statements, existing_indexes=existing)
+
+
+def _should_refresh_incremental_dataset_counts(*, skip_incremental_analyze: bool) -> bool:
+    default_refresh = not bool(skip_incremental_analyze)
+    return _env_bool("MMP_LIFECYCLE_INCREMENTAL_REFRESH_DATASET_COUNTS", default=default_refresh)
+
+
+def _should_auto_ensure_incremental_lookup_indexes() -> bool:
+    return _env_bool("MMP_LIFECYCLE_AUTO_ENSURE_LOOKUP_INDEXES", default=True)
+
+
+def _should_run_incremental_core_index_ensure() -> bool:
+    # Incremental merge already guarantees required lookup indexes.
+    # Full core index ensure is expensive on very large datasets and usually redundant per batch.
+    return _env_bool("MMP_LIFECYCLE_INCREMENTAL_ENSURE_CORE_INDEXES", default=False)
+
+
+def _should_align_incremental_id_sequences() -> bool:
+    # Keep per-batch sequence alignment enabled by default for correctness,
+    # while using index-tail ID lookup to avoid full-table scans.
+    return _env_bool("MMP_LIFECYCLE_INCREMENTAL_ALIGN_SEQUENCES", default=True)
+
+
+def _should_auto_analyze_incremental_tables() -> bool:
+    # Keep query planner statistics fresh without paying full ANALYZE cost every batch.
+    return _env_bool("MMP_LIFECYCLE_INCREMENTAL_AUTO_ANALYZE", default=True)
+
+
+def _maybe_auto_analyze_incremental_tables(cursor, table_names: Sequence[str]) -> List[str]:
+    if not _should_auto_analyze_incremental_tables():
+        return []
+    min_mods = max(1, _env_int("MMP_LIFECYCLE_INCREMENTAL_AUTO_ANALYZE_MIN_MODS", 3000))
+    abs_threshold = max(min_mods, _env_int("MMP_LIFECYCLE_INCREMENTAL_AUTO_ANALYZE_ABS_MODS", 50000))
+    rel_threshold = max(0.0, _env_float("MMP_LIFECYCLE_INCREMENTAL_AUTO_ANALYZE_REL_THRESHOLD", 0.02))
+    analyzed: List[str] = []
+    seen: set[str] = set()
+    for table_name in table_names:
+        token = str(table_name or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        cursor.execute(
+            """
+            SELECT
+                COALESCE(c.reltuples, 0)::BIGINT AS rel_rows,
+                COALESCE(s.n_mod_since_analyze, 0)::BIGINT AS n_mod_since_analyze,
+                (s.last_analyze IS NULL AND s.last_autoanalyze IS NULL) AS never_analyzed
+            FROM pg_class c
+            LEFT JOIN pg_stat_user_tables s
+                   ON s.relid = c.oid
+            WHERE c.oid = to_regclass(%s)
+            """,
+            [token],
+        )
+        row = cursor.fetchone()
+        if row is None:
+            continue
+        rel_rows = max(0, int(row[0] or 0))
+        modified_rows = max(0, int(row[1] or 0))
+        never_analyzed = bool(row[2])
+        if modified_rows <= 0:
+            continue
+        if never_analyzed and modified_rows >= min_mods:
+            cursor.execute(f"ANALYZE {token}")
+            analyzed.append(token)
+            continue
+        if modified_rows < min_mods:
+            continue
+        if modified_rows >= abs_threshold:
+            cursor.execute(f"ANALYZE {token}")
+            analyzed.append(token)
+            continue
+        if rel_rows > 0 and (float(modified_rows) / float(rel_rows)) >= rel_threshold:
+            cursor.execute(f"ANALYZE {token}")
+            analyzed.append(token)
+    if analyzed:
+        logging.getLogger(__name__).info(
+            "Incremental auto-analyze triggered for tables: %s",
+            ", ".join(analyzed),
+        )
+    return analyzed
+
+
 def _finalize_incremental_merge_state(
     cursor,
     *,
@@ -3745,24 +4204,29 @@ def _merge_incremental_temp_schema_into_target(
     skip_finalize: bool = False,
     align_sequences: bool = True,
 ) -> None:
+    merge_debug_stats = _env_bool("MMP_LIFECYCLE_INCREMENTAL_DEBUG_STATS", default=False)
+    _logger = logging.getLogger(__name__)
     constants = sorted({str(item or "").strip() for item in affected_constants if str(item or "").strip()})
     candidate_values = sorted({str(item or "").strip() for item in candidate_smiles if str(item or "").strip()})
     if not constants:
         return
     if align_sequences:
-        for table_name in (
-            "compound",
-            "rule_smiles",
-            "rule",
-            "environment_fingerprint",
-            "rule_environment",
-            "constant_smiles",
-            "pair",
-            "property_name",
-            "rule_environment_statistics",
-            "compound_property",
-        ):
-            _pg_align_id_sequence(cursor, table_name)
+        if _should_align_incremental_id_sequences():
+            for table_name in (
+                "compound",
+                "rule_smiles",
+                "rule",
+                "environment_fingerprint",
+                "rule_environment",
+                "constant_smiles",
+                "pair",
+                "property_name",
+                "rule_environment_statistics",
+                "compound_property",
+            ):
+                _pg_align_id_sequence(cursor, table_name)
+        if _should_auto_ensure_incremental_lookup_indexes():
+            _ensure_incremental_lookup_indexes(cursor)
 
     cursor.execute("DROP TABLE IF EXISTS tmp_inc_affected_constants")
     cursor.execute(
@@ -3772,8 +4236,9 @@ def _merge_incremental_temp_schema_into_target(
         ) ON COMMIT DROP
         """
     )
-    cursor.executemany(
-        "INSERT INTO tmp_inc_affected_constants (smiles) VALUES (%s) ON CONFLICT DO NOTHING",
+    _copy_rows(
+        cursor,
+        "COPY tmp_inc_affected_constants (smiles) FROM STDIN",
         [(value,) for value in constants],
     )
     cursor.execute("DROP TABLE IF EXISTS tmp_inc_merge_candidate_smiles")
@@ -3785,8 +4250,9 @@ def _merge_incremental_temp_schema_into_target(
         """
     )
     if candidate_values:
-        cursor.executemany(
-            "INSERT INTO tmp_inc_merge_candidate_smiles (clean_smiles) VALUES (%s) ON CONFLICT DO NOTHING",
+        _copy_rows(
+            cursor,
+            "COPY tmp_inc_merge_candidate_smiles (clean_smiles) FROM STDIN",
             [(value,) for value in candidate_values],
         )
 
@@ -3941,19 +4407,16 @@ def _merge_incremental_temp_schema_into_target(
             CREATE TEMP TABLE tmp_map_compound AS
             SELECT
                 t.id AS temp_id,
-                c.id AS main_id
+                MIN(c.id) AS main_id
             FROM {ts}.compound t
             INNER JOIN tmp_inc_temp_used_compound_ids u
                     ON u.id = t.id
-            INNER JOIN LATERAL (
-                SELECT id
-                FROM compound c0
-                WHERE c0.clean_smiles = t.clean_smiles
-                ORDER BY c0.id
-                LIMIT 1
-            ) c ON TRUE
+            INNER JOIN compound c
+                    ON c.clean_smiles = t.clean_smiles
+            GROUP BY t.id
             """
         )
+        cursor.execute("CREATE INDEX tmp_map_compound_temp_idx ON tmp_map_compound(temp_id)")
         cursor.execute("DROP TABLE IF EXISTS tmp_inc_candidate_compound_ids")
         cursor.execute(
             """
@@ -3972,41 +4435,41 @@ def _merge_incremental_temp_schema_into_target(
             ON CONFLICT DO NOTHING
             """
         )
-        _logger = logging.getLogger(__name__)
-        cursor.execute(
-            """
-            SELECT
-                COUNT(*)::BIGINT AS mapped_rows,
-                COUNT(DISTINCT temp_id)::BIGINT AS mapped_temp_ids,
-                COUNT(DISTINCT main_id)::BIGINT AS mapped_main_ids
-            FROM tmp_map_compound
-            """
-        )
-        _map_stats = cursor.fetchone()
-        if _map_stats:
-            _logger.info(
-                "Incremental merge mapping: temp_compound_rows=%s temp_ids=%s main_ids=%s",
-                int(_map_stats[0] or 0),
-                int(_map_stats[1] or 0),
-                int(_map_stats[2] or 0),
-            )
-        cursor.execute(
-            """
-            SELECT COUNT(*)::BIGINT
-            FROM (
-                SELECT main_id
+        if merge_debug_stats:
+            cursor.execute(
+                """
+                SELECT
+                    COUNT(*)::BIGINT AS mapped_rows,
+                    COUNT(DISTINCT temp_id)::BIGINT AS mapped_temp_ids,
+                    COUNT(DISTINCT main_id)::BIGINT AS mapped_main_ids
                 FROM tmp_map_compound
-                GROUP BY main_id
-                HAVING COUNT(*) > 1
-            ) dup
-            """
-        )
-        _compound_map_collisions = int(cursor.fetchone()[0] or 0)
-        if _compound_map_collisions > 0:
-            _logger.warning(
-                "Incremental merge mapping collisions: %s main compound IDs map from >1 temp compound IDs.",
-                _compound_map_collisions,
+                """
             )
+            _map_stats = cursor.fetchone()
+            if _map_stats:
+                _logger.info(
+                    "Incremental merge mapping: temp_compound_rows=%s temp_ids=%s main_ids=%s",
+                    int(_map_stats[0] or 0),
+                    int(_map_stats[1] or 0),
+                    int(_map_stats[2] or 0),
+                )
+            cursor.execute(
+                """
+                SELECT COUNT(*)::BIGINT
+                FROM (
+                    SELECT main_id
+                    FROM tmp_map_compound
+                    GROUP BY main_id
+                    HAVING COUNT(*) > 1
+                ) dup
+                """
+            )
+            _compound_map_collisions = int(cursor.fetchone()[0] or 0)
+            if _compound_map_collisions > 0:
+                _logger.warning(
+                    "Incremental merge mapping collisions: %s main compound IDs map from >1 temp compound IDs.",
+                    _compound_map_collisions,
+                )
 
         cursor.execute(
             f"""
@@ -4026,19 +4489,16 @@ def _merge_incremental_temp_schema_into_target(
             CREATE TEMP TABLE tmp_map_rule_smiles AS
             SELECT
                 t.id AS temp_id,
-                m.id AS main_id
+                MIN(m.id) AS main_id
             FROM {ts}.rule_smiles t
             INNER JOIN tmp_inc_temp_used_rule_smiles_ids u
                     ON u.id = t.id
-            INNER JOIN LATERAL (
-                SELECT id
-                FROM rule_smiles m0
-                WHERE m0.smiles = t.smiles
-                ORDER BY m0.id
-                LIMIT 1
-            ) m ON TRUE
+            INNER JOIN rule_smiles m
+                    ON m.smiles = t.smiles
+            GROUP BY t.id
             """
         )
+        cursor.execute("CREATE INDEX tmp_map_rule_smiles_temp_idx ON tmp_map_rule_smiles(temp_id)")
 
         cursor.execute("DROP TABLE IF EXISTS tmp_inc_rule_keys")
         cursor.execute(
@@ -4074,18 +4534,15 @@ def _merge_incremental_temp_schema_into_target(
             CREATE TEMP TABLE tmp_map_rule AS
             SELECT
                 rk.temp_id,
-                r.id AS main_id
+                MIN(r.id) AS main_id
             FROM tmp_inc_rule_keys rk
-            INNER JOIN LATERAL (
-                SELECT id
-                FROM rule r0
-                WHERE r0.from_smiles_id = rk.from_id
-                  AND r0.to_smiles_id = rk.to_id
-                ORDER BY r0.id
-                LIMIT 1
-            ) r ON TRUE
+            INNER JOIN rule r
+                    ON r.from_smiles_id = rk.from_id
+                   AND r.to_smiles_id = rk.to_id
+            GROUP BY rk.temp_id
             """
         )
+        cursor.execute("CREATE INDEX tmp_map_rule_temp_idx ON tmp_map_rule(temp_id)")
 
         cursor.execute(
             f"""
@@ -4107,21 +4564,18 @@ def _merge_incremental_temp_schema_into_target(
             CREATE TEMP TABLE tmp_map_env_fp AS
             SELECT
                 t.id AS temp_id,
-                m.id AS main_id
+                MIN(m.id) AS main_id
             FROM {ts}.environment_fingerprint t
             INNER JOIN tmp_inc_temp_used_env_fp_ids u
                     ON u.id = t.id
-            INNER JOIN LATERAL (
-                SELECT id
-                FROM environment_fingerprint e0
-                WHERE e0.smarts = t.smarts
-                  AND e0.pseudosmiles = t.pseudosmiles
-                  AND e0.parent_smarts = t.parent_smarts
-                ORDER BY e0.id
-                LIMIT 1
-            ) m ON TRUE
+            INNER JOIN environment_fingerprint m
+                    ON m.smarts = t.smarts
+                   AND m.pseudosmiles = t.pseudosmiles
+                   AND m.parent_smarts = t.parent_smarts
+            GROUP BY t.id
             """
         )
+        cursor.execute("CREATE INDEX tmp_map_env_fp_temp_idx ON tmp_map_env_fp(temp_id)")
 
         cursor.execute("DROP TABLE IF EXISTS tmp_inc_rule_env_keys")
         cursor.execute(
@@ -4159,19 +4613,16 @@ def _merge_incremental_temp_schema_into_target(
             CREATE TEMP TABLE tmp_map_rule_env AS
             SELECT
                 k.temp_id,
-                re.id AS main_id
+                MIN(re.id) AS main_id
             FROM tmp_inc_rule_env_keys k
-            INNER JOIN LATERAL (
-                SELECT id
-                FROM rule_environment re0
-                WHERE re0.rule_id = k.rule_id
-                  AND re0.environment_fingerprint_id = k.env_fp_id
-                  AND re0.radius = k.radius
-                ORDER BY re0.id
-                LIMIT 1
-            ) re ON TRUE
+            INNER JOIN rule_environment re
+                    ON re.rule_id = k.rule_id
+                   AND re.environment_fingerprint_id = k.env_fp_id
+                   AND re.radius = k.radius
+            GROUP BY k.temp_id
             """
         )
+        cursor.execute("CREATE INDEX tmp_map_rule_env_temp_idx ON tmp_map_rule_env(temp_id)")
 
         cursor.execute(
             f"""
@@ -4191,41 +4642,39 @@ def _merge_incremental_temp_schema_into_target(
             CREATE TEMP TABLE tmp_map_constant AS
             SELECT
                 t.id AS temp_id,
-                m.id AS main_id
+                MIN(m.id) AS main_id
             FROM {ts}.constant_smiles t
             INNER JOIN tmp_inc_temp_used_constant_ids uc
                     ON uc.id = t.id
-            INNER JOIN LATERAL (
-                SELECT id
-                FROM constant_smiles c0
-                WHERE c0.smiles = t.smiles
-                ORDER BY c0.id
-                LIMIT 1
-            ) m ON TRUE
+            INNER JOIN constant_smiles m
+                    ON m.smiles = t.smiles
+            GROUP BY t.id
             """
         )
+        cursor.execute("CREATE INDEX tmp_map_constant_temp_idx ON tmp_map_constant(temp_id)")
 
         if replace_existing_pairs_for_constants:
-            cursor.execute(
-                f"""
-                SELECT COUNT(*)
-                FROM {ts}.pair p
-                INNER JOIN tmp_map_rule_env mre
-                        ON mre.temp_id = p.rule_environment_id
-                INNER JOIN tmp_map_compound mc1
-                        ON mc1.temp_id = p.compound1_id
-                INNER JOIN tmp_map_compound mc2
-                        ON mc2.temp_id = p.compound2_id
-                INNER JOIN tmp_map_constant mcs
-                        ON mcs.temp_id = p.constant_id
-                WHERE mc1.main_id IN (SELECT id FROM tmp_inc_candidate_compound_ids)
-                   OR mc2.main_id IN (SELECT id FROM tmp_inc_candidate_compound_ids)
-                """
-            )
-            _logger.info(
-                "Incremental merge replace-mode candidate mapped pairs: %s",
-                int(cursor.fetchone()[0] or 0),
-            )
+            if merge_debug_stats:
+                cursor.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM {ts}.pair p
+                    INNER JOIN tmp_map_rule_env mre
+                            ON mre.temp_id = p.rule_environment_id
+                    INNER JOIN tmp_map_compound mc1
+                            ON mc1.temp_id = p.compound1_id
+                    INNER JOIN tmp_map_compound mc2
+                            ON mc2.temp_id = p.compound2_id
+                    INNER JOIN tmp_map_constant mcs
+                            ON mcs.temp_id = p.constant_id
+                    WHERE mc1.main_id IN (SELECT id FROM tmp_inc_candidate_compound_ids)
+                       OR mc2.main_id IN (SELECT id FROM tmp_inc_candidate_compound_ids)
+                    """
+                )
+                _logger.info(
+                    "Incremental merge replace-mode candidate mapped pairs: %s",
+                    int(cursor.fetchone()[0] or 0),
+                )
             cursor.execute(
                 f"""
                 INSERT INTO pair (rule_environment_id, compound1_id, compound2_id, constant_id)
@@ -4247,13 +4696,15 @@ def _merge_incremental_temp_schema_into_target(
                        ON cc1.id = mc1.main_id
                 LEFT JOIN tmp_inc_candidate_compound_ids cc2
                        ON cc2.id = mc2.main_id
-                LEFT JOIN pair existing
-                       ON existing.rule_environment_id = mre.main_id
-                      AND existing.compound1_id = mc1.main_id
-                      AND existing.compound2_id = mc2.main_id
-                      AND COALESCE(existing.constant_id, -1) = COALESCE(mcs.main_id, -1)
                 WHERE (cc1.id IS NOT NULL OR cc2.id IS NOT NULL)
-                  AND existing.id IS NULL
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM pair existing
+                        WHERE existing.rule_environment_id = mre.main_id
+                          AND existing.compound1_id = mc1.main_id
+                          AND existing.compound2_id = mc2.main_id
+                          AND existing.constant_id IS NOT DISTINCT FROM mcs.main_id
+                    )
                 """
             )
         else:
@@ -4264,26 +4715,30 @@ def _merge_incremental_temp_schema_into_target(
                 ) ON COMMIT DROP
                 """
             )
+            cursor.execute("DROP TABLE IF EXISTS tmp_inc_candidate_pair_keys")
             cursor.execute(
-                f"""
-                SELECT COUNT(*)
-                FROM {ts}.pair p
-                INNER JOIN tmp_map_rule_env mre
-                        ON mre.temp_id = p.rule_environment_id
-                INNER JOIN tmp_map_compound mc1
-                        ON mc1.temp_id = p.compound1_id
-                INNER JOIN tmp_map_compound mc2
-                        ON mc2.temp_id = p.compound2_id
-                INNER JOIN tmp_map_constant mcs
-                        ON mcs.temp_id = p.constant_id
-                WHERE mc1.main_id IN (SELECT id FROM tmp_inc_candidate_compound_ids)
-                   OR mc2.main_id IN (SELECT id FROM tmp_inc_candidate_compound_ids)
+                """
+                CREATE TEMP TABLE tmp_inc_candidate_pair_keys (
+                    rule_environment_id INTEGER NOT NULL,
+                    compound1_id INTEGER NOT NULL,
+                    compound2_id INTEGER NOT NULL,
+                    constant_id INTEGER
+                ) ON COMMIT DROP
                 """
             )
-            _append_candidate_pairs = int(cursor.fetchone()[0] or 0)
             cursor.execute(
                 f"""
-                SELECT COUNT(*)
+                INSERT INTO tmp_inc_candidate_pair_keys (
+                    rule_environment_id,
+                    compound1_id,
+                    compound2_id,
+                    constant_id
+                )
+                SELECT DISTINCT
+                    mre.main_id AS rule_environment_id,
+                    mc1.main_id AS compound1_id,
+                    mc2.main_id AS compound2_id,
+                    mcs.main_id AS constant_id
                 FROM {ts}.pair p
                 INNER JOIN tmp_map_rule_env mre
                         ON mre.temp_id = p.rule_environment_id
@@ -4297,49 +4752,74 @@ def _merge_incremental_temp_schema_into_target(
                        ON cc1.id = mc1.main_id
                 LEFT JOIN tmp_inc_candidate_compound_ids cc2
                        ON cc2.id = mc2.main_id
-                INNER JOIN pair existing
-                        ON existing.rule_environment_id = mre.main_id
-                       AND existing.compound1_id = mc1.main_id
-                       AND existing.compound2_id = mc2.main_id
-                       AND COALESCE(existing.constant_id, -1) = COALESCE(mcs.main_id, -1)
                 WHERE cc1.id IS NOT NULL OR cc2.id IS NOT NULL
                 """
             )
-            _append_existing_pairs = int(cursor.fetchone()[0] or 0)
-            _logger.info(
-                "Incremental merge append-mode candidate mapped pairs: total=%s existing=%s",
-                _append_candidate_pairs,
-                _append_existing_pairs,
+            cursor.execute(
+                """
+                CREATE INDEX tmp_inc_candidate_pair_lookup_idx
+                ON tmp_inc_candidate_pair_keys(rule_environment_id, compound1_id, compound2_id, constant_id)
+                """
             )
+            cursor.execute("DROP TABLE IF EXISTS tmp_inc_existing_pair_keys")
+            cursor.execute(
+                """
+                CREATE TEMP TABLE tmp_inc_existing_pair_keys AS
+                SELECT DISTINCT
+                    existing.rule_environment_id,
+                    existing.compound1_id,
+                    existing.compound2_id,
+                    existing.constant_id
+                FROM pair existing
+                INNER JOIN tmp_map_constant mcs
+                        ON mcs.main_id = existing.constant_id
+                LEFT JOIN tmp_inc_candidate_compound_ids cc1
+                       ON cc1.id = existing.compound1_id
+                LEFT JOIN tmp_inc_candidate_compound_ids cc2
+                       ON cc2.id = existing.compound2_id
+                WHERE cc1.id IS NOT NULL OR cc2.id IS NOT NULL
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX tmp_inc_existing_pair_lookup_idx
+                ON tmp_inc_existing_pair_keys(rule_environment_id, compound1_id, compound2_id, constant_id)
+                """
+            )
+            if merge_debug_stats:
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) FROM tmp_inc_candidate_pair_keys
+                    """
+                )
+                _append_candidate_pairs = int(cursor.fetchone()[0] or 0)
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) FROM tmp_inc_existing_pair_keys
+                    """
+                )
+                _append_existing_pairs = int(cursor.fetchone()[0] or 0)
+                _logger.info(
+                    "Incremental merge append-mode candidate mapped pairs: total=%s existing=%s",
+                    _append_candidate_pairs,
+                    _append_existing_pairs,
+                )
             cursor.execute(
                 f"""
                 WITH inserted_pairs AS (
                     INSERT INTO pair (rule_environment_id, compound1_id, compound2_id, constant_id)
                     SELECT
-                        mre.main_id AS rule_environment_id,
-                        mc1.main_id AS compound1_id,
-                        mc2.main_id AS compound2_id,
-                        mcs.main_id AS constant_id
-                    FROM {ts}.pair p
-                    INNER JOIN tmp_map_rule_env mre
-                            ON mre.temp_id = p.rule_environment_id
-                    INNER JOIN tmp_map_compound mc1
-                            ON mc1.temp_id = p.compound1_id
-                    INNER JOIN tmp_map_compound mc2
-                            ON mc2.temp_id = p.compound2_id
-                    INNER JOIN tmp_map_constant mcs
-                            ON mcs.temp_id = p.constant_id
-                    LEFT JOIN tmp_inc_candidate_compound_ids cc1
-                           ON cc1.id = mc1.main_id
-                    LEFT JOIN tmp_inc_candidate_compound_ids cc2
-                           ON cc2.id = mc2.main_id
-                    LEFT JOIN pair existing
-                           ON existing.rule_environment_id = mre.main_id
-                          AND existing.compound1_id = mc1.main_id
-                          AND existing.compound2_id = mc2.main_id
-                          AND COALESCE(existing.constant_id, -1) = COALESCE(mcs.main_id, -1)
-                    WHERE (cc1.id IS NOT NULL OR cc2.id IS NOT NULL)
-                      AND existing.id IS NULL
+                        cpk.rule_environment_id,
+                        cpk.compound1_id,
+                        cpk.compound2_id,
+                        cpk.constant_id
+                    FROM tmp_inc_candidate_pair_keys cpk
+                    LEFT JOIN tmp_inc_existing_pair_keys existing
+                           ON existing.rule_environment_id = cpk.rule_environment_id
+                          AND existing.compound1_id = cpk.compound1_id
+                          AND existing.compound2_id = cpk.compound2_id
+                          AND existing.constant_id IS NOT DISTINCT FROM cpk.constant_id
+                    WHERE existing.rule_environment_id IS NULL
                     RETURNING id AS pair_id, rule_environment_id
                 ),
                 _inserted_pair_ids AS (
@@ -4359,11 +4839,12 @@ def _merge_incremental_temp_schema_into_target(
                  WHERE re.id = counts.rule_environment_id
                 """
             )
-            cursor.execute("SELECT COUNT(*) FROM tmp_inc_inserted_pair_ids_all")
-            _logger.info(
-                "Incremental merge append-mode inserted pair IDs (cumulative in tx): %s",
-                int(cursor.fetchone()[0] or 0),
-            )
+            if merge_debug_stats:
+                cursor.execute("SELECT COUNT(*) FROM tmp_inc_inserted_pair_ids_all")
+                _logger.info(
+                    "Incremental merge append-mode inserted pair IDs (cumulative in tx): %s",
+                    int(cursor.fetchone()[0] or 0),
+                )
 
         cursor.execute(
             f"""
@@ -4383,19 +4864,16 @@ def _merge_incremental_temp_schema_into_target(
             CREATE TEMP TABLE tmp_map_property_name AS
             SELECT
                 t.id AS temp_id,
-                p.id AS main_id
+                MIN(p.id) AS main_id
             FROM {ts}.property_name t
             INNER JOIN tmp_inc_temp_used_property_name_ids up
                     ON up.id = t.id
-            INNER JOIN LATERAL (
-                SELECT id
-                FROM property_name p0
-                WHERE p0.name = t.name
-                ORDER BY p0.id
-                LIMIT 1
-            ) p ON TRUE
+            INNER JOIN property_name p
+                    ON p.name = t.name
+            GROUP BY t.id
             """
         )
+        cursor.execute("CREATE INDEX tmp_map_property_name_temp_idx ON tmp_map_property_name(temp_id)")
         cursor.execute("DROP TABLE IF EXISTS tmp_inc_rule_env_stats")
         cursor.execute(
             f"""
@@ -4519,7 +4997,12 @@ def _merge_incremental_temp_schema_into_target(
               AND NOT EXISTS (
                     SELECT 1
                     FROM rule r
-                    WHERE r.from_smiles_id = rs.id OR r.to_smiles_id = rs.id
+                    WHERE r.from_smiles_id = rs.id
+                )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM rule r
+                    WHERE r.to_smiles_id = rs.id
                 )
             """
         )
@@ -4550,6 +5033,8 @@ def _incremental_add_compounds_without_reindex(
     *,
     schema: str,
     added_rows: Sequence[Tuple[str, str, str]],
+    analyze_after_update: bool = True,
+    refresh_dataset_counts: bool = True,
 ) -> Dict[str, int]:
     normalized_schema = _validate_pg_schema(schema)
     unique_rows: List[Tuple[str, str, str]] = []
@@ -4589,8 +5074,9 @@ def _incremental_add_compounds_without_reindex(
             _pg_set_search_path(cursor, normalized_schema)
             _ensure_compound_batch_tables(cursor, seed_base_from_compound=True)
             _ensure_property_batch_tables(cursor, seed_base_from_compound_property=True)
-            # Incremental inserts must start from current max(id) after temp-schema merges.
-            _pg_align_id_sequence(cursor, "compound")
+            _ensure_pair_compound_lookup_indexes(cursor)
+            if _should_align_incremental_id_sequences():
+                _pg_align_id_sequence(cursor, "compound")
 
             cursor.execute("DROP TABLE IF EXISTS tmp_inc_add_rows")
             cursor.execute(
@@ -4603,15 +5089,9 @@ def _incremental_add_compounds_without_reindex(
                 ) ON COMMIT DROP
                 """
             )
-            cursor.executemany(
-                """
-                INSERT INTO tmp_inc_add_rows (clean_smiles, public_id, input_smiles, clean_num_heavies)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (clean_smiles) DO UPDATE
-                   SET public_id = EXCLUDED.public_id,
-                       input_smiles = EXCLUDED.input_smiles,
-                       clean_num_heavies = EXCLUDED.clean_num_heavies
-                """,
+            _copy_rows(
+                cursor,
+                "COPY tmp_inc_add_rows (clean_smiles, public_id, input_smiles, clean_num_heavies) FROM STDIN",
                 payload,
             )
             cursor.execute(
@@ -4667,9 +5147,16 @@ def _incremental_add_compounds_without_reindex(
             stats["cp_updated"] = int(cp_stats["updated"])
             stats["cp_inserted"] = int(cp_stats["inserted"])
             stats["cp_deleted"] = int(cp_stats["deleted"])
-            _update_dataset_counts(cursor)
-            cursor.execute("ANALYZE compound")
-            cursor.execute("ANALYZE compound_property")
+            if refresh_dataset_counts:
+                _update_dataset_counts(cursor)
+            if analyze_after_update:
+                cursor.execute("ANALYZE compound")
+                cursor.execute("ANALYZE compound_property")
+            else:
+                _maybe_auto_analyze_incremental_tables(
+                    cursor,
+                    ["compound", "compound_property"],
+                )
             conn.commit()
     return stats
 
@@ -4679,6 +5166,8 @@ def _incremental_delete_compounds_without_reindex(
     *,
     schema: str,
     removed_rows: Sequence[Tuple[str, str, str]],
+    analyze_after_update: bool = True,
+    refresh_dataset_counts: bool = True,
 ) -> Dict[str, int]:
     normalized_schema = _validate_pg_schema(schema)
     removed_smiles = sorted(
@@ -4699,6 +5188,7 @@ def _incremental_delete_compounds_without_reindex(
             _pg_set_search_path(cursor, normalized_schema)
             _ensure_compound_batch_tables(cursor, seed_base_from_compound=True)
             _ensure_property_batch_tables(cursor, seed_base_from_compound_property=True)
+            _ensure_pair_compound_lookup_indexes(cursor)
 
             cursor.execute("DROP TABLE IF EXISTS tmp_inc_removed_smiles")
             cursor.execute(
@@ -4708,8 +5198,9 @@ def _incremental_delete_compounds_without_reindex(
                 ) ON COMMIT DROP
                 """
             )
-            cursor.executemany(
-                "INSERT INTO tmp_inc_removed_smiles (clean_smiles) VALUES (%s) ON CONFLICT DO NOTHING",
+            _copy_rows(
+                cursor,
+                "COPY tmp_inc_removed_smiles (clean_smiles) FROM STDIN",
                 [(value,) for value in removed_smiles],
             )
 
@@ -4723,9 +5214,8 @@ def _incremental_delete_compounds_without_reindex(
                         ON r.clean_smiles = c.clean_smiles
                 """
             )
-            cursor.execute("SELECT COUNT(*) FROM tmp_inc_removed_compounds")
-            stats["matched_compounds"] = int(cursor.fetchone()[0] or 0)
-            if stats["matched_compounds"] <= 0:
+            cursor.execute("SELECT 1 FROM tmp_inc_removed_compounds LIMIT 1")
+            if cursor.fetchone() is None:
                 conn.commit()
                 return stats
 
@@ -4733,25 +5223,38 @@ def _incremental_delete_compounds_without_reindex(
             cursor.execute(
                 """
                 CREATE TEMP TABLE tmp_inc_removed_touched_constants AS
+                WITH touched_constant_ids AS (
+                    SELECT p.constant_id AS constant_id
+                    FROM pair p
+                    INNER JOIN tmp_inc_removed_compounds r
+                            ON r.id = p.compound1_id
+                    UNION
+                    SELECT p.constant_id AS constant_id
+                    FROM pair p
+                    INNER JOIN tmp_inc_removed_compounds r
+                            ON r.id = p.compound2_id
+                )
                 SELECT DISTINCT cs.smiles AS smiles
-                FROM pair p
+                FROM touched_constant_ids t
                 INNER JOIN constant_smiles cs
-                        ON cs.id = p.constant_id
-                WHERE p.compound1_id IN (SELECT id FROM tmp_inc_removed_compounds)
-                   OR p.compound2_id IN (SELECT id FROM tmp_inc_removed_compounds)
+                        ON cs.id = t.constant_id
                 """
             )
-            cursor.execute("SELECT COUNT(*) FROM tmp_inc_removed_touched_constants")
-            stats["affected_constants"] = int(cursor.fetchone()[0] or 0)
-
             cursor.execute(
                 """
                 DELETE FROM pair p
                 WHERE p.compound1_id IN (SELECT id FROM tmp_inc_removed_compounds)
-                   OR p.compound2_id IN (SELECT id FROM tmp_inc_removed_compounds)
                 """
             )
-            stats["deleted_pairs"] = int(cursor.rowcount or 0)
+            deleted_pairs_c1 = int(cursor.rowcount or 0)
+            cursor.execute(
+                """
+                DELETE FROM pair p
+                WHERE p.compound2_id IN (SELECT id FROM tmp_inc_removed_compounds)
+                """
+            )
+            deleted_pairs_c2 = int(cursor.rowcount or 0)
+            stats["deleted_pairs"] = deleted_pairs_c1 + deleted_pairs_c2
 
             cursor.execute(
                 """
@@ -4766,9 +5269,11 @@ def _incremental_delete_compounds_without_reindex(
                 """
             )
             stats["deleted_compounds"] = int(cursor.rowcount or 0)
+            stats["matched_compounds"] = stats["deleted_compounds"]
 
             cursor.execute("SELECT smiles FROM tmp_inc_removed_touched_constants")
             touched_constants = [str(row[0] or "").strip() for row in cursor.fetchall() if str(row[0] or "").strip()]
+            stats["affected_constants"] = len(touched_constants)
             if touched_constants:
                 _cleanup_orphan_mmp_rows_for_constants(
                     cursor,
@@ -4778,17 +5283,32 @@ def _incremental_delete_compounds_without_reindex(
                     cursor,
                     affected_constants=touched_constants,
                 )
-            _update_dataset_counts(cursor)
-            for table_name in (
-                "compound",
-                "pair",
-                "rule_environment",
-                "rule",
-                "rule_smiles",
-                "constant_smiles",
-                "compound_property",
-            ):
-                cursor.execute(f"ANALYZE {table_name}")
+            if refresh_dataset_counts:
+                _update_dataset_counts(cursor)
+            if analyze_after_update:
+                for table_name in (
+                    "compound",
+                    "pair",
+                    "rule_environment",
+                    "rule",
+                    "rule_smiles",
+                    "constant_smiles",
+                    "compound_property",
+                ):
+                    cursor.execute(f"ANALYZE {table_name}")
+            else:
+                _maybe_auto_analyze_incremental_tables(
+                    cursor,
+                    [
+                        "compound",
+                        "pair",
+                        "rule_environment",
+                        "rule",
+                        "rule_smiles",
+                        "constant_smiles",
+                        "compound_property",
+                    ],
+                )
             conn.commit()
     return stats
 
@@ -4797,7 +5317,8 @@ def _incremental_reindex_compound_delta(
     postgres_url: str,
     *,
     schema: str,
-    changed_rows: Sequence[Tuple[str, str, str]],
+    changed_rows: Sequence[Tuple[str, str, str]] = (),
+    changed_rows_file: str = "",
     output_dir: str,
     max_heavy_atoms: int,
     skip_attachment_enrichment: bool,
@@ -4812,6 +5333,7 @@ def _incremental_reindex_compound_delta(
     build_construct_tables: bool,
     build_constant_smiles_mol_index: bool,
     delta_mode: str,
+    skip_incremental_analyze: bool = False,
 ) -> bool:
     logger = logging.getLogger(__name__)
     t_total_start = time.time()
@@ -4822,30 +5344,52 @@ def _incremental_reindex_compound_delta(
         return False
     schema_fragment_cache_file = os.path.join(output_dir, f"{normalized_schema}_compound_state.cache.fragdb")
 
-    unique_rows: List[Tuple[str, str, str]] = []
+    unique_smiles: List[str] = []
     seen_smiles: set[str] = set()
-    for raw in changed_rows:
-        clean_smiles = str((raw[0] if len(raw) > 0 else "") or "").strip()
-        if not clean_smiles or clean_smiles in seen_smiles:
-            continue
-        seen_smiles.add(clean_smiles)
-        public_id = str((raw[1] if len(raw) > 1 else "") or "").strip()
-        input_smiles = str((raw[2] if len(raw) > 2 else "") or "").strip()
-        if not public_id:
-            public_id = f"DELTA_{len(unique_rows) + 1:09d}"
-        if not input_smiles:
-            input_smiles = clean_smiles
-        unique_rows.append((clean_smiles, public_id, input_smiles))
-    if not unique_rows:
+    delta_source_file = str(changed_rows_file or "").strip()
+    if delta_source_file:
+        if not os.path.exists(delta_source_file):
+            logger.error("Incremental delta source file not found: %s", delta_source_file)
+            return False
+        delimiter = _detect_table_delimiter(delta_source_file)
+        with open(delta_source_file, "r", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle, delimiter=delimiter)
+            headers = [str(h or "").strip() for h in (reader.fieldnames or [])]
+            if not headers:
+                logger.error("Incremental delta source file has no header: %s", delta_source_file)
+                return False
+            smiles_col = _resolve_smiles_column(headers, preferred_column="SMILES")
+            for row in reader:
+                clean_smiles = str((row or {}).get(smiles_col) or "").strip()
+                if not clean_smiles or clean_smiles in seen_smiles:
+                    continue
+                seen_smiles.add(clean_smiles)
+                unique_smiles.append(clean_smiles)
+    else:
+        for raw in changed_rows:
+            clean_smiles = str((raw[0] if len(raw) > 0 else "") or "").strip()
+            if not clean_smiles or clean_smiles in seen_smiles:
+                continue
+            seen_smiles.add(clean_smiles)
+            unique_smiles.append(clean_smiles)
+    if not unique_smiles:
         logger.info("No structural compound delta rows detected; skipping incremental index.")
         return True
+    refresh_dataset_counts = _should_refresh_incremental_dataset_counts(
+        skip_incremental_analyze=bool(skip_incremental_analyze),
+    )
+
+    unique_smiles_count = len(unique_smiles)
 
     if normalized_mode == "delete":
         t0 = time.time()
+        removed_rows = [(smiles, f"DELTA_{idx:09d}", smiles) for idx, smiles in enumerate(unique_smiles, start=1)]
         delete_stats = _incremental_delete_compounds_without_reindex(
             postgres_url,
             schema=normalized_schema,
-            removed_rows=unique_rows,
+            removed_rows=removed_rows,
+            analyze_after_update=(not bool(skip_incremental_analyze)),
+            refresh_dataset_counts=refresh_dataset_counts,
         )
         logger.info(
             "Incremental delete fast-path elapsed=%.2fs removed_smiles=%s matched_compounds=%s deleted_compounds=%s deleted_pairs=%s affected_constants=%s",
@@ -4887,16 +5431,19 @@ def _incremental_reindex_compound_delta(
         logger.info("Incremental index phase cache_ready elapsed=%.2fs", max(0.0, time.time() - t0))
 
         t0 = time.time()
-        delta_fragment_rows = [
+        delta_id_seed = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+        delta_count = _write_smiles_records_file(
+            delta_smiles_file,
             (
-                clean_smiles,
-                f"INCDELTA_{hashlib.md5(clean_smiles.encode('utf-8')).hexdigest()[:20]}",
-                input_smiles,
-            )
-            for clean_smiles, _public_id, input_smiles in unique_rows
-            if str(clean_smiles or "").strip()
-        ]
-        delta_count = _write_smiles_records_file(delta_smiles_file, delta_fragment_rows)
+                (
+                    smiles,
+                    f"INCDELTA_{delta_id_seed}_{idx:09d}",
+                    smiles,
+                )
+                for idx, smiles in enumerate(unique_smiles, start=1)
+                if str(smiles or "").strip()
+            ),
+        )
         if delta_count <= 0:
             logger.info("Delta SMILES set is empty; skipping incremental index.")
             return True
@@ -4928,7 +5475,12 @@ def _incremental_reindex_compound_delta(
             fast_stats = _incremental_add_compounds_without_reindex(
                 postgres_url,
                 schema=normalized_schema,
-                added_rows=unique_rows,
+                added_rows=[
+                    (smiles, f"INCDELTA_{delta_id_seed}_{idx:09d}", smiles)
+                    for idx, smiles in enumerate(unique_smiles, start=1)
+                ],
+                analyze_after_update=(not bool(skip_incremental_analyze)),
+                refresh_dataset_counts=refresh_dataset_counts,
             )
             logger.info(
                 "Incremental add fast-path elapsed=%.2fs (no constants): added_smiles=%s inserted_compounds=%s updated_compounds=%s cp(updated=%s inserted=%s deleted=%s).",
@@ -4947,8 +5499,7 @@ def _incremental_reindex_compound_delta(
             )
             logger.info("Incremental index total elapsed=%.2fs", max(0.0, time.time() - t_total_start))
             return True
-        delta_smiles_values = [row[0] for row in unique_rows if str(row[0] or "").strip()]
-        sync_smiles_scope = sorted({str(item or "").strip() for item in delta_smiles_values if str(item or "").strip()})
+        sync_smiles_scope = [str(item or "").strip() for item in unique_smiles if str(item or "").strip()]
         sync_active_rows = _load_active_compounds_for_smiles(
             postgres_url,
             schema=normalized_schema,
@@ -5085,8 +5636,6 @@ def _incremental_reindex_compound_delta(
                 _pg_set_search_path(cursor, normalized_schema)
                 _ensure_compound_batch_tables(cursor, seed_base_from_compound=True)
                 _ensure_property_batch_tables(cursor, seed_base_from_compound_property=True)
-                cursor.execute("SELECT COUNT(*) FROM pair")
-                target_pairs_before_merge = int(cursor.fetchone()[0] or 0)
                 for merge_seq, (temp_schema_name, shard_constants) in enumerate(shard_sources):
                     replace_existing = False
                     _merge_incremental_temp_schema_into_target(
@@ -5121,44 +5670,53 @@ def _incremental_reindex_compound_delta(
                         affected_constants=affected_constants,
                         enable_constant_smiles_mol_index=build_constant_smiles_mol_index,
                     )
-                _create_postgres_core_indexes(
-                    cursor,
-                    normalized_schema,
-                    enable_constant_smiles_mol_index=build_constant_smiles_mol_index,
-                )
+                if _should_run_incremental_core_index_ensure():
+                    _create_postgres_core_indexes(
+                        cursor,
+                        normalized_schema,
+                        enable_constant_smiles_mol_index=build_constant_smiles_mol_index,
+                    )
                 if build_construct_tables:
                     _append_construct_tables_postgres_for_inserted_pairs(cursor)
-                _update_dataset_counts(cursor)
+                if refresh_dataset_counts:
+                    _update_dataset_counts(cursor)
                 refresh_stats = _refresh_compound_property_for_smiles(
                     cursor,
                     sync_smiles_scope,
                 )
-                cursor.execute("SELECT COUNT(*) FROM pair")
-                target_pairs_after_merge = int(cursor.fetchone()[0] or 0)
-                logger.info(
-                    "Incremental merge target pair count: before=%s after=%s delta=%s",
-                    target_pairs_before_merge,
-                    target_pairs_after_merge,
-                    target_pairs_after_merge - target_pairs_before_merge,
-                )
-                analyze_tables = [
-                    "compound",
-                    "pair",
-                    "rule_environment",
-                    "compound_property",
-                ]
-                analyze_tables.extend(
-                    [
+                if not bool(skip_incremental_analyze):
+                    analyze_tables = [
+                        "compound",
+                        "pair",
+                        "rule_environment",
+                        "compound_property",
+                    ]
+                    analyze_tables.extend(
+                        [
+                            "rule_environment_statistics",
+                            "rule",
+                            "rule_smiles",
+                            "constant_smiles",
+                        ]
+                    )
+                    if build_construct_tables:
+                        analyze_tables.extend(["from_construct", "to_construct"])
+                    for table_name in analyze_tables:
+                        cursor.execute(f"ANALYZE {table_name}")
+                else:
+                    auto_tables = [
+                        "compound",
+                        "pair",
+                        "rule_environment",
+                        "compound_property",
                         "rule_environment_statistics",
                         "rule",
                         "rule_smiles",
                         "constant_smiles",
                     ]
-                )
-                if build_construct_tables:
-                    analyze_tables.extend(["from_construct", "to_construct"])
-                for table_name in analyze_tables:
-                    cursor.execute(f"ANALYZE {table_name}")
+                    if build_construct_tables:
+                        auto_tables.extend(["from_construct", "to_construct"])
+                    _maybe_auto_analyze_incremental_tables(cursor, auto_tables)
                 conn.commit()
         logger.info("Incremental index phase merge_finalize elapsed=%.2fs", max(0.0, time.time() - t0))
 
@@ -5166,7 +5724,7 @@ def _incremental_reindex_compound_delta(
             "Incremental compound index succeeded for schema '%s' mode=%s: delta_compounds=%s affected_constants=%s sync_smiles=%s cp(updated=%s inserted=%s deleted=%s).",
             normalized_schema,
             normalized_mode,
-            len(unique_rows),
+            unique_smiles_count,
             len(affected_constants),
             len(sync_smiles_scope),
             refresh_stats["updated"],
@@ -5237,6 +5795,8 @@ def import_compound_batch_postgres(
     incremental_index_jobs: int = 1,
     build_construct_tables: bool = True,
     build_constant_smiles_mol_index: bool = True,
+    skip_incremental_analyze: bool = False,
+    overwrite_existing_batch: bool = False,
 ) -> bool:
     logger = logging.getLogger(__name__)
     if not HAS_PSYCOPG:
@@ -5251,25 +5811,110 @@ def import_compound_batch_postgres(
         return False
     normalized_schema = _validate_pg_schema(schema)
     normalized_batch_id = _normalize_compound_batch_id(batch_id)
-    new_unique_rows_payload: List[Tuple[str, str, str]] = []
+    existing_materialized_rows = 0
+    existing_compounds_before = False
+    bootstrap_smiles_file = ""
+    bootstrap_smiles_rows = 0
+    incremental_delta_file = ""
+    parse_stats: Dict[str, int] = {"total_rows": 0, "valid_rows": 0, "invalid_smiles_rows": 0, "dedup_rows": 0}
+    new_unique_rows = 0
+    inserted_rows = 0
     try:
         with psycopg.connect(postgres_url, autocommit=False) as conn:
             with conn.cursor() as cursor:
                 _pg_set_search_path(cursor, normalized_schema)
                 _ensure_compound_batch_tables(cursor, seed_base_from_compound=True)
                 _ensure_property_batch_tables(cursor, seed_base_from_compound_property=True)
+                existing_compounds_before = _schema_has_any_compounds(cursor)
+                if existing_compounds_before:
+                    allow_cache_reseed = _env_bool("LEADOPT_MMP_ALLOW_CACHE_RESEED", False)
+                    schema_fragment_cache_file = os.path.join(
+                        output_dir,
+                        f"{normalized_schema}_compound_state.cache.fragdb",
+                    )
+                    if (not allow_cache_reseed) and (not os.path.exists(schema_fragment_cache_file)):
+                        logger.error(
+                            "Incremental compound import requires existing fragment cache: %s. "
+                            "Strict incremental mode forbids implicit full-cache rebuild.",
+                            schema_fragment_cache_file,
+                        )
+                        conn.rollback()
+                        return False
+                    if (not allow_cache_reseed) and os.path.exists(schema_fragment_cache_file):
+                        try:
+                            signature = _collect_compound_cache_signature(
+                                postgres_url,
+                                schema=normalized_schema,
+                            )
+                        except Exception as exc:
+                            logger.error(
+                                "Failed collecting fragment cache signature for schema '%s': %s",
+                                normalized_schema,
+                                exc,
+                            )
+                            conn.rollback()
+                            return False
+                        if not _is_fragment_cache_meta_match(
+                            cache_fragdb=schema_fragment_cache_file,
+                            signature=signature,
+                        ):
+                            logger.error(
+                                "Fragment cache metadata mismatch for schema '%s' and strict incremental mode is enabled. "
+                                "Refusing import to avoid implicit full-cache rebuild.",
+                                normalized_schema,
+                            )
+                            conn.rollback()
+                            return False
+                cursor.execute("DROP TABLE IF EXISTS tmp_compound_existing_batch_materialized")
+                cursor.execute(
+                    """
+                    CREATE TEMP TABLE tmp_compound_existing_batch_materialized (
+                        clean_smiles TEXT PRIMARY KEY
+                    )
+                    """
+                )
                 cursor.execute(
                     f"SELECT 1 FROM {COMPOUND_BATCH_HEADER_TABLE} WHERE batch_id = %s LIMIT 1",
                     [normalized_batch_id],
                 )
                 if cursor.fetchone() is not None:
-                    logger.error(
-                        "Compound batch id '%s' already exists in schema '%s'.",
+                    if not overwrite_existing_batch:
+                        logger.error(
+                            "Compound batch id '%s' already exists in schema '%s'.",
+                            normalized_batch_id,
+                            normalized_schema,
+                        )
+                        conn.rollback()
+                        return False
+                    # Snapshot currently materialized rows from this batch before overwrite delete.
+                    # If compounds are already in main `compound`, retrying same batch should not
+                    # re-trigger structural delta indexing for them.
+                    cursor.execute(
+                        f"""
+                        INSERT INTO tmp_compound_existing_batch_materialized(clean_smiles)
+                        SELECT DISTINCT r.clean_smiles
+                        FROM {COMPOUND_BATCH_ROWS_TABLE} r
+                        INNER JOIN compound c ON c.clean_smiles = r.clean_smiles
+                        WHERE r.batch_id = %s
+                        """,
+                        [normalized_batch_id],
+                    )
+                    cursor.execute("SELECT COUNT(*) FROM tmp_compound_existing_batch_materialized")
+                    existing_materialized_rows = int(cursor.fetchone()[0] or 0)
+                    logger.warning(
+                        "Compound batch id '%s' already exists in schema '%s'; replacing existing rows for retry (materialized=%s).",
                         normalized_batch_id,
                         normalized_schema,
+                        existing_materialized_rows,
                     )
-                    conn.rollback()
-                    return False
+                    cursor.execute(
+                        f"DELETE FROM {COMPOUND_BATCH_ROWS_TABLE} WHERE batch_id = %s",
+                        [normalized_batch_id],
+                    )
+                    cursor.execute(
+                        f"DELETE FROM {COMPOUND_BATCH_HEADER_TABLE} WHERE batch_id = %s",
+                        [normalized_batch_id],
+                    )
                 parse_stats = _load_compound_batch_temp_table(
                     cursor,
                     structures_file=source_file,
@@ -5281,42 +5926,50 @@ def import_compound_batch_postgres(
                     logger.error("No valid deduplicated compound rows parsed from: %s", source_file)
                     conn.rollback()
                     return False
+                cursor.execute("DROP TABLE IF EXISTS tmp_compound_new_unique")
                 cursor.execute(
                     f"""
-                    SELECT COUNT(*)
+                    CREATE TEMP TABLE tmp_compound_new_unique AS
+                    SELECT d.clean_smiles, d.public_id, d.input_smiles
                     FROM tmp_compound_upload_dedup d
                     WHERE NOT EXISTS (
+                            SELECT 1 FROM compound c WHERE c.clean_smiles = d.clean_smiles
+                        )
+                      AND NOT EXISTS (
                             SELECT 1 FROM {COMPOUND_BATCH_BASE_TABLE} b WHERE b.clean_smiles = d.clean_smiles
                         )
                       AND NOT EXISTS (
                             SELECT 1 FROM {COMPOUND_BATCH_ROWS_TABLE} r WHERE r.clean_smiles = d.clean_smiles
                         )
+                      AND NOT EXISTS (
+                            SELECT 1 FROM tmp_compound_existing_batch_materialized m WHERE m.clean_smiles = d.clean_smiles
+                        )
                     """
                 )
-                new_unique_rows = int(cursor.fetchone()[0])
-                if new_unique_rows > 0:
-                    cursor.execute(
-                        f"""
-                        SELECT d.clean_smiles, d.public_id, d.input_smiles
-                        FROM tmp_compound_upload_dedup d
-                        WHERE NOT EXISTS (
-                                SELECT 1 FROM {COMPOUND_BATCH_BASE_TABLE} b WHERE b.clean_smiles = d.clean_smiles
-                            )
-                          AND NOT EXISTS (
-                                SELECT 1 FROM {COMPOUND_BATCH_ROWS_TABLE} r WHERE r.clean_smiles = d.clean_smiles
-                            )
-                        ORDER BY d.clean_smiles
-                        """
+                cursor.execute("SELECT COUNT(*) FROM tmp_compound_new_unique")
+                new_unique_rows = int(cursor.fetchone()[0] or 0)
+                if (not existing_compounds_before) and new_unique_rows > 0 and existing_materialized_rows <= 0:
+                    file_tag = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                    bootstrap_smiles_file = os.path.join(
+                        output_dir,
+                        f"{normalized_schema}_bootstrap_new_batch_{file_tag}.smi",
                     )
-                    new_unique_rows_payload = [
-                        (
-                            str(row[0] or "").strip(),
-                            str(row[1] or "").strip(),
-                            str(row[2] or "").strip(),
-                        )
-                        for row in cursor.fetchall()
-                        if str(row[0] or "").strip()
-                    ]
+                    bootstrap_smiles_rows = _export_smiles_file_from_temp_compound_table(
+                        cursor,
+                        source_table="tmp_compound_new_unique",
+                        output_file=bootstrap_smiles_file,
+                    )
+                else:
+                    file_tag = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                    incremental_delta_file = os.path.join(
+                        output_dir,
+                        f"{normalized_schema}_incremental_new_batch_{file_tag}.smi",
+                    )
+                    _export_smiles_file_from_temp_compound_table(
+                        cursor,
+                        source_table="tmp_compound_new_unique",
+                        output_file=incremental_delta_file,
+                    )
                 cursor.execute(
                     f"""
                     INSERT INTO {COMPOUND_BATCH_HEADER_TABLE}
@@ -5348,7 +6001,7 @@ def import_compound_batch_postgres(
                 inserted_rows = int(cursor.rowcount or 0)
                 conn.commit()
         logger.info(
-            "Imported compound batch '%s' into schema '%s': total=%s valid=%s dedup=%s new_unique=%s inserted=%s. Starting index sync...",
+            "Imported compound batch '%s' into schema '%s': total=%s valid=%s dedup=%s new_unique=%s inserted=%s existing_materialized_retry=%s. Starting index sync...",
             normalized_batch_id,
             normalized_schema,
             parse_stats["total_rows"],
@@ -5356,11 +6009,43 @@ def import_compound_batch_postgres(
             parse_stats["dedup_rows"],
             new_unique_rows,
             inserted_rows,
+            existing_materialized_rows,
         )
+        if bootstrap_smiles_rows > 0:
+            logger.info(
+                "Compound batch '%s' detected empty target schema '%s'; using bootstrap full-index strategy (rows=%s).",
+                normalized_batch_id,
+                normalized_schema,
+                bootstrap_smiles_rows,
+            )
+            try:
+                return _bootstrap_rebuild_index_from_smiles_file(
+                    postgres_url,
+                    schema=normalized_schema,
+                    smiles_file=bootstrap_smiles_file,
+                    output_dir=output_dir,
+                    max_heavy_atoms=max_heavy_atoms,
+                    skip_attachment_enrichment=skip_attachment_enrichment,
+                    attachment_force_recompute=attachment_force_recompute,
+                    fragment_jobs=fragment_jobs,
+                    index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+                    index_work_mem_mb=index_work_mem_mb,
+                    index_parallel_workers=index_parallel_workers,
+                    index_commit_every_flushes=index_commit_every_flushes,
+                    build_construct_tables=build_construct_tables,
+                    build_constant_smiles_mol_index=build_constant_smiles_mol_index,
+                )
+            finally:
+                try:
+                    if bootstrap_smiles_file and os.path.exists(bootstrap_smiles_file):
+                        os.remove(bootstrap_smiles_file)
+                except Exception:
+                    pass
         return _incremental_reindex_compound_delta(
             postgres_url,
             schema=normalized_schema,
-            changed_rows=new_unique_rows_payload,
+            changed_rows=(),
+            changed_rows_file=incremental_delta_file,
             output_dir=output_dir,
             max_heavy_atoms=max_heavy_atoms,
             skip_attachment_enrichment=skip_attachment_enrichment,
@@ -5375,10 +6060,27 @@ def import_compound_batch_postgres(
             build_construct_tables=build_construct_tables,
             build_constant_smiles_mol_index=build_constant_smiles_mol_index,
             delta_mode="add",
+            skip_incremental_analyze=skip_incremental_analyze,
         )
     except Exception as exc:
+        try:
+            if bootstrap_smiles_file and os.path.exists(bootstrap_smiles_file):
+                os.remove(bootstrap_smiles_file)
+        except Exception:
+            pass
+        try:
+            if incremental_delta_file and os.path.exists(incremental_delta_file):
+                os.remove(incremental_delta_file)
+        except Exception:
+            pass
         logger.error("Failed importing compound batch: %s", exc, exc_info=True)
         return False
+    finally:
+        try:
+            if incremental_delta_file and os.path.exists(incremental_delta_file):
+                os.remove(incremental_delta_file)
+        except Exception:
+            pass
 
 
 def delete_compound_batch_postgres(
@@ -5399,6 +6101,7 @@ def delete_compound_batch_postgres(
     incremental_index_jobs: int = 1,
     build_construct_tables: bool = True,
     build_constant_smiles_mol_index: bool = True,
+    skip_incremental_analyze: bool = False,
 ) -> bool:
     logger = logging.getLogger(__name__)
     if not HAS_PSYCOPG:
@@ -5459,7 +6162,6 @@ def delete_compound_batch_postgres(
                     """
                     SELECT clean_smiles, public_id, input_smiles
                     FROM tmp_inc_removed_after_delete
-                    ORDER BY clean_smiles
                     """
                 )
                 removed_rows_payload = [
@@ -5496,6 +6198,7 @@ def delete_compound_batch_postgres(
             build_construct_tables=build_construct_tables,
             build_constant_smiles_mol_index=build_constant_smiles_mol_index,
             delta_mode="delete",
+            skip_incremental_analyze=skip_incremental_analyze,
         )
     except Exception as exc:
         logger.error("Failed deleting compound batch '%s': %s", normalized_batch_id, exc, exc_info=True)
@@ -6034,21 +6737,21 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
     parser.add_argument(
         '--pg_index_maintenance_work_mem_mb',
         type=int,
-        default=1024,
-        help='索引构建阶段 maintenance_work_mem (MB, 默认: 1024)'
+        default=2048,
+        help='索引构建阶段 maintenance_work_mem (MB, 默认: 2048)'
     )
 
     parser.add_argument(
         '--pg_index_work_mem_mb',
         type=int,
-        default=128,
-        help='索引/排序阶段 work_mem (MB, 默认: 128)'
+        default=64,
+        help='索引/排序阶段 work_mem (MB, 默认: 64)'
     )
 
     parser.add_argument(
         '--pg_index_parallel_workers',
         type=int,
-        default=max(1, min(8, int((os.cpu_count() or 2) // 2))),
+        default=2,
         help='索引构建并行 worker 上限 (max_parallel_maintenance_workers)'
     )
 

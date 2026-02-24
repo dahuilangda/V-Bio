@@ -100,7 +100,7 @@ export default function App() {
         }
       />
       <Route
-        path="/users"
+        path="/admin/users"
         element={
           <AdminRoute>
             <ShellPage>
@@ -111,6 +111,7 @@ export default function App() {
           </AdminRoute>
         }
       />
+      <Route path="/users" element={<Navigate to="/admin/users" replace />} />
       <Route
         path="/admin/mmp-lifecycle"
         element={

@@ -493,6 +493,8 @@ class MmpLifecycleAdminStore:
             "review": None,
             "approval": None,
             "rejection": None,
+            "apply_runtime": None,
+            "last_error": "",
             "apply_history": [],
             "rollback_history": [],
             "status_history": [
@@ -532,6 +534,8 @@ class MmpLifecycleAdminStore:
                     next_database_id = str(patch.get("selected_database_id") or "").strip()
                     if next_database_id != before_database_id:
                         row["status"] = "draft"
+                        row["apply_runtime"] = None
+                        row["last_error"] = ""
                         row["last_check"] = None
                         row["review"] = None
                         row["approval"] = None
@@ -611,6 +615,8 @@ class MmpLifecycleAdminStore:
                 files[kind] = metadata
                 row["files"] = files
                 row["status"] = "draft"
+                row["apply_runtime"] = None
+                row["last_error"] = ""
                 row["last_check"] = None
                 row["review"] = None
                 row["approval"] = None
@@ -632,14 +638,29 @@ class MmpLifecycleAdminStore:
         path = str(file_path or "").strip()
         if not token or not path:
             raise ValueError("batch_id and file_path are required")
+        resolved_path = Path(path).resolve()
+        size_value = int(meta.get("size") or 0)
+        if size_value <= 0:
+            try:
+                if resolved_path.exists():
+                    size_value = int(resolved_path.stat().st_size)
+            except Exception:
+                size_value = 0
+        path_rel = ""
+        try:
+            path_rel = str(resolved_path.relative_to(self.root_dir.resolve()))
+        except Exception:
+            path_rel = ""
         payload = {
-            "path": path,
-            "stored_name": Path(path).name,
-            "size": int(meta.get("size") or 0),
+            "path": str(resolved_path),
+            "path_rel": path_rel,
+            "stored_name": resolved_path.name,
+            "size": size_value,
             "generated_at": _utc_now_iso(),
             "row_count": int(meta.get("row_count") or 0),
             "property_count": int(meta.get("property_count") or 0),
             "database_id": str(meta.get("database_id") or "").strip(),
+            "source_signature": str(meta.get("source_signature") or "").strip(),
         }
         with self._lock:
             state = self._read_state()
@@ -680,6 +701,8 @@ class MmpLifecycleAdminStore:
                     files["generated_property_import"] = None
                 row["files"] = files
                 row["status"] = "draft"
+                row["apply_runtime"] = None
+                row["last_error"] = ""
                 row["last_check"] = None
                 row["review"] = None
                 row["approval"] = None
@@ -717,6 +740,7 @@ class MmpLifecycleAdminStore:
                 row = dict(item)
                 row["last_check"] = stamped
                 row["status"] = "checked"
+                row["apply_runtime"] = None
                 row["review"] = None
                 row["approval"] = None
                 row["rejection"] = None
@@ -743,8 +767,189 @@ class MmpLifecycleAdminStore:
                 history.append(entry)
                 row["apply_history"] = history
                 row["status"] = "applied"
+                row["apply_runtime"] = None
+                row["last_error"] = ""
                 row = self._append_status_history(row, status="applied", event="applied", note=str(entry.get("apply_id") or ""))
                 row["updated_at"] = _utc_now_iso()
+                state["batches"][index] = row
+                self._write_state(state)
+                return row
+        raise ValueError(f"Batch '{token}' not found")
+
+    def mark_apply_queued(
+        self,
+        batch_id: str,
+        *,
+        task_id: str,
+        database_id: str = "",
+        import_batch_id: str = "",
+        import_compounds: bool = True,
+        import_experiments: bool = True,
+    ) -> Dict[str, Any]:
+        token = str(batch_id or "").strip()
+        task_token = str(task_id or "").strip()
+        if not token or not task_token:
+            raise ValueError("batch_id and task_id are required")
+        now = _utc_now_iso()
+        with self._lock:
+            state = self._read_state()
+            for index, item in enumerate(state.get("batches", [])):
+                if str((item or {}).get("id") or "").strip() != token:
+                    continue
+                row = dict(item)
+                row["status"] = "queued"
+                row["apply_runtime"] = {
+                    "task_id": task_token,
+                    "phase": "queued",
+                    "stage": "queued",
+                    "message": "Queued",
+                    "database_id": str(database_id or "").strip(),
+                    "import_batch_id": str(import_batch_id or "").strip(),
+                    "import_compounds": bool(import_compounds),
+                    "import_experiments": bool(import_experiments),
+                    "queued_at": now,
+                    "started_at": "",
+                    "finished_at": "",
+                    "updated_at": now,
+                    "error": "",
+                    "timings_s": {},
+                }
+                row["last_error"] = ""
+                row = self._append_status_history(row, status="queued", event="apply_queued", note=task_token)
+                row["updated_at"] = now
+                state["batches"][index] = row
+                self._write_state(state)
+                return row
+        raise ValueError(f"Batch '{token}' not found")
+
+    def mark_apply_running(self, batch_id: str, *, task_id: str) -> Dict[str, Any]:
+        token = str(batch_id or "").strip()
+        task_token = str(task_id or "").strip()
+        if not token or not task_token:
+            raise ValueError("batch_id and task_id are required")
+        now = _utc_now_iso()
+        with self._lock:
+            state = self._read_state()
+            for index, item in enumerate(state.get("batches", [])):
+                if str((item or {}).get("id") or "").strip() != token:
+                    continue
+                row = dict(item)
+                runtime = dict(row.get("apply_runtime") or {})
+                current_task = str(runtime.get("task_id") or "").strip()
+                if current_task and current_task != task_token:
+                    raise ValueError(f"Batch '{token}' has another active apply task")
+                runtime["task_id"] = task_token
+                runtime["phase"] = "running"
+                runtime["stage"] = "starting"
+                runtime["message"] = "Running"
+                if not str(runtime.get("queued_at") or "").strip():
+                    runtime["queued_at"] = now
+                runtime["started_at"] = now
+                runtime["finished_at"] = ""
+                runtime["updated_at"] = now
+                runtime["error"] = ""
+                row["status"] = "running"
+                row["apply_runtime"] = runtime
+                row["last_error"] = ""
+                row = self._append_status_history(row, status="running", event="apply_running", note=task_token)
+                row["updated_at"] = now
+                state["batches"][index] = row
+                self._write_state(state)
+                return row
+        raise ValueError(f"Batch '{token}' not found")
+
+    def mark_apply_progress(
+        self,
+        batch_id: str,
+        *,
+        task_id: str,
+        stage: str = "",
+        message: str = "",
+        timings_s: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        token = str(batch_id or "").strip()
+        task_token = str(task_id or "").strip()
+        if not token or not task_token:
+            raise ValueError("batch_id and task_id are required")
+        now = _utc_now_iso()
+        stage_token = str(stage or "").strip()
+        message_token = str(message or "").strip()
+        with self._lock:
+            state = self._read_state()
+            for index, item in enumerate(state.get("batches", [])):
+                if str((item or {}).get("id") or "").strip() != token:
+                    continue
+                row = dict(item)
+                runtime = dict(row.get("apply_runtime") or {})
+                current_task = str(runtime.get("task_id") or "").strip()
+                if current_task and current_task != task_token:
+                    raise ValueError(f"Batch '{token}' has another active apply task")
+                runtime["task_id"] = task_token
+                runtime["phase"] = "running"
+                if not str(runtime.get("queued_at") or "").strip():
+                    runtime["queued_at"] = now
+                if not str(runtime.get("started_at") or "").strip():
+                    runtime["started_at"] = now
+                runtime["finished_at"] = ""
+                runtime["updated_at"] = now
+                runtime["error"] = ""
+                if stage_token:
+                    runtime["stage"] = stage_token
+                if message_token:
+                    runtime["message"] = message_token
+                if isinstance(timings_s, dict):
+                    merged_timings = dict(runtime.get("timings_s") or {})
+                    for key, value in timings_s.items():
+                        name = str(key or "").strip()
+                        if not name:
+                            continue
+                        try:
+                            merged_timings[name] = float(value)
+                        except Exception:
+                            continue
+                    runtime["timings_s"] = merged_timings
+                row["status"] = "running"
+                row["apply_runtime"] = runtime
+                row["last_error"] = ""
+                row["updated_at"] = now
+                state["batches"][index] = row
+                self._write_state(state)
+                return row
+        raise ValueError(f"Batch '{token}' not found")
+
+    def mark_apply_failed(self, batch_id: str, *, task_id: str, error: str) -> Dict[str, Any]:
+        token = str(batch_id or "").strip()
+        task_token = str(task_id or "").strip()
+        error_text = str(error or "").strip()
+        if not token or not task_token:
+            raise ValueError("batch_id and task_id are required")
+        now = _utc_now_iso()
+        with self._lock:
+            state = self._read_state()
+            for index, item in enumerate(state.get("batches", [])):
+                if str((item or {}).get("id") or "").strip() != token:
+                    continue
+                row = dict(item)
+                runtime = dict(row.get("apply_runtime") or {})
+                current_task = str(runtime.get("task_id") or "").strip()
+                if current_task and current_task != task_token:
+                    raise ValueError(f"Batch '{token}' has another active apply task")
+                runtime["task_id"] = task_token
+                runtime["phase"] = "failed"
+                runtime["stage"] = "failed"
+                runtime["message"] = error_text
+                if not str(runtime.get("queued_at") or "").strip():
+                    runtime["queued_at"] = now
+                if not str(runtime.get("started_at") or "").strip():
+                    runtime["started_at"] = now
+                runtime["finished_at"] = now
+                runtime["updated_at"] = now
+                runtime["error"] = error_text
+                row["status"] = "failed"
+                row["apply_runtime"] = runtime
+                row["last_error"] = error_text
+                row = self._append_status_history(row, status="failed", event="apply_failed", note=error_text[:240])
+                row["updated_at"] = now
                 state["batches"][index] = row
                 self._write_state(state)
                 return row
@@ -840,6 +1045,8 @@ class MmpLifecycleAdminStore:
                     row = self._append_status_history(row, status="rejected", event="rejected", note=note_token)
                 elif action_token == "reopen":
                     row["status"] = "draft"
+                    row["apply_runtime"] = None
+                    row["last_error"] = ""
                     row["last_check"] = None
                     row["review"] = None
                     row["approval"] = None
@@ -1259,20 +1466,17 @@ class MmpLifecycleAdminStore:
             seen_props.add(key)
             normalized_properties.append(prop)
 
-        preferred_property_by_family: Dict[str, str] = {}
+        discovered_preferred_property_by_family: Dict[str, str] = {}
         for prop in normalized_properties:
             family = _canonical_property_family(prop)
             if not family:
                 continue
-            current = preferred_property_by_family.get(family)
+            current = discovered_preferred_property_by_family.get(family)
             if not current:
-                preferred_property_by_family[family] = prop
+                discovered_preferred_property_by_family[family] = prop
                 continue
             if _property_preference_rank(prop, family) < _property_preference_rank(current, family):
-                preferred_property_by_family[family] = prop
-
-        selected_property_keys = {value.lower() for value in preferred_property_by_family.values() if value}
-        selected_properties = [prop for prop in normalized_properties if prop.lower() in selected_property_keys]
+                discovered_preferred_property_by_family[family] = prop
 
         now = _utc_now_iso()
         created_methods = 0
@@ -1286,6 +1490,35 @@ class MmpLifecycleAdminStore:
             state = self._read_state()
             methods = [dict(item) for item in state.get("methods", []) if isinstance(item, dict)]
             mappings = [dict(item) for item in state.get("property_mappings", []) if isinstance(item, dict)]
+            property_name_by_lower: Dict[str, str] = {str(item or "").strip().lower(): str(item or "").strip() for item in normalized_properties}
+            preferred_property_by_family: Dict[str, str] = dict(discovered_preferred_property_by_family)
+
+            # Preserve existing method-edited output property per family for this database.
+            # This prevents sync from reverting back to legacy tokens when both names coexist.
+            methods_for_db = [
+                dict(item)
+                for item in methods
+                if str(item.get("id") or "").strip()
+                and str(item.get("reference") or "").strip() in {"", db_token}
+            ]
+            methods_for_db.sort(key=lambda row: str(row.get("updated_at") or ""), reverse=True)
+            methods_for_db.sort(
+                key=lambda row: 0 if not str(row.get("id") or "").strip().startswith("method_auto_") else 1
+            )
+            for item in methods_for_db:
+                output_prop = str(item.get("output_property") or "").strip()
+                if not output_prop:
+                    continue
+                canonical_output = property_name_by_lower.get(output_prop.lower(), "")
+                if not canonical_output:
+                    continue
+                family = _canonical_property_family(canonical_output)
+                if not family:
+                    continue
+                preferred_property_by_family[family] = canonical_output
+
+            selected_property_keys = {value.lower() for value in preferred_property_by_family.values() if value}
+            selected_properties = [prop for prop in normalized_properties if prop.lower() in selected_property_keys]
 
             filtered_mappings: List[Dict[str, Any]] = []
             for item in mappings:
@@ -1297,7 +1530,8 @@ class MmpLifecycleAdminStore:
                 if not source:
                     filtered_mappings.append(row)
                     continue
-                family = _canonical_property_family(source)
+                mapped_prop = str(row.get("mmp_property") or "").strip()
+                family = _canonical_property_family(mapped_prop or source)
                 preferred = str(preferred_property_by_family.get(family) or "").strip()
                 mapping_id = str(row.get("id") or "").strip()
                 mapping_notes = str(row.get("notes") or "").strip().lower()
@@ -1306,7 +1540,8 @@ class MmpLifecycleAdminStore:
                     "method bound mapping.",
                     "optional",
                 }
-                if preferred and source.lower() != preferred.lower() and auto_generated:
+                compare_token = (mapped_prop or source).lower()
+                if preferred and compare_token != preferred.lower() and auto_generated:
                     removed_mappings += 1
                     changed = True
                     continue
@@ -1314,9 +1549,12 @@ class MmpLifecycleAdminStore:
             mappings = filtered_mappings
 
             method_id_by_output: Dict[str, str] = {}
+            method_by_id: Dict[str, Dict[str, Any]] = {}
             for item in methods:
                 output = str(item.get("output_property") or "").strip()
                 method_id = str(item.get("id") or "").strip()
+                if method_id:
+                    method_by_id[method_id] = dict(item)
                 if output and method_id and output.lower() not in method_id_by_output:
                     method_id_by_output[output.lower()] = method_id
             method_display_transform_by_id: Dict[str, str] = {}
@@ -1340,12 +1578,16 @@ class MmpLifecycleAdminStore:
                     auto_method_id_by_family[family] = method_id
 
             db_mapping_indexes_by_source: Dict[str, int] = {}
+            db_mapping_indexes_by_method: Dict[str, int] = {}
             for index, item in enumerate(mappings):
                 if str(item.get("database_id") or "").strip() != db_token:
                     continue
                 source = str(item.get("source_property") or "").strip()
                 if source and source.lower() not in db_mapping_indexes_by_source:
                     db_mapping_indexes_by_source[source.lower()] = index
+                method_ref = str(item.get("method_id") or "").strip()
+                if method_ref and method_ref not in db_mapping_indexes_by_method:
+                    db_mapping_indexes_by_method[method_ref] = index
 
             for prop in selected_properties:
                 prop_key = prop.lower()
@@ -1406,17 +1648,26 @@ class MmpLifecycleAdminStore:
                         }
                     )
                     method_id_by_output[prop_key] = method_id
+                    method_by_id[method_id] = dict(methods[-1])
                     created_methods += 1
                     changed = True
 
-                existing_idx = db_mapping_indexes_by_source.get(prop_key)
+                method_row = dict(method_by_id.get(method_id) or {})
+                source_for_mapping = str(method_row.get("key") or "").strip() or prop
+                source_for_mapping_key = source_for_mapping.lower()
+
+                existing_idx = db_mapping_indexes_by_method.get(method_id)
+                if existing_idx is None:
+                    existing_idx = db_mapping_indexes_by_source.get(source_for_mapping_key)
+                if existing_idx is None:
+                    existing_idx = db_mapping_indexes_by_source.get(prop_key)
                 if existing_idx is None:
                     mapping_transform = str(method_display_transform_by_id.get(method_id) or "none").strip().lower() or "none"
                     mappings.append(
                         {
-                            "id": _auto_mapping_id(db_token, prop),
+                            "id": _auto_mapping_id(db_token, source_for_mapping),
                             "database_id": db_token,
-                            "source_property": prop,
+                            "source_property": source_for_mapping,
                             "mmp_property": prop,
                             "method_id": method_id,
                             "value_transform": mapping_transform,
@@ -1424,22 +1675,41 @@ class MmpLifecycleAdminStore:
                             "updated_at": now,
                         }
                     )
+                    db_mapping_indexes_by_source[source_for_mapping_key] = len(mappings) - 1
                     db_mapping_indexes_by_source[prop_key] = len(mappings) - 1
+                    db_mapping_indexes_by_method[method_id] = len(mappings) - 1
                     created_mappings += 1
                     changed = True
                     continue
 
                 current = dict(mappings[existing_idx])
+                current_source = str(current.get("source_property") or "").strip()
                 current_prop = str(current.get("mmp_property") or "").strip()
                 current_method = str(current.get("method_id") or "").strip()
                 current_value_transform = str(current.get("value_transform") or "").strip().lower()
+                current_id = str(current.get("id") or "").strip()
+                current_notes = str(current.get("notes") or "").strip().lower()
+                current_auto_generated = current_id.startswith("map_auto_") or current_notes in {
+                    "method-bound mapping.",
+                    "method bound mapping.",
+                    "optional",
+                }
                 row_changed = False
-                if not current_prop:
+                if current_auto_generated and current_source.lower() != source_for_mapping_key:
+                    current["source_property"] = source_for_mapping
+                    current_source = source_for_mapping
+                    row_changed = True
+                if not current_prop or (current_auto_generated and current_prop.lower() != prop_key):
                     current["mmp_property"] = prop
                     current_prop = prop
                     row_changed = True
                 if not current_method and current_prop.lower() == prop_key:
                     current["method_id"] = method_id
+                    current_method = method_id
+                    row_changed = True
+                elif current_auto_generated and current_method != method_id:
+                    current["method_id"] = method_id
+                    current_method = method_id
                     row_changed = True
                 if not current_value_transform:
                     current["value_transform"] = "none"
@@ -1447,8 +1717,30 @@ class MmpLifecycleAdminStore:
                 if row_changed:
                     current["updated_at"] = now
                     mappings[existing_idx] = current
+                    db_mapping_indexes_by_source[source_for_mapping_key] = existing_idx
+                    if current_source:
+                        db_mapping_indexes_by_source[current_source.lower()] = existing_idx
+                    db_mapping_indexes_by_method[method_id] = existing_idx
                     updated_mappings += 1
                     changed = True
+
+            deduped_mappings: List[Dict[str, Any]] = []
+            seen_source_by_db: set[str] = set()
+            for item in mappings:
+                row = dict(item)
+                row_db = str(row.get("database_id") or "").strip()
+                source = str(row.get("source_property") or "").strip()
+                if row_db != db_token or not source:
+                    deduped_mappings.append(row)
+                    continue
+                source_key = source.lower()
+                if source_key in seen_source_by_db:
+                    removed_mappings += 1
+                    changed = True
+                    continue
+                seen_source_by_db.add(source_key)
+                deduped_mappings.append(row)
+            mappings = deduped_mappings
 
             referenced_method_ids = {
                 str(item.get("method_id") or "").strip()

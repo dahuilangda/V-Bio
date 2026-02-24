@@ -88,8 +88,6 @@ interface CheckOverview {
   experimentInvalidRows: number;
 }
 
-type BatchApplyRuntimePhase = 'queue' | 'running' | 'failed';
-
 type BatchSortKey = 'updated_at' | 'name' | 'status' | 'selected_database_id';
 type SortDirection = 'asc' | 'desc';
 
@@ -150,6 +148,52 @@ function summarizeCount(value: unknown): string {
   const num = readNumber(value);
   if (num === null) return '-';
   return Math.trunc(num).toLocaleString();
+}
+
+const APPLY_STAGE_ORDER = ['preflight', 'pending_sync', 'import_compounds', 'prepare_experiments', 'import_experiments', 'finalize', 'total'];
+const APPLY_STAGE_LABEL: Record<string, string> = {
+  preflight: 'prep',
+  pending_sync: 'sync',
+  import_compounds: 'cmpd',
+  prepare_experiments: 'prep-exp',
+  import_experiments: 'exp',
+  finalize: 'final',
+  total: 'total',
+};
+
+function formatDurationSeconds(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return '';
+  if (value < 1) return `${value.toFixed(2)}s`;
+  if (value < 10) return `${value.toFixed(1)}s`;
+  return `${Math.round(value)}s`;
+}
+
+function summarizeApplyRuntimeTimings(value: unknown): string {
+  const source = asRecord(value);
+  const entries: Array<{ key: string; seconds: number }> = [];
+  for (const [rawKey, rawValue] of Object.entries(source)) {
+    const key = readText(rawKey);
+    if (!key) continue;
+    const seconds = readNumber(rawValue);
+    if (seconds === null || seconds <= 0) continue;
+    entries.push({ key, seconds });
+  }
+  if (entries.length === 0) return '';
+  entries.sort((left, right) => {
+    const li = APPLY_STAGE_ORDER.indexOf(left.key);
+    const ri = APPLY_STAGE_ORDER.indexOf(right.key);
+    const lrank = li >= 0 ? li : APPLY_STAGE_ORDER.length + 1;
+    const rrank = ri >= 0 ? ri : APPLY_STAGE_ORDER.length + 1;
+    if (lrank !== rrank) return lrank - rrank;
+    return left.key.localeCompare(right.key);
+  });
+  const total = entries.find((item) => item.key === 'total');
+  const picked = entries.filter((item) => item.key !== 'total').slice(0, 3);
+  const parts = picked.map((item) => `${APPLY_STAGE_LABEL[item.key] || item.key} ${formatDurationSeconds(item.seconds)}`).filter(Boolean);
+  if (total) {
+    parts.push(`${APPLY_STAGE_LABEL.total} ${formatDurationSeconds(total.seconds)}`);
+  }
+  return parts.join(' · ');
 }
 
 function asNonNegativeInt(value: unknown): number {
@@ -536,7 +580,6 @@ export function MmpLifecycleAdminPage() {
   const [checkResult, setCheckResult] = useState<Record<string, unknown> | null>(null);
   const [selectedBatchIds, setSelectedBatchIds] = useState<string[]>([]);
   const [bulkApplyRunning, setBulkApplyRunning] = useState(false);
-  const [batchApplyRuntimeById, setBatchApplyRuntimeById] = useState<Record<string, { phase: BatchApplyRuntimePhase; message: string }>>({});
   const [flowStep, setFlowStep] = useState<FlowStep>('batch');
   const [viewMode, setViewMode] = useState<'list' | 'detail'>('list');
   const [createBatchModalOpen, setCreateBatchModalOpen] = useState(false);
@@ -576,9 +619,12 @@ export function MmpLifecycleAdminPage() {
     [uploadConfigPanelWidth]
   );
 
-  const loadOverview = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const loadOverview = useCallback(async (options?: { silent?: boolean }) => {
+    const silent = options?.silent === true;
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const overview = await fetchMmpLifecycleOverview();
       setDatabases(Array.isArray(overview.databases) ? overview.databases : []);
@@ -597,9 +643,13 @@ export function MmpLifecycleAdminPage() {
         return readText(nextBatches[0].id);
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load lifecycle overview.');
+      if (!silent) {
+        setError(err instanceof Error ? err.message : 'Failed to load lifecycle overview.');
+      }
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -679,6 +729,25 @@ export function MmpLifecycleAdminPage() {
   useEffect(() => {
     void loadOverview();
   }, [loadOverview]);
+
+  const hasApplyingBatch = useMemo(
+    () =>
+      batches.some((item) => {
+        const runtime = asRecord(item.apply_runtime);
+        const phase = readText(runtime.phase).toLowerCase();
+        const status = readText(item.status).toLowerCase();
+        return phase === 'queued' || phase === 'queue' || phase === 'running' || status === 'queued' || status === 'running';
+      }),
+    [batches]
+  );
+
+  useEffect(() => {
+    if (!hasApplyingBatch) return;
+    const timer = window.setInterval(() => {
+      void loadOverview({ silent: true });
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [hasApplyingBatch, loadOverview]);
 
   const selectedBatch = useMemo(
     () => batches.find((item) => readText(item.id) === selectedBatchId) || null,
@@ -1176,8 +1245,21 @@ export function MmpLifecycleAdminPage() {
 
         if (selectedActivityColumns.length > 0) {
           const transformByActivity: Record<string, ActivityTransform> = {};
+          const methodByActivity: Record<string, string> = {};
+          const outputPropertyByActivity: Record<string, string> = {};
+          const methodOutputById = new Map<string, string>();
+          for (const item of methods) {
+            const methodId = readText(item.id);
+            if (!methodId) continue;
+            methodOutputById.set(methodId, readText(item.output_property));
+          }
           for (const activityColumn of selectedActivityColumns) {
             transformByActivity[activityColumn] = normalizeActivityTransform(transformMapRaw[activityColumn] || 'none');
+            const methodId = readText(activityMethodMap[activityColumn]);
+            if (methodId) {
+              methodByActivity[activityColumn] = methodId;
+            }
+            outputPropertyByActivity[activityColumn] = readText(methodOutputById.get(methodId) || activityColumn);
           }
           const effectiveActivityColumns = selectedActivityColumns.slice();
           const experimentRows: Array<Record<string, string>> = [];
@@ -1216,12 +1298,17 @@ export function MmpLifecycleAdminPage() {
               property_column: 'source_property',
               value_column: 'value',
               activity_columns: effectiveActivityColumns,
+              activity_method_map: effectiveActivityColumns.reduce<Record<string, string>>((acc, col) => {
+                const methodId = readText(methodByActivity[col]);
+                if (methodId) acc[col] = methodId;
+                return acc;
+              }, {}),
               activity_transform_map: effectiveActivityColumns.reduce<Record<string, string>>((acc, col) => {
                 acc[col] = transformByActivity[col];
                 return acc;
               }, {}),
               activity_output_property_map: effectiveActivityColumns.reduce<Record<string, string>>((acc, col) => {
-                acc[col] = col;
+                acc[col] = readText(outputPropertyByActivity[col] || col);
                 return acc;
               }, {}),
             });
@@ -1238,7 +1325,7 @@ export function MmpLifecycleAdminPage() {
         setSaving(false);
       }
     },
-    [selectedBatch, parseUploadTable, buildTsvFile, mergeBatch]
+    [selectedBatch, parseUploadTable, buildTsvFile, mergeBatch, activityMethodMap, methods]
   );
 
   const onUploadFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -1358,48 +1445,9 @@ export function MmpLifecycleAdminPage() {
         category: methodCategory.trim(),
         description: methodDescription.trim(),
       };
-      const savedMethod = await (editingMethodId
+      await (editingMethodId
         ? patchMmpLifecycleMethod(editingMethodId, payload)
         : createMmpLifecycleMethod(payload));
-      const savedMethodId = readText(savedMethod.id);
-      const savedOutputProperty = readText(savedMethod.output_property || methodOutputProperty.trim());
-      const targetDatabaseId = readText(assayMethodDatabaseId);
-      if (savedMethodId && savedOutputProperty && targetDatabaseId) {
-        const currentMappings = await fetchMmpLifecyclePropertyMappings(targetDatabaseId);
-        const outputToken = savedOutputProperty.toLowerCase();
-        const existing = currentMappings.find((item) => {
-          const methodId = readText(item.method_id);
-          const source = readText(item.source_property).toLowerCase();
-          const mapped = readText(item.mmp_property).toLowerCase();
-          return methodId === savedMethodId || source === outputToken || mapped === outputToken;
-        });
-        const passthrough = currentMappings
-          .map((item) => ({
-            id: readText(item.id),
-            source_property: readText(item.source_property),
-            mmp_property: readText(item.mmp_property),
-            method_id: readText(item.method_id),
-            value_transform: normalizeActivityTransform(readText(item.value_transform || 'none')),
-            notes: readText(item.notes),
-          }))
-          .filter((item) => {
-            const methodId = readText(item.method_id);
-            const source = readText(item.source_property).toLowerCase();
-            const mapped = readText(item.mmp_property).toLowerCase();
-            return !(methodId === savedMethodId || source === outputToken || mapped === outputToken);
-          });
-        await saveMmpLifecyclePropertyMappings(targetDatabaseId, [
-          ...passthrough,
-          {
-            id: readText(existing?.id),
-            source_property: savedOutputProperty,
-            mmp_property: savedOutputProperty,
-            method_id: savedMethodId,
-            value_transform: normalizedDisplayTransform,
-            notes: readText(existing?.notes) || 'Method-bound mapping.',
-          },
-        ]);
-      }
       await loadOverview();
       await loadAssayDatabaseMethodBindings(assayMethodDatabaseId);
       await loadAssayDatabaseProperties(assayMethodDatabaseId);
@@ -1714,47 +1762,26 @@ export function MmpLifecycleAdminPage() {
     setSaving(true);
     setBulkApplyRunning(true);
     setError(null);
-    setBatchApplyRuntimeById((prev) => {
-      const next = { ...prev };
-      for (const batchId of runnableIds) {
-        next[batchId] = { phase: 'queue', message: '' };
-      }
-      return next;
-    });
     let failedCount = 0;
     let firstFailureMessage = '';
     try {
-      for (const batchId of runnableIds) {
+      const pushFailure = (batch: MmpLifecycleBatch | undefined, batchId: string, message: string) => {
+        failedCount += 1;
+        if (!firstFailureMessage) firstFailureMessage = `${readText(batch?.name) || batchId}: ${message}`;
+      };
+
+      const submitOne = async (batchId: string) => {
         const batch = batchById.get(batchId);
-        if (!batch) continue;
+        if (!batch) return;
         const databaseId = readText(batch.selected_database_id);
-        setBatchApplyRuntimeById((prev) => ({
-          ...prev,
-          [batchId]: { phase: 'running', message: '' },
-        }));
         if (!databaseId) {
-          const message = 'Missing target database.';
-          failedCount += 1;
-          if (!firstFailureMessage) firstFailureMessage = message;
-          setBatchApplyRuntimeById((prev) => ({
-            ...prev,
-            [batchId]: { phase: 'failed', message },
-          }));
-          continue;
+          pushFailure(batch, batchId, 'Missing target database.');
+          return;
         }
 
         try {
-          const checkPayload = await checkMmpLifecycleBatch(batchId, {
-            database_id: databaseId,
-            row_limit: 200,
-            check_policy: { ...BULK_APPLY_RELAXED_POLICY } as Record<string, unknown>,
-          });
-          const checkBatch = asRecord(checkPayload.batch);
-          if (Object.keys(checkBatch).length > 0) {
-            mergeBatch(checkBatch as unknown as MmpLifecycleBatch);
-          }
-
           const applyPayload = await applyMmpLifecycleBatch(batchId, {
+            async: true,
             database_id: databaseId,
             import_compounds: true,
             import_experiments: true,
@@ -1764,21 +1791,23 @@ export function MmpLifecycleAdminPage() {
           if (Object.keys(appliedBatch).length > 0) {
             mergeBatch(appliedBatch as unknown as MmpLifecycleBatch);
           }
-          setBatchApplyRuntimeById((prev) => {
-            const next = { ...prev };
-            delete next[batchId];
-            return next;
-          });
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Failed to apply batch.';
-          failedCount += 1;
-          if (!firstFailureMessage) firstFailureMessage = message;
-          setBatchApplyRuntimeById((prev) => ({
-            ...prev,
-            [batchId]: { phase: 'failed', message },
-          }));
+          pushFailure(batch, batchId, message);
         }
-      }
+      };
+
+      const queue = [...runnableIds];
+      const maxConcurrency = Math.min(4, queue.length);
+      await Promise.all(
+        Array.from({ length: maxConcurrency }, async () => {
+          while (queue.length > 0) {
+            const nextBatchId = queue.shift();
+            if (!nextBatchId) break;
+            await submitOne(nextBatchId);
+          }
+        })
+      );
 
       if (failedCount > 0) {
         setError(`${failedCount}/${runnableIds.length} batch apply failed. ${firstFailureMessage}`);
@@ -2097,35 +2126,9 @@ export function MmpLifecycleAdminPage() {
     () => filteredBatches.map((item) => readText(item.id)).filter(Boolean),
     [filteredBatches]
   );
-  useEffect(() => {
-    const validIds = new Set(batches.map((item) => readText(item.id)).filter(Boolean));
-    setBatchApplyRuntimeById((prev) => {
-      const next: Record<string, { phase: BatchApplyRuntimePhase; message: string }> = {};
-      for (const [batchId, runtime] of Object.entries(prev)) {
-        if (!validIds.has(batchId)) continue;
-        next[batchId] = runtime;
-      }
-      const sameKeys =
-        Object.keys(next).length === Object.keys(prev).length &&
-        Object.keys(next).every((key) => {
-          const left = prev[key];
-          const right = next[key];
-          return left?.phase === right?.phase && left?.message === right?.message;
-        });
-      return sameKeys ? prev : next;
-    });
-  }, [batches]);
   const allFilteredSelected =
     filteredBatchIds.length > 0 && filteredBatchIds.every((id) => selectedBatchIds.includes(id));
   const selectedCount = selectedBatchIds.length;
-  const runtimeQueueCount = useMemo(
-    () => Object.values(batchApplyRuntimeById).filter((item) => item.phase === 'queue').length,
-    [batchApplyRuntimeById]
-  );
-  const runtimeRunningCount = useMemo(
-    () => Object.values(batchApplyRuntimeById).filter((item) => item.phase === 'running').length,
-    [batchApplyRuntimeById]
-  );
   useEffect(() => {
     const visible = new Set(filteredBatchIds);
     setSelectedBatchIds((prev) => {
@@ -2383,8 +2386,6 @@ export function MmpLifecycleAdminPage() {
               </label>
             </div>
             <div className="project-toolbar-meta project-toolbar-meta-rich">
-              {runtimeQueueCount > 0 ? <span className="meta-chip">Queue {runtimeQueueCount}</span> : null}
-              {runtimeRunningCount > 0 ? <span className="meta-chip">Running {runtimeRunningCount}</span> : null}
               <button
                 className="btn btn-primary btn-compact"
                 type="button"
@@ -2458,16 +2459,23 @@ export function MmpLifecycleAdminPage() {
                   filteredBatches.map((item) => {
                     const id = readText(item.id);
                     const files = asRecord(item.files);
-                    const runtime = batchApplyRuntimeById[id];
-                    const statusRaw = runtime?.phase || readText(item.status).toLowerCase();
+                    const runtime = asRecord(item.apply_runtime);
+                    const runtimePhaseRaw = readText(runtime.phase).toLowerCase();
+                    const runtimePhase = runtimePhaseRaw === 'queue' ? 'queued' : runtimePhaseRaw;
+                    const runtimeStage = readText(runtime.stage).toLowerCase();
+                    const statusRaw = runtimePhase || readText(item.status).toLowerCase();
                     const statusToken = statusRaw.replace(/_/g, '-').replace('queue', 'queued');
-                    const statusLabel = runtime?.phase === 'queue'
-                      ? 'queue'
-                      : runtime?.phase === 'running'
-                        ? 'running'
-                        : runtime?.phase === 'failed'
-                          ? 'failed'
-                          : (readText(item.status) || '-');
+                    const statusLabel =
+                      runtimePhase === 'running' && runtimeStage
+                        ? `running · ${runtimeStage}`
+                        : (runtimePhase || readText(item.status) || '-');
+                    const runtimeMessage = readText(runtime.error || runtime.message || item.last_error);
+                    const runtimeTimingSummary = summarizeApplyRuntimeTimings(runtime.timings_s);
+                    const applyHistory = Array.isArray(item.apply_history) ? item.apply_history : [];
+                    const latestApply = applyHistory.length > 0 ? asRecord(applyHistory[applyHistory.length - 1]) : {};
+                    const latestApplyTimingSummary = summarizeApplyRuntimeTimings(latestApply.timings_s);
+                    const statusTimingSummary = runtimeTimingSummary || (statusRaw === 'applied' ? latestApplyTimingSummary : '');
+                    const runtimeTitle = [runtimeMessage, statusTimingSummary].filter(Boolean).join('\n');
                     const fileSummary = `${asRecord(files.compounds).path ? 'compounds ' : ''}${asRecord(files.experiments).path ? 'experiments' : ''}`.trim() || '-';
                     const dbId = readText(item.selected_database_id);
                     const dbMeta = databaseById.get(dbId);
@@ -2504,9 +2512,16 @@ export function MmpLifecycleAdminPage() {
                           </div>
                         </td>
                         <td className="mmp-life-status-cell">
-                          <span className={`task-state-chip ${statusToken || 'draft'}`} title={readText(runtime?.message)}>
-                            {statusLabel}
-                          </span>
+                          <div className="mmp-life-status-wrap">
+                            <span className={`task-state-chip ${statusToken || 'draft'}`} title={runtimeTitle}>
+                              {statusLabel}
+                            </span>
+                            {statusTimingSummary ? (
+                              <div className="mmp-life-status-meta" title={runtimeTitle}>
+                                {statusTimingSummary}
+                              </div>
+                            ) : null}
+                          </div>
                         </td>
                         <td className="mmp-life-db-cell">
                           <div className="mmp-life-db-primary">{dbLabel}</div>
