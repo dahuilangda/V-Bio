@@ -300,29 +300,10 @@ class MmpLifecycleAdminStore:
                 base["database_operation_locks"] = []
             if not isinstance(base.get("batches"), list):
                 base["batches"] = []
-            original_methods = json.dumps(base.get("methods", []), sort_keys=True, ensure_ascii=False)
-            original_mappings = json.dumps(base.get("property_mappings", []), sort_keys=True, ensure_ascii=False)
-            original_pending_sync = json.dumps(base.get("pending_database_sync", []), sort_keys=True, ensure_ascii=False)
-            original_db_locks = json.dumps(base.get("database_operation_locks", []), sort_keys=True, ensure_ascii=False)
-            original_batches = json.dumps(base.get("batches", []), sort_keys=True, ensure_ascii=False)
             normalized_methods, method_aliases = self._normalize_method_collection_with_aliases(base.get("methods"))
             base["methods"] = normalized_methods
             self._apply_method_aliases_to_state(base, method_aliases)
             self._sanitize_state_inplace(base)
-            normalized_methods_dump = json.dumps(base.get("methods", []), sort_keys=True, ensure_ascii=False)
-            normalized_mappings_dump = json.dumps(base.get("property_mappings", []), sort_keys=True, ensure_ascii=False)
-            normalized_pending_sync_dump = json.dumps(base.get("pending_database_sync", []), sort_keys=True, ensure_ascii=False)
-            normalized_db_locks_dump = json.dumps(base.get("database_operation_locks", []), sort_keys=True, ensure_ascii=False)
-            normalized_batches_dump = json.dumps(base.get("batches", []), sort_keys=True, ensure_ascii=False)
-            if (
-                normalized_methods_dump != original_methods
-                or normalized_mappings_dump != original_mappings
-                or normalized_pending_sync_dump != original_pending_sync
-                or normalized_db_locks_dump != original_db_locks
-                or normalized_batches_dump != original_batches
-            ):
-                base["updated_at"] = _utc_now_iso()
-                _atomic_json_write(self.state_file, base)
             return base
         except Exception:
             return self._empty_state()

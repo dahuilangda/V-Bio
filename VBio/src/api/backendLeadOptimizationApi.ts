@@ -111,6 +111,7 @@ export interface LeadOptMmpDatabaseItem {
   schema?: string;
   visible?: boolean;
   is_default?: boolean;
+  status?: 'ready' | 'building' | string;
   source?: string;
   properties: LeadOptMmpDatabaseProperty[];
   stats?: LeadOptMmpDatabaseStats;

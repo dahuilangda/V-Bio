@@ -5,6 +5,7 @@ import os
 import threading
 from typing import Callable, Tuple
 
+from lead_optimization import mmp_database_registry as registry
 from lead_optimization.mmp_lifecycle import engine as legacy
 
 from ..models import PostgresTarget
@@ -49,6 +50,38 @@ def _supports_auto_cache_reseed(error_message: str) -> bool:
     return any(marker in token for marker in fallback_markers)
 
 
+def _run_with_database_status(target: PostgresTarget, *, operation: str, fn: Callable[[], bool]) -> bool:
+    status_token = ""
+    operation_label = str(operation or "").strip() or "operation"
+    try:
+        status_token = registry.begin_mmp_database_operation(
+            database_url=target.url,
+            schema=target.schema,
+            message=operation_label,
+        )
+    except Exception:
+        status_token = ""
+    ok = False
+    error_text = ""
+    try:
+        ok = bool(fn())
+        return ok
+    except Exception as exc:
+        error_text = str(exc or "")
+        raise
+    finally:
+        try:
+            registry.finish_mmp_database_operation(
+                database_url=target.url,
+                schema=target.schema,
+                token=status_token,
+                success=ok,
+                message="" if ok else (error_text or f"{operation_label} failed"),
+            )
+        except Exception:
+            pass
+
+
 def build_database_from_smiles(
     target: PostgresTarget,
     *,
@@ -69,28 +102,31 @@ def build_database_from_smiles(
     build_construct_tables: bool = True,
     build_constant_smiles_mol_index: bool = True,
 ) -> bool:
-    ok = legacy.create_mmp_database(
-        smiles_file,
-        target.url,
-        max_heavy_atoms,
-        output_dir=output_dir,
-        postgres_schema=target.schema,
-        properties_file=properties_file or None,
-        skip_attachment_enrichment=skip_attachment_enrichment,
-        attachment_force_recompute=attachment_force_recompute,
-        force_rebuild_schema=force_rebuild_schema,
-        keep_fragments=keep_fragdb,
-        fragment_jobs=fragment_jobs,
-        index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
-        index_work_mem_mb=index_work_mem_mb,
-        index_parallel_workers=index_parallel_workers,
-        index_commit_every_flushes=index_commit_every_flushes,
-        build_construct_tables=build_construct_tables,
-        build_constant_smiles_mol_index=build_constant_smiles_mol_index,
-    )
-    if ok and property_metadata_file:
-        return legacy.apply_property_metadata_postgres(target.url, target.schema, property_metadata_file)
-    return ok
+    def _do_build() -> bool:
+        ok = legacy.create_mmp_database(
+            smiles_file,
+            target.url,
+            max_heavy_atoms,
+            output_dir=output_dir,
+            postgres_schema=target.schema,
+            properties_file=properties_file or None,
+            skip_attachment_enrichment=skip_attachment_enrichment,
+            attachment_force_recompute=attachment_force_recompute,
+            force_rebuild_schema=force_rebuild_schema,
+            keep_fragments=keep_fragdb,
+            fragment_jobs=fragment_jobs,
+            index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+            index_work_mem_mb=index_work_mem_mb,
+            index_parallel_workers=index_parallel_workers,
+            index_commit_every_flushes=index_commit_every_flushes,
+            build_construct_tables=build_construct_tables,
+            build_constant_smiles_mol_index=build_constant_smiles_mol_index,
+        )
+        if ok and property_metadata_file:
+            return legacy.apply_property_metadata_postgres(target.url, target.schema, property_metadata_file)
+        return ok
+
+    return _run_with_database_status(target, operation="build_database", fn=_do_build)
 
 
 def index_fragdb_into_database(
@@ -109,24 +145,27 @@ def index_fragdb_into_database(
     build_construct_tables: bool = True,
     build_constant_smiles_mol_index: bool = True,
 ) -> bool:
-    ok = legacy._index_fragments_to_postgres(
-        fragments_file,
-        target.url,
-        postgres_schema=target.schema,
-        force_rebuild_schema=force_rebuild_schema,
-        properties_file=properties_file or None,
-        skip_attachment_enrichment=skip_attachment_enrichment,
-        attachment_force_recompute=attachment_force_recompute,
-        index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
-        index_work_mem_mb=index_work_mem_mb,
-        index_parallel_workers=index_parallel_workers,
-        index_commit_every_flushes=index_commit_every_flushes,
-        build_construct_tables=build_construct_tables,
-        build_constant_smiles_mol_index=build_constant_smiles_mol_index,
-    )
-    if ok and property_metadata_file:
-        return legacy.apply_property_metadata_postgres(target.url, target.schema, property_metadata_file)
-    return ok
+    def _do_index() -> bool:
+        ok = legacy._index_fragments_to_postgres(
+            fragments_file,
+            target.url,
+            postgres_schema=target.schema,
+            force_rebuild_schema=force_rebuild_schema,
+            properties_file=properties_file or None,
+            skip_attachment_enrichment=skip_attachment_enrichment,
+            attachment_force_recompute=attachment_force_recompute,
+            index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+            index_work_mem_mb=index_work_mem_mb,
+            index_parallel_workers=index_parallel_workers,
+            index_commit_every_flushes=index_commit_every_flushes,
+            build_construct_tables=build_construct_tables,
+            build_constant_smiles_mol_index=build_constant_smiles_mol_index,
+        )
+        if ok and property_metadata_file:
+            return legacy.apply_property_metadata_postgres(target.url, target.schema, property_metadata_file)
+        return ok
+
+    return _run_with_database_status(target, operation="index_fragdb", fn=_do_index)
 
 
 def import_property_batch(
@@ -140,21 +179,29 @@ def import_property_batch(
     canonicalize_smiles: bool = True,
     overwrite_existing_batch: bool = False,
 ) -> bool:
-    return legacy.import_property_batch_postgres(
-        target.url,
-        schema=target.schema,
-        property_file=property_file,
-        batch_id=batch_id,
-        batch_label=batch_label,
-        batch_notes=batch_notes,
-        smiles_column=smiles_column,
-        canonicalize_smiles=canonicalize_smiles,
-        overwrite_existing_batch=overwrite_existing_batch,
+    return _run_with_database_status(
+        target,
+        operation="import_property_batch",
+        fn=lambda: legacy.import_property_batch_postgres(
+            target.url,
+            schema=target.schema,
+            property_file=property_file,
+            batch_id=batch_id,
+            batch_label=batch_label,
+            batch_notes=batch_notes,
+            smiles_column=smiles_column,
+            canonicalize_smiles=canonicalize_smiles,
+            overwrite_existing_batch=overwrite_existing_batch,
+        ),
     )
 
 
 def delete_property_batch(target: PostgresTarget, *, batch_id: str) -> bool:
-    return legacy.delete_property_batch_postgres(target.url, schema=target.schema, batch_id=batch_id)
+    return _run_with_database_status(
+        target,
+        operation="delete_property_batch",
+        fn=lambda: legacy.delete_property_batch_postgres(target.url, schema=target.schema, batch_id=batch_id),
+    )
 
 
 def list_property_batches(target: PostgresTarget) -> bool:
@@ -241,6 +288,18 @@ def import_compound_batch_with_diagnostics(
     skip_incremental_analyze: bool = False,
     overwrite_existing_batch: bool = False,
 ) -> Tuple[bool, str]:
+    status_token = ""
+    try:
+        status_token = registry.begin_mmp_database_operation(
+            database_url=target.url,
+            schema=target.schema,
+            message="import_compound_batch",
+        )
+    except Exception:
+        status_token = ""
+    status_ok = False
+    status_error = ""
+
     def _invoke_import() -> bool:
         return legacy.import_compound_batch_postgres(
             target.url,
@@ -269,27 +328,41 @@ def import_compound_batch_with_diagnostics(
             overwrite_existing_batch=overwrite_existing_batch,
         )
 
-    ok, error_message = _run_with_legacy_error_capture(_invoke_import)
-    if ok:
-        return True, ""
-    if not _supports_auto_cache_reseed(error_message):
-        return False, error_message
-
-    env_key = "LEADOPT_MMP_ALLOW_CACHE_RESEED"
-    previous_value = os.environ.get(env_key)
-    os.environ[env_key] = "1"
     try:
-        retry_ok, retry_error = _run_with_legacy_error_capture(_invoke_import)
+        ok, error_message = _run_with_legacy_error_capture(_invoke_import)
+        if ok:
+            status_ok = True
+            return True, ""
+        if not _supports_auto_cache_reseed(error_message):
+            status_error = error_message
+            return False, error_message
+
+        env_key = "LEADOPT_MMP_ALLOW_CACHE_RESEED"
+        previous_value = os.environ.get(env_key)
+        os.environ[env_key] = "1"
+        try:
+            retry_ok, retry_error = _run_with_legacy_error_capture(_invoke_import)
+        finally:
+            if previous_value is None:
+                os.environ.pop(env_key, None)
+            else:
+                os.environ[env_key] = previous_value
+        if retry_ok:
+            status_ok = True
+            return True, ""
+        status_error = retry_error or error_message
+        return False, retry_error or error_message
     finally:
-        if previous_value is None:
-            os.environ.pop(env_key, None)
-        else:
-            os.environ[env_key] = previous_value
-    if retry_ok:
-        return True, ""
-    if retry_error:
-        return False, retry_error
-    return False, error_message
+        try:
+            registry.finish_mmp_database_operation(
+                database_url=target.url,
+                schema=target.schema,
+                token=status_token,
+                success=status_ok,
+                message="" if status_ok else (status_error or "import_compound_batch failed"),
+            )
+        except Exception:
+            pass
 
 
 def get_compound_import_failure_diagnostic(
@@ -332,24 +405,28 @@ def delete_compound_batch(
     build_constant_smiles_mol_index: bool = True,
     skip_incremental_analyze: bool = False,
 ) -> bool:
-    return legacy.delete_compound_batch_postgres(
-        target.url,
-        schema=target.schema,
-        batch_id=batch_id,
-        output_dir=output_dir,
-        max_heavy_atoms=max_heavy_atoms,
-        skip_attachment_enrichment=skip_attachment_enrichment,
-        attachment_force_recompute=attachment_force_recompute,
-        fragment_jobs=fragment_jobs,
-        index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
-        index_work_mem_mb=index_work_mem_mb,
-        index_parallel_workers=index_parallel_workers,
-        index_commit_every_flushes=index_commit_every_flushes,
-        incremental_index_shards=incremental_index_shards,
-        incremental_index_jobs=incremental_index_jobs,
-        build_construct_tables=build_construct_tables,
-        build_constant_smiles_mol_index=build_constant_smiles_mol_index,
-        skip_incremental_analyze=skip_incremental_analyze,
+    return _run_with_database_status(
+        target,
+        operation="delete_compound_batch",
+        fn=lambda: legacy.delete_compound_batch_postgres(
+            target.url,
+            schema=target.schema,
+            batch_id=batch_id,
+            output_dir=output_dir,
+            max_heavy_atoms=max_heavy_atoms,
+            skip_attachment_enrichment=skip_attachment_enrichment,
+            attachment_force_recompute=attachment_force_recompute,
+            fragment_jobs=fragment_jobs,
+            index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+            index_work_mem_mb=index_work_mem_mb,
+            index_parallel_workers=index_parallel_workers,
+            index_commit_every_flushes=index_commit_every_flushes,
+            incremental_index_shards=incremental_index_shards,
+            incremental_index_jobs=incremental_index_jobs,
+            build_construct_tables=build_construct_tables,
+            build_constant_smiles_mol_index=build_constant_smiles_mol_index,
+            skip_incremental_analyze=skip_incremental_analyze,
+        ),
     )
 
 
@@ -358,4 +435,8 @@ def list_compound_batches(target: PostgresTarget) -> bool:
 
 
 def apply_property_metadata(target: PostgresTarget, *, metadata_file: str) -> bool:
-    return legacy.apply_property_metadata_postgres(target.url, target.schema, metadata_file)
+    return _run_with_database_status(
+        target,
+        operation="apply_property_metadata",
+        fn=lambda: legacy.apply_property_metadata_postgres(target.url, target.schema, metadata_file),
+    )

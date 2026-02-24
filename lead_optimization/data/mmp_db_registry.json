@@ -8,16 +8,24 @@
       "visible": true,
       "is_default": true,
       "database_url": "postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp",
-      "schema": "chembl_cyp3a4_herg"
+      "schema": "chembl_cyp3a4_herg",
+      "status": "ready",
+      "status_message": "",
+      "status_updated_at": "2026-02-24T16:59:50Z",
+      "status_token": ""
     },
     {
       "id": "pg:127.0.0.1:54330:leadopt_mmp:chembl36_full",
-      "label": "chembl36_full",
+      "label": "ChEMBL36-Full",
       "description": "",
       "visible": true,
       "is_default": false,
       "database_url": "postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp",
-      "schema": "chembl36_full"
+      "schema": "chembl36_full",
+      "status": "building",
+      "status_message": "syncing",
+      "status_updated_at": "2026-02-24T17:00:51Z",
+      "status_token": "op_855d96cb"
     }
   ]
 }

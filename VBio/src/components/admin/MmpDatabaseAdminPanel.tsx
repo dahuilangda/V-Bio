@@ -11,8 +11,22 @@ interface MmpDatabaseAdminPanelProps {
   compact?: boolean;
 }
 
+const MMP_DB_CATALOG_CACHE_MS = 15_000;
+let mmpDbCatalogCacheRows: LeadOptMmpDatabaseItem[] = [];
+let mmpDbCatalogCacheAt = 0;
+
+function readMmpDbCatalogCache(): LeadOptMmpDatabaseItem[] {
+  if (Date.now() - mmpDbCatalogCacheAt > MMP_DB_CATALOG_CACHE_MS) return [];
+  return Array.isArray(mmpDbCatalogCacheRows) ? mmpDbCatalogCacheRows : [];
+}
+
+function writeMmpDbCatalogCache(rows: LeadOptMmpDatabaseItem[]): void {
+  mmpDbCatalogCacheRows = Array.isArray(rows) ? rows : [];
+  mmpDbCatalogCacheAt = Date.now();
+}
+
 export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanelProps) {
-  const [databases, setDatabases] = useState<LeadOptMmpDatabaseItem[]>([]);
+  const [databases, setDatabases] = useState<LeadOptMmpDatabaseItem[]>(() => readMmpDbCatalogCache());
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editingLabelId, setEditingLabelId] = useState('');
@@ -20,23 +34,26 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  const loadCatalog = useCallback(async () => {
-    setLoading(true);
+  const loadCatalog = useCallback(async (options?: { silent?: boolean }) => {
+    const silent = options?.silent === true;
+    if (!silent) setLoading(true);
     setError(null);
     try {
       const catalog = await fetchLeadOptimizationMmpDatabases({ includeHidden: true });
       const rows = Array.isArray(catalog.databases) ? catalog.databases : [];
-      setDatabases(rows.filter((item) => String(item.backend || '').toLowerCase() === 'postgres'));
+      const nextRows = rows.filter((item) => String(item.backend || '').toLowerCase() === 'postgres');
+      setDatabases(nextRows);
+      writeMmpDbCatalogCache(nextRows);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load MMP databases.');
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void loadCatalog();
-  }, [loadCatalog]);
+    void loadCatalog({ silent: databases.length > 0 });
+  }, [loadCatalog, databases.length]);
 
   const updateVisibility = async (databaseId: string, visible: boolean) => {
     if (!databaseId) return;
@@ -146,6 +163,13 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
     return rows.length > 0 ? rows.join(', ') : '-';
   };
 
+  const readDatabaseState = (db: LeadOptMmpDatabaseItem): 'ready' | 'building' | 'failed' => {
+    const status = String(db.status || '').trim().toLowerCase();
+    if (status === 'ready') return 'ready';
+    if (status === 'failed') return 'failed';
+    return 'building';
+  };
+
   return (
     <section className="panel settings-admin-panel">
       {!compact ? (
@@ -168,6 +192,7 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
                 <th>Label</th>
                 <th>Schema</th>
                 <th>Counts (Cmp/Rule/Pair)</th>
+                <th>Status</th>
                 <th>Properties</th>
                 <th>Visible</th>
                 <th>Default</th>
@@ -202,6 +227,9 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
                 })();
                 const counts = db.stats || {};
                 const countsText = `${formatCount(counts.compounds)} / ${formatCount(counts.rules)} / ${formatCount(counts.pairs)}`;
+                const state = readDatabaseState(db);
+                const statusLabel = state === 'ready' ? 'Ready' : state === 'failed' ? 'Failed' : 'Syncing';
+                const statusShort = state === 'ready' ? 'R' : state === 'failed' ? 'F' : 'S';
                 const propertiesText = formatProperties(db.properties);
                 const isEditingLabel = editingLabelId === id;
                 const deleteDisabled = saving || isPublicSchema || isDefault;
@@ -275,6 +303,15 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
                       <code className="leadopt-db-schema-code">{schema || '-'}</code>
                     </td>
                     <td title="Compounds / Rules / Pairs">{countsText}</td>
+                    <td>
+                      <span
+                        className={`leadopt-db-status-dot ${state}`}
+                        title={statusLabel}
+                        aria-label={statusLabel}
+                      >
+                        {statusShort}
+                      </span>
+                    </td>
                     <td className="leadopt-db-props" title={propertiesText}>
                       {propertiesText}
                     </td>

@@ -1891,6 +1891,7 @@ def register_mmp_lifecycle_admin_routes(
 
         _start_stage("finalize", "Finalizing apply")
         after = verify_service.fetch_dataset_stats(target)
+        verify_service.persist_dataset_stats(target, after)
         before_payload = _dataset_stats_payload(before)
         after_payload = _dataset_stats_payload(after)
         delta_payload = _dataset_delta_payload(before, after)
@@ -1948,11 +1949,11 @@ def register_mmp_lifecycle_admin_routes(
     def mmp_lifecycle_overview():
         try:
             catalog = _filter_lifecycle_catalog_databases(
-                mmp_database_registry.get_mmp_database_catalog(include_hidden=True, include_stats=True)
-            )
-            _sync_assay_methods_for_catalog(store, catalog)
-            catalog = _filter_lifecycle_catalog_databases(
-                mmp_database_registry.get_mmp_database_catalog(include_hidden=True, include_stats=True)
+                mmp_database_registry.get_mmp_database_catalog(
+                    include_hidden=True,
+                    include_stats=True,
+                    include_properties=False,
+                )
             )
             pending_rows = store.list_pending_database_sync(pending_only=True)
             allowed_database_ids = {
@@ -3557,6 +3558,7 @@ def register_mmp_lifecycle_admin_routes(
                     raise RuntimeError("Compound batch rollback failed")
 
             after = verify_service.fetch_dataset_stats(target)
+            verify_service.persist_dataset_stats(target, after)
             before_payload = _dataset_stats_payload(before)
             after_payload = _dataset_stats_payload(after)
             delta_payload = _dataset_delta_payload(before, after)

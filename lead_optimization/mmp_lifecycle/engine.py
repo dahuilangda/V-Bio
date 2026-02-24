@@ -105,6 +105,65 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
+def _registry_begin_status(postgres_url: str, schema: str, operation: str) -> str:
+    try:
+        from lead_optimization import mmp_database_registry as registry
+    except Exception:
+        return ""
+    try:
+        return registry.begin_mmp_database_operation(
+            database_url=str(postgres_url or "").strip(),
+            schema=str(schema or "").strip(),
+            message=str(operation or "").strip() or "operation",
+        )
+    except Exception:
+        return ""
+
+
+def _registry_finish_status(
+    postgres_url: str,
+    schema: str,
+    *,
+    token: str,
+    success: bool,
+    message: str = "",
+) -> None:
+    try:
+        from lead_optimization import mmp_database_registry as registry
+    except Exception:
+        return
+    try:
+        registry.finish_mmp_database_operation(
+            database_url=str(postgres_url or "").strip(),
+            schema=str(schema or "").strip(),
+            token=str(token or "").strip(),
+            success=bool(success),
+            message=str(message or "").strip(),
+        )
+    except Exception:
+        return
+
+
+def _run_with_registry_status(postgres_url: str, schema: str, operation: str, fn):
+    token = _registry_begin_status(postgres_url, schema, operation)
+    ok = False
+    error_text = ""
+    try:
+        ok = bool(fn())
+        return ok
+    except Exception as exc:
+        error_text = str(exc or "")
+        raise
+    finally:
+        _registry_finish_status(
+            postgres_url,
+            schema,
+            token=token,
+            success=ok,
+            message="" if ok else (error_text or f"{operation} failed"),
+        )
+
+
 def _guard_large_index_auto_build(*, pair_rows_est: int, missing_indexes: Sequence[str], guard_label: str) -> None:
     if not missing_indexes:
         return
@@ -6922,10 +6981,15 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                 sys.exit(0)
 
             if property_batch_delete_id:
-                ok = delete_property_batch_postgres(
+                ok = _run_with_registry_status(
                     postgres_url,
-                    schema=args.postgres_schema,
-                    batch_id=property_batch_delete_id,
+                    args.postgres_schema,
+                    "delete_property_batch",
+                    lambda: delete_property_batch_postgres(
+                        postgres_url,
+                        schema=args.postgres_schema,
+                        batch_id=property_batch_delete_id,
+                    ),
                 )
                 if not ok:
                     sys.exit(1)
@@ -6938,28 +7002,37 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                 sys.exit(0)
 
             normalized_import_batch_id = _normalize_property_batch_id(args.property_batch_id)
-            import_ok = import_property_batch_postgres(
+            property_metadata_file = str(args.property_metadata_file or "").strip()
+
+            def _do_property_batch_import() -> bool:
+                ok = import_property_batch_postgres(
+                    postgres_url,
+                    schema=args.postgres_schema,
+                    property_file=property_batch_import_file,
+                    batch_id=normalized_import_batch_id,
+                    batch_label=args.property_batch_label,
+                    batch_notes=args.property_batch_notes,
+                    smiles_column=args.property_batch_smiles_column,
+                    canonicalize_smiles=not args.property_batch_no_canonicalize_smiles,
+                )
+                if not ok:
+                    return False
+                if property_metadata_file:
+                    return apply_property_metadata_postgres(
+                        postgres_url,
+                        args.postgres_schema,
+                        property_metadata_file,
+                    )
+                return True
+
+            import_ok = _run_with_registry_status(
                 postgres_url,
-                schema=args.postgres_schema,
-                property_file=property_batch_import_file,
-                batch_id=normalized_import_batch_id,
-                batch_label=args.property_batch_label,
-                batch_notes=args.property_batch_notes,
-                smiles_column=args.property_batch_smiles_column,
-                canonicalize_smiles=not args.property_batch_no_canonicalize_smiles,
+                args.postgres_schema,
+                "import_property_batch",
+                _do_property_batch_import,
             )
             if not import_ok:
                 sys.exit(1)
-            property_metadata_file = str(args.property_metadata_file or "").strip()
-            if property_metadata_file:
-                metadata_ok = apply_property_metadata_postgres(
-                    postgres_url,
-                    args.postgres_schema,
-                    property_metadata_file,
-                )
-                if not metadata_ok:
-                    logger.error("PostgreSQL property metadata import failed")
-                    sys.exit(1)
             print("\n" + "=" * 60)
             print("属性批次导入完成!")
             print("=" * 60)
@@ -6990,10 +7063,52 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                 sys.exit(0)
 
             if compound_batch_delete_id:
-                ok = delete_compound_batch_postgres(
+                ok = _run_with_registry_status(
+                    postgres_url,
+                    args.postgres_schema,
+                    "delete_compound_batch",
+                    lambda: delete_compound_batch_postgres(
+                        postgres_url,
+                        schema=args.postgres_schema,
+                        batch_id=compound_batch_delete_id,
+                        output_dir=args.output_dir,
+                        max_heavy_atoms=args.max_heavy_atoms,
+                        skip_attachment_enrichment=args.skip_attachment_enrichment,
+                        attachment_force_recompute=args.attachment_force_recompute,
+                        fragment_jobs=args.fragment_jobs,
+                        index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
+                        index_work_mem_mb=args.pg_index_work_mem_mb,
+                        index_parallel_workers=args.pg_index_parallel_workers,
+                        incremental_index_shards=args.pg_incremental_index_shards,
+                        incremental_index_jobs=args.pg_incremental_index_jobs,
+                        build_construct_tables=not args.pg_skip_construct_tables,
+                        build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
+                    ),
+                )
+                if not ok:
+                    sys.exit(1)
+                print("\n" + "=" * 60)
+                print("化合物批次删除并增量索引完成!")
+                print("=" * 60)
+                print(f"PostgreSQL: {postgres_url}")
+                print(f"schema: {args.postgres_schema}")
+                print(f"deleted compound batch_id: {compound_batch_delete_id}")
+                sys.exit(0)
+
+            normalized_compound_batch_id = _normalize_compound_batch_id(args.compound_batch_id)
+            property_metadata_file = str(args.property_metadata_file or "").strip()
+
+            def _do_compound_batch_import() -> bool:
+                ok = import_compound_batch_postgres(
                     postgres_url,
                     schema=args.postgres_schema,
-                    batch_id=compound_batch_delete_id,
+                    structures_file=compound_batch_import_file,
+                    batch_id=normalized_compound_batch_id,
+                    batch_label=args.compound_batch_label,
+                    batch_notes=args.compound_batch_notes,
+                    smiles_column=args.compound_batch_smiles_column,
+                    id_column=args.compound_batch_id_column,
+                    canonicalize_smiles=not args.compound_batch_no_canonicalize_smiles,
                     output_dir=args.output_dir,
                     max_heavy_atoms=args.max_heavy_atoms,
                     skip_attachment_enrichment=args.skip_attachment_enrichment,
@@ -7008,51 +7123,23 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                     build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
                 )
                 if not ok:
-                    sys.exit(1)
-                print("\n" + "=" * 60)
-                print("化合物批次删除并增量索引完成!")
-                print("=" * 60)
-                print(f"PostgreSQL: {postgres_url}")
-                print(f"schema: {args.postgres_schema}")
-                print(f"deleted compound batch_id: {compound_batch_delete_id}")
-                sys.exit(0)
+                    return False
+                if property_metadata_file:
+                    return apply_property_metadata_postgres(
+                        postgres_url,
+                        args.postgres_schema,
+                        property_metadata_file,
+                    )
+                return True
 
-            normalized_compound_batch_id = _normalize_compound_batch_id(args.compound_batch_id)
-            import_ok = import_compound_batch_postgres(
+            import_ok = _run_with_registry_status(
                 postgres_url,
-                schema=args.postgres_schema,
-                structures_file=compound_batch_import_file,
-                batch_id=normalized_compound_batch_id,
-                batch_label=args.compound_batch_label,
-                batch_notes=args.compound_batch_notes,
-                smiles_column=args.compound_batch_smiles_column,
-                id_column=args.compound_batch_id_column,
-                canonicalize_smiles=not args.compound_batch_no_canonicalize_smiles,
-                output_dir=args.output_dir,
-                max_heavy_atoms=args.max_heavy_atoms,
-                skip_attachment_enrichment=args.skip_attachment_enrichment,
-                attachment_force_recompute=args.attachment_force_recompute,
-                fragment_jobs=args.fragment_jobs,
-                index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
-                index_work_mem_mb=args.pg_index_work_mem_mb,
-                index_parallel_workers=args.pg_index_parallel_workers,
-                incremental_index_shards=args.pg_incremental_index_shards,
-                incremental_index_jobs=args.pg_incremental_index_jobs,
-                build_construct_tables=not args.pg_skip_construct_tables,
-                build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
+                args.postgres_schema,
+                "import_compound_batch",
+                _do_compound_batch_import,
             )
             if not import_ok:
                 sys.exit(1)
-            property_metadata_file = str(args.property_metadata_file or "").strip()
-            if property_metadata_file:
-                metadata_ok = apply_property_metadata_postgres(
-                    postgres_url,
-                    args.postgres_schema,
-                    property_metadata_file,
-                )
-                if not metadata_ok:
-                    logger.error("PostgreSQL property metadata import failed")
-                    sys.exit(1)
             print("\n" + "=" * 60)
             print("化合物批次导入并增量索引完成!")
             print("=" * 60)
@@ -7138,19 +7225,37 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
 
         if fragments_input_file:
             logger.info("Indexing existing fragments file into PostgreSQL...")
-            build_ok = _index_fragments_to_postgres(
-                fragments_input_file,
+
+            def _do_fragdb_index_build() -> bool:
+                ok = _index_fragments_to_postgres(
+                    fragments_input_file,
+                    postgres_url,
+                    postgres_schema=args.postgres_schema,
+                    force_rebuild_schema=args.force,
+                    properties_file=properties_file if properties_file else None,
+                    skip_attachment_enrichment=args.skip_attachment_enrichment,
+                    attachment_force_recompute=args.attachment_force_recompute,
+                    index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
+                    index_work_mem_mb=args.pg_index_work_mem_mb,
+                    index_parallel_workers=args.pg_index_parallel_workers,
+                    build_construct_tables=not args.pg_skip_construct_tables,
+                    build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
+                )
+                if not ok:
+                    return False
+                if property_metadata_file:
+                    return apply_property_metadata_postgres(
+                        postgres_url,
+                        args.postgres_schema,
+                        property_metadata_file,
+                    )
+                return True
+
+            build_ok = _run_with_registry_status(
                 postgres_url,
-                postgres_schema=args.postgres_schema,
-                force_rebuild_schema=args.force,
-                properties_file=properties_file if properties_file else None,
-                skip_attachment_enrichment=args.skip_attachment_enrichment,
-                attachment_force_recompute=args.attachment_force_recompute,
-                index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
-                index_work_mem_mb=args.pg_index_work_mem_mb,
-                index_parallel_workers=args.pg_index_parallel_workers,
-                build_construct_tables=not args.pg_skip_construct_tables,
-                build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
+                args.postgres_schema,
+                "index_fragdb",
+                _do_fragdb_index_build,
             )
         else:
             base_name = os.path.splitext(os.path.basename(str(smiles_file or "").strip()))[0] or "dataset"
@@ -7169,37 +7274,45 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                     sys.exit(1)
 
             logger.info("Building MMP dataset directly into PostgreSQL...")
-            build_ok = create_mmp_database(
-                smiles_file,
+
+            def _do_full_database_build() -> bool:
+                ok = create_mmp_database(
+                    smiles_file,
+                    postgres_url,
+                    args.max_heavy_atoms,
+                    output_dir=args.output_dir,
+                    postgres_schema=args.postgres_schema,
+                    properties_file=properties_file if properties_file else None,
+                    skip_attachment_enrichment=args.skip_attachment_enrichment,
+                    attachment_force_recompute=args.attachment_force_recompute,
+                    force_rebuild_schema=args.force,
+                    keep_fragments=args.keep_fragdb,
+                    fragment_jobs=args.fragment_jobs,
+                    index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
+                    index_work_mem_mb=args.pg_index_work_mem_mb,
+                    index_parallel_workers=args.pg_index_parallel_workers,
+                    build_construct_tables=not args.pg_skip_construct_tables,
+                    build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
+                )
+                if not ok:
+                    return False
+                if property_metadata_file:
+                    return apply_property_metadata_postgres(
+                        postgres_url,
+                        args.postgres_schema,
+                        property_metadata_file,
+                    )
+                return True
+
+            build_ok = _run_with_registry_status(
                 postgres_url,
-                args.max_heavy_atoms,
-                output_dir=args.output_dir,
-                postgres_schema=args.postgres_schema,
-                properties_file=properties_file if properties_file else None,
-                skip_attachment_enrichment=args.skip_attachment_enrichment,
-                attachment_force_recompute=args.attachment_force_recompute,
-                force_rebuild_schema=args.force,
-                keep_fragments=args.keep_fragdb,
-                fragment_jobs=args.fragment_jobs,
-                index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
-                index_work_mem_mb=args.pg_index_work_mem_mb,
-                index_parallel_workers=args.pg_index_parallel_workers,
-                build_construct_tables=not args.pg_skip_construct_tables,
-                build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
+                args.postgres_schema,
+                "build_database",
+                _do_full_database_build,
             )
         if not build_ok:
             logger.error("MMP database setup failed")
             sys.exit(1)
-
-        if property_metadata_file:
-            metadata_ok = apply_property_metadata_postgres(
-                postgres_url,
-                args.postgres_schema,
-                property_metadata_file,
-            )
-            if not metadata_ok:
-                logger.error("PostgreSQL property metadata import failed")
-                sys.exit(1)
         logger.info("PostgreSQL database is ready.")
 
         # Print usage instructions

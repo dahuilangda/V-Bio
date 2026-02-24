@@ -21,6 +21,45 @@ except Exception:
     gemmi = None
 
 
+def _normalize_mmp_catalog_status(raw: Any) -> str:
+    token = str(raw or "").strip().lower()
+    if token in {"ready", "building", "failed"}:
+        return token
+    return "building"
+
+
+def _decorate_mmp_catalog_status(catalog: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(catalog or {}) if isinstance(catalog, dict) else {}
+    rows: List[Dict[str, Any]] = []
+    for item in payload.get("databases", []) if isinstance(payload.get("databases"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        row["status"] = _normalize_mmp_catalog_status(row.get("status"))
+        rows.append(row)
+    payload["databases"] = rows
+    return payload
+
+
+def _filter_ready_mmp_catalog(catalog: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(catalog or {}) if isinstance(catalog, dict) else {}
+    rows = []
+    for item in payload.get("databases", []) if isinstance(payload.get("databases"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        status = _normalize_mmp_catalog_status(item.get("status"))
+        if status == "ready":
+            rows.append(dict(item))
+    payload["databases"] = rows
+    default_id = str(payload.get("default_database_id") or "").strip()
+    if default_id and not any(str(item.get("id") or "").strip() == default_id for item in rows):
+        payload["default_database_id"] = str(rows[0].get("id") or "").strip() if rows else ""
+    payload["total"] = len(rows)
+    payload["total_visible"] = len(rows)
+    payload["total_all"] = len(rows)
+    return payload
+
+
 def _build_chain_residue_index_map(
     structure_text: str,
     structure_format: str,
@@ -185,6 +224,8 @@ def register_lead_opt_mmp_routes(
     def lead_optimization_mmp_databases():
         try:
             catalog = get_mmp_database_catalog(include_hidden=False, include_stats=False)
+            catalog = _decorate_mmp_catalog_status(catalog)
+            catalog = _filter_ready_mmp_catalog(catalog)
             return jsonify(catalog)
         except Exception as exc:
             logger.exception('Failed to list lead optimization MMP databases: %s', exc)
@@ -195,6 +236,7 @@ def register_lead_opt_mmp_routes(
     def admin_list_lead_optimization_mmp_databases():
         try:
             catalog = get_mmp_database_catalog(include_hidden=True, include_stats=True)
+            catalog = _decorate_mmp_catalog_status(catalog)
             return jsonify(catalog)
         except Exception as exc:
             logger.exception('Admin failed to list lead optimization MMP databases: %s', exc)

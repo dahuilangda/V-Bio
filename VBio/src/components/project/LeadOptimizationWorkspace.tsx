@@ -108,6 +108,11 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+function isReadyMmpDatabase(item: LeadOptMmpDatabaseItem): boolean {
+  const status = readText(item.status).trim().toLowerCase();
+  return status === 'ready';
+}
+
 function normalizeAtomIndices(value: unknown): number[] {
   if (!Array.isArray(value)) return [];
   return Array.from(
@@ -464,23 +469,24 @@ export function LeadOptimizationWorkspace({
 
   const applyDatabaseCatalog = useCallback(
     (catalog: { default_database_id?: string; databases?: LeadOptMmpDatabaseItem[] }) => {
-      const visibleOnly = Array.isArray(catalog.databases)
-        ? catalog.databases.filter((item) => Boolean(item.visible ?? true))
+      const visibleReady = Array.isArray(catalog.databases)
+        ? catalog.databases.filter((item) => Boolean(item.visible ?? true) && isReadyMmpDatabase(item))
         : [];
-      setDatabaseOptions(visibleOnly);
+      setDatabaseOptions(visibleReady);
       const snapshotDatabaseId = snapshotDatabaseIdRef.current;
       const catalogDefault = readText(catalog.default_database_id).trim();
-      const firstVisible = readText(visibleOnly[0]?.id).trim();
+      const firstVisible = readText(visibleReady[0]?.id).trim();
+      const hasOption = (id: string) => Boolean(id) && visibleReady.some((item) => readText(item.id).trim() === id);
       setSelectedDatabaseId((prev) => {
         const previous = readText(prev).trim();
-        if (previous && visibleOnly.some((item) => readText(item.id).trim() === previous)) {
+        if (hasOption(previous)) {
           return previous;
         }
-        const fallback = snapshotDatabaseId || catalogDefault || firstVisible;
+        const fallback = [snapshotDatabaseId, catalogDefault, firstVisible].find((id) => hasOption(readText(id).trim())) || '';
         return fallback || '';
       });
-      if (visibleOnly.length === 0) {
-        setDatabaseHint('No visible MMP database. Please contact an admin to enable one.');
+      if (visibleReady.length === 0) {
+        setDatabaseHint('No ready MMP database. Please contact an admin to complete build or enable one.');
       } else {
         setDatabaseHint('');
       }

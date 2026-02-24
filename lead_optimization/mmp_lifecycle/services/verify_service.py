@@ -26,6 +26,13 @@ def _ensure_psycopg() -> None:
 
 def fetch_dataset_stats(target: PostgresTarget) -> DatasetStats:
     _ensure_psycopg()
+    dataset_row = None
+    live_counts = {
+        "compounds": 0,
+        "rules": 0,
+        "pairs": 0,
+        "rule_environments": 0,
+    }
     with psycopg.connect(target.url, autocommit=True) as conn:
         with conn.cursor() as cursor:
             cursor.execute(f'SET search_path TO "{target.schema}", public')
@@ -41,15 +48,53 @@ def fetch_dataset_stats(target: PostgresTarget) -> DatasetStats:
                 LIMIT 1
                 """
             )
-            row = cursor.fetchone()
-    if not row:
-        return DatasetStats(compounds=0, rules=0, pairs=0, rule_environments=0)
+            dataset_row = cursor.fetchone()
+            cursor.execute("SELECT COUNT(*) FROM compound")
+            live_counts["compounds"] = int((cursor.fetchone() or [0])[0] or 0)
+            cursor.execute("SELECT COUNT(*) FROM rule")
+            live_counts["rules"] = int((cursor.fetchone() or [0])[0] or 0)
+            cursor.execute("SELECT COUNT(*) FROM pair")
+            live_counts["pairs"] = int((cursor.fetchone() or [0])[0] or 0)
+            cursor.execute("SELECT COUNT(*) FROM rule_environment")
+            live_counts["rule_environments"] = int((cursor.fetchone() or [0])[0] or 0)
+    if not dataset_row:
+        return DatasetStats(
+            compounds=live_counts["compounds"],
+            rules=live_counts["rules"],
+            pairs=live_counts["pairs"],
+            rule_environments=live_counts["rule_environments"],
+        )
     return DatasetStats(
-        compounds=int(row[0] or 0),
-        rules=int(row[1] or 0),
-        pairs=int(row[2] or 0),
-        rule_environments=int(row[3] or 0),
+        compounds=int(live_counts["compounds"]),
+        rules=int(live_counts["rules"]),
+        pairs=int(live_counts["pairs"]),
+        rule_environments=int(live_counts["rule_environments"]),
     )
+
+
+def persist_dataset_stats(target: PostgresTarget, stats: DatasetStats) -> None:
+    _ensure_psycopg()
+    row = stats if isinstance(stats, DatasetStats) else None
+    if row is None:
+        return
+    with psycopg.connect(target.url, autocommit=True) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(f'SET search_path TO "{target.schema}", public')
+            cursor.execute(
+                """
+                UPDATE dataset
+                   SET num_compounds = %s,
+                       num_rules = %s,
+                       num_pairs = %s,
+                       num_rule_environments = %s
+                """,
+                [
+                    int(row.compounds),
+                    int(row.rules),
+                    int(row.pairs),
+                    int(row.rule_environments),
+                ],
+            )
 
 
 def count_pairs_touching_smiles(target: PostgresTarget, smiles: str) -> int:
