@@ -89,6 +89,10 @@ export async function applyStructureAppearancePipeline({
         await tryApplyAlphaFoldTheme(viewer, confidenceBackend);
         if (!isRequestCurrent()) return;
       } else {
+        // De-flicker: immediately clear any lingering AF confidence tint on the
+        // currently visible scene before async representation rebuild kicks in.
+        await tryApplyElementSymbolThemeToCurrentScene(viewer);
+        if (!isRequestCurrent()) return;
         await tryApplyLeadOptResultsInteractionTheme(viewer);
         if (!isRequestCurrent()) return;
         trySetElementSymbolStyle(viewer);
