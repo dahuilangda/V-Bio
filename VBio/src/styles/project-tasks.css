@@ -1,3 +1,16 @@
 @import './project-tasks-query.css';
 @import './project-tasks-table.css';
 @import './project-tasks-responsive.css';
+
+@keyframes mmp-life-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.mmp-life-icon-spin {
+  animation: mmp-life-spin 0.9s linear infinite;
+}
