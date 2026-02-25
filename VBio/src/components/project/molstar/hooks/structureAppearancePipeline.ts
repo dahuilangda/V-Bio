@@ -18,6 +18,7 @@ interface ApplyStructureAppearancePipelineArgs {
   scenePreset: 'default' | 'lead_opt';
   leadOptStyleVariant: 'default' | 'results';
   suppressAutoFocus: boolean;
+  autoFocusLigand: boolean;
   focusLigandAnchor: (viewer: any) => boolean;
   isRequestCurrent: () => boolean;
 }
@@ -70,6 +71,7 @@ export async function applyStructureAppearancePipeline({
   scenePreset,
   leadOptStyleVariant,
   suppressAutoFocus,
+  autoFocusLigand,
   focusLigandAnchor,
   isRequestCurrent
 }: ApplyStructureAppearancePipelineArgs): Promise<void> {
@@ -103,7 +105,7 @@ export async function applyStructureAppearancePipeline({
         pocketStickScale: 0.52
       });
       if (!isRequestCurrent()) return;
-      if (!suppressAutoFocus) {
+      if (autoFocusLigand && !suppressAutoFocus) {
         focusLigandAnchor(viewer);
         if (resolvedColorMode !== 'alphafold') {
           // Focus selection can create transient interaction sticks; clear them in fragment mode.
@@ -147,7 +149,7 @@ export async function applyStructureAppearancePipeline({
       pocketStickScale: isResultsVariant ? 0.52 : 0.62
     });
     if (!isRequestCurrent()) return;
-    if (!suppressAutoFocus) {
+    if (autoFocusLigand && !suppressAutoFocus) {
       focusLigandAnchor(viewer);
     }
     return;
@@ -162,7 +164,12 @@ export async function applyStructureAppearancePipeline({
   }
   if (resolvedColorMode === 'alphafold') {
     await tryApplyAlphaFoldTheme(viewer, confidenceBackend);
-    return;
+    if (!isRequestCurrent()) return;
+  } else {
+    await tryApplyElementSymbolThemeToCurrentScene(viewer);
+    if (!isRequestCurrent()) return;
   }
-  await tryApplyElementSymbolThemeToCurrentScene(viewer);
+  if (autoFocusLigand && !suppressAutoFocus) {
+    focusLigandAnchor(viewer);
+  }
 }

@@ -378,6 +378,48 @@ def _build_chain_subset_structure(structure: Any, chain_ids: Iterable[str]) -> A
     return subset
 
 
+def _build_polymer_only_structure(structure: Any) -> Any:
+    gemmi = _load_gemmi()
+    if len(structure) == 0:
+        raise AffinityPreviewError("Source structure contains no models.")
+
+    subset = gemmi.Structure()
+    try:
+        subset.spacegroup_hm = structure.spacegroup_hm
+    except Exception:
+        pass
+    try:
+        subset.cell = structure.cell
+    except Exception:
+        pass
+
+    model = gemmi.Model("1")
+    added_chains = 0
+    for source_chain in structure[0]:
+        chain_id = str(source_chain.name or "").strip()
+        if not chain_id:
+            continue
+        chain_clone = gemmi.Chain(chain_id)
+        added_residues = 0
+        for residue in source_chain:
+            if residue.het_flag != "A":
+                continue
+            chain_clone.add_residue(residue.clone())
+            added_residues += 1
+        if added_residues <= 0:
+            continue
+        model.add_chain(chain_clone)
+        added_chains += 1
+
+    if added_chains <= 0:
+        raise AffinityPreviewError("Unable to extract polymer-only target structure for preview.")
+
+    subset.add_model(model)
+    subset.setup_entities()
+    _ensure_polymer_sequences(subset)
+    return subset
+
+
 def build_affinity_preview(
     protein_text: str,
     protein_filename: str,
@@ -448,6 +490,19 @@ def build_affinity_preview(
         target_structure_text = protein_text
         ligand_structure_text = ""
         ligand_structure_format = target_structure_format
+
+        if has_ligand:
+            try:
+                target_only_structure = _build_polymer_only_structure(structure)
+                target_structure_text, target_structure_format = _serialize_structure(
+                    target_only_structure,
+                    target_structure_format,
+                    temp_path,
+                    "affinity_preview_target_only",
+                )
+            except Exception:
+                # Keep backward-compatible behavior if polymer extraction fails.
+                target_structure_text = protein_text
 
         if has_ligand and ligand_chain_ids:
             ligand_only_structure = _build_chain_subset_structure(structure, ligand_chain_ids)

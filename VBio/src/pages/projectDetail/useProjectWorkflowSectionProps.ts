@@ -49,6 +49,7 @@ interface UseProjectWorkflowSectionPropsInput {
   affinityDisplayStructureFormat: 'pdb' | 'cif';
   affinityResultLigandSmiles: string;
   affinityTargetChainIds: string[];
+  affinityLigandChainId: string;
   snapshotLigandAtomPlddts: number[];
   snapshotPlddt: number | null;
   canEdit: boolean;
@@ -56,7 +57,7 @@ interface UseProjectWorkflowSectionPropsInput {
   affinityTargetFileName: string;
   affinityLigandFileName: string;
   affinityLigandSmiles: string;
-  affinityPreviewLigandStructureText: string;
+  affinityPreviewLigandSmiles: string;
   affinityUseMsa: boolean;
   affinityConfidenceOnlyUiValue: boolean;
   affinityConfidenceOnlyUiLocked: boolean;
@@ -170,6 +171,7 @@ export function useProjectWorkflowSectionProps({
   affinityDisplayStructureFormat,
   affinityResultLigandSmiles,
   affinityTargetChainIds,
+  affinityLigandChainId,
   snapshotLigandAtomPlddts,
   snapshotPlddt,
   canEdit,
@@ -177,7 +179,7 @@ export function useProjectWorkflowSectionProps({
   affinityTargetFileName,
   affinityLigandFileName,
   affinityLigandSmiles,
-  affinityPreviewLigandStructureText,
+  affinityPreviewLigandSmiles,
   affinityUseMsa,
   affinityConfidenceOnlyUiValue,
   affinityConfidenceOnlyUiLocked,
@@ -236,6 +238,7 @@ export function useProjectWorkflowSectionProps({
       withLeadOptimizationLigandSmiles
     });
   };
+  const affinityEffectiveLigandSmiles = affinityLigandSmiles.trim() || affinityPreviewLigandSmiles.trim();
 
   const projectResultsSectionProps = buildProjectResultsSectionProps({
     isPredictionWorkflow,
@@ -276,8 +279,8 @@ export function useProjectWorkflowSectionProps({
     backend,
     targetFileName: affinityTargetFileName,
     ligandFileName: affinityLigandFileName,
-    ligandSmiles: affinityLigandSmiles,
-    ligandEditorInput: affinityLigandSmiles.trim() || affinityPreviewLigandStructureText,
+    ligandSmiles: affinityEffectiveLigandSmiles,
+    ligandEditorInput: affinityEffectiveLigandSmiles,
     useMsa: affinityUseMsa,
     confidenceOnly: affinityConfidenceOnlyUiValue,
     confidenceOnlyLocked: affinityConfidenceOnlyUiLocked,
@@ -290,6 +293,7 @@ export function useProjectWorkflowSectionProps({
     previewTargetStructureFormat: affinityPreviewStructureFormat,
     previewLigandStructureText: affinityPreviewLigandOverlayText,
     previewLigandStructureFormat: affinityPreviewLigandOverlayFormat,
+    previewLigandChainId: affinityLigandChainId,
     resultsGridRef,
     isResultsResizing,
     resultsGridStyle,

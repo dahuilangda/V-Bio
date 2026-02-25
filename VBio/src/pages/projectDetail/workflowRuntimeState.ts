@@ -59,14 +59,12 @@ export function buildRunUiState(params: BuildRunUiStateParams): RunUiStateResult
     affinitySupportsActivity,
     affinityConfidenceOnly,
     affinityConfidenceOnlyLocked,
-    draftBackend,
   } = params;
 
   const componentStepLabel = 'Components';
   const showQuickRunFab = showFloatingRunButton && !isRunRedirecting;
 
-  const affinityBackend = String(draftBackend || 'boltz').trim().toLowerCase();
-  const affinityBackendSupportsActivity = affinityBackend === 'boltz' || affinityBackend === 'protenix';
+  const affinityBackendSupportsActivity = true;
   const affinityConfidenceOnlyForced = !affinityBackendSupportsActivity;
   const affinityConfidenceOnlyUiValue = affinityConfidenceOnlyForced ? true : affinityConfidenceOnly;
   const affinityConfidenceOnlyUiLocked = affinityConfidenceOnlyLocked || affinityConfidenceOnlyForced;

@@ -20,6 +20,7 @@ export function WorkflowRuntimeSettingsSection({
   onSeedChange
 }: WorkflowRuntimeSettingsSectionProps) {
   if (!visible) return null;
+  const normalizedBackend = isAffinityWorkflow ? 'boltz' : backend;
 
   return (
     <section className="panel subtle component-runtime-settings">
@@ -28,11 +29,10 @@ export function WorkflowRuntimeSettingsSection({
           <span>
             Backend <span className="required-mark">*</span>
           </span>
-          <select required value={backend} onChange={(e) => onBackendChange(e.target.value)} disabled={!canEdit}>
+          <select required value={normalizedBackend} onChange={(e) => onBackendChange(e.target.value)} disabled={!canEdit}>
             {(isAffinityWorkflow
               ? [
-                  { value: 'boltz', label: 'Boltz-2' },
-                  { value: 'protenix', label: 'Protenix2Score' }
+                  { value: 'boltz', label: 'Boltz-2' }
                 ]
               : [
                   { value: 'boltz', label: 'Boltz-2' },

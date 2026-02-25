@@ -67,8 +67,10 @@ export function LeadOptReferencePanel({
             className="file-input-unified"
             accept=".pdb,.cif,.mmcif,.ent"
             onChange={async (event) => {
+              const input = event.currentTarget;
               const nextTarget = event.target.files?.[0] || null;
               await onTargetFileChange(nextTarget);
+              input.value = '';
             }}
             disabled={!canEdit || loading || submitting}
           />
@@ -80,8 +82,10 @@ export function LeadOptReferencePanel({
             className="file-input-unified"
             accept=".sdf,.sd,.mol2,.mol,.pdb,.ent,.cif,.mmcif"
             onChange={async (event) => {
+              const input = event.currentTarget;
               const nextLigand = event.target.files?.[0] || null;
               await onLigandFileChange(nextLigand);
+              input.value = '';
             }}
             disabled={!canEdit || loading || submitting}
           />

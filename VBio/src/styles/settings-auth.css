@@ -1225,6 +1225,39 @@
   margin: 0;
 }
 
+.leadopt-db-toolbar {
+  margin-bottom: 8px;
+  align-items: center;
+}
+
+.leadopt-db-toolbar .search-input,
+.mmp-life-assay-toolbar .search-input {
+  height: 32px;
+  min-height: 32px;
+  width: clamp(360px, 52vw, 620px);
+  max-width: 620px;
+  overflow: hidden;
+}
+
+.leadopt-db-toolbar .search-input input,
+.mmp-life-assay-toolbar .search-input input {
+  padding-top: 0;
+  padding-bottom: 0;
+  font-size: var(--text-sm);
+  line-height: 1.2;
+  background: transparent;
+}
+
+.leadopt-db-toolbar .project-toolbar-meta-rich,
+.mmp-life-assay-toolbar .project-toolbar-meta-rich {
+  min-height: 32px;
+}
+
+.leadopt-db-pagination,
+.mmp-life-assay-pagination {
+  margin-top: 10px;
+}
+
 .mmp-life-table-meta {
   margin-bottom: 8px;
 }

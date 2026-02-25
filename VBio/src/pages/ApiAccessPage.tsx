@@ -65,7 +65,7 @@ type ProjectStatsWorkflowFilter = 'all' | 'prediction' | 'affinity' | 'lead_opti
 type ProjectStatsSort = 'calls_desc' | 'calls_asc' | 'success_desc' | 'success_asc' | 'last_desc' | 'last_asc';
 type BuilderWorkflowKey = 'prediction' | 'affinity' | 'lead_optimization';
 type PredictionBackend = 'boltz' | 'alphafold3' | 'protenix';
-type AffinityBackend = 'boltz' | 'protenix';
+type AffinityBackend = 'boltz';
 
 interface ProjectStatsRow {
   project: Project;
@@ -177,8 +177,8 @@ function normalizePredictionBackend(value: string | null | undefined): Predictio
   return 'boltz';
 }
 
-function normalizeAffinityBackend(value: string | null | undefined): AffinityBackend {
-  return String(value || '').trim().toLowerCase() === 'protenix' ? 'protenix' : 'boltz';
+function normalizeAffinityBackend(_value: string | null | undefined): AffinityBackend {
+  return 'boltz';
 }
 
 function randomAlphaNum(length: number): string {
@@ -450,10 +450,8 @@ export function ApiAccessPage() {
   const [builderYamlProperties, setBuilderYamlProperties] = useState<PredictionProperties>({ ...EMPTY_PREDICTION_PROPERTIES });
   const [builderTargetPath, setBuilderTargetPath] = useState('./protein.pdb');
   const [builderLigandPath, setBuilderLigandPath] = useState('./ligand.sdf');
-  const [builderComplexPath, setBuilderComplexPath] = useState('./complex.cif');
   const [builderResultPath, setBuilderResultPath] = useState('./result.zip');
   const [builderPredictionBackend, setBuilderPredictionBackend] = useState<PredictionBackend>('boltz');
-  const [builderUseMsaProtenix, setBuilderUseMsaProtenix] = useState(true);
   const [builderUseMsaAffinity, setBuilderUseMsaAffinity] = useState(true);
   const [builderAffinityConfidenceOnly, setBuilderAffinityConfidenceOnly] = useState(true);
   const [builderAffinityTargetChain, setBuilderAffinityTargetChain] = useState('A');
@@ -1029,7 +1027,6 @@ export function ApiAccessPage() {
     if (!isAffinityWorkflow) return;
     const useMsa = Boolean(selectedProject?.use_msa);
     setBuilderUseMsaAffinity(useMsa);
-    setBuilderUseMsaProtenix(useMsa);
     setBuilderAffinityConfidenceOnly(true);
     setBuilderAffinityTargetChain('A');
     setBuilderAffinityLigandChain('L');
@@ -1502,7 +1499,6 @@ export function ApiAccessPage() {
     : '';
   const escapedTargetPath = escapeForDoubleQuotedShell(builderTargetPath.trim() || './protein.pdb');
   const escapedLigandPath = escapeForDoubleQuotedShell(builderLigandPath.trim() || './ligand.sdf');
-  const escapedComplexPath = escapeForDoubleQuotedShell(builderComplexPath.trim() || './complex.cif');
   const affinityTargetChain = String(builderAffinityTargetChain || '').trim();
   const affinityLigandChain = String(builderAffinityLigandChain || '').trim();
   const affinityLigandSmiles = String(builderAffinityLigandSmiles || '').trim();
@@ -1574,18 +1570,10 @@ ${submitTaskIdCapture}`;
   -F "max_parallel_samples=1" \\
   -F "priority=high"${affinityActivityFlags})
 ${submitTaskIdCapture}`;
-  const commandSubmitAffinityProtenix = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/api/protenix2score" \\
-  -H "X-API-Token: ${curlToken}" \\
-  -F "project_id=${selectedTokenProjectId}"${submitTaskMetaFlags} \\
-  -F "input_file=@${escapedComplexPath}" \\
-  -F "use_msa=${builderUseMsaProtenix ? 'true' : 'false'}" \\
-  -F "use_template=false" \\
-  -F "priority=high"${affinityActivityFlags})
-${submitTaskIdCapture}`;
   const commandSubmit = !isSupportedSubmitWorkflow
     ? `# Workflow "${selectedWorkflow.title}" is not supported in Command Builder.\n# Use project workflows: Prediction or Affinity.`
     : (builderWorkflowKey === 'affinity'
-      ? (effectiveAffinityBackend === 'protenix' ? commandSubmitAffinityProtenix : commandSubmitAffinityBoltz)
+      ? commandSubmitAffinityBoltz
       : commandSubmitPrediction);
   const commandSubmitWithHints = `${commandSubmit}${affinityModeHint}${predictionPairHint}${predictionAffinityHint}${leadOptHint}`;
   const submitBackendLabel = builderWorkflowKey === 'affinity' ? effectiveAffinityBackend : effectivePredictionBackend;
@@ -2182,7 +2170,6 @@ ${submitTaskIdCapture}`;
                   onChange={(e) => setBuilderAffinityBackend(normalizeAffinityBackend(e.target.value))}
                 >
                   <option value="boltz">boltz</option>
-                  <option value="protenix">protenix</option>
                 </select>
               </label>
             )}
@@ -2278,7 +2265,7 @@ ${submitTaskIdCapture}`;
               </>
             )}
 
-            {isAffinityWorkflow && effectiveAffinityBackend === 'boltz' && (
+            {isAffinityWorkflow && (
               <>
                 <div className="api-yaml-component-flags api-affinity-options">
                   <label className="checkbox-inline">
@@ -2305,61 +2292,6 @@ ${submitTaskIdCapture}`;
                 <label className="field">
                   <span>Ligand file path</span>
                   <input value={builderLigandPath} onChange={(e) => setBuilderLigandPath(e.target.value)} placeholder="./ligand.sdf" />
-                </label>
-                {!builderAffinityConfidenceOnly && (
-                  <>
-                    <label className="field">
-                      <span>Target chain</span>
-                      <input
-                        value={builderAffinityTargetChain}
-                        onChange={(e) => setBuilderAffinityTargetChain(e.target.value)}
-                        placeholder="A"
-                      />
-                    </label>
-                    <label className="field">
-                      <span>Ligand chain</span>
-                      <input
-                        value={builderAffinityLigandChain}
-                        onChange={(e) => setBuilderAffinityLigandChain(e.target.value)}
-                        placeholder="L"
-                      />
-                    </label>
-                    <label className="field">
-                      <span>Ligand SMILES</span>
-                      <input
-                        value={builderAffinityLigandSmiles}
-                        onChange={(e) => setBuilderAffinityLigandSmiles(e.target.value)}
-                        placeholder="Required for affinity mode"
-                      />
-                    </label>
-                  </>
-                )}
-              </>
-            )}
-
-            {isAffinityWorkflow && effectiveAffinityBackend === 'protenix' && (
-              <>
-                <div className="api-yaml-component-flags api-affinity-options">
-                  <label className="checkbox-inline">
-                    <input
-                      type="checkbox"
-                      checked={builderUseMsaProtenix}
-                      onChange={(e) => setBuilderUseMsaProtenix(e.target.checked)}
-                    />
-                    <span>MSA</span>
-                  </label>
-                  <label className="checkbox-inline">
-                    <input
-                      type="checkbox"
-                      checked={builderAffinityConfidenceOnly}
-                      onChange={(e) => setBuilderAffinityConfidenceOnly(e.target.checked)}
-                    />
-                    <span>Confidence Only</span>
-                  </label>
-                </div>
-                <label className="field">
-                  <span>Complex file path</span>
-                  <input value={builderComplexPath} onChange={(e) => setBuilderComplexPath(e.target.value)} placeholder="./complex.cif" />
                 </label>
                 {!builderAffinityConfidenceOnly && (
                   <>

@@ -27,6 +27,7 @@ interface MolstarViewerProps {
   scenePreset?: 'default' | 'lead_opt';
   leadOptStyleVariant?: 'default' | 'results';
   ligandFocusChainId?: string;
+  autoFocusLigand?: boolean;
   suppressResidueSelection?: boolean;
 }
 
@@ -52,6 +53,7 @@ export function MolstarViewer({
   scenePreset = 'default',
   leadOptStyleVariant = 'default',
   ligandFocusChainId = '',
+  autoFocusLigand,
   suppressResidueSelection = false
 }: MolstarViewerProps) {
   const hadExternalHighlightsRef = useRef(false);
@@ -68,6 +70,8 @@ export function MolstarViewer({
     onResiduePick,
     pickMode
   });
+
+  const shouldAutoFocusLigand = autoFocusLigand ?? scenePreset === 'lead_opt';
 
   const focusLigandAnchor = useMolstarFocus({
     format,
@@ -89,6 +93,7 @@ export function MolstarViewer({
     scenePreset,
     leadOptStyleVariant,
     suppressAutoFocus,
+    autoFocusLigand: shouldAutoFocusLigand,
     focusLigandAnchor,
     setError
   });

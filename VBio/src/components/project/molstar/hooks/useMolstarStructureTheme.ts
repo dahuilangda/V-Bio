@@ -14,6 +14,7 @@ interface UseMolstarStructureThemeArgs {
   scenePreset: 'default' | 'lead_opt';
   leadOptStyleVariant: 'default' | 'results';
   suppressAutoFocus: boolean;
+  autoFocusLigand: boolean;
   focusLigandAnchor: (viewer: any) => boolean;
   setError: (value: string | null) => void;
 }
@@ -30,6 +31,7 @@ export function useMolstarStructureTheme({
   scenePreset,
   leadOptStyleVariant,
   suppressAutoFocus,
+  autoFocusLigand,
   focusLigandAnchor,
   setError
 }: UseMolstarStructureThemeArgs) {
@@ -154,6 +156,7 @@ export function useMolstarStructureTheme({
           scenePreset,
           leadOptStyleVariant,
           suppressAutoFocus,
+          autoFocusLigand,
           focusLigandAnchor,
           isRequestCurrent: () => requestId === styleRequestIdRef.current
         });
@@ -181,6 +184,7 @@ export function useMolstarStructureTheme({
     scenePreset,
     leadOptStyleVariant,
     suppressAutoFocus,
+    autoFocusLigand,
     focusLigandAnchor,
     setError
   ]);

@@ -1,5 +1,5 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { Activity, ArrowLeft, CheckCircle2, Database, Filter, Link2, ListChecks, Loader2, Pencil, Plus, RotateCcw, Save, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, X } from 'lucide-react';
+import { Activity, ArrowLeft, CheckCircle2, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Database, Filter, Link2, ListChecks, Loader2, Pencil, Plus, RotateCcw, Save, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, X } from 'lucide-react';
 import {
   applyMmpLifecycleBatch,
   clearMmpLifecycleExperiments,
@@ -134,6 +134,7 @@ const BULK_APPLY_RELAXED_POLICY: Record<string, unknown> = {
 
 const UPLOAD_PREVIEW_ROW_CAP = 500;
 const UPLOAD_PREVIEW_PAGE_SIZE = 8;
+const ASSAY_METHODS_PAGE_SIZE = 10;
 
 type ActivityTransform =
   | 'none'
@@ -624,6 +625,8 @@ export function MmpLifecycleAdminPage() {
   const [batchDatabaseFilter, setBatchDatabaseFilter] = useState('all');
   const [batchSortKey, setBatchSortKey] = useState<BatchSortKey>('updated_at');
   const [batchSortDirection, setBatchSortDirection] = useState<SortDirection>('desc');
+  const [assayMethodQuery, setAssayMethodQuery] = useState('');
+  const [assayMethodPage, setAssayMethodPage] = useState(1);
 
   const [methodEditorOpen, setMethodEditorOpen] = useState(false);
   const [assayMethodDatabaseId, setAssayMethodDatabaseId] = useState('');
@@ -2766,6 +2769,8 @@ export function MmpLifecycleAdminPage() {
     resetMethodEditorDraft();
     setMethodEditorOpen(false);
     setError(null);
+    setAssayMethodQuery('');
+    setAssayMethodPage(1);
     const candidateDbId = readText(batchDatabaseId) || readText(databases[0]?.id);
     setAssayMethodDatabaseId(candidateDbId);
     void loadAssayDatabaseProperties(candidateDbId);
@@ -2777,6 +2782,8 @@ export function MmpLifecycleAdminPage() {
 
   const closeAssayMethodsModal = () => {
     setMethodEditorOpen(false);
+    setAssayMethodQuery('');
+    setAssayMethodPage(1);
     setAssayMethodDatabaseId('');
     setAssayDatabasePropertyNames([]);
     setAssayBoundMethodIds([]);
@@ -2854,6 +2861,59 @@ export function MmpLifecycleAdminPage() {
     }
     return output;
   }, [assayMethodDatabaseId, assayMethodUsageRows]);
+
+  const filteredAssayMethodsForSelectedDatabase = useMemo(() => {
+    const query = readText(assayMethodQuery).toLowerCase();
+    if (!query) return assayMethodsForSelectedDatabase;
+    return assayMethodsForSelectedDatabase.filter((item) => {
+      const id = readText(item.id);
+      const dataCount = assayMethodDataCountById.get(id);
+      const effectiveDisplayTransform = normalizeActivityTransform(
+        readText(item.display_transform || assayMethodDisplayTransformById[id] || 'none')
+      );
+      const displayLabel = ACTIVITY_TRANSFORM_OPTIONS.find(
+        (option) => option.value === effectiveDisplayTransform
+      )?.label || 'Raw';
+      const tokens = [
+        readText(item.key),
+        readText(item.name),
+        readText(item.output_property),
+        readText(item.category),
+        readText(item.input_unit),
+        readText(item.output_unit),
+        readText(item.display_unit),
+        displayLabel,
+        dataCount === undefined ? '' : String(dataCount),
+      ]
+        .map((token) => token.toLowerCase())
+        .filter(Boolean);
+      return tokens.some((token) => token.includes(query));
+    });
+  }, [assayMethodDataCountById, assayMethodDisplayTransformById, assayMethodQuery, assayMethodsForSelectedDatabase]);
+
+  const assayMethodTotalPages = Math.max(1, Math.ceil(filteredAssayMethodsForSelectedDatabase.length / ASSAY_METHODS_PAGE_SIZE));
+  const assayMethodCurrentPage = Math.min(assayMethodPage, assayMethodTotalPages);
+  const pagedAssayMethodsForSelectedDatabase = useMemo(() => {
+    const start = (assayMethodCurrentPage - 1) * ASSAY_METHODS_PAGE_SIZE;
+    return filteredAssayMethodsForSelectedDatabase.slice(start, start + ASSAY_METHODS_PAGE_SIZE);
+  }, [assayMethodCurrentPage, filteredAssayMethodsForSelectedDatabase]);
+  const assayMethodPageStart = filteredAssayMethodsForSelectedDatabase.length === 0
+    ? 0
+    : (assayMethodCurrentPage - 1) * ASSAY_METHODS_PAGE_SIZE + 1;
+  const assayMethodPageEnd = Math.min(
+    filteredAssayMethodsForSelectedDatabase.length,
+    assayMethodCurrentPage * ASSAY_METHODS_PAGE_SIZE
+  );
+
+  useEffect(() => {
+    setAssayMethodPage(1);
+  }, [assayMethodDatabaseId, assayMethodQuery]);
+
+  useEffect(() => {
+    if (assayMethodPage > assayMethodTotalPages) {
+      setAssayMethodPage(assayMethodTotalPages);
+    }
+  }, [assayMethodPage, assayMethodTotalPages]);
 
   const assayPropertySummaryText = useMemo(() => {
     if (assayDatabasePropertyNames.length === 0) return '-';
@@ -4010,6 +4070,25 @@ export function MmpLifecycleAdminPage() {
                 {`State ${selectedAssayDatabaseStateLabel} · Props ${summarizeCount(assayDatabasePropertyNames.length)} · Pending ${summarizeCount(selectedAssayDatabasePendingSyncCount)} · ${assayPropertySummaryText}`}
               </div>
             </div>
+            <div className="toolbar project-toolbar mmp-life-list-toolbar mmp-life-assay-toolbar">
+              <div className="project-toolbar-filters">
+                <div className="project-filter-field project-filter-field-search">
+                  <div className="input-wrap search-input">
+                    <Search size={16} />
+                    <input
+                      value={assayMethodQuery}
+                      onChange={(event) => setAssayMethodQuery(event.target.value)}
+                      placeholder="Search key / name / property / unit / transform"
+                      aria-label="Search assay methods"
+                    />
+                  </div>
+                </div>
+              </div>
+              <div className="project-toolbar-meta project-toolbar-meta-rich">
+                <span className="meta-chip">Rows {filteredAssayMethodsForSelectedDatabase.length}</span>
+                <span className="meta-chip">Page {assayMethodCurrentPage}/{assayMethodTotalPages}</span>
+              </div>
+            </div>
             {methodEditorOpen ? (
               <section className="panel subtle mmp-life-method-editor-card">
                 <form className="form-grid" onSubmit={createMethod}>
@@ -4117,8 +4196,12 @@ export function MmpLifecycleAdminPage() {
                     <tr>
                       <td colSpan={8} className="muted">No assay method for selected database.</td>
                     </tr>
+                  ) : filteredAssayMethodsForSelectedDatabase.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="muted">No assay method matches the current search.</td>
+                    </tr>
                   ) : (
-                    assayMethodsForSelectedDatabase.map((item) => {
+                    pagedAssayMethodsForSelectedDatabase.map((item) => {
                       const id = readText(item.id);
                       const dataCount = assayMethodDataCountById.get(id);
                       const effectiveDisplayTransform = normalizeActivityTransform(
@@ -4158,6 +4241,55 @@ export function MmpLifecycleAdminPage() {
                   )}
                 </tbody>
               </table>
+            </div>
+            <div className="project-pagination mmp-life-assay-pagination">
+              <div className="project-pagination-controls">
+                <button
+                  className="icon-btn"
+                  type="button"
+                  onClick={() => setAssayMethodPage(1)}
+                  disabled={assayMethodCurrentPage <= 1}
+                  title="First page"
+                  aria-label="First page"
+                >
+                  <ChevronsLeft size={14} />
+                </button>
+                <button
+                  className="icon-btn"
+                  type="button"
+                  onClick={() => setAssayMethodPage((prev) => Math.max(1, prev - 1))}
+                  disabled={assayMethodCurrentPage <= 1}
+                  title="Previous page"
+                  aria-label="Previous page"
+                >
+                  <ChevronLeft size={14} />
+                </button>
+                <button
+                  className="icon-btn"
+                  type="button"
+                  onClick={() => setAssayMethodPage((prev) => Math.min(assayMethodTotalPages, prev + 1))}
+                  disabled={assayMethodCurrentPage >= assayMethodTotalPages}
+                  title="Next page"
+                  aria-label="Next page"
+                >
+                  <ChevronRight size={14} />
+                </button>
+                <button
+                  className="icon-btn"
+                  type="button"
+                  onClick={() => setAssayMethodPage(assayMethodTotalPages)}
+                  disabled={assayMethodCurrentPage >= assayMethodTotalPages}
+                  title="Last page"
+                  aria-label="Last page"
+                >
+                  <ChevronsRight size={14} />
+                </button>
+              </div>
+              <div className="project-pagination-info muted small">
+                {filteredAssayMethodsForSelectedDatabase.length === 0
+                  ? 'No rows'
+                  : `Showing ${assayMethodPageStart}-${assayMethodPageEnd} of ${filteredAssayMethodsForSelectedDatabase.length}`}
+              </div>
             </div>
           </div>
         </div>

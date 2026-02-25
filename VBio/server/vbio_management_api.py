@@ -136,11 +136,6 @@ def submit_boltz2score() -> Tuple[Response, int]:
     return gateway.forward_submit("/api/boltz2score", "submit_boltz2score")
 
 
-@app.post("/vbio-api/api/protenix2score")
-def submit_protenix2score() -> Tuple[Response, int]:
-    return gateway.forward_submit("/api/protenix2score", "submit_protenix2score")
-
-
 @app.post("/vbio-api/api/lead_optimization/submit")
 def submit_lead_optimization() -> Tuple[Response, int]:
     return (

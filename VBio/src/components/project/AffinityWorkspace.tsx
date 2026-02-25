@@ -33,6 +33,7 @@ interface AffinityBasicsWorkspaceProps {
   previewTargetStructureFormat: 'cif' | 'pdb';
   previewLigandStructureText: string;
   previewLigandStructureFormat: 'cif' | 'pdb';
+  previewLigandChainId?: string;
   resultsGridRef: RefObject<HTMLDivElement>;
   isResultsResizing: boolean;
   resultsGridStyle: ResultsGridStyle;
@@ -62,6 +63,7 @@ export function AffinityBasicsWorkspace({
   previewTargetStructureFormat,
   previewLigandStructureText,
   previewLigandStructureFormat,
+  previewLigandChainId = '',
   resultsGridRef,
   isResultsResizing,
   resultsGridStyle,
@@ -121,7 +123,6 @@ export function AffinityBasicsWorkspace({
               onChange={(event) => onBackendChange(event.target.value)}
             >
               <option value="boltz">Boltz-2</option>
-              <option value="protenix">Protenix2Score</option>
             </select>
           </label>
 
@@ -162,6 +163,8 @@ export function AffinityBasicsWorkspace({
               format={previewTargetStructureFormat}
               overlayStructureText={previewLigandStructureText}
               overlayFormat={previewLigandStructureFormat}
+              ligandFocusChainId={previewLigandChainId}
+              autoFocusLigand
               colorMode="default"
             />
           ) : (

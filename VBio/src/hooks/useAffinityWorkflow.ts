@@ -86,6 +86,8 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
   const preferredConfidenceOnlyRef = useRef(Boolean(preferredConfidenceOnly));
   const hydratedUploadKeyRef = useRef('');
   const hydratedPersistedSmilesKeyRef = useRef('');
+  const targetUploadReadSeqRef = useRef(0);
+  const ligandUploadReadSeqRef = useRef(0);
 
   const currentPairKey = useMemo(() => buildPairKey(targetFile, ligandFile), [targetFile, ligandFile]);
   const isPreviewCurrent = Boolean(currentPairKey) && previewPairKey === currentPairKey;
@@ -124,6 +126,8 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
 
   useEffect(() => {
     requestSeqRef.current += 1;
+    targetUploadReadSeqRef.current += 1;
+    ligandUploadReadSeqRef.current += 1;
     setUploadsHydrating(true);
     resetAll();
     hydratedUploadKeyRef.current = '';
@@ -152,6 +156,8 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
       return;
     }
 
+    targetUploadReadSeqRef.current += 1;
+    ligandUploadReadSeqRef.current += 1;
     hydratedUploadKeyRef.current = persistedUploadKey;
     const restoredTarget = new File([targetContent], targetName, { type: 'text/plain' });
     const ligandName = String(persistedUploads?.ligand?.fileName || '').trim();
@@ -174,6 +180,9 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
 
   const onTargetFileChange = useCallback(
     (file: File | null) => {
+      const targetReadSeq = targetUploadReadSeqRef.current + 1;
+      targetUploadReadSeqRef.current = targetReadSeq;
+      ligandUploadReadSeqRef.current += 1;
       setTargetFile(file);
       // Re-uploading target should reset ligand-dependent preview state.
       setLigandFile(null);
@@ -185,28 +194,30 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
       confidenceOnlyTouchedRef.current = false;
       setPreview(null);
       setPreviewVersion((prev) => prev + 1);
-      if (!file) {
-        setPersistedTargetUpload(null);
-        setPersistedLigandUpload(null);
-      } else {
-        void file
-          .text()
-          .then((content) => {
-            setPersistedTargetUpload({ fileName: file.name, content });
-          })
-          .catch(() => {
-            setPersistedTargetUpload({ fileName: file.name, content: '' });
-          });
-      }
+      // Force overwrite semantics: clear previous cached uploads immediately.
+      setPersistedTargetUpload(null);
+      setPersistedLigandUpload(null);
       if (!file) {
         return;
       }
+      void file
+        .text()
+        .then((content) => {
+          if (targetUploadReadSeqRef.current !== targetReadSeq) return;
+          setPersistedTargetUpload({ fileName: file.name, content });
+        })
+        .catch(() => {
+          if (targetUploadReadSeqRef.current !== targetReadSeq) return;
+          setPersistedTargetUpload({ fileName: file.name, content: '' });
+        });
     },
     []
   );
 
   const onLigandFileChange = useCallback(
     (file: File | null) => {
+      const ligandReadSeq = ligandUploadReadSeqRef.current + 1;
+      ligandUploadReadSeqRef.current = ligandReadSeq;
       setLigandFile(file);
       setPreviewError(null);
       setPreviewPairKey('');
@@ -216,21 +227,21 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
       confidenceOnlyTouchedRef.current = false;
       setPreview(null);
       setPreviewVersion((prev) => prev + 1);
-      if (!file) {
-        setPersistedLigandUpload(null);
-      } else {
-        void file
-          .text()
-          .then((content) => {
-            setPersistedLigandUpload({ fileName: file.name, content });
-          })
-          .catch(() => {
-            setPersistedLigandUpload({ fileName: file.name, content: '' });
-          });
-      }
+      // Clear stale ligand upload content before applying new upload result.
+      setPersistedLigandUpload(null);
       if (!file) {
         return;
       }
+      void file
+        .text()
+        .then((content) => {
+          if (ligandUploadReadSeqRef.current !== ligandReadSeq) return;
+          setPersistedLigandUpload({ fileName: file.name, content });
+        })
+        .catch(() => {
+          if (ligandUploadReadSeqRef.current !== ligandReadSeq) return;
+          setPersistedLigandUpload({ fileName: file.name, content: '' });
+        });
     },
     []
   );

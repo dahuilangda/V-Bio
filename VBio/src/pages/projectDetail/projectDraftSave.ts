@@ -103,7 +103,7 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
   } = deps;
 
   const workflowDef = getWorkflowDefinition(project.task_type);
-  const persistedBackend = draft.backend;
+  const persistedBackend = workflowDef.key === 'affinity' ? 'boltz' : draft.backend;
   const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, persistedBackend);
   const activeComponents = nonEmptyComponents(normalizedConfig.components);
   const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(normalizedConfig);

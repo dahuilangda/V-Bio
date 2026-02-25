@@ -219,6 +219,9 @@ export function useLeadOptReferenceFragment({
   const [selectedFragmentIds, setSelectedFragmentIds] = useState<string[]>([]);
   const hydratedUploadKeyRef = useRef('');
   const hydratedSelectionKeyRef = useRef('');
+  const targetUploadReadSeqRef = useRef(0);
+  const ligandUploadReadSeqRef = useRef(0);
+  const referencePreviewSeqRef = useRef(0);
 
   const busy = busyCount > 0;
   const beginBusy = () => setBusyCount((prev) => prev + 1);
@@ -245,6 +248,9 @@ export function useLeadOptReferenceFragment({
   }, [ligandSmiles]);
 
   useEffect(() => {
+    targetUploadReadSeqRef.current += 1;
+    ligandUploadReadSeqRef.current += 1;
+    referencePreviewSeqRef.current += 1;
     hydratedUploadKeyRef.current = '';
     hydratedSelectionKeyRef.current = '';
     const targetName = String(persistedUploads?.target?.fileName || '').trim();
@@ -262,6 +268,8 @@ export function useLeadOptReferenceFragment({
     setReferenceLigandChainId('');
     setPreviewStructureText('');
     setPreviewOverlayStructureText('');
+    setReferenceLigandSmilesResolved('');
+    setFragmentSourceSmiles('');
     setFragments([]);
     setActiveFragmentId('');
     setSelectedFragmentIds([]);
@@ -549,12 +557,22 @@ export function useLeadOptReferenceFragment({
     }
   };
 
-  const runReferencePreviewWithFiles = async (targetFile: File | null, ligandFile: File | null) => {
+  const runReferencePreviewWithFiles = async (
+    targetFile: File | null,
+    ligandFile: File | null,
+    requestId?: number
+  ) => {
     if (!targetFile || !ligandFile) return;
+    const currentRequestId =
+      typeof requestId === 'number' && Number.isFinite(requestId)
+        ? requestId
+        : referencePreviewSeqRef.current + 1;
+    referencePreviewSeqRef.current = currentRequestId;
     onError(null);
     beginBusy();
     try {
       const response = await previewLeadOptimizationReference(targetFile, ligandFile);
+      if (referencePreviewSeqRef.current !== currentRequestId) return;
       const nextPocket = normalizePocketResidues(response.pocket_residues);
       const nextTargetChainSequences = (() => {
         const out: Record<string, string> = {};
@@ -633,11 +651,32 @@ export function useLeadOptReferenceFragment({
         onLigandSmilesChange(referenceSmiles);
       }
       if (nextSmiles) {
-        await fetchFragmentPreview(nextSmiles);
+        const fragmentResponse = await previewLeadOptimizationFragments(nextSmiles.trim());
+        if (referencePreviewSeqRef.current !== currentRequestId) return;
+        setFragmentSourceSmiles(readText(fragmentResponse.smiles).trim() || nextSmiles.trim());
+        const nextFragments = normalizeFragments(fragmentResponse.fragments);
+        setFragments(nextFragments);
+        const recommendedIds = Array.isArray(fragmentResponse.recommended_variable_fragment_ids)
+          ? fragmentResponse.recommended_variable_fragment_ids.map((id) => readText(id)).filter(Boolean)
+          : [];
+        const defaultFragmentId = pickReasonableDefaultFragment(nextFragments);
+        const defaultIds = uniqueFragmentIds([
+          ...recommendedIds.slice(0, 1),
+          defaultFragmentId,
+          nextFragments[0]?.fragment_id || ''
+        ]).slice(0, 1);
+        const firstRecommended = defaultIds[0] || '';
+        if (firstRecommended) setActiveFragmentId(firstRecommended);
+        setSelectedFragmentIds(defaultIds);
+        if (!currentVariableQuery.trim() && fragmentResponse.auto_generated_rules?.variable_smarts) {
+          const first = fragmentResponse.auto_generated_rules.variable_smarts.split(';;')[0] || '';
+          if (first) onAutoVariableQuery(first);
+        }
       } else {
         onError('Reference ligand uploaded but no small-molecule SMILES could be resolved. Please use SDF/MOL2 or input SMILES.');
       }
     } catch (e) {
+      if (referencePreviewSeqRef.current !== currentRequestId) return;
       setReferenceReady(false);
       setTargetChainSequences({});
       setReferenceTargetChainId('');
@@ -649,60 +688,79 @@ export function useLeadOptReferenceFragment({
   };
 
   const handleTargetFileChange = async (file: File | null) => {
+    const targetReadSeq = targetUploadReadSeqRef.current + 1;
+    targetUploadReadSeqRef.current = targetReadSeq;
+    ligandUploadReadSeqRef.current += 1;
+    const previewRequestId = referencePreviewSeqRef.current + 1;
+    referencePreviewSeqRef.current = previewRequestId;
     setReferenceTargetFile(file);
+    // Upload target should overwrite old target snapshot immediately.
+    setPersistedTargetUpload(null);
+    // Target replacement invalidates old 3D/reference-derived UI until new preview returns.
+    setPocketResidues([]);
+    setLigandAtomContacts([]);
+    setReferenceReady(false);
+    setTargetChainSequences({});
+    setReferenceTargetChainId('');
+    setReferenceLigandChainId('');
+    setPreviewStructureText('');
+    setPreviewOverlayStructureText('');
+    setFragmentSourceSmiles('');
+    setFragments([]);
+    setActiveFragmentId('');
+    setSelectedFragmentIds([]);
     if (!file) {
-      setPersistedTargetUpload(null);
       setPersistedLigandUpload(null);
       setReferenceLigandFile(null);
-      setPocketResidues([]);
-      setLigandAtomContacts([]);
-      setReferenceReady(false);
-      setTargetChainSequences({});
-      setReferenceTargetChainId('');
-      setReferenceLigandChainId('');
-      setPreviewStructureText('');
-      setPreviewOverlayStructureText('');
-      setFragments([]);
-      setActiveFragmentId('');
-      setSelectedFragmentIds([]);
       return;
     }
     const targetText = await file
       .text()
       .then((text) => text)
       .catch(() => '');
+    if (targetUploadReadSeqRef.current !== targetReadSeq) return;
     setPersistedTargetUpload({
       fileName: file.name,
       content: targetText
     });
-    await runReferencePreviewWithFiles(file, referenceLigandFile);
+    await runReferencePreviewWithFiles(file, referenceLigandFile, previewRequestId);
   };
 
   const handleLigandFileChange = async (file: File | null) => {
+    const ligandReadSeq = ligandUploadReadSeqRef.current + 1;
+    ligandUploadReadSeqRef.current = ligandReadSeq;
+    const previewRequestId = referencePreviewSeqRef.current + 1;
+    referencePreviewSeqRef.current = previewRequestId;
     setReferenceLigandFile(file);
+    // Upload ligand should overwrite old ligand snapshot immediately.
+    setPersistedLigandUpload(null);
+    setPocketResidues([]);
+    setLigandAtomContacts([]);
+    setReferenceReady(false);
+    setTargetChainSequences({});
+    setReferenceTargetChainId('');
+    setReferenceLigandChainId('');
+    setPreviewStructureText('');
+    setPreviewOverlayStructureText('');
+    setReferenceLigandSmilesResolved('');
+    setFragmentSourceSmiles('');
+    onLigandSmilesChange('');
+    setFragments([]);
+    setActiveFragmentId('');
+    setSelectedFragmentIds([]);
     if (!file) {
-      setPersistedLigandUpload(null);
-      setPocketResidues([]);
-      setLigandAtomContacts([]);
-      setReferenceReady(false);
-      setTargetChainSequences({});
-      setReferenceTargetChainId('');
-      setReferenceLigandChainId('');
-      setPreviewOverlayStructureText('');
-      setFragments([]);
-      setActiveFragmentId('');
-      setSelectedFragmentIds([]);
       return;
     }
     const ligandText = await file
       .text()
       .then((text) => text)
       .catch(() => '');
+    if (ligandUploadReadSeqRef.current !== ligandReadSeq) return;
     setPersistedLigandUpload({
       fileName: file.name,
       content: ligandText
     });
-    await runReferencePreviewWithFiles(referenceTargetFile, file);
+    await runReferencePreviewWithFiles(referenceTargetFile, file, previewRequestId);
   };
 
   useEffect(() => {
@@ -710,6 +768,10 @@ export function useLeadOptReferenceFragment({
     const targetContent = String(persistedUploads?.target?.content || '').trim();
     if (!targetName || !targetContent) return;
     if (hydratedUploadKeyRef.current === uploadHydrationKey) return;
+    targetUploadReadSeqRef.current += 1;
+    ligandUploadReadSeqRef.current += 1;
+    const previewRequestId = referencePreviewSeqRef.current + 1;
+    referencePreviewSeqRef.current = previewRequestId;
     hydratedUploadKeyRef.current = uploadHydrationKey;
     const restoredTarget = new File([targetContent], targetName, { type: 'text/plain' });
     const ligandName = String(persistedUploads?.ligand?.fileName || '').trim();
@@ -720,7 +782,7 @@ export function useLeadOptReferenceFragment({
     setReferenceLigandFile(restoredLigand);
     setPersistedTargetUpload({ fileName: targetName, content: targetContent });
     setPersistedLigandUpload(restoredLigand ? { fileName: ligandName, content: ligandContent } : null);
-    void runReferencePreviewWithFiles(restoredTarget, restoredLigand);
+    void runReferencePreviewWithFiles(restoredTarget, restoredLigand, previewRequestId);
   }, [persistedUploads, uploadHydrationKey]);
 
   const toggleFragmentSelection = (fragmentId: string, options?: { additive?: boolean }) => {

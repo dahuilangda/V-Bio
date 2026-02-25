@@ -281,7 +281,7 @@ def build_prediction_task_snapshot_from_yaml(request_obj: Any, logger: Any) -> D
 
 
 def build_affinity_task_snapshot(request_obj: Any, upstream_path: str) -> Dict[str, Any]:
-    if upstream_path not in {"/api/boltz2score", "/api/protenix2score"}:
+    if upstream_path != "/api/boltz2score":
         return {}
 
     target_chain = (request_obj.form.get("target_chain") or "").strip()

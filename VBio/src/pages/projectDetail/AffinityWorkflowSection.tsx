@@ -18,6 +18,7 @@ export interface AffinityWorkflowSectionProps {
   previewTargetStructureFormat: 'cif' | 'pdb';
   previewLigandStructureText: string;
   previewLigandStructureFormat: 'cif' | 'pdb';
+  previewLigandChainId: string;
   resultsGridRef: RefObject<HTMLDivElement>;
   isResultsResizing: boolean;
   resultsGridStyle: CSSProperties;
@@ -48,6 +49,7 @@ export function AffinityWorkflowSection({
   previewTargetStructureFormat,
   previewLigandStructureText,
   previewLigandStructureFormat,
+  previewLigandChainId,
   resultsGridRef,
   isResultsResizing,
   resultsGridStyle,
@@ -79,6 +81,7 @@ export function AffinityWorkflowSection({
       previewTargetStructureFormat={previewTargetStructureFormat}
       previewLigandStructureText={previewLigandStructureText}
       previewLigandStructureFormat={previewLigandStructureFormat}
+      previewLigandChainId={previewLigandChainId}
       resultsGridRef={resultsGridRef}
       isResultsResizing={isResultsResizing}
       resultsGridStyle={resultsGridStyle}

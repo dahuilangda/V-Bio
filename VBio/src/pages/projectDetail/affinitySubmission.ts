@@ -143,8 +143,8 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
     setError(affinityPreviewError || 'Failed to prepare scoring input from uploaded files.');
     return;
   }
-  const activeAffinityBackend = String(draft.backend || 'boltz').trim().toLowerCase();
-  const backendSupportsActivity = activeAffinityBackend === 'boltz' || activeAffinityBackend === 'protenix';
+  const activeAffinityBackend = 'boltz';
+  const backendSupportsActivity = true;
   const effectiveConfidenceOnly = backendSupportsActivity ? affinityConfidenceOnly : true;
   const targetChains = affinityTargetChainIds.filter((item) => item.trim());
   const ligandChain = affinityLigandChainId.trim();

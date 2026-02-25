@@ -427,12 +427,6 @@ class ResultArchiveService:
                     include.append(structure)
                 if confidence:
                     include.append(confidence)
-                protenix_metrics = next(
-                    (name for name in names if name.lower() == 'protenix/output/protenix2score_metrics.json'),
-                    None,
-                )
-                if protenix_metrics:
-                    include.append(protenix_metrics)
                 affinity_candidates = [
                     name
                     for name in names

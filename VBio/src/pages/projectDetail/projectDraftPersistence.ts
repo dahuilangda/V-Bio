@@ -1,6 +1,7 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type { InputComponent, Project, ProjectInputConfig, ProjectTask } from '../../types/models';
 import { extractPrimaryProteinAndLigand } from '../../utils/projectInputs';
+import { getWorkflowDefinition } from '../../utils/workflows';
 
 export interface DraftSnapshotSource {
   taskName: string;
@@ -136,6 +137,7 @@ export async function persistDraftTaskSnapshotRecord(params: {
   const storedProteinSequence =
     typeof options?.proteinSequenceOverride === 'string' ? options.proteinSequenceOverride : proteinSequence;
   const storedLigandSmiles = typeof options?.ligandSmilesOverride === 'string' ? options.ligandSmilesOverride : ligandSmiles;
+  const effectiveBackend = getWorkflowDefinition(project.task_type).key === 'affinity' ? 'boltz' : draft.backend;
 
   const basePayload: Partial<ProjectTask> = {
     project_id: project.id,
@@ -145,7 +147,7 @@ export async function persistDraftTaskSnapshotRecord(params: {
     task_state: 'DRAFT',
     status_text: statusText,
     error_text: '',
-    backend: draft.backend,
+    backend: effectiveBackend,
     seed: normalizedConfig.options.seed ?? null,
     protein_sequence: storedProteinSequence,
     ligand_smiles: storedLigandSmiles,

@@ -162,16 +162,6 @@ curl -X POST "${VBIO_API_BASE}/api/boltz2score" \
   -F "backend=boltz"
 ```
 
-Affinity score (Protenix2Score) with local complex file:
-
-```bash
-curl -X POST "${VBIO_API_BASE}/api/protenix2score" \
-  -H "X-API-Token: ${VBIO_API_TOKEN}" \
-  -F "project_id=${VBIO_PROJECT_ID}" \
-  -F "input_file=@./complex.cif" \
-  -F "use_msa=true"
-```
-
 Cancel task:
 
 ```bash

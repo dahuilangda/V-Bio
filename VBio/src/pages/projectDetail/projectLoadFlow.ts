@@ -63,6 +63,7 @@ export async function loadProjectFlow(params: {
 
   const activeTaskId = (next.task_id || '').trim();
   const workflowDef = getWorkflowDefinition(next.task_type);
+  const normalizedBackend = workflowDef.key === 'affinity' ? 'boltz' : next.backend;
   const query = new URLSearchParams(locationSearch);
   const requestedTab = String(query.get('tab') || '').trim().toLowerCase();
   const shouldIncludeTaskComponents =
@@ -92,13 +93,13 @@ export async function loadProjectFlow(params: {
   const savedConfig = loadProjectInputConfig(next.id);
   const baseConfig = requestNewTask ? defaultConfigFromProject(next) : savedConfig || defaultConfigFromProject(next);
   const taskAlignedConfig = mergeTaskSnapshotIntoConfig(baseConfig, snapshotSourceTaskRow);
-  const backendConstraints = filterConstraintsByBackend(taskAlignedConfig.constraints, next.backend);
+  const backendConstraints = filterConstraintsByBackend(taskAlignedConfig.constraints, normalizedBackend);
 
   const savedUiState = loadProjectUiState(next.id);
   const loadedDraft: LoadedDraftFields = {
     taskName: String(snapshotSourceTaskRow?.name || '').trim(),
     taskSummary: String(snapshotSourceTaskRow?.summary || '').trim(),
-    backend: next.backend,
+    backend: normalizedBackend,
     use_msa: next.use_msa,
     color_mode: next.color_mode === 'alphafold' ? 'alphafold' : 'default',
     inputConfig: {

@@ -32,7 +32,6 @@ def register_affinity_routes(
     config_module,
     affinity_task,
     boltz2score_task,
-    protenix2score_task,
     build_affinity_preview,
     affinity_preview_error_cls,
     parse_bool: Callable[[Optional[str], bool], bool],
@@ -374,77 +373,5 @@ def register_affinity_routes(
         except Exception as exc:
             logger.exception('Failed to dispatch Boltz2Score task from %s: %s', request.remote_addr, exc)
             return jsonify({'error': 'Failed to dispatch Boltz2Score task.', 'details': str(exc)}), 500
-
-        return jsonify({'task_id': task.id}), 202
-
-    @app.route('/api/protenix2score', methods=['POST'])
-    @require_api_token
-    def handle_protenix2score():
-        logger.info('Received Protenix2Score request.')
-
-        if 'input_file' not in request.files:
-            logger.error('Missing input_file in Protenix2Score request. Client IP: %s', request.remote_addr)
-            return jsonify({'error': "Request form must contain 'input_file'."}), 400
-
-        input_file = request.files['input_file']
-        if input_file.filename == '':
-            logger.error('No selected file for input_file in Protenix2Score request.')
-            return jsonify({'error': 'No selected file for input_file'}), 400
-
-        try:
-            input_file_content = input_file.read().decode('utf-8')
-        except UnicodeDecodeError:
-            logger.error('Failed to decode Protenix2Score input_file as UTF-8. Client IP: %s', request.remote_addr)
-            return jsonify({'error': "Failed to decode input_file. Ensure it's a valid UTF-8 text file."}), 400
-        except IOError as exc:
-            logger.exception('Failed to read Protenix2Score input_file: %s', exc)
-            return jsonify({'error': f'Failed to read input_file: {exc}'}), 400
-
-        priority = request.form.get('priority', 'default').lower()
-        if priority not in ['high', 'default']:
-            logger.warning("Invalid priority '%s' for Protenix2Score, defaulting to default.", priority)
-            priority = 'default'
-        target_queue = config_module.HIGH_PRIORITY_QUEUE if priority == 'high' else config_module.DEFAULT_QUEUE
-
-        target_chain = request.form.get('target_chain')
-        ligand_chain = request.form.get('ligand_chain')
-        try:
-            ligand_smiles_map = _parse_ligand_smiles_map(request.form.get('ligand_smiles_map'))
-        except Exception as exc:
-            logger.error('Invalid ligand_smiles_map JSON from %s: %s', request.remote_addr, exc)
-            return jsonify({'error': "Invalid 'ligand_smiles_map' JSON format."}), 400
-
-        score_args: Dict[str, Any] = {
-            'input_file_content': input_file_content,
-            'input_filename': secure_filename(input_file.filename),
-            'affinity_refine': parse_bool(request.form.get('affinity_refine'), False),
-            'enable_affinity': parse_bool(request.form.get('enable_affinity'), False),
-            'auto_enable_affinity': parse_bool(request.form.get('auto_enable_affinity'), False),
-            'use_msa': parse_bool(request.form.get('use_msa'), True),
-            'use_template': parse_bool(request.form.get('use_template'), False),
-        }
-        logger.info(
-            'Protenix2Score options: use_msa=%s, use_template=%s, enable_affinity=%s',
-            score_args['use_msa'],
-            score_args['use_template'],
-            score_args['enable_affinity'],
-        )
-        if target_chain:
-            score_args['target_chain'] = target_chain
-        if ligand_chain:
-            score_args['ligand_chain'] = ligand_chain
-        if ligand_smiles_map:
-            score_args['ligand_smiles_map'] = ligand_smiles_map
-
-        seed = parse_int(request.form.get('seed'), None)
-        if seed is not None:
-            score_args['seed'] = seed
-
-        try:
-            task = protenix2score_task.apply_async(args=[score_args], queue=target_queue)
-            logger.info('Protenix2Score task %s dispatched to queue %s.', task.id, target_queue)
-        except Exception as exc:
-            logger.exception('Failed to dispatch Protenix2Score task from %s: %s', request.remote_addr, exc)
-            return jsonify({'error': 'Failed to dispatch Protenix2Score task.', 'details': str(exc)}), 500
 
         return jsonify({'task_id': task.id}), 202

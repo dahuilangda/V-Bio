@@ -169,7 +169,7 @@
 .lead-opt-fragment-sketcher {
   display: grid;
   gap: 8px;
-  grid-template-columns: minmax(0, 1fr) 146px;
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
 }
 
@@ -195,14 +195,14 @@
 
 .lead-opt-fragment-legend {
   display: grid;
-  grid-template-columns: repeat(2, minmax(68px, 68px));
+  grid-template-columns: repeat(auto-fill, minmax(68px, 68px));
   gap: 6px;
   max-height: none;
   overflow: visible;
-  justify-content: end;
+  justify-content: start;
   align-content: start;
-  grid-column: 2;
-  grid-row: 1;
+  grid-column: 1;
+  grid-row: 2;
 }
 
 .lead-opt-fragment-legend-item {
@@ -279,10 +279,6 @@
 }
 
 @media (max-width: 1320px) {
-  .lead-opt-fragment-sketcher {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
   .lead-opt-fragment-legend {
     grid-column: 1;
     grid-row: 2;

@@ -78,8 +78,6 @@ class GatewayHandlers:
         backend = (form_backend or "").strip().lower()
         if backend:
             return backend
-        if path.endswith("/api/protenix2score"):
-            return "protenix"
         return "boltz"
 
     @staticmethod

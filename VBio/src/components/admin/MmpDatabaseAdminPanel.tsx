@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Check, Eye, EyeOff, Pencil, Star, Trash2, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Check, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Eye, EyeOff, Pencil, Search, Star, Trash2, X } from 'lucide-react';
 import {
   deleteLeadOptimizationMmpDatabaseAdmin,
   fetchLeadOptimizationMmpDatabases,
@@ -12,6 +12,7 @@ interface MmpDatabaseAdminPanelProps {
 }
 
 const MMP_DB_CATALOG_CACHE_MS = 15_000;
+const MMP_DB_PAGE_SIZE = 10;
 let mmpDbCatalogCacheRows: LeadOptMmpDatabaseItem[] = [];
 let mmpDbCatalogCacheAt = 0;
 
@@ -31,6 +32,8 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
   const [saving, setSaving] = useState(false);
   const [editingLabelId, setEditingLabelId] = useState('');
   const [editingLabelValue, setEditingLabelValue] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [page, setPage] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
@@ -170,6 +173,43 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
     return 'building';
   };
 
+  const filteredDatabases = useMemo(() => {
+    const q = String(searchQuery || '').trim().toLowerCase();
+    if (!q) return databases;
+    return databases.filter((db) => {
+      const status = readDatabaseState(db);
+      const tokens = [
+        String(db.id || ''),
+        String(db.label || ''),
+        String(db.schema || ''),
+        String(db.source || ''),
+        status,
+        formatProperties(db.properties || []),
+      ]
+        .map((item) => item.trim().toLowerCase())
+        .filter(Boolean);
+      return tokens.some((item) => item.includes(q));
+    });
+  }, [databases, searchQuery]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredDatabases.length / MMP_DB_PAGE_SIZE));
+
+  const pagedDatabases = useMemo(() => {
+    const start = (page - 1) * MMP_DB_PAGE_SIZE;
+    return filteredDatabases.slice(start, start + MMP_DB_PAGE_SIZE);
+  }, [filteredDatabases, page]);
+
+  const pageStart = filteredDatabases.length === 0 ? 0 : (page - 1) * MMP_DB_PAGE_SIZE + 1;
+  const pageEnd = Math.min(filteredDatabases.length, page * MMP_DB_PAGE_SIZE);
+
+  useEffect(() => {
+    setPage(1);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
   return (
     <section className="panel settings-admin-panel">
       {!compact ? (
@@ -185,22 +225,47 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
       {loading ? (
         <div className="muted">Loading MMP databases...</div>
       ) : (
-        <div className="table-wrap">
-          <table className="table settings-admin-table">
-            <thead>
-              <tr>
-                <th>Label</th>
-                <th>Schema</th>
-                <th>Counts (Cmp/Rule/Pair)</th>
-                <th>Status</th>
-                <th>Properties</th>
-                <th>Visible</th>
-                <th>Default</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {databases.map((db) => {
+        <>
+          <div className="toolbar project-toolbar mmp-life-list-toolbar leadopt-db-toolbar">
+            <div className="project-toolbar-filters">
+              <div className="project-filter-field project-filter-field-search">
+                <div className="input-wrap search-input">
+                  <Search size={16} />
+                  <input
+                    value={searchQuery}
+                    onChange={(event) => setSearchQuery(event.target.value)}
+                    placeholder="Search label / schema / status / property"
+                    aria-label="Search lead opt databases"
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="project-toolbar-meta project-toolbar-meta-rich">
+              <span className="meta-chip">Rows {filteredDatabases.length}</span>
+              <span className="meta-chip">Page {page}/{totalPages}</span>
+            </div>
+          </div>
+          <div className="table-wrap">
+            <table className="table settings-admin-table">
+              <thead>
+                <tr>
+                  <th>Label</th>
+                  <th>Schema</th>
+                  <th>Counts (Cmp/Rule/Pair)</th>
+                  <th>Status</th>
+                  <th>Properties</th>
+                  <th>Visible</th>
+                  <th>Default</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pagedDatabases.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="muted">No databases match the current search.</td>
+                  </tr>
+                ) : (
+                  pagedDatabases.map((db) => {
                 const id = String(db.id || '');
                 const schema = String(db.schema || '');
                 const isPublicSchema = schema.trim().toLowerCase() === 'public';
@@ -352,11 +417,60 @@ export function MmpDatabaseAdminPanel({ compact = false }: MmpDatabaseAdminPanel
                       </div>
                     </td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                  );
+                })
+              )}
+              </tbody>
+            </table>
+          </div>
+          <div className="project-pagination leadopt-db-pagination">
+            <div className="project-pagination-controls">
+              <button
+                className="icon-btn"
+                type="button"
+                onClick={() => setPage(1)}
+                disabled={page <= 1}
+                title="First page"
+                aria-label="First page"
+              >
+                <ChevronsLeft size={14} />
+              </button>
+              <button
+                className="icon-btn"
+                type="button"
+                onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+                disabled={page <= 1}
+                title="Previous page"
+                aria-label="Previous page"
+              >
+                <ChevronLeft size={14} />
+              </button>
+              <button
+                className="icon-btn"
+                type="button"
+                onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
+                disabled={page >= totalPages}
+                title="Next page"
+                aria-label="Next page"
+              >
+                <ChevronRight size={14} />
+              </button>
+              <button
+                className="icon-btn"
+                type="button"
+                onClick={() => setPage(totalPages)}
+                disabled={page >= totalPages}
+                title="Last page"
+                aria-label="Last page"
+              >
+                <ChevronsRight size={14} />
+              </button>
+            </div>
+            <div className="project-pagination-info muted small">
+              {filteredDatabases.length === 0 ? 'No rows' : `Showing ${pageStart}-${pageEnd} of ${filteredDatabases.length}`}
+            </div>
+          </div>
+        </>
       )}
     </section>
   );

@@ -92,11 +92,9 @@ export async function previewAffinityComplex(input: {
 
 export async function submitAffinityScoring(input: AffinitySubmitInput): Promise<string> {
   const structureText = String(input.inputStructureText || '').trim();
-  const backend = String(input.backend || 'boltz').trim().toLowerCase();
-  const useProtenix = backend === 'protenix';
   const targetFile = input.targetFile instanceof File ? input.targetFile : null;
   const ligandFile = input.ligandFile instanceof File ? input.ligandFile : null;
-  const useSeparateBoltzInputs = !useProtenix && Boolean(targetFile && ligandFile);
+  const useSeparateBoltzInputs = Boolean(targetFile && ligandFile);
   if (!useSeparateBoltzInputs && !structureText) {
     throw new Error('Affinity scoring requires a prepared input structure.');
   }
@@ -145,23 +143,15 @@ export async function submitAffinityScoring(input: AffinitySubmitInput): Promise
   if (normalizedSeed !== null) {
     form.append('seed', String(normalizedSeed));
   }
-  if (!useProtenix) {
-    const useMsaServer = input.useMsa === true;
-    form.append('use_msa_server', String(useMsaServer).toLowerCase());
-    form.append('structure_refine', String(BOLTZ2SCORE_AFFINITY_PROFILE.structureRefine).toLowerCase());
-    form.append('recycling_steps', String(BOLTZ2SCORE_AFFINITY_PROFILE.recyclingSteps));
-    form.append('sampling_steps', String(BOLTZ2SCORE_AFFINITY_PROFILE.samplingSteps));
-    form.append('diffusion_samples', String(BOLTZ2SCORE_AFFINITY_PROFILE.diffusionSamples));
-    form.append('max_parallel_samples', String(BOLTZ2SCORE_AFFINITY_PROFILE.maxParallelSamples));
-  }
+  const useMsaServer = input.useMsa === true;
+  form.append('use_msa_server', String(useMsaServer).toLowerCase());
+  form.append('structure_refine', String(BOLTZ2SCORE_AFFINITY_PROFILE.structureRefine).toLowerCase());
+  form.append('recycling_steps', String(BOLTZ2SCORE_AFFINITY_PROFILE.recyclingSteps));
+  form.append('sampling_steps', String(BOLTZ2SCORE_AFFINITY_PROFILE.samplingSteps));
+  form.append('diffusion_samples', String(BOLTZ2SCORE_AFFINITY_PROFILE.diffusionSamples));
+  form.append('max_parallel_samples', String(BOLTZ2SCORE_AFFINITY_PROFILE.maxParallelSamples));
   form.append('priority', 'high');
-  const endpoint = useProtenix ? '/api/protenix2score' : '/api/boltz2score';
-  if (useProtenix) {
-    const useMsa = input.useMsa !== false;
-    const useTemplate = Boolean(input.useTemplate);
-    form.append('use_msa', String(useMsa).toLowerCase());
-    form.append('use_template', String(useTemplate).toLowerCase());
-  }
+  const endpoint = '/api/boltz2score';
 
   const res = await requestBackend(endpoint, {
     method: 'POST',
