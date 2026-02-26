@@ -221,7 +221,8 @@ function buildAtomLociForStructure(
     const unitElements = unit?.elements;
     if (!hierarchy || !unitElements) continue;
 
-    const matches: number[] = [];
+    const matchesByName: number[] = [];
+    const matchesByIndex: number[] = [];
     let residueHeavyAtomOrdinal = -1;
     const unitLength =
       typeof unitElements.length === 'number' && unitElements.length > 0
@@ -264,12 +265,21 @@ function buildAtomLociForStructure(
         readIndexedValue(hierarchy?.atoms?.auth_atom_id, atomIndex) ??
           readIndexedValue(hierarchy?.atoms?.label_atom_id, atomIndex)
       );
-      const matchedByIndex = expectedAtomIndex !== null && !isHydrogen && residueHeavyAtomOrdinal === expectedAtomIndex;
-      const matchedByName = expectedAtomIndex === null && normalizedAtomName ? atomToken === normalizedAtomName : false;
-      if (!matchedByIndex && !matchedByName) continue;
-      matches.push(indexInUnit);
+      if (normalizedAtomName && atomToken === normalizedAtomName) {
+        matchesByName.push(indexInUnit);
+        continue;
+      }
+      if (!normalizedAtomName && expectedAtomIndex !== null && !isHydrogen && residueHeavyAtomOrdinal === expectedAtomIndex) {
+        matchesByIndex.push(indexInUnit);
+      }
     }
 
+    const matches =
+      matchesByName.length > 0
+        ? matchesByName
+        : expectedAtomIndex !== null
+          ? matchesByIndex
+          : [];
     if (!matches.length) continue;
     const indices = createOrderedSet(matches);
     if (!indices) continue;

@@ -51,6 +51,20 @@ def register_lead_opt_routes(
         # Keep the original parsed graph to preserve atom-index consistency with
         # fragment atom selections and downstream variable_spec atom indices.
         mol = input_mol
+        atom_bonds: List[List[int]] = []
+        seen_bonds: set[tuple[int, int]] = set()
+        for bond in mol.GetBonds():
+            a = int(bond.GetBeginAtomIdx())
+            b = int(bond.GetEndAtomIdx())
+            if a == b:
+                continue
+            left = min(a, b)
+            right = max(a, b)
+            key = (left, right)
+            if key in seen_bonds:
+                continue
+            seen_bonds.add(key)
+            atom_bonds.append([left, right])
 
         def _normalize_attachment_smiles(query: str) -> str:
             text = str(query or '').strip()
@@ -296,6 +310,7 @@ def register_lead_opt_routes(
         return jsonify({
             'smiles': smiles,
             'fragments': fragments,
+            'atom_bonds': atom_bonds,
             'recommended_variable_fragment_ids': recommended_variable_ids,
             'auto_generated_rules': {
                 'variable_smarts': ';;'.join(

@@ -530,8 +530,8 @@ export function LeadOptimizationWorkspace({
   );
 
   const inferredQueryMode = useMemo(
-    () => inferQueryModeFromSelection(selectedFragmentItems, reference.fragments),
-    [reference.fragments, selectedFragmentItems]
+    () => inferQueryModeFromSelection(selectedFragmentItems, reference.fragments, reference.ligandAtomBonds),
+    [reference.fragments, reference.ligandAtomBonds, selectedFragmentItems]
   );
 
   useEffect(() => {
@@ -745,7 +745,11 @@ export function LeadOptimizationWorkspace({
   ]);
 
   const runMmpQuery = useCallback(async () => {
-    const variableItems = queryForm.buildVariableItems(selectedFragmentItems, reference.fragments);
+    const variableItems = queryForm.buildVariableItems(
+      selectedFragmentItems,
+      reference.fragments,
+      reference.ligandAtomBonds
+    );
     const querySmiles = fragmentSketchSmiles;
     await mmp.runMmpQuery({
       canQuery,
@@ -798,6 +802,7 @@ export function LeadOptimizationWorkspace({
     selectedDatabaseId,
     fragmentSketchSmiles,
     reference.fragments,
+    reference.ligandAtomBonds,
     reference.persistedUploads,
     selectedFragmentItems,
     canQuery,

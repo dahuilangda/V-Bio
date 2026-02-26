@@ -5,14 +5,18 @@ export interface LeadOptFragmentPreviewResponse {
   fragments: Array<{
     fragment_id: string;
     smiles: string;
+    query_smiles?: string;
+    display_smiles?: string;
     atom_indices: number[];
     heavy_atoms: number;
+    attachment_count?: number;
     recommended_action: string;
     color: string;
     rule_coverage: number;
     quality_score: number;
     num_frags?: number;
   }>;
+  atom_bonds?: Array<[number, number]>;
   recommended_variable_fragment_ids: string[];
   auto_generated_rules: {
     variable_smarts: string;

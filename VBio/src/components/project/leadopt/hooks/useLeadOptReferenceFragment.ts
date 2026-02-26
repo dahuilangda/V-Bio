@@ -5,7 +5,7 @@ import {
 } from '../../../../api/backendApi';
 import { type LigandFragmentItem } from '../../LigandFragmentSketcher';
 import { type MolstarAtomHighlight, type MolstarResidueHighlight, type MolstarResiduePick } from '../../MolstarViewer';
-import { resolveVariableSelection } from './fragmentVariableSelection';
+import { resolveVariableSelection, type LigandAtomBond } from './fragmentVariableSelection';
 
 type PocketResidue = {
   chain_id: string;
@@ -159,6 +159,28 @@ function normalizeAtomMap(rows: unknown): LigandAtomContact[] {
   return result;
 }
 
+function normalizeAtomBonds(rows: unknown): LigandAtomBond[] {
+  if (!Array.isArray(rows)) return [];
+  const dedup = new Set<string>();
+  const result: LigandAtomBond[] = [];
+  rows.forEach((item) => {
+    if (!Array.isArray(item) || item.length < 2) return;
+    const left = Number(item[0]);
+    const right = Number(item[1]);
+    if (!Number.isFinite(left) || !Number.isFinite(right)) return;
+    const a = Math.floor(left);
+    const b = Math.floor(right);
+    if (a < 0 || b < 0 || a === b) return;
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+    const key = `${lo}:${hi}`;
+    if (dedup.has(key)) return;
+    dedup.add(key);
+    result.push([lo, hi]);
+  });
+  return result;
+}
+
 function pickReasonableDefaultFragment(fragments: LigandFragmentItem[]): string {
   if (fragments.length === 0) return '';
   const sorted = [...fragments].sort((a, b) => {
@@ -213,6 +235,7 @@ export function useLeadOptReferenceFragment({
   const [previewOverlayStructureFormat, setPreviewOverlayStructureFormat] = useState<'cif' | 'pdb'>('cif');
   const [referenceLigandSmilesResolved, setReferenceLigandSmilesResolved] = useState('');
   const [fragmentSourceSmiles, setFragmentSourceSmiles] = useState('');
+  const [ligandAtomBonds, setLigandAtomBonds] = useState<LigandAtomBond[]>([]);
 
   const [fragments, setFragments] = useState<LigandFragmentItem[]>([]);
   const [activeFragmentId, setActiveFragmentId] = useState('');
@@ -331,6 +354,11 @@ export function useLeadOptReferenceFragment({
     [selectedFragmentIds, fragmentById]
   );
 
+  const highlightSourceFragments = useMemo(
+    () => (selectedFragmentItems.length > 0 ? selectedFragmentItems : activeFragment ? [activeFragment] : []),
+    [activeFragment, selectedFragmentItems]
+  );
+
   useEffect(() => {
     if (!initialSelection) return;
     if (fragments.length === 0) return;
@@ -384,8 +412,8 @@ export function useLeadOptReferenceFragment({
   }, [fragmentById, fragments, initialSelection, initialSelectionKey]);
 
   const resolvedVariableSelection = useMemo(
-    () => resolveVariableSelection(selectedFragmentItems, fragments),
-    [selectedFragmentItems, fragments]
+    () => resolveVariableSelection(selectedFragmentItems, fragments, ligandAtomBonds),
+    [selectedFragmentItems, fragments, ligandAtomBonds]
   );
 
   const selectedFragmentSmiles = useMemo(
@@ -395,7 +423,10 @@ export function useLeadOptReferenceFragment({
 
   useEffect(() => {
     const fragmentDrivenQuery = selectedFragmentSmiles.join(';;') || activeFragment?.smiles || '';
-    if (!fragmentDrivenQuery) return;
+    if (!fragmentDrivenQuery) {
+      onAutoVariableQuery('');
+      return;
+    }
     onAutoVariableQuery(fragmentDrivenQuery);
   }, [activeFragment?.smiles, onAutoVariableQuery, selectedFragmentSmiles]);
 
@@ -428,25 +459,24 @@ export function useLeadOptReferenceFragment({
 
   const highlightedLigandAtoms = useMemo(() => {
     const dedup = new Map<string, MolstarAtomHighlight>();
-    const sourceFragments = activeFragment
-      ? [activeFragment]
-      : selectedFragmentIds.length > 0
-        ? selectedFragmentIds.map((id) => fragmentById.get(id)).filter((item): item is LigandFragmentItem => Boolean(item))
-        : [];
-    sourceFragments.forEach((fragment) => {
+    highlightSourceFragments.forEach((fragment) => {
       fragment.atom_indices.forEach((atomIndex) => {
         const contact = atomContactDetailMap.get(atomIndex) || ligandAtomsByOrdinal[atomIndex] || null;
         if (!contact) return;
         const chainId = readText(contact.chain_id).trim();
         const residueNumber = Math.floor(readNumber(contact.residue_number));
         const atomName = readText(contact.atom_name).trim();
-        if (!chainId || residueNumber <= 0 || !atomName) return;
-        const key = `${chainId}:${residueNumber}:${atomName}`;
+        if (!chainId || residueNumber <= 0) return;
+        const normalizedAtomIndex = Number.isFinite(atomIndex) && atomIndex >= 0 ? Math.floor(atomIndex) : undefined;
+        const atomKey = atomName || (normalizedAtomIndex !== undefined ? `idx-${normalizedAtomIndex}` : '');
+        if (!atomKey) return;
+        const key = `${chainId}:${residueNumber}:${atomKey}`;
         if (!dedup.has(key)) {
           dedup.set(key, {
             chainId,
             residue: residueNumber,
             atomName,
+            atomIndex: normalizedAtomIndex,
             emphasis: 'default'
           });
         }
@@ -455,7 +485,7 @@ export function useLeadOptReferenceFragment({
     const rows = Array.from(dedup.values());
     if (rows.length > 0) rows[0] = { ...rows[0], emphasis: 'active' };
     return rows;
-  }, [activeFragment, atomContactDetailMap, fragmentById, ligandAtomsByOrdinal, selectedFragmentIds]);
+  }, [atomContactDetailMap, highlightSourceFragments, ligandAtomsByOrdinal]);
 
   const defaultLigandFocusAtom = useMemo(() => {
     for (const atom of ligandAtomContacts) {
@@ -481,12 +511,7 @@ export function useLeadOptReferenceFragment({
 
   const selectedPocketResidues = useMemo(() => {
     const dedup = new Map<string, { chain_id: string; residue_number: number; min_distance: number }>();
-    const sourceFragments = activeFragment
-      ? [activeFragment]
-      : selectedFragmentIds.length > 0
-        ? selectedFragmentIds.map((id) => fragmentById.get(id)).filter((item): item is LigandFragmentItem => Boolean(item))
-        : [];
-    sourceFragments.forEach((fragment) => {
+    highlightSourceFragments.forEach((fragment) => {
       fragment.atom_indices.forEach((atomIndex) => {
         const contact = atomContactDetailMap.get(atomIndex) || ligandAtomsByOrdinal[atomIndex] || null;
         if (!contact) return;
@@ -507,7 +532,7 @@ export function useLeadOptReferenceFragment({
       .sort((a, b) => a.min_distance - b.min_distance)
       .slice(0, 48)
       .map((item) => ({ chain_id: item.chain_id, residue_number: item.residue_number }));
-  }, [activeFragment, atomContactDetailMap, fragmentById, ligandAtomsByOrdinal, selectedFragmentIds]);
+  }, [atomContactDetailMap, highlightSourceFragments, ligandAtomsByOrdinal]);
 
   const highlightedPocketResidues = useMemo<MolstarResidueHighlight[]>(() => {
     return selectedPocketResidues.map((item, index) => ({
@@ -520,6 +545,7 @@ export function useLeadOptReferenceFragment({
   const fetchFragmentPreview = async (smilesValue: string) => {
     const response = await previewLeadOptimizationFragments(smilesValue.trim());
     setFragmentSourceSmiles(readText(response.smiles).trim() || smilesValue.trim());
+    setLigandAtomBonds(normalizeAtomBonds(response.atom_bonds));
     const nextFragments = normalizeFragments(response.fragments);
     setFragments(nextFragments);
     const recommendedIds = Array.isArray(response.recommended_variable_fragment_ids)
@@ -654,6 +680,7 @@ export function useLeadOptReferenceFragment({
         const fragmentResponse = await previewLeadOptimizationFragments(nextSmiles.trim());
         if (referencePreviewSeqRef.current !== currentRequestId) return;
         setFragmentSourceSmiles(readText(fragmentResponse.smiles).trim() || nextSmiles.trim());
+        setLigandAtomBonds(normalizeAtomBonds(fragmentResponse.atom_bonds));
         const nextFragments = normalizeFragments(fragmentResponse.fragments);
         setFragments(nextFragments);
         const recommendedIds = Array.isArray(fragmentResponse.recommended_variable_fragment_ids)
@@ -707,6 +734,7 @@ export function useLeadOptReferenceFragment({
     setPreviewOverlayStructureText('');
     setFragmentSourceSmiles('');
     setFragments([]);
+    setLigandAtomBonds([]);
     setActiveFragmentId('');
     setSelectedFragmentIds([]);
     if (!file) {
@@ -746,6 +774,7 @@ export function useLeadOptReferenceFragment({
     setFragmentSourceSmiles('');
     onLigandSmilesChange('');
     setFragments([]);
+    setLigandAtomBonds([]);
     setActiveFragmentId('');
     setSelectedFragmentIds([]);
     if (!file) {
@@ -787,16 +816,25 @@ export function useLeadOptReferenceFragment({
 
   const toggleFragmentSelection = (fragmentId: string, options?: { additive?: boolean }) => {
     if (!fragmentId) return;
-    const additive = Boolean(options?.additive);
-    setActiveFragmentId(fragmentId);
+    const additive = typeof options?.additive === 'boolean' ? options.additive : true;
     setSelectedFragmentIds((prev) => {
-      if (!additive) return [fragmentId];
+      if (!additive) {
+        setActiveFragmentId(fragmentId);
+        return [fragmentId];
+      }
       const exists = prev.includes(fragmentId);
       if (exists) {
         const next = prev.filter((item) => item !== fragmentId);
-        return next.length > 0 ? next : [fragmentId];
+        setActiveFragmentId((current) => {
+          if (next.length === 0) return '';
+          if (!current || current === fragmentId || !next.includes(current)) return next[0];
+          return current;
+        });
+        return next;
       }
-      return uniqueFragmentIds([...prev, fragmentId]).slice(0, 6);
+      const next = uniqueFragmentIds([...prev, fragmentId]).slice(0, 6);
+      setActiveFragmentId(fragmentId);
+      return next;
     });
   };
 
@@ -866,6 +904,7 @@ export function useLeadOptReferenceFragment({
     previewOverlayStructureFormat,
     effectiveLigandSmiles,
     fragments,
+    ligandAtomBonds,
     activeFragmentId,
     activeFragment,
     selectedFragmentIds,

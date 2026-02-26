@@ -271,7 +271,7 @@ export function LigandFragmentSketcher({
               onBackgroundClick?.();
               return;
             }
-            const additive = event.metaKey || event.ctrlKey || event.shiftKey;
+            const additive = event.altKey ? false : event.metaKey || event.ctrlKey || event.shiftKey ? true : undefined;
             const preferredFragmentId = atomDisplayMap.get(atomIndex)?.fragmentId;
             onAtomClick(atomIndex, { additive, preferredFragmentId });
           }}
@@ -302,7 +302,8 @@ export function LigandFragmentSketcher({
                     : undefined
               }
               onClick={(event) => {
-                onFragmentClick?.(fragmentId, { additive: event.metaKey || event.ctrlKey || event.shiftKey });
+                const additive = event.altKey ? false : event.metaKey || event.ctrlKey || event.shiftKey ? true : undefined;
+                onFragmentClick?.(fragmentId, { additive });
               }}
             >
               <span className="lead-opt-fragment-legend-preview" aria-hidden="true">

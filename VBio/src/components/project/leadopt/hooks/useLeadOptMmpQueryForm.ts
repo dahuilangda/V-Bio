@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react';
 import type { LigandFragmentItem } from '../../LigandFragmentSketcher';
-import { resolveVariableSelection } from './fragmentVariableSelection';
+import { resolveVariableSelection, type LigandAtomBond } from './fragmentVariableSelection';
 
 export type LeadOptDirection = 'increase' | 'decrease' | '';
 export type LeadOptVariableMode = 'substructure' | 'exact';
@@ -65,8 +65,16 @@ export function useLeadOptMmpQueryForm({ onError }: UseLeadOptMmpQueryFormParams
   );
 
   const buildVariableItems = useCallback(
-    (selectedFragmentItems: LigandFragmentItem[], allFragments: LigandFragmentItem[] = []): LeadOptVariableItemInput[] => {
-      const resolved = resolveVariableSelection(selectedFragmentItems, allFragments.length > 0 ? allFragments : selectedFragmentItems);
+    (
+      selectedFragmentItems: LigandFragmentItem[],
+      allFragments: LigandFragmentItem[] = [],
+      atomBonds?: LigandAtomBond[]
+    ): LeadOptVariableItemInput[] => {
+      const resolved = resolveVariableSelection(
+        selectedFragmentItems,
+        allFragments.length > 0 ? allFragments : selectedFragmentItems,
+        atomBonds
+      );
       const selectedItems = resolved.effectiveItems.map((item) => {
         const atomIndices = Array.isArray(item.atom_indices)
           ? item.atom_indices
