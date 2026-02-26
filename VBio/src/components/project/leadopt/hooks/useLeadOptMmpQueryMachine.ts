@@ -125,7 +125,7 @@ function normalizePredictionRecord(value: unknown): LeadOptPredictionRecord | nu
   const structureText = readText(raw.structureText ?? raw.structure_text);
   const structureFormat = readText(raw.structureFormat ?? raw.structure_format).toLowerCase() === 'pdb' ? 'pdb' : 'cif';
   const structureName = readText(raw.structureName ?? raw.structure_name);
-  const pairIptm = normalizeIptm(raw.pairIptm ?? raw.pair_iptm ?? raw.ligand_iptm ?? raw.iptm);
+  const pairIptm = normalizeIptm(raw.pairIptm ?? raw.pair_iptm);
   const pairPae = normalizePae(raw.pairPae ?? raw.pair_pae ?? raw.pae);
   const ligandPlddtRaw = Number(raw.ligandPlddt ?? raw.ligand_plddt);
   const ligandPlddt = Number.isFinite(ligandPlddtRaw) ? normalizePlddtValue(ligandPlddtRaw) : null;
@@ -504,6 +504,7 @@ function readPairPaeForChains(
 
 function findPairIptm(confidence: Record<string, unknown>, targetChain: string, ligandChain: string): number | null {
   const chainIds = toChainList(confidence.chain_ids);
+  const pairMapRaw = readObjectPath(confidence, 'pair_chains_iptm');
   const ligandHints = uniqueChainHints(
     ligandChain,
     confidence.model_ligand_chain_id,
@@ -538,7 +539,17 @@ function findPairIptm(confidence: Record<string, unknown>, targetChain: string, 
       }
     }
   }
-  const scalar = readFirstFiniteMetric(confidence, ['pair_iptm', 'ligand_iptm', 'iptm']);
+  // Pair-only fallback: when confidence only exposes a 2x2 numeric pair map and
+  // chain labels are unavailable/mismatched, infer the off-diagonal pair directly.
+  if (pairMapRaw && typeof pairMapRaw === 'object' && !Array.isArray(pairMapRaw)) {
+    const keys = Object.keys(pairMapRaw).map((item) => String(item || '').trim()).filter(Boolean);
+    if (keys.length === 2 && keys.every((item) => isNumericToken(item))) {
+      const [first, second] = keys.sort((a, b) => Number(a) - Number(b));
+      const inferred = readPairValueFromNestedMap(pairMapRaw, first, second);
+      if (inferred !== null) return normalizeIptm(inferred);
+    }
+  }
+  const scalar = readFirstFiniteMetric(confidence, ['pair_iptm']);
   return scalar !== null ? normalizeIptm(scalar) : null;
 }
 
