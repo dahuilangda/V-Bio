@@ -6903,6 +6903,12 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
     )
 
     parser.add_argument(
+        '--resume_from_fragdb',
+        action='store_true',
+        help='如果存在同名 .fragdb，则跳过 fragment 阶段并直接从该文件继续 index（断点续跑）'
+    )
+
+    parser.add_argument(
         '--keep_fragdb',
         action='store_true',
         help='保留中间 .fragdb 文件（默认构建成功后自动删除）'
@@ -7221,8 +7227,23 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                     fragments_input_file,
                 )
 
-        # Validate SMILES file
-        if smiles_file and not validate_smiles_file(smiles_file):
+        if args.resume_from_fragdb and (not fragments_input_file) and smiles_file:
+            resume_base_name = os.path.splitext(os.path.basename(str(smiles_file or "").strip()))[0] or "dataset"
+            resume_fragments_file = os.path.join(args.output_dir, f"{resume_base_name}.fragdb")
+            if os.path.exists(resume_fragments_file):
+                fragments_input_file = resume_fragments_file
+                logger.info(
+                    "Resume mode enabled, using existing fragments file and skipping fragment stage: %s",
+                    resume_fragments_file,
+                )
+            else:
+                logger.info(
+                    "Resume mode enabled but no fragments file found at: %s; full build flow will run.",
+                    resume_fragments_file,
+                )
+
+        # Validate SMILES file (skip in resume-from-fragdb path)
+        if smiles_file and (not fragments_input_file) and not validate_smiles_file(smiles_file):
             logger.error("SMILES file validation failed")
             sys.exit(1)
         if properties_file and not os.path.exists(properties_file):
@@ -7279,7 +7300,7 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                         sys.exit(1)
                 else:
                     logger.error("Fragments file already exists: %s", fragments_file)
-                    logger.error("Use --force to overwrite")
+                    logger.error("Use --force to overwrite, or --resume_from_fragdb to continue from this file")
                     sys.exit(1)
 
             logger.info("Building MMP dataset directly into PostgreSQL...")
