@@ -37,6 +37,11 @@ interface UseLeadOptReferenceFragmentParams {
     fragmentIds?: string[];
     atomIndices?: number[];
     variableQueries?: string[];
+    variableItems?: Array<{
+      fragmentId?: string;
+      atomIndices?: number[];
+      query?: string;
+    }>;
   } | null;
 }
 
@@ -206,6 +211,30 @@ function uniqueFragmentIds(values: string[]): string[] {
   return result;
 }
 
+function normalizeAtomIndexList(values: unknown): number[] {
+  if (!Array.isArray(values)) return [];
+  return Array.from(
+    new Set(
+      values
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value >= 0)
+        .map((value) => Math.floor(value))
+    )
+  ).sort((a, b) => a - b);
+}
+
+function parseMergedFragmentIdTokens(value: string): string[] {
+  const token = String(value || '').trim();
+  if (!token) return [];
+  if (!token.startsWith('merged:')) return [];
+  const body = token.slice('merged:'.length).trim();
+  if (!body) return [];
+  return body
+    .split('+')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 export function useLeadOptReferenceFragment({
   ligandSmiles,
   onLigandSmilesChange,
@@ -242,6 +271,7 @@ export function useLeadOptReferenceFragment({
   const [selectedFragmentIds, setSelectedFragmentIds] = useState<string[]>([]);
   const hydratedUploadKeyRef = useRef('');
   const hydratedSelectionKeyRef = useRef('');
+  const hydratedSelectionScopeRef = useRef('');
   const targetUploadReadSeqRef = useRef(0);
   const ligandUploadReadSeqRef = useRef(0);
   const referencePreviewSeqRef = useRef(0);
@@ -276,6 +306,7 @@ export function useLeadOptReferenceFragment({
     referencePreviewSeqRef.current += 1;
     hydratedUploadKeyRef.current = '';
     hydratedSelectionKeyRef.current = '';
+    hydratedSelectionScopeRef.current = '';
     const targetName = String(persistedUploads?.target?.fileName || '').trim();
     const targetContent = String(persistedUploads?.target?.content || '').trim();
     if (targetName && targetContent) return;
@@ -302,8 +333,25 @@ export function useLeadOptReferenceFragment({
     const ids = Array.isArray(initialSelection?.fragmentIds) ? initialSelection?.fragmentIds : [];
     const atoms = Array.isArray(initialSelection?.atomIndices) ? initialSelection?.atomIndices : [];
     const queries = Array.isArray(initialSelection?.variableQueries) ? initialSelection?.variableQueries : [];
-    return `${String(scopeKey || '')}|${ids.join(',')}|${atoms.join(',')}|${queries.join(';;')}`;
-  }, [initialSelection?.atomIndices, initialSelection?.fragmentIds, initialSelection?.variableQueries, scopeKey]);
+    const items = Array.isArray(initialSelection?.variableItems) ? initialSelection?.variableItems : [];
+    const itemKey = items
+      .map((item) => {
+        const itemId = String(item?.fragmentId || '').trim();
+        const itemQuery = String(item?.query || '').trim();
+        const itemAtoms = normalizeAtomIndexList(item?.atomIndices).join(',');
+        return `${itemId}#${itemQuery}#${itemAtoms}`;
+      })
+      .join('||');
+    return `${String(scopeKey || '')}|${ids.join(',')}|${atoms.join(',')}|${queries.join(';;')}|${itemKey}`;
+  }, [initialSelection?.atomIndices, initialSelection?.fragmentIds, initialSelection?.variableItems, initialSelection?.variableQueries, scopeKey]);
+
+  const hasInitialSelectionSeed = useMemo(() => {
+    const ids = Array.isArray(initialSelection?.fragmentIds) ? initialSelection.fragmentIds : [];
+    const atoms = Array.isArray(initialSelection?.atomIndices) ? initialSelection.atomIndices : [];
+    const queries = Array.isArray(initialSelection?.variableQueries) ? initialSelection.variableQueries : [];
+    const items = Array.isArray(initialSelection?.variableItems) ? initialSelection.variableItems : [];
+    return ids.length > 0 || atoms.length > 0 || queries.length > 0 || items.length > 0;
+  }, [initialSelection?.atomIndices, initialSelection?.fragmentIds, initialSelection?.variableItems, initialSelection?.variableQueries]);
 
   useEffect(() => {
     if (typeof onPersistedUploadsChange !== 'function') return;
@@ -362,54 +410,115 @@ export function useLeadOptReferenceFragment({
   useEffect(() => {
     if (!initialSelection) return;
     if (fragments.length === 0) return;
+    const selectionScope = String(scopeKey || '');
+    if (hydratedSelectionScopeRef.current === selectionScope && selectionScope) return;
     if (hydratedSelectionKeyRef.current === initialSelectionKey) return;
 
     const requestedIds = uniqueFragmentIds(Array.isArray(initialSelection.fragmentIds) ? initialSelection.fragmentIds : []);
     const variableQueries = Array.isArray(initialSelection.variableQueries)
       ? initialSelection.variableQueries.map((value) => readText(value).trim()).filter(Boolean)
       : [];
-    const selectedAtoms = Array.isArray(initialSelection.atomIndices)
-      ? Array.from(
-          new Set(
-            initialSelection.atomIndices
-              .map((value) => Number(value))
-              .filter((value) => Number.isFinite(value) && value >= 0)
-              .map((value) => Math.floor(value))
-          )
-        )
+    const selectedAtoms = normalizeAtomIndexList(initialSelection.atomIndices);
+    const selectedAtomKey = selectedAtoms.join(',');
+    const requestedItems = Array.isArray(initialSelection.variableItems)
+      ? initialSelection.variableItems
+          .map((item) => {
+            const row = item && typeof item === 'object' ? item : {};
+            return {
+              fragmentId: readText((row as { fragmentId?: unknown }).fragmentId).trim(),
+              query: readText((row as { query?: unknown }).query).trim(),
+              atomIndices: normalizeAtomIndexList((row as { atomIndices?: unknown }).atomIndices)
+            };
+          })
+          .filter((item) => item.fragmentId || item.query || item.atomIndices.length > 0)
       : [];
 
-    let nextIds = requestedIds.filter((id) => fragmentById.has(id));
+    const expandedRequestedIds = requestedIds.flatMap((id) => {
+      const normalizedId = String(id || '').trim();
+      if (!normalizedId) return [];
+      if (fragmentById.has(normalizedId)) return [normalizedId];
+      return parseMergedFragmentIdTokens(normalizedId).filter((token) => fragmentById.has(token));
+    });
+
+    let nextIds: string[] = [];
+    const used = new Set<string>();
+    const pushFragmentId = (fragmentId: string) => {
+      const normalizedId = String(fragmentId || '').trim();
+      if (!normalizedId || used.has(normalizedId) || !fragmentById.has(normalizedId)) return;
+      used.add(normalizedId);
+      nextIds.push(normalizedId);
+    };
+    const matchByAtomSet = (atomIndices: number[]): string => {
+      const key = normalizeAtomIndexList(atomIndices).join(',');
+      if (!key) return '';
+      return (
+        fragments.find((fragment) => normalizeAtomIndexList(fragment.atom_indices).join(',') === key)?.fragment_id || ''
+      );
+    };
+
+    // Primary restore path: variable items from saved selection/query payload.
+    requestedItems.forEach((item) => {
+      const exactByAtoms = item.atomIndices.length > 0 ? matchByAtomSet(item.atomIndices) : '';
+      if (exactByAtoms) {
+        pushFragmentId(exactByAtoms);
+        return;
+      }
+      if (item.fragmentId) {
+        if (fragmentById.has(item.fragmentId)) {
+          pushFragmentId(item.fragmentId);
+          return;
+        }
+        parseMergedFragmentIdTokens(item.fragmentId).forEach((token) => pushFragmentId(token));
+        if (nextIds.length > 0) return;
+      }
+      if (item.query) {
+        const matched = fragments.find((fragment) => {
+          const query = readText(fragment.smiles).trim();
+          const display = readText(fragment.display_smiles).trim();
+          return query === item.query || display === item.query;
+        });
+        if (matched) pushFragmentId(matched.fragment_id);
+      }
+    });
+
+    if (nextIds.length === 0) {
+      expandedRequestedIds.forEach((id) => pushFragmentId(id));
+    }
 
     if (nextIds.length === 0 && selectedAtoms.length > 0) {
-      nextIds = [...fragments]
-        .map((fragment) => {
-          const overlap = fragment.atom_indices.filter((atomIndex) => selectedAtoms.includes(atomIndex)).length;
-          return { fragmentId: fragment.fragment_id, overlap };
-        })
-        .filter((item) => item.overlap > 0)
-        .sort((a, b) => b.overlap - a.overlap)
-        .map((item) => item.fragmentId);
+      const exact = fragments.find((fragment) => normalizeAtomIndexList(fragment.atom_indices).join(',') === selectedAtomKey);
+      if (exact) pushFragmentId(exact.fragment_id);
     }
 
     if (nextIds.length === 0 && variableQueries.length > 0) {
-      const querySet = new Set(variableQueries);
-      nextIds = fragments
-        .filter((fragment) => {
-          const query = readText(fragment.smiles).trim();
-          const display = readText(fragment.display_smiles).trim();
-          return querySet.has(query) || querySet.has(display);
-        })
-        .map((fragment) => fragment.fragment_id);
+      const byQuery = variableQueries.flatMap((queryValue) => {
+        const token = String(queryValue || '').trim();
+        if (!token) return [];
+        return fragments
+          .filter((fragment) => {
+            const query = readText(fragment.smiles).trim();
+            const display = readText(fragment.display_smiles).trim();
+            if (query !== token && display !== token) return false;
+            const fragmentId = String(fragment.fragment_id || '').trim();
+            if (!fragmentId || used.has(fragmentId)) return false;
+            return true;
+          })
+          .map((fragment) => fragment.fragment_id);
+      });
+      byQuery.forEach((id) => pushFragmentId(id));
     }
 
-    if (nextIds.length === 0) return;
     const normalized = uniqueFragmentIds(nextIds).slice(0, 6);
-    if (normalized.length === 0) return;
     hydratedSelectionKeyRef.current = initialSelectionKey;
-    setActiveFragmentId(normalized[0]);
+    if (normalized.length === 0) {
+      setActiveFragmentId('');
+      setSelectedFragmentIds([]);
+      return;
+    }
+    hydratedSelectionScopeRef.current = selectionScope;
+    setActiveFragmentId(normalized[0] || '');
     setSelectedFragmentIds(normalized);
-  }, [fragmentById, fragments, initialSelection, initialSelectionKey]);
+  }, [fragmentById, fragments, initialSelection, initialSelectionKey, scopeKey]);
 
   const resolvedVariableSelection = useMemo(
     () => resolveVariableSelection(selectedFragmentItems, fragments, ligandAtomBonds),
@@ -557,10 +666,12 @@ export function useLeadOptReferenceFragment({
       defaultFragmentId,
       nextFragments[0]?.fragment_id || ''
     ]).slice(0, 1);
-    const firstRecommended = defaultIds[0] || '';
-    if (firstRecommended) setActiveFragmentId(firstRecommended);
-    setSelectedFragmentIds(defaultIds);
-    if (!currentVariableQuery.trim() && response.auto_generated_rules?.variable_smarts) {
+    if (!hasInitialSelectionSeed) {
+      const firstRecommended = defaultIds[0] || '';
+      if (firstRecommended) setActiveFragmentId(firstRecommended);
+      setSelectedFragmentIds(defaultIds);
+    }
+    if (!hasInitialSelectionSeed && !currentVariableQuery.trim() && response.auto_generated_rules?.variable_smarts) {
       const first = response.auto_generated_rules.variable_smarts.split(';;')[0] || '';
       if (first) onAutoVariableQuery(first);
     }
@@ -692,10 +803,12 @@ export function useLeadOptReferenceFragment({
           defaultFragmentId,
           nextFragments[0]?.fragment_id || ''
         ]).slice(0, 1);
-        const firstRecommended = defaultIds[0] || '';
-        if (firstRecommended) setActiveFragmentId(firstRecommended);
-        setSelectedFragmentIds(defaultIds);
-        if (!currentVariableQuery.trim() && fragmentResponse.auto_generated_rules?.variable_smarts) {
+        if (!hasInitialSelectionSeed) {
+          const firstRecommended = defaultIds[0] || '';
+          if (firstRecommended) setActiveFragmentId(firstRecommended);
+          setSelectedFragmentIds(defaultIds);
+        }
+        if (!hasInitialSelectionSeed && !currentVariableQuery.trim() && fragmentResponse.auto_generated_rules?.variable_smarts) {
           const first = fragmentResponse.auto_generated_rules.variable_smarts.split(';;')[0] || '';
           if (first) onAutoVariableQuery(first);
         }

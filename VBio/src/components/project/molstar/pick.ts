@@ -656,7 +656,8 @@ export function subscribePickEvents(
   onResiduePick?: (pick: MolstarResiduePick) => void,
   pickMode: 'click' | 'alt-left' = 'click',
   isModifierPressed?: () => boolean,
-  shouldSuppress?: () => boolean
+  shouldSuppress?: () => boolean,
+  includePassiveSelectionEvents = false
 ): (() => void) | null {
   if (!onResiduePick) return null;
   const subscriptions: Array<{ unsubscribe: () => void }> = [];
@@ -745,37 +746,39 @@ export function subscribePickEvents(
     }
   }
 
-  const selectionChanged = viewer?.plugin?.managers?.structure?.selection?.events?.changed;
-  if (selectionChanged && typeof selectionChanged.subscribe === 'function') {
-    const sub = selectionChanged.subscribe((event: any) => {
-      if (shouldSuppress?.()) return;
-      if (pickMode !== 'click') return;
-      const loci = extractLociFromEvent(event);
-      if (!loci) return;
-      const parsed = parsePickFromEvent({ current: { loci } }) ?? parsePickFromSelectionEntry(event);
-      if (!parsed) return;
-      pickDebugLog('selection.changed', parsed.label);
-      emitPick(parsed);
-    });
-    if (sub && typeof sub.unsubscribe === 'function') {
-      subscriptions.push(sub);
+  if (includePassiveSelectionEvents) {
+    const selectionChanged = viewer?.plugin?.managers?.structure?.selection?.events?.changed;
+    if (selectionChanged && typeof selectionChanged.subscribe === 'function') {
+      const sub = selectionChanged.subscribe((event: any) => {
+        if (shouldSuppress?.()) return;
+        if (pickMode !== 'click') return;
+        const loci = extractLociFromEvent(event);
+        if (!loci) return;
+        const parsed = parsePickFromEvent({ current: { loci } }) ?? parsePickFromSelectionEntry(event);
+        if (!parsed) return;
+        pickDebugLog('selection.changed', parsed.label);
+        emitPick(parsed);
+      });
+      if (sub && typeof sub.unsubscribe === 'function') {
+        subscriptions.push(sub);
+      }
     }
-  }
 
-  const focusChanged = viewer?.plugin?.managers?.structure?.focus?.behaviors?.current;
-  if (focusChanged && typeof focusChanged.subscribe === 'function') {
-    const sub = focusChanged.subscribe((event: any) => {
-      if (shouldSuppress?.()) return;
-      if (pickMode !== 'click') return;
-      const loci = extractLociFromEvent(event);
-      if (!loci) return;
-      const parsed = parsePickFromEvent({ current: { loci } }) ?? parsePickFromFocusEvent(event);
-      if (!parsed) return;
-      pickDebugLog('focus.changed', parsed.label);
-      emitPick(parsed);
-    });
-    if (sub && typeof sub.unsubscribe === 'function') {
-      subscriptions.push(sub);
+    const focusChanged = viewer?.plugin?.managers?.structure?.focus?.behaviors?.current;
+    if (focusChanged && typeof focusChanged.subscribe === 'function') {
+      const sub = focusChanged.subscribe((event: any) => {
+        if (shouldSuppress?.()) return;
+        if (pickMode !== 'click') return;
+        const loci = extractLociFromEvent(event);
+        if (!loci) return;
+        const parsed = parsePickFromEvent({ current: { loci } }) ?? parsePickFromFocusEvent(event);
+        if (!parsed) return;
+        pickDebugLog('focus.changed', parsed.label);
+        emitPick(parsed);
+      });
+      if (sub && typeof sub.unsubscribe === 'function') {
+        subscriptions.push(sub);
+      }
     }
   }
 

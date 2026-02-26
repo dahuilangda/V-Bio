@@ -182,12 +182,29 @@ function buildLeadOptSelectionFromPayload(payload: Record<string, unknown>, cont
       atom_indices: atomIndices
     };
   });
+  const selectedFragmentIdsFromPayload = Array.isArray(payload.selected_fragment_ids)
+    ? payload.selected_fragment_ids
+        .map((value) => readText(value).trim())
+        .filter(Boolean)
+    : [];
+  const selectedFragmentAtomIndicesFromPayload = Array.isArray(payload.selected_fragment_atom_indices)
+    ? payload.selected_fragment_atom_indices
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value >= 0)
+        .map((value) => Math.floor(value))
+    : [];
   const selectedFragmentIds = Array.from(
-    new Set(variableItems.map((item) => readText(item.fragment_id).trim()).filter(Boolean))
+    new Set(
+      selectedFragmentIdsFromPayload.length > 0
+        ? selectedFragmentIdsFromPayload
+        : variableItems.map((item) => readText(item.fragment_id).trim()).filter(Boolean)
+    )
   );
   const selectedFragmentAtomIndices = Array.from(
     new Set(
-      variableItems.flatMap((item) => item.atom_indices || [])
+      selectedFragmentAtomIndicesFromPayload.length > 0
+        ? selectedFragmentAtomIndicesFromPayload
+        : variableItems.flatMap((item) => item.atom_indices || [])
     )
   );
   const variableQueries = Array.from(

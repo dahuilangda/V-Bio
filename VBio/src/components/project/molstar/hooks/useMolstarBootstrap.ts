@@ -134,7 +134,8 @@ export function useMolstarBootstrap({
           hasResiduePickHandler ? emitResiduePick : undefined,
           pickMode,
           isModifierPick,
-          () => suppressPickEventsRef.current
+          () => suppressPickEventsRef.current,
+          false
         );
         setReady(true);
       } catch (e) {
@@ -181,7 +182,8 @@ export function useMolstarBootstrap({
       hasResiduePickHandler ? emitResiduePick : undefined,
       pickMode,
       isModifierPick,
-      () => suppressPickEventsRef.current
+      () => suppressPickEventsRef.current,
+      false
     );
     return () => {
       if (pickUnsubscribeRef.current) {
@@ -200,4 +202,3 @@ export function useMolstarBootstrap({
     suppressPickEventsRef
   };
 }
-

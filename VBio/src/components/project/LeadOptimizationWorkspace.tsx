@@ -331,21 +331,32 @@ export function LeadOptimizationWorkspace({
       : Array.isArray(variableSpec.items)
         ? variableSpec.items
         : [];
+    const normalizedVariableItems = variableItems
+      .map((item) => {
+        const row = item && typeof item === 'object' ? (item as Record<string, unknown>) : {};
+        const atomValues = Array.isArray(row.atom_indices) ? row.atom_indices : [];
+        return {
+          fragmentId: readText(row.fragment_id).trim(),
+          query: readText(row.query).trim(),
+          atomIndices: atomValues
+            .map((value) => Number(value))
+            .filter((value) => Number.isFinite(value) && value >= 0)
+            .map((value) => Math.floor(value))
+        };
+      })
+      .filter((item) => item.fragmentId || item.query || item.atomIndices.length > 0);
     const fragmentIds = Array.isArray(selection.selected_fragment_ids)
       ? selection.selected_fragment_ids
-      : variableItems
-        .map((item) => readText((item as Record<string, unknown>).fragment_id).trim())
+      : normalizedVariableItems
+        .map((item) => item.fragmentId)
         .filter(Boolean);
     const atomIndices = Array.isArray(selection.selected_fragment_atom_indices)
       ? selection.selected_fragment_atom_indices
-      : variableItems.flatMap((item) => {
-          const atomValues = (item as Record<string, unknown>).atom_indices;
-          return Array.isArray(atomValues) ? atomValues : [];
-        });
+      : normalizedVariableItems.flatMap((item) => item.atomIndices);
     const variableQueries = Array.isArray(selection.variable_queries)
       ? selection.variable_queries
-      : variableItems
-        .map((item) => readText((item as Record<string, unknown>).query).trim())
+      : normalizedVariableItems
+        .map((item) => item.query)
         .filter(Boolean);
     return {
       fragmentIds: fragmentIds.map((value) => readText(value).trim()).filter(Boolean),
@@ -353,7 +364,8 @@ export function LeadOptimizationWorkspace({
         .map((value) => Number(value))
         .filter((value) => Number.isFinite(value) && value >= 0)
         .map((value) => Math.floor(value)),
-      variableQueries: variableQueries.map((value) => readText(value).trim()).filter(Boolean)
+      variableQueries: variableQueries.map((value) => readText(value).trim()).filter(Boolean),
+      variableItems: normalizedVariableItems
     };
   }, [initialMmpSnapshot]);
 
@@ -527,6 +539,23 @@ export function LeadOptimizationWorkspace({
         .map((fragmentId) => fragmentById.get(fragmentId))
         .filter((item): item is LigandFragmentItem => Boolean(item)),
     [fragmentById, reference.selectedFragmentIds]
+  );
+
+  const selectedFragmentAtomIndices = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          selectedFragmentItems.flatMap((item) =>
+            Array.isArray(item.atom_indices)
+              ? item.atom_indices
+                  .map((value) => Number(value))
+                  .filter((value) => Number.isFinite(value) && value >= 0)
+                  .map((value) => Math.floor(value))
+              : []
+          )
+        )
+      ),
+    [selectedFragmentItems]
   );
 
   const inferredQueryMode = useMemo(
@@ -763,6 +792,8 @@ export function LeadOptimizationWorkspace({
       groupedByEnvironment: queryForm.groupedByEnvironment,
       minPairs: queryForm.minPairs,
       envRadius: queryForm.envRadius,
+      selectedFragmentIds: reference.selectedFragmentIds,
+      selectedFragmentAtomIndices,
       onTaskQueued:
         typeof onMmpTaskQueued === 'function'
           ? async ({ taskId, requestPayload }) => {
@@ -804,6 +835,8 @@ export function LeadOptimizationWorkspace({
     reference.fragments,
     reference.ligandAtomBonds,
     reference.persistedUploads,
+    reference.selectedFragmentIds,
+    selectedFragmentAtomIndices,
     selectedFragmentItems,
     canQuery,
     onMmpTaskQueued,

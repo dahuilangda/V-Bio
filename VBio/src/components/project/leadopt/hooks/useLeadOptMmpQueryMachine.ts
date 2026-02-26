@@ -40,6 +40,8 @@ interface RunMmpQueryInput {
   groupedByEnvironment: GroupedByEnvironmentMode;
   minPairs: number;
   envRadius: number;
+  selectedFragmentIds?: string[];
+  selectedFragmentAtomIndices?: number[];
   onTaskQueued?: (payload: { taskId: string; requestPayload: Record<string, unknown> }) => void | Promise<void>;
   onTaskCompleted?: (payload: {
     taskId: string;
@@ -1146,6 +1148,8 @@ export function useLeadOptMmpQueryMachine({
       groupedByEnvironment,
       minPairs,
       envRadius,
+      selectedFragmentIds,
+      selectedFragmentAtomIndices,
       onTaskQueued,
       onTaskCompleted,
       onTaskFailed
@@ -1194,6 +1198,21 @@ export function useLeadOptMmpQueryMachine({
             mode: variableItems[0]?.mode || 'substructure',
             items: variableItems
           },
+          selected_fragment_ids: Array.from(
+            new Set(
+              (Array.isArray(selectedFragmentIds) ? selectedFragmentIds : [])
+                .map((item) => String(item || '').trim())
+                .filter(Boolean)
+            )
+          ),
+          selected_fragment_atom_indices: Array.from(
+            new Set(
+              (Array.isArray(selectedFragmentAtomIndices) ? selectedFragmentAtomIndices : [])
+                .map((value) => Number(value))
+                .filter((value) => Number.isFinite(value) && value >= 0)
+                .map((value) => Math.floor(value))
+            )
+          ),
           constant_spec: constantQuery.trim() ? { query: constantQuery.trim(), mode: 'substructure' } : {},
           property_targets: propertyTargets,
           mmp_database_id: mmpDatabaseId,
