@@ -11,6 +11,11 @@ function getBaseName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
+function readText(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  return String(value);
+}
+
 function parseJsonObject(text: string | null | undefined): Record<string, unknown> | null {
   if (!text) return null;
   try {
@@ -1492,6 +1497,202 @@ function extractResiduePlddtsByChainFromStructure(
     : extractResiduePlddtsByChainFromCif(structureText);
 }
 
+const DESIGN_RANK_RE = /(?:^|\/)rank_(\d+)(?:_|\.|$)/i;
+const MAX_PEPTIDE_CANDIDATES_FOR_UI = 24;
+
+function asRecordArray(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item) => item && typeof item === 'object' && !Array.isArray(item)) as Array<Record<string, unknown>>;
+}
+
+function readFirstObjectArrayPath(payload: Record<string, unknown>, paths: string[]): Array<Record<string, unknown>> {
+  for (const path of paths) {
+    let current: unknown = payload;
+    let matched = true;
+    for (const token of path.split('.')) {
+      if (!current || typeof current !== 'object' || Array.isArray(current)) {
+        matched = false;
+        break;
+      }
+      current = (current as Record<string, unknown>)[token];
+    }
+    if (!matched) continue;
+    const rows = asRecordArray(current);
+    if (rows.length > 0) return rows;
+  }
+  return [];
+}
+
+function readFiniteNumberLoose(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function firstNonEmptyTextByKeys(row: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const text = readText(row[key]).trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+function resolveDesignStructurePathFromRow(
+  row: Record<string, unknown>,
+  structureByName: Set<string>,
+  structurePathByBaseName: Map<string, string>
+): string {
+  const directCandidates = [
+    'structure_path',
+    'structure_file',
+    'structurePath',
+    'structureFile',
+    'structure_name',
+    'structureName',
+    'path',
+    'file',
+    'model_path',
+    'model_file'
+  ];
+  for (const key of directCandidates) {
+    const raw = readText(row[key]).trim();
+    if (!raw) continue;
+    if (structureByName.has(raw)) return raw;
+    const byBaseName = structurePathByBaseName.get(getBaseName(raw).toLowerCase());
+    if (byBaseName) return byBaseName;
+  }
+  return '';
+}
+
+async function parsePeptideDesignCandidatesFromBundle(
+  zip: JSZip,
+  names: string[]
+): Promise<Array<Record<string, unknown>>> {
+  const summaryCandidates = names
+    .filter((name) => {
+      const base = getBaseName(name).toLowerCase();
+      if (!base.endsWith('.json')) return false;
+      if (base === 'results_summary.json') return true;
+      return base.includes('design_results') || base.includes('best_sequences');
+    })
+    .sort((a, b) => a.length - b.length);
+  if (summaryCandidates.length === 0) return [];
+
+  let rows: Array<Record<string, unknown>> = [];
+  for (const summaryPath of summaryCandidates) {
+    const payload = await readZipJson(zip, summaryPath);
+    if (!payload) continue;
+    rows = readFirstObjectArrayPath(payload, [
+      'top_results',
+      'best_sequences',
+      'peptide_design.best_sequences',
+      'peptide_design.candidates',
+      'results.best_sequences',
+      'results.candidates',
+      'peptide_results',
+      'candidates'
+    ]);
+    if (rows.length > 0) break;
+  }
+  if (rows.length === 0) return [];
+
+  const structureFiles = names
+    .filter((name) => {
+      const lower = name.toLowerCase();
+      if (!/\.(cif|mmcif|pdb)$/i.test(lower)) return false;
+      if (lower.includes('af3/output/')) return false;
+      if (lower.includes('confidence_') || lower.includes('summary_confidence')) return false;
+      // Prefer design structure folders, but still allow rank_* files elsewhere.
+      return (
+        lower.startsWith('structures/') ||
+        lower.includes('/structures/') ||
+        lower.includes('/designs/') ||
+        lower.includes('/results/') ||
+        DESIGN_RANK_RE.test(lower)
+      );
+    })
+    .map((name) => {
+      const match = DESIGN_RANK_RE.exec(name);
+      const rank = match ? Number(match[1]) : Number.NaN;
+      return {
+        name,
+        rank: Number.isFinite(rank) ? rank : Number.MAX_SAFE_INTEGER,
+        hasRank: Number.isFinite(rank)
+      };
+    })
+    .sort((a, b) => {
+      if (a.hasRank !== b.hasRank) return a.hasRank ? -1 : 1;
+      return a.rank - b.rank || a.name.localeCompare(b.name);
+    });
+
+  const byRank = new Map<number, string>();
+  structureFiles.forEach((item, index) => {
+    const resolvedRank = Number.isFinite(item.rank) && item.rank > 0 ? item.rank : index + 1;
+    if (!byRank.has(resolvedRank)) byRank.set(resolvedRank, item.name);
+  });
+  const structureByName = new Set(structureFiles.map((item) => item.name));
+  const structurePathByBaseName = new Map<string, string>();
+  structureFiles.forEach((item) => {
+    const base = getBaseName(item.name).toLowerCase();
+    if (!structurePathByBaseName.has(base)) {
+      structurePathByBaseName.set(base, item.name);
+    }
+  });
+
+  const candidates: Array<Record<string, unknown>> = [];
+  for (let index = 0; index < rows.length && candidates.length < MAX_PEPTIDE_CANDIDATES_FOR_UI; index += 1) {
+    const row = rows[index];
+    const rankRaw =
+      readFiniteNumberLoose(row.rank) ??
+      readFiniteNumberLoose(row.ranking) ??
+      readFiniteNumberLoose(row.order) ??
+      index + 1;
+    const rank = Math.max(1, Math.floor(rankRaw));
+    const structurePath =
+      resolveDesignStructurePathFromRow(row, structureByName, structurePathByBaseName) ||
+      byRank.get(rank) ||
+      structureFiles[index]?.name ||
+      '';
+    const structureText = structurePath ? (await zip.file(structurePath)?.async('text')) || '' : '';
+    const structureFormat: 'cif' | 'pdb' = getBaseName(structurePath).toLowerCase().endsWith('.pdb') ? 'pdb' : 'cif';
+    const sequence = firstNonEmptyTextByKeys(row, [
+      'peptide_sequence',
+      'binder_sequence',
+      'candidate_sequence',
+      'designed_sequence',
+      'sequence'
+    ]);
+    candidates.push({
+      rank,
+      generation: readFiniteNumberLoose(row.generation) ?? readFiniteNumberLoose(row.iteration),
+      sequence,
+      score:
+        readFiniteNumberLoose(row.composite_score) ??
+        readFiniteNumberLoose(row.score) ??
+        readFiniteNumberLoose(row.fitness) ??
+        readFiniteNumberLoose(row.objective),
+      iptm: readFiniteNumberLoose(row.iptm) ?? readFiniteNumberLoose(row.pair_iptm),
+      plddt:
+        readFiniteNumberLoose(row.binder_avg_plddt) ??
+        readFiniteNumberLoose(row.plddt) ??
+        readFiniteNumberLoose(row.ligand_mean_plddt) ??
+        readFiniteNumberLoose(row.mean_plddt),
+      structure_name: getBaseName(structurePath),
+      structure_format: structureFormat,
+      structure_text: structureText
+    });
+  }
+
+  return candidates.filter((item) => {
+    const sequence = readText(item.sequence).trim();
+    const structureText = readText(item.structure_text).trim();
+    return Boolean(sequence || structureText);
+  });
+}
+
 function compactConfidenceForStorage(input: Record<string, unknown>): Record<string, unknown> {
   const next = { ...input };
   const pae = next.pae;
@@ -1499,6 +1700,51 @@ function compactConfidenceForStorage(input: Record<string, unknown>): Record<str
   if (Array.isArray(pae) || (pae && typeof pae === 'object')) {
     delete next.pae;
   }
+
+  const compactCandidateRows = (value: unknown): Array<Record<string, unknown>> => {
+    if (!Array.isArray(value)) return [];
+    return value
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object' && !Array.isArray(item)))
+      .slice(0, MAX_PEPTIDE_CANDIDATES_FOR_UI)
+      .map((row) => {
+        const compact = { ...row };
+        delete compact.structure_text;
+        delete compact.structureText;
+        delete compact.cif_text;
+        delete compact.pdb_text;
+        delete compact.content;
+        return compact;
+      });
+  };
+
+  const bestSequences = compactCandidateRows(next.best_sequences);
+  if (bestSequences.length > 0) {
+    next.best_sequences = bestSequences;
+  }
+
+  const currentBestSequences = compactCandidateRows(next.current_best_sequences);
+  if (currentBestSequences.length > 0) {
+    next.current_best_sequences = currentBestSequences;
+  }
+
+  const peptideDesignRaw = next.peptide_design;
+  if (peptideDesignRaw && typeof peptideDesignRaw === 'object' && !Array.isArray(peptideDesignRaw)) {
+    const peptideDesign = { ...(peptideDesignRaw as Record<string, unknown>) };
+    const peptideBest = compactCandidateRows(peptideDesign.best_sequences);
+    if (peptideBest.length > 0) {
+      peptideDesign.best_sequences = peptideBest;
+      if (!Number.isFinite(Number(peptideDesign.candidate_count))) {
+        peptideDesign.candidate_count = peptideBest.length;
+      }
+    }
+    const peptideCurrentBest = compactCandidateRows(peptideDesign.current_best_sequences);
+    if (peptideCurrentBest.length > 0) {
+      peptideDesign.current_best_sequences = peptideCurrentBest;
+    }
+    delete peptideDesign.candidates;
+    next.peptide_design = peptideDesign;
+  }
+
   return next;
 }
 
@@ -1736,6 +1982,25 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
     confidence = {
       ...confidence,
       residue_plddt_by_chain: extractedResiduePlddtByChain
+    };
+  }
+  const peptideDesignCandidates = await parsePeptideDesignCandidatesFromBundle(zip, names);
+  if (peptideDesignCandidates.length > 0) {
+    const confidenceRecordLocal = confidence as Record<string, unknown>;
+    const existingPeptideDesign =
+      confidenceRecordLocal.peptide_design &&
+      typeof confidenceRecordLocal.peptide_design === 'object' &&
+      !Array.isArray(confidenceRecordLocal.peptide_design)
+        ? (confidenceRecordLocal.peptide_design as Record<string, unknown>)
+        : {};
+    confidence = {
+      ...confidence,
+      peptide_design: {
+        ...existingPeptideDesign,
+        best_sequences: peptideDesignCandidates,
+        candidate_count: peptideDesignCandidates.length
+      },
+      best_sequences: peptideDesignCandidates
     };
   }
   confidence = compactConfidenceForStorage(confidence);

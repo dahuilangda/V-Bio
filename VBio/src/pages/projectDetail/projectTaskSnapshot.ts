@@ -30,8 +30,9 @@ function normalizeComponents(components: InputComponent[]): InputComponent[] {
 }
 
 export function defaultConfigFromProject(project: Project): ProjectInputConfig {
-  const config = buildDefaultInputConfig();
-  if (normalizeWorkflowKey(project.task_type) === 'affinity') {
+  const workflowKey = normalizeWorkflowKey(project.task_type);
+  const config = buildDefaultInputConfig(workflowKey);
+  if (workflowKey === 'affinity') {
     config.components = [createInputComponent('protein')];
     return config;
   }

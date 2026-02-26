@@ -22,6 +22,7 @@ interface ComponentCompletionSummary {
 interface UseProjectWorkflowContextInput {
   draft: DraftLike | null;
   fallbackBackend: string;
+  isPeptideDesignWorkflow?: boolean;
 }
 
 interface UseProjectWorkflowContextOutput {
@@ -35,7 +36,11 @@ interface UseProjectWorkflowContextOutput {
   isBondOnlyBackend: boolean;
 }
 
-export function useProjectWorkflowContext({ draft, fallbackBackend }: UseProjectWorkflowContextInput): UseProjectWorkflowContextOutput {
+export function useProjectWorkflowContext({
+  draft,
+  fallbackBackend,
+  isPeptideDesignWorkflow = false
+}: UseProjectWorkflowContextInput): UseProjectWorkflowContextOutput {
   const normalizedDraftComponents = useMemo(() => {
     if (!draft) return [];
     return normalizeComponents(draft.inputConfig.components);
@@ -57,8 +62,11 @@ export function useProjectWorkflowContext({ draft, fallbackBackend }: UseProject
   }, [draft]);
 
   const incompleteComponentOrders = useMemo(
-    () => listIncompleteComponentOrders(normalizedDraftComponents),
-    [normalizedDraftComponents]
+    () =>
+      listIncompleteComponentOrders(normalizedDraftComponents, {
+        ignoreEmptyLigand: isPeptideDesignWorkflow
+      }),
+    [normalizedDraftComponents, isPeptideDesignWorkflow]
   );
 
   const componentCompletion = useMemo<ComponentCompletionSummary>(() => {

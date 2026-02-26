@@ -1,7 +1,7 @@
 import type { MutableRefObject } from 'react';
 import { submitPrediction } from '../../api/backendApi';
 import { assignChainIdsForComponents } from '../../utils/chainAssignments';
-import { extractPrimaryProteinAndLigand } from '../../utils/projectInputs';
+import { extractPrimaryProteinAndLigand, PEPTIDE_DESIGNED_LIGAND_TOKEN } from '../../utils/projectInputs';
 import type { InputComponent, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
 
 export type PredictionWorkspaceTab = 'results' | 'basics' | 'components' | 'constraints';
@@ -18,6 +18,7 @@ export interface PredictionDraftFields {
 export interface PredictionSubmitDeps {
   project: Project;
   draft: PredictionDraftFields;
+  isPeptideDesignWorkflow?: boolean;
   workspaceTab: PredictionWorkspaceTab;
   proteinTemplates: Record<string, ProteinTemplateUpload>;
   submitInFlightRef: MutableRefObject<boolean>;
@@ -67,10 +68,98 @@ export interface PredictionSubmitDeps {
   saveProjectInputConfig: (projectId: string, config: ProjectInputConfig) => void;
 }
 
+function resolveComponentIdByChainId(components: InputComponent[], chainId: string): string | null {
+  const normalizedChainId = String(chainId || '').trim();
+  if (!normalizedChainId || normalizedChainId === PEPTIDE_DESIGNED_LIGAND_TOKEN) return null;
+  const assignments = assignChainIdsForComponents(components);
+  for (let index = 0; index < assignments.length; index += 1) {
+    const chainIds = assignments[index] || [];
+    if (!chainIds.includes(normalizedChainId)) continue;
+    return components[index]?.id || null;
+  }
+  return null;
+}
+
+function buildQueuedPeptideDesignConfidenceSnapshot(options: ProjectInputConfig['options']): Record<string, unknown> {
+  const requestOptions: Record<string, unknown> = {
+    ...options
+  };
+  const peptideDesign: Record<string, unknown> = {};
+
+  const designMode = options.peptideDesignMode;
+  if (designMode) {
+    requestOptions.peptide_design_mode = designMode;
+    peptideDesign.design_mode = designMode;
+  }
+  if (typeof options.peptideBinderLength === 'number' && Number.isFinite(options.peptideBinderLength)) {
+    requestOptions.peptide_binder_length = options.peptideBinderLength;
+    peptideDesign.binder_length = Math.max(0, Math.floor(options.peptideBinderLength));
+  }
+  if (typeof options.peptideIterations === 'number' && Number.isFinite(options.peptideIterations)) {
+    requestOptions.peptide_iterations = options.peptideIterations;
+    peptideDesign.iterations = Math.max(0, Math.floor(options.peptideIterations));
+    peptideDesign.total_generations = Math.max(0, Math.floor(options.peptideIterations));
+    peptideDesign.current_generation = 0;
+  }
+  if (typeof options.peptidePopulationSize === 'number' && Number.isFinite(options.peptidePopulationSize)) {
+    requestOptions.peptide_population_size = options.peptidePopulationSize;
+    peptideDesign.population_size = Math.max(0, Math.floor(options.peptidePopulationSize));
+  }
+  if (typeof options.peptideEliteSize === 'number' && Number.isFinite(options.peptideEliteSize)) {
+    requestOptions.peptide_elite_size = options.peptideEliteSize;
+    peptideDesign.elite_size = Math.max(0, Math.floor(options.peptideEliteSize));
+  }
+  if (typeof options.peptideMutationRate === 'number' && Number.isFinite(options.peptideMutationRate)) {
+    requestOptions.peptide_mutation_rate = options.peptideMutationRate;
+    peptideDesign.mutation_rate = options.peptideMutationRate;
+  }
+
+  peptideDesign.current_status = 'queued';
+  peptideDesign.status_message = 'Task submitted and waiting in queue';
+
+  const progressSnapshot: Record<string, unknown> = {
+    current_status: peptideDesign.current_status,
+    status_message: peptideDesign.status_message
+  };
+  if (typeof peptideDesign.current_generation === 'number') progressSnapshot.current_generation = peptideDesign.current_generation;
+  if (typeof peptideDesign.total_generations === 'number') progressSnapshot.total_generations = peptideDesign.total_generations;
+
+  return {
+    request: {
+      options: requestOptions
+    },
+    peptide_design: peptideDesign,
+    progress: progressSnapshot
+  };
+}
+
+function buildPredictionSubmissionConfig(
+  normalizedConfig: ProjectInputConfig,
+  isPeptideDesignWorkflow: boolean
+): ProjectInputConfig {
+  if (!isPeptideDesignWorkflow) return normalizedConfig;
+  const ligandSelector = String(normalizedConfig.properties?.binder || normalizedConfig.properties?.ligand || '').trim();
+  const designedLigandComponentId = resolveComponentIdByChainId(normalizedConfig.components, ligandSelector);
+  const filteredComponents = designedLigandComponentId
+    ? normalizedConfig.components.filter((component) => component.id !== designedLigandComponentId)
+    : normalizedConfig.components;
+  return {
+    ...normalizedConfig,
+    components: filteredComponents,
+    properties: {
+      ...normalizedConfig.properties,
+      affinity: false,
+      ligand: PEPTIDE_DESIGNED_LIGAND_TOKEN,
+      binder: PEPTIDE_DESIGNED_LIGAND_TOKEN
+    }
+  };
+}
+
 export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps): Promise<void> {
   const {
     project,
     draft,
+    isPeptideDesignWorkflow = false,
     workspaceTab,
     proteinTemplates,
     submitInFlightRef,
@@ -109,6 +198,7 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
   } = deps;
 
   const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, draft.backend);
+  const submissionConfig = buildPredictionSubmissionConfig(normalizedConfig, isPeptideDesignWorkflow);
   const missingOrders = listIncompleteComponentOrders(normalizedConfig.components);
   if (missingOrders.length > 0) {
     const maxShown = 3;
@@ -122,7 +212,7 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
     return;
   }
 
-  const activeComponents = normalizedConfig.components;
+  const activeComponents = submissionConfig.components;
   const validationError = validateComponents(activeComponents);
   if (validationError) {
     setError(validationError);
@@ -144,7 +234,7 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
   }
 
   try {
-    const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(normalizedConfig);
+    const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(submissionConfig);
     const hasMsa = computeUseMsaFlag(activeComponents, draft.use_msa);
     const persistenceWarnings: string[] = [];
 
@@ -178,8 +268,8 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
       );
     }
 
-    const snapshotComponents = addTemplatesToTaskSnapshotComponents(normalizedConfig.components, proteinTemplates);
-    const draftTaskRow = await persistDraftTaskSnapshot(normalizedConfig, {
+    const snapshotComponents = addTemplatesToTaskSnapshotComponents(submissionConfig.components, proteinTemplates);
+    const draftTaskRow = await persistDraftTaskSnapshot(submissionConfig, {
       statusText: 'Draft snapshot prepared for run',
       reuseTaskRowId: resolveEditableDraftTaskRowId(),
       snapshotComponents
@@ -208,10 +298,13 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
       projectName: project.name,
       proteinSequence,
       ligandSmiles,
+      workflow: isPeptideDesignWorkflow ? 'peptide_design' : 'prediction',
       components: activeComponents,
-      constraints: normalizedConfig.constraints,
-      properties: normalizedConfig.properties,
-      seed: normalizedConfig.options.seed,
+      constraints: submissionConfig.constraints,
+      properties: submissionConfig.properties,
+      peptideDesignOptions: isPeptideDesignWorkflow ? submissionConfig.options : undefined,
+      peptideDesignTargetChainId: isPeptideDesignWorkflow ? submissionConfig.properties.target : null,
+      seed: submissionConfig.options.seed,
       backend: draft.backend,
       useMsa: hasMsa,
       templateUploads
@@ -226,13 +319,15 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
       status_text: 'Task submitted and waiting in queue',
       error_text: '',
       backend: draft.backend,
-      seed: normalizedConfig.options.seed ?? null,
+      seed: submissionConfig.options.seed ?? null,
       protein_sequence: proteinSequence,
       ligand_smiles: ligandSmiles,
       components: snapshotComponents,
-      constraints: normalizedConfig.constraints,
-      properties: normalizedConfig.properties,
-      confidence: {},
+      constraints: submissionConfig.constraints,
+      properties: submissionConfig.properties,
+      confidence: isPeptideDesignWorkflow
+        ? buildQueuedPeptideDesignConfidenceSnapshot(submissionConfig.options)
+        : {},
       affinity: {},
       structure_name: '',
       submitted_at: queuedAt,

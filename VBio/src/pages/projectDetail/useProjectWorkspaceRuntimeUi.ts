@@ -3,7 +3,7 @@ import type { Dispatch, SetStateAction } from 'react';
 import type { Project, ProteinTemplateUpload, TaskState } from '../../types/models';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import { saveProjectUiState } from '../../utils/projectInputs';
-import { getWorkflowDefinition } from '../../utils/workflows';
+import { getWorkflowDefinition, isPredictionLikeWorkflowKey } from '../../utils/workflows';
 import type { WorkspaceTab } from './workspaceTypes';
 
 interface UseProjectWorkspaceRuntimeUiOptions {
@@ -34,9 +34,10 @@ export function useProjectWorkspaceRuntimeUi({
   useEffect(() => {
     if (!project) return;
     const workflowDef = getWorkflowDefinition(project.task_type);
+    const isPredictionLikeWorkflow = isPredictionLikeWorkflowKey(workflowDef.key);
     const allowsComponentsTab =
-      workflowDef.key === 'prediction' || workflowDef.key === 'affinity' || workflowDef.key === 'lead_optimization';
-    const allowsConstraintsTab = workflowDef.key === 'prediction' || workflowDef.key === 'lead_optimization';
+      isPredictionLikeWorkflow || workflowDef.key === 'affinity' || workflowDef.key === 'lead_optimization';
+    const allowsConstraintsTab = isPredictionLikeWorkflow || workflowDef.key === 'lead_optimization';
     if (
       (!allowsComponentsTab && workspaceTab === 'components') ||
       (!allowsConstraintsTab && workspaceTab === 'constraints')

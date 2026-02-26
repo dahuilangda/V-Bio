@@ -6,7 +6,6 @@ import {
   Beaker,
   Calendar,
   Clock3,
-  Compass,
   Dna,
   ExternalLink,
   Filter,
@@ -28,8 +27,7 @@ import type { ProjectTaskCounts, TaskState } from '../types/models';
 
 const workflowIconMap: Record<WorkflowKey, JSX.Element> = {
   prediction: <Dna size={16} />,
-  designer: <Compass size={16} />,
-  bicyclic_designer: <Atom size={16} />,
+  peptide_design: <Atom size={16} />,
   lead_optimization: <FlaskConical size={16} />,
   affinity: <Beaker size={16} />
 };
@@ -369,7 +367,7 @@ export function ProjectsPage() {
       if (!created?.id) {
         throw new Error('Project was created but no project ID was returned from PostgREST.');
       }
-      saveProjectInputConfig(created.id, buildDefaultInputConfig());
+      saveProjectInputConfig(created.id, buildDefaultInputConfig(workflow));
       setShowCreate(false);
       navigate(`/projects/${created.id}?tab=inputs`);
     } catch (err) {

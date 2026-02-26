@@ -91,7 +91,7 @@ export async function submitTaskByWorkflow(params: {
   }
 
   const workflow = getWorkflowDefinition(project.task_type);
-  if (workflow.key !== 'prediction') {
+  if (workflow.key !== 'prediction' && workflow.key !== 'peptide_design') {
     setError(`${workflow.title} runner is not wired yet in React UI.`);
     return;
   }

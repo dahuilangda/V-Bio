@@ -167,6 +167,7 @@ export interface BuildPredictionComponentsSidebarParams {
   workspaceLigandSelectableOptions: PredictionComponentsSidebarProps['workspaceLigandSelectableOptions'];
   setAffinityComponentFromWorkspace: (role: 'target' | 'ligand', componentId: string | null) => void;
   affinityEnableDisabledReason: string;
+  showAffinityComputeToggle?: boolean;
 }
 
 export function buildPredictionComponentsSidebarProps(
@@ -204,7 +205,8 @@ export function buildPredictionComponentsSidebarProps(
     workspaceTargetOptions,
     workspaceLigandSelectableOptions,
     setAffinityComponentFromWorkspace,
-    affinityEnableDisabledReason
+    affinityEnableDisabledReason,
+    showAffinityComputeToggle
   } = params;
 
   return {
@@ -240,7 +242,8 @@ export function buildPredictionComponentsSidebarProps(
     workspaceTargetOptions,
     workspaceLigandSelectableOptions,
     onSetAffinityComponentFromWorkspace: setAffinityComponentFromWorkspace,
-    affinityEnableDisabledReason
+    affinityEnableDisabledReason,
+    showAffinityComputeToggle
   };
 }
 

@@ -53,6 +53,116 @@ function hasFiniteMetric(value: unknown): boolean {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
+const PEPTIDE_RUNTIME_SETUP_KEYS = [
+  'design_mode',
+  'mode',
+  'binder_length',
+  'length',
+  'iterations',
+  'population_size',
+  'elite_size',
+  'mutation_rate'
+] as const;
+
+const PEPTIDE_RUNTIME_PROGRESS_KEYS = [
+  'current_generation',
+  'generation',
+  'total_generations',
+  'completed_tasks',
+  'pending_tasks',
+  'total_tasks',
+  'candidate_count',
+  'best_score',
+  'current_best_score',
+  'progress_percent',
+  'current_status',
+  'status_stage',
+  'stage',
+  'status_message',
+  'current_best_sequences',
+  'best_sequences',
+  'candidates'
+] as const;
+
+function pickRecordFields(source: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+  const next: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+    const value = source[key];
+    if (value === undefined || value === null || value === '') continue;
+    next[key] = value;
+  }
+  return next;
+}
+
+function mergePeptideRuntimeStatusIntoConfidence(
+  task: ProjectTask,
+  statusInfo: Record<string, unknown>
+): Record<string, unknown> | null {
+  const info = asRecord(statusInfo);
+  if (Object.keys(info).length === 0) return null;
+
+  const statusPeptide = asRecord(info.peptide_design);
+  const statusPeptideProgress = asRecord(statusPeptide.progress);
+  const statusTopProgress = asRecord(info.progress);
+  const statusRequest = asRecord(info.request);
+  const statusRequestOptions = asRecord(statusRequest.options);
+  const statusTopOptions = asRecord(info.options);
+
+  const setupPatch = pickRecordFields(statusPeptide, PEPTIDE_RUNTIME_SETUP_KEYS);
+  const peptideProgressPatch = {
+    ...pickRecordFields(statusPeptide, PEPTIDE_RUNTIME_PROGRESS_KEYS),
+    ...pickRecordFields(statusPeptideProgress, PEPTIDE_RUNTIME_PROGRESS_KEYS)
+  };
+  const topProgressPatch = pickRecordFields(statusTopProgress, PEPTIDE_RUNTIME_PROGRESS_KEYS);
+  const optionsPatch = Object.keys(statusRequestOptions).length > 0 ? statusRequestOptions : statusTopOptions;
+
+  if (
+    Object.keys(setupPatch).length === 0 &&
+    Object.keys(peptideProgressPatch).length === 0 &&
+    Object.keys(topProgressPatch).length === 0 &&
+    Object.keys(optionsPatch).length === 0
+  ) {
+    return null;
+  }
+
+  const currentConfidence = asRecord(task.confidence);
+  const nextConfidence: Record<string, unknown> = { ...currentConfidence };
+
+  if (Object.keys(optionsPatch).length > 0) {
+    const currentRequest = asRecord(nextConfidence.request);
+    nextConfidence.request = {
+      ...currentRequest,
+      options: {
+        ...asRecord(currentRequest.options),
+        ...optionsPatch
+      }
+    };
+  }
+
+  const currentPeptide = asRecord(nextConfidence.peptide_design);
+  const mergedPeptideProgress = {
+    ...asRecord(currentPeptide.progress),
+    ...topProgressPatch,
+    ...peptideProgressPatch
+  };
+  nextConfidence.peptide_design = {
+    ...currentPeptide,
+    ...setupPatch,
+    ...peptideProgressPatch,
+    progress: mergedPeptideProgress
+  };
+
+  const currentTopProgress = asRecord(nextConfidence.progress);
+  nextConfidence.progress = {
+    ...currentTopProgress,
+    ...topProgressPatch,
+    ...peptideProgressPatch
+  };
+
+  return JSON.stringify(nextConfidence) === JSON.stringify(currentConfidence) ? null : nextConfidence;
+}
+
 function readErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error || 'unknown error');
@@ -591,13 +701,18 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
             return Number.isFinite(duration) && duration >= 0 ? duration : null;
           })()
         : null;
+    const runtimeInfo = asRecord(result.value.info);
+    const runtimeWorkflow = resolveTaskWorkflowKey(runtimeTask, nextProject.task_type || '');
+    const runtimeConfidencePatch =
+      runtimeWorkflow === 'peptide_design' ? mergePeptideRuntimeStatusIntoConfidence(runtimeTask, runtimeInfo) : null;
 
     const taskNeedsPatch =
       runtimeTask.task_state !== taskState ||
       (runtimeTask.status_text || '') !== statusText ||
       (runtimeTask.error_text || '') !== errorText ||
       runtimeTask.completed_at !== completedAt ||
-      runtimeTask.duration_seconds !== durationSeconds;
+      runtimeTask.duration_seconds !== durationSeconds ||
+      Boolean(runtimeConfidencePatch);
 
     if (taskNeedsPatch) {
       const taskPatch: Partial<ProjectTask> = {
@@ -607,6 +722,9 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
         completed_at: completedAt,
         duration_seconds: durationSeconds
       };
+      if (runtimeConfidencePatch) {
+        taskPatch.confidence = runtimeConfidencePatch;
+      }
       try {
         const nextTask = await persistProjectTaskPatch(runtimeTask, taskPatch);
         nextTaskRows = nextTaskRows.map((row) => (row.id === runtimeTask.id ? nextTask : row));
@@ -626,7 +744,8 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
         (nextProject.status_text || '') !== statusText ||
         (nextProject.error_text || '') !== errorText ||
         nextProject.completed_at !== completedAt ||
-        nextProject.duration_seconds !== durationSeconds;
+        nextProject.duration_seconds !== durationSeconds ||
+        Boolean(runtimeConfidencePatch);
       if (projectNeedsPatch) {
         const projectPatch: Partial<Project> = {
           task_state: taskState,
@@ -635,6 +754,9 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
           completed_at: completedAt,
           duration_seconds: durationSeconds
         };
+        if (runtimeConfidencePatch) {
+          projectPatch.confidence = runtimeConfidencePatch;
+        }
         try {
           nextProject = await persistProjectPatch(nextProject, projectPatch);
         } catch (error) {
@@ -672,7 +794,13 @@ export async function hydrateTaskMetricsFromResultRows(
       const taskId = String(row.task_id || '').trim();
       if (!taskId || row.task_state !== 'SUCCESS') return false;
       if (hasLeadOptMmpOnlySnapshot(row)) return false;
-      const selection = resolveTaskSelectionContext(row, undefined, resolveTaskWorkflowKey(row, projectRow.task_type || ''));
+      const workflowKey = resolveTaskWorkflowKey(row, projectRow.task_type || '');
+      if (workflowKey === 'peptide_design') {
+        // Peptide task rows already render from persisted runtime summary; avoid bulk result downloads on list refresh.
+        resultHydrationDoneRef.current.add(taskId);
+        return false;
+      }
+      const selection = resolveTaskSelectionContext(row, undefined, workflowKey);
       const confidence =
         row.confidence && typeof row.confidence === 'object' && !Array.isArray(row.confidence)
           ? (row.confidence as Record<string, unknown>)

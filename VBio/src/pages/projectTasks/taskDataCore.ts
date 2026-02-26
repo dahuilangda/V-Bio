@@ -23,13 +23,13 @@ const AFFINITY_LIGAND_UPLOAD_COMPONENT_ID = '__affinity_ligand_upload__';
 const LEADOPT_TARGET_UPLOAD_COMPONENT_ID = '__leadopt_target_upload__';
 const LEADOPT_LIGAND_UPLOAD_COMPONENT_ID = '__leadopt_ligand_upload__';
 
-type TaskLigandSourceWorkflow = 'prediction' | 'affinity' | 'lead_optimization' | 'auto';
+type TaskLigandSourceWorkflow = 'prediction' | 'peptide_design' | 'affinity' | 'lead_optimization' | 'auto';
 
 function normalizeTaskLigandSourceWorkflow(value: string | null | undefined): TaskLigandSourceWorkflow {
   const normalized = String(value || '')
     .trim()
     .toLowerCase();
-  if (normalized === 'prediction' || normalized === 'affinity' || normalized === 'lead_optimization') {
+  if (normalized === 'prediction' || normalized === 'peptide_design' || normalized === 'affinity' || normalized === 'lead_optimization') {
     return normalized;
   }
   return 'auto';
@@ -461,7 +461,7 @@ function resolveTaskSelectionContext(
   const workflow = normalizeTaskLigandSourceWorkflow(workflowHint);
   const preferTaskSmilesLigand = workflow === 'affinity' || workflow === 'lead_optimization';
   const taskLigandSmiles = readTaskLigandSmilesHint(task, workspacePreference?.ligandChainId || null);
-  const useBindingPreference = workflow === 'prediction' || workflow === 'auto';
+  const useBindingPreference = workflow === 'prediction' || workflow === 'peptide_design' || workflow === 'auto';
   const taskProperties = task.properties && typeof task.properties === 'object' ? task.properties : null;
   const rawTarget = taskProperties && typeof taskProperties.target === 'string' ? taskProperties.target.trim() : '';
   const rawLigand = taskProperties && typeof taskProperties.ligand === 'string' ? taskProperties.ligand.trim() : '';
@@ -679,6 +679,24 @@ function readTaskConfidenceMetrics(task: ProjectTask, context?: TaskMetricContex
   };
 }
 
+interface PeptideTaskSummary {
+  designMode: 'linear' | 'cyclic' | 'bicyclic' | null;
+  binderLength: number | null;
+  iterations: number | null;
+  populationSize: number | null;
+  eliteSize: number | null;
+  mutationRate: number | null;
+  currentGeneration: number | null;
+  totalGenerations: number | null;
+  bestScore: number | null;
+  candidateCount: number | null;
+  completedTasks: number | null;
+  pendingTasks: number | null;
+  totalTasks: number | null;
+  stage: string;
+  statusMessage: string;
+}
+
 interface LeadOptTaskSummary {
   stage: string;
   summary: string;
@@ -698,6 +716,12 @@ interface LeadOptTaskSummary {
   selectedFragmentQuery: string;
 }
 
+interface PeptideBestCandidatePreview {
+  sequence: string;
+  plddt: number | null;
+  residuePlddts: number[] | null;
+}
+
 function readFiniteNumber(value: unknown): number | null {
   const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
   if (!Number.isFinite(parsed)) return null;
@@ -709,6 +733,454 @@ function readStringArray(value: unknown): string[] {
   return value
     .map((item) => (typeof item === 'string' ? item.trim() : ''))
     .filter(Boolean);
+}
+
+function readFirstFiniteFromPayloadPaths(payloads: Record<string, unknown>[], paths: string[]): number | null {
+  for (const payload of payloads) {
+    for (const path of paths) {
+      const value = readFiniteNumber(readObjectPath(payload, path));
+      if (value !== null) return value;
+    }
+  }
+  return null;
+}
+
+function readFirstTextFromPayloadPaths(payloads: Record<string, unknown>[], paths: string[]): string {
+  for (const payload of payloads) {
+    for (const path of paths) {
+      const value = String(readObjectPath(payload, path) || '').trim();
+      if (value) return value;
+    }
+  }
+  return '';
+}
+
+function readFirstRecordArrayFromPayloadPaths(
+  payloads: Record<string, unknown>[],
+  paths: string[]
+): Array<Record<string, unknown>> {
+  for (const payload of payloads) {
+    for (const path of paths) {
+      const rows = readObjectPath(payload, path);
+      if (!Array.isArray(rows)) continue;
+      const records = rows.filter(
+        (item): item is Record<string, unknown> => Boolean(item && typeof item === 'object' && !Array.isArray(item))
+      );
+      if (records.length > 0) return records;
+    }
+  }
+  return [];
+}
+
+function normalizePeptideDesignMode(value: string): 'linear' | 'cyclic' | 'bicyclic' | null {
+  const token = value.trim().toLowerCase().replace(/[\s_-]+/g, '');
+  if (!token) return null;
+  if (token === 'linear') return 'linear';
+  if (token === 'cyclic' || token === 'cycle' || token === 'monocyclic') return 'cyclic';
+  if (token === 'bicyclic' || token === 'bicycle' || token === 'doublecyclic') return 'bicyclic';
+  return null;
+}
+
+function normalizeNonNegativeInteger(value: number | null): number | null {
+  if (value === null) return null;
+  return Math.max(0, Math.floor(value));
+}
+
+function readPeptideTaskCandidateCount(payloads: Record<string, unknown>[]): number | null {
+  const direct = readFirstFiniteFromPayloadPaths(payloads, [
+    'candidate_count',
+    'num_candidates',
+    'best_sequence_count',
+    'peptide_design.candidate_count'
+  ]);
+  if (direct !== null) return Math.max(0, Math.floor(direct));
+  const arrayPaths = [
+    'best_sequences',
+    'current_best_sequences',
+    'candidates',
+    'peptide_candidates',
+    'peptide_design.best_sequences',
+    'peptide_design.current_best_sequences',
+    'peptide_design.candidates'
+  ];
+  for (const payload of payloads) {
+    for (const path of arrayPaths) {
+      const rows = readObjectPath(payload, path);
+      if (Array.isArray(rows) && rows.length > 0) return rows.length;
+    }
+  }
+  return null;
+}
+
+function readPeptideTaskSummary(task: ProjectTask): PeptideTaskSummary | null {
+  const confidence =
+    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
+      ? (task.confidence as Record<string, unknown>)
+      : null;
+  const peptideDesign =
+    confidence?.peptide_design && typeof confidence.peptide_design === 'object' && !Array.isArray(confidence.peptide_design)
+      ? (confidence.peptide_design as Record<string, unknown>)
+      : {};
+  const peptideProgress =
+    peptideDesign.progress && typeof peptideDesign.progress === 'object' && !Array.isArray(peptideDesign.progress)
+      ? (peptideDesign.progress as Record<string, unknown>)
+      : {};
+  const topProgress =
+    confidence?.progress && typeof confidence.progress === 'object' && !Array.isArray(confidence.progress)
+      ? (confidence.progress as Record<string, unknown>)
+      : {};
+  const requestPayload =
+    confidence?.request && typeof confidence.request === 'object' && !Array.isArray(confidence.request)
+      ? (confidence.request as Record<string, unknown>)
+      : {};
+  const requestOptions =
+    requestPayload.options && typeof requestPayload.options === 'object' && !Array.isArray(requestPayload.options)
+      ? (requestPayload.options as Record<string, unknown>)
+      : {};
+  const inputPayload =
+    confidence?.inputs && typeof confidence.inputs === 'object' && !Array.isArray(confidence.inputs)
+      ? (confidence.inputs as Record<string, unknown>)
+      : {};
+  const inputOptions =
+    inputPayload.options && typeof inputPayload.options === 'object' && !Array.isArray(inputPayload.options)
+      ? (inputPayload.options as Record<string, unknown>)
+      : {};
+  const taskRecord = task as unknown as Record<string, unknown>;
+  const taskOptions =
+    taskRecord.options && typeof taskRecord.options === 'object' && !Array.isArray(taskRecord.options)
+      ? (taskRecord.options as Record<string, unknown>)
+      : {};
+  const payloads = [
+    confidence || {},
+    topProgress,
+    peptideDesign,
+    peptideProgress,
+    requestPayload,
+    requestOptions,
+    inputPayload,
+    inputOptions,
+    taskOptions
+  ];
+
+  const designMode = normalizePeptideDesignMode(
+    readFirstTextFromPayloadPaths(payloads, [
+      'design_mode',
+      'mode',
+      'peptide_design_mode',
+      'peptideDesignMode',
+      'peptide_design.design_mode',
+      'peptide_design.mode',
+      'request.options.peptide_design_mode',
+      'request.options.peptideDesignMode',
+      'inputs.options.peptide_design_mode',
+      'inputs.options.peptideDesignMode'
+    ])
+  );
+
+  const binderLength = normalizeNonNegativeInteger(
+    readFirstFiniteFromPayloadPaths(payloads, [
+      'binder_length',
+      'length',
+      'peptide_binder_length',
+      'peptideBinderLength',
+      'peptide_design.binder_length',
+      'peptide_design.length',
+      'request.options.peptide_binder_length',
+      'request.options.peptideBinderLength',
+      'inputs.options.peptide_binder_length',
+      'inputs.options.peptideBinderLength'
+    ])
+  );
+
+  const iterations = normalizeNonNegativeInteger(
+    readFirstFiniteFromPayloadPaths(payloads, [
+      'peptide_iterations',
+      'peptideIterations',
+      'generations',
+      'total_generations',
+      'peptide_design.iterations',
+      'peptide_design.generations',
+      'peptide_design.total_generations',
+      'request.options.peptide_iterations',
+      'request.options.peptideIterations',
+      'inputs.options.peptide_iterations',
+      'inputs.options.peptideIterations'
+    ])
+  );
+
+  const populationSize = normalizeNonNegativeInteger(
+    readFirstFiniteFromPayloadPaths(payloads, [
+      'population_size',
+      'peptide_population_size',
+      'peptidePopulationSize',
+      'peptide_design.population_size',
+      'request.options.peptide_population_size',
+      'request.options.peptidePopulationSize',
+      'inputs.options.peptide_population_size',
+      'inputs.options.peptidePopulationSize'
+    ])
+  );
+
+  const eliteSize = normalizeNonNegativeInteger(
+    readFirstFiniteFromPayloadPaths(payloads, [
+      'elite_size',
+      'num_elites',
+      'peptide_elite_size',
+      'peptideEliteSize',
+      'peptide_design.elite_size',
+      'request.options.peptide_elite_size',
+      'request.options.peptideEliteSize',
+      'inputs.options.peptide_elite_size',
+      'inputs.options.peptideEliteSize'
+    ])
+  );
+
+  const mutationRateRaw = readFirstFiniteFromPayloadPaths(payloads, [
+    'mutation_rate',
+    'peptide_mutation_rate',
+    'peptideMutationRate',
+    'peptide_design.mutation_rate',
+    'request.options.peptide_mutation_rate',
+    'request.options.peptideMutationRate',
+    'inputs.options.peptide_mutation_rate',
+    'inputs.options.peptideMutationRate'
+  ]);
+  const mutationRate = mutationRateRaw === null ? null : mutationRateRaw > 1 && mutationRateRaw <= 100 ? mutationRateRaw / 100 : mutationRateRaw;
+
+  const currentGeneration = normalizeNonNegativeInteger(
+    readFirstFiniteFromPayloadPaths(payloads, [
+      'current_generation',
+      'generation',
+      'iter',
+      'progress.current_generation',
+      'peptide_design.current_generation',
+      'peptide_design.progress.current_generation'
+    ])
+  );
+  const totalGenerations = normalizeNonNegativeInteger(
+    readFirstFiniteFromPayloadPaths(payloads, [
+      'total_generations',
+      'generations',
+      'max_generation',
+      'progress.total_generations',
+      'peptide_design.total_generations',
+      'peptide_design.progress.total_generations'
+    ])
+  );
+  const bestScore = readFirstFiniteFromPayloadPaths(payloads, [
+    'best_score',
+    'current_best_score',
+    'score',
+    'peptide_design.best_score',
+    'peptide_design.current_best_score'
+  ]);
+  const completedTasks = normalizeNonNegativeInteger(
+    readFirstFiniteFromPayloadPaths(payloads, [
+      'completed_tasks',
+      'done_tasks',
+      'finished_tasks',
+      'peptide_design.completed_tasks',
+      'peptide_design.progress.completed_tasks'
+    ])
+  );
+  const pendingTasks = normalizeNonNegativeInteger(
+    readFirstFiniteFromPayloadPaths(payloads, [
+      'pending_tasks',
+      'queued_tasks',
+      'peptide_design.pending_tasks',
+      'peptide_design.progress.pending_tasks'
+    ])
+  );
+  const totalTasksRaw = readFirstFiniteFromPayloadPaths(payloads, [
+    'total_tasks',
+    'task_total',
+    'peptide_design.total_tasks',
+    'peptide_design.progress.total_tasks'
+  ]);
+  const totalTasks = normalizeNonNegativeInteger(
+    totalTasksRaw !== null ? totalTasksRaw : completedTasks !== null && pendingTasks !== null ? completedTasks + pendingTasks : null
+  );
+  const candidateCount = readPeptideTaskCandidateCount(payloads);
+  const stage = readFirstTextFromPayloadPaths(payloads, [
+    'current_status',
+    'status_stage',
+    'stage',
+    'progress.current_status',
+    'peptide_design.current_status',
+    'peptide_design.status_stage',
+    'peptide_design.stage',
+    'peptide_design.progress.current_status'
+  ]);
+  const statusMessage = readFirstTextFromPayloadPaths(payloads, [
+    'status_message',
+    'message',
+    'status',
+    'progress.status_message',
+    'peptide_design.status_message',
+    'peptide_design.progress.status_message'
+  ]);
+
+  if (
+    !confidence &&
+    designMode === null &&
+    binderLength === null &&
+    iterations === null &&
+    populationSize === null &&
+    eliteSize === null &&
+    mutationRate === null &&
+    currentGeneration === null &&
+    totalGenerations === null &&
+    bestScore === null &&
+    candidateCount === null &&
+    completedTasks === null &&
+    pendingTasks === null &&
+    totalTasks === null &&
+    !stage &&
+    !statusMessage
+  ) {
+    return null;
+  }
+
+  return {
+    designMode,
+    binderLength,
+    iterations,
+    populationSize,
+    eliteSize,
+    mutationRate,
+    currentGeneration,
+    totalGenerations,
+    bestScore,
+    candidateCount,
+    completedTasks,
+    pendingTasks,
+    totalTasks,
+    stage,
+    statusMessage
+  };
+}
+
+function normalizePeptideCandidateSequence(value: string): string {
+  return value.replace(/\s+/g, '').trim().toUpperCase();
+}
+
+function normalizePlddtScalar(value: number | null): number | null {
+  if (value === null || !Number.isFinite(value)) return null;
+  if (value >= 0 && value <= 1) return value * 100;
+  return value;
+}
+
+function readPeptideCandidateSequence(row: Record<string, unknown>): string {
+  const sequence = readFirstTextFromPayloadPaths([row], [
+    'peptide_sequence',
+    'binder_sequence',
+    'candidate_sequence',
+    'designed_sequence',
+    'sequence'
+  ]);
+  return normalizePeptideCandidateSequence(sequence);
+}
+
+function comparePeptideCandidateRows(a: Record<string, unknown>, b: Record<string, unknown>, aIndex: number, bIndex: number): number {
+  const aRank = readFirstFiniteFromPayloadPaths([a], ['rank', 'ranking', 'order']);
+  const bRank = readFirstFiniteFromPayloadPaths([b], ['rank', 'ranking', 'order']);
+  const aRankValue = aRank !== null ? Math.max(1, Math.floor(aRank)) : null;
+  const bRankValue = bRank !== null ? Math.max(1, Math.floor(bRank)) : null;
+  if (aRankValue !== null && bRankValue !== null && aRankValue !== bRankValue) {
+    return aRankValue - bRankValue;
+  }
+  if (aRankValue !== null && bRankValue === null) return -1;
+  if (aRankValue === null && bRankValue !== null) return 1;
+
+  const aScore = readFirstFiniteFromPayloadPaths([a], ['composite_score', 'score', 'fitness', 'objective']);
+  const bScore = readFirstFiniteFromPayloadPaths([b], ['composite_score', 'score', 'fitness', 'objective']);
+  if (aScore !== null && bScore !== null && aScore !== bScore) {
+    return bScore - aScore;
+  }
+  if (aScore !== null && bScore === null) return -1;
+  if (aScore === null && bScore !== null) return 1;
+
+  const aPlddt = normalizePlddtScalar(
+    readFirstFiniteFromPayloadPaths([a], ['binder_avg_plddt', 'plddt', 'ligand_mean_plddt', 'mean_plddt'])
+  );
+  const bPlddt = normalizePlddtScalar(
+    readFirstFiniteFromPayloadPaths([b], ['binder_avg_plddt', 'plddt', 'ligand_mean_plddt', 'mean_plddt'])
+  );
+  if (aPlddt !== null && bPlddt !== null && aPlddt !== bPlddt) {
+    return bPlddt - aPlddt;
+  }
+  if (aPlddt !== null && bPlddt === null) return -1;
+  if (aPlddt === null && bPlddt !== null) return 1;
+
+  return aIndex - bIndex;
+}
+
+function readPeptideBestCandidatePreview(task: ProjectTask): PeptideBestCandidatePreview | null {
+  const confidence =
+    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
+      ? (task.confidence as Record<string, unknown>)
+      : null;
+  if (!confidence) return null;
+  const peptideDesign =
+    confidence.peptide_design && typeof confidence.peptide_design === 'object' && !Array.isArray(confidence.peptide_design)
+      ? (confidence.peptide_design as Record<string, unknown>)
+      : {};
+  const peptideProgress =
+    peptideDesign.progress && typeof peptideDesign.progress === 'object' && !Array.isArray(peptideDesign.progress)
+      ? (peptideDesign.progress as Record<string, unknown>)
+      : {};
+  const topProgress =
+    confidence.progress && typeof confidence.progress === 'object' && !Array.isArray(confidence.progress)
+      ? (confidence.progress as Record<string, unknown>)
+      : {};
+
+  const candidateRows = readFirstRecordArrayFromPayloadPaths(
+    [confidence, peptideDesign, peptideProgress, topProgress],
+    [
+      'peptide_design.best_sequences',
+      'peptide_design.current_best_sequences',
+      'peptide_design.candidates',
+      'best_sequences',
+      'current_best_sequences',
+      'candidates',
+      'progress.best_sequences',
+      'progress.current_best_sequences'
+    ]
+  );
+  if (candidateRows.length === 0) return null;
+
+  const rowOrder = new Map(candidateRows.map((row, index) => [row, index] as const));
+  const sorted = [...candidateRows].sort((a, b) =>
+    comparePeptideCandidateRows(a, b, rowOrder.get(a) ?? 0, rowOrder.get(b) ?? 0)
+  );
+  const best = sorted.find((row) => Boolean(readPeptideCandidateSequence(row))) || sorted[0];
+  if (!best) return null;
+
+  const sequence = readPeptideCandidateSequence(best);
+  if (!sequence) return null;
+
+  const plddt = normalizePlddtScalar(
+    readFirstFiniteFromPayloadPaths([best], ['binder_avg_plddt', 'plddt', 'ligand_mean_plddt', 'mean_plddt'])
+  );
+  const residuePlddts = (() => {
+    const parsed = normalizeAtomPlddts(
+      toFiniteNumberArray(
+        readObjectPath(best, 'residue_plddts') ??
+          readObjectPath(best, 'residue_plddt') ??
+          readObjectPath(best, 'token_plddts') ??
+          readObjectPath(best, 'token_plddt') ??
+          readObjectPath(best, 'plddts')
+      )
+    );
+    if (parsed.length === 0) return null;
+    return parsed;
+  })();
+
+  return {
+    sequence,
+    plddt,
+    residuePlddts
+  };
 }
 
 function readLeadOptVariableItems(leadOptMmp: Record<string, unknown>): Array<Record<string, unknown>> {
@@ -1257,6 +1729,8 @@ export {
   readTaskLigandAtomPlddts,
   readTaskLigandResiduePlddts,
   readTaskConfidenceMetrics,
+  readPeptideTaskSummary,
+  readPeptideBestCandidatePreview,
   readLeadOptTaskSummary,
   hasLeadOptPredictionRuntime,
   isSequenceLigandType,

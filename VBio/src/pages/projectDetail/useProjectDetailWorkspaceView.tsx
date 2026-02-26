@@ -273,6 +273,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     project,
     draft,
     isPredictionWorkflow,
+    isPeptideDesignWorkflow,
     isAffinityWorkflow,
     isLeadOptimizationWorkflow,
     workspaceTab,
@@ -351,6 +352,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     affinityPreviewLigandStructureFormat,
     snapshotAffinity,
     snapshotConfidence,
+    statusInfo,
     statusContextTaskRow,
     requestedStatusTaskRow,
     projectTasks,
@@ -924,6 +926,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   } = useProjectRunState({
     workspaceTab,
     isPredictionWorkflow,
+    isPeptideDesignWorkflow,
     isAffinityWorkflow,
     isLeadOptimizationWorkflow,
     hasIncompleteComponents,
@@ -1071,6 +1074,22 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     handlePredictionTemplateResiduePick,
     handleRuntimeBackendChange,
     handleRuntimeSeedChange,
+    handleRuntimePeptideDesignModeChange,
+    handleRuntimePeptideBinderLengthChange,
+    handleRuntimePeptideUseInitialSequenceChange,
+    handleRuntimePeptideInitialSequenceChange,
+    handleRuntimePeptideSequenceMaskChange,
+    handleRuntimePeptideIterationsChange,
+    handleRuntimePeptidePopulationSizeChange,
+    handleRuntimePeptideEliteSizeChange,
+    handleRuntimePeptideMutationRateChange,
+    handleRuntimePeptideBicyclicLinkerCcdChange,
+    handleRuntimePeptideBicyclicCysPositionModeChange,
+    handleRuntimePeptideBicyclicFixTerminalCysChange,
+    handleRuntimePeptideBicyclicIncludeExtraCysChange,
+    handleRuntimePeptideBicyclicCys1PosChange,
+    handleRuntimePeptideBicyclicCys2PosChange,
+    handleRuntimePeptideBicyclicCys3PosChange,
     handleTaskNameChange,
     handleTaskSummaryChange
   } = useProjectEditorHandlers({
@@ -1136,7 +1155,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     workspaceTargetOptions,
     workspaceLigandSelectableOptions,
     setAffinityComponentFromWorkspace,
-    affinityEnableDisabledReason
+    affinityEnableDisabledReason,
+    showAffinityComputeToggle: !isPeptideDesignWorkflow
   });
   const {
     projectResultsSectionProps,
@@ -1146,11 +1166,14 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     workflowRuntimeSettingsSectionProps
   } = useProjectWorkflowSectionProps({
     isPredictionWorkflow,
+    isPeptideDesignWorkflow,
     isAffinityWorkflow,
     workflowTitle: workflow.title,
     workflowShortTitle: workflow.shortTitle,
-    projectTaskState: project.task_state || '',
+    projectTaskState: displayTaskState || project.task_state || '',
     projectTaskId: project.task_id || '',
+    statusInfo: statusInfo || null,
+    progressPercent,
     resultsGridRef,
     isResultsResizing,
     resultsGridStyle,
@@ -1177,6 +1200,9 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     affinityLigandChainId,
     snapshotLigandAtomPlddts,
     snapshotPlddt,
+    snapshotIptm,
+    snapshotSelectedPairIptm,
+    selectedResultLigandSequence,
     canEdit,
     submitting,
     affinityTargetFileName: affinityTargetFile?.name || '',
@@ -1231,8 +1257,44 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     predictionComponentsSidebarProps,
     backend: draft.backend,
     seed: draft.inputConfig.options.seed ?? null,
+    peptideDesignMode: draft.inputConfig.options.peptideDesignMode ?? 'cyclic',
+    peptideBinderLength: draft.inputConfig.options.peptideBinderLength ?? 20,
+    peptideUseInitialSequence: draft.inputConfig.options.peptideUseInitialSequence ?? false,
+    peptideInitialSequence: draft.inputConfig.options.peptideInitialSequence ?? '',
+    peptideSequenceMask:
+      draft.inputConfig.options.peptideSequenceMask ??
+      'X'.repeat(Math.max(1, draft.inputConfig.options.peptideBinderLength ?? 20)),
+    peptideIterations: draft.inputConfig.options.peptideIterations ?? 12,
+    peptidePopulationSize: draft.inputConfig.options.peptidePopulationSize ?? 16,
+    peptideEliteSize: draft.inputConfig.options.peptideEliteSize ?? 5,
+    peptideMutationRate: draft.inputConfig.options.peptideMutationRate ?? 0.25,
+    peptideBicyclicLinkerCcd: draft.inputConfig.options.peptideBicyclicLinkerCcd ?? 'SEZ',
+    peptideBicyclicCysPositionMode: draft.inputConfig.options.peptideBicyclicCysPositionMode ?? 'auto',
+    peptideBicyclicFixTerminalCys: draft.inputConfig.options.peptideBicyclicFixTerminalCys ?? true,
+    peptideBicyclicIncludeExtraCys: draft.inputConfig.options.peptideBicyclicIncludeExtraCys ?? false,
+    peptideBicyclicCys1Pos: draft.inputConfig.options.peptideBicyclicCys1Pos ?? 3,
+    peptideBicyclicCys2Pos: draft.inputConfig.options.peptideBicyclicCys2Pos ?? 8,
+    peptideBicyclicCys3Pos:
+      draft.inputConfig.options.peptideBicyclicCys3Pos ??
+      (draft.inputConfig.options.peptideBinderLength ?? 20),
     onBackendChange: handleRuntimeBackendChange,
-    onSeedChange: handleRuntimeSeedChange
+    onSeedChange: handleRuntimeSeedChange,
+    onPeptideDesignModeChange: handleRuntimePeptideDesignModeChange,
+    onPeptideBinderLengthChange: handleRuntimePeptideBinderLengthChange,
+    onPeptideUseInitialSequenceChange: handleRuntimePeptideUseInitialSequenceChange,
+    onPeptideInitialSequenceChange: handleRuntimePeptideInitialSequenceChange,
+    onPeptideSequenceMaskChange: handleRuntimePeptideSequenceMaskChange,
+    onPeptideIterationsChange: handleRuntimePeptideIterationsChange,
+    onPeptidePopulationSizeChange: handleRuntimePeptidePopulationSizeChange,
+    onPeptideEliteSizeChange: handleRuntimePeptideEliteSizeChange,
+    onPeptideMutationRateChange: handleRuntimePeptideMutationRateChange,
+    onPeptideBicyclicLinkerCcdChange: handleRuntimePeptideBicyclicLinkerCcdChange,
+    onPeptideBicyclicCysPositionModeChange: handleRuntimePeptideBicyclicCysPositionModeChange,
+    onPeptideBicyclicFixTerminalCysChange: handleRuntimePeptideBicyclicFixTerminalCysChange,
+    onPeptideBicyclicIncludeExtraCysChange: handleRuntimePeptideBicyclicIncludeExtraCysChange,
+    onPeptideBicyclicCys1PosChange: handleRuntimePeptideBicyclicCys1PosChange,
+    onPeptideBicyclicCys2PosChange: handleRuntimePeptideBicyclicCys2PosChange,
+    onPeptideBicyclicCys3PosChange: handleRuntimePeptideBicyclicCys3PosChange
   });
   const taskHistoryPath = `/projects/${project.id}/tasks`;
   const {
@@ -1264,7 +1326,6 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       ? 'Select at least one fragment to run.'
       : 'Run action is only available in Lead Optimization Components view.'
     : runBlockedReason;
-
   const handleHeaderRunAction = () => {
     if (isLeadOptimizationWorkflow) {
       if (!leadOptHeaderRunAction || leadOptHeaderRunPending) return;

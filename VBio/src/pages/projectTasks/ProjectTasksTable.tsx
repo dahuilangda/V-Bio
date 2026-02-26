@@ -1,11 +1,11 @@
 import { Clock3 } from 'lucide-react';
 import type { ProjectTask } from '../../types/models';
 import { ProjectTaskRow } from './ProjectTaskRow';
-import type { SortKey, TaskListRow } from './taskListTypes';
+import type { SortKey, TaskListRow, TaskTableMode } from './taskListTypes';
 
 interface ProjectTasksTableProps {
   filteredCount: number;
-  leadOptOnlyView: boolean;
+  tableMode: TaskTableMode;
   sortKey: SortKey;
   sortMark: (key: SortKey) => string;
   onSort: (key: SortKey) => void;
@@ -31,7 +31,7 @@ interface ProjectTasksTableProps {
 
 export function ProjectTasksTable({
   filteredCount,
-  leadOptOnlyView,
+  tableMode,
   sortKey,
   sortMark,
   onSort,
@@ -54,25 +54,40 @@ export function ProjectTasksTable({
   onPageChange,
   onJumpToPage
 }: ProjectTasksTableProps) {
+  const isLeadOptMode = tableMode === 'lead_opt';
+  const isPeptideMode = tableMode === 'peptide';
+  const tableClass = `table project-table task-table${
+    isLeadOptMode ? ' task-table--leadopt' : isPeptideMode ? ' task-table--peptide' : ''
+  }`;
+
   return (
     <>
       {filteredCount === 0 ? (
         <div className="empty-state">No task runs yet.</div>
       ) : (
         <div className="table-wrap project-table-wrap task-table-wrap">
-          <table className={`table project-table task-table${leadOptOnlyView ? ' task-table--leadopt' : ''}`}>
+          <table className={tableClass}>
             <thead>
               <tr>
                 <th>
                   <span className="project-th">Ligand View</span>
                 </th>
-                {leadOptOnlyView ? (
+                {isLeadOptMode ? (
                   <>
                     <th>
                       <span className="project-th">MMP Stats</span>
                     </th>
                     <th>
                       <span className="project-th">Database</span>
+                    </th>
+                  </>
+                ) : isPeptideMode ? (
+                  <>
+                    <th>
+                      <span className="project-th">Design Setup</span>
+                    </th>
+                    <th>
+                      <span className="project-th">Iteration</span>
                     </th>
                   </>
                 ) : (
@@ -99,21 +114,21 @@ export function ProjectTasksTable({
                     <span className="project-th"><Clock3 size={13} /> Submitted <span className="task-th-arrow">{sortMark('submitted')}</span></span>
                   </button>
                 </th>
-                {!leadOptOnlyView && (
+                {!isLeadOptMode && !isPeptideMode && (
                   <th>
                     <button type="button" className={`task-th-sort ${sortKey === 'backend' ? 'active' : ''}`} onClick={() => onSort('backend')}>
                       <span className="project-th">Backend <span className="task-th-arrow">{sortMark('backend')}</span></span>
                     </button>
                   </th>
                 )}
-                {!leadOptOnlyView && (
+                {!isLeadOptMode && !isPeptideMode && (
                   <th>
                     <button type="button" className={`task-th-sort ${sortKey === 'seed' ? 'active' : ''}`} onClick={() => onSort('seed')}>
                       <span className="project-th">Seed <span className="task-th-arrow">{sortMark('seed')}</span></span>
                     </button>
                   </th>
                 )}
-                {!leadOptOnlyView && (
+                {!isLeadOptMode && !isPeptideMode && (
                   <th>
                     <button type="button" className={`task-th-sort ${sortKey === 'duration' ? 'active' : ''}`} onClick={() => onSort('duration')}>
                       <span className="project-th">Duration <span className="task-th-arrow">{sortMark('duration')}</span></span>
@@ -130,7 +145,7 @@ export function ProjectTasksTable({
                 <ProjectTaskRow
                   key={row.task.id}
                   row={row}
-                  mode={leadOptOnlyView ? 'lead_opt' : 'default'}
+                  mode={tableMode}
                   editingTaskNameId={editingTaskNameId}
                   editingTaskNameValue={editingTaskNameValue}
                   savingTaskNameId={savingTaskNameId}

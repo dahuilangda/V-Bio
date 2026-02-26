@@ -64,6 +64,7 @@ export function createWorkflowSubmitters(c: WorkflowSubmitterContext) {
     await submitPredictionTaskFromDraft({
       project: c.project,
       draft: c.draft,
+      isPeptideDesignWorkflow: Boolean(c.isPeptideDesignWorkflow),
       workspaceTab: c.workspaceTab,
       proteinTemplates: c.proteinTemplates,
       submitInFlightRef: c.submitInFlightRef,

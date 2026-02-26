@@ -144,6 +144,12 @@
   background: #fff6e6;
 }
 
+.task-workflow-chip.workflow-peptide-design {
+  color: #1f4f67;
+  border-color: #9ac5d8;
+  background: #e8f5fb;
+}
+
 .task-col-backend {
   min-width: 110px;
 }
@@ -177,6 +183,29 @@
 .task-col-leadopt-db {
   min-width: 220px;
   white-space: normal;
+}
+
+.task-col-peptide-setup,
+.task-col-peptide-progress {
+  min-width: 240px;
+  white-space: normal;
+}
+
+.task-table.task-table--peptide .task-col-peptide-setup,
+.task-table.task-table--peptide .task-col-peptide-progress {
+  min-width: 0;
+  width: 18%;
+}
+
+.task-table.task-table--peptide .task-col-submitted {
+  min-width: 0;
+  width: 24%;
+  white-space: normal;
+}
+
+.task-table.task-table--peptide .project-col-actions {
+  width: 64px;
+  min-width: 64px;
 }
 
 .task-leadopt-db-cell {
@@ -246,6 +275,67 @@
   color: #2f5b4c;
   font-size: var(--text-sm);
   font-weight: 700;
+}
+
+.task-peptide-cell {
+  display: grid;
+  gap: 4px;
+}
+
+.task-peptide-inline {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 0;
+  min-height: 24px;
+}
+
+.task-peptide-inline-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding-right: 10px;
+  margin-right: 10px;
+  position: relative;
+}
+
+.task-peptide-inline-item:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 3px;
+  bottom: 3px;
+  width: 1px;
+  background: #c8dbcf;
+}
+
+.task-peptide-inline-key {
+  color: #2f5b4c;
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.task-peptide-inline-value {
+  color: #123f30;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-transform: none;
+}
+
+.task-peptide-note {
+  color: #5f7468;
+  font-size: var(--text-2xs);
+  line-height: 1.25;
+}
+
+.task-table.task-table--peptide .task-submitted-title,
+.task-table.task-table--peptide .task-submitted-summary,
+.task-table.task-table--peptide .task-submitted-time,
+.task-table.task-table--peptide .task-run-note,
+.task-table.task-table--peptide .task-peptide-note {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .task-run-note {

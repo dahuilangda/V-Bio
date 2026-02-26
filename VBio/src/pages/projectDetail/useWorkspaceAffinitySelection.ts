@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from 'react';
 import type { InputComponent, ProjectInputConfig } from '../../types/models';
 import { buildChainInfos } from '../../utils/chainAssignments';
-import { componentTypeLabel } from '../../utils/projectInputs';
+import { componentTypeLabel, PEPTIDE_DESIGNED_LIGAND_TOKEN } from '../../utils/projectInputs';
 import { nonEmptyComponents } from './projectDraftUtils';
 
 type ChainInfo = ReturnType<typeof buildChainInfos>[number];
@@ -12,11 +12,13 @@ type WorkspaceOption = {
   type: InputComponent['type'];
   label: string;
   isSmallMolecule: boolean;
+  isDesignedPeptide?: boolean;
 };
 
 export interface UseWorkspaceAffinitySelectionParams {
   normalizedDraftComponents: InputComponent[];
   draftProperties: ProjectInputConfig['properties'] | null | undefined;
+  isPeptideDesignWorkflow?: boolean;
 }
 
 export interface UseWorkspaceAffinitySelectionResult {
@@ -37,7 +39,7 @@ export interface UseWorkspaceAffinitySelectionResult {
 export function useWorkspaceAffinitySelection(
   params: UseWorkspaceAffinitySelectionParams
 ): UseWorkspaceAffinitySelectionResult {
-  const { normalizedDraftComponents, draftProperties } = params;
+  const { normalizedDraftComponents, draftProperties, isPeptideDesignWorkflow = false } = params;
 
   const activeChainInfos = useMemo(() => {
     return buildChainInfos(nonEmptyComponents(normalizedDraftComponents));
@@ -92,8 +94,21 @@ export function useWorkspaceAffinitySelection(
   }, [workspaceAffinityOptions]);
 
   const workspaceLigandOptions = useMemo(() => {
+    if (isPeptideDesignWorkflow) {
+      return [
+        {
+          componentId: PEPTIDE_DESIGNED_LIGAND_TOKEN,
+          componentIndex: 0,
+          chainId: PEPTIDE_DESIGNED_LIGAND_TOKEN,
+          type: 'ligand' as const,
+          label: 'Designed Peptide · Comp',
+          isSmallMolecule: false,
+          isDesignedPeptide: true
+        }
+      ];
+    }
     return workspaceAffinityOptions;
-  }, [workspaceAffinityOptions]);
+  }, [isPeptideDesignWorkflow, workspaceAffinityOptions]);
 
   const resolveChainFromProperty = useCallback(
     (
@@ -138,8 +153,14 @@ export function useWorkspaceAffinitySelection(
   }, [selectedWorkspaceTarget.componentId, workspaceLigandOptions]);
 
   const selectedWorkspaceLigand = useMemo(() => {
-    const rawLigand = String(draftProperties?.ligand || '').trim();
-    if (rawLigand) {
+    const rawLigand = String(draftProperties?.ligand || draftProperties?.binder || '').trim();
+    if (isPeptideDesignWorkflow) {
+      return {
+        chainId: PEPTIDE_DESIGNED_LIGAND_TOKEN,
+        componentId: PEPTIDE_DESIGNED_LIGAND_TOKEN
+      };
+    }
+    if (rawLigand && rawLigand !== PEPTIDE_DESIGNED_LIGAND_TOKEN) {
       const resolved = resolveChainFromProperty(rawLigand, workspaceLigandOptions);
       if (resolved.componentId && resolved.componentId !== selectedWorkspaceTarget.componentId) {
         return resolved;
@@ -147,16 +168,17 @@ export function useWorkspaceAffinitySelection(
       return { chainId: null, componentId: null };
     }
     const optionsWithoutTarget = workspaceLigandSelectableOptions;
-    const defaultSmallMolecule =
-      optionsWithoutTarget.find((item) => item.isSmallMolecule) ||
-      optionsWithoutTarget[0] ||
-      null;
+    const preferredLigand = isPeptideDesignWorkflow
+      ? optionsWithoutTarget[0] || null
+      : optionsWithoutTarget.find((item) => item.isSmallMolecule) || optionsWithoutTarget[0] || null;
     return {
-      chainId: defaultSmallMolecule?.chainId || null,
-      componentId: defaultSmallMolecule?.componentId || null
+      chainId: preferredLigand?.chainId || null,
+      componentId: preferredLigand?.componentId || null
     };
   }, [
     draftProperties?.ligand,
+    draftProperties?.binder,
+    isPeptideDesignWorkflow,
     resolveChainFromProperty,
     selectedWorkspaceTarget.componentId,
     workspaceLigandOptions,

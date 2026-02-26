@@ -6,6 +6,7 @@ import type {
   SeedFilterOption,
   StructureSearchMode,
   SubmittedWithinDaysOption,
+  TaskTableMode,
   TaskWorkflowFilter
 } from './taskListTypes';
 import { backendLabel } from './taskPresentation';
@@ -21,7 +22,8 @@ interface ProjectTasksFiltersProps {
   backendFilter: 'all' | string;
   onBackendFilterChange: (value: string) => void;
   backendOptions: string[];
-  leadOptOnlyView: boolean;
+  tableMode: TaskTableMode;
+  compactMetricsView: boolean;
   filteredMatchedCount: number;
   showAdvancedFilters: boolean;
   onToggleAdvancedFilters: () => void;
@@ -59,7 +61,8 @@ export function ProjectTasksFilters({
   backendFilter,
   onBackendFilterChange,
   backendOptions,
-  leadOptOnlyView,
+  tableMode,
+  compactMetricsView,
   filteredMatchedCount,
   showAdvancedFilters,
   onToggleAdvancedFilters,
@@ -85,6 +88,13 @@ export function ProjectTasksFilters({
   structureSearchMatches,
   onClearAdvancedFilters
 }: ProjectTasksFiltersProps) {
+  const searchPlaceholder =
+    tableMode === 'lead_opt'
+      ? 'Search status/MMP/fragments...'
+      : tableMode === 'peptide'
+        ? 'Search status/sequence/design...'
+        : 'Search status/backend/metrics...';
+
   return (
     <>
       <div className="toolbar project-toolbar">
@@ -95,7 +105,7 @@ export function ProjectTasksFilters({
               <input
                 value={taskSearch}
                 onChange={(e) => onTaskSearchChange(e.target.value)}
-                placeholder={leadOptOnlyView ? 'Search status/MMP/fragments...' : 'Search status/backend/metrics...'}
+                placeholder={searchPlaceholder}
                 aria-label="Search tasks"
               />
             </div>
@@ -133,7 +143,7 @@ export function ProjectTasksFilters({
               ))}
             </select>
           </label>
-          {!leadOptOnlyView && (
+          {!compactMetricsView && (
             <label className="project-filter-field">
               <Filter size={14} />
               <select
@@ -185,7 +195,7 @@ export function ProjectTasksFilters({
                 <option value="90">Last 90 days</option>
               </select>
             </label>
-            {!leadOptOnlyView && (
+            {!compactMetricsView && (
               <label className="advanced-filter-field">
                 <span>Seed</span>
                 <select
@@ -199,7 +209,7 @@ export function ProjectTasksFilters({
                 </select>
               </label>
             )}
-            {!leadOptOnlyView && (
+            {!compactMetricsView && (
               <>
                 <label className="advanced-filter-field">
                   <span>Min pLDDT</span>

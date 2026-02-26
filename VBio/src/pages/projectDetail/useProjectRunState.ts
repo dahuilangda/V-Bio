@@ -5,6 +5,7 @@ import type { WorkspaceTab } from './workspaceTypes';
 interface UseProjectRunStateInput {
   workspaceTab: WorkspaceTab;
   isPredictionWorkflow: boolean;
+  isPeptideDesignWorkflow: boolean;
   isAffinityWorkflow: boolean;
   isLeadOptimizationWorkflow: boolean;
   hasIncompleteComponents: boolean;
@@ -43,6 +44,7 @@ export function useProjectRunState(input: UseProjectRunStateInput): UseProjectRu
   const runUiState = buildRunUiState({
     workspaceTab: input.workspaceTab,
     isPredictionWorkflow: input.isPredictionWorkflow,
+    isPeptideDesignWorkflow: input.isPeptideDesignWorkflow,
     isAffinityWorkflow: input.isAffinityWorkflow,
     isLeadOptimizationWorkflow: input.isLeadOptimizationWorkflow,
     hasIncompleteComponents: input.hasIncompleteComponents,

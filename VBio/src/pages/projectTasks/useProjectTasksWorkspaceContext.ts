@@ -9,6 +9,8 @@ import {
   isProjectTaskRow,
   isSequenceLigandType,
   mean,
+  readPeptideBestCandidatePreview,
+  readPeptideTaskSummary,
   readLeadOptTaskSummary,
   readTaskConfidenceMetrics,
   readTaskLigandAtomPlddts,
@@ -110,23 +112,40 @@ export function useProjectTasksWorkspaceContext({
           : null;
       const resolvedWorkflow = resolveTaskWorkflowKey(task, project?.task_type || '');
       const workflowKey =
-        resolvedWorkflow === 'affinity' || resolvedWorkflow === 'lead_optimization' ? resolvedWorkflow : 'prediction';
+        resolvedWorkflow === 'affinity' ||
+        resolvedWorkflow === 'lead_optimization' ||
+        resolvedWorkflow === 'peptide_design'
+          ? resolvedWorkflow
+          : 'prediction';
       const selection = resolveTaskSelectionContext(task, workspacePairPreference, workflowKey);
       const ligandAtomPlddts = readTaskLigandAtomPlddts(task, selection.ligandChainId, selection.ligandComponentCount <= 1);
+      const peptideBest = workflowKey === 'peptide_design' ? readPeptideBestCandidatePreview(task) : null;
+      const resolvedLigandSequence =
+        workflowKey === 'peptide_design' && peptideBest?.sequence
+          ? peptideBest.sequence
+          : selection.ligandSequence;
+      const resolvedLigandSequenceType =
+        workflowKey === 'peptide_design' && peptideBest?.sequence
+          ? 'protein'
+          : selection.ligandSequenceType;
       const ligandResiduePlddtsRaw =
-        selection.ligandSequence && isSequenceLigandType(selection.ligandSequenceType)
-          ? readTaskLigandResiduePlddts(task, selection.ligandChainId)
-          : null;
-      const ligandResiduePlddts = alignConfidenceSeriesToLength(
-        ligandResiduePlddtsRaw,
-        selection.ligandSequence.length,
-        null
-      );
+        workflowKey === 'peptide_design' && peptideBest?.sequence
+          ? peptideBest.residuePlddts
+          : selection.ligandSequence && isSequenceLigandType(selection.ligandSequenceType)
+            ? readTaskLigandResiduePlddts(task, selection.ligandChainId)
+            : null;
+      const ligandResiduePlddts = alignConfidenceSeriesToLength(ligandResiduePlddtsRaw, resolvedLigandSequence.length, null);
       const metrics = readTaskConfidenceMetrics(task, selection);
       const ligandMeanPlddt = mean(ligandAtomPlddts);
       const ligandSequenceMeanPlddt = mean(ligandResiduePlddts);
-      const plddt = metrics.plddt !== null ? metrics.plddt : ligandMeanPlddt ?? ligandSequenceMeanPlddt;
+      const plddt =
+        metrics.plddt !== null
+          ? metrics.plddt
+          : workflowKey === 'peptide_design'
+            ? peptideBest?.plddt ?? ligandMeanPlddt ?? ligandSequenceMeanPlddt
+            : ligandMeanPlddt ?? ligandSequenceMeanPlddt;
       const leadOpt = readLeadOptTaskSummary(task);
+      const peptide = workflowKey === 'peptide_design' ? readPeptideTaskSummary(task) : null;
       const resolvedBucketCount =
         workflowKey === 'lead_optimization' && leadOpt
           ? leadOpt.bucketCount
@@ -140,11 +159,11 @@ export function useProjectTasksWorkspaceContext({
         submittedTs,
         backendValue: resolveTaskBackendValue(task, project?.backend || ''),
         durationValue,
-        ligandSmiles: selection.ligandSmiles,
-        ligandIsSmiles: selection.ligandIsSmiles,
+        ligandSmiles: workflowKey === 'peptide_design' ? '' : selection.ligandSmiles,
+        ligandIsSmiles: workflowKey === 'peptide_design' ? false : selection.ligandIsSmiles,
         ligandAtomPlddts,
-        ligandSequence: selection.ligandSequence,
-        ligandSequenceType: selection.ligandSequenceType,
+        ligandSequence: resolvedLigandSequence,
+        ligandSequenceType: resolvedLigandSequenceType,
         ligandResiduePlddts,
         workflowKey,
         workflowLabel: getWorkflowDefinition(workflowKey).shortTitle,
@@ -163,7 +182,22 @@ export function useProjectTasksWorkspaceContext({
         leadOptPredictionFailure: leadOpt?.predictionFailure ?? null,
         leadOptSelectedFragmentIds: leadOpt?.selectedFragmentIds || [],
         leadOptSelectedAtomIndices: leadOpt?.selectedAtomIndices || [],
-        leadOptSelectedFragmentQuery: leadOpt?.selectedFragmentQuery || ''
+        leadOptSelectedFragmentQuery: leadOpt?.selectedFragmentQuery || '',
+        peptideDesignMode: peptide?.designMode ?? null,
+        peptideBinderLength: peptide?.binderLength ?? null,
+        peptideIterations: peptide?.iterations ?? null,
+        peptidePopulationSize: peptide?.populationSize ?? null,
+        peptideEliteSize: peptide?.eliteSize ?? null,
+        peptideMutationRate: peptide?.mutationRate ?? null,
+        peptideCurrentGeneration: peptide?.currentGeneration ?? null,
+        peptideTotalGenerations: peptide?.totalGenerations ?? null,
+        peptideBestScore: peptide?.bestScore ?? null,
+        peptideCandidateCount: peptide?.candidateCount ?? null,
+        peptideCompletedTasks: peptide?.completedTasks ?? null,
+        peptidePendingTasks: peptide?.pendingTasks ?? null,
+        peptideTotalTasks: peptide?.totalTasks ?? null,
+        peptideStage: peptide?.stage || '',
+        peptideStatusMessage: peptide?.statusMessage || ''
       };
     });
   }, [tasks, workspacePairPreference, project?.backend, project?.task_type]);

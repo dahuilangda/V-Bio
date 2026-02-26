@@ -31,9 +31,16 @@ export function computeUseMsaFlag(components: InputComponent[], fallback = true)
   return proteinComponents.some((component) => component.useMsa !== false);
 }
 
-export function listIncompleteComponentOrders(components: InputComponent[]): number[] {
+export function listIncompleteComponentOrders(
+  components: InputComponent[],
+  options: { ignoreEmptyLigand?: boolean } = {}
+): number[] {
+  const ignoreEmptyLigand = options.ignoreEmptyLigand === true;
   const missing: number[] = [];
   components.forEach((component, index) => {
+    if (ignoreEmptyLigand && component.type === 'ligand' && !component.sequence.trim()) {
+      return;
+    }
     if (!component.sequence.trim()) {
       missing.push(index + 1);
     }

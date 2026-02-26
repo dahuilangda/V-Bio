@@ -21,7 +21,7 @@ function isSequenceLigandType(type: InputComponent['type'] | null): boolean {
 
 interface ProjectTaskRowProps {
   row: TaskListRow;
-  mode: 'default' | 'lead_opt';
+  mode: 'default' | 'lead_opt' | 'peptide';
   editingTaskNameId: string | null;
   editingTaskNameValue: string;
   savingTaskNameId: string | null;
@@ -33,6 +33,24 @@ interface ProjectTaskRowProps {
   onCancelTaskNameEdit: () => void;
   onSaveTaskNameEdit: (task: ProjectTask, displayName: string) => Promise<void> | void;
   onEditingTaskNameValueChange: (value: string) => void;
+}
+
+function peptideModeLabel(mode: 'linear' | 'cyclic' | 'bicyclic' | null): string {
+  if (mode === 'linear') return 'Linear';
+  if (mode === 'cyclic') return 'Cyclic';
+  if (mode === 'bicyclic') return 'Bicyclic';
+  return '-';
+}
+
+function formatPeptideBestScore(value: number | null): string {
+  if (value === null) return '-';
+  return value.toFixed(3);
+}
+
+function formatPeptideMutationRate(value: number | null): string {
+  if (value === null) return '-';
+  const normalized = value > 1 && value <= 100 ? value / 100 : value;
+  return `${Math.max(0, normalized * 100).toFixed(0)}%`;
 }
 
 export function ProjectTaskRow({
@@ -66,6 +84,7 @@ export function ProjectTaskRow({
   const paeTone = toneForPae(metrics.pae);
   const workflowClass = row.workflowKey.replace(/_/g, '-');
   const isLeadOptMode = mode === 'lead_opt';
+  const isPeptideMode = mode === 'peptide';
   const hasCompletedMmp = isLeadOptMode && String(task.task_state || '').toUpperCase() === 'SUCCESS';
   const mmpTransforms = hasCompletedMmp && row.leadOptTransformCount !== null ? row.leadOptTransformCount : null;
   const mmpCandidates = hasCompletedMmp && row.leadOptCandidateCount !== null ? row.leadOptCandidateCount : null;
@@ -84,6 +103,38 @@ export function ProjectTaskRow({
     }
     return items;
   })();
+  const peptideDesignItems = [
+    { key: 'mode', label: 'Mode', value: peptideModeLabel(row.peptideDesignMode) },
+    { key: 'length', label: 'Length', value: row.peptideBinderLength !== null ? String(row.peptideBinderLength) : '-' },
+    { key: 'iter', label: 'Iter', value: row.peptideIterations !== null ? String(row.peptideIterations) : '-' },
+    { key: 'pop', label: 'Pop', value: row.peptidePopulationSize !== null ? String(row.peptidePopulationSize) : '-' },
+    { key: 'elite', label: 'Elite', value: row.peptideEliteSize !== null ? String(row.peptideEliteSize) : '-' },
+    { key: 'mut', label: 'Mut', value: formatPeptideMutationRate(row.peptideMutationRate) }
+  ];
+  const peptideProgressItems = [
+    {
+      key: 'gen',
+      label: 'Gen',
+      value:
+        row.peptideCurrentGeneration !== null
+          ? row.peptideTotalGenerations !== null
+            ? `${row.peptideCurrentGeneration}/${row.peptideTotalGenerations}`
+            : String(row.peptideCurrentGeneration)
+          : '-'
+    },
+    { key: 'best', label: 'Best', value: formatPeptideBestScore(row.peptideBestScore) },
+    { key: 'cand', label: 'Cand', value: row.peptideCandidateCount !== null ? String(row.peptideCandidateCount) : '-' },
+    {
+      key: 'tasks',
+      label: 'Tasks',
+      value:
+        row.peptideTotalTasks !== null
+          ? `${row.peptideCompletedTasks ?? 0}/${row.peptideTotalTasks}`
+          : row.peptideCompletedTasks !== null || row.peptidePendingTasks !== null
+            ? `${row.peptideCompletedTasks ?? 0}/${(row.peptideCompletedTasks ?? 0) + (row.peptidePendingTasks ?? 0)}`
+            : '-'
+    }
+  ];
 
   return (
     <tr key={task.id}>
@@ -151,6 +202,34 @@ export function ProjectTaskRow({
             <span className="task-mmp-empty">-</span>
           )}
         </td>
+      ) : isPeptideMode ? (
+        <>
+          <td className="task-col-peptide-setup">
+            <div className="task-peptide-cell">
+              <div className="task-peptide-inline" aria-label="Peptide design setup">
+                {peptideDesignItems.map((item) => (
+                  <span key={item.key} className="task-peptide-inline-item">
+                    <span className="task-peptide-inline-key">{item.label}</span>
+                    <span className="task-peptide-inline-value">{item.value}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          </td>
+          <td className="task-col-peptide-progress">
+            <div className="task-peptide-cell">
+              <div className="task-peptide-inline" aria-label="Peptide iteration progress">
+                {peptideProgressItems.map((item) => (
+                  <span key={item.key} className="task-peptide-inline-item">
+                    <span className="task-peptide-inline-key">{item.label}</span>
+                    <span className="task-peptide-inline-value">{item.value}</span>
+                  </span>
+                ))}
+              </div>
+              {row.peptideStatusMessage ? <div className="task-peptide-note">{row.peptideStatusMessage}</div> : null}
+            </div>
+          </td>
+        </>
       ) : (
         <>
           <td className="task-col-metric">
@@ -208,13 +287,13 @@ export function ProjectTaskRow({
           {showRunNote ? <div className={`task-run-note is-${stateTone}`}>{runNote}</div> : null}
         </div>
       </td>
-      {!isLeadOptMode ? (
+      {mode === 'default' ? (
         <td className="task-col-backend">
           <span className="badge task-backend-badge">{backendLabel(row.backendValue)}</span>
         </td>
       ) : null}
-      {!isLeadOptMode ? <td className="task-col-seed">{task.seed ?? '-'}</td> : null}
-      {!isLeadOptMode ? <td className="project-col-time">{formatDuration(task.duration_seconds)}</td> : null}
+      {mode === 'default' ? <td className="task-col-seed">{task.seed ?? '-'}</td> : null}
+      {mode === 'default' ? <td className="project-col-time">{formatDuration(task.duration_seconds)}</td> : null}
       <td className="project-col-actions">
         <div className="row gap-6 project-action-row">
           <button

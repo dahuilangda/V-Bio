@@ -149,7 +149,7 @@ export function applyMolstarHighlights({
       }
     }
 
-    void applyLigandSpotlight(viewer, normalizedAtoms.length > 0 || normalized.length > 0, 0.16);
+    void applyLigandSpotlight(viewer, normalizedAtoms.length > 0 || normalized.length > 0, 0.28);
   } catch {
     // no-op
   } finally {

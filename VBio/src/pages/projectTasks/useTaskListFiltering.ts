@@ -103,17 +103,23 @@ export function useTaskListFiltering(taskRows: TaskListRow[]): UseTaskListFilter
   const [filtersHydrated, setFiltersHydrated] = useState(false);
 
   const advancedFilterCount = useMemo(() => {
-    const leadOptOnlyFiltering = workflowFilter === 'lead_optimization';
+    const workflowOnly = taskRows.length > 0 && taskRows.every((row) => row.workflowKey === taskRows[0].workflowKey)
+      ? taskRows[0].workflowKey
+      : null;
+    const compactMetricFiltering =
+      workflowFilter === 'lead_optimization' ||
+      workflowFilter === 'peptide_design' ||
+      (workflowFilter === 'all' && (workflowOnly === 'lead_optimization' || workflowOnly === 'peptide_design'));
     let count = 0;
     if (submittedWithinDays !== 'all') count += 1;
-    if (!leadOptOnlyFiltering && seedFilter !== 'all') count += 1;
+    if (!compactMetricFiltering && seedFilter !== 'all') count += 1;
     if (failureOnly) count += 1;
-    if (!leadOptOnlyFiltering && minPlddt.trim()) count += 1;
-    if (!leadOptOnlyFiltering && minIptm.trim()) count += 1;
-    if (!leadOptOnlyFiltering && maxPae.trim()) count += 1;
+    if (!compactMetricFiltering && minPlddt.trim()) count += 1;
+    if (!compactMetricFiltering && minIptm.trim()) count += 1;
+    if (!compactMetricFiltering && maxPae.trim()) count += 1;
     if (structureSearchQuery.trim()) count += 1;
     return count;
-  }, [workflowFilter, submittedWithinDays, seedFilter, failureOnly, minPlddt, minIptm, maxPae, structureSearchQuery]);
+  }, [taskRows, workflowFilter, submittedWithinDays, seedFilter, failureOnly, minPlddt, minIptm, maxPae, structureSearchQuery]);
 
   const clearAdvancedFilters = useCallback(() => {
     setSubmittedWithinDays('all');
@@ -146,7 +152,7 @@ export function useTaskListFiltering(taskRows: TaskListRow[]): UseTaskListFilter
       }
       if (
         typeof saved.workflowFilter === 'string' &&
-        ['all', 'prediction', 'affinity', 'lead_optimization'].includes(saved.workflowFilter)
+        ['all', 'prediction', 'peptide_design', 'affinity', 'lead_optimization'].includes(saved.workflowFilter)
       ) {
         setWorkflowFilter(saved.workflowFilter as TaskWorkflowFilter);
       }
@@ -332,22 +338,28 @@ export function useTaskListFiltering(taskRows: TaskListRow[]): UseTaskListFilter
 
   const filteredRows = useMemo(() => {
     const query = taskSearch.trim().toLowerCase();
-    const leadOptOnlyFiltering = workflowFilter === 'lead_optimization';
+    const workflowOnly = taskRows.length > 0 && taskRows.every((row) => row.workflowKey === taskRows[0].workflowKey)
+      ? taskRows[0].workflowKey
+      : null;
+    const compactMetricFiltering =
+      workflowFilter === 'lead_optimization' ||
+      workflowFilter === 'peptide_design' ||
+      (workflowFilter === 'all' && (workflowOnly === 'lead_optimization' || workflowOnly === 'peptide_design'));
     const structureSearchActive = Boolean(structureSearchQuery.trim());
     const applyStructureFilter = structureSearchActive && !structureSearchLoading && !structureSearchError;
     const submittedWindowMs = submittedWithinDays === 'all' ? null : Number(submittedWithinDays) * 24 * 60 * 60 * 1000;
     const submittedCutoff = submittedWindowMs === null ? null : Date.now() - submittedWindowMs;
-    const minPlddtThreshold = leadOptOnlyFiltering ? null : normalizePlddtThreshold(parseNumberOrNull(minPlddt));
-    const minIptmThreshold = leadOptOnlyFiltering ? null : normalizeIptmThreshold(parseNumberOrNull(minIptm));
-    const maxPaeThreshold = leadOptOnlyFiltering ? null : parseNumberOrNull(maxPae);
+    const minPlddtThreshold = compactMetricFiltering ? null : normalizePlddtThreshold(parseNumberOrNull(minPlddt));
+    const minIptmThreshold = compactMetricFiltering ? null : normalizeIptmThreshold(parseNumberOrNull(minIptm));
+    const maxPaeThreshold = compactMetricFiltering ? null : parseNumberOrNull(maxPae);
 
     const filtered = taskRows.filter((row) => {
       const { task, metrics } = row;
       if (stateFilter !== 'all' && task.task_state !== stateFilter) return false;
       if (workflowFilter !== 'all' && row.workflowKey !== workflowFilter) return false;
-      if (!leadOptOnlyFiltering && backendFilter !== 'all' && row.backendValue !== backendFilter) return false;
-      if (!leadOptOnlyFiltering && seedFilter === 'with_seed' && (task.seed === null || task.seed === undefined)) return false;
-      if (!leadOptOnlyFiltering && seedFilter === 'without_seed' && task.seed !== null && task.seed !== undefined) return false;
+      if (!compactMetricFiltering && backendFilter !== 'all' && row.backendValue !== backendFilter) return false;
+      if (!compactMetricFiltering && seedFilter === 'with_seed' && (task.seed === null || task.seed === undefined)) return false;
+      if (!compactMetricFiltering && seedFilter === 'without_seed' && task.seed !== null && task.seed !== undefined) return false;
       if (failureOnly && task.task_state !== 'FAILURE' && !(task.error_text || '').trim()) return false;
       if (submittedCutoff !== null && (!Number.isFinite(row.submittedTs) || row.submittedTs < submittedCutoff)) return false;
       if (minPlddtThreshold !== null && (metrics.plddt === null || metrics.plddt < minPlddtThreshold)) return false;

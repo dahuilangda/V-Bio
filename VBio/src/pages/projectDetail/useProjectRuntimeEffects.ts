@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import type { MutableRefObject } from 'react';
+import type { DownloadResultMode } from '../../api/backendTaskApi';
 
 interface RuntimeTaskLike {
   id: string;
@@ -30,8 +31,9 @@ interface UseProjectRuntimeEffectsInput {
   structureText: string;
   pullResultForViewer: (
     taskId: string,
-    options?: { taskRowId?: string; persistProject?: boolean }
+    options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode }
   ) => Promise<void>;
+  isPeptideDesignWorkflow: boolean;
   workspaceTab: 'results' | 'basics' | 'components' | 'constraints';
   activeConstraintId: string | null;
   selectedContactConstraintIdsLength: number;
@@ -50,6 +52,7 @@ export function useProjectRuntimeEffects({
   structureTaskId,
   structureText,
   pullResultForViewer,
+  isPeptideDesignWorkflow,
   workspaceTab,
   activeConstraintId,
   selectedContactConstraintIdsLength,
@@ -77,9 +80,11 @@ export function useProjectRuntimeEffects({
     if (structureTaskId === contextTaskId && structureText.trim()) return;
 
     const activeRuntimeTaskId = String(projectTaskId || '').trim();
+    const resultMode: DownloadResultMode = 'view';
     void pullResultForViewer(contextTaskId, {
       taskRowId: contextTask?.id || undefined,
-      persistProject: activeRuntimeTaskId === contextTaskId
+      persistProject: activeRuntimeTaskId === contextTaskId,
+      resultMode
     });
   }, [
     statusContextTaskRow,
@@ -87,7 +92,8 @@ export function useProjectRuntimeEffects({
     projectTaskId,
     structureTaskId,
     structureText,
-    pullResultForViewer
+    pullResultForViewer,
+    isPeptideDesignWorkflow
   ]);
 
   useEffect(() => {

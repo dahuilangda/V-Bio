@@ -244,6 +244,128 @@ def _store_progress(redis_client, key: str, payload: dict, ttl: int = PROGRESS_T
     except Exception as e:
         logger.warning(f"Failed to store progress for {key}: {e}")
 
+
+def _read_json_record(path: str) -> dict:
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            parsed = json.load(f)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _read_int_metric(value: Any) -> Optional[int]:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0, parsed)
+
+
+def _read_float_metric(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not (parsed == parsed and parsed not in (float('inf'), float('-inf'))):
+        return None
+    return parsed
+
+
+def _collect_peptide_design_setup_meta(predict_args: dict) -> dict:
+    options = predict_args.get('peptide_design_options')
+    if not isinstance(options, dict):
+        return {}
+
+    setup = {}
+    mode = str(options.get('peptideDesignMode') or options.get('peptide_design_mode') or '').strip().lower()
+    if mode:
+        setup['design_mode'] = mode
+
+    binder_length = _read_int_metric(options.get('peptideBinderLength', options.get('peptide_binder_length')))
+    if binder_length is not None:
+        setup['binder_length'] = binder_length
+
+    iterations = _read_int_metric(options.get('peptideIterations', options.get('peptide_iterations')))
+    if iterations is not None:
+        setup['iterations'] = iterations
+        setup['total_generations'] = iterations
+
+    population_size = _read_int_metric(options.get('peptidePopulationSize', options.get('peptide_population_size')))
+    if population_size is not None:
+        setup['population_size'] = population_size
+
+    elite_size = _read_int_metric(options.get('peptideEliteSize', options.get('peptide_elite_size')))
+    if elite_size is not None:
+        setup['elite_size'] = elite_size
+
+    mutation_rate = _read_float_metric(options.get('peptideMutationRate', options.get('peptide_mutation_rate')))
+    if mutation_rate is not None:
+        setup['mutation_rate'] = mutation_rate
+
+    return setup
+
+
+def _build_peptide_runtime_meta(predict_args: dict, gpu_id: int) -> dict:
+    runtime_meta = {
+        'status': f'Running prediction on GPU {gpu_id}'
+    }
+
+    setup_payload = _collect_peptide_design_setup_meta(predict_args)
+    progress_path = str(predict_args.get('peptide_progress_path') or '').strip()
+    progress_payload = _read_json_record(progress_path)
+    peptide_progress_raw = progress_payload.get('peptide_design') if isinstance(progress_payload, dict) else {}
+    peptide_progress = peptide_progress_raw if isinstance(peptide_progress_raw, dict) else {}
+
+    status_override = str(
+        peptide_progress.get('current_status')
+        or peptide_progress.get('status_message')
+        or ''
+    ).strip()
+    if status_override:
+        runtime_meta['status'] = status_override
+
+    merged_peptide = {
+        **setup_payload,
+        **peptide_progress
+    }
+    if merged_peptide:
+        runtime_meta['peptide_design'] = merged_peptide
+
+    progress_meta = {}
+    for key in (
+        'current_generation',
+        'generation',
+        'total_generations',
+        'completed_tasks',
+        'pending_tasks',
+        'total_tasks',
+        'best_score',
+        'progress_percent',
+        'current_status',
+        'status_message',
+        'current_best_sequences',
+        'best_sequences',
+        'candidates',
+        'candidate_count',
+    ):
+        if key in peptide_progress:
+            progress_meta[key] = peptide_progress[key]
+
+    if progress_meta:
+        runtime_meta['progress'] = progress_meta
+
+    options = predict_args.get('peptide_design_options')
+    if isinstance(options, dict) and options:
+        runtime_meta['request'] = {
+            'options': options
+        }
+
+    return runtime_meta
+
+
 def _write_base64_file(encoded_content: str, path: str, text_mode: bool = False) -> None:
     """Write base64 encoded content to disk."""
     raw = base64.b64decode(encoded_content)
@@ -538,6 +660,8 @@ def predict_task(self, predict_args: dict):
         output_archive_path = os.path.join(task_temp_dir, f"{task_id}_results.zip")
         predict_args['output_archive_path'] = output_archive_path
         predict_args['task_id'] = task_id
+        if str(predict_args.get('workflow', '')).strip().lower() == 'peptide_design':
+            predict_args['peptide_progress_path'] = os.path.join(task_temp_dir, "peptide_progress.json")
 
         args_file_path = os.path.join(task_temp_dir, 'args.json')
         with open(args_file_path, 'w') as f:
@@ -556,8 +680,14 @@ def predict_task(self, predict_args: dict):
         ]
 
         logger.info(f"Task {task_id}: Running prediction on GPU {gpu_id}. Subprocess timeout: {SUBPROCESS_TIMEOUT}s. Command: {' '.join(command)}")
-        self.update_state(state='PROGRESS', meta={'status': f'Running prediction on GPU {gpu_id}'})
-        tracker.update_status("running", f"Executing prediction with GPU {gpu_id}")
+        is_peptide_design = str(predict_args.get('workflow', '')).strip().lower() == 'peptide_design'
+        if is_peptide_design:
+            initial_runtime_meta = _build_peptide_runtime_meta(predict_args, gpu_id)
+            self.update_state(state='PROGRESS', meta=initial_runtime_meta)
+            tracker.update_status("running", str(initial_runtime_meta.get('status') or f"Executing prediction with GPU {gpu_id}"))
+        else:
+            self.update_state(state='PROGRESS', meta={'status': f'Running prediction on GPU {gpu_id}'})
+            tracker.update_status("running", f"Executing prediction with GPU {gpu_id}")
         
         process = subprocess.Popen(
             command,
@@ -570,7 +700,34 @@ def predict_task(self, predict_args: dict):
         
         # 注册进程ID用于监控
         tracker.register_process(process.pid)
-        
+
+        progress_stop_event = threading.Event()
+        progress_thread = None
+        if is_peptide_design:
+            def _emit_peptide_progress() -> None:
+                last_meta = None
+                while not progress_stop_event.wait(PROGRESS_UPDATE_INTERVAL):
+                    try:
+                        runtime_meta = _build_peptide_runtime_meta(predict_args, gpu_id)
+                        if runtime_meta == last_meta:
+                            continue
+                        self.update_state(state='PROGRESS', meta=runtime_meta)
+                        status_text = str(runtime_meta.get('status') or '').strip()
+                        if status_text:
+                            tracker.update_status("running", status_text)
+                        last_meta = runtime_meta
+                    except Exception as progress_exc:
+                        logger.debug(f"Task {task_id}: Failed to emit peptide progress update: {progress_exc}")
+
+            progress_thread = threading.Thread(
+                target=_emit_peptide_progress,
+                daemon=True,
+                name=f"peptide-progress-{task_id[:8]}"
+            )
+            progress_thread.start()
+
+        stdout = ''
+        stderr = ''
         try:
             stdout, stderr = process.communicate(timeout=SUBPROCESS_TIMEOUT)
         except subprocess.TimeoutExpired as e:
@@ -584,6 +741,10 @@ def predict_task(self, predict_args: dict):
             logger.error(error_message)
             tracker.update_status("timeout", f"Process timeout after {SUBPROCESS_TIMEOUT}s")
             raise TimeoutError(error_message) from e
+        finally:
+            progress_stop_event.set()
+            if progress_thread and progress_thread.is_alive():
+                progress_thread.join(timeout=5)
 
         if process.returncode != 0:
             error_message = _format_subprocess_failure("task", task_id, process.returncode, stderr, stdout)
@@ -603,6 +764,15 @@ def predict_task(self, predict_args: dict):
         self.update_state(state='PROGRESS', meta={'status': f'Uploading results for task {task_id}'})
         logger.info(f"Task {task_id}: Results archive found at '{output_archive_path}'. Initiating upload.")
         tracker.update_status("uploading", "Uploading results to central API")
+
+        design_runtime_meta = {}
+        if str(predict_args.get('workflow', '')).strip().lower() == 'peptide_design':
+            try:
+                parsed_progress = _read_json_record(str(predict_args.get('peptide_progress_path') or '').strip())
+                if isinstance(parsed_progress, dict):
+                    design_runtime_meta = parsed_progress
+            except Exception as progress_exc:
+                logger.warning(f"Task {task_id}: Failed to read peptide progress metadata: {progress_exc}")
         
         upload_response = upload_result_to_central_api(task_id, output_archive_path, os.path.basename(output_archive_path))
         
@@ -612,6 +782,8 @@ def predict_task(self, predict_args: dict):
             'upload_info': upload_response,
             'result_file': os.path.basename(output_archive_path) 
         }
+        if design_runtime_meta:
+            final_meta.update(design_runtime_meta)
         self.update_state(state='SUCCESS', meta=final_meta)
         logger.info(f"Task {task_id}: Prediction completed and results uploaded successfully. Final status: SUCCESS.")
         tracker.update_status("completed", "Task completed successfully")

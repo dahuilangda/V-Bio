@@ -1,7 +1,7 @@
 import type { InputComponent, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import { extractPrimaryProteinAndLigand, saveProjectInputConfig } from '../../utils/projectInputs';
-import { getWorkflowDefinition } from '../../utils/workflows';
+import { getWorkflowDefinition, isPredictionLikeWorkflowKey } from '../../utils/workflows';
 
 export interface SaveDraftFields {
   taskName: string;
@@ -185,7 +185,7 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
   setSavedComputationFingerprint(createComputationFingerprint(nextDraft));
   setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
   setRunMenuOpen(false);
-  const nextTab = workflowDef.key === 'prediction' ? 'components' : 'basics';
+  const nextTab = isPredictionLikeWorkflowKey(workflowDef.key) ? 'components' : 'basics';
   const query = new URLSearchParams({
     tab: nextTab,
     task_row_id: draftTaskRow.id,

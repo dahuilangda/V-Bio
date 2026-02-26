@@ -1,5 +1,5 @@
 import type { ProjectTask } from '../../types/models';
-import { getWorkflowDefinition, normalizeWorkflowKey, type WorkflowKey } from '../../utils/workflows';
+import { getWorkflowDefinition, isPredictionLikeWorkflowKey, normalizeWorkflowKey, type WorkflowKey } from '../../utils/workflows';
 import type { MetricTone } from './taskListTypes';
 
 function hasObjectFields(value: unknown): boolean {
@@ -86,7 +86,7 @@ export function backendLabel(value: string): string {
 
 export function resolveTaskWorkflowKey(task: ProjectTask, fallbackTaskType: string): WorkflowKey {
   const normalizedFallback = normalizeWorkflowKey(fallbackTaskType);
-  if (normalizedFallback === 'prediction' || normalizedFallback === 'affinity' || normalizedFallback === 'lead_optimization') {
+  if (isPredictionLikeWorkflowKey(normalizedFallback) || normalizedFallback === 'affinity' || normalizedFallback === 'lead_optimization') {
     return normalizedFallback;
   }
 

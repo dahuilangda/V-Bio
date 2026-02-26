@@ -14,6 +14,50 @@ const TEMPLATE_CONTENT_REF_PREFIX = '@pool:';
 const VALID_MOLECULE_TYPES: MoleculeType[] = ['protein', 'ligand', 'dna', 'rna'];
 const VALID_LIGAND_INPUT_METHODS = new Set(['smiles', 'ccd', 'jsme']);
 const INVALID_COMPONENT_ID_TOKENS = new Set(['undefined', 'null', 'nan']);
+const DEFAULT_PEPTIDE_DESIGN_MODE = 'cyclic';
+const VALID_PEPTIDE_DESIGN_MODES = new Set(['linear', 'cyclic', 'bicyclic']);
+const VALID_PEPTIDE_MASK_CHARS = new Set(['A', 'R', 'N', 'D', 'C', 'Q', 'E', 'G', 'H', 'I', 'L', 'K', 'M', 'F', 'P', 'S', 'T', 'W', 'Y', 'V', 'X']);
+const VALID_PEPTIDE_INITIAL_SEQUENCE_CHARS = new Set([
+  'A',
+  'R',
+  'N',
+  'D',
+  'C',
+  'Q',
+  'E',
+  'G',
+  'H',
+  'I',
+  'L',
+  'K',
+  'M',
+  'F',
+  'P',
+  'S',
+  'T',
+  'W',
+  'Y',
+  'V'
+]);
+const DEFAULT_PEPTIDE_BINDER_LENGTH = 20;
+const DEFAULT_PEPTIDE_USE_INITIAL_SEQUENCE = false;
+const DEFAULT_PEPTIDE_INITIAL_SEQUENCE = '';
+const DEFAULT_PEPTIDE_SEQUENCE_MASK = '';
+const DEFAULT_PEPTIDE_ITERATIONS = 12;
+const DEFAULT_PEPTIDE_POPULATION_SIZE = 16;
+const DEFAULT_PEPTIDE_ELITE_SIZE = 5;
+const DEFAULT_PEPTIDE_MUTATION_RATE = 0.25;
+const DEFAULT_PEPTIDE_BICYCLIC_LINKER_CCD = 'SEZ';
+const VALID_PEPTIDE_BICYCLIC_LINKER_CCD = new Set(['SEZ', '29N', 'BS3']);
+const DEFAULT_PEPTIDE_BICYCLIC_CYS_POSITION_MODE = 'auto';
+const VALID_PEPTIDE_BICYCLIC_CYS_POSITION_MODES = new Set(['auto', 'manual']);
+const DEFAULT_PEPTIDE_BICYCLIC_FIX_TERMINAL_CYS = true;
+const DEFAULT_PEPTIDE_BICYCLIC_INCLUDE_EXTRA_CYS = false;
+const DEFAULT_PEPTIDE_BICYCLIC_CYS1_POS = 3;
+const DEFAULT_PEPTIDE_BICYCLIC_CYS2_POS = 8;
+const DEFAULT_PEPTIDE_BICYCLIC_CYS3_POS = 15;
+
+export const PEPTIDE_DESIGNED_LIGAND_TOKEN = '__designed_peptide__';
 
 export interface ProjectUiState {
   proteinTemplates: Record<string, ProteinTemplateUpload>;
@@ -129,7 +173,96 @@ export function normalizeInputComponents(components: InputComponent[]): InputCom
   });
 }
 
-export function buildDefaultInputConfig(): ProjectInputConfig {
+function normalizePeptideDesignMode(value: unknown): 'linear' | 'cyclic' | 'bicyclic' {
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (VALID_PEPTIDE_DESIGN_MODES.has(normalized)) {
+      return normalized as 'linear' | 'cyclic' | 'bicyclic';
+    }
+  }
+  return DEFAULT_PEPTIDE_DESIGN_MODE;
+}
+
+function normalizePeptideBicyclicLinkerCcd(value: unknown): 'SEZ' | '29N' | 'BS3' {
+  if (typeof value === 'string') {
+    const normalized = value.trim().toUpperCase();
+    if (VALID_PEPTIDE_BICYCLIC_LINKER_CCD.has(normalized)) {
+      return normalized as 'SEZ' | '29N' | 'BS3';
+    }
+  }
+  return DEFAULT_PEPTIDE_BICYCLIC_LINKER_CCD as 'SEZ' | '29N' | 'BS3';
+}
+
+function normalizePeptideBicyclicCysPositionMode(value: unknown): 'auto' | 'manual' {
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (VALID_PEPTIDE_BICYCLIC_CYS_POSITION_MODES.has(normalized)) {
+      return normalized as 'auto' | 'manual';
+    }
+  }
+  return DEFAULT_PEPTIDE_BICYCLIC_CYS_POSITION_MODE as 'auto' | 'manual';
+}
+
+function readFiniteNumber(value: unknown): number | null {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
+  if (!Number.isFinite(parsed)) return null;
+  return parsed;
+}
+
+function normalizeIntegerOption(
+  value: unknown,
+  fallback: number,
+  minValue: number,
+  maxValue: number
+): number {
+  const parsed = readFiniteNumber(value);
+  if (parsed === null) return fallback;
+  return Math.max(minValue, Math.min(maxValue, Math.floor(parsed)));
+}
+
+function normalizeRateOption(value: unknown, fallback: number, minValue: number, maxValue: number): number {
+  const parsed = readFiniteNumber(value);
+  if (parsed === null) return fallback;
+  const clamped = Math.max(minValue, Math.min(maxValue, parsed));
+  return Math.round(clamped * 100) / 100;
+}
+
+function normalizeBooleanOption(value: unknown, fallback: boolean): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') return true;
+    if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') return false;
+  }
+  return fallback;
+}
+
+function normalizePeptideInitialSequence(value: unknown, binderLength: number): string {
+  if (typeof value !== 'string') return DEFAULT_PEPTIDE_INITIAL_SEQUENCE;
+  const cleaned = value
+    .replace(/[\s_-]/g, '')
+    .toUpperCase()
+    .split('')
+    .filter((char) => VALID_PEPTIDE_INITIAL_SEQUENCE_CHARS.has(char))
+    .join('');
+  return cleaned.slice(0, Math.max(0, binderLength));
+}
+
+function normalizePeptideSequenceMask(value: unknown, binderLength: number): string {
+  const cleaned = typeof value === 'string' ? value.replace(/[\s_-]/g, '').toUpperCase() : '';
+  const normalized = cleaned
+    .split('')
+    .filter((char) => VALID_PEPTIDE_MASK_CHARS.has(char))
+    .join('')
+    .slice(0, Math.max(0, binderLength));
+  if (binderLength <= 0) return DEFAULT_PEPTIDE_SEQUENCE_MASK;
+  if (!normalized) return 'X'.repeat(binderLength);
+  return normalized.padEnd(binderLength, 'X');
+}
+
+export function buildDefaultInputConfig(workflowKey: string | null | undefined = 'prediction'): ProjectInputConfig {
+  const isPeptideDesignWorkflow = String(workflowKey || '').trim().toLowerCase() === 'peptide_design';
   return {
     version: 1,
     components: [createInputComponent('protein')],
@@ -137,11 +270,27 @@ export function buildDefaultInputConfig(): ProjectInputConfig {
     properties: {
       affinity: false,
       target: null,
-      ligand: null,
-      binder: null
+      ligand: isPeptideDesignWorkflow ? PEPTIDE_DESIGNED_LIGAND_TOKEN : null,
+      binder: isPeptideDesignWorkflow ? PEPTIDE_DESIGNED_LIGAND_TOKEN : null
     },
     options: {
-      seed: 42
+      seed: 42,
+      peptideDesignMode: DEFAULT_PEPTIDE_DESIGN_MODE,
+      peptideBinderLength: DEFAULT_PEPTIDE_BINDER_LENGTH,
+      peptideUseInitialSequence: DEFAULT_PEPTIDE_USE_INITIAL_SEQUENCE,
+      peptideInitialSequence: DEFAULT_PEPTIDE_INITIAL_SEQUENCE,
+      peptideSequenceMask: 'X'.repeat(DEFAULT_PEPTIDE_BINDER_LENGTH),
+      peptideIterations: DEFAULT_PEPTIDE_ITERATIONS,
+      peptidePopulationSize: DEFAULT_PEPTIDE_POPULATION_SIZE,
+      peptideEliteSize: DEFAULT_PEPTIDE_ELITE_SIZE,
+      peptideMutationRate: DEFAULT_PEPTIDE_MUTATION_RATE,
+      peptideBicyclicLinkerCcd: DEFAULT_PEPTIDE_BICYCLIC_LINKER_CCD as 'SEZ' | '29N' | 'BS3',
+      peptideBicyclicCysPositionMode: DEFAULT_PEPTIDE_BICYCLIC_CYS_POSITION_MODE as 'auto' | 'manual',
+      peptideBicyclicFixTerminalCys: DEFAULT_PEPTIDE_BICYCLIC_FIX_TERMINAL_CYS,
+      peptideBicyclicIncludeExtraCys: DEFAULT_PEPTIDE_BICYCLIC_INCLUDE_EXTRA_CYS,
+      peptideBicyclicCys1Pos: DEFAULT_PEPTIDE_BICYCLIC_CYS1_POS,
+      peptideBicyclicCys2Pos: DEFAULT_PEPTIDE_BICYCLIC_CYS2_POS,
+      peptideBicyclicCys3Pos: DEFAULT_PEPTIDE_BICYCLIC_CYS3_POS
     }
   };
 }
@@ -160,13 +309,135 @@ function normalizeProperties(value: unknown): PredictionProperties {
 }
 
 function normalizeOptions(value: unknown): PredictionOptions {
-  const raw = (value || {}) as Partial<PredictionOptions>;
+  const rawObj = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+  const raw = rawObj as Partial<PredictionOptions>;
   const seed = raw.seed;
+  const peptideDesignMode = normalizePeptideDesignMode(raw.peptideDesignMode ?? rawObj.peptide_design_mode);
+  const minPeptideLength = peptideDesignMode === 'bicyclic' ? 8 : 5;
+  const peptideBinderLength = normalizeIntegerOption(
+    raw.peptideBinderLength ?? rawObj.peptide_binder_length ?? rawObj.binder_length,
+    DEFAULT_PEPTIDE_BINDER_LENGTH,
+    minPeptideLength,
+    80
+  );
+  const peptideUseInitialSequence = normalizeBooleanOption(
+    raw.peptideUseInitialSequence ?? rawObj.peptide_use_initial_sequence ?? rawObj.use_initial_sequence,
+    DEFAULT_PEPTIDE_USE_INITIAL_SEQUENCE
+  );
+  const peptideInitialSequence = normalizePeptideInitialSequence(
+    raw.peptideInitialSequence ?? rawObj.peptide_initial_sequence ?? rawObj.initial_sequence,
+    peptideBinderLength
+  );
+  const peptideSequenceMask = normalizePeptideSequenceMask(
+    raw.peptideSequenceMask ?? rawObj.peptide_sequence_mask ?? rawObj.sequence_mask,
+    peptideBinderLength
+  );
+  const peptideIterations = normalizeIntegerOption(
+    raw.peptideIterations ?? rawObj.peptide_iterations ?? rawObj.generations,
+    DEFAULT_PEPTIDE_ITERATIONS,
+    2,
+    100
+  );
+  const peptidePopulationSize = normalizeIntegerOption(
+    raw.peptidePopulationSize ?? rawObj.peptide_population_size ?? rawObj.population_size,
+    DEFAULT_PEPTIDE_POPULATION_SIZE,
+    2,
+    100
+  );
+  const peptideEliteSize = Math.max(
+    1,
+    Math.min(
+      Math.max(1, peptidePopulationSize - 1),
+      normalizeIntegerOption(
+        raw.peptideEliteSize ?? rawObj.peptide_elite_size ?? rawObj.elite_size ?? rawObj.num_elites,
+        DEFAULT_PEPTIDE_ELITE_SIZE,
+        1,
+        99
+      )
+    )
+  );
+  const peptideMutationRate = normalizeRateOption(
+    raw.peptideMutationRate ?? rawObj.peptide_mutation_rate ?? rawObj.mutation_rate,
+    DEFAULT_PEPTIDE_MUTATION_RATE,
+    0.01,
+    1
+  );
+  const peptideBicyclicLinkerCcd = normalizePeptideBicyclicLinkerCcd(
+    raw.peptideBicyclicLinkerCcd ?? rawObj.peptide_bicyclic_linker_ccd ?? rawObj.linker_ccd
+  );
+  const peptideBicyclicCysPositionMode = normalizePeptideBicyclicCysPositionMode(
+    raw.peptideBicyclicCysPositionMode ?? rawObj.peptide_bicyclic_cys_position_mode ?? rawObj.cys_position_mode
+  );
+  const peptideBicyclicFixTerminalCys = normalizeBooleanOption(
+    raw.peptideBicyclicFixTerminalCys ?? rawObj.peptide_bicyclic_fix_terminal_cys ?? rawObj.fix_terminal_cys,
+    DEFAULT_PEPTIDE_BICYCLIC_FIX_TERMINAL_CYS
+  );
+  const peptideBicyclicIncludeExtraCys = normalizeBooleanOption(
+    raw.peptideBicyclicIncludeExtraCys ??
+      rawObj.peptide_bicyclic_include_extra_cys ??
+      rawObj.include_extra_cys ??
+      rawObj.include_cysteine,
+    DEFAULT_PEPTIDE_BICYCLIC_INCLUDE_EXTRA_CYS
+  );
+  const peptideBicyclicCys1Pos = normalizeIntegerOption(
+    raw.peptideBicyclicCys1Pos ?? rawObj.peptide_bicyclic_cys1_pos ?? rawObj.cys1_pos,
+    DEFAULT_PEPTIDE_BICYCLIC_CYS1_POS,
+    1,
+    Math.max(1, peptideBinderLength - 2)
+  );
+  const peptideBicyclicCys2Pos = normalizeIntegerOption(
+    raw.peptideBicyclicCys2Pos ?? rawObj.peptide_bicyclic_cys2_pos ?? rawObj.cys2_pos,
+    DEFAULT_PEPTIDE_BICYCLIC_CYS2_POS,
+    1,
+    peptideBicyclicFixTerminalCys ? Math.max(1, peptideBinderLength - 2) : Math.max(1, peptideBinderLength - 1)
+  );
+  const peptideBicyclicCys3Pos = peptideBicyclicFixTerminalCys
+    ? peptideBinderLength
+    : normalizeIntegerOption(
+        raw.peptideBicyclicCys3Pos ?? rawObj.peptide_bicyclic_cys3_pos ?? rawObj.cys3_pos,
+        DEFAULT_PEPTIDE_BICYCLIC_CYS3_POS,
+        1,
+        peptideBinderLength
+      );
   if (seed === null) {
-    return { seed: null };
+    return {
+      seed: null,
+      peptideDesignMode,
+      peptideBinderLength,
+      peptideUseInitialSequence,
+      peptideInitialSequence,
+      peptideSequenceMask,
+      peptideIterations,
+      peptidePopulationSize,
+      peptideEliteSize,
+      peptideMutationRate,
+      peptideBicyclicLinkerCcd,
+      peptideBicyclicCysPositionMode,
+      peptideBicyclicFixTerminalCys,
+      peptideBicyclicIncludeExtraCys,
+      peptideBicyclicCys1Pos,
+      peptideBicyclicCys2Pos,
+      peptideBicyclicCys3Pos
+    };
   }
   return {
-    seed: typeof seed === 'number' && Number.isFinite(seed) ? Math.max(0, Math.floor(seed)) : 42
+    seed: typeof seed === 'number' && Number.isFinite(seed) ? Math.max(0, Math.floor(seed)) : 42,
+    peptideDesignMode,
+    peptideBinderLength,
+    peptideUseInitialSequence,
+    peptideInitialSequence,
+    peptideSequenceMask,
+    peptideIterations,
+    peptidePopulationSize,
+    peptideEliteSize,
+    peptideMutationRate,
+    peptideBicyclicLinkerCcd,
+    peptideBicyclicCysPositionMode,
+    peptideBicyclicFixTerminalCys,
+    peptideBicyclicIncludeExtraCys,
+    peptideBicyclicCys1Pos,
+    peptideBicyclicCys2Pos,
+    peptideBicyclicCys3Pos
   };
 }
 

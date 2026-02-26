@@ -2,7 +2,7 @@ import { getProjectById, getProjectTaskById, listProjectTasksCompact, listProjec
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import type { Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
 import { loadProjectInputConfig, loadProjectUiState } from '../../utils/projectInputs';
-import { getWorkflowDefinition } from '../../utils/workflows';
+import { getWorkflowDefinition, isPredictionLikeWorkflowKey } from '../../utils/workflows';
 import { resolveRestoredEditorState, resolveTaskSnapshotContext } from './projectLoadHelpers';
 import {
   defaultConfigFromProject,
@@ -63,13 +63,15 @@ export async function loadProjectFlow(params: {
 
   const activeTaskId = (next.task_id || '').trim();
   const workflowDef = getWorkflowDefinition(next.task_type);
+  const isPredictionLikeWorkflow = isPredictionLikeWorkflowKey(workflowDef.key);
   const normalizedBackend = workflowDef.key === 'affinity' ? 'boltz' : next.backend;
   const query = new URLSearchParams(locationSearch);
   const requestedTab = String(query.get('tab') || '').trim().toLowerCase();
   const shouldIncludeTaskComponents =
     workflowDef.key !== 'lead_optimization' || (requestedTab !== 'results' && requestedTab !== 'basics');
+  const shouldUseTaskListView = workflowDef.key === 'lead_optimization' || workflowDef.key === 'peptide_design';
   const taskRowsBase = sortProjectTasks(
-    await (workflowDef.key === 'lead_optimization'
+    await (shouldUseTaskListView
       ? listProjectTasksForList(next.id, { includeComponents: shouldIncludeTaskComponents })
       : listProjectTasksCompact(next.id))
   );
@@ -138,9 +140,9 @@ export async function loadProjectFlow(params: {
 
   let suggestedWorkspaceTab: 'results' | 'components' | 'basics' | null = null;
   if (!query.get('tab')) {
-    if (requestNewTask && (workflowDef.key === 'prediction' || workflowDef.key === 'affinity')) {
+    if (requestNewTask && (isPredictionLikeWorkflow || workflowDef.key === 'affinity')) {
       suggestedWorkspaceTab = 'components';
-    } else if (workflowDef.key === 'prediction' || workflowDef.key === 'affinity') {
+    } else if (isPredictionLikeWorkflow || workflowDef.key === 'affinity') {
       suggestedWorkspaceTab = contextHasResult || projectHasResult ? 'results' : 'components';
     } else {
       suggestedWorkspaceTab = 'basics';

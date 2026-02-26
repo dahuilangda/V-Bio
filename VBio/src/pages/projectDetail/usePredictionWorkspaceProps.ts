@@ -83,6 +83,7 @@ interface UsePredictionWorkspacePropsInput {
   workspaceLigandSelectableOptions: BuildPredictionComponentsSidebarParams['workspaceLigandSelectableOptions'];
   setAffinityComponentFromWorkspace: (role: 'target' | 'ligand', componentId: string | null) => void;
   affinityEnableDisabledReason: string;
+  showAffinityComputeToggle?: boolean;
 
 }
 
@@ -148,7 +149,8 @@ export function usePredictionWorkspaceProps({
   workspaceTargetOptions,
   workspaceLigandSelectableOptions,
   setAffinityComponentFromWorkspace,
-  affinityEnableDisabledReason
+  affinityEnableDisabledReason,
+  showAffinityComputeToggle
 }: UsePredictionWorkspacePropsInput): UsePredictionWorkspacePropsResult {
   const predictionConstraintsWorkspaceProps = buildPredictionConstraintsWorkspaceProps({
     constraintsWorkspaceRef,
@@ -240,7 +242,8 @@ export function usePredictionWorkspaceProps({
     workspaceTargetOptions,
     workspaceLigandSelectableOptions,
     setAffinityComponentFromWorkspace,
-    affinityEnableDisabledReason
+    affinityEnableDisabledReason,
+    showAffinityComputeToggle
   });
 
   return {

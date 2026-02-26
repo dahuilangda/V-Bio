@@ -31,11 +31,9 @@ load_env_file()
 
 from frontend.state import initialize_session_state
 from frontend.views.prediction_page import render_prediction_page
-from frontend.views.designer_page import render_designer_page
-from frontend.views.bicyclic_designer_page import render_bicyclic_designer_page
+from frontend.views.peptide_designer_page import render_peptide_designer_page
 from frontend.views.lead_optimization_page import render_lead_optimization_page
 from frontend.views.affinity_page import render_affinity_page
-from frontend.url_state import URLStateManager
 
 st.set_page_config(layout="centered", page_title="Boltz-WebUI", page_icon="🧬")
 
@@ -204,15 +202,17 @@ task_type = str(task_type_param)
 
 task_type_to_tab_index = {
     "prediction": 0,
+    "peptide_designer": 1,
+    "peptide_design": 1,
     "designer": 1,
-    "bicyclic_designer": 2,
-    "lead_optimization": 3,
-    "affinity": 4,
+    "bicyclic_designer": 1,
+    "lead_optimization": 2,
+    "affinity": 3,
 }
 target_tab_index = task_type_to_tab_index.get(task_type, 0)
 
 # 创建选项卡（保持原有样式）
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["结构预测", "分子设计", "双环肽设计", "先导优化", "亲和力预测"])
+tab1, tab2, tab3, tab4 = st.tabs(["结构预测", "多肽设计", "先导优化", "亲和力预测"])
 
 # URL 驱动选项卡：根据 task_type 自动切换；点击时同步更新 task_type 到地址栏
 st.components.v1.html(f"""
@@ -223,10 +223,9 @@ st.components.v1.html(f"""
     const targetIndex = {target_tab_index};
     const indexToTaskType = {{
         0: "prediction",
-        1: "designer",
-        2: "bicyclic_designer",
-        3: "lead_optimization",
-        4: "affinity",
+        1: "peptide_designer",
+        2: "lead_optimization",
+        3: "affinity",
     }};
 
     const getTabs = () => {{
@@ -275,13 +274,10 @@ with tab1:
     render_prediction_page()
 
 with tab2:
-    render_designer_page()
+    render_peptide_designer_page()
 
 with tab3:
-    render_bicyclic_designer_page()
-
-with tab4:
     render_lead_optimization_page()
 
-with tab5:
+with tab4:
     render_affinity_page()

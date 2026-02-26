@@ -7,6 +7,7 @@ import type {
   SortKey,
   StructureSearchMode,
   SubmittedWithinDaysOption,
+  TaskTableMode,
   TaskListRow,
   TaskWorkflowFilter
 } from './taskListTypes';
@@ -128,15 +129,23 @@ export function ProjectTasksWorkspace({
   onPageChange,
   onJumpToPage
 }: ProjectTasksWorkspaceProps) {
-  const leadOptOnlyView =
-    workflowFilter === 'lead_optimization' ||
-    (filteredRows.length > 0 && filteredRows.every((row) => row.workflowKey === 'lead_optimization'));
+  const hasSingleWorkflow = workflowOptions.length === 1 ? workflowOptions[0] : null;
+  const tableMode: TaskTableMode = (() => {
+    if (workflowFilter === 'lead_optimization' || (workflowFilter === 'all' && hasSingleWorkflow === 'lead_optimization')) {
+      return 'lead_opt';
+    }
+    if (workflowFilter === 'peptide_design' || (workflowFilter === 'all' && hasSingleWorkflow === 'peptide_design')) {
+      return 'peptide';
+    }
+    return 'default';
+  })();
+  const compactMetricsView = tableMode !== 'default';
 
   useEffect(() => {
-    if (!leadOptOnlyView) return;
-    if (sortKey !== 'seed' && sortKey !== 'duration') return;
+    if (!compactMetricsView) return;
+    if (sortKey === 'submitted') return;
     onSort('submitted');
-  }, [leadOptOnlyView, onSort, sortKey]);
+  }, [compactMetricsView, onSort, sortKey]);
 
   return (
     <section className="panel">
@@ -151,7 +160,8 @@ export function ProjectTasksWorkspace({
         backendFilter={backendFilter}
         onBackendFilterChange={onBackendFilterChange}
         backendOptions={backendOptions}
-        leadOptOnlyView={leadOptOnlyView}
+        tableMode={tableMode}
+        compactMetricsView={compactMetricsView}
         filteredMatchedCount={filteredRows.length}
         showAdvancedFilters={showAdvancedFilters}
         onToggleAdvancedFilters={onToggleAdvancedFilters}
@@ -180,7 +190,7 @@ export function ProjectTasksWorkspace({
 
       <ProjectTasksTable
         filteredCount={filteredCount}
-        leadOptOnlyView={leadOptOnlyView}
+        tableMode={tableMode}
         sortKey={sortKey}
         sortMark={sortMark}
         onSort={onSort}

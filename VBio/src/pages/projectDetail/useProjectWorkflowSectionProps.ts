@@ -21,11 +21,14 @@ import type { ProjectWorkspaceDraft, WorkspaceTab } from './workspaceTypes';
 
 interface UseProjectWorkflowSectionPropsInput {
   isPredictionWorkflow: boolean;
+  isPeptideDesignWorkflow: boolean;
   isAffinityWorkflow: boolean;
   workflowTitle: string;
   workflowShortTitle: string;
   projectTaskState: string;
   projectTaskId: string;
+  statusInfo: Record<string, unknown> | null;
+  progressPercent: number;
   resultsGridRef: RefObject<HTMLDivElement>;
   isResultsResizing: boolean;
   resultsGridStyle: CSSProperties;
@@ -52,6 +55,9 @@ interface UseProjectWorkflowSectionPropsInput {
   affinityLigandChainId: string;
   snapshotLigandAtomPlddts: number[];
   snapshotPlddt: number | null;
+  snapshotIptm: number | null;
+  snapshotSelectedPairIptm: number | null;
+  selectedResultLigandSequence: string;
   canEdit: boolean;
   submitting: boolean;
   affinityTargetFileName: string;
@@ -129,8 +135,40 @@ interface UseProjectWorkflowSectionPropsInput {
   predictionComponentsSidebarProps: ReturnType<typeof buildPredictionWorkflowSectionProps>['componentsSidebarProps'];
   backend: string;
   seed: number | null;
+  peptideDesignMode: 'linear' | 'cyclic' | 'bicyclic';
+  peptideBinderLength: number;
+  peptideUseInitialSequence: boolean;
+  peptideInitialSequence: string;
+  peptideSequenceMask: string;
+  peptideIterations: number;
+  peptidePopulationSize: number;
+  peptideEliteSize: number;
+  peptideMutationRate: number;
+  peptideBicyclicLinkerCcd: 'SEZ' | '29N' | 'BS3';
+  peptideBicyclicCysPositionMode: 'auto' | 'manual';
+  peptideBicyclicFixTerminalCys: boolean;
+  peptideBicyclicIncludeExtraCys: boolean;
+  peptideBicyclicCys1Pos: number;
+  peptideBicyclicCys2Pos: number;
+  peptideBicyclicCys3Pos: number;
   onBackendChange: (backend: string) => void;
   onSeedChange: (seed: number | null) => void;
+  onPeptideDesignModeChange: (mode: 'linear' | 'cyclic' | 'bicyclic') => void;
+  onPeptideBinderLengthChange: (value: number) => void;
+  onPeptideUseInitialSequenceChange: (value: boolean) => void;
+  onPeptideInitialSequenceChange: (value: string) => void;
+  onPeptideSequenceMaskChange: (value: string) => void;
+  onPeptideIterationsChange: (value: number) => void;
+  onPeptidePopulationSizeChange: (value: number) => void;
+  onPeptideEliteSizeChange: (value: number) => void;
+  onPeptideMutationRateChange: (value: number) => void;
+  onPeptideBicyclicLinkerCcdChange: (value: 'SEZ' | '29N' | 'BS3') => void;
+  onPeptideBicyclicCysPositionModeChange: (value: 'auto' | 'manual') => void;
+  onPeptideBicyclicFixTerminalCysChange: (value: boolean) => void;
+  onPeptideBicyclicIncludeExtraCysChange: (value: boolean) => void;
+  onPeptideBicyclicCys1PosChange: (value: number) => void;
+  onPeptideBicyclicCys2PosChange: (value: number) => void;
+  onPeptideBicyclicCys3PosChange: (value: number) => void;
 }
 
 interface UseProjectWorkflowSectionPropsResult {
@@ -143,11 +181,14 @@ interface UseProjectWorkflowSectionPropsResult {
 
 export function useProjectWorkflowSectionProps({
   isPredictionWorkflow,
+  isPeptideDesignWorkflow,
   isAffinityWorkflow,
   workflowTitle,
   workflowShortTitle,
   projectTaskState,
   projectTaskId,
+  statusInfo,
+  progressPercent,
   resultsGridRef,
   isResultsResizing,
   resultsGridStyle,
@@ -174,6 +215,9 @@ export function useProjectWorkflowSectionProps({
   affinityLigandChainId,
   snapshotLigandAtomPlddts,
   snapshotPlddt,
+  snapshotIptm,
+  snapshotSelectedPairIptm,
+  selectedResultLigandSequence,
   canEdit,
   submitting,
   affinityTargetFileName,
@@ -229,7 +273,39 @@ export function useProjectWorkflowSectionProps({
   backend,
   seed,
   onBackendChange,
-  onSeedChange
+  onSeedChange,
+  peptideDesignMode,
+  peptideBinderLength,
+  peptideUseInitialSequence,
+  peptideInitialSequence,
+  peptideSequenceMask,
+  peptideIterations,
+  peptidePopulationSize,
+  peptideEliteSize,
+  peptideMutationRate,
+  peptideBicyclicLinkerCcd,
+  peptideBicyclicCysPositionMode,
+  peptideBicyclicFixTerminalCys,
+  peptideBicyclicIncludeExtraCys,
+  peptideBicyclicCys1Pos,
+  peptideBicyclicCys2Pos,
+  peptideBicyclicCys3Pos,
+  onPeptideDesignModeChange,
+  onPeptideBinderLengthChange,
+  onPeptideUseInitialSequenceChange,
+  onPeptideInitialSequenceChange,
+  onPeptideSequenceMaskChange,
+  onPeptideIterationsChange,
+  onPeptidePopulationSizeChange,
+  onPeptideEliteSizeChange,
+  onPeptideMutationRateChange,
+  onPeptideBicyclicLinkerCcdChange,
+  onPeptideBicyclicCysPositionModeChange,
+  onPeptideBicyclicFixTerminalCysChange,
+  onPeptideBicyclicIncludeExtraCysChange,
+  onPeptideBicyclicCys1PosChange,
+  onPeptideBicyclicCys2PosChange,
+  onPeptideBicyclicCys3PosChange
 }: UseProjectWorkflowSectionPropsInput): UseProjectWorkflowSectionPropsResult {
   const onLeadOptimizationLigandSmilesChange = (value: string) => {
     handleLeadOptimizationLigandSmilesChangeAction({
@@ -242,6 +318,7 @@ export function useProjectWorkflowSectionProps({
 
   const projectResultsSectionProps = buildProjectResultsSectionProps({
     isPredictionWorkflow,
+    isPeptideDesignWorkflow,
     isAffinityWorkflow,
     workflowTitle,
     workflowShortTitle,
@@ -271,7 +348,12 @@ export function useProjectWorkflowSectionProps({
     affinityLigandSmiles: affinityResultLigandSmiles,
     affinityPrimaryTargetChainId: affinityTargetChainIds[0] || null,
     affinityLigandAtomPlddts: snapshotLigandAtomPlddts,
-    affinityLigandConfidenceHint: snapshotPlddt
+    affinityLigandConfidenceHint: snapshotPlddt,
+    selectedResultLigandSequence,
+    peptideFallbackPlddt: snapshotPlddt,
+    peptideFallbackIptm: snapshotSelectedPairIptm ?? snapshotIptm,
+    statusInfo,
+    progressPercent
   });
   const affinityWorkflowSectionProps = buildAffinityWorkflowSectionProps({
     canEdit,
@@ -350,11 +432,44 @@ export function useProjectWorkflowSectionProps({
   const workflowRuntimeSettingsSectionProps = buildWorkflowRuntimeSettingsSectionProps({
     canEdit,
     isPredictionWorkflow,
+    isPeptideDesignWorkflow,
     isAffinityWorkflow,
     backend,
     seed: seed ?? null,
+    peptideDesignMode,
+    peptideBinderLength,
+    peptideUseInitialSequence,
+    peptideInitialSequence,
+    peptideSequenceMask,
+    peptideIterations,
+    peptidePopulationSize,
+    peptideEliteSize,
+    peptideMutationRate,
+    peptideBicyclicLinkerCcd,
+    peptideBicyclicCysPositionMode,
+    peptideBicyclicFixTerminalCys,
+    peptideBicyclicIncludeExtraCys,
+    peptideBicyclicCys1Pos,
+    peptideBicyclicCys2Pos,
+    peptideBicyclicCys3Pos,
     onBackendChange,
-    onSeedChange
+    onSeedChange,
+    onPeptideDesignModeChange,
+    onPeptideBinderLengthChange,
+    onPeptideUseInitialSequenceChange,
+    onPeptideInitialSequenceChange,
+    onPeptideSequenceMaskChange,
+    onPeptideIterationsChange,
+    onPeptidePopulationSizeChange,
+    onPeptideEliteSizeChange,
+    onPeptideMutationRateChange,
+    onPeptideBicyclicLinkerCcdChange,
+    onPeptideBicyclicCysPositionModeChange,
+    onPeptideBicyclicFixTerminalCysChange,
+    onPeptideBicyclicIncludeExtraCysChange,
+    onPeptideBicyclicCys1PosChange,
+    onPeptideBicyclicCys2PosChange,
+    onPeptideBicyclicCys3PosChange
   });
 
   return {

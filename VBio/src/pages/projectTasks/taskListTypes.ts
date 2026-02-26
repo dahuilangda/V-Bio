@@ -4,6 +4,7 @@ import type { WorkflowKey } from '../../utils/workflows';
 export type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
 export type SortKey = 'plddt' | 'iptm' | 'pae' | 'submitted' | 'backend' | 'seed' | 'duration';
 export type SortDirection = 'asc' | 'desc';
+export type TaskTableMode = 'default' | 'lead_opt' | 'peptide';
 export type SubmittedWithinDaysOption = 'all' | '1' | '7' | '30' | '90';
 export type SeedFilterOption = 'all' | 'with_seed' | 'without_seed';
 export type StructureSearchMode = 'exact' | 'substructure';
@@ -65,4 +66,19 @@ export interface TaskListRow {
   leadOptSelectedFragmentIds: string[];
   leadOptSelectedAtomIndices: number[];
   leadOptSelectedFragmentQuery: string;
+  peptideDesignMode: 'linear' | 'cyclic' | 'bicyclic' | null;
+  peptideBinderLength: number | null;
+  peptideIterations: number | null;
+  peptidePopulationSize: number | null;
+  peptideEliteSize: number | null;
+  peptideMutationRate: number | null;
+  peptideCurrentGeneration: number | null;
+  peptideTotalGenerations: number | null;
+  peptideBestScore: number | null;
+  peptideCandidateCount: number | null;
+  peptideCompletedTasks: number | null;
+  peptidePendingTasks: number | null;
+  peptideTotalTasks: number | null;
+  peptideStage: string;
+  peptideStatusMessage: string;
 }

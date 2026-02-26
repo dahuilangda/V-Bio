@@ -893,7 +893,7 @@ export function ApiAccessPage() {
   const selectedWorkflow = useMemo(() => getWorkflowDefinition(selectedProject?.task_type), [selectedProject?.task_type]);
   const selectedBackend = String(selectedProject?.backend || 'boltz').trim().toLowerCase() || 'boltz';
   const isAffinityWorkflow = selectedWorkflow.key === 'affinity';
-  const isPredictionWorkflow = selectedWorkflow.key === 'prediction';
+  const isPredictionWorkflow = selectedWorkflow.key === 'prediction' || selectedWorkflow.key === 'peptide_design';
   const isLeadOptimizationWorkflow = selectedWorkflow.key === 'lead_optimization';
   const isSupportedSubmitWorkflow = isPredictionWorkflow || isAffinityWorkflow;
   const effectivePredictionBackend: PredictionBackend = normalizePredictionBackend(builderPredictionBackend);

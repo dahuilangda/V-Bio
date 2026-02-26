@@ -22,6 +22,7 @@ export interface WorkspaceOption {
   componentId: string;
   label: string;
   isSmallMolecule?: boolean;
+  isDesignedPeptide?: boolean;
 }
 
 export interface PredictionComponentsSidebarProps {
@@ -58,6 +59,7 @@ export interface PredictionComponentsSidebarProps {
   workspaceLigandSelectableOptions: WorkspaceOption[];
   onSetAffinityComponentFromWorkspace: (role: 'target' | 'ligand', componentId: string | null) => void;
   affinityEnableDisabledReason: string;
+  showAffinityComputeToggle?: boolean;
 }
 
 export function PredictionComponentsSidebar({
@@ -93,7 +95,8 @@ export function PredictionComponentsSidebar({
   workspaceTargetOptions,
   workspaceLigandSelectableOptions,
   onSetAffinityComponentFromWorkspace,
-  affinityEnableDisabledReason
+  affinityEnableDisabledReason,
+  showAffinityComputeToggle = true
 }: PredictionComponentsSidebarProps) {
   if (!visible) return null;
 
@@ -217,15 +220,17 @@ export function PredictionComponentsSidebar({
             <Target size={13} />
             <strong>Binding</strong>
           </span>
-          <label className="affinity-enable-toggle">
-            <input
-              type="checkbox"
-              checked={properties.affinity}
-              disabled={!canEdit || !canEnableAffinityFromWorkspace}
-              onChange={(event) => onSetAffinityEnabledFromWorkspace(event.target.checked)}
-            />
-            <span>Compute</span>
-          </label>
+          {showAffinityComputeToggle ? (
+            <label className="affinity-enable-toggle">
+              <input
+                type="checkbox"
+                checked={properties.affinity}
+                disabled={!canEdit || !canEnableAffinityFromWorkspace}
+                onChange={(event) => onSetAffinityEnabledFromWorkspace(event.target.checked)}
+              />
+              <span>Compute</span>
+            </label>
+          ) : null}
         </div>
         <div className="component-sidebar-list component-sidebar-list-nested affinity-sidebar-list">
           <label className="field affinity-field">
@@ -249,10 +254,10 @@ export function PredictionComponentsSidebar({
               disabled={!canEdit || workspaceLigandSelectableOptions.length === 0}
               onChange={(e) => onSetAffinityComponentFromWorkspace('ligand', e.target.value || null)}
             >
-              <option value="">-</option>
+              {showAffinityComputeToggle ? <option value="">-</option> : null}
               {workspaceLigandSelectableOptions.map((item) => (
                 <option key={`workspace-affinity-ligand-${item.componentId}`} value={item.componentId}>
-                  {item.isSmallMolecule ? item.label : `${item.label} (affinity disabled)`}
+                  {item.isSmallMolecule || !showAffinityComputeToggle ? item.label : `${item.label} (affinity disabled)`}
                 </option>
               ))}
             </select>

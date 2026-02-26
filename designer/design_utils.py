@@ -640,6 +640,57 @@ def _get_pair_iptm(
             return float(value)
     return None
 
+
+def _read_pair_chains_iptm_from_map(
+    pair_map: Optional[dict],
+    chain_a: Optional[str],
+    chain_b: Optional[str],
+    chain_order: Optional[List[str]] = None,
+) -> Optional[float]:
+    if not isinstance(pair_map, dict) or not chain_a or not chain_b or chain_a == chain_b:
+        return None
+
+    def _lookup_row(key_a, key_b) -> Optional[float]:
+        row = pair_map.get(key_a)
+        if not isinstance(row, dict):
+            return None
+        value = row.get(key_b)
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
+
+    direct = _lookup_row(chain_a, chain_b)
+    if direct is not None:
+        return direct
+    reverse = _lookup_row(chain_b, chain_a)
+    if reverse is not None:
+        return reverse
+
+    keys = [str(key).strip() for key in pair_map.keys()]
+    if not keys or not all(token.isdigit() for token in keys):
+        return None
+
+    if not chain_order:
+        return None
+
+    normalized_order = [str(item).strip() for item in chain_order if str(item).strip()]
+    if chain_a not in normalized_order or chain_b not in normalized_order:
+        return None
+
+    idx_a = normalized_order.index(chain_a)
+    idx_b = normalized_order.index(chain_b)
+    for key_a, key_b in (
+        (str(idx_a), str(idx_b)),
+        (str(idx_b), str(idx_a)),
+        (idx_a, idx_b),
+        (idx_b, idx_a),
+    ):
+        value = _lookup_row(key_a, key_b)
+        if value is not None:
+            return value
+    return None
+
+
 def parse_confidence_metrics(
     results_path: str,
     binder_chain_id: str,
@@ -649,6 +700,7 @@ def parse_confidence_metrics(
     """从预测输出目录中解析关键置信度指标，并兼容 Boltz 与 AlphaFold3 后端。"""
     metrics = {
         'iptm': 0.0,
+        'pair_iptm': None,
         'ptm': 0.0,
         'complex_plddt': 0.0,
         'binder_avg_plddt': 0.0,
@@ -749,6 +801,8 @@ def parse_confidence_metrics(
                     metrics['ptm'] = ptm
 
                 iptm = summary_data.get("iptm")
+                if isinstance(iptm, (int, float)):
+                    metrics['iptm'] = float(iptm)
                 chain_pair_iptm = summary_data.get("chain_pair_iptm")
                 if isinstance(chain_pair_iptm, list):
                     chain_ids = _extract_chain_ids_from_summary(summary_data)
@@ -761,18 +815,7 @@ def parse_confidence_metrics(
                         target_chain_id
                     )
                     if pair_value is not None:
-                        iptm = pair_value
-                if not isinstance(iptm, (int, float)) or iptm == 0.0:
-                    if (
-                        isinstance(chain_pair_iptm, list)
-                        and chain_pair_iptm
-                        and isinstance(chain_pair_iptm[0], list)
-                        and chain_pair_iptm[0]
-                        and isinstance(chain_pair_iptm[0][0], (int, float))
-                    ):
-                        iptm = chain_pair_iptm[0][0]
-                if isinstance(iptm, (int, float)):
-                    metrics['iptm'] = iptm
+                        metrics['pair_iptm'] = float(pair_value)
 
                 ranking_score = summary_data.get("ranking_score")
                 if isinstance(ranking_score, (int, float)):
@@ -833,25 +876,19 @@ def parse_confidence_metrics(
                 'ptm': data.get('ptm', 0.0),
                 'complex_plddt': data.get('complex_plddt', 0.0)
             })
-            metrics['iptm'] = data.get('iptm', 0.0)
+            iptm_raw = data.get('iptm', 0.0)
+            if isinstance(iptm_raw, (int, float)):
+                metrics['iptm'] = float(iptm_raw)
             pair_iptm = data.get('pair_chains_iptm', {})
-            pair_value = None
-            if target_chain_id and isinstance(pair_iptm, dict):
-                direct = pair_iptm.get(binder_chain_id, {}).get(target_chain_id)
-                if isinstance(direct, (int, float)):
-                    pair_value = float(direct)
-                else:
-                    reverse = pair_iptm.get(target_chain_id, {}).get(binder_chain_id)
-                    if isinstance(reverse, (int, float)):
-                        pair_value = float(reverse)
+            pair_value = _read_pair_chains_iptm_from_map(
+                pair_iptm,
+                binder_chain_id,
+                target_chain_id,
+                chain_order,
+            ) if target_chain_id else None
 
             if pair_value is not None:
-                metrics['iptm'] = pair_value
-            elif metrics['iptm'] == 0.0 and isinstance(pair_iptm, dict):
-                for c1, c2_dict in pair_iptm.items():
-                    for c2, iptm_val in (c2_dict or {}).items():
-                        if c1 != c2 and isinstance(iptm_val, (int, float)) and iptm_val > 0:
-                            metrics['iptm'] = max(metrics['iptm'], iptm_val)
+                metrics['pair_iptm'] = float(pair_value)
     except Exception as exc:
         logger.warning(f"Could not parse confidence metrics from JSON in {results_path}. Error: {exc}")
 

@@ -209,7 +209,7 @@ export function useProjectTasksDataLoader({
           throw new Error('You do not have permission to access this project.');
         }
         const workflowKey = normalizeWorkflowKey(projectRow.task_type);
-        const includeComponentsForList = workflowKey === 'prediction';
+        const includeComponentsForList = workflowKey === 'prediction' || workflowKey === 'peptide_design';
         const taskRows = await listProjectTasksForList(projectId, { includeComponents: includeComponentsForList });
 
         lastFullFetchTsRef.current = Date.now();

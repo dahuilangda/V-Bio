@@ -4,6 +4,7 @@ import { buildPredictionYaml, buildPredictionYamlFromComponents } from '../utils
 import { API_HEADERS, requestBackend } from './backendClient';
 
 export async function submitPrediction(input: PredictionSubmitInput): Promise<string> {
+  const workflow = input.workflow === 'peptide_design' ? 'peptide_design' : 'prediction';
   const backend = String(input.backend || 'boltz').trim().toLowerCase();
   const constraintsForBackend = (input.constraints || []).filter((constraint) =>
     backend === 'alphafold3' || backend === 'protenix' ? constraint.type === 'bond' : true
@@ -75,7 +76,15 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
   const yamlFile = new File([yaml], 'config.yaml', { type: 'application/x-yaml' });
   form.append('yaml_file', yamlFile);
   form.append('backend', backend || 'boltz');
+  form.append('workflow', workflow);
   form.append('use_msa_server', String(useMsaServer).toLowerCase());
+  if (workflow === 'peptide_design' && input.peptideDesignOptions) {
+    form.append('peptide_design_options', JSON.stringify(input.peptideDesignOptions));
+  }
+  const peptideTargetChainId = String(input.peptideDesignTargetChainId || '').trim();
+  if (workflow === 'peptide_design' && peptideTargetChainId) {
+    form.append('peptide_design_target_chain', peptideTargetChainId);
+  }
   if (typeof input.seed === 'number' && Number.isFinite(input.seed)) {
     form.append('seed', String(Math.max(0, Math.floor(input.seed))));
   }

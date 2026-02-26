@@ -361,7 +361,7 @@ export async function listProjectTasksForList(
     order: 'created_at.desc'
   });
   const detailRows = includeComponents
-    ? await request<Array<Partial<ProjectTask>>>('/project_tasks', undefined, {
+    ? await request<Array<Partial<ProjectTask>>>('/project_tasks_list', undefined, {
         select: 'id,components',
         project_id: `eq.${projectId}`,
         order: 'created_at.desc'

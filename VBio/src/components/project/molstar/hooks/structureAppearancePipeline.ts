@@ -23,6 +23,9 @@ interface ApplyStructureAppearancePipelineArgs {
   isRequestCurrent: () => boolean;
 }
 
+const LEAD_OPT_RESULTS_POLYMER_ALPHA = 0.48;
+const LEAD_OPT_RESULTS_POLYMER_ALPHA_AF = 0.52;
+
 function resolveMolstarColorMode(mode: string): MolstarResolvedColorMode {
   return mode === 'alphafold' ? 'alphafold' : 'default';
 }
@@ -100,7 +103,7 @@ export async function applyStructureAppearancePipeline({
         trySetElementSymbolStyle(viewer);
       }
       await tryApplyLeadOptSceneStyle(viewer, {
-        polymerAlpha: resolvedColorMode === 'alphafold' ? 0.36 : 0.3,
+        polymerAlpha: resolvedColorMode === 'alphafold' ? LEAD_OPT_RESULTS_POLYMER_ALPHA_AF : LEAD_OPT_RESULTS_POLYMER_ALPHA,
         ligandAlpha: 1.0,
         pocketStickScale: 0.52
       });
@@ -144,7 +147,14 @@ export async function applyStructureAppearancePipeline({
       if (!isRequestCurrent()) return;
     }
     await tryApplyLeadOptSceneStyle(viewer, {
-      polymerAlpha: resolvedColorMode === 'alphafold' ? 0.36 : isResultsVariant ? 0.3 : 0.36,
+      polymerAlpha:
+        resolvedColorMode === 'alphafold'
+          ? isResultsVariant
+            ? LEAD_OPT_RESULTS_POLYMER_ALPHA_AF
+            : 0.36
+          : isResultsVariant
+            ? LEAD_OPT_RESULTS_POLYMER_ALPHA
+            : 0.36,
       ligandAlpha: 1.0,
       pocketStickScale: isResultsVariant ? 0.52 : 0.62
     });

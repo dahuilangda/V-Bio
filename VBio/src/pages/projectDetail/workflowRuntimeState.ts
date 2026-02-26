@@ -1,6 +1,7 @@
 export interface BuildRunUiStateParams {
   workspaceTab: 'results' | 'basics' | 'components' | 'constraints';
   isPredictionWorkflow: boolean;
+  isPeptideDesignWorkflow: boolean;
   isAffinityWorkflow: boolean;
   isLeadOptimizationWorkflow: boolean;
   hasIncompleteComponents: boolean;
@@ -40,6 +41,7 @@ export function buildRunUiState(params: BuildRunUiStateParams): RunUiStateResult
   const {
     workspaceTab,
     isPredictionWorkflow,
+    isPeptideDesignWorkflow,
     isAffinityWorkflow,
     isLeadOptimizationWorkflow,
     hasIncompleteComponents,
@@ -90,7 +92,11 @@ export function buildRunUiState(params: BuildRunUiStateParams): RunUiStateResult
                 ? 'Ligand SMILES is required for activity mode.'
                 : '';
 
-  const runBlockedReason = isPredictionWorkflow
+  const runBlockedReason = isPeptideDesignWorkflow
+    ? hasIncompleteComponents
+      ? `Complete all components before run (${componentCompletion.filledCount}/${componentCompletion.total} ready).`
+      : ''
+    : isPredictionWorkflow
     ? hasIncompleteComponents
       ? `Complete all components before run (${componentCompletion.filledCount}/${componentCompletion.total} ready).`
       : ''

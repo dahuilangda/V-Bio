@@ -51,6 +51,7 @@ export async function resolveTaskSnapshotContext(params: {
     snapshotTaskRowId &&
       (
         workflowKey === 'prediction' ||
+        workflowKey === 'peptide_design' ||
         workflowKey === 'affinity' ||
         (workflowKey === 'lead_optimization' && requestedTab !== 'results' && requestedTab !== 'basics')
       )

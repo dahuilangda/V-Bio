@@ -4,9 +4,11 @@ import type { AffinitySignalCard, ResultsGridStyle } from './AffinityWorkspace';
 import { LigandPropertyGrid } from './LigandPropertyGrid';
 import { MetricsPanel } from './MetricsPanel';
 import { MolstarViewer } from './MolstarViewer';
+import { PeptideDesignResultsWorkspace } from './PeptideDesignResultsWorkspace';
 
 export interface ProjectResultsSectionProps {
   isPredictionWorkflow: boolean;
+  isPeptideDesignWorkflow: boolean;
   isAffinityWorkflow: boolean;
   workflowTitle: string;
   workflowShortTitle: string;
@@ -37,10 +39,16 @@ export interface ProjectResultsSectionProps {
   affinityPrimaryTargetChainId: string | null;
   affinityLigandAtomPlddts: number[];
   affinityLigandConfidenceHint: number | null;
+  selectedResultLigandSequence: string;
+  peptideFallbackPlddt: number | null;
+  peptideFallbackIptm: number | null;
+  statusInfo: Record<string, unknown> | null;
+  progressPercent: number;
 }
 
 export function ProjectResultsSection({
   isPredictionWorkflow,
+  isPeptideDesignWorkflow,
   isAffinityWorkflow,
   workflowTitle,
   workflowShortTitle,
@@ -69,7 +77,12 @@ export function ProjectResultsSection({
   affinityLigandSmiles,
   affinityPrimaryTargetChainId,
   affinityLigandAtomPlddts,
-  affinityLigandConfidenceHint
+  affinityLigandConfidenceHint,
+  selectedResultLigandSequence,
+  peptideFallbackPlddt,
+  peptideFallbackIptm,
+  statusInfo,
+  progressPercent
 }: ProjectResultsSectionProps) {
   const initialPredictionColorMode = useMemo<'default' | 'alphafold'>(
     () => (displayStructureColorMode === 'alphafold' ? 'alphafold' : 'default'),
@@ -82,6 +95,32 @@ export function ProjectResultsSection({
   useEffect(() => {
     setPredictionViewerColorMode(initialPredictionColorMode);
   }, [initialPredictionColorMode, projectTaskId]);
+
+  if (isPeptideDesignWorkflow) {
+    return (
+      <PeptideDesignResultsWorkspace
+        projectTaskId={projectTaskId}
+        resultsGridRef={resultsGridRef}
+        isResultsResizing={isResultsResizing}
+        resultsGridStyle={resultsGridStyle}
+        onResizerPointerDown={onResizerPointerDown}
+        onResizerKeyDown={onResizerKeyDown}
+        snapshotConfidence={snapshotConfidence || {}}
+        displayStructureText={displayStructureText}
+        displayStructureFormat={displayStructureFormat}
+        selectedResultTargetChainId={selectedResultTargetChainId}
+        selectedResultLigandChainId={selectedResultLigandChainId}
+        selectedResultLigandSequence={selectedResultLigandSequence}
+        confidenceBackend={confidenceBackend}
+        projectBackend={projectBackend}
+        fallbackPlddt={peptideFallbackPlddt}
+        fallbackIptm={peptideFallbackIptm}
+        statusInfo={statusInfo || {}}
+        projectTaskState={projectTaskState}
+        progressPercent={progressPercent}
+      />
+    );
+  }
 
   if (isPredictionWorkflow) {
     return (

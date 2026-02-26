@@ -73,6 +73,25 @@ def register_prediction_routes(
             backend = 'boltz'
         logger.info('backend parameter received: %s for client %s.', backend, request.remote_addr)
 
+        workflow_raw = request.form.get('workflow', 'prediction')
+        workflow = str(workflow_raw).strip().lower()
+        if workflow in {'peptide', 'peptide_designer', 'designer'}:
+            workflow = 'peptide_design'
+        if workflow not in {'prediction', 'peptide_design'}:
+            logger.warning("Invalid workflow '%s' provided by client %s. Defaulting to 'prediction'.", workflow, request.remote_addr)
+            workflow = 'prediction'
+
+        peptide_design_options = {}
+        if workflow == 'peptide_design':
+            peptide_opts_raw = request.form.get('peptide_design_options')
+            if peptide_opts_raw:
+                try:
+                    parsed = json.loads(peptide_opts_raw)
+                    if isinstance(parsed, dict):
+                        peptide_design_options = parsed
+                except json.JSONDecodeError:
+                    logger.warning('Invalid peptide_design_options JSON provided; ignoring design options.')
+
         priority = request.form.get('priority', 'default').lower()
         if priority not in ['high', 'default']:
             logger.warning("Invalid priority '%s' provided by client %s. Defaulting to 'default'.", priority, request.remote_addr)
@@ -128,7 +147,13 @@ def register_prediction_routes(
             'model_name': model_name,
             'backend': backend,
             'seed': seed_value,
+            'workflow': workflow,
         }
+        if workflow == 'peptide_design':
+            predict_args['peptide_design_options'] = peptide_design_options
+            peptide_target_chain = str(request.form.get('peptide_design_target_chain', '')).strip()
+            if peptide_target_chain:
+                predict_args['peptide_design_target_chain'] = peptide_target_chain
         if template_inputs:
             predict_args['template_inputs'] = template_inputs
 

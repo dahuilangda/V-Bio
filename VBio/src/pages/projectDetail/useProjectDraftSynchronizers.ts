@@ -6,6 +6,8 @@ import type {
   ProjectInputConfig,
   ProteinTemplateUpload,
 } from '../../types/models';
+import { PEPTIDE_DESIGNED_LIGAND_TOKEN } from '../../utils/projectInputs';
+import { isPredictionLikeWorkflowKey } from '../../utils/workflows';
 import { filterConstraintsByBackend } from './projectDraftUtils';
 
 interface DraftLike {
@@ -32,6 +34,7 @@ interface UseProjectDraftSynchronizersOptions<TDraft extends DraftLike> {
   activeComponentId: string | null;
   setActiveComponentId: Dispatch<SetStateAction<string | null>>;
   workflowKey: string;
+  isPeptideDesignWorkflow: boolean;
   selectedWorkspaceLigandChainId: string | null;
   selectedWorkspaceTargetChainId: string | null;
   canEnableAffinityFromWorkspace: boolean;
@@ -52,6 +55,7 @@ export function useProjectDraftSynchronizers<TDraft extends DraftLike>({
   activeComponentId,
   setActiveComponentId,
   workflowKey,
+  isPeptideDesignWorkflow,
   selectedWorkspaceLigandChainId,
   selectedWorkspaceTargetChainId,
   canEnableAffinityFromWorkspace,
@@ -172,12 +176,14 @@ export function useProjectDraftSynchronizers<TDraft extends DraftLike>({
   }, [draft, activeComponentId, setActiveComponentId]);
 
   useEffect(() => {
-    if (workflowKey !== 'prediction') return;
+    if (!isPredictionLikeWorkflowKey(workflowKey)) return;
     if (!draft) return;
     const props = draft.inputConfig.properties;
-    const nextLigand = selectedWorkspaceLigandChainId;
+    const nextLigand = isPeptideDesignWorkflow
+      ? PEPTIDE_DESIGNED_LIGAND_TOKEN
+      : selectedWorkspaceLigandChainId || null;
     const nextTarget = selectedWorkspaceTargetChainId;
-    const nextAffinity = canEnableAffinityFromWorkspace ? props.affinity : false;
+    const nextAffinity = isPeptideDesignWorkflow ? false : canEnableAffinityFromWorkspace ? props.affinity : false;
     const nextProps = {
       ...props,
       affinity: nextAffinity,
@@ -209,6 +215,7 @@ export function useProjectDraftSynchronizers<TDraft extends DraftLike>({
     selectedWorkspaceLigandChainId,
     selectedWorkspaceTargetChainId,
     canEnableAffinityFromWorkspace,
+    isPeptideDesignWorkflow,
     workflowKey,
     setDraft,
   ]);

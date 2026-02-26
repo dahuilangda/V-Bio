@@ -15,6 +15,84 @@ function parseCifTokens(line: string): string[] {
   return tokens.map((token) => token.replace(/^['"]|['"]$/g, ''));
 }
 
+function inferPolymerAnchorFromPdb(
+  pdbText: string,
+  preferredChain: string
+): { chain: string; residue: number; atom: string } | null {
+  const preferred = String(preferredChain || '').trim();
+  if (!preferred) return null;
+  const residueToAtom = new Map<number, string>();
+  for (const line of String(pdbText || '').split(/\r?\n/)) {
+    if (!line.startsWith('ATOM')) continue;
+    const chain = line.slice(21, 22).trim();
+    if (chain !== preferred) continue;
+    const residue = Number.parseInt(line.slice(22, 26).trim(), 10);
+    const atom = line.slice(12, 16).trim();
+    if (!Number.isFinite(residue) || residue <= 0 || !atom) continue;
+    const current = residueToAtom.get(residue);
+    if (!current || atom === 'CA') {
+      residueToAtom.set(residue, atom);
+    }
+  }
+  if (residueToAtom.size === 0) return null;
+  const residues = [...residueToAtom.keys()].sort((a, b) => a - b);
+  const midResidue = residues[Math.floor((residues.length - 1) / 2)];
+  return { chain: preferred, residue: midResidue, atom: residueToAtom.get(midResidue) || 'CA' };
+}
+
+function inferPolymerAnchorFromCif(
+  cifText: string,
+  preferredChain: string
+): { chain: string; residue: number; atom: string } | null {
+  const preferred = String(preferredChain || '').trim();
+  if (!preferred) return null;
+  const lines = String(cifText || '').split(/\r?\n/);
+  const residueToAtom = new Map<number, string>();
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() !== 'loop_') continue;
+    const headers: string[] = [];
+    let j = i + 1;
+    while (j < lines.length && lines[j].trim().startsWith('_')) {
+      headers.push(lines[j].trim());
+      j += 1;
+    }
+    if (headers.length === 0 || !headers.some((item) => item.startsWith('_atom_site.'))) continue;
+    const idx = (name: string) => headers.findIndex((item) => item === name);
+    const groupIdx = idx('_atom_site.group_PDB');
+    const authAsymIdx = idx('_atom_site.auth_asym_id');
+    const labelAsymIdx = idx('_atom_site.label_asym_id');
+    const authSeqIdx = idx('_atom_site.auth_seq_id');
+    const labelSeqIdx = idx('_atom_site.label_seq_id');
+    const authAtomIdx = idx('_atom_site.auth_atom_id');
+    const labelAtomIdx = idx('_atom_site.label_atom_id');
+    const maxIdx = Math.max(groupIdx, authAsymIdx, labelAsymIdx, authSeqIdx, labelSeqIdx, authAtomIdx, labelAtomIdx);
+
+    for (; j < lines.length; j += 1) {
+      const raw = lines[j].trim();
+      if (!raw) continue;
+      if (raw === '#' || raw === 'loop_' || raw.startsWith('data_') || raw.startsWith('_')) break;
+      const tokens = parseCifTokens(raw);
+      if (tokens.length <= maxIdx) continue;
+      const group = String(groupIdx >= 0 ? tokens[groupIdx] : 'ATOM').trim().toUpperCase();
+      if (group && group !== 'ATOM') continue;
+      const chain = String((authAsymIdx >= 0 ? tokens[authAsymIdx] : tokens[labelAsymIdx] || '') || '').trim();
+      if (chain !== preferred) continue;
+      const residueToken = String((authSeqIdx >= 0 ? tokens[authSeqIdx] : tokens[labelSeqIdx] || '') || '').trim();
+      const residue = Number.parseInt(residueToken, 10);
+      const atom = String((authAtomIdx >= 0 ? tokens[authAtomIdx] : tokens[labelAtomIdx] || '') || '').trim();
+      if (!Number.isFinite(residue) || residue <= 0 || !atom || atom === '?') continue;
+      const current = residueToAtom.get(residue);
+      if (!current || atom === 'CA') {
+        residueToAtom.set(residue, atom);
+      }
+    }
+  }
+  if (residueToAtom.size === 0) return null;
+  const residues = [...residueToAtom.keys()].sort((a, b) => a - b);
+  const midResidue = residues[Math.floor((residues.length - 1) / 2)];
+  return { chain: preferred, residue: midResidue, atom: residueToAtom.get(midResidue) || 'CA' };
+}
+
 function inferLigandAnchorFromPdb(
   pdbText: string,
   preferredChain: string
@@ -33,6 +111,10 @@ function inferLigandAnchorFromPdb(
     const current = { chain, residue, atom };
     if (preferred && chain === preferred) return current;
     if (!fallback) fallback = current;
+  }
+  if (preferred) {
+    const polymerAnchor = inferPolymerAnchorFromPdb(pdbText, preferred);
+    if (polymerAnchor) return polymerAnchor;
   }
   return fallback;
 }
@@ -85,6 +167,10 @@ function inferLigandAnchorFromCif(
       if (preferred && chain === preferred) return current;
       if (!fallback) fallback = current;
     }
+  }
+  if (preferred) {
+    const polymerAnchor = inferPolymerAnchorFromCif(cifText, preferred);
+    if (polymerAnchor) return polymerAnchor;
   }
   return fallback;
 }

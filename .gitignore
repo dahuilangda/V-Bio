@@ -98,3 +98,5 @@ lead_optimization/data/bench_compound_batch_*
 lead_optimization/data/bench_herg_*
 lead_optimization/data/*_compound_state.cache.fragdb
 lead_optimization/mmp_lifecycle/matcher/
+PocketXMol
+BioPhi

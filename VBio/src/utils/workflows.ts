@@ -1,7 +1,6 @@
 export type WorkflowKey =
   | 'prediction'
-  | 'designer'
-  | 'bicyclic_designer'
+  | 'peptide_design'
   | 'lead_optimization'
   | 'affinity';
 
@@ -26,21 +25,12 @@ export const WORKFLOWS: WorkflowDefinition[] = [
     supportsSequenceInputs: true
   },
   {
-    key: 'designer',
-    taskType: 'designer',
-    title: 'Molecule Designer',
-    shortTitle: 'Designer',
-    description: 'Generative molecular design workflow.',
-    runLabel: 'Run Design',
-    supportsSequenceInputs: false
-  },
-  {
-    key: 'bicyclic_designer',
-    taskType: 'bicyclic_designer',
-    title: 'Bicyclic Designer',
-    shortTitle: 'Bicyclic',
-    description: 'Bicyclic peptide design workflow.',
-    runLabel: 'Run Bicyclic Design',
+    key: 'peptide_design',
+    taskType: 'peptide_design',
+    title: 'Peptide Designer',
+    shortTitle: 'Peptide',
+    description: 'Unified cyclic and bicyclic peptide design workflow.',
+    runLabel: 'Run Peptide Designer',
     supportsSequenceInputs: false
   },
   {
@@ -71,10 +61,16 @@ const taskTypeAlias: Record<string, WorkflowKey> = {
   'boltz2 prediction': 'prediction',
   boltz_2_prediction: 'prediction',
   boltz2_prediction: 'prediction',
-  designer: 'designer',
-  bicyclic_designer: 'bicyclic_designer',
-  'bicyclic designer': 'bicyclic_designer',
-  bicyclicdesigner: 'bicyclic_designer',
+  peptide_design: 'peptide_design',
+  peptide_designer: 'peptide_design',
+  'peptide design': 'peptide_design',
+  'peptide designer': 'peptide_design',
+  peptidedesign: 'peptide_design',
+  peptidedesigner: 'peptide_design',
+  designer: 'peptide_design',
+  bicyclic_designer: 'peptide_design',
+  'bicyclic designer': 'peptide_design',
+  bicyclicdesigner: 'peptide_design',
   lead_optimization: 'lead_optimization',
   'lead optimization': 'lead_optimization',
   leadoptimization: 'lead_optimization',
@@ -94,6 +90,11 @@ export function normalizeWorkflowKey(taskTypeRaw: string | null | undefined): Wo
   const compact = normalized.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
   const compactNoUnderscore = compact.replace(/_/g, '');
   return taskTypeAlias[normalized] || taskTypeAlias[compact] || taskTypeAlias[compactNoUnderscore] || 'prediction';
+}
+
+export function isPredictionLikeWorkflowKey(taskTypeRaw: string | null | undefined): boolean {
+  const key = normalizeWorkflowKey(taskTypeRaw);
+  return key === 'prediction' || key === 'peptide_design';
 }
 
 export function getWorkflowDefinition(taskTypeRaw: string | null | undefined): WorkflowDefinition {

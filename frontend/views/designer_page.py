@@ -31,9 +31,9 @@ from frontend.ui_components import render_contact_constraint_ui, render_bond_con
 from frontend.utils import visualize_structure_py3dmol
 from frontend.url_state import URLStateManager
 
-def render_designer_page():
-    st.markdown("### 🧪 分子设计")
-    st.markdown("使用演化算法设计分子结合体，优化其与目标复合物的结合亲和力。")
+def render_designer_page(allow_glycopeptide: bool = False):
+    st.markdown("### 🧬 环肽设计")
+    st.markdown("使用演化算法设计环状多肽，优化其与目标复合物的结合亲和力。")
     
     # 添加设计类型选择器
     st.markdown("---")
@@ -45,9 +45,12 @@ def render_designer_page():
         st.session_state.designer_backend = current_backend
     is_af3_backend = current_backend == 'alphafold3'
 
-    design_type_options = ["peptide", "glycopeptide"]
-    if is_af3_backend:
-        design_type_options = ["peptide"]
+    if not allow_glycopeptide and st.session_state.get("main_design_type_selector") == "glycopeptide":
+        st.session_state["main_design_type_selector"] = "peptide"
+
+    design_type_options = ["peptide"]
+    if allow_glycopeptide and not is_af3_backend:
+        design_type_options.append("glycopeptide")
     with col_design_type:
         design_type_selector = st.selectbox(
             "选择设计类型",
@@ -56,15 +59,15 @@ def render_designer_page():
                 "peptide": "🧬 多肽设计",
                 "glycopeptide": "🍯 糖肽设计"
             }[x],
-            help="选择要设计的分子类型。多肽设计适合大多数蛋白质结合需求，糖肽设计可添加糖基修饰。",
+            help="选择要设计的多肽类型。当前默认提供环肽设计。",
             key="main_design_type_selector"
         )
     
     with col_design_info:
-        if is_af3_backend:
+        if is_af3_backend and allow_glycopeptide:
             st.warning("AlphaFold3 后端暂不支持糖肽设计，已自动切换为多肽模式。", icon="⚠️")
         elif design_type_selector == "peptide":
-            st.info("**多肽设计**: 设计天然或修饰的氨基酸序列，具有优化的结合亲和力和特异性。", icon="🧬")
+            st.info("**环肽设计**: 基于结构预测和打分反馈，迭代优化环状多肽序列。", icon="🧬")
         else:  # glycopeptide
             st.info("**糖肽设计**: 设计含有糖基修饰的多肽，增强稳定性和生物活性，常用于免疫调节和细胞识别。", icon="🍯")
     

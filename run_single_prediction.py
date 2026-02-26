@@ -18,6 +18,8 @@ import io
 import itertools
 import re
 import base64
+import random
+import copy
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any, Iterable
 import subprocess
@@ -3508,6 +3510,617 @@ def _normalize_protenix_output_permissions(
         print(f"⚠️ 无法自动修复 Protenix 输出目录权限: {perm_err}", file=sys.stderr)
 
 
+def _read_int_option(
+    options: Dict[str, Any],
+    key: str,
+    default: int,
+    *,
+    min_value: int,
+    max_value: int,
+) -> int:
+    raw = options.get(key, default)
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(min_value, min(max_value, parsed))
+
+
+def _read_float_option(
+    options: Dict[str, Any],
+    key: str,
+    default: float,
+    *,
+    min_value: float,
+    max_value: float,
+) -> float:
+    raw = options.get(key, default)
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(min_value, min(max_value, parsed))
+
+
+def _read_bool_option(options: Dict[str, Any], key: str, default: bool) -> bool:
+    raw = options.get(key, default)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    token = str(raw or "").strip().lower()
+    if token in {"1", "true", "yes", "y", "on"}:
+        return True
+    if token in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _normalize_peptide_design_mode(raw: Any) -> str:
+    token = str(raw or "").strip().lower()
+    if token in {"linear"}:
+        return "linear"
+    if token in {"cyclic", "cycle", "ring"}:
+        return "cyclic"
+    if token in {"bicyclic", "bicycle", "bi-cyclic"}:
+        return "bicyclic"
+    return "cyclic"
+
+
+def _extract_chain_ids_from_yaml(yaml_data: Dict[str, Any]) -> List[str]:
+    chain_ids: List[str] = []
+    for seq_block in yaml_data.get("sequences", []) or []:
+        if not isinstance(seq_block, dict):
+            continue
+        payload: Dict[str, Any] = {}
+        for key in ("protein", "dna", "rna", "ligand"):
+            candidate = seq_block.get(key)
+            if isinstance(candidate, dict):
+                payload = candidate
+                break
+        if not payload:
+            continue
+        seq_id = payload.get("id")
+        if isinstance(seq_id, list):
+            for item in seq_id:
+                text = str(item or "").strip()
+                if text and text not in chain_ids:
+                    chain_ids.append(text)
+        else:
+            text = str(seq_id or "").strip()
+            if text and text not in chain_ids:
+                chain_ids.append(text)
+    return chain_ids
+
+
+def _next_available_chain_id(used_chain_ids: List[str], preferred: str) -> str:
+    token = str(preferred or "").strip()
+    if token and token not in used_chain_ids:
+        return token
+    alphabet = [chr(code) for code in range(ord("A"), ord("Z") + 1)]
+    for candidate in alphabet:
+        if candidate not in used_chain_ids:
+            return candidate
+    suffix = 1
+    while True:
+        candidate = f"Z{suffix}"
+        if candidate not in used_chain_ids:
+            return candidate
+        suffix += 1
+
+
+def _normalize_sequence_mask(raw_mask: Any, binder_length: int) -> str:
+    if raw_mask is None:
+        return ""
+    text = str(raw_mask).strip()
+    if not text:
+        return ""
+    mask = text.replace("-", "").replace("_", "").replace(" ", "").upper()
+    if len(mask) != binder_length:
+        return ""
+    valid = {"X", "A", "C", "D", "E", "F", "G", "H", "I", "K", "L", "M", "N", "P", "Q", "R", "S", "T", "V", "W", "Y"}
+    if any(char not in valid for char in mask):
+        return ""
+    return mask
+
+
+def _apply_sequence_mask(sequence: str, sequence_mask: str) -> str:
+    if not sequence_mask:
+        return sequence
+    seq_chars = list(sequence)
+    for idx, mask_char in enumerate(sequence_mask):
+        if idx >= len(seq_chars):
+            break
+        if mask_char != "X":
+            seq_chars[idx] = mask_char
+    return "".join(seq_chars)
+
+
+def _enforce_bicyclic_cys_layout(
+    sequence: str,
+    *,
+    binder_length: int,
+    cys_positions: Optional[List[int]],
+) -> str:
+    amino_no_c = "ARNDQEGHILKMFPSTWYV"
+    seq = list(sequence[:binder_length].upper())
+    if len(seq) < binder_length:
+        seq.extend(random.choice(amino_no_c) for _ in range(binder_length - len(seq)))
+
+    for idx in range(binder_length):
+        if seq[idx] == "C":
+            seq[idx] = random.choice(amino_no_c)
+
+    terminal_idx = binder_length - 1
+    seq[terminal_idx] = "C"
+
+    chosen_positions: List[int] = []
+    if cys_positions:
+        for pos in cys_positions:
+            if isinstance(pos, int) and 0 <= pos < terminal_idx and pos not in chosen_positions:
+                chosen_positions.append(pos)
+            if len(chosen_positions) == 2:
+                break
+    if len(chosen_positions) < 2:
+        pool = [idx for idx in range(terminal_idx) if idx not in chosen_positions]
+        if len(pool) >= (2 - len(chosen_positions)):
+            chosen_positions.extend(random.sample(pool, k=2 - len(chosen_positions)))
+
+    for pos in chosen_positions[:2]:
+        seq[pos] = "C"
+
+    return "".join(seq)
+
+
+def _normalize_initial_sequence(
+    raw_sequence: Any,
+    *,
+    binder_length: int,
+    sequence_mask: str,
+    default_sequence: str,
+) -> str:
+    cleaned = "".join(ch for ch in str(raw_sequence or "").upper() if "A" <= ch <= "Z")
+    if not cleaned:
+        cleaned = default_sequence
+    if len(cleaned) < binder_length:
+        cleaned = cleaned + default_sequence[len(cleaned):binder_length]
+    else:
+        cleaned = cleaned[:binder_length]
+    return _apply_sequence_mask(cleaned, sequence_mask)
+
+
+def _build_peptide_candidate_yaml(
+    base_yaml_data: Dict[str, Any],
+    *,
+    binder_chain_id: str,
+    binder_sequence: str,
+    design_mode: str,
+    linker_ccd: str,
+    linker_chain_id: str,
+    linker_atom_map: Dict[str, List[str]],
+) -> str:
+    yaml_data = copy.deepcopy(base_yaml_data)
+    if not isinstance(yaml_data.get("sequences"), list):
+        yaml_data["sequences"] = []
+
+    binder_entry: Dict[str, Any] = {
+        "protein": {
+            "id": binder_chain_id,
+            "sequence": binder_sequence,
+            "msa": "empty",
+        }
+    }
+    if design_mode == "cyclic":
+        binder_entry["protein"]["cyclic"] = True
+
+    yaml_data["sequences"].append(binder_entry)
+
+    if design_mode == "bicyclic":
+        yaml_data["sequences"].append({"ligand": {"id": linker_chain_id, "ccd": linker_ccd}})
+        cys_indices = [idx for idx, aa in enumerate(binder_sequence) if aa == "C"]
+        if len(cys_indices) != 3:
+            raise ValueError(f"Bicyclic peptide requires exactly 3 cysteine residues, got {len(cys_indices)}.")
+        linker_atoms = linker_atom_map.get(linker_ccd) or []
+        if len(linker_atoms) != 3:
+            raise ValueError(f"Unsupported bicyclic linker '{linker_ccd}'.")
+
+        existing_constraints = yaml_data.get("constraints")
+        if not isinstance(existing_constraints, list):
+            existing_constraints = []
+        for cys_idx, linker_atom in zip(cys_indices, linker_atoms):
+            existing_constraints.append(
+                {
+                    "bond": {
+                        "atom1": [binder_chain_id, cys_idx + 1, "SG"],
+                        "atom2": [linker_chain_id, 1, linker_atom],
+                    }
+                }
+            )
+        yaml_data["constraints"] = existing_constraints
+
+    return yaml.safe_dump(yaml_data, sort_keys=False, default_flow_style=False)
+
+
+def _select_primary_structure_file(results_dir: str) -> Optional[Path]:
+    path_obj = Path(results_dir)
+    candidates = [p for p in path_obj.glob("*.cif")]
+    if not candidates:
+        candidates = [p for p in path_obj.glob("*.pdb")]
+    if not candidates:
+        return None
+
+    def _score(path: Path) -> Tuple[int, str]:
+        name = path.name.lower()
+        score = 100
+        if "rank_1" in name:
+            score = 1
+        elif "rank_" in name:
+            score = 10
+        elif "model_0" in name:
+            score = 20
+        elif "model_" in name:
+            score = 30
+        return (score, name)
+
+    return sorted(candidates, key=_score)[0]
+
+
+def _write_peptide_progress(progress_path: Optional[str], payload: Dict[str, Any]) -> None:
+    if not progress_path:
+        return
+    try:
+        path_obj = Path(progress_path)
+        path_obj.parent.mkdir(parents=True, exist_ok=True)
+        path_obj.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        print(f"⚠️ Failed to write peptide progress file: {exc}", file=sys.stderr)
+
+
+def run_peptide_design_backend(
+    temp_dir: str,
+    yaml_content: str,
+    output_archive_path: str,
+    predict_args: Dict[str, Any],
+    model_name: Optional[str],
+    seed: Optional[int],
+    options: Dict[str, Any],
+    target_chain_id: Optional[str],
+    progress_path: Optional[str],
+) -> None:
+    designer_dir = os.path.join(os.getcwd(), "designer")
+    if designer_dir not in sys.path:
+        sys.path.append(designer_dir)
+
+    from design_utils import generate_random_sequence, mutate_sequence, parse_confidence_metrics  # type: ignore
+
+    try:
+        base_yaml_data = yaml.safe_load(yaml_content) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid YAML for peptide design: {exc}") from exc
+    if not isinstance(base_yaml_data, dict):
+        raise ValueError("YAML root must be a mapping for peptide design.")
+
+    random_seed = seed if isinstance(seed, int) else int(time.time())
+    random.seed(random_seed)
+
+    design_mode = _normalize_peptide_design_mode(options.get("peptideDesignMode"))
+    min_binder_len = 8 if design_mode == "bicyclic" else 5
+    binder_length = _read_int_option(
+        options,
+        "peptideBinderLength",
+        20 if design_mode != "bicyclic" else 15,
+        min_value=min_binder_len,
+        max_value=120,
+    )
+    iterations = _read_int_option(options, "peptideIterations", 12, min_value=1, max_value=200)
+    population_size = _read_int_option(options, "peptidePopulationSize", 16, min_value=1, max_value=200)
+    elite_size = _read_int_option(options, "peptideEliteSize", 4, min_value=1, max_value=max(1, population_size))
+    mutation_rate = _read_float_option(options, "peptideMutationRate", 0.25, min_value=0.01, max_value=1.0)
+    use_initial_sequence = _read_bool_option(options, "peptideUseInitialSequence", False)
+    sequence_mask = _normalize_sequence_mask(options.get("peptideSequenceMask"), binder_length)
+    linker_ccd = str(options.get("peptideBicyclicLinkerCcd") or "SEZ").strip().upper() or "SEZ"
+
+    used_chain_ids = _extract_chain_ids_from_yaml(base_yaml_data)
+    chain_order = list(used_chain_ids)
+    binder_chain_id = _next_available_chain_id(used_chain_ids, "B")
+    chain_order.append(binder_chain_id)
+    linker_chain_id = _next_available_chain_id(chain_order, "L")
+
+    resolved_target_chain_id = str(target_chain_id or "").strip()
+    if not resolved_target_chain_id:
+        protein_chain_lengths = _extract_protein_chain_lengths_from_yaml(base_yaml_data)
+        resolved_target_chain_id = next(iter(protein_chain_lengths.keys()), "")
+    if resolved_target_chain_id and resolved_target_chain_id not in chain_order:
+        chain_order.append(resolved_target_chain_id)
+
+    design_params: Dict[str, Any] = {
+        "design_type": "bicyclic" if design_mode == "bicyclic" else "linear",
+        "sequence_mask": sequence_mask or None,
+        "include_cysteine": True,
+    }
+    if design_mode == "cyclic":
+        design_params["cyclic_binder"] = True
+    if design_mode == "bicyclic":
+        cys_position_mode = str(options.get("peptideBicyclicCysPositionMode") or "auto").strip().lower()
+        cys1_pos = _read_int_option(options, "peptideBicyclicCys1Pos", 3, min_value=1, max_value=max(1, binder_length - 1))
+        cys2_pos = _read_int_option(
+            options,
+            "peptideBicyclicCys2Pos",
+            max(2, binder_length // 2),
+            min_value=1,
+            max_value=max(1, binder_length - 1),
+        )
+        if cys1_pos == cys2_pos:
+            cys2_pos = min(max(1, binder_length - 1), cys2_pos + 1 if cys2_pos < binder_length - 1 else cys2_pos - 1)
+        if cys_position_mode == "manual":
+            design_params["cys_positions"] = [cys1_pos - 1, cys2_pos - 1]
+
+    linker_atom_map = {
+        "SEZ": ["CD", "C1", "C2"],
+        "29N": ["C16", "C19", "C25"],
+        "BS3": ["BI", "BI", "BI"],
+    }
+    if design_mode == "bicyclic" and linker_ccd not in linker_atom_map:
+        linker_ccd = "SEZ"
+
+    baseline_sequence = generate_random_sequence(binder_length, design_params)
+    initial_sequence = ""
+    if use_initial_sequence:
+        initial_sequence = _normalize_initial_sequence(
+            options.get("peptideInitialSequence"),
+            binder_length=binder_length,
+            sequence_mask=sequence_mask,
+            default_sequence=baseline_sequence,
+        )
+        if design_mode == "bicyclic":
+            initial_sequence = _enforce_bicyclic_cys_layout(
+                initial_sequence,
+                binder_length=binder_length,
+                cys_positions=design_params.get("cys_positions"),
+            )
+
+    total_tasks = iterations * population_size
+    completed_tasks = 0
+    evaluated_sequences: set[str] = set()
+    elite_population: List[Dict[str, Any]] = []
+    all_results: List[Dict[str, Any]] = []
+
+    runtime_predict_args = dict(predict_args)
+    if "seed" in runtime_predict_args:
+        runtime_predict_args.pop("seed", None)
+
+    for generation in range(1, iterations + 1):
+        generation_candidates: List[str] = []
+        attempts = 0
+        max_attempts = max(population_size * 30, 60)
+
+        while len(generation_candidates) < population_size and attempts < max_attempts:
+            attempts += 1
+            if generation == 1 and initial_sequence and initial_sequence not in evaluated_sequences:
+                candidate_sequence = initial_sequence
+            elif not elite_population:
+                candidate_sequence = generate_random_sequence(binder_length, design_params)
+            else:
+                parent = random.choice(elite_population)
+                parent_seq = str(parent.get("sequence") or "")
+                parent_plddts = parent.get("plddts") if isinstance(parent.get("plddts"), list) else None
+                candidate_sequence = mutate_sequence(
+                    parent_seq,
+                    mutation_rate=mutation_rate,
+                    plddt_scores=parent_plddts,
+                    design_params=design_params,
+                )
+
+            candidate_sequence = _apply_sequence_mask(candidate_sequence, sequence_mask)
+            if design_mode == "bicyclic":
+                candidate_sequence = _enforce_bicyclic_cys_layout(
+                    candidate_sequence,
+                    binder_length=binder_length,
+                    cys_positions=design_params.get("cys_positions"),
+                )
+
+            if candidate_sequence in evaluated_sequences:
+                continue
+            evaluated_sequences.add(candidate_sequence)
+            generation_candidates.append(candidate_sequence)
+
+        if not generation_candidates:
+            break
+
+        for idx, candidate_sequence in enumerate(generation_candidates, start=1):
+            candidate_yaml = _build_peptide_candidate_yaml(
+                base_yaml_data,
+                binder_chain_id=binder_chain_id,
+                binder_sequence=candidate_sequence,
+                design_mode=design_mode,
+                linker_ccd=linker_ccd,
+                linker_chain_id=linker_chain_id,
+                linker_atom_map=linker_atom_map,
+            )
+            candidate_dir = os.path.join(temp_dir, "peptide_design", f"gen_{generation:03d}", f"cand_{idx:03d}")
+            os.makedirs(candidate_dir, exist_ok=True)
+            archive_path = os.path.join(candidate_dir, "result.zip")
+
+            per_candidate_args = dict(runtime_predict_args)
+            if isinstance(seed, int):
+                per_candidate_args["seed"] = int(seed) + completed_tasks + idx
+
+            run_boltz_backend(
+                candidate_dir,
+                candidate_yaml,
+                archive_path,
+                per_candidate_args,
+                model_name,
+            )
+            result_dir = find_results_dir(candidate_dir)
+            metrics = parse_confidence_metrics(
+                result_dir,
+                binder_chain_id=binder_chain_id,
+                target_chain_id=resolved_target_chain_id or None,
+                chain_order=chain_order,
+            )
+
+            pair_iptm_raw = metrics.get("pair_iptm")
+            pair_iptm = float(pair_iptm_raw) if isinstance(pair_iptm_raw, (int, float)) else None
+            binder_avg_plddt = float(metrics.get("binder_avg_plddt") or 0.0)
+            composite_score = (0.7 * pair_iptm) + (0.3 * (binder_avg_plddt / 100.0)) if pair_iptm is not None else None
+            structure_file = _select_primary_structure_file(result_dir)
+            result_row = {
+                "sequence": candidate_sequence,
+                "generation": generation,
+                "iptm": pair_iptm,
+                "pair_iptm": pair_iptm,
+                "binder_avg_plddt": binder_avg_plddt,
+                "composite_score": composite_score,
+                "score": composite_score,
+                "plddt": binder_avg_plddt,
+                "model": "Boltz",
+                "structure_source_path": str(structure_file) if structure_file else "",
+                "structure_format": (
+                    "pdb"
+                    if structure_file and structure_file.suffix.lower() == ".pdb"
+                    else "cif"
+                ),
+                "plddts": metrics.get("plddts") if isinstance(metrics.get("plddts"), list) else [],
+            }
+            all_results.append(result_row)
+            completed_tasks += 1
+
+        all_results.sort(
+            key=lambda item: (
+                1 if isinstance(item.get("composite_score"), (int, float)) else 0,
+                float(item.get("composite_score")) if isinstance(item.get("composite_score"), (int, float)) else float("-inf"),
+            ),
+            reverse=True,
+        )
+        elite_population = [
+            {
+                "sequence": str(row.get("sequence") or ""),
+                "plddts": row.get("plddts") if isinstance(row.get("plddts"), list) else [],
+            }
+            for row in all_results[:elite_size]
+        ]
+
+        current_best_rows = []
+        for rank, row in enumerate(all_results[: min(8, len(all_results))], start=1):
+            current_best_rows.append(
+                {
+                    "rank": rank,
+                    "sequence": row.get("sequence"),
+                    "generation": row.get("generation"),
+                    "score": row.get("composite_score"),
+                    "iptm": row.get("iptm"),
+                    "binder_avg_plddt": row.get("binder_avg_plddt"),
+                }
+            )
+        progress_payload = {
+            "peptide_design": {
+                "current_generation": generation,
+                "total_generations": iterations,
+                "completed_tasks": completed_tasks,
+                "pending_tasks": max(0, total_tasks - completed_tasks),
+                "total_tasks": total_tasks,
+                "best_score": all_results[0].get("composite_score") if all_results else 0.0,
+                "progress_percent": (completed_tasks / total_tasks * 100.0) if total_tasks > 0 else 0.0,
+                "current_status": f"Generation {generation}/{iterations}",
+                "status_message": f"Completed generation {generation} of {iterations}",
+                "current_best_sequences": current_best_rows,
+            }
+        }
+        _write_peptide_progress(progress_path, progress_payload)
+
+    all_results.sort(
+        key=lambda item: (
+            1 if isinstance(item.get("composite_score"), (int, float)) else 0,
+            float(item.get("composite_score")) if isinstance(item.get("composite_score"), (int, float)) else float("-inf"),
+        ),
+        reverse=True,
+    )
+    top_results = all_results[:24]
+    if not top_results:
+        raise RuntimeError("Peptide design produced no valid candidates.")
+
+    zip_rows: List[Dict[str, Any]] = []
+    with zipfile.ZipFile(output_archive_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for rank, row in enumerate(top_results, start=1):
+            next_row = dict(row)
+            source_path = str(next_row.pop("structure_source_path", "") or "")
+            structure_arcname = ""
+            if source_path and os.path.isfile(source_path):
+                suffix = Path(source_path).suffix.lower()
+                ext = ".pdb" if suffix == ".pdb" else ".cif"
+                structure_arcname = f"structures/rank_{rank:02d}{ext}"
+                zipf.write(source_path, structure_arcname)
+            next_row["rank"] = rank
+            next_row["structure_file"] = structure_arcname
+            next_row["structure_name"] = Path(structure_arcname).name if structure_arcname else ""
+            next_row["structure_path"] = structure_arcname
+            next_row.pop("plddts", None)
+            zip_rows.append(next_row)
+
+        summary_payload = {
+            "summary": {
+                "design_mode": design_mode,
+                "binder_length": binder_length,
+                "iterations": iterations,
+                "population_size": population_size,
+                "elite_size": elite_size,
+                "mutation_rate": mutation_rate,
+                "completed_tasks": completed_tasks,
+                "total_tasks": total_tasks,
+                "best_score": zip_rows[0].get("composite_score") if zip_rows else 0.0,
+            },
+            "peptide_design": {
+                "design_mode": design_mode,
+                "binder_length": binder_length,
+                "iterations": iterations,
+                "population_size": population_size,
+                "elite_size": elite_size,
+                "mutation_rate": mutation_rate,
+                "current_generation": iterations,
+                "total_generations": iterations,
+                "completed_tasks": completed_tasks,
+                "pending_tasks": max(0, total_tasks - completed_tasks),
+                "total_tasks": total_tasks,
+                "best_score": zip_rows[0].get("composite_score") if zip_rows else 0.0,
+                "best_sequences": zip_rows,
+                "candidate_count": len(zip_rows),
+            },
+            "top_results": zip_rows,
+            "best_sequences": zip_rows,
+        }
+        zipf.writestr("results_summary.json", json.dumps(summary_payload, ensure_ascii=False, indent=2))
+
+        all_results_payload = []
+        for row in all_results:
+            copied = dict(row)
+            copied.pop("structure_source_path", None)
+            copied.pop("plddts", None)
+            all_results_payload.append(copied)
+        zipf.writestr(
+            "design_results.json",
+            json.dumps({"candidates": all_results_payload}, ensure_ascii=False, indent=2),
+        )
+
+    _write_peptide_progress(
+        progress_path,
+        {
+            "peptide_design": {
+                "current_generation": iterations,
+                "total_generations": iterations,
+                "completed_tasks": completed_tasks,
+                "pending_tasks": 0,
+                "total_tasks": total_tasks,
+                "best_score": zip_rows[0].get("composite_score") if zip_rows else 0.0,
+                "progress_percent": 100.0,
+                "current_status": "completed",
+                "status_message": "Peptide design completed",
+                "best_sequences": zip_rows[:8],
+            }
+        },
+    )
+
+
 def run_boltz_backend(
     temp_dir: str,
     yaml_content: str,
@@ -4052,6 +4665,16 @@ def main():
         backend = str(predict_args.pop("backend", "boltz")).strip().lower()
         if backend not in ("boltz", "alphafold3", "protenix"):
             raise ValueError(f"Unsupported backend '{backend}'.")
+        workflow = str(predict_args.pop("workflow", "prediction")).strip().lower()
+        if workflow in {"peptide", "peptide_designer", "designer"}:
+            workflow = "peptide_design"
+        if workflow not in {"prediction", "peptide_design"}:
+            workflow = "prediction"
+        peptide_design_options = predict_args.pop("peptide_design_options", {})
+        if not isinstance(peptide_design_options, dict):
+            peptide_design_options = {}
+        peptide_design_target_chain = str(predict_args.pop("peptide_design_target_chain", "")).strip() or None
+        peptide_progress_path = str(predict_args.pop("peptide_progress_path", "")).strip() or None
 
         model_name = predict_args.pop("model_name", None)
         seed = predict_args.pop("seed", None)
@@ -4068,13 +4691,31 @@ def main():
         with tempfile.TemporaryDirectory() as temp_dir:
             processed_yaml = yaml_content
             af3_template_payloads: List[dict] = []
-            if template_inputs and backend in ("boltz", "alphafold3"):
+            if template_inputs and (backend in ("boltz", "alphafold3") or workflow == "peptide_design"):
                 processed_yaml, af3_template_payloads = prepare_template_payloads(
                     yaml_content,
                     template_inputs,
                     temp_dir,
                 )
-            if backend == "alphafold3":
+            if workflow == "peptide_design":
+                if backend != "boltz":
+                    print(
+                        f"⚠️ Peptide design currently supports Boltz backend only. Requested '{backend}', fallback to 'boltz'.",
+                        file=sys.stderr,
+                    )
+                validate_template_paths(processed_yaml)
+                run_peptide_design_backend(
+                    temp_dir=temp_dir,
+                    yaml_content=processed_yaml,
+                    output_archive_path=output_archive_path,
+                    predict_args=predict_args,
+                    model_name=model_name,
+                    seed=seed,
+                    options=peptide_design_options,
+                    target_chain_id=peptide_design_target_chain,
+                    progress_path=peptide_progress_path,
+                )
+            elif backend == "alphafold3":
                 if not af3_template_payloads:
                     af3_template_payloads = prepare_yaml_template_payloads(processed_yaml, temp_dir)
                 run_alphafold3_backend(

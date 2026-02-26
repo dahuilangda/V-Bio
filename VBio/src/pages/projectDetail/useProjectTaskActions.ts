@@ -1,6 +1,7 @@
 import type { Dispatch, FormEvent, MutableRefObject, SetStateAction } from 'react';
 import { useCallback } from 'react';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
+import type { DownloadResultMode } from '../../api/backendTaskApi';
 import type {
   InputComponent,
   Project,
@@ -91,7 +92,10 @@ interface UseProjectTaskActionsOutput {
     }
   ) => Promise<ProjectTask>;
   saveDraft: (event?: FormEvent) => Promise<void>;
-  pullResultForViewer: (taskId: string, options?: { taskRowId?: string; persistProject?: boolean }) => Promise<void>;
+  pullResultForViewer: (
+    taskId: string,
+    options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode }
+  ) => Promise<void>;
   refreshStatus: (options?: { silent?: boolean }) => Promise<void>;
 }
 
@@ -303,7 +307,7 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
   );
 
   const pullResultForViewer = useCallback(
-    async (taskId: string, options?: { taskRowId?: string; persistProject?: boolean }) =>
+    async (taskId: string, options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode }) =>
       pullResultForViewerTask({
         taskId,
         options,

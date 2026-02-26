@@ -2,6 +2,7 @@ export type TaskState = 'DRAFT' | 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE' |
 export type MoleculeType = 'protein' | 'dna' | 'rna' | 'ligand';
 export type LigandInputMethod = 'smiles' | 'ccd' | 'jsme';
 export type PredictionConstraintType = 'contact' | 'bond' | 'pocket';
+export type PeptideDesignMode = 'linear' | 'cyclic' | 'bicyclic';
 
 export interface InputComponent {
   id: string;
@@ -71,6 +72,22 @@ export interface PredictionProperties {
 
 export interface PredictionOptions {
   seed: number | null;
+  peptideDesignMode?: PeptideDesignMode;
+  peptideBinderLength?: number;
+  peptideUseInitialSequence?: boolean;
+  peptideInitialSequence?: string;
+  peptideSequenceMask?: string;
+  peptideIterations?: number;
+  peptidePopulationSize?: number;
+  peptideEliteSize?: number;
+  peptideMutationRate?: number;
+  peptideBicyclicLinkerCcd?: 'SEZ' | '29N' | 'BS3';
+  peptideBicyclicCysPositionMode?: 'auto' | 'manual';
+  peptideBicyclicFixTerminalCys?: boolean;
+  peptideBicyclicIncludeExtraCys?: boolean;
+  peptideBicyclicCys1Pos?: number;
+  peptideBicyclicCys2Pos?: number;
+  peptideBicyclicCys3Pos?: number;
 }
 
 export interface ProjectInputConfig {
@@ -228,9 +245,12 @@ export interface PredictionSubmitInput {
   projectName: string;
   proteinSequence: string;
   ligandSmiles: string;
+  workflow?: 'prediction' | 'peptide_design';
   components?: InputComponent[];
   constraints?: PredictionConstraint[];
   properties?: PredictionProperties;
+  peptideDesignOptions?: PredictionOptions;
+  peptideDesignTargetChainId?: string | null;
   seed?: number | null;
   backend: string;
   useMsa: boolean;

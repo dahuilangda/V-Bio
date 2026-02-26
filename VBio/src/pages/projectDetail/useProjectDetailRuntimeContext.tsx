@@ -1,5 +1,6 @@
 import { useEffect, useMemo } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import type { InputComponent } from '../../types/models';
 import { useAuth } from '../../hooks/useAuth';
 import {
   insertProjectTask,
@@ -10,7 +11,7 @@ import {
 } from '../../api/supabaseLite';
 import { saveProjectInputConfig } from '../../utils/projectInputs';
 import { validateComponents } from '../../utils/inputValidation';
-import { getWorkflowDefinition } from '../../utils/workflows';
+import { getWorkflowDefinition, isPredictionLikeWorkflowKey } from '../../utils/workflows';
 import { createWorkflowSubmitters } from './workflowSubmitters';
 import { useEntryRoutingResolution } from './useEntryRoutingResolution';
 import { useProjectTaskActions } from './useProjectTaskActions';
@@ -228,7 +229,8 @@ export function useProjectDetailRuntimeContext() {
     return project.user_id === session.userId;
   }, [project, session]);
   const workflowKey = useMemo(() => getWorkflowDefinition(project?.task_type).key, [project?.task_type]);
-  const isPredictionWorkflow = workflowKey === 'prediction';
+  const isPredictionWorkflow = isPredictionLikeWorkflowKey(workflowKey);
+  const isPeptideDesignWorkflow = workflowKey === 'peptide_design';
   const isAffinityWorkflow = workflowKey === 'affinity';
   const isLeadOptimizationWorkflow = workflowKey === 'lead_optimization';
   const runtimeTaskSignature = useMemo(() => buildTaskRuntimeSignature(projectTasks), [projectTasks]);
@@ -251,8 +253,9 @@ export function useProjectDetailRuntimeContext() {
       if (cancelled || inFlight) return;
       inFlight = true;
       try {
+        const shouldUseTaskListView = workflowKey === 'lead_optimization' || workflowKey === 'peptide_design';
         const rowsRaw =
-          workflowKey === 'lead_optimization'
+          shouldUseTaskListView
             ? await listProjectTasksForList(projectIdValue, { includeComponents: false })
             : await listProjectTasksCompact(projectIdValue);
         if (cancelled) return;
@@ -358,7 +361,8 @@ export function useProjectDetailRuntimeContext() {
     isBondOnlyBackend
   } = useProjectWorkflowContext({
     draft,
-    fallbackBackend: project?.backend || 'boltz'
+    fallbackBackend: project?.backend || 'boltz',
+    isPeptideDesignWorkflow
   });
 
   const componentTypeBuckets = useComponentTypeBuckets(normalizedDraftComponents);
@@ -428,6 +432,7 @@ export function useProjectDetailRuntimeContext() {
   } = useWorkspaceAffinitySelection({
     normalizedDraftComponents,
     draftProperties: draft?.inputConfig.properties,
+    isPeptideDesignWorkflow,
   });
   const {
     constraintTemplateOptions,
@@ -462,6 +467,7 @@ export function useProjectDetailRuntimeContext() {
     activeComponentId,
     setActiveComponentId,
     workflowKey,
+    isPeptideDesignWorkflow,
     selectedWorkspaceLigandChainId: selectedWorkspaceLigand.chainId,
     selectedWorkspaceTargetChainId: selectedWorkspaceTarget.chainId,
     canEnableAffinityFromWorkspace,
@@ -622,6 +628,7 @@ export function useProjectDetailRuntimeContext() {
   const { submitAffinityTask, submitPredictionTask } = createWorkflowSubmitters({
     project,
     draft,
+    isPeptideDesignWorkflow,
     workspaceTab,
     affinityTargetFile,
     affinityLigandFile,
@@ -670,7 +677,10 @@ export function useProjectDetailRuntimeContext() {
     updateProjectTask,
     sortProjectTasks,
     saveProjectInputConfig,
-    listIncompleteComponentOrders,
+    listIncompleteComponentOrders: (components: InputComponent[]) =>
+      listIncompleteComponentOrders(components, {
+        ignoreEmptyLigand: isPeptideDesignWorkflow
+      }),
     validateComponents
   });
 
@@ -697,6 +707,7 @@ export function useProjectDetailRuntimeContext() {
     structureTaskId,
     structureText,
     pullResultForViewer,
+    isPeptideDesignWorkflow,
     workspaceTab,
     activeConstraintId,
     selectedContactConstraintIdsLength: selectedContactConstraintIds.length,
@@ -744,6 +755,7 @@ export function useProjectDetailRuntimeContext() {
     canEdit,
     workflowKey,
     isPredictionWorkflow,
+    isPeptideDesignWorkflow,
     isAffinityWorkflow,
     isLeadOptimizationWorkflow,
     requestedStatusTaskRow,
