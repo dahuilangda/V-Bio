@@ -1733,6 +1733,17 @@ async function parsePeptideDesignCandidatesFromBundle(
       '';
     const structureText = structurePath ? (await zip.file(structurePath)?.async('text')) || '' : '';
     const structureFormat: 'cif' | 'pdb' = getBaseName(structurePath).toLowerCase().endsWith('.pdb') ? 'pdb' : 'cif';
+    const extractedResidueByChain =
+      structureText ? extractResiduePlddtsByChainFromStructure(structureText, structureFormat) : {};
+    const residuePayload = extractPeptideCandidateResiduePayload(row);
+    if (
+      Object.keys(extractedResidueByChain).length > 0 &&
+      !Object.prototype.hasOwnProperty.call(residuePayload, 'residue_plddt_by_chain') &&
+      !Object.prototype.hasOwnProperty.call(residuePayload, 'residuePlddtByChain') &&
+      !Object.prototype.hasOwnProperty.call(residuePayload, 'residue_plddts_by_chain')
+    ) {
+      residuePayload.residue_plddt_by_chain = extractedResidueByChain;
+    }
     const sequence = firstNonEmptyTextByKeys(row, [
       'peptide_sequence',
       'binder_sequence',
@@ -1762,7 +1773,7 @@ async function parsePeptideDesignCandidatesFromBundle(
       target_chain_id: readText(row.target_chain_id),
       binder_chain_id: readText(row.binder_chain_id),
       linker_chain_id: readText(row.linker_chain_id),
-      ...extractPeptideCandidateResiduePayload(row),
+      ...residuePayload,
       structure_name: getBaseName(structurePath),
       structure_format: structureFormat,
       structure_text: structureText

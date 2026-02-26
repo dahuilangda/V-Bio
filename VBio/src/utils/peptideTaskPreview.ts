@@ -116,6 +116,88 @@ function normalizeResiduePlddts(values: number[]): number[] {
     .filter((value): value is number => value !== null);
 }
 
+function normalizeChainToken(value: string): string {
+  return value.trim().toUpperCase();
+}
+
+function alignResidueSeriesToSequence(values: number[], sequenceLength: number): number[] {
+  const normalized = normalizeResiduePlddts(values);
+  if (normalized.length === 0) return [];
+  if (sequenceLength <= 0) return normalized;
+  if (normalized.length === sequenceLength) return normalized;
+  if (normalized.length < Math.min(sequenceLength, 4)) return [];
+  if (normalized.length > sequenceLength) {
+    const reduced: number[] = [];
+    for (let i = 0; i < sequenceLength; i += 1) {
+      const start = Math.floor((i * normalized.length) / sequenceLength);
+      const end = Math.max(start + 1, Math.floor(((i + 1) * normalized.length) / sequenceLength));
+      const chunk = normalized.slice(start, end);
+      const avg = chunk.reduce((sum, item) => sum + item, 0) / chunk.length;
+      reduced.push(avg);
+    }
+    return reduced;
+  }
+  const expanded: number[] = [];
+  for (let i = 0; i < sequenceLength; i += 1) {
+    const mapped = Math.floor((i * normalized.length) / sequenceLength);
+    expanded.push(normalized[Math.min(normalized.length - 1, Math.max(0, mapped))]);
+  }
+  return expanded;
+}
+
+function readResiduePlddtsFromByChain(value: unknown, sequenceLength: number, preferredChainId: string): number[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+  const record = value as Record<string, unknown>;
+  const entries = Object.entries(record)
+    .map(([chainId, raw]) => ({
+      chainId,
+      values: normalizeResiduePlddts(toFiniteNumberArray(raw))
+    }))
+    .filter((entry) => entry.values.length > 0);
+  if (entries.length === 0) return [];
+  const preferredToken = normalizeChainToken(preferredChainId);
+  let best: { values: number[]; score: number } | null = null;
+  for (const entry of entries) {
+    const length = entry.values.length;
+    let score = 0;
+    score -= Math.abs(length - sequenceLength) * 4;
+    if (length === sequenceLength) score += 30;
+    if (length >= Math.max(1, sequenceLength - 2) && length <= sequenceLength + 2) score += 16;
+    if (preferredToken && normalizeChainToken(entry.chainId) === preferredToken) score += 48;
+    if (!best || score > best.score) {
+      best = { values: entry.values, score };
+    }
+  }
+  if (!best) return [];
+  return alignResidueSeriesToSequence(best.values, sequenceLength);
+}
+
+function readCandidateResiduePlddts(row: Record<string, unknown>, sequenceLength: number, preferredChainId: string): number[] {
+  const directCandidates = [
+    readObjectPath(row, 'residue_plddts'),
+    readObjectPath(row, 'residue_plddt'),
+    readObjectPath(row, 'per_residue_plddt'),
+    readObjectPath(row, 'plddts')
+  ];
+  for (const candidate of directCandidates) {
+    const parsed = alignResidueSeriesToSequence(toFiniteNumberArray(candidate), sequenceLength);
+    if (parsed.length >= Math.min(sequenceLength, 4)) return parsed;
+  }
+  const byChainCandidates = [
+    readObjectPath(row, 'residue_plddt_by_chain'),
+    readObjectPath(row, 'residuePlddtByChain'),
+    readObjectPath(row, 'residue_plddts_by_chain'),
+    readObjectPath(row, 'chain_residue_plddt'),
+    readObjectPath(row, 'chain_plddt'),
+    readObjectPath(row, 'chain_plddts')
+  ];
+  for (const candidate of byChainCandidates) {
+    const parsed = readResiduePlddtsFromByChain(candidate, sequenceLength, preferredChainId);
+    if (parsed.length >= Math.min(sequenceLength, 4)) return parsed;
+  }
+  return [];
+}
+
 function readCandidateSequence(row: Record<string, unknown>): string {
   return (
     firstTextMetric([row], ['peptide_sequence', 'binder_sequence', 'candidate_sequence', 'designed_sequence', 'sequence'])
@@ -353,14 +435,13 @@ function buildPeptidePreview(payload: Record<string, unknown>): Record<string, u
     const best = sorted.find((row) => Boolean(readCandidateSequence(row))) || sorted[0];
     const sequence = readCandidateSequence(best);
     if (sequence) {
-      const residuePlddts = normalizeResiduePlddts(
-        toFiniteNumberArray(
-          readObjectPath(best, 'residue_plddts') ??
-            readObjectPath(best, 'residue_plddt') ??
-            readObjectPath(best, 'per_residue_plddt') ??
-            readObjectPath(best, 'plddts')
-        )
-      );
+      const binderChainId = firstTextMetric([best, payload, peptideDesign, peptideProgress, topProgress], [
+        'binder_chain_id',
+        'model_ligand_chain_id',
+        'requested_ligand_chain_id',
+        'ligand_chain_id'
+      ]);
+      const residuePlddts = readCandidateResiduePlddts(best, sequence.length, binderChainId);
       bestCandidate = {
         sequence,
         plddt: normalizePlddtValue(firstFiniteMetric([best], ['binder_avg_plddt', 'plddt', 'ligand_mean_plddt', 'mean_plddt'])),
@@ -368,12 +449,7 @@ function buildPeptidePreview(payload: Record<string, unknown>): Record<string, u
         score: firstFiniteMetric([best], ['composite_score', 'score', 'fitness', 'objective']),
         rank: normalizeInt(firstFiniteMetric([best], ['rank', 'ranking', 'order'])),
         generation: normalizeInt(firstFiniteMetric([best], ['generation', 'iteration', 'iter'])),
-        binder_chain_id: firstTextMetric([best, payload, peptideDesign, peptideProgress, topProgress], [
-          'binder_chain_id',
-          'model_ligand_chain_id',
-          'requested_ligand_chain_id',
-          'ligand_chain_id'
-        ]),
+        binder_chain_id: binderChainId,
         residue_plddts: residuePlddts.length >= Math.min(sequence.length, 4) ? residuePlddts : []
       };
     }

@@ -1372,6 +1372,86 @@ function comparePeptideCandidateRows(a: Record<string, unknown>, b: Record<strin
   return aIndex - bIndex;
 }
 
+function alignResidueSeriesToSequence(values: number[], sequenceLength: number): number[] {
+  const normalized = normalizeAtomPlddts(values);
+  if (normalized.length === 0) return [];
+  if (sequenceLength <= 0) return normalized;
+  if (normalized.length === sequenceLength) return normalized;
+  if (normalized.length < Math.min(sequenceLength, 4)) return [];
+  if (normalized.length > sequenceLength) {
+    const reduced: number[] = [];
+    for (let i = 0; i < sequenceLength; i += 1) {
+      const start = Math.floor((i * normalized.length) / sequenceLength);
+      const end = Math.max(start + 1, Math.floor(((i + 1) * normalized.length) / sequenceLength));
+      const chunk = normalized.slice(start, end);
+      reduced.push(chunk.reduce((sum, value) => sum + value, 0) / chunk.length);
+    }
+    return reduced;
+  }
+  const expanded: number[] = [];
+  for (let i = 0; i < sequenceLength; i += 1) {
+    const mapped = Math.floor((i * normalized.length) / sequenceLength);
+    expanded.push(normalized[Math.min(normalized.length - 1, Math.max(0, mapped))]);
+  }
+  return expanded;
+}
+
+function readResidueSeriesByChain(
+  value: unknown,
+  sequenceLength: number,
+  preferredChainId: string | null | undefined
+): number[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+  const record = value as Record<string, unknown>;
+  const preferred = String(preferredChainId || '').trim();
+  let best: { values: number[]; score: number } | null = null;
+  for (const [chainId, raw] of Object.entries(record)) {
+    const values = normalizeAtomPlddts(toFiniteNumberArray(raw));
+    if (values.length === 0) continue;
+    let score = 0;
+    if (preferred && chainKeysMatch(chainId, preferred)) score += 48;
+    score -= Math.abs(values.length - sequenceLength) * 4;
+    if (values.length === sequenceLength) score += 30;
+    if (values.length >= Math.max(1, sequenceLength - 2) && values.length <= sequenceLength + 2) score += 16;
+    if (!best || score > best.score) {
+      best = { values, score };
+    }
+  }
+  if (!best) return [];
+  return alignResidueSeriesToSequence(best.values, sequenceLength);
+}
+
+function readCandidateResiduePlddts(
+  row: Record<string, unknown>,
+  sequenceLength: number,
+  preferredChainId: string | null | undefined
+): number[] | null {
+  const direct = alignResidueSeriesToSequence(
+    toFiniteNumberArray(
+      readObjectPath(row, 'residue_plddts') ??
+        readObjectPath(row, 'residue_plddt') ??
+        readObjectPath(row, 'per_residue_plddt') ??
+        readObjectPath(row, 'plddts')
+    ),
+    sequenceLength
+  );
+  if (direct.length >= Math.min(sequenceLength, 4)) return direct;
+
+  const byChainCandidates = [
+    readObjectPath(row, 'residue_plddt_by_chain'),
+    readObjectPath(row, 'residuePlddtByChain'),
+    readObjectPath(row, 'residue_plddts_by_chain'),
+    readObjectPath(row, 'chain_residue_plddt'),
+    readObjectPath(row, 'chain_plddt'),
+    readObjectPath(row, 'chain_plddts')
+  ];
+  for (const candidate of byChainCandidates) {
+    const values = readResidueSeriesByChain(candidate, sequenceLength, preferredChainId);
+    if (values.length >= Math.min(sequenceLength, 4)) return values;
+  }
+  return null;
+}
+
 function readPeptideBestCandidatePreview(task: ProjectTask): PeptideBestCandidatePreview | null {
   const peptidePreview = readPeptidePreviewFromProperties(task.properties);
   const previewBest = peptidePreview
@@ -1393,19 +1473,7 @@ function readPeptideBestCandidatePreview(task: ProjectTask): PeptideBestCandidat
         [previewBest, peptidePreview || {}],
         ['binder_chain_id', 'model_ligand_chain_id', 'requested_ligand_chain_id', 'ligand_chain_id']
       );
-      const residuePlddts = (() => {
-        const parsed = normalizeAtomPlddts(
-          toFiniteNumberArray(
-            readObjectPath(previewBest, 'residue_plddts') ??
-              readObjectPath(previewBest, 'residue_plddt') ??
-              readObjectPath(previewBest, 'per_residue_plddt') ??
-              readObjectPath(previewBest, 'plddts')
-          )
-        );
-        if (parsed.length === 0) return null;
-        if (parsed.length < Math.min(sequence.length, 4)) return null;
-        return parsed;
-      })();
+      const residuePlddts = readCandidateResiduePlddts(previewBest, sequence.length, binderChainId);
       return {
         sequence,
         plddt,
@@ -1469,18 +1537,7 @@ function readPeptideBestCandidatePreview(task: ProjectTask): PeptideBestCandidat
     [best, confidence, peptideDesign, peptideProgress, topProgress],
     ['binder_chain_id', 'model_ligand_chain_id', 'requested_ligand_chain_id', 'ligand_chain_id']
   );
-  const residuePlddts = (() => {
-    const parsed = normalizeAtomPlddts(
-      toFiniteNumberArray(
-        readObjectPath(best, 'residue_plddts') ??
-          readObjectPath(best, 'residue_plddt') ??
-          readObjectPath(best, 'plddts')
-      )
-    );
-    if (parsed.length === 0) return null;
-    if (parsed.length < Math.min(sequence.length, 4)) return null;
-    return parsed;
-  })();
+  const residuePlddts = readCandidateResiduePlddts(best, sequence.length, binderChainId);
 
   return {
     sequence,

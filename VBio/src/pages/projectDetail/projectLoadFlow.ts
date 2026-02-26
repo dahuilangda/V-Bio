@@ -70,7 +70,10 @@ export async function loadProjectFlow(params: {
   const requestedTaskRowId = String(query.get('task_row_id') || '').trim();
   const shouldIncludeTaskComponents =
     requestNewTask || requestedTab === 'components' || requestedTab === 'constraints' || !requestedTab;
-  const shouldIncludeTaskConfidence = workflowDef.key !== 'peptide_design' || Boolean(requestedTaskRowId);
+  const shouldIncludeTaskConfidence =
+    workflowDef.key === 'peptide_design'
+      ? requestedTab === 'results' || !requestedTab || Boolean(requestedTaskRowId)
+      : true;
   const shouldUseTaskListView = workflowDef.key === 'lead_optimization' || workflowDef.key === 'peptide_design';
   const taskRowsBase = sortProjectTasks(
     await (shouldUseTaskListView
