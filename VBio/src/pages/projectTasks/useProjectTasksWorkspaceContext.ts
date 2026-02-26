@@ -148,6 +148,7 @@ export function useProjectTasksWorkspaceContext({
           : workflowKey === 'peptide_design'
             ? peptideBest?.plddt ?? ligandMeanPlddt ?? ligandSequenceMeanPlddt
             : ligandMeanPlddt ?? ligandSequenceMeanPlddt;
+      const iptm = metrics.iptm !== null ? metrics.iptm : workflowKey === 'peptide_design' ? peptideBest?.iptm ?? null : null;
       const leadOpt = readLeadOptTaskSummary(task);
       const peptide = workflowKey === 'peptide_design' ? readPeptideTaskSummary(task) : null;
       const resolvedBucketCount =
@@ -158,7 +159,8 @@ export function useProjectTasksWorkspaceContext({
         task,
         metrics: {
           ...metrics,
-          plddt
+          plddt,
+          iptm
         },
         submittedTs,
         backendValue: resolveTaskBackendValue(task, project?.backend || ''),

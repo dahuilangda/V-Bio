@@ -84,6 +84,30 @@ function taskStatePriority(value: unknown): number {
   return TASK_STATE_PRIORITY[String(value || '').trim().toUpperCase()] ?? 0;
 }
 
+function hasObjectContent(value: unknown): boolean {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length > 0);
+}
+
+function mergePayloadFields<T extends object, U extends object>(next: T, prev: U): T {
+  const nextAny = next as Record<string, unknown>;
+  const prevAny = prev as Record<string, unknown>;
+  const merged = { ...nextAny };
+  if (Object.prototype.hasOwnProperty.call(nextAny, 'confidence') || Object.prototype.hasOwnProperty.call(prevAny, 'confidence')) {
+    merged.confidence = hasObjectContent(nextAny.confidence) ? nextAny.confidence : prevAny.confidence;
+  }
+  if (Object.prototype.hasOwnProperty.call(nextAny, 'affinity') || Object.prototype.hasOwnProperty.call(prevAny, 'affinity')) {
+    merged.affinity = hasObjectContent(nextAny.affinity) ? nextAny.affinity : prevAny.affinity;
+  }
+  if (Object.prototype.hasOwnProperty.call(nextAny, 'properties') || Object.prototype.hasOwnProperty.call(prevAny, 'properties')) {
+    merged.properties = hasObjectContent(nextAny.properties) ? nextAny.properties : prevAny.properties;
+  }
+  if (Object.prototype.hasOwnProperty.call(nextAny, 'components') || Object.prototype.hasOwnProperty.call(prevAny, 'components')) {
+    const nextComponents = Array.isArray(nextAny.components) ? nextAny.components : [];
+    merged.components = nextComponents.length > 0 ? nextComponents : prevAny.components;
+  }
+  return merged as T;
+}
+
 function mergeTaskRuntimeFields<
   T extends {
     task_id?: string | null;
@@ -104,27 +128,27 @@ function mergeTaskRuntimeFields<
 >(next: T, prev: U): T {
   const nextTaskId = String(next.task_id || '').trim();
   const prevTaskId = String(prev.task_id || '').trim();
-  if (!nextTaskId || !prevTaskId || nextTaskId !== prevTaskId) return next;
+  if (!nextTaskId || !prevTaskId || nextTaskId !== prevTaskId) return mergePayloadFields(next, prev);
   const nextPriority = taskStatePriority(next.task_state);
   const prevPriority = taskStatePriority(prev.task_state);
-  if (prevPriority < nextPriority) return next;
+  if (prevPriority < nextPriority) return mergePayloadFields(next, prev);
   if (prevPriority > nextPriority) {
-    return {
+    return mergePayloadFields({
       ...next,
       task_state: prev.task_state,
       status_text: prev.status_text,
       error_text: prev.error_text,
       completed_at: prev.completed_at || next.completed_at,
       duration_seconds: prev.duration_seconds ?? next.duration_seconds
-    };
+    }, prev);
   }
-  return {
+  return mergePayloadFields({
     ...next,
     completed_at: next.completed_at || prev.completed_at,
     duration_seconds: next.duration_seconds ?? prev.duration_seconds,
     status_text: String(next.status_text || '').trim() || prev.status_text,
     error_text: String(next.error_text || '').trim() || prev.error_text
-  };
+  }, prev);
 }
 
 export function useProjectDetailRuntimeContext() {
@@ -256,7 +280,7 @@ export function useProjectDetailRuntimeContext() {
         const shouldUseTaskListView = workflowKey === 'lead_optimization' || workflowKey === 'peptide_design';
         const rowsRaw =
           shouldUseTaskListView
-            ? await listProjectTasksForList(projectIdValue, { includeComponents: false })
+            ? await listProjectTasksForList(projectIdValue, { includeComponents: false, includeConfidence: false })
             : await listProjectTasksCompact(projectIdValue);
         if (cancelled) return;
         const nextRows = sortProjectTasks(rowsRaw);

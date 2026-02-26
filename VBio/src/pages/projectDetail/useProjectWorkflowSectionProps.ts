@@ -29,6 +29,7 @@ interface UseProjectWorkflowSectionPropsInput {
   projectTaskId: string;
   statusInfo: Record<string, unknown> | null;
   progressPercent: number;
+  onPeptideRequestStructure?: () => Promise<void> | void;
   resultsGridRef: RefObject<HTMLDivElement>;
   isResultsResizing: boolean;
   resultsGridStyle: CSSProperties;
@@ -189,6 +190,7 @@ export function useProjectWorkflowSectionProps({
   projectTaskId,
   statusInfo,
   progressPercent,
+  onPeptideRequestStructure,
   resultsGridRef,
   isResultsResizing,
   resultsGridStyle,
@@ -354,7 +356,8 @@ export function useProjectWorkflowSectionProps({
     peptideFallbackPlddt: snapshotPlddt,
     peptideFallbackIptm: snapshotSelectedPairIptm,
     statusInfo,
-    progressPercent
+    progressPercent,
+    onPeptideRequestStructure
   });
   const affinityWorkflowSectionProps = buildAffinityWorkflowSectionProps({
     canEdit,

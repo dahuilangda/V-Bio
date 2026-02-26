@@ -231,13 +231,55 @@ export async function listProjects(options: ListProjectsOptions = {}): Promise<P
   })) as Project[];
 }
 
-export async function getProjectById(projectId: string): Promise<Project | null> {
+interface GetProjectByIdOptions {
+  lightweight?: boolean;
+}
+
+export async function getProjectById(projectId: string, options: GetProjectByIdOptions = {}): Promise<Project | null> {
+  const selectFields = options.lightweight
+    ? [
+        'id',
+        'user_id',
+        'name',
+        'summary',
+        'backend',
+        'use_msa',
+        'color_mode',
+        'task_type',
+        'task_id',
+        'task_state',
+        'status_text',
+        'error_text',
+        'submitted_at',
+        'completed_at',
+        'duration_seconds',
+        'structure_name',
+        'created_at',
+        'updated_at',
+        'deleted_at'
+      ].join(',')
+    : '*';
   const rows = await request<Project[]>('/projects', undefined, {
-    select: '*',
+    select: selectFields,
     id: `eq.${projectId}`,
     limit: '1'
   });
-  return rows[0] || null;
+  const row = rows[0];
+  if (!row) return null;
+  const normalized = row as Partial<Project>;
+  return {
+    ...normalized,
+    protein_sequence: normalized.protein_sequence || '',
+    ligand_smiles: normalized.ligand_smiles || '',
+    confidence:
+      normalized.confidence && typeof normalized.confidence === 'object' && !Array.isArray(normalized.confidence)
+        ? normalized.confidence
+        : {},
+    affinity:
+      normalized.affinity && typeof normalized.affinity === 'object' && !Array.isArray(normalized.affinity)
+        ? normalized.affinity
+        : {}
+  } as Project;
 }
 
 export async function insertProject(input: Partial<Project>): Promise<Project> {
@@ -330,9 +372,10 @@ export async function listProjectTasksCompact(projectId: string): Promise<Projec
 
 export async function listProjectTasksForList(
   projectId: string,
-  options?: { includeComponents?: boolean }
+  options?: { includeComponents?: boolean; includeConfidence?: boolean }
 ): Promise<ProjectTask[]> {
   const includeComponents = options?.includeComponents !== false;
+  const includeConfidence = options?.includeConfidence !== false;
   const selectFields = [
     'id',
     'project_id',
@@ -344,10 +387,9 @@ export async function listProjectTasksForList(
     'error_text',
     'backend',
     'seed',
-    'protein_sequence',
     'ligand_smiles',
     'properties',
-    'confidence',
+    ...(includeConfidence ? ['confidence'] : []),
     'structure_name',
     'submitted_at',
     'completed_at',
@@ -385,6 +427,7 @@ export async function listProjectTasksForList(
     name: '',
     summary: '',
     protein_sequence: '',
+    confidence: {},
     affinity: {},
     constraints: [],
     properties: {

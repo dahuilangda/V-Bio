@@ -416,6 +416,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     runActionRef,
     topRunButtonRef,
     patchTask,
+    pullResultForViewer,
     persistDraftTaskSnapshot,
     submitTask,
     setRunMenuOpen,
@@ -1174,6 +1175,16 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     projectTaskId: project.task_id || '',
     statusInfo: statusInfo || null,
     progressPercent,
+    onPeptideRequestStructure: async () => {
+      const contextTask = statusContextTaskRow || activeResultTask;
+      const taskId = String(contextTask?.task_id || project.task_id || '').trim();
+      if (!taskId) return;
+      await pullResultForViewer(taskId, {
+        taskRowId: contextTask?.id || undefined,
+        persistProject: String(project.task_id || '').trim() === taskId,
+        resultMode: 'view'
+      });
+    },
     resultsGridRef,
     isResultsResizing,
     resultsGridStyle,

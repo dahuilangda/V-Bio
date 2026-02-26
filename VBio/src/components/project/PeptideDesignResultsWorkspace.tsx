@@ -1,5 +1,5 @@
 import { X } from 'lucide-react';
-import { useEffect, useMemo, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
 import { MolstarViewer } from './MolstarViewer';
 
 type ResultsGridStyle = CSSProperties & { '--results-main-width'?: string };
@@ -27,6 +27,7 @@ interface PeptideDesignResultsWorkspaceProps {
   projectBackend: string;
   fallbackPlddt: number | null;
   fallbackIptm: number | null;
+  onRequestStructure?: () => Promise<void> | void;
 }
 
 interface PeptideDesignCandidate {
@@ -419,9 +420,27 @@ function parseNumberList(value: unknown): number[] {
   }
   if (value && typeof value === 'object') {
     const record = value as Record<string, unknown>;
+    const scalarEntries = Object.entries(record)
+      .map(([key, item]) => ({
+        key,
+        keyNumber: Number(key),
+        value: readFiniteNumber(item)
+      }))
+      .filter((entry) => entry.value !== null);
+    const numericKeyEntries = scalarEntries.filter((entry) => Number.isFinite(entry.keyNumber));
+    if (numericKeyEntries.length >= 3 && numericKeyEntries.length >= Math.floor(scalarEntries.length * 0.6)) {
+      numericKeyEntries.sort((a, b) => a.keyNumber - b.keyNumber);
+      return numericKeyEntries.map((entry) => entry.value as number);
+    }
     if (Array.isArray(record.values)) return parseNumberList(record.values);
     if (Array.isArray(record.scores)) return parseNumberList(record.scores);
     if (Array.isArray(record.plddt)) return parseNumberList(record.plddt);
+    if (Array.isArray(record.plddts)) return parseNumberList(record.plddts);
+    if (Array.isArray(record.residue_plddt)) return parseNumberList(record.residue_plddt);
+    if (Array.isArray(record.residue_plddts)) return parseNumberList(record.residue_plddts);
+    if (Array.isArray(record.per_residue_plddt)) return parseNumberList(record.per_residue_plddt);
+    if (Array.isArray(record.token_plddt)) return parseNumberList(record.token_plddt);
+    if (Array.isArray(record.token_plddts)) return parseNumberList(record.token_plddts);
     for (const entry of Object.values(record)) {
       const nested = parseNumberList(entry);
       if (nested.length > 0) return nested;
@@ -974,20 +993,19 @@ function parseCandidateResiduePlddts(
   sequence: string,
   sequenceLength: number,
   structure: { structureText: string; structureFormat: 'cif' | 'pdb' },
-  preferredChainId?: string,
-  sharedPayload?: Record<string, unknown>
+  preferredChainId?: string
 ): number[] {
   const nested = [
     row,
     asRecord(row.result),
     asRecord(row.prediction),
     asRecord(row.metadata),
-    asRecord(row.structure_payload),
-    asRecord(sharedPayload)
+    asRecord(row.structure_payload)
   ];
   const directKeys = [
     'residue_plddt',
     'residue_plddts',
+    'plddts',
     'residue_confidence',
     'residue_confidences',
     'residue_scores',
@@ -1001,7 +1019,9 @@ function parseCandidateResiduePlddts(
     'aa_plddt',
     'aa_plddts',
     'ligand_residue_plddt',
-    'ligand_residue_plddts'
+    'ligand_residue_plddts',
+    'token_plddt',
+    'token_plddts'
   ];
   const pathKeys = [
     'confidence.residue_plddt',
@@ -1233,8 +1253,7 @@ function parseCandidateRows(
   defaultState: RuntimeState,
   defaultModelLabel: string,
   preferredLigandChainId?: string,
-  preferredTargetChainId?: string,
-  sharedPayload?: Record<string, unknown>
+  preferredTargetChainId?: string
 ): PeptideDesignCandidate[] {
   return rows
     .map((row, index) => {
@@ -1261,8 +1280,7 @@ function parseCandidateRows(
         sequence,
         sequence.length,
         structure,
-        preferredLigandChainId,
-        sharedPayload
+        preferredLigandChainId
       );
       const modelLabel = parseCandidateModelLabel(row, defaultModelLabel);
       const hasStructure = Boolean(structure.structureText.trim());
@@ -1475,7 +1493,8 @@ export function PeptideDesignResultsWorkspace({
   confidenceBackend,
   projectBackend,
   fallbackPlddt,
-  fallbackIptm
+  fallbackIptm,
+  onRequestStructure
 }: PeptideDesignResultsWorkspaceProps) {
   void selectedResultLigandSequence;
   void fallbackIptm;
@@ -1509,8 +1528,7 @@ export function PeptideDesignResultsWorkspace({
         'SUCCESS',
         runtimeModelLabel,
         selectedResultLigandChainId || undefined,
-        selectedResultTargetChainId || undefined,
-        snapshotConfidence || {}
+        selectedResultTargetChainId || undefined
       ),
       ...parseCandidateRows(
         liveRows,
@@ -1518,8 +1536,7 @@ export function PeptideDesignResultsWorkspace({
         liveDefaultState,
         runtimeModelLabel,
         selectedResultLigandChainId || undefined,
-        selectedResultTargetChainId || undefined,
-        snapshotConfidence || {}
+        selectedResultTargetChainId || undefined
       )
     ])
       .sort((a, b) => {
@@ -1576,6 +1593,8 @@ export function PeptideDesignResultsWorkspace({
   const [cardMode, setCardMode] = useState(false);
   const [sortKey, setSortKey] = useState<PeptideSortKey>('score');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+  const [requestingStructure, setRequestingStructure] = useState(false);
+  const requestedStructureKeyRef = useRef('');
 
   const sortedCandidates = useMemo(() => {
     const sorted = [...candidates];
@@ -1633,6 +1652,8 @@ export function PeptideDesignResultsWorkspace({
   useEffect(() => {
     setCardMode(false);
     setSelectedCandidateId('');
+    requestedStructureKeyRef.current = '';
+    setRequestingStructure(false);
   }, [projectTaskId]);
 
   const hasCandidateRows = sortedCandidates.length > 0;
@@ -1651,6 +1672,20 @@ export function PeptideDesignResultsWorkspace({
     );
     return focusChain || selectedResultLigandChainId || '';
   }, [selectedCandidate?.sequence, selectedResultLigandChainId, viewerStructureFormat, viewerStructureText]);
+
+  useEffect(() => {
+    if (!cardMode) return;
+    if (!onRequestStructure) return;
+    if (!hasCandidateRows) return;
+    if (readText(viewerStructureText).trim()) return;
+    const requestKey = `${projectTaskId}:${selectedCandidate?.id || 'none'}`;
+    if (requestedStructureKeyRef.current === requestKey) return;
+    requestedStructureKeyRef.current = requestKey;
+    setRequestingStructure(true);
+    Promise.resolve(onRequestStructure())
+      .catch(() => {})
+      .finally(() => setRequestingStructure(false));
+  }, [cardMode, hasCandidateRows, onRequestStructure, projectTaskId, selectedCandidate?.id, viewerStructureText]);
 
   const openCandidateCard = (candidateId: string) => {
     setSelectedCandidateId(candidateId);
@@ -1954,7 +1989,25 @@ export function PeptideDesignResultsWorkspace({
             showSequence={false}
           />
         ) : (
-          <div className="ligand-preview-empty">Selected peptide has no precomputed structure yet.</div>
+          <div className="ligand-preview-empty">
+            <span>{requestingStructure ? 'Loading structure...' : 'Selected peptide has no precomputed structure yet.'}</span>
+            {onRequestStructure ? (
+              <button
+                type="button"
+                className="lead-opt-row-action-btn"
+                disabled={requestingStructure}
+                onClick={() => {
+                  requestedStructureKeyRef.current = '';
+                  setRequestingStructure(true);
+                  Promise.resolve(onRequestStructure())
+                    .catch(() => {})
+                    .finally(() => setRequestingStructure(false));
+                }}
+              >
+                {requestingStructure ? 'Loading' : 'Load Structure'}
+              </button>
+            ) : null}
+          </div>
         )}
       </section>
 

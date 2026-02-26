@@ -318,6 +318,8 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
         null;
       const baseTaskConfidence =
         taskRow?.confidence && typeof taskRow.confidence === 'object' ? (taskRow.confidence as Record<string, unknown>) : null;
+      const baseTaskProperties =
+        taskRow?.properties && typeof taskRow.properties === 'object' ? (taskRow.properties as unknown as Record<string, unknown>) : null;
       const baseProjectConfidence =
         project?.confidence && typeof project.confidence === 'object' ? (project.confidence as Record<string, unknown>) : null;
       return pullResultForViewerTask({
@@ -325,6 +327,7 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
         options,
         baseProjectConfidence,
         baseTaskConfidence,
+        baseTaskProperties,
         patch,
         patchTask,
         setStatusInfo,

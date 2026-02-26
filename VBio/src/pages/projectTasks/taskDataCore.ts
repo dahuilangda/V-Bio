@@ -1,5 +1,6 @@
 import type { InputComponent, Project, ProjectTask } from '../../types/models';
 import { assignChainIdsForComponents } from '../../utils/chainAssignments';
+import { readPeptidePreviewFromProperties } from '../../utils/peptideTaskPreview';
 import { normalizeComponentSequence, normalizeInputComponents } from '../../utils/projectInputs';
 import type {
   SeedFilterOption,
@@ -970,6 +971,7 @@ interface LeadOptTaskSummary {
 interface PeptideBestCandidatePreview {
   sequence: string;
   plddt: number | null;
+  iptm: number | null;
   residuePlddts: number[] | null;
   binderChainId: string | null;
 }
@@ -1065,6 +1067,7 @@ function readPeptideTaskCandidateCount(payloads: Record<string, unknown>[]): num
 }
 
 function readPeptideTaskSummary(task: ProjectTask): PeptideTaskSummary | null {
+  const peptidePreview = readPeptidePreviewFromProperties(task.properties);
   const confidence =
     task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
       ? (task.confidence as Record<string, unknown>)
@@ -1103,6 +1106,7 @@ function readPeptideTaskSummary(task: ProjectTask): PeptideTaskSummary | null {
       ? (taskRecord.options as Record<string, unknown>)
       : {};
   const payloads = [
+    peptidePreview || {},
     confidence || {},
     topProgress,
     peptideDesign,
@@ -1273,6 +1277,7 @@ function readPeptideTaskSummary(task: ProjectTask): PeptideTaskSummary | null {
   ]);
 
   if (
+    !peptidePreview &&
     !confidence &&
     designMode === null &&
     binderLength === null &&
@@ -1368,6 +1373,49 @@ function comparePeptideCandidateRows(a: Record<string, unknown>, b: Record<strin
 }
 
 function readPeptideBestCandidatePreview(task: ProjectTask): PeptideBestCandidatePreview | null {
+  const peptidePreview = readPeptidePreviewFromProperties(task.properties);
+  const previewBest = peptidePreview
+    ? (() => {
+        const best = readObjectPath(peptidePreview, 'best_candidate');
+        return best && typeof best === 'object' && !Array.isArray(best) ? (best as Record<string, unknown>) : null;
+      })()
+    : null;
+  if (previewBest) {
+    const sequence = readPeptideCandidateSequence(previewBest);
+    if (sequence) {
+      const plddt = normalizePlddtScalar(
+        readFirstFiniteFromPayloadPaths([previewBest], ['plddt', 'binder_avg_plddt', 'ligand_mean_plddt', 'mean_plddt'])
+      );
+      const iptm = normalizeProbability(
+        readFirstFiniteFromPayloadPaths([previewBest], ['pair_iptm_target_binder', 'pair_iptm', 'iptm'])
+      );
+      const binderChainId = readFirstTextFromPayloadPaths(
+        [previewBest, peptidePreview || {}],
+        ['binder_chain_id', 'model_ligand_chain_id', 'requested_ligand_chain_id', 'ligand_chain_id']
+      );
+      const residuePlddts = (() => {
+        const parsed = normalizeAtomPlddts(
+          toFiniteNumberArray(
+            readObjectPath(previewBest, 'residue_plddts') ??
+              readObjectPath(previewBest, 'residue_plddt') ??
+              readObjectPath(previewBest, 'per_residue_plddt') ??
+              readObjectPath(previewBest, 'plddts')
+          )
+        );
+        if (parsed.length === 0) return null;
+        if (parsed.length < Math.min(sequence.length, 4)) return null;
+        return parsed;
+      })();
+      return {
+        sequence,
+        plddt,
+        iptm,
+        residuePlddts,
+        binderChainId: binderChainId || null
+      };
+    }
+  }
+
   const confidence =
     task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
       ? (task.confidence as Record<string, unknown>)
@@ -1414,6 +1462,9 @@ function readPeptideBestCandidatePreview(task: ProjectTask): PeptideBestCandidat
   const plddt = normalizePlddtScalar(
     readFirstFiniteFromPayloadPaths([best], ['binder_avg_plddt', 'plddt', 'ligand_mean_plddt', 'mean_plddt'])
   );
+  const iptm = normalizeProbability(
+    readFirstFiniteFromPayloadPaths([best], ['pair_iptm_target_binder', 'pair_iptm', 'iptm'])
+  );
   const binderChainId = readFirstTextFromPayloadPaths(
     [best, confidence, peptideDesign, peptideProgress, topProgress],
     ['binder_chain_id', 'model_ligand_chain_id', 'requested_ligand_chain_id', 'ligand_chain_id']
@@ -1423,18 +1474,18 @@ function readPeptideBestCandidatePreview(task: ProjectTask): PeptideBestCandidat
       toFiniteNumberArray(
         readObjectPath(best, 'residue_plddts') ??
           readObjectPath(best, 'residue_plddt') ??
-          readObjectPath(best, 'token_plddts') ??
-          readObjectPath(best, 'token_plddt') ??
           readObjectPath(best, 'plddts')
       )
     );
     if (parsed.length === 0) return null;
+    if (parsed.length < Math.min(sequence.length, 4)) return null;
     return parsed;
   })();
 
   return {
     sequence,
     plddt,
+    iptm,
     residuePlddts,
     binderChainId: binderChainId || null
   };
@@ -1680,6 +1731,26 @@ function toFiniteNumberArray(value: unknown): number[] {
   }
   if (value && typeof value === 'object') {
     const obj = value as Record<string, unknown>;
+    const scalarEntries = Object.entries(obj)
+      .map(([key, item]) => ({
+        key,
+        keyNumber: Number(key),
+        value:
+          typeof item === 'number'
+            ? (Number.isFinite(item) ? item : null)
+            : typeof item === 'string'
+              ? (() => {
+                  const parsed = Number(item.trim());
+                  return Number.isFinite(parsed) ? parsed : null;
+                })()
+              : null
+      }))
+      .filter((entry) => entry.value !== null);
+    const numericKeyEntries = scalarEntries.filter((entry) => Number.isFinite(entry.keyNumber));
+    if (numericKeyEntries.length >= 3 && numericKeyEntries.length >= Math.floor(scalarEntries.length * 0.6)) {
+      numericKeyEntries.sort((a, b) => a.keyNumber - b.keyNumber);
+      return numericKeyEntries.map((entry) => entry.value as number);
+    }
     const nestedCandidates: unknown[] = [
       obj.values,
       obj.value,

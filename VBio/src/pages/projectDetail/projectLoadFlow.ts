@@ -67,12 +67,17 @@ export async function loadProjectFlow(params: {
   const normalizedBackend = workflowDef.key === 'affinity' ? 'boltz' : next.backend;
   const query = new URLSearchParams(locationSearch);
   const requestedTab = String(query.get('tab') || '').trim().toLowerCase();
+  const requestedTaskRowId = String(query.get('task_row_id') || '').trim();
   const shouldIncludeTaskComponents =
-    workflowDef.key !== 'lead_optimization' || (requestedTab !== 'results' && requestedTab !== 'basics');
+    requestNewTask || requestedTab === 'components' || requestedTab === 'constraints' || !requestedTab;
+  const shouldIncludeTaskConfidence = workflowDef.key !== 'peptide_design' || Boolean(requestedTaskRowId);
   const shouldUseTaskListView = workflowDef.key === 'lead_optimization' || workflowDef.key === 'peptide_design';
   const taskRowsBase = sortProjectTasks(
     await (shouldUseTaskListView
-      ? listProjectTasksForList(next.id, { includeComponents: shouldIncludeTaskComponents })
+      ? listProjectTasksForList(next.id, {
+          includeComponents: shouldIncludeTaskComponents,
+          includeConfidence: shouldIncludeTaskConfidence
+        })
       : listProjectTasksCompact(next.id))
   );
 

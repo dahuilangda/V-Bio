@@ -1498,8 +1498,6 @@ function extractResiduePlddtsByChainFromStructure(
 }
 
 const DESIGN_RANK_RE = /(?:^|\/)rank_(\d+)(?:_|\.|$)/i;
-const MAX_PEPTIDE_CANDIDATES_FOR_UI = 24;
-
 function asRecordArray(value: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(value)) return [];
   return value.filter((item) => item && typeof item === 'object' && !Array.isArray(item)) as Array<Record<string, unknown>>;
@@ -1538,6 +1536,83 @@ function firstNonEmptyTextByKeys(row: Record<string, unknown>, keys: string[]): 
     if (text) return text;
   }
   return '';
+}
+
+function readObjectPathLoose(payload: Record<string, unknown>, path: string): unknown {
+  let current: unknown = payload;
+  for (const token of path.split('.')) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[token];
+  }
+  return current;
+}
+
+const PEPTIDE_CANDIDATE_RESIDUE_KEYS = [
+  'residue_plddt',
+  'residue_plddts',
+  'plddts',
+  'residue_confidence',
+  'residue_confidences',
+  'residue_scores',
+  'per_residue_plddt',
+  'per_residue_confidence',
+  'binder_residue_plddt',
+  'binder_residue_plddts',
+  'binder_plddt_per_residue',
+  'plddt_per_residue',
+  'plddt_by_residue',
+  'aa_plddt',
+  'aa_plddts',
+  'token_plddt',
+  'token_plddts',
+  'ligand_residue_plddt',
+  'ligand_residue_plddts',
+  'residue_plddt_by_chain',
+  'residuePlddtByChain',
+  'residue_plddts_by_chain',
+  'chain_residue_plddt',
+  'chain_plddt',
+  'chain_plddts'
+];
+
+const PEPTIDE_CANDIDATE_RESIDUE_PATH_ALIASES: Array<{ path: string; asKey: string }> = [
+  { path: 'confidence.residue_plddt', asKey: 'residue_plddt' },
+  { path: 'confidence.residue_plddts', asKey: 'residue_plddts' },
+  { path: 'confidence.plddts', asKey: 'plddts' },
+  { path: 'confidence.per_residue_plddt', asKey: 'per_residue_plddt' },
+  { path: 'confidence.binder_residue_plddt', asKey: 'binder_residue_plddt' },
+  { path: 'confidence.token_plddt', asKey: 'token_plddt' },
+  { path: 'confidence.token_plddts', asKey: 'token_plddts' },
+  { path: 'metrics.residue_plddt', asKey: 'residue_plddt' },
+  { path: 'metrics.per_residue_plddt', asKey: 'per_residue_plddt' },
+  { path: 'scores.plddts', asKey: 'plddts' },
+  { path: 'scores.residue_plddt', asKey: 'residue_plddt' },
+  { path: 'scores.per_residue_plddt', asKey: 'per_residue_plddt' },
+  { path: 'confidence.residue_plddt_by_chain', asKey: 'residue_plddt_by_chain' },
+  { path: 'confidence.residuePlddtByChain', asKey: 'residuePlddtByChain' },
+  { path: 'confidence.residue_plddts_by_chain', asKey: 'residue_plddts_by_chain' },
+  { path: 'confidence.chain_residue_plddt', asKey: 'chain_residue_plddt' },
+  { path: 'confidence.chain_plddt', asKey: 'chain_plddt' },
+  { path: 'confidence.chain_plddts', asKey: 'chain_plddts' }
+];
+
+function extractPeptideCandidateResiduePayload(row: Record<string, unknown>): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  for (const key of PEPTIDE_CANDIDATE_RESIDUE_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(row, key)) {
+      payload[key] = row[key];
+    }
+  }
+  for (const alias of PEPTIDE_CANDIDATE_RESIDUE_PATH_ALIASES) {
+    if (Object.prototype.hasOwnProperty.call(payload, alias.asKey)) continue;
+    const value = readObjectPathLoose(row, alias.path);
+    if (value !== undefined) {
+      payload[alias.asKey] = value;
+    }
+  }
+  return payload;
 }
 
 function resolveDesignStructurePathFromRow(
@@ -1643,7 +1718,7 @@ async function parsePeptideDesignCandidatesFromBundle(
   });
 
   const candidates: Array<Record<string, unknown>> = [];
-  for (let index = 0; index < rows.length && candidates.length < MAX_PEPTIDE_CANDIDATES_FOR_UI; index += 1) {
+  for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
     const rankRaw =
       readFiniteNumberLoose(row.rank) ??
@@ -1687,6 +1762,7 @@ async function parsePeptideDesignCandidatesFromBundle(
       target_chain_id: readText(row.target_chain_id),
       binder_chain_id: readText(row.binder_chain_id),
       linker_chain_id: readText(row.linker_chain_id),
+      ...extractPeptideCandidateResiduePayload(row),
       structure_name: getBaseName(structurePath),
       structure_format: structureFormat,
       structure_text: structureText
@@ -1716,7 +1792,6 @@ function compactConfidenceForStorage(
     if (!Array.isArray(value)) return [];
     return value
       .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object' && !Array.isArray(item)))
-      .slice(0, MAX_PEPTIDE_CANDIDATES_FOR_UI)
       .map((row) => {
         const compact = { ...row };
         if (!preservePeptideCandidateStructureText) {

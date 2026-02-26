@@ -2,6 +2,7 @@ import type { MutableRefObject } from 'react';
 import { downloadResultBlob, getTaskStatus, parseResultBundle } from '../../api/backendApi';
 import { updateProject, updateProjectTask } from '../../api/supabaseLite';
 import type { Project, ProjectTask } from '../../types/models';
+import { mergePeptidePreviewIntoProperties } from '../../utils/peptideTaskPreview';
 import {
   readLeadOptTaskSummary,
   readTaskConfidenceMetrics,
@@ -705,6 +706,10 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
     const runtimeWorkflow = resolveTaskWorkflowKey(runtimeTask, nextProject.task_type || '');
     const runtimeConfidencePatch =
       runtimeWorkflow === 'peptide_design' ? mergePeptideRuntimeStatusIntoConfidence(runtimeTask, runtimeInfo) : null;
+    const runtimePropertiesPatch =
+      runtimeWorkflow === 'peptide_design'
+        ? mergePeptidePreviewIntoProperties(runtimeTask.properties, runtimeConfidencePatch || runtimeTask.confidence)
+        : null;
 
     const taskNeedsPatch =
       runtimeTask.task_state !== taskState ||
@@ -712,7 +717,8 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
       (runtimeTask.error_text || '') !== errorText ||
       runtimeTask.completed_at !== completedAt ||
       runtimeTask.duration_seconds !== durationSeconds ||
-      Boolean(runtimeConfidencePatch);
+      Boolean(runtimeConfidencePatch) ||
+      Boolean(runtimePropertiesPatch);
 
     if (taskNeedsPatch) {
       const taskPatch: Partial<ProjectTask> = {
@@ -724,6 +730,9 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
       };
       if (runtimeConfidencePatch) {
         taskPatch.confidence = runtimeConfidencePatch;
+      }
+      if (runtimePropertiesPatch) {
+        taskPatch.properties = runtimePropertiesPatch as unknown as ProjectTask['properties'];
       }
       try {
         const nextTask = await persistProjectTaskPatch(runtimeTask, taskPatch);

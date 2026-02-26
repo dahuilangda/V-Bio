@@ -2,6 +2,7 @@ import type { MutableRefObject } from 'react';
 import { submitPrediction } from '../../api/backendApi';
 import { assignChainIdsForComponents } from '../../utils/chainAssignments';
 import { extractPrimaryProteinAndLigand, PEPTIDE_DESIGNED_LIGAND_TOKEN } from '../../utils/projectInputs';
+import { buildQueuedPeptidePreviewFromOptions, PEPTIDE_TASK_PREVIEW_KEY } from '../../utils/peptideTaskPreview';
 import type { InputComponent, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
 
 export type PredictionWorkspaceTab = 'results' | 'basics' | 'components' | 'constraints';
@@ -311,6 +312,15 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
     });
 
     const queuedAt = new Date().toISOString();
+    const queuedTaskProperties: ProjectTask['properties'] = (() => {
+      if (!isPeptideDesignWorkflow) return submissionConfig.properties;
+      const preview = buildQueuedPeptidePreviewFromOptions(submissionConfig.options as unknown as Record<string, unknown>);
+      if (Object.keys(preview).length === 0) return submissionConfig.properties;
+      return {
+        ...(submissionConfig.properties as unknown as Record<string, unknown>),
+        [PEPTIDE_TASK_PREVIEW_KEY]: preview
+      } as unknown as ProjectTask['properties'];
+    })();
     const queuedTaskPatch: Partial<ProjectTask> = {
       name: nextDraft.taskName.trim(),
       summary: nextDraft.taskSummary.trim(),
@@ -324,7 +334,7 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
       ligand_smiles: ligandSmiles,
       components: snapshotComponents,
       constraints: submissionConfig.constraints,
-      properties: submissionConfig.properties,
+      properties: queuedTaskProperties,
       confidence: isPeptideDesignWorkflow
         ? buildQueuedPeptideDesignConfidenceSnapshot(submissionConfig.options)
         : {},

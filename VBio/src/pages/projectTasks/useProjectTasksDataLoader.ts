@@ -44,6 +44,10 @@ function taskStatePriority(value: unknown): number {
   return TASK_STATE_PRIORITY[String(value || '').trim().toUpperCase()] ?? 0;
 }
 
+function hasObjectContent(value: unknown): boolean {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length > 0);
+}
+
 function mergeTaskRuntimeFields(next: ProjectTask, prev: ProjectTask): ProjectTask {
   const nextTaskId = String(next.task_id || '').trim();
   const prevTaskId = String(prev.task_id || '').trim();
@@ -54,6 +58,10 @@ function mergeTaskRuntimeFields(next: ProjectTask, prev: ProjectTask): ProjectTa
   if (prevPriority > nextPriority) {
     return {
       ...next,
+      confidence: hasObjectContent(next.confidence) ? next.confidence : prev.confidence,
+      affinity: hasObjectContent(next.affinity) ? next.affinity : prev.affinity,
+      components: Array.isArray(next.components) && next.components.length > 0 ? next.components : prev.components,
+      properties: hasObjectContent(next.properties) ? next.properties : prev.properties,
       task_state: prev.task_state,
       status_text: prev.status_text,
       error_text: prev.error_text,
@@ -64,6 +72,10 @@ function mergeTaskRuntimeFields(next: ProjectTask, prev: ProjectTask): ProjectTa
   }
   return {
     ...next,
+    confidence: hasObjectContent(next.confidence) ? next.confidence : prev.confidence,
+    affinity: hasObjectContent(next.affinity) ? next.affinity : prev.affinity,
+    components: Array.isArray(next.components) && next.components.length > 0 ? next.components : prev.components,
+    properties: hasObjectContent(next.properties) ? next.properties : prev.properties,
     completed_at: next.completed_at || prev.completed_at,
     duration_seconds: next.duration_seconds ?? prev.duration_seconds,
     status_text: String(next.status_text || '').trim() || prev.status_text,
@@ -201,7 +213,7 @@ export function useProjectTasksDataLoader({
           return;
         }
 
-        const projectRow = await getProjectById(projectId);
+        const projectRow = await getProjectById(projectId, { lightweight: true });
         if (!projectRow || projectRow.deleted_at) {
           throw new Error('Project not found or already deleted.');
         }
@@ -209,8 +221,12 @@ export function useProjectTasksDataLoader({
           throw new Error('You do not have permission to access this project.');
         }
         const workflowKey = normalizeWorkflowKey(projectRow.task_type);
-        const includeComponentsForList = workflowKey === 'prediction' || workflowKey === 'peptide_design';
-        const taskRows = await listProjectTasksForList(projectId, { includeComponents: includeComponentsForList });
+        const includeComponentsForList = workflowKey === 'prediction';
+        const includeConfidenceForList = workflowKey === 'peptide_design' ? false : !(silent && cachedTasks.length > 0);
+        const taskRows = await listProjectTasksForList(projectId, {
+          includeComponents: includeComponentsForList,
+          includeConfidence: includeConfidenceForList
+        });
 
         lastFullFetchTsRef.current = Date.now();
         const sortedTaskRows = sortProjectTasks(sanitizeTaskRows(taskRows));

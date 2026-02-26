@@ -44,6 +44,7 @@ export interface ProjectResultsSectionProps {
   peptideFallbackIptm: number | null;
   statusInfo: Record<string, unknown> | null;
   progressPercent: number;
+  onPeptideRequestStructure?: () => Promise<void> | void;
 }
 
 export function ProjectResultsSection({
@@ -82,7 +83,8 @@ export function ProjectResultsSection({
   peptideFallbackPlddt,
   peptideFallbackIptm,
   statusInfo,
-  progressPercent
+  progressPercent,
+  onPeptideRequestStructure
 }: ProjectResultsSectionProps) {
   const initialPredictionColorMode = useMemo<'default' | 'alphafold'>(
     () => (displayStructureColorMode === 'alphafold' ? 'alphafold' : 'default'),
@@ -118,6 +120,7 @@ export function ProjectResultsSection({
         statusInfo={statusInfo || {}}
         projectTaskState={projectTaskState}
         progressPercent={progressPercent}
+        onRequestStructure={onPeptideRequestStructure}
       />
     );
   }

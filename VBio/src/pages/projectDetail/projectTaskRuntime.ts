@@ -7,6 +7,7 @@ import {
 } from '../../api/backendApi';
 import type { DownloadResultMode } from '../../api/backendTaskApi';
 import type { Project, ProjectTask, TaskState } from '../../types/models';
+import { mergePeptidePreviewIntoProperties } from '../../utils/peptideTaskPreview';
 import { normalizeWorkflowKey } from '../../utils/workflows';
 import { mapTaskState, readStatusText } from './projectMetrics';
 
@@ -422,6 +423,7 @@ export async function pullResultForViewerTask(params: {
   options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode };
   baseProjectConfidence?: Record<string, unknown> | null;
   baseTaskConfidence?: Record<string, unknown> | null;
+  baseTaskProperties?: Record<string, unknown> | null;
   patch: (payload: Partial<Project>) => Promise<Project | null>;
   patchTask: (taskRowId: string, payload: Partial<ProjectTask>) => Promise<ProjectTask | null>;
   setStatusInfo?: (
@@ -440,6 +442,7 @@ export async function pullResultForViewerTask(params: {
     options,
     baseProjectConfidence,
     baseTaskConfidence,
+    baseTaskProperties,
     patch,
     patchTask,
     setStatusInfo,
@@ -459,12 +462,20 @@ export async function pullResultForViewerTask(params: {
       throw new Error('No structure file was found in the result archive.');
     }
     const parsedConfidence = asRecord(parsed.confidence);
-    const persistedConfidence = compactResultConfidenceForStorage(parsedConfidence, {
+    const persistedConfidenceFull = compactResultConfidenceForStorage(parsedConfidence, {
       preservePeptideCandidateStructureText: true
     });
-    const persistedProjectConfidence = mergePeptideSummaryIntoParsedConfidence(persistedConfidence, baseProjectConfidence);
+    const persistedConfidenceCompact = compactResultConfidenceForStorage(parsedConfidence, {
+      preservePeptideCandidateStructureText: false
+    });
+    const hasPeptidePayload = hasPeptideSummaryFields(persistedConfidenceFull);
+    const persistedProjectConfidenceSource = hasPeptidePayload ? persistedConfidenceCompact : persistedConfidenceFull;
+    const persistedProjectConfidence = mergePeptideSummaryIntoParsedConfidence(
+      persistedProjectConfidenceSource,
+      baseProjectConfidence
+    );
     const persistedTaskConfidence = mergePeptideSummaryIntoParsedConfidence(
-      persistedConfidence,
+      hasPeptidePayload ? persistedConfidenceCompact : persistedConfidenceFull,
       baseTaskConfidence ?? baseProjectConfidence
     );
 
@@ -515,10 +526,12 @@ export async function pullResultForViewerTask(params: {
       });
     }
     if (options?.taskRowId) {
+      const propertiesPatch = mergePeptidePreviewIntoProperties(baseTaskProperties || {}, persistedProjectConfidence);
       await patchTask(options.taskRowId, {
         confidence: persistedTaskConfidence,
         affinity: parsed.affinity,
         structure_name: parsed.structureName,
+        ...(propertiesPatch ? { properties: propertiesPatch as unknown as ProjectTask['properties'] } : {})
       });
     }
   } catch (err) {
@@ -641,8 +654,14 @@ export async function refreshTaskStatus(params: {
       const taskConfidencePatch = isPeptideDesignWorkflow
         ? mergePeptideRuntimeStatusIntoConfidence(runtimeTask.confidence, runtimeInfo)
         : null;
+      const taskPropertiesPatch = isPeptideDesignWorkflow
+        ? mergePeptidePreviewIntoProperties(runtimeTask.properties, taskConfidencePatch || runtimeTask.confidence)
+        : null;
       if (taskConfidencePatch) {
         taskPatch.confidence = taskConfidencePatch;
+      }
+      if (taskPropertiesPatch) {
+        taskPatch.properties = taskPropertiesPatch as unknown as ProjectTask['properties'];
       }
       if (taskState === 'SUCCESS') {
         taskPatch.completed_at = completedAt;
@@ -653,7 +672,8 @@ export async function refreshTaskStatus(params: {
         (runtimeTask.status_text || '') !== statusText ||
         (runtimeTask.error_text || '') !== nextErrorText ||
         (taskState === 'SUCCESS' && (!runtimeTask.completed_at || runtimeTask.duration_seconds === null)) ||
-        Boolean(taskConfidencePatch);
+        Boolean(taskConfidencePatch) ||
+        Boolean(taskPropertiesPatch);
       if (shouldPatchTask) {
         await patchTask(runtimeTask.id, taskPatch);
       }

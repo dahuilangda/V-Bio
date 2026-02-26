@@ -556,6 +556,15 @@ if _DELTA_PAIR_IDS_FILE:
 def _q_ident(value):
     return '"' + str(value).replace('"', '""') + '"'
 
+def _create_postgres_bigint_schema(db):
+    schema_sql = mmp_schema.get_schema_for_database(mmp_schema.PostgresConfig)
+    # mmpdblib default Postgres schema uses SERIAL/INTEGER (int4), which can overflow
+    # on large datasets (for example full ChEMBL pair table). Promote to int8 at create time.
+    schema_sql = schema_sql.replace("SERIAL PRIMARY KEY", "BIGSERIAL PRIMARY KEY")
+    schema_sql = schema_sql.replace(" INTEGER", " BIGINT")
+    c = db.cursor()
+    mmp_schema._execute_sql(c, schema_sql)
+
 def _patched_create_schema(self):
     c = self.conn
     c.execute("SELECT current_schema()")
@@ -574,7 +583,7 @@ def _patched_create_schema(self):
                 _q_ident(table_name),
             )
         )
-    mmp_schema.create_schema(self.db, mmp_schema.PostgresConfig)
+    _create_postgres_bigint_schema(self.db)
 
 def _patched_end_skip_finalize(self, reporter):
     self.flush()
