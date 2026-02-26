@@ -10,44 +10,55 @@ interface UseMolstarFocusArgs {
   ligandFocusChainId?: string;
 }
 
-function parseCifTokens(line: string): string[] {
-  const tokens = line.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
-  return tokens.map((token) => token.replace(/^['"]|['"]$/g, ''));
+interface SmallMoleculeFocusStats {
+  chainHasSmallMolecule: Map<string, boolean>;
+  hasAnySmallMolecule: boolean;
 }
 
-function inferPolymerAnchorFromPdb(
-  pdbText: string,
-  preferredChain: string
-): { chain: string; residue: number; atom: string } | null {
-  const preferred = String(preferredChain || '').trim();
-  if (!preferred) return null;
-  const residueToAtom = new Map<number, string>();
-  for (const line of String(pdbText || '').split(/\r?\n/)) {
-    if (!line.startsWith('ATOM')) continue;
-    const chain = line.slice(21, 22).trim();
-    if (chain !== preferred) continue;
-    const residue = Number.parseInt(line.slice(22, 26).trim(), 10);
-    const atom = line.slice(12, 16).trim();
-    if (!Number.isFinite(residue) || residue <= 0 || !atom) continue;
-    const current = residueToAtom.get(residue);
-    if (!current || atom === 'CA') {
-      residueToAtom.set(residue, atom);
+function normalizeChainToken(value: string): string {
+  return String(value || '').trim().toUpperCase();
+}
+
+function isLikelyWaterResidue(residueName: string): boolean {
+  const token = String(residueName || '').trim().toUpperCase();
+  return token === 'HOH' || token === 'WAT' || token === 'DOD';
+}
+
+function mergeSmallMoleculeStats(base: SmallMoleculeFocusStats, incoming: SmallMoleculeFocusStats): SmallMoleculeFocusStats {
+  const merged = new Map<string, boolean>(base.chainHasSmallMolecule);
+  for (const [chain, hasSmallMolecule] of incoming.chainHasSmallMolecule.entries()) {
+    if (!chain) continue;
+    if (hasSmallMolecule) {
+      merged.set(chain, true);
+      continue;
     }
+    if (!merged.has(chain)) merged.set(chain, false);
   }
-  if (residueToAtom.size === 0) return null;
-  const residues = [...residueToAtom.keys()].sort((a, b) => a - b);
-  const midResidue = residues[Math.floor((residues.length - 1) / 2)];
-  return { chain: preferred, residue: midResidue, atom: residueToAtom.get(midResidue) || 'CA' };
+  return {
+    chainHasSmallMolecule: merged,
+    hasAnySmallMolecule: base.hasAnySmallMolecule || incoming.hasAnySmallMolecule
+  };
 }
 
-function inferPolymerAnchorFromCif(
-  cifText: string,
-  preferredChain: string
-): { chain: string; residue: number; atom: string } | null {
-  const preferred = String(preferredChain || '').trim();
-  if (!preferred) return null;
+function collectSmallMoleculeStatsFromPdb(pdbText: string): SmallMoleculeFocusStats {
+  const chainHasSmallMolecule = new Map<string, boolean>();
+  for (const line of String(pdbText || '').split(/\r?\n/)) {
+    if (!line.startsWith('HETATM')) continue;
+    const residueName = line.slice(17, 20).trim().toUpperCase();
+    if (!residueName || isLikelyWaterResidue(residueName)) continue;
+    const chain = normalizeChainToken(line.slice(21, 22));
+    if (!chain) continue;
+    chainHasSmallMolecule.set(chain, true);
+  }
+  return {
+    chainHasSmallMolecule,
+    hasAnySmallMolecule: [...chainHasSmallMolecule.values()].some(Boolean)
+  };
+}
+
+function collectSmallMoleculeStatsFromCif(cifText: string): SmallMoleculeFocusStats {
   const lines = String(cifText || '').split(/\r?\n/);
-  const residueToAtom = new Map<number, string>();
+  const chainHasSmallMolecule = new Map<string, boolean>();
   for (let i = 0; i < lines.length; i += 1) {
     if (lines[i].trim() !== 'loop_') continue;
     const headers: string[] = [];
@@ -59,38 +70,46 @@ function inferPolymerAnchorFromCif(
     if (headers.length === 0 || !headers.some((item) => item.startsWith('_atom_site.'))) continue;
     const idx = (name: string) => headers.findIndex((item) => item === name);
     const groupIdx = idx('_atom_site.group_PDB');
+    const authCompIdx = idx('_atom_site.auth_comp_id');
+    const labelCompIdx = idx('_atom_site.label_comp_id');
     const authAsymIdx = idx('_atom_site.auth_asym_id');
     const labelAsymIdx = idx('_atom_site.label_asym_id');
-    const authSeqIdx = idx('_atom_site.auth_seq_id');
-    const labelSeqIdx = idx('_atom_site.label_seq_id');
-    const authAtomIdx = idx('_atom_site.auth_atom_id');
-    const labelAtomIdx = idx('_atom_site.label_atom_id');
-    const maxIdx = Math.max(groupIdx, authAsymIdx, labelAsymIdx, authSeqIdx, labelSeqIdx, authAtomIdx, labelAtomIdx);
-
     for (; j < lines.length; j += 1) {
       const raw = lines[j].trim();
       if (!raw) continue;
       if (raw === '#' || raw === 'loop_' || raw.startsWith('data_') || raw.startsWith('_')) break;
       const tokens = parseCifTokens(raw);
-      if (tokens.length <= maxIdx) continue;
-      const group = String(groupIdx >= 0 ? tokens[groupIdx] : 'ATOM').trim().toUpperCase();
-      if (group && group !== 'ATOM') continue;
-      const chain = String((authAsymIdx >= 0 ? tokens[authAsymIdx] : tokens[labelAsymIdx] || '') || '').trim();
-      if (chain !== preferred) continue;
-      const residueToken = String((authSeqIdx >= 0 ? tokens[authSeqIdx] : tokens[labelSeqIdx] || '') || '').trim();
-      const residue = Number.parseInt(residueToken, 10);
-      const atom = String((authAtomIdx >= 0 ? tokens[authAtomIdx] : tokens[labelAtomIdx] || '') || '').trim();
-      if (!Number.isFinite(residue) || residue <= 0 || !atom || atom === '?') continue;
-      const current = residueToAtom.get(residue);
-      if (!current || atom === 'CA') {
-        residueToAtom.set(residue, atom);
-      }
+      if (tokens.length < headers.length) continue;
+      const group = String(groupIdx >= 0 ? tokens[groupIdx] : 'HETATM').trim().toUpperCase();
+      if (group && group !== 'HETATM') continue;
+      const residueName = String((authCompIdx >= 0 ? tokens[authCompIdx] : tokens[labelCompIdx] || '') || '')
+        .trim()
+        .toUpperCase();
+      if (!residueName || isLikelyWaterResidue(residueName)) continue;
+      const chain = normalizeChainToken(String((authAsymIdx >= 0 ? tokens[authAsymIdx] : tokens[labelAsymIdx] || '') || ''));
+      if (!chain) continue;
+      chainHasSmallMolecule.set(chain, true);
     }
   }
-  if (residueToAtom.size === 0) return null;
-  const residues = [...residueToAtom.keys()].sort((a, b) => a - b);
-  const midResidue = residues[Math.floor((residues.length - 1) / 2)];
-  return { chain: preferred, residue: midResidue, atom: residueToAtom.get(midResidue) || 'CA' };
+  return {
+    chainHasSmallMolecule,
+    hasAnySmallMolecule: [...chainHasSmallMolecule.values()].some(Boolean)
+  };
+}
+
+function collectSmallMoleculeStats(text: string, format: 'cif' | 'pdb'): SmallMoleculeFocusStats {
+  if (!String(text || '').trim()) {
+    return {
+      chainHasSmallMolecule: new Map<string, boolean>(),
+      hasAnySmallMolecule: false
+    };
+  }
+  return format === 'pdb' ? collectSmallMoleculeStatsFromPdb(text) : collectSmallMoleculeStatsFromCif(text);
+}
+
+function parseCifTokens(line: string): string[] {
+  const tokens = line.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
+  return tokens.map((token) => token.replace(/^['"]|['"]$/g, ''));
 }
 
 function inferLigandAnchorFromPdb(
@@ -111,10 +130,6 @@ function inferLigandAnchorFromPdb(
     const current = { chain, residue, atom };
     if (preferred && chain === preferred) return current;
     if (!fallback) fallback = current;
-  }
-  if (preferred) {
-    const polymerAnchor = inferPolymerAnchorFromPdb(pdbText, preferred);
-    if (polymerAnchor) return polymerAnchor;
   }
   return fallback;
 }
@@ -168,10 +183,6 @@ function inferLigandAnchorFromCif(
       if (!fallback) fallback = current;
     }
   }
-  if (preferred) {
-    const polymerAnchor = inferPolymerAnchorFromCif(cifText, preferred);
-    if (polymerAnchor) return polymerAnchor;
-  }
   return fallback;
 }
 
@@ -196,6 +207,15 @@ export function useMolstarFocus({
     (viewer: any): boolean => {
       const focusManager = viewer?.plugin?.managers?.structure?.focus;
       if (!focusManager?.setFromLoci) return false;
+      const preferredChain = normalizeChainToken(ligandFocusChainId);
+      const overlayText = String(overlayStructureText || '');
+      const resolvedOverlayFormat: 'cif' | 'pdb' = overlayFormat === 'pdb' ? 'pdb' : format;
+      const primaryStats = collectSmallMoleculeStats(structureText, format);
+      const overlayStats = collectSmallMoleculeStats(overlayText, resolvedOverlayFormat);
+      const focusStats = mergeSmallMoleculeStats(primaryStats, overlayStats);
+      const allowSmallMoleculeFocus = Boolean(preferredChain) && focusStats.chainHasSmallMolecule.get(preferredChain) === true;
+      if (!allowSmallMoleculeFocus) return false;
+
       const applyFocusLoci = (loci: any): boolean => {
         if (!loci) return false;
         try {
@@ -222,14 +242,9 @@ export function useMolstarFocus({
         }
         return true;
       };
-      const preferredChain = String(ligandFocusChainId || '').trim();
       const parsedAnchor =
         inferLigandAnchor(structureText, format, preferredChain) ||
-        inferLigandAnchor(
-          String(overlayStructureText || ''),
-          overlayFormat === 'pdb' ? 'pdb' : format,
-          preferredChain
-        );
+        inferLigandAnchor(overlayText, resolvedOverlayFormat, preferredChain);
       if (parsedAnchor) {
         const loci = buildResidueLoci(viewer, parsedAnchor.chain, parsedAnchor.residue);
         if (applyFocusLoci(loci)) return true;

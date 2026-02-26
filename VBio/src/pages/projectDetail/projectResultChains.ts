@@ -112,6 +112,7 @@ export function resolveSelectedResultLigandChainId(params: {
   selectedResultTargetChainId: string | null;
   affinityData: Record<string, unknown> | null;
   confidenceData: Record<string, unknown> | null;
+  preferSequenceLigand?: boolean;
 }): string | null {
   const {
     resultPairPreference,
@@ -120,8 +121,10 @@ export function resolveSelectedResultLigandChainId(params: {
     resultChainIds,
     selectedResultTargetChainId,
     affinityData,
-    confidenceData
+    confidenceData,
+    preferSequenceLigand
   } = params;
+  const shouldPreferSequenceLigand = Boolean(preferSequenceLigand);
 
   const preferred = typeof resultPairPreference?.ligand === 'string' ? resultPairPreference.ligand.trim() : '';
   const affinityModelLigand = readFirstNonEmptyStringMetric(affinityData, ['model_ligand_chain_id']);
@@ -158,13 +161,23 @@ export function resolveSelectedResultLigandChainId(params: {
 
   for (const candidate of preferredCandidates) {
     const chain = resolveChainCandidate(candidate, resultChainInfoById, knownChainIdByKey, knownChainIds, resultComponentOptions);
-    if (chain && chain !== selectedResultTargetChainId) return chain;
+    if (chain && chain !== selectedResultTargetChainId) {
+      if (!shouldPreferSequenceLigand) return chain;
+      const option = resultComponentOptions.find((item) => item.chainId === chain) || null;
+      if (option && option.type === 'ligand') continue;
+      return chain;
+    }
   }
 
   const optionsWithoutTarget = resultComponentOptions.filter((item) => item.chainId && item.chainId !== selectedResultTargetChainId);
+  const sequenceOptionsWithoutTarget = optionsWithoutTarget.filter((item) => item.type !== 'ligand');
   const inferredFallbackLigand =
     knownChainIds.find((chainId) => chainId !== selectedResultTargetChainId && confidenceLigandIds.includes(chainId)) ||
     knownChainIds.find((chainId) => chainId !== selectedResultTargetChainId) ||
+    null;
+  const defaultSequenceOption =
+    sequenceOptionsWithoutTarget[0] ||
+    resultComponentOptions.find((item) => item.chainId && item.type !== 'ligand') ||
     null;
   const defaultOption =
     optionsWithoutTarget.find((item) => item.isSmiles) ||
@@ -173,6 +186,9 @@ export function resolveSelectedResultLigandChainId(params: {
     resultComponentOptions[0] ||
     null;
 
+  if (shouldPreferSequenceLigand && defaultSequenceOption?.chainId) {
+    return defaultSequenceOption.chainId;
+  }
   return defaultOption?.chainId || inferredFallbackLigand;
 }
 

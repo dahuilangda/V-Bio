@@ -536,7 +536,7 @@ function findPairIptm(confidence: Record<string, unknown>, targetChain: string, 
       }
     }
   }
-  const scalar = readFirstFiniteMetric(confidence, ['pair_iptm', 'iptm', 'ligand_iptm', 'protein_iptm']);
+  const scalar = readFirstFiniteMetric(confidence, ['pair_iptm']);
   return scalar !== null ? normalizeIptm(scalar) : null;
 }
 

@@ -1,23 +1,25 @@
 .task-table {
-  min-width: 1120px;
+  min-width: 1300px;
   --task-row-pad-y: 7px;
   --task-ligand-inner-h: 120px;
   --task-ligand-thumb-h: 120px;
-  --task-ligand-thumb-w: 184px;
-  --task-ligand-col-w: 196px;
+  --task-ligand-thumb-w: 312px;
+  --task-ligand-col-w: 324px;
   --task-ligand-svg-max-h: 104px;
 }
 
 .task-table.task-table--leadopt {
   min-width: 1120px;
+  --task-ligand-thumb-w: 184px;
+  --task-ligand-col-w: 196px;
 }
 
 .task-table.task-table--peptide {
   min-width: 0;
   width: 100%;
   table-layout: fixed;
-  --task-ligand-thumb-w: 168px;
-  --task-ligand-col-w: 176px;
+  --task-ligand-thumb-w: 248px;
+  --task-ligand-col-w: 260px;
 }
 
 .task-table-wrap {

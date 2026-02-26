@@ -23,6 +23,7 @@ _BOLTZ_ION_RESNAMES = {
     'CD', 'HG', 'SR', 'BA', 'CS', 'LI', 'BR', 'I',
 }
 _PROTENIX_SUMMARY_SAMPLE_RE = re.compile(r'_summary_confidence_sample_(\d+)\.json$', re.IGNORECASE)
+_PEPTIDE_DESIGN_RANK_RE = re.compile(r'(?:^|/)rank_(\d+)(?:_|\.|$)', re.IGNORECASE)
 
 
 class ResultArchiveService:
@@ -110,6 +111,46 @@ class ResultArchiveService:
             raise FileNotFoundError(f'Result file not found on disk: {filepath}')
 
         return filename, filepath
+
+    @staticmethod
+    def _is_structure_file(name: str) -> bool:
+        lower = name.lower()
+        return lower.endswith('.cif') or lower.endswith('.mmcif') or lower.endswith('.pdb')
+
+    @staticmethod
+    def _collect_peptide_design_structure_files(names: list[str]) -> list[str]:
+        scored: list[tuple[int, int, int, str]] = []
+        for name in names:
+            lower = name.lower()
+            if not ResultArchiveService._is_structure_file(name):
+                continue
+            if 'af3/output/' in lower:
+                continue
+            if 'confidence_' in lower or 'summary_confidence' in lower:
+                continue
+
+            is_design_path = (
+                lower.startswith('structures/')
+                or '/structures/' in lower
+                or '/designs/' in lower
+                or '/results/' in lower
+            )
+            rank_match = _PEPTIDE_DESIGN_RANK_RE.search(lower)
+            has_rank = rank_match is not None
+            rank_value = int(rank_match.group(1)) if rank_match else 10**9
+            if not is_design_path and not has_rank:
+                continue
+            scored.append((0 if has_rank else 1, rank_value, len(name), name))
+
+        scored.sort()
+        unique: list[str] = []
+        seen: set[str] = set()
+        for _, _, _, name in scored:
+            if name in seen:
+                continue
+            seen.add(name)
+            unique.append(name)
+        return unique
 
     @staticmethod
     def _choose_preferred_path(candidates: list[str]) -> Optional[str]:
@@ -450,6 +491,7 @@ class ResultArchiveService:
                 peptide_summary = self._choose_preferred_path(peptide_summary_candidates)
                 if peptide_summary:
                     include.append(peptide_summary)
+                    include.extend(self._collect_peptide_design_structure_files(names))
                 affinity_candidates = [name for name in names if name.lower().endswith('.json') and 'affinity' in name.lower()]
                 if affinity_candidates:
                     include.append(sorted(affinity_candidates, key=lambda item: len(item))[0])
@@ -478,7 +520,7 @@ class ResultArchiveService:
 
     def build_or_get_view_archive(self, source_zip_path: str) -> str:
         src_stat = os.stat(source_zip_path)
-        cache_schema_version = 'view-v6-boltz-peptide-summary'
+        cache_schema_version = 'view-v7-peptide-candidate-structures'
         cache_seed = f'{cache_schema_version}|{source_zip_path}|{int(src_stat.st_mtime_ns)}|{src_stat.st_size}'
         cache_key = hashlib.sha256(cache_seed.encode('utf-8')).hexdigest()[:24]
         cache_dir = Path('/tmp/boltz_result_view_cache')

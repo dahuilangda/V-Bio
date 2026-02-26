@@ -13,25 +13,15 @@ function ligandSequenceDensityClass(length: number): 'is-short' | 'is-medium' | 
   return 'is-xlong';
 }
 
-function residuesPerLineForLength(length: number): number {
-  if (length <= 30) return 10;
-  if (length <= 90) return 11;
-  if (length <= 180) return 12;
-  return 13;
-}
+const RESIDUES_PER_LINE = 10;
 
 function splitSequenceNodesIntoBalancedLines<T>(nodes: T[]): T[][] {
   if (nodes.length === 0) return [];
-  const preferredPerLine = residuesPerLineForLength(nodes.length);
-  const lineCount = Math.max(1, Math.ceil(nodes.length / preferredPerLine));
-  const baseSize = Math.floor(nodes.length / lineCount);
-  const remainder = nodes.length % lineCount;
+  const lineCount = Math.max(1, Math.ceil(nodes.length / RESIDUES_PER_LINE));
   const lines: T[][] = [];
-  let cursor = 0;
   for (let i = 0; i < lineCount; i += 1) {
-    const size = baseSize + (i < remainder ? 1 : 0);
-    lines.push(nodes.slice(cursor, cursor + size));
-    cursor += size;
+    const start = i * RESIDUES_PER_LINE;
+    lines.push(nodes.slice(start, start + RESIDUES_PER_LINE));
   }
   return lines;
 }

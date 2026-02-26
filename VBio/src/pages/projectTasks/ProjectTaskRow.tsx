@@ -35,13 +35,6 @@ interface ProjectTaskRowProps {
   onEditingTaskNameValueChange: (value: string) => void;
 }
 
-function peptideModeLabel(mode: 'linear' | 'cyclic' | 'bicyclic' | null): string {
-  if (mode === 'linear') return 'Linear';
-  if (mode === 'cyclic') return 'Cyclic';
-  if (mode === 'bicyclic') return 'Bicyclic';
-  return '-';
-}
-
 function formatPeptideBestScore(value: number | null): string {
   if (value === null) return '-';
   return value.toFixed(3);
@@ -85,6 +78,7 @@ export function ProjectTaskRow({
   const workflowClass = row.workflowKey.replace(/_/g, '-');
   const isLeadOptMode = mode === 'lead_opt';
   const isPeptideMode = mode === 'peptide';
+  const ligandPreviewWidth = isPeptideMode ? 248 : isLeadOptMode ? 184 : 312;
   const hasCompletedMmp = isLeadOptMode && String(task.task_state || '').toUpperCase() === 'SUCCESS';
   const mmpTransforms = hasCompletedMmp && row.leadOptTransformCount !== null ? row.leadOptTransformCount : null;
   const mmpCandidates = hasCompletedMmp && row.leadOptCandidateCount !== null ? row.leadOptCandidateCount : null;
@@ -104,8 +98,6 @@ export function ProjectTaskRow({
     return items;
   })();
   const peptideDesignItems = [
-    { key: 'mode', label: 'Mode', value: peptideModeLabel(row.peptideDesignMode) },
-    { key: 'length', label: 'Length', value: row.peptideBinderLength !== null ? String(row.peptideBinderLength) : '-' },
     { key: 'iter', label: 'Iter', value: row.peptideIterations !== null ? String(row.peptideIterations) : '-' },
     { key: 'pop', label: 'Pop', value: row.peptidePopulationSize !== null ? String(row.peptidePopulationSize) : '-' },
     { key: 'elite', label: 'Elite', value: row.peptideEliteSize !== null ? String(row.peptideEliteSize) : '-' },
@@ -151,7 +143,7 @@ export function ProjectTaskRow({
             <div className="task-ligand-thumb">
               <Ligand2DPreview
                 smiles={row.ligandSmiles}
-                width={184}
+                width={ligandPreviewWidth}
                 height={120}
                 atomConfidences={row.ligandAtomPlddts}
                 confidenceHint={metrics.plddt}
@@ -293,7 +285,7 @@ export function ProjectTaskRow({
         </td>
       ) : null}
       {mode === 'default' ? <td className="task-col-seed">{task.seed ?? '-'}</td> : null}
-      {mode === 'default' ? <td className="project-col-time">{formatDuration(task.duration_seconds)}</td> : null}
+      {mode === 'default' ? <td className="project-col-time task-col-duration">{formatDuration(task.duration_seconds)}</td> : null}
       <td className="project-col-actions">
         <div className="row gap-6 project-action-row">
           <button

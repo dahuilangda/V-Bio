@@ -1674,12 +1674,19 @@ async function parsePeptideDesignCandidatesFromBundle(
         readFiniteNumberLoose(row.score) ??
         readFiniteNumberLoose(row.fitness) ??
         readFiniteNumberLoose(row.objective),
-      iptm: readFiniteNumberLoose(row.iptm) ?? readFiniteNumberLoose(row.pair_iptm),
+      iptm: readFiniteNumberLoose(row.pair_iptm_target_binder) ?? readFiniteNumberLoose(row.pair_iptm) ?? readFiniteNumberLoose(row.iptm),
+      pair_iptm: readFiniteNumberLoose(row.pair_iptm),
+      pair_iptm_target_binder: readFiniteNumberLoose(row.pair_iptm_target_binder),
+      pair_iptm_target_linker: readFiniteNumberLoose(row.pair_iptm_target_linker),
+      pair_iptm_formula: readText(row.pair_iptm_formula),
       plddt:
         readFiniteNumberLoose(row.binder_avg_plddt) ??
         readFiniteNumberLoose(row.plddt) ??
         readFiniteNumberLoose(row.ligand_mean_plddt) ??
         readFiniteNumberLoose(row.mean_plddt),
+      target_chain_id: readText(row.target_chain_id),
+      binder_chain_id: readText(row.binder_chain_id),
+      linker_chain_id: readText(row.linker_chain_id),
       structure_name: getBaseName(structurePath),
       structure_format: structureFormat,
       structure_text: structureText
@@ -1693,8 +1700,12 @@ async function parsePeptideDesignCandidatesFromBundle(
   });
 }
 
-function compactConfidenceForStorage(input: Record<string, unknown>): Record<string, unknown> {
+function compactConfidenceForStorage(
+  input: Record<string, unknown>,
+  options?: { preservePeptideCandidateStructureText?: boolean }
+): Record<string, unknown> {
   const next = { ...input };
+  const preservePeptideCandidateStructureText = Boolean(options?.preservePeptideCandidateStructureText);
   const pae = next.pae;
   // Full PAE matrices dominate payload size but UI reads compact summary metrics (complex_pde/complex_pae).
   if (Array.isArray(pae) || (pae && typeof pae === 'object')) {
@@ -1708,11 +1719,13 @@ function compactConfidenceForStorage(input: Record<string, unknown>): Record<str
       .slice(0, MAX_PEPTIDE_CANDIDATES_FOR_UI)
       .map((row) => {
         const compact = { ...row };
-        delete compact.structure_text;
-        delete compact.structureText;
-        delete compact.cif_text;
-        delete compact.pdb_text;
-        delete compact.content;
+        if (!preservePeptideCandidateStructureText) {
+          delete compact.structure_text;
+          delete compact.structureText;
+          delete compact.cif_text;
+          delete compact.pdb_text;
+          delete compact.content;
+        }
         return compact;
       });
   };
@@ -1748,7 +1761,19 @@ function compactConfidenceForStorage(input: Record<string, unknown>): Record<str
   return next;
 }
 
-export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle | null> {
+export function compactResultConfidenceForStorage(
+  input: Record<string, unknown>,
+  options?: { preservePeptideCandidateStructureText?: boolean }
+): Record<string, unknown> {
+  return compactConfidenceForStorage(input, options);
+}
+
+interface ParseResultBundleOptions {
+  preservePeptideCandidateStructureText?: boolean;
+}
+
+export async function parseResultBundle(blob: Blob, options?: ParseResultBundleOptions): Promise<ParsedResultBundle | null> {
+  const preservePeptideCandidateStructureText = Boolean(options?.preservePeptideCandidateStructureText);
   const { default: JSZipLib } = await import('jszip');
   const zip = await JSZipLib.loadAsync(blob);
   const names = Object.keys(zip.files).filter((name) => !zip.files[name]?.dir);
@@ -1828,10 +1853,7 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
       af3Metrics.chain_pair_iptm = chainPairIptm;
     }
 
-    let iptm = summary ? toFiniteNumber(summary.iptm) : null;
-    if (iptm === null && Array.isArray(chainPairIptm) && Array.isArray(chainPairIptm[0])) {
-      iptm = toFiniteNumber(chainPairIptm[0][0]);
-    }
+    const iptm = summary ? toFiniteNumber(summary.iptm) : null;
     if (iptm !== null) {
       af3Metrics.iptm = iptm;
     }
@@ -1850,7 +1872,7 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
       confidence = compactConfidenceForStorage({
         ...parsedConfidence,
         backend: isProtenix ? 'protenix' : 'boltz'
-      });
+      }, { preservePeptideCandidateStructureText });
     } else {
       confidence = {
         backend: isProtenix ? 'protenix' : 'boltz'
@@ -2003,7 +2025,7 @@ export async function parseResultBundle(blob: Blob): Promise<ParsedResultBundle 
       best_sequences: peptideDesignCandidates
     };
   }
-  confidence = compactConfidenceForStorage(confidence);
+  confidence = compactConfidenceForStorage(confidence, { preservePeptideCandidateStructureText });
 
   const affinityFile = names
     .filter((name) => name.toLowerCase().endsWith('.json') && name.toLowerCase().includes('affinity'))

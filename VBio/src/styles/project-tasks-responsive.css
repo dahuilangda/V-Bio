@@ -1,21 +1,21 @@
 @media (max-width: 1460px) {
-  .task-table {
-    min-width: 980px;
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) {
+    min-width: 1120px;
   }
 
-  .task-table th:nth-child(7),
-  .task-table td:nth-child(7) {
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) th:nth-child(7),
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) td:nth-child(7) {
     display: none;
   }
 }
 
 @media (max-width: 1300px) {
-  .task-table {
-    min-width: 860px;
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) {
+    min-width: 1000px;
   }
 
-  .task-table th:nth-child(8),
-  .task-table td:nth-child(8) {
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) th:nth-child(8),
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) td:nth-child(8) {
     display: none;
   }
 }

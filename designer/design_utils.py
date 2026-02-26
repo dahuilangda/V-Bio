@@ -695,12 +695,22 @@ def parse_confidence_metrics(
     results_path: str,
     binder_chain_id: str,
     target_chain_id: Optional[str] = None,
-    chain_order: Optional[List[str]] = None
+    chain_order: Optional[List[str]] = None,
+    partner_chain_ids: Optional[List[str]] = None,
 ) -> dict:
     """从预测输出目录中解析关键置信度指标，并兼容 Boltz 与 AlphaFold3 后端。"""
+    normalized_partner_chain_ids: List[str] = []
+    for chain_id in partner_chain_ids or []:
+        token = str(chain_id or "").strip()
+        if not token or token == binder_chain_id or token in normalized_partner_chain_ids:
+            continue
+        normalized_partner_chain_ids.append(token)
+
+    pair_chain_candidates = [binder_chain_id, *normalized_partner_chain_ids]
     metrics = {
         'iptm': 0.0,
         'pair_iptm': None,
+        'pair_iptm_by_chain': {},
         'ptm': 0.0,
         'complex_plddt': 0.0,
         'binder_avg_plddt': 0.0,
@@ -808,14 +818,22 @@ def parse_confidence_metrics(
                     chain_ids = _extract_chain_ids_from_summary(summary_data)
                     if not chain_ids and chain_order:
                         chain_ids = chain_order
-                    pair_value = _get_pair_iptm(
-                        chain_pair_iptm,
-                        chain_ids,
-                        binder_chain_id,
-                        target_chain_id
-                    )
-                    if pair_value is not None:
-                        metrics['pair_iptm'] = float(pair_value)
+                    pair_values_by_chain: Dict[str, float] = {}
+                    for chain_id in pair_chain_candidates:
+                        pair_value = _get_pair_iptm(
+                            chain_pair_iptm,
+                            chain_ids,
+                            chain_id,
+                            target_chain_id
+                        )
+                        if pair_value is not None:
+                            pair_values_by_chain[chain_id] = float(pair_value)
+                    if pair_values_by_chain:
+                        metrics['pair_iptm_by_chain'] = pair_values_by_chain
+                        preferred_pair = pair_values_by_chain.get(binder_chain_id)
+                        if preferred_pair is None:
+                            preferred_pair = next(iter(pair_values_by_chain.values()))
+                        metrics['pair_iptm'] = float(preferred_pair)
 
                 ranking_score = summary_data.get("ranking_score")
                 if isinstance(ranking_score, (int, float)):
@@ -880,15 +898,24 @@ def parse_confidence_metrics(
             if isinstance(iptm_raw, (int, float)):
                 metrics['iptm'] = float(iptm_raw)
             pair_iptm = data.get('pair_chains_iptm', {})
-            pair_value = _read_pair_chains_iptm_from_map(
-                pair_iptm,
-                binder_chain_id,
-                target_chain_id,
-                chain_order,
-            ) if target_chain_id else None
+            pair_values_by_chain: Dict[str, float] = {}
+            if target_chain_id:
+                for chain_id in pair_chain_candidates:
+                    pair_value = _read_pair_chains_iptm_from_map(
+                        pair_iptm,
+                        chain_id,
+                        target_chain_id,
+                        chain_order,
+                    )
+                    if pair_value is not None:
+                        pair_values_by_chain[chain_id] = float(pair_value)
 
-            if pair_value is not None:
-                metrics['pair_iptm'] = float(pair_value)
+            if pair_values_by_chain:
+                metrics['pair_iptm_by_chain'] = pair_values_by_chain
+                preferred_pair = pair_values_by_chain.get(binder_chain_id)
+                if preferred_pair is None:
+                    preferred_pair = next(iter(pair_values_by_chain.values()))
+                metrics['pair_iptm'] = float(preferred_pair)
     except Exception as exc:
         logger.warning(f"Could not parse confidence metrics from JSON in {results_path}. Error: {exc}")
 

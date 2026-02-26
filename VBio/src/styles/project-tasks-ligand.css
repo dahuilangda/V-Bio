@@ -110,7 +110,7 @@
 }
 
 .task-ligand-sequence-link {
-  width: 2px;
+  width: 5px;
   height: 1px;
   border-radius: 999px;
   background: #ccd9d2;
@@ -136,31 +136,37 @@
 .task-ligand-sequence.is-medium .task-ligand-sequence-link,
 .task-ligand-sequence.is-long .task-ligand-sequence-link,
 .task-ligand-sequence.is-xlong .task-ligand-sequence-link {
-  width: 2px;
+  width: 5px;
 }
 
 .task-ligand-sequence.is-short .task-ligand-sequence-residue {
-  width: 20px;
-  height: 20px;
-  font-size: 11px;
+  width: 22px;
+  height: 22px;
+  font-size: 10px;
 }
 
 .task-ligand-sequence.is-medium .task-ligand-sequence-residue {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   font-size: 10px;
 }
 
 .task-ligand-sequence.is-long .task-ligand-sequence-residue {
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   font-size: 9px;
 }
 
 .task-ligand-sequence.is-xlong .task-ligand-sequence-residue {
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
   font-size: 8px;
+}
+
+.task-table.task-table--peptide .task-ligand-open-btn,
+.task-table.task-table--peptide .task-ligand-thumb,
+.task-table.task-table--peptide .task-ligand-sequence {
+  width: 100%;
 }
 
 .task-ligand-sequence-residue.tone-excellent {
@@ -234,4 +240,3 @@
   width: 100%;
   max-height: var(--task-ligand-svg-max-h);
 }
-

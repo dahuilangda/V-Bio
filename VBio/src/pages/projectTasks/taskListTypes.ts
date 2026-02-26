@@ -21,6 +21,7 @@ export interface TaskMetricContext {
   chainIds: string[];
   targetChainId: string | null;
   ligandChainId: string | null;
+  strictPairIptm?: boolean;
 }
 
 export interface WorkspacePairPreference {

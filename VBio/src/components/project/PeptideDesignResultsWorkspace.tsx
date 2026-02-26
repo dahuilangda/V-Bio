@@ -250,7 +250,12 @@ function resolvePairIptmForCandidate(
 
   // Primary source for peptide design rows: candidate-level ipTM in results_summary/design_results.
   const directRowValue = normalizeIptm(
-    firstFiniteMetric(row, ['pair_iptm', 'pairIptm', 'pair_iptm_resolved', 'pairIptmResolved'])
+    firstFiniteMetric(row, [
+      'pair_iptm_target_binder',
+      'pairIptmTargetBinder',
+      'pair_iptm',
+      'pairIptm'
+    ])
   );
   if (directRowValue !== null) return directRowValue;
 
@@ -308,7 +313,14 @@ function resolvePairIptmForCandidate(
   }
 
   for (const payload of payloads) {
-    const pairScalar = normalizeIptm(firstFiniteMetric(payload, ['pair_iptm', 'pairIptm', 'pair_iptm_resolved', 'pairIptmResolved']));
+    const pairScalar = normalizeIptm(
+      firstFiniteMetric(payload, [
+        'pair_iptm_target_binder',
+        'pairIptmTargetBinder',
+        'pair_iptm',
+        'pairIptm'
+      ])
+    );
     if (pairScalar !== null) return pairScalar;
   }
   return null;
@@ -422,6 +434,86 @@ function normalizePlddtList(values: number[]): number[] {
   return values
     .map((item) => normalizePlddt(item))
     .filter((item): item is number => item !== null && Number.isFinite(item));
+}
+
+function alignResidueSeriesToSequence(values: number[], sequenceLength: number): number[] {
+  const normalized = normalizePlddtList(values);
+  if (normalized.length === 0) return [];
+  if (sequenceLength <= 0) return normalized;
+  if (normalized.length === sequenceLength) return normalized;
+  if (normalized.length < Math.min(sequenceLength, 4)) return [];
+  if (normalized.length > sequenceLength) {
+    const reduced: number[] = [];
+    for (let i = 0; i < sequenceLength; i += 1) {
+      const start = Math.floor((i * normalized.length) / sequenceLength);
+      const end = Math.max(start + 1, Math.floor(((i + 1) * normalized.length) / sequenceLength));
+      const chunk = normalized.slice(start, end);
+      const avg = chunk.reduce((sum, value) => sum + value, 0) / chunk.length;
+      reduced.push(avg);
+    }
+    return reduced;
+  }
+  const expanded: number[] = [];
+  for (let i = 0; i < sequenceLength; i += 1) {
+    const mapped = Math.floor((i * normalized.length) / sequenceLength);
+    expanded.push(normalized[Math.min(normalized.length - 1, Math.max(0, mapped))]);
+  }
+  return expanded;
+}
+
+function readResiduePlddtByChainSeries(
+  payloads: Array<Record<string, unknown>>,
+  sequenceLength: number,
+  preferredChainId?: string
+): number[] {
+  if (sequenceLength <= 0) return [];
+  const byChain = new Map<string, { chainId: string; values: number[] }>();
+  const mapPaths = [
+    'residue_plddt_by_chain',
+    'residuePlddtByChain',
+    'residue_plddts_by_chain',
+    'confidence.residue_plddt_by_chain',
+    'confidence.residuePlddtByChain'
+  ];
+
+  for (const payload of payloads) {
+    for (const path of mapPaths) {
+      const raw = readObjectPath(payload, path);
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+      for (const [chainIdRaw, chainValuesRaw] of Object.entries(raw as Record<string, unknown>)) {
+        const chainId = readText(chainIdRaw).trim();
+        if (!chainId) continue;
+        const values = normalizePlddtList(parseNumberList(chainValuesRaw));
+        if (values.length === 0) continue;
+        const key = normalizeChainToken(chainId);
+        const existing = byChain.get(key);
+        if (!existing || values.length > existing.values.length) {
+          byChain.set(key, { chainId, values });
+        }
+      }
+    }
+  }
+
+  const entries = [...byChain.values()];
+  if (entries.length === 0) return [];
+
+  const preferredToken = normalizeChainToken(readText(preferredChainId));
+  let best: { chainId: string; values: number[]; score: number } | null = null;
+  for (const entry of entries) {
+    const chainToken = normalizeChainToken(entry.chainId);
+    const length = entry.values.length;
+    let score = 0;
+    score -= Math.abs(length - sequenceLength) * 4;
+    if (length === sequenceLength) score += 30;
+    if (length >= Math.max(1, sequenceLength - 2) && length <= sequenceLength + 2) score += 16;
+    if (sequenceLength >= 8 && length <= 4) score -= 40;
+    if (preferredToken && chainToken === preferredToken) score += 12;
+    if (!best || score > best.score) {
+      best = { chainId: entry.chainId, values: entry.values, score };
+    }
+  }
+  if (!best) return [];
+  return alignResidueSeriesToSequence(best.values, sequenceLength);
 }
 
 interface ResidueConfidenceBucket {
@@ -882,9 +974,17 @@ function parseCandidateResiduePlddts(
   sequence: string,
   sequenceLength: number,
   structure: { structureText: string; structureFormat: 'cif' | 'pdb' },
-  preferredChainId?: string
+  preferredChainId?: string,
+  sharedPayload?: Record<string, unknown>
 ): number[] {
-  const nested = [row, asRecord(row.result), asRecord(row.prediction), asRecord(row.metadata), asRecord(row.structure_payload)];
+  const nested = [
+    row,
+    asRecord(row.result),
+    asRecord(row.prediction),
+    asRecord(row.metadata),
+    asRecord(row.structure_payload),
+    asRecord(sharedPayload)
+  ];
   const directKeys = [
     'residue_plddt',
     'residue_plddts',
@@ -896,17 +996,12 @@ function parseCandidateResiduePlddts(
     'binder_residue_plddt',
     'binder_residue_plddts',
     'binder_plddt_per_residue',
-    'binder_plddt',
     'plddt_per_residue',
     'plddt_by_residue',
     'aa_plddt',
     'aa_plddts',
-    'token_plddt',
-    'token_plddts',
     'ligand_residue_plddt',
-    'ligand_residue_plddts',
-    'chain_plddt',
-    'chain_plddts'
+    'ligand_residue_plddts'
   ];
   const pathKeys = [
     'confidence.residue_plddt',
@@ -919,30 +1014,36 @@ function parseCandidateResiduePlddts(
     'scores.per_residue_plddt'
   ];
 
-  if (structure.structureText.trim()) {
-    const structureValues = parseResidueConfidenceFromStructure(
-      structure.structureText,
-      structure.structureFormat,
-      sequenceLength,
-      preferredChainId,
-      sequence
-    );
-    if (structureValues.length > 0) return structureValues;
-  }
-
   for (const source of nested) {
     for (const key of directKeys) {
-      const parsed = normalizePlddtList(parseNumberList(source[key]));
+      const parsed = alignResidueSeriesToSequence(parseNumberList(source[key]), sequenceLength);
       if (parsed.length > 0) {
-        return sequenceLength > 0 ? parsed.slice(0, sequenceLength) : parsed;
+        return parsed;
       }
     }
     for (const path of pathKeys) {
-      const parsed = normalizePlddtList(parseNumberList(readObjectPath(source, path)));
+      const parsed = alignResidueSeriesToSequence(parseNumberList(readObjectPath(source, path)), sequenceLength);
       if (parsed.length > 0) {
-        return sequenceLength > 0 ? parsed.slice(0, sequenceLength) : parsed;
+        return parsed;
       }
     }
+  }
+
+  const byChainSeries = readResiduePlddtByChainSeries(nested, sequenceLength, preferredChainId);
+  if (byChainSeries.length > 0) return byChainSeries;
+
+  if (structure.structureText.trim()) {
+    const structureValues = alignResidueSeriesToSequence(
+      parseResidueConfidenceFromStructure(
+        structure.structureText,
+        structure.structureFormat,
+        sequenceLength,
+        preferredChainId,
+        sequence
+      ),
+      sequenceLength
+    );
+    if (structureValues.length > 0) return structureValues;
   }
 
   return [];
@@ -1132,7 +1233,8 @@ function parseCandidateRows(
   defaultState: RuntimeState,
   defaultModelLabel: string,
   preferredLigandChainId?: string,
-  preferredTargetChainId?: string
+  preferredTargetChainId?: string,
+  sharedPayload?: Record<string, unknown>
 ): PeptideDesignCandidate[] {
   return rows
     .map((row, index) => {
@@ -1154,7 +1256,14 @@ function parseCandidateRows(
       const generation = firstFiniteMetric(row, ['generation', 'iteration', 'iter']);
       const rankRaw = firstFiniteMetric(row, ['rank', 'ranking', 'order']);
       const structure = parseCandidateStructure(row);
-      const residuePlddts = parseCandidateResiduePlddts(row, sequence, sequence.length, structure, preferredLigandChainId);
+      const residuePlddts = parseCandidateResiduePlddts(
+        row,
+        sequence,
+        sequence.length,
+        structure,
+        preferredLigandChainId,
+        sharedPayload
+      );
       const modelLabel = parseCandidateModelLabel(row, defaultModelLabel);
       const hasStructure = Boolean(structure.structureText.trim());
       const rowState = normalizeRuntimeState(
@@ -1400,7 +1509,8 @@ export function PeptideDesignResultsWorkspace({
         'SUCCESS',
         runtimeModelLabel,
         selectedResultLigandChainId || undefined,
-        selectedResultTargetChainId || undefined
+        selectedResultTargetChainId || undefined,
+        snapshotConfidence || {}
       ),
       ...parseCandidateRows(
         liveRows,
@@ -1408,7 +1518,8 @@ export function PeptideDesignResultsWorkspace({
         liveDefaultState,
         runtimeModelLabel,
         selectedResultLigandChainId || undefined,
-        selectedResultTargetChainId || undefined
+        selectedResultTargetChainId || undefined,
+        snapshotConfidence || {}
       )
     ])
       .sort((a, b) => {

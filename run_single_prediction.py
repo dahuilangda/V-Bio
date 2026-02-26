@@ -3825,6 +3825,8 @@ def run_peptide_design_backend(
     binder_chain_id = _next_available_chain_id(used_chain_ids, "B")
     chain_order.append(binder_chain_id)
     linker_chain_id = _next_available_chain_id(chain_order, "L")
+    if design_mode == "bicyclic":
+        chain_order.append(linker_chain_id)
 
     resolved_target_chain_id = str(target_chain_id or "").strip()
     if not resolved_target_chain_id:
@@ -3958,10 +3960,25 @@ def run_peptide_design_backend(
                 binder_chain_id=binder_chain_id,
                 target_chain_id=resolved_target_chain_id or None,
                 chain_order=chain_order,
+                partner_chain_ids=[linker_chain_id] if design_mode == "bicyclic" else None,
             )
 
-            pair_iptm_raw = metrics.get("pair_iptm")
-            pair_iptm = float(pair_iptm_raw) if isinstance(pair_iptm_raw, (int, float)) else None
+            pair_iptm_map_raw = metrics.get("pair_iptm_by_chain")
+            pair_iptm_map = pair_iptm_map_raw if isinstance(pair_iptm_map_raw, dict) else {}
+            pair_iptm_target_binder_raw = pair_iptm_map.get(binder_chain_id, metrics.get("pair_iptm"))
+            pair_iptm_target_binder = (
+                float(pair_iptm_target_binder_raw)
+                if isinstance(pair_iptm_target_binder_raw, (int, float))
+                else None
+            )
+            pair_iptm_target_linker_raw = pair_iptm_map.get(linker_chain_id)
+            pair_iptm_target_linker = (
+                float(pair_iptm_target_linker_raw)
+                if isinstance(pair_iptm_target_linker_raw, (int, float))
+                else None
+            )
+            pair_iptm = pair_iptm_target_binder
+            pair_iptm_formula = "target_vs_peptide_chain"
             binder_avg_plddt = float(metrics.get("binder_avg_plddt") or 0.0)
             composite_score = (0.7 * pair_iptm) + (0.3 * (binder_avg_plddt / 100.0)) if pair_iptm is not None else None
             structure_file = _select_primary_structure_file(result_dir)
@@ -3970,11 +3987,18 @@ def run_peptide_design_backend(
                 "generation": generation,
                 "iptm": pair_iptm,
                 "pair_iptm": pair_iptm,
+                "pair_iptm_target_binder": pair_iptm_target_binder,
+                "pair_iptm_target_linker": pair_iptm_target_linker,
+                "pair_iptm_formula": pair_iptm_formula,
+                "pair_iptm_resolved": pair_iptm is not None,
                 "binder_avg_plddt": binder_avg_plddt,
                 "composite_score": composite_score,
                 "score": composite_score,
                 "plddt": binder_avg_plddt,
                 "model": "Boltz",
+                "target_chain_id": resolved_target_chain_id,
+                "binder_chain_id": binder_chain_id,
+                "linker_chain_id": linker_chain_id if design_mode == "bicyclic" else "",
                 "structure_source_path": str(structure_file) if structure_file else "",
                 "structure_format": (
                     "pdb"
@@ -4010,7 +4034,14 @@ def run_peptide_design_backend(
                     "generation": row.get("generation"),
                     "score": row.get("composite_score"),
                     "iptm": row.get("iptm"),
+                    "pair_iptm": row.get("pair_iptm"),
+                    "pair_iptm_target_binder": row.get("pair_iptm_target_binder"),
+                    "pair_iptm_target_linker": row.get("pair_iptm_target_linker"),
+                    "pair_iptm_formula": row.get("pair_iptm_formula"),
                     "binder_avg_plddt": row.get("binder_avg_plddt"),
+                    "target_chain_id": row.get("target_chain_id"),
+                    "binder_chain_id": row.get("binder_chain_id"),
+                    "linker_chain_id": row.get("linker_chain_id"),
                 }
             )
         progress_payload = {
@@ -4077,6 +4108,9 @@ def run_peptide_design_backend(
                 "population_size": population_size,
                 "elite_size": elite_size,
                 "mutation_rate": mutation_rate,
+                "target_chain_id": resolved_target_chain_id,
+                "binder_chain_id": binder_chain_id,
+                "linker_chain_id": linker_chain_id if design_mode == "bicyclic" else "",
                 "current_generation": iterations,
                 "total_generations": iterations,
                 "completed_tasks": completed_tasks,

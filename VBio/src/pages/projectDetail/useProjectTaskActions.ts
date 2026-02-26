@@ -73,7 +73,7 @@ interface UseProjectTaskActionsInput {
   setStructureFormat: (value: 'cif' | 'pdb') => void;
   setStructureTaskId: (value: string | null) => void;
   setResultError: (value: string | null) => void;
-  setStatusInfo: (value: Record<string, unknown> | null) => void;
+  setStatusInfo: Dispatch<SetStateAction<Record<string, unknown> | null>>;
 }
 
 interface UseProjectTaskActionsOutput {
@@ -307,18 +307,34 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
   );
 
   const pullResultForViewer = useCallback(
-    async (taskId: string, options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode }) =>
-      pullResultForViewerTask({
+    async (taskId: string, options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode }) => {
+      const normalizedTaskRowId = String(options?.taskRowId || '').trim();
+      const normalizedTaskId = String(taskId || '').trim();
+      const taskRow =
+        (normalizedTaskRowId
+          ? projectTasks.find((row) => String(row.id || '').trim() === normalizedTaskRowId)
+          : null) ||
+        projectTasks.find((row) => String(row.task_id || '').trim() === normalizedTaskId) ||
+        null;
+      const baseTaskConfidence =
+        taskRow?.confidence && typeof taskRow.confidence === 'object' ? (taskRow.confidence as Record<string, unknown>) : null;
+      const baseProjectConfidence =
+        project?.confidence && typeof project.confidence === 'object' ? (project.confidence as Record<string, unknown>) : null;
+      return pullResultForViewerTask({
         taskId,
         options,
+        baseProjectConfidence,
+        baseTaskConfidence,
         patch,
         patchTask,
+        setStatusInfo,
         setStructureText,
         setStructureFormat,
         setStructureTaskId,
         setResultError
-      }),
-    [patch, patchTask, setStructureText, setStructureFormat, setStructureTaskId, setResultError]
+      });
+    },
+    [project, projectTasks, patch, patchTask, setStatusInfo, setStructureText, setStructureFormat, setStructureTaskId, setResultError]
   );
 
   const refreshStatus = useCallback(

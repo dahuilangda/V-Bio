@@ -130,12 +130,16 @@ export function useProjectTasksWorkspaceContext({
           : selection.ligandSequenceType;
       const ligandResiduePlddtsRaw =
         workflowKey === 'peptide_design' && peptideBest?.sequence
-          ? peptideBest.residuePlddts
+          ? peptideBest.residuePlddts ?? readTaskLigandResiduePlddts(task, peptideBest.binderChainId || selection.ligandChainId)
           : selection.ligandSequence && isSequenceLigandType(selection.ligandSequenceType)
             ? readTaskLigandResiduePlddts(task, selection.ligandChainId)
             : null;
       const ligandResiduePlddts = alignConfidenceSeriesToLength(ligandResiduePlddtsRaw, resolvedLigandSequence.length, null);
-      const metrics = readTaskConfidenceMetrics(task, selection);
+      const metricSelection =
+        workflowKey === 'peptide_design' && peptideBest?.binderChainId
+          ? { ...selection, ligandChainId: peptideBest.binderChainId }
+          : selection;
+      const metrics = readTaskConfidenceMetrics(task, { ...metricSelection, strictPairIptm: true });
       const ligandMeanPlddt = mean(ligandAtomPlddts);
       const ligandSequenceMeanPlddt = mean(ligandResiduePlddts);
       const plddt =

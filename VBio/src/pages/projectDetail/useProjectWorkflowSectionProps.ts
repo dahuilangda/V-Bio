@@ -307,6 +307,7 @@ export function useProjectWorkflowSectionProps({
   onPeptideBicyclicCys2PosChange,
   onPeptideBicyclicCys3PosChange
 }: UseProjectWorkflowSectionPropsInput): UseProjectWorkflowSectionPropsResult {
+  void snapshotIptm;
   const onLeadOptimizationLigandSmilesChange = (value: string) => {
     handleLeadOptimizationLigandSmilesChangeAction({
       value,
@@ -351,7 +352,7 @@ export function useProjectWorkflowSectionProps({
     affinityLigandConfidenceHint: snapshotPlddt,
     selectedResultLigandSequence,
     peptideFallbackPlddt: snapshotPlddt,
-    peptideFallbackIptm: snapshotSelectedPairIptm ?? snapshotIptm,
+    peptideFallbackIptm: snapshotSelectedPairIptm,
     statusInfo,
     progressPercent
   });

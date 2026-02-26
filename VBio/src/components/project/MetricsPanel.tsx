@@ -156,6 +156,72 @@ function normalizeProbability(value: number | null): number | null {
   return value;
 }
 
+function normalizeChainToken(value: string): string {
+  return String(value || '').trim().toUpperCase();
+}
+
+function chainTokenEquals(a: string, b: string): boolean {
+  const left = normalizeChainToken(a);
+  const right = normalizeChainToken(b);
+  if (!left || !right) return false;
+  if (left === right) return true;
+  const compactLeft = left.replace(/[^A-Z0-9]/g, '');
+  const compactRight = right.replace(/[^A-Z0-9]/g, '');
+  if (!compactLeft || !compactRight) return false;
+  return compactLeft === compactRight;
+}
+
+function isNumericToken(value: string): boolean {
+  return /^\d+$/.test(String(value || '').trim());
+}
+
+function readPairValueFromNestedMap(
+  mapValue: unknown,
+  chainA: string,
+  chainB: string
+): number | null {
+  if (!mapValue || typeof mapValue !== 'object' || Array.isArray(mapValue)) return null;
+  const byChain = mapValue as Record<string, unknown>;
+  const rowA = byChain[chainA];
+  const rowB = byChain[chainB];
+  const v1 =
+    rowA && typeof rowA === 'object' && !Array.isArray(rowA)
+      ? normalizeProbability(toNumber((rowA as Record<string, unknown>)[chainB]))
+      : null;
+  const v2 =
+    rowB && typeof rowB === 'object' && !Array.isArray(rowB)
+      ? normalizeProbability(toNumber((rowB as Record<string, unknown>)[chainA]))
+      : null;
+  if (v1 === null && v2 === null) return null;
+  return Math.max(v1 ?? Number.NEGATIVE_INFINITY, v2 ?? Number.NEGATIVE_INFINITY);
+}
+
+function readPairValueFromNumericMap(
+  mapValue: unknown,
+  chainA: string,
+  chainB: string,
+  chainOrderHints: string[]
+): number | null {
+  if (!mapValue || typeof mapValue !== 'object' || Array.isArray(mapValue)) return null;
+  const byChain = mapValue as Record<string, unknown>;
+  const keys = Object.keys(byChain).map((item) => String(item || '').trim()).filter(Boolean);
+  if (keys.length === 0 || !keys.every((item) => isNumericToken(item))) return null;
+
+  const idxA = chainOrderHints.findIndex((hint) => chainTokenEquals(hint, chainA));
+  const idxB = chainOrderHints.findIndex((hint) => chainTokenEquals(hint, chainB));
+  if (idxA >= 0 && idxB >= 0 && idxA !== idxB) {
+    const mapped = readPairValueFromNestedMap(byChain, String(idxA), String(idxB));
+    if (mapped !== null) return mapped;
+  }
+
+  if (keys.length === 2) {
+    const [first, second] = keys.sort((a, b) => Number(a) - Number(b));
+    const inferred = readPairValueFromNestedMap(byChain, first, second);
+    if (inferred !== null) return inferred;
+  }
+  return null;
+}
+
 function readPairIptmForChains(
   data: Record<string, unknown>,
   chainA: string | null | undefined,
@@ -165,35 +231,24 @@ function readPairIptmForChains(
   if (!chainA || !chainB) return null;
   if (chainA === chainB) return null;
 
-  const pairMap = readByPath(data, 'pair_chains_iptm');
-  if (pairMap && typeof pairMap === 'object' && !Array.isArray(pairMap)) {
-    const byChain = pairMap as Record<string, unknown>;
-    const rowA = byChain[chainA];
-    const rowB = byChain[chainB];
-    const v1 =
-      rowA && typeof rowA === 'object' && !Array.isArray(rowA)
-        ? normalizeProbability(toNumber((rowA as Record<string, unknown>)[chainB]))
-        : null;
-    const v2 =
-      rowB && typeof rowB === 'object' && !Array.isArray(rowB)
-        ? normalizeProbability(toNumber((rowB as Record<string, unknown>)[chainA]))
-        : null;
-    if (v1 !== null || v2 !== null) {
-      return Math.max(v1 ?? Number.NEGATIVE_INFINITY, v2 ?? Number.NEGATIVE_INFINITY);
-    }
-  }
-
-  const pairMatrixRaw = readByPath(data, 'chain_pair_iptm') ?? readByPath(data, 'chain_pair_iptm_global');
-  if (!Array.isArray(pairMatrixRaw)) return null;
-  const pairMatrix = pairMatrixRaw;
-
   const chainsFromData = readByPath(data, 'chain_ids');
   const chainIds =
     Array.isArray(chainsFromData) && chainsFromData.every((x) => typeof x === 'string')
       ? (chainsFromData as string[])
       : fallbackChainIds;
-  const i = chainIds.findIndex((value) => value === chainA);
-  const j = chainIds.findIndex((value) => value === chainB);
+
+  const pairMap = readByPath(data, 'pair_chains_iptm');
+  const direct = readPairValueFromNestedMap(pairMap, chainA, chainB);
+  if (direct !== null) return direct;
+  const numericMapped = readPairValueFromNumericMap(pairMap, chainA, chainB, chainIds);
+  if (numericMapped !== null) return numericMapped;
+
+  const pairMatrixRaw = readByPath(data, 'chain_pair_iptm') ?? readByPath(data, 'chain_pair_iptm_global');
+  if (!Array.isArray(pairMatrixRaw)) return null;
+  const pairMatrix = pairMatrixRaw;
+
+  const i = chainIds.findIndex((value) => chainTokenEquals(value, chainA));
+  const j = chainIds.findIndex((value) => chainTokenEquals(value, chainB));
   if (i < 0 || j < 0) return null;
   const rowI = pairMatrix[i];
   const rowJ = pairMatrix[j];
@@ -367,7 +422,7 @@ function ConfidencePanel({
       pickNumber(data, ['ligand_mean_plddt', 'ligand_plddt', 'complex_iplddt', 'complex_plddt_protein', 'complex_plddt'])
     );
   const selectedPairIptm = readPairIptmForChains(data, selectedTargetChainId, selectedLigandChainId, chainIds);
-  const iptm = selectedPairIptm ?? pickNumber(data, ['iptm']);
+  const iptm = selectedPairIptm;
   const ptm = pickNumber(data, ['ptm']);
   const pae = pickNumber(data, ['complex_pde', 'complex_pae', 'gpde', 'pae']);
   const rankingScore = pickNumber(data, ['ranking_score']);

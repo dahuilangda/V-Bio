@@ -1,5 +1,5 @@
 .task-col-submitted {
-  min-width: 272px;
+  min-width: 248px;
   white-space: normal;
 }
 
@@ -151,7 +151,7 @@
 }
 
 .task-col-backend {
-  min-width: 110px;
+  min-width: 104px;
 }
 
 .task-backend-badge {
@@ -159,16 +159,25 @@
 }
 
 .task-col-seed {
-  min-width: 86px;
+  min-width: 72px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
 
 .task-col-metric {
-  min-width: 86px;
+  min-width: 80px;
   text-align: right;
   font-variant-numeric: tabular-nums;
   color: #3e5c4f;
+}
+
+.task-col-duration {
+  min-width: 88px;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-table:not(.task-table--leadopt):not(.task-table--peptide) .project-col-actions {
+  min-width: 86px;
 }
 
 .task-metric-value {
@@ -194,18 +203,50 @@
 .task-table.task-table--peptide .task-col-peptide-setup,
 .task-table.task-table--peptide .task-col-peptide-progress {
   min-width: 0;
-  width: 18%;
+}
+
+.task-table.task-table--peptide .task-col-ligand {
+  min-width: 0;
+  width: 34%;
+}
+
+.task-table.task-table--peptide thead th:nth-child(1) {
+  width: 34%;
+}
+
+.task-table.task-table--peptide .task-col-peptide-setup {
+  width: 17%;
+}
+
+.task-table.task-table--peptide thead th:nth-child(2) {
+  width: 17%;
+}
+
+.task-table.task-table--peptide .task-col-peptide-progress {
+  width: 16%;
+}
+
+.task-table.task-table--peptide thead th:nth-child(3) {
+  width: 16%;
 }
 
 .task-table.task-table--peptide .task-col-submitted {
   min-width: 0;
-  width: 24%;
+  width: 25%;
   white-space: normal;
 }
 
+.task-table.task-table--peptide thead th:nth-child(4) {
+  width: 25%;
+}
+
 .task-table.task-table--peptide .project-col-actions {
-  width: 64px;
-  min-width: 64px;
+  width: 8%;
+  min-width: 76px;
+}
+
+.task-table.task-table--peptide thead th:nth-child(5) {
+  width: 8%;
 }
 
 .task-leadopt-db-cell {

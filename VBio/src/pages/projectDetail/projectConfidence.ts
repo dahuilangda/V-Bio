@@ -150,13 +150,9 @@ export function readResiduePlddtsForChain(
   const chainMapCandidates: unknown[] = [
     confidence.residue_plddt_by_chain,
     confidence.chain_residue_plddt,
-    confidence.chain_plddt,
-    confidence.chain_plddts,
     confidence.plddt_by_chain,
     readObjectPath(confidence, 'residue_plddt_by_chain'),
     readObjectPath(confidence, 'chain_residue_plddt'),
-    readObjectPath(confidence, 'chain_plddt'),
-    readObjectPath(confidence, 'chain_plddts'),
     readObjectPath(confidence, 'plddt.by_chain')
   ];
 

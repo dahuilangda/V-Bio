@@ -23,8 +23,8 @@ interface ApplyStructureAppearancePipelineArgs {
   isRequestCurrent: () => boolean;
 }
 
-const LEAD_OPT_RESULTS_POLYMER_ALPHA = 0.48;
-const LEAD_OPT_RESULTS_POLYMER_ALPHA_AF = 0.52;
+const LEAD_OPT_RESULTS_POLYMER_ALPHA = 0.62;
+const LEAD_OPT_RESULTS_POLYMER_ALPHA_AF = 0.66;
 
 function resolveMolstarColorMode(mode: string): MolstarResolvedColorMode {
   return mode === 'alphafold' ? 'alphafold' : 'default';

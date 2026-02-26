@@ -254,7 +254,8 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
       resultChainIds,
       selectedResultTargetChainId,
       affinityData,
-      confidenceData
+      confidenceData,
+      preferSequenceLigand: workflowKey === 'peptide_design'
     });
   }, [
     resultPairPreference,
@@ -265,7 +266,8 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     activeResultTask?.affinity,
     project?.affinity,
     activeResultTask?.confidence,
-    project?.confidence
+    project?.confidence,
+    workflowKey
   ]);
 
   const selectedResultLigandComponent = useMemo(() => {
@@ -388,12 +390,8 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
   }, [snapshotConfidence, selectedResultTargetChainId, selectedResultLigandChainId, resultChainIds]);
 
   const snapshotIptm = useMemo(() => {
-    if (snapshotSelectedPairIptm !== null) {
-      return snapshotSelectedPairIptm;
-    }
-    if (!snapshotConfidence) return null;
-    return readFirstFiniteMetric(snapshotConfidence, ['iptm', 'ligand_iptm', 'protein_iptm']);
-  }, [snapshotConfidence, snapshotSelectedPairIptm]);
+    return snapshotSelectedPairIptm;
+  }, [snapshotSelectedPairIptm]);
 
   const snapshotBindingValues = useMemo(() => {
     if (!snapshotAffinity) return null;

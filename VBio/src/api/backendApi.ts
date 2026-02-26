@@ -70,6 +70,7 @@ export { downloadResultBlob, getTaskStatus, terminateTask } from './backendTaskA
 export type { DownloadResultMode } from './backendTaskApi';
 
 export {
+  compactResultConfidenceForStorage,
   downloadResultFile,
   ensureStructureConfidenceColoringData,
   parseResultBundle
