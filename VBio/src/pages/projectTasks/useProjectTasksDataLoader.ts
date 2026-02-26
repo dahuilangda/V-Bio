@@ -223,7 +223,9 @@ export function useProjectTasksDataLoader({
         const workflowKey = normalizeWorkflowKey(projectRow.task_type);
         const includeComponentsForList = workflowKey === 'prediction';
         const includeConfidenceForList =
-          workflowKey === 'peptide_design'
+          workflowKey === 'lead_optimization'
+            ? false
+            : workflowKey === 'peptide_design'
             ? !silent || cachedTasks.length === 0
             : !(silent && cachedTasks.length > 0);
         const taskRows = await listProjectTasksForList(projectId, {

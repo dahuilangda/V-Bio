@@ -804,6 +804,12 @@ export async function hydrateTaskMetricsFromResultRows(
       if (!taskId || row.task_state !== 'SUCCESS') return false;
       if (hasLeadOptMmpOnlySnapshot(row)) return false;
       const workflowKey = resolveTaskWorkflowKey(row, projectRow.task_type || '');
+      if (workflowKey === 'lead_optimization') {
+        // Lead-opt task list should not bulk-download result bundles on list open/refresh.
+        // Detailed artifacts are hydrated only when users open a concrete result task.
+        resultHydrationDoneRef.current.add(taskId);
+        return false;
+      }
       if (workflowKey === 'peptide_design') {
         // Peptide task rows already render from persisted runtime summary; avoid bulk result downloads on list refresh.
         resultHydrationDoneRef.current.add(taskId);

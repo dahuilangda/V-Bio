@@ -1579,15 +1579,29 @@ function normalizeLeadOptTaskStage(value: string): string {
   return token;
 }
 
+function readLeadOptTaskListMetaFromProperties(task: ProjectTask): Record<string, unknown> | null {
+  const properties =
+    task.properties && typeof task.properties === 'object' && !Array.isArray(task.properties)
+      ? (task.properties as unknown as Record<string, unknown>)
+      : null;
+  if (!properties) return null;
+  const meta = properties.lead_opt_list;
+  if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+    return meta as Record<string, unknown>;
+  }
+  return null;
+}
+
 function readLeadOptTaskSummary(task: ProjectTask): LeadOptTaskSummary | null {
   const confidence =
     task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
       ? (task.confidence as Record<string, unknown>)
       : null;
-  const leadOptMmp =
+  const leadOptMmpFromConfidence =
     confidence?.lead_opt_mmp && typeof confidence.lead_opt_mmp === 'object' && !Array.isArray(confidence.lead_opt_mmp)
       ? (confidence.lead_opt_mmp as Record<string, unknown>)
       : null;
+  const leadOptMmp = leadOptMmpFromConfidence || readLeadOptTaskListMetaFromProperties(task);
   if (!leadOptMmp) return null;
   const queryResultRaw = readObjectPath(leadOptMmp, 'query_result');
   const queryResult =
@@ -1647,7 +1661,9 @@ function readLeadOptTaskSummary(task: ProjectTask): LeadOptTaskSummary | null {
   const transformCount = readFiniteNumber(leadOptMmp.transform_count);
   const candidateCount = readFiniteNumber(leadOptMmp.candidate_count);
   const selectedFragmentIds = (() => {
-    const selectionIds = readStringArray(readObjectPath(leadOptMmp, 'selection.selected_fragment_ids'));
+    const selectionIds = readStringArray(
+      readObjectPath(leadOptMmp, 'selection.selected_fragment_ids') ?? leadOptMmp.selected_fragment_ids
+    );
     if (selectionIds.length > 0) return Array.from(new Set(selectionIds));
     const variableItems = readLeadOptVariableItems(leadOptMmp);
     return Array.from(
@@ -1659,7 +1675,8 @@ function readLeadOptTaskSummary(task: ProjectTask): LeadOptTaskSummary | null {
     );
   })();
   const selectedAtomIndices = (() => {
-    const selectionAtomsRaw = readObjectPath(leadOptMmp, 'selection.selected_fragment_atom_indices');
+    const selectionAtomsRaw =
+      readObjectPath(leadOptMmp, 'selection.selected_fragment_atom_indices') ?? leadOptMmp.selected_fragment_atom_indices;
     if (Array.isArray(selectionAtomsRaw)) {
       return Array.from(
         new Set(
@@ -1684,14 +1701,16 @@ function readLeadOptTaskSummary(task: ProjectTask): LeadOptTaskSummary | null {
     );
   })();
   const selectedFragmentQuery = (() => {
-    const selectionQueries = readStringArray(readObjectPath(leadOptMmp, 'selection.variable_queries'));
+    const selectionQueries = readStringArray(
+      readObjectPath(leadOptMmp, 'selection.variable_queries') ?? leadOptMmp.variable_queries
+    );
     if (selectionQueries.length > 0) return selectionQueries[0];
     const variableItems = readLeadOptVariableItems(leadOptMmp);
     for (const item of variableItems) {
       const query = String(item.query || '').trim();
       if (query) return query;
     }
-    return '';
+    return String(leadOptMmp.selected_fragment_query || '').trim();
   })();
 
   const stageLabel = (() => {

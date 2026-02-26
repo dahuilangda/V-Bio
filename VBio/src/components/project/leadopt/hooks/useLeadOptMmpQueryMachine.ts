@@ -125,8 +125,8 @@ function normalizePredictionRecord(value: unknown): LeadOptPredictionRecord | nu
   const structureText = readText(raw.structureText ?? raw.structure_text);
   const structureFormat = readText(raw.structureFormat ?? raw.structure_format).toLowerCase() === 'pdb' ? 'pdb' : 'cif';
   const structureName = readText(raw.structureName ?? raw.structure_name);
-  const pairIptm = normalizeIptm(raw.pairIptm ?? raw.pair_iptm);
-  const pairPae = normalizePae(raw.pairPae ?? raw.pair_pae);
+  const pairIptm = normalizeIptm(raw.pairIptm ?? raw.pair_iptm ?? raw.ligand_iptm ?? raw.iptm);
+  const pairPae = normalizePae(raw.pairPae ?? raw.pair_pae ?? raw.pae);
   const ligandPlddtRaw = Number(raw.ligandPlddt ?? raw.ligand_plddt);
   const ligandPlddt = Number.isFinite(ligandPlddtRaw) ? normalizePlddtValue(ligandPlddtRaw) : null;
   const ligandAtomPlddts = normalizePlddtArray(raw.ligandAtomPlddts ?? raw.ligand_atom_plddts);
@@ -538,7 +538,7 @@ function findPairIptm(confidence: Record<string, unknown>, targetChain: string, 
       }
     }
   }
-  const scalar = readFirstFiniteMetric(confidence, ['pair_iptm']);
+  const scalar = readFirstFiniteMetric(confidence, ['pair_iptm', 'ligand_iptm', 'iptm']);
   return scalar !== null ? normalizeIptm(scalar) : null;
 }
 
