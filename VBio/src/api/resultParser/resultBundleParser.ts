@@ -1646,6 +1646,13 @@ async function parsePeptideDesignCandidatesFromBundle(
   zip: JSZip,
   names: string[]
 ): Promise<Array<Record<string, unknown>>> {
+  const summarySourcePriority = (path: string): number => {
+    const base = getBaseName(path).toLowerCase();
+    if (base.includes('design_results')) return 0;
+    if (base.includes('best_sequences')) return 1;
+    if (base === 'results_summary.json') return 2;
+    return 3;
+  };
   const summaryCandidates = names
     .filter((name) => {
       const base = getBaseName(name).toLowerCase();
@@ -1653,14 +1660,19 @@ async function parsePeptideDesignCandidatesFromBundle(
       if (base === 'results_summary.json') return true;
       return base.includes('design_results') || base.includes('best_sequences');
     })
-    .sort((a, b) => a.length - b.length);
+    .sort((a, b) => {
+      const priorityDelta = summarySourcePriority(a) - summarySourcePriority(b);
+      if (priorityDelta !== 0) return priorityDelta;
+      return a.length - b.length;
+    });
   if (summaryCandidates.length === 0) return [];
 
   let rows: Array<Record<string, unknown>> = [];
+  let rowsSourcePriority = Number.POSITIVE_INFINITY;
   for (const summaryPath of summaryCandidates) {
     const payload = await readZipJson(zip, summaryPath);
     if (!payload) continue;
-    rows = readFirstObjectArrayPath(payload, [
+    const nextRows = readFirstObjectArrayPath(payload, [
       'top_results',
       'best_sequences',
       'peptide_design.best_sequences',
@@ -1670,7 +1682,15 @@ async function parsePeptideDesignCandidatesFromBundle(
       'peptide_results',
       'candidates'
     ]);
-    if (rows.length > 0) break;
+    if (nextRows.length === 0) continue;
+    const sourcePriority = summarySourcePriority(summaryPath);
+    if (
+      nextRows.length > rows.length ||
+      (nextRows.length === rows.length && sourcePriority < rowsSourcePriority)
+    ) {
+      rows = nextRows;
+      rowsSourcePriority = sourcePriority;
+    }
   }
   if (rows.length === 0) return [];
 

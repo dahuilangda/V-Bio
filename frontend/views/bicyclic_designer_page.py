@@ -1217,9 +1217,8 @@ def render_bicyclic_designer_page():
         best_sequences = results['best_sequences']
         evolution_history = results['evolution_history']
         
-        # Add slider for controlling display count in bicyclic designer
-        with st.expander("LayoutPanel **结果过滤设置**", expanded=False):  # The actual emoji is "🎛️"
-            st.markdown("调整以下参数来筛选和显示设计结果：")
+        with st.expander("🎛️ **结果过滤与分页设置**", expanded=False):
+            st.markdown("调整以下参数来筛选和分页显示设计结果：")
             col_filter1, col_filter2 = st.columns(2)
             
             with col_filter1:
@@ -1227,34 +1226,67 @@ def render_bicyclic_designer_page():
                     "评分阈值",
                     min_value=0.0,
                     max_value=1.0,
-                    value=0.6,
+                    value=0.0,
                     step=0.05,
-                    help="只显示评分高于此阈值的设计"
+                    help="默认 0.0（显示全部设计）；提高阈值可只看高分结果"
                 )
                 
             with col_filter2:
-                max_display = st.slider(
-                    "最大显示数量",
-                    min_value=5,
-                    max_value=150,  # Increased from 10 to 50 to match the molecular designer
-                    value=10,
-                    step=1,
-                    help="最多显示多少个符合条件的设计"
+                page_size = st.select_slider(
+                    "每页显示数量",
+                    options=[5, 10, 20, 50, 100],
+                    value=20
                 )
         
         st.subheader("📊 设计统计摘要", anchor=False)
         
+        high_quality_sequences = [seq for seq in best_sequences if seq.get('score', 0) >= custom_threshold]
+        top_sequences = high_quality_sequences
+        total_filtered = len(top_sequences)
+        total_pages = max(1, (total_filtered + page_size - 1) // page_size)
+        page_key = "bicyclic_results_page"
+        current_page = int(st.session_state.get(page_key, 1))
+        if current_page < 1:
+            current_page = 1
+        if current_page > total_pages:
+            current_page = total_pages
+        st.session_state[page_key] = current_page
+        page_number = st.number_input(
+            "结果页码",
+            min_value=1,
+            max_value=total_pages,
+            value=current_page,
+            step=1,
+            key=page_key,
+            help="翻页查看全部双环肽设计结果"
+        )
+        page_start = (page_number - 1) * page_size
+        page_end = min(page_start + page_size, total_filtered)
+        paged_sequences = top_sequences[page_start:page_end]
+
+        nav_cols = st.columns([1, 2, 1])
+        with nav_cols[0]:
+            if st.button("⬅️ 上一页", key="bicyclic_prev_page", disabled=page_number <= 1, use_container_width=True):
+                st.session_state[page_key] = max(1, page_number - 1)
+                st.rerun()
+        with nav_cols[1]:
+            if total_filtered > 0:
+                st.caption(f"当前显示第 {page_start + 1}-{page_end} 条，共 {total_filtered} 条")
+            else:
+                st.caption("当前无符合筛选条件的结果")
+        with nav_cols[2]:
+            if st.button("下一页 ➡️", key="bicyclic_next_page", disabled=page_number >= total_pages, use_container_width=True):
+                st.session_state[page_key] = min(total_pages, page_number + 1)
+                st.rerun()
+
         col_stats = st.columns(4)
         col_stats[0].metric("总设计数", len(best_sequences))
-        high_quality_sequences = [seq for seq in best_sequences if seq.get('score', 0) >= custom_threshold]
-        col_stats[1].metric("高质量设计", len(high_quality_sequences), help=f"评分 ≥ {custom_threshold}")
-        col_stats[2].metric(f"Top {max_display} 展示", min(max_display, len(high_quality_sequences)))
+        col_stats[1].metric("筛选后设计", total_filtered, help=f"评分 ≥ {custom_threshold}")
+        col_stats[2].metric("当前页", f"{page_number}/{total_pages}")
         if best_sequences:
             col_stats[3].metric("最高评分", f"{max(seq.get('score', 0) for seq in best_sequences):.3f}")
         
         st.subheader("🥇 最佳双环肽序列", anchor=False)
-        
-        top_sequences = high_quality_sequences[:max_display]
 
         results_components = [
             comp for comp in st.session_state.get('bicyclic_components', [])
@@ -1270,16 +1302,17 @@ def render_bicyclic_designer_page():
         if not top_sequences:
             st.warning("😔 没有找到高质量的双环肽设计。请尝试调整参数重新设计。")
         else:
-            st.success(f"🎉 发现 {len(top_sequences)} 个高质量双环肽设计！")
+            st.success(f"🎉 共找到 {len(top_sequences)} 个双环肽设计，当前页显示 {len(paged_sequences)} 个。")
             
-            for i, seq_data in enumerate(top_sequences):
-                rank = i + 1
+            for local_idx, seq_data in enumerate(paged_sequences):
+                global_idx = page_start + local_idx
+                rank = global_idx + 1
                 score = seq_data.get('score', 0)
                 sequence = seq_data.get('sequence', '')
                 
                 score_color = "🟢" if score >= 0.8 else "🟡" if score >= 0.7 else "🟠"
                 
-                with st.expander(f"**第 {rank} 名** {score_color} 评分: {score:.3f}", expanded=(i < 3)):
+                with st.expander(f"**第 {rank} 名** {score_color} 评分: {score:.3f}", expanded=(local_idx < 3)):
                                         # 高亮显示Cys和环结构
                     highlighted_sequence = ""
                     cys_positions = []
@@ -1355,17 +1388,17 @@ def render_bicyclic_designer_page():
                                         file_name=download_name,
                                         mime=mime_type,
                                         use_container_width=True,
-                                        key=f"download_bicyclic_cif_{i}"
+                                        key=f"download_bicyclic_cif_{global_idx}"
                                     )
 
                                 with col_download[1]:
-                                    if st.button("🔬 查看双环结构", use_container_width=True, key=f"view_bicyclic_{i}"):
-                                        if f"show_bicyclic_3d_{i}" not in st.session_state:
-                                            st.session_state[f"show_bicyclic_3d_{i}"] = False
-                                        st.session_state[f"show_bicyclic_3d_{i}"] = not st.session_state.get(f"show_bicyclic_3d_{i}", False)
+                                    if st.button("🔬 查看双环结构", use_container_width=True, key=f"view_bicyclic_{global_idx}"):
+                                        if f"show_bicyclic_3d_{global_idx}" not in st.session_state:
+                                            st.session_state[f"show_bicyclic_3d_{global_idx}"] = False
+                                        st.session_state[f"show_bicyclic_3d_{global_idx}"] = not st.session_state.get(f"show_bicyclic_3d_{global_idx}", False)
                                         st.rerun()
 
-                                if st.session_state.get(f"show_bicyclic_3d_{i}", False):
+                                if st.session_state.get(f"show_bicyclic_3d_{global_idx}", False):
                                     st.markdown("---")
                                     st.markdown("**🔬 双环肽3D结构**")
 

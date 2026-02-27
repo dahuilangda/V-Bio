@@ -1467,47 +1467,74 @@ def render_designer_page(allow_glycopeptide: bool = False):
         
         st.subheader("📊 设计统计摘要", anchor=False)
         
-        score_threshold = 0.6
-        high_quality_sequences = [seq for seq in best_sequences if seq.get('score', 0) >= score_threshold]
-        top_sequences = high_quality_sequences[:10]
-        
-        col_stats = st.columns(4)
-        col_stats[0].metric("总设计数", len(best_sequences))
-        col_stats[1].metric("高质量设计", len(high_quality_sequences), help=f"评分 ≥ {score_threshold}")
-        col_stats[2].metric("Top 10 选中", len(top_sequences))
-        if best_sequences:
-            col_stats[3].metric("最高评分", f"{max(seq.get('score', 0) for seq in best_sequences):.3f}")
-        
-        with st.expander("🎛️ **结果过滤设置**", expanded=False):
-            st.markdown("调整以下参数来筛选和显示设计结果：")
+        default_threshold = 0.0
+        with st.expander("🎛️ **结果过滤与分页设置**", expanded=False):
+            st.markdown("调整以下参数来筛选和分页显示设计结果：")
             col_filter1, col_filter2 = st.columns(2)
-            
+
             with col_filter1:
                 custom_threshold = st.slider(
                     "评分阈值",
                     min_value=0.0,
                     max_value=1.0,
-                    value=score_threshold,
+                    value=default_threshold,
                     step=0.05,
-                    help="只显示评分高于此阈值的设计"
+                    help="默认 0.0（显示全部设计）；提高阈值可只看高分结果"
                 )
-                
+
             with col_filter2:
-                max_display = st.slider(
-                    "最大显示数量",
-                    min_value=5,
-                    max_value=250,  # Increased from 20 to 250
-                    value=10,
-                    step=1,
-                    help="最多显示多少个符合条件的设计"
+                page_size = st.select_slider(
+                    "每页显示数量",
+                    options=[5, 10, 20, 50, 100],
+                    value=20
                 )
-            
-            if custom_threshold != score_threshold:
-                high_quality_sequences = [seq for seq in best_sequences if seq.get('score', 0) >= custom_threshold]
-                top_sequences = high_quality_sequences[:max_display]
-                
-                col_stats[1].metric("高质量设计", len(high_quality_sequences), help=f"评分 ≥ {custom_threshold}")
-                col_stats[2].metric(f"Top {max_display} 选中", len(top_sequences))
+
+        high_quality_sequences = [seq for seq in best_sequences if seq.get('score', 0) >= custom_threshold]
+        top_sequences = high_quality_sequences
+        total_filtered = len(top_sequences)
+        total_pages = max(1, (total_filtered + page_size - 1) // page_size)
+        page_key = "designer_results_page"
+        current_page = int(st.session_state.get(page_key, 1))
+        if current_page < 1:
+            current_page = 1
+        if current_page > total_pages:
+            current_page = total_pages
+        st.session_state[page_key] = current_page
+        page_number = st.number_input(
+            "结果页码",
+            min_value=1,
+            max_value=total_pages,
+            value=current_page,
+            step=1,
+            key=page_key,
+            help="翻页查看全部设计结果"
+        )
+
+        page_start = (page_number - 1) * page_size
+        page_end = min(page_start + page_size, total_filtered)
+        paged_sequences = top_sequences[page_start:page_end]
+
+        nav_cols = st.columns([1, 2, 1])
+        with nav_cols[0]:
+            if st.button("⬅️ 上一页", key="designer_prev_page", disabled=page_number <= 1, use_container_width=True):
+                st.session_state[page_key] = max(1, page_number - 1)
+                st.rerun()
+        with nav_cols[1]:
+            if total_filtered > 0:
+                st.caption(f"当前显示第 {page_start + 1}-{page_end} 条，共 {total_filtered} 条")
+            else:
+                st.caption("当前无符合筛选条件的结果")
+        with nav_cols[2]:
+            if st.button("下一页 ➡️", key="designer_next_page", disabled=page_number >= total_pages, use_container_width=True):
+                st.session_state[page_key] = min(total_pages, page_number + 1)
+                st.rerun()
+
+        col_stats = st.columns(4)
+        col_stats[0].metric("总设计数", len(best_sequences))
+        col_stats[1].metric("筛选后设计", total_filtered, help=f"评分 ≥ {custom_threshold}")
+        col_stats[2].metric("当前页", f"{page_number}/{total_pages}")
+        if best_sequences:
+            col_stats[3].metric("最高评分", f"{max(seq.get('score', 0) for seq in best_sequences):.3f}")
         
         st.subheader("🥇 最佳设计序列", anchor=False)
 
@@ -1525,10 +1552,11 @@ def render_designer_page(allow_glycopeptide: bool = False):
         if not top_sequences:
             st.warning(f"😔 没有找到评分高于 {custom_threshold} 的设计序列。请尝试降低阈值或检查设计参数。")
         else:
-            st.success(f"🎉 找到 {len(top_sequences)} 个高质量设计序列！")
+            st.success(f"🎉 共找到 {len(top_sequences)} 个设计结果，当前页显示 {len(paged_sequences)} 个。")
             
-            for i, seq_data in enumerate(top_sequences):
-                rank = i + 1
+            for local_idx, seq_data in enumerate(paged_sequences):
+                global_idx = page_start + local_idx
+                rank = global_idx + 1
                 score = seq_data.get('score', 0)
                 
                 if score >= 0.8:
@@ -1542,7 +1570,7 @@ def render_designer_page(allow_glycopeptide: bool = False):
                 
                 with st.expander(
                     f"**第 {rank} 名** {score_color} 评分: {score:.3f}", 
-                    expanded=(i < 3)
+                    expanded=(local_idx < 3)
                 ):
                     designer_config = st.session_state.get('designer_config', {})
                     sequence = seq_data['sequence']
@@ -1647,7 +1675,7 @@ def render_designer_page(allow_glycopeptide: bool = False):
                                     file_name=download_name,
                                     mime=mime_type,
                                     use_container_width=True,
-                                    key=f"download_structure_{i}",
+                                    key=f"download_structure_{global_idx}",
                                     help="下载该设计序列的3D结构文件"
                                 )
 
@@ -1655,15 +1683,15 @@ def render_designer_page(allow_glycopeptide: bool = False):
                                 if st.button(
                                     "🔬 查看相互作用",
                                     use_container_width=True,
-                                    key=f"view_interaction_{i}",
+                                    key=f"view_interaction_{global_idx}",
                                     help="在3D视图中查看该设计序列与目标的相互作用"
                                 ):
-                                    if f"show_3d_{i}" not in st.session_state:
-                                        st.session_state[f"show_3d_{i}"] = False
-                                    st.session_state[f"show_3d_{i}"] = not st.session_state.get(f"show_3d_{i}", False)
+                                    if f"show_3d_{global_idx}" not in st.session_state:
+                                        st.session_state[f"show_3d_{global_idx}"] = False
+                                    st.session_state[f"show_3d_{global_idx}"] = not st.session_state.get(f"show_3d_{global_idx}", False)
                                     st.rerun()
 
-                            if st.session_state.get(f"show_3d_{i}", False):
+                            if st.session_state.get(f"show_3d_{global_idx}", False):
                                 st.markdown("---")
                                 st.markdown("**🔬 3D结构与相互作用**")
 
@@ -1689,8 +1717,8 @@ def render_designer_page(allow_glycopeptide: bool = False):
                                     - 🟠 **橙色**：低置信度区域 (pLDDT < 50)
                                     """)
 
-                                    if st.button("❌ 关闭3D视图", key=f"close_3d_{i}", help="隐藏3D结构显示"):
-                                        st.session_state[f"show_3d_{i}"] = False
+                                    if st.button("❌ 关闭3D视图", key=f"close_3d_{global_idx}", help="隐藏3D结构显示"):
+                                        st.session_state[f"show_3d_{global_idx}"] = False
                                         st.rerun()
 
                                 except Exception as e:

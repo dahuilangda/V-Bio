@@ -23,9 +23,9 @@
       "database_url": "postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp",
       "schema": "chembl36_full",
       "status": "building",
-      "status_message": "index_fragdb",
-      "status_updated_at": "2026-02-26T14:40:31Z",
-      "status_token": "op_1772116831499_a3440003"
+      "status_message": "build_database",
+      "status_updated_at": "2026-02-26T23:25:30Z",
+      "status_token": "op_1772148330849_5a5cea3f"
     }
   ]
 }

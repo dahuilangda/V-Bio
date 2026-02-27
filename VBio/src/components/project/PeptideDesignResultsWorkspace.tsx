@@ -1,4 +1,4 @@
-import { X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
 import { MolstarViewer } from './MolstarViewer';
 
@@ -6,6 +6,7 @@ type ResultsGridStyle = CSSProperties & { '--results-main-width'?: string };
 type RuntimeState = 'SUCCESS' | 'RUNNING' | 'QUEUED' | 'FAILURE' | 'UNSCORED';
 type PeptideSortKey = 'rank' | 'generation' | 'score' | 'plddt' | 'iptm';
 type ConfidenceTone = 'vhigh' | 'high' | 'low' | 'vlow' | 'na';
+const PEPTIDE_RESULTS_PAGE_SIZE_OPTIONS = [8, 20, 50, 100] as const;
 
 interface PeptideDesignResultsWorkspaceProps {
   projectTaskId: string;
@@ -1593,6 +1594,9 @@ export function PeptideDesignResultsWorkspace({
   const [cardMode, setCardMode] = useState(false);
   const [sortKey, setSortKey] = useState<PeptideSortKey>('score');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+  const [page, setPage] = useState(1);
+  const [pageInput, setPageInput] = useState('1');
+  const [pageSize, setPageSize] = useState<(typeof PEPTIDE_RESULTS_PAGE_SIZE_OPTIONS)[number]>(20);
   const [requestingStructure, setRequestingStructure] = useState(false);
   const requestedStructureKeyRef = useRef('');
 
@@ -1625,6 +1629,16 @@ export function PeptideDesignResultsWorkspace({
     return { min: Math.min(...values), max: Math.max(...values) };
   }, [sortedCandidates]);
 
+  const totalPages = useMemo(
+    () => Math.max(1, Math.ceil(sortedCandidates.length / pageSize)),
+    [pageSize, sortedCandidates.length]
+  );
+  const clampedPage = Math.max(1, Math.min(totalPages, page));
+  const pagedCandidates = useMemo(
+    () => sortedCandidates.slice((clampedPage - 1) * pageSize, clampedPage * pageSize),
+    [sortedCandidates, clampedPage, pageSize]
+  );
+
   useEffect(() => {
     setViewerColorMode(initialViewerColorMode);
   }, [initialViewerColorMode]);
@@ -1639,6 +1653,16 @@ export function PeptideDesignResultsWorkspace({
     }
   }, [sortedCandidates, selectedCandidateId]);
 
+  useEffect(() => {
+    if (page !== clampedPage) {
+      setPage(clampedPage);
+    }
+  }, [page, clampedPage]);
+
+  useEffect(() => {
+    setPageInput(String(clampedPage));
+  }, [clampedPage]);
+
   const selectedCandidate = useMemo(() => {
     if (!sortedCandidates.length) return null;
     return sortedCandidates.find((item) => item.id === selectedCandidateId) || sortedCandidates[0];
@@ -1652,6 +1676,8 @@ export function PeptideDesignResultsWorkspace({
   useEffect(() => {
     setCardMode(false);
     setSelectedCandidateId('');
+    setPage(1);
+    setPageInput('1');
     requestedStructureKeyRef.current = '';
     setRequestingStructure(false);
   }, [projectTaskId]);
@@ -1766,7 +1792,7 @@ export function PeptideDesignResultsWorkspace({
             </tr>
           </thead>
           <tbody>
-            {sortedCandidates.map((candidate) => {
+            {pagedCandidates.map((candidate) => {
               const isActive = candidate.id === selectedCandidate?.id;
               const scoreTone = confidenceTone(scoreConfidencePercent(candidate.score, scoreRange.min, scoreRange.max));
               const plddtTone = confidenceTone(candidate.plddt);
@@ -1849,6 +1875,89 @@ export function PeptideDesignResultsWorkspace({
           </tbody>
         </table>
       </div>
+      {sortedCandidates.length > 0 && totalPages > 1 ? (
+        <div className="lead-opt-page-row">
+          <span className="badge">Page {clampedPage}/{totalPages}</span>
+          <button
+            type="button"
+            className="lead-opt-row-action-btn"
+            onClick={() => setPage(1)}
+            disabled={clampedPage <= 1}
+            aria-label="First page"
+            title="First page"
+          >
+            <ChevronsLeft size={14} />
+          </button>
+          <button
+            type="button"
+            className="lead-opt-row-action-btn"
+            onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+            disabled={clampedPage <= 1}
+            aria-label="Previous page"
+            title="Previous page"
+          >
+            <ChevronLeft size={14} />
+          </button>
+          <button
+            type="button"
+            className="lead-opt-row-action-btn"
+            onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
+            disabled={clampedPage >= totalPages}
+            aria-label="Next page"
+            title="Next page"
+          >
+            <ChevronRight size={14} />
+          </button>
+          <button
+            type="button"
+            className="lead-opt-row-action-btn"
+            onClick={() => setPage(totalPages)}
+            disabled={clampedPage >= totalPages}
+            aria-label="Last page"
+            title="Last page"
+          >
+            <ChevronsRight size={14} />
+          </button>
+          <label className="project-page-size">
+            <span className="muted small">Go to</span>
+            <input
+              type="number"
+              min={1}
+              max={totalPages}
+              value={pageInput}
+              onChange={(event) => {
+                const nextRaw = event.target.value;
+                setPageInput(nextRaw);
+                const parsed = Number(nextRaw);
+                if (!Number.isFinite(parsed)) return;
+                setPage(Math.max(1, Math.min(totalPages, Math.floor(parsed))));
+              }}
+              aria-label="Go to peptide result page"
+            />
+          </label>
+          <label className="project-page-size">
+            <span className="muted small">Rows</span>
+            <select
+              value={String(pageSize)}
+              onChange={(event) => {
+                const parsed = Number(event.target.value);
+                if (!Number.isFinite(parsed)) return;
+                const next = PEPTIDE_RESULTS_PAGE_SIZE_OPTIONS.find((value) => value === parsed);
+                if (!next) return;
+                setPageSize(next);
+                setPage(1);
+              }}
+              aria-label="Rows per page"
+            >
+              {PEPTIDE_RESULTS_PAGE_SIZE_OPTIONS.map((value) => (
+                <option key={value} value={value}>
+                  {value}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      ) : null}
     </section>
   );
 
