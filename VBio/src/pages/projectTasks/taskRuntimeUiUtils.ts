@@ -28,6 +28,44 @@ function mapTaskState(raw: string): ProjectTask['task_state'] {
   return 'QUEUED';
 }
 
+function resolveNonRegressiveTaskState(
+  currentStateInput: unknown,
+  incomingState: ProjectTask['task_state']
+): ProjectTask['task_state'] {
+  const current = String(currentStateInput || '').trim().toUpperCase();
+  if (!current) return incomingState;
+  if (current === 'RUNNING' && incomingState === 'QUEUED') return 'RUNNING';
+  if ((current === 'SUCCESS' || current === 'FAILURE' || current === 'REVOKED') && (incomingState === 'QUEUED' || incomingState === 'RUNNING')) {
+    return current as ProjectTask['task_state'];
+  }
+  return incomingState;
+}
+
+function inferRunningHintFromStatusText(statusText: string): boolean {
+  const text = String(statusText || '').trim().toLowerCase();
+  if (!text) return false;
+  return (
+    text.includes('running') ||
+    text.includes('started') ||
+    text.includes('starting') ||
+    text.includes('acquiring') ||
+    text.includes('preparing') ||
+    text.includes('uploading') ||
+    text.includes('processing') ||
+    text.includes('termination in progress')
+  );
+}
+
+function inferTaskStateFromStatusPayload(
+  status: { info?: Record<string, unknown>; state: string },
+  currentStateInput?: unknown
+): ProjectTask['task_state'] {
+  const mapped = mapTaskState(String(status.state || ''));
+  const statusText = readStatusText(status);
+  const hinted = mapped === 'QUEUED' && inferRunningHintFromStatusText(statusText) ? 'RUNNING' : mapped;
+  return resolveNonRegressiveTaskState(currentStateInput, hinted);
+}
+
 async function waitForRuntimeTaskToStop(taskId: string, timeoutMs = 12000, intervalMs = 900): Promise<ProjectTask['task_state'] | null> {
   const normalizedTaskId = String(taskId || '').trim();
   if (!normalizedTaskId) return null;
@@ -37,7 +75,10 @@ async function waitForRuntimeTaskToStop(taskId: string, timeoutMs = 12000, inter
   while (Date.now() < deadline) {
     try {
       const status = await getTaskStatus(normalizedTaskId);
-      const mapped = mapTaskState(String(status.state || ''));
+      const mapped = inferTaskStateFromStatusPayload(
+        status as { info?: Record<string, unknown>; state: string },
+        lastState
+      );
       lastState = mapped;
       if (mapped !== 'QUEUED' && mapped !== 'RUNNING') {
         return mapped;
@@ -146,6 +187,7 @@ export {
   defaultSortDirection,
   nextSortDirection,
   mapTaskState,
+  inferTaskStateFromStatusPayload,
   waitForRuntimeTaskToStop,
   readStatusText,
   resolveTaskBackendValue,

@@ -278,9 +278,15 @@ export function useProjectDetailRuntimeContext() {
       inFlight = true;
       try {
         const shouldUseTaskListView = workflowKey === 'lead_optimization' || workflowKey === 'peptide_design';
+        const includeComponentsForRuntime =
+          workflowKey === 'lead_optimization' && workspaceTab === 'components';
         const rowsRaw =
           shouldUseTaskListView
-            ? await listProjectTasksForList(projectIdValue, { includeComponents: false, includeConfidence: false })
+            ? await listProjectTasksForList(projectIdValue, {
+                includeComponents: includeComponentsForRuntime,
+                includeConfidence: false,
+                includeProperties: false
+              })
             : await listProjectTasksCompact(projectIdValue);
         if (cancelled) return;
         const nextRows = sortProjectTasks(rowsRaw);
@@ -342,15 +348,16 @@ export function useProjectDetailRuntimeContext() {
     };
 
     void refreshTaskRows();
+    const pollIntervalMs = workflowKey === 'lead_optimization' ? 9000 : 4200;
     const timer = window.setInterval(() => {
       void refreshTaskRows();
-    }, 4200);
+    }, pollIntervalMs);
 
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [project?.id, project?.task_id, projectTasks, runtimeTaskSignature, setProject, setProjectTasks, workflowKey]);
+  }, [project?.id, project?.task_id, projectTasks, runtimeTaskSignature, setProject, setProjectTasks, workflowKey, workspaceTab]);
 
   const {
     requestedStatusTaskRow,
@@ -432,9 +439,23 @@ export function useProjectDetailRuntimeContext() {
     isDraftTaskSnapshot: (task) => isDraftTaskSnapshot(task ?? null),
   });
   const leadOptPersistedUploads = useMemo(() => {
-    const sourceTask = statusContextTaskRow || activeResultTask || requestedStatusTaskRow || null;
-    return readTaskLeadOptUploads(sourceTask);
-  }, [statusContextTaskRow, activeResultTask, requestedStatusTaskRow]);
+    const sourceTask = requestedStatusTaskRow || statusContextTaskRow || activeResultTask || null;
+    const hasText = (value: unknown) => String(value || '').trim().length > 0;
+    if (!sourceTask) {
+      return { target: null, ligand: null };
+    }
+    const uploads = readTaskLeadOptUploads(sourceTask);
+    return {
+      target:
+        hasText(uploads.target?.fileName) && hasText(uploads.target?.content)
+          ? { ...uploads.target! }
+          : null,
+      ligand:
+        hasText(uploads.ligand?.fileName) && hasText(uploads.ligand?.content)
+          ? { ...uploads.ligand! }
+          : null
+    };
+  }, [activeResultTask, requestedStatusTaskRow, statusContextTaskRow]);
   const activeConstraintIndex = useMemo(() => {
     if (!draft || !activeConstraintId) return -1;
     return draft.inputConfig.constraints.findIndex((item) => item.id === activeConstraintId);
@@ -732,6 +753,7 @@ export function useProjectDetailRuntimeContext() {
     structureText,
     pullResultForViewer,
     isPeptideDesignWorkflow,
+    isLeadOptimizationWorkflow,
     workspaceTab,
     activeConstraintId,
     selectedContactConstraintIdsLength: selectedContactConstraintIds.length,

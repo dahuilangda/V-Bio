@@ -32,6 +32,7 @@ interface UseLeadOptReferenceFragmentParams {
   onError: (message: string | null) => void;
   scopeKey?: string | null;
   persistedUploads?: LeadOptPersistedUploads;
+  deferHydrationPreview?: boolean;
   onPersistedUploadsChange?: (uploads: LeadOptPersistedUploads) => void;
   initialSelection?: {
     fragmentIds?: string[];
@@ -243,6 +244,7 @@ export function useLeadOptReferenceFragment({
   onError,
   scopeKey,
   persistedUploads,
+  deferHydrationPreview = false,
   onPersistedUploadsChange,
   initialSelection
 }: UseLeadOptReferenceFragmentParams) {
@@ -909,23 +911,42 @@ export function useLeadOptReferenceFragment({
     const targetName = String(persistedUploads?.target?.fileName || '').trim();
     const targetContent = String(persistedUploads?.target?.content || '').trim();
     if (!targetName || !targetContent) return;
-    if (hydratedUploadKeyRef.current === uploadHydrationKey) return;
+    const hydrationModeKey = `${deferHydrationPreview ? 'defer' : 'full'}:${uploadHydrationKey}`;
+    if (hydratedUploadKeyRef.current === hydrationModeKey) return;
     targetUploadReadSeqRef.current += 1;
     ligandUploadReadSeqRef.current += 1;
     const previewRequestId = referencePreviewSeqRef.current + 1;
     referencePreviewSeqRef.current = previewRequestId;
-    hydratedUploadKeyRef.current = uploadHydrationKey;
-    const restoredTarget = new File([targetContent], targetName, { type: 'text/plain' });
+    hydratedUploadKeyRef.current = hydrationModeKey;
     const ligandName = String(persistedUploads?.ligand?.fileName || '').trim();
     const ligandContent = String(persistedUploads?.ligand?.content || '').trim();
-    const restoredLigand =
-      ligandName && ligandContent ? new File([ligandContent], ligandName, { type: 'text/plain' }) : null;
+    const hasLigandUpload = Boolean(ligandName && ligandContent);
+    setPersistedTargetUpload({ fileName: targetName, content: targetContent });
+    setPersistedLigandUpload(hasLigandUpload ? { fileName: ligandName, content: ligandContent } : null);
+    if (deferHydrationPreview) {
+      setReferenceTargetFile(null);
+      setReferenceLigandFile(null);
+      setPocketResidues([]);
+      setLigandAtomContacts([]);
+      setTargetChainSequences({});
+      setReferenceTargetChainId('');
+      setReferenceLigandChainId('');
+      setPreviewStructureText('');
+      setPreviewOverlayStructureText('');
+      setFragmentSourceSmiles('');
+      setFragments([]);
+      setLigandAtomBonds([]);
+      setActiveFragmentId('');
+      setSelectedFragmentIds([]);
+      setReferenceReady(hasLigandUpload);
+      return;
+    }
+    const restoredTarget = new File([targetContent], targetName, { type: 'text/plain' });
+    const restoredLigand = hasLigandUpload ? new File([ligandContent], ligandName, { type: 'text/plain' }) : null;
     setReferenceTargetFile(restoredTarget);
     setReferenceLigandFile(restoredLigand);
-    setPersistedTargetUpload({ fileName: targetName, content: targetContent });
-    setPersistedLigandUpload(restoredLigand ? { fileName: ligandName, content: ligandContent } : null);
     void runReferencePreviewWithFiles(restoredTarget, restoredLigand, previewRequestId);
-  }, [persistedUploads, uploadHydrationKey]);
+  }, [deferHydrationPreview, persistedUploads, uploadHydrationKey]);
 
   const toggleFragmentSelection = (fragmentId: string, options?: { additive?: boolean }) => {
     if (!fragmentId) return;

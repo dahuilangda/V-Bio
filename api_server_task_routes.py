@@ -61,6 +61,12 @@ def register_task_routes(
                     logger.info('Task %s is PENDING or non-existent.', task_id)
         elif task_result.state == 'SUCCESS':
             response['info'] = info if isinstance(info, dict) else {'result': str(info)}
+            if not isinstance(response['info'], dict):
+                response['info'] = {'result': str(response['info'])}
+            if not response['info'].get('result_file'):
+                archive_name = find_result_archive(task_id)
+                if archive_name:
+                    response['info']['result_file'] = archive_name
             response['info']['status'] = 'Task completed successfully.'
             logger.info('Task %s is SUCCESS.', task_id)
         elif task_result.state == 'FAILURE':

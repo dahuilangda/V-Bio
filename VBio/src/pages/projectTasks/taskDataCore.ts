@@ -201,6 +201,10 @@ function readObjectPath(data: Record<string, unknown>, path: string): unknown {
   return current;
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
 function readFirstFiniteMetric(data: Record<string, unknown>, paths: string[]): number | null {
   for (const path of paths) {
     const value = readObjectPath(data, path);
@@ -1592,6 +1596,19 @@ function readLeadOptTaskListMetaFromProperties(task: ProjectTask): Record<string
   return null;
 }
 
+function readLeadOptTaskStateMetaFromProperties(task: ProjectTask): Record<string, unknown> | null {
+  const properties =
+    task.properties && typeof task.properties === 'object' && !Array.isArray(task.properties)
+      ? (task.properties as unknown as Record<string, unknown>)
+      : null;
+  if (!properties) return null;
+  const meta = properties.lead_opt_state;
+  if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+    return meta as Record<string, unknown>;
+  }
+  return null;
+}
+
 function readLeadOptTaskSummary(task: ProjectTask): LeadOptTaskSummary | null {
   const confidence =
     task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
@@ -1601,7 +1618,28 @@ function readLeadOptTaskSummary(task: ProjectTask): LeadOptTaskSummary | null {
     confidence?.lead_opt_mmp && typeof confidence.lead_opt_mmp === 'object' && !Array.isArray(confidence.lead_opt_mmp)
       ? (confidence.lead_opt_mmp as Record<string, unknown>)
       : null;
-  const leadOptMmp = leadOptMmpFromConfidence || readLeadOptTaskListMetaFromProperties(task);
+  const leadOptListMeta = readLeadOptTaskListMetaFromProperties(task);
+  const leadOptStateMeta = readLeadOptTaskStateMetaFromProperties(task);
+  const mergedLeadOptFromProperties: Record<string, unknown> | null =
+    leadOptListMeta || leadOptStateMeta
+      ? {
+          ...(leadOptListMeta || {}),
+          ...(leadOptStateMeta || {}),
+          prediction_summary: {
+            ...asRecord((leadOptListMeta || {}).prediction_summary),
+            ...asRecord((leadOptStateMeta || {}).prediction_summary),
+          },
+          prediction_by_smiles: {
+            ...asRecord((leadOptListMeta || {}).prediction_by_smiles),
+            ...asRecord((leadOptStateMeta || {}).prediction_by_smiles),
+          },
+          reference_prediction_by_backend: {
+            ...asRecord((leadOptListMeta || {}).reference_prediction_by_backend),
+            ...asRecord((leadOptStateMeta || {}).reference_prediction_by_backend),
+          },
+        } as Record<string, unknown>
+      : null;
+  const leadOptMmp = leadOptMmpFromConfidence || mergedLeadOptFromProperties;
   if (!leadOptMmp) return null;
   const queryResultRaw = readObjectPath(leadOptMmp, 'query_result');
   const queryResult =
@@ -2141,6 +2179,7 @@ export {
 export {
   SILENT_CACHE_SYNC_WINDOW_MS,
   mapTaskState,
+  inferTaskStateFromStatusPayload,
   readStatusText,
   resolveTaskBackendValue,
   compareNullableNumber,

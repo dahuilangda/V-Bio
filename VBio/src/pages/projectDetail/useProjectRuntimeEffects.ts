@@ -34,6 +34,7 @@ interface UseProjectRuntimeEffectsInput {
     options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode }
   ) => Promise<void>;
   isPeptideDesignWorkflow: boolean;
+  isLeadOptimizationWorkflow: boolean;
   workspaceTab: 'results' | 'basics' | 'components' | 'constraints';
   activeConstraintId: string | null;
   selectedContactConstraintIdsLength: number;
@@ -53,6 +54,7 @@ export function useProjectRuntimeEffects({
   structureText,
   pullResultForViewer,
   isPeptideDesignWorkflow,
+  isLeadOptimizationWorkflow,
   workspaceTab,
   activeConstraintId,
   selectedContactConstraintIdsLength,
@@ -73,6 +75,7 @@ export function useProjectRuntimeEffects({
 
   useEffect(() => {
     if (isPeptideDesignWorkflow) return;
+    if (isLeadOptimizationWorkflow) return;
     const contextTask = statusContextTaskRow || runtimeResultTask;
     const contextTaskId = String(contextTask?.task_id || '').trim();
     if (!contextTaskId) return;
@@ -93,7 +96,8 @@ export function useProjectRuntimeEffects({
     structureTaskId,
     structureText,
     pullResultForViewer,
-    isPeptideDesignWorkflow
+    isPeptideDesignWorkflow,
+    isLeadOptimizationWorkflow
   ]);
 
   useEffect(() => {

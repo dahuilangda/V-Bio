@@ -178,7 +178,8 @@ function stateClass(state: 'SUCCESS' | 'RUNNING' | 'FAILURE' | 'QUEUED' | 'UNSCO
 const BACKEND_OPTIONS: Array<{ key: string; label: string }> = [
   { key: 'boltz', label: 'Boltz2' },
   { key: 'protenix', label: 'Protenix' },
-  { key: 'alphafold3', label: 'AF3' }
+  { key: 'alphafold3', label: 'AF3' },
+  { key: 'pocketxmol', label: 'PocketXMol' }
 ];
 
 function normalizeBackend(value: string): string {
@@ -243,8 +244,9 @@ export function normalizeLeadOptCandidatesUiState(
     value && typeof value === 'object' && !Array.isArray(value)
       ? (value as Record<string, unknown>)
       : {};
+  const preferredDefaultBackend = normalizeBackend(readText(defaultPredictionBackend) || 'boltz');
   return {
-    selectedBackend: normalizeBackend(readText(payload.selectedBackend ?? payload.selected_backend) || defaultPredictionBackend),
+    selectedBackend: normalizeBackend(readText(payload.selectedBackend ?? payload.selected_backend) || preferredDefaultBackend),
     stateFilter: normalizeStateFilter(payload.stateFilter ?? payload.state_filter),
     showAdvanced: normalizeBoolean(payload.showAdvanced ?? payload.show_advanced, false),
     mwMin: readText(payload.mwMin ?? payload.mw_min).trim(),
@@ -292,8 +294,6 @@ const TABLE_CANDIDATE_2D_WIDTH = 288;
 const CARD_CANDIDATE_2D_WIDTH = 190;
 const CARD_PREVIEW_2D_HEIGHT = 166;
 const PREVIEW_2D_HEIGHT = 138;
-const CONFIDENCE_HYDRATION_COOLDOWN_MS = 1800;
-const CONFIDENCE_HYDRATION_GLOBAL_COOLDOWN_MS = 1200;
 
 interface LeadOptCandidatesPanelProps {
   sectionId?: string;
@@ -304,13 +304,13 @@ interface LeadOptCandidatesPanelProps {
   referenceSmiles: string;
   predictionBySmiles: Record<string, LeadOptPredictionRecord>;
   referencePredictionByBackend?: Record<string, LeadOptPredictionRecord>;
+  backendAvailability?: Record<string, boolean>;
   defaultPredictionBackend: string;
   initialUiState?: LeadOptCandidatesUiState | null;
   activeSmiles: string;
   onActiveSmilesChange: (smiles: string) => void;
-  onRunPredictCandidate: (candidateSmiles: string, backend: string) => void;
+  onRunPredictCandidate: (candidateSmiles: string, backend: string, variableAtomIndices?: number[]) => void;
   onOpenPredictionResult: (candidateSmiles: string, highlightAtomIndices?: number[]) => void;
-  onEnsurePredictionResult?: (candidateSmiles: string) => Promise<LeadOptPredictionRecord | null>;
   onUiStateChange?: (state: LeadOptCandidatesUiState) => void;
   onPreviewRenderModeChange?: (mode: CandidatePreviewRenderMode) => void;
   onExitCardMode?: () => void;
@@ -325,13 +325,13 @@ export function LeadOptCandidatesPanel({
   referenceSmiles,
   predictionBySmiles,
   referencePredictionByBackend = {},
+  backendAvailability,
   defaultPredictionBackend,
   initialUiState,
   activeSmiles,
   onActiveSmilesChange,
   onRunPredictCandidate,
   onOpenPredictionResult,
-  onEnsurePredictionResult,
   onUiStateChange,
   onPreviewRenderModeChange,
   onExitCardMode
@@ -372,12 +372,10 @@ export function LeadOptCandidatesPanel({
   const [structureSearchLoading, setStructureSearchLoading] = useState(false);
   const [structureSearchError, setStructureSearchError] = useState<string | null>(null);
   const cardLoadMoreRef = useRef<HTMLDivElement | null>(null);
-  const confidenceHydrationInFlightRef = useRef<Record<string, boolean>>({});
-  const confidenceHydrationAttemptAtRef = useRef<Record<string, number>>({});
-  const confidenceHydrationLastGlobalAtRef = useRef(0);
   const uiStateHydrationSignatureRef = useRef('');
   const uiStateEmitSignatureRef = useRef('');
   const selectedBackendKey = normalizeBackend(selectedBackend);
+  const pocketxAvailable = backendAvailability?.pocketxmol !== false;
 
   const buildUiState = (
     overrides?: Partial<LeadOptCandidatesUiState>
@@ -453,6 +451,12 @@ export function LeadOptCandidatesPanel({
   useEffect(() => {
     setSelectedBackend((prev) => (prev ? prev : normalizeBackend(defaultPredictionBackend)));
   }, [defaultPredictionBackend]);
+
+  useEffect(() => {
+    if (pocketxAvailable) return;
+    if (selectedBackendKey !== 'pocketxmol') return;
+    setSelectedBackend('boltz');
+  }, [pocketxAvailable, selectedBackendKey]);
 
   useEffect(() => {
     if (typeof onUiStateChange !== 'function') return;
@@ -740,42 +744,6 @@ export function LeadOptCandidatesPanel({
     return () => observer.disconnect();
   }, [CARD_BATCH_SIZE, cardMode, hasMoreCardRows, renderedRows.length]);
 
-  useEffect(() => {
-    if (typeof onEnsurePredictionResult !== 'function') return;
-    const visibleRows = cardMode ? cardRows : pageRows;
-    if (visibleRows.length === 0) return;
-    const now = Date.now();
-    if (now - confidenceHydrationLastGlobalAtRef.current < CONFIDENCE_HYDRATION_GLOBAL_COOLDOWN_MS) return;
-
-    const pendingSmiles = visibleRows
-      .map((row) => readText(row.smiles).trim())
-      .filter(Boolean)
-      .filter((smiles) => {
-        const record = predictionForBackend(smiles);
-        if (!record || normalizeState(record.state) !== 'SUCCESS') return false;
-        if ((record.ligandAtomPlddts || []).length > 0) return false;
-        if (confidenceHydrationInFlightRef.current[smiles]) return false;
-        const lastAttempt = Number(confidenceHydrationAttemptAtRef.current[smiles] || 0);
-        return now - lastAttempt >= CONFIDENCE_HYDRATION_COOLDOWN_MS;
-      });
-    if (pendingSmiles.length === 0) return;
-
-    const activeSmilesKey = readText(activeSmiles).trim();
-    const targetSmiles =
-      activeSmilesKey && pendingSmiles.includes(activeSmilesKey) ? activeSmilesKey : pendingSmiles[0];
-    if (!targetSmiles) return;
-
-    confidenceHydrationLastGlobalAtRef.current = now;
-    confidenceHydrationInFlightRef.current[targetSmiles] = true;
-    confidenceHydrationAttemptAtRef.current[targetSmiles] = now;
-    void onEnsurePredictionResult(targetSmiles)
-      .catch(() => null)
-      .finally(() => {
-        delete confidenceHydrationInFlightRef.current[targetSmiles];
-        confidenceHydrationAttemptAtRef.current[targetSmiles] = Date.now();
-      });
-  }, [activeSmiles, cardMode, cardRows, onEnsurePredictionResult, pageRows, predictionBySmiles, selectedBackendKey]);
-
   const physchemFilterFields = [
     { label: 'MW', min: mwMin, max: mwMax, setMin: setMwMin, setMax: setMwMax, minPlaceholder: '250', maxPlaceholder: '550' },
     { label: 'LogP', min: logpMin, max: logpMax, setMin: setLogpMin, setMax: setLogpMax, minPlaceholder: '0.0', maxPlaceholder: '5.0' },
@@ -790,12 +758,14 @@ export function LeadOptCandidatesPanel({
 
   const renderPredictAction = (
     smiles: string,
-    predictionState: 'SUCCESS' | 'RUNNING' | 'FAILURE' | 'QUEUED' | 'UNSCORED'
+    predictionState: 'SUCCESS' | 'RUNNING' | 'FAILURE' | 'QUEUED' | 'UNSCORED',
+    variableAtomIndices: number[]
   ) => {
     const isRunning = predictionState === 'RUNNING';
     const isQueued = predictionState === 'QUEUED';
     const isPending = isRunning || isQueued;
-    const isActionDisabled = isPending || loading || !referenceReady || !smiles;
+    const backendUnavailable = selectedBackendKey === 'pocketxmol' && !pocketxAvailable;
+    const isActionDisabled = isPending || !referenceReady || !smiles || backendUnavailable;
     const buttonClass = [
       'lead-opt-row-action-btn',
       !isPending ? 'lead-opt-row-action-btn-primary' : '',
@@ -808,15 +778,17 @@ export function LeadOptCandidatesPanel({
       ? 'Running'
       : isQueued
         ? 'Queued'
-        : referenceReady
-          ? 'Run structure prediction'
-          : 'Upload reference first';
+      : !referenceReady
+          ? 'Upload reference first'
+          : backendUnavailable
+            ? 'PocketXMol unavailable on backend'
+            : 'Run structure prediction';
     const ariaLabel = isRunning ? 'Running' : isQueued ? 'Queued' : 'Run structure prediction';
     return (
       <button
         type="button"
         className={buttonClass}
-        onClick={isPending ? undefined : () => onRunPredictCandidate(smiles, selectedBackendKey)}
+        onClick={isPending ? undefined : () => onRunPredictCandidate(smiles, selectedBackendKey, variableAtomIndices)}
         disabled={isActionDisabled}
         title={title}
         aria-label={ariaLabel}
@@ -829,7 +801,8 @@ export function LeadOptCandidatesPanel({
   return (
     <section
       id={sectionId}
-      className={`lead-opt-candidates-panel${cardMode ? ' lead-opt-candidates-panel--card-mode' : ''}`}
+      className={`lead-opt-candidates-panel${cardMode ? ' lead-opt-candidates-panel--card-mode' : ''}${loading ? ' is-loading' : ''}`}
+      aria-busy={loading}
     >
       <div className="lead-opt-panel-head">
         <div className="lead-opt-query-toolbar lead-opt-query-toolbar--single-row">
@@ -866,19 +839,21 @@ export function LeadOptCandidatesPanel({
           )}
           <span className="lead-opt-query-toolbar-spacer" />
           <div className="lead-opt-query-toolbar-right">
-            {!cardMode ? (
-              <select
-                className="lead-opt-backend-select lead-opt-backend-select--engine"
-                value={selectedBackend}
-                onChange={(event) => setSelectedBackend(normalizeBackend(event.target.value))}
-              >
-                {BACKEND_OPTIONS.map((option) => (
-                  <option key={option.key} value={option.key}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            ) : null}
+            <select
+              className="lead-opt-backend-select lead-opt-backend-select--engine"
+              value={selectedBackend}
+              onChange={(event) => setSelectedBackend(normalizeBackend(event.target.value))}
+            >
+              {BACKEND_OPTIONS.map((option) => (
+                <option
+                  key={option.key}
+                  value={option.key}
+                  disabled={option.key === 'pocketxmol' && !pocketxAvailable}
+                >
+                  {option.label}
+                </option>
+              ))}
+            </select>
             <div className="lead-opt-render-mode-switch" role="tablist" aria-label="2D preview render mode">
               <button
                 type="button"
@@ -1069,14 +1044,7 @@ export function LeadOptCandidatesPanel({
       ) : null}
 
       {renderedRows.length === 0 ? (
-        loading ? (
-          <div className="lead-opt-loading-state" role="status" aria-live="polite">
-            <span className="lead-opt-loading-spinner" />
-            <span>Building rows...</span>
-          </div>
-        ) : (
-          <p className="muted small">{cardMode ? 'No scored candidates yet.' : 'Run MMP to build results.'}</p>
-        )
+        <p className="muted small">{cardMode ? 'No scored candidates yet.' : 'Run MMP to build results.'}</p>
       ) : (
         cardMode ? (
           <div className="lead-opt-card-list">
@@ -1340,7 +1308,7 @@ export function LeadOptCandidatesPanel({
                         </span>
                       </td>
                       <td className="col-actions" onClick={(event) => event.stopPropagation()}>
-                        {renderPredictAction(smiles, predictionState)}
+                        {renderPredictAction(smiles, predictionState, highlightAtomIndices)}
                       </td>
                     </tr>
                   );

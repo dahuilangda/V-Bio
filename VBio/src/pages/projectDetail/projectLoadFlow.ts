@@ -21,6 +21,58 @@ import {
   sortProjectTasks,
 } from './projectDraftUtils';
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function readText(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  return String(value);
+}
+
+function hasLeadOptResultPayload(value: unknown): boolean {
+  const row = asRecord(value);
+  const confidence = asRecord(row.confidence);
+  const leadOptMmp = asRecord(confidence.lead_opt_mmp);
+  const queryResult = asRecord(leadOptMmp.query_result);
+  const leadOptMeta = asRecord(asRecord(row.properties).lead_opt_list);
+  const metaPredictionSummary = asRecord(leadOptMeta.prediction_summary);
+
+  const queryId =
+    readText(leadOptMmp.query_id || queryResult.query_id).trim() ||
+    readText(leadOptMeta.query_id).trim();
+  if (queryId) return true;
+
+  const enumeratedCandidates = Array.isArray(leadOptMmp.enumerated_candidates)
+    ? leadOptMmp.enumerated_candidates
+    : [];
+  if (enumeratedCandidates.length > 0) return true;
+
+  const predictionBySmiles = asRecord(leadOptMmp.prediction_by_smiles);
+  if (Object.keys(predictionBySmiles).length > 0) return true;
+
+  const candidateCount = Number(leadOptMeta.candidate_count);
+  if (Number.isFinite(candidateCount) && candidateCount > 0) return true;
+
+  const bucketCount = Number(leadOptMeta.bucket_count);
+  if (Number.isFinite(bucketCount) && bucketCount > 0) return true;
+
+  const metaCandidates = Array.isArray(leadOptMeta.enumerated_candidates)
+    ? leadOptMeta.enumerated_candidates
+    : [];
+  if (metaCandidates.length > 0) return true;
+
+  const metaPredictionBySmiles = asRecord(leadOptMeta.prediction_by_smiles);
+  if (Object.keys(metaPredictionBySmiles).length > 0) return true;
+
+  const predictionTotal = Number(metaPredictionSummary.total);
+  if (Number.isFinite(predictionTotal) && predictionTotal > 0) return true;
+
+  return false;
+}
+
 export interface LoadedDraftFields {
   taskName: string;
   taskSummary: string;
@@ -150,9 +202,21 @@ export async function loadProjectFlow(params: {
     String(next.structure_name || '').trim() || hasRecordData(next.confidence) || hasRecordData(next.affinity)
   );
 
+  const contextHasLeadOptResult = hasLeadOptResultPayload(defaultContextTask);
+  const projectHasLeadOptResult = hasLeadOptResultPayload(next);
+
   let suggestedWorkspaceTab: 'results' | 'components' | 'basics' | null = null;
   if (!query.get('tab')) {
-    if (requestNewTask && (isPredictionLikeWorkflow || workflowDef.key === 'affinity')) {
+    if (workflowDef.key === 'lead_optimization') {
+      if (requestedTaskRowId) {
+        suggestedWorkspaceTab = 'results';
+      } else {
+        suggestedWorkspaceTab =
+          requestNewTask || (!contextHasLeadOptResult && !projectHasLeadOptResult)
+            ? 'components'
+            : 'results';
+      }
+    } else if (requestNewTask && (isPredictionLikeWorkflow || workflowDef.key === 'affinity')) {
       suggestedWorkspaceTab = 'components';
     } else if (isPredictionLikeWorkflow || workflowDef.key === 'affinity') {
       suggestedWorkspaceTab = contextHasResult || projectHasResult ? 'results' : 'components';

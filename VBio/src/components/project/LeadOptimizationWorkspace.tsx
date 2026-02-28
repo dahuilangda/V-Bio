@@ -27,6 +27,7 @@ import {
   type LeadOptPredictionRecord
 } from './leadopt/hooks/useLeadOptMmpQueryMachine';
 import {
+  fetchLeadOptimizationBackendCapabilities,
   fetchLeadOptimizationMmpDatabases,
   type LeadOptMmpDatabaseItem
 } from '../../api/backendApi';
@@ -99,6 +100,31 @@ interface LeadOptPropertyOption {
   label: string;
 }
 
+const AMINO_ACID_THREE_TO_ONE: Record<string, string> = {
+  ALA: 'A',
+  ARG: 'R',
+  ASN: 'N',
+  ASP: 'D',
+  CYS: 'C',
+  GLN: 'Q',
+  GLU: 'E',
+  GLY: 'G',
+  HIS: 'H',
+  ILE: 'I',
+  LEU: 'L',
+  LYS: 'K',
+  MET: 'M',
+  PHE: 'F',
+  PRO: 'P',
+  SER: 'S',
+  THR: 'T',
+  TRP: 'W',
+  TYR: 'Y',
+  VAL: 'V',
+  SEC: 'U',
+  PYL: 'O'
+};
+
 function readText(value: unknown): string {
   if (value === null || value === undefined) return '';
   return String(value);
@@ -128,6 +154,111 @@ function normalizeAtomIndices(value: unknown): number[] {
 function parseCifTokens(line: string): string[] {
   const tokens = line.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
   return tokens.map((token) => token.replace(/^['"]|['"]$/g, ''));
+}
+
+function inferStructureFormatFromFileName(fileName: string): 'cif' | 'pdb' {
+  const normalized = String(fileName || '').trim().toLowerCase();
+  if (normalized.endsWith('.pdb') || normalized.endsWith('.ent')) return 'pdb';
+  return 'cif';
+}
+
+function inferProteinChainSequencesFromPdb(pdbText: string): Record<string, string> {
+  const lines = String(pdbText || '').split(/\r?\n/);
+  const chainResidues = new Map<string, Array<{ seq: number; ins: string; aa: string }>>();
+  const seen = new Set<string>();
+  for (const line of lines) {
+    if (!line.startsWith('ATOM')) continue;
+    const residueName = line.slice(17, 20).trim().toUpperCase();
+    const amino = AMINO_ACID_THREE_TO_ONE[residueName];
+    if (!amino) continue;
+    const chainId = line.slice(21, 22).trim();
+    const seq = Number.parseInt(line.slice(22, 26).trim(), 10);
+    const ins = line.slice(26, 27).trim();
+    if (!chainId || !Number.isFinite(seq)) continue;
+    const key = `${chainId}:${seq}:${ins}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!chainResidues.has(chainId)) chainResidues.set(chainId, []);
+    chainResidues.get(chainId)?.push({ seq, ins, aa: amino });
+  }
+  const out: Record<string, string> = {};
+  for (const [chainId, residues] of chainResidues.entries()) {
+    residues.sort((a, b) => {
+      if (a.seq !== b.seq) return a.seq - b.seq;
+      return a.ins.localeCompare(b.ins);
+    });
+    const sequence = residues.map((item) => item.aa).join('');
+    if (sequence) out[chainId] = sequence;
+  }
+  return out;
+}
+
+function inferProteinChainSequencesFromCif(cifText: string): Record<string, string> {
+  const lines = String(cifText || '').split(/\r?\n/);
+  const chainResidues = new Map<string, Array<{ seq: number; ins: string; aa: string }>>();
+  const seen = new Set<string>();
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() !== 'loop_') continue;
+    const headers: string[] = [];
+    let j = i + 1;
+    while (j < lines.length && lines[j].trim().startsWith('_')) {
+      headers.push(lines[j].trim());
+      j += 1;
+    }
+    if (headers.length === 0 || !headers.some((item) => item.startsWith('_atom_site.'))) continue;
+    const idx = (name: string) => headers.findIndex((item) => item === name);
+    const groupIdx = idx('_atom_site.group_PDB');
+    const authCompIdx = idx('_atom_site.auth_comp_id');
+    const labelCompIdx = idx('_atom_site.label_comp_id');
+    const authAsymIdx = idx('_atom_site.auth_asym_id');
+    const labelAsymIdx = idx('_atom_site.label_asym_id');
+    const authSeqIdx = idx('_atom_site.auth_seq_id');
+    const labelSeqIdx = idx('_atom_site.label_seq_id');
+    const insIdx = idx('_atom_site.pdbx_PDB_ins_code');
+    for (; j < lines.length; j += 1) {
+      const raw = lines[j].trim();
+      if (!raw) continue;
+      if (raw === '#' || raw === 'loop_' || raw.startsWith('data_') || raw.startsWith('_')) break;
+      const tokens = parseCifTokens(raw);
+      if (tokens.length < headers.length) continue;
+      const group = (groupIdx >= 0 ? tokens[groupIdx] : 'ATOM').trim().toUpperCase();
+      if (group && group !== 'ATOM') continue;
+      const residueName = String((authCompIdx >= 0 ? tokens[authCompIdx] : tokens[labelCompIdx] || '') || '')
+        .trim()
+        .toUpperCase();
+      const amino = AMINO_ACID_THREE_TO_ONE[residueName];
+      if (!amino) continue;
+      const chainId = String((authAsymIdx >= 0 ? tokens[authAsymIdx] : tokens[labelAsymIdx] || '') || '').trim();
+      const seqToken = String((authSeqIdx >= 0 ? tokens[authSeqIdx] : tokens[labelSeqIdx] || '') || '').trim();
+      const ins = String((insIdx >= 0 ? tokens[insIdx] : '') || '').trim();
+      const seq = Number.parseInt(seqToken, 10);
+      if (!chainId || !Number.isFinite(seq)) continue;
+      const key = `${chainId}:${seq}:${ins}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (!chainResidues.has(chainId)) chainResidues.set(chainId, []);
+      chainResidues.get(chainId)?.push({ seq, ins, aa: amino });
+    }
+  }
+  const out: Record<string, string> = {};
+  for (const [chainId, residues] of chainResidues.entries()) {
+    residues.sort((a, b) => {
+      if (a.seq !== b.seq) return a.seq - b.seq;
+      return a.ins.localeCompare(b.ins);
+    });
+    const sequence = residues.map((item) => item.aa).join('');
+    if (sequence) out[chainId] = sequence;
+  }
+  return out;
+}
+
+function inferProteinChainSequencesFromStructure(
+  structureText: string,
+  format: 'cif' | 'pdb'
+): Record<string, string> {
+  if (!String(structureText || '').trim()) return {};
+  if (format === 'pdb') return inferProteinChainSequencesFromPdb(structureText);
+  return inferProteinChainSequencesFromCif(structureText);
 }
 
 function inferLigandAnchorFromPdb(
@@ -247,6 +378,12 @@ export function LeadOptimizationWorkspace({
   const [databaseOptions, setDatabaseOptions] = useState<LeadOptMmpDatabaseItem[]>([]);
   const [selectedDatabaseId, setSelectedDatabaseId] = useState('');
   const [databaseHint, setDatabaseHint] = useState('');
+  const [backendAvailability, setBackendAvailability] = useState<Record<string, boolean>>({
+    boltz: true,
+    alphafold3: true,
+    protenix: true,
+    pocketxmol: true
+  });
 
   const [leftPanelWidth, setLeftPanelWidth] = useState(LEFT_PANEL_DEFAULT);
   const resizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -379,18 +516,34 @@ export function LeadOptimizationWorkspace({
     onError: setError,
     scopeKey: referenceScopeKey || `${targetChain}:${ligandChain}`,
     persistedUploads: persistedReferenceUploads,
+    deferHydrationPreview: viewMode !== 'reference',
     onPersistedUploadsChange: onReferenceUploadsChange,
     initialSelection: initialFragmentSelection
   });
 
-  const effectiveTargetChain = useMemo(
-    () => readText(reference.referenceTargetChainId).trim() || readText(targetChain).trim(),
-    [reference.referenceTargetChainId, targetChain]
-  );
-  const effectiveLigandChain = useMemo(
-    () => readText(reference.referenceLigandChainId).trim() || readText(ligandChain).trim(),
-    [reference.referenceLigandChainId, ligandChain]
-  );
+  const effectiveChains = useMemo(() => {
+    const chainPool = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    const explicitTargetChain = readText(reference.referenceTargetChainId).trim();
+    const explicitLigandChain = readText(reference.referenceLigandChainId).trim();
+    const preferredTargetChain = readText(targetChain).trim();
+    const preferredLigandChain = readText(ligandChain).trim();
+    const normalizedTargetChain = explicitTargetChain || preferredTargetChain || 'A';
+    let normalizedLigandChain = explicitLigandChain || preferredLigandChain;
+    if (!normalizedLigandChain || normalizedLigandChain.toUpperCase() === normalizedTargetChain.toUpperCase()) {
+      const fallbackLigand =
+        chainPool
+          .split('')
+          .find((id) => id.toUpperCase() !== normalizedTargetChain.toUpperCase()) || 'B';
+      normalizedLigandChain = fallbackLigand;
+    }
+    return {
+      targetChain: normalizedTargetChain,
+      ligandChain: normalizedLigandChain
+    };
+  }, [ligandChain, reference.referenceLigandChainId, reference.referenceTargetChainId, targetChain]);
+
+  const effectiveTargetChain = effectiveChains.targetChain;
+  const effectiveLigandChain = effectiveChains.ligandChain;
 
   const mmp = useLeadOptMmpQueryMachine({
     proteinSequence,
@@ -402,8 +555,36 @@ export function LeadOptimizationWorkspace({
     onPredictionStateChange
   });
 
+  useEffect(() => {
+    let cancelled = false;
+    void fetchLeadOptimizationBackendCapabilities()
+      .then((payload) => {
+        if (cancelled) return;
+        const backends = payload?.backends || {};
+        setBackendAvailability({
+          boltz: true,
+          alphafold3: true,
+          protenix: true,
+          pocketxmol: backends.pocketxmol?.available !== false
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setBackendAvailability((prev) => ({
+          boltz: true,
+          alphafold3: true,
+          protenix: true,
+          pocketxmol: prev.pocketxmol ?? true
+        }));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const hydratedSnapshotKeyRef = useRef('');
   const snapshotDatabaseIdRef = useRef('');
+  const lazyLoadedQueryIdRef = useRef('');
 
   useEffect(() => {
     const snapshot = (initialMmpSnapshot || null) as Record<string, unknown> | null;
@@ -479,6 +660,31 @@ export function LeadOptimizationWorkspace({
     queryForm.setQueryProperty
   ]);
 
+  useEffect(() => {
+    if (viewMode !== 'design') return;
+    const snapshot = (initialMmpSnapshot || null) as Record<string, unknown> | null;
+    const queryResult =
+      snapshot && typeof snapshot.query_result === 'object'
+        ? (snapshot.query_result as Record<string, unknown>)
+        : null;
+    const snapshotQueryId = readText(queryResult?.query_id).trim();
+    if (!snapshotQueryId) return;
+    if (lazyLoadedQueryIdRef.current === snapshotQueryId) return;
+    if (mmp.loading) return;
+    if (mmp.enumeratedCandidates.length > 0) return;
+    const activeQueryId = readText(mmp.queryId).trim();
+    if (activeQueryId && activeQueryId !== snapshotQueryId) return;
+    lazyLoadedQueryIdRef.current = snapshotQueryId;
+    void mmp.loadQueryRun(snapshotQueryId);
+  }, [
+    viewMode,
+    initialMmpSnapshot,
+    mmp.enumeratedCandidates.length,
+    mmp.loadQueryRun,
+    mmp.loading,
+    mmp.queryId
+  ]);
+
   const applyDatabaseCatalog = useCallback(
     (catalog: { default_database_id?: string; databases?: LeadOptMmpDatabaseItem[] }) => {
       const visibleReady = Array.isArray(catalog.databases)
@@ -524,8 +730,27 @@ export function LeadOptimizationWorkspace({
   }, [applyDatabaseCatalog]);
 
   const loading = reference.busy || mmp.loading;
-  const canQuery = canEdit && Boolean(reference.effectiveLigandSmiles);
   const fragmentSketchSmiles = reference.fragmentSourceSmiles.trim() || reference.effectiveLigandSmiles.trim();
+  const canQuery = canEdit && Boolean(fragmentSketchSmiles);
+  const persistedReferenceQuerySmiles = useMemo(() => {
+    const snapshot = asRecord(initialMmpSnapshot || null);
+    const selection = asRecord(snapshot.selection);
+    const queryPayload = asRecord(snapshot.query_payload);
+    const queryResult = asRecord(snapshot.query_result);
+    return (
+      readText(selection.query_smiles).trim() ||
+      readText(queryPayload.query_mol).trim() ||
+      readText(queryResult.query_mol).trim() ||
+      ''
+    );
+  }, [initialMmpSnapshot]);
+  const referenceControlSmiles = useMemo(
+    () =>
+      readText(reference.effectiveLigandSmiles).trim() ||
+      fragmentSketchSmiles ||
+      persistedReferenceQuerySmiles,
+    [fragmentSketchSmiles, persistedReferenceQuerySmiles, reference.effectiveLigandSmiles]
+  );
 
   const fragmentById = useMemo(() => {
     const map = new Map<string, LigandFragmentItem>();
@@ -667,14 +892,47 @@ export function LeadOptimizationWorkspace({
   }, [openedResultLigandAnchor, resultViewerOpen]);
   const referenceProteinSequence = useMemo(() => {
     const map = reference.targetChainSequences || {};
+    const targetUploadContent = readText(reference.persistedUploads.target?.content);
+    const targetUploadFileName = readText(reference.persistedUploads.target?.fileName).trim();
+    const uploadFormat = inferStructureFormatFromFileName(targetUploadFileName || 'reference_target.cif');
+    const parsedFromUpload = inferProteinChainSequencesFromStructure(targetUploadContent, uploadFormat);
     const direct = readText((map as Record<string, unknown>)[effectiveTargetChain]).replace(/\s+/g, '').trim();
     if (direct) return direct;
+    const parsedDirect = readText((parsedFromUpload as Record<string, unknown>)[effectiveTargetChain]).replace(/\s+/g, '').trim();
+    if (parsedDirect) return parsedDirect;
     for (const value of Object.values(map as Record<string, unknown>)) {
       const sequence = readText(value).replace(/\s+/g, '').trim();
       if (sequence) return sequence;
     }
+    for (const value of Object.values(parsedFromUpload as Record<string, unknown>)) {
+      const sequence = readText(value).replace(/\s+/g, '').trim();
+      if (sequence) return sequence;
+    }
     return '';
-  }, [effectiveTargetChain, reference.targetChainSequences]);
+  }, [
+    effectiveTargetChain,
+    reference.persistedUploads.target?.content,
+    reference.persistedUploads.target?.fileName,
+    reference.targetChainSequences
+  ]);
+  const templateStructureTextForPrediction = useMemo(() => {
+    const previewTemplate = readText(reference.previewStructureText).trim();
+    if (previewTemplate) return previewTemplate;
+    if (referenceProteinSequence) return '';
+    return readText(reference.persistedUploads.target?.content).trim();
+  }, [reference.persistedUploads.target?.content, reference.previewStructureText, referenceProteinSequence]);
+  const templateStructureFormatForPrediction = useMemo<'cif' | 'pdb'>(() => {
+    const previewTemplate = readText(reference.previewStructureText).trim();
+    if (previewTemplate) {
+      return reference.previewStructureFormat === 'pdb' ? 'pdb' : 'cif';
+    }
+    const targetUploadFileName = readText(reference.persistedUploads.target?.fileName).trim();
+    return inferStructureFormatFromFileName(targetUploadFileName || 'reference_target.cif');
+  }, [
+    reference.persistedUploads.target?.fileName,
+    reference.previewStructureFormat,
+    reference.previewStructureText
+  ]);
 
   useEffect(() => {
     if (candidateSmilesList.length === 0) {
@@ -746,32 +1004,6 @@ export function LeadOptimizationWorkspace({
   const handlePreviewRenderModeChange = useCallback((mode: CandidatePreviewRenderMode) => {
     setViewerPreviewRenderMode(mode);
   }, []);
-
-  useEffect(() => {
-    if (effectiveViewMode !== 'design') return;
-    const backendKey = readText(resultsUiState.selectedBackend).trim().toLowerCase();
-    if (!backendKey) return;
-    const record = mmp.referencePredictionByBackend[backendKey];
-    if (!record) return;
-    if (String(record.state || '').toUpperCase() !== 'SUCCESS') return;
-    if (readText(record.structureText).trim() && record.pairIptmResolved === true) return;
-
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      if (cancelled) return;
-      void mmp.ensureReferencePredictionResult(backendKey);
-    }, 220);
-
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [
-    effectiveViewMode,
-    mmp.ensureReferencePredictionResult,
-    mmp.referencePredictionByBackend,
-    resultsUiState.selectedBackend
-  ]);
 
   const runMmpQuery = useCallback(async () => {
     const variableItems = queryForm.buildVariableItems(
@@ -1098,40 +1330,55 @@ export function LeadOptimizationWorkspace({
               enumeratedCandidates={mmp.enumeratedCandidates}
               loading={loading}
               referenceReady={reference.referenceReady}
-              referenceSmiles={reference.effectiveLigandSmiles}
+              referenceSmiles={referenceControlSmiles}
               predictionBySmiles={mmp.predictionBySmiles}
               referencePredictionByBackend={mmp.referencePredictionByBackend}
+              backendAvailability={backendAvailability}
               defaultPredictionBackend={backend}
               initialUiState={resultsUiState}
               activeSmiles={activeSmiles}
               onActiveSmilesChange={setActiveSmiles}
-              onRunPredictCandidate={(candidateSmiles, predictionBackend) => {
-                const referenceCandidateSmiles = readText(reference.effectiveLigandSmiles).trim();
+              onRunPredictCandidate={(candidateSmiles, predictionBackend, variableAtomIndices) => {
+                const referenceCandidateSmiles = readText(referenceControlSmiles).trim();
+                const normalizedVariableAtomIndices = normalizeAtomIndices(variableAtomIndices);
+                const effectiveVariableAtomIndices =
+                  normalizedVariableAtomIndices.length > 0
+                    ? normalizedVariableAtomIndices
+                    : selectedFragmentAtomIndices;
                 if (referenceCandidateSmiles) {
                   void mmp.runPredictReferenceForBackend({
                     candidateSmiles: referenceCandidateSmiles,
                     referenceReady: reference.referenceReady,
                     referenceProteinSequence,
-                    referenceTemplateStructureText: reference.previewStructureText,
-                    referenceTemplateFormat: reference.previewStructureFormat,
+                    referenceTemplateStructureText: templateStructureTextForPrediction,
+                    referenceTemplateFormat: templateStructureFormatForPrediction,
                     backend: predictionBackend,
-                    pocketResidues: pocketPayload
+                    pocketResidues: predictionBackend === 'pocketxmol' ? [] : pocketPayload,
+                    variableAtomIndices: effectiveVariableAtomIndices,
+                    referenceTargetFilename: readText(reference.persistedUploads.target?.fileName).trim(),
+                    referenceTargetFileContent: readText(reference.persistedUploads.target?.content),
+                    referenceLigandFilename: readText(reference.persistedUploads.ligand?.fileName).trim(),
+                    referenceLigandFileContent: readText(reference.persistedUploads.ligand?.content)
                   });
                 }
                 void mmp.runPredictCandidate({
                   candidateSmiles,
                   referenceReady: reference.referenceReady,
                   referenceProteinSequence,
-                  referenceTemplateStructureText: reference.previewStructureText,
-                  referenceTemplateFormat: reference.previewStructureFormat,
+                  referenceTemplateStructureText: templateStructureTextForPrediction,
+                  referenceTemplateFormat: templateStructureFormatForPrediction,
                   backend: predictionBackend,
-                  pocketResidues: pocketPayload
+                  pocketResidues: predictionBackend === 'pocketxmol' ? [] : pocketPayload,
+                  variableAtomIndices: effectiveVariableAtomIndices,
+                  referenceTargetFilename: readText(reference.persistedUploads.target?.fileName).trim(),
+                  referenceTargetFileContent: readText(reference.persistedUploads.target?.content),
+                  referenceLigandFilename: readText(reference.persistedUploads.ligand?.fileName).trim(),
+                  referenceLigandFileContent: readText(reference.persistedUploads.ligand?.content)
                 });
               }}
               onOpenPredictionResult={(candidateSmiles, highlightAtomIndices) => {
                 void handleOpenPredictionResult(candidateSmiles, highlightAtomIndices);
               }}
-              onEnsurePredictionResult={mmp.ensurePredictionResult}
               onUiStateChange={handleCandidatesUiStateChange}
               onPreviewRenderModeChange={handlePreviewRenderModeChange}
               onExitCardMode={() => setResultViewerOpen(false)}

@@ -1,0 +1,27 @@
+services:
+  pocketxmol:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pocketxmol:cu128
+    working_dir: /workspace
+    shm_size: "8gb"
+    gpus: all
+    device_cgroup_rules:
+      - "c 195:* rmw"
+      - "c 510:* rmw"
+      - "c 235:* rmw"
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      PXM_CONFIG_TASK: ${PXM_CONFIG_TASK:-configs/sample/examples/dock_smallmol.yml}
+      PXM_CONFIG_MODEL: ${PXM_CONFIG_MODEL:-configs/sample/pxm.yml}
+      PXM_OUTDIR: ${PXM_OUTDIR:-outputs_examples}
+      PXM_DEVICE: ${PXM_DEVICE:-cuda:0}
+      PXM_BATCH_SIZE: ${PXM_BATCH_SIZE:-0}
+    volumes:
+      - ./:/workspace
+      - /tmp:/tmp
+    command:
+      - bash
+      - docker/run_inference.sh

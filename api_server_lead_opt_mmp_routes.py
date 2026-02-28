@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -192,6 +193,55 @@ def _normalize_boolean(raw: Any, default: bool = False) -> bool:
     if token in {"0", "false", "no", "off"}:
         return False
     return bool(default)
+
+
+def _infer_structure_format_from_filename(filename: Any, default: str = "cif") -> str:
+    token = str(filename or "").strip().lower()
+    if token.endswith(".pdb") or token.endswith(".ent"):
+        return "pdb"
+    return "cif" if str(default or "cif").strip().lower() != "pdb" else "pdb"
+
+
+def _normalize_atom_indices(raw: Any) -> List[int]:
+    if not isinstance(raw, list):
+        return []
+    values: List[int] = []
+    seen: set[int] = set()
+    for item in raw:
+        try:
+            idx = int(item)
+        except Exception:
+            continue
+        if idx < 0 or idx in seen:
+            continue
+        seen.add(idx)
+        values.append(idx)
+    values.sort()
+    return values
+
+
+def _detect_pocketxmol_availability() -> tuple[bool, str]:
+    repo_root = Path(__file__).resolve().parent
+    pocket_root_candidates = [repo_root / "PocketXMol", repo_root]
+    pocket_root = None
+    missing_by_candidate: List[str] = []
+    for candidate in pocket_root_candidates:
+        required_paths = [
+            candidate / "scripts" / "run_pocketxmol_docker.sh",
+            candidate / "docker-compose.yml",
+            candidate / "configs" / "sample" / "pxm.yml",
+        ]
+        missing = [str(path.relative_to(repo_root)) for path in required_paths if not path.exists()]
+        if not missing:
+            pocket_root = candidate
+            break
+        missing_by_candidate.extend(missing)
+    if pocket_root is None:
+        dedup_missing = sorted(set(missing_by_candidate))
+        return False, f"Missing PocketXMol files: {', '.join(dedup_missing)}"
+    if shutil.which("docker") is None:
+        return False, "docker command not found in PATH."
+    return True, ""
 
 
 def register_lead_opt_mmp_routes(
@@ -672,10 +722,15 @@ def register_lead_opt_mmp_routes(
         ligand_chain = str(payload.get("ligand_chain") or "L").strip() or "L"
         resolved_target_chain = target_chain
         pocket_residues = payload.get("pocket_residues") if isinstance(payload.get("pocket_residues"), list) else []
+        variable_atom_indices = _normalize_atom_indices(payload.get("variable_atom_indices"))
         reference_template_structure_text = str(payload.get("reference_template_structure_text") or "").strip()
         reference_template_structure_format = str(payload.get("reference_template_structure_format") or "cif").strip().lower()
         if reference_template_structure_format not in {"cif", "pdb"}:
             reference_template_structure_format = "cif"
+        reference_target_filename = str(payload.get("reference_target_filename") or "reference_target.pdb").strip() or "reference_target.pdb"
+        reference_target_file_content = str(payload.get("reference_target_file_content") or "").strip()
+        reference_ligand_filename = str(payload.get("reference_ligand_filename") or "reference_ligand.sdf").strip() or "reference_ligand.sdf"
+        reference_ligand_file_content = str(payload.get("reference_ligand_file_content") or "").strip()
         seed_value = payload.get("seed")
         use_msa_raw = payload.get("use_msa_server", None)
         if use_msa_raw is None:
@@ -686,22 +741,38 @@ def register_lead_opt_mmp_routes(
             use_msa_server = parse_bool(str(use_msa_raw), True)
         priority = str(payload.get("priority") or "high").strip().lower()
 
-        if backend not in ["boltz", "alphafold3", "protenix"]:
-            backend = "boltz"
+        if backend not in ["boltz", "alphafold3", "protenix", "pocketxmol"]:
+            return jsonify({"error": f"Unsupported backend '{backend}' for lead optimization prediction."}), 400
         if not candidate_smiles:
             return jsonify({"error": "'candidate_smiles' is required."}), 400
 
-        has_reference_template = bool(reference_template_structure_text)
-        if not protein_sequence and not has_reference_template:
+        resolved_reference_template_text = reference_template_structure_text
+        resolved_reference_template_format = reference_template_structure_format
+        if backend == "pocketxmol" and reference_target_file_content:
+            resolved_reference_template_text = reference_target_file_content
+            resolved_reference_template_format = _infer_structure_format_from_filename(
+                reference_target_filename,
+                default=reference_template_structure_format,
+            )
+
+        has_reference_template = bool(resolved_reference_template_text)
+        if not protein_sequence and not has_reference_template and backend != "pocketxmol":
             return jsonify({"error": "'protein_sequence' is required."}), 400
+        if backend == "pocketxmol":
+            if not reference_target_file_content:
+                return jsonify({"error": "PocketXMol backend requires 'reference_target_file_content'."}), 400
+            if not reference_ligand_file_content:
+                return jsonify({"error": "PocketXMol backend requires 'reference_ligand_file_content'."}), 400
+            if not variable_atom_indices:
+                return jsonify({"error": "PocketXMol backend requires non-empty 'variable_atom_indices'."}), 400
 
         normalized_protein_sequence = str(protein_sequence or "").replace("\n", "").replace(" ", "").strip()
         normalized_pocket_residues = pocket_residues
 
         if has_reference_template:
             residue_index_map, chain_lengths, chain_sequences = _build_chain_residue_index_map(
-                reference_template_structure_text,
-                reference_template_structure_format,
+                resolved_reference_template_text,
+                resolved_reference_template_format,
             )
             if chain_sequences:
                 resolved_target_chain = _select_target_chain_for_template(
@@ -737,6 +808,13 @@ def register_lead_opt_mmp_routes(
                         len(normalized_pocket_residues),
                     )
 
+        if backend == "pocketxmol":
+            # PocketXMol path does not consume pocket residue constraints from lead-opt YAML.
+            normalized_pocket_residues = []
+            if not normalized_protein_sequence:
+                # Keep YAML construction valid even if uploaded structure sequence parsing fails.
+                normalized_protein_sequence = "A"
+
         if normalized_protein_sequence and normalized_pocket_residues:
             sequence_len = len(normalized_protein_sequence)
             valid_rows: List[Dict[str, Any]] = []
@@ -771,7 +849,7 @@ def register_lead_opt_mmp_routes(
                         )
                     }
                 ), 400
-        if pocket_residues and not normalized_pocket_residues:
+        if backend != "pocketxmol" and pocket_residues and not normalized_pocket_residues:
             return jsonify({"error": "No valid pocket residues available after template mapping."}), 400
 
         ligand_chain = ligand_chain or "L"
@@ -807,16 +885,28 @@ def register_lead_opt_mmp_routes(
             "seed": parse_int(str(seed_value), None) if seed_value is not None else None,
         }
         if has_reference_template and backend in {"boltz", "alphafold3"}:
-            template_file_name = f"leadopt_reference_template.{reference_template_structure_format}"
+            template_file_name = f"leadopt_reference_template.{resolved_reference_template_format}"
             predict_args["template_inputs"] = [
                 {
-                    "content_base64": base64.b64encode(reference_template_structure_text.encode("utf-8")).decode("ascii"),
-                    "format": reference_template_structure_format,
+                    "content_base64": base64.b64encode(resolved_reference_template_text.encode("utf-8")).decode("ascii"),
+                    "format": resolved_reference_template_format,
                     "file_name": template_file_name,
                     "template_chain_id": resolved_target_chain,
                     "target_chain_ids": [resolved_target_chain],
                 }
             ]
+        if backend == "pocketxmol":
+            predict_args["pocketxmol_inputs"] = {
+                "candidate_smiles": candidate_smiles,
+                "variable_atom_indices": variable_atom_indices,
+                "reference_target_filename": reference_target_filename,
+                "reference_target_format": _infer_structure_format_from_filename(reference_target_filename, default="cif"),
+                "reference_target_content_base64": base64.b64encode(reference_target_file_content.encode("utf-8")).decode("ascii"),
+                "reference_ligand_filename": reference_ligand_filename,
+                "reference_ligand_content_base64": base64.b64encode(reference_ligand_file_content.encode("utf-8")).decode("ascii"),
+                "target_chain": resolved_target_chain,
+                "ligand_chain": ligand_chain,
+            }
         target_queue = config_module.HIGH_PRIORITY_QUEUE if priority == "high" else config_module.DEFAULT_QUEUE
         try:
             task = predict_task.apply_async(args=[predict_args], queue=target_queue)
@@ -828,6 +918,8 @@ def register_lead_opt_mmp_routes(
         if normalized_pocket_residues:
             if backend in {"boltz", "protenix"}:
                 applied_constraint_type = "pocket"
+        if backend == "pocketxmol" and variable_atom_indices:
+            applied_constraint_type = "variable_atoms"
 
         return jsonify(
             {
@@ -837,8 +929,24 @@ def register_lead_opt_mmp_routes(
                 "ligand_chain": ligand_chain,
                 "applied_constraint_type": applied_constraint_type,
                 "pocket_residue_count": len(normalized_pocket_residues),
+                "variable_atom_count": len(variable_atom_indices),
             }
         ), 202
+
+    @app.route('/api/lead_optimization/backends', methods=['GET'])
+    @require_api_token
+    def list_lead_optimization_backends():
+        pocket_available, pocket_reason = _detect_pocketxmol_availability()
+        return jsonify(
+            {
+                "backends": {
+                    "boltz": {"available": True},
+                    "alphafold3": {"available": True},
+                    "protenix": {"available": True},
+                    "pocketxmol": {"available": pocket_available, "reason": pocket_reason},
+                }
+            }
+        )
 
     @app.route('/api/lead_optimization/status/<task_id>', methods=['GET'])
     @require_api_token

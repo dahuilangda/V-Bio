@@ -96,7 +96,12 @@ type PredictionState = 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE';
 type ClusterGroupBy = 'to' | 'from' | 'rule_env_radius';
 const RESULT_HYDRATION_RETRY_BASE_MS = 1200;
 const RESULT_HYDRATION_RETRY_MAX_MS = 10000;
-const ENABLE_BACKGROUND_RESULT_HYDRATION = false;
+const RESULT_HYDRATION_MAX_RETRIES = 8;
+const ENABLE_BACKGROUND_CANDIDATE_RESULT_HYDRATION = false;
+const ENABLE_BACKGROUND_REFERENCE_RESULT_HYDRATION = true;
+const RUNTIME_STATUS_POLL_DELAY_MS = 5000;
+const RUNTIME_STATUS_CANDIDATE_BATCH_SIZE = 2;
+const RUNTIME_STATUS_REFERENCE_BATCH_SIZE = 1;
 
 export interface LeadOptPredictionRecord {
   taskId: string;
@@ -178,9 +183,55 @@ function mapPredictionRuntimeState(raw: unknown): PredictionState | null {
   return null;
 }
 
+function inferPredictionRuntimeStateFromStatusPayload(status: { state?: unknown; info?: unknown }): PredictionState | null {
+  const direct = mapPredictionRuntimeState(status?.state);
+  if (direct === 'SUCCESS' || direct === 'FAILURE' || direct === 'RUNNING') return direct;
+  const info = asRecord(status?.info);
+  const tracker = asRecord(info.tracker);
+  const statusText = readText(info.status || info.message || tracker.details || tracker.status).trim().toLowerCase();
+  if (!statusText) return direct;
+  if (
+    statusText.includes('running') ||
+    statusText.includes('starting') ||
+    statusText.includes('acquiring') ||
+    statusText.includes('preparing') ||
+    statusText.includes('uploading') ||
+    statusText.includes('processing')
+  ) {
+    return 'RUNNING';
+  }
+  if (statusText.includes('failed') || statusText.includes('error') || statusText.includes('timeout')) {
+    return 'FAILURE';
+  }
+  if (statusText.includes('complete') || statusText.includes('completed') || statusText.includes('success')) {
+    return 'SUCCESS';
+  }
+  return direct;
+}
+
+function normalizePredictionStateToken(value: unknown): PredictionState | null {
+  const token = String(value || '').trim().toUpperCase();
+  if (token === 'QUEUED' || token === 'RUNNING' || token === 'SUCCESS' || token === 'FAILURE') return token;
+  return null;
+}
+
+function resolveNonRegressiveRuntimeState(
+  currentStateInput: unknown,
+  incomingState: PredictionState | null
+): PredictionState | null {
+  if (!incomingState) return null;
+  const currentState = normalizePredictionStateToken(currentStateInput);
+  if (!currentState) return incomingState;
+  if (currentState === 'RUNNING' && incomingState === 'QUEUED') return 'RUNNING';
+  if ((currentState === 'SUCCESS' || currentState === 'FAILURE') && (incomingState === 'QUEUED' || incomingState === 'RUNNING')) {
+    return currentState;
+  }
+  return incomingState;
+}
+
 function normalizeBackendKey(value: unknown): string {
   const token = String(value || '').trim().toLowerCase();
-  return token === 'alphafold3' || token === 'protenix' ? token : 'boltz';
+  return token === 'alphafold3' || token === 'protenix' || token === 'pocketxmol' ? token : 'boltz';
 }
 
 function summarizePredictionRecords(records: Record<string, LeadOptPredictionRecord>) {
@@ -249,16 +300,113 @@ function isResultArchivePendingError(error: unknown): boolean {
   if (!message) return false;
   return (
     (message.includes('failed to download result (404)') && message.includes('/results/')) ||
-    message.includes('result file information not found in task metadata or on disk') ||
     message.includes('result file not found on disk') ||
-    message.includes('task has not completed yet')
+    message.includes('task has not completed yet') ||
+    message.includes('state: pending') ||
+    message.includes('"state":"pending"') ||
+    message.includes('state: queued') ||
+    message.includes('"state":"queued"') ||
+    message.includes('state: running') ||
+    message.includes('"state":"running"')
   );
+}
+
+function isResultArchiveMissingError(error: unknown): boolean {
+  const message = String(error instanceof Error ? error.message : error || '').toLowerCase();
+  if (!message) return false;
+  return message.includes('result file information not found in task metadata or on disk');
+}
+
+function buildMissingResultArchiveMessage(taskId: string): string {
+  const normalizedTaskId = readText(taskId).trim();
+  return normalizedTaskId
+    ? `Result archive missing for task ${normalizedTaskId}.`
+    : 'Result archive missing for this task.';
+}
+
+function inferPendingRuntimeStateFromError(error: unknown): PredictionState {
+  const message = String(error instanceof Error ? error.message : error || '').toLowerCase();
+  if (!message) return 'RUNNING';
+  if (message.includes('state: success') || message.includes('"state":"success"')) return 'SUCCESS';
+  if (
+    message.includes('state: pending') ||
+    message.includes('"state":"pending"') ||
+    message.includes('state: queued') ||
+    message.includes('"state":"queued"') ||
+    message.includes('received') ||
+    message.includes('retry')
+  ) {
+    return 'QUEUED';
+  }
+  return 'RUNNING';
+}
+
+function extractPredictionMetricsFromStatusInfo(
+  statusInfoInput: unknown,
+  targetChain: string,
+  ligandChain: string
+): {
+  pairIptm: number | null;
+  pairPae: number | null;
+  ligandPlddt: number | null;
+  ligandAtomPlddts: number[];
+  hasMetrics: boolean;
+} {
+  const statusInfo = asRecord(statusInfoInput);
+  const confidence = asRecord(statusInfo.confidence);
+  const affinity = asRecord(statusInfo.affinity);
+  const pairIptm = findPairIptm(confidence, targetChain, ligandChain) ?? findPairIptm(affinity, targetChain, ligandChain);
+  const pairPae = findPairPae(confidence, targetChain, ligandChain) ?? findPairPae(affinity, targetChain, ligandChain);
+  const ligandAtomPlddts = findLigandAtomPlddts(confidence, ligandChain);
+  const ligandPlddt = mean(ligandAtomPlddts);
+  const hasMetrics = pairIptm !== null || pairPae !== null || ligandPlddt !== null || ligandAtomPlddts.length > 0;
+  return {
+    pairIptm,
+    pairPae,
+    ligandPlddt,
+    ligandAtomPlddts,
+    hasMetrics
+  };
 }
 
 function computeHydrationRetryDelayMs(attempt: number): number {
   const safeAttempt = Math.max(0, Math.min(6, attempt));
   const delay = RESULT_HYDRATION_RETRY_BASE_MS * (2 ** safeAttempt);
   return Math.min(RESULT_HYDRATION_RETRY_MAX_MS, delay);
+}
+
+function unresolvedPredictionSort(
+  left: [string, LeadOptPredictionRecord],
+  right: [string, LeadOptPredictionRecord]
+): number {
+  const leftState = String(left[1]?.state || '').toUpperCase();
+  const rightState = String(right[1]?.state || '').toUpperCase();
+  const leftPriority = leftState === 'RUNNING' ? 0 : 1;
+  const rightPriority = rightState === 'RUNNING' ? 0 : 1;
+  if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+  return String(left[0] || '').localeCompare(String(right[0] || ''));
+}
+
+function sliceRoundRobin<T>(
+  entries: T[],
+  limit: number,
+  cursor: number
+): { items: T[]; nextCursor: number } {
+  if (!Array.isArray(entries) || entries.length === 0 || limit <= 0) {
+    return { items: [], nextCursor: 0 };
+  }
+  if (entries.length <= limit) {
+    return { items: entries, nextCursor: 0 };
+  }
+  const safeCursor = ((cursor % entries.length) + entries.length) % entries.length;
+  const out: T[] = [];
+  for (let i = 0; i < Math.min(limit, entries.length); i += 1) {
+    out.push(entries[(safeCursor + i) % entries.length]);
+  }
+  return {
+    items: out,
+    nextCursor: (safeCursor + limit) % entries.length
+  };
 }
 
 function readText(value: unknown): string {
@@ -662,6 +810,8 @@ export function useLeadOptMmpQueryMachine({
   const referenceHydrationRetryCountRef = useRef<Record<string, number>>({});
   const referenceHydrationRetryTimerRef = useRef<Record<string, number>>({});
   const referenceHydrationInFlightRef = useRef<Set<string>>(new Set());
+  const predictionRuntimePollCursorRef = useRef(0);
+  const referenceRuntimePollCursorRef = useRef(0);
 
   useEffect(() => {
     return () => {
@@ -689,15 +839,21 @@ export function useLeadOptMmpQueryMachine({
 
   useEffect(() => {
     if (!runtimeStatusPollingEnabled) return;
-    const pendingEntries = Object.entries(predictionBySmiles)
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+    const pendingEntriesAll = Object.entries(predictionBySmiles)
       .filter(([, record]) => {
         const state = String(record.state || '').toUpperCase();
         if (state !== 'QUEUED' && state !== 'RUNNING') return false;
         const taskId = readText(record.taskId).trim();
         return taskId.length > 0 && !taskId.startsWith('local:');
       })
-      .sort((a, b) => Number(a[1]?.updatedAt || 0) - Number(b[1]?.updatedAt || 0))
-      .slice(0, 8);
+      .sort(unresolvedPredictionSort);
+    const { items: pendingEntries, nextCursor } = sliceRoundRobin(
+      pendingEntriesAll,
+      RUNTIME_STATUS_CANDIDATE_BATCH_SIZE,
+      predictionRuntimePollCursorRef.current
+    );
+    predictionRuntimePollCursorRef.current = nextCursor;
     if (pendingEntries.length === 0) return;
 
     let cancelled = false;
@@ -708,8 +864,9 @@ export function useLeadOptMmpQueryMachine({
           try {
             const status = await getTaskStatus(record.taskId);
             if (cancelled) return;
-            const runtimeState = mapPredictionRuntimeState(status.state);
+            const runtimeState = inferPredictionRuntimeStateFromStatusPayload(status);
             if (runtimeState === 'SUCCESS') {
+              const metrics = extractPredictionMetricsFromStatusInfo(status.info, targetChain, ligandChain);
               const retryTimer = predictionHydrationRetryTimerRef.current[smiles];
               if (retryTimer) {
                 window.clearTimeout(retryTimer);
@@ -721,6 +878,15 @@ export function useLeadOptMmpQueryMachine({
                 [smiles]: {
                   ...(prev[smiles] || record),
                   state: 'SUCCESS',
+                  ...(metrics.hasMetrics
+                    ? {
+                        pairIptm: metrics.pairIptm,
+                        pairPae: metrics.pairPae,
+                        pairIptmResolved: true,
+                        ligandPlddt: metrics.ligandPlddt,
+                        ligandAtomPlddts: metrics.ligandAtomPlddts
+                      }
+                    : {}),
                   error: '',
                   updatedAt: Date.now()
                 }
@@ -749,42 +915,24 @@ export function useLeadOptMmpQueryMachine({
             if (runtimeState !== 'QUEUED' && runtimeState !== 'RUNNING') continue;
             setPredictionBySmiles((prev) => {
               const current = prev[smiles] || record;
-              if (String(current.state || '').toUpperCase() === runtimeState) {
-                return {
-                  ...prev,
-                  [smiles]: {
-                    ...current,
-                    updatedAt: Date.now()
-                  }
-                };
-              }
+              const nextRuntimeState = resolveNonRegressiveRuntimeState(current.state, runtimeState);
+              if (!nextRuntimeState) return prev;
+              if (String(current.state || '').toUpperCase() === nextRuntimeState) return prev;
               return {
                 ...prev,
                 [smiles]: {
                   ...current,
-                  state: runtimeState,
+                  state: nextRuntimeState,
                   updatedAt: Date.now()
                 }
               };
             });
           } catch {
-            // On transient status errors, still bump timestamp so polling can rotate
-            // through other queued/running records instead of starving after the first slice.
-            setPredictionBySmiles((prev) => {
-              const current = prev[smiles] || record;
-              if (!current) return prev;
-              return {
-                ...prev,
-                [smiles]: {
-                  ...current,
-                  updatedAt: Date.now()
-                }
-              };
-            });
+            // Keep existing state on transient status errors.
           }
         }
       })();
-    }, 2200);
+    }, RUNTIME_STATUS_POLL_DELAY_MS);
 
     return () => {
       cancelled = true;
@@ -794,15 +942,21 @@ export function useLeadOptMmpQueryMachine({
 
   useEffect(() => {
     if (!runtimeStatusPollingEnabled) return;
-    const pendingEntries = Object.entries(referencePredictionByBackend)
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+    const pendingEntriesAll = Object.entries(referencePredictionByBackend)
       .filter(([, record]) => {
         const state = String(record.state || '').toUpperCase();
         if (state !== 'QUEUED' && state !== 'RUNNING') return false;
         const taskId = readText(record.taskId).trim();
         return taskId.length > 0 && !taskId.startsWith('local:');
       })
-      .sort((a, b) => Number(a[1]?.updatedAt || 0) - Number(b[1]?.updatedAt || 0))
-      .slice(0, 4);
+      .sort(unresolvedPredictionSort);
+    const { items: pendingEntries, nextCursor } = sliceRoundRobin(
+      pendingEntriesAll,
+      RUNTIME_STATUS_REFERENCE_BATCH_SIZE,
+      referenceRuntimePollCursorRef.current
+    );
+    referenceRuntimePollCursorRef.current = nextCursor;
     if (pendingEntries.length === 0) return;
 
     let cancelled = false;
@@ -813,8 +967,9 @@ export function useLeadOptMmpQueryMachine({
           try {
             const status = await getTaskStatus(record.taskId);
             if (cancelled) return;
-            const runtimeState = mapPredictionRuntimeState(status.state);
+            const runtimeState = inferPredictionRuntimeStateFromStatusPayload(status);
             if (runtimeState === 'SUCCESS') {
+              const metrics = extractPredictionMetricsFromStatusInfo(status.info, targetChain, ligandChain);
               const retryTimer = referenceHydrationRetryTimerRef.current[backendKey];
               if (retryTimer) {
                 window.clearTimeout(retryTimer);
@@ -826,6 +981,15 @@ export function useLeadOptMmpQueryMachine({
                 [backendKey]: {
                   ...(prev[backendKey] || record),
                   state: 'SUCCESS',
+                  ...(metrics.hasMetrics
+                    ? {
+                        pairIptm: metrics.pairIptm,
+                        pairPae: metrics.pairPae,
+                        pairIptmResolved: true,
+                        ligandPlddt: metrics.ligandPlddt,
+                        ligandAtomPlddts: metrics.ligandAtomPlddts
+                      }
+                    : {}),
                   error: '',
                   updatedAt: Date.now()
                 }
@@ -854,41 +1018,24 @@ export function useLeadOptMmpQueryMachine({
             if (runtimeState !== 'QUEUED' && runtimeState !== 'RUNNING') continue;
             setReferencePredictionByBackend((prev) => {
               const current = prev[backendKey] || record;
-              if (String(current.state || '').toUpperCase() === runtimeState) {
-                return {
-                  ...prev,
-                  [backendKey]: {
-                    ...current,
-                    updatedAt: Date.now()
-                  }
-                };
-              }
+              const nextRuntimeState = resolveNonRegressiveRuntimeState(current.state, runtimeState);
+              if (!nextRuntimeState) return prev;
+              if (String(current.state || '').toUpperCase() === nextRuntimeState) return prev;
               return {
                 ...prev,
                 [backendKey]: {
                   ...current,
-                  state: runtimeState,
+                  state: nextRuntimeState,
                   updatedAt: Date.now()
                 }
               };
             });
           } catch {
-            // Same rotation strategy for reference predictions.
-            setReferencePredictionByBackend((prev) => {
-              const current = prev[backendKey] || record;
-              if (!current) return prev;
-              return {
-                ...prev,
-                [backendKey]: {
-                  ...current,
-                  updatedAt: Date.now()
-                }
-              };
-            });
+            // Keep existing state on transient status errors.
           }
         }
       })();
-    }, 2200);
+    }, RUNTIME_STATUS_POLL_DELAY_MS);
 
     return () => {
       cancelled = true;
@@ -897,12 +1044,13 @@ export function useLeadOptMmpQueryMachine({
   }, [referencePredictionByBackend, runtimeStatusPollingEnabled]);
 
   useEffect(() => {
-    if (!ENABLE_BACKGROUND_RESULT_HYDRATION) return;
+    if (!ENABLE_BACKGROUND_CANDIDATE_RESULT_HYDRATION) return;
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
     const hydrationEntries = Object.entries(predictionBySmiles)
       .filter(([, record]) => shouldHydratePredictionRecord(record))
       .filter(([smiles]) => !predictionHydrationInFlightRef.current.has(smiles))
       .sort((a, b) => Number(a[1]?.updatedAt || 0) - Number(b[1]?.updatedAt || 0))
-      .slice(0, 3);
+      .slice(0, 1);
     if (hydrationEntries.length === 0) return;
 
     let cancelled = false;
@@ -952,8 +1100,28 @@ export function useLeadOptMmpQueryMachine({
             }
             delete predictionHydrationRetryCountRef.current[smiles];
           } catch (error) {
+            if (isResultArchiveMissingError(error)) {
+              setPredictionBySmiles((prev) => {
+                const current = prev[smiles] || record;
+                if (!current) return prev;
+                return {
+                  ...prev,
+                  [smiles]: {
+                    ...current,
+                    state: 'FAILURE',
+                    error: buildMissingResultArchiveMessage(current.taskId || record.taskId),
+                    updatedAt: Date.now()
+                  }
+                };
+              });
+              continue;
+            }
             if (isResultArchivePendingError(error)) {
               const attempt = Number(predictionHydrationRetryCountRef.current[smiles] || 0) + 1;
+              if (attempt > RESULT_HYDRATION_MAX_RETRIES) {
+                delete predictionHydrationRetryCountRef.current[smiles];
+                continue;
+              }
               predictionHydrationRetryCountRef.current[smiles] = attempt;
               if (!predictionHydrationRetryTimerRef.current[smiles]) {
                 const delayMs = computeHydrationRetryDelayMs(attempt);
@@ -1000,12 +1168,13 @@ export function useLeadOptMmpQueryMachine({
   }, [ligandChain, predictionBySmiles, targetChain]);
 
   useEffect(() => {
-    if (!ENABLE_BACKGROUND_RESULT_HYDRATION) return;
+    if (!ENABLE_BACKGROUND_REFERENCE_RESULT_HYDRATION) return;
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
     const hydrationEntries = Object.entries(referencePredictionByBackend)
       .filter(([, record]) => shouldHydratePredictionRecord(record))
       .filter(([backendKey]) => !referenceHydrationInFlightRef.current.has(backendKey))
       .sort((a, b) => Number(a[1]?.updatedAt || 0) - Number(b[1]?.updatedAt || 0))
-      .slice(0, 2);
+      .slice(0, 1);
     if (hydrationEntries.length === 0) return;
 
     let cancelled = false;
@@ -1055,8 +1224,28 @@ export function useLeadOptMmpQueryMachine({
             }
             delete referenceHydrationRetryCountRef.current[backendKey];
           } catch (error) {
+            if (isResultArchiveMissingError(error)) {
+              setReferencePredictionByBackend((prev) => {
+                const current = prev[backendKey] || record;
+                if (!current) return prev;
+                return {
+                  ...prev,
+                  [backendKey]: {
+                    ...current,
+                    state: 'FAILURE',
+                    error: buildMissingResultArchiveMessage(current.taskId || record.taskId),
+                    updatedAt: Date.now()
+                  }
+                };
+              });
+              continue;
+            }
             if (isResultArchivePendingError(error)) {
               const attempt = Number(referenceHydrationRetryCountRef.current[backendKey] || 0) + 1;
+              if (attempt > RESULT_HYDRATION_MAX_RETRIES) {
+                delete referenceHydrationRetryCountRef.current[backendKey];
+                continue;
+              }
               referenceHydrationRetryCountRef.current[backendKey] = attempt;
               if (!referenceHydrationRetryTimerRef.current[backendKey]) {
                 const delayMs = computeHydrationRetryDelayMs(attempt);
@@ -1521,7 +1710,12 @@ export function useLeadOptMmpQueryMachine({
       referenceProteinSequence,
       referenceTemplateStructureText,
       referenceTemplateFormat,
-      pocketResidues
+      pocketResidues,
+      variableAtomIndices,
+      referenceTargetFilename,
+      referenceTargetFileContent,
+      referenceLigandFilename,
+      referenceLigandFileContent
     }: {
       candidateSmiles: string;
       backend?: string;
@@ -1530,6 +1724,11 @@ export function useLeadOptMmpQueryMachine({
       referenceTemplateStructureText?: string;
       referenceTemplateFormat?: 'cif' | 'pdb';
       pocketResidues: Array<Record<string, unknown>>;
+      variableAtomIndices?: number[];
+      referenceTargetFilename?: string;
+      referenceTargetFileContent?: string;
+      referenceLigandFilename?: string;
+      referenceLigandFileContent?: string;
     }) => {
       const nextSmiles = String(candidateSmiles || '').trim();
       if (!nextSmiles) {
@@ -1538,34 +1737,71 @@ export function useLeadOptMmpQueryMachine({
       if (!referenceReady) {
         throw new Error('Please upload reference target+ligand first.');
       }
+      const selectedBackend = String(backendOverride || backend || 'boltz').trim().toLowerCase();
+      if (!['boltz', 'alphafold3', 'protenix', 'pocketxmol'].includes(selectedBackend)) {
+        throw new Error(`Unsupported backend '${selectedBackend}' for lead optimization prediction.`);
+      }
       const effectiveProteinSequence = String(referenceProteinSequence || '').trim() || String(proteinSequence || '').trim();
-      const templateStructureText = String(referenceTemplateStructureText || '').trim();
-      if (!effectiveProteinSequence && !templateStructureText) {
+      const normalizedReferenceTargetFilename = String(referenceTargetFilename || '').trim();
+      const normalizedReferenceTargetFileContent = String(referenceTargetFileContent || '').trim();
+      const normalizedReferenceLigandFilename = String(referenceLigandFilename || '').trim();
+      const normalizedReferenceLigandFileContent = String(referenceLigandFileContent || '').trim();
+      const explicitTemplateStructureText = String(referenceTemplateStructureText || '').trim();
+      const explicitTemplateFormat = referenceTemplateFormat === 'pdb' ? 'pdb' : 'cif';
+      if (!effectiveProteinSequence && !explicitTemplateStructureText) {
         throw new Error('Protein sequence/template is unavailable. Upload reference target first or provide sequence.');
       }
-      const normalizedTargetChain = String(targetChain || '').trim();
-      const normalizedLigandChain = String(ligandChain || '').trim();
+      let normalizedTargetChain = String(targetChain || '').trim();
+      let normalizedLigandChain = String(ligandChain || '').trim();
       if (!normalizedTargetChain || !normalizedLigandChain) {
         throw new Error('Target chain and ligand chain are required for lead optimization prediction.');
       }
       if (normalizedTargetChain.toUpperCase() === normalizedLigandChain.toUpperCase()) {
-        throw new Error(
-          `Target chain and ligand chain cannot be the same ('${normalizedTargetChain}'). Re-upload reference to resolve chain mapping.`
-        );
+        if (selectedBackend === 'pocketxmol') {
+          throw new Error(
+            `Target chain and ligand chain cannot be the same ('${normalizedTargetChain}'). Re-upload reference to resolve chain mapping.`
+          );
+        }
+        const normalizedTargetUpper = normalizedTargetChain.toUpperCase();
+        normalizedLigandChain = normalizedTargetUpper === 'L' ? 'B' : 'L';
       }
-      const selectedBackend = String(backendOverride || backend || 'boltz').trim().toLowerCase();
       if (selectedBackend === 'protenix' && !effectiveProteinSequence) {
         throw new Error('Protenix backend requires protein sequence. Please provide sequence or use Boltz/AlphaFold3 template mode.');
       }
+      if (selectedBackend === 'pocketxmol') {
+        if (!normalizedReferenceTargetFileContent) {
+          throw new Error('PocketXMol backend requires uploaded reference target file content.');
+        }
+        if (!normalizedReferenceLigandFileContent) {
+          throw new Error('PocketXMol backend requires uploaded reference ligand file content.');
+        }
+        const normalizedVariableIndices = Array.from(
+          new Set(
+            (Array.isArray(variableAtomIndices) ? variableAtomIndices : [])
+              .map((value) => Number(value))
+              .filter((value) => Number.isFinite(value) && value >= 0)
+              .map((value) => Math.floor(value))
+          )
+        );
+        if (normalizedVariableIndices.length === 0) {
+          throw new Error('PocketXMol backend requires variable atom indices from lead-opt selection.');
+        }
+      }
+      const shouldSendPocketReferenceFiles = selectedBackend === 'pocketxmol';
       const taskId = await predictLeadOptimizationCandidate({
         candidateSmiles: nextSmiles,
         proteinSequence: effectiveProteinSequence,
         backend: selectedBackend,
         targetChain: normalizedTargetChain,
         ligandChain: normalizedLigandChain,
-        referenceTemplateStructureText: templateStructureText,
-        referenceTemplateFormat: referenceTemplateFormat === 'pdb' ? 'pdb' : 'cif',
+        referenceTemplateStructureText: explicitTemplateStructureText,
+        referenceTemplateFormat: explicitTemplateFormat,
         pocketResidues,
+        variableAtomIndices,
+        referenceTargetFilename: shouldSendPocketReferenceFiles ? normalizedReferenceTargetFilename : undefined,
+        referenceTargetFileContent: shouldSendPocketReferenceFiles ? normalizedReferenceTargetFileContent : undefined,
+        referenceLigandFilename: shouldSendPocketReferenceFiles ? normalizedReferenceLigandFilename : undefined,
+        referenceLigandFileContent: shouldSendPocketReferenceFiles ? normalizedReferenceLigandFileContent : undefined,
         useMsaServer: true,
         seed: null
       });
@@ -1582,7 +1818,12 @@ export function useLeadOptMmpQueryMachine({
       referenceProteinSequence,
       referenceTemplateStructureText,
       referenceTemplateFormat,
-      pocketResidues
+      pocketResidues,
+      variableAtomIndices,
+      referenceTargetFilename,
+      referenceTargetFileContent,
+      referenceLigandFilename,
+      referenceLigandFileContent
     }: {
       candidateSmiles: string;
       backend?: string;
@@ -1591,6 +1832,11 @@ export function useLeadOptMmpQueryMachine({
       referenceTemplateStructureText?: string;
       referenceTemplateFormat?: 'cif' | 'pdb';
       pocketResidues: Array<Record<string, unknown>>;
+      variableAtomIndices?: number[];
+      referenceTargetFilename?: string;
+      referenceTargetFileContent?: string;
+      referenceLigandFilename?: string;
+      referenceLigandFileContent?: string;
     }) => {
       onError(null);
       setLoading(true);
@@ -1619,7 +1865,12 @@ export function useLeadOptMmpQueryMachine({
           referenceProteinSequence,
           referenceTemplateStructureText,
           referenceTemplateFormat,
-          pocketResidues
+          pocketResidues,
+          variableAtomIndices,
+          referenceTargetFilename,
+          referenceTargetFileContent,
+          referenceLigandFilename,
+          referenceLigandFileContent
         });
         if (typeof onPredictionQueued === 'function') {
           await onPredictionQueued({ taskId, backend: selectedBackend, candidateSmiles: normalizedSmiles });
@@ -1634,21 +1885,33 @@ export function useLeadOptMmpQueryMachine({
         setRuntimeStatusPollingEnabled(true);
       } catch (e) {
         const normalizedSmiles = String(candidateSmiles || '').trim();
-        const previousRecord = predictionBySmiles[normalizedSmiles];
+        const selectedBackend = String(backendOverride || backend || 'boltz').trim().toLowerCase();
+        const message = e instanceof Error ? e.message : 'Candidate prediction failed.';
         setPredictionBySmiles((prev) => {
           const current = prev[normalizedSmiles];
-          if (!current || !String(current.taskId || '').startsWith('local:')) return prev;
-          if (previousRecord) {
+          if (!current) {
             return {
               ...prev,
-              [normalizedSmiles]: previousRecord
+              [normalizedSmiles]: {
+                ...buildQueuedPredictionRecord(`local:failed:${Date.now()}`, selectedBackend),
+                state: 'FAILURE',
+                error: message,
+                updatedAt: Date.now()
+              }
             };
           }
-          const next = { ...prev };
-          delete next[normalizedSmiles];
-          return next;
+          return {
+            ...prev,
+            [normalizedSmiles]: {
+              ...current,
+              backend: selectedBackend,
+              state: 'FAILURE',
+              error: message,
+              updatedAt: Date.now()
+            }
+          };
         });
-        onError(e instanceof Error ? e.message : 'Candidate prediction failed.');
+        onError(message);
       } finally {
         setLoading(false);
       }
@@ -1664,7 +1927,12 @@ export function useLeadOptMmpQueryMachine({
       referenceProteinSequence,
       referenceTemplateStructureText,
       referenceTemplateFormat,
-      pocketResidues
+      pocketResidues,
+      variableAtomIndices,
+      referenceTargetFilename,
+      referenceTargetFileContent,
+      referenceLigandFilename,
+      referenceLigandFileContent
     }: {
       candidateSmiles: string;
       backend?: string;
@@ -1673,6 +1941,11 @@ export function useLeadOptMmpQueryMachine({
       referenceTemplateStructureText?: string;
       referenceTemplateFormat?: 'cif' | 'pdb';
       pocketResidues: Array<Record<string, unknown>>;
+      variableAtomIndices?: number[];
+      referenceTargetFilename?: string;
+      referenceTargetFileContent?: string;
+      referenceLigandFilename?: string;
+      referenceLigandFileContent?: string;
     }) => {
       const selectedBackend = normalizeBackendKey(backendOverride || backend || 'boltz');
       const referenceSmiles = String(candidateSmiles || '').trim();
@@ -1687,7 +1960,13 @@ export function useLeadOptMmpQueryMachine({
       const existingState = String(existing?.state || '').toUpperCase();
       if (existingState === 'QUEUED' || existingState === 'RUNNING') return;
       if (existingState === 'SUCCESS') {
-        if (existing && existing.pairIptmResolved === true && readText(existing.structureText).trim()) return;
+        const hasMetrics =
+          existing.pairIptmResolved === true ||
+          existing.pairIptm !== null ||
+          existing.pairPae !== null ||
+          existing.ligandPlddt !== null ||
+          (Array.isArray(existing.ligandAtomPlddts) && existing.ligandAtomPlddts.length > 0);
+        if (existing && hasMetrics) return;
       }
 
       const localTaskId = `local:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
@@ -1706,7 +1985,12 @@ export function useLeadOptMmpQueryMachine({
           referenceProteinSequence,
           referenceTemplateStructureText,
           referenceTemplateFormat,
-          pocketResidues
+          pocketResidues,
+          variableAtomIndices,
+          referenceTargetFilename,
+          referenceTargetFileContent,
+          referenceLigandFilename,
+          referenceLigandFileContent
         });
         setLastPredictionTaskId(taskId);
         setReferencePredictionByBackend((prev) => ({
@@ -1717,14 +2001,31 @@ export function useLeadOptMmpQueryMachine({
         }));
         setRuntimeStatusPollingEnabled(true);
       } catch (error) {
+        const message = error instanceof Error ? error.message : 'Reference prediction failed.';
         setReferencePredictionByBackend((prev) => {
           const current = prev[selectedBackend];
-          if (!current || !String(current.taskId || '').startsWith('local:')) return prev;
-          const next = { ...prev };
-          delete next[selectedBackend];
-          return next;
+          if (!current) {
+            return {
+              ...prev,
+              [selectedBackend]: {
+                ...buildQueuedPredictionRecord(`local:failed:${Date.now()}`, selectedBackend),
+                state: 'FAILURE',
+                error: message,
+                updatedAt: Date.now()
+              }
+            };
+          }
+          return {
+            ...prev,
+            [selectedBackend]: {
+              ...current,
+              state: 'FAILURE',
+              error: message,
+              updatedAt: Date.now()
+            }
+          };
         });
-        onError(error instanceof Error ? error.message : 'Reference prediction failed.');
+        onError(message);
       }
     },
     [backend, onError, referencePredictionByBackend, submitPredictCandidateTask]
@@ -1838,6 +2139,41 @@ export function useLeadOptMmpQueryMachine({
       const taskId = readText(existing.taskId).trim();
       if (!taskId) return existing;
       try {
+        const status = await getTaskStatus(taskId);
+        const runtimeState = inferPredictionRuntimeStateFromStatusPayload(status);
+        if (runtimeState === 'QUEUED' || runtimeState === 'RUNNING') {
+          const nextRuntimeState = resolveNonRegressiveRuntimeState(existing.state, runtimeState);
+          if (!nextRuntimeState) return existing;
+          const nextRecord: LeadOptPredictionRecord = {
+            ...existing,
+            state: nextRuntimeState,
+            error: '',
+            updatedAt: Date.now()
+          };
+          setPredictionBySmiles((prev) => ({
+            ...prev,
+            [normalizedSmiles]: nextRecord
+          }));
+          return nextRecord;
+        }
+        if (runtimeState === 'FAILURE') {
+          const errorText = readText(asRecord(status.info).error || asRecord(status.info).message || status.state);
+          const nextRecord: LeadOptPredictionRecord = {
+            ...existing,
+            state: 'FAILURE',
+            error: errorText || 'Prediction failed.',
+            updatedAt: Date.now()
+          };
+          setPredictionBySmiles((prev) => ({
+            ...prev,
+            [normalizedSmiles]: nextRecord
+          }));
+          return nextRecord;
+        }
+      } catch {
+        // Ignore transient status failures and fall through to result download.
+      }
+      try {
         const blob = await downloadResultBlob(taskId, { mode: 'view' });
         const parsed = await parseResultBundle(blob);
         const resultPayload = extractPredictionResultPayload(parsed, targetChain, ligandChain);
@@ -1871,8 +2207,36 @@ export function useLeadOptMmpQueryMachine({
         delete predictionHydrationRetryCountRef.current[normalizedSmiles];
         return nextRecord;
       } catch (error) {
+        if (isResultArchiveMissingError(error)) {
+          const nextRecord: LeadOptPredictionRecord = {
+            ...existing,
+            state: 'FAILURE',
+            error: buildMissingResultArchiveMessage(taskId),
+            updatedAt: Date.now()
+          };
+          setPredictionBySmiles((prev) => ({
+            ...prev,
+            [normalizedSmiles]: nextRecord
+          }));
+          return nextRecord;
+        }
         if (isResultArchivePendingError(error)) {
+          const pendingState = resolveNonRegressiveRuntimeState(existing.state, inferPendingRuntimeStateFromError(error)) || 'RUNNING';
+          const nextRecord: LeadOptPredictionRecord = {
+            ...existing,
+            state: pendingState,
+            error: '',
+            updatedAt: Date.now()
+          };
+          setPredictionBySmiles((prev) => ({
+            ...prev,
+            [normalizedSmiles]: nextRecord
+          }));
           const attempt = Number(predictionHydrationRetryCountRef.current[normalizedSmiles] || 0) + 1;
+          if (attempt > RESULT_HYDRATION_MAX_RETRIES) {
+            delete predictionHydrationRetryCountRef.current[normalizedSmiles];
+            return nextRecord;
+          }
           predictionHydrationRetryCountRef.current[normalizedSmiles] = attempt;
           if (!predictionHydrationRetryTimerRef.current[normalizedSmiles]) {
             const delayMs = computeHydrationRetryDelayMs(attempt);
@@ -1885,13 +2249,15 @@ export function useLeadOptMmpQueryMachine({
                   ...prev,
                   [normalizedSmiles]: {
                     ...current,
+                    state: pendingState,
+                    error: '',
                     updatedAt: Date.now()
                   }
                 };
               });
             }, delayMs);
           }
-          return existing;
+          return nextRecord;
         }
         onError(error instanceof Error ? error.message : 'Failed to load prediction result.');
         return existing;
@@ -1912,6 +2278,41 @@ export function useLeadOptMmpQueryMachine({
 
       const taskId = readText(existing.taskId).trim();
       if (!taskId) return existing;
+      try {
+        const status = await getTaskStatus(taskId);
+        const runtimeState = inferPredictionRuntimeStateFromStatusPayload(status);
+        if (runtimeState === 'QUEUED' || runtimeState === 'RUNNING') {
+          const nextRuntimeState = resolveNonRegressiveRuntimeState(existing.state, runtimeState);
+          if (!nextRuntimeState) return existing;
+          const nextRecord: LeadOptPredictionRecord = {
+            ...existing,
+            state: nextRuntimeState,
+            error: '',
+            updatedAt: Date.now()
+          };
+          setReferencePredictionByBackend((prev) => ({
+            ...prev,
+            [backendKey]: nextRecord
+          }));
+          return nextRecord;
+        }
+        if (runtimeState === 'FAILURE') {
+          const errorText = readText(asRecord(status.info).error || asRecord(status.info).message || status.state);
+          const nextRecord: LeadOptPredictionRecord = {
+            ...existing,
+            state: 'FAILURE',
+            error: errorText || 'Prediction failed.',
+            updatedAt: Date.now()
+          };
+          setReferencePredictionByBackend((prev) => ({
+            ...prev,
+            [backendKey]: nextRecord
+          }));
+          return nextRecord;
+        }
+      } catch {
+        // Ignore transient status failures and fall through to result download.
+      }
       try {
         const blob = await downloadResultBlob(taskId, { mode: 'view' });
         const parsed = await parseResultBundle(blob);
@@ -1946,8 +2347,36 @@ export function useLeadOptMmpQueryMachine({
         delete referenceHydrationRetryCountRef.current[backendKey];
         return nextRecord;
       } catch (error) {
+        if (isResultArchiveMissingError(error)) {
+          const nextRecord: LeadOptPredictionRecord = {
+            ...existing,
+            state: 'FAILURE',
+            error: buildMissingResultArchiveMessage(taskId),
+            updatedAt: Date.now()
+          };
+          setReferencePredictionByBackend((prev) => ({
+            ...prev,
+            [backendKey]: nextRecord
+          }));
+          return nextRecord;
+        }
         if (isResultArchivePendingError(error)) {
+          const pendingState = resolveNonRegressiveRuntimeState(existing.state, inferPendingRuntimeStateFromError(error)) || 'RUNNING';
+          const nextRecord: LeadOptPredictionRecord = {
+            ...existing,
+            state: pendingState,
+            error: '',
+            updatedAt: Date.now()
+          };
+          setReferencePredictionByBackend((prev) => ({
+            ...prev,
+            [backendKey]: nextRecord
+          }));
           const attempt = Number(referenceHydrationRetryCountRef.current[backendKey] || 0) + 1;
+          if (attempt > RESULT_HYDRATION_MAX_RETRIES) {
+            delete referenceHydrationRetryCountRef.current[backendKey];
+            return nextRecord;
+          }
           referenceHydrationRetryCountRef.current[backendKey] = attempt;
           if (!referenceHydrationRetryTimerRef.current[backendKey]) {
             const delayMs = computeHydrationRetryDelayMs(attempt);
@@ -1960,13 +2389,15 @@ export function useLeadOptMmpQueryMachine({
                   ...prev,
                   [backendKey]: {
                     ...current,
+                    state: pendingState,
+                    error: '',
                     updatedAt: Date.now()
                   }
                 };
               });
             }, delayMs);
           }
-          return existing;
+          return nextRecord;
         }
         onError(error instanceof Error ? error.message : 'Failed to load prediction result.');
         return existing;

@@ -6,6 +6,7 @@ import { deleteProjectTask, getProjectTaskById, updateProject, updateProjectTask
 import { getWorkflowDefinition } from '../../utils/workflows';
 import {
   isProjectTaskRow,
+  readLeadOptTaskSummary,
   sanitizeTaskRows,
   waitForRuntimeTaskToStop,
 } from './taskDataUtils';
@@ -89,15 +90,15 @@ export function useProjectTaskRowActions({
         structure_name: taskForOpen.structure_name || '',
         backend: taskForOpen.backend || project.backend
       });
-      const isCompletedLeadOptTask =
-        workflowKey === 'lead_optimization' && String(taskForOpen.task_state || '').toUpperCase() === 'SUCCESS';
+      const hasLeadOptResultPayload =
+        workflowKey === 'lead_optimization' && Boolean(readLeadOptTaskSummary(taskForOpen));
       const hasTaskResult = Boolean(
         taskForOpen.task_state === 'SUCCESS' &&
           (String(taskForOpen.structure_name || '').trim() ||
             hasObjectContent(taskForOpen.confidence) ||
             hasObjectContent(taskForOpen.affinity))
       );
-      if (isCompletedLeadOptTask || hasTaskResult) {
+      if (hasLeadOptResultPayload || hasTaskResult) {
         navigate(`/projects/${project.id}?tab=results`);
       } else {
         const query = new URLSearchParams({

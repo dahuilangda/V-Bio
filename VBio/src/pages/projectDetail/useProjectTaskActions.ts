@@ -38,7 +38,11 @@ interface UseProjectTaskActionsInput {
   statusRefreshInFlightRef: MutableRefObject<Set<string>>;
   insertProjectTask: (input: Partial<ProjectTask>) => Promise<ProjectTask>;
   updateProject: (projectId: string, patch: Partial<Project>) => Promise<Project>;
-  updateProjectTask: (taskRowId: string, patch: Partial<ProjectTask>) => Promise<ProjectTask>;
+  updateProjectTask: (
+    taskRowId: string,
+    patch: Partial<ProjectTask>,
+    options?: { minimalReturn?: boolean; select?: string }
+  ) => Promise<ProjectTask>;
   sortProjectTasks: (rows: ProjectTask[]) => ProjectTask[];
   isDraftTaskSnapshot: (task: ProjectTask | null) => boolean;
   normalizeConfigForBackend: (inputConfig: ProjectInputConfig, backend: string) => ProjectInputConfig;

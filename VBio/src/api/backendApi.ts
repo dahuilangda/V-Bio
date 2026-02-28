@@ -4,6 +4,7 @@ export {
   clusterLeadOptimizationMmp,
   deleteLeadOptimizationMmpDatabaseAdmin,
   enumerateLeadOptimizationMmp,
+  fetchLeadOptimizationBackendCapabilities,
   fetchLeadOptimizationMmpDatabases,
   fetchLeadOptimizationMmpEvidence,
   fetchLeadOptimizationMmpQueryResult,
@@ -17,6 +18,7 @@ export {
 } from './backendLeadOptimizationApi';
 export type {
   LeadOptFragmentPreviewResponse,
+  LeadOptBackendCapabilityResponse,
   LeadOptMmpDatabaseCatalogResponse,
   LeadOptMmpDatabaseItem,
   LeadOptMmpDatabaseProperty,

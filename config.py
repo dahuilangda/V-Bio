@@ -187,3 +187,16 @@ PROTENIX_DOCKER_EXTRA_ARGS = os.environ.get("PROTENIX_DOCKER_EXTRA_ARGS", "")
 PROTENIX_INFER_EXTRA_ARGS = os.environ.get("PROTENIX_INFER_EXTRA_ARGS", "")
 PROTENIX_PYTHON_BIN = os.environ.get("PROTENIX_PYTHON_BIN", "python3")
 PROTENIX_USE_HOST_USER = os.environ.get("PROTENIX_USE_HOST_USER", "false")
+
+# ==============================================================================
+# 7. PocketXMol Docker 集成
+# ==============================================================================
+
+POCKETXMOL_ROOT_DIR = os.environ.get(
+    "POCKETXMOL_ROOT_DIR",
+    str(Path(__file__).parent / "PocketXMol")
+)
+POCKETXMOL_CONFIG_MODEL = os.environ.get("POCKETXMOL_CONFIG_MODEL", "configs/sample/pxm.yml")
+POCKETXMOL_OUTPUT_DIR = os.environ.get("POCKETXMOL_OUTPUT_DIR", "outputs_leadopt_runtime")
+POCKETXMOL_DEVICE = os.environ.get("POCKETXMOL_DEVICE", "cuda:0")
+POCKETXMOL_BATCH_SIZE = int(os.environ.get("POCKETXMOL_BATCH_SIZE", "50"))

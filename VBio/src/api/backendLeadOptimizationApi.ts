@@ -129,6 +129,15 @@ export interface LeadOptMmpDatabaseCatalogResponse {
   total_all?: number;
 }
 
+export interface LeadOptBackendCapability {
+  available: boolean;
+  reason?: string;
+}
+
+export interface LeadOptBackendCapabilityResponse {
+  backends: Record<string, LeadOptBackendCapability>;
+}
+
 interface LeadOptMmpQueryStatusResponse {
   task_id?: string;
   state?: string;
@@ -289,6 +298,21 @@ export async function fetchLeadOptimizationMmpDatabases(options?: {
   return (await res.json()) as LeadOptMmpDatabaseCatalogResponse;
 }
 
+export async function fetchLeadOptimizationBackendCapabilities(): Promise<LeadOptBackendCapabilityResponse> {
+  const res = await requestBackend('/api/lead_optimization/backends', {
+    method: 'GET',
+    headers: {
+      ...API_HEADERS,
+      Accept: 'application/json'
+    }
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to fetch lead optimization backend capabilities (${res.status}): ${text}`);
+  }
+  return (await res.json()) as LeadOptBackendCapabilityResponse;
+}
+
 export async function patchLeadOptimizationMmpDatabaseAdmin(
   databaseId: string,
   patch: {
@@ -428,11 +452,18 @@ export async function predictLeadOptimizationCandidate(payload: {
   targetChain: string;
   ligandChain: string;
   pocketResidues: Array<Record<string, unknown>>;
+  variableAtomIndices?: number[];
   referenceTemplateStructureText?: string;
   referenceTemplateFormat?: 'cif' | 'pdb';
+  referenceTargetFilename?: string;
+  referenceTargetFileContent?: string;
+  referenceLigandFilename?: string;
+  referenceLigandFileContent?: string;
   useMsaServer?: boolean;
   seed?: number | null;
 }): Promise<string> {
+  const normalizedBackend = String(payload.backend || 'boltz').trim().toLowerCase();
+  const includePocketReferenceFiles = normalizedBackend === 'pocketxmol';
   const res = await requestBackend('/api/lead_optimization/predict_candidate', {
     method: 'POST',
     headers: {
@@ -443,12 +474,17 @@ export async function predictLeadOptimizationCandidate(payload: {
     body: JSON.stringify({
       candidate_smiles: payload.candidateSmiles,
       protein_sequence: payload.proteinSequence || '',
-      backend: payload.backend,
+      backend: normalizedBackend,
       target_chain: payload.targetChain,
       ligand_chain: payload.ligandChain,
       pocket_residues: payload.pocketResidues || [],
+      variable_atom_indices: payload.variableAtomIndices || [],
       reference_template_structure_text: payload.referenceTemplateStructureText || '',
       reference_template_structure_format: payload.referenceTemplateFormat || 'cif',
+      reference_target_filename: includePocketReferenceFiles ? payload.referenceTargetFilename || '' : '',
+      reference_target_file_content: includePocketReferenceFiles ? payload.referenceTargetFileContent || '' : '',
+      reference_ligand_filename: includePocketReferenceFiles ? payload.referenceLigandFilename || '' : '',
+      reference_ligand_file_content: includePocketReferenceFiles ? payload.referenceLigandFileContent || '' : '',
       use_msa_server: payload.useMsaServer ?? true,
       seed: payload.seed ?? null,
       priority: 'high'

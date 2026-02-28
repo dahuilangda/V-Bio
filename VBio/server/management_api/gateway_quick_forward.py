@@ -8,6 +8,27 @@ from flask import Response, jsonify, request
 from management_api.runtime_proxy import RuntimeProxyBusyError
 
 
+def _remember_task_alias_from_response(gateway: Any, project_id: Optional[str], upstream: requests.Response) -> None:
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id:
+        return
+    if not (200 <= int(upstream.status_code or 0) < 300):
+        return
+    content_type = str(upstream.headers.get("Content-Type") or "").lower()
+    if "json" not in content_type:
+        return
+    try:
+        payload = upstream.json()
+    except Exception:
+        return
+    if not isinstance(payload, dict):
+        return
+    task_id = str(payload.get("task_id") or payload.get("taskId") or "").strip()
+    if not task_id:
+        return
+    gateway.task_store.remember_task_alias(normalized_project_id, task_id)
+
+
 def forward_quick_json(
     gateway: Any,
     upstream_path: str,
@@ -33,6 +54,7 @@ def forward_quick_json(
         upstream_payload.pop("project_id", None)
 
         upstream = gateway._proxy_post_json(upstream_path, upstream_payload)
+        _remember_task_alias_from_response(gateway, effective_project_id, upstream)
         response, status_code = gateway._build_flask_response(upstream)
         succeeded = 200 <= status_code < 300
 
@@ -103,6 +125,7 @@ def forward_quick_multipart(
         effective_project_id = project_id or token.project_id
 
         upstream = gateway._proxy_multipart(upstream_path)
+        _remember_task_alias_from_response(gateway, effective_project_id, upstream)
         response, status_code = gateway._build_flask_response(upstream)
         succeeded = 200 <= status_code < 300
 

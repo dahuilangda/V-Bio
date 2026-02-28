@@ -50,6 +50,21 @@ def _parse_chain_list(value: Optional[str]) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
+def _read_chain_ids_from_structure(path: Path) -> list[str]:
+    try:
+        structure = gemmi.read_structure(str(path))
+    except Exception:
+        return []
+    if len(structure) == 0:
+        return []
+    chain_ids: list[str] = []
+    for chain in structure[0]:
+        chain_id = str(chain.name or "").strip()
+        if chain_id:
+            chain_ids.append(chain_id)
+    return chain_ids
+
+
 def _to_base36(value: int) -> str:
     digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     if value <= 0:
@@ -1336,6 +1351,7 @@ def main() -> None:
             raise ValueError(f"Invalid --ligand_smiles_map JSON: {exc}") from exc
 
     # Check for separate protein and ligand file mode
+    separate_input_mode = bool(args.protein_file and args.ligand_file)
     if args.protein_file and args.ligand_file:
         # Separate input mode: combine protein and ligand files
         protein_path = Path(args.protein_file).expanduser().resolve()
@@ -1456,6 +1472,20 @@ def main() -> None:
     # Optional affinity prediction (requires target + ligand chains)
     target_chains = _parse_chain_list(args.target_chain)
     ligand_chains = _parse_chain_list(args.ligand_chain)
+    requested_ligand_chain_for_alignment = ligand_chains[0] if ligand_chains else None
+
+    if separate_input_mode and ligand_chains:
+        available_chains = _read_chain_ids_from_structure(input_path)
+        available_set = set(available_chains)
+        if "L" in available_set and any(chain_id not in available_set for chain_id in ligand_chains):
+            unresolved = [chain_id for chain_id in ligand_chains if chain_id not in available_set]
+            print(
+                "[Info] Remapping requested ligand chain(s) to model chain 'L' "
+                f"for separate protein/ligand mode. Requested={ligand_chains}, "
+                f"unresolved={unresolved}, available={available_chains}"
+            )
+            ligand_chains = ["L"]
+
     run_affinity = bool(target_chains) and bool(ligand_chains)
 
     if (target_chains or ligand_chains) and not run_affinity:
@@ -1555,7 +1585,11 @@ def main() -> None:
         processed_dir=work_dir / "processed",
         output_dir=output_dir,
         record_id=record_id,
-        requested_ligand_chain_id=ligand_chains[0] if ligand_chains else None,
+        requested_ligand_chain_id=(
+            requested_ligand_chain_for_alignment
+            if requested_ligand_chain_for_alignment
+            else (ligand_chains[0] if ligand_chains else None)
+        ),
         ligand_smiles_map=ligand_smiles_map if ligand_smiles_map else None,
         reference_ligand_mol=reference_ligand_mol_for_alignment,
     )

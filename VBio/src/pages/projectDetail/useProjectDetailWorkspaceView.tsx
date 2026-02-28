@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
+import { useCallback, useRef, useState, type RefObject } from 'react';
 import { Link } from 'react-router-dom';
 import type { PredictionConstraint } from '../../types/models';
 import { downloadResultFile } from '../../api/backendApi';
@@ -40,6 +40,113 @@ function asRecord(value: unknown): Record<string, unknown> {
 function asPredictionRecordMap(value: unknown): Record<string, LeadOptPredictionRecord> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   return value as Record<string, LeadOptPredictionRecord>;
+}
+
+function normalizePredictionState(value: unknown): 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE' {
+  const token = readText(value).trim().toUpperCase();
+  if (token === 'RUNNING' || token === 'SUCCESS' || token === 'FAILURE') return token;
+  return 'QUEUED';
+}
+
+function predictionStatePriority(state: unknown): number {
+  const normalized = normalizePredictionState(state);
+  if (normalized === 'QUEUED') return 1;
+  if (normalized === 'RUNNING') return 2;
+  return 3;
+}
+
+function hasPredictionRecordMetrics(record: LeadOptPredictionRecord | null | undefined): boolean {
+  if (!record) return false;
+  if (toFiniteNumber(record.pairIptm) !== null) return true;
+  if (toFiniteNumber(record.pairPae) !== null) return true;
+  if (toFiniteNumber(record.ligandPlddt) !== null) return true;
+  return Array.isArray(record.ligandAtomPlddts) && record.ligandAtomPlddts.length > 0;
+}
+
+function hasPredictionRecordStructure(record: LeadOptPredictionRecord | null | undefined): boolean {
+  if (!record) return false;
+  return readText(record.structureText).trim().length > 0;
+}
+
+function choosePreferredPredictionRecord(
+  left: LeadOptPredictionRecord,
+  right: LeadOptPredictionRecord
+): LeadOptPredictionRecord {
+  const leftPriority = predictionStatePriority(left.state);
+  const rightPriority = predictionStatePriority(right.state);
+  if (leftPriority !== rightPriority) {
+    return rightPriority > leftPriority ? right : left;
+  }
+  const leftMetrics = hasPredictionRecordMetrics(left) ? 1 : 0;
+  const rightMetrics = hasPredictionRecordMetrics(right) ? 1 : 0;
+  if (leftMetrics !== rightMetrics) {
+    return rightMetrics > leftMetrics ? right : left;
+  }
+  const leftStructure = hasPredictionRecordStructure(left) ? 1 : 0;
+  const rightStructure = hasPredictionRecordStructure(right) ? 1 : 0;
+  if (leftStructure !== rightStructure) {
+    return rightStructure > leftStructure ? right : left;
+  }
+  const leftTs = Number.isFinite(Number(left.updatedAt)) ? Number(left.updatedAt) : 0;
+  const rightTs = Number.isFinite(Number(right.updatedAt)) ? Number(right.updatedAt) : 0;
+  if (leftTs !== rightTs) {
+    return rightTs > leftTs ? right : left;
+  }
+  return readText(right.error).trim() ? right : left;
+}
+
+function mergePredictionRecordPair(
+  fromConfidence: LeadOptPredictionRecord | null | undefined,
+  fromProperties: LeadOptPredictionRecord | null | undefined
+): LeadOptPredictionRecord | null {
+  if (!fromConfidence && !fromProperties) return null;
+  if (!fromConfidence) return fromProperties || null;
+  if (!fromProperties) return fromConfidence;
+  const primary = choosePreferredPredictionRecord(fromConfidence, fromProperties);
+  const secondary = primary === fromConfidence ? fromProperties : fromConfidence;
+  return {
+    ...secondary,
+    ...primary,
+    taskId: readText(primary.taskId || secondary.taskId).trim(),
+    state: normalizePredictionState(primary.state),
+    backend: readText(primary.backend || secondary.backend).trim().toLowerCase() || 'boltz',
+    pairIptm: toFiniteNumber(primary.pairIptm) ?? toFiniteNumber(secondary.pairIptm),
+    pairPae: toFiniteNumber(primary.pairPae) ?? toFiniteNumber(secondary.pairPae),
+    pairIptmResolved:
+      primary.pairIptmResolved === true ||
+      secondary.pairIptmResolved === true ||
+      hasPredictionRecordMetrics(primary) ||
+      hasPredictionRecordMetrics(secondary),
+    ligandPlddt: toFiniteNumber(primary.ligandPlddt) ?? toFiniteNumber(secondary.ligandPlddt),
+    ligandAtomPlddts: Array.isArray(primary.ligandAtomPlddts)
+      ? primary.ligandAtomPlddts
+      : Array.isArray(secondary.ligandAtomPlddts)
+        ? secondary.ligandAtomPlddts
+        : [],
+    updatedAt: Math.max(
+      Number.isFinite(Number(primary.updatedAt)) ? Number(primary.updatedAt) : 0,
+      Number.isFinite(Number(secondary.updatedAt)) ? Number(secondary.updatedAt) : 0,
+      Date.now()
+    )
+  };
+}
+
+function mergePredictionRecordMaps(
+  confidenceInput: unknown,
+  propertiesInput: unknown
+): Record<string, LeadOptPredictionRecord> {
+  const confidence = asPredictionRecordMap(confidenceInput);
+  const properties = asPredictionRecordMap(propertiesInput);
+  const merged: Record<string, LeadOptPredictionRecord> = {};
+  const keys = new Set<string>([...Object.keys(confidence), ...Object.keys(properties)]);
+  for (const key of keys) {
+    const normalizedKey = readText(key).trim();
+    if (!normalizedKey) continue;
+    const mergedRecord = mergePredictionRecordPair(confidence[normalizedKey], properties[normalizedKey]);
+    if (!mergedRecord) continue;
+    merged[normalizedKey] = mergedRecord;
+  }
+  return merged;
 }
 
 function summarizeLeadOptPredictions(records: Record<string, LeadOptPredictionRecord>) {
@@ -195,6 +302,23 @@ function buildLeadOptListMeta(leadOptMmpInput: unknown): Record<string, unknown>
   const selection = asRecord(leadOptMmp.selection);
   const predictionSummary = asRecord(leadOptMmp.prediction_summary);
   const predictionMap = asRecord(leadOptMmp.prediction_by_smiles);
+  const compactCandidates = compactLeadOptEnumeratedCandidates(
+    leadOptMmp.enumerated_candidates ?? asRecord(leadOptMmp.result_snapshot).enumerated_candidates
+  );
+  const compactQueryResult = {
+    query_id: readText(leadOptMmp.query_id || queryResult.query_id).trim(),
+    query_mode: readText(queryResult.query_mode).trim() || 'one-to-many',
+    aggregation_type: readText(queryResult.aggregation_type).trim(),
+    property_targets: asRecord(queryResult.property_targets),
+    rule_env_radius: toFiniteNumber(queryResult.rule_env_radius),
+    grouped_by_environment: readBooleanToken(queryResult.grouped_by_environment),
+    mmp_database_id: readText(leadOptMmp.mmp_database_id || queryResult.mmp_database_id).trim(),
+    mmp_database_label: readText(leadOptMmp.mmp_database_label || queryResult.mmp_database_label).trim(),
+    mmp_database_schema: readText(leadOptMmp.mmp_database_schema || queryResult.mmp_database_schema).trim(),
+    cluster_group_by: readText(queryResult.cluster_group_by).trim(),
+    min_pairs: toFiniteNumber(queryResult.min_pairs),
+    stats: asRecord(queryResult.stats)
+  } as Record<string, unknown>;
   const predictionTotal = toFiniteNumber(predictionSummary.total);
   const selectedFragmentIds = readLeadOptStringArray(
     selection.selected_fragment_ids ?? leadOptMmp.selected_fragment_ids
@@ -232,7 +356,12 @@ function buildLeadOptListMeta(leadOptMmpInput: unknown): Record<string, unknown>
       running: toFiniteNumber(predictionSummary.running),
       success: toFiniteNumber(predictionSummary.success),
       failure: toFiniteNumber(predictionSummary.failure)
-    }
+    },
+    query_result: compactQueryResult,
+    enumerated_candidates: compactCandidates,
+    ui_state: asRecord(leadOptMmp.ui_state),
+    target_chain: readText(leadOptMmp.target_chain).trim(),
+    ligand_chain: readText(leadOptMmp.ligand_chain).trim()
   };
 }
 
@@ -244,6 +373,77 @@ function mergeLeadOptListMetaIntoProperties(
   return {
     ...properties,
     lead_opt_list: buildLeadOptListMeta(leadOptMmpInput)
+  };
+}
+
+function buildLeadOptStateMeta(leadOptInput: unknown): Record<string, unknown> {
+  const leadOpt = asRecord(leadOptInput);
+  const predictionSummary = asRecord(leadOpt.prediction_summary);
+  return {
+    stage: readText(leadOpt.stage).trim(),
+    prediction_stage: readText(leadOpt.prediction_stage).trim(),
+    query_id: readText(leadOpt.query_id || asRecord(leadOpt.query_result).query_id).trim(),
+    prediction_task_id: readText(leadOpt.prediction_task_id).trim(),
+    prediction_candidate_smiles: readText(leadOpt.prediction_candidate_smiles).trim(),
+    prediction_summary: {
+      total: toFiniteNumber(predictionSummary.total) ?? 0,
+      queued: toFiniteNumber(predictionSummary.queued) ?? 0,
+      running: toFiniteNumber(predictionSummary.running) ?? 0,
+      success: toFiniteNumber(predictionSummary.success) ?? 0,
+      failure: toFiniteNumber(predictionSummary.failure) ?? 0,
+      latest_task_id: readText(predictionSummary.latest_task_id).trim()
+    },
+    prediction_by_smiles: compactLeadOptPredictionMap(asPredictionRecordMap(leadOpt.prediction_by_smiles)),
+    reference_prediction_by_backend: compactLeadOptPredictionMap(asPredictionRecordMap(leadOpt.reference_prediction_by_backend)),
+    target_chain: readText(leadOpt.target_chain).trim(),
+    ligand_chain: readText(leadOpt.ligand_chain).trim()
+  };
+}
+
+function mergeLeadOptStateMetaIntoProperties(
+  propertiesInput: unknown,
+  leadOptInput: unknown
+): Record<string, unknown> {
+  const properties = asRecord(propertiesInput);
+  return {
+    ...properties,
+    lead_opt_state: buildLeadOptStateMeta(leadOptInput)
+  };
+}
+
+function mergeLeadOptMetaIntoProperties(
+  propertiesInput: unknown,
+  leadOptInput: unknown
+): Record<string, unknown> {
+  const properties = asRecord(propertiesInput);
+  return {
+    ...properties,
+    lead_opt_list: buildLeadOptListMeta(leadOptInput),
+    lead_opt_state: buildLeadOptStateMeta(leadOptInput)
+  };
+}
+
+function compactLeadOptForConfidenceWrite(leadOptInput: unknown): Record<string, unknown> {
+  const leadOpt = asRecord(leadOptInput);
+  const predictionSummary = asRecord(leadOpt.prediction_summary);
+  const compactPredictionSummary = {
+    total: toFiniteNumber(predictionSummary.total) ?? 0,
+    queued: toFiniteNumber(predictionSummary.queued) ?? 0,
+    running: toFiniteNumber(predictionSummary.running) ?? 0,
+    success: toFiniteNumber(predictionSummary.success) ?? 0,
+    failure: toFiniteNumber(predictionSummary.failure) ?? 0,
+    latest_task_id: readText(predictionSummary.latest_task_id).trim()
+  };
+  return {
+    stage: readText(leadOpt.stage).trim(),
+    prediction_stage: readText(leadOpt.prediction_stage).trim(),
+    query_id: readText(leadOpt.query_id || asRecord(leadOpt.query_result).query_id).trim(),
+    mmp_database_id: readText(leadOpt.mmp_database_id || asRecord(leadOpt.query_result).mmp_database_id).trim(),
+    target_chain: readText(leadOpt.target_chain).trim(),
+    ligand_chain: readText(leadOpt.ligand_chain).trim(),
+    prediction_summary: compactPredictionSummary,
+    prediction_by_smiles: compactLeadOptPredictionMap(asPredictionRecordMap(leadOpt.prediction_by_smiles)),
+    reference_prediction_by_backend: compactLeadOptPredictionMap(asPredictionRecordMap(leadOpt.reference_prediction_by_backend))
   };
 }
 
@@ -294,6 +494,75 @@ function compactLeadOptCandidatesUiState(value: LeadOptCandidatesUiState): LeadO
     structureSearchMode: value.structureSearchMode,
     structureSearchQuery: readText(value.structureSearchQuery).trim(),
     previewRenderMode: value.previewRenderMode
+  };
+}
+
+function resolveLeadOptSnapshotFromTask(taskInput: unknown): Record<string, unknown> {
+  const task = asRecord(taskInput);
+  const fromConfidence = asRecord(asRecord(task.confidence).lead_opt_mmp);
+  const properties = asRecord(task.properties);
+  const fromProperties = asRecord(properties.lead_opt_list);
+  const fromPropertiesState = asRecord(properties.lead_opt_state);
+  if (Object.keys(fromConfidence).length === 0 && Object.keys(fromPropertiesState).length === 0) return fromProperties;
+  if (Object.keys(fromProperties).length === 0 && Object.keys(fromPropertiesState).length === 0) return fromConfidence;
+
+  const confidenceQueryResult = asRecord(fromConfidence.query_result);
+  const propertiesQueryResult = asRecord(fromProperties.query_result);
+  const mergedPredictions = mergePredictionRecordMaps(
+    mergePredictionRecordMaps(fromConfidence.prediction_by_smiles, fromProperties.prediction_by_smiles),
+    fromPropertiesState.prediction_by_smiles
+  );
+  const mergedReferencePredictions = mergePredictionRecordMaps(
+    mergePredictionRecordMaps(fromConfidence.reference_prediction_by_backend, fromProperties.reference_prediction_by_backend),
+    fromPropertiesState.reference_prediction_by_backend
+  );
+  const confidenceSelection = asRecord(fromConfidence.selection);
+  const propertiesSelection = asRecord(fromProperties.selection);
+  const confidenceUiState = asRecord(fromConfidence.ui_state);
+  const propertiesUiState = asRecord(fromProperties.ui_state);
+
+  return {
+    ...fromConfidence,
+    ...fromProperties,
+    query_result:
+      Object.keys(propertiesQueryResult).length > 0
+        ? propertiesQueryResult
+        : confidenceQueryResult,
+    enumerated_candidates:
+      Array.isArray(fromProperties.enumerated_candidates) && fromProperties.enumerated_candidates.length > 0
+        ? fromProperties.enumerated_candidates
+        : Array.isArray(fromConfidence.enumerated_candidates)
+          ? fromConfidence.enumerated_candidates
+          : [],
+    prediction_by_smiles: mergedPredictions,
+    reference_prediction_by_backend: mergedReferencePredictions,
+    stage: readText(fromPropertiesState.stage).trim() || readText(fromProperties.stage || fromConfidence.stage).trim(),
+    prediction_stage:
+      readText(fromPropertiesState.prediction_stage).trim() ||
+      readText(fromProperties.prediction_stage || fromConfidence.prediction_stage).trim(),
+    prediction_summary:
+      Object.keys(asRecord(fromPropertiesState.prediction_summary)).length > 0
+        ? asRecord(fromPropertiesState.prediction_summary)
+        : asRecord(fromProperties.prediction_summary || fromConfidence.prediction_summary),
+    selection:
+      Object.keys(propertiesSelection).length > 0
+        ? propertiesSelection
+        : confidenceSelection,
+    ui_state:
+      Object.keys(propertiesUiState).length > 0
+        ? propertiesUiState
+        : confidenceUiState,
+    query_id:
+      readText(fromProperties.query_id || propertiesQueryResult.query_id).trim() ||
+      readText(fromConfidence.query_id || confidenceQueryResult.query_id).trim(),
+    target_chain: readText(fromProperties.target_chain).trim() || readText(fromConfidence.target_chain).trim(),
+    ligand_chain: readText(fromProperties.ligand_chain).trim() || readText(fromConfidence.ligand_chain).trim(),
+    prediction_task_id:
+      readText(fromPropertiesState.prediction_task_id).trim() ||
+      readText(fromProperties.prediction_task_id || fromConfidence.prediction_task_id).trim(),
+    prediction_candidate_smiles:
+      readText(fromPropertiesState.prediction_candidate_smiles).trim() ||
+      readText(fromProperties.prediction_candidate_smiles || fromConfidence.prediction_candidate_smiles).trim()
   };
 }
 
@@ -507,7 +776,6 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     statusInfo,
     statusContextTaskRow,
     requestedStatusTaskRow,
-    projectTasks,
     snapshotLigandAtomPlddts,
     overviewPrimaryLigand,
     selectedResultLigandSequence,
@@ -582,40 +850,33 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   const leadOptUploadPersistKeyRef = useRef('');
   const leadOptActiveTaskRowIdRef = useRef('');
   const leadOptPredictionPersistKeyRef = useRef('');
+  const leadOptPredictionPersistQueueRef = useRef<Promise<void>>(Promise.resolve());
   const leadOptUiStatePersistKeyRef = useRef('');
-  const leadOptListMetaPersistKeyRef = useRef('');
   const leadOptMmpContextByTaskIdRef = useRef<Record<string, Record<string, unknown>>>({});
 
   const resolveLeadOptTaskRowId = useCallback((): string => {
+    const requestedRowId = readText(requestedStatusTaskRow?.id).trim();
+    if (requestedRowId) return requestedRowId;
+
     const contextRowId = readText(statusContextTaskRow?.id).trim();
     if (contextRowId) return contextRowId;
 
     const activeResultRowId = readText(activeResultTask?.id).trim();
     if (activeResultRowId) return activeResultRowId;
 
-    const requestedRowId = readText(requestedStatusTaskRow?.id).trim();
-    if (requestedRowId) return requestedRowId;
-
-    const cachedRowId = readText(leadOptActiveTaskRowIdRef.current).trim();
-    if (cachedRowId) return cachedRowId;
-
-    const fallback = projectTasks.find((row) => {
-      const leadOpt = asRecord(asRecord(row.confidence).lead_opt_mmp);
-      return Object.keys(leadOpt).length > 0;
-    });
-    return readText(fallback?.id).trim();
-  }, [activeResultTask, projectTasks, requestedStatusTaskRow, statusContextTaskRow]);
+    return '';
+  }, [activeResultTask, requestedStatusTaskRow, statusContextTaskRow]);
 
   const resolveLeadOptSourceTask = useCallback(
     (taskRowId: string) => {
       const id = readText(taskRowId).trim();
       if (!id) return null;
+      if (requestedStatusTaskRow && String(requestedStatusTaskRow.id) === id) return requestedStatusTaskRow;
       if (statusContextTaskRow && String(statusContextTaskRow.id) === id) return statusContextTaskRow;
       if (activeResultTask && String(activeResultTask.id) === id) return activeResultTask;
-      if (requestedStatusTaskRow && String(requestedStatusTaskRow.id) === id) return requestedStatusTaskRow;
-      return projectTasks.find((row) => String(row.id) === id) || null;
+      return null;
     },
-    [activeResultTask, projectTasks, requestedStatusTaskRow, statusContextTaskRow]
+    [activeResultTask, requestedStatusTaskRow, statusContextTaskRow]
   );
 
   const handleLeadOptMmpTaskQueued = async (payload: {
@@ -679,9 +940,9 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       completed_at: null,
       duration_seconds: null,
       components: snapshotComponents,
-      properties: mergeLeadOptListMetaIntoProperties(draft.inputConfig.properties, leadOptPayload) as any,
+      properties: mergeLeadOptMetaIntoProperties(draft.inputConfig.properties, leadOptPayload) as any,
       confidence: {
-        lead_opt_mmp: leadOptPayload
+        lead_opt_mmp: compactLeadOptForConfidenceWrite(leadOptPayload)
       }
     });
     setRunRedirectTaskId(taskId);
@@ -749,13 +1010,13 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     const sourceTask = resolveLeadOptSourceTask(taskRowId);
     await patchTask(taskRowId, {
       task_state: 'SUCCESS',
-      status_text: `MMP complete (${payload.transformCount} transforms, ${payload.candidateCount} rows)`,
+      status_text: `MMP complete (${payload.transformCount} transforms, ${payload.candidateCount} rows). Scoring not started.`,
       error_text: '',
       completed_at: completedAt,
       duration_seconds: Number.isFinite(payload.elapsedSeconds) ? payload.elapsedSeconds : null,
-      properties: mergeLeadOptListMetaIntoProperties(sourceTask?.properties, leadOptPayload) as any,
+      properties: mergeLeadOptMetaIntoProperties(sourceTask?.properties, leadOptPayload) as any,
       confidence: {
-        lead_opt_mmp: leadOptPayload
+        lead_opt_mmp: compactLeadOptForConfidenceWrite(leadOptPayload)
       }
     });
     delete leadOptMmpTaskRowMapRef.current[taskId];
@@ -790,9 +1051,9 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       status_text: 'MMP query failed',
       error_text: payload.error || 'MMP query failed.',
       completed_at: completedAt,
-      properties: mergeLeadOptListMetaIntoProperties(sourceTask?.properties, leadOptPayload) as any,
+      properties: mergeLeadOptMetaIntoProperties(sourceTask?.properties, leadOptPayload) as any,
       confidence: {
-        lead_opt_mmp: leadOptPayload
+        lead_opt_mmp: compactLeadOptForConfidenceWrite(leadOptPayload)
       }
     });
     delete leadOptMmpTaskRowMapRef.current[taskId];
@@ -801,78 +1062,15 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
 
   const handleLeadOptPredictionQueued = useCallback(
     async (payload: { taskId: string; backend: string; candidateSmiles: string }) => {
-      if (!project) return;
       const taskId = readText(payload.taskId).trim();
       if (!taskId) return;
       const taskRowId = resolveLeadOptTaskRowId();
       if (!taskRowId) return;
       leadOptActiveTaskRowIdRef.current = taskRowId;
-
-      const candidateSmiles = readText(payload.candidateSmiles).trim() || leadOptPrimary.ligandSmiles;
-      const sourceTask = resolveLeadOptSourceTask(taskRowId);
-      const sourceConfidence = asRecord(sourceTask?.confidence);
-      const sourceLeadOpt = asRecord(sourceConfidence.lead_opt_mmp);
-      const mergedRecords = compactLeadOptPredictionMap(asPredictionRecordMap(sourceLeadOpt.prediction_by_smiles));
-      const mergedReferenceByBackend = compactLeadOptPredictionMap(
-        asPredictionRecordMap(sourceLeadOpt.reference_prediction_by_backend)
-      );
-      if (!mergedRecords[candidateSmiles]) {
-        mergedRecords[candidateSmiles] = {
-          taskId,
-          state: 'QUEUED',
-          backend: readText(payload.backend).trim().toLowerCase() || 'boltz',
-          pairIptm: null,
-          pairPae: null,
-          pairIptmResolved: false,
-          ligandPlddt: null,
-          ligandAtomPlddts: [],
-          structureText: '',
-          structureFormat: 'cif',
-          structureName: '',
-          error: '',
-          updatedAt: Date.now()
-        };
-      }
-      const summary = summarizeLeadOptPredictions(mergedRecords);
-      const unresolved = summary.queued + summary.running;
-      const nextLeadOpt = {
-        ...sourceLeadOpt,
-        stage: 'prediction_queued',
-        prediction_candidate_smiles: candidateSmiles,
-        prediction_task_id: taskId,
-        prediction_state: 'QUEUED',
-        prediction_stage: 'queued',
-        prediction_summary: {
-          ...summary,
-          latest_task_id: taskId
-        },
-        bucket_count: summary.total,
-        prediction_by_smiles: mergedRecords,
-        reference_prediction_by_backend: mergedReferenceByBackend,
-        query_id: readText(sourceLeadOpt.query_id).trim(),
-        selection: asRecord(sourceLeadOpt.selection),
-        target_chain: readText(sourceLeadOpt.target_chain).trim(),
-        ligand_chain: readText(sourceLeadOpt.ligand_chain).trim()
-      } as Record<string, unknown>;
-      await patchTask(taskRowId, {
-        task_state: 'QUEUED',
-        status_text: unresolved > 0 ? `Scoring ${unresolved} queued (${summary.success}/${summary.total} done)` : 'Scoring queued',
-        error_text: '',
-        completed_at: null,
-        properties: mergeLeadOptListMetaIntoProperties(sourceTask?.properties, nextLeadOpt) as any,
-        confidence: {
-          ...sourceConfidence,
-          lead_opt_mmp: nextLeadOpt
-        }
-      });
+      // Prediction queue status is persisted by the throttled state-change handler.
+      // Avoid per-candidate writes here to prevent burst traffic on batch submit.
     },
-    [
-      leadOptPrimary.ligandSmiles,
-      patchTask,
-      project,
-      resolveLeadOptSourceTask,
-      resolveLeadOptTaskRowId
-    ]
+    [resolveLeadOptTaskRowId]
   );
 
   const handleLeadOptPredictionStateChange = useCallback(
@@ -897,22 +1095,26 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       const summary = summarizeLeadOptPredictions(records);
       const unresolved = summary.queued + summary.running;
       const unresolvedState = summary.running > 0 ? 'RUNNING' : summary.queued > 0 ? 'QUEUED' : null;
-      const nextState =
-        unresolvedState || (summary.total > 0 && summary.success === 0 && summary.failure > 0 ? 'FAILURE' : 'SUCCESS');
+      const nextTaskState: 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE' =
+        unresolved > 0
+          ? unresolvedState === 'RUNNING'
+            ? 'RUNNING'
+            : 'QUEUED'
+          : summary.total > 0 && summary.success === 0 && summary.failure > 0
+            ? 'FAILURE'
+            : 'SUCCESS';
       const statusText =
         unresolved > 0
           ? unresolvedState === 'RUNNING'
-            ? `Scoring ${unresolved} running (${summary.success}/${summary.total} done)`
-            : `Scoring ${unresolved} queued (${summary.success}/${summary.total} done)`
+            ? `Scoring ${unresolved} running (${summary.success}/${Math.max(1, summary.total)} done)`
+            : `Scoring ${unresolved} queued (${summary.success}/${Math.max(1, summary.total)} done)`
           : summary.total > 0
-            ? `Scoring complete (${summary.success}/${summary.total})`
+            ? `Scoring complete (${summary.success}/${Math.max(1, summary.total)})`
             : 'MMP complete';
       const errorText = summary.total > 0 && summary.success === 0 && summary.failure > 0 ? 'All candidate scoring jobs failed.' : '';
-      const completedAt = unresolved > 0 ? null : new Date().toISOString();
 
       const sourceTask = resolveLeadOptSourceTask(taskRowId);
-      const sourceConfidence = asRecord(sourceTask?.confidence);
-      const sourceLeadOpt = asRecord(sourceConfidence.lead_opt_mmp);
+      const sourceLeadOpt = resolveLeadOptSnapshotFromTask(sourceTask);
       const nextLeadOpt = {
         ...sourceLeadOpt,
         stage:
@@ -932,14 +1134,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         prediction_by_smiles: records,
         reference_prediction_by_backend: referenceRecords
       } as Record<string, unknown>;
-      const nextConfidence = {
-        ...sourceConfidence,
-        lead_opt_mmp: nextLeadOpt
-      };
-
       const persistKey = [
         taskRowId,
-        nextState,
         statusText,
         errorText,
         summary.total,
@@ -947,21 +1143,30 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         summary.running,
         summary.success,
         summary.failure,
-        readText(payload.summary?.latestTaskId).trim(),
         buildLeadOptPredictionPersistSignature(records),
         buildLeadOptPredictionPersistSignature(referenceRecords)
       ].join('|');
       if (leadOptPredictionPersistKeyRef.current === persistKey) return;
       leadOptPredictionPersistKeyRef.current = persistKey;
 
-      await patchTask(taskRowId, {
-        task_state: nextState,
+      const patchPayload = {
+        task_state: nextTaskState,
         status_text: statusText,
         error_text: errorText,
-        completed_at: completedAt,
-        properties: mergeLeadOptListMetaIntoProperties(sourceTask?.properties, nextLeadOpt) as any,
-        confidence: nextConfidence
-      });
+        ...(unresolved > 0
+          ? {}
+          : { properties: mergeLeadOptStateMetaIntoProperties(sourceTask?.properties, nextLeadOpt) as any }),
+        confidence: {
+          lead_opt_mmp: compactLeadOptForConfidenceWrite(nextLeadOpt)
+        }
+      };
+      const nextPersist = leadOptPredictionPersistQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          await patchTask(taskRowId, patchPayload);
+        });
+      leadOptPredictionPersistQueueRef.current = nextPersist;
+      await nextPersist;
     },
     [patchTask, resolveLeadOptSourceTask, resolveLeadOptTaskRowId]
   );
@@ -973,8 +1178,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       if (!taskRowId) return;
       leadOptActiveTaskRowIdRef.current = taskRowId;
       const sourceTask = resolveLeadOptSourceTask(taskRowId);
-      const sourceConfidence = asRecord(sourceTask?.confidence);
-      const sourceLeadOpt = asRecord(sourceConfidence.lead_opt_mmp);
+      const sourceLeadOpt = resolveLeadOptSnapshotFromTask(sourceTask);
       if (Object.keys(sourceLeadOpt).length === 0) return;
       const compactUiState = compactLeadOptCandidatesUiState(payload.uiState);
       const persistKey = [
@@ -984,41 +1188,16 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       ].join('|');
       if (leadOptUiStatePersistKeyRef.current === persistKey) return;
       leadOptUiStatePersistKeyRef.current = persistKey;
+      const nextLeadOpt = {
+        ...sourceLeadOpt,
+        ui_state: compactUiState
+      };
       await patchTask(taskRowId, {
-        confidence: {
-          ...sourceConfidence,
-          lead_opt_mmp: {
-            ...sourceLeadOpt,
-            ui_state: compactUiState
-          }
-        }
+        properties: mergeLeadOptListMetaIntoProperties(sourceTask?.properties, nextLeadOpt) as any
       });
     },
     [patchTask, project, resolveLeadOptSourceTask, resolveLeadOptTaskRowId]
   );
-
-  useEffect(() => {
-    if (!isLeadOptimizationWorkflow) return;
-    const sourceTask = statusContextTaskRow || activeResultTask || requestedStatusTaskRow || null;
-    const taskRowId = readText(sourceTask?.id).trim();
-    if (!taskRowId) return;
-    const leadOptMmp = asRecord(asRecord(sourceTask?.confidence).lead_opt_mmp);
-    if (Object.keys(leadOptMmp).length === 0) return;
-    const nextMeta = buildLeadOptListMeta(leadOptMmp);
-    const properties = asRecord(sourceTask?.properties);
-    const currentMeta = asRecord(properties.lead_opt_list);
-    const nextSignature = JSON.stringify(nextMeta);
-    if (JSON.stringify(currentMeta) === nextSignature) return;
-    const persistKey = `${taskRowId}|${nextSignature}`;
-    if (leadOptListMetaPersistKeyRef.current === persistKey) return;
-    leadOptListMetaPersistKeyRef.current = persistKey;
-    void patchTask(taskRowId, {
-      properties: {
-        ...properties,
-        lead_opt_list: nextMeta
-      } as any
-    });
-  }, [activeResultTask, isLeadOptimizationWorkflow, patchTask, requestedStatusTaskRow, statusContextTaskRow]);
 
   const handleLeadOptReferenceUploadsChange = useCallback(
     async (uploads: LeadOptPersistedUploads) => {
@@ -1068,11 +1247,9 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   const affinityUseMsa = computeUseMsaFlag(draft.inputConfig.components, draft.use_msa);
   const runSubmitting = submitting || (isLeadOptimizationWorkflow && leadOptHeaderRunPending);
   const leadOptInitialMmpSnapshot = (() => {
-    const sourceTask =
-      statusContextTaskRow ||
-      activeResultTask ||
-      null;
-    const leadOptMmp = asRecord(asRecord(sourceTask?.confidence).lead_opt_mmp);
+    const preferredTaskRowId = resolveLeadOptTaskRowId();
+    const sourceTask = resolveLeadOptSourceTask(preferredTaskRowId);
+    const leadOptMmp = resolveLeadOptSnapshotFromTask(sourceTask);
     if (!leadOptMmp || Object.keys(leadOptMmp).length === 0) return null;
     const queryResult = asRecord(leadOptMmp.query_result);
     const queryId = readText(leadOptMmp.query_id || queryResult.query_id).trim();
@@ -1111,6 +1288,19 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       ligand_chain: readText(leadOptMmp.ligand_chain).trim()
     } as Record<string, unknown>;
   })();
+  const leadOptSnapshotContext = asRecord(leadOptInitialMmpSnapshot || null);
+  const leadOptSnapshotSelection = asRecord(leadOptSnapshotContext.selection);
+  const leadOptSnapshotQueryPayload = asRecord(leadOptSnapshotContext.query_payload);
+  const leadOptSnapshotTargetChain =
+    readText(leadOptSnapshotContext.target_chain).trim() ||
+    readText(leadOptSnapshotSelection.target_chain).trim() ||
+    readText(leadOptSnapshotQueryPayload.target_chain).trim();
+  const leadOptSnapshotLigandChain =
+    readText(leadOptSnapshotContext.ligand_chain).trim() ||
+    readText(leadOptSnapshotSelection.ligand_chain).trim() ||
+    readText(leadOptSnapshotQueryPayload.ligand_chain).trim();
+  const leadOptWorkspaceTargetChain = leadOptSnapshotTargetChain || readText(leadOptChainContext.targetChain).trim();
+  const leadOptWorkspaceLigandChain = leadOptSnapshotLigandChain || readText(leadOptChainContext.ligandChain).trim();
   const {
     componentStepLabel,
     isRunRedirecting,
@@ -1432,9 +1622,9 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     setAffinityLigandSmiles,
     leadOptProteinSequence: leadOptPrimary.proteinSequence,
     leadOptLigandSmiles: leadOptPrimary.ligandSmiles,
-    leadOptTargetChain: leadOptChainContext.targetChain,
-    leadOptLigandChain: leadOptChainContext.ligandChain,
-    leadOptReferenceScopeKey: `${project.id}:${statusContextTaskRow?.id || 'new'}`,
+    leadOptTargetChain: leadOptWorkspaceTargetChain,
+    leadOptLigandChain: leadOptWorkspaceLigandChain,
+    leadOptReferenceScopeKey: `${project.id}:leadopt`,
     leadOptPersistedReferenceUploads: leadOptPersistedUploads,
     onLeadOptReferenceUploadsChange: handleLeadOptReferenceUploadsChange,
     onLeadOptMmpTaskQueued: handleLeadOptMmpTaskQueued,

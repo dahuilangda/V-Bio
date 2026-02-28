@@ -504,6 +504,7 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
     * `POST /api/lead_optimization/mmp_enumerate`
     * `GET /api/lead_optimization/mmp_evidence/<transform_id>`
     * `POST /api/lead_optimization/predict_candidate`
+    * `GET /api/lead_optimization/backends`（返回各后端可用性，用于前端灰掉不可用选项）
     * `GET /api/lead_optimization/mmp_databases`
   * **数据库从零构建指南**: `lead_optimization/README.md`
 
@@ -545,6 +546,54 @@ export BOLTZ_API_TOKEN='your-super-secret-and-long-token'
 - **API 请求**：参考上节 `backend=alphafold3` 的 curl 示例；若环境变量配置正确，可在 `celery.log` 中看到 Docker 启动信息，并在 `alphafold3_predictions/<jobname>/` 下找到中间结果。
 - **命令行设计器**：支持在设计流程中直接切换后端，例如 `python designer/run_design.py --yaml_template ./examples/design.yaml --backend alphafold3 --server_url http://127.0.0.1:5000 --api_token <your-token>`；其余参数与 Boltz 引擎一致。
 - **结果说明**：ZIP 文件中 `af3/` 目录含 `af3_input.fasta`、`fold_input.json`、`msa/`、`output/` 以及原始 `input.yaml`，便于在外部 AlphaFold3 环境复现或继续分析。
+
+### **PocketXMol Docker（Lead Opt 片段替换）**
+
+Lead optimization 的候选打分支持新增 `backend=pocketxmol`。该模式用于“固定一部分、替换一部分”的参考引导对接：
+- 以参考蛋白结构 + 参考已对接配体为口袋上下文；
+- 使用 Lead Opt 提供的 `atom indices`（`final_highlight_atom_indices`）作为可变片段；
+- 后端将其转换为固定原子集合（补集）并交给 PocketXMol 的 `fix_some.atom`；
+- 对 PocketXMol 的 rank1 结果再调用 Boltz2Score，输出 confidence JSON（不是仅生成即结束）。
+
+注意：该流程**不使用 MCS** 识别改造片段，避免 MCS 慢和错配问题。
+
+#### 1) 准备 PocketXMol
+
+默认集成目录是仓库下 `PocketXMol/`。至少需要：
+- `PocketXMol/scripts/run_pocketxmol_docker.sh`
+- `PocketXMol/docker-compose.yml`
+- `PocketXMol/configs/sample/pxm.yml`
+- 宿主机可用 `docker` 命令
+
+可选环境变量（启动 Flask/Celery 前设置）：
+
+```bash
+export POCKETXMOL_ROOT_DIR=/path/to/Boltz-WebUI/PocketXMol
+export POCKETXMOL_CONFIG_MODEL=configs/sample/pxm.yml
+export POCKETXMOL_OUTPUT_DIR=outputs_leadopt_runtime
+export POCKETXMOL_DEVICE=cuda:0
+export POCKETXMOL_BATCH_SIZE=50
+```
+
+#### 2) 前端行为
+
+- Lead Opt 结果区 backend 下拉框新增 `PocketXMol`。
+- 若后端检测到 PocketXMol 未安装/不可用（`GET /api/lead_optimization/backends`），该选项会自动灰掉（disabled）。
+
+#### 3) `predict_candidate` 额外字段（PocketXMol）
+
+当 `backend=pocketxmol` 时，除了原有字段外，新增：
+- `variable_atom_indices`（来自 Lead Opt 的原子索引，不走 MCS）
+- `reference_target_filename`
+- `reference_target_file_content`
+- `reference_ligand_filename`
+- `reference_ligand_file_content`
+
+返回结果 zip 额外包含：
+- 根目录的结构文件与 `confidence_*.json`（可被现有结果解析器直接读取）
+- `pocketxmol/input/`（原始 target + reference ligand）
+- `pocketxmol/rank1/`（rank1 pose）
+- `pocketxmol/output/`（ranking/gen_info/log）
 
 #### **提交亲和力预测任务**
 

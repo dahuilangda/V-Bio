@@ -9,7 +9,7 @@ import type { DownloadResultMode } from '../../api/backendTaskApi';
 import type { Project, ProjectTask, TaskState } from '../../types/models';
 import { mergePeptidePreviewIntoProperties } from '../../utils/peptideTaskPreview';
 import { normalizeWorkflowKey } from '../../utils/workflows';
-import { mapTaskState, readStatusText } from './projectMetrics';
+import { inferTaskStateFromStatusPayload, readStatusText } from './projectMetrics';
 
 function hasLeadOptMmpOnlySnapshot(task: ProjectTask | null): boolean {
   if (!task) return false;
@@ -591,7 +591,11 @@ export async function refreshTaskStatus(params: {
 
   try {
     const status = await getTaskStatus(activeTaskId);
-    const taskState: TaskState = mapTaskState(status.state);
+    const runtimeTask = projectTasks.find((item) => item.task_id === activeTaskId) || null;
+    const taskState: TaskState = inferTaskStateFromStatusPayload(
+      status,
+      runtimeTask?.task_state || project.task_state
+    );
     const statusText = readStatusText(status);
     setStatusInfo((previous) => {
       const incoming = asRecord(status.info);
@@ -607,8 +611,8 @@ export async function refreshTaskStatus(params: {
     });
     const runtimeInfo = asRecord(status.info);
     const isPeptideDesignWorkflow = normalizeWorkflowKey(project.task_type) === 'peptide_design';
+    const isLeadOptimizationWorkflow = normalizeWorkflowKey(project.task_type) === 'lead_optimization';
     const nextErrorText = taskState === 'FAILURE' ? statusText : '';
-    const runtimeTask = projectTasks.find((item) => item.task_id === activeTaskId) || null;
     const completedAt = taskState === 'SUCCESS' ? new Date().toISOString() : null;
     const submittedAt = runtimeTask?.submitted_at || project.submitted_at;
     const durationSeconds =
@@ -680,7 +684,13 @@ export async function refreshTaskStatus(params: {
     }
 
     const statusLooksLikeMmp = String(statusText || '').toUpperCase().includes('MMP');
-    if (taskState === 'SUCCESS' && next?.task_id && !statusLooksLikeMmp && !hasLeadOptMmpOnlySnapshot(runtimeTask)) {
+    if (
+      taskState === 'SUCCESS' &&
+      next?.task_id &&
+      !isLeadOptimizationWorkflow &&
+      !statusLooksLikeMmp &&
+      !hasLeadOptMmpOnlySnapshot(runtimeTask)
+    ) {
       const resultMode: DownloadResultMode = isPeptideDesignWorkflow ? 'full' : 'view';
       await pullResultForViewer(next.task_id, {
         taskRowId: runtimeTask?.id,

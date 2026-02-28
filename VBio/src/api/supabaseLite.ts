@@ -372,10 +372,11 @@ export async function listProjectTasksCompact(projectId: string): Promise<Projec
 
 export async function listProjectTasksForList(
   projectId: string,
-  options?: { includeComponents?: boolean; includeConfidence?: boolean }
+  options?: { includeComponents?: boolean; includeConfidence?: boolean; includeProperties?: boolean }
 ): Promise<ProjectTask[]> {
   const includeComponents = options?.includeComponents !== false;
   const includeConfidence = options?.includeConfidence !== false;
+  const includeProperties = options?.includeProperties !== false;
   const selectFields = [
     'id',
     'project_id',
@@ -388,7 +389,7 @@ export async function listProjectTasksForList(
     'backend',
     'seed',
     'ligand_smiles',
-    'properties',
+    ...(includeProperties ? ['properties'] : []),
     ...(includeConfidence ? ['confidence'] : []),
     'structure_name',
     'submitted_at',
@@ -430,12 +431,14 @@ export async function listProjectTasksForList(
     confidence: {},
     affinity: {},
     constraints: [],
-    properties: {
-      affinity: false,
-      target: null,
-      ligand: null,
-      binder: null
-    },
+    properties: includeProperties
+      ? {
+          affinity: false,
+          target: null,
+          ligand: null,
+          binder: null
+        }
+      : {},
     ...row
   })) as ProjectTask[];
 }
@@ -594,22 +597,34 @@ export async function insertProjectTask(input: Partial<ProjectTask>): Promise<Pr
   return rows[0];
 }
 
-export async function updateProjectTask(taskRowId: string, patch: Partial<ProjectTask>): Promise<ProjectTask> {
+export async function updateProjectTask(
+  taskRowId: string,
+  patch: Partial<ProjectTask>,
+  options?: { minimalReturn?: boolean; select?: string }
+): Promise<ProjectTask> {
   const sanitized = sanitizeProjectTaskWritePayload(patch);
+  const preferHeader = options?.minimalReturn ? 'return=minimal' : 'return=representation';
   const rows = await request<ProjectTask[]>(
     '/project_tasks',
     {
       method: 'PATCH',
       headers: {
-        Prefer: 'return=representation'
+        Prefer: preferHeader
       },
       body: JSON.stringify(sanitized)
     },
     {
       id: `eq.${taskRowId}`,
-      select: '*'
+      ...(options?.minimalReturn ? {} : { select: options?.select || '*' })
     }
   );
+  if (options?.minimalReturn) {
+    return {
+      id: taskRowId,
+      ...sanitized,
+      updated_at: new Date().toISOString()
+    } as ProjectTask;
+  }
   return rows[0];
 }
 

@@ -25,7 +25,11 @@ export async function patchProjectRecord(params: {
 export async function patchTaskRecord(params: {
   taskRowId: string;
   payload: Partial<ProjectTask>;
-  updateProjectTask: (taskRowId: string, payload: Partial<ProjectTask>) => Promise<ProjectTask>;
+  updateProjectTask: (
+    taskRowId: string,
+    payload: Partial<ProjectTask>,
+    options?: { minimalReturn?: boolean; select?: string }
+  ) => Promise<ProjectTask>;
   setProjectTasks: Dispatch<SetStateAction<ProjectTask[]>>;
   sortProjectTasks: (rows: ProjectTask[]) => ProjectTask[];
 }): Promise<ProjectTask | null> {
@@ -46,9 +50,23 @@ export async function patchTaskRecord(params: {
     );
     return null;
   }
-  const next = await updateProjectTask(taskRowId, payload);
-  setProjectTasks((prev) => sortProjectTasks(prev.map((row) => (row.id === taskRowId ? next : row))));
-  return next;
+  const next = await updateProjectTask(taskRowId, payload, { minimalReturn: true });
+  let mergedRow: ProjectTask | null = null;
+  setProjectTasks((prev) =>
+    sortProjectTasks(
+      prev.map((row) => {
+        if (row.id !== taskRowId) return row;
+        mergedRow = {
+          ...row,
+          ...payload,
+          ...next,
+          updated_at: String(next.updated_at || new Date().toISOString())
+        } as ProjectTask;
+        return mergedRow;
+      })
+    )
+  );
+  return mergedRow || next;
 }
 
 export function resolveEditableDraftTaskRowIdFromContext(params: {
@@ -109,7 +127,11 @@ export async function persistDraftTaskSnapshotRecord(params: {
     ligandSmilesOverride?: string;
   };
   insertProjectTask: (payload: Partial<ProjectTask>) => Promise<ProjectTask>;
-  updateProjectTask: (taskRowId: string, payload: Partial<ProjectTask>) => Promise<ProjectTask>;
+  updateProjectTask: (
+    taskRowId: string,
+    payload: Partial<ProjectTask>,
+    options?: { minimalReturn?: boolean; select?: string }
+  ) => Promise<ProjectTask>;
   setProjectTasks: Dispatch<SetStateAction<ProjectTask[]>>;
   sortProjectTasks: (rows: ProjectTask[]) => ProjectTask[];
 }): Promise<ProjectTask> {

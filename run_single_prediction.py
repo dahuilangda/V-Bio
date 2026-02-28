@@ -16,6 +16,7 @@ import time
 import tarfile
 import io
 import itertools
+import math
 import re
 import base64
 import random
@@ -42,6 +43,10 @@ from config import (
     PROTENIX_INFER_EXTRA_ARGS,
     PROTENIX_PYTHON_BIN,
     PROTENIX_USE_HOST_USER,
+    POCKETXMOL_ROOT_DIR,
+    POCKETXMOL_CONFIG_MODEL,
+    POCKETXMOL_DEVICE,
+    POCKETXMOL_BATCH_SIZE,
 )
 from af3_adapter import (
     AF3Preparation,
@@ -63,6 +68,8 @@ from Bio import Align
 from Bio.PDB import PDBParser, MMCIFParser, Select
 from Bio.PDB.Polypeptide import is_aa
 import gemmi
+from rdkit import Chem
+from rdkit.Chem import AllChem, rdFMCS, rdMolAlign
 
 # MSA 缓存配置
 MSA_CACHE_CONFIG = {
@@ -3510,6 +3517,915 @@ def _normalize_protenix_output_permissions(
         print(f"⚠️ 无法自动修复 Protenix 输出目录权限: {perm_err}", file=sys.stderr)
 
 
+def _decode_base64_text(value: Any, field_name: str) -> str:
+    token = str(value or "").strip()
+    if not token:
+        raise ValueError(f"Missing required field: {field_name}")
+    try:
+        return base64.b64decode(token).decode("utf-8")
+    except Exception as exc:
+        raise ValueError(f"Failed to decode {field_name} as base64 UTF-8 text: {exc}") from exc
+
+
+def _safe_runtime_token(raw: Any) -> str:
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(raw or "").strip()).strip("._-")
+    if token:
+        return token[:72]
+    return f"pxm_{int(time.time())}_{random.randint(1000, 9999)}"
+
+
+def _normalize_path_within_root(raw: Any, root: Path, fallback: str) -> Path:
+    raw_token = str(raw or "").strip()
+    if not raw_token:
+        return Path(fallback)
+    candidate = Path(raw_token)
+    if candidate.is_absolute():
+        try:
+            return candidate.resolve().relative_to(root.resolve())
+        except Exception:
+            return Path(fallback)
+    return candidate
+
+
+def _tail_lines(path: Path, count: int = 80) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return ""
+    return "\n".join(lines[-count:])
+
+
+def _find_latest_pocketxmol_experiment(outdir: Path, config_stem: str, model_stem: str) -> Optional[Path]:
+    if not outdir.exists():
+        return None
+    prefix = f"{config_stem}_{model_stem}_20"
+    candidates = [path for path in outdir.iterdir() if path.is_dir() and path.name.startswith(prefix)]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda path: path.name)
+    return candidates[-1]
+
+
+def _pick_rank1_pose_from_experiment(exp_dir: Path) -> Tuple[Path, Optional[Path], Optional[dict]]:
+    ranking_path = exp_dir / "confidence_ranking.csv"
+    ranking_row: Optional[dict] = None
+    pose_filename = ""
+    if ranking_path.exists():
+        try:
+            with ranking_path.open("r", encoding="utf-8", newline="") as f:
+                reader = csv.DictReader(f)
+                first_row = next(reader, None)
+                if isinstance(first_row, dict):
+                    ranking_row = first_row
+                    pose_filename = str(first_row.get("filename") or "").strip()
+        except Exception:
+            pose_filename = ""
+
+    pose_roots = [
+        exp_dir / f"{exp_dir.name}_SDF",
+        exp_dir / "SDF",
+    ]
+    for root in pose_roots:
+        if not root.exists():
+            continue
+        if pose_filename:
+            candidate = root / pose_filename
+            if candidate.exists():
+                return candidate, (ranking_path if ranking_path.exists() else None), ranking_row
+        sdf_candidates = sorted([path for path in root.glob("*.sdf") if path.is_file()])
+        if sdf_candidates:
+            return sdf_candidates[0], (ranking_path if ranking_path.exists() else None), ranking_row
+
+    raise FileNotFoundError(f"No generated SDF pose found in PocketXMol experiment: {exp_dir}")
+
+
+def _convert_target_structure_for_pocketxmol(source_path: Path, source_format: str, output_pdb: Path) -> Path:
+    fmt = str(source_format or "").strip().lower()
+    if fmt == "pdb" or source_path.suffix.lower() in {".pdb", ".ent"}:
+        if source_path.resolve() != output_pdb.resolve():
+            shutil.copyfile(source_path, output_pdb)
+        return output_pdb
+    if fmt != "cif" and source_path.suffix.lower() not in {".cif", ".mmcif"}:
+        raise ValueError(f"Unsupported reference target format for PocketXMol: {source_path.suffix}")
+    structure = gemmi.read_structure(str(source_path))
+    structure.write_pdb(str(output_pdb))
+    return output_pdb
+
+
+def _convert_reference_ligand_for_pocketxmol(source_path: Path, output_dir: Path) -> Path:
+    suffix = source_path.suffix.lower()
+    if suffix in {".sdf", ".sd", ".pdb", ".ent"}:
+        output_path = output_dir / f"reference_ligand{suffix if suffix != '.sd' else '.sdf'}"
+        if source_path.resolve() != output_path.resolve():
+            shutil.copyfile(source_path, output_path)
+        return output_path
+
+    if suffix == ".mol2":
+        mol = Chem.MolFromMol2File(str(source_path), sanitize=False, removeHs=False)
+        if mol is None:
+            raise ValueError(f"Failed to parse MOL2 ligand: {source_path}")
+        output_path = output_dir / "reference_ligand.sdf"
+        Chem.MolToMolFile(mol, str(output_path))
+        return output_path
+
+    if suffix == ".mol":
+        mol = Chem.MolFromMolFile(str(source_path), sanitize=False, removeHs=False)
+        if mol is None:
+            raise ValueError(f"Failed to parse MOL ligand: {source_path}")
+        output_path = output_dir / "reference_ligand.sdf"
+        Chem.MolToMolFile(mol, str(output_path))
+        return output_path
+
+    raise ValueError(
+        "PocketXMol requires reference ligand in SDF/PDB/MOL/MOL2 format for lead-opt docking."
+    )
+
+
+def _find_first_existing(paths: List[Path]) -> Optional[Path]:
+    for path in paths:
+        if path.exists():
+            return path
+    return None
+
+
+def _load_reference_ligand_with_coords(path: Path) -> Chem.Mol:
+    suffix = path.suffix.lower()
+    mol: Optional[Chem.Mol] = None
+    if suffix in {".sdf", ".sd", ".mol"}:
+        supplier = Chem.SDMolSupplier(str(path), removeHs=False)
+        for item in supplier:
+            if item is not None:
+                mol = item
+                break
+    elif suffix == ".mol2":
+        mol = Chem.MolFromMol2File(str(path), sanitize=True, removeHs=False)
+    elif suffix in {".pdb", ".ent"}:
+        mol = Chem.MolFromPDBFile(str(path), sanitize=True, removeHs=False)
+    if mol is None:
+        raise ValueError(f"Failed to load reference ligand with 3D coordinates: {path}")
+    mol = Chem.RemoveHs(mol)
+    if mol.GetNumConformers() <= 0:
+        raise ValueError(f"Reference ligand has no 3D conformer: {path}")
+    return mol
+
+
+def _build_3d_mol_from_smiles(smiles: str, seed: int) -> Chem.Mol:
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError(f"Invalid candidate SMILES: {smiles}")
+    mol = Chem.AddHs(mol)
+    params = AllChem.ETKDGv3()
+    params.randomSeed = int(seed)
+    status = AllChem.EmbedMolecule(mol, params)
+    if status != 0:
+        status = AllChem.EmbedMolecule(mol, useRandomCoords=True, randomSeed=int(seed))
+    if status != 0:
+        raise ValueError("Failed to embed 3D conformer for candidate SMILES.")
+    try:
+        AllChem.UFFOptimizeMolecule(mol, maxIters=500)
+    except Exception:
+        pass
+    mol = Chem.RemoveHs(mol)
+    return mol
+
+
+def _prepare_aligned_candidate_input_ligand(
+    reference_ligand_path: Path,
+    candidate_smiles: str,
+    fixed_atom_indices: List[int],
+    output_sdf_path: Path,
+    seed: int,
+) -> Tuple[Path, List[int], Dict[int, int]]:
+    reference_mol = _load_reference_ligand_with_coords(reference_ligand_path)
+    candidate_mol = _build_3d_mol_from_smiles(candidate_smiles, seed=seed)
+    ref_conf = reference_mol.GetConformer()
+    candidate_atom_count = candidate_mol.GetNumAtoms()
+    kept_old_indices = sorted(
+        set(
+            int(i)
+            for i in fixed_atom_indices
+            if isinstance(i, int) and 0 <= int(i) < candidate_atom_count
+        )
+    )
+    if not kept_old_indices:
+        raise ValueError("No valid fixed atom indices for candidate molecule.")
+
+    remove_indices = sorted(set(range(candidate_atom_count)) - set(kept_old_indices), reverse=True)
+    rw = Chem.RWMol(candidate_mol)
+    for idx in remove_indices:
+        rw.RemoveAtom(int(idx))
+    fixed_submol = rw.GetMol()
+    try:
+        Chem.SanitizeMol(fixed_submol)
+    except Exception:
+        # Subgraph may still be usable as query even if sanitize fails.
+        pass
+    old_to_new: Dict[int, int] = {}
+    next_idx = 0
+    remove_set = set(remove_indices)
+    for old_idx in range(candidate_atom_count):
+        if old_idx in remove_set:
+            continue
+        old_to_new[old_idx] = next_idx
+        next_idx += 1
+
+    mapping_candidates: List[Dict[int, int]] = []
+
+    strict_matches = reference_mol.GetSubstructMatches(
+        fixed_submol,
+        uniquify=True,
+        useChirality=False,
+        maxMatches=256,
+    )
+    for match in strict_matches:
+        fixed_to_ref: Dict[int, int] = {}
+        valid = True
+        for old_idx in kept_old_indices:
+            new_idx = old_to_new.get(old_idx)
+            if new_idx is None or new_idx >= len(match):
+                valid = False
+                break
+            ref_idx = int(match[new_idx])
+            fixed_to_ref[int(old_idx)] = ref_idx
+        if valid and fixed_to_ref:
+            mapping_candidates.append(fixed_to_ref)
+
+    if not mapping_candidates:
+        # Relax bond-type constraints for aromatic/kekule inconsistencies in uploaded ligands.
+        try:
+            query_params = Chem.AdjustQueryParameters.NoAdjustments()
+            query_params.makeBondsGeneric = True
+            relaxed_query = Chem.AdjustQueryProperties(fixed_submol, query_params)
+            relaxed_matches = reference_mol.GetSubstructMatches(
+                relaxed_query,
+                uniquify=True,
+                useChirality=False,
+                maxMatches=256,
+            )
+            for match in relaxed_matches:
+                fixed_to_ref = {}
+                valid = True
+                for old_idx in kept_old_indices:
+                    new_idx = old_to_new.get(old_idx)
+                    if new_idx is None or new_idx >= len(match):
+                        valid = False
+                        break
+                    fixed_to_ref[int(old_idx)] = int(match[new_idx])
+                if valid and fixed_to_ref:
+                    mapping_candidates.append(fixed_to_ref)
+        except Exception:
+            pass
+
+    if not mapping_candidates:
+        # Derive a full-molecule MCS map, then project onto requested fixed atoms.
+        try:
+            mcs = rdFMCS.FindMCS(
+                [candidate_mol, reference_mol],
+                atomCompare=rdFMCS.AtomCompare.CompareElements,
+                bondCompare=rdFMCS.BondCompare.CompareAny,
+                ringMatchesRingOnly=False,
+                completeRingsOnly=False,
+                matchValences=False,
+                timeout=8,
+            )
+            if mcs and mcs.numAtoms > 0 and mcs.smartsString:
+                mcs_query = Chem.MolFromSmarts(mcs.smartsString)
+                if mcs_query is not None:
+                    cand_matches = candidate_mol.GetSubstructMatches(
+                        mcs_query,
+                        uniquify=True,
+                        useChirality=False,
+                        maxMatches=128,
+                    )
+                    ref_matches = reference_mol.GetSubstructMatches(
+                        mcs_query,
+                        uniquify=True,
+                        useChirality=False,
+                        maxMatches=128,
+                    )
+                    for cand_match in cand_matches:
+                        for ref_match in ref_matches:
+                            paired = zip(cand_match, ref_match)
+                            fixed_to_ref = {
+                                int(cand_idx): int(ref_idx)
+                                for cand_idx, ref_idx in paired
+                                if int(cand_idx) in kept_old_indices
+                            }
+                            if fixed_to_ref:
+                                mapping_candidates.append(fixed_to_ref)
+        except Exception:
+            pass
+
+    best_atom_map: List[Tuple[int, int]] = []
+    best_fixed_to_ref: Dict[int, int] = {}
+    best_key: Optional[Tuple[int, float]] = None
+    for fixed_to_ref in mapping_candidates:
+        atom_map_candidate_to_ref: List[Tuple[int, int]] = []
+        valid = True
+        for cand_idx, ref_idx in fixed_to_ref.items():
+            if cand_idx < 0 or ref_idx < 0:
+                valid = False
+                break
+            if cand_idx >= candidate_mol.GetNumAtoms() or ref_idx >= reference_mol.GetNumAtoms():
+                valid = False
+                break
+            cand_atom = candidate_mol.GetAtomWithIdx(int(cand_idx))
+            ref_atom = reference_mol.GetAtomWithIdx(int(ref_idx))
+            if int(cand_atom.GetAtomicNum()) != int(ref_atom.GetAtomicNum()):
+                valid = False
+                break
+            atom_map_candidate_to_ref.append((int(cand_idx), int(ref_idx)))
+        if not valid or not atom_map_candidate_to_ref:
+            continue
+
+        probe = Chem.Mol(candidate_mol)
+        rmsd = 9999.0
+        if len(atom_map_candidate_to_ref) >= 3:
+            try:
+                rmsd = float(rdMolAlign.AlignMol(probe, reference_mol, atomMap=atom_map_candidate_to_ref))
+            except Exception:
+                rmsd = 9999.0
+        else:
+            rmsd = 0.0
+
+        ranking_key = (len(atom_map_candidate_to_ref), -rmsd)
+        if best_key is None or ranking_key > best_key:
+            best_key = ranking_key
+            best_atom_map = atom_map_candidate_to_ref
+            best_fixed_to_ref = {int(k): int(v) for k, v in fixed_to_ref.items()}
+
+    if not best_atom_map or not best_fixed_to_ref:
+        raise ValueError(
+            "Unable to map fixed scaffold atoms onto uploaded reference ligand. "
+            "Please verify reference ligand corresponds to current Lead-Opt reference."
+        )
+    aligned = Chem.Mol(candidate_mol)
+    if len(best_atom_map) >= 3:
+        try:
+            rdMolAlign.AlignMol(aligned, reference_mol, atomMap=best_atom_map)
+        except Exception:
+            aligned = Chem.Mol(candidate_mol)
+
+    aligned_conf = aligned.GetConformer()
+    for cand_idx, ref_idx in best_fixed_to_ref.items():
+        aligned_conf.SetAtomPosition(int(cand_idx), ref_conf.GetAtomPosition(int(ref_idx)))
+
+    selected_fixed_indices = sorted(best_fixed_to_ref.keys())
+    output_sdf_path.parent.mkdir(parents=True, exist_ok=True)
+    Chem.MolToMolFile(aligned, str(output_sdf_path))
+    return output_sdf_path, selected_fixed_indices, best_fixed_to_ref
+
+
+def _load_ligand_coordinates_for_pocket_radius(ligand_path: Path) -> List[Tuple[float, float, float]]:
+    suffix = ligand_path.suffix.lower()
+    mol = None
+    if suffix in {".sdf", ".sd", ".mol"}:
+        mol = Chem.MolFromMolFile(str(ligand_path), sanitize=False, removeHs=False)
+    elif suffix == ".mol2":
+        mol = Chem.MolFromMol2File(str(ligand_path), sanitize=False, removeHs=False)
+    elif suffix in {".pdb", ".ent"}:
+        mol = Chem.MolFromPDBFile(str(ligand_path), sanitize=False, removeHs=False)
+    else:
+        raise ValueError(f"Unsupported ligand format for pocket radius estimation: {ligand_path.suffix}")
+    if mol is None:
+        raise ValueError(f"Failed to parse ligand coordinates from {ligand_path}")
+    if mol.GetNumConformers() <= 0:
+        raise ValueError(f"Ligand file has no 3D conformer: {ligand_path}")
+    conf = mol.GetConformer()
+    coords: List[Tuple[float, float, float]] = []
+    for atom_idx in range(mol.GetNumAtoms()):
+        pos = conf.GetAtomPosition(atom_idx)
+        coords.append((float(pos.x), float(pos.y), float(pos.z)))
+    if not coords:
+        raise ValueError(f"No ligand atoms found in {ligand_path}")
+    return coords
+
+
+def _estimate_pocket_radius_from_ligand_coords(coords: List[Tuple[float, float, float]]) -> int:
+    if not coords:
+        raise ValueError("Cannot estimate pocket radius from empty ligand coordinates.")
+    center_x = sum(point[0] for point in coords) / len(coords)
+    center_y = sum(point[1] for point in coords) / len(coords)
+    center_z = sum(point[2] for point in coords) / len(coords)
+    max_dist = 0.0
+    for x, y, z in coords:
+        dx = x - center_x
+        dy = y - center_y
+        dz = z - center_z
+        max_dist = max(max_dist, math.sqrt(dx * dx + dy * dy + dz * dz))
+    # Radius is ligand extent plus a fixed shell for pocket context.
+    estimated = int(math.ceil(max_dist + 6.0))
+    return max(10, min(32, estimated))
+
+
+def _split_atom_indices_into_connected_components(
+    mol: Chem.Mol,
+    atom_indices: List[int],
+) -> List[List[int]]:
+    atom_set = set(
+        int(idx)
+        for idx in atom_indices
+        if isinstance(idx, int) and 0 <= int(idx) < int(mol.GetNumAtoms())
+    )
+    if not atom_set:
+        return []
+    visited: set[int] = set()
+    components: List[List[int]] = []
+    for start_idx in sorted(atom_set):
+        if start_idx in visited:
+            continue
+        queue = [start_idx]
+        visited.add(start_idx)
+        component: List[int] = []
+        while queue:
+            current = queue.pop()
+            component.append(current)
+            atom = mol.GetAtomWithIdx(int(current))
+            for neighbor in atom.GetNeighbors():
+                nid = int(neighbor.GetIdx())
+                if nid not in atom_set or nid in visited:
+                    continue
+                visited.add(nid)
+                queue.append(nid)
+        components.append(sorted(component))
+    return components
+
+
+def _load_protein_heavy_atom_coords_from_pdb(pdb_path: Path) -> List[Tuple[float, float, float]]:
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("target", str(pdb_path))
+    coords: List[Tuple[float, float, float]] = []
+    for atom in structure.get_atoms():
+        element = str(getattr(atom, "element", "") or "").strip().upper()
+        if element == "H":
+            continue
+        xyz = atom.get_coord()
+        coords.append((float(xyz[0]), float(xyz[1]), float(xyz[2])))
+    if not coords:
+        raise ValueError(f"No heavy atoms parsed from target structure: {pdb_path}")
+    return coords
+
+
+def _reference_ligand_contact_flags_against_target(
+    reference_ligand_path: Path,
+    target_pdb_path: Path,
+    distance_cutoff: float = 4.5,
+) -> Dict[int, bool]:
+    reference_mol = _load_reference_ligand_with_coords(reference_ligand_path)
+    ref_conf = reference_mol.GetConformer()
+    protein_coords = _load_protein_heavy_atom_coords_from_pdb(target_pdb_path)
+    cutoff_sq = float(distance_cutoff) * float(distance_cutoff)
+    flags: Dict[int, bool] = {}
+    for ref_idx in range(reference_mol.GetNumAtoms()):
+        pos = ref_conf.GetAtomPosition(int(ref_idx))
+        px = float(pos.x)
+        py = float(pos.y)
+        pz = float(pos.z)
+        contact = False
+        for tx, ty, tz in protein_coords:
+            dx = px - tx
+            dy = py - ty
+            dz = pz - tz
+            if (dx * dx + dy * dy + dz * dz) <= cutoff_sq:
+                contact = True
+                break
+        flags[int(ref_idx)] = contact
+    return flags
+
+
+def _select_single_anchor_fixed_component(
+    candidate_mol: Chem.Mol,
+    fixed_atom_indices: List[int],
+    fixed_atom_mapping_to_reference: Dict[int, int],
+    reference_ligand_path: Path,
+    target_pdb_path: Path,
+) -> Tuple[List[int], Dict[str, Any]]:
+    components = _split_atom_indices_into_connected_components(candidate_mol, fixed_atom_indices)
+    if len(components) <= 1:
+        return sorted(set(int(i) for i in fixed_atom_indices)), {
+            "strategy": "single_component",
+            "component_count": len(components),
+        }
+
+    contact_flags: Dict[int, bool] = {}
+    contact_error = ""
+    try:
+        contact_flags = _reference_ligand_contact_flags_against_target(
+            reference_ligand_path=reference_ligand_path,
+            target_pdb_path=target_pdb_path,
+            distance_cutoff=4.5,
+        )
+    except Exception as exc:
+        contact_error = str(exc)
+        contact_flags = {}
+
+    scored_rows: List[Dict[str, Any]] = []
+    for component in components:
+        mapped_refs = [
+            int(fixed_atom_mapping_to_reference[idx])
+            for idx in component
+            if int(idx) in fixed_atom_mapping_to_reference
+        ]
+        contact_count = int(sum(1 for ref_idx in mapped_refs if contact_flags.get(int(ref_idx), False)))
+        scored_rows.append(
+            {
+                "candidate_atom_indices": component,
+                "reference_atom_indices": mapped_refs,
+                "contact_count": contact_count,
+                "size": len(component),
+            }
+        )
+
+    # Priority:
+    # 1) maximum contact_count with target pocket
+    # 2) fallback to maximum fragment size
+    # 3) deterministic tie-breaker by smallest atom index
+    ranked = sorted(
+        scored_rows,
+        key=lambda row: (
+            int(row.get("contact_count", 0)),
+            int(row.get("size", 0)),
+            -min(row.get("candidate_atom_indices") or [10**9]),
+        ),
+        reverse=True,
+    )
+    selected_row = ranked[0] if ranked else {"candidate_atom_indices": []}
+    selected = sorted(set(int(i) for i in selected_row.get("candidate_atom_indices") or []))
+    if not selected:
+        selected = sorted(set(int(i) for i in fixed_atom_indices))
+
+    debug_payload: Dict[str, Any] = {
+        "strategy": "single_anchor_by_pocket_contact_then_size",
+        "component_count": len(components),
+        "components": scored_rows,
+        "selected_component_candidate_atom_indices": selected,
+    }
+    if contact_error:
+        debug_payload["contact_fallback_reason"] = contact_error
+    return selected, debug_payload
+
+
+def run_pocketxmol_backend(
+    temp_dir: str,
+    output_archive_path: str,
+    pocketxmol_inputs: Dict[str, Any],
+    seed: Optional[int] = None,
+    task_id: Optional[str] = None,
+) -> None:
+    print("🚀 Using PocketXMol backend", file=sys.stderr)
+    if not isinstance(pocketxmol_inputs, dict) or not pocketxmol_inputs:
+        raise ValueError("Missing pocketxmol_inputs for PocketXMol backend.")
+
+    candidate_smiles = str(pocketxmol_inputs.get("candidate_smiles") or "").strip()
+    if not candidate_smiles:
+        raise ValueError("PocketXMol backend requires candidate_smiles.")
+
+    mol = Chem.MolFromSmiles(candidate_smiles)
+    if mol is None:
+        raise ValueError("PocketXMol backend received invalid candidate SMILES.")
+    num_atoms = int(mol.GetNumAtoms())
+    if num_atoms <= 0:
+        raise ValueError("Candidate SMILES has no atoms.")
+
+    raw_variable_indices = pocketxmol_inputs.get("variable_atom_indices")
+    if not isinstance(raw_variable_indices, list):
+        raise ValueError("PocketXMol backend requires variable_atom_indices list.")
+    variable_set: set[int] = set()
+    for item in raw_variable_indices:
+        if not isinstance(item, (int, float, str)):
+            continue
+        token = str(item).strip()
+        if not token:
+            continue
+        try:
+            parsed = int(token)
+        except Exception:
+            continue
+        variable_set.add(parsed)
+    variable_atom_indices = sorted(variable_set)
+    if not variable_atom_indices:
+        raise ValueError("PocketXMol backend requires non-empty variable_atom_indices.")
+    if variable_atom_indices[0] < 0 or variable_atom_indices[-1] >= num_atoms:
+        raise ValueError(
+            f"variable_atom_indices out of range for candidate molecule with {num_atoms} atoms."
+        )
+
+    fixed_atom_indices = [idx for idx in range(num_atoms) if idx not in set(variable_atom_indices)]
+    if not fixed_atom_indices:
+        raise ValueError("PocketXMol backend needs at least one fixed scaffold atom.")
+
+    target_filename = str(pocketxmol_inputs.get("reference_target_filename") or "reference_target.pdb").strip()
+    target_content = _decode_base64_text(
+        pocketxmol_inputs.get("reference_target_content_base64"),
+        "reference_target_content_base64",
+    )
+    target_format = str(pocketxmol_inputs.get("reference_target_format") or "cif").strip().lower()
+    if target_format not in {"cif", "pdb"}:
+        target_format = "cif"
+
+    ligand_filename = str(pocketxmol_inputs.get("reference_ligand_filename") or "reference_ligand.sdf").strip()
+    ligand_content = _decode_base64_text(
+        pocketxmol_inputs.get("reference_ligand_content_base64"),
+        "reference_ligand_content_base64",
+    )
+
+    target_chain = str(pocketxmol_inputs.get("target_chain") or "A").strip() or "A"
+    ligand_chain = str(pocketxmol_inputs.get("ligand_chain") or "L").strip() or "L"
+    runtime_seed = int(seed) if isinstance(seed, int) else 2024
+
+    repo_root = Path(__file__).resolve().parent
+    pocket_root = Path(POCKETXMOL_ROOT_DIR).expanduser().resolve()
+    if not pocket_root.exists():
+        raise FileNotFoundError(f"PocketXMol root not found: {pocket_root}")
+    run_script = pocket_root / "scripts" / "run_pocketxmol_docker.sh"
+    if not run_script.exists():
+        raise FileNotFoundError(f"PocketXMol docker runner not found: {run_script}")
+
+    runtime_token = _safe_runtime_token(task_id or os.environ.get("BOLTZ_TASK_ID") or "")
+    runtime_root = Path(temp_dir) / "pocketxmol_runtime" / runtime_token
+    input_dir = runtime_root / "input"
+    config_path = runtime_root / "task.yml"
+    outdir_host = runtime_root / "output"
+    model_rel = _normalize_path_within_root(POCKETXMOL_CONFIG_MODEL, pocket_root, "configs/sample/pxm.yml")
+    input_dir.mkdir(parents=True, exist_ok=True)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    outdir_host.mkdir(parents=True, exist_ok=True)
+
+    target_source_suffix = Path(target_filename).suffix.lower() or (".pdb" if target_format == "pdb" else ".cif")
+    if target_source_suffix == ".mmcif":
+        target_source_suffix = ".cif"
+    target_source = input_dir / f"reference_target{target_source_suffix}"
+    target_source.write_text(target_content, encoding="utf-8")
+    target_for_pocket = input_dir / "reference_target_for_pocket.pdb"
+    _convert_target_structure_for_pocketxmol(target_source, target_format, target_for_pocket)
+
+    ligand_source_suffix = Path(ligand_filename).suffix.lower() or ".sdf"
+    if ligand_source_suffix == ".mmcif":
+        ligand_source_suffix = ".cif"
+    ligand_source = input_dir / f"reference_ligand{ligand_source_suffix}"
+    ligand_source.write_text(ligand_content, encoding="utf-8")
+    ligand_for_pocket = _convert_reference_ligand_for_pocketxmol(ligand_source, input_dir)
+    aligned_input_ligand, aligned_fixed_atom_indices, fixed_atom_mapping_to_reference = _prepare_aligned_candidate_input_ligand(
+        reference_ligand_path=ligand_for_pocket,
+        candidate_smiles=candidate_smiles,
+        fixed_atom_indices=fixed_atom_indices,
+        output_sdf_path=runtime_root / "prepared_inputs" / "candidate_aligned_input.sdf",
+        seed=runtime_seed,
+    )
+    if not aligned_fixed_atom_indices:
+        raise ValueError("PocketXMol backend could not derive fixed atoms for aligned candidate ligand input.")
+    selected_fixed_atom_indices, fix_anchor_debug = _select_single_anchor_fixed_component(
+        candidate_mol=mol,
+        fixed_atom_indices=aligned_fixed_atom_indices,
+        fixed_atom_mapping_to_reference=fixed_atom_mapping_to_reference,
+        reference_ligand_path=ligand_for_pocket,
+        target_pdb_path=target_for_pocket,
+    )
+    if not selected_fixed_atom_indices:
+        raise ValueError("PocketXMol backend failed to select fixed anchor atoms.")
+    ligand_coords = _load_ligand_coordinates_for_pocket_radius(ligand_for_pocket)
+    pocket_radius = _estimate_pocket_radius_from_ligand_coords(ligand_coords)
+
+    config_payload: Dict[str, Any] = {
+        "sample": {
+            "seed": runtime_seed,
+            "batch_size": max(1, int(POCKETXMOL_BATCH_SIZE)),
+            "num_mols": 100,
+            "save_traj_prob": 0.05,
+        },
+        "data": {
+            "protein_path": str(target_for_pocket),
+            "input_ligand": str(aligned_input_ligand),
+            "is_pep": False,
+            "pocket_args": {
+                "ref_ligand_path": str(ligand_for_pocket),
+                "radius": pocket_radius,
+            },
+        },
+        "task": {
+            "name": "dock",
+            "transform": {
+                "name": "dock",
+                "settings": {"free": 1, "flexible": 0},
+                "fix_some": {"atom": selected_fixed_atom_indices},
+            },
+        },
+        "noise": {
+            "name": "dock",
+            "num_steps": 100,
+            "prior": "from_train",
+            "pre_process": "fix_some",
+            "level": {
+                "name": "advance",
+                "min": 0.0,
+                "max": 1.0,
+                "step2level": {
+                    "scale_start": 0.99999,
+                    "scale_end": 0.00001,
+                    "width": 3,
+                },
+            },
+        },
+    }
+    pocketxmol_log = Path(temp_dir) / "pocketxmol_docker.log"
+    cmd = [
+        "bash",
+        str(run_script),
+        "--config-task",
+        str(config_path),
+        "--config-model",
+        model_rel.as_posix(),
+        "--outdir",
+        str(outdir_host),
+        "--device",
+        str(POCKETXMOL_DEVICE or "cuda:0"),
+        "--batch-size",
+        str(max(1, int(POCKETXMOL_BATCH_SIZE))),
+        "--rescore",
+        "--rank-mode",
+        "tuned",
+        "--rank-output",
+        "confidence_ranking.csv",
+    ]
+    config_path.write_text(
+        yaml.safe_dump(config_payload, sort_keys=False, default_flow_style=False),
+        encoding="utf-8",
+    )
+    print(
+        f"🐳 运行 PocketXMol Docker (radius={pocket_radius}): "
+        f"{' '.join(shlex.quote(part) for part in cmd)}",
+        file=sys.stderr,
+    )
+    with pocketxmol_log.open("w", encoding="utf-8") as logf:
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(pocket_root),
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        return_code = process.wait()
+    if return_code != 0:
+        last_tail = _tail_lines(pocketxmol_log, 120)
+        if "Empty pocket within the radius" in last_tail:
+            raise RuntimeError(
+                "PocketXMol pocket extraction returned empty pocket. "
+                f"Estimated radius={pocket_radius}. "
+                "Please ensure uploaded target and reference ligand use the same 3D coordinate frame. "
+                f"Tail:\n{last_tail}"
+            )
+        raise RuntimeError(
+            "PocketXMol docker run failed with "
+            f"exit code {return_code}. Tail:\n{last_tail}"
+        )
+
+    exp_dir = _find_latest_pocketxmol_experiment(
+        outdir_host,
+        config_path.stem,
+        Path(model_rel).stem,
+    )
+    if exp_dir is None:
+        raise FileNotFoundError(
+            f"PocketXMol experiment directory not found under {outdir_host} for config {config_path.stem}."
+        )
+    rank1_pose_path, ranking_csv_path, ranking_row = _pick_rank1_pose_from_experiment(exp_dir)
+
+    score_out_dir = Path(temp_dir) / "pocketxmol_boltz2score_output"
+    score_work_dir = Path(temp_dir) / "pocketxmol_boltz2score_work"
+    score_out_dir.mkdir(parents=True, exist_ok=True)
+    score_work_dir.mkdir(parents=True, exist_ok=True)
+    score_log = Path(temp_dir) / "pocketxmol_boltz2score.log"
+
+    score_cmd = [
+        sys.executable,
+        str(repo_root / "Boltz2Score" / "boltz2score.py"),
+        "--output_dir",
+        str(score_out_dir),
+        "--work_dir",
+        str(score_work_dir),
+        "--accelerator",
+        "gpu",
+        "--devices",
+        "1",
+        "--num_workers",
+        "0",
+        "--recycling_steps",
+        "20",
+        "--sampling_steps",
+        "1",
+        "--diffusion_samples",
+        "1",
+        "--max_parallel_samples",
+        "1",
+        "--protein_file",
+        str(target_source),
+        "--ligand_file",
+        str(rank1_pose_path),
+        "--target_chain",
+        target_chain,
+        "--ligand_chain",
+        ligand_chain,
+        "--seed",
+        str(runtime_seed),
+    ]
+    score_env = os.environ.copy()
+    score_env["NUMBA_CACHE_DIR"] = str(Path(temp_dir) / "numba_cache")
+    print(f"🧮 运行 Boltz2Score: {' '.join(shlex.quote(part) for part in score_cmd)}", file=sys.stderr)
+    with score_log.open("w", encoding="utf-8") as logf:
+        score_proc = subprocess.Popen(
+            score_cmd,
+            cwd=str(repo_root),
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=score_env,
+        )
+        score_return = score_proc.wait()
+    if score_return != 0:
+        raise RuntimeError(
+            "Boltz2Score failed for PocketXMol result with "
+            f"exit code {score_return}. Tail:\n{_tail_lines(score_log, 120)}"
+        )
+
+    score_structure = _find_first_existing(
+        sorted(score_out_dir.rglob("*_model_0.cif")) +
+        sorted(score_out_dir.rglob("*_model_0.mmcif")) +
+        sorted(score_out_dir.rglob("*_model_0.pdb"))
+    )
+    if score_structure is None:
+        raise FileNotFoundError(f"Boltz2Score output structure not found under {score_out_dir}")
+    score_confidence = _find_first_existing(sorted(score_out_dir.rglob("confidence_*_model_0.json")))
+    score_affinity = _find_first_existing(sorted(score_out_dir.rglob("affinity_*.json")))
+
+    exported_structure = Path(temp_dir) / f"pocketxmol_model_0{score_structure.suffix.lower()}"
+    shutil.copyfile(score_structure, exported_structure)
+
+    if not (score_confidence and score_confidence.exists()):
+        raise FileNotFoundError(
+            f"Boltz2Score confidence JSON is required but not found under {score_out_dir}"
+        )
+    exported_confidence = Path(temp_dir) / "confidence_pocketxmol_model_0.json"
+    confidence_payload: Dict[str, Any] = {}
+    try:
+        confidence_payload = json.loads(score_confidence.read_text(encoding="utf-8"))
+        if not isinstance(confidence_payload, dict):
+            confidence_payload = {}
+    except Exception:
+        confidence_payload = {}
+    confidence_payload["backend"] = "pocketxmol"
+    confidence_payload["candidate_smiles"] = candidate_smiles
+    confidence_payload["variable_atom_indices"] = variable_atom_indices
+    confidence_payload["fixed_atom_indices"] = selected_fixed_atom_indices
+    confidence_payload["fixed_atom_indices_all"] = aligned_fixed_atom_indices
+    confidence_payload["fixed_atom_mapping_to_reference"] = {
+        str(k): int(v) for k, v in fixed_atom_mapping_to_reference.items()
+    }
+    confidence_payload["fixed_anchor_selection"] = fix_anchor_debug
+    confidence_payload["top_pose_filename"] = rank1_pose_path.name
+    if isinstance(ranking_row, dict):
+        for key in ("ranking_score", "tuned_cfd", "cfd_traj", "cfd_pos", "cfd_node", "cfd_edge"):
+            value = ranking_row.get(key)
+            if value is None or str(value).strip() == "":
+                continue
+            try:
+                confidence_payload[f"pocketxmol_{key}"] = float(value)
+            except Exception:
+                confidence_payload[f"pocketxmol_{key}"] = value
+    exported_confidence.write_text(json.dumps(confidence_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    exported_affinity: Optional[Path] = None
+    if score_affinity and score_affinity.exists():
+        exported_affinity = Path(temp_dir) / "affinity_pocketxmol_model_0.json"
+        shutil.copyfile(score_affinity, exported_affinity)
+
+    with zipfile.ZipFile(output_archive_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        zipf.write(exported_structure, exported_structure.name)
+        zipf.write(exported_confidence, exported_confidence.name)
+        if exported_affinity:
+            zipf.write(exported_affinity, exported_affinity.name)
+
+        if pocketxmol_log.exists():
+            zipf.write(pocketxmol_log, "pocketxmol/pocketxmol_docker.log")
+        if score_log.exists():
+            zipf.write(score_log, "pocketxmol/boltz2score.log")
+        if config_path.exists():
+            zipf.write(config_path, "pocketxmol/config/task.yml")
+        if ranking_csv_path and ranking_csv_path.exists():
+            zipf.write(ranking_csv_path, "pocketxmol/output/confidence_ranking.csv")
+        gen_info_path = exp_dir / "gen_info.csv"
+        if gen_info_path.exists():
+            zipf.write(gen_info_path, "pocketxmol/output/gen_info.csv")
+        exp_log_path = exp_dir / "log.txt"
+        if exp_log_path.exists():
+            zipf.write(exp_log_path, "pocketxmol/output/log.txt")
+
+        zipf.write(target_source, f"pocketxmol/input/{target_source.name}")
+        zipf.write(ligand_source, f"pocketxmol/input/{ligand_source.name}")
+        if aligned_input_ligand.exists():
+            zipf.write(aligned_input_ligand, f"pocketxmol/input/{aligned_input_ligand.name}")
+        zipf.write(rank1_pose_path, f"pocketxmol/rank1/{rank1_pose_path.name}")
+
+
 def _read_int_option(
     options: Dict[str, Any],
     key: str,
@@ -4697,7 +5613,7 @@ def main():
         runtime_task_id = str(predict_args.pop("task_id", "")).strip() or None
         yaml_content = predict_args.pop("yaml_content")
         backend = str(predict_args.pop("backend", "boltz")).strip().lower()
-        if backend not in ("boltz", "alphafold3", "protenix"):
+        if backend not in ("boltz", "alphafold3", "protenix", "pocketxmol"):
             raise ValueError(f"Unsupported backend '{backend}'.")
         workflow = str(predict_args.pop("workflow", "prediction")).strip().lower()
         if workflow in {"peptide", "peptide_designer", "designer"}:
@@ -4713,6 +5629,7 @@ def main():
         model_name = predict_args.pop("model_name", None)
         seed = predict_args.pop("seed", None)
         template_inputs = predict_args.pop("template_inputs", None)
+        pocketxmol_inputs = predict_args.pop("pocketxmol_inputs", {})
 
         use_msa_raw = predict_args.get("use_msa_server", True)
         if isinstance(use_msa_raw, bool):
@@ -4769,6 +5686,14 @@ def main():
                     yaml_content=processed_yaml,
                     output_archive_path=output_archive_path,
                     use_msa_server=use_msa_server,
+                    seed=seed,
+                    task_id=runtime_task_id,
+                )
+            elif backend == "pocketxmol":
+                run_pocketxmol_backend(
+                    temp_dir=temp_dir,
+                    output_archive_path=output_archive_path,
+                    pocketxmol_inputs=pocketxmol_inputs if isinstance(pocketxmol_inputs, dict) else {},
                     seed=seed,
                     task_id=runtime_task_id,
                 )

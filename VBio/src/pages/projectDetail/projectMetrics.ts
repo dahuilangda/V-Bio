@@ -12,6 +12,16 @@ export function mapTaskState(raw: string): TaskState {
   return 'QUEUED';
 }
 
+function resolveNonRegressiveTaskState(currentStateInput: unknown, incomingState: TaskState): TaskState {
+  const current = String(currentStateInput || '').trim().toUpperCase();
+  if (!current) return incomingState;
+  if (current === 'RUNNING' && incomingState === 'QUEUED') return 'RUNNING';
+  if ((current === 'SUCCESS' || current === 'FAILURE' || current === 'REVOKED') && (incomingState === 'QUEUED' || incomingState === 'RUNNING')) {
+    return current as TaskState;
+  }
+  return incomingState;
+}
+
 export function readStatusText(task: { info?: Record<string, unknown>; state: string }) {
   if (!task.info) return task.state;
   const s1 = task.info.status;
@@ -19,6 +29,27 @@ export function readStatusText(task: { info?: Record<string, unknown>; state: st
   if (typeof s1 === 'string' && s1.trim()) return s1;
   if (typeof s2 === 'string' && s2.trim()) return s2;
   return task.state;
+}
+
+export function inferTaskStateFromStatusPayload(
+  task: { info?: Record<string, unknown>; state: string },
+  currentStateInput?: unknown
+): TaskState {
+  const mapped = mapTaskState(task.state);
+  const statusText = readStatusText(task).trim().toLowerCase();
+  const hinted =
+    mapped === 'QUEUED' &&
+    (statusText.includes('running') ||
+      statusText.includes('started') ||
+      statusText.includes('starting') ||
+      statusText.includes('acquiring') ||
+      statusText.includes('preparing') ||
+      statusText.includes('uploading') ||
+      statusText.includes('processing') ||
+      statusText.includes('termination in progress'))
+      ? 'RUNNING'
+      : mapped;
+  return resolveNonRegressiveTaskState(currentStateInput, hinted);
 }
 
 export function findProgressPercent(data: unknown): number | null {

@@ -11,7 +11,7 @@ import {
   hasTaskSummaryMetrics,
   isProjectRow,
   isProjectTaskRow,
-  mapTaskState,
+  inferTaskStateFromStatusPayload,
   mean,
   readStatusText,
   resolveTaskBackendValue,
@@ -347,6 +347,20 @@ function summarizeLeadOptPredictionMap(predictionMap: Record<string, unknown>): 
   };
 }
 
+function resolveLeadOptNonRegressiveState(current: string, incoming: string): string {
+  const currentState = String(current || '').trim().toUpperCase();
+  const incomingState = String(incoming || '').trim().toUpperCase();
+  if (!incomingState) return currentState || 'QUEUED';
+  if (currentState === 'RUNNING' && incomingState === 'QUEUED') return 'RUNNING';
+  if (
+    (currentState === 'SUCCESS' || currentState === 'FAILURE') &&
+    (incomingState === 'QUEUED' || incomingState === 'RUNNING')
+  ) {
+    return currentState;
+  }
+  return incomingState;
+}
+
 async function reconcileLeadOptPredictionMapStates(
   predictionMap: Record<string, unknown>
 ): Promise<{ nextMap: Record<string, unknown>; changed: boolean }> {
@@ -366,8 +380,11 @@ async function reconcileLeadOptPredictionMapStates(
     if (!taskId) continue;
     try {
       const status = await getTaskStatus(taskId);
-      const runtimeState = mapTaskState(status.state);
-      const state =
+      const runtimeState = inferTaskStateFromStatusPayload(
+        status as { info?: Record<string, unknown>; state: string },
+        String(entry.record.state || '').trim().toUpperCase()
+      );
+      const nextState =
         runtimeState === 'SUCCESS'
           ? 'SUCCESS'
           : runtimeState === 'FAILURE' || runtimeState === 'REVOKED'
@@ -375,6 +392,8 @@ async function reconcileLeadOptPredictionMapStates(
             : runtimeState === 'RUNNING'
               ? 'RUNNING'
               : 'QUEUED';
+      const currentState = String(entry.record.state || '').trim().toUpperCase();
+      const state = resolveLeadOptNonRegressiveState(currentState, nextState);
       const errorText =
         state === 'FAILURE'
           ? String(
@@ -383,7 +402,6 @@ async function reconcileLeadOptPredictionMapStates(
                 : '') || status.state || 'Prediction failed.'
             ).trim()
           : '';
-      const currentState = String(entry.record.state || '').trim().toUpperCase();
       const currentError = String(entry.record.error || '').trim();
       if (currentState === state && currentError === errorText) continue;
       nextMap[entry.smiles] = {
@@ -521,7 +539,11 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
 
   const leadOptRows = safeTaskRows.filter((row) => {
     if (!Boolean(row.task_id)) return false;
-    if (!readLeadOptTaskSummary(row)) return false;
+    const summary = readLeadOptTaskSummary(row);
+    if (!summary) return false;
+    const queued = Math.max(0, summary.predictionQueued || 0);
+    const running = Math.max(0, summary.predictionRunning || 0);
+    if (queued + running > 0) return true;
     return row.task_state === 'QUEUED' || row.task_state === 'RUNNING';
   });
   for (const row of leadOptRows) {
@@ -689,7 +711,7 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
     if (result.status !== 'fulfilled') continue;
 
     const runtimeTask = runtimeRows[i];
-    const taskState = mapTaskState(result.value.state);
+    const taskState = inferTaskStateFromStatusPayload(result.value, runtimeTask.task_state);
     const statusText = readStatusText(result.value);
     const errorText = taskState === 'FAILURE' ? statusText : '';
     const terminal = taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED';
