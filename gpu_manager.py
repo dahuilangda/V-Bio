@@ -1,6 +1,7 @@
 import redis
 import config
 import logging
+import time
 
 # 使用标准日志记录模块
 logger = logging.getLogger(__name__)
@@ -30,8 +31,19 @@ def initialize_gpu_pool(devices_to_use: list[int]):
     pipe = client.pipeline()
     
     # 1. 删除旧键，确保状态干净
-    logger.info(f"正在删除旧键: {config.GPU_POOL_KEY}, {config.GPU_VALID_SET_KEY}, {config.GPU_IN_USE_HASH_KEY}")
-    pipe.delete(config.GPU_POOL_KEY, config.GPU_VALID_SET_KEY, config.GPU_IN_USE_HASH_KEY)
+    logger.info(
+        "正在删除旧键: %s, %s, %s, %s",
+        config.GPU_POOL_KEY,
+        config.GPU_VALID_SET_KEY,
+        config.GPU_IN_USE_HASH_KEY,
+        config.GPU_WAITING_NON_PEPTIDE_SET_KEY,
+    )
+    pipe.delete(
+        config.GPU_POOL_KEY,
+        config.GPU_VALID_SET_KEY,
+        config.GPU_IN_USE_HASH_KEY,
+        config.GPU_WAITING_NON_PEPTIDE_SET_KEY,
+    )
     
     # 2. 将给定的设备 ID 添加到 SET 和 LIST 中
     if devices_to_use:
@@ -81,6 +93,67 @@ def acquire_gpu(task_id: str, timeout: int = 3600) -> int:
     logger.info(f"✅ 任务 {task_id}: 已获取 GPU {gpu_id}。")
     return gpu_id
 
+
+def register_non_peptide_gpu_waiter(task_id: str) -> None:
+    """Register a non-peptide task as waiting for GPU allocation."""
+    normalized_task_id = str(task_id or "").strip()
+    if not normalized_task_id:
+        return
+    client = get_redis_client()
+    client.sadd(config.GPU_WAITING_NON_PEPTIDE_SET_KEY, normalized_task_id)
+
+
+def unregister_non_peptide_gpu_waiter(task_id: str) -> None:
+    """Remove a non-peptide task from waiting set after acquire attempt completes."""
+    normalized_task_id = str(task_id or "").strip()
+    if not normalized_task_id:
+        return
+    client = get_redis_client()
+    client.srem(config.GPU_WAITING_NON_PEPTIDE_SET_KEY, normalized_task_id)
+
+
+def get_non_peptide_gpu_waiter_count() -> int:
+    client = get_redis_client()
+    try:
+        return int(client.scard(config.GPU_WAITING_NON_PEPTIDE_SET_KEY) or 0)
+    except Exception:
+        return 0
+
+
+def acquire_gpu_for_peptide_worker(task_id: str, timeout: int = 3600, poll_interval: float = 1.0) -> int:
+    """
+    Fair GPU acquire for peptide candidate workers.
+    If any non-peptide tasks are waiting for GPU, peptide workers yield and retry.
+    """
+    client = get_redis_client()
+    deadline = time.monotonic() + max(1, int(timeout))
+    sleep_step = max(0.2, float(poll_interval))
+    logger.info(f"任务 {task_id}: 多肽子任务开始公平获取 GPU (timeout={timeout}s)。")
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"任务 {task_id}: 多肽子任务在 {timeout}s 内未能获取 GPU。")
+
+        try:
+            waiting_non_peptide = int(client.scard(config.GPU_WAITING_NON_PEPTIDE_SET_KEY) or 0)
+        except Exception:
+            waiting_non_peptide = 0
+        if waiting_non_peptide > 0:
+            time.sleep(min(sleep_step, max(0.2, remaining)))
+            continue
+
+        blpop_timeout = max(1, min(int(remaining), int(round(sleep_step))))
+        result = client.blpop(config.GPU_POOL_KEY, timeout=blpop_timeout)
+        if result is None:
+            continue
+
+        _, gpu_id_str = result
+        gpu_id = int(gpu_id_str)
+        client.hset(config.GPU_IN_USE_HASH_KEY, gpu_id, task_id)
+        logger.info(f"✅ 任务 {task_id}: 多肽子任务已获取 GPU {gpu_id}。")
+        return gpu_id
+
 def release_gpu(gpu_id: int, task_id: str):
     """
     原子化且安全地将一个 GPU ID 返回到池中。
@@ -115,7 +188,8 @@ def get_gpu_status() -> dict:
         "in_use": in_use,
         "available": available,
         "available_count": len(available),
-        "in_use_count": len(in_use)
+        "in_use_count": len(in_use),
+        "waiting_non_peptide_count": get_non_peptide_gpu_waiter_count(),
     }
 
 # --- 管理脚本入口 ---
@@ -197,6 +271,7 @@ if __name__ == '__main__':
         print("\n--- GPU Pool Status ---")
         print(f"Available ({status['available_count']}): {status['available']}")
         print(f"In Use ({status['in_use_count']}):")
+        print(f"Waiting non-peptide: {status.get('waiting_non_peptide_count', 0)}")
         if status['in_use']:
             for gpu, task in status['in_use'].items():
                 print(f"  - GPU {gpu}: Task {task}")

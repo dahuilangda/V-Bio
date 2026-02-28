@@ -22,9 +22,8 @@ import base64
 import random
 import copy
 from pathlib import Path
-from typing import Optional, List, Tuple, Dict, Any, Iterable
+from typing import Optional, List, Tuple, Dict, Any, Iterable, Callable
 import subprocess
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 sys.path.append(os.getcwd())
 from boltz_wrapper import predict
@@ -48,6 +47,8 @@ from config import (
     POCKETXMOL_CONFIG_MODEL,
     POCKETXMOL_DEVICE,
     POCKETXMOL_BATCH_SIZE,
+    DEFAULT_QUEUE,
+    PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX,
 )
 from af3_adapter import (
     AF3Preparation,
@@ -1172,7 +1173,7 @@ def determine_docker_gpu_arg(visible_devices: Optional[str]) -> str:
     available = discover_cuda_devices()
     if not available:
         raise RuntimeError(
-            "AlphaFold3 backend 需要 NVIDIA GPU，但当前环境未检测到可用的 CUDA 设备。"
+            "当前后端需要 NVIDIA GPU，但当前环境未检测到可用的 CUDA 设备。"
         )
 
     if not visible_devices:
@@ -4133,6 +4134,15 @@ def run_pocketxmol_backend(
     target_chain = str(pocketxmol_inputs.get("target_chain") or "A").strip() or "A"
     ligand_chain = str(pocketxmol_inputs.get("ligand_chain") or "L").strip() or "L"
     runtime_seed = int(seed) if isinstance(seed, int) else 2024
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    try:
+        pocketxmol_gpu_arg = determine_docker_gpu_arg(visible_devices)
+    except RuntimeError as gpu_err:
+        print(f"❌ 无法准备 PocketXMol GPU 环境: {gpu_err}", file=sys.stderr)
+        raise
+    pocketxmol_visible_devices = ""
+    if pocketxmol_gpu_arg.startswith("device="):
+        pocketxmol_visible_devices = pocketxmol_gpu_arg.split("=", 1)[1].strip()
 
     repo_root = Path(__file__).resolve().parent
     pocket_root = Path(POCKETXMOL_ROOT_DIR).expanduser().resolve()
@@ -4248,10 +4258,24 @@ def run_pocketxmol_backend(
         "--rank-output",
         "confidence_ranking.csv",
     ]
+    if pocketxmol_visible_devices:
+        cmd.extend(["--visible-devices", pocketxmol_visible_devices])
     config_path.write_text(
         yaml.safe_dump(config_payload, sort_keys=False, default_flow_style=False),
         encoding="utf-8",
     )
+    if pocketxmol_visible_devices:
+        print(
+            f"🎯 PocketXMol GPU 绑定: CUDA_VISIBLE_DEVICES={visible_devices} "
+            f"-> NVIDIA_VISIBLE_DEVICES={pocketxmol_visible_devices}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"🎯 PocketXMol GPU 绑定: CUDA_VISIBLE_DEVICES={visible_devices or '(unset)'} "
+            f"-> docker device constraint {pocketxmol_gpu_arg}",
+            file=sys.stderr,
+        )
     print(
         f"🐳 运行 PocketXMol Docker (radius={pocket_radius}): "
         f"{' '.join(shlex.quote(part) for part in cmd)}",
@@ -4712,6 +4736,52 @@ def _normalize_peptide_gpu_ids(raw_gpu_ids: Any) -> List[int]:
     return normalized
 
 
+def _peptide_subtask_registry_key(parent_task_id: str) -> str:
+    token = str(parent_task_id or "").strip()
+    if not token:
+        token = "unknown"
+    return f"{PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX}{token}"
+
+
+def _get_redis_client_optional():
+    try:
+        from gpu_manager import get_redis_client as get_redis_client_fn
+        return get_redis_client_fn()
+    except Exception:
+        return None
+
+
+def _register_peptide_subtask(parent_task_id: str, subtask_id: str) -> None:
+    parent_token = str(parent_task_id or "").strip()
+    subtask_token = str(subtask_id or "").strip()
+    if not parent_token or not subtask_token:
+        return
+    client = _get_redis_client_optional()
+    if client is None:
+        return
+    key = _peptide_subtask_registry_key(parent_token)
+    try:
+        pipe = client.pipeline()
+        pipe.sadd(key, subtask_token)
+        pipe.expire(key, 24 * 3600)
+        pipe.execute()
+    except Exception:
+        pass
+
+
+def _clear_peptide_subtask_registry(parent_task_id: str) -> None:
+    parent_token = str(parent_task_id or "").strip()
+    if not parent_token:
+        return
+    client = _get_redis_client_optional()
+    if client is None:
+        return
+    try:
+        client.delete(_peptide_subtask_registry_key(parent_token))
+    except Exception:
+        pass
+
+
 def _detect_peptide_gpu_pool_capacity() -> Optional[int]:
     try:
         from gpu_manager import get_gpu_status as get_gpu_status_fn
@@ -4745,85 +4815,125 @@ def _resolve_peptide_parallel_workers(
     return upper_bound
 
 
-def _run_peptide_candidate_worker_job(job: Dict[str, Any], worker_entry_path: str) -> None:
-    args_path = str(job["worker_args_path"])
+def _submit_peptide_candidate_worker_job(job: Dict[str, Any], queue_name: str, parent_task_id: str):
+    from celery_app import celery_app
+
     payload = {
-        "__peptide_candidate_worker__": True,
-        "temp_dir": job["candidate_dir"],
-        "yaml_content": job["candidate_yaml"],
-        "output_archive_path": job["archive_path"],
-        "predict_args": job["predict_args"],
+        "generation": int(job.get("generation") or 0),
+        "candidate_index": int(job.get("candidate_index") or 0),
+        "sequence": str(job.get("sequence") or ""),
+        "candidate_yaml": str(job.get("candidate_yaml") or ""),
+        "candidate_dir": str(job.get("candidate_dir") or ""),
+        "archive_path": str(job.get("archive_path") or ""),
+        "predict_args": job.get("predict_args", {}),
         "model_name": job.get("model_name"),
         "backend": str(job.get("backend") or "boltz"),
-        "__peptide_worker_acquire_gpu__": True,
-        "__peptide_worker_task_id__": str(job.get("worker_task_id") or ""),
+        "worker_args_path": str(job.get("worker_args_path") or ""),
     }
-    Path(args_path).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-
-    worker_env = os.environ.copy()
-    worker_env.pop("CUDA_VISIBLE_DEVICES", None)
-    worker_env["BOLTZ_PEPTIDE_WORKER_TASK_ID"] = str(job.get("worker_task_id") or "")
-    command = [sys.executable, worker_entry_path, args_path]
-    process = subprocess.run(command, capture_output=True, text=True, env=worker_env)
-    if process.returncode == 0:
-        return
-
-    stderr_tail = (process.stderr or "")[-12000:]
-    stdout_tail = (process.stdout or "")[-4000:]
-    raise RuntimeError(
-        "Peptide candidate worker failed "
-        f"(generation={job.get('generation')}, candidate={job.get('candidate_index')}, "
-        f"worker_task_id={job.get('worker_task_id')}, "
-        f"exit_code={process.returncode}). "
-        f"Stderr tail:\n{stderr_tail}\nStdout tail:\n{stdout_tail}"
+    async_result = celery_app.send_task(
+        "tasks.peptide_candidate_worker_task",
+        args=[payload],
+        queue=queue_name,
     )
+    _register_peptide_subtask(parent_task_id=parent_task_id, subtask_id=str(getattr(async_result, "id", "") or ""))
+    return async_result
 
 
 def _execute_peptide_generation_jobs(
     jobs: List[Dict[str, Any]],
     parallel_workers: int,
     worker_entry_path: str,
+    queue_name: str,
+    parent_task_id: str,
+    progress_callback: Optional[Callable[[Dict[str, int]], None]] = None,
 ) -> List[Dict[str, Any]]:
+    del worker_entry_path  # Worker logic now runs in dedicated Celery subtask.
     if not jobs:
         return []
     worker_count = max(1, int(parallel_workers or 1))
-    completed_jobs: List[Dict[str, Any]] = []
-    if worker_count == 1:
-        for job in jobs:
-            _run_peptide_candidate_worker_job(job, worker_entry_path)
-            completed_jobs.append(job)
-        return completed_jobs
-
     pending = list(jobs)
-    running: Dict[Any, Dict[str, Any]] = {}
+    running: List[Tuple[Any, Dict[str, Any]]] = []
+    completed_jobs: List[Dict[str, Any]] = []
     first_error: Optional[Exception] = None
+    last_progress_signature: Optional[Tuple[int, int, int, int, int]] = None
 
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        def submit_next() -> None:
-            if not pending or first_error is not None:
-                return
+    while pending or running:
+        while pending and len(running) < worker_count and first_error is None:
             next_job = pending.pop(0)
-            future = executor.submit(_run_peptide_candidate_worker_job, next_job, worker_entry_path)
-            running[future] = next_job
+            async_result = _submit_peptide_candidate_worker_job(
+                next_job,
+                queue_name=queue_name,
+                parent_task_id=parent_task_id,
+            )
+            running.append((async_result, next_job))
 
-        for _ in range(worker_count):
-            submit_next()
+        if not running:
+            break
 
-        while running:
-            done, _ = wait(list(running.keys()), return_when=FIRST_COMPLETED)
-            for completed in done:
-                finished_job = running.pop(completed, None)
-                try:
-                    completed.result()
-                    if isinstance(finished_job, dict):
-                        completed_jobs.append(finished_job)
-                except Exception as exc:
-                    if first_error is None:
-                        first_error = exc
-                submit_next()
+        next_running: List[Tuple[Any, Dict[str, Any]]] = []
+        state_counts = {
+            "queued": 0,
+            "running": 0,
+            "success": 0,
+            "failure": 0,
+        }
+        for async_result, submitted_job in running:
+            state = str(getattr(async_result, "state", "") or "").upper()
+            if state in {"SUCCESS", "FAILURE", "REVOKED"}:
+                if state == "SUCCESS":
+                    completed_jobs.append(submitted_job)
+                    state_counts["success"] += 1
+                    continue
+                failure_info = getattr(async_result, "result", None)
+                if first_error is None:
+                    first_error = RuntimeError(
+                        "Peptide candidate worker celery task failed "
+                        f"(generation={submitted_job.get('generation')}, candidate={submitted_job.get('candidate_index')}, "
+                        f"celery_task_id={getattr(async_result, 'id', '')}, state={state}): {failure_info}"
+                    )
+                state_counts["failure"] += 1
+                continue
+            if state in {"PENDING", "RECEIVED", "RETRY"}:
+                state_counts["queued"] += 1
+            else:
+                state_counts["running"] += 1
+            next_running.append((async_result, submitted_job))
+        running = next_running
+
+        if callable(progress_callback):
+            try:
+                progress_payload = {
+                    "total": len(jobs),
+                    "completed": len(completed_jobs),
+                    "queued": int(state_counts.get("queued", 0)),
+                    "running": int(state_counts.get("running", 0)),
+                    "failed": int(state_counts.get("failure", 0)),
+                }
+                progress_signature = (
+                    int(progress_payload["total"]),
+                    int(progress_payload["completed"]),
+                    int(progress_payload["queued"]),
+                    int(progress_payload["running"]),
+                    int(progress_payload["failed"]),
+                )
+                if progress_signature != last_progress_signature:
+                    progress_callback(progress_payload)
+                    last_progress_signature = progress_signature
+            except Exception:
+                pass
+
+        if first_error is not None:
+            break
+        time.sleep(0.8)
 
     if first_error is not None:
+        for async_result, _ in running:
+            try:
+                async_result.revoke(terminate=True, signal="SIGTERM")
+            except Exception:
+                pass
         raise first_error
+
     return completed_jobs
 
 
@@ -4838,6 +4948,7 @@ def run_peptide_design_backend(
     target_chain_id: Optional[str],
     progress_path: Optional[str],
     gpu_ids: Optional[List[int]] = None,
+    subtask_queue: Optional[str] = None,
 ) -> None:
     designer_dir = os.path.join(os.getcwd(), "designer")
     if designer_dir not in sys.path:
@@ -4947,6 +5058,7 @@ def run_peptide_design_backend(
     runtime_predict_args.pop("peptideParallelGpus", None)
 
     worker_entry_path = str(Path(__file__).resolve())
+    resolved_subtask_queue = str(subtask_queue or "").strip() or str(DEFAULT_QUEUE or "default")
     peptide_gpu_ids = _normalize_peptide_gpu_ids(gpu_ids)
     parallel_workers = _resolve_peptide_parallel_workers(options, peptide_gpu_ids, population_size)
     parent_task_id = str(os.environ.get("BOLTZ_TASK_ID") or "peptide-design").strip() or "peptide-design"
@@ -4960,6 +5072,7 @@ def run_peptide_design_backend(
             f"🧵 Peptide design parallel workers: {parallel_workers} (gpu pool auto-detected)",
             file=sys.stderr,
         )
+    print(f"🧵 Peptide design subtask celery queue: {resolved_subtask_queue}", file=sys.stderr)
 
     for generation in range(1, iterations + 1):
         _write_peptide_progress(
@@ -5053,7 +5166,45 @@ def run_peptide_design_backend(
                 }
             )
 
-        completed_generation_jobs = _execute_peptide_generation_jobs(generation_jobs, parallel_workers, worker_entry_path)
+        def _emit_generation_runtime_progress(runtime_counts: Dict[str, int]) -> None:
+            done_now = int(runtime_counts.get("completed") or 0)
+            global_done = generation_completed_base + done_now
+            current_best_score = all_results[0].get("composite_score") if all_results else None
+            queued_now = int(runtime_counts.get("queued") or 0)
+            running_now = int(runtime_counts.get("running") or 0)
+            generation_total = int(runtime_counts.get("total") or len(generation_jobs))
+            _write_peptide_progress(
+                progress_path,
+                {
+                    "peptide_design": {
+                        "current_generation": generation,
+                        "total_generations": iterations,
+                        "completed_tasks": global_done,
+                        "pending_tasks": max(0, total_tasks - global_done),
+                        "total_tasks": total_tasks,
+                        "best_score": current_best_score,
+                        "progress_percent": (global_done / total_tasks * 100.0) if total_tasks > 0 else 0.0,
+                        "current_status": f"Generation {generation}/{iterations}",
+                        "status_message": (
+                            f"Generation {generation}/{iterations}: "
+                            f"done {done_now}/{generation_total}, running {running_now}, queued {queued_now}"
+                        ),
+                        "generation_total_tasks": generation_total,
+                        "generation_completed_tasks": done_now,
+                        "generation_running_tasks": running_now,
+                        "generation_queued_tasks": queued_now,
+                    }
+                },
+            )
+
+        completed_generation_jobs = _execute_peptide_generation_jobs(
+            generation_jobs,
+            parallel_workers,
+            worker_entry_path,
+            resolved_subtask_queue,
+            parent_task_id,
+            progress_callback=_emit_generation_runtime_progress,
+        )
         if not completed_generation_jobs:
             raise RuntimeError(f"Peptide generation {generation} completed with no candidate results.")
 
@@ -5821,7 +5972,10 @@ def main():
             worker_release_gpu = None
             try:
                 if worker_acquire_gpu:
-                    from gpu_manager import acquire_gpu as worker_acquire_gpu_fn, release_gpu as worker_release_gpu_fn
+                    from gpu_manager import (
+                        acquire_gpu_for_peptide_worker as worker_acquire_gpu_fn,
+                        release_gpu as worker_release_gpu_fn,
+                    )
                     worker_release_gpu = worker_release_gpu_fn
                     worker_gpu_id = worker_acquire_gpu_fn(task_id=worker_task_id, timeout=3600)
                     os.environ["CUDA_VISIBLE_DEVICES"] = str(worker_gpu_id)
@@ -5863,6 +6017,7 @@ def main():
         peptide_design_target_chain = str(predict_args.pop("peptide_design_target_chain", "")).strip() or None
         peptide_progress_path = str(predict_args.pop("peptide_progress_path", "")).strip() or None
         peptide_gpu_ids = _normalize_peptide_gpu_ids(predict_args.pop("peptide_gpu_ids", []))
+        peptide_subtask_queue = str(predict_args.pop("peptide_subtask_queue", "")).strip() or None
         predict_args.pop("peptide_parallel_gpus", None)
         predict_args.pop("peptideParallelGpus", None)
 
@@ -5894,18 +6049,24 @@ def main():
                         f"Peptide design currently supports Boltz backend only. Requested backend: '{backend}'."
                     )
                 validate_template_paths(processed_yaml)
-                run_peptide_design_backend(
-                    temp_dir=temp_dir,
-                    yaml_content=processed_yaml,
-                    output_archive_path=output_archive_path,
-                    predict_args=predict_args,
-                    model_name=model_name,
-                    seed=seed,
-                    options=peptide_design_options,
-                    target_chain_id=peptide_design_target_chain,
-                    progress_path=peptide_progress_path,
-                    gpu_ids=peptide_gpu_ids,
-                )
+                peptide_parent_task_id = str(runtime_task_id or os.environ.get("BOLTZ_TASK_ID") or "").strip()
+                try:
+                    run_peptide_design_backend(
+                        temp_dir=temp_dir,
+                        yaml_content=processed_yaml,
+                        output_archive_path=output_archive_path,
+                        predict_args=predict_args,
+                        model_name=model_name,
+                        seed=seed,
+                        options=peptide_design_options,
+                        target_chain_id=peptide_design_target_chain,
+                        progress_path=peptide_progress_path,
+                        gpu_ids=peptide_gpu_ids,
+                        subtask_queue=peptide_subtask_queue,
+                    )
+                finally:
+                    if peptide_parent_task_id:
+                        _clear_peptide_subtask_registry(peptide_parent_task_id)
             elif backend == "alphafold3":
                 if not af3_template_payloads:
                     af3_template_payloads = prepare_yaml_template_payloads(processed_yaml, temp_dir)

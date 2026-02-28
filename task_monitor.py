@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 import psutil
 from celery.result import AsyncResult
 
+import config
 from celery_app import celery_app
 from gpu_manager import get_gpu_status, get_redis_client, release_gpu
 
@@ -299,6 +300,38 @@ class TaskMonitor:
                 self.logger.error('释放GPU %s 时出错: %s', gpu_id, exc)
         return released
 
+    def _revoke_peptide_subtasks(self, parent_task_id: str, force: bool = False) -> Dict[str, List[str]]:
+        result = {
+            'found': [],
+            'revoked': [],
+            'failed': [],
+        }
+        key = f"{config.PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX}{str(parent_task_id or '').strip()}"
+        if not parent_task_id:
+            return result
+        try:
+            task_ids = self.redis_client.smembers(key) or set()
+        except Exception as exc:
+            result['failed'].append(f"read_registry_failed:{exc}")
+            return result
+
+        normalized_ids = [str(item or '').strip() for item in task_ids if str(item or '').strip()]
+        result['found'] = normalized_ids
+        for subtask_id in normalized_ids:
+            try:
+                if force:
+                    celery_app.control.revoke(subtask_id, terminate=True, signal='SIGTERM', send_event=True)
+                else:
+                    celery_app.control.revoke(subtask_id, terminate=False, send_event=True)
+                result['revoked'].append(subtask_id)
+            except Exception as exc:
+                result['failed'].append(f"{subtask_id}:{exc}")
+        try:
+            self.redis_client.delete(key)
+        except Exception:
+            pass
+        return result
+
     def terminate_task_runtime(self, task_id: str, force: bool = False) -> Dict:
         result = {
             'task_id': task_id,
@@ -313,6 +346,9 @@ class TaskMonitor:
             'released_gpus': [],
             'remaining_processes': [],
             'remaining_containers': [],
+            'peptide_subtasks_found': [],
+            'peptide_subtasks_revoked': [],
+            'peptide_subtasks_failed': [],
             'ok': False,
             'errors': [],
         }
@@ -326,6 +362,11 @@ class TaskMonitor:
             result['celery_revoked'] = True
         except Exception as exc:
             result['errors'].append(f'Failed to revoke Celery task: {exc}')
+
+        peptide_revocation = self._revoke_peptide_subtasks(task_id, force=force)
+        result['peptide_subtasks_found'] = peptide_revocation.get('found') or []
+        result['peptide_subtasks_revoked'] = peptide_revocation.get('revoked') or []
+        result['peptide_subtasks_failed'] = peptide_revocation.get('failed') or []
 
         for proc in task_processes:
             pid = proc.get('pid')

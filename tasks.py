@@ -23,7 +23,13 @@ from werkzeug.utils import secure_filename
 
 import requests
 from celery_app import celery_app
-from gpu_manager import acquire_gpu, release_gpu, get_redis_client
+from gpu_manager import (
+    acquire_gpu,
+    release_gpu,
+    get_redis_client,
+    register_non_peptide_gpu_waiter,
+    unregister_non_peptide_gpu_waiter,
+)
 import config
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -78,6 +84,28 @@ MAX_STATUS_DETAILS_CHARS = 4_000
 MAX_EXCEPTION_MESSAGE_CHARS = 20_000
 MAX_TRACEBACK_CHARS = 40_000
 MAX_STDIO_TAIL_CHARS = 12_000
+
+
+def _acquire_gpu_with_non_peptide_wait_registration(task_id: str, timeout: int = 3600) -> int:
+    """
+    Register non-peptide waiting intent before blocking on GPU allocation.
+    This enables peptide subtask workers to yield and avoid starving regular tasks.
+    """
+    wait_registered = False
+    try:
+        register_non_peptide_gpu_waiter(task_id)
+        wait_registered = True
+    except Exception as exc:
+        logger.warning("Task %s: Failed to register non-peptide GPU waiter: %s", task_id, exc)
+
+    try:
+        return acquire_gpu(task_id=task_id, timeout=timeout)
+    finally:
+        if wait_registered:
+            try:
+                unregister_non_peptide_gpu_waiter(task_id)
+            except Exception as exc:
+                logger.warning("Task %s: Failed to unregister non-peptide GPU waiter: %s", task_id, exc)
 
 BOLTZ2SCORE_DEFAULT_RECYCLING_STEPS = 20
 BOLTZ2SCORE_DEFAULT_SAMPLING_STEPS = 1
@@ -375,6 +403,10 @@ def _build_peptide_runtime_meta(predict_args: dict, gpu_info: Any) -> dict:
         'progress_percent',
         'current_status',
         'status_message',
+        'generation_total_tasks',
+        'generation_completed_tasks',
+        'generation_running_tasks',
+        'generation_queued_tasks',
         'current_best_sequences',
         'best_sequences',
         'candidates',
@@ -691,7 +723,7 @@ def predict_task(self, predict_args: dict):
         else:
             logger.info(f"Task {task_id}: Attempting to acquire GPU.")
             tracker.update_status("acquiring_gpu", "Waiting for GPU allocation")
-            gpu_id = acquire_gpu(task_id=task_id, timeout=3600)
+            gpu_id = _acquire_gpu_with_non_peptide_wait_registration(task_id=task_id, timeout=3600)
             allocated_gpu_ids = [gpu_id]
             self.update_state(state='PROGRESS', meta={'status': f'Acquired GPU {gpu_id}. Starting computation.'})
             logger.info(f"Task {task_id}: Acquired GPU {gpu_id}. Creating temporary directory.")
@@ -877,6 +909,84 @@ def predict_task(self, predict_args: dict):
 
 
 @celery_app.task(bind=True)
+def peptide_candidate_worker_task(self, worker_payload: dict):
+    """
+    Execute one peptide-design candidate as an independent Celery task.
+    GPU allocation is handled inside run_single_prediction.py worker mode.
+    """
+    task_id = self.request.id
+    if not isinstance(worker_payload, dict):
+        raise ValueError("peptide_candidate_worker_task requires a dict payload.")
+
+    candidate_dir = str(worker_payload.get("candidate_dir") or "").strip()
+    if not candidate_dir:
+        raise ValueError("peptide_candidate_worker_task requires candidate_dir.")
+    os.makedirs(candidate_dir, exist_ok=True)
+
+    archive_path = str(worker_payload.get("archive_path") or "").strip()
+    if not archive_path:
+        archive_path = os.path.join(candidate_dir, "result.zip")
+
+    args_path = str(worker_payload.get("worker_args_path") or "").strip()
+    if not args_path:
+        args_path = os.path.join(candidate_dir, "worker_args.json")
+
+    payload = {
+        "__peptide_candidate_worker__": True,
+        "temp_dir": candidate_dir,
+        "yaml_content": worker_payload.get("candidate_yaml"),
+        "output_archive_path": archive_path,
+        "predict_args": worker_payload.get("predict_args", {}),
+        "model_name": worker_payload.get("model_name"),
+        "backend": str(worker_payload.get("backend") or "boltz"),
+        "__peptide_worker_acquire_gpu__": True,
+        "__peptide_worker_task_id__": str(task_id),
+    }
+    with open(args_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+
+    proc_env = os.environ.copy()
+    proc_env.pop("CUDA_VISIBLE_DEVICES", None)
+    proc_env["BOLTZ_TASK_ID"] = str(task_id)
+    proc_env["BOLTZ_PEPTIDE_WORKER_TASK_ID"] = str(task_id)
+
+    command = [sys.executable, "run_single_prediction.py", args_path]
+    self.update_state(state="PROGRESS", meta={"status": "Peptide candidate task started"})
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=proc_env,
+        start_new_session=True,
+    )
+
+    try:
+        stdout, stderr = process.communicate(timeout=SUBPROCESS_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        stdout, stderr = process.communicate()
+        raise TimeoutError(
+            f"Peptide candidate task {task_id} timed out after {SUBPROCESS_TIMEOUT}s.\n"
+            f"Stderr (tail):\n{_truncate_text(stderr, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}\n"
+            f"Stdout (tail):\n{_truncate_text(stdout, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}"
+        ) from exc
+
+    if process.returncode != 0:
+        raise RuntimeError(_format_subprocess_failure("peptide candidate task", task_id, process.returncode, stderr, stdout))
+
+    if not os.path.exists(archive_path):
+        raise FileNotFoundError(f"Peptide candidate task {task_id} completed without archive: {archive_path}")
+
+    self.update_state(state="SUCCESS", meta={"status": "Complete", "archive_path": archive_path})
+    return {
+        "task_id": task_id,
+        "archive_path": archive_path,
+        "candidate_dir": candidate_dir,
+    }
+
+
+@celery_app.task(bind=True)
 def get_task_status_info(self, task_id):
     """获取任务状态信息"""
     try:
@@ -993,7 +1103,7 @@ def affinity_task(self, affinity_args: dict):
         logger.info(f"Task {task_id}: Attempting to acquire GPU for affinity prediction.")
         tracker.update_status("acquiring_gpu", "Waiting for GPU allocation")
 
-        gpu_id = acquire_gpu(task_id=task_id, timeout=3600)
+        gpu_id = _acquire_gpu_with_non_peptide_wait_registration(task_id=task_id, timeout=3600)
         self.update_state(state='PROGRESS', meta={'status': f'Acquired GPU {gpu_id}. Starting affinity prediction.'})
         logger.info(f"Task {task_id}: Acquired GPU {gpu_id}. Creating temporary directory.")
         tracker.update_status("gpu_acquired", f"Using GPU {gpu_id}")
@@ -1286,7 +1396,7 @@ def boltz2score_task(self, score_args: dict):
         logger.info(f"Task {task_id}: Attempting to acquire GPU for Boltz2Score.")
         tracker.update_status("acquiring_gpu", "Waiting for GPU allocation")
 
-        gpu_id = acquire_gpu(task_id=task_id, timeout=3600)
+        gpu_id = _acquire_gpu_with_non_peptide_wait_registration(task_id=task_id, timeout=3600)
         self.update_state(state='PROGRESS', meta={'status': f'Acquired GPU {gpu_id}. Starting Boltz2Score.'})
         logger.info(f"Task {task_id}: Acquired GPU {gpu_id}. Creating temporary directory.")
         tracker.update_status("gpu_acquired", f"Using GPU {gpu_id}")

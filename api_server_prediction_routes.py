@@ -98,6 +98,9 @@ def register_prediction_routes(
             priority = 'default'
 
         target_queue = config_module.HIGH_PRIORITY_QUEUE if priority == 'high' else config_module.DEFAULT_QUEUE
+        if workflow == 'peptide_design':
+            # Parent peptide task is orchestration-only; keep GPU workers free for candidate subtasks.
+            target_queue = config_module.CPU_QUEUE
         logger.info('Prediction priority: %s, targeting queue: %s for client %s.', priority, target_queue, request.remote_addr)
 
         seed_value = parse_int(request.form.get('seed'), None)
@@ -154,6 +157,8 @@ def register_prediction_routes(
             peptide_target_chain = str(request.form.get('peptide_design_target_chain', '')).strip()
             if peptide_target_chain:
                 predict_args['peptide_design_target_chain'] = peptide_target_chain
+            # Candidate subtasks are dispatched as independent Celery GPU jobs.
+            predict_args['peptide_subtask_queue'] = config_module.DEFAULT_QUEUE
         if template_inputs:
             predict_args['template_inputs'] = template_inputs
 

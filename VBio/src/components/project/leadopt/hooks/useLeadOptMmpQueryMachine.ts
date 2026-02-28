@@ -100,6 +100,8 @@ const RESULT_HYDRATION_MAX_RETRIES = 8;
 const ENABLE_BACKGROUND_CANDIDATE_RESULT_HYDRATION = false;
 const ENABLE_BACKGROUND_REFERENCE_RESULT_HYDRATION = true;
 const RUNTIME_STATUS_POLL_DELAY_MS = 5000;
+const RUNTIME_STATUS_IDLE_POLL_DELAY_MS = 12000;
+const RUNTIME_STATUS_HIDDEN_POLL_DELAY_MULTIPLIER = 2;
 const RUNTIME_STATUS_CANDIDATE_BATCH_SIZE = 2;
 const RUNTIME_STATUS_REFERENCE_BATCH_SIZE = 1;
 
@@ -185,26 +187,31 @@ function mapPredictionRuntimeState(raw: unknown): PredictionState | null {
 
 function inferPredictionRuntimeStateFromStatusPayload(status: { state?: unknown; info?: unknown }): PredictionState | null {
   const direct = mapPredictionRuntimeState(status?.state);
-  if (direct === 'SUCCESS' || direct === 'FAILURE' || direct === 'RUNNING') return direct;
+  if (direct === 'SUCCESS' || direct === 'FAILURE') return direct;
   const info = asRecord(status?.info);
+  const resultFile = readText(info.result_file || info.resultFile).trim();
+  if (resultFile) return 'SUCCESS';
+  const explicitError = readText(info.error || info.exc_message || info.exc_type).trim();
+  if (explicitError) return 'FAILURE';
   const tracker = asRecord(info.tracker);
   const statusText = readText(info.status || info.message || tracker.details || tracker.status).trim().toLowerCase();
-  if (!statusText) return direct;
-  if (
-    statusText.includes('running') ||
-    statusText.includes('starting') ||
-    statusText.includes('acquiring') ||
-    statusText.includes('preparing') ||
-    statusText.includes('uploading') ||
-    statusText.includes('processing')
-  ) {
-    return 'RUNNING';
-  }
-  if (statusText.includes('failed') || statusText.includes('error') || statusText.includes('timeout')) {
-    return 'FAILURE';
-  }
-  if (statusText.includes('complete') || statusText.includes('completed') || statusText.includes('success')) {
-    return 'SUCCESS';
+  if (statusText) {
+    if (statusText.includes('failed') || statusText.includes('error') || statusText.includes('timeout')) {
+      return 'FAILURE';
+    }
+    if (statusText.includes('complete') || statusText.includes('completed') || statusText.includes('success')) {
+      return 'SUCCESS';
+    }
+    if (
+      statusText.includes('running') ||
+      statusText.includes('starting') ||
+      statusText.includes('acquiring') ||
+      statusText.includes('preparing') ||
+      statusText.includes('uploading') ||
+      statusText.includes('processing')
+    ) {
+      return 'RUNNING';
+    }
   }
   return direct;
 }
@@ -865,27 +872,43 @@ export function useLeadOptMmpQueryMachine({
 
   useEffect(() => {
     if (!runtimeStatusPollingEnabled) return;
-    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-    const pendingEntriesAll = Object.entries(predictionBySmiles)
-      .filter(([, record]) => {
-        const state = String(record.state || '').toUpperCase();
-        const shouldPoll = state === 'QUEUED' || state === 'RUNNING';
-        if (!shouldPoll) return false;
-        const taskId = readText(record.taskId).trim();
-        return taskId.length > 0 && !taskId.startsWith('local:');
-      })
-      .sort(unresolvedPredictionSort);
-    const { items: pendingEntries, nextCursor } = sliceRoundRobin(
-      pendingEntriesAll,
-      RUNTIME_STATUS_CANDIDATE_BATCH_SIZE,
-      predictionRuntimePollCursorRef.current
-    );
-    predictionRuntimePollCursorRef.current = nextCursor;
-    if (pendingEntries.length === 0) return;
-
     let cancelled = false;
-    const timer = window.setTimeout(() => {
-      void (async () => {
+    let timer: number | null = null;
+    const computeDelayMs = (hasActiveWork: boolean) => {
+      const baseDelay = hasActiveWork ? RUNTIME_STATUS_POLL_DELAY_MS : RUNTIME_STATUS_IDLE_POLL_DELAY_MS;
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return baseDelay * RUNTIME_STATUS_HIDDEN_POLL_DELAY_MULTIPLIER;
+      }
+      return baseDelay;
+    };
+    const scheduleNext = (hasActiveWork: boolean) => {
+      if (cancelled) return;
+      timer = window.setTimeout(() => {
+        void pollOnce();
+      }, computeDelayMs(hasActiveWork));
+    };
+
+    const pollOnce = async () => {
+      let hasActiveWork = false;
+      try {
+        const pendingEntriesAll = Object.entries(predictionBySmiles)
+          .filter(([, record]) => {
+            const state = String(record.state || '').toUpperCase();
+            const shouldPoll = state === 'QUEUED' || state === 'RUNNING';
+            if (!shouldPoll) return false;
+            const taskId = readText(record.taskId).trim();
+            return taskId.length > 0 && !taskId.startsWith('local:');
+          })
+          .sort(unresolvedPredictionSort);
+        hasActiveWork = pendingEntriesAll.length > 0;
+        const { items: pendingEntries, nextCursor } = sliceRoundRobin(
+          pendingEntriesAll,
+          RUNTIME_STATUS_CANDIDATE_BATCH_SIZE,
+          predictionRuntimePollCursorRef.current
+        );
+        predictionRuntimePollCursorRef.current = nextCursor;
+        if (pendingEntries.length === 0) return;
+
         for (const [smiles, record] of pendingEntries) {
           if (cancelled) return;
           try {
@@ -964,38 +987,61 @@ export function useLeadOptMmpQueryMachine({
             // Keep existing state on transient status errors.
           }
         }
-      })();
-    }, RUNTIME_STATUS_POLL_DELAY_MS);
+      } finally {
+        scheduleNext(hasActiveWork);
+      }
+    };
+
+    scheduleNext(true);
 
     return () => {
       cancelled = true;
-      window.clearTimeout(timer);
+      if (timer) {
+        window.clearTimeout(timer);
+      }
     };
   }, [ligandChain, predictionBySmiles, runtimeStatusPollingEnabled, targetChain]);
 
   useEffect(() => {
     if (!runtimeStatusPollingEnabled) return;
-    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-    const pendingEntriesAll = Object.entries(referencePredictionByBackend)
-      .filter(([, record]) => {
-        const state = String(record.state || '').toUpperCase();
-        const shouldPoll = state === 'QUEUED' || state === 'RUNNING';
-        if (!shouldPoll) return false;
-        const taskId = readText(record.taskId).trim();
-        return taskId.length > 0 && !taskId.startsWith('local:');
-      })
-      .sort(unresolvedPredictionSort);
-    const { items: pendingEntries, nextCursor } = sliceRoundRobin(
-      pendingEntriesAll,
-      RUNTIME_STATUS_REFERENCE_BATCH_SIZE,
-      referenceRuntimePollCursorRef.current
-    );
-    referenceRuntimePollCursorRef.current = nextCursor;
-    if (pendingEntries.length === 0) return;
 
     let cancelled = false;
-    const timer = window.setTimeout(() => {
-      void (async () => {
+    let timer: number | null = null;
+    const computeDelayMs = (hasActiveWork: boolean) => {
+      const baseDelay = hasActiveWork ? RUNTIME_STATUS_POLL_DELAY_MS : RUNTIME_STATUS_IDLE_POLL_DELAY_MS;
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return baseDelay * RUNTIME_STATUS_HIDDEN_POLL_DELAY_MULTIPLIER;
+      }
+      return baseDelay;
+    };
+    const scheduleNext = (hasActiveWork: boolean) => {
+      if (cancelled) return;
+      timer = window.setTimeout(() => {
+        void pollOnce();
+      }, computeDelayMs(hasActiveWork));
+    };
+
+    const pollOnce = async () => {
+      let hasActiveWork = false;
+      try {
+        const pendingEntriesAll = Object.entries(referencePredictionByBackend)
+          .filter(([, record]) => {
+            const state = String(record.state || '').toUpperCase();
+            const shouldPoll = state === 'QUEUED' || state === 'RUNNING';
+            if (!shouldPoll) return false;
+            const taskId = readText(record.taskId).trim();
+            return taskId.length > 0 && !taskId.startsWith('local:');
+          })
+          .sort(unresolvedPredictionSort);
+        hasActiveWork = pendingEntriesAll.length > 0;
+        const { items: pendingEntries, nextCursor } = sliceRoundRobin(
+          pendingEntriesAll,
+          RUNTIME_STATUS_REFERENCE_BATCH_SIZE,
+          referenceRuntimePollCursorRef.current
+        );
+        referenceRuntimePollCursorRef.current = nextCursor;
+        if (pendingEntries.length === 0) return;
+
         for (const [backendKey, record] of pendingEntries) {
           if (cancelled) return;
           try {
@@ -1074,14 +1120,20 @@ export function useLeadOptMmpQueryMachine({
             // Keep existing state on transient status errors.
           }
         }
-      })();
-    }, RUNTIME_STATUS_POLL_DELAY_MS);
+      } finally {
+        scheduleNext(hasActiveWork);
+      }
+    };
+
+    scheduleNext(true);
 
     return () => {
       cancelled = true;
-      window.clearTimeout(timer);
+      if (timer) {
+        window.clearTimeout(timer);
+      }
     };
-  }, [referencePredictionByBackend, runtimeStatusPollingEnabled]);
+  }, [referencePredictionByBackend, runtimeStatusPollingEnabled, targetChain, ligandChain]);
 
   useEffect(() => {
     if (!ENABLE_BACKGROUND_CANDIDATE_RESULT_HYDRATION) return;
@@ -1918,9 +1970,6 @@ export function useLeadOptMmpQueryMachine({
           referenceLigandFilename,
           referenceLigandFileContent
         });
-        if (typeof onPredictionQueued === 'function') {
-          await onPredictionQueued({ taskId, backend: selectedBackend, candidateSmiles: normalizedSmiles });
-        }
         setLastPredictionTaskId(taskId);
         setPredictionBySmiles((prev) => ({
           ...prev,
@@ -1929,6 +1978,11 @@ export function useLeadOptMmpQueryMachine({
           }
         }));
         setRuntimeStatusPollingEnabled(true);
+        if (typeof onPredictionQueued === 'function') {
+          void Promise.resolve(onPredictionQueued({ taskId, backend: selectedBackend, candidateSmiles: normalizedSmiles })).catch(() => {
+            // Keep runtime state progression independent from persistence latency/failures.
+          });
+        }
       } catch (e) {
         const normalizedSmiles = String(candidateSmiles || '').trim();
         const selectedBackend = String(backendOverride || backend || 'boltz').trim().toLowerCase();
@@ -2129,9 +2183,6 @@ export function useLeadOptMmpQueryMachine({
               referenceTemplateFormat,
               pocketResidues
             });
-            if (typeof onPredictionQueued === 'function') {
-              await onPredictionQueued({ taskId, backend: selectedBackend, candidateSmiles: smiles });
-            }
             success += 1;
             lastTaskId = taskId;
             setPredictionBySmiles((prev) => ({
@@ -2141,6 +2192,11 @@ export function useLeadOptMmpQueryMachine({
               }
             }));
             setRuntimeStatusPollingEnabled(true);
+            if (typeof onPredictionQueued === 'function') {
+              void Promise.resolve(onPredictionQueued({ taskId, backend: selectedBackend, candidateSmiles: smiles })).catch(() => {
+                // Keep runtime state progression independent from persistence latency/failures.
+              });
+            }
           } catch (_error) {
             failure += 1;
             setPredictionBySmiles((prev) => {

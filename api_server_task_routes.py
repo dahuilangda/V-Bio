@@ -48,12 +48,17 @@ def register_task_routes(
             else:
                 tracker_status, heartbeat = get_tracker_status(task_id)
                 if tracker_status or heartbeat:
+                    tracker_status_token = str((tracker_status or {}).get('status') or '').strip().lower()
                     response['state'] = 'PROGRESS'
                     status_message = (
                         (tracker_status or {}).get('details')
                         or (tracker_status or {}).get('status')
                         or 'Task is running'
                     )
+                    if tracker_status_token in {'completed', 'complete', 'success', 'succeeded'}:
+                        response['state'] = 'SUCCESS'
+                    elif tracker_status_token in {'failed', 'failure', 'timeout', 'error'}:
+                        response['state'] = 'FAILURE'
                     response['info'] = {
                         'status': status_message,
                         'message': status_message,
@@ -63,7 +68,19 @@ def register_task_routes(
                     tracker_payload = (tracker_status or {}).get('payload')
                     if isinstance(tracker_payload, dict) and tracker_payload:
                         response['info'].update(tracker_payload)
-                    logger.info('Task %s is running per tracker; Celery state PENDING.', task_id)
+                    if response['state'] == 'SUCCESS':
+                        archive_name_from_tracker = find_result_archive(task_id)
+                        if archive_name_from_tracker:
+                            response['info']['result_file'] = archive_name_from_tracker
+                            compact_metrics = get_compact_prediction_metrics(task_id)
+                            if isinstance(compact_metrics, dict) and compact_metrics:
+                                response['info']['compact_metrics'] = compact_metrics
+                                response['info']['lead_opt_metrics'] = compact_metrics
+                        logger.info('Task %s inferred SUCCESS from tracker status while Celery state PENDING.', task_id)
+                    elif response['state'] == 'FAILURE':
+                        logger.warning('Task %s inferred FAILURE from tracker status while Celery state PENDING.', task_id)
+                    else:
+                        logger.info('Task %s is running per tracker; Celery state PENDING.', task_id)
                 else:
                     response['info']['status'] = 'Task is waiting in the queue or the task ID does not exist.'
                     logger.info('Task %s is PENDING or non-existent.', task_id)
@@ -112,8 +129,69 @@ def register_task_routes(
                 response['info']['status'] = 'Task was revoked.'
                 logger.warning('Task %s was REVOKED.', task_id)
         else:
-            response['info'] = info if isinstance(info, dict) else {'message': str(info)}
-            logger.info('Task %s is in state: %s.', task_id, task_result.state)
+            archive_name = find_result_archive(task_id)
+            if archive_name:
+                response['state'] = 'SUCCESS'
+                response['info'] = info if isinstance(info, dict) else {'result': str(info)}
+                if not isinstance(response['info'], dict):
+                    response['info'] = {'result': str(response['info'])}
+                response['info']['result_file'] = archive_name
+                compact_metrics = None
+                if isinstance(response['info'].get('compact_metrics'), dict):
+                    compact_metrics = response['info']['compact_metrics']
+                elif isinstance(response['info'].get('lead_opt_metrics'), dict):
+                    compact_metrics = response['info']['lead_opt_metrics']
+                else:
+                    compact_metrics = get_compact_prediction_metrics(task_id)
+                if isinstance(compact_metrics, dict) and compact_metrics:
+                    response['info']['compact_metrics'] = compact_metrics
+                    response['info']['lead_opt_metrics'] = compact_metrics
+                response['info']['status'] = 'Task completed successfully.'
+                logger.info("Task %s marked SUCCESS via result archive '%s' from state %s.", task_id, archive_name, task_result.state)
+            else:
+                tracker_status, heartbeat = get_tracker_status(task_id)
+                tracker_message = ''
+                if isinstance(tracker_status, dict):
+                    tracker_message = str(tracker_status.get('details') or tracker_status.get('status') or '').strip()
+                info_payload = info if isinstance(info, dict) else {'message': str(info)}
+                if not isinstance(info_payload, dict):
+                    info_payload = {'message': str(info_payload)}
+                candidate_message = str(
+                    info_payload.get('status')
+                    or info_payload.get('message')
+                    or tracker_message
+                    or ''
+                ).strip()
+                lowered_message = candidate_message.lower()
+                failure_hint = (
+                    lowered_message and (
+                        'failed' in lowered_message
+                        or 'error' in lowered_message
+                        or 'timeout' in lowered_message
+                        or 'terminated' in lowered_message
+                    )
+                )
+                if failure_hint:
+                    response['state'] = 'FAILURE'
+                    response['info'] = {
+                        **info_payload,
+                        'message': candidate_message or 'Task failed.',
+                    }
+                    if tracker_status:
+                        response['info']['tracker'] = tracker_status
+                    if heartbeat:
+                        response['info']['heartbeat'] = heartbeat
+                    logger.warning('Task %s inferred FAILURE from runtime status text while state=%s.', task_id, task_result.state)
+                else:
+                    response['info'] = info_payload
+                    if tracker_status:
+                        response['info']['tracker'] = tracker_status
+                    if heartbeat:
+                        response['info']['heartbeat'] = heartbeat
+                    if tracker_message:
+                        response['info']['status'] = tracker_message
+                        response['info']['message'] = tracker_message
+                    logger.info('Task %s is in state: %s.', task_id, task_result.state)
 
         return jsonify(response)
 

@@ -108,6 +108,10 @@ GPU_POOL_KEY = "boltz_gpu_pool:available"
 GPU_VALID_SET_KEY = "boltz_gpu_pool:valid_gpus"
 # 用于追踪任务与 GPU 占用关系的 Redis 哈希
 GPU_IN_USE_HASH_KEY = "boltz_gpu_pool:in_use"
+# 用于追踪等待 GPU 的“非多肽子任务”集合（公平调度：普通任务优先于多肽子任务续跑）
+GPU_WAITING_NON_PEPTIDE_SET_KEY = "boltz_gpu_pool:waiting_non_peptide"
+# 用于追踪多肽父任务 -> 子任务 Celery IDs 的注册表前缀
+PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX = "boltz_peptide_subtasks:"
 
 
 # ==============================================================================
