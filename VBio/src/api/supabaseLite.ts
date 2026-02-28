@@ -372,11 +372,17 @@ export async function listProjectTasksCompact(projectId: string): Promise<Projec
 
 export async function listProjectTasksForList(
   projectId: string,
-  options?: { includeComponents?: boolean; includeConfidence?: boolean; includeProperties?: boolean }
+  options?: {
+    includeComponents?: boolean;
+    includeConfidence?: boolean;
+    includeProperties?: boolean;
+    includeLeadOptSummary?: boolean;
+  }
 ): Promise<ProjectTask[]> {
   const includeComponents = options?.includeComponents !== false;
   const includeConfidence = options?.includeConfidence !== false;
   const includeProperties = options?.includeProperties !== false;
+  const includeLeadOptSummary = options?.includeLeadOptSummary === true;
   const selectFields = [
     'id',
     'project_id',
@@ -391,6 +397,35 @@ export async function listProjectTasksForList(
     'ligand_smiles',
     ...(includeProperties ? ['properties'] : []),
     ...(includeConfidence ? ['confidence'] : []),
+    ...(includeLeadOptSummary
+      ? [
+          'lead_opt_list_stage:properties->lead_opt_list->>stage',
+          'lead_opt_list_prediction_stage:properties->lead_opt_list->>prediction_stage',
+          'lead_opt_list_query_id:properties->lead_opt_list->>query_id',
+          'lead_opt_list_transform_count:properties->lead_opt_list->>transform_count',
+          'lead_opt_list_candidate_count:properties->lead_opt_list->>candidate_count',
+          'lead_opt_list_bucket_count:properties->lead_opt_list->>bucket_count',
+          'lead_opt_list_database_id:properties->lead_opt_list->>mmp_database_id',
+          'lead_opt_list_database_label:properties->lead_opt_list->>mmp_database_label',
+          'lead_opt_list_database_schema:properties->lead_opt_list->>mmp_database_schema',
+          'lead_opt_list_selected_fragment_ids:properties->lead_opt_list->selection->selected_fragment_ids',
+          'lead_opt_list_selected_atom_indices:properties->lead_opt_list->selection->selected_fragment_atom_indices',
+          'lead_opt_list_selected_fragment_query:properties->lead_opt_list->>selected_fragment_query',
+          'lead_opt_list_prediction_total:properties->lead_opt_list->prediction_summary->>total',
+          'lead_opt_list_prediction_queued:properties->lead_opt_list->prediction_summary->>queued',
+          'lead_opt_list_prediction_running:properties->lead_opt_list->prediction_summary->>running',
+          'lead_opt_list_prediction_success:properties->lead_opt_list->prediction_summary->>success',
+          'lead_opt_list_prediction_failure:properties->lead_opt_list->prediction_summary->>failure',
+          'lead_opt_state_stage:properties->lead_opt_state->>stage',
+          'lead_opt_state_prediction_stage:properties->lead_opt_state->>prediction_stage',
+          'lead_opt_state_query_id:properties->lead_opt_state->>query_id',
+          'lead_opt_state_prediction_total:properties->lead_opt_state->prediction_summary->>total',
+          'lead_opt_state_prediction_queued:properties->lead_opt_state->prediction_summary->>queued',
+          'lead_opt_state_prediction_running:properties->lead_opt_state->prediction_summary->>running',
+          'lead_opt_state_prediction_success:properties->lead_opt_state->prediction_summary->>success',
+          'lead_opt_state_prediction_failure:properties->lead_opt_state->prediction_summary->>failure',
+        ]
+      : []),
     'structure_name',
     'submitted_at',
     'completed_at',
@@ -416,42 +451,455 @@ export async function listProjectTasksForList(
       .filter(([id]) => Boolean(id))
   );
 
+  const readText = (value: unknown): string => {
+    if (value === null || value === undefined) return '';
+    return String(value).trim();
+  };
+
+  const readFiniteNumber = (value: unknown): number | null => {
+    const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value.trim()) : Number.NaN;
+    if (!Number.isFinite(parsed)) return null;
+    return parsed;
+  };
+
+  const readStringArray = (value: unknown): string[] => {
+    if (!Array.isArray(value)) return [];
+    return Array.from(
+      new Set(
+        value
+          .map((item) => String(item || '').trim())
+          .filter(Boolean)
+      )
+    );
+  };
+
+  const readIntegerArray = (value: unknown): number[] => {
+    if (!Array.isArray(value)) return [];
+    return Array.from(
+      new Set(
+        value
+          .map((item) => Number(item))
+          .filter((item) => Number.isFinite(item) && item >= 0)
+          .map((item) => Math.floor(item))
+      )
+    );
+  };
+
+  const buildLeadOptSummaryProperties = (row: Record<string, unknown>): Record<string, unknown> | null => {
+    const listStage = readText(row.lead_opt_list_stage);
+    const listPredictionStage = readText(row.lead_opt_list_prediction_stage);
+    const listQueryId = readText(row.lead_opt_list_query_id);
+    const listTransformCount = readFiniteNumber(row.lead_opt_list_transform_count);
+    const listCandidateCount = readFiniteNumber(row.lead_opt_list_candidate_count);
+    const listBucketCount = readFiniteNumber(row.lead_opt_list_bucket_count);
+    const listDatabaseId = readText(row.lead_opt_list_database_id);
+    const listDatabaseLabel = readText(row.lead_opt_list_database_label);
+    const listDatabaseSchema = readText(row.lead_opt_list_database_schema);
+    const listSelectedFragmentIds = readStringArray(row.lead_opt_list_selected_fragment_ids);
+    const listSelectedAtomIndices = readIntegerArray(row.lead_opt_list_selected_atom_indices);
+    const listSelectedFragmentQuery = readText(row.lead_opt_list_selected_fragment_query);
+
+    const listPredictionTotal = readFiniteNumber(row.lead_opt_list_prediction_total);
+    const listPredictionQueued = readFiniteNumber(row.lead_opt_list_prediction_queued);
+    const listPredictionRunning = readFiniteNumber(row.lead_opt_list_prediction_running);
+    const listPredictionSuccess = readFiniteNumber(row.lead_opt_list_prediction_success);
+    const listPredictionFailure = readFiniteNumber(row.lead_opt_list_prediction_failure);
+
+    const stateStage = readText(row.lead_opt_state_stage);
+    const statePredictionStage = readText(row.lead_opt_state_prediction_stage);
+    const stateQueryId = readText(row.lead_opt_state_query_id);
+    const statePredictionTotal = readFiniteNumber(row.lead_opt_state_prediction_total);
+    const statePredictionQueued = readFiniteNumber(row.lead_opt_state_prediction_queued);
+    const statePredictionRunning = readFiniteNumber(row.lead_opt_state_prediction_running);
+    const statePredictionSuccess = readFiniteNumber(row.lead_opt_state_prediction_success);
+    const statePredictionFailure = readFiniteNumber(row.lead_opt_state_prediction_failure);
+
+    const hasAnyLeadOptMeta = Boolean(
+      listStage ||
+        listPredictionStage ||
+        listQueryId ||
+        listDatabaseId ||
+        listDatabaseLabel ||
+        listDatabaseSchema ||
+        stateStage ||
+        statePredictionStage ||
+        stateQueryId ||
+        listTransformCount !== null ||
+        listCandidateCount !== null ||
+        listBucketCount !== null ||
+        listPredictionTotal !== null ||
+        listPredictionQueued !== null ||
+        listPredictionRunning !== null ||
+        listPredictionSuccess !== null ||
+        listPredictionFailure !== null ||
+        statePredictionTotal !== null ||
+        statePredictionQueued !== null ||
+        statePredictionRunning !== null ||
+        statePredictionSuccess !== null ||
+        statePredictionFailure !== null
+    );
+    if (!hasAnyLeadOptMeta) return null;
+
+    const normalizedPredictionSummary = {
+      total: statePredictionTotal ?? listPredictionTotal ?? 0,
+      queued: statePredictionQueued ?? listPredictionQueued ?? 0,
+      running: statePredictionRunning ?? listPredictionRunning ?? 0,
+      success: statePredictionSuccess ?? listPredictionSuccess ?? 0,
+      failure: statePredictionFailure ?? listPredictionFailure ?? 0,
+    };
+
+    return {
+      lead_opt_list: {
+        stage: listStage,
+        prediction_stage: listPredictionStage || statePredictionStage,
+        query_id: listQueryId || stateQueryId,
+        transform_count: listTransformCount,
+        candidate_count: listCandidateCount,
+        bucket_count: listBucketCount,
+        mmp_database_id: listDatabaseId,
+        mmp_database_label: listDatabaseLabel,
+        mmp_database_schema: listDatabaseSchema,
+        selection: {
+          selected_fragment_ids: listSelectedFragmentIds,
+          selected_fragment_atom_indices: listSelectedAtomIndices,
+          variable_queries: listSelectedFragmentQuery ? [listSelectedFragmentQuery] : []
+        },
+        selected_fragment_ids: listSelectedFragmentIds,
+        selected_fragment_atom_indices: listSelectedAtomIndices,
+        selected_fragment_query: listSelectedFragmentQuery,
+        prediction_summary: normalizedPredictionSummary
+      },
+      lead_opt_state: {
+        stage: stateStage || listStage,
+        prediction_stage: statePredictionStage || listPredictionStage,
+        query_id: stateQueryId || listQueryId,
+        prediction_summary: normalizedPredictionSummary
+      }
+    };
+  };
+
   const mergedRows = rows.map((row) => {
     const detail = detailById.get(String(row.id || '').trim()) || {};
+    const rowRecord = row as unknown as Record<string, unknown>;
+    const leadOptSummaryProperties = includeLeadOptSummary ? buildLeadOptSummaryProperties(rowRecord) : null;
     return {
       ...row,
-      components: Array.isArray((detail as any).components) ? (detail as any).components : []
+      components: Array.isArray((detail as any).components) ? (detail as any).components : [],
+      properties:
+        includeProperties
+          ? row.properties
+          : leadOptSummaryProperties || {}
     };
   });
 
-  return mergedRows.map((row) => ({
+  return mergedRows.map((row) => {
+    const normalizedProperties = includeProperties
+      ? (row.properties && typeof row.properties === 'object' && !Array.isArray(row.properties)
+          ? (row.properties as ProjectTask['properties'])
+          : {
+              affinity: false,
+              target: null,
+              ligand: null,
+              binder: null
+            }) as ProjectTask['properties']
+      : (row.properties && typeof row.properties === 'object' && !Array.isArray(row.properties)
+          ? (row.properties as ProjectTask['properties'])
+          : {}) as ProjectTask['properties'];
+    return {
+      name: '',
+      summary: '',
+      protein_sequence: '',
+      confidence: {},
+      affinity: {},
+      constraints: [],
+      ...row,
+      properties: normalizedProperties
+    };
+  }) as ProjectTask[];
+}
+
+export async function getProjectTaskById(
+  taskRowId: string,
+  options?: {
+    includeComponents?: boolean;
+    includeConstraints?: boolean;
+    includeProperties?: boolean;
+    includeLeadOptSummary?: boolean;
+    includeLeadOptCandidates?: boolean;
+    includeConfidence?: boolean;
+    includeAffinity?: boolean;
+    includeProteinSequence?: boolean;
+  }
+): Promise<ProjectTask | null> {
+  const normalizedTaskRowId = String(taskRowId || '').trim();
+  if (!normalizedTaskRowId) return null;
+  const includeComponents = options?.includeComponents !== false;
+  const includeConstraints = options?.includeConstraints !== false;
+  const includeProperties = options?.includeProperties !== false;
+  const includeLeadOptSummary = options?.includeLeadOptSummary === true;
+  const includeLeadOptCandidates = options?.includeLeadOptCandidates === true;
+  const includeConfidence = options?.includeConfidence !== false;
+  const includeAffinity = options?.includeAffinity !== false;
+  const includeProteinSequence = options?.includeProteinSequence !== false;
+  const selectFields = [
+    'id',
+    'project_id',
+    'name',
+    'summary',
+    'task_id',
+    'task_state',
+    'status_text',
+    'error_text',
+    ...(includeProteinSequence ? ['protein_sequence'] : []),
+    'backend',
+    'seed',
+    'ligand_smiles',
+    ...(includeAffinity ? ['affinity'] : []),
+    ...(includeConfidence ? ['confidence'] : []),
+    ...(includeComponents ? ['components'] : []),
+    ...(includeConstraints ? ['constraints'] : []),
+    ...(includeProperties ? ['properties'] : []),
+    ...(includeLeadOptSummary
+      ? [
+          'lead_opt_list_stage:properties->lead_opt_list->>stage',
+          'lead_opt_list_prediction_stage:properties->lead_opt_list->>prediction_stage',
+          'lead_opt_list_query_id:properties->lead_opt_list->>query_id',
+          'lead_opt_list_transform_count:properties->lead_opt_list->>transform_count',
+          'lead_opt_list_candidate_count:properties->lead_opt_list->>candidate_count',
+          'lead_opt_list_bucket_count:properties->lead_opt_list->>bucket_count',
+          'lead_opt_list_database_id:properties->lead_opt_list->>mmp_database_id',
+          'lead_opt_list_database_label:properties->lead_opt_list->>mmp_database_label',
+          'lead_opt_list_database_schema:properties->lead_opt_list->>mmp_database_schema',
+          'lead_opt_list_selected_fragment_ids:properties->lead_opt_list->selection->selected_fragment_ids',
+          'lead_opt_list_selected_atom_indices:properties->lead_opt_list->selection->selected_fragment_atom_indices',
+          'lead_opt_list_selected_fragment_query:properties->lead_opt_list->>selected_fragment_query',
+          'lead_opt_list_prediction_total:properties->lead_opt_list->prediction_summary->>total',
+          'lead_opt_list_prediction_queued:properties->lead_opt_list->prediction_summary->>queued',
+          'lead_opt_list_prediction_running:properties->lead_opt_list->prediction_summary->>running',
+          'lead_opt_list_prediction_success:properties->lead_opt_list->prediction_summary->>success',
+          'lead_opt_list_prediction_failure:properties->lead_opt_list->prediction_summary->>failure',
+          'lead_opt_list_selection:properties->lead_opt_list->selection',
+          'lead_opt_list_ui_state:properties->lead_opt_list->ui_state',
+          'lead_opt_list_query_result:properties->lead_opt_list->query_result',
+          ...(includeLeadOptCandidates
+            ? ['lead_opt_list_enumerated_candidates:properties->lead_opt_list->enumerated_candidates']
+            : []),
+          'lead_opt_state_stage:properties->lead_opt_state->>stage',
+          'lead_opt_state_prediction_stage:properties->lead_opt_state->>prediction_stage',
+          'lead_opt_state_query_id:properties->lead_opt_state->>query_id',
+          'lead_opt_state_prediction_total:properties->lead_opt_state->prediction_summary->>total',
+          'lead_opt_state_prediction_queued:properties->lead_opt_state->prediction_summary->>queued',
+          'lead_opt_state_prediction_running:properties->lead_opt_state->prediction_summary->>running',
+          'lead_opt_state_prediction_success:properties->lead_opt_state->prediction_summary->>success',
+          'lead_opt_state_prediction_failure:properties->lead_opt_state->prediction_summary->>failure',
+          ...(includeLeadOptCandidates
+            ? [
+                'lead_opt_state_prediction_by_smiles:properties->lead_opt_state->prediction_by_smiles',
+                'lead_opt_state_reference_prediction_by_backend:properties->lead_opt_state->reference_prediction_by_backend'
+              ]
+            : []),
+          'lead_opt_state_prediction_task_id:properties->lead_opt_state->>prediction_task_id',
+          'lead_opt_state_prediction_candidate_smiles:properties->lead_opt_state->>prediction_candidate_smiles',
+        ]
+      : []),
+    'structure_name',
+    'submitted_at',
+    'completed_at',
+    'duration_seconds',
+    'created_at',
+    'updated_at'
+  ].join(',');
+  const rows = await request<Array<Partial<ProjectTask>>>('/project_tasks', undefined, {
+    select: selectFields,
+    id: `eq.${normalizedTaskRowId}`,
+    limit: '1'
+  });
+  const row = rows[0];
+  if (!row) return null;
+  const rowRecord = row as unknown as Record<string, unknown>;
+  const readText = (value: unknown): string => {
+    if (value === null || value === undefined) return '';
+    return String(value).trim();
+  };
+  const readFiniteNumber = (value: unknown): number | null => {
+    const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value.trim()) : Number.NaN;
+    if (!Number.isFinite(parsed)) return null;
+    return parsed;
+  };
+  const readStringArray = (value: unknown): string[] => {
+    if (!Array.isArray(value)) return [];
+    return Array.from(
+      new Set(
+        value
+          .map((item) => String(item || '').trim())
+          .filter(Boolean)
+      )
+    );
+  };
+  const readIntegerArray = (value: unknown): number[] => {
+    if (!Array.isArray(value)) return [];
+    return Array.from(
+      new Set(
+        value
+          .map((item) => Number(item))
+          .filter((item) => Number.isFinite(item) && item >= 0)
+          .map((item) => Math.floor(item))
+      )
+    );
+  };
+
+  const normalizedProperties = (() => {
+    if (includeProperties) {
+      if (row.properties && typeof row.properties === 'object' && !Array.isArray(row.properties)) {
+        return row.properties as ProjectTask['properties'];
+      }
+      return {
+        affinity: false,
+        target: null,
+        ligand: null,
+        binder: null
+      } as ProjectTask['properties'];
+    }
+    if (!includeLeadOptSummary) {
+      return {} as ProjectTask['properties'];
+    }
+    const listStage = readText(rowRecord.lead_opt_list_stage);
+    const listPredictionStage = readText(rowRecord.lead_opt_list_prediction_stage);
+    const listQueryId = readText(rowRecord.lead_opt_list_query_id);
+    const listTransformCount = readFiniteNumber(rowRecord.lead_opt_list_transform_count);
+    const listCandidateCount = readFiniteNumber(rowRecord.lead_opt_list_candidate_count);
+    const listBucketCount = readFiniteNumber(rowRecord.lead_opt_list_bucket_count);
+    const listDatabaseId = readText(rowRecord.lead_opt_list_database_id);
+    const listDatabaseLabel = readText(rowRecord.lead_opt_list_database_label);
+    const listDatabaseSchema = readText(rowRecord.lead_opt_list_database_schema);
+    const listSelectedFragmentIds = readStringArray(rowRecord.lead_opt_list_selected_fragment_ids);
+    const listSelectedAtomIndices = readIntegerArray(rowRecord.lead_opt_list_selected_atom_indices);
+    const listSelectedFragmentQuery = readText(rowRecord.lead_opt_list_selected_fragment_query);
+    const listPredictionTotal = readFiniteNumber(rowRecord.lead_opt_list_prediction_total);
+    const listPredictionQueued = readFiniteNumber(rowRecord.lead_opt_list_prediction_queued);
+    const listPredictionRunning = readFiniteNumber(rowRecord.lead_opt_list_prediction_running);
+    const listPredictionSuccess = readFiniteNumber(rowRecord.lead_opt_list_prediction_success);
+    const listPredictionFailure = readFiniteNumber(rowRecord.lead_opt_list_prediction_failure);
+
+    const stateStage = readText(rowRecord.lead_opt_state_stage);
+    const statePredictionStage = readText(rowRecord.lead_opt_state_prediction_stage);
+    const stateQueryId = readText(rowRecord.lead_opt_state_query_id);
+    const statePredictionTotal = readFiniteNumber(rowRecord.lead_opt_state_prediction_total);
+    const statePredictionQueued = readFiniteNumber(rowRecord.lead_opt_state_prediction_queued);
+    const statePredictionRunning = readFiniteNumber(rowRecord.lead_opt_state_prediction_running);
+    const statePredictionSuccess = readFiniteNumber(rowRecord.lead_opt_state_prediction_success);
+    const statePredictionFailure = readFiniteNumber(rowRecord.lead_opt_state_prediction_failure);
+    const statePredictionTaskId = readText(rowRecord.lead_opt_state_prediction_task_id);
+    const statePredictionCandidateSmiles = readText(rowRecord.lead_opt_state_prediction_candidate_smiles);
+
+    const hasAnyLeadOptMeta = Boolean(
+      listStage ||
+        listPredictionStage ||
+        listQueryId ||
+        listDatabaseId ||
+        listDatabaseLabel ||
+        listDatabaseSchema ||
+        stateStage ||
+        statePredictionStage ||
+        stateQueryId ||
+        statePredictionTaskId ||
+        statePredictionCandidateSmiles ||
+        listTransformCount !== null ||
+        listCandidateCount !== null ||
+        listBucketCount !== null ||
+        listPredictionTotal !== null ||
+        listPredictionQueued !== null ||
+        listPredictionRunning !== null ||
+        listPredictionSuccess !== null ||
+        listPredictionFailure !== null ||
+        statePredictionTotal !== null ||
+        statePredictionQueued !== null ||
+        statePredictionRunning !== null ||
+        statePredictionSuccess !== null ||
+        statePredictionFailure !== null
+    );
+    if (!hasAnyLeadOptMeta) return {} as ProjectTask['properties'];
+
+    const normalizedPredictionSummary = {
+      total: statePredictionTotal ?? listPredictionTotal ?? 0,
+      queued: statePredictionQueued ?? listPredictionQueued ?? 0,
+      running: statePredictionRunning ?? listPredictionRunning ?? 0,
+      success: statePredictionSuccess ?? listPredictionSuccess ?? 0,
+      failure: statePredictionFailure ?? listPredictionFailure ?? 0,
+    };
+
+    return {
+      lead_opt_list: {
+        stage: listStage,
+        prediction_stage: listPredictionStage || statePredictionStage,
+        query_id: listQueryId || stateQueryId,
+        transform_count: listTransformCount,
+        candidate_count: listCandidateCount,
+        bucket_count: listBucketCount,
+        mmp_database_id: listDatabaseId,
+        mmp_database_label: listDatabaseLabel,
+        mmp_database_schema: listDatabaseSchema,
+        selection:
+          rowRecord.lead_opt_list_selection && typeof rowRecord.lead_opt_list_selection === 'object' && !Array.isArray(rowRecord.lead_opt_list_selection)
+            ? rowRecord.lead_opt_list_selection
+            : {
+                selected_fragment_ids: listSelectedFragmentIds,
+                selected_fragment_atom_indices: listSelectedAtomIndices,
+                variable_queries: listSelectedFragmentQuery ? [listSelectedFragmentQuery] : []
+              },
+        selected_fragment_ids: listSelectedFragmentIds,
+        selected_fragment_atom_indices: listSelectedAtomIndices,
+        selected_fragment_query: listSelectedFragmentQuery,
+        prediction_summary: normalizedPredictionSummary,
+        query_result:
+          rowRecord.lead_opt_list_query_result && typeof rowRecord.lead_opt_list_query_result === 'object' && !Array.isArray(rowRecord.lead_opt_list_query_result)
+            ? rowRecord.lead_opt_list_query_result
+            : {},
+        ui_state:
+          rowRecord.lead_opt_list_ui_state && typeof rowRecord.lead_opt_list_ui_state === 'object' && !Array.isArray(rowRecord.lead_opt_list_ui_state)
+            ? rowRecord.lead_opt_list_ui_state
+            : {},
+        enumerated_candidates:
+          includeLeadOptCandidates && Array.isArray(rowRecord.lead_opt_list_enumerated_candidates)
+            ? rowRecord.lead_opt_list_enumerated_candidates
+            : []
+      },
+      lead_opt_state: {
+        stage: stateStage || listStage,
+        prediction_stage: statePredictionStage || listPredictionStage,
+        query_id: stateQueryId || listQueryId,
+        prediction_summary: normalizedPredictionSummary,
+        prediction_task_id: statePredictionTaskId,
+        prediction_candidate_smiles: statePredictionCandidateSmiles,
+        prediction_by_smiles:
+          includeLeadOptCandidates &&
+          rowRecord.lead_opt_state_prediction_by_smiles &&
+          typeof rowRecord.lead_opt_state_prediction_by_smiles === 'object' &&
+          !Array.isArray(rowRecord.lead_opt_state_prediction_by_smiles)
+            ? rowRecord.lead_opt_state_prediction_by_smiles
+            : {},
+        reference_prediction_by_backend:
+          includeLeadOptCandidates &&
+          rowRecord.lead_opt_state_reference_prediction_by_backend &&
+          typeof rowRecord.lead_opt_state_reference_prediction_by_backend === 'object' &&
+          !Array.isArray(rowRecord.lead_opt_state_reference_prediction_by_backend)
+            ? rowRecord.lead_opt_state_reference_prediction_by_backend
+            : {}
+      }
+    } as unknown as ProjectTask['properties'];
+  })();
+
+  return {
     name: '',
     summary: '',
     protein_sequence: '',
     confidence: {},
     affinity: {},
+    components: [],
     constraints: [],
-    properties: includeProperties
-      ? {
-          affinity: false,
-          target: null,
-          ligand: null,
-          binder: null
-        }
-      : {},
-    ...row
-  })) as ProjectTask[];
-}
-
-export async function getProjectTaskById(taskRowId: string): Promise<ProjectTask | null> {
-  const normalizedTaskRowId = String(taskRowId || '').trim();
-  if (!normalizedTaskRowId) return null;
-  const rows = await request<ProjectTask[]>('/project_tasks', undefined, {
-    select: '*',
-    id: `eq.${normalizedTaskRowId}`,
-    limit: '1'
-  });
-  return rows[0] || null;
+    ...row,
+    properties: normalizedProperties
+  } as ProjectTask;
 }
 
 function stripTemplateContentFromTaskComponents(components: unknown): unknown {

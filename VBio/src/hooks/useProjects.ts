@@ -7,7 +7,7 @@ import {
   updateProject,
   updateProjectTaskByTaskId
 } from '../api/supabaseLite';
-import { getTaskStatus } from '../api/backendApi';
+import { getTaskStatusBatch } from '../api/backendApi';
 import { removeProjectInputConfig, removeProjectUiState } from '../utils/projectInputs';
 import { normalizeWorkflowKey } from '../utils/workflows';
 
@@ -175,15 +175,22 @@ export function useProjects(session: Session | null) {
       if (preferBackendStatus) {
         const runtimeRows = rows.filter((row) => Boolean(row.task_id) && (row.task_state === 'QUEUED' || row.task_state === 'RUNNING'));
         if (runtimeRows.length > 0) {
-          const checks = await Promise.allSettled(runtimeRows.map((row) => getTaskStatus(row.task_id)));
+          let statusByTaskId: Record<string, { task_id: string; state: string; info?: Record<string, unknown> }> = {};
+          try {
+            statusByTaskId = await getTaskStatusBatch(runtimeRows.map((row) => String(row.task_id || '').trim()));
+          } catch {
+            statusByTaskId = {};
+          }
           const patchById = new Map<string, Partial<Project>>();
           const taskPatches: Array<{ projectId: string; taskId: string; patch: Partial<ProjectTask> }> = [];
 
-          checks.forEach((result, index) => {
-            if (result.status !== 'fulfilled') return;
-            const source = runtimeRows[index];
-            const taskState = mapTaskState(result.value.state);
-            const statusText = readStatusText(result.value);
+          runtimeRows.forEach((source) => {
+            const sourceTaskId = String(source.task_id || '').trim();
+            if (!sourceTaskId) return;
+            const statusPayload = statusByTaskId[sourceTaskId];
+            if (!statusPayload) return;
+            const taskState = mapTaskState(statusPayload.state);
+            const statusText = readStatusText(statusPayload);
             const errorText = taskState === 'FAILURE' ? statusText : '';
             const terminal = taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED';
             const completedAt = terminal ? source.completed_at || new Date().toISOString() : source.completed_at;

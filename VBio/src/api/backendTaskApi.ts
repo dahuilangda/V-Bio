@@ -15,6 +15,40 @@ export async function getTaskStatus(taskId: string): Promise<TaskStatusResponse>
   return (await res.json()) as TaskStatusResponse;
 }
 
+export async function getTaskStatusBatch(taskIds: string[]): Promise<Record<string, TaskStatusResponse>> {
+  const normalizedTaskIds = Array.from(
+    new Set(
+      (Array.isArray(taskIds) ? taskIds : [])
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 64);
+  if (normalizedTaskIds.length === 0) return {};
+  const res = await requestBackend('/status_batch', {
+    method: 'POST',
+    headers: {
+      ...API_HEADERS,
+      Accept: 'application/json'
+    },
+    body: JSON.stringify({
+      task_ids: normalizedTaskIds
+    })
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to fetch task status batch (${res.status}): ${text}`);
+  }
+  const payload = (await res.json().catch(() => ({}))) as { tasks?: TaskStatusResponse[] };
+  const tasks = Array.isArray(payload?.tasks) ? payload.tasks : [];
+  const byTaskId: Record<string, TaskStatusResponse> = {};
+  for (const task of tasks) {
+    const taskId = String(task?.task_id || '').trim();
+    if (!taskId) continue;
+    byTaskId[taskId] = task;
+  }
+  return byTaskId;
+}
+
 export async function terminateTask(taskId: string): Promise<{
   status?: string;
   task_id?: string;

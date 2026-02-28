@@ -1374,6 +1374,7 @@ export function LeadOptimizationWorkspace({
               loading={loading}
               referenceReady={reference.referenceReady}
               referenceSmiles={referenceControlSmiles}
+              referenceTemplateMolblock={readText(reference.persistedUploads.ligand?.content).trim()}
               predictionBySmiles={mmp.predictionBySmiles}
               referencePredictionByBackend={mmp.referencePredictionByBackend}
               backendAvailability={backendAvailability}

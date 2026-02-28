@@ -10,7 +10,10 @@ interface Ligand2DPreviewProps {
   confidenceHint?: number | null;
   highlightQuery?: string | null;
   highlightAtomIndices?: number[] | null;
+  alignmentQuerySmiles?: string | null;
+  alignmentAtomMap?: Array<[number, number]> | null;
   templateSmiles?: string | null;
+  templateMolblock?: string | null;
   strictTemplateAlignment?: boolean;
 }
 
@@ -22,7 +25,10 @@ export function Ligand2DPreview({
   confidenceHint = null,
   highlightQuery = null,
   highlightAtomIndices = null,
+  alignmentQuerySmiles = null,
+  alignmentAtomMap = null,
   templateSmiles = null,
+  templateMolblock = null,
   strictTemplateAlignment = false
 }: Ligand2DPreviewProps) {
   const [svg, setSvg] = useState<string>('');
@@ -37,6 +43,17 @@ export function Ligand2DPreview({
     if (!Array.isArray(highlightAtomIndices) || highlightAtomIndices.length === 0) return '';
     return highlightAtomIndices.map((value) => Math.floor(Number(value) || 0)).join(',');
   }, [highlightAtomIndices]);
+
+  const alignmentAtomMapSignature = useMemo(() => {
+    if (!Array.isArray(alignmentAtomMap) || alignmentAtomMap.length === 0) return '';
+    return alignmentAtomMap
+      .map((pair) => {
+        if (!Array.isArray(pair) || pair.length < 2) return '';
+        return `${Math.floor(Number(pair[0]) || 0)}:${Math.floor(Number(pair[1]) || 0)}`;
+      })
+      .filter(Boolean)
+      .join(',');
+  }, [alignmentAtomMap]);
 
   useEffect(() => {
     let cancelled = false;
@@ -62,7 +79,10 @@ export function Ligand2DPreview({
           confidenceHint,
           highlightQuery,
           highlightAtomIndices,
+          alignmentQuerySmiles,
+          alignmentAtomMap,
           templateSmiles,
+          templateMolblock,
           strictTemplateAlignment
         });
         if (cancelled) return;
@@ -84,10 +104,14 @@ export function Ligand2DPreview({
     height,
     confidenceHint,
     highlightQuery,
+    alignmentQuerySmiles,
+    alignmentAtomMap,
     templateSmiles,
+    templateMolblock,
     strictTemplateAlignment,
     atomConfidenceSignature,
-    highlightAtomSignature
+    highlightAtomSignature,
+    alignmentAtomMapSignature
   ]);
 
   if (!smiles.trim()) {

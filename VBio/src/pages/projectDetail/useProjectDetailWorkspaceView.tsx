@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type RefObject } from 'react';
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import { Link } from 'react-router-dom';
 import type { PredictionConstraint } from '../../types/models';
 import { downloadResultFile, terminateTask as terminateBackendTask } from '../../api/backendApi';
@@ -272,13 +272,49 @@ function compactLeadOptEnumeratedCandidateRow(value: unknown): Record<string, un
         )
       )
     : [];
+  const constantSmiles = readText(row.constant_smiles).trim();
+  const alignmentCoreSmiles = readText(row.alignment_core_smiles).trim();
+  const alignmentAtomPairs = (() => {
+    if (!Array.isArray(row.alignment_atom_pairs)) return [] as number[];
+    if (row.alignment_atom_pairs.length > 0 && typeof row.alignment_atom_pairs[0] === 'number') {
+      const flatPairs: number[] = [];
+      for (let idx = 0; idx + 1 < row.alignment_atom_pairs.length; idx += 2) {
+        const candidateAtomIndex = Number(row.alignment_atom_pairs[idx]);
+        const referenceAtomIndex = Number(row.alignment_atom_pairs[idx + 1]);
+        if (!Number.isFinite(candidateAtomIndex) || !Number.isFinite(referenceAtomIndex)) continue;
+        if (candidateAtomIndex < 0 || referenceAtomIndex < 0) continue;
+        flatPairs.push(Math.floor(candidateAtomIndex), Math.floor(referenceAtomIndex));
+      }
+      return flatPairs;
+    }
+    const flatPairs: number[] = [];
+    for (const item of row.alignment_atom_pairs) {
+      let candidateAtomIndex = Number.NaN;
+      let referenceAtomIndex = Number.NaN;
+      if (Array.isArray(item)) {
+        candidateAtomIndex = Number(item[0]);
+        referenceAtomIndex = Number(item[1]);
+      } else if (item && typeof item === 'object') {
+        const pair = item as Record<string, unknown>;
+        candidateAtomIndex = Number(pair.candidate_atom_index);
+        referenceAtomIndex = Number(pair.reference_atom_index);
+      }
+      if (!Number.isFinite(candidateAtomIndex) || !Number.isFinite(referenceAtomIndex)) continue;
+      if (candidateAtomIndex < 0 || referenceAtomIndex < 0) continue;
+      flatPairs.push(Math.floor(candidateAtomIndex), Math.floor(referenceAtomIndex));
+    }
+    return flatPairs;
+  })();
   return {
     smiles,
     ...(nPairs === null ? {} : { n_pairs: nPairs }),
     ...(medianDelta === null ? {} : { median_delta: medianDelta }),
     properties,
     property_deltas: propertyDeltas,
-    final_highlight_atom_indices: highlightAtomIndices
+    final_highlight_atom_indices: highlightAtomIndices,
+    ...(constantSmiles ? { constant_smiles: constantSmiles } : {}),
+    ...(alignmentCoreSmiles ? { alignment_core_smiles: alignmentCoreSmiles } : {}),
+    ...(alignmentAtomPairs.length > 0 ? { alignment_atom_pairs: alignmentAtomPairs } : {})
   };
 }
 
@@ -445,6 +481,7 @@ function mergeLeadOptMetaIntoProperties(
 
 function compactLeadOptForConfidenceWrite(leadOptInput: unknown): Record<string, unknown> {
   const leadOpt = asRecord(leadOptInput);
+  const queryResult = asRecord(leadOpt.query_result);
   const predictionSummary = asRecord(leadOpt.prediction_summary);
   const compactPredictionSummary = {
     total: toFiniteNumber(predictionSummary.total) ?? 0,
@@ -457,8 +494,13 @@ function compactLeadOptForConfidenceWrite(leadOptInput: unknown): Record<string,
   return {
     stage: readText(leadOpt.stage).trim(),
     prediction_stage: readText(leadOpt.prediction_stage).trim(),
-    query_id: readText(leadOpt.query_id || asRecord(leadOpt.query_result).query_id).trim(),
-    mmp_database_id: readText(leadOpt.mmp_database_id || asRecord(leadOpt.query_result).mmp_database_id).trim(),
+    query_id: readText(leadOpt.query_id || queryResult.query_id).trim(),
+    transform_count: toFiniteNumber(leadOpt.transform_count),
+    candidate_count: toFiniteNumber(leadOpt.candidate_count),
+    bucket_count: toFiniteNumber(leadOpt.bucket_count),
+    mmp_database_id: readText(leadOpt.mmp_database_id || queryResult.mmp_database_id).trim(),
+    mmp_database_label: readText(leadOpt.mmp_database_label || queryResult.mmp_database_label).trim(),
+    mmp_database_schema: readText(leadOpt.mmp_database_schema || queryResult.mmp_database_schema).trim(),
     target_chain: readText(leadOpt.target_chain).trim(),
     ligand_chain: readText(leadOpt.ligand_chain).trim(),
     prediction_summary: compactPredictionSummary,
@@ -880,8 +922,23 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   const leadOptActiveTaskRowIdRef = useRef('');
   const leadOptPredictionPersistKeyRef = useRef('');
   const leadOptPredictionPersistQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const leadOptPredictionPersistTimerRef = useRef<number | null>(null);
+  const leadOptPredictionPersistPendingByTaskRowRef = useRef<Record<string, {
+    taskRowId: string;
+    patchPayload: Record<string, unknown>;
+  }>>({});
   const leadOptUiStatePersistKeyRef = useRef('');
   const leadOptMmpContextByTaskIdRef = useRef<Record<string, Record<string, unknown>>>({});
+
+  useEffect(() => {
+    return () => {
+      if (leadOptPredictionPersistTimerRef.current !== null) {
+        window.clearTimeout(leadOptPredictionPersistTimerRef.current);
+      }
+      leadOptPredictionPersistTimerRef.current = null;
+      leadOptPredictionPersistPendingByTaskRowRef.current = {};
+    };
+  }, []);
 
   const resolveLeadOptTaskRowId = useCallback((): string => {
     const requestedRowId = readText(requestedStatusTaskRow?.id).trim();
@@ -1255,13 +1312,25 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
           lead_opt_mmp: compactLeadOptForConfidenceWrite(nextLeadOpt)
         }
       };
-      const nextPersist = leadOptPredictionPersistQueueRef.current
-        .catch(() => undefined)
-        .then(async () => {
-          await patchTask(taskRowId, patchPayload);
-        });
-      leadOptPredictionPersistQueueRef.current = nextPersist;
-      await nextPersist;
+      leadOptPredictionPersistPendingByTaskRowRef.current[taskRowId] = {
+        taskRowId,
+        patchPayload
+      };
+      if (leadOptPredictionPersistTimerRef.current !== null) return;
+      leadOptPredictionPersistTimerRef.current = window.setTimeout(() => {
+        leadOptPredictionPersistTimerRef.current = null;
+        const pendingEntries = Object.values(leadOptPredictionPersistPendingByTaskRowRef.current);
+        leadOptPredictionPersistPendingByTaskRowRef.current = {};
+        if (pendingEntries.length === 0) return;
+        const nextPersist = leadOptPredictionPersistQueueRef.current
+          .catch(() => undefined)
+          .then(async () => {
+            for (const entry of pendingEntries) {
+              await patchTask(entry.taskRowId, entry.patchPayload as any);
+            }
+          });
+        leadOptPredictionPersistQueueRef.current = nextPersist;
+      }, 900);
     },
     [patchTask, resolveLeadOptSourceTask, resolveLeadOptTaskRowId, resolveLeadOptTaskRowIdByPredictionTaskId]
   );

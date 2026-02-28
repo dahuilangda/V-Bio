@@ -50,6 +50,7 @@ import { useProjectDirtyState } from './useProjectDirtyState';
 import { useProjectConfidenceSignals } from './useProjectConfidenceSignals';
 import { useComponentTypeBuckets } from './useComponentTypeBuckets';
 import { useProjectDetailLocalState } from './useProjectDetailLocalState';
+import { hasLeadOptPredictionRuntime, readLeadOptTaskSummary } from '../projectTasks/taskDataUtils';
 
 function buildTaskRuntimeSignature(
   rows: Array<{
@@ -68,6 +69,42 @@ function buildTaskRuntimeSignature(
       (row) =>
         `${String(row.id || '').trim()}|${String(row.task_id || '').trim()}|${String(row.task_state || '').trim()}|${String(row.status_text || '').trim()}|${String(row.error_text || '').trim()}|${String(row.updated_at || '').trim()}|${String(row.completed_at || '').trim()}|${Number.isFinite(Number(row.duration_seconds)) ? Number(row.duration_seconds) : ''}`
     )
+    .join('\n');
+}
+
+function isRuntimeTaskState(value: unknown): boolean {
+  const token = String(value || '').trim().toUpperCase();
+  return token === 'QUEUED' || token === 'RUNNING';
+}
+
+function buildRuntimePollingSignature(rows: Array<{
+  id?: string | null;
+  task_id?: string | null;
+  task_state?: string | null;
+  updated_at?: string | null;
+  properties?: unknown;
+  confidence?: unknown;
+}>): string {
+  return rows
+    .filter((row) => {
+      const hasRuntimeTaskState = isRuntimeTaskState(row.task_state) && String(row.task_id || '').trim();
+      if (hasRuntimeTaskState) return true;
+      return hasLeadOptPredictionRuntime(row as any);
+    })
+    .map((row) => {
+      if (hasLeadOptPredictionRuntime(row as any)) {
+        const summary = readLeadOptTaskSummary(row as any);
+        const queued = Math.max(0, summary?.predictionQueued || 0);
+        const running = Math.max(0, summary?.predictionRunning || 0);
+        const stage = String(summary?.stage || '').trim().toLowerCase();
+        return `leadopt|${String(row.id || '').trim()}|${queued}|${running}|${stage}|${String(row.updated_at || '').trim()}`;
+      }
+      const taskId = String(row.task_id || '').trim();
+      const taskState = String(row.task_state || '').trim().toUpperCase();
+      const updatedAt = String(row.updated_at || '').trim();
+      return `${taskId}|${taskState}|${updatedAt}`;
+    })
+    .sort((a, b) => a.localeCompare(b))
     .join('\n');
 }
 
@@ -257,42 +294,89 @@ export function useProjectDetailRuntimeContext() {
   const isPeptideDesignWorkflow = workflowKey === 'peptide_design';
   const isAffinityWorkflow = workflowKey === 'affinity';
   const isLeadOptimizationWorkflow = workflowKey === 'lead_optimization';
-  const runtimeTaskSignature = useMemo(() => buildTaskRuntimeSignature(projectTasks), [projectTasks]);
+  const runtimePollingSignature = useMemo(() => buildRuntimePollingSignature(projectTasks), [projectTasks]);
+  const runtimePollingSummary = useMemo(() => {
+    let hasRuntimeTasks = false;
+    let hasRunning = false;
+    let hasQueued = false;
+
+    for (const row of projectTasks) {
+      const runtimeTaskState = String(row.task_state || '').trim().toUpperCase();
+      const hasRuntimeTaskState = isRuntimeTaskState(runtimeTaskState) && String(row.task_id || '').trim();
+      if (hasRuntimeTaskState) {
+        hasRuntimeTasks = true;
+        if (runtimeTaskState === 'RUNNING') hasRunning = true;
+        if (runtimeTaskState === 'QUEUED') hasQueued = true;
+      }
+
+      if (!hasLeadOptPredictionRuntime(row)) continue;
+      hasRuntimeTasks = true;
+      const summary = readLeadOptTaskSummary(row);
+      const stage = String(summary?.stage || '').trim().toLowerCase();
+      const queued = Math.max(0, summary?.predictionQueued || 0);
+      const running = Math.max(0, summary?.predictionRunning || 0);
+      if (running > 0 || stage === 'running' || stage === 'prediction_running') {
+        hasRunning = true;
+      } else if (queued > 0 || stage === 'queued' || stage === 'prediction_queued') {
+        hasQueued = true;
+      }
+    }
+
+    return {
+      hasRuntimeTasks,
+      hasRunning,
+      hasQueued
+    };
+  }, [runtimePollingSignature, projectTasks]);
 
   useEffect(() => {
     const projectIdValue = String(project?.id || '').trim();
     if (!projectIdValue) return;
-    const hasRuntimeTasks = projectTasks.some((row) => {
-      const taskId = String(row.task_id || '').trim();
-      const taskState = String(row.task_state || '').toUpperCase();
-      if (!taskId) return false;
-      return taskState === 'QUEUED' || taskState === 'RUNNING';
-    });
-    if (!hasRuntimeTasks) return;
+    if (!runtimePollingSummary.hasRuntimeTasks) return;
 
     let cancelled = false;
     let inFlight = false;
+    let timer: number | null = null;
+
+    const computePollDelayMs = () => {
+      const isLeadOptOrPeptide = workflowKey === 'lead_optimization' || workflowKey === 'peptide_design';
+      const baseDelayMs = runtimePollingSummary.hasRunning
+        ? isLeadOptOrPeptide
+          ? 6500
+          : 4200
+        : runtimePollingSummary.hasQueued
+          ? isLeadOptOrPeptide
+            ? 10000
+            : 7000
+          : 12000;
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return baseDelayMs * 2;
+      }
+      return baseDelayMs;
+    };
+    const scheduleNext = () => {
+      if (cancelled) return;
+      timer = window.setTimeout(() => {
+        void refreshTaskRows();
+      }, computePollDelayMs());
+    };
 
     const refreshTaskRows = async () => {
       if (cancelled || inFlight) return;
       inFlight = true;
       try {
-        const shouldUseTaskListView = workflowKey === 'lead_optimization' || workflowKey === 'peptide_design';
-        const includeComponentsForRuntime =
-          workflowKey === 'lead_optimization' && workspaceTab === 'components';
-        const rowsRaw =
-          shouldUseTaskListView
-            ? await listProjectTasksForList(projectIdValue, {
-                includeComponents: includeComponentsForRuntime,
-                includeConfidence: false,
-                includeProperties: false
-              })
-            : await listProjectTasksCompact(projectIdValue);
+        const rowsRaw = await listProjectTasksForList(projectIdValue, {
+          includeComponents: false,
+          includeConfidence: false,
+          includeProperties: false,
+          includeLeadOptSummary: workflowKey === 'lead_optimization'
+        });
         if (cancelled) return;
         const nextRows = sortProjectTasks(rowsRaw);
         setProjectTasks((prev) => {
+          const prevById = new Map(prev.map((item) => [item.id, item]));
           const mergedRows = nextRows.map((row) => {
-            const prevRow = prev.find((item) => item.id === row.id);
+            const prevRow = prevById.get(row.id);
             if (!prevRow) return row;
             return mergeTaskRuntimeFields(row, prevRow);
           });
@@ -344,20 +428,27 @@ export function useProjectDetailRuntimeContext() {
         // keep local state and retry on next cycle
       } finally {
         inFlight = false;
+        scheduleNext();
       }
     };
 
     void refreshTaskRows();
-    const pollIntervalMs = workflowKey === 'lead_optimization' ? 9000 : 4200;
-    const timer = window.setInterval(() => {
-      void refreshTaskRows();
-    }, pollIntervalMs);
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timer !== null) window.clearTimeout(timer);
     };
-  }, [project?.id, project?.task_id, projectTasks, runtimeTaskSignature, setProject, setProjectTasks, workflowKey, workspaceTab]);
+  }, [
+    project?.id,
+    project?.task_id,
+    runtimePollingSignature,
+    runtimePollingSummary.hasQueued,
+    runtimePollingSummary.hasRunning,
+    runtimePollingSummary.hasRuntimeTasks,
+    setProject,
+    setProjectTasks,
+    workflowKey
+  ]);
 
   const {
     requestedStatusTaskRow,
@@ -745,7 +836,7 @@ export function useProjectDetailRuntimeContext() {
   useProjectRuntimeEffects({
     projectTaskId: project?.task_id || null,
     projectTaskState: project?.task_state || null,
-    projectTasksDependency: projectTasks,
+    projectTasksDependency: runtimePollingSignature,
     refreshStatus,
     statusContextTaskRow,
     runtimeResultTask,

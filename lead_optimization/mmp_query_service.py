@@ -714,6 +714,30 @@ def _attachment_search_tokens(fragment: str) -> List[str]:
     return dedup[:6]
 
 
+def _normalize_attachment_substructure_forms(fragment: str) -> List[str]:
+    base = str(fragment or "").strip()
+    if not base:
+        return []
+    forms: List[str] = []
+    seen: set[str] = set()
+
+    def _add(candidate: str) -> None:
+        token = str(candidate or "").strip()
+        if not token or token in seen:
+            return
+        seen.add(token)
+        forms.append(token)
+
+    _add(base)
+    _add(_normalize_attachment_query(base))
+    # Some mmpdb rule_smiles rows ignore attachment map labels for search purposes.
+    # Keep the same attachment count while removing map-number constraints.
+    unlabeled = re.sub(r"\[\*:\d+\]", "*", base)
+    _add(unlabeled)
+    _add(_normalize_attachment_query(unlabeled))
+    return forms
+
+
 def _resolve_variable_mode(variable_spec: Dict[str, Any]) -> str:
     modes = {
         str((item or {}).get("mode") or "").strip().lower()
@@ -761,33 +785,31 @@ def _lookup_rule_smiles_ids_postgres_substructure(
     cursor = conn.cursor()
     ids: set[int] = set()
     for fragment in forms:
-        token = str(fragment or "").strip()
-        if not token:
-            continue
-        num_frags = max(1, token.count("*"))
-        where_clauses = ["smiles_mol @> mol_from_smiles(?)"]
-        params: List[Any] = [token]
-        if has_num_frags:
-            # Keep matcher semantics: variable fragment and DB fragment must share the same attachment count.
-            where_clauses.append("num_frags = ?")
-            params.append(num_frags)
-        if max_heavy > 0:
-            where_clauses.append("num_heavies BETWEEN ? AND ?")
-            params.extend([max(0, int(min_heavy)), max(0, int(max_heavy))])
-        params.append(int(max_rule_smiles))
-        sql = f"SELECT id FROM rule_smiles WHERE {' AND '.join(where_clauses)} LIMIT ?"
-        try:
-            cursor.execute(sql, params)
-        except Exception:
-            logger.debug("Lead-opt MMP substructure SQL skipped for fragment=%s", token, exc_info=True)
-            continue
-        for row in cursor.fetchall():
-            value = _row_first(row)
-            if value is None:
+        for token in _normalize_attachment_substructure_forms(fragment):
+            num_frags = max(1, token.count("*"))
+            where_clauses = ["smiles_mol @> mol_from_smiles(?)"]
+            params: List[Any] = [token]
+            if has_num_frags:
+                # Keep matcher semantics: variable fragment and DB fragment must share the same attachment count.
+                where_clauses.append("num_frags = ?")
+                params.append(num_frags)
+            if max_heavy > 0:
+                where_clauses.append("num_heavies BETWEEN ? AND ?")
+                params.extend([max(0, int(min_heavy)), max(0, int(max_heavy))])
+            params.append(int(max_rule_smiles))
+            sql = f"SELECT id FROM rule_smiles WHERE {' AND '.join(where_clauses)} LIMIT ?"
+            try:
+                cursor.execute(sql, params)
+            except Exception:
+                logger.debug("Lead-opt MMP substructure SQL skipped for fragment=%s", token, exc_info=True)
                 continue
-            ids.add(int(value))
-            if len(ids) >= max_rule_smiles:
-                return sorted(ids)[:max_rule_smiles]
+            for row in cursor.fetchall():
+                value = _row_first(row)
+                if value is None:
+                    continue
+                ids.add(int(value))
+                if len(ids) >= max_rule_smiles:
+                    return sorted(ids)[:max_rule_smiles]
     return sorted(ids)[:max_rule_smiles]
 
 
@@ -861,13 +883,18 @@ def _lookup_rule_smiles_ids(
     # Match matcher backend behavior on PostgreSQL: use cartridge substructure search over smiles_mol,
     # with exact attachment-count gating (num_frags).
     if variable_mode == "substructure" and has_smiles_mol:
-        return _lookup_rule_smiles_ids_postgres_substructure(
+        postgres_hits = _lookup_rule_smiles_ids_postgres_substructure(
             conn,
             forms=form_list,
             has_num_frags=has_num_frags,
             min_heavy=min_heavy,
             max_heavy=max_heavy,
             max_rule_smiles=max_rule_smiles,
+        )
+        if postgres_hits:
+            return postgres_hits
+        logger.info(
+            "Lead-opt MMP substructure cartridge returned 0 hits; continuing with RDKit-side rule_smiles matching."
         )
 
     def _normalize_dummy_labels(mol: Any) -> None:
@@ -1520,6 +1547,11 @@ def _prepare_query_replacement_context(query_mol: str, atom_indices: List[int]) 
     boundary = sorted(boundary_records.values(), key=lambda item: (item[2], item[1], item[0]))
     bond_indices = [item[0] for item in boundary]
     labels = list(range(1, len(boundary) + 1))
+    label_to_parent_atom: Dict[int, int] = {
+        int(label): int(boundary[idx][2])
+        for idx, label in enumerate(labels)
+        if idx < len(boundary)
+    }
     dummy_labels = [(label, label) for label in labels]
     fragmented = Chem.FragmentOnBonds(parent, bond_indices, addDummies=True, dummyLabels=dummy_labels)
     for atom in fragmented.GetAtoms():
@@ -1528,7 +1560,9 @@ def _prepare_query_replacement_context(query_mol: str, atom_indices: List[int]) 
         label = _read_dummy_label(atom)
         if label > 0:
             atom.SetAtomMapNum(label)
-            atom.SetIsotope(0)
+            # Keep isotope labels in sync with atom-map labels so symmetric scaffold
+            # substructure matches are disambiguated by attachment labels.
+            atom.SetIsotope(label)
 
     fragments = Chem.GetMolFrags(fragmented, asMols=False, sanitizeFrags=False)
     selected_atoms: Optional[set[int]] = None
@@ -1550,16 +1584,99 @@ def _prepare_query_replacement_context(query_mol: str, atom_indices: List[int]) 
 
     try:
         variable_smiles = Chem.MolFragmentToSmiles(fragmented, atomsToUse=variable_atoms, canonical=True)
+        # Keep the original labeled-dummy scaffold encoding; stitching relies on these labels.
         scaffold_smiles = Chem.MolFragmentToSmiles(fragmented, atomsToUse=scaffold_atoms, canonical=True)
     except Exception:
         return None
+    query_smiles, query_origin_to_canonical = _extract_canonical_fragment_with_origin_mapping(
+        parent,
+        list(range(parent.GetNumAtoms())),
+    )
     if not variable_smiles or not scaffold_smiles or "*" not in variable_smiles or "*" not in scaffold_smiles:
         return None
+    if not query_smiles:
+        return None
+    scaffold_atom_to_query_atom: List[Dict[str, int]] = []
+    scaffold_mol = Chem.MolFromSmiles(scaffold_smiles) if scaffold_smiles else None
+    if scaffold_mol is not None:
+        removed_from_fragmented = sorted(set(range(fragmented.GetNumAtoms())).difference(scaffold_atoms))
+        scaffold_fragment_rw = Chem.RWMol(fragmented)
+        for atom_idx in sorted(removed_from_fragmented, reverse=True):
+            scaffold_fragment_rw.RemoveAtom(int(atom_idx))
+        scaffold_fragment = scaffold_fragment_rw.GetMol()
+        scaffold_fragment_to_parent: Dict[int, int] = {}
+        for old_idx in scaffold_atoms:
+            if int(old_idx) >= int(parent.GetNumAtoms()):
+                continue
+            fragment_idx = int(old_idx) - bisect_left(removed_from_fragmented, int(old_idx))
+            scaffold_fragment_to_parent[int(fragment_idx)] = int(old_idx)
+
+        scaffold_matches = scaffold_fragment.GetSubstructMatches(scaffold_mol, uniquify=False)
+        if scaffold_matches:
+            parent_to_scaffold_fragment: Dict[int, int] = {
+                int(parent_idx): int(fragment_idx)
+                for fragment_idx, parent_idx in scaffold_fragment_to_parent.items()
+            }
+            label_to_scaffold_atom_idx: Dict[int, int] = {}
+            for atom in scaffold_mol.GetAtoms():
+                if int(atom.GetAtomicNum()) != 0:
+                    continue
+                label = _read_dummy_label(atom)
+                if label <= 0:
+                    continue
+                neighbors = [int(n.GetIdx()) for n in atom.GetNeighbors()]
+                if len(neighbors) != 1:
+                    continue
+                label_to_scaffold_atom_idx[int(label)] = int(neighbors[0])
+
+            def _score_scaffold_match(match: Tuple[int, ...]) -> Tuple[int, int, Tuple[int, ...]]:
+                hits = 0
+                misses = 0
+                for label, parent_atom_idx in label_to_parent_atom.items():
+                    expected_fragment_idx = parent_to_scaffold_fragment.get(int(parent_atom_idx))
+                    scaffold_atom_idx = label_to_scaffold_atom_idx.get(int(label))
+                    if expected_fragment_idx is None or scaffold_atom_idx is None:
+                        continue
+                    mapped_fragment_idx = int(match[int(scaffold_atom_idx)])
+                    if mapped_fragment_idx == int(expected_fragment_idx):
+                        hits += 1
+                    else:
+                        misses += 1
+                # Maximize hits, then minimize misses, then deterministic lexical order.
+                return (int(hits), int(-misses), tuple(int(v) for v in match))
+
+            best_match = max(scaffold_matches, key=_score_scaffold_match)
+            for scaffold_atom_index, fragment_idx in enumerate(best_match):
+                parent_idx = scaffold_fragment_to_parent.get(int(fragment_idx))
+                if parent_idx is None:
+                    continue
+                query_atom_idx = query_origin_to_canonical.get(int(parent_idx))
+                if query_atom_idx is None:
+                    continue
+                scaffold_atom_to_query_atom.append(
+                    {
+                        "scaffold_atom_index": int(scaffold_atom_index),
+                        "query_atom_index": int(query_atom_idx),
+                    }
+                )
+    attachment_label_to_query_atom: List[Dict[str, int]] = []
+    for label, parent_atom_idx in sorted(label_to_parent_atom.items()):
+        query_atom_idx = query_origin_to_canonical.get(int(parent_atom_idx))
+        if query_atom_idx is None:
+            continue
+        attachment_label_to_query_atom.append(
+            {
+                "label": int(label),
+                "query_atom_index": int(query_atom_idx),
+            }
+        )
     return {
-        "query_smiles": Chem.MolToSmiles(parent, canonical=True),
+        "query_smiles": query_smiles,
         "variable_smiles": variable_smiles,
         "scaffold_smiles": scaffold_smiles,
         "attachment_count": len(boundary),
+        "scaffold_atom_to_query_atom": scaffold_atom_to_query_atom,
+        "attachment_label_to_query_atom": attachment_label_to_query_atom,
     }
 
 
@@ -1603,6 +1720,8 @@ def _build_attachment_label_mapping(from_smiles: str, query_variable_smiles: str
     _clear_dummy_labels_for_matching(plain_query)
 
     matches = plain_query.GetSubstructMatches(plain_from, uniquify=False)
+    valid_mappings: List[Dict[int, int]] = []
+    seen_keys: set[Tuple[Tuple[int, int], ...]] = set()
     for match in matches:
         mapping: Dict[int, int] = {}
         valid = True
@@ -1612,10 +1731,37 @@ def _build_attachment_label_mapping(from_smiles: str, query_variable_smiles: str
             if query_label <= 0:
                 valid = False
                 break
-            mapping[from_label] = query_label
-        if valid and len(mapping) == len(from_dummy_labels):
-            return mapping
-    return None
+            mapping[int(from_label)] = int(query_label)
+        if not valid or len(mapping) != len(from_dummy_labels):
+            continue
+        signature = tuple(sorted((int(k), int(v)) for k, v in mapping.items()))
+        if signature in seen_keys:
+            continue
+        seen_keys.add(signature)
+        valid_mappings.append(mapping)
+
+    if not valid_mappings:
+        return None
+    if len(valid_mappings) == 1:
+        return valid_mappings[0]
+
+    # For symmetric fragments there can be multiple equivalent mappings.
+    # Pick the one that best preserves attachment label order to prevent
+    # left-right mirror flips in downstream 2D alignment.
+    from_labels_sorted = sorted(int(v) for v in from_dummy_labels.values() if int(v) > 0)
+
+    def _mapping_score(mapping: Dict[int, int]) -> Tuple[int, int, Tuple[int, ...]]:
+        mapped_labels = [int(mapping.get(label, 0)) for label in from_labels_sorted]
+        inversions = 0
+        for i in range(len(mapped_labels)):
+            for j in range(i + 1, len(mapped_labels)):
+                if mapped_labels[i] > mapped_labels[j]:
+                    inversions += 1
+        abs_delta = sum(abs(int(src) - int(dst)) for src, dst in zip(from_labels_sorted, mapped_labels))
+        return (int(inversions), int(abs_delta), tuple(mapped_labels))
+
+    valid_mappings.sort(key=_mapping_score)
+    return valid_mappings[0]
 
 
 def _relabel_attachment_fragment(fragment_smiles: str, label_mapping: Dict[int, int]) -> str:
@@ -1637,45 +1783,81 @@ def _relabel_attachment_fragment(fragment_smiles: str, label_mapping: Dict[int, 
             continue
         new_label = int(label_mapping.get(old_label, old_label))
         atom.SetAtomMapNum(new_label)
-        atom.SetIsotope(0)
+        atom.SetIsotope(new_label)
     try:
         return Chem.MolToSmiles(mol, canonical=True)
     except Exception:
         return ""
 
 
-def _canonicalize_smiles_with_traced_atoms(mol: Any, traced_atom_indices: List[int]) -> Tuple[str, List[int]]:
+def _trace_tag_sort_key(tag: str) -> Tuple[str, int]:
+    text = str(tag or "")
+    m = re.match(r"^(.*?)(\d+)$", text)
+    if not m:
+        return (text, -1)
+    return (str(m.group(1)), int(m.group(2)))
+
+
+def _canonicalize_smiles_with_trace_groups(
+    mol: Any,
+    trace_groups: Dict[str, List[int]],
+) -> Tuple[str, Dict[str, List[int]]]:
     try:
         from rdkit import Chem
     except Exception:
-        return "", []
+        return "", {}
     if mol is None:
-        return "", []
-    valid_indices = sorted(
-        {
-            int(idx)
-            for idx in traced_atom_indices
-            if isinstance(idx, int) and 0 <= int(idx) < int(mol.GetNumAtoms())
-        }
-    )
+        return "", {}
+    normalized_groups: Dict[str, List[int]] = {}
+    atom_count = int(mol.GetNumAtoms())
+    for key, indices in (trace_groups or {}).items():
+        tag = str(key or "").strip()
+        if not tag:
+            continue
+        if not isinstance(indices, list):
+            continue
+        normalized = sorted(
+            {
+                int(idx)
+                for idx in indices
+                if isinstance(idx, int) and 0 <= int(idx) < atom_count
+            }
+        )
+        if not normalized:
+            continue
+        normalized_groups[tag] = normalized
+    if not normalized_groups:
+        return "", {}
+
     trace_base = 900000
+    map_num_to_tag: Dict[int, str] = {}
     tagged = Chem.Mol(mol)
-    for offset, atom_idx in enumerate(valid_indices, start=1):
-        atom = tagged.GetAtomWithIdx(int(atom_idx))
-        atom.SetAtomMapNum(trace_base + offset)
-        atom.SetIsotope(0)
+    ordered_group_tags = sorted(normalized_groups.keys(), key=_trace_tag_sort_key)
+    for group_offset, tag in enumerate(ordered_group_tags, start=1):
+        base = trace_base + group_offset * 1000
+        for atom_offset, atom_idx in enumerate(normalized_groups[tag], start=1):
+            map_num = base + atom_offset
+            atom = tagged.GetAtomWithIdx(int(atom_idx))
+            atom.SetAtomMapNum(map_num)
+            atom.SetIsotope(0)
+            map_num_to_tag[map_num] = tag
     try:
         tagged_smiles = Chem.MolToSmiles(tagged, canonical=True)
     except Exception:
-        return "", []
+        return "", {}
     tagged_mol = Chem.MolFromSmiles(tagged_smiles)
     if tagged_mol is None:
-        return "", []
+        return "", {}
 
-    template_traced_indices: List[int] = []
+    template_indices_by_tag: Dict[str, List[int]] = {}
     for atom in tagged_mol.GetAtoms():
-        if int(atom.GetAtomMapNum() or 0) >= trace_base:
-            template_traced_indices.append(int(atom.GetIdx()))
+        map_num = int(atom.GetAtomMapNum() or 0)
+        tag = map_num_to_tag.get(map_num)
+        if not tag:
+            continue
+        template_indices_by_tag.setdefault(tag, []).append(int(atom.GetIdx()))
+    if not template_indices_by_tag:
+        return "", {}
 
     template_mol = Chem.Mol(tagged_mol)
     for atom in template_mol.GetAtoms():
@@ -1685,24 +1867,96 @@ def _canonicalize_smiles_with_traced_atoms(mol: Any, traced_atom_indices: List[i
     try:
         final_smiles = Chem.MolToSmiles(template_mol, canonical=True)
     except Exception:
-        return "", []
+        return "", {}
     final_mol = Chem.MolFromSmiles(final_smiles)
     if final_mol is None:
-        return "", []
+        return "", {}
 
-    # Map traced atoms onto the atom indexing of the final canonical SMILES.
     matches = final_mol.GetSubstructMatches(template_mol, uniquify=False)
     if not matches:
-        return final_smiles, []
-    mapped_candidates: List[Tuple[int, ...]] = []
+        return final_smiles, {}
+    ordered_tags = sorted(template_indices_by_tag.keys(), key=_trace_tag_sort_key)
+    mapped_candidates: List[Tuple[Tuple[Tuple[int, ...], ...], Dict[str, List[int]]]] = []
     for match in matches:
-        mapped = tuple(sorted(int(match[idx]) for idx in template_traced_indices if 0 <= int(idx) < len(match)))
-        if mapped:
-            mapped_candidates.append(mapped)
+        mapped_by_tag: Dict[str, List[int]] = {}
+        signature_parts: List[Tuple[int, ...]] = []
+        for tag in ordered_tags:
+            template_indices = template_indices_by_tag.get(tag, [])
+            mapped = sorted(int(match[idx]) for idx in template_indices if 0 <= int(idx) < len(match))
+            mapped_by_tag[tag] = mapped
+            signature_parts.append(tuple(mapped))
+        mapped_candidates.append((tuple(signature_parts), mapped_by_tag))
     if not mapped_candidates:
-        return final_smiles, []
-    mapped_candidates.sort()
-    return final_smiles, list(mapped_candidates[0])
+        return final_smiles, {}
+
+    def _mapping_score(item: Tuple[Tuple[Tuple[int, ...], ...], Dict[str, List[int]]]) -> Tuple[int, int, Tuple[Tuple[int, ...], ...]]:
+        signature, mapped_by_tag = item
+        flat: List[int] = []
+        for tag in ordered_tags:
+            flat.extend(int(v) for v in mapped_by_tag.get(tag, []))
+        inversions = 0
+        for i in range(len(flat)):
+            left = int(flat[i])
+            for j in range(i + 1, len(flat)):
+                if left > int(flat[j]):
+                    inversions += 1
+        # Prefer mappings that preserve source traced-atom order, then deterministic signature.
+        return (int(inversions), len(flat), signature)
+
+    mapped_candidates.sort(key=_mapping_score)
+    return final_smiles, mapped_candidates[0][1]
+
+
+def _extract_canonical_fragment_with_origin_mapping(
+    source_mol: Any,
+    keep_atom_indices: List[int],
+) -> Tuple[str, Dict[int, int]]:
+    try:
+        from rdkit import Chem
+    except Exception:
+        return "", {}
+    if source_mol is None:
+        return "", {}
+    atom_count = int(source_mol.GetNumAtoms())
+    normalized_keep = sorted(
+        {
+            int(idx)
+            for idx in (keep_atom_indices or [])
+            if isinstance(idx, int) and 0 <= int(idx) < atom_count
+        }
+    )
+    if not normalized_keep:
+        return "", {}
+    remove_indices = sorted(set(range(atom_count)).difference(normalized_keep))
+    rw = Chem.RWMol(source_mol)
+    for atom_idx in sorted(remove_indices, reverse=True):
+        rw.RemoveAtom(int(atom_idx))
+    fragment = rw.GetMol()
+    origin_to_fragment: Dict[int, int] = {}
+    for old_idx in normalized_keep:
+        origin_to_fragment[int(old_idx)] = int(old_idx) - bisect_left(remove_indices, int(old_idx))
+    trace_groups = {
+        f"origin_{int(old_idx)}": [int(fragment_idx)]
+        for old_idx, fragment_idx in origin_to_fragment.items()
+    }
+    final_smiles, mapped = _canonicalize_smiles_with_trace_groups(fragment, trace_groups)
+    if not final_smiles:
+        return "", {}
+    canonical_mapping: Dict[int, int] = {}
+    for old_idx in normalized_keep:
+        mapped_indices = mapped.get(f"origin_{int(old_idx)}", [])
+        if not mapped_indices:
+            continue
+        canonical_mapping[int(old_idx)] = int(mapped_indices[0])
+    return final_smiles, canonical_mapping
+
+
+def _canonicalize_smiles_with_traced_atoms(mol: Any, traced_atom_indices: List[int]) -> Tuple[str, List[int]]:
+    final_smiles, mapped = _canonicalize_smiles_with_trace_groups(
+        mol,
+        {"trace": traced_atom_indices},
+    )
+    return final_smiles, list(mapped.get("trace", []))
 
 
 def _stitch_scaffold_and_replacement(scaffold_smiles: str, replacement_smiles: str) -> Dict[str, Any]:
@@ -1716,6 +1970,11 @@ def _stitch_scaffold_and_replacement(scaffold_smiles: str, replacement_smiles: s
         return {}
 
     scaffold_atom_count = scaffold.GetNumAtoms()
+    scaffold_real_atom_old_indices: List[int] = [
+        int(atom.GetIdx())
+        for atom in scaffold.GetAtoms()
+        if int(atom.GetAtomicNum()) != 0
+    ]
     combo = Chem.CombineMols(scaffold, replacement)
     rw = Chem.RWMol(combo)
     replacement_real_atom_ids: List[int] = []
@@ -1735,6 +1994,7 @@ def _stitch_scaffold_and_replacement(scaffold_smiles: str, replacement_smiles: s
         return {}
 
     to_remove: List[int] = []
+    anchor_by_label_old_idx: Dict[int, int] = {}
     for label, atom_ids in dummies_by_label.items():
         scaffold_dummy = next((idx for idx in atom_ids if idx < scaffold_atom_count), None)
         replacement_dummy = next((idx for idx in atom_ids if idx >= scaffold_atom_count), None)
@@ -1762,6 +2022,8 @@ def _stitch_scaffold_and_replacement(scaffold_smiles: str, replacement_smiles: s
         if rw.GetBondBetweenAtoms(left, right) is None:
             rw.AddBond(left, right, bond_type)
         to_remove.extend([scaffold_dummy, replacement_dummy])
+        if int(label) > 0:
+            anchor_by_label_old_idx[int(label)] = int(left)
 
     if not to_remove:
         return {}
@@ -1773,6 +2035,16 @@ def _stitch_scaffold_and_replacement(scaffold_smiles: str, replacement_smiles: s
         if old_idx in removed_set:
             continue
         replacement_after_remove.append(int(old_idx) - bisect_left(removed, int(old_idx)))
+    anchor_by_label_after_remove: Dict[int, int] = {}
+    for label, old_idx in anchor_by_label_old_idx.items():
+        if old_idx in removed_set:
+            continue
+        anchor_by_label_after_remove[int(label)] = int(old_idx) - bisect_left(removed, int(old_idx))
+    scaffold_real_atom_after_remove: Dict[int, int] = {}
+    for old_idx in scaffold_real_atom_old_indices:
+        if old_idx in removed_set:
+            continue
+        scaffold_real_atom_after_remove[int(old_idx)] = int(old_idx) - bisect_left(removed, int(old_idx))
 
     for atom_idx in sorted(removed_set, reverse=True):
         rw.RemoveAtom(atom_idx)
@@ -1782,12 +2054,40 @@ def _stitch_scaffold_and_replacement(scaffold_smiles: str, replacement_smiles: s
         Chem.SanitizeMol(result)
     except Exception:
         return {}
-    final_smiles, canonical_replacement_indices = _canonicalize_smiles_with_traced_atoms(result, replacement_after_remove)
+    trace_groups: Dict[str, List[int]] = {
+        "replacement_atoms": replacement_after_remove,
+    }
+    for label, atom_idx in sorted(anchor_by_label_after_remove.items()):
+        trace_groups[f"anchor_label_{int(label)}"] = [int(atom_idx)]
+    for old_idx, atom_idx in sorted(scaffold_real_atom_after_remove.items()):
+        trace_groups[f"scaffold_atom_{int(old_idx)}"] = [int(atom_idx)]
+    final_smiles, mapped = _canonicalize_smiles_with_trace_groups(result, trace_groups)
+    canonical_replacement_indices = list(mapped.get("replacement_atoms", []))
     if not final_smiles:
         return {}
+    canonical_anchor_indices: List[Dict[str, int]] = []
+    for label in sorted(anchor_by_label_after_remove.keys()):
+        mapped_indices = mapped.get(f"anchor_label_{int(label)}", [])
+        if not mapped_indices:
+            continue
+        canonical_anchor_indices.append({
+            "label": int(label),
+            "atom_index": int(mapped_indices[0]),
+        })
+    canonical_scaffold_atom_mapping: List[Dict[str, int]] = []
+    for old_idx in sorted(scaffold_real_atom_after_remove.keys()):
+        mapped_indices = mapped.get(f"scaffold_atom_{int(old_idx)}", [])
+        if not mapped_indices:
+            continue
+        canonical_scaffold_atom_mapping.append({
+            "scaffold_atom_index": int(old_idx),
+            "atom_index": int(mapped_indices[0]),
+        })
     return {
         "final_smiles": final_smiles,
         "replacement_atom_indices": canonical_replacement_indices,
+        "attachment_anchor_indices": canonical_anchor_indices,
+        "scaffold_atom_mapping": canonical_scaffold_atom_mapping,
     }
 
 
@@ -1822,8 +2122,88 @@ def _generate_query_specific_final_smiles(
     stitched = _stitch_scaffold_and_replacement(scaffold_smiles, relabeled_to)
     if not stitched:
         return {}
+    # Build reference-side mapping through the same stitching pipeline as candidate,
+    # so symmetric scaffolds share one canonical scaffold-index frame.
+    query_stitched = _stitch_scaffold_and_replacement(scaffold_smiles, relabeled_from)
+    if not query_stitched:
+        return {}
+    query_smiles = str(query_stitched.get("final_smiles") or query_context.get("query_smiles") or "").strip()
+    if not query_smiles:
+        return {}
+    query_anchor_by_label = {
+        int(item.get("label")): int(item.get("atom_index"))
+        for item in query_stitched.get("attachment_anchor_indices", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("label"), int)
+        and isinstance(item.get("atom_index"), int)
+        and int(item.get("label")) > 0
+        and int(item.get("atom_index")) >= 0
+    }
+    query_core_by_scaffold = {
+        int(item.get("scaffold_atom_index")): int(item.get("atom_index"))
+        for item in query_stitched.get("scaffold_atom_mapping", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("scaffold_atom_index"), int)
+        and isinstance(item.get("atom_index"), int)
+        and int(item.get("scaffold_atom_index")) >= 0
+        and int(item.get("atom_index")) >= 0
+    }
+    candidate_anchor_by_label = {
+        int(item.get("label")): int(item.get("atom_index"))
+        for item in stitched.get("attachment_anchor_indices", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("label"), int)
+        and isinstance(item.get("atom_index"), int)
+        and int(item.get("label")) > 0
+        and int(item.get("atom_index")) >= 0
+    }
+    alignment_anchor_pairs: List[Dict[str, int]] = []
+    for label in sorted(set(candidate_anchor_by_label.keys()).intersection(query_anchor_by_label.keys())):
+        alignment_anchor_pairs.append({
+            "label": int(label),
+            "candidate_atom_index": int(candidate_anchor_by_label[label]),
+            "reference_atom_index": int(query_anchor_by_label[label]),
+        })
+    candidate_core_by_scaffold = {
+        int(item.get("scaffold_atom_index")): int(item.get("atom_index"))
+        for item in stitched.get("scaffold_atom_mapping", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("scaffold_atom_index"), int)
+        and isinstance(item.get("atom_index"), int)
+        and int(item.get("scaffold_atom_index")) >= 0
+        and int(item.get("atom_index")) >= 0
+    }
+    alignment_core_atom_pairs: List[Dict[str, int]] = []
+    for scaffold_atom_index in sorted(set(candidate_core_by_scaffold.keys()).intersection(query_core_by_scaffold.keys())):
+        alignment_core_atom_pairs.append({
+            "scaffold_atom_index": int(scaffold_atom_index),
+            "candidate_atom_index": int(candidate_core_by_scaffold[scaffold_atom_index]),
+            "reference_atom_index": int(query_core_by_scaffold[scaffold_atom_index]),
+        })
+    alignment_atom_pairs: List[Dict[str, int]] = []
+    used_candidate_atoms: set[int] = set()
+    used_reference_atoms: set[int] = set()
+    for pair in [*alignment_anchor_pairs, *alignment_core_atom_pairs]:
+        candidate_atom_index = int(pair.get("candidate_atom_index", -1))
+        reference_atom_index = int(pair.get("reference_atom_index", -1))
+        if candidate_atom_index < 0 or reference_atom_index < 0:
+            continue
+        if candidate_atom_index in used_candidate_atoms or reference_atom_index in used_reference_atoms:
+            continue
+        used_candidate_atoms.add(candidate_atom_index)
+        used_reference_atoms.add(reference_atom_index)
+        alignment_atom_pairs.append(
+            {
+                "candidate_atom_index": int(candidate_atom_index),
+                "reference_atom_index": int(reference_atom_index),
+            }
+        )
     stitched["from_smiles_env"] = f"{relabeled_from}||{scaffold_smiles}"
     stitched["to_smiles_env"] = f"{relabeled_to}||{scaffold_smiles}"
+    stitched["alignment_anchor_pairs"] = alignment_anchor_pairs
+    stitched["alignment_core_atom_pairs"] = alignment_core_atom_pairs
+    stitched["alignment_atom_pairs"] = alignment_atom_pairs
+    stitched["alignment_reference_smiles"] = query_smiles
     return stitched
 
 
@@ -2125,6 +2505,7 @@ def _build_rows_from_candidates(
         n_pairs = max(1, n_pairs)
 
         constant_smiles = str(query_context.get("scaffold_smiles") or "")
+        alignment_core_smiles = _sanitize_transform_fragment_for_highlight(constant_smiles)
         raw_transform_key = f"{from_smiles}>>{to_smiles}||{constant_smiles}"
         raw_transform_id = hashlib.sha1(raw_transform_key.encode("utf-8")).hexdigest()[:16]
         from_smiles_env = str(stitched.get("from_smiles_env") or "").strip() if grouped_by_environment else ""
@@ -2190,6 +2571,11 @@ def _build_rows_from_candidates(
             "from_num_frags": int(candidate.get("from_num_frags", 0) or max(1, from_smiles.count("*"))),
             "to_num_frags": int(candidate.get("to_num_frags", 0) or max(1, to_smiles.count("*"))),
             "constant_smiles": constant_smiles,
+            "alignment_core_smiles": alignment_core_smiles,
+            "alignment_reference_smiles": str(stitched.get("alignment_reference_smiles") or "").strip(),
+            "alignment_anchor_pairs": stitched.get("alignment_anchor_pairs", []),
+            "alignment_core_atom_pairs": stitched.get("alignment_core_atom_pairs", []),
+            "alignment_atom_pairs": stitched.get("alignment_atom_pairs", []),
             "from_smiles_env": from_smiles_env,
             "to_smiles_env": to_smiles_env,
             "grouped_by_environment": grouped_by_environment,

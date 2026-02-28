@@ -43,6 +43,7 @@ from config import (
     PROTENIX_INFER_EXTRA_ARGS,
     PROTENIX_PYTHON_BIN,
     PROTENIX_USE_HOST_USER,
+    PROTENIX_COMMON_CACHE_DIR,
     POCKETXMOL_ROOT_DIR,
     POCKETXMOL_CONFIG_MODEL,
     POCKETXMOL_DEVICE,
@@ -3297,6 +3298,10 @@ def run_protenix_backend(
             f"未找到 Protenix 模型文件: {checkpoint_path}. "
             "请确认 PROTENIX_MODEL_DIR 与 PROTENIX_MODEL_NAME 配置正确。"
         )
+    protenix_common_cache_dir = os.path.abspath(
+        str(PROTENIX_COMMON_CACHE_DIR or os.path.join(os.getcwd(), "protenix", "common_cache")).strip()
+    )
+    os.makedirs(protenix_common_cache_dir, exist_ok=True)
 
     visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
     try:
@@ -3333,6 +3338,8 @@ def run_protenix_backend(
             f"{model_dir}:/workspace/model",
             "--volume",
             f"{source_dir}:/app",
+            "--volume",
+            f"{protenix_common_cache_dir}:/root/common",
         ]
     )
     if os.path.exists("/dev/shm"):
@@ -3350,6 +3357,7 @@ def run_protenix_backend(
         print(f"🔐 Protenix 容器使用宿主机用户: {host_uid}:{host_gid}", file=sys.stderr)
     else:
         print("🔐 Protenix 容器使用默认 root 用户（官方镜像推荐）", file=sys.stderr)
+    print(f"🗂️ Protenix 缓存挂载: {protenix_common_cache_dir} -> /root/common", file=sys.stderr)
 
     docker_command.extend(extra_args)
 

@@ -64,13 +64,42 @@ export function useProjectRuntimeEffects({
 }: UseProjectRuntimeEffectsInput) {
   useEffect(() => {
     if (!projectTaskId) return;
-    if (!['QUEUED', 'RUNNING'].includes(String(projectTaskState || '').toUpperCase())) return;
+    const normalizedState = String(projectTaskState || '').toUpperCase();
+    if (normalizedState !== 'QUEUED' && normalizedState !== 'RUNNING') return;
 
-    const timer = setInterval(() => {
-      void refreshStatus({ silent: true });
-    }, 4000);
+    let cancelled = false;
+    let inFlight = false;
+    let timer: number | null = null;
+    const computeDelayMs = () => {
+      const baseDelay = normalizedState === 'RUNNING' ? 5000 : 9000;
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return baseDelay * 2;
+      }
+      return baseDelay;
+    };
+    const scheduleNext = () => {
+      if (cancelled) return;
+      timer = window.setTimeout(() => {
+        void tick();
+      }, computeDelayMs());
+    };
+    const tick = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      try {
+        await refreshStatus({ silent: true });
+      } finally {
+        inFlight = false;
+        scheduleNext();
+      }
+    };
 
-    return () => clearInterval(timer);
+    scheduleNext();
+
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
   }, [projectTaskId, projectTaskState, projectTasksDependency, refreshStatus]);
 
   useEffect(() => {

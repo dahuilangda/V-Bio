@@ -100,3 +100,4 @@ lead_optimization/data/bench_herg_*
 lead_optimization/data/*_compound_state.cache.fragdb
 lead_optimization/mmp_lifecycle/matcher/
 BioPhi
+protenix/common_cache/

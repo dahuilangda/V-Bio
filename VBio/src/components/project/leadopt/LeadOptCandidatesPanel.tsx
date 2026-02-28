@@ -81,8 +81,49 @@ function normalizeAtomIndices(value: unknown): number[] {
         .map((item) => Number(item))
         .filter((item) => Number.isFinite(item) && item >= 0)
         .map((item) => Math.floor(item))
-    )
+      )
   );
+}
+
+function normalizeAlignmentAtomPairs(value: unknown): Array<[number, number]> {
+  if (!Array.isArray(value)) return [];
+  // compact format: [cand0, ref0, cand1, ref1, ...]
+  if (value.length > 0 && typeof value[0] === 'number') {
+    const out: Array<[number, number]> = [];
+    for (let idx = 0; idx + 1 < value.length; idx += 2) {
+      const candidateIdx = Number(value[idx]);
+      const referenceIdx = Number(value[idx + 1]);
+      if (!Number.isFinite(candidateIdx) || !Number.isFinite(referenceIdx)) continue;
+      if (candidateIdx < 0 || referenceIdx < 0) continue;
+      out.push([Math.floor(candidateIdx), Math.floor(referenceIdx)]);
+    }
+    return out;
+  }
+  // pair format: [[cand, ref], ...]
+  if (Array.isArray(value[0])) {
+    return value
+      .map((item) => {
+        if (!Array.isArray(item)) return null;
+        const candidateIdx = Number(item[0]);
+        const referenceIdx = Number(item[1]);
+        if (!Number.isFinite(candidateIdx) || !Number.isFinite(referenceIdx)) return null;
+        if (candidateIdx < 0 || referenceIdx < 0) return null;
+        return [Math.floor(candidateIdx), Math.floor(referenceIdx)] as [number, number];
+      })
+      .filter((item): item is [number, number] => Boolean(item));
+  }
+  // legacy object format: [{candidate_atom_index, reference_atom_index}, ...]
+  return value
+    .map((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+      const pair = item as Record<string, unknown>;
+      const candidateIdx = Number(pair.candidate_atom_index);
+      const referenceIdx = Number(pair.reference_atom_index);
+      if (!Number.isFinite(candidateIdx) || !Number.isFinite(referenceIdx)) return null;
+      if (candidateIdx < 0 || referenceIdx < 0) return null;
+      return [Math.floor(candidateIdx), Math.floor(referenceIdx)] as [number, number];
+    })
+    .filter((item): item is [number, number] => Boolean(item));
 }
 
 function deriveReferenceProperty(row: Record<string, unknown>, key: 'mw' | 'logp' | 'tpsa'): number | null {
@@ -302,6 +343,7 @@ interface LeadOptCandidatesPanelProps {
   loading: boolean;
   referenceReady: boolean;
   referenceSmiles: string;
+  referenceTemplateMolblock?: string;
   predictionBySmiles: Record<string, LeadOptPredictionRecord>;
   referencePredictionByBackend?: Record<string, LeadOptPredictionRecord>;
   backendAvailability?: Record<string, boolean>;
@@ -323,6 +365,7 @@ export function LeadOptCandidatesPanel({
   loading,
   referenceReady,
   referenceSmiles,
+  referenceTemplateMolblock = '',
   predictionBySmiles,
   referencePredictionByBackend = {},
   backendAvailability,
@@ -336,6 +379,7 @@ export function LeadOptCandidatesPanel({
   onPreviewRenderModeChange,
   onExitCardMode
 }: LeadOptCandidatesPanelProps) {
+  void referenceSmiles;
   const PAGE_SIZE = 12;
   const CARD_BATCH_SIZE = 24;
   const normalizedInitialUiState = useMemo(
@@ -1077,6 +1121,12 @@ export function LeadOptCandidatesPanel({
               const paeValue = prediction?.pairPae ?? null;
               const plddtTone = resolveConfidenceTone(plddtValue);
               const useConfidenceRender = previewRenderMode === 'confidence';
+              const templateSmilesForRow =
+                readText(row.alignment_reference_smiles).trim() || readText(referenceSmiles).trim();
+              const alignmentQuerySmiles =
+                readText(row.alignment_core_smiles).trim() || readText(row.constant_smiles).trim();
+              const effectiveAlignmentMap = normalizeAlignmentAtomPairs(row.alignment_atom_pairs);
+              const alignedAtomMap = templateSmilesForRow ? effectiveAlignmentMap : [];
               const isActive = activeSmiles === smiles;
               const rowDelta = readNumberOrNull(row.median_delta);
               const rowDeltaTone = resolveDeltaTone(rowDelta);
@@ -1120,7 +1170,10 @@ export function LeadOptCandidatesPanel({
                         width={CARD_CANDIDATE_2D_WIDTH}
                         height={CARD_PREVIEW_2D_HEIGHT}
                         highlightAtomIndices={useConfidenceRender ? null : highlightAtomIndices}
-                        templateSmiles={referenceSmiles}
+                        alignmentQuerySmiles={alignmentQuerySmiles}
+                        alignmentAtomMap={alignedAtomMap}
+                        templateSmiles={templateSmilesForRow}
+                        templateMolblock={referenceTemplateMolblock}
                         strictTemplateAlignment
                         atomConfidences={useConfidenceRender ? prediction?.ligandAtomPlddts || null : null}
                         confidenceHint={useConfidenceRender ? prediction?.ligandPlddt ?? null : null}
@@ -1216,6 +1269,12 @@ export function LeadOptCandidatesPanel({
                   const logpDeltaTone = resolveDeltaTone(logpDelta);
                   const tpsaDeltaTone = resolveDeltaTone(tpsaDelta);
                   const rowDeltaTone = resolveDeltaTone(rowDelta);
+                  const templateSmilesForRow =
+                    readText(row.alignment_reference_smiles).trim() || readText(referenceSmiles).trim();
+                  const alignmentQuerySmiles =
+                    readText(row.alignment_core_smiles).trim() || readText(row.constant_smiles).trim();
+                  const effectiveAlignmentMap = normalizeAlignmentAtomPairs(row.alignment_atom_pairs);
+                  const alignedAtomMap = templateSmilesForRow ? effectiveAlignmentMap : [];
                   return (
                     <tr key={smiles || `${clampedPage}-${index}`} className={isActive ? 'selected' : ''}>
                       <td className="col-rank">{(clampedPage - 1) * PAGE_SIZE + index + 1}</td>
@@ -1237,7 +1296,10 @@ export function LeadOptCandidatesPanel({
                             width={TABLE_CANDIDATE_2D_WIDTH}
                             height={PREVIEW_2D_HEIGHT}
                             highlightAtomIndices={useConfidenceRender ? null : highlightAtomIndices}
-                            templateSmiles={referenceSmiles}
+                            alignmentQuerySmiles={alignmentQuerySmiles}
+                            alignmentAtomMap={alignedAtomMap}
+                            templateSmiles={templateSmilesForRow}
+                            templateMolblock={referenceTemplateMolblock}
                             strictTemplateAlignment
                             atomConfidences={useConfidenceRender ? prediction?.ligandAtomPlddts || null : null}
                             confidenceHint={useConfidenceRender ? prediction?.ligandPlddt ?? null : null}

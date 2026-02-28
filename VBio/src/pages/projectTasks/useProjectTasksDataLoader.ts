@@ -228,9 +228,12 @@ export function useProjectTasksDataLoader({
             : workflowKey === 'peptide_design'
             ? !silent || cachedTasks.length === 0
             : !(silent && cachedTasks.length > 0);
+        const includePropertiesForList = workflowKey === 'lead_optimization' ? false : true;
         const taskRows = await listProjectTasksForList(projectId, {
           includeComponents: includeComponentsForList,
-          includeConfidence: includeConfidenceForList
+          includeConfidence: includeConfidenceForList,
+          includeProperties: includePropertiesForList,
+          includeLeadOptSummary: workflowKey === 'lead_optimization'
         });
 
         lastFullFetchTsRef.current = Date.now();
@@ -296,27 +299,66 @@ export function useProjectTasksDataLoader({
     };
   }, [loadData, workspaceView]);
 
-  const hasActiveRuntime = useMemo(
-    () =>
-      tasks.some(
-        (row) => {
-          if (!isProjectTaskRow(row)) return false;
-          if (Boolean(row.task_id) && (row.task_state === 'QUEUED' || row.task_state === 'RUNNING')) return true;
-          if (hasLeadOptPredictionRuntime(row)) return true;
-          return false;
-        }
-      ),
-    [tasks]
-  );
+  const runtimePollState = useMemo(() => {
+    let hasActiveRuntime = false;
+    let hasRunning = false;
+    let hasQueued = false;
+    for (const row of tasks) {
+      if (!isProjectTaskRow(row)) continue;
+      const taskState = String(row.task_state || '').trim().toUpperCase();
+      if (Boolean(row.task_id) && (taskState === 'QUEUED' || taskState === 'RUNNING')) {
+        hasActiveRuntime = true;
+        if (taskState === 'RUNNING') hasRunning = true;
+        if (taskState === 'QUEUED') hasQueued = true;
+        continue;
+      }
+      if (hasLeadOptPredictionRuntime(row)) {
+        hasActiveRuntime = true;
+        hasRunning = true;
+      }
+    }
+    return {
+      hasActiveRuntime,
+      hasRunning,
+      hasQueued
+    };
+  }, [tasks]);
 
   useEffect(() => {
     if (workspaceView !== 'tasks') return;
-    if (!hasActiveRuntime) return;
-    const timer = window.setInterval(() => {
-      void loadData({ silent: true, showRefreshing: false });
-    }, 4000);
-    return () => window.clearInterval(timer);
-  }, [hasActiveRuntime, loadData, workspaceView]);
+    if (!runtimePollState.hasActiveRuntime) return;
+    let cancelled = false;
+    let timer: number | null = null;
+    let inFlight = false;
+    const computeDelayMs = () => {
+      const baseDelay = runtimePollState.hasRunning ? 5000 : runtimePollState.hasQueued ? 9000 : 12000;
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return baseDelay * 2;
+      }
+      return baseDelay;
+    };
+    const scheduleNext = () => {
+      if (cancelled) return;
+      timer = window.setTimeout(() => {
+        void tick();
+      }, computeDelayMs());
+    };
+    const tick = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      try {
+        await loadData({ silent: true, showRefreshing: false });
+      } finally {
+        inFlight = false;
+        scheduleNext();
+      }
+    };
+    scheduleNext();
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [loadData, runtimePollState.hasActiveRuntime, runtimePollState.hasQueued, runtimePollState.hasRunning, workspaceView]);
 
   return {
     project,

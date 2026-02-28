@@ -1772,10 +1772,6 @@ export function PeptideDesignResultsWorkspace({
 
   const renderCandidateTable = (standalone = false) => (
     <section className={`peptide-result-list-panel${standalone ? ' peptide-result-list-panel--standalone' : ''}`}>
-      <div className="lead-opt-query-toolbar lead-opt-query-toolbar--single-row peptide-result-toolbar">
-        <div className="peptide-result-toolbar-left" />
-        <span className="lead-opt-query-toolbar-spacer" />
-      </div>
       <div className="lead-opt-result-table-wrap peptide-result-table-wrap">
         <table className="lead-opt-candidate-table lead-opt-result-table peptide-result-table">
           <thead>

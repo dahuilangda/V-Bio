@@ -170,101 +170,262 @@ export interface Ligand2DRenderOptions {
   confidenceHint?: number | null;
   highlightQuery?: string | null;
   highlightAtomIndices?: number[] | null;
+  alignmentQuerySmiles?: string | null;
+  alignmentAtomMap?: Array<[number, number]> | null;
   templateSmiles?: string | null;
+  templateMolblock?: string | null;
   strictTemplateAlignment?: boolean;
+}
+
+function isLikelyMolblockInput(value: string): boolean {
+  const text = String(value || '').trim();
+  if (!text) return false;
+  if (!text.includes('\n')) return false;
+  return /\bV2000\b|\bV3000\b/.test(text);
 }
 
 function tryAlignDepictionToTemplate(
   rdkit: RDKitModule,
-  mol: ReturnType<RDKitModule['get_mol']>,
-  templateSmiles: string | null | undefined
+  mol: NonNullable<ReturnType<RDKitModule['get_mol']>>,
+  templateInput: string | null | undefined,
+  alignmentQueryInput?: string | null,
+  preferredAtomMapInput?: Array<[number, number]> | null
 ): boolean {
-  const template = String(templateSmiles || '').trim();
+  function classifyAlignmentResult(value: unknown): 'success' | 'failure' | 'unknown' {
+    if (value === null || value === undefined) return 'unknown';
+    if (typeof value === 'boolean') return value ? 'success' : 'failure';
+    if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? 'success' : 'failure';
+    if (typeof value === 'string') {
+      const token = value.trim();
+      if (!token) return 'unknown';
+      const lowered = token.toLowerCase();
+      if (lowered === '-1' || lowered === 'false' || lowered === 'null' || lowered === 'none' || lowered === 'undefined') {
+        return 'failure';
+      }
+      if (lowered === 'true' || lowered === 'ok' || lowered === 'success') {
+        return 'success';
+      }
+      const atoms = parseSubstructureMatchAtoms(token);
+      if (atoms.length > 0) return 'success';
+      if (token.startsWith('[') || token.startsWith('{')) return 'failure';
+      return 'unknown';
+    }
+    if (typeof value === 'object') {
+      const atoms = parseSubstructureMatchAtoms(value);
+      return atoms.length > 0 ? 'success' : 'failure';
+    }
+    return 'unknown';
+  }
+
+  const template = String(templateInput || '').trim();
+  void alignmentQueryInput;
   if (!template || !mol) return false;
   const templateMol = rdkit.get_mol(template);
   if (!templateMol) return false;
-  let aligned = false;
   try {
-    templateMol.set_new_coords?.();
+    // For SMILES templates we need deterministic 2D coordinates.
+    // For supplied molblocks, keep original coordinates as the absolute reference frame.
+    if (!isLikelyMolblockInput(template)) {
+      templateMol.set_new_coords?.();
+    }
     const anyMol = mol as unknown as Record<string, unknown>;
-    const candidate = [
-      'generate_aligned_coords',
-      'generateDepictionMatching2DStructure',
-      'generate_depiction_matching2d_structure',
-      'generate_depiction_matching2D_structure',
-      'generate_depiction_matching2DStructure',
-    ]
-      .map((name) => anyMol[name])
-      .find((fn) => typeof fn === 'function') as ((...args: unknown[]) => unknown) | undefined;
-    if (!candidate) return false;
+    const alignCoords = anyMol.generate_aligned_coords as ((...args: unknown[]) => unknown) | undefined;
+    if (typeof alignCoords !== 'function') return false;
+
+    const normalizedPreferredAtomMap = Array.isArray(preferredAtomMapInput)
+      ? preferredAtomMapInput
+          .map((item) => {
+            if (!Array.isArray(item) || item.length < 2) return null;
+            const left = Number(item[0]);
+            const right = Number(item[1]);
+            if (!Number.isFinite(left) || !Number.isFinite(right)) return null;
+            if (left < 0 || right < 0) return null;
+            return [Math.floor(left), Math.floor(right)] as [number, number];
+          })
+          .filter((item): item is [number, number] => Boolean(item))
+      : [];
+    // Enforce explicit backend-provided atom map to keep orientation deterministic.
+    if (normalizedPreferredAtomMap.length === 0) return false;
+    const constrainedOptions: Record<string, unknown> = {
+      allowRGroups: true,
+      acceptFailure: false,
+      alignOnly: false
+    };
+    // RDKit expects atomMap entries as (templateAtomIdx, targetMolAtomIdx).
+    constrainedOptions.atomMap = normalizedPreferredAtomMap.map(([molAtomIdx, referenceAtomIdx]) => [
+      referenceAtomIdx,
+      molAtomIdx
+    ]);
+
     try {
-      candidate.call(mol, templateMol);
-      aligned = true;
-      return aligned;
+      const result = alignCoords.call(mol, templateMol, JSON.stringify(constrainedOptions));
+      const verdict = classifyAlignmentResult(result);
+      if (verdict === 'success') return true;
+      if (verdict === 'failure') return false;
+      // Some rdkit.js builds return undefined for success.
+      return true;
     } catch {
-      // try alternative signatures below
-    }
-    try {
-      candidate.call(mol, templateMol, JSON.stringify({ acceptFailure: false, allowRGroups: false }));
-      aligned = true;
-      return aligned;
-    } catch {
-      // try alternative signatures below
-    }
-    try {
-      candidate.call(mol, template);
-      aligned = true;
-      return aligned;
-    } catch {
-      // try alternative signatures below
-    }
-    try {
-      candidate.call(mol, template, JSON.stringify({ acceptFailure: false, allowRGroups: false }));
-      aligned = true;
-    } catch {
-      // no-op
+      return false;
     }
   } finally {
     templateMol.delete();
   }
-  return aligned;
+  return false;
 }
 
-function parseSubstructureMatchAtoms(value: unknown): number[] {
+function normalizeSubstructureMatch(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => Number(item))
+    .filter((item) => Number.isFinite(item) && item >= 0)
+    .map((item) => Math.floor(item));
+}
+
+function parseSubstructureMatches(value: unknown): number[][] {
   if (typeof value === 'string') {
     const text = value.trim();
     if (!text || text === '-1' || text === '[]' || text === 'null' || text === '{}') return [];
     try {
-      return parseSubstructureMatchAtoms(JSON.parse(text));
+      return parseSubstructureMatches(JSON.parse(text));
     } catch {
       return [];
     }
   }
   if (Array.isArray(value)) {
-    const flat: number[] = [];
-    value.forEach((item) => {
-      if (typeof item === 'number' && Number.isFinite(item) && item >= 0) {
-        flat.push(Math.floor(item));
-        return;
-      }
-      if (Array.isArray(item)) {
-        item.forEach((sub) => {
-          if (typeof sub === 'number' && Number.isFinite(sub) && sub >= 0) {
-            flat.push(Math.floor(sub));
-          }
-        });
-      }
-    });
-    return Array.from(new Set(flat));
+    if (value.length === 0) return [];
+    const first = value[0];
+    if (typeof first === 'number') {
+      const normalized = normalizeSubstructureMatch(value);
+      return normalized.length > 0 ? [normalized] : [];
+    }
+    const rows = value
+      .map((item) => normalizeSubstructureMatch(item))
+      .filter((item) => item.length > 0);
+    return rows;
   }
   if (value && typeof value === 'object') {
     const obj = value as Record<string, unknown>;
     if (Array.isArray(obj.atoms)) {
-      return parseSubstructureMatchAtoms(obj.atoms);
+      return parseSubstructureMatches(obj.atoms);
+    }
+    if (Array.isArray(obj.matches)) {
+      return parseSubstructureMatches(obj.matches);
     }
     return [];
   }
   return [];
+}
+
+function parseSubstructureMatchAtoms(value: unknown): number[] {
+  const matches = parseSubstructureMatches(value);
+  const flat = new Set<number>();
+  matches.forEach((match) => {
+    match.forEach((idx) => {
+      if (Number.isFinite(idx) && idx >= 0) {
+        flat.add(Math.floor(idx));
+      }
+    });
+  });
+  return Array.from(flat);
+}
+
+function compareNumberArrays(a: number[], b: number[]): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i += 1) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return a.length - b.length;
+}
+
+function normalizeMatchRows(rows: number[][]): number[][] {
+  return rows
+    .map((row) =>
+      row
+        .map((item) => Number(item))
+        .filter((item) => Number.isFinite(item) && item >= 0)
+        .map((item) => Math.floor(item))
+    )
+    .filter((row) => row.length >= 2)
+    .sort(compareNumberArrays);
+}
+
+const ALIGNMENT_MAP_CACHE = new Map<string, Array<[number, number]>>();
+
+function buildFrontEndAlignmentAtomMap(
+  rdkit: RDKitModule,
+  candidateMol: NonNullable<ReturnType<RDKitModule['get_mol']>>,
+  candidateSmiles: string,
+  templateSmiles: string,
+  alignmentQuerySmiles: string
+): Array<[number, number]> {
+  const candidate = String(candidateSmiles || '').trim();
+  const template = String(templateSmiles || '').trim();
+  const query = String(alignmentQuerySmiles || '').trim();
+  if (!candidate || !template || !query) return [];
+  const cacheKey = `${candidate}||${template}||${query}`;
+  if (ALIGNMENT_MAP_CACHE.has(cacheKey)) {
+    return ALIGNMENT_MAP_CACHE.get(cacheKey) || [];
+  }
+
+  const templateMol = rdkit.get_mol(template);
+  const queryMol =
+    (typeof rdkit.get_qmol === 'function' ? rdkit.get_qmol(query) : null) ||
+    rdkit.get_mol(query);
+  if (!templateMol || !queryMol) {
+    templateMol?.delete();
+    queryMol?.delete();
+    ALIGNMENT_MAP_CACHE.set(cacheKey, []);
+    return [];
+  }
+
+  try {
+    const candidateMatchesRaw =
+      (typeof candidateMol.get_substruct_matches === 'function'
+        ? candidateMol.get_substruct_matches(queryMol)
+        : typeof candidateMol.get_substruct_match === 'function'
+          ? candidateMol.get_substruct_match(queryMol)
+          : []) || [];
+    const templateMatchesRaw =
+      (typeof templateMol.get_substruct_matches === 'function'
+        ? templateMol.get_substruct_matches(queryMol)
+        : typeof templateMol.get_substruct_match === 'function'
+          ? templateMol.get_substruct_match(queryMol)
+          : []) || [];
+
+    const candidateMatches = normalizeMatchRows(parseSubstructureMatches(candidateMatchesRaw));
+    const templateMatches = normalizeMatchRows(parseSubstructureMatches(templateMatchesRaw));
+    if (candidateMatches.length === 0 || templateMatches.length === 0) {
+      ALIGNMENT_MAP_CACHE.set(cacheKey, []);
+      return [];
+    }
+
+    for (const templateMatch of templateMatches) {
+      for (const candidateMatch of candidateMatches) {
+        if (candidateMatch.length !== templateMatch.length) continue;
+        const pairs: Array<[number, number]> = [];
+        const usedCandidate = new Set<number>();
+        const usedTemplate = new Set<number>();
+        for (let i = 0; i < candidateMatch.length; i += 1) {
+          const candidateAtomIdx = candidateMatch[i];
+          const templateAtomIdx = templateMatch[i];
+          if (usedCandidate.has(candidateAtomIdx) || usedTemplate.has(templateAtomIdx)) continue;
+          usedCandidate.add(candidateAtomIdx);
+          usedTemplate.add(templateAtomIdx);
+          pairs.push([candidateAtomIdx, templateAtomIdx]);
+        }
+        if (pairs.length >= 2) {
+          ALIGNMENT_MAP_CACHE.set(cacheKey, pairs);
+          return pairs;
+        }
+      }
+    }
+
+    ALIGNMENT_MAP_CACHE.set(cacheKey, []);
+    return [];
+  } finally {
+    queryMol.delete();
+    templateMol.delete();
+  }
 }
 
 export function renderLigand2DSvg(
@@ -277,7 +438,10 @@ export function renderLigand2DSvg(
     confidenceHint = null,
     highlightQuery = null,
     highlightAtomIndices = null,
+    alignmentQuerySmiles = null,
+    alignmentAtomMap = null,
     templateSmiles = null,
+    templateMolblock = null,
     strictTemplateAlignment = false
   }: Ligand2DRenderOptions
 ): string {
@@ -320,26 +484,40 @@ export function renderLigand2DSvg(
       : atomCount > 52
         ? 11
         : 13;
-
   try {
-    const normalizedTemplate = String(templateSmiles || '').trim();
-    const templateRequired = strictTemplateAlignment === true;
-    if (templateRequired && !normalizedTemplate) {
-      throw new Error('Template alignment requires a reference template SMILES.');
-    }
+    void alignmentAtomMap;
+    const normalizedTemplateSmiles = String(templateSmiles || '').trim();
+    void templateMolblock;
+    const normalizedTemplate = normalizedTemplateSmiles;
+    const normalizedAlignmentQuery = String(alignmentQuerySmiles || '').trim();
+    let renderMol: NonNullable<ReturnType<RDKitModule['get_mol']>> = mol;
     // Ensure deterministic base orientation before template matching.
     mol.set_new_coords?.();
-    const alignedByTemplate = normalizedTemplate
-      ? tryAlignDepictionToTemplate(rdkit, mol, normalizedTemplate)
-      : false;
-    if (normalizedTemplate && templateRequired && !alignedByTemplate) {
-      throw new Error('Failed to align 2D depiction to the reference template.');
-    }
-    if (!templateRequired && !alignedByTemplate) {
-      mol.normalize_depiction?.();
+    if (normalizedTemplate) {
+      const frontEndAlignmentAtomMap = buildFrontEndAlignmentAtomMap(
+        rdkit,
+        mol,
+        value,
+        normalizedTemplate,
+        normalizedAlignmentQuery
+      );
+      const effectiveAlignmentMap = frontEndAlignmentAtomMap;
+      if (strictTemplateAlignment && effectiveAlignmentMap.length < 2) {
+        throw new Error('Strict template alignment requires valid front-end atom mapping.');
+      }
+      const alignedByRdkit = tryAlignDepictionToTemplate(
+        rdkit,
+        mol,
+        normalizedTemplate,
+        normalizedAlignmentQuery,
+        effectiveAlignmentMap
+      );
+      if (strictTemplateAlignment && effectiveAlignmentMap.length >= 2 && !alignedByRdkit) {
+        throw new Error('Template alignment failed.');
+      }
     }
     let rawSvg = '';
-    if (typeof mol.get_svg_with_highlights === 'function') {
+    if (typeof renderMol.get_svg_with_highlights === 'function') {
       try {
         const details: Record<string, unknown> = {
           width,
@@ -402,11 +580,11 @@ export function renderLigand2DSvg(
           if (queryMol) {
             try {
               let matchedAtoms: number[] = [];
-              if (typeof mol.get_substruct_match === 'function') {
-                matchedAtoms = parseSubstructureMatchAtoms(mol.get_substruct_match(queryMol));
+              if (typeof renderMol.get_substruct_match === 'function') {
+                matchedAtoms = parseSubstructureMatchAtoms(renderMol.get_substruct_match(queryMol));
               }
-              if (matchedAtoms.length === 0 && typeof mol.get_substruct_matches === 'function') {
-                matchedAtoms = parseSubstructureMatchAtoms(mol.get_substruct_matches(queryMol));
+              if (matchedAtoms.length === 0 && typeof renderMol.get_substruct_matches === 'function') {
+                matchedAtoms = parseSubstructureMatchAtoms(renderMol.get_substruct_matches(queryMol));
               }
               if (matchedAtoms.length > 0) {
                 const highlightAtoms = Array.isArray(details.highlightAtoms)
@@ -433,13 +611,13 @@ export function renderLigand2DSvg(
           }
         }
 
-        rawSvg = mol.get_svg_with_highlights(JSON.stringify(details));
+        rawSvg = renderMol.get_svg_with_highlights(JSON.stringify(details));
       } catch {
         rawSvg = '';
       }
     }
     if (!rawSvg) {
-      rawSvg = mol.get_svg(width, height);
+      rawSvg = renderMol.get_svg(width, height);
     }
     if (!rawSvg) {
       throw new Error('RDKit returned empty SVG.');

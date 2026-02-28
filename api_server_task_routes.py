@@ -195,6 +195,54 @@ def register_task_routes(
 
         return jsonify(response)
 
+    @app.route('/status_batch', methods=['POST'])
+    def get_task_status_batch():
+        payload = request.get_json(silent=True)
+        raw_task_ids = payload.get('task_ids') if isinstance(payload, dict) else None
+        if not isinstance(raw_task_ids, list):
+            return jsonify({'error': 'task_ids must be a list.'}), 400
+
+        normalized_task_ids: list[str] = []
+        seen_task_ids: set[str] = set()
+        for raw_task_id in raw_task_ids:
+            task_id = str(raw_task_id or '').strip()
+            if not task_id or task_id in seen_task_ids:
+                continue
+            seen_task_ids.add(task_id)
+            normalized_task_ids.append(task_id)
+            if len(normalized_task_ids) >= 64:
+                break
+
+        responses: list[dict[str, Any]] = []
+        for task_id in normalized_task_ids:
+            try:
+                single_response = get_task_status(task_id)
+                if isinstance(single_response, tuple):
+                    flask_response = single_response[0]
+                else:
+                    flask_response = single_response
+                payload_obj = (
+                    flask_response.get_json(silent=True)
+                    if hasattr(flask_response, 'get_json')
+                    else None
+                )
+                if isinstance(payload_obj, dict):
+                    responses.append(payload_obj)
+                else:
+                    responses.append({'task_id': task_id, 'state': 'PENDING', 'info': {'status': 'Unknown task status payload.'}})
+            except Exception as exc:
+                logger.exception('Failed to resolve task status in batch for task %s: %s', task_id, exc)
+                responses.append({
+                    'task_id': task_id,
+                    'state': 'PENDING',
+                    'info': {
+                        'status': 'Failed to resolve task status.',
+                        'message': str(exc),
+                    }
+                })
+
+        return jsonify({'tasks': responses, 'count': len(responses)})
+
     @app.route('/results/<task_id>', methods=['GET'])
     def download_results(task_id):
         logger.info('Received download request for task ID: %s', task_id)

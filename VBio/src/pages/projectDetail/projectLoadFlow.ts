@@ -130,12 +130,15 @@ export async function loadProjectFlow(params: {
       : workflowDef.key === 'peptide_design'
       ? requestedTab === 'results' || !requestedTab || Boolean(requestedTaskRowId)
       : true;
+  const shouldIncludeTaskProperties = workflowDef.key === 'lead_optimization' ? false : true;
   const shouldUseTaskListView = workflowDef.key === 'lead_optimization' || workflowDef.key === 'peptide_design';
   const taskRowsBase = sortProjectTasks(
     await (shouldUseTaskListView
       ? listProjectTasksForList(next.id, {
           includeComponents: shouldIncludeTaskComponents,
-          includeConfidence: shouldIncludeTaskConfidence
+          includeConfidence: shouldIncludeTaskConfidence,
+          includeProperties: shouldIncludeTaskProperties,
+          includeLeadOptSummary: workflowDef.key === 'lead_optimization'
         })
       : listProjectTasksCompact(next.id))
   );

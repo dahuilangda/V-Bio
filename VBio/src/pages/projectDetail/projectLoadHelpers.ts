@@ -13,7 +13,19 @@ export async function resolveTaskSnapshotContext(params: {
   locationSearch: string;
   requestNewTask: boolean;
   workflowKey: string;
-  getProjectTaskById: (taskRowId: string) => Promise<ProjectTask | null>;
+  getProjectTaskById: (
+    taskRowId: string,
+    options?: {
+      includeComponents?: boolean;
+      includeConstraints?: boolean;
+      includeProperties?: boolean;
+      includeLeadOptSummary?: boolean;
+      includeLeadOptCandidates?: boolean;
+      includeConfidence?: boolean;
+      includeAffinity?: boolean;
+      includeProteinSequence?: boolean;
+    }
+  ) => Promise<ProjectTask | null>;
   sortProjectTasks: (rows: ProjectTask[]) => ProjectTask[];
 }): Promise<{
   taskRows: ProjectTask[];
@@ -30,6 +42,7 @@ export async function resolveTaskSnapshotContext(params: {
 
   const query = new URLSearchParams(locationSearch);
   const requestedTaskRowId = query.get('task_row_id');
+  const requestedTab = String(query.get('tab') || '').trim().toLowerCase();
   const requestedTaskRow =
     requestedTaskRowId && requestedTaskRowId.trim()
       ? taskRowsBase.find((item) => String(item.id || '').trim() === requestedTaskRowId.trim()) || null
@@ -55,9 +68,36 @@ export async function resolveTaskSnapshotContext(params: {
         workflowKey === 'lead_optimization'
       )
   );
-  const snapshotSourceTaskRowDetail = shouldLoadSnapshotDetail && snapshotTaskRowId
-    ? await getProjectTaskById(snapshotTaskRowId)
-    : null;
+  const snapshotSourceTaskRowDetail =
+    shouldLoadSnapshotDetail && snapshotTaskRowId
+      ? await (async () => {
+          if (workflowKey !== 'lead_optimization') {
+            return await getProjectTaskById(snapshotTaskRowId);
+          }
+          const loadForComponents =
+            requestNewTask || requestedTab === 'components' || requestedTab === 'constraints';
+          if (loadForComponents) {
+            return await getProjectTaskById(snapshotTaskRowId, {
+              includeComponents: true,
+              includeConstraints: true,
+              includeProperties: true,
+              includeConfidence: false,
+              includeAffinity: false,
+              includeProteinSequence: true
+            });
+          }
+          return await getProjectTaskById(snapshotTaskRowId, {
+            includeComponents: false,
+            includeConstraints: false,
+            includeProperties: false,
+            includeLeadOptSummary: true,
+            includeLeadOptCandidates: true,
+            includeConfidence: false,
+            includeAffinity: false,
+            includeProteinSequence: false
+          });
+        })()
+      : null;
   const snapshotSourceTaskRow = snapshotSourceTaskRowDetail || snapshotSourceTaskRowBase;
 
   const taskRows = sortProjectTasks(

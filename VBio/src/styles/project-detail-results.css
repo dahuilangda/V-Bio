@@ -407,10 +407,12 @@
 .peptide-result-list-panel {
   display: grid;
   min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  align-content: start;
 }
 
 .peptide-result-list-panel--standalone {
-  min-height: 520px;
+  min-height: 0;
 }
 
 .peptide-result-card-panel {

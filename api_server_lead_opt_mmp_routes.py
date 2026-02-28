@@ -677,12 +677,18 @@ def register_lead_opt_mmp_routes(
             cluster_meta = transform_cluster_map.get(transform_id, {})
             candidates.append({
                 'smiles': smiles,
+                'input_smiles': row.get('input_smiles', ''),
                 'transform_id': transform_id,
                 'from_smiles': row.get('from_smiles', ''),
                 'to_smiles': row.get('to_smiles', ''),
                 'to_highlight_smiles': row.get('to_highlight_smiles', ''),
                 'selected_fragment_id': row.get('selected_fragment_id', ''),
                 'query_variable_smiles': row.get('query_variable_smiles', ''),
+                'constant_smiles': row.get('constant_smiles', ''),
+                'alignment_core_smiles': row.get('alignment_core_smiles', ''),
+                'alignment_anchor_pairs': row.get('alignment_anchor_pairs', []),
+                'alignment_core_atom_pairs': row.get('alignment_core_atom_pairs', []),
+                'alignment_atom_pairs': row.get('alignment_atom_pairs', []),
                 'final_highlight_atom_indices': highlight_indices,
                 'n_pairs': row.get('n_pairs', 1),
                 'median_delta': row.get('median_delta', 0.0),

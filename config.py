@@ -191,6 +191,10 @@ PROTENIX_DOCKER_EXTRA_ARGS = os.environ.get("PROTENIX_DOCKER_EXTRA_ARGS", "")
 PROTENIX_INFER_EXTRA_ARGS = os.environ.get("PROTENIX_INFER_EXTRA_ARGS", "")
 PROTENIX_PYTHON_BIN = os.environ.get("PROTENIX_PYTHON_BIN", "python3")
 PROTENIX_USE_HOST_USER = os.environ.get("PROTENIX_USE_HOST_USER", "false")
+PROTENIX_COMMON_CACHE_DIR = os.environ.get(
+    "PROTENIX_COMMON_CACHE_DIR",
+    str(Path(__file__).parent / "protenix" / "common_cache"),
+)
 
 # ==============================================================================
 # 7. PocketXMol Docker 集成

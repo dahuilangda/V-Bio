@@ -1,5 +1,5 @@
 import type { MutableRefObject } from 'react';
-import { downloadResultBlob, getTaskStatus, parseResultBundle } from '../../api/backendApi';
+import { downloadResultBlob, getTaskStatus, getTaskStatusBatch, parseResultBundle } from '../../api/backendApi';
 import { updateProject, updateProjectTask } from '../../api/supabaseLite';
 import type { Project, ProjectTask } from '../../types/models';
 import { mergePeptidePreviewIntoProperties } from '../../utils/peptideTaskPreview';
@@ -734,15 +734,21 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
     };
   }
 
-  const checks = await Promise.allSettled(runtimeRows.map((row) => getTaskStatus(row.task_id)));
+  let statusByTaskId: Record<string, { task_id: string; state: string; info?: Record<string, unknown> }> = {};
+  try {
+    statusByTaskId = await getTaskStatusBatch(runtimeRows.map((row) => String(row.task_id || '').trim()));
+  } catch {
+    statusByTaskId = {};
+  }
 
-  for (let i = 0; i < checks.length; i += 1) {
-    const result = checks[i];
-    if (result.status !== 'fulfilled') continue;
+  for (const runtimeTask of runtimeRows) {
+    const runtimeTaskId = String(runtimeTask.task_id || '').trim();
+    if (!runtimeTaskId) continue;
+    const statusPayload = statusByTaskId[runtimeTaskId];
+    if (!statusPayload) continue;
 
-    const runtimeTask = runtimeRows[i];
-    const taskState = inferTaskStateFromStatusPayload(result.value, runtimeTask.task_state);
-    const statusText = readStatusText(result.value);
+    const taskState = inferTaskStateFromStatusPayload(statusPayload, runtimeTask.task_state);
+    const statusText = readStatusText(statusPayload);
     const errorText = taskState === 'FAILURE' ? statusText : '';
     const terminal = taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED';
     const completedAt = terminal ? runtimeTask.completed_at || new Date().toISOString() : null;
@@ -754,7 +760,7 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
             return Number.isFinite(duration) && duration >= 0 ? duration : null;
           })()
         : null;
-    const runtimeInfo = asRecord(result.value.info);
+    const runtimeInfo = asRecord(statusPayload.info);
     const runtimeWorkflow = resolveTaskWorkflowKey(runtimeTask, nextProject.task_type || '');
     const runtimeConfidencePatch =
       runtimeWorkflow === 'peptide_design' ? mergePeptideRuntimeStatusIntoConfidence(runtimeTask, runtimeInfo) : null;

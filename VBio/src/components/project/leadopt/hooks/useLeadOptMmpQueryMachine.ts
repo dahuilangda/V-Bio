@@ -5,6 +5,7 @@ import {
   enumerateLeadOptimizationMmp,
   fetchLeadOptimizationMmpEvidence,
   fetchLeadOptimizationMmpQueryResult,
+  getTaskStatusBatch,
   getTaskStatus,
   type LeadOptMmpEvidenceResponse,
   parseResultBundle,
@@ -98,8 +99,9 @@ const RESULT_HYDRATION_RETRY_BASE_MS = 1200;
 const RESULT_HYDRATION_RETRY_MAX_MS = 10000;
 const RESULT_HYDRATION_MAX_RETRIES = 8;
 const ENABLE_BACKGROUND_CANDIDATE_RESULT_HYDRATION = false;
-const ENABLE_BACKGROUND_REFERENCE_RESULT_HYDRATION = true;
-const RUNTIME_STATUS_POLL_DELAY_MS = 5000;
+const ENABLE_BACKGROUND_REFERENCE_RESULT_HYDRATION = false;
+const RUNTIME_STATUS_RUNNING_POLL_DELAY_MS = 5000;
+const RUNTIME_STATUS_QUEUED_POLL_DELAY_MS = 9000;
 const RUNTIME_STATUS_IDLE_POLL_DELAY_MS = 12000;
 const RUNTIME_STATUS_HIDDEN_POLL_DELAY_MULTIPLIER = 2;
 const RUNTIME_STATUS_CANDIDATE_BATCH_SIZE = 2;
@@ -180,7 +182,8 @@ function mapPredictionRuntimeState(raw: unknown): PredictionState | null {
   if (!token) return null;
   if (token === 'SUCCESS') return 'SUCCESS';
   if (token === 'FAILURE' || token === 'REVOKED') return 'FAILURE';
-  if (token === 'PENDING' || token === 'RECEIVED' || token === 'RETRY') return 'QUEUED';
+  if (token === 'PENDING') return null;
+  if (token === 'RECEIVED' || token === 'RETRY') return 'QUEUED';
   if (token === 'STARTED' || token === 'RUNNING' || token === 'PROGRESS') return 'RUNNING';
   return null;
 }
@@ -418,6 +421,44 @@ function unresolvedPredictionSort(
   const rightPriority = rightState === 'RUNNING' ? 0 : rightState === 'QUEUED' ? 1 : rightState === 'SUCCESS' ? 2 : 3;
   if (leftPriority !== rightPriority) return leftPriority - rightPriority;
   return String(left[0] || '').localeCompare(String(right[0] || ''));
+}
+
+function buildPendingPredictionEntries(
+  records: Record<string, LeadOptPredictionRecord>
+): Array<[string, LeadOptPredictionRecord]> {
+  return Object.entries(records)
+    .filter(([, record]) => {
+      const state = String(record.state || '').toUpperCase();
+      const shouldPoll = state === 'QUEUED' || state === 'RUNNING';
+      if (!shouldPoll) return false;
+      const taskId = readText(record.taskId).trim();
+      return taskId.length > 0 && !taskId.startsWith('local:');
+    })
+    .sort(unresolvedPredictionSort);
+}
+
+function buildPendingPredictionSignature(entries: Array<[string, LeadOptPredictionRecord]>): string {
+  if (!Array.isArray(entries) || entries.length === 0) return '';
+  return entries
+    .map(([key, record]) => {
+      const taskId = readText(record.taskId).trim();
+      const state = readText(record.state).trim().toUpperCase();
+      return `${readText(key).trim()}|${taskId}|${state}`;
+    })
+    .join('||');
+}
+
+function computeRuntimePollDelayMs(options: { hasRunning: boolean; hasQueued: boolean }): number {
+  if (options.hasRunning) return RUNTIME_STATUS_RUNNING_POLL_DELAY_MS;
+  if (options.hasQueued) return RUNTIME_STATUS_QUEUED_POLL_DELAY_MS;
+  return RUNTIME_STATUS_IDLE_POLL_DELAY_MS;
+}
+
+function computeRuntimePollBatchSize(totalPending: number, maxBatchSize: number): number {
+  const safeTotal = Math.max(0, Math.floor(Number(totalPending) || 0));
+  if (safeTotal <= 0) return 0;
+  if (safeTotal <= 4) return 1;
+  return Math.min(Math.max(1, maxBatchSize), Math.max(1, Math.ceil(safeTotal / 8)));
 }
 
 function sliceRoundRobin<T>(
@@ -864,6 +905,22 @@ export function useLeadOptMmpQueryMachine({
   }, []);
 
   const hasSelection = selectedTransformIds.length > 0;
+  const pendingCandidateEntries = useMemo(
+    () => buildPendingPredictionEntries(predictionBySmiles),
+    [predictionBySmiles]
+  );
+  const pendingReferenceEntries = useMemo(
+    () => buildPendingPredictionEntries(referencePredictionByBackend),
+    [referencePredictionByBackend]
+  );
+  const pendingCandidateSignature = useMemo(
+    () => buildPendingPredictionSignature(pendingCandidateEntries),
+    [pendingCandidateEntries]
+  );
+  const pendingReferenceSignature = useMemo(
+    () => buildPendingPredictionSignature(pendingReferenceEntries),
+    [pendingReferenceEntries]
+  );
 
   const clearSelections = useCallback(() => {
     setSelectedTransformIds([]);
@@ -874,45 +931,54 @@ export function useLeadOptMmpQueryMachine({
     if (!runtimeStatusPollingEnabled) return;
     let cancelled = false;
     let timer: number | null = null;
-    const computeDelayMs = (hasActiveWork: boolean) => {
-      const baseDelay = hasActiveWork ? RUNTIME_STATUS_POLL_DELAY_MS : RUNTIME_STATUS_IDLE_POLL_DELAY_MS;
+    const computeDelayMs = (hasRunning: boolean, hasQueued: boolean) => {
+      const baseDelay = computeRuntimePollDelayMs({ hasRunning, hasQueued });
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
         return baseDelay * RUNTIME_STATUS_HIDDEN_POLL_DELAY_MULTIPLIER;
       }
       return baseDelay;
     };
-    const scheduleNext = (hasActiveWork: boolean) => {
+    const scheduleNext = (hasRunning: boolean, hasQueued: boolean) => {
       if (cancelled) return;
       timer = window.setTimeout(() => {
         void pollOnce();
-      }, computeDelayMs(hasActiveWork));
+      }, computeDelayMs(hasRunning, hasQueued));
     };
 
     const pollOnce = async () => {
-      let hasActiveWork = false;
+      let hasRunning = false;
+      let hasQueued = false;
       try {
-        const pendingEntriesAll = Object.entries(predictionBySmiles)
-          .filter(([, record]) => {
-            const state = String(record.state || '').toUpperCase();
-            const shouldPoll = state === 'QUEUED' || state === 'RUNNING';
-            if (!shouldPoll) return false;
-            const taskId = readText(record.taskId).trim();
-            return taskId.length > 0 && !taskId.startsWith('local:');
-          })
-          .sort(unresolvedPredictionSort);
-        hasActiveWork = pendingEntriesAll.length > 0;
+        const pendingEntriesAll = pendingCandidateEntries;
+        hasRunning = pendingEntriesAll.some(([, record]) => String(record.state || '').toUpperCase() === 'RUNNING');
+        hasQueued = pendingEntriesAll.some(([, record]) => String(record.state || '').toUpperCase() === 'QUEUED');
+        const pollBatchSize = computeRuntimePollBatchSize(
+          pendingEntriesAll.length,
+          RUNTIME_STATUS_CANDIDATE_BATCH_SIZE
+        );
         const { items: pendingEntries, nextCursor } = sliceRoundRobin(
           pendingEntriesAll,
-          RUNTIME_STATUS_CANDIDATE_BATCH_SIZE,
+          pollBatchSize,
           predictionRuntimePollCursorRef.current
         );
         predictionRuntimePollCursorRef.current = nextCursor;
         if (pendingEntries.length === 0) return;
+        const taskIds = pendingEntries
+          .map(([, record]) => readText(record.taskId).trim())
+          .filter(Boolean);
+        let statusByTaskId: Record<string, { task_id: string; state: string; info?: Record<string, unknown> }> = {};
+        try {
+          statusByTaskId = await getTaskStatusBatch(taskIds);
+        } catch {
+          return;
+        }
 
         for (const [smiles, record] of pendingEntries) {
           if (cancelled) return;
+          const taskId = readText(record.taskId).trim();
+          const status = taskId ? statusByTaskId[taskId] : undefined;
+          if (!status) continue;
           try {
-            const status = await getTaskStatus(record.taskId);
             if (cancelled) return;
             const runtimeState = inferPredictionRuntimeStateFromStatusPayload(status);
             if (runtimeState === 'SUCCESS') {
@@ -988,11 +1054,11 @@ export function useLeadOptMmpQueryMachine({
           }
         }
       } finally {
-        scheduleNext(hasActiveWork);
+        scheduleNext(hasRunning, hasQueued);
       }
     };
 
-    scheduleNext(true);
+    scheduleNext(true, false);
 
     return () => {
       cancelled = true;
@@ -1000,52 +1066,61 @@ export function useLeadOptMmpQueryMachine({
         window.clearTimeout(timer);
       }
     };
-  }, [ligandChain, predictionBySmiles, runtimeStatusPollingEnabled, targetChain]);
+  }, [ligandChain, pendingCandidateEntries, pendingCandidateSignature, runtimeStatusPollingEnabled, targetChain]);
 
   useEffect(() => {
     if (!runtimeStatusPollingEnabled) return;
 
     let cancelled = false;
     let timer: number | null = null;
-    const computeDelayMs = (hasActiveWork: boolean) => {
-      const baseDelay = hasActiveWork ? RUNTIME_STATUS_POLL_DELAY_MS : RUNTIME_STATUS_IDLE_POLL_DELAY_MS;
+    const computeDelayMs = (hasRunning: boolean, hasQueued: boolean) => {
+      const baseDelay = computeRuntimePollDelayMs({ hasRunning, hasQueued });
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
         return baseDelay * RUNTIME_STATUS_HIDDEN_POLL_DELAY_MULTIPLIER;
       }
       return baseDelay;
     };
-    const scheduleNext = (hasActiveWork: boolean) => {
+    const scheduleNext = (hasRunning: boolean, hasQueued: boolean) => {
       if (cancelled) return;
       timer = window.setTimeout(() => {
         void pollOnce();
-      }, computeDelayMs(hasActiveWork));
+      }, computeDelayMs(hasRunning, hasQueued));
     };
 
     const pollOnce = async () => {
-      let hasActiveWork = false;
+      let hasRunning = false;
+      let hasQueued = false;
       try {
-        const pendingEntriesAll = Object.entries(referencePredictionByBackend)
-          .filter(([, record]) => {
-            const state = String(record.state || '').toUpperCase();
-            const shouldPoll = state === 'QUEUED' || state === 'RUNNING';
-            if (!shouldPoll) return false;
-            const taskId = readText(record.taskId).trim();
-            return taskId.length > 0 && !taskId.startsWith('local:');
-          })
-          .sort(unresolvedPredictionSort);
-        hasActiveWork = pendingEntriesAll.length > 0;
+        const pendingEntriesAll = pendingReferenceEntries;
+        hasRunning = pendingEntriesAll.some(([, record]) => String(record.state || '').toUpperCase() === 'RUNNING');
+        hasQueued = pendingEntriesAll.some(([, record]) => String(record.state || '').toUpperCase() === 'QUEUED');
+        const pollBatchSize = computeRuntimePollBatchSize(
+          pendingEntriesAll.length,
+          RUNTIME_STATUS_REFERENCE_BATCH_SIZE
+        );
         const { items: pendingEntries, nextCursor } = sliceRoundRobin(
           pendingEntriesAll,
-          RUNTIME_STATUS_REFERENCE_BATCH_SIZE,
+          pollBatchSize,
           referenceRuntimePollCursorRef.current
         );
         referenceRuntimePollCursorRef.current = nextCursor;
         if (pendingEntries.length === 0) return;
+        const taskIds = pendingEntries
+          .map(([, record]) => readText(record.taskId).trim())
+          .filter(Boolean);
+        let statusByTaskId: Record<string, { task_id: string; state: string; info?: Record<string, unknown> }> = {};
+        try {
+          statusByTaskId = await getTaskStatusBatch(taskIds);
+        } catch {
+          return;
+        }
 
         for (const [backendKey, record] of pendingEntries) {
           if (cancelled) return;
+          const taskId = readText(record.taskId).trim();
+          const status = taskId ? statusByTaskId[taskId] : undefined;
+          if (!status) continue;
           try {
-            const status = await getTaskStatus(record.taskId);
             if (cancelled) return;
             const runtimeState = inferPredictionRuntimeStateFromStatusPayload(status);
             if (runtimeState === 'SUCCESS') {
@@ -1121,11 +1196,11 @@ export function useLeadOptMmpQueryMachine({
           }
         }
       } finally {
-        scheduleNext(hasActiveWork);
+        scheduleNext(hasRunning, hasQueued);
       }
     };
 
-    scheduleNext(true);
+    scheduleNext(true, false);
 
     return () => {
       cancelled = true;
@@ -1133,7 +1208,26 @@ export function useLeadOptMmpQueryMachine({
         window.clearTimeout(timer);
       }
     };
-  }, [referencePredictionByBackend, runtimeStatusPollingEnabled, targetChain, ligandChain]);
+  }, [ligandChain, pendingReferenceEntries, pendingReferenceSignature, runtimeStatusPollingEnabled, targetChain]);
+
+  useEffect(() => {
+    if (!runtimeStatusPollingEnabled) return;
+    const hasPendingCandidates = pendingCandidateEntries.length > 0;
+    const hasPendingReferences = pendingReferenceEntries.length > 0;
+    if (hasPendingCandidates || hasPendingReferences) return;
+    const timer = window.setTimeout(() => {
+      setRuntimeStatusPollingEnabled(false);
+    }, RUNTIME_STATUS_IDLE_POLL_DELAY_MS);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [
+    pendingCandidateEntries.length,
+    pendingCandidateSignature,
+    pendingReferenceEntries.length,
+    pendingReferenceSignature,
+    runtimeStatusPollingEnabled
+  ]);
 
   useEffect(() => {
     if (!ENABLE_BACKGROUND_CANDIDATE_RESULT_HYDRATION) return;
