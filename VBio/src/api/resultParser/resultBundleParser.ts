@@ -1646,6 +1646,38 @@ async function parsePeptideDesignCandidatesFromBundle(
   zip: JSZip,
   names: string[]
 ): Promise<Array<Record<string, unknown>>> {
+  const candidatePathsForSummary = (summaryPath: string): string[] => {
+    const base = getBaseName(summaryPath).toLowerCase();
+    if (base.includes('design_results')) {
+      return [
+        'design_results',
+        'results.design_results',
+        'peptide_design.design_results',
+        'candidates',
+        'results.candidates',
+        'peptide_design.candidates',
+        'top_results',
+        'best_sequences',
+        'results.best_sequences',
+        'peptide_design.best_sequences',
+        'peptide_results',
+      ];
+    }
+    return [
+      'top_results',
+      'best_sequences',
+      'peptide_design.best_sequences',
+      'peptide_design.candidates',
+      'results.best_sequences',
+      'results.candidates',
+      'peptide_results',
+      'candidates',
+      'design_results',
+      'results.design_results',
+      'peptide_design.design_results',
+    ];
+  };
+
   const summarySourcePriority = (path: string): number => {
     const base = getBaseName(path).toLowerCase();
     if (base.includes('design_results')) return 0;
@@ -1672,16 +1704,7 @@ async function parsePeptideDesignCandidatesFromBundle(
   for (const summaryPath of summaryCandidates) {
     const payload = await readZipJson(zip, summaryPath);
     if (!payload) continue;
-    const nextRows = readFirstObjectArrayPath(payload, [
-      'top_results',
-      'best_sequences',
-      'peptide_design.best_sequences',
-      'peptide_design.candidates',
-      'results.best_sequences',
-      'results.candidates',
-      'peptide_results',
-      'candidates'
-    ]);
+    const nextRows = readFirstObjectArrayPath(payload, candidatePathsForSummary(summaryPath));
     if (nextRows.length === 0) continue;
     const sourcePriority = summarySourcePriority(summaryPath);
     if (

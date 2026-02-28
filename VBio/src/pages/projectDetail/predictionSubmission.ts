@@ -4,6 +4,7 @@ import { assignChainIdsForComponents } from '../../utils/chainAssignments';
 import { extractPrimaryProteinAndLigand, PEPTIDE_DESIGNED_LIGAND_TOKEN } from '../../utils/projectInputs';
 import { buildQueuedPeptidePreviewFromOptions, PEPTIDE_TASK_PREVIEW_KEY } from '../../utils/peptideTaskPreview';
 import type { InputComponent, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
+import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
 
 export type PredictionWorkspaceTab = 'results' | 'basics' | 'components' | 'constraints';
 
@@ -269,8 +270,15 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
       );
     }
 
-    const snapshotComponents = addTemplatesToTaskSnapshotComponents(submissionConfig.components, proteinTemplates);
-    const draftTaskRow = await persistDraftTaskSnapshot(submissionConfig, {
+    const submissionConfigWithTaskOptions: ProjectInputConfig = {
+      ...submissionConfig,
+      properties: mergeTaskInputOptionsIntoProperties(submissionConfig.properties, submissionConfig.options)
+    };
+    const snapshotComponents = addTemplatesToTaskSnapshotComponents(
+      submissionConfigWithTaskOptions.components,
+      proteinTemplates
+    );
+    const draftTaskRow = await persistDraftTaskSnapshot(submissionConfigWithTaskOptions, {
       statusText: 'Draft snapshot prepared for run',
       reuseTaskRowId: resolveEditableDraftTaskRowId(),
       snapshotComponents
@@ -313,11 +321,17 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
 
     const queuedAt = new Date().toISOString();
     const queuedTaskProperties: ProjectTask['properties'] = (() => {
-      if (!isPeptideDesignWorkflow) return submissionConfig.properties;
+      if (!isPeptideDesignWorkflow) {
+        return mergeTaskInputOptionsIntoProperties(submissionConfig.properties, submissionConfig.options);
+      }
       const preview = buildQueuedPeptidePreviewFromOptions(submissionConfig.options as unknown as Record<string, unknown>);
-      if (Object.keys(preview).length === 0) return submissionConfig.properties;
+      const propertiesWithTaskOptions = mergeTaskInputOptionsIntoProperties(
+        submissionConfig.properties,
+        submissionConfig.options
+      );
+      if (Object.keys(preview).length === 0) return propertiesWithTaskOptions;
       return {
-        ...(submissionConfig.properties as unknown as Record<string, unknown>),
+        ...(propertiesWithTaskOptions as unknown as Record<string, unknown>),
         [PEPTIDE_TASK_PREVIEW_KEY]: preview
       } as unknown as ProjectTask['properties'];
     })();

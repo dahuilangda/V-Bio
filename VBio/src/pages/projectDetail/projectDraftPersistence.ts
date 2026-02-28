@@ -2,6 +2,7 @@ import type { Dispatch, SetStateAction } from 'react';
 import type { InputComponent, Project, ProjectInputConfig, ProjectTask } from '../../types/models';
 import { extractPrimaryProteinAndLigand } from '../../utils/projectInputs';
 import { getWorkflowDefinition } from '../../utils/workflows';
+import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
 
 export interface DraftSnapshotSource {
   taskName: string;
@@ -175,7 +176,7 @@ export async function persistDraftTaskSnapshotRecord(params: {
     ligand_smiles: storedLigandSmiles,
     components: snapshotComponents,
     constraints: normalizedConfig.constraints,
-    properties: normalizedConfig.properties,
+    properties: mergeTaskInputOptionsIntoProperties(normalizedConfig.properties, normalizedConfig.options),
     confidence: {},
     affinity: {},
     structure_name: '',

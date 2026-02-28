@@ -60,6 +60,9 @@ def register_task_routes(
                         'tracker': tracker_status or {},
                         'heartbeat': heartbeat,
                     }
+                    tracker_payload = (tracker_status or {}).get('payload')
+                    if isinstance(tracker_payload, dict) and tracker_payload:
+                        response['info'].update(tracker_payload)
                     logger.info('Task %s is running per tracker; Celery state PENDING.', task_id)
                 else:
                     response['info']['status'] = 'Task is waiting in the queue or the task ID does not exist.'

@@ -65,12 +65,16 @@ export function useProjectTaskStatusContext({
   const progressPercent = useMemo(() => {
     if (['SUCCESS', 'FAILURE', 'REVOKED'].includes(displayTaskState)) return 100;
     if (!['QUEUED', 'RUNNING'].includes(displayTaskState)) return 0;
-    const explicit = findProgressPercent(statusInfo);
+    const statusPayload = statusInfo && typeof statusInfo === 'object' ? (statusInfo as Record<string, unknown>) : null;
+    const scopedStatusTaskId = String(statusPayload?.__task_id ?? statusPayload?.task_id ?? statusPayload?.taskId ?? '').trim();
+    const contextTaskId = String(statusContextTaskRow?.task_id || project?.task_id || '').trim();
+    const shouldUseScopedStatus = !scopedStatusTaskId || !contextTaskId || scopedStatusTaskId === contextTaskId;
+    const explicit = shouldUseScopedStatus ? findProgressPercent(statusInfo) : null;
     if (explicit !== null) return Math.max(0, Math.min(100, explicit));
     if (displayTaskState === 'RUNNING') return 62;
     if (displayTaskState === 'QUEUED') return 18;
     return 0;
-  }, [displayTaskState, statusInfo]);
+  }, [displayTaskState, statusInfo, statusContextTaskRow?.task_id, project?.task_id]);
 
   const waitingSeconds = useMemo(() => {
     if (!displaySubmittedAt) return null;

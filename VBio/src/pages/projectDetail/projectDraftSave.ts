@@ -2,6 +2,7 @@ import type { InputComponent, Project, ProjectInputConfig, ProjectTask, ProteinT
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import { extractPrimaryProteinAndLigand, saveProjectInputConfig } from '../../utils/projectInputs';
 import { getWorkflowDefinition, isPredictionLikeWorkflowKey } from '../../utils/workflows';
+import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
 
 export interface SaveDraftFields {
   taskName: string;
@@ -137,7 +138,7 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
     inputConfig: normalizedConfig,
   };
 
-  if (workspaceTab === 'basics' || metadataOnlyDraftDirty) {
+  if (metadataOnlyDraftDirty) {
     const metadataTaskRowId =
       requestedStatusTaskRowId ||
       activeStatusTaskRowId ||
@@ -160,16 +161,20 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
   const reusableDraftTaskRowId = resolveEditableDraftTaskRowId({
     allowLatestDraftFallback: workflowDef.key !== 'affinity',
   });
+  const normalizedConfigWithTaskOptions: ProjectInputConfig = {
+    ...normalizedConfig,
+    properties: mergeTaskInputOptionsIntoProperties(normalizedConfig.properties, normalizedConfig.options)
+  };
   const snapshotComponents =
     workflowDef.key === 'affinity'
       ? await buildAffinityUploadSnapshotComponents(
-          normalizedConfig.components,
+          normalizedConfigWithTaskOptions.components,
           affinityTargetFile,
           affinityLigandFile,
           storedLigandSmiles
         )
-      : addTemplatesToTaskSnapshotComponents(normalizedConfig.components, proteinTemplates);
-  const draftTaskRow = await persistDraftTaskSnapshot(normalizedConfig, {
+      : addTemplatesToTaskSnapshotComponents(normalizedConfigWithTaskOptions.components, proteinTemplates);
+  const draftTaskRow = await persistDraftTaskSnapshot(normalizedConfigWithTaskOptions, {
     statusText: 'Draft saved (not submitted)',
     reuseTaskRowId: reusableDraftTaskRowId,
     snapshotComponents,
@@ -185,7 +190,8 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
   setSavedComputationFingerprint(createComputationFingerprint(nextDraft));
   setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
   setRunMenuOpen(false);
-  const nextTab = isPredictionLikeWorkflowKey(workflowDef.key) ? 'components' : 'basics';
+  const nextTab =
+    workspaceTab === 'basics' ? 'basics' : isPredictionLikeWorkflowKey(workflowDef.key) ? 'components' : 'basics';
   const query = new URLSearchParams({
     tab: nextTab,
     task_row_id: draftTaskRow.id,

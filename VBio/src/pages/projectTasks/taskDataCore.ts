@@ -1639,7 +1639,38 @@ function readLeadOptTaskSummary(task: ProjectTask): LeadOptTaskSummary | null {
           },
         } as Record<string, unknown>
       : null;
-  const leadOptMmp = leadOptMmpFromConfidence || mergedLeadOptFromProperties;
+  const leadOptMmp = (() => {
+    if (!leadOptMmpFromConfidence && !mergedLeadOptFromProperties) return null;
+    if (!leadOptMmpFromConfidence) return mergedLeadOptFromProperties;
+    if (!mergedLeadOptFromProperties) return leadOptMmpFromConfidence;
+    const merged = {
+      ...leadOptMmpFromConfidence,
+      ...mergedLeadOptFromProperties,
+      query_result:
+        Object.keys(asRecord(mergedLeadOptFromProperties.query_result)).length > 0
+          ? asRecord(mergedLeadOptFromProperties.query_result)
+          : asRecord(leadOptMmpFromConfidence.query_result),
+      enumerated_candidates:
+        Array.isArray(mergedLeadOptFromProperties.enumerated_candidates) && mergedLeadOptFromProperties.enumerated_candidates.length > 0
+          ? mergedLeadOptFromProperties.enumerated_candidates
+          : Array.isArray(leadOptMmpFromConfidence.enumerated_candidates)
+            ? leadOptMmpFromConfidence.enumerated_candidates
+            : [],
+      prediction_summary: {
+        ...asRecord(leadOptMmpFromConfidence.prediction_summary),
+        ...asRecord(mergedLeadOptFromProperties.prediction_summary),
+      },
+      prediction_by_smiles: {
+        ...asRecord(leadOptMmpFromConfidence.prediction_by_smiles),
+        ...asRecord(mergedLeadOptFromProperties.prediction_by_smiles),
+      },
+      reference_prediction_by_backend: {
+        ...asRecord(leadOptMmpFromConfidence.reference_prediction_by_backend),
+        ...asRecord(mergedLeadOptFromProperties.reference_prediction_by_backend),
+      },
+    } as Record<string, unknown>;
+    return merged;
+  })();
   if (!leadOptMmp) return null;
   const queryResultRaw = readObjectPath(leadOptMmp, 'query_result');
   const queryResult =

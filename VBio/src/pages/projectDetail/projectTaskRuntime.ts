@@ -72,6 +72,21 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+function normalizeTaskId(value: unknown): string {
+  return String(value || '').trim();
+}
+
+function readStatusScopeTaskId(value: unknown): string {
+  const payload = asRecord(value);
+  const direct = normalizeTaskId(payload.__task_id ?? payload.task_id ?? payload.taskId);
+  if (direct) return direct;
+  const progress = asRecord(payload.progress);
+  const fromProgress = normalizeTaskId(progress.task_id ?? progress.taskId);
+  if (fromProgress) return fromProgress;
+  const peptide = asRecord(payload.peptide_design);
+  return normalizeTaskId(peptide.task_id ?? peptide.taskId);
+}
+
 function asRecordArray(value: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object' && !Array.isArray(item)));
@@ -470,13 +485,16 @@ export async function pullResultForViewerTask(params: {
     });
     const hasPeptidePayload = hasPeptideSummaryFields(persistedConfidenceFull);
     const persistedProjectConfidenceSource = hasPeptidePayload ? persistedConfidenceCompact : persistedConfidenceFull;
-    const persistedProjectConfidence = mergePeptideSummaryIntoParsedConfidence(
-      persistedProjectConfidenceSource,
-      baseProjectConfidence
-    );
+    const persistedProjectConfidence = hasPeptidePayload
+      ? persistedProjectConfidenceSource
+      : mergePeptideSummaryIntoParsedConfidence(
+          persistedProjectConfidenceSource,
+          baseProjectConfidence
+        );
+    const taskConfidenceBase = baseTaskConfidence ?? (hasPeptidePayload ? null : baseProjectConfidence);
     const persistedTaskConfidence = mergePeptideSummaryIntoParsedConfidence(
       hasPeptidePayload ? persistedConfidenceCompact : persistedConfidenceFull,
-      baseTaskConfidence ?? baseProjectConfidence
+      taskConfidenceBase
     );
 
     setStructureText(parsed.structureText);
@@ -491,15 +509,19 @@ export async function pullResultForViewerTask(params: {
       if (effectiveRows.length > 0) {
         setStatusInfo((previous) => {
           const prev = asRecord(previous);
-          const prevPeptide = asRecord(prev.peptide_design);
-          const prevProgress = asRecord(prev.progress);
+          const previousTaskScope = readStatusScopeTaskId(prev);
+          const scopedPrev = previousTaskScope === normalizeTaskId(taskId) ? prev : {};
+          const prevPeptide = asRecord(scopedPrev.peptide_design);
+          const prevProgress = asRecord(scopedPrev.progress);
+          const scopedTaskId = normalizeTaskId(taskId);
           const nextPeptideProgress = {
             ...asRecord(prevPeptide.progress),
             best_sequences: effectiveRows,
             current_best_sequences: effectiveRows
           };
           return {
-            ...prev,
+            ...scopedPrev,
+            __task_id: scopedTaskId,
             peptide_design: {
               ...prevPeptide,
               best_sequences: effectiveRows,
@@ -526,7 +548,7 @@ export async function pullResultForViewerTask(params: {
       });
     }
     if (options?.taskRowId) {
-      const propertiesPatch = mergePeptidePreviewIntoProperties(baseTaskProperties || {}, persistedProjectConfidence);
+      const propertiesPatch = mergePeptidePreviewIntoProperties(baseTaskProperties || {}, persistedTaskConfidence);
       await patchTask(options.taskRowId, {
         confidence: persistedTaskConfidence,
         affinity: parsed.affinity,
@@ -599,15 +621,20 @@ export async function refreshTaskStatus(params: {
     const statusText = readStatusText(status);
     setStatusInfo((previous) => {
       const incoming = asRecord(status.info);
+      const scopedIncoming = {
+        ...incoming,
+        __task_id: activeTaskId
+      };
       const incomingRows = readPeptideCandidateRowsFromPayload(incoming);
       if (incomingRows.length > 0) {
-        return incoming;
+        return scopedIncoming;
       }
       const previousRows = readPeptideCandidateRowsFromPayload(previous);
-      if (previousRows.length > 0) {
-        return injectPeptideCandidateRowsIntoStatusPayload(incoming, previousRows);
+      const previousScopeTaskId = readStatusScopeTaskId(previous);
+      if (previousRows.length > 0 && previousScopeTaskId === activeTaskId) {
+        return injectPeptideCandidateRowsIntoStatusPayload(scopedIncoming, previousRows);
       }
-      return Object.keys(incoming).length > 0 ? incoming : null;
+      return Object.keys(incoming).length > 0 ? scopedIncoming : null;
     });
     const runtimeInfo = asRecord(status.info);
     const isPeptideDesignWorkflow = normalizeWorkflowKey(project.task_type) === 'peptide_design';
@@ -628,8 +655,12 @@ export async function refreshTaskStatus(params: {
       status_text: statusText,
       error_text: nextErrorText,
     };
+    const projectConfidenceBase =
+      runtimeTask?.confidence && typeof runtimeTask.confidence === 'object'
+        ? (runtimeTask.confidence as Record<string, unknown>)
+        : project.confidence;
     const projectConfidencePatch = isPeptideDesignWorkflow
-      ? mergePeptideRuntimeStatusIntoConfidence(project.confidence, runtimeInfo)
+      ? mergePeptideRuntimeStatusIntoConfidence(projectConfidenceBase, runtimeInfo)
       : null;
     if (projectConfidencePatch) {
       patchData.confidence = projectConfidencePatch;

@@ -156,6 +156,21 @@ class ResultArchiveService:
         return unique
 
     @staticmethod
+    def _choose_peptide_design_results_file(names: list[str]) -> Optional[str]:
+        candidates = [
+            name
+            for name in names
+            if name.lower().endswith('.json')
+            and (
+                os.path.basename(name).lower() == 'design_results.json'
+                or 'design_results' in os.path.basename(name).lower()
+            )
+        ]
+        if not candidates:
+            return None
+        return sorted(candidates, key=lambda item: (0 if os.path.basename(item).lower() == 'design_results.json' else 1, len(item)))[0]
+
+    @staticmethod
     def _choose_preferred_path(candidates: list[str]) -> Optional[str]:
         if not candidates:
             return None
@@ -494,6 +509,9 @@ class ResultArchiveService:
                 peptide_summary = self._choose_preferred_path(peptide_summary_candidates)
                 if peptide_summary:
                     include.append(peptide_summary)
+                    design_results = self._choose_peptide_design_results_file(names)
+                    if design_results:
+                        include.append(design_results)
                     include.extend(self._collect_peptide_design_structure_files(names))
                 affinity_candidates = [name for name in names if name.lower().endswith('.json') and 'affinity' in name.lower()]
                 if affinity_candidates:
@@ -523,7 +541,7 @@ class ResultArchiveService:
 
     def build_or_get_view_archive(self, source_zip_path: str) -> str:
         src_stat = os.stat(source_zip_path)
-        cache_schema_version = 'view-v7-peptide-candidate-structures'
+        cache_schema_version = 'view-v8-peptide-design-results'
         cache_seed = f'{cache_schema_version}|{source_zip_path}|{int(src_stat.st_mtime_ns)}|{src_stat.st_size}'
         cache_key = hashlib.sha256(cache_seed.encode('utf-8')).hexdigest()[:24]
         cache_dir = Path('/tmp/boltz_result_view_cache')

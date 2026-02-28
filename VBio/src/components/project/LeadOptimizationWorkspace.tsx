@@ -151,6 +151,20 @@ function normalizeAtomIndices(value: unknown): number[] {
   );
 }
 
+function normalizeBackendKey(value: unknown): string {
+  const token = String(value || '').trim().toLowerCase();
+  return token === 'alphafold3' || token === 'protenix' || token === 'pocketxmol' ? token : 'boltz';
+}
+
+function hasResolvedLeadOptPredictionMetrics(record: LeadOptPredictionRecord | null | undefined): boolean {
+  if (!record) return false;
+  if (record.pairIptmResolved === true) return true;
+  if (typeof record.pairIptm === 'number' && Number.isFinite(record.pairIptm)) return true;
+  if (typeof record.pairPae === 'number' && Number.isFinite(record.pairPae)) return true;
+  if (typeof record.ligandPlddt === 'number' && Number.isFinite(record.ligandPlddt)) return true;
+  return Array.isArray(record.ligandAtomPlddts) && record.ligandAtomPlddts.length > 0;
+}
+
 function parseCifTokens(line: string): string[] {
   const tokens = line.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
   return tokens.map((token) => token.replace(/^['"]|['"]$/g, ''));
@@ -394,6 +408,7 @@ export function LeadOptimizationWorkspace({
   const resultLayoutRef = useRef<HTMLDivElement | null>(null);
   const [isResultResizing, setIsResultResizing] = useState(false);
   const runMmpQueryRef = useRef<(() => Promise<void>) | null>(null);
+  const autoReferenceKickoffKeyRef = useRef('');
   const [activeSmiles, setActiveSmiles] = useState('');
   const [openedResultSmiles, setOpenedResultSmiles] = useState('');
   const [openedResultHighlightAtomIndices, setOpenedResultHighlightAtomIndices] = useState<number[]>([]);
@@ -584,7 +599,6 @@ export function LeadOptimizationWorkspace({
 
   const hydratedSnapshotKeyRef = useRef('');
   const snapshotDatabaseIdRef = useRef('');
-  const lazyLoadedQueryIdRef = useRef('');
 
   useEffect(() => {
     const snapshot = (initialMmpSnapshot || null) as Record<string, unknown> | null;
@@ -658,31 +672,6 @@ export function LeadOptimizationWorkspace({
     queryForm.setGroupedByEnvironment,
     queryForm.setMinPairs,
     queryForm.setQueryProperty
-  ]);
-
-  useEffect(() => {
-    if (viewMode !== 'design') return;
-    const snapshot = (initialMmpSnapshot || null) as Record<string, unknown> | null;
-    const queryResult =
-      snapshot && typeof snapshot.query_result === 'object'
-        ? (snapshot.query_result as Record<string, unknown>)
-        : null;
-    const snapshotQueryId = readText(queryResult?.query_id).trim();
-    if (!snapshotQueryId) return;
-    if (lazyLoadedQueryIdRef.current === snapshotQueryId) return;
-    if (mmp.loading) return;
-    if (mmp.enumeratedCandidates.length > 0) return;
-    const activeQueryId = readText(mmp.queryId).trim();
-    if (activeQueryId && activeQueryId !== snapshotQueryId) return;
-    lazyLoadedQueryIdRef.current = snapshotQueryId;
-    void mmp.loadQueryRun(snapshotQueryId);
-  }, [
-    viewMode,
-    initialMmpSnapshot,
-    mmp.enumeratedCandidates.length,
-    mmp.loadQueryRun,
-    mmp.loading,
-    mmp.queryId
   ]);
 
   const applyDatabaseCatalog = useCallback(
@@ -1004,6 +993,60 @@ export function LeadOptimizationWorkspace({
   const handlePreviewRenderModeChange = useCallback((mode: CandidatePreviewRenderMode) => {
     setViewerPreviewRenderMode(mode);
   }, []);
+
+  useEffect(() => {
+    if (!reference.referenceReady) return;
+    const selectedBackendKey = normalizeBackendKey(resultsUiState.selectedBackend || backend);
+    const referenceSmiles = readText(referenceControlSmiles).trim();
+    if (!referenceSmiles) return;
+    const hasAnyPredictionForSelectedBackend = Object.values(mmp.predictionBySmiles).some((record) => {
+      if (!record) return false;
+      return normalizeBackendKey(record.backend) === selectedBackendKey;
+    });
+    if (!hasAnyPredictionForSelectedBackend) return;
+
+    const referenceRecord = mmp.referencePredictionByBackend[selectedBackendKey];
+    const referenceState = String(referenceRecord?.state || '').trim().toUpperCase();
+    if (referenceState === 'QUEUED' || referenceState === 'RUNNING') return;
+    if (referenceState === 'SUCCESS' && hasResolvedLeadOptPredictionMetrics(referenceRecord)) return;
+
+    const kickoffKey = `${readText(mmp.queryId).trim() || 'no-query'}|${selectedBackendKey}|${referenceSmiles}`;
+    if (autoReferenceKickoffKeyRef.current === kickoffKey) return;
+    autoReferenceKickoffKeyRef.current = kickoffKey;
+
+    void mmp.runPredictReferenceForBackend({
+      candidateSmiles: referenceSmiles,
+      referenceReady: reference.referenceReady,
+      referenceProteinSequence,
+      referenceTemplateStructureText: templateStructureTextForPrediction,
+      referenceTemplateFormat: templateStructureFormatForPrediction,
+      backend: selectedBackendKey,
+      pocketResidues: selectedBackendKey === 'pocketxmol' ? [] : pocketPayload,
+      variableAtomIndices: selectedFragmentAtomIndices,
+      referenceTargetFilename: readText(reference.persistedUploads.target?.fileName).trim(),
+      referenceTargetFileContent: readText(reference.persistedUploads.target?.content),
+      referenceLigandFilename: readText(reference.persistedUploads.ligand?.fileName).trim(),
+      referenceLigandFileContent: readText(reference.persistedUploads.ligand?.content)
+    });
+  }, [
+    backend,
+    mmp.predictionBySmiles,
+    mmp.queryId,
+    mmp.referencePredictionByBackend,
+    mmp.runPredictReferenceForBackend,
+    pocketPayload,
+    reference.referenceReady,
+    reference.persistedUploads.ligand?.content,
+    reference.persistedUploads.ligand?.fileName,
+    reference.persistedUploads.target?.content,
+    reference.persistedUploads.target?.fileName,
+    referenceControlSmiles,
+    referenceProteinSequence,
+    resultsUiState.selectedBackend,
+    selectedFragmentAtomIndices,
+    templateStructureFormatForPrediction,
+    templateStructureTextForPrediction
+  ]);
 
   const runMmpQuery = useCallback(async () => {
     const variableItems = queryForm.buildVariableItems(
@@ -1334,7 +1377,7 @@ export function LeadOptimizationWorkspace({
               predictionBySmiles={mmp.predictionBySmiles}
               referencePredictionByBackend={mmp.referencePredictionByBackend}
               backendAvailability={backendAvailability}
-              defaultPredictionBackend={backend}
+              defaultPredictionBackend="pocketxmol"
               initialUiState={resultsUiState}
               activeSmiles={activeSmiles}
               onActiveSmilesChange={setActiveSmiles}

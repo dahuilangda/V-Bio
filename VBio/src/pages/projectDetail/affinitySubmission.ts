@@ -2,6 +2,7 @@ import type { MutableRefObject } from 'react';
 import { submitAffinityScoring } from '../../api/backendApi';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import type { AffinityPreviewPayload, InputComponent, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
+import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
 
 export type AffinityWorkspaceTab = 'results' | 'basics' | 'components' | 'constraints';
 
@@ -196,6 +197,10 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
         binder: runAffinityActivity ? ligandChain : null
       }
     };
+    const configWithAffinityTaskOptions: ProjectInputConfig = {
+      ...configWithAffinity,
+      properties: mergeTaskInputOptionsIntoProperties(configWithAffinity.properties, configWithAffinity.options)
+    };
     const persistenceWarnings: string[] = [];
     const storedLigandSmiles = ligandSmiles;
     const snapshotComponents = await buildAffinityUploadSnapshotComponents(
@@ -235,7 +240,7 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
       );
     }
 
-    const draftTaskRow = await persistDraftTaskSnapshot(configWithAffinity, {
+    const draftTaskRow = await persistDraftTaskSnapshot(configWithAffinityTaskOptions, {
       statusText: 'Affinity draft snapshot prepared for run',
       reuseTaskRowId: resolveEditableDraftTaskRowId({ allowLatestDraftFallback: false }),
       snapshotComponents,
@@ -272,7 +277,7 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
       ligand_smiles: storedLigandSmiles,
       components: snapshotComponents,
       constraints: configWithAffinity.constraints,
-      properties: configWithAffinity.properties,
+      properties: configWithAffinityTaskOptions.properties,
       confidence: {},
       affinity: {},
       structure_name: '',

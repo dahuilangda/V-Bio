@@ -501,7 +501,7 @@ function buildLeadOptPredictionPersistSignature(records: Record<string, LeadOptP
 
 function compactLeadOptCandidatesUiState(value: LeadOptCandidatesUiState): LeadOptCandidatesUiState {
   return {
-    selectedBackend: readText(value.selectedBackend).trim().toLowerCase() || 'boltz',
+    selectedBackend: readText(value.selectedBackend).trim().toLowerCase() || 'pocketxmol',
     stateFilter: value.stateFilter,
     showAdvanced: value.showAdvanced === true,
     mwMin: readText(value.mwMin).trim(),
@@ -801,6 +801,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     statusInfo,
     statusContextTaskRow,
     requestedStatusTaskRow,
+    projectTasks,
     snapshotLigandAtomPlddts,
     overviewPrimaryLigand,
     selectedResultLigandSequence,
@@ -889,8 +890,32 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     const activeResultRowId = readText(activeResultTask?.id).trim();
     if (activeResultRowId) return activeResultRowId;
 
+    const rememberedRowId = readText(leadOptActiveTaskRowIdRef.current).trim();
+    if (rememberedRowId) return rememberedRowId;
+
+    const leadOptSnapshotTask = projectTasks.find((row) => {
+      const properties = asRecord(row?.properties);
+      const leadOptList = asRecord(properties.lead_opt_list);
+      const leadOptState = asRecord(properties.lead_opt_state);
+      const leadOptConfidence = asRecord(asRecord(row?.confidence).lead_opt_mmp);
+      return (
+        Object.keys(leadOptList).length > 0 ||
+        Object.keys(leadOptState).length > 0 ||
+        Object.keys(leadOptConfidence).length > 0
+      );
+    });
+    const leadOptSnapshotTaskRowId = readText(leadOptSnapshotTask?.id).trim();
+    if (leadOptSnapshotTaskRowId) return leadOptSnapshotTaskRowId;
+
+    const latestRuntimeTaskRow = projectTasks.find((row) => readText(row?.task_id).trim().length > 0);
+    const latestRuntimeTaskRowId = readText(latestRuntimeTaskRow?.id).trim();
+    if (latestRuntimeTaskRowId) return latestRuntimeTaskRowId;
+
+    const firstTaskRowId = readText(projectTasks[0]?.id).trim();
+    if (firstTaskRowId) return firstTaskRowId;
+
     return '';
-  }, [activeResultTask, requestedStatusTaskRow, statusContextTaskRow]);
+  }, [activeResultTask, projectTasks, requestedStatusTaskRow, statusContextTaskRow]);
 
   const resolveLeadOptSourceTask = useCallback(
     (taskRowId: string) => {
@@ -1120,6 +1145,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       const summary = summarizeLeadOptPredictions(records);
       const unresolved = summary.queued + summary.running;
       const unresolvedState = summary.running > 0 ? 'RUNNING' : summary.queued > 0 ? 'QUEUED' : null;
+      const sourceTask = resolveLeadOptSourceTask(taskRowId);
       const nextTaskState: 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE' =
         unresolved > 0
           ? unresolvedState === 'RUNNING'
@@ -1128,6 +1154,11 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
           : summary.total > 0 && summary.success === 0 && summary.failure > 0
             ? 'FAILURE'
             : 'SUCCESS';
+      const sourceTaskState = readText(sourceTask?.task_state).trim().toUpperCase();
+      const persistedTaskState: 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE' =
+        sourceTaskState === 'SUCCESS' && (nextTaskState === 'QUEUED' || nextTaskState === 'RUNNING')
+          ? 'SUCCESS'
+          : nextTaskState;
       const statusText =
         unresolved > 0
           ? unresolvedState === 'RUNNING'
@@ -1138,7 +1169,6 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
             : 'MMP complete';
       const errorText = summary.total > 0 && summary.success === 0 && summary.failure > 0 ? 'All candidate scoring jobs failed.' : '';
 
-      const sourceTask = resolveLeadOptSourceTask(taskRowId);
       const sourceLeadOpt = resolveLeadOptSnapshotFromTask(sourceTask);
       const nextLeadOpt = {
         ...sourceLeadOpt,
@@ -1175,12 +1205,10 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       leadOptPredictionPersistKeyRef.current = persistKey;
 
       const patchPayload = {
-        task_state: nextTaskState,
+        task_state: persistedTaskState,
         status_text: statusText,
         error_text: errorText,
-        ...(unresolved > 0
-          ? {}
-          : { properties: mergeLeadOptStateMetaIntoProperties(sourceTask?.properties, nextLeadOpt) as any }),
+        properties: mergeLeadOptStateMetaIntoProperties(sourceTask?.properties, nextLeadOpt) as any,
         confidence: {
           lead_opt_mmp: compactLeadOptForConfidenceWrite(nextLeadOpt)
         }
@@ -1584,7 +1612,10 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     workflowTitle: workflow.title,
     workflowShortTitle: workflow.shortTitle,
     projectTaskState: displayTaskState || project.task_state || '',
-    projectTaskId: project.task_id || '',
+    projectTaskId:
+      String(statusContextTaskRow?.task_id || '').trim() ||
+      String(activeResultTask?.task_id || '').trim() ||
+      String(project.task_id || '').trim(),
     statusInfo: statusInfo || null,
     progressPercent,
     onPeptideRequestStructure: async () => {

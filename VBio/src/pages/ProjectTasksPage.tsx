@@ -111,6 +111,7 @@ export function ProjectTasksPage() {
   const {
     openingTaskId,
     deletingTaskId,
+    terminatingTaskId,
     editingTaskNameId,
     editingTaskNameValue,
     savingTaskNameId,
@@ -119,6 +120,7 @@ export function ProjectTasksPage() {
     beginTaskNameEdit,
     cancelTaskNameEdit,
     saveTaskNameEdit,
+    terminateTask,
     removeTask,
   } = useProjectTaskRowActions({
     project,
@@ -247,7 +249,9 @@ export function ProjectTasksPage() {
           savingTaskNameId={savingTaskNameId}
           openingTaskId={openingTaskId}
           deletingTaskId={deletingTaskId}
+          terminatingTaskId={terminatingTaskId}
           onOpenTask={openTask}
+          onTerminateTask={terminateTask}
           onRemoveTask={removeTask}
           onBeginTaskNameEdit={beginTaskNameEdit}
           onCancelTaskNameEdit={cancelTaskNameEdit}

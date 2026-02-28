@@ -87,8 +87,8 @@ CPU_QUEUE = 'cpu_queue'
 
 # -- Worker 并发设置 --
 # Worker 可以同时运行的最大并发任务数。
-# 这是一个“期望值”，实际的并发数应在 Worker 启动时根据可用 GPU 动态调整。
-MAX_CONCURRENT_TASKS = int(os.environ.get("MAX_CONCURRENT_TASKS", 2))
+# >0: 限制可并发占用的 GPU 数；<=0: 自动使用全部探测到的可用 GPU。
+MAX_CONCURRENT_TASKS = int(os.environ.get("MAX_CONCURRENT_TASKS", -1))
 
 # CPU worker 并发（用于 CPU_QUEUE，独立于 GPU 数量）
 # 0 表示自动使用本机全部 CPU 核心。

@@ -206,7 +206,7 @@ class TaskProgressTracker:
                 logger.error(f"Heartbeat error for task {self.task_id}: {e}")
                 break
     
-    def update_status(self, status, details=None):
+    def update_status(self, status, details=None, payload: Optional[dict] = None):
         """更新任务状态"""
         try:
             status_data = {
@@ -214,6 +214,8 @@ class TaskProgressTracker:
                 "timestamp": datetime.now().isoformat(),
                 "details": _truncate_text(details, MAX_STATUS_DETAILS_CHARS)
             }
+            if isinstance(payload, dict) and payload:
+                status_data["payload"] = payload
             self.redis_client.setex(self.status_key, 3600, json.dumps(status_data))
             logger.info(f"Task {self.task_id}: Status updated to {status}")
         except Exception as e:
@@ -308,10 +310,37 @@ def _collect_peptide_design_setup_meta(predict_args: dict) -> dict:
     return setup
 
 
-def _build_peptide_runtime_meta(predict_args: dict, gpu_id: int) -> dict:
+def _normalize_gpu_ids_for_meta(gpu_value: Any) -> list[int]:
+    if isinstance(gpu_value, int):
+        return [gpu_value]
+    if isinstance(gpu_value, (list, tuple)):
+        normalized: list[int] = []
+        for item in gpu_value:
+            try:
+                parsed = int(item)
+            except (TypeError, ValueError):
+                continue
+            normalized.append(parsed)
+        return normalized
+    return []
+
+
+def _build_peptide_runtime_meta(predict_args: dict, gpu_info: Any) -> dict:
+    gpu_ids = _normalize_gpu_ids_for_meta(gpu_info)
+    primary_gpu = gpu_ids[0] if gpu_ids else -1
+    if len(gpu_ids) > 1:
+        status_text = f"Running peptide design on GPUs {', '.join(str(item) for item in gpu_ids)}"
+    elif primary_gpu >= 0:
+        status_text = f"Running prediction on GPU {primary_gpu}"
+    else:
+        status_text = "Running peptide design"
+
     runtime_meta = {
-        'status': f'Running prediction on GPU {gpu_id}'
+        'status': status_text
     }
+    if gpu_ids:
+        runtime_meta['gpu_ids'] = gpu_ids
+        runtime_meta['gpu_id'] = primary_gpu
 
     setup_payload = _collect_peptide_design_setup_meta(predict_args)
     progress_path = str(predict_args.get('peptide_progress_path') or '').strip()
@@ -637,6 +666,7 @@ def predict_task(self, predict_args: dict):
     This task includes GPU management, subprocess timeout control, progress tracking, and authenticated upload.
     """
     gpu_id = -1
+    allocated_gpu_ids: list[int] = []
     task_id = self.request.id
     task_temp_dir = None 
     tracker = None
@@ -647,14 +677,25 @@ def predict_task(self, predict_args: dict):
         tracker = TaskProgressTracker(task_id, redis_client)
         tracker.start_heartbeat()
         tracker.update_status("starting", "Initializing task")
-        
-        logger.info(f"Task {task_id}: Attempting to acquire GPU.")
-        tracker.update_status("acquiring_gpu", "Waiting for GPU allocation")
-        
-        gpu_id = acquire_gpu(task_id=task_id, timeout=3600) 
-        self.update_state(state='PROGRESS', meta={'status': f'Acquired GPU {gpu_id}. Starting computation.'})
-        logger.info(f"Task {task_id}: Acquired GPU {gpu_id}. Creating temporary directory.")
-        tracker.update_status("gpu_acquired", f"Using GPU {gpu_id}")
+        is_peptide_design = str(predict_args.get('workflow', '')).strip().lower() == 'peptide_design'
+        if is_peptide_design:
+            logger.info(
+                f"Task {task_id}: Peptide workflow detected. "
+                "Using per-candidate GPU allocation to avoid long GPU reservation."
+            )
+            self.update_state(
+                state='PROGRESS',
+                meta={'status': 'Scheduling peptide candidate subtasks (GPU allocated per candidate)'}
+            )
+            tracker.update_status("preparing", "Scheduling peptide candidate subtasks")
+        else:
+            logger.info(f"Task {task_id}: Attempting to acquire GPU.")
+            tracker.update_status("acquiring_gpu", "Waiting for GPU allocation")
+            gpu_id = acquire_gpu(task_id=task_id, timeout=3600)
+            allocated_gpu_ids = [gpu_id]
+            self.update_state(state='PROGRESS', meta={'status': f'Acquired GPU {gpu_id}. Starting computation.'})
+            logger.info(f"Task {task_id}: Acquired GPU {gpu_id}. Creating temporary directory.")
+            tracker.update_status("gpu_acquired", f"Using GPU {gpu_id}")
         
         task_temp_dir = tempfile.mkdtemp(prefix=f"boltz_task_{task_id}_")
         output_archive_path = os.path.join(task_temp_dir, f"{task_id}_results.zip")
@@ -670,7 +711,11 @@ def predict_task(self, predict_args: dict):
         tracker.update_status("preparing", "Setting up temporary workspace")
 
         proc_env = os.environ.copy()
-        proc_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        if is_peptide_design:
+            # Parent peptide workflow only orchestrates candidate workers.
+            proc_env.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            proc_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
         proc_env["BOLTZ_TASK_ID"] = task_id
         
         command = [
@@ -679,13 +724,24 @@ def predict_task(self, predict_args: dict):
             args_file_path 
         ]
 
-        logger.info(f"Task {task_id}: Running prediction on GPU {gpu_id}. Subprocess timeout: {SUBPROCESS_TIMEOUT}s. Command: {' '.join(command)}")
-        is_peptide_design = str(predict_args.get('workflow', '')).strip().lower() == 'peptide_design'
         if is_peptide_design:
-            initial_runtime_meta = _build_peptide_runtime_meta(predict_args, gpu_id)
+            logger.info(
+                f"Task {task_id}: Running peptide orchestration subprocess. "
+                f"Subprocess timeout: {SUBPROCESS_TIMEOUT}s. Command: {' '.join(command)}"
+            )
+            initial_runtime_meta = _build_peptide_runtime_meta(predict_args, allocated_gpu_ids)
             self.update_state(state='PROGRESS', meta=initial_runtime_meta)
-            tracker.update_status("running", str(initial_runtime_meta.get('status') or f"Executing prediction with GPU {gpu_id}"))
+            tracker.update_status(
+                "running",
+                str(initial_runtime_meta.get('status') or "Executing peptide candidate subtasks"),
+                payload=initial_runtime_meta
+            )
         else:
+            gpu_log_text = str(gpu_id)
+            logger.info(
+                f"Task {task_id}: Running prediction on GPU {gpu_log_text}. "
+                f"Subprocess timeout: {SUBPROCESS_TIMEOUT}s. Command: {' '.join(command)}"
+            )
             self.update_state(state='PROGRESS', meta={'status': f'Running prediction on GPU {gpu_id}'})
             tracker.update_status("running", f"Executing prediction with GPU {gpu_id}")
         
@@ -708,13 +764,13 @@ def predict_task(self, predict_args: dict):
                 last_meta = None
                 while not progress_stop_event.wait(PROGRESS_UPDATE_INTERVAL):
                     try:
-                        runtime_meta = _build_peptide_runtime_meta(predict_args, gpu_id)
+                        runtime_meta = _build_peptide_runtime_meta(predict_args, allocated_gpu_ids)
                         if runtime_meta == last_meta:
                             continue
                         self.update_state(state='PROGRESS', meta=runtime_meta)
                         status_text = str(runtime_meta.get('status') or '').strip()
                         if status_text:
-                            tracker.update_status("running", status_text)
+                            tracker.update_status("running", status_text, payload=runtime_meta)
                         last_meta = runtime_meta
                     except Exception as progress_exc:
                         logger.debug(f"Task {task_id}: Failed to emit peptide progress update: {progress_exc}")
@@ -779,6 +835,7 @@ def predict_task(self, predict_args: dict):
         final_meta = {
             'status': 'Complete', 
             'gpu_id': gpu_id, 
+            'gpu_ids': allocated_gpu_ids or ([gpu_id] if gpu_id != -1 else []),
             'upload_info': upload_response,
             'result_file': os.path.basename(output_archive_path) 
         }
@@ -797,8 +854,16 @@ def predict_task(self, predict_args: dict):
         raise e
 
     finally:
-        if gpu_id != -1:
-            release_gpu(gpu_id=gpu_id, task_id=task_id) 
+        if allocated_gpu_ids:
+            released = set()
+            for allocated_gpu in allocated_gpu_ids:
+                if allocated_gpu in released:
+                    continue
+                released.add(allocated_gpu)
+                release_gpu(gpu_id=allocated_gpu, task_id=task_id)
+            logger.info(f"Task {task_id}: Released GPUs {sorted(released)}.")
+        elif gpu_id != -1:
+            release_gpu(gpu_id=gpu_id, task_id=task_id)
             logger.info(f"Task {task_id}: Released GPU {gpu_id}.")
         
         if task_temp_dir and os.path.exists(task_temp_dir):

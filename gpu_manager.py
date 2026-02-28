@@ -175,11 +175,18 @@ if __name__ == '__main__':
             final_concurrency = 0
             devices_to_use = []
         else:
-            final_concurrency = min(max_concurrent, len(available_gpus))
-            if final_concurrency < len(available_gpus):
+            if max_concurrent <= 0:
+                final_concurrency = len(available_gpus)
                 logger.info(
-                    f"MAX_CONCURRENT_TASKS={max_concurrent} 限制并发，实际使用 {final_concurrency} 块 GPU"
+                    "MAX_CONCURRENT_TASKS<=0，自动使用全部探测到的 GPU: %s",
+                    final_concurrency,
                 )
+            else:
+                final_concurrency = min(max_concurrent, len(available_gpus))
+                if final_concurrency < len(available_gpus):
+                    logger.info(
+                        f"MAX_CONCURRENT_TASKS={max_concurrent} 限制并发，实际使用 {final_concurrency} 块 GPU"
+                    )
             devices_to_use = available_gpus[:final_concurrency]
 
         logger.info(f"将使用以下设备初始化 GPU 池: {devices_to_use}")

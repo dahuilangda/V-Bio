@@ -15,7 +15,9 @@ interface ProjectTasksTableProps {
   savingTaskNameId: string | null;
   openingTaskId: string | null;
   deletingTaskId: string | null;
+  terminatingTaskId: string | null;
   onOpenTask: (task: ProjectTask) => void;
+  onTerminateTask: (task: ProjectTask) => void;
   onRemoveTask: (task: ProjectTask) => void;
   onBeginTaskNameEdit: (task: ProjectTask, displayName: string) => void;
   onCancelTaskNameEdit: () => void;
@@ -41,7 +43,9 @@ export function ProjectTasksTable({
   savingTaskNameId,
   openingTaskId,
   deletingTaskId,
+  terminatingTaskId,
   onOpenTask,
+  onTerminateTask,
   onRemoveTask,
   onBeginTaskNameEdit,
   onCancelTaskNameEdit,
@@ -151,7 +155,9 @@ export function ProjectTasksTable({
                   savingTaskNameId={savingTaskNameId}
                   openingTaskId={openingTaskId}
                   deletingTaskId={deletingTaskId}
+                  terminatingTaskId={terminatingTaskId}
                   onOpenTask={onOpenTask}
+                  onTerminateTask={onTerminateTask}
                   onRemoveTask={onRemoveTask}
                   onBeginTaskNameEdit={onBeginTaskNameEdit}
                   onCancelTaskNameEdit={onCancelTaskNameEdit}

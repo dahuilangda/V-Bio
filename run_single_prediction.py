@@ -24,6 +24,7 @@ import copy
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any, Iterable
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 sys.path.append(os.getcwd())
 from boltz_wrapper import predict
@@ -4692,6 +4693,140 @@ def _write_peptide_progress(progress_path: Optional[str], payload: Dict[str, Any
         print(f"⚠️ Failed to write peptide progress file: {exc}", file=sys.stderr)
 
 
+def _normalize_peptide_gpu_ids(raw_gpu_ids: Any) -> List[int]:
+    if isinstance(raw_gpu_ids, int):
+        return [raw_gpu_ids]
+    if not isinstance(raw_gpu_ids, (list, tuple)):
+        return []
+    normalized: List[int] = []
+    seen = set()
+    for item in raw_gpu_ids:
+        try:
+            parsed = int(item)
+        except (TypeError, ValueError):
+            continue
+        if parsed in seen:
+            continue
+        seen.add(parsed)
+        normalized.append(parsed)
+    return normalized
+
+
+def _detect_peptide_gpu_pool_capacity() -> Optional[int]:
+    try:
+        from gpu_manager import get_gpu_status as get_gpu_status_fn
+        status = get_gpu_status_fn()
+        if isinstance(status, dict):
+            available_count = int(status.get("available_count") or 0)
+            in_use_count = int(status.get("in_use_count") or 0)
+            total = available_count + in_use_count
+            if total > 0:
+                return total
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_peptide_parallel_workers(
+    options: Dict[str, Any],
+    requested_gpu_ids: List[int],
+    population_size: int,
+) -> int:
+    del options  # Multi-worker parallelism is now derived from runtime GPU pool capacity.
+    upper_bound = min(max(1, population_size), 64)
+    if requested_gpu_ids:
+        return min(max(1, len(requested_gpu_ids)), upper_bound)
+
+    gpu_pool_capacity = _detect_peptide_gpu_pool_capacity()
+    if isinstance(gpu_pool_capacity, int) and gpu_pool_capacity > 0:
+        return min(max(1, gpu_pool_capacity), upper_bound)
+
+    # Fallback when pool metadata is temporarily unavailable.
+    return upper_bound
+
+
+def _run_peptide_candidate_worker_job(job: Dict[str, Any], worker_entry_path: str) -> None:
+    args_path = str(job["worker_args_path"])
+    payload = {
+        "__peptide_candidate_worker__": True,
+        "temp_dir": job["candidate_dir"],
+        "yaml_content": job["candidate_yaml"],
+        "output_archive_path": job["archive_path"],
+        "predict_args": job["predict_args"],
+        "model_name": job.get("model_name"),
+        "backend": str(job.get("backend") or "boltz"),
+        "__peptide_worker_acquire_gpu__": True,
+        "__peptide_worker_task_id__": str(job.get("worker_task_id") or ""),
+    }
+    Path(args_path).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    worker_env = os.environ.copy()
+    worker_env.pop("CUDA_VISIBLE_DEVICES", None)
+    worker_env["BOLTZ_PEPTIDE_WORKER_TASK_ID"] = str(job.get("worker_task_id") or "")
+    command = [sys.executable, worker_entry_path, args_path]
+    process = subprocess.run(command, capture_output=True, text=True, env=worker_env)
+    if process.returncode == 0:
+        return
+
+    stderr_tail = (process.stderr or "")[-12000:]
+    stdout_tail = (process.stdout or "")[-4000:]
+    raise RuntimeError(
+        "Peptide candidate worker failed "
+        f"(generation={job.get('generation')}, candidate={job.get('candidate_index')}, "
+        f"worker_task_id={job.get('worker_task_id')}, "
+        f"exit_code={process.returncode}). "
+        f"Stderr tail:\n{stderr_tail}\nStdout tail:\n{stdout_tail}"
+    )
+
+
+def _execute_peptide_generation_jobs(
+    jobs: List[Dict[str, Any]],
+    parallel_workers: int,
+    worker_entry_path: str,
+) -> List[Dict[str, Any]]:
+    if not jobs:
+        return []
+    worker_count = max(1, int(parallel_workers or 1))
+    completed_jobs: List[Dict[str, Any]] = []
+    if worker_count == 1:
+        for job in jobs:
+            _run_peptide_candidate_worker_job(job, worker_entry_path)
+            completed_jobs.append(job)
+        return completed_jobs
+
+    pending = list(jobs)
+    running: Dict[Any, Dict[str, Any]] = {}
+    first_error: Optional[Exception] = None
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        def submit_next() -> None:
+            if not pending or first_error is not None:
+                return
+            next_job = pending.pop(0)
+            future = executor.submit(_run_peptide_candidate_worker_job, next_job, worker_entry_path)
+            running[future] = next_job
+
+        for _ in range(worker_count):
+            submit_next()
+
+        while running:
+            done, _ = wait(list(running.keys()), return_when=FIRST_COMPLETED)
+            for completed in done:
+                finished_job = running.pop(completed, None)
+                try:
+                    completed.result()
+                    if isinstance(finished_job, dict):
+                        completed_jobs.append(finished_job)
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+                submit_next()
+
+    if first_error is not None:
+        raise first_error
+    return completed_jobs
+
+
 def run_peptide_design_backend(
     temp_dir: str,
     yaml_content: str,
@@ -4702,6 +4837,7 @@ def run_peptide_design_backend(
     options: Dict[str, Any],
     target_chain_id: Optional[str],
     progress_path: Optional[str],
+    gpu_ids: Optional[List[int]] = None,
 ) -> None:
     designer_dir = os.path.join(os.getcwd(), "designer")
     if designer_dir not in sys.path:
@@ -4806,8 +4942,44 @@ def run_peptide_design_backend(
     runtime_predict_args = dict(predict_args)
     if "seed" in runtime_predict_args:
         runtime_predict_args.pop("seed", None)
+    runtime_predict_args.pop("peptide_gpu_ids", None)
+    runtime_predict_args.pop("peptide_parallel_gpus", None)
+    runtime_predict_args.pop("peptideParallelGpus", None)
+
+    worker_entry_path = str(Path(__file__).resolve())
+    peptide_gpu_ids = _normalize_peptide_gpu_ids(gpu_ids)
+    parallel_workers = _resolve_peptide_parallel_workers(options, peptide_gpu_ids, population_size)
+    parent_task_id = str(os.environ.get("BOLTZ_TASK_ID") or "peptide-design").strip() or "peptide-design"
+    if peptide_gpu_ids:
+        print(
+            f"🧵 Peptide design parallel workers: {parallel_workers} (requested_gpu_ids={peptide_gpu_ids})",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"🧵 Peptide design parallel workers: {parallel_workers} (gpu pool auto-detected)",
+            file=sys.stderr,
+        )
 
     for generation in range(1, iterations + 1):
+        _write_peptide_progress(
+            progress_path,
+            {
+                "peptide_design": {
+                    "current_generation": generation,
+                    "total_generations": iterations,
+                    "completed_tasks": completed_tasks,
+                    "pending_tasks": max(0, total_tasks - completed_tasks),
+                    "total_tasks": total_tasks,
+                    "best_score": all_results[0].get("composite_score") if all_results else None,
+                    "progress_percent": (completed_tasks / total_tasks * 100.0) if total_tasks > 0 else 0.0,
+                    "current_status": f"Generation {generation}/{iterations}",
+                    "status_message": f"Running generation {generation} of {iterations}",
+                    "current_best_sequences": [],
+                }
+            },
+        )
+
         generation_candidates: List[str] = []
         attempts = 0
         max_attempts = max(population_size * 30, 60)
@@ -4845,6 +5017,8 @@ def run_peptide_design_backend(
         if not generation_candidates:
             break
 
+        generation_jobs: List[Dict[str, Any]] = []
+        generation_completed_base = completed_tasks
         for idx, candidate_sequence in enumerate(generation_candidates, start=1):
             candidate_yaml = _build_peptide_candidate_yaml(
                 base_yaml_data,
@@ -4861,15 +5035,33 @@ def run_peptide_design_backend(
 
             per_candidate_args = dict(runtime_predict_args)
             if isinstance(seed, int):
-                per_candidate_args["seed"] = int(seed) + completed_tasks + idx
+                per_candidate_args["seed"] = int(seed) + generation_completed_base + idx
 
-            run_boltz_backend(
-                candidate_dir,
-                candidate_yaml,
-                archive_path,
-                per_candidate_args,
-                model_name,
+            generation_jobs.append(
+                {
+                    "generation": generation,
+                    "candidate_index": idx,
+                    "sequence": candidate_sequence,
+                    "candidate_yaml": candidate_yaml,
+                    "candidate_dir": candidate_dir,
+                    "archive_path": archive_path,
+                    "predict_args": per_candidate_args,
+                    "model_name": model_name,
+                    "backend": "boltz",
+                    "worker_task_id": f"{parent_task_id}:g{generation:03d}:c{idx:03d}",
+                    "worker_args_path": os.path.join(candidate_dir, "worker_args.json"),
+                }
             )
+
+        completed_generation_jobs = _execute_peptide_generation_jobs(generation_jobs, parallel_workers, worker_entry_path)
+        if not completed_generation_jobs:
+            raise RuntimeError(f"Peptide generation {generation} completed with no candidate results.")
+
+        generation_done = 0
+        for job in completed_generation_jobs:
+            idx = int(job.get("candidate_index") or 0)
+            candidate_sequence = str(job.get("sequence") or "")
+            candidate_dir = str(job.get("candidate_dir") or "")
             result_dir = find_results_dir(candidate_dir)
             metrics = parse_confidence_metrics(
                 result_dir,
@@ -4925,56 +5117,60 @@ def run_peptide_design_backend(
             }
             all_results.append(result_row)
             completed_tasks += 1
+            generation_done += 1
 
-        all_results.sort(
-            key=lambda item: (
-                1 if isinstance(item.get("composite_score"), (int, float)) else 0,
-                float(item.get("composite_score")) if isinstance(item.get("composite_score"), (int, float)) else float("-inf"),
-            ),
-            reverse=True,
-        )
-        elite_population = [
-            {
-                "sequence": str(row.get("sequence") or ""),
-                "plddts": row.get("plddts") if isinstance(row.get("plddts"), list) else [],
-            }
-            for row in all_results[:elite_size]
-        ]
-
-        current_best_rows = []
-        for rank, row in enumerate(all_results[: min(8, len(all_results))], start=1):
-            current_best_rows.append(
-                {
-                    "rank": rank,
-                    "sequence": row.get("sequence"),
-                    "generation": row.get("generation"),
-                    "score": row.get("composite_score"),
-                    "iptm": row.get("iptm"),
-                    "pair_iptm": row.get("pair_iptm"),
-                    "pair_iptm_target_binder": row.get("pair_iptm_target_binder"),
-                    "pair_iptm_target_linker": row.get("pair_iptm_target_linker"),
-                    "pair_iptm_formula": row.get("pair_iptm_formula"),
-                    "binder_avg_plddt": row.get("binder_avg_plddt"),
-                    "target_chain_id": row.get("target_chain_id"),
-                    "binder_chain_id": row.get("binder_chain_id"),
-                    "linker_chain_id": row.get("linker_chain_id"),
-                }
+            all_results.sort(
+                key=lambda item: (
+                    1 if isinstance(item.get("composite_score"), (int, float)) else 0,
+                    float(item.get("composite_score")) if isinstance(item.get("composite_score"), (int, float)) else float("-inf"),
+                ),
+                reverse=True,
             )
-        progress_payload = {
-            "peptide_design": {
-                "current_generation": generation,
-                "total_generations": iterations,
-                "completed_tasks": completed_tasks,
-                "pending_tasks": max(0, total_tasks - completed_tasks),
-                "total_tasks": total_tasks,
-                "best_score": all_results[0].get("composite_score") if all_results else 0.0,
-                "progress_percent": (completed_tasks / total_tasks * 100.0) if total_tasks > 0 else 0.0,
-                "current_status": f"Generation {generation}/{iterations}",
-                "status_message": f"Completed generation {generation} of {iterations}",
-                "current_best_sequences": current_best_rows,
+            elite_population = [
+                {
+                    "sequence": str(row.get("sequence") or ""),
+                    "plddts": row.get("plddts") if isinstance(row.get("plddts"), list) else [],
+                }
+                for row in all_results[:elite_size]
+            ]
+
+            current_best_rows = []
+            for rank, row in enumerate(all_results[: min(8, len(all_results))], start=1):
+                current_best_rows.append(
+                    {
+                        "rank": rank,
+                        "sequence": row.get("sequence"),
+                        "generation": row.get("generation"),
+                        "score": row.get("composite_score"),
+                        "iptm": row.get("iptm"),
+                        "pair_iptm": row.get("pair_iptm"),
+                        "pair_iptm_target_binder": row.get("pair_iptm_target_binder"),
+                        "pair_iptm_target_linker": row.get("pair_iptm_target_linker"),
+                        "pair_iptm_formula": row.get("pair_iptm_formula"),
+                        "binder_avg_plddt": row.get("binder_avg_plddt"),
+                        "target_chain_id": row.get("target_chain_id"),
+                        "binder_chain_id": row.get("binder_chain_id"),
+                        "linker_chain_id": row.get("linker_chain_id"),
+                    }
+                )
+            progress_payload = {
+                "peptide_design": {
+                    "current_generation": generation,
+                    "total_generations": iterations,
+                    "completed_tasks": completed_tasks,
+                    "pending_tasks": max(0, total_tasks - completed_tasks),
+                    "total_tasks": total_tasks,
+                    "best_score": all_results[0].get("composite_score") if all_results else 0.0,
+                    "progress_percent": (completed_tasks / total_tasks * 100.0) if total_tasks > 0 else 0.0,
+                    "current_status": f"Generation {generation}/{iterations}",
+                    "status_message": (
+                        f"Generation {generation}/{iterations}: "
+                        f"{generation_done}/{len(generation_jobs)} candidates completed"
+                    ),
+                    "current_best_sequences": current_best_rows,
+                }
             }
-        }
-        _write_peptide_progress(progress_path, progress_payload)
+            _write_peptide_progress(progress_path, progress_payload)
 
     all_results.sort(
         key=lambda item: (
@@ -5609,6 +5805,47 @@ def main():
         with open(args_file_path, 'r') as f:
             predict_args = json.load(f)
 
+        if bool(predict_args.pop("__peptide_candidate_worker__", False)):
+            worker_temp_dir = str(predict_args.pop("temp_dir"))
+            worker_yaml_content = str(predict_args.pop("yaml_content"))
+            worker_output_archive_path = str(predict_args.pop("output_archive_path"))
+            worker_predict_args = predict_args.pop("predict_args", {})
+            worker_model_name = predict_args.pop("model_name", None)
+            worker_backend = str(predict_args.pop("backend", "boltz")).strip().lower() or "boltz"
+            worker_acquire_gpu = bool(predict_args.pop("__peptide_worker_acquire_gpu__", True))
+            worker_task_id = str(predict_args.pop("__peptide_worker_task_id__", "")).strip() or "peptide-candidate-worker"
+            if not isinstance(worker_predict_args, dict):
+                worker_predict_args = {}
+            os.makedirs(worker_temp_dir, exist_ok=True)
+            worker_gpu_id = -1
+            worker_release_gpu = None
+            try:
+                if worker_acquire_gpu:
+                    from gpu_manager import acquire_gpu as worker_acquire_gpu_fn, release_gpu as worker_release_gpu_fn
+                    worker_release_gpu = worker_release_gpu_fn
+                    worker_gpu_id = worker_acquire_gpu_fn(task_id=worker_task_id, timeout=3600)
+                    os.environ["CUDA_VISIBLE_DEVICES"] = str(worker_gpu_id)
+
+                if worker_backend != "boltz":
+                    raise ValueError(
+                        f"Peptide candidate worker currently supports boltz backend only. Requested backend: '{worker_backend}'."
+                    )
+                run_boltz_backend(
+                    worker_temp_dir,
+                    worker_yaml_content,
+                    worker_output_archive_path,
+                    worker_predict_args,
+                    worker_model_name,
+                )
+            finally:
+                if worker_gpu_id != -1 and callable(worker_release_gpu):
+                    worker_release_gpu(gpu_id=worker_gpu_id, task_id=worker_task_id)
+            if not os.path.exists(worker_output_archive_path):
+                raise FileNotFoundError(
+                    f"Peptide candidate worker did not produce archive: {worker_output_archive_path}"
+                )
+            return
+
         output_archive_path = predict_args.pop("output_archive_path")
         runtime_task_id = str(predict_args.pop("task_id", "")).strip() or None
         yaml_content = predict_args.pop("yaml_content")
@@ -5625,6 +5862,9 @@ def main():
             peptide_design_options = {}
         peptide_design_target_chain = str(predict_args.pop("peptide_design_target_chain", "")).strip() or None
         peptide_progress_path = str(predict_args.pop("peptide_progress_path", "")).strip() or None
+        peptide_gpu_ids = _normalize_peptide_gpu_ids(predict_args.pop("peptide_gpu_ids", []))
+        predict_args.pop("peptide_parallel_gpus", None)
+        predict_args.pop("peptideParallelGpus", None)
 
         model_name = predict_args.pop("model_name", None)
         seed = predict_args.pop("seed", None)
@@ -5650,9 +5890,8 @@ def main():
                 )
             if workflow == "peptide_design":
                 if backend != "boltz":
-                    print(
-                        f"⚠️ Peptide design currently supports Boltz backend only. Requested '{backend}', fallback to 'boltz'.",
-                        file=sys.stderr,
+                    raise ValueError(
+                        f"Peptide design currently supports Boltz backend only. Requested backend: '{backend}'."
                     )
                 validate_template_paths(processed_yaml)
                 run_peptide_design_backend(
@@ -5665,6 +5904,7 @@ def main():
                     options=peptide_design_options,
                     target_chain_id=peptide_design_target_chain,
                     progress_path=peptide_progress_path,
+                    gpu_ids=peptide_gpu_ids,
                 )
             elif backend == "alphafold3":
                 if not af3_template_payloads:

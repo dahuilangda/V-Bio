@@ -176,15 +176,15 @@ function stateClass(state: 'SUCCESS' | 'RUNNING' | 'FAILURE' | 'QUEUED' | 'UNSCO
 }
 
 const BACKEND_OPTIONS: Array<{ key: string; label: string }> = [
+  { key: 'pocketxmol', label: 'PocketXMol' },
   { key: 'boltz', label: 'Boltz2' },
   { key: 'protenix', label: 'Protenix' },
-  { key: 'alphafold3', label: 'AF3' },
-  { key: 'pocketxmol', label: 'PocketXMol' }
+  { key: 'alphafold3', label: 'AF3' }
 ];
 
 function normalizeBackend(value: string): string {
   const token = String(value || '').trim().toLowerCase();
-  return BACKEND_OPTIONS.some((item) => item.key === token) ? token : 'boltz';
+  return BACKEND_OPTIONS.some((item) => item.key === token) ? token : 'pocketxmol';
 }
 
 type CandidateStateFilter = 'all' | 'pending' | 'queued' | 'running' | 'success' | 'failure';
@@ -244,7 +244,7 @@ export function normalizeLeadOptCandidatesUiState(
     value && typeof value === 'object' && !Array.isArray(value)
       ? (value as Record<string, unknown>)
       : {};
-  const preferredDefaultBackend = normalizeBackend(readText(defaultPredictionBackend) || 'boltz');
+  const preferredDefaultBackend = normalizeBackend(readText(defaultPredictionBackend) || 'pocketxmol');
   return {
     selectedBackend: normalizeBackend(readText(payload.selectedBackend ?? payload.selected_backend) || preferredDefaultBackend),
     stateFilter: normalizeStateFilter(payload.stateFilter ?? payload.state_filter),
@@ -372,6 +372,7 @@ export function LeadOptCandidatesPanel({
   const [structureSearchLoading, setStructureSearchLoading] = useState(false);
   const [structureSearchError, setStructureSearchError] = useState<string | null>(null);
   const cardLoadMoreRef = useRef<HTMLDivElement | null>(null);
+  const pageMemoryByBackendRef = useRef<Record<string, number>>({});
   const uiStateHydrationSignatureRef = useRef('');
   const uiStateEmitSignatureRef = useRef('');
   const selectedBackendKey = normalizeBackend(selectedBackend);
@@ -419,6 +420,10 @@ export function LeadOptCandidatesPanel({
   useEffect(() => {
     const signature = buildLeadOptCandidatesUiStateSignature(normalizedInitialUiState);
     if (uiStateHydrationSignatureRef.current === signature) return;
+    if (uiStateEmitSignatureRef.current === signature) {
+      uiStateHydrationSignatureRef.current = signature;
+      return;
+    }
     uiStateHydrationSignatureRef.current = signature;
     setSelectedBackend(normalizedInitialUiState.selectedBackend);
     setStateFilter(normalizedInitialUiState.stateFilter);
@@ -439,14 +444,7 @@ export function LeadOptCandidatesPanel({
     setStructureSearchQuery(normalizedInitialUiState.structureSearchQuery);
     setPreviewRenderMode(normalizedInitialUiState.previewRenderMode);
     setDebouncedStructureSearchQuery(normalizedInitialUiState.structureSearchQuery);
-    setPage(1);
-    setPageInput('1');
   }, [normalizedInitialUiState]);
-
-  useEffect(() => {
-    setPage(1);
-    setPageInput('1');
-  }, [enumeratedCandidates]);
 
   useEffect(() => {
     setSelectedBackend((prev) => (prev ? prev : normalizeBackend(defaultPredictionBackend)));
@@ -718,6 +716,21 @@ export function LeadOptCandidatesPanel({
   useEffect(() => {
     setPageInput(String(clampedPage));
   }, [clampedPage]);
+
+  useEffect(() => {
+    pageMemoryByBackendRef.current[selectedBackendKey] = clampedPage;
+  }, [clampedPage, selectedBackendKey]);
+
+  useEffect(() => {
+    const rememberedPage = Number(pageMemoryByBackendRef.current[selectedBackendKey] || 0);
+    if (!Number.isFinite(rememberedPage) || rememberedPage <= 0) return;
+    setPage((prev) => (prev === rememberedPage ? prev : rememberedPage));
+  }, [selectedBackendKey]);
+
+  useEffect(() => {
+    if (page <= totalPages) return;
+    setPage(totalPages);
+  }, [page, totalPages]);
 
   useEffect(() => {
     if (!cardMode) return;

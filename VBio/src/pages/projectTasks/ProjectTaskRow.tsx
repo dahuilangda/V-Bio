@@ -1,9 +1,10 @@
-import { ExternalLink, LoaderCircle, Trash2 } from 'lucide-react';
+import { ExternalLink, LoaderCircle, Square, Trash2 } from 'lucide-react';
 import { Ligand2DPreview } from '../../components/project/Ligand2DPreview';
 import type { InputComponent, ProjectTask } from '../../types/models';
 import { formatDateTime, formatDuration } from '../../utils/date';
 import { TaskLigandSequencePreview } from './TaskLigandSequencePreview';
 import type { TaskListRow } from './taskListTypes';
+import { inferTaskStateFromStatusPayload } from './taskRuntimeUiUtils';
 import {
   backendLabel,
   formatMetric,
@@ -27,7 +28,9 @@ interface ProjectTaskRowProps {
   savingTaskNameId: string | null;
   openingTaskId: string | null;
   deletingTaskId: string | null;
+  terminatingTaskId: string | null;
   onOpenTask: (task: ProjectTask) => Promise<void> | void;
+  onTerminateTask: (task: ProjectTask) => Promise<void> | void;
   onRemoveTask: (task: ProjectTask) => Promise<void> | void;
   onBeginTaskNameEdit: (task: ProjectTask, displayName: string) => void;
   onCancelTaskNameEdit: () => void;
@@ -54,7 +57,9 @@ export function ProjectTaskRow({
   savingTaskNameId,
   openingTaskId,
   deletingTaskId,
+  terminatingTaskId,
   onOpenTask,
+  onTerminateTask,
   onRemoveTask,
   onBeginTaskNameEdit,
   onCancelTaskNameEdit,
@@ -70,6 +75,16 @@ export function ProjectTaskRow({
   const showRunNote = shouldShowRunNote(task.task_state, runNote);
   const submittedTs = task.submitted_at || task.created_at;
   const hasRuntimeTaskId = Boolean(String(task.task_id || '').trim());
+  const runtimeActionState = inferTaskStateFromStatusPayload(
+    { state: String(task.task_state || ''), info: { status: String(task.status_text || '') } },
+    task.task_state
+  );
+  const normalizedTaskState = String(task.task_state || '').trim().toUpperCase();
+  const isTerminalState =
+    normalizedTaskState === 'SUCCESS' || normalizedTaskState === 'FAILURE' || normalizedTaskState === 'REVOKED';
+  const showTerminateHint = !hasRuntimeTaskId && (runtimeActionState === 'QUEUED' || runtimeActionState === 'RUNNING');
+  const canTerminateTask = hasRuntimeTaskId && !isTerminalState;
+  const terminatingThisTask = terminatingTaskId === task.id;
   const actionTitle = hasRuntimeTaskId ? 'Open this task result' : 'Open this draft snapshot for editing';
   const stateTone = taskStateTone(task.task_state);
   const plddtTone = toneForPlddt(metrics.plddt);
@@ -292,17 +307,43 @@ export function ProjectTaskRow({
             type="button"
             className="task-row-action-btn"
             onClick={() => void onOpenTask(task)}
-            disabled={openingTaskId === task.id}
+            disabled={openingTaskId === task.id || terminatingThisTask}
             title={actionTitle}
             aria-label={actionTitle}
           >
             {openingTaskId === task.id ? <LoaderCircle size={13} className="spin" /> : <ExternalLink size={14} />}
           </button>
+          {canTerminateTask || showTerminateHint ? (
+            <button
+              type="button"
+              className="task-row-action-btn"
+              onClick={() => void onTerminateTask(task)}
+              disabled={!canTerminateTask || terminatingThisTask || deletingTaskId === task.id}
+              title={
+                !canTerminateTask
+                  ? 'Task is active but runtime task ID is missing'
+                  : runtimeActionState === 'RUNNING'
+                    ? 'Stop running task'
+                    : runtimeActionState === 'QUEUED'
+                      ? 'Cancel queued task'
+                      : 'Cancel active task'
+              }
+              aria-label={
+                runtimeActionState === 'RUNNING'
+                  ? 'Stop running task'
+                  : runtimeActionState === 'QUEUED'
+                    ? 'Cancel queued task'
+                    : 'Cancel active task'
+              }
+            >
+              {terminatingThisTask ? <LoaderCircle size={13} className="spin" /> : <Square size={13} />}
+            </button>
+          ) : null}
           <button
             type="button"
             className="task-row-action-btn danger"
             onClick={() => void onRemoveTask(task)}
-            disabled={deletingTaskId === task.id}
+            disabled={deletingTaskId === task.id || terminatingThisTask}
             title="Delete task"
             aria-label="Delete task"
           >

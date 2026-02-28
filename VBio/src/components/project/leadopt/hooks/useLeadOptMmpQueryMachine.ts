@@ -321,6 +321,16 @@ function isResultArchiveMissingError(error: unknown): boolean {
   return message.includes('result file information not found in task metadata or on disk');
 }
 
+function isMmpQueryExpiredError(error: unknown): boolean {
+  const message = String(error instanceof Error ? error.message : error || '').toLowerCase();
+  if (!message) return false;
+  return (
+    message.includes('failed to fetch mmp query result (404)') ||
+    message.includes('query_id not found or expired') ||
+    message.includes('"query_id not found or expired"')
+  );
+}
+
 function buildMissingResultArchiveMessage(taskId: string): string {
   const normalizedTaskId = readText(taskId).trim();
   return normalizedTaskId
@@ -859,10 +869,7 @@ export function useLeadOptMmpQueryMachine({
     const pendingEntriesAll = Object.entries(predictionBySmiles)
       .filter(([, record]) => {
         const state = String(record.state || '').toUpperCase();
-        const shouldPoll =
-          state === 'QUEUED' ||
-          state === 'RUNNING' ||
-          (state === 'SUCCESS' && !hasResolvedPredictionMetrics(record));
+        const shouldPoll = state === 'QUEUED' || state === 'RUNNING';
         if (!shouldPoll) return false;
         const taskId = readText(record.taskId).trim();
         return taskId.length > 0 && !taskId.startsWith('local:');
@@ -895,20 +902,6 @@ export function useLeadOptMmpQueryMachine({
               delete predictionHydrationRetryCountRef.current[smiles];
               setPredictionBySmiles((prev) => {
                 const current = prev[smiles] || record;
-                const currentHasMetrics = hasResolvedPredictionMetrics(current);
-                const hasAnyMetrics = metrics.hasMetrics || currentHasMetrics;
-                if (!hasAnyMetrics) {
-                  const pendingState = resolveNonRegressiveRuntimeState(current.state, 'RUNNING') || 'RUNNING';
-                  return {
-                    ...prev,
-                    [smiles]: {
-                      ...current,
-                      state: pendingState,
-                      error: '',
-                      updatedAt: Date.now()
-                    }
-                  };
-                }
                 const nextPairIptm = metrics.hasMetrics ? metrics.pairIptm : current.pairIptm;
                 const nextPairPae = metrics.hasMetrics ? metrics.pairPae : current.pairPae;
                 const nextLigandPlddt = metrics.hasMetrics ? metrics.ligandPlddt : current.ligandPlddt;
@@ -920,7 +913,10 @@ export function useLeadOptMmpQueryMachine({
                     state: 'SUCCESS',
                     pairIptm: nextPairIptm,
                     pairPae: nextPairPae,
-                    pairIptmResolved: true,
+                    pairIptmResolved:
+                      metrics.hasMetrics ||
+                      current.pairIptmResolved === true ||
+                      hasResolvedPredictionMetrics(current),
                     ligandPlddt: nextLigandPlddt,
                     ligandAtomPlddts: nextLigandAtomPlddts,
                     error: '',
@@ -983,10 +979,7 @@ export function useLeadOptMmpQueryMachine({
     const pendingEntriesAll = Object.entries(referencePredictionByBackend)
       .filter(([, record]) => {
         const state = String(record.state || '').toUpperCase();
-        const shouldPoll =
-          state === 'QUEUED' ||
-          state === 'RUNNING' ||
-          (state === 'SUCCESS' && !hasResolvedPredictionMetrics(record));
+        const shouldPoll = state === 'QUEUED' || state === 'RUNNING';
         if (!shouldPoll) return false;
         const taskId = readText(record.taskId).trim();
         return taskId.length > 0 && !taskId.startsWith('local:');
@@ -1019,20 +1012,6 @@ export function useLeadOptMmpQueryMachine({
               delete referenceHydrationRetryCountRef.current[backendKey];
               setReferencePredictionByBackend((prev) => {
                 const current = prev[backendKey] || record;
-                const currentHasMetrics = hasResolvedPredictionMetrics(current);
-                const hasAnyMetrics = metrics.hasMetrics || currentHasMetrics;
-                if (!hasAnyMetrics) {
-                  const pendingState = resolveNonRegressiveRuntimeState(current.state, 'RUNNING') || 'RUNNING';
-                  return {
-                    ...prev,
-                    [backendKey]: {
-                      ...current,
-                      state: pendingState,
-                      error: '',
-                      updatedAt: Date.now()
-                    }
-                  };
-                }
                 const nextPairIptm = metrics.hasMetrics ? metrics.pairIptm : current.pairIptm;
                 const nextPairPae = metrics.hasMetrics ? metrics.pairPae : current.pairPae;
                 const nextLigandPlddt = metrics.hasMetrics ? metrics.ligandPlddt : current.ligandPlddt;
@@ -1044,7 +1023,10 @@ export function useLeadOptMmpQueryMachine({
                     state: 'SUCCESS',
                     pairIptm: nextPairIptm,
                     pairPae: nextPairPae,
-                    pairIptmResolved: true,
+                    pairIptmResolved:
+                      metrics.hasMetrics ||
+                      current.pairIptmResolved === true ||
+                      hasResolvedPredictionMetrics(current),
                     ligandPlddt: nextLigandPlddt,
                     ligandAtomPlddts: nextLigandAtomPlddts,
                     error: '',
@@ -1687,7 +1669,13 @@ export function useLeadOptMmpQueryMachine({
         setEnumeratedCandidates(nextCandidates);
         setQueryNotice(`Loaded MMP rows (${nextCandidates.length}).`);
       } catch (error) {
-        onError(error instanceof Error ? error.message : 'Failed to load saved MMP query.');
+        if (isMmpQueryExpiredError(error)) {
+          // Query cache may expire on backend; keep persisted task snapshot as source of truth.
+          setQueryNotice('Loaded saved MMP snapshot. Query cache expired on backend.');
+          onError(null);
+        } else {
+          onError(error instanceof Error ? error.message : 'Failed to load saved MMP query.');
+        }
       } finally {
         setLoading(false);
       }

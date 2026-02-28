@@ -235,16 +235,17 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
   ]);
 
   const selectedResultLigandChainId = useMemo(() => {
+    const shouldUseProjectFallback = workflowKey !== 'peptide_design';
     const affinityData =
       activeResultTask?.affinity && typeof activeResultTask.affinity === 'object' && !Array.isArray(activeResultTask.affinity)
         ? (activeResultTask.affinity as Record<string, unknown>)
-        : project?.affinity && typeof project.affinity === 'object' && !Array.isArray(project.affinity)
+        : shouldUseProjectFallback && project?.affinity && typeof project.affinity === 'object' && !Array.isArray(project.affinity)
           ? (project.affinity as Record<string, unknown>)
           : null;
     const confidenceData =
       activeResultTask?.confidence && typeof activeResultTask.confidence === 'object' && !Array.isArray(activeResultTask.confidence)
         ? (activeResultTask.confidence as Record<string, unknown>)
-        : project?.confidence && typeof project.confidence === 'object' && !Array.isArray(project.confidence)
+        : shouldUseProjectFallback && project?.confidence && typeof project.confidence === 'object' && !Array.isArray(project.confidence)
           ? (project.confidence as Record<string, unknown>)
           : null;
     return resolveSelectedResultLigandChainId({
@@ -316,11 +317,14 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     if (activeResultTask?.confidence && Object.keys(activeResultTask.confidence).length > 0) {
       return activeResultTask.confidence as Record<string, unknown>;
     }
+    if (workflowKey === 'peptide_design') {
+      return null;
+    }
     if (project?.confidence && Object.keys(project.confidence).length > 0) {
       return project.confidence as Record<string, unknown>;
     }
     return null;
-  }, [activeResultTask?.confidence, project?.confidence]);
+  }, [activeResultTask?.confidence, project?.confidence, workflowKey]);
 
   const resultChainConsistencyWarning = useMemo(() => {
     return buildResultChainConsistencyWarning({
@@ -335,11 +339,14 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     if (activeResultTask?.affinity && Object.keys(activeResultTask.affinity).length > 0) {
       return activeResultTask.affinity as Record<string, unknown>;
     }
+    if (workflowKey === 'peptide_design') {
+      return null;
+    }
     if (project?.affinity && Object.keys(project.affinity).length > 0) {
       return project.affinity as Record<string, unknown>;
     }
     return null;
-  }, [activeResultTask?.affinity, project?.affinity]);
+  }, [activeResultTask?.affinity, project?.affinity, workflowKey]);
 
   const snapshotLigandAtomPlddts = useMemo(() => {
     return readLigandAtomPlddtsFromConfidence(snapshotConfidence, selectedResultLigandChainId);

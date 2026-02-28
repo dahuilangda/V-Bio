@@ -1,4 +1,12 @@
-import type { InputComponent, PredictionConstraint, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
+import type {
+  InputComponent,
+  PredictionConstraint,
+  PredictionOptions,
+  Project,
+  ProjectInputConfig,
+  ProjectTask,
+  ProteinTemplateUpload
+} from '../../types/models';
 import type { AffinityPersistedUpload, AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import {
   buildDefaultInputConfig,
@@ -14,6 +22,27 @@ export const AFFINITY_UPLOAD_SCOPE_PREFIX = '__new_from_';
 export const AFFINITY_UPLOAD_SCOPE_NEW = '__new__';
 export const LEADOPT_TARGET_UPLOAD_COMPONENT_ID = '__leadopt_target_upload__';
 export const LEADOPT_LIGAND_UPLOAD_COMPONENT_ID = '__leadopt_ligand_upload__';
+export const TASK_INPUT_OPTIONS_KEY = '__vbio_input_options_v1';
+
+const TASK_INPUT_OPTION_KEYS: Array<keyof PredictionOptions> = [
+  'seed',
+  'peptideDesignMode',
+  'peptideBinderLength',
+  'peptideUseInitialSequence',
+  'peptideInitialSequence',
+  'peptideSequenceMask',
+  'peptideIterations',
+  'peptidePopulationSize',
+  'peptideEliteSize',
+  'peptideMutationRate',
+  'peptideBicyclicLinkerCcd',
+  'peptideBicyclicCysPositionMode',
+  'peptideBicyclicFixTerminalCys',
+  'peptideBicyclicIncludeExtraCys',
+  'peptideBicyclicCys1Pos',
+  'peptideBicyclicCys2Pos',
+  'peptideBicyclicCys3Pos'
+];
 
 export interface LeadOptPersistedUpload {
   fileName: string;
@@ -27,6 +56,79 @@ export interface LeadOptPersistedUploads {
 
 function normalizeComponents(components: InputComponent[]): InputComponent[] {
   return normalizeInputComponents(components);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function normalizeTaskInputOptions(value: unknown): Partial<PredictionOptions> {
+  const raw = asRecord(value);
+  const next: Partial<PredictionOptions> = {};
+  TASK_INPUT_OPTION_KEYS.forEach((key) => {
+    const optionValue = raw[key];
+    if (optionValue === undefined) return;
+    (next as Record<string, unknown>)[key] = optionValue;
+  });
+  return next;
+}
+
+function readTaskOptionsFromConfidence(task: ProjectTask): Partial<PredictionOptions> {
+  const confidence = asRecord(task.confidence);
+  const requestOptions = asRecord(asRecord(confidence.request).options);
+  const topOptions = asRecord(confidence.options);
+  const peptide = asRecord(confidence.peptide_design);
+  const mergedRaw: Record<string, unknown> = {
+    ...topOptions,
+    ...requestOptions
+  };
+  if (mergedRaw.peptideDesignMode === undefined && typeof peptide.design_mode === 'string') {
+    mergedRaw.peptideDesignMode = peptide.design_mode;
+  }
+  if (mergedRaw.peptideBinderLength === undefined && peptide.binder_length !== undefined) {
+    mergedRaw.peptideBinderLength = peptide.binder_length;
+  }
+  if (mergedRaw.peptideIterations === undefined && peptide.iterations !== undefined) {
+    mergedRaw.peptideIterations = peptide.iterations;
+  }
+  if (mergedRaw.peptidePopulationSize === undefined && peptide.population_size !== undefined) {
+    mergedRaw.peptidePopulationSize = peptide.population_size;
+  }
+  if (mergedRaw.peptideEliteSize === undefined && peptide.elite_size !== undefined) {
+    mergedRaw.peptideEliteSize = peptide.elite_size;
+  }
+  if (mergedRaw.peptideMutationRate === undefined && peptide.mutation_rate !== undefined) {
+    mergedRaw.peptideMutationRate = peptide.mutation_rate;
+  }
+  return normalizeTaskInputOptions(mergedRaw);
+}
+
+export function mergeTaskInputOptionsIntoProperties(
+  properties: ProjectInputConfig['properties'] | null | undefined,
+  options: ProjectInputConfig['options']
+): ProjectInputConfig['properties'] {
+  const base = asRecord(properties);
+  return {
+    ...base,
+    [TASK_INPUT_OPTIONS_KEY]: normalizeTaskInputOptions(options)
+  } as unknown as ProjectInputConfig['properties'];
+}
+
+export function readTaskInputOptions(task: ProjectTask | null): Partial<PredictionOptions> {
+  if (!task) return {};
+  const taskProperties = asRecord(task.properties);
+  const fromProperties = normalizeTaskInputOptions(taskProperties[TASK_INPUT_OPTIONS_KEY]);
+  if (Object.keys(fromProperties).length > 0) return fromProperties;
+  return readTaskOptionsFromConfidence(task);
+}
+
+function stripTaskStorageFieldsFromProperties(
+  properties: ProjectInputConfig['properties'] | null | undefined
+): ProjectInputConfig['properties'] | null {
+  if (!properties || typeof properties !== 'object') return null;
+  const next = { ...(properties as unknown as Record<string, unknown>) };
+  delete next[TASK_INPUT_OPTIONS_KEY];
+  return next as unknown as ProjectInputConfig['properties'];
 }
 
 export function defaultConfigFromProject(project: Project): ProjectInputConfig {
@@ -403,8 +505,10 @@ export function mergeTaskSnapshotIntoConfig(baseConfig: ProjectInputConfig, task
 
   const taskComponents = readTaskComponents(task);
   const taskConstraints = Array.isArray(task.constraints) ? (task.constraints as PredictionConstraint[]) : null;
-  const taskProperties =
-    task.properties && typeof task.properties === 'object' ? (task.properties as ProjectInputConfig['properties']) : null;
+  const taskProperties = stripTaskStorageFieldsFromProperties(
+    task.properties && typeof task.properties === 'object' ? (task.properties as ProjectInputConfig['properties']) : null
+  );
+  const taskOptions = readTaskInputOptions(task);
   const taskSeed = typeof task.seed === 'number' && Number.isFinite(task.seed) ? Math.max(0, Math.floor(task.seed)) : null;
 
   return {
@@ -414,7 +518,8 @@ export function mergeTaskSnapshotIntoConfig(baseConfig: ProjectInputConfig, task
     properties: taskProperties ?? baseConfig.properties,
     options: {
       ...baseConfig.options,
-      seed: taskSeed ?? baseConfig.options.seed
+      ...taskOptions,
+      seed: taskSeed ?? taskOptions.seed ?? baseConfig.options.seed
     }
   };
 }
