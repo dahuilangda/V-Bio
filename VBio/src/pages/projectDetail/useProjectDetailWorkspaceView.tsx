@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState, type RefObject } from 'react';
 import { Link } from 'react-router-dom';
 import type { PredictionConstraint } from '../../types/models';
-import { downloadResultFile } from '../../api/backendApi';
+import { downloadResultFile, terminateTask as terminateBackendTask } from '../../api/backendApi';
 import { createInputComponent } from '../../utils/projectInputs';
 import { getWorkflowDefinition } from '../../utils/workflows';
 import { ProjectDetailLayout } from './ProjectDetailLayout';
@@ -579,6 +579,7 @@ function resolveLeadOptSnapshotFromTask(taskInput: unknown): Record<string, unkn
         : confidenceUiState,
     query_id:
       readText(fromProperties.query_id || propertiesQueryResult.query_id).trim() ||
+      readText(fromPropertiesState.query_id).trim() ||
       readText(fromConfidence.query_id || confidenceQueryResult.query_id).trim(),
     target_chain: readText(fromProperties.target_chain).trim() || readText(fromConfidence.target_chain).trim(),
     ligand_chain: readText(fromProperties.ligand_chain).trim() || readText(fromConfidence.ligand_chain).trim(),
@@ -709,6 +710,7 @@ export function useProjectDetailWorkspaceView() {
 function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeReady }) {
   const [leadOptHeaderRunAction, setLeadOptHeaderRunAction] = useState<(() => void | Promise<void>) | null>(null);
   const [leadOptHeaderRunPending, setLeadOptHeaderRunPending] = useState(false);
+  const [headerStopRunPending, setHeaderStopRunPending] = useState(false);
   const handleRegisterLeadOptHeaderRunAction = useCallback((action: (() => void | Promise<void>) | null) => {
     setLeadOptHeaderRunAction(() => action);
   }, []);
@@ -873,6 +875,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     affinityLigandFile
   } = runtime;
   const leadOptMmpTaskRowMapRef = useRef<Record<string, string>>({});
+  const leadOptPredictionTaskRowMapRef = useRef<Record<string, string>>({});
   const leadOptUploadPersistKeyRef = useRef('');
   const leadOptActiveTaskRowIdRef = useRef('');
   const leadOptPredictionPersistKeyRef = useRef('');
@@ -924,9 +927,29 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       if (requestedStatusTaskRow && String(requestedStatusTaskRow.id) === id) return requestedStatusTaskRow;
       if (statusContextTaskRow && String(statusContextTaskRow.id) === id) return statusContextTaskRow;
       if (activeResultTask && String(activeResultTask.id) === id) return activeResultTask;
+      const projectTask = projectTasks.find((row) => readText(row?.id).trim() === id);
+      if (projectTask) return projectTask;
       return null;
     },
-    [activeResultTask, requestedStatusTaskRow, statusContextTaskRow]
+    [activeResultTask, projectTasks, requestedStatusTaskRow, statusContextTaskRow]
+  );
+
+  const resolveLeadOptTaskRowIdByPredictionTaskId = useCallback(
+    (predictionTaskIdInput: string): string => {
+      const predictionTaskId = readText(predictionTaskIdInput).trim();
+      if (!predictionTaskId) return '';
+      for (const row of projectTasks) {
+        const snapshot = resolveLeadOptSnapshotFromTask(row);
+        const predictionMap = asPredictionRecordMap(snapshot.prediction_by_smiles);
+        for (const record of Object.values(predictionMap)) {
+          if (readText(record?.taskId).trim() === predictionTaskId) {
+            return readText(row?.id).trim();
+          }
+        }
+      }
+      return '';
+    },
+    [projectTasks]
   );
 
   const handleLeadOptMmpTaskQueued = async (payload: {
@@ -1117,6 +1140,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       const taskRowId = resolveLeadOptTaskRowId();
       if (!taskRowId) return;
       leadOptActiveTaskRowIdRef.current = taskRowId;
+      leadOptPredictionTaskRowMapRef.current[taskId] = taskRowId;
       // Prediction queue status is persisted by the throttled state-change handler.
       // Avoid per-candidate writes here to prevent burst traffic on batch submit.
     },
@@ -1136,7 +1160,10 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         latestTaskId: string;
       };
     }) => {
-      const taskRowId = resolveLeadOptTaskRowId();
+      const latestTaskId = readText(payload.summary?.latestTaskId).trim();
+      const mappedTaskRowId = latestTaskId ? readText(leadOptPredictionTaskRowMapRef.current[latestTaskId]).trim() : '';
+      const rowIdFromSnapshot = latestTaskId ? resolveLeadOptTaskRowIdByPredictionTaskId(latestTaskId) : '';
+      const taskRowId = mappedTaskRowId || rowIdFromSnapshot || resolveLeadOptTaskRowId();
       if (!taskRowId) return;
       leadOptActiveTaskRowIdRef.current = taskRowId;
 
@@ -1146,6 +1173,15 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       const unresolved = summary.queued + summary.running;
       const unresolvedState = summary.running > 0 ? 'RUNNING' : summary.queued > 0 ? 'QUEUED' : null;
       const sourceTask = resolveLeadOptSourceTask(taskRowId);
+      const sourceLeadOpt = resolveLeadOptSnapshotFromTask(sourceTask);
+      const sourceQueryResult = asRecord(sourceLeadOpt.query_result);
+      const sourceLeadOptQueryId = readText(sourceLeadOpt.query_id || sourceQueryResult.query_id).trim();
+      const hasMaterializedLeadOptQuery = Boolean(
+        sourceLeadOptQueryId ||
+        readText(sourceLeadOpt.mmp_database_id || sourceQueryResult.mmp_database_id).trim() ||
+        Number.isFinite(Number(sourceLeadOpt.transform_count)) ||
+        Number.isFinite(Number(sourceLeadOpt.candidate_count))
+      );
       const nextTaskState: 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE' =
         unresolved > 0
           ? unresolvedState === 'RUNNING'
@@ -1156,9 +1192,11 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
             : 'SUCCESS';
       const sourceTaskState = readText(sourceTask?.task_state).trim().toUpperCase();
       const persistedTaskState: 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE' =
-        sourceTaskState === 'SUCCESS' && (nextTaskState === 'QUEUED' || nextTaskState === 'RUNNING')
+        hasMaterializedLeadOptQuery
           ? 'SUCCESS'
-          : nextTaskState;
+          : sourceTaskState === 'SUCCESS' && (nextTaskState === 'QUEUED' || nextTaskState === 'RUNNING')
+            ? 'SUCCESS'
+            : nextTaskState;
       const statusText =
         unresolved > 0
           ? unresolvedState === 'RUNNING'
@@ -1167,9 +1205,13 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
           : summary.total > 0
             ? `Scoring complete (${summary.success}/${Math.max(1, summary.total)})`
             : 'MMP complete';
-      const errorText = summary.total > 0 && summary.success === 0 && summary.failure > 0 ? 'All candidate scoring jobs failed.' : '';
+      const errorText =
+        hasMaterializedLeadOptQuery
+          ? ''
+          : summary.total > 0 && summary.success === 0 && summary.failure > 0
+            ? 'All candidate scoring jobs failed.'
+            : '';
 
-      const sourceLeadOpt = resolveLeadOptSnapshotFromTask(sourceTask);
       const nextLeadOpt = {
         ...sourceLeadOpt,
         stage:
@@ -1183,7 +1225,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         prediction_stage: unresolved > 0 ? (unresolvedState === 'RUNNING' ? 'running' : 'queued') : 'completed',
         prediction_summary: {
           ...summary,
-          latest_task_id: readText(payload.summary?.latestTaskId).trim()
+          latest_task_id: latestTaskId
         },
         bucket_count: summary.total,
         prediction_by_smiles: records,
@@ -1221,7 +1263,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       leadOptPredictionPersistQueueRef.current = nextPersist;
       await nextPersist;
     },
-    [patchTask, resolveLeadOptSourceTask, resolveLeadOptTaskRowId]
+    [patchTask, resolveLeadOptSourceTask, resolveLeadOptTaskRowId, resolveLeadOptTaskRowIdByPredictionTaskId]
   );
 
   const handleLeadOptUiStateChange = useCallback(
@@ -1780,6 +1822,17 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       ? 'Select at least one fragment to run.'
       : 'Run action is only available in Lead Optimization Components view.'
     : runBlockedReason;
+  const headerRuntimeTaskId =
+    readText(statusContextTaskRow?.task_id).trim() ||
+    readText(activeResultTask?.task_id).trim() ||
+    readText(project.task_id).trim();
+  const headerRuntimeStateToken = readText(displayTaskState || project.task_state).trim().toUpperCase();
+  const showHeaderStopAction =
+    isPeptideDesignWorkflow &&
+    Boolean(headerRuntimeTaskId) &&
+    (headerRuntimeStateToken === 'RUNNING' || headerRuntimeStateToken === 'QUEUED');
+  const headerStopRunTitle = headerRuntimeStateToken === 'RUNNING' ? 'Stop run' : 'Cancel queued run';
+  const headerStopRunDisabled = !showHeaderStopAction || headerStopRunPending || runSubmitting;
   const handleHeaderRunAction = () => {
     if (isLeadOptimizationWorkflow) {
       if (!leadOptHeaderRunAction || leadOptHeaderRunPending) return;
@@ -1794,6 +1847,27 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       return;
     }
     handleRunAction();
+  };
+  const handleHeaderStopAction = () => {
+    if (!showHeaderStopAction || headerStopRunDisabled) return;
+    if (!headerRuntimeTaskId) return;
+    const actionToken = headerRuntimeStateToken === 'RUNNING' ? 'stop' : 'cancel';
+    if (!window.confirm(`Confirm ${actionToken} for task "${headerRuntimeTaskId}"?`)) return;
+    setHeaderStopRunPending(true);
+    setError(null);
+    void terminateBackendTask(headerRuntimeTaskId)
+      .then(async (response) => {
+        if (response.terminated !== true) {
+          throw new Error(`Backend did not confirm ${actionToken} for task "${headerRuntimeTaskId}".`);
+        }
+        await loadProject();
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : `Failed to ${actionToken} running task.`);
+      })
+      .finally(() => {
+        setHeaderStopRunPending(false);
+      });
   };
 
   return (
@@ -1833,6 +1907,10 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       isRunRedirecting={isRunRedirecting}
       canOpenRunMenu={canOpenRunMenu}
       showHeaderRunAction
+      showStopAction={showHeaderStopAction}
+      stopSubmitting={headerStopRunPending}
+      stopDisabled={headerStopRunDisabled}
+      stopTitle={headerStopRunTitle}
       showQuickRunFab={showQuickRunFab}
       taskHistoryPath={taskHistoryPath}
       runSuccessNotice={runSuccessNotice}
@@ -1868,6 +1946,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       }}
       onReset={handleResetFromHeader}
       onRunAction={handleHeaderRunAction}
+      onStopAction={handleHeaderStopAction}
       onRestoreSavedDraft={handleRestoreSavedDraft}
       onRunCurrentDraft={handleRunCurrentDraft}
       onWorkspaceTabChange={setWorkspaceTab}

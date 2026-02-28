@@ -1,6 +1,5 @@
-import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, LoaderCircle, Square, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
-import { terminateTask as terminateBackendTask } from '../../api/backendApi';
 import { MolstarViewer } from './MolstarViewer';
 
 type ResultsGridStyle = CSSProperties & { '--results-main-width'?: string };
@@ -1612,12 +1611,7 @@ export function PeptideDesignResultsWorkspace({
   const [pageInput, setPageInput] = useState('1');
   const [pageSize, setPageSize] = useState<(typeof PEPTIDE_RESULTS_PAGE_SIZE_OPTIONS)[number]>(20);
   const [requestingStructure, setRequestingStructure] = useState(false);
-  const [terminatingRun, setTerminatingRun] = useState(false);
-  const [terminateRunMessage, setTerminateRunMessage] = useState('');
   const requestedStructureKeyRef = useRef('');
-  const runtimeTaskId = useMemo(() => readText(projectTaskId).trim(), [projectTaskId]);
-  const canTerminateRun = Boolean(runtimeTaskId) && (runtimeContext.state === 'RUNNING' || runtimeContext.state === 'QUEUED');
-  const terminateRunLabel = runtimeContext.state === 'RUNNING' ? 'Stop run' : 'Cancel queued run';
 
   const sortedCandidates = useMemo(() => {
     const sorted = [...candidates];
@@ -1699,33 +1693,7 @@ export function PeptideDesignResultsWorkspace({
     setPageInput('1');
     requestedStructureKeyRef.current = '';
     setRequestingStructure(false);
-    setTerminatingRun(false);
-    setTerminateRunMessage('');
   }, [projectTaskId]);
-
-  const onTerminateRun = async () => {
-    if (!canTerminateRun) return;
-    if (!runtimeTaskId) return;
-    const action = runtimeContext.state === 'RUNNING' ? 'stop' : 'cancel';
-    if (!window.confirm(`Confirm ${action} for task "${runtimeTaskId}"?`)) return;
-    setTerminatingRun(true);
-    setTerminateRunMessage('');
-    try {
-      const response = await terminateBackendTask(runtimeTaskId);
-      if (response.terminated !== true) {
-        throw new Error(`Backend did not confirm ${action} for task "${runtimeTaskId}".`);
-      }
-      setTerminateRunMessage(
-        runtimeContext.state === 'RUNNING'
-          ? 'Stop request submitted. Runtime state will update shortly.'
-          : 'Cancel request submitted. Runtime state will update shortly.'
-      );
-    } catch (error) {
-      setTerminateRunMessage(error instanceof Error ? error.message : 'Failed to submit stop request.');
-    } finally {
-      setTerminatingRun(false);
-    }
-  };
 
   const hasCandidateRows = sortedCandidates.length > 0;
   const viewerStructureText = hasCandidateRows ? selectedCandidate?.structureText || '' : displayStructureText;
@@ -1805,23 +1773,9 @@ export function PeptideDesignResultsWorkspace({
   const renderCandidateTable = (standalone = false) => (
     <section className={`peptide-result-list-panel${standalone ? ' peptide-result-list-panel--standalone' : ''}`}>
       <div className="lead-opt-query-toolbar lead-opt-query-toolbar--single-row peptide-result-toolbar">
-        <div className="peptide-result-toolbar-left">
-          {canTerminateRun ? (
-            <button
-              type="button"
-              className="task-row-action-btn"
-              onClick={() => void onTerminateRun()}
-              disabled={terminatingRun}
-              title={terminateRunLabel}
-              aria-label={terminateRunLabel}
-            >
-              {terminatingRun ? <LoaderCircle size={13} className="spin" /> : <Square size={13} />}
-            </button>
-          ) : null}
-        </div>
+        <div className="peptide-result-toolbar-left" />
         <span className="lead-opt-query-toolbar-spacer" />
       </div>
-      {terminateRunMessage ? <div className="task-run-note">{terminateRunMessage}</div> : null}
       <div className="lead-opt-result-table-wrap peptide-result-table-wrap">
         <table className="lead-opt-candidate-table lead-opt-result-table peptide-result-table">
           <thead>
@@ -2037,18 +1991,6 @@ export function PeptideDesignResultsWorkspace({
           >
             <X size={14} />
           </button>
-          {canTerminateRun ? (
-            <button
-              type="button"
-              className="task-row-action-btn"
-              onClick={() => void onTerminateRun()}
-              disabled={terminatingRun}
-              title={terminateRunLabel}
-              aria-label={terminateRunLabel}
-            >
-              {terminatingRun ? <LoaderCircle size={13} className="spin" /> : <Square size={13} />}
-            </button>
-          ) : null}
         </div>
         <span className="lead-opt-query-toolbar-spacer" />
         <div className="lead-opt-query-toolbar-right">

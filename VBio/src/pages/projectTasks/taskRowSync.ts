@@ -616,7 +616,37 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
     const derived = deriveLeadOptRuntimeState(summary);
     if (!derived) continue;
 
-    const terminal = derived.taskState === 'SUCCESS' || derived.taskState === 'FAILURE' || derived.taskState === 'REVOKED';
+    const leadOptListMeta = asRecord(asRecord(workingRow.properties).lead_opt_list);
+    const leadOptConfidenceMeta = asRecord(asRecord(workingConfidence).lead_opt_mmp);
+    const leadOptQueryId = String(
+      leadOptListMeta.query_id ||
+      asRecord(leadOptListMeta.query_result).query_id ||
+      leadOptConfidenceMeta.query_id ||
+      asRecord(leadOptConfidenceMeta.query_result).query_id ||
+      ''
+    ).trim();
+    const hasMaterializedLeadOptQuery = Boolean(
+      leadOptQueryId ||
+      summary.transformCount !== null ||
+      summary.candidateCount !== null ||
+      summary.databaseId ||
+      summary.databaseLabel ||
+      summary.databaseSchema
+    );
+    const currentTaskState = String(workingRow.task_state || '').trim().toUpperCase();
+    let persistedTaskState: ProjectTask['task_state'] = derived.taskState;
+    if (hasMaterializedLeadOptQuery) {
+      // Lead-opt task row should remain a stable MMP list row after query materialization.
+      // Candidate scoring progress is reflected in status_text and prediction summary only.
+      persistedTaskState = 'SUCCESS';
+    } else if (
+      (currentTaskState === 'SUCCESS' || currentTaskState === 'FAILURE' || currentTaskState === 'REVOKED') &&
+      (persistedTaskState === 'QUEUED' || persistedTaskState === 'RUNNING')
+    ) {
+      persistedTaskState = currentTaskState as ProjectTask['task_state'];
+    }
+
+    const terminal = persistedTaskState === 'SUCCESS' || persistedTaskState === 'FAILURE' || persistedTaskState === 'REVOKED';
     const completedAt = terminal ? workingRow.completed_at || new Date().toISOString() : null;
     const submittedAt = workingRow.submitted_at || (nextProject.task_id === workingRow.task_id ? nextProject.submitted_at : null);
     const durationSeconds =
@@ -631,7 +661,7 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
     const mergedStructureNamePatch =
       promoted.structureNamePatch || hydrationStructureNamePatch || '';
     const taskPatch: Partial<ProjectTask> = {
-      task_state: derived.taskState,
+      task_state: persistedTaskState,
       status_text: derived.statusText,
       error_text: derived.errorText,
       completed_at: completedAt,
@@ -645,7 +675,7 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
     }
 
     const taskNeedsPatch =
-      workingRow.task_state !== derived.taskState ||
+      workingRow.task_state !== persistedTaskState ||
       (workingRow.status_text || '') !== derived.statusText ||
       (workingRow.error_text || '') !== derived.errorText ||
       workingRow.completed_at !== completedAt ||
@@ -667,7 +697,7 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
 
     if (nextProject.task_id === workingRow.task_id) {
       const projectPatch: Partial<Project> = {
-        task_state: derived.taskState,
+        task_state: persistedTaskState,
         status_text: derived.statusText,
         error_text: derived.errorText,
         completed_at: completedAt,

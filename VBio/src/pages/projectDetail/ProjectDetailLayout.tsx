@@ -66,6 +66,11 @@ export interface ProjectDetailLayoutProps {
   onRunAction: () => void;
   onRestoreSavedDraft: () => void;
   onRunCurrentDraft: () => void;
+  showStopAction?: boolean;
+  stopSubmitting?: boolean;
+  stopDisabled?: boolean;
+  stopTitle?: string;
+  onStopAction?: () => void;
   onWorkspaceTabChange: (tab: WorkspaceTab) => void;
   onTaskNameChange: (value: string) => void;
   onTaskSummaryChange: (value: string) => void;
@@ -121,6 +126,11 @@ export function ProjectDetailLayout({
   onRunAction,
   onRestoreSavedDraft,
   onRunCurrentDraft,
+  showStopAction = false,
+  stopSubmitting = false,
+  stopDisabled = false,
+  stopTitle = '',
+  onStopAction,
   onWorkspaceTabChange,
   onTaskNameChange,
   onTaskSummaryChange,
@@ -164,6 +174,11 @@ export function ProjectDetailLayout({
           onRestoreSavedDraft={onRestoreSavedDraft}
           onRunCurrentDraft={onRunCurrentDraft}
           showRunAction={showHeaderRunAction}
+          showStopAction={showStopAction}
+          stopSubmitting={stopSubmitting}
+          stopDisabled={stopDisabled}
+          stopTitle={stopTitle}
+          onStopAction={onStopAction}
         />
       </section>
 

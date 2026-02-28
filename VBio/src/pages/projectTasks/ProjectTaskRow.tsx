@@ -94,7 +94,9 @@ export function ProjectTaskRow({
   const isLeadOptMode = mode === 'lead_opt';
   const isPeptideMode = mode === 'peptide';
   const ligandPreviewWidth = isPeptideMode ? 248 : isLeadOptMode ? 184 : 312;
-  const hasCompletedMmp = isLeadOptMode && String(task.task_state || '').toUpperCase() === 'SUCCESS';
+  const hasCompletedMmp =
+    isLeadOptMode &&
+    (row.leadOptTransformCount !== null || row.leadOptCandidateCount !== null || row.leadOptBucketCount !== null);
   const mmpTransforms = hasCompletedMmp && row.leadOptTransformCount !== null ? row.leadOptTransformCount : null;
   const mmpCandidates = hasCompletedMmp && row.leadOptCandidateCount !== null ? row.leadOptCandidateCount : null;
   const mmpBuckets = hasCompletedMmp && row.leadOptBucketCount !== null ? row.leadOptBucketCount : null;

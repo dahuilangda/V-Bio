@@ -1,5 +1,5 @@
 import type { MouseEvent, RefObject } from 'react';
-import { ArrowLeft, Download, LoaderCircle, RefreshCcw, Save } from 'lucide-react';
+import { ArrowLeft, Download, LoaderCircle, RefreshCcw, Save, Square } from 'lucide-react';
 import { RunPlayIcon } from './RunPlayIcon';
 
 interface ProjectHeaderActionsProps {
@@ -27,6 +27,11 @@ interface ProjectHeaderActionsProps {
   onRestoreSavedDraft: () => void;
   onRunCurrentDraft: () => void;
   showRunAction?: boolean;
+  showStopAction?: boolean;
+  stopSubmitting?: boolean;
+  stopDisabled?: boolean;
+  stopTitle?: string;
+  onStopAction?: () => void;
 }
 
 export function ProjectHeaderActions({
@@ -53,7 +58,12 @@ export function ProjectHeaderActions({
   runMenuOpen,
   onRestoreSavedDraft,
   onRunCurrentDraft,
-  showRunAction = true
+  showRunAction = true,
+  showStopAction = false,
+  stopSubmitting = false,
+  stopDisabled = false,
+  stopTitle = '',
+  onStopAction
 }: ProjectHeaderActionsProps) {
   const runTitle =
     runSubmitting
@@ -115,6 +125,18 @@ export function ProjectHeaderActions({
       >
         <RefreshCcw size={14} />
       </button>
+      {showStopAction ? (
+        <button
+          type="button"
+          className="task-row-action-btn"
+          onClick={onStopAction}
+          disabled={stopDisabled || !onStopAction}
+          title={stopTitle}
+          aria-label={stopTitle || 'Stop run'}
+        >
+          {stopSubmitting ? <LoaderCircle size={14} className="spin" /> : <Square size={14} />}
+        </button>
+      ) : null}
       {showRunAction ? (
         <div className="run-action" ref={runActionRef}>
           <button
