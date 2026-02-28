@@ -8,6 +8,7 @@ import math
 import os
 import re
 import tempfile
+import threading
 import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -32,6 +33,8 @@ class ResultArchiveService:
         self.celery_app = celery_app
         self.logger = logger
         self.get_redis_client = get_redis_client_fn
+        self._compact_metrics_lock = threading.Lock()
+        self._compact_metrics_cache: Dict[str, Dict[str, Any]] = {}
 
     def find_result_archive(self, task_id: str) -> Optional[str]:
         base_dir = self.app.config.get('UPLOAD_FOLDER')
@@ -545,3 +548,306 @@ class ResultArchiveService:
         except Exception as exc:
             self.logger.warning('Failed to fetch tracker status for task %s: %s', task_id, exc)
             return None, None
+
+    @staticmethod
+    def _normalize_01_or_100(value: float) -> float:
+        return value * 100.0 if value <= 1.0 else value
+
+    def _extract_off_diagonal_extreme(self, value: Any, *, pick: str) -> Optional[float]:
+        best: Optional[float] = None
+
+        def update(candidate: Optional[float]) -> None:
+            nonlocal best
+            if candidate is None:
+                return
+            if best is None:
+                best = candidate
+                return
+            if pick == 'min':
+                if candidate < best:
+                    best = candidate
+            elif candidate > best:
+                best = candidate
+
+        if isinstance(value, dict):
+            for left_key, nested in value.items():
+                left_token = str(left_key)
+                if isinstance(nested, dict):
+                    for right_key, raw in nested.items():
+                        if left_token == str(right_key):
+                            continue
+                        update(self._to_finite_float(raw))
+                    continue
+                if isinstance(nested, list):
+                    for right_idx, raw in enumerate(nested):
+                        if left_token == str(right_idx):
+                            continue
+                        update(self._to_finite_float(raw))
+                    continue
+                update(self._to_finite_float(nested))
+            return best
+
+        if isinstance(value, list):
+            contains_rows = any(isinstance(item, list) for item in value)
+            if contains_rows:
+                for row_idx, row in enumerate(value):
+                    if not isinstance(row, list):
+                        continue
+                    for col_idx, raw in enumerate(row):
+                        if row_idx == col_idx:
+                            continue
+                        update(self._to_finite_float(raw))
+                return best
+            for raw in value:
+                update(self._to_finite_float(raw))
+            return best
+
+        return self._to_finite_float(value)
+
+    def _collect_finite_floats(self, value: Any, *, limit: int = 20000) -> list[float]:
+        if limit <= 0:
+            return []
+        out: list[float] = []
+        stack = [value]
+        while stack and len(out) < limit:
+            current = stack.pop()
+            if isinstance(current, dict):
+                stack.extend(current.values())
+                continue
+            if isinstance(current, list):
+                stack.extend(current)
+                continue
+            parsed = self._to_finite_float(current)
+            if parsed is None:
+                continue
+            out.append(parsed)
+        return out
+
+    def _extract_ligand_atom_plddts(self, payload: Dict[str, Any]) -> list[float]:
+        max_atoms = 512
+
+        def normalize_values(raw_values: Any) -> list[float]:
+            values = [self._normalize_01_or_100(item) for item in self._collect_finite_floats(raw_values, limit=max_atoms)]
+            return values[:max_atoms]
+
+        # Preferred explicit ligand-level arrays.
+        for key in ('ligand_atom_plddts', 'ligand_atom_plddt'):
+            values = normalize_values(payload.get(key))
+            if values:
+                return values
+
+        # AF-style confidences usually expose global atom arrays + chain ids.
+        atom_values_raw = payload.get('atom_plddts') or payload.get('atom_plddt')
+        chain_values_raw = payload.get('atom_chain_ids')
+        if not isinstance(atom_values_raw, list) or not isinstance(chain_values_raw, list):
+            return []
+        if len(atom_values_raw) == 0 or len(atom_values_raw) != len(chain_values_raw):
+            return []
+
+        per_chain: Dict[str, list[float]] = {}
+        for chain_id, atom_plddt in zip(chain_values_raw, atom_values_raw):
+            chain_token = str(chain_id or '').strip()
+            if not chain_token:
+                continue
+            parsed = self._to_finite_float(atom_plddt)
+            if parsed is None:
+                continue
+            per_chain.setdefault(chain_token, []).append(self._normalize_01_or_100(parsed))
+
+        if len(per_chain) < 2:
+            return []
+        ranked = sorted(per_chain.items(), key=lambda item: (len(item[1]), item[0]))
+        ligand_chain, ligand_values = ranked[0]
+        total_atoms = sum(len(values) for values in per_chain.values())
+        if not ligand_values or total_atoms <= 0:
+            return []
+        # Guard against selecting a full protein chain when chain typing is ambiguous.
+        if len(ligand_values) > max_atoms and (len(ligand_values) / float(total_atoms)) > 0.45:
+            self.logger.debug(
+                'Skip ligand atom pLDDT extraction due to ambiguous chain split: %s (%d/%d)',
+                ligand_chain,
+                len(ligand_values),
+                total_atoms,
+            )
+            return []
+        return ligand_values[:max_atoms]
+
+    def _extract_pair_iptm(self, payload: Dict[str, Any]) -> Optional[float]:
+        direct = self._to_finite_float(
+            payload.get('pair_iptm_target_binder')
+            or payload.get('pair_iptm')
+            or payload.get('iptm')
+            or payload.get('confidence_score')
+        )
+        if direct is not None:
+            return direct
+        for key in ('pair_chains_iptm', 'chain_pair_iptm', 'pair_iptm_matrix'):
+            parsed = self._extract_off_diagonal_extreme(payload.get(key), pick='max')
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _extract_pair_pae(self, payload: Dict[str, Any]) -> Optional[float]:
+        direct = self._to_finite_float(
+            payload.get('complex_pde')
+            or payload.get('complex_pae')
+            or payload.get('pair_pae')
+            or payload.get('pair_pae_min')
+            or payload.get('pae')
+        )
+        if direct is not None:
+            return direct
+        for key in (
+            'pair_chains_pae',
+            'pair_chains_pae_min',
+            'chain_pair_pae',
+            'chain_pair_pae_min',
+            'chain_pair_pae_minimum',
+        ):
+            parsed = self._extract_off_diagonal_extreme(payload.get(key), pick='min')
+            if parsed is not None:
+                return parsed
+        pae_matrix = payload.get('pae')
+        if not isinstance(pae_matrix, list):
+            return None
+        total = 0.0
+        count = 0
+        for row in pae_matrix:
+            if not isinstance(row, list):
+                continue
+            for value in row:
+                parsed = self._to_finite_float(value)
+                if parsed is None:
+                    continue
+                total += parsed
+                count += 1
+                if count >= 20000:
+                    break
+            if count >= 20000:
+                break
+        if count == 0:
+            return None
+        return total / float(count)
+
+    def _extract_ligand_plddt(self, payload: Dict[str, Any], ligand_atom_plddts: Optional[list[float]] = None) -> Optional[float]:
+        direct = self._to_finite_float(payload.get('ligand_mean_plddt') or payload.get('ligand_plddt'))
+        if direct is not None:
+            return self._normalize_01_or_100(direct)
+        atom_values = ligand_atom_plddts if isinstance(ligand_atom_plddts, list) else self._extract_ligand_atom_plddts(payload)
+        if atom_values:
+            return sum(atom_values) / float(len(atom_values))
+        fallback = self._to_finite_float(payload.get('complex_plddt') or payload.get('mean_plddt') or payload.get('plddt'))
+        if fallback is not None:
+            return self._normalize_01_or_100(fallback)
+        return None
+
+    def _extract_compact_prediction_metrics_from_zip(self, source_zip_path: str) -> Optional[Dict[str, Any]]:
+        try:
+            with zipfile.ZipFile(source_zip_path, 'r') as src_zip:
+                names = [name for name in src_zip.namelist() if not name.endswith('/')]
+                json_candidates = [
+                    name for name in names
+                    if name.lower().endswith('.json')
+                    and (
+                        'confidence' in name.lower()
+                        or os.path.basename(name).lower() in {'confidences.json', 'affinity_data.json'}
+                    )
+                ]
+                if not json_candidates:
+                    return None
+                parsed_entries: list[tuple[int, Dict[str, Any]]] = []
+                best: Optional[Dict[str, Any]] = None
+                best_score = -1
+                for name in json_candidates:
+                    try:
+                        payload = json.loads(src_zip.read(name))
+                    except Exception:
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    pair_iptm = self._extract_pair_iptm(payload)
+                    pair_pae = self._extract_pair_pae(payload)
+                    ligand_atom_plddts = self._extract_ligand_atom_plddts(payload)
+                    ligand_plddt = self._extract_ligand_plddt(payload, ligand_atom_plddts=ligand_atom_plddts)
+                    coverage = int(pair_iptm is not None) + int(pair_pae is not None) + int(ligand_plddt is not None)
+                    if coverage <= 0:
+                        continue
+                    score = coverage * 100 - len(name)
+                    if score <= best_score:
+                        parsed_entries.append((
+                            score,
+                            {
+                                'pair_iptm': pair_iptm,
+                                'pair_pae': pair_pae,
+                                'ligand_plddt': ligand_plddt,
+                                'ligand_atom_plddts': ligand_atom_plddts,
+                            }
+                        ))
+                        continue
+                    best_score = score
+                    best = {
+                        'pair_iptm': pair_iptm,
+                        'pair_pae': pair_pae,
+                        'ligand_plddt': ligand_plddt,
+                        'ligand_atom_plddts': ligand_atom_plddts,
+                    }
+                    parsed_entries.append((score, dict(best)))
+                if not best:
+                    return None
+                merged: Dict[str, Any] = {k: v for k, v in best.items() if v is not None}
+                for metric_key in ('pair_iptm', 'pair_pae', 'ligand_plddt', 'ligand_atom_plddts'):
+                    if metric_key in merged:
+                        continue
+                    best_metric_score = -1
+                    best_metric_value: Optional[Any] = None
+                    for metric_score, metrics in parsed_entries:
+                        if metric_key == 'ligand_atom_plddts':
+                            values = metrics.get(metric_key)
+                            if not isinstance(values, list) or len(values) == 0:
+                                continue
+                            value = values
+                        else:
+                            value = self._to_finite_float(metrics.get(metric_key))
+                            if value is None:
+                                continue
+                        if metric_score <= best_metric_score:
+                            continue
+                        best_metric_score = metric_score
+                        best_metric_value = value
+                    if best_metric_value is not None:
+                        merged[metric_key] = best_metric_value
+                return merged or None
+        except Exception as exc:
+            self.logger.debug('Failed to extract compact prediction metrics from %s: %s', source_zip_path, exc)
+            return None
+
+    def get_compact_prediction_metrics(self, task_id: str) -> Optional[Dict[str, Any]]:
+        normalized_task_id = str(task_id or '').strip()
+        if not normalized_task_id:
+            return None
+        try:
+            _, source_zip_path = self.resolve_result_archive_path(normalized_task_id)
+        except Exception:
+            return None
+
+        try:
+            stat = os.stat(source_zip_path)
+        except Exception:
+            return None
+        cache_key = hashlib.sha256(
+            f"{source_zip_path}|{int(stat.st_mtime_ns)}|{stat.st_size}".encode('utf-8')
+        ).hexdigest()[:24]
+
+        with self._compact_metrics_lock:
+            cached = self._compact_metrics_cache.get(cache_key)
+            if cached is not None:
+                return dict(cached)
+
+        parsed = self._extract_compact_prediction_metrics_from_zip(source_zip_path)
+        if not parsed:
+            return None
+        with self._compact_metrics_lock:
+            if len(self._compact_metrics_cache) > 512:
+                self._compact_metrics_cache.clear()
+            self._compact_metrics_cache[cache_key] = dict(parsed)
+        return dict(parsed)

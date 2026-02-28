@@ -284,6 +284,10 @@ function hasResolvedPredictionMetrics(record: LeadOptPredictionRecord | null | u
   const pairPae = typeof record.pairPae === 'number' && Number.isFinite(record.pairPae);
   const ligandPlddt = typeof record.ligandPlddt === 'number' && Number.isFinite(record.ligandPlddt);
   const ligandAtomPlddts = Array.isArray(record.ligandAtomPlddts) && record.ligandAtomPlddts.length > 0;
+  const backend = normalizeBackendKey(record.backend);
+  if (backend === 'alphafold3' && !ligandAtomPlddts) {
+    return false;
+  }
   return record.pairIptmResolved === true && (pairIptm || pairPae || ligandPlddt || ligandAtomPlddts);
 }
 
@@ -353,12 +357,24 @@ function extractPredictionMetricsFromStatusInfo(
   hasMetrics: boolean;
 } {
   const statusInfo = asRecord(statusInfoInput);
+  const compact = asRecord(statusInfo.lead_opt_metrics || statusInfo.compact_metrics || statusInfo.prediction_metrics);
   const confidence = asRecord(statusInfo.confidence);
   const affinity = asRecord(statusInfo.affinity);
-  const pairIptm = findPairIptm(confidence, targetChain, ligandChain) ?? findPairIptm(affinity, targetChain, ligandChain);
-  const pairPae = findPairPae(confidence, targetChain, ligandChain) ?? findPairPae(affinity, targetChain, ligandChain);
-  const ligandAtomPlddts = findLigandAtomPlddts(confidence, ligandChain);
-  const ligandPlddt = mean(ligandAtomPlddts);
+  const pairIptm =
+    findPairIptm(confidence, targetChain, ligandChain) ??
+    findPairIptm(affinity, targetChain, ligandChain) ??
+    normalizeIptm(compact.pair_iptm ?? compact.pairIptm ?? compact.iptm);
+  const pairPae =
+    findPairPae(confidence, targetChain, ligandChain) ??
+    findPairPae(affinity, targetChain, ligandChain) ??
+    normalizePae(compact.pair_pae ?? compact.pairPae ?? compact.complex_pde ?? compact.complex_pae ?? compact.pae);
+  const confidenceLigandAtomPlddts = findLigandAtomPlddts(confidence, ligandChain);
+  const compactLigandAtomPlddts = normalizePlddtArray(compact.ligand_atom_plddts ?? compact.ligandAtomPlddts);
+  const ligandAtomPlddts = confidenceLigandAtomPlddts.length > 0 ? confidenceLigandAtomPlddts : compactLigandAtomPlddts;
+  const compactLigandPlddt = Number(compact.ligand_plddt ?? compact.ligandPlddt ?? compact.ligand_mean_plddt);
+  const ligandPlddt =
+    mean(ligandAtomPlddts) ??
+    (Number.isFinite(compactLigandPlddt) ? normalizePlddtValue(compactLigandPlddt) : null);
   const hasMetrics = pairIptm !== null || pairPae !== null || ligandPlddt !== null || ligandAtomPlddts.length > 0;
   return {
     pairIptm,
@@ -381,8 +397,8 @@ function unresolvedPredictionSort(
 ): number {
   const leftState = String(left[1]?.state || '').toUpperCase();
   const rightState = String(right[1]?.state || '').toUpperCase();
-  const leftPriority = leftState === 'RUNNING' ? 0 : 1;
-  const rightPriority = rightState === 'RUNNING' ? 0 : 1;
+  const leftPriority = leftState === 'RUNNING' ? 0 : leftState === 'QUEUED' ? 1 : leftState === 'SUCCESS' ? 2 : 3;
+  const rightPriority = rightState === 'RUNNING' ? 0 : rightState === 'QUEUED' ? 1 : rightState === 'SUCCESS' ? 2 : 3;
   if (leftPriority !== rightPriority) return leftPriority - rightPriority;
   return String(left[0] || '').localeCompare(String(right[0] || ''));
 }
@@ -843,7 +859,11 @@ export function useLeadOptMmpQueryMachine({
     const pendingEntriesAll = Object.entries(predictionBySmiles)
       .filter(([, record]) => {
         const state = String(record.state || '').toUpperCase();
-        if (state !== 'QUEUED' && state !== 'RUNNING') return false;
+        const shouldPoll =
+          state === 'QUEUED' ||
+          state === 'RUNNING' ||
+          (state === 'SUCCESS' && !hasResolvedPredictionMetrics(record));
+        if (!shouldPoll) return false;
         const taskId = readText(record.taskId).trim();
         return taskId.length > 0 && !taskId.startsWith('local:');
       })
@@ -873,24 +893,41 @@ export function useLeadOptMmpQueryMachine({
                 delete predictionHydrationRetryTimerRef.current[smiles];
               }
               delete predictionHydrationRetryCountRef.current[smiles];
-              setPredictionBySmiles((prev) => ({
-                ...prev,
-                [smiles]: {
-                  ...(prev[smiles] || record),
-                  state: 'SUCCESS',
-                  ...(metrics.hasMetrics
-                    ? {
-                        pairIptm: metrics.pairIptm,
-                        pairPae: metrics.pairPae,
-                        pairIptmResolved: true,
-                        ligandPlddt: metrics.ligandPlddt,
-                        ligandAtomPlddts: metrics.ligandAtomPlddts
-                      }
-                    : {}),
-                  error: '',
-                  updatedAt: Date.now()
+              setPredictionBySmiles((prev) => {
+                const current = prev[smiles] || record;
+                const currentHasMetrics = hasResolvedPredictionMetrics(current);
+                const hasAnyMetrics = metrics.hasMetrics || currentHasMetrics;
+                if (!hasAnyMetrics) {
+                  const pendingState = resolveNonRegressiveRuntimeState(current.state, 'RUNNING') || 'RUNNING';
+                  return {
+                    ...prev,
+                    [smiles]: {
+                      ...current,
+                      state: pendingState,
+                      error: '',
+                      updatedAt: Date.now()
+                    }
+                  };
                 }
-              }));
+                const nextPairIptm = metrics.hasMetrics ? metrics.pairIptm : current.pairIptm;
+                const nextPairPae = metrics.hasMetrics ? metrics.pairPae : current.pairPae;
+                const nextLigandPlddt = metrics.hasMetrics ? metrics.ligandPlddt : current.ligandPlddt;
+                const nextLigandAtomPlddts = metrics.hasMetrics ? metrics.ligandAtomPlddts : current.ligandAtomPlddts;
+                return {
+                  ...prev,
+                  [smiles]: {
+                    ...current,
+                    state: 'SUCCESS',
+                    pairIptm: nextPairIptm,
+                    pairPae: nextPairPae,
+                    pairIptmResolved: true,
+                    ligandPlddt: nextLigandPlddt,
+                    ligandAtomPlddts: nextLigandAtomPlddts,
+                    error: '',
+                    updatedAt: Date.now()
+                  }
+                };
+              });
               continue;
             }
             if (runtimeState === 'FAILURE') {
@@ -946,7 +983,11 @@ export function useLeadOptMmpQueryMachine({
     const pendingEntriesAll = Object.entries(referencePredictionByBackend)
       .filter(([, record]) => {
         const state = String(record.state || '').toUpperCase();
-        if (state !== 'QUEUED' && state !== 'RUNNING') return false;
+        const shouldPoll =
+          state === 'QUEUED' ||
+          state === 'RUNNING' ||
+          (state === 'SUCCESS' && !hasResolvedPredictionMetrics(record));
+        if (!shouldPoll) return false;
         const taskId = readText(record.taskId).trim();
         return taskId.length > 0 && !taskId.startsWith('local:');
       })
@@ -976,24 +1017,41 @@ export function useLeadOptMmpQueryMachine({
                 delete referenceHydrationRetryTimerRef.current[backendKey];
               }
               delete referenceHydrationRetryCountRef.current[backendKey];
-              setReferencePredictionByBackend((prev) => ({
-                ...prev,
-                [backendKey]: {
-                  ...(prev[backendKey] || record),
-                  state: 'SUCCESS',
-                  ...(metrics.hasMetrics
-                    ? {
-                        pairIptm: metrics.pairIptm,
-                        pairPae: metrics.pairPae,
-                        pairIptmResolved: true,
-                        ligandPlddt: metrics.ligandPlddt,
-                        ligandAtomPlddts: metrics.ligandAtomPlddts
-                      }
-                    : {}),
-                  error: '',
-                  updatedAt: Date.now()
+              setReferencePredictionByBackend((prev) => {
+                const current = prev[backendKey] || record;
+                const currentHasMetrics = hasResolvedPredictionMetrics(current);
+                const hasAnyMetrics = metrics.hasMetrics || currentHasMetrics;
+                if (!hasAnyMetrics) {
+                  const pendingState = resolveNonRegressiveRuntimeState(current.state, 'RUNNING') || 'RUNNING';
+                  return {
+                    ...prev,
+                    [backendKey]: {
+                      ...current,
+                      state: pendingState,
+                      error: '',
+                      updatedAt: Date.now()
+                    }
+                  };
                 }
-              }));
+                const nextPairIptm = metrics.hasMetrics ? metrics.pairIptm : current.pairIptm;
+                const nextPairPae = metrics.hasMetrics ? metrics.pairPae : current.pairPae;
+                const nextLigandPlddt = metrics.hasMetrics ? metrics.ligandPlddt : current.ligandPlddt;
+                const nextLigandAtomPlddts = metrics.hasMetrics ? metrics.ligandAtomPlddts : current.ligandAtomPlddts;
+                return {
+                  ...prev,
+                  [backendKey]: {
+                    ...current,
+                    state: 'SUCCESS',
+                    pairIptm: nextPairIptm,
+                    pairPae: nextPairPae,
+                    pairIptmResolved: true,
+                    ligandPlddt: nextLigandPlddt,
+                    ligandAtomPlddts: nextLigandAtomPlddts,
+                    error: '',
+                    updatedAt: Date.now()
+                  }
+                };
+              });
               continue;
             }
             if (runtimeState === 'FAILURE') {

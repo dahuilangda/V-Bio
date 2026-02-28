@@ -181,6 +181,26 @@ function toFiniteNumber(value: unknown): number | null {
   return numeric;
 }
 
+function normalizePlddtMetric(value: unknown): number | null {
+  const numeric = toFiniteNumber(value);
+  if (numeric === null) return null;
+  const scaled = numeric >= 0 && numeric <= 1 ? numeric * 100 : numeric;
+  if (!Number.isFinite(scaled)) return null;
+  return Math.max(0, Math.min(100, scaled));
+}
+
+function compactLigandAtomPlddts(values: unknown): number[] {
+  if (!Array.isArray(values)) return [];
+  const out: number[] = [];
+  for (const item of values) {
+    const normalized = normalizePlddtMetric(item);
+    if (normalized === null) continue;
+    out.push(Math.round(normalized * 100) / 100);
+    if (out.length >= 256) break;
+  }
+  return out;
+}
+
 function readBooleanToken(value: unknown): boolean | null {
   if (value === true) return true;
   if (value === false) return false;
@@ -199,8 +219,8 @@ function compactLeadOptPredictionRecord(value: LeadOptPredictionRecord): LeadOpt
     pairIptm: toFiniteNumber(value.pairIptm),
     pairPae: toFiniteNumber(value.pairPae),
     pairIptmResolved: value.pairIptmResolved === true,
-    ligandPlddt: toFiniteNumber(value.ligandPlddt),
-    ligandAtomPlddts: [],
+    ligandPlddt: normalizePlddtMetric(value.ligandPlddt),
+    ligandAtomPlddts: compactLigandAtomPlddts(value.ligandAtomPlddts),
     structureText: '',
     structureFormat: readText(value.structureFormat).toLowerCase() === 'pdb' ? 'pdb' : 'cif',
     structureName: readText(value.structureName).trim(),
@@ -456,7 +476,11 @@ function buildLeadOptPredictionPersistSignature(records: Record<string, LeadOptP
       const backend = readText(record.backend).trim().toLowerCase() || 'boltz';
       const pairIptm = toFiniteNumber(record.pairIptm);
       const pairPae = toFiniteNumber(record.pairPae);
-      const ligandPlddt = toFiniteNumber(record.ligandPlddt);
+      const ligandPlddt = normalizePlddtMetric(record.ligandPlddt);
+      const atomPlddts = compactLigandAtomPlddts(record.ligandAtomPlddts);
+      const atomPlddtSignature = atomPlddts.length > 0
+        ? `${atomPlddts.length}:${atomPlddts[0]?.toFixed(2) || ''}:${atomPlddts[atomPlddts.length - 1]?.toFixed(2) || ''}`
+        : '';
       const error = readText(record.error).trim();
       return [
         normalizedKey,
@@ -467,6 +491,7 @@ function buildLeadOptPredictionPersistSignature(records: Record<string, LeadOptP
         pairPae === null ? '' : pairPae.toFixed(3),
         record.pairIptmResolved === true ? '1' : '0',
         ligandPlddt === null ? '' : ligandPlddt.toFixed(3),
+        atomPlddtSignature,
         error
       ].join('~');
     })

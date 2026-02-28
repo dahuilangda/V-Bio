@@ -884,20 +884,22 @@ export function LeadOptCandidatesPanel({
                 Std
               </button>
             </div>
-            <button
-              type="button"
-              className="btn btn-ghost btn-compact"
-              onClick={() => setShowAdvanced((prev) => !prev)}
-              title={showAdvanced ? 'Hide advanced filters' : 'Show advanced filters'}
-            >
-              <SlidersHorizontal size={14} />
-              Advanced
-            </button>
+            {!cardMode ? (
+              <button
+                type="button"
+                className="btn btn-ghost btn-compact"
+                onClick={() => setShowAdvanced((prev) => !prev)}
+                title={showAdvanced ? 'Hide advanced filters' : 'Show advanced filters'}
+              >
+                <SlidersHorizontal size={14} />
+                Advanced
+              </button>
+            ) : null}
           </div>
         </div>
       </div>
 
-      {showAdvanced ? (
+      {!cardMode && showAdvanced ? (
         <div className="lead-opt-candidate-advanced">
           <div className="lead-opt-candidate-advanced-head">
             <div className="lead-opt-candidate-advanced-title">Advanced Filters</div>

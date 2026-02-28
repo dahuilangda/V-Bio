@@ -22,6 +22,7 @@ def register_task_routes(
     resolve_result_archive_path: Callable[[str], tuple[str, str]],
     build_or_get_view_archive: Callable[[str], str],
     get_tracker_status: Callable[[str], tuple[Dict[str, Any] | None, str | None]],
+    get_compact_prediction_metrics: Callable[[str], Dict[str, Any] | None],
 ) -> None:
     @app.route('/status/<task_id>', methods=['GET'])
     def get_task_status(task_id):
@@ -39,6 +40,10 @@ def register_task_routes(
                     'status': 'Task completed (result file found on server).',
                     'result_file': archive_name,
                 }
+                compact_metrics = get_compact_prediction_metrics(task_id)
+                if isinstance(compact_metrics, dict) and compact_metrics:
+                    response['info']['compact_metrics'] = compact_metrics
+                    response['info']['lead_opt_metrics'] = compact_metrics
                 logger.info("Task %s marked SUCCESS via result archive '%s'.", task_id, archive_name)
             else:
                 tracker_status, heartbeat = get_tracker_status(task_id)
@@ -67,6 +72,16 @@ def register_task_routes(
                 archive_name = find_result_archive(task_id)
                 if archive_name:
                     response['info']['result_file'] = archive_name
+            compact_metrics = None
+            if isinstance(response['info'].get('compact_metrics'), dict):
+                compact_metrics = response['info']['compact_metrics']
+            elif isinstance(response['info'].get('lead_opt_metrics'), dict):
+                compact_metrics = response['info']['lead_opt_metrics']
+            else:
+                compact_metrics = get_compact_prediction_metrics(task_id)
+            if isinstance(compact_metrics, dict) and compact_metrics:
+                response['info']['compact_metrics'] = compact_metrics
+                response['info']['lead_opt_metrics'] = compact_metrics
             response['info']['status'] = 'Task completed successfully.'
             logger.info('Task %s is SUCCESS.', task_id)
         elif task_result.state == 'FAILURE':

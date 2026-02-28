@@ -254,6 +254,7 @@ register_task_routes(
     resolve_result_archive_path=result_archive_service.resolve_result_archive_path,
     build_or_get_view_archive=result_archive_service.build_or_get_view_archive,
     get_tracker_status=result_archive_service.get_tracker_status,
+    get_compact_prediction_metrics=result_archive_service.get_compact_prediction_metrics,
 )
 
 
