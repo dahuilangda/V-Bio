@@ -2572,6 +2572,33 @@ def find_results_dir(base_dir: str) -> str:
     )
 
 
+def _extract_peptide_candidate_archive_for_metrics(candidate_dir: str, archive_path: str) -> str:
+    candidate_root = str(candidate_dir or "").strip()
+    if not candidate_root:
+        raise ValueError("Peptide candidate directory is required for metrics parsing.")
+
+    archive_file = Path(str(archive_path or "")).expanduser().resolve()
+    if not archive_file.is_file():
+        raise FileNotFoundError(
+            f"Peptide candidate archive not found for metrics parsing: {archive_file}"
+        )
+
+    extract_root = Path(candidate_root).expanduser().resolve() / "_metrics_extract"
+    if extract_root.exists():
+        shutil.rmtree(extract_root)
+    extract_root.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with zipfile.ZipFile(archive_file, "r") as zf:
+            zf.extractall(extract_root)
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError(
+            f"Peptide candidate archive is not a valid zip: {archive_file}"
+        ) from exc
+
+    return find_results_dir(str(extract_root))
+
+
 def _resolve_backend_results_root(backend: str, task_id: Optional[str], temp_dir: str) -> Path:
     backend_token = str(backend or "unknown").strip().lower() or "unknown"
     runtime_token = _safe_runtime_token(task_id or os.environ.get("BOLTZ_TASK_ID") or Path(temp_dir).name)
@@ -5086,7 +5113,16 @@ def _execute_peptide_generation_jobs(
             state = str(getattr(async_result, "state", "") or "").upper()
             if state in {"SUCCESS", "FAILURE", "REVOKED"}:
                 if state == "SUCCESS":
-                    completed_jobs.append(submitted_job)
+                    completed_job = dict(submitted_job)
+                    worker_result = getattr(async_result, "result", None)
+                    if isinstance(worker_result, dict):
+                        archive_from_worker = str(worker_result.get("archive_path") or "").strip()
+                        if archive_from_worker:
+                            completed_job["archive_path"] = archive_from_worker
+                        candidate_dir_from_worker = str(worker_result.get("candidate_dir") or "").strip()
+                        if candidate_dir_from_worker:
+                            completed_job["candidate_dir"] = candidate_dir_from_worker
+                    completed_jobs.append(completed_job)
                     state_counts["success"] += 1
                     continue
                 failure_info = getattr(async_result, "result", None)
@@ -5418,7 +5454,8 @@ def run_peptide_design_backend(
             idx = int(job.get("candidate_index") or 0)
             candidate_sequence = str(job.get("sequence") or "")
             candidate_dir = str(job.get("candidate_dir") or "")
-            result_dir = find_results_dir(candidate_dir)
+            archive_path = str(job.get("archive_path") or "")
+            result_dir = _extract_peptide_candidate_archive_for_metrics(candidate_dir, archive_path)
             metrics = parse_confidence_metrics(
                 result_dir,
                 binder_chain_id=binder_chain_id,
