@@ -106,10 +106,21 @@ def run_gpu_worker() -> None:
     raw_capabilities = str(os.environ.get("GPU_WORKER_CAPABILITIES") or os.environ.get("WORKER_CAPABILITIES") or "")
     queue_list = _resolve_worker_queues("gpu", raw_capabilities, include_high_priority=True)
     gpu_status = get_gpu_status()
-    concurrency = int(gpu_status.get("available_count", 0) or 0)
-    if concurrency <= 0:
-        LOGGER.warning("GPU pool is empty, fallback concurrency=1")
-        concurrency = 1
+    valid_count = int(gpu_status.get("valid_count", 0) or 0)
+    available_count = int(gpu_status.get("available_count", 0) or 0)
+    in_use_count = int(gpu_status.get("in_use_count", 0) or 0)
+    if valid_count <= 0:
+        raise RuntimeError(
+            "GPU pool has zero capacity (valid_count=0). Refusing to start worker without explicit GPU capacity."
+        )
+    concurrency = valid_count
+    LOGGER.info(
+        "Resolved GPU worker concurrency=%s from pool capacity (valid=%s, available=%s, in_use=%s).",
+        concurrency,
+        valid_count,
+        available_count,
+        in_use_count,
+    )
 
     _exec_or_die(
         [
@@ -180,4 +191,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

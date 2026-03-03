@@ -1070,7 +1070,7 @@ def predict_task(self, predict_args: dict):
             logger.info(f"Task {task_id}: Cleanup completed")
 
 
-@celery_app.task(bind=True)
+@celery_app.task(bind=True, name="tasks.peptide_candidate_worker_task")
 def peptide_candidate_worker_task(self, worker_payload: dict):
     """
     Execute one peptide-design candidate as an independent Celery task.

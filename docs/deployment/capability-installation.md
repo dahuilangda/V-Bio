@@ -1,6 +1,6 @@
 # 功能安装与 Docker 配置
 
-本文档给出功能安装最小闭环，重点覆盖：`boltz2`、`alphafold3`、`protenix`、`pocketxmol`、`colabfold_server`、`lead_opt(MMP)`。
+本文档给出功能最小安装，重点覆盖：`boltz2`、`alphafold3`、`protenix`、`pocketxmol`、`colabfold_server`、`lead_opt(MMP)`。
 
 统一原则：
 - 配置写入对应 stack 的 env 文件（`deploy/docker/DOCKER_STACK_*.env`），不要使用临时 `export`。
@@ -288,7 +288,3 @@ LEAD_OPT_MMP_DB_SCHEMA=chembl_cyp3a4_herg
 GPU_WORKER_CAPABILITIES=boltz2,alphafold3,protenix,pocketxmol
 MAX_CONCURRENT_TASKS=-1
 ```
-
-说明：
-- 不要声明未安装功能。
-- 当某功能无在线 worker 时，任务会被 API 快速拒绝（`503`），不会进入默认队列。

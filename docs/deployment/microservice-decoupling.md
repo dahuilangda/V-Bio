@@ -1,6 +1,6 @@
 # 微服务解耦部署（中央 / Redis / Capability / MSA）
 
-目标：将中央调度、Redis、GPU capability worker、CPU worker、MSA 服务拆为独立栈，支持跨机器部署与按能力横向扩缩容。
+将中央调度、Redis、GPU capability worker、CPU worker、MSA 服务拆为独立栈，支持跨机器部署与按能力横向扩缩容。
 
 说明：本方案只使用 `deploy/docker/DOCKER_STACK_*.env`；不依赖仓库根目录 `.env`。
 
@@ -13,7 +13,7 @@ docker compose -f deploy/docker/DOCKER_STACK_REDIS.compose.yml \
   --env-file deploy/docker/DOCKER_STACK_REDIS.env up -d
 ```
 
-## 2. 中央服务（不内置 Redis）
+## 2. 中央服务
 
 ```bash
 cd /data/V-Bio
@@ -23,7 +23,7 @@ docker compose -f deploy/docker/DOCKER_STACK_CENTRAL_DECOUPLED.compose.yml \
   --env-file deploy/docker/DOCKER_STACK_CENTRAL_DECOUPLED.env up -d --build
 ```
 
-## 3. GPU capability 微服务（按 profile 启动）
+## 3. GPU capability 微服务
 
 ```bash
 cd /data/V-Bio
@@ -49,10 +49,6 @@ docker compose -f deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.compose.yml \
 - `protenix`
 - `pocketxmol`
 
-实现说明：
-- 每个 capability worker 都会设置独立 `GPU_POOL_NAMESPACE`，GPU 池 Redis 键隔离，避免初始化相互覆盖。
-- 默认可不设置 `GPU_DEVICE_IDS_*`：多个 capability 会共享/争抢 GPU，以提升总体利用率。
-- 如需资源隔离、降低互相影响，再在 `DOCKER_STACK_WORKER_GPU_CAPS.env` 显式设置不同的 `GPU_DEVICE_IDS_*`（可选）。
 
 ## 4. CPU worker（Lead Opt / MMP）
 

@@ -5,6 +5,7 @@ import time
 import os
 import shutil
 import subprocess
+from typing import Any
 
 # 使用标准日志记录模块
 logger = logging.getLogger(__name__)
@@ -29,6 +30,152 @@ def _read_gpu_pool_state(client: redis.Redis) -> tuple[set[int], list[int], dict
     valid = {int(item) for item in valid_raw}
     available = [int(item) for item in available_raw]
     return valid, available, in_use_raw
+
+
+def _to_int(value: Any) -> int | None:
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return None
+
+
+def _collect_live_celery_task_ids() -> set[str]:
+    """
+    Collect currently live Celery task ids from active/reserved/scheduled slots.
+    """
+    live: set[str] = set()
+    try:
+        from backend.core.celery_app import celery_app
+    except Exception as exc:
+        logger.warning("无法导入 celery_app 以检查活跃任务，将跳过 live-task 检查: %s", exc)
+        return live
+
+    try:
+        inspector = celery_app.control.inspect(timeout=2)
+        active = inspector.active() or {}
+        reserved = inspector.reserved() or {}
+        scheduled = inspector.scheduled() or {}
+    except Exception as exc:
+        logger.warning("检查 Celery 活跃任务失败，将跳过 live-task 检查: %s", exc)
+        return live
+
+    def _append_from_rows(rows: Any) -> None:
+        if not isinstance(rows, list):
+            return
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            request = row.get("request")
+            if isinstance(request, dict):
+                task_id = str(request.get("id") or "").strip()
+                if task_id:
+                    live.add(task_id)
+            task_id = str(row.get("id") or row.get("task_id") or "").strip()
+            if task_id:
+                live.add(task_id)
+
+    for payload in (active, reserved, scheduled):
+        if not isinstance(payload, dict):
+            continue
+        for rows in payload.values():
+            _append_from_rows(rows)
+    return live
+
+
+def _read_task_state(task_id: str) -> str:
+    normalized = str(task_id or "").strip()
+    if not normalized:
+        return ""
+    try:
+        from backend.core.celery_app import celery_app
+        from celery.result import AsyncResult
+        return str(AsyncResult(normalized, app=celery_app).state or "").strip().upper()
+    except Exception:
+        return ""
+
+
+def _rebuild_available_gpu_queue(client: redis.Redis, valid: set[int], in_use_raw: dict[str, str]) -> tuple[list[int], list[int]]:
+    in_use_ids: set[int] = set()
+    for gpu_key in in_use_raw.keys():
+        parsed = _to_int(gpu_key)
+        if parsed is not None:
+            in_use_ids.add(parsed)
+    expected_available = sorted([gpu_id for gpu_id in valid if gpu_id not in in_use_ids])
+    current_available_raw = client.lrange(config.GPU_POOL_KEY, 0, -1)
+    current_available = []
+    for item in current_available_raw:
+        parsed = _to_int(item)
+        if parsed is not None:
+            current_available.append(parsed)
+
+    if current_available == expected_available:
+        return current_available, expected_available
+
+    pipe = client.pipeline()
+    pipe.delete(config.GPU_POOL_KEY)
+    if expected_available:
+        pipe.rpush(config.GPU_POOL_KEY, *expected_available)
+    pipe.execute()
+    return current_available, expected_available
+
+
+def _reconcile_in_use_allocations(client: redis.Redis, valid: set[int]) -> dict[str, Any]:
+    """
+    Reconcile stale in-use leases:
+    - Keep leases owned by live celery tasks.
+    - Keep leases with active heartbeat.
+    - Reclaim leases for terminal tasks.
+    - Reclaim PENDING leases that are not live and have no heartbeat (typical worker-crash orphan).
+    """
+    in_use_raw = client.hgetall(config.GPU_IN_USE_HASH_KEY) or {}
+    if not in_use_raw:
+        return {"released": [], "kept": {}, "live_tasks": 0}
+
+    live_task_ids = _collect_live_celery_task_ids()
+    released: list[tuple[int, str, str]] = []
+    kept: dict[str, str] = {}
+
+    for gpu_key, owner_task_id in in_use_raw.items():
+        gpu_id = _to_int(gpu_key)
+        task_id = str(owner_task_id or "").strip()
+        if gpu_id is None:
+            # Invalid hash field, purge defensively.
+            client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_key)
+            continue
+        if gpu_id not in valid:
+            # GPU no longer part of valid set.
+            client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_key)
+            continue
+        if not task_id:
+            client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_key)
+            released.append((gpu_id, "", "empty_owner"))
+            continue
+        if task_id in live_task_ids:
+            kept[str(gpu_id)] = task_id
+            continue
+
+        has_heartbeat = bool(client.exists(f"task_heartbeat:{task_id}"))
+        if has_heartbeat:
+            kept[str(gpu_id)] = task_id
+            continue
+
+        state = _read_task_state(task_id)
+        if state in {"SUCCESS", "FAILURE", "REVOKED"}:
+            client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_key)
+            released.append((gpu_id, task_id, f"terminal_{state.lower()}"))
+            continue
+        if state in {"PROGRESS", "STARTED", "RECEIVED", "RETRY"}:
+            client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_key)
+            released.append((gpu_id, task_id, f"{state.lower()}_without_live_or_heartbeat"))
+            continue
+        if state == "PENDING":
+            client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_key)
+            released.append((gpu_id, task_id, "pending_without_live_or_heartbeat"))
+            continue
+
+        kept[str(gpu_id)] = task_id
+
+    return {"released": released, "kept": kept, "live_tasks": len(live_task_ids)}
 
 def initialize_gpu_pool(devices_to_use: list[int]):
     """
@@ -88,18 +235,34 @@ def ensure_gpu_pool(devices_to_use: list[int]):
     """
     client = get_redis_client()
     desired = {int(device) for device in devices_to_use}
-    current_valid, current_available, current_in_use = _read_gpu_pool_state(client)
+    current_valid, _current_available, current_in_use = _read_gpu_pool_state(client)
 
     if not current_valid:
         logger.info("共享 GPU 池当前为空，执行初始化。")
         initialize_gpu_pool(devices_to_use)
         return
 
+    reconcile = _reconcile_in_use_allocations(client, current_valid)
+    if reconcile.get("released"):
+        released_msgs = [
+            f"gpu={gpu_id},task={task_id or '-'},reason={reason}"
+            for gpu_id, task_id, reason in reconcile["released"]
+        ]
+        logger.warning("检测到并回收陈旧 GPU 占用: %s", "; ".join(released_msgs))
+    current_valid, current_available, current_in_use = _read_gpu_pool_state(client)
+    old_available, expected_available = _rebuild_available_gpu_queue(client, current_valid, current_in_use)
+    if old_available != expected_available:
+        logger.info(
+            "已重建 GPU 可用队列: old_available=%s -> new_available=%s",
+            old_available,
+            expected_available,
+        )
+
     if current_valid == desired:
         logger.info(
             "共享 GPU 池已存在，跳过重置。valid=%s available=%s in_use=%s",
             sorted(current_valid),
-            current_available,
+            expected_available,
             current_in_use,
         )
         return
@@ -233,9 +396,13 @@ def release_gpu(gpu_id: int, task_id: str):
 def get_gpu_status() -> dict:
     """一个用于监控所有 GPU 状态的辅助工具。"""
     client = get_redis_client()
+    valid_raw = client.smembers(config.GPU_VALID_SET_KEY)
+    valid = sorted([int(item) for item in valid_raw])
     in_use = client.hgetall(config.GPU_IN_USE_HASH_KEY)
     available = client.lrange(config.GPU_POOL_KEY, 0, -1)
     return {
+        "valid": valid,
+        "valid_count": len(valid),
         "in_use": in_use,
         "available": available,
         "available_count": len(available),
@@ -256,54 +423,51 @@ if __name__ == '__main__':
     
     if command == 'init':
         # 动态检测逻辑现在位于此处，仅在作为脚本运行时执行
-        try:
-            import torch  # type: ignore
-        except Exception as exc:  # pragma: no cover - 安装环境相关
-            torch = None  # type: ignore[assignment]
-            logger.warning(f"无法导入 torch，用于 GPU 自动探测: {exc}")
-
         max_concurrent = config.MAX_CONCURRENT_TASKS
         configured_gpus = config.GPU_DEVICE_IDS or []
         detected_gpus: list[int] = []
         torch_detected_count: int | None = None
 
-        if 'torch' in locals() and torch is not None:
+        # 1) 优先使用 nvidia-smi（容器内最稳定，且不依赖 Python torch 包）
+        try:
+            if shutil.which("nvidia-smi"):
+                probe = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader,nounits"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                if probe.returncode == 0:
+                    lines = [line.strip() for line in (probe.stdout or "").splitlines() if line.strip()]
+                    parsed = []
+                    for line in lines:
+                        try:
+                            parsed.append(int(line))
+                        except ValueError:
+                            continue
+                    if parsed:
+                        detected_gpus = sorted(set(parsed))
+                        logger.info(f"通过 nvidia-smi 检测到可用 GPU: {detected_gpus}")
+                else:
+                    logger.warning(f"nvidia-smi 探测 GPU 失败: {probe.stderr.strip()}")
+        except Exception as exc:
+            logger.warning(f"使用 nvidia-smi 自动探测 GPU 失败: {exc}")
+
+        # 2) 仅在 nvidia-smi 未得到结果时，回退到 torch 探测
+        if not detected_gpus:
             try:
+                import torch  # type: ignore
+
                 if torch.cuda.is_available():
                     torch_detected_count = torch.cuda.device_count()
                     detected_gpus = list(range(torch_detected_count))
-                    logger.info(f"检测到 {len(detected_gpus)} 个可用 GPU: {detected_gpus}")
+                    logger.info(f"通过 torch.cuda 检测到可用 GPU: {detected_gpus}")
                 else:
                     logger.info("torch.cuda 未检测到可用 GPU。")
-            except Exception as e:
-                logger.warning(f"无法初始化 torch.cuda: {e}")
-
-        if not detected_gpus:
-            try:
-                if shutil.which("nvidia-smi"):
-                    probe = subprocess.run(
-                        ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader,nounits"],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        timeout=10,
-                        check=False,
-                    )
-                    if probe.returncode == 0:
-                        lines = [line.strip() for line in (probe.stdout or "").splitlines() if line.strip()]
-                        parsed = []
-                        for line in lines:
-                            try:
-                                parsed.append(int(line))
-                            except ValueError:
-                                continue
-                        if parsed:
-                            detected_gpus = sorted(set(parsed))
-                            logger.info(f"通过 nvidia-smi 检测到可用 GPU: {detected_gpus}")
-                    else:
-                        logger.warning(f"nvidia-smi 探测 GPU 失败: {probe.stderr.strip()}")
-            except Exception as exc:
-                logger.warning(f"使用 nvidia-smi 自动探测 GPU 失败: {exc}")
+            except Exception as exc:  # pragma: no cover - 安装环境相关
+                logger.info(f"torch 不可用，跳过 torch GPU 探测: {exc}")
 
         if not detected_gpus:
             raw_visible = str(os.environ.get("NVIDIA_VISIBLE_DEVICES", "") or "").strip()
@@ -374,6 +538,7 @@ if __name__ == '__main__':
     elif command == 'status':
         status = get_gpu_status()
         print("\n--- GPU Pool Status ---")
+        print(f"Valid ({status.get('valid_count', 0)}): {status.get('valid', [])}")
         print(f"Available ({status['available_count']}): {status['available']}")
         print(f"In Use ({status['in_use_count']}):")
         print(f"Waiting non-peptide: {status.get('waiting_non_peptide_count', 0)}")

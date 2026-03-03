@@ -1,6 +1,6 @@
 # 单机安装全部应用（Docker + 前端）
 
-目标：在一台机器上启动完整 V-Bio 微服务栈，包含：
+在一台机器上启动完整 V-Bio 服务，包含：
 - Redis（独立服务）
 - 中央服务（API + Monitor）
 - GPU 能力（`boltz2` / `boltz2score` / `affinity` / `alphafold3` / `protenix` / `pocketxmol`）
