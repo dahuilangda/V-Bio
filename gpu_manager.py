@@ -1,7 +1,10 @@
 import redis
-import config
+from backend.core import config
 import logging
 import time
+import os
+import shutil
+import subprocess
 
 # 使用标准日志记录模块
 logger = logging.getLogger(__name__)
@@ -17,6 +20,15 @@ except Exception as e:
 def get_redis_client():
     """从共享连接池返回一个 Redis 客户端。"""
     return redis.Redis(connection_pool=REDIS_CONNECTION_POOL)
+
+
+def _read_gpu_pool_state(client: redis.Redis) -> tuple[set[int], list[int], dict[str, str]]:
+    valid_raw = client.smembers(config.GPU_VALID_SET_KEY)
+    available_raw = client.lrange(config.GPU_POOL_KEY, 0, -1)
+    in_use_raw = client.hgetall(config.GPU_IN_USE_HASH_KEY)
+    valid = {int(item) for item in valid_raw}
+    available = [int(item) for item in available_raw]
+    return valid, available, in_use_raw
 
 def initialize_gpu_pool(devices_to_use: list[int]):
     """
@@ -68,6 +80,45 @@ def initialize_gpu_pool(devices_to_use: list[int]):
     else:
         logger.warning("⚠️ GPU 池初始化可能失败。")
     logger.info("-----------------------------")
+
+
+def ensure_gpu_pool(devices_to_use: list[int]):
+    """
+    Ensure a shared GPU pool exists without clobbering active allocations.
+    """
+    client = get_redis_client()
+    desired = {int(device) for device in devices_to_use}
+    current_valid, current_available, current_in_use = _read_gpu_pool_state(client)
+
+    if not current_valid:
+        logger.info("共享 GPU 池当前为空，执行初始化。")
+        initialize_gpu_pool(devices_to_use)
+        return
+
+    if current_valid == desired:
+        logger.info(
+            "共享 GPU 池已存在，跳过重置。valid=%s available=%s in_use=%s",
+            sorted(current_valid),
+            current_available,
+            current_in_use,
+        )
+        return
+
+    if current_in_use:
+        logger.warning(
+            "共享 GPU 池设备集合与期望值不一致，但当前存在占用，保留现有池避免错误重置。current=%s desired=%s in_use=%s",
+            sorted(current_valid),
+            sorted(desired),
+            current_in_use,
+        )
+        return
+
+    logger.info(
+        "共享 GPU 池设备集合与期望值不一致，且当前无占用，重建池。current=%s desired=%s",
+        sorted(current_valid),
+        sorted(desired),
+    )
+    initialize_gpu_pool(devices_to_use)
 
 
 def acquire_gpu(task_id: str, timeout: int = 3600) -> int:
@@ -227,6 +278,60 @@ if __name__ == '__main__':
             except Exception as e:
                 logger.warning(f"无法初始化 torch.cuda: {e}")
 
+        if not detected_gpus:
+            try:
+                if shutil.which("nvidia-smi"):
+                    probe = subprocess.run(
+                        ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader,nounits"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    if probe.returncode == 0:
+                        lines = [line.strip() for line in (probe.stdout or "").splitlines() if line.strip()]
+                        parsed = []
+                        for line in lines:
+                            try:
+                                parsed.append(int(line))
+                            except ValueError:
+                                continue
+                        if parsed:
+                            detected_gpus = sorted(set(parsed))
+                            logger.info(f"通过 nvidia-smi 检测到可用 GPU: {detected_gpus}")
+                    else:
+                        logger.warning(f"nvidia-smi 探测 GPU 失败: {probe.stderr.strip()}")
+            except Exception as exc:
+                logger.warning(f"使用 nvidia-smi 自动探测 GPU 失败: {exc}")
+
+        if not detected_gpus:
+            raw_visible = str(os.environ.get("NVIDIA_VISIBLE_DEVICES", "") or "").strip()
+            if raw_visible and raw_visible.lower() not in {"all", "none", "void"}:
+                parsed_visible = []
+                for token in raw_visible.split(","):
+                    token = token.strip()
+                    if not token:
+                        continue
+                    try:
+                        parsed_visible.append(int(token))
+                    except ValueError:
+                        continue
+                if parsed_visible:
+                    detected_gpus = sorted(set(parsed_visible))
+                    logger.info(f"通过 NVIDIA_VISIBLE_DEVICES 推断可用 GPU: {detected_gpus}")
+
+        if not detected_gpus:
+            try:
+                proc_gpus_dir = "/proc/driver/nvidia/gpus"
+                if os.path.isdir(proc_gpus_dir):
+                    gpu_entries = [item for item in os.listdir(proc_gpus_dir) if item.strip()]
+                    if gpu_entries:
+                        detected_gpus = list(range(len(gpu_entries)))
+                        logger.info(f"通过 {proc_gpus_dir} 检测到可用 GPU: {detected_gpus}")
+            except Exception as exc:
+                logger.warning(f"通过 /proc 路径探测 GPU 失败: {exc}")
+
         available_gpus = []
 
         if configured_gpus:
@@ -263,8 +368,8 @@ if __name__ == '__main__':
                     )
             devices_to_use = available_gpus[:final_concurrency]
 
-        logger.info(f"将使用以下设备初始化 GPU 池: {devices_to_use}")
-        initialize_gpu_pool(devices_to_use)
+        logger.info(f"将使用以下设备确保 GPU 池就绪: {devices_to_use}")
+        ensure_gpu_pool(devices_to_use)
 
     elif command == 'status':
         status = get_gpu_status()

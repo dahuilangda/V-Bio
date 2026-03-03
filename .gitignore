@@ -8,15 +8,15 @@ __pycache__/
 .env.local
 .env.production
 *.env.bak
+deploy/docker/*.env
 
 # Application directories
 boltz_central_results/
-colabfold_server/databases
-colabfold_server/jobs/
-designer/temp_design_run_*
+capabilities/colabfold_server/databases
+capabilities/colabfold_server/jobs/
+capabilities/designer/temp_design_run_*
 
 # Logs
-streamlit.log
 monitor.log
 monitor.pid
 celery.log
@@ -37,67 +37,57 @@ env/
 # OS
 .DS_Store
 Thumbs.db
-test.txt
 
 # Others
-.gitignore
 data/affinity2.yaml
-virtual_screening/LM
-virtual_screening/small_molecule_results/
 method.md
-docs/
 data/fold_input.json
-.gitignore
-!PocketXMol/.gitignore
 .af3_jax_cache/
 
 # Boltz2Score
-Boltz2Score/data/Cmp2.pdb
-Boltz2Score/data/Cmp4.pdb
-Boltz2Score/data/ligand.mol2
-Boltz2Score/data/protein.pdb
-Boltz2Score/data/lig2.mol2
-Boltz2Score/data/prot2.pdb
+capabilities/boltz2score/data/Cmp2.pdb
+capabilities/boltz2score/data/Cmp4.pdb
+capabilities/boltz2score/data/ligand.mol2
+capabilities/boltz2score/data/protein.pdb
+capabilities/boltz2score/data/lig2.mol2
+capabilities/boltz2score/data/prot2.pdb
 AF3Score/
-Boltz2Score/data/Cmp7.pdb
-.streamlit/
+capabilities/boltz2score/data/Cmp7.pdb
+.boltz_cache/
 
-# VBio
-VBio/node_modules/
-VBio/demo/
-VBio/dist/
-VBio/.vite/
-VBio/*.tsbuildinfo
-VBio/vite.config.js
-VBio/vite.config.d.ts
-VBio/.env
-VBio/.env.local
-VBio/.env.*.local
-!VBio/.env.example
-VBio/npm-debug.log*
-VBio/yarn-debug.log*
-VBio/yarn-error.log*
-VBio/pnpm-debug.log*
-VBio/supabase-lite/.env
-!VBio/supabase-lite/.env.example
-VBio/supabase-lite/data/
-VBio/.run/
+# frontend
+frontend/node_modules/
+frontend/demo/
+frontend/dist/
+frontend/.vite/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+!frontend/.env.example
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+frontend/supabase-lite/.env
+!frontend/supabase-lite/.env.example
+frontend/supabase-lite/data/
+frontend/.run/
 # Lead Optimization
-lead_optimization/postgres/.env
-lead_optimization/postgres/data/
-lead_optimization/data/mmp_query_cache/
-lead_optimization/data/mmp_lifecycle_admin/
-lead_optimization/data/chembl_*
-lead_optimization/data/.mmp_staging.db
-lead_optimization/data/*.db
-lead_optimization/data/*.sqlite
-lead_optimization/data/*.sqlite3
-lead_optimization/**/__pycache__/
-lead_optimization/data/ChEMBL_CYP3A4_hERG_structures.fragdb*
-lead_optimization/data/mmp_db_registry.json
-lead_optimization/data/bench_compound_batch_*
-lead_optimization/data/bench_herg_*
-lead_optimization/data/*_compound_state.cache.fragdb
-lead_optimization/mmp_lifecycle/matcher/
+capabilities/lead_optimization/data/mmp_query_cache/
+capabilities/lead_optimization/data/mmp_lifecycle_admin/
+capabilities/lead_optimization/data/chembl_*
+capabilities/lead_optimization/data/.mmp_staging.db
+capabilities/lead_optimization/data/*.db
+capabilities/lead_optimization/data/*.sqlite
+capabilities/lead_optimization/data/*.sqlite3
+capabilities/lead_optimization/**/__pycache__/
+capabilities/lead_optimization/data/ChEMBL_CYP3A4_hERG_structures.fragdb*
+capabilities/lead_optimization/data/mmp_db_registry.json
+capabilities/lead_optimization/data/bench_compound_batch_*
+capabilities/lead_optimization/data/bench_herg_*
+capabilities/lead_optimization/data/*_compound_state.cache.fragdb
+capabilities/lead_optimization/mmp_lifecycle/matcher/
 BioPhi
-protenix/common_cache/

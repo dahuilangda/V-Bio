@@ -1,0 +1,17 @@
+name: vbio-worker-cpu
+
+services:
+  cpu-worker:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/DOCKER_BACKEND_RUNTIME.Dockerfile
+    container_name: vbio-cpu-worker
+    restart: unless-stopped
+    working_dir: ${BOLTZ_HOST_ROOT}
+    env_file:
+      - ./DOCKER_STACK_WORKER_CPU.env
+    volumes:
+      - ${BOLTZ_HOST_ROOT}:${BOLTZ_HOST_ROOT}
+      - ${RESULTS_BASE_DIR:-/data/boltz_central_results}:${RESULTS_BASE_DIR:-/data/boltz_central_results}
+    command: >-
+      bash -lc "cd ${BOLTZ_HOST_ROOT} && python -m backend.scripts.runtime_entrypoint cpu-worker"

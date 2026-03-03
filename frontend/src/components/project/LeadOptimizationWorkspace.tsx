@@ -1,0 +1,1576 @@
+import {
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react';
+import { LoaderCircle } from 'lucide-react';
+import { type LigandFragmentItem } from './LigandFragmentSketcher';
+import { type MolstarAtomHighlight, type MolstarResidueHighlight } from './MolstarViewer';
+import {
+  LeadOptCandidatesPanel,
+  normalizeLeadOptCandidatesUiState,
+  type CandidatePreviewRenderMode,
+  type LeadOptCandidatesUiState
+} from './leadopt/LeadOptCandidatesPanel';
+import { LeadOptFragmentPanel } from './leadopt/LeadOptFragmentPanel';
+import { LeadOptMolstarViewer } from './leadopt/LeadOptMolstarViewer';
+import { LeadOptReferencePanel } from './leadopt/LeadOptReferencePanel';
+import {
+  useLeadOptMmpQueryMachine,
+  type LeadOptMmpPersistedSnapshot,
+  type LeadOptPredictionRecord
+} from './leadopt/hooks/useLeadOptMmpQueryMachine';
+import {
+  fetchLeadOptimizationMmpDatabases,
+  type LeadOptMmpDatabaseItem
+} from '../../api/backendApi';
+import { useLeadOptMmpQueryForm } from './leadopt/hooks/useLeadOptMmpQueryForm';
+import { inferQueryModeFromSelection } from './leadopt/hooks/fragmentVariableSelection';
+import {
+  useLeadOptReferenceFragment,
+  type LeadOptPersistedUploads,
+  type PocketResidue
+} from './leadopt/hooks/useLeadOptReferenceFragment';
+
+interface LeadOptimizationWorkspaceProps {
+  viewMode?: 'reference' | 'design';
+  canEdit: boolean;
+  submitting: boolean;
+  backend: string;
+  onNavigateToResults?: () => void;
+  onRegisterHeaderRunAction?: (action: (() => void | Promise<void>) | null) => void;
+  proteinSequence: string;
+  ligandSmiles: string;
+  targetChain: string;
+  ligandChain: string;
+  onLigandSmilesChange: (value: string) => void;
+  referenceScopeKey?: string;
+  persistedReferenceUploads?: LeadOptPersistedUploads;
+  onReferenceUploadsChange?: (uploads: LeadOptPersistedUploads) => void;
+  onMmpTaskQueued?: (payload: {
+    taskId: string;
+    requestPayload: Record<string, unknown>;
+    querySmiles: string;
+    referenceUploads: LeadOptPersistedUploads;
+  }) => void | Promise<void>;
+  onMmpTaskCompleted?: (payload: {
+    taskId: string;
+    queryId: string;
+    transformCount: number;
+    candidateCount: number;
+    elapsedSeconds: number;
+    resultSnapshot?: Record<string, unknown>;
+  }) => void | Promise<void>;
+  onMmpTaskFailed?: (payload: { taskId: string; error: string }) => void | Promise<void>;
+  initialMmpSnapshot?: LeadOptMmpPersistedSnapshot | null;
+  onMmpUiStateChange?: (payload: { uiState: LeadOptCandidatesUiState }) => void | Promise<void>;
+  onPredictionQueued?: (payload: { taskId: string; backend: string; candidateSmiles: string }) => void | Promise<void>;
+  onPredictionStateChange?: (payload: {
+    records: Record<string, LeadOptPredictionRecord>;
+    referenceRecords: Record<string, LeadOptPredictionRecord>;
+    summary: {
+      total: number;
+      queued: number;
+      running: number;
+      success: number;
+      failure: number;
+      latestTaskId: string;
+    };
+  }) => void | Promise<void>;
+}
+
+const LEFT_PANEL_MIN = 320;
+const RIGHT_PANEL_MIN = 300;
+const RESIZER_WIDTH = 10;
+const LEFT_PANEL_KEY_STEP = 24;
+const LEFT_PANEL_DEFAULT = 760;
+const RESULT_VIEWER_MIN = 340;
+const RESULT_MAIN_MIN = 612;
+const RESULT_VIEWER_DEFAULT = 780;
+
+interface LeadOptPropertyOption {
+  value: string;
+  label: string;
+}
+
+const AMINO_ACID_THREE_TO_ONE: Record<string, string> = {
+  ALA: 'A',
+  ARG: 'R',
+  ASN: 'N',
+  ASP: 'D',
+  CYS: 'C',
+  GLN: 'Q',
+  GLU: 'E',
+  GLY: 'G',
+  HIS: 'H',
+  ILE: 'I',
+  LEU: 'L',
+  LYS: 'K',
+  MET: 'M',
+  PHE: 'F',
+  PRO: 'P',
+  SER: 'S',
+  THR: 'T',
+  TRP: 'W',
+  TYR: 'Y',
+  VAL: 'V',
+  SEC: 'U',
+  PYL: 'O'
+};
+
+function readText(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  return String(value);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function buildLeadOptPredictionHydrationSignature(value: unknown): string {
+  const records = asRecord(value);
+  const entries = Object.entries(records)
+    .map(([key, raw]) => {
+      const record = asRecord(raw);
+      const ligandAtomPlddts = Array.isArray(record.ligandAtomPlddts ?? record.ligand_atom_plddts)
+        ? ((record.ligandAtomPlddts ?? record.ligand_atom_plddts) as unknown[])
+        : [];
+      return [
+        readText(key).trim(),
+        readText(record.taskId || record.task_id).trim(),
+        readText(record.state).trim().toUpperCase(),
+        Number.isFinite(Number(record.updatedAt ?? record.updated_at)) ? String(Number(record.updatedAt ?? record.updated_at)) : '',
+        Number.isFinite(Number(record.pairIptm ?? record.pair_iptm)) ? 'iptm' : '',
+        Number.isFinite(Number(record.pairPae ?? record.pair_pae ?? record.pae)) ? 'pae' : '',
+        Number.isFinite(Number(record.ligandPlddt ?? record.ligand_plddt)) ? 'plddt' : '',
+        String(ligandAtomPlddts.length)
+      ].join(':');
+    })
+    .sort((left, right) => left.localeCompare(right));
+  return entries.join('|');
+}
+
+function buildLeadOptSnapshotHydrationKey(snapshotInput: LeadOptMmpPersistedSnapshot | Record<string, unknown> | null | undefined): string {
+  const snapshot = asRecord(snapshotInput || null);
+  const queryResult = asRecord(snapshot.query_result);
+  const queryId = readText(queryResult.query_id || snapshot.query_id).trim();
+  if (!queryId) return '';
+  const candidates = Array.isArray(snapshot.enumerated_candidates) ? snapshot.enumerated_candidates : [];
+  const predictions = asRecord(snapshot.prediction_by_smiles);
+  const referencePredictions = asRecord(snapshot.reference_prediction_by_backend);
+  const transforms = Array.isArray(queryResult.transforms) ? queryResult.transforms : [];
+  const clusters = Array.isArray(queryResult.clusters) ? queryResult.clusters : [];
+  const firstCandidateSmiles =
+    candidates.length > 0 && candidates[0] && typeof candidates[0] === 'object'
+      ? readText((candidates[0] as Record<string, unknown>).smiles).trim()
+      : '';
+  const lastCandidateSmiles =
+    candidates.length > 0 && candidates[candidates.length - 1] && typeof candidates[candidates.length - 1] === 'object'
+      ? readText((candidates[candidates.length - 1] as Record<string, unknown>).smiles).trim()
+      : '';
+  return [
+    queryId,
+    candidates.length,
+    firstCandidateSmiles,
+    lastCandidateSmiles,
+    buildLeadOptPredictionHydrationSignature(predictions),
+    buildLeadOptPredictionHydrationSignature(referencePredictions),
+    transforms.length,
+    clusters.length
+  ].join('|');
+}
+
+function isReadyMmpDatabase(item: LeadOptMmpDatabaseItem): boolean {
+  const status = readText(item.status).trim().toLowerCase();
+  return status === 'ready';
+}
+
+function normalizeAtomIndices(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(
+      value
+        .map((item) => Number(item))
+        .filter((item) => Number.isFinite(item) && item >= 0)
+        .map((item) => Math.floor(item))
+    )
+  );
+}
+
+function normalizeBackendKey(value: unknown): string {
+  const token = String(value || '').trim().toLowerCase();
+  return token === 'alphafold3' || token === 'protenix' || token === 'pocketxmol' ? token : 'boltz';
+}
+
+function hasResolvedLeadOptPredictionMetrics(record: LeadOptPredictionRecord | null | undefined): boolean {
+  if (!record) return false;
+  if (record.pairIptmResolved === true) return true;
+  if (typeof record.pairIptm === 'number' && Number.isFinite(record.pairIptm)) return true;
+  if (typeof record.pairPae === 'number' && Number.isFinite(record.pairPae)) return true;
+  if (typeof record.ligandPlddt === 'number' && Number.isFinite(record.ligandPlddt)) return true;
+  return Array.isArray(record.ligandAtomPlddts) && record.ligandAtomPlddts.length > 0;
+}
+
+function parseCifTokens(line: string): string[] {
+  const tokens = line.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
+  return tokens.map((token) => token.replace(/^['"]|['"]$/g, ''));
+}
+
+function inferStructureFormatFromFileName(fileName: string): 'cif' | 'pdb' {
+  const normalized = String(fileName || '').trim().toLowerCase();
+  if (normalized.endsWith('.pdb') || normalized.endsWith('.ent')) return 'pdb';
+  return 'cif';
+}
+
+function sortStableChainIds(values: string[]): string[] {
+  return Array.from(
+    new Set(
+      (Array.isArray(values) ? values : [])
+        .map((value) => readText(value).trim())
+        .filter(Boolean)
+    )
+  ).sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }));
+}
+
+function selectSequentialLigandChain(reservedTargetChains: string[]): string {
+  const reserved = new Set(
+    (Array.isArray(reservedTargetChains) ? reservedTargetChains : [])
+      .map((value) => readText(value).trim().toUpperCase())
+      .filter(Boolean)
+  );
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+  for (const token of alphabet) {
+    if (!reserved.has(token)) return token;
+  }
+  return '';
+}
+
+function inferProteinChainSequencesFromPdb(pdbText: string): Record<string, string> {
+  const lines = String(pdbText || '').split(/\r?\n/);
+  const chainResidues = new Map<string, Array<{ seq: number; ins: string; aa: string }>>();
+  const seen = new Set<string>();
+  for (const line of lines) {
+    if (!line.startsWith('ATOM')) continue;
+    const residueName = line.slice(17, 20).trim().toUpperCase();
+    const amino = AMINO_ACID_THREE_TO_ONE[residueName];
+    if (!amino) continue;
+    const chainId = line.slice(21, 22).trim();
+    const seq = Number.parseInt(line.slice(22, 26).trim(), 10);
+    const ins = line.slice(26, 27).trim();
+    if (!chainId || !Number.isFinite(seq)) continue;
+    const key = `${chainId}:${seq}:${ins}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!chainResidues.has(chainId)) chainResidues.set(chainId, []);
+    chainResidues.get(chainId)?.push({ seq, ins, aa: amino });
+  }
+  const out: Record<string, string> = {};
+  for (const [chainId, residues] of chainResidues.entries()) {
+    residues.sort((a, b) => {
+      if (a.seq !== b.seq) return a.seq - b.seq;
+      return a.ins.localeCompare(b.ins);
+    });
+    const sequence = residues.map((item) => item.aa).join('');
+    if (sequence) out[chainId] = sequence;
+  }
+  return out;
+}
+
+function inferProteinChainSequencesFromCif(cifText: string): Record<string, string> {
+  const lines = String(cifText || '').split(/\r?\n/);
+  const chainResidues = new Map<string, Array<{ seq: number; ins: string; aa: string }>>();
+  const seen = new Set<string>();
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() !== 'loop_') continue;
+    const headers: string[] = [];
+    let j = i + 1;
+    while (j < lines.length && lines[j].trim().startsWith('_')) {
+      headers.push(lines[j].trim());
+      j += 1;
+    }
+    if (headers.length === 0 || !headers.some((item) => item.startsWith('_atom_site.'))) continue;
+    const idx = (name: string) => headers.findIndex((item) => item === name);
+    const groupIdx = idx('_atom_site.group_PDB');
+    const authCompIdx = idx('_atom_site.auth_comp_id');
+    const labelCompIdx = idx('_atom_site.label_comp_id');
+    const authAsymIdx = idx('_atom_site.auth_asym_id');
+    const labelAsymIdx = idx('_atom_site.label_asym_id');
+    const authSeqIdx = idx('_atom_site.auth_seq_id');
+    const labelSeqIdx = idx('_atom_site.label_seq_id');
+    const insIdx = idx('_atom_site.pdbx_PDB_ins_code');
+    for (; j < lines.length; j += 1) {
+      const raw = lines[j].trim();
+      if (!raw) continue;
+      if (raw === '#' || raw === 'loop_' || raw.startsWith('data_') || raw.startsWith('_')) break;
+      const tokens = parseCifTokens(raw);
+      if (tokens.length < headers.length) continue;
+      const group = (groupIdx >= 0 ? tokens[groupIdx] : 'ATOM').trim().toUpperCase();
+      if (group && group !== 'ATOM') continue;
+      const residueName = String((authCompIdx >= 0 ? tokens[authCompIdx] : tokens[labelCompIdx] || '') || '')
+        .trim()
+        .toUpperCase();
+      const amino = AMINO_ACID_THREE_TO_ONE[residueName];
+      if (!amino) continue;
+      const chainId = String((authAsymIdx >= 0 ? tokens[authAsymIdx] : tokens[labelAsymIdx] || '') || '').trim();
+      const seqToken = String((authSeqIdx >= 0 ? tokens[authSeqIdx] : tokens[labelSeqIdx] || '') || '').trim();
+      const ins = String((insIdx >= 0 ? tokens[insIdx] : '') || '').trim();
+      const seq = Number.parseInt(seqToken, 10);
+      if (!chainId || !Number.isFinite(seq)) continue;
+      const key = `${chainId}:${seq}:${ins}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (!chainResidues.has(chainId)) chainResidues.set(chainId, []);
+      chainResidues.get(chainId)?.push({ seq, ins, aa: amino });
+    }
+  }
+  const out: Record<string, string> = {};
+  for (const [chainId, residues] of chainResidues.entries()) {
+    residues.sort((a, b) => {
+      if (a.seq !== b.seq) return a.seq - b.seq;
+      return a.ins.localeCompare(b.ins);
+    });
+    const sequence = residues.map((item) => item.aa).join('');
+    if (sequence) out[chainId] = sequence;
+  }
+  return out;
+}
+
+function inferProteinChainSequencesFromStructure(
+  structureText: string,
+  format: 'cif' | 'pdb'
+): Record<string, string> {
+  if (!String(structureText || '').trim()) return {};
+  if (format === 'pdb') return inferProteinChainSequencesFromPdb(structureText);
+  return inferProteinChainSequencesFromCif(structureText);
+}
+
+function inferLigandAnchorFromPdb(
+  pdbText: string,
+  preferredChain: string
+): { chainId: string; residue: number } | null {
+  const preferred = String(preferredChain || '').trim();
+  const lines = String(pdbText || '').split(/\r?\n/);
+  let fallback: { chainId: string; residue: number } | null = null;
+  for (const line of lines) {
+    if (!line.startsWith('HETATM')) continue;
+    const residueName = line.slice(17, 20).trim().toUpperCase();
+    if (!residueName || residueName === 'HOH' || residueName === 'WAT') continue;
+    const chainId = line.slice(21, 22).trim();
+    const residue = Number.parseInt(line.slice(22, 26).trim(), 10);
+    if (!chainId || !Number.isFinite(residue) || residue <= 0) continue;
+    const current = { chainId, residue };
+    if (preferred && chainId === preferred) return current;
+    if (!fallback) fallback = current;
+  }
+  return fallback;
+}
+
+function inferLigandAnchorFromCif(
+  cifText: string,
+  preferredChain: string
+): { chainId: string; residue: number } | null {
+  const preferred = String(preferredChain || '').trim();
+  const lines = String(cifText || '').split(/\r?\n/);
+  let fallback: { chainId: string; residue: number } | null = null;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() !== 'loop_') continue;
+    const headers: string[] = [];
+    let j = i + 1;
+    while (j < lines.length && lines[j].trim().startsWith('_')) {
+      headers.push(lines[j].trim());
+      j += 1;
+    }
+    if (headers.length === 0 || !headers.some((item) => item.startsWith('_atom_site.'))) continue;
+    const idx = (name: string) => headers.findIndex((item) => item === name);
+    const groupIdx = idx('_atom_site.group_PDB');
+    const authCompIdx = idx('_atom_site.auth_comp_id');
+    const labelCompIdx = idx('_atom_site.label_comp_id');
+    const authAsymIdx = idx('_atom_site.auth_asym_id');
+    const labelAsymIdx = idx('_atom_site.label_asym_id');
+    const authSeqIdx = idx('_atom_site.auth_seq_id');
+    const labelSeqIdx = idx('_atom_site.label_seq_id');
+
+    for (; j < lines.length; j += 1) {
+      const raw = lines[j].trim();
+      if (!raw) continue;
+      if (raw === '#' || raw === 'loop_' || raw.startsWith('data_') || raw.startsWith('_')) break;
+      const tokens = parseCifTokens(raw);
+      if (tokens.length < headers.length) continue;
+      const group = (groupIdx >= 0 ? tokens[groupIdx] : 'HETATM').trim().toUpperCase();
+      if (group && group !== 'HETATM') continue;
+      const residueName = String((authCompIdx >= 0 ? tokens[authCompIdx] : tokens[labelCompIdx] || '') || '')
+        .trim()
+        .toUpperCase();
+      if (!residueName || residueName === 'HOH' || residueName === 'WAT') continue;
+      const chainId = String((authAsymIdx >= 0 ? tokens[authAsymIdx] : tokens[labelAsymIdx] || '') || '').trim();
+      const residueToken = String((authSeqIdx >= 0 ? tokens[authSeqIdx] : tokens[labelSeqIdx] || '') || '').trim();
+      const residue = Number.parseInt(residueToken, 10);
+      if (!chainId || !Number.isFinite(residue) || residue <= 0) continue;
+      const current = { chainId, residue };
+      if (preferred && chainId === preferred) return current;
+      if (!fallback) fallback = current;
+    }
+  }
+  return fallback;
+}
+
+function inferLigandAnchor(
+  structureText: string,
+  format: 'cif' | 'pdb',
+  preferredChain: string
+): { chainId: string; residue: number } | null {
+  if (!String(structureText || '').trim()) return null;
+  if (format === 'pdb') return inferLigandAnchorFromPdb(structureText, preferredChain);
+  return inferLigandAnchorFromCif(structureText, preferredChain);
+}
+
+function toPocketPayload(rows: PocketResidue[]): Array<Record<string, unknown>> {
+  return rows.map((item) => ({
+    chain_id: item.chain_id,
+    residue_name: item.residue_name,
+    residue_number: item.residue_number,
+    min_distance: item.min_distance || 0,
+    interaction_types: item.interaction_types || []
+  }));
+}
+
+export function LeadOptimizationWorkspace({
+  viewMode = 'design',
+  canEdit,
+  submitting,
+  backend,
+  onRegisterHeaderRunAction,
+  proteinSequence,
+  ligandSmiles,
+  targetChain,
+  ligandChain,
+  onLigandSmilesChange,
+  referenceScopeKey,
+  persistedReferenceUploads,
+  onReferenceUploadsChange,
+  onMmpTaskQueued,
+  onMmpTaskCompleted,
+  onMmpTaskFailed,
+  initialMmpSnapshot,
+  onMmpUiStateChange,
+  onPredictionQueued,
+  onPredictionStateChange
+}: LeadOptimizationWorkspaceProps) {
+  const [error, setError] = useState<string | null>(null);
+  const queryForm = useLeadOptMmpQueryForm({ onError: setError });
+  const [databaseOptions, setDatabaseOptions] = useState<LeadOptMmpDatabaseItem[]>([]);
+  const [selectedDatabaseId, setSelectedDatabaseId] = useState('');
+  const [databaseHint, setDatabaseHint] = useState('');
+
+  const [leftPanelWidth, setLeftPanelWidth] = useState(LEFT_PANEL_DEFAULT);
+  const resizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const layoutRef = useRef<HTMLDivElement | null>(null);
+  const [isResizing, setIsResizing] = useState(false);
+  const [resultViewerWidth, setResultViewerWidth] = useState(RESULT_VIEWER_DEFAULT);
+  const resultResizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const resultLayoutRef = useRef<HTMLDivElement | null>(null);
+  const [isResultResizing, setIsResultResizing] = useState(false);
+  const runMmpQueryRef = useRef<(() => Promise<void>) | null>(null);
+  const autoReferenceKickoffKeyRef = useRef('');
+  const [activeSmiles, setActiveSmiles] = useState('');
+  const [openedResultSmiles, setOpenedResultSmiles] = useState('');
+  const [openedResultHighlightAtomIndices, setOpenedResultHighlightAtomIndices] = useState<number[]>([]);
+  const [resultViewerOpen, setResultViewerOpen] = useState(false);
+  const [showMmpRunTransition, setShowMmpRunTransition] = useState(false);
+  const snapshotUiState = useMemo(() => {
+    const payload = asRecord(initialMmpSnapshot || null);
+    return normalizeLeadOptCandidatesUiState(payload.ui_state, backend);
+  }, [backend, initialMmpSnapshot]);
+  const [resultsUiState, setResultsUiState] = useState<LeadOptCandidatesUiState>(snapshotUiState);
+  const [viewerPreviewRenderMode, setViewerPreviewRenderMode] = useState<CandidatePreviewRenderMode>(
+    snapshotUiState.previewRenderMode
+  );
+  const resultsUiStateRef = useRef<LeadOptCandidatesUiState>(snapshotUiState);
+  const hydratedUiStateKeyRef = useRef('');
+
+  const computeLeftBounds = (containerWidth: number): { min: number; max: number } => {
+    const minWidth = LEFT_PANEL_MIN;
+    const maxWidth = containerWidth - RIGHT_PANEL_MIN - RESIZER_WIDTH - 12;
+    return {
+      min: minWidth,
+      max: Math.max(minWidth, maxWidth)
+    };
+  };
+
+  const computeResultBounds = (containerWidth: number): { min: number; max: number } => {
+    const minWidth = RESULT_VIEWER_MIN;
+    const maxWidth = containerWidth - RESULT_MAIN_MIN - RESIZER_WIDTH - 12;
+    return {
+      min: minWidth,
+      max: Math.max(minWidth, maxWidth)
+    };
+  };
+
+  useEffect(() => {
+    resultsUiStateRef.current = resultsUiState;
+  }, [resultsUiState]);
+
+  useEffect(() => {
+    setViewerPreviewRenderMode(resultsUiState.previewRenderMode);
+  }, [resultsUiState.previewRenderMode]);
+
+  useEffect(() => {
+    const snapshot = asRecord(initialMmpSnapshot || null);
+    const queryResult = asRecord(snapshot.query_result);
+    const queryId = readText(queryResult.query_id).trim();
+    const taskId = readText(queryResult.task_id || snapshot.task_id).trim();
+    const key = queryId || taskId || '__initial__';
+    if (hydratedUiStateKeyRef.current === key) return;
+    hydratedUiStateKeyRef.current = key;
+    setResultsUiState(snapshotUiState);
+    setViewerPreviewRenderMode(snapshotUiState.previewRenderMode);
+  }, [initialMmpSnapshot, snapshotUiState]);
+
+  const initialFragmentSelection = useMemo(() => {
+    const snapshot = (initialMmpSnapshot || null) as Record<string, unknown> | null;
+    if (!snapshot) return null;
+    const selection =
+      snapshot.selection && typeof snapshot.selection === 'object' && !Array.isArray(snapshot.selection)
+        ? (snapshot.selection as Record<string, unknown>)
+        : {};
+    const queryResult =
+      snapshot.query_result && typeof snapshot.query_result === 'object' && !Array.isArray(snapshot.query_result)
+        ? (snapshot.query_result as Record<string, unknown>)
+        : {};
+    const variableSpec =
+      queryResult.variable_spec && typeof queryResult.variable_spec === 'object' && !Array.isArray(queryResult.variable_spec)
+        ? (queryResult.variable_spec as Record<string, unknown>)
+        : {};
+    const variableItems = Array.isArray(selection.variable_items)
+      ? selection.variable_items
+      : Array.isArray(variableSpec.items)
+        ? variableSpec.items
+        : [];
+    const normalizedVariableItems = variableItems
+      .map((item) => {
+        const row = item && typeof item === 'object' ? (item as Record<string, unknown>) : {};
+        const atomValues = Array.isArray(row.atom_indices) ? row.atom_indices : [];
+        return {
+          fragmentId: readText(row.fragment_id).trim(),
+          query: readText(row.query).trim(),
+          atomIndices: atomValues
+            .map((value) => Number(value))
+            .filter((value) => Number.isFinite(value) && value >= 0)
+            .map((value) => Math.floor(value))
+        };
+      })
+      .filter((item) => item.fragmentId || item.query || item.atomIndices.length > 0);
+    const fragmentIds = Array.isArray(selection.selected_fragment_ids)
+      ? selection.selected_fragment_ids
+      : normalizedVariableItems
+        .map((item) => item.fragmentId)
+        .filter(Boolean);
+    const atomIndices = Array.isArray(selection.selected_fragment_atom_indices)
+      ? selection.selected_fragment_atom_indices
+      : normalizedVariableItems.flatMap((item) => item.atomIndices);
+    const variableQueries = Array.isArray(selection.variable_queries)
+      ? selection.variable_queries
+      : normalizedVariableItems
+        .map((item) => item.query)
+        .filter(Boolean);
+    return {
+      fragmentIds: fragmentIds.map((value) => readText(value).trim()).filter(Boolean),
+      atomIndices: atomIndices
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value >= 0)
+        .map((value) => Math.floor(value)),
+      variableQueries: variableQueries.map((value) => readText(value).trim()).filter(Boolean),
+      variableItems: normalizedVariableItems
+    };
+  }, [initialMmpSnapshot]);
+
+  const reference = useLeadOptReferenceFragment({
+    ligandSmiles,
+    onLigandSmilesChange,
+    currentVariableQuery: queryForm.variableQuery,
+    onAutoVariableQuery: (value) => {
+      queryForm.setVariableQuery((prev) => (prev === value ? prev : value));
+    },
+    onError: setError,
+    scopeKey: referenceScopeKey || `${targetChain}:${ligandChain}`,
+    persistedUploads: persistedReferenceUploads,
+    deferHydrationPreview: viewMode !== 'reference',
+    onPersistedUploadsChange: onReferenceUploadsChange,
+    initialSelection: initialFragmentSelection
+  });
+
+  const effectiveChains = useMemo(() => {
+    const explicitTargetChain = readText(reference.referenceTargetChainId).trim();
+    const explicitLigandChain = readText(reference.referenceLigandChainId).trim();
+    const preferredTargetChain = readText(targetChain).trim();
+    const preferredLigandChain = readText(ligandChain).trim();
+    const targetUploadContent = readText(reference.persistedUploads.target?.content);
+    const targetUploadFileName = readText(reference.persistedUploads.target?.fileName).trim();
+    const uploadFormat = inferStructureFormatFromFileName(targetUploadFileName || 'reference_target.cif');
+    const uploadChainSequences = inferProteinChainSequencesFromStructure(targetUploadContent, uploadFormat);
+    const uploadTargetChains = sortStableChainIds(Object.keys(uploadChainSequences));
+    const previewTargetChains = sortStableChainIds(Object.keys(reference.targetChainSequences || {}));
+    const declaredTargetCandidates = sortStableChainIds([explicitTargetChain, preferredTargetChain]);
+    const targetChainPool =
+      uploadTargetChains.length > 0
+        ? uploadTargetChains
+        : previewTargetChains.length > 0
+          ? previewTargetChains
+          : declaredTargetCandidates;
+    const normalizedTargetChain = targetChainPool[0] || 'A';
+    const reservedTargetChains =
+      uploadTargetChains.length > 0
+        ? uploadTargetChains
+        : previewTargetChains.length > 0
+          ? previewTargetChains
+          : [normalizedTargetChain];
+    const declaredLigandCandidates = sortStableChainIds([explicitLigandChain, preferredLigandChain]);
+    const reservedTargetSet = new Set(reservedTargetChains.map((item) => item.toUpperCase()));
+    let normalizedLigandChain = '';
+    for (const candidate of declaredLigandCandidates) {
+      const candidateUpper = candidate.toUpperCase();
+      if (!candidateUpper) continue;
+      if (candidateUpper === normalizedTargetChain.toUpperCase()) continue;
+      if (reservedTargetSet.has(candidateUpper)) continue;
+      normalizedLigandChain = candidate;
+      break;
+    }
+    if (!normalizedLigandChain) {
+      normalizedLigandChain = selectSequentialLigandChain(reservedTargetChains);
+    }
+    return {
+      targetChain: normalizedTargetChain,
+      ligandChain:
+        normalizedLigandChain && normalizedLigandChain.toUpperCase() !== normalizedTargetChain.toUpperCase()
+          ? normalizedLigandChain
+          : ''
+    };
+  }, [
+    ligandChain,
+    reference.persistedUploads.target?.content,
+    reference.persistedUploads.target?.fileName,
+    reference.referenceLigandChainId,
+    reference.referenceTargetChainId,
+    reference.targetChainSequences,
+    targetChain
+  ]);
+
+  const effectiveTargetChain = effectiveChains.targetChain;
+  const effectiveLigandChain = effectiveChains.ligandChain;
+
+  const mmp = useLeadOptMmpQueryMachine({
+    proteinSequence,
+    targetChain: effectiveTargetChain,
+    ligandChain: effectiveLigandChain,
+    backend,
+    onError: setError,
+    onPredictionQueued,
+    onPredictionStateChange
+  });
+
+  const hydratedSnapshotKeyRef = useRef('');
+  const snapshotDatabaseIdRef = useRef('');
+
+  useEffect(() => {
+    const snapshot = (initialMmpSnapshot || null) as Record<string, unknown> | null;
+    const queryResult = snapshot && typeof snapshot.query_result === 'object' ? (snapshot.query_result as Record<string, unknown>) : null;
+    snapshotDatabaseIdRef.current = readText(queryResult?.mmp_database_id).trim();
+    const hydrationKey = buildLeadOptSnapshotHydrationKey(snapshot);
+    if (!hydrationKey) return;
+    if (hydratedSnapshotKeyRef.current === hydrationKey) return;
+    hydratedSnapshotKeyRef.current = hydrationKey;
+    mmp.hydrateFromSnapshot(initialMmpSnapshot || null);
+  }, [initialMmpSnapshot, mmp]);
+
+  useEffect(() => {
+    if (!initialMmpSnapshot) return;
+    const snapshot = initialMmpSnapshot as Record<string, unknown>;
+    const queryResult = (snapshot.query_result && typeof snapshot.query_result === 'object')
+      ? (snapshot.query_result as Record<string, unknown>)
+      : null;
+    const selection = (snapshot.selection && typeof snapshot.selection === 'object')
+      ? (snapshot.selection as Record<string, unknown>)
+      : null;
+    const queryPayload = (snapshot.query_payload && typeof snapshot.query_payload === 'object')
+      ? (snapshot.query_payload as Record<string, unknown>)
+      : null;
+    const selectionProperty = readText(selection?.query_property).trim();
+    const queryResultProperty = readText(asRecord(queryResult?.property_targets).property).trim();
+    const queryPayloadProperty = readText(asRecord(queryPayload?.property_targets).property).trim();
+    const savedProperty = selectionProperty || queryResultProperty || queryPayloadProperty;
+    queryForm.setQueryProperty(savedProperty);
+    const selectionDirectionToken = readText(selection?.direction).trim().toLowerCase();
+    const queryResultDirectionToken = readText(asRecord(queryResult?.property_targets).direction).trim().toLowerCase();
+    const queryPayloadDirectionToken = readText(asRecord(queryPayload?.property_targets).direction).trim().toLowerCase();
+    const savedDirectionToken = selectionDirectionToken || queryResultDirectionToken || queryPayloadDirectionToken;
+    const savedDirection: '' | 'increase' | 'decrease' =
+      savedDirectionToken === 'increase' || savedDirectionToken === 'decrease' ? savedDirectionToken : '';
+    queryForm.setDirection(savedProperty ? savedDirection : '');
+    const savedMinPairsRaw = Number(selection?.min_pairs ?? queryResult?.min_pairs ?? queryPayload?.min_pairs ?? 1);
+    const savedMinPairs = Number.isFinite(savedMinPairsRaw) ? Math.max(1, Math.floor(savedMinPairsRaw)) : 1;
+    queryForm.setMinPairs(savedMinPairs);
+    const savedEnvRadiusRaw = Number(
+      selection?.env_radius ?? queryResult?.rule_env_radius ?? queryPayload?.rule_env_radius ?? 1
+    );
+    const savedEnvRadius = Number.isFinite(savedEnvRadiusRaw) ? Math.max(0, Math.min(6, Math.floor(savedEnvRadiusRaw))) : 1;
+    queryForm.setEnvRadius(savedEnvRadius);
+    const savedGroupingMode = readText(selection?.grouped_by_environment_mode).trim().toLowerCase();
+    const groupedByEnvironmentToken =
+      savedGroupingMode ||
+      (() => {
+        const fromQueryResult = queryResult ? queryResult.grouped_by_environment : undefined;
+        const fromPayload = queryPayload ? queryPayload.grouped_by_environment : undefined;
+        if (fromQueryResult === true || readText(fromQueryResult).trim().toLowerCase() === 'true') return 'on';
+        if (fromQueryResult === false || readText(fromQueryResult).trim().toLowerCase() === 'false') return 'off';
+        if (fromPayload === true || readText(fromPayload).trim().toLowerCase() === 'true') return 'on';
+        if (fromPayload === false || readText(fromPayload).trim().toLowerCase() === 'false') return 'off';
+        return '';
+      })();
+    const normalizedGroupingMode: 'auto' | 'on' | 'off' =
+      groupedByEnvironmentToken === 'on' || groupedByEnvironmentToken === 'off' ? groupedByEnvironmentToken : 'auto';
+    queryForm.setGroupedByEnvironment(normalizedGroupingMode);
+    const snapshotDbId = readText(queryResult?.mmp_database_id).trim();
+    if (!snapshotDbId) return;
+    if (!databaseOptions.some((item) => readText(item.id).trim() === snapshotDbId)) return;
+    setSelectedDatabaseId(snapshotDbId);
+  }, [
+    databaseOptions,
+    initialMmpSnapshot,
+    queryForm.setDirection,
+    queryForm.setEnvRadius,
+    queryForm.setGroupedByEnvironment,
+    queryForm.setMinPairs,
+    queryForm.setQueryProperty
+  ]);
+
+  const applyDatabaseCatalog = useCallback(
+    (catalog: { default_database_id?: string; databases?: LeadOptMmpDatabaseItem[] }) => {
+      const visibleReady = Array.isArray(catalog.databases)
+        ? catalog.databases.filter((item) => Boolean(item.visible ?? true) && isReadyMmpDatabase(item))
+        : [];
+      setDatabaseOptions(visibleReady);
+      const snapshotDatabaseId = snapshotDatabaseIdRef.current;
+      const catalogDefault = readText(catalog.default_database_id).trim();
+      const firstVisible = readText(visibleReady[0]?.id).trim();
+      const hasOption = (id: string) => Boolean(id) && visibleReady.some((item) => readText(item.id).trim() === id);
+      setSelectedDatabaseId((prev) => {
+        const previous = readText(prev).trim();
+        if (hasOption(previous)) {
+          return previous;
+        }
+        const fallback = [snapshotDatabaseId, catalogDefault, firstVisible].find((id) => hasOption(readText(id).trim())) || '';
+        return fallback || '';
+      });
+      if (visibleReady.length === 0) {
+        setDatabaseHint('No ready MMP database. Please contact an admin to complete build or enable one.');
+      } else {
+        setDatabaseHint('');
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const catalog = await fetchLeadOptimizationMmpDatabases();
+        if (cancelled) return;
+        applyDatabaseCatalog(catalog);
+      } catch (err) {
+        if (cancelled) return;
+        setDatabaseHint(err instanceof Error ? err.message : 'Failed to load MMP database catalog.');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [applyDatabaseCatalog]);
+
+  const loading = reference.busy || mmp.loading;
+  const fragmentSketchSmiles = reference.fragmentSourceSmiles.trim() || reference.effectiveLigandSmiles.trim();
+  const canQuery = canEdit && Boolean(fragmentSketchSmiles);
+  const persistedReferenceQuerySmiles = useMemo(() => {
+    const snapshot = asRecord(initialMmpSnapshot || null);
+    const selection = asRecord(snapshot.selection);
+    const queryPayload = asRecord(snapshot.query_payload);
+    const queryResult = asRecord(snapshot.query_result);
+    return (
+      readText(selection.query_smiles).trim() ||
+      readText(queryPayload.query_mol).trim() ||
+      readText(queryResult.query_mol).trim() ||
+      ''
+    );
+  }, [initialMmpSnapshot]);
+  const referenceControlSmiles = useMemo(
+    () =>
+      readText(reference.effectiveLigandSmiles).trim() ||
+      fragmentSketchSmiles ||
+      persistedReferenceQuerySmiles,
+    [fragmentSketchSmiles, persistedReferenceQuerySmiles, reference.effectiveLigandSmiles]
+  );
+
+  const fragmentById = useMemo(() => {
+    const map = new Map<string, LigandFragmentItem>();
+    reference.fragments.forEach((item) => map.set(item.fragment_id, item));
+    return map;
+  }, [reference.fragments]);
+
+  const selectedFragmentItems = useMemo(
+    () =>
+      reference.selectedFragmentIds
+        .map((fragmentId) => fragmentById.get(fragmentId))
+        .filter((item): item is LigandFragmentItem => Boolean(item)),
+    [fragmentById, reference.selectedFragmentIds]
+  );
+
+  const selectedFragmentAtomIndices = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          selectedFragmentItems.flatMap((item) =>
+            Array.isArray(item.atom_indices)
+              ? item.atom_indices
+                  .map((value) => Number(value))
+                  .filter((value) => Number.isFinite(value) && value >= 0)
+                  .map((value) => Math.floor(value))
+              : []
+          )
+        )
+      ),
+    [selectedFragmentItems]
+  );
+  const snapshotSelectedFragmentAtomIndices = useMemo(() => {
+    const snapshot = asRecord(initialMmpSnapshot || null);
+    const selection = asRecord(snapshot.selection);
+    const selectedFromSelection = Array.isArray(selection.selected_fragment_atom_indices)
+      ? selection.selected_fragment_atom_indices
+      : [];
+    const selectedFromVariableItems = Array.isArray(selection.variable_items)
+      ? selection.variable_items.flatMap((item) => {
+          const row = asRecord(item);
+          return Array.isArray(row.atom_indices) ? row.atom_indices : [];
+        })
+      : [];
+    return Array.from(
+      new Set(
+        [...selectedFromSelection, ...selectedFromVariableItems]
+          .map((value) => Number(value))
+          .filter((value) => Number.isFinite(value) && value >= 0)
+          .map((value) => Math.floor(value))
+      )
+    );
+  }, [initialMmpSnapshot]);
+
+  const inferredQueryMode = useMemo(
+    () => inferQueryModeFromSelection(selectedFragmentItems, reference.fragments, reference.ligandAtomBonds),
+    [reference.fragments, reference.ligandAtomBonds, selectedFragmentItems]
+  );
+
+  useEffect(() => {
+    if (selectedFragmentItems.length === 0) return;
+    if (queryForm.queryMode !== inferredQueryMode) {
+      queryForm.setQueryMode(inferredQueryMode);
+    }
+  }, [inferredQueryMode, queryForm.queryMode, queryForm.setQueryMode, selectedFragmentItems.length]);
+
+  const selectedDatabase = useMemo(
+    () => databaseOptions.find((item) => readText(item.id).trim() === selectedDatabaseId) || null,
+    [databaseOptions, selectedDatabaseId]
+  );
+
+  const dbSelectOptions = useMemo(
+    () =>
+      databaseOptions.map((item) => ({
+        id: readText(item.id).trim(),
+        label: readText(item.label).trim() || readText(item.id).trim()
+      })),
+    [databaseOptions]
+  );
+
+  const propertyOptions = useMemo<LeadOptPropertyOption[]>(() => {
+    const base: LeadOptPropertyOption[] = [];
+    const seen = new Set<string>();
+    const dbProperties = Array.isArray(selectedDatabase?.properties) ? selectedDatabase?.properties : [];
+    for (const item of dbProperties) {
+      const value = readText(item.name).trim();
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      const label = readText(item.display_name).trim() || readText(item.label).trim() || value;
+      base.push({ value, label });
+    }
+    const descriptorDefaults: LeadOptPropertyOption[] = [
+      { value: 'mw', label: 'MW' },
+      { value: 'logp', label: 'LogP' },
+      { value: 'tpsa', label: 'TPSA' }
+    ];
+    for (const item of descriptorDefaults) {
+      if (seen.has(item.value)) continue;
+      seen.add(item.value);
+      base.push(item);
+    }
+    if (base.length === 0) {
+      base.push({ value: 'mw', label: 'MW' });
+    }
+    return base;
+  }, [selectedDatabase?.properties]);
+
+  useEffect(() => {
+    const active = readText(queryForm.queryProperty).trim();
+    if (!active) return;
+    if (propertyOptions.some((item) => item.value === active)) return;
+    queryForm.setQueryProperty('');
+    queryForm.setDirection('');
+  }, [propertyOptions, queryForm.queryProperty, queryForm.setDirection, queryForm.setQueryProperty]);
+
+  useEffect(() => {
+    if (readText(queryForm.queryProperty).trim()) return;
+    if (!readText(queryForm.direction).trim()) return;
+    queryForm.setDirection('');
+  }, [queryForm.direction, queryForm.queryProperty, queryForm.setDirection]);
+
+  const effectiveViewMode = viewMode;
+
+  const pocketPayload = useMemo(() => toPocketPayload(reference.pocketResidues), [reference.pocketResidues]);
+  const candidateSmilesList = useMemo(
+    () =>
+      mmp.enumeratedCandidates
+        .map((row) => readText(row.smiles).trim())
+        .filter((value): value is string => Boolean(value)),
+    [mmp.enumeratedCandidates]
+  );
+  const openedPredictionRecord = openedResultSmiles ? mmp.predictionBySmiles[openedResultSmiles] : null;
+  const openedStructureText = readText(openedPredictionRecord?.structureText).trim();
+  const openedStructureFormat: 'cif' | 'pdb' =
+    readText(openedPredictionRecord?.structureFormat).toLowerCase() === 'pdb' ? 'pdb' : 'cif';
+  const openedStructureTaskId = readText(openedPredictionRecord?.taskId).trim();
+  const openedResultViewerKey = `${openedResultSmiles}:${openedStructureTaskId}:${openedStructureFormat}:${viewerPreviewRenderMode}`;
+  const openedResultLigandAnchor = useMemo(
+    () => inferLigandAnchor(openedStructureText, openedStructureFormat, effectiveLigandChain),
+    [effectiveLigandChain, openedStructureFormat, openedStructureText]
+  );
+  const openedResultHighlightAtoms = useMemo<MolstarAtomHighlight[]>(() => {
+    if (!resultViewerOpen) return [];
+    if (!openedResultLigandAnchor || openedResultHighlightAtomIndices.length === 0) return [];
+    return openedResultHighlightAtomIndices.map((atomIndex) => ({
+      chainId: openedResultLigandAnchor.chainId,
+      residue: openedResultLigandAnchor.residue,
+      atomName: '',
+      atomIndex,
+      emphasis: 'default'
+    }));
+  }, [openedResultHighlightAtomIndices, openedResultLigandAnchor, resultViewerOpen]);
+  const openedResultActiveAtom: MolstarAtomHighlight | null = null;
+  const openedResultActiveResidue = useMemo<MolstarResidueHighlight | null>(() => {
+    if (!resultViewerOpen || !openedResultLigandAnchor) return null;
+    return {
+      chainId: openedResultLigandAnchor.chainId,
+      residue: openedResultLigandAnchor.residue,
+      emphasis: 'active'
+    };
+  }, [openedResultLigandAnchor, resultViewerOpen]);
+  const referenceProteinSequence = useMemo(() => {
+    const map = reference.targetChainSequences || {};
+    const targetUploadContent = readText(reference.persistedUploads.target?.content);
+    const targetUploadFileName = readText(reference.persistedUploads.target?.fileName).trim();
+    const uploadFormat = inferStructureFormatFromFileName(targetUploadFileName || 'reference_target.cif');
+    const parsedFromUpload = inferProteinChainSequencesFromStructure(targetUploadContent, uploadFormat);
+    const direct = readText((map as Record<string, unknown>)[effectiveTargetChain]).replace(/\s+/g, '').trim();
+    if (direct) return direct;
+    const parsedDirect = readText((parsedFromUpload as Record<string, unknown>)[effectiveTargetChain]).replace(/\s+/g, '').trim();
+    if (parsedDirect) return parsedDirect;
+    for (const value of Object.values(map as Record<string, unknown>)) {
+      const sequence = readText(value).replace(/\s+/g, '').trim();
+      if (sequence) return sequence;
+    }
+    for (const value of Object.values(parsedFromUpload as Record<string, unknown>)) {
+      const sequence = readText(value).replace(/\s+/g, '').trim();
+      if (sequence) return sequence;
+    }
+    return '';
+  }, [
+    effectiveTargetChain,
+    reference.persistedUploads.target?.content,
+    reference.persistedUploads.target?.fileName,
+    reference.targetChainSequences
+  ]);
+  const templateStructureTextForPrediction = useMemo(() => {
+    const previewTemplate = readText(reference.previewStructureText).trim();
+    if (previewTemplate) return previewTemplate;
+    if (referenceProteinSequence) return '';
+    return readText(reference.persistedUploads.target?.content).trim();
+  }, [reference.persistedUploads.target?.content, reference.previewStructureText, referenceProteinSequence]);
+  const templateStructureFormatForPrediction = useMemo<'cif' | 'pdb'>(() => {
+    const previewTemplate = readText(reference.previewStructureText).trim();
+    if (previewTemplate) {
+      return reference.previewStructureFormat === 'pdb' ? 'pdb' : 'cif';
+    }
+    const targetUploadFileName = readText(reference.persistedUploads.target?.fileName).trim();
+    return inferStructureFormatFromFileName(targetUploadFileName || 'reference_target.cif');
+  }, [
+    reference.persistedUploads.target?.fileName,
+    reference.previewStructureFormat,
+    reference.previewStructureText
+  ]);
+
+  useEffect(() => {
+    if (candidateSmilesList.length === 0) {
+      setActiveSmiles('');
+      setOpenedResultSmiles('');
+      setOpenedResultHighlightAtomIndices([]);
+      setResultViewerOpen(false);
+      return;
+    }
+    if (!activeSmiles || !candidateSmilesList.includes(activeSmiles)) {
+      setActiveSmiles(candidateSmilesList[0]);
+    }
+    if (openedResultSmiles && !candidateSmilesList.includes(openedResultSmiles)) {
+      setOpenedResultSmiles('');
+      setOpenedResultHighlightAtomIndices([]);
+      setResultViewerOpen(false);
+    }
+  }, [activeSmiles, candidateSmilesList, openedResultSmiles]);
+
+  useEffect(() => {
+    const notice = readText(mmp.queryNotice).trim();
+    const isMmpRunning = mmp.loading && notice.toLowerCase().includes('running mmp query');
+    if (isMmpRunning) {
+      setShowMmpRunTransition(true);
+      return;
+    }
+    if (!showMmpRunTransition) return;
+    const timer = window.setTimeout(() => setShowMmpRunTransition(false), 360);
+    return () => window.clearTimeout(timer);
+  }, [mmp.loading, mmp.queryNotice, showMmpRunTransition]);
+
+  const handleOpenPredictionResult = useCallback(
+    async (candidateSmiles: string, highlightAtomIndices?: number[]) => {
+      const normalizedSmiles = readText(candidateSmiles).trim();
+      if (!normalizedSmiles) return;
+      setActiveSmiles(normalizedSmiles);
+      setOpenedResultSmiles(normalizedSmiles);
+      setResultViewerOpen(true);
+      setError(null);
+      const fallbackHighlight = normalizeAtomIndices(
+        mmp.enumeratedCandidates.find((row) => readText(row.smiles).trim() === normalizedSmiles)?.final_highlight_atom_indices
+      );
+      setOpenedResultHighlightAtomIndices(
+        normalizeAtomIndices(highlightAtomIndices).length > 0
+          ? normalizeAtomIndices(highlightAtomIndices)
+          : fallbackHighlight
+      );
+      const record = await mmp.ensurePredictionResult(normalizedSmiles);
+      if (!record || String(record.state || '').toUpperCase() !== 'SUCCESS') return;
+      if (!readText(record.structureText).trim()) {
+        setError('Prediction completed, but result bundle has no readable structure.');
+        return;
+      }
+      setError(null);
+    },
+    [mmp.ensurePredictionResult, mmp.enumeratedCandidates]
+  );
+
+  const handleCandidatesUiStateChange = useCallback(
+    (nextUiState: LeadOptCandidatesUiState) => {
+      setResultsUiState(nextUiState);
+      if (typeof onMmpUiStateChange === 'function') {
+        void onMmpUiStateChange({ uiState: nextUiState });
+      }
+    },
+    [onMmpUiStateChange]
+  );
+
+  const handlePreviewRenderModeChange = useCallback((mode: CandidatePreviewRenderMode) => {
+    setViewerPreviewRenderMode(mode);
+  }, []);
+
+  useEffect(() => {
+    if (!reference.referenceReady) return;
+    const selectedBackendKey = normalizeBackendKey(resultsUiState.selectedBackend || backend);
+    const referenceSmiles = readText(referenceControlSmiles).trim();
+    if (!referenceSmiles) return;
+    const hasAnyPredictionForSelectedBackend = Object.values(mmp.predictionBySmiles).some((record) => {
+      if (!record) return false;
+      return normalizeBackendKey(record.backend) === selectedBackendKey;
+    });
+    if (!hasAnyPredictionForSelectedBackend) return;
+
+    const referenceRecord = mmp.referencePredictionByBackend[selectedBackendKey];
+    const referenceState = String(referenceRecord?.state || '').trim().toUpperCase();
+    if (referenceState === 'QUEUED' || referenceState === 'RUNNING') return;
+    if (referenceState === 'SUCCESS' && hasResolvedLeadOptPredictionMetrics(referenceRecord)) return;
+
+    const kickoffKey = `${readText(mmp.queryId).trim() || 'no-query'}|${selectedBackendKey}|${referenceSmiles}`;
+    if (autoReferenceKickoffKeyRef.current === kickoffKey) return;
+    autoReferenceKickoffKeyRef.current = kickoffKey;
+
+    void mmp.runPredictReferenceForBackend({
+      candidateSmiles: referenceSmiles,
+      referenceReady: reference.referenceReady,
+      referenceProteinSequence,
+      referenceTemplateStructureText: templateStructureTextForPrediction,
+      referenceTemplateFormat: templateStructureFormatForPrediction,
+      backend: selectedBackendKey,
+      pocketResidues: selectedBackendKey === 'pocketxmol' ? [] : pocketPayload,
+      variableAtomIndices:
+        selectedFragmentAtomIndices.length > 0 ? selectedFragmentAtomIndices : snapshotSelectedFragmentAtomIndices,
+      referenceTargetFilename: readText(reference.persistedUploads.target?.fileName).trim(),
+      referenceTargetFileContent: readText(reference.persistedUploads.target?.content),
+      referenceLigandFilename: readText(reference.persistedUploads.ligand?.fileName).trim(),
+      referenceLigandFileContent: readText(reference.persistedUploads.ligand?.content)
+    });
+  }, [
+    backend,
+    mmp.predictionBySmiles,
+    mmp.queryId,
+    mmp.referencePredictionByBackend,
+    mmp.runPredictReferenceForBackend,
+    pocketPayload,
+    reference.referenceReady,
+    reference.persistedUploads.ligand?.content,
+    reference.persistedUploads.ligand?.fileName,
+    reference.persistedUploads.target?.content,
+    reference.persistedUploads.target?.fileName,
+    referenceControlSmiles,
+    referenceProteinSequence,
+    resultsUiState.selectedBackend,
+    selectedFragmentAtomIndices,
+    snapshotSelectedFragmentAtomIndices,
+    templateStructureFormatForPrediction,
+    templateStructureTextForPrediction
+  ]);
+
+  const candidatesEmptyState = useMemo(() => {
+    const snapshot = asRecord(initialMmpSnapshot || null);
+    const queryResult = asRecord(snapshot.query_result);
+    const queryId = readText(queryResult.query_id || snapshot.query_id).trim();
+    const queryCacheState = readText(snapshot.query_cache_state || queryResult.query_cache_state).trim().toLowerCase();
+    const candidateCountHint = Number.isFinite(Number(snapshot.candidate_count)) ? Number(snapshot.candidate_count) : 0;
+    const transformCountHint = Math.max(
+      Number.isFinite(Number(snapshot.transform_count)) ? Number(snapshot.transform_count) : 0,
+      Number.isFinite(Number(queryResult.count)) ? Number(queryResult.count) : 0
+    );
+    const enumeratedCount = mmp.enumeratedCandidates.length;
+    const predictionCount = Object.keys(mmp.predictionBySmiles).length;
+    const likelyExpired = queryCacheState === 'expired';
+    return {
+      hint: likelyExpired
+        ? 'Query cache expired for this task. Re-run MMP to regenerate candidate list.'
+        : '',
+      context: {
+        queryId,
+        queryCacheState,
+        candidateCountHint,
+        transformCountHint,
+        enumeratedCount,
+        predictionCount
+      }
+    };
+  }, [initialMmpSnapshot, mmp.enumeratedCandidates.length, mmp.predictionBySmiles]);
+
+  const runMmpQuery = useCallback(async () => {
+    const variableItems = queryForm.buildVariableItems(
+      selectedFragmentItems,
+      reference.fragments,
+      reference.ligandAtomBonds
+    );
+    const querySmiles = fragmentSketchSmiles;
+    await mmp.runMmpQuery({
+      canQuery,
+      effectiveLigandSmiles: querySmiles,
+      variableItems,
+      constantQuery: queryForm.constantQuery,
+      direction: queryForm.direction,
+      queryProperty: queryForm.queryProperty,
+      mmpDatabaseId: selectedDatabaseId,
+      queryMode: queryForm.queryMode,
+      groupedByEnvironment: queryForm.groupedByEnvironment,
+      minPairs: queryForm.minPairs,
+      envRadius: queryForm.envRadius,
+      selectedFragmentIds: reference.selectedFragmentIds,
+      selectedFragmentAtomIndices,
+      onTaskQueued:
+        typeof onMmpTaskQueued === 'function'
+          ? async ({ taskId, requestPayload }) => {
+              await onMmpTaskQueued({
+                taskId,
+                requestPayload,
+                querySmiles,
+                referenceUploads: reference.persistedUploads
+              });
+            }
+          : undefined,
+      onTaskCompleted:
+        typeof onMmpTaskCompleted === 'function'
+          ? async (payload) => {
+              const baseSnapshot = asRecord(payload.resultSnapshot);
+              await onMmpTaskCompleted({
+                ...payload,
+                resultSnapshot: {
+                  ...baseSnapshot,
+                  ui_state: { ...resultsUiStateRef.current }
+                }
+              });
+            }
+          : undefined,
+      onTaskFailed: onMmpTaskFailed
+    });
+  }, [
+    mmp.runMmpQuery,
+    queryForm.buildVariableItems,
+    queryForm.constantQuery,
+    queryForm.direction,
+    queryForm.envRadius,
+    queryForm.groupedByEnvironment,
+    queryForm.minPairs,
+    queryForm.queryMode,
+    queryForm.queryProperty,
+    selectedDatabaseId,
+    fragmentSketchSmiles,
+    reference.fragments,
+    reference.ligandAtomBonds,
+    reference.persistedUploads,
+    reference.selectedFragmentIds,
+    selectedFragmentAtomIndices,
+    selectedFragmentItems,
+    canQuery,
+    onMmpTaskQueued,
+    onMmpTaskCompleted,
+    onMmpTaskFailed,
+    pocketPayload
+  ]);
+  runMmpQueryRef.current = runMmpQuery;
+
+  const triggerHeaderRun = useCallback(async () => {
+    const action = runMmpQueryRef.current;
+    if (!action) return;
+    await action();
+  }, []);
+
+  const handleResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 1100px)').matches) return;
+    if (!layoutRef.current) return;
+    resizeStateRef.current = { startX: event.clientX, startWidth: leftPanelWidth };
+    setIsResizing(true);
+    event.preventDefault();
+  };
+
+  const handleResizerKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const container = layoutRef.current;
+    if (!container) return;
+    const bounds = computeLeftBounds(container.clientWidth);
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      setLeftPanelWidth((current) => Math.max(bounds.min, current - LEFT_PANEL_KEY_STEP));
+      return;
+    }
+    if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      setLeftPanelWidth((current) => Math.min(bounds.max, current + LEFT_PANEL_KEY_STEP));
+      return;
+    }
+    if (event.key === 'Home') {
+      event.preventDefault();
+      setLeftPanelWidth(LEFT_PANEL_DEFAULT);
+    }
+  };
+
+  const handleResultResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 1100px)').matches) return;
+    if (!resultLayoutRef.current) return;
+    resultResizeStateRef.current = { startX: event.clientX, startWidth: resultViewerWidth };
+    setIsResultResizing(true);
+    event.preventDefault();
+  };
+
+  const handleResultResizerKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const container = resultLayoutRef.current;
+    if (!container) return;
+    const bounds = computeResultBounds(container.clientWidth);
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      setResultViewerWidth((current) => Math.max(bounds.min, current - LEFT_PANEL_KEY_STEP));
+      return;
+    }
+    if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      setResultViewerWidth((current) => Math.min(bounds.max, current + LEFT_PANEL_KEY_STEP));
+      return;
+    }
+    if (event.key === 'Home') {
+      event.preventDefault();
+      setResultViewerWidth(RESULT_VIEWER_DEFAULT);
+    }
+  };
+
+  useEffect(() => {
+    if (!isResizing) return;
+    const handleMove = (event: PointerEvent) => {
+      const state = resizeStateRef.current;
+      const container = layoutRef.current;
+      if (!state || !container) return;
+      const delta = event.clientX - state.startX;
+      const total = container.clientWidth;
+      const bounds = computeLeftBounds(total);
+      const next = Math.max(bounds.min, Math.min(bounds.max, state.startWidth + delta));
+      setLeftPanelWidth(next);
+    };
+    const handleUp = () => {
+      setIsResizing(false);
+      resizeStateRef.current = null;
+    };
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    return () => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [isResizing]);
+
+  useEffect(() => {
+    if (!isResultResizing) return;
+    const handleMove = (event: PointerEvent) => {
+      const state = resultResizeStateRef.current;
+      const container = resultLayoutRef.current;
+      if (!state || !container) return;
+      const delta = event.clientX - state.startX;
+      const total = container.clientWidth;
+      const bounds = computeResultBounds(total);
+      const next = Math.max(bounds.min, Math.min(bounds.max, state.startWidth + delta));
+      setResultViewerWidth(next);
+    };
+    const handleUp = () => {
+      setIsResultResizing(false);
+      resultResizeStateRef.current = null;
+    };
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    return () => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [isResultResizing]);
+
+  useLayoutEffect(() => {
+    if (typeof onRegisterHeaderRunAction !== 'function') return;
+    if (effectiveViewMode !== 'reference') {
+      onRegisterHeaderRunAction(null);
+      return;
+    }
+    onRegisterHeaderRunAction(triggerHeaderRun);
+    return () => onRegisterHeaderRunAction(null);
+  }, [effectiveViewMode, onRegisterHeaderRunAction, triggerHeaderRun]);
+
+  const layoutStyle = useMemo(
+    () =>
+      ({
+        '--lead-opt-left-width': `${leftPanelWidth}px`,
+        '--lead-opt-result-left-width': `${resultViewerWidth}px`,
+        '--lead-opt-result-main-min-width': `${RESULT_MAIN_MIN}px`
+      }) as CSSProperties,
+    [leftPanelWidth, resultViewerWidth]
+  );
+
+  return (
+    <div className="lead-opt-workspace">
+      {effectiveViewMode === 'reference' ? (
+        <div ref={layoutRef} className="lead-opt-layout lead-opt-layout--resizable" style={layoutStyle}>
+          <LeadOptReferencePanel
+            sectionId="leadopt-reference"
+            canEdit={canEdit}
+            loading={loading}
+            submitting={submitting}
+            referenceReady={reference.referenceReady}
+            previewStructureText={reference.previewStructureText}
+            previewStructureFormat={reference.previewStructureFormat}
+            previewOverlayStructureText={reference.previewOverlayStructureText}
+            previewOverlayStructureFormat={reference.previewOverlayStructureFormat}
+            ligandChain={effectiveLigandChain}
+            highlightedLigandAtoms={reference.highlightedLigandAtoms}
+            highlightedPocketResidues={reference.highlightedPocketResidues}
+            activeMolstarAtom={reference.activeMolstarAtom}
+            onResiduePick={reference.handleMolstarResiduePick}
+            onTargetFileChange={reference.handleTargetFileChange}
+            onLigandFileChange={reference.handleLigandFileChange}
+          />
+
+          <div
+            className={`panel-resizer lead-opt-layout-resizer ${isResizing ? 'dragging' : ''}`}
+            onPointerDown={handleResizeStart}
+            onKeyDown={handleResizerKeyDown}
+            role="separator"
+            aria-label="Resize 3D and fragments panels"
+            aria-orientation="vertical"
+            tabIndex={0}
+          />
+
+          <LeadOptFragmentPanel
+            sectionId="leadopt-fragment"
+            effectiveLigandSmiles={fragmentSketchSmiles}
+            fragments={reference.fragments}
+            selectedFragmentIds={reference.selectedFragmentIds}
+            activeFragmentId={reference.activeFragmentId}
+            onAtomClick={reference.handleFragmentAtomClick}
+            onToggleFragmentSelection={reference.toggleFragmentSelection}
+            onClearFragmentSelection={reference.clearFragmentSelection}
+            direction={queryForm.direction}
+            queryProperty={queryForm.queryProperty}
+            groupedByEnvironment={queryForm.groupedByEnvironment}
+            selectedDatabaseId={selectedDatabaseId}
+            databaseOptions={dbSelectOptions}
+            propertyOptions={propertyOptions}
+            envRadius={queryForm.envRadius}
+            minPairs={queryForm.minPairs}
+            onDirectionChange={queryForm.setDirection}
+            onQueryPropertyChange={queryForm.setQueryProperty}
+            onGroupedByEnvironmentChange={queryForm.setGroupedByEnvironment}
+            onDatabaseIdChange={setSelectedDatabaseId}
+            onEnvRadiusChange={queryForm.setEnvRadius}
+            onMinPairsChange={queryForm.setMinPairs}
+          />
+        </div>
+      ) : (
+        <div
+          ref={resultLayoutRef}
+          className={`lead-opt-mmp-layout${
+            resultViewerOpen ? ' lead-opt-mmp-layout--viewer-open lead-opt-mmp-layout--resizable' : ''
+          }`}
+          style={layoutStyle}
+        >
+          {resultViewerOpen ? (
+            <section className="lead-opt-mmp-viewer">
+              {openedStructureText ? (
+                <LeadOptMolstarViewer
+                  key={openedResultViewerKey}
+                  structureText={openedStructureText}
+                  format={openedStructureFormat}
+                  colorMode={viewerPreviewRenderMode === 'confidence' ? 'alphafold' : 'default'}
+                  confidenceBackend={resultsUiState.selectedBackend}
+                  styleVariant="results"
+                  ligandFocusChainId={effectiveLigandChain}
+                  highlightAtoms={openedResultHighlightAtoms}
+                  activeResidue={openedResultActiveResidue}
+                  activeAtom={openedResultActiveAtom}
+                  showSequence={false}
+                  suppressResidueSelection
+                  interactionGranularity="element"
+                  suppressAutoFocus={false}
+                />
+              ) : (
+                <div className="ligand-preview-empty">Result not ready yet.</div>
+              )}
+            </section>
+          ) : null}
+          {resultViewerOpen ? (
+            <div
+              className={`panel-resizer lead-opt-layout-resizer ${isResultResizing ? 'dragging' : ''}`}
+              onPointerDown={handleResultResizeStart}
+              onKeyDown={handleResultResizerKeyDown}
+              role="separator"
+              aria-label="Resize 3D and candidate panels"
+              aria-orientation="vertical"
+              tabIndex={0}
+            />
+          ) : null}
+          <div className={`lead-opt-mmp-main${resultViewerOpen ? ' lead-opt-mmp-main--viewer-open' : ''}`}>
+            <LeadOptCandidatesPanel
+              sectionId="leadopt-candidates"
+              cardMode={resultViewerOpen}
+              enumeratedCandidates={mmp.enumeratedCandidates}
+              loading={loading}
+              referenceReady={reference.referenceReady}
+              predictionBySmiles={mmp.predictionBySmiles}
+              referencePredictionByBackend={mmp.referencePredictionByBackend}
+              defaultPredictionBackend="pocketxmol"
+              initialUiState={resultsUiState}
+              activeSmiles={activeSmiles}
+              onActiveSmilesChange={setActiveSmiles}
+              onRunPredictCandidate={(candidateSmiles, predictionBackend, variableAtomIndices) => {
+                const referenceCandidateSmiles = readText(referenceControlSmiles).trim();
+                const normalizedVariableAtomIndices = normalizeAtomIndices(variableAtomIndices);
+                const effectiveVariableAtomIndices =
+                  normalizedVariableAtomIndices.length > 0
+                    ? normalizedVariableAtomIndices
+                    : selectedFragmentAtomIndices.length > 0
+                      ? selectedFragmentAtomIndices
+                      : snapshotSelectedFragmentAtomIndices;
+                if (referenceCandidateSmiles) {
+                  void mmp.runPredictReferenceForBackend({
+                    candidateSmiles: referenceCandidateSmiles,
+                    referenceReady: reference.referenceReady,
+                    referenceProteinSequence,
+                    referenceTemplateStructureText: templateStructureTextForPrediction,
+                    referenceTemplateFormat: templateStructureFormatForPrediction,
+                    backend: predictionBackend,
+                    pocketResidues: predictionBackend === 'pocketxmol' ? [] : pocketPayload,
+                    variableAtomIndices: effectiveVariableAtomIndices,
+                    referenceTargetFilename: readText(reference.persistedUploads.target?.fileName).trim(),
+                    referenceTargetFileContent: readText(reference.persistedUploads.target?.content),
+                    referenceLigandFilename: readText(reference.persistedUploads.ligand?.fileName).trim(),
+                    referenceLigandFileContent: readText(reference.persistedUploads.ligand?.content)
+                  });
+                }
+                void mmp.runPredictCandidate({
+                  candidateSmiles,
+                  referenceReady: reference.referenceReady,
+                  referenceProteinSequence,
+                  referenceTemplateStructureText: templateStructureTextForPrediction,
+                  referenceTemplateFormat: templateStructureFormatForPrediction,
+                  backend: predictionBackend,
+                  pocketResidues: predictionBackend === 'pocketxmol' ? [] : pocketPayload,
+                  variableAtomIndices: effectiveVariableAtomIndices,
+                  referenceTargetFilename: readText(reference.persistedUploads.target?.fileName).trim(),
+                  referenceTargetFileContent: readText(reference.persistedUploads.target?.content),
+                  referenceLigandFilename: readText(reference.persistedUploads.ligand?.fileName).trim(),
+                  referenceLigandFileContent: readText(reference.persistedUploads.ligand?.content)
+                });
+              }}
+              onOpenPredictionResult={(candidateSmiles, highlightAtomIndices) => {
+                void handleOpenPredictionResult(candidateSmiles, highlightAtomIndices);
+              }}
+              onUiStateChange={handleCandidatesUiStateChange}
+              onPreviewRenderModeChange={handlePreviewRenderModeChange}
+              onExitCardMode={() => setResultViewerOpen(false)}
+              emptyStateHint={candidatesEmptyState.hint}
+              emptyStateContext={candidatesEmptyState.context}
+            />
+          </div>
+        </div>
+      )}
+
+      {showMmpRunTransition ? (
+        <div className="run-submit-transition" role="status" aria-live="polite" aria-label="MMP query running">
+          <div className="run-submit-transition-card">
+            <span className="run-submit-transition-icon" aria-hidden="true">
+              <LoaderCircle size={14} className="spin" />
+            </span>
+            <span className="run-submit-transition-title">Running MMP query...</span>
+          </div>
+        </div>
+      ) : null}
+
+      {databaseHint ? <p className="lead-opt-error">{readText(databaseHint)}</p> : null}
+      {error ? <p className="lead-opt-error">{readText(error)}</p> : null}
+    </div>
+  );
+}

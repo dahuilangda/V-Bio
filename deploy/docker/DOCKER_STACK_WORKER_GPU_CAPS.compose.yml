@@ -1,0 +1,76 @@
+name: vbio-worker-gpu-caps
+
+x-gpu-worker-base: &gpu_worker_base
+  build:
+    context: ../..
+    dockerfile: deploy/docker/DOCKER_BACKEND_RUNTIME.Dockerfile
+  restart: unless-stopped
+  gpus: all
+  working_dir: ${BOLTZ_HOST_ROOT}
+  env_file:
+    - ./DOCKER_STACK_WORKER_GPU_CAPS.env
+  volumes:
+    - /usr/bin/docker:/usr/bin/docker:ro
+    - /var/run/docker.sock:/var/run/docker.sock
+    - ${BOLTZ_HOST_ROOT}:${BOLTZ_HOST_ROOT}
+    - ${RESULTS_BASE_DIR:-/data/boltz_central_results}:${RESULTS_BASE_DIR:-/data/boltz_central_results}
+    - ${BOLTZ2_HOST_CACHE_DIR:-/data/boltz_cache}:${BOLTZ2_HOST_CACHE_DIR:-/data/boltz_cache}
+    - ${PROTENIX_SOURCE_DIR_HOST:-/data/protenix}:/data/protenix
+    - ${ALPHAFOLD3_ROOT_HOST:-/data/alphafold3}:/data/alphafold3
+  command: >-
+    bash -lc "cd ${BOLTZ_HOST_ROOT} && python -m backend.scripts.runtime_entrypoint gpu-worker"
+
+services:
+  gpu-worker-boltz2:
+    <<: *gpu_worker_base
+    profiles: ["boltz2"]
+    container_name: vbio-gpu-worker-boltz2
+    environment:
+      GPU_WORKER_CAPABILITIES: "boltz2"
+      MAX_CONCURRENT_TASKS: "${MAX_CONCURRENT_TASKS_BOLTZ2:--1}"
+      GPU_DEVICE_IDS: "${GPU_DEVICE_IDS_BOLTZ2:-}"
+
+  gpu-worker-boltz2score:
+    <<: *gpu_worker_base
+    profiles: ["boltz2score"]
+    container_name: vbio-gpu-worker-boltz2score
+    environment:
+      GPU_WORKER_CAPABILITIES: "boltz2score"
+      MAX_CONCURRENT_TASKS: "${MAX_CONCURRENT_TASKS_BOLTZ2SCORE:--1}"
+      GPU_DEVICE_IDS: "${GPU_DEVICE_IDS_BOLTZ2SCORE:-}"
+
+  gpu-worker-affinity:
+    <<: *gpu_worker_base
+    profiles: ["affinity"]
+    container_name: vbio-gpu-worker-affinity
+    environment:
+      GPU_WORKER_CAPABILITIES: "affinity"
+      MAX_CONCURRENT_TASKS: "${MAX_CONCURRENT_TASKS_AFFINITY:--1}"
+      GPU_DEVICE_IDS: "${GPU_DEVICE_IDS_AFFINITY:-}"
+
+  gpu-worker-alphafold3:
+    <<: *gpu_worker_base
+    profiles: ["alphafold3"]
+    container_name: vbio-gpu-worker-alphafold3
+    environment:
+      GPU_WORKER_CAPABILITIES: "alphafold3"
+      MAX_CONCURRENT_TASKS: "${MAX_CONCURRENT_TASKS_ALPHAFOLD3:--1}"
+      GPU_DEVICE_IDS: "${GPU_DEVICE_IDS_ALPHAFOLD3:-}"
+
+  gpu-worker-protenix:
+    <<: *gpu_worker_base
+    profiles: ["protenix"]
+    container_name: vbio-gpu-worker-protenix
+    environment:
+      GPU_WORKER_CAPABILITIES: "protenix"
+      MAX_CONCURRENT_TASKS: "${MAX_CONCURRENT_TASKS_PROTENIX:--1}"
+      GPU_DEVICE_IDS: "${GPU_DEVICE_IDS_PROTENIX:-}"
+
+  gpu-worker-pocketxmol:
+    <<: *gpu_worker_base
+    profiles: ["pocketxmol"]
+    container_name: vbio-gpu-worker-pocketxmol
+    environment:
+      GPU_WORKER_CAPABILITIES: "pocketxmol"
+      MAX_CONCURRENT_TASKS: "${MAX_CONCURRENT_TASKS_POCKETXMOL:--1}"
+      GPU_DEVICE_IDS: "${GPU_DEVICE_IDS_POCKETXMOL:-}"

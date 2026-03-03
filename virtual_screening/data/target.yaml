@@ -1,9 +1,0 @@
-# 示例目标蛋白配置文件
-# 这个文件定义了筛选的目标蛋白结构
-
-version: 1
-sequences:
-  # 目标蛋白（受体）
-  - protein:
-      id: A
-      sequence: "VACVCEALQQGGNLDRLARFLWSLPQSDLLRGNESLLKARALVAFHQGIYPELYSILESHSFESANHPLLQQLWYKARYTEAERARGRPLGAVDKYRLRRKFPLPRTIWDGEETVYCFKEKSRNA"

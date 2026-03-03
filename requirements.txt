@@ -1,12 +1,9 @@
-boltz[cuda]
 flask
 celery
 redis
 gunicorn
 requests
-mmpdb
-streamlit
-streamlit-ketcher
+mmpdb==3.1.3
 pyyaml
 biopython
 py3dmol
@@ -14,3 +11,5 @@ numpy
 psutil>=5.9.0
 python-dotenv
 psycopg[binary]
+gemmi
+rdkit

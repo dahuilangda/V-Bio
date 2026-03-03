@@ -1,0 +1,21 @@
+name: vbio-worker-gpu
+
+services:
+  gpu-worker:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/DOCKER_BACKEND_RUNTIME.Dockerfile
+    container_name: vbio-gpu-worker
+    restart: unless-stopped
+    gpus: all
+    working_dir: ${BOLTZ_HOST_ROOT}
+    env_file:
+      - ./DOCKER_STACK_WORKER_GPU.env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${BOLTZ_HOST_ROOT}:${BOLTZ_HOST_ROOT}
+      - ${BOLTZ2_HOST_CACHE_DIR:-/data/boltz_cache}:${BOLTZ2_HOST_CACHE_DIR:-/data/boltz_cache}
+      - ${PROTENIX_SOURCE_DIR_HOST:-/data/protenix}:/data/protenix
+      - ${ALPHAFOLD3_ROOT_HOST:-/data/alphafold3}:/data/alphafold3
+    command: >-
+      bash -lc "cd ${BOLTZ_HOST_ROOT} && python -m backend.scripts.runtime_entrypoint gpu-worker"

@@ -1,0 +1,15 @@
+[Unit]
+Description=V-Bio GPU Worker (docker compose)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/data/V-Bio/deploy/docker
+ExecStart=/usr/bin/docker compose -f DOCKER_STACK_WORKER_GPU.compose.yml --env-file DOCKER_STACK_WORKER_GPU.env up -d --build
+ExecStop=/usr/bin/docker compose -f DOCKER_STACK_WORKER_GPU.compose.yml --env-file DOCKER_STACK_WORKER_GPU.env down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
