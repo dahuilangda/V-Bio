@@ -1239,15 +1239,46 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   const leadOptUiStatePersistKeyRef = useRef('');
   const leadOptMmpContextByTaskIdRef = useRef<Record<string, Record<string, unknown>>>({});
 
+  const flushLeadOptPredictionPersistQueue = useCallback(() => {
+    const pendingEntries = Object.values(leadOptPredictionPersistPendingByTaskRowRef.current);
+    leadOptPredictionPersistPendingByTaskRowRef.current = {};
+    if (pendingEntries.length === 0) return;
+    const nextPersist = leadOptPredictionPersistQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        for (const entry of pendingEntries) {
+          await patchTask(entry.taskRowId, entry.patchPayload as any);
+        }
+      });
+    leadOptPredictionPersistQueueRef.current = nextPersist;
+  }, [patchTask]);
+
+  const queueLeadOptPredictionPersistPatch = useCallback(
+    (taskRowId: string, patchPayload: Record<string, unknown>) => {
+      const normalizedTaskRowId = readText(taskRowId).trim();
+      if (!normalizedTaskRowId) return;
+      leadOptPredictionPersistPendingByTaskRowRef.current[normalizedTaskRowId] = {
+        taskRowId: normalizedTaskRowId,
+        patchPayload
+      };
+      if (leadOptPredictionPersistTimerRef.current !== null) return;
+      leadOptPredictionPersistTimerRef.current = window.setTimeout(() => {
+        leadOptPredictionPersistTimerRef.current = null;
+        flushLeadOptPredictionPersistQueue();
+      }, 900);
+    },
+    [flushLeadOptPredictionPersistQueue]
+  );
+
   useEffect(() => {
     return () => {
       if (leadOptPredictionPersistTimerRef.current !== null) {
         window.clearTimeout(leadOptPredictionPersistTimerRef.current);
       }
       leadOptPredictionPersistTimerRef.current = null;
-      leadOptPredictionPersistPendingByTaskRowRef.current = {};
+      flushLeadOptPredictionPersistQueue();
     };
-  }, []);
+  }, [flushLeadOptPredictionPersistQueue]);
 
   const preferredLeadOptSnapshotTask = useMemo(
     () => pickPreferredLeadOptTask(projectTasks),
@@ -1545,10 +1576,87 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       if (!taskRowId) return;
       leadOptActiveTaskRowIdRef.current = taskRowId;
       leadOptPredictionTaskRowMapRef.current[taskId] = taskRowId;
-      // Prediction queue status is persisted by the throttled state-change handler.
-      // Avoid per-candidate writes here to prevent burst traffic on batch submit.
+      const sourceTask = resolveLeadOptSourceTask(taskRowId);
+      const sourceLeadOpt = resolveLeadOptSnapshotFromTask(sourceTask);
+      const sourceQueryResult = asRecord(sourceLeadOpt.query_result);
+      const sourceLeadOptQueryId = readText(sourceLeadOpt.query_id || sourceQueryResult.query_id).trim();
+      const nextPredictionMap = compactLeadOptPredictionMap(
+        asPredictionRecordMap(sourceLeadOpt.prediction_by_smiles)
+      );
+      const backend = readText(payload.backend).trim().toLowerCase() || 'boltz';
+      const candidateSmiles = readText(payload.candidateSmiles).trim();
+      const predictionKey = buildLeadOptPredictionRecordKey(backend, candidateSmiles);
+      if (!predictionKey) return;
+      nextPredictionMap[predictionKey] = {
+        taskId,
+        state: 'QUEUED',
+        backend,
+        pairIptm: null,
+        pairPae: null,
+        pairIptmResolved: false,
+        ligandPlddt: null,
+        ligandAtomPlddts: [],
+        structureText: '',
+        structureFormat: 'cif',
+        structureName: '',
+        error: '',
+        updatedAt: Date.now()
+      };
+      const summary = summarizeLeadOptPredictions(nextPredictionMap);
+      const statusText = `Scoring ${Math.max(1, summary.queued + summary.running)} queued (${summary.success}/${Math.max(1, summary.total)} done)`;
+      const referenceRecords = compactLeadOptPredictionMap(
+        hydratePredictionRecordMapFromHistory(
+          asPredictionRecordMap(sourceLeadOpt.reference_prediction_by_backend),
+          leadOptHistoricalReferenceRecords
+        )
+      );
+      const nextLeadOpt = {
+        ...sourceLeadOpt,
+        stage: 'prediction_queued',
+        prediction_stage: 'queued',
+        prediction_summary: {
+          ...summary,
+          latest_task_id: taskId
+        },
+        prediction_task_id: taskId,
+        prediction_candidate_smiles: candidateSmiles,
+        bucket_count: summary.total,
+        prediction_by_smiles: nextPredictionMap,
+        reference_prediction_by_backend: referenceRecords
+      } as Record<string, unknown>;
+      const lightweightStateForProperties = {
+        stage: nextLeadOpt.stage,
+        prediction_stage: nextLeadOpt.prediction_stage,
+        query_id: sourceLeadOptQueryId,
+        prediction_summary: {
+          ...summary,
+          latest_task_id: taskId
+        },
+        prediction_task_id: taskId,
+        prediction_candidate_smiles: candidateSmiles,
+        bucket_count: summary.total,
+        prediction_by_smiles: nextPredictionMap,
+        reference_prediction_by_backend: referenceRecords,
+        target_chain: readText(sourceLeadOpt.target_chain).trim(),
+        ligand_chain: readText(sourceLeadOpt.ligand_chain).trim()
+      } as Record<string, unknown>;
+      const patchPayload = {
+        task_state: 'QUEUED',
+        status_text: statusText,
+        error_text: '',
+        confidence: {
+          lead_opt_mmp: compactLeadOptForConfidenceWrite(nextLeadOpt)
+        },
+        properties: mergeLeadOptStateMetaIntoProperties(sourceTask?.properties, lightweightStateForProperties) as any
+      };
+      queueLeadOptPredictionPersistPatch(taskRowId, patchPayload);
     },
-    [resolveLeadOptTaskRowId]
+    [
+      leadOptHistoricalReferenceRecords,
+      queueLeadOptPredictionPersistPatch,
+      resolveLeadOptSourceTask,
+      resolveLeadOptTaskRowId
+    ]
   );
 
   const handleLeadOptPredictionStateChange = useCallback(
@@ -1683,27 +1791,15 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         },
         properties: mergeLeadOptStateMetaIntoProperties(sourceTask?.properties, lightweightStateForProperties) as any
       };
-      leadOptPredictionPersistPendingByTaskRowRef.current[taskRowId] = {
-        taskRowId,
-        patchPayload
-      };
-      if (leadOptPredictionPersistTimerRef.current !== null) return;
-      leadOptPredictionPersistTimerRef.current = window.setTimeout(() => {
-        leadOptPredictionPersistTimerRef.current = null;
-        const pendingEntries = Object.values(leadOptPredictionPersistPendingByTaskRowRef.current);
-        leadOptPredictionPersistPendingByTaskRowRef.current = {};
-        if (pendingEntries.length === 0) return;
-        const nextPersist = leadOptPredictionPersistQueueRef.current
-          .catch(() => undefined)
-          .then(async () => {
-            for (const entry of pendingEntries) {
-              await patchTask(entry.taskRowId, entry.patchPayload as any);
-            }
-          });
-        leadOptPredictionPersistQueueRef.current = nextPersist;
-      }, 900);
+      queueLeadOptPredictionPersistPatch(taskRowId, patchPayload);
     },
-    [leadOptHistoricalReferenceRecords, patchTask, resolveLeadOptSourceTask, resolveLeadOptTaskRowId, resolveLeadOptTaskRowIdByPredictionTaskId]
+    [
+      leadOptHistoricalReferenceRecords,
+      queueLeadOptPredictionPersistPatch,
+      resolveLeadOptSourceTask,
+      resolveLeadOptTaskRowId,
+      resolveLeadOptTaskRowIdByPredictionTaskId
+    ]
   );
 
   const handleLeadOptUiStateChange = useCallback(

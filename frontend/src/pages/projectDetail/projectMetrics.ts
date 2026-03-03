@@ -37,6 +37,7 @@ export function inferTaskStateFromStatusPayload(
 ): TaskState {
   const mapped = mapTaskState(task.state);
   const statusText = readStatusText(task).trim().toLowerCase();
+  const pendingLike = mapped === 'QUEUED' || mapped === 'RUNNING';
   if (
     statusText.includes('non-existent') ||
     statusText.includes('does not exist') ||
@@ -44,6 +45,9 @@ export function inferTaskStateFromStatusPayload(
     statusText.includes('unknown task') ||
     statusText.includes('expired')
   ) {
+    if (pendingLike) {
+      return resolveNonRegressiveTaskState(currentStateInput, mapped);
+    }
     return resolveNonRegressiveTaskState(currentStateInput, 'FAILURE');
   }
   const hinted =

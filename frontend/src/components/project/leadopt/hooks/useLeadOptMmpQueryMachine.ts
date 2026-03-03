@@ -167,7 +167,9 @@ function normalizePredictionRecord(value: unknown): LeadOptPredictionRecord | nu
   const structureFormat = readText(raw.structureFormat ?? raw.structure_format).toLowerCase() === 'pdb' ? 'pdb' : 'cif';
   const structureName = readText(raw.structureName ?? raw.structure_name);
   const pairIptm = normalizeIptm(raw.pairIptm ?? raw.pair_iptm);
-  const pairPae = normalizePae(raw.pairPae ?? raw.pair_pae ?? raw.pae);
+  const pairPae = normalizePae(
+    raw.pairPae ?? raw.pair_pae ?? raw.pair_pde ?? raw.pair_gpde ?? raw.complex_pde ?? raw.complex_pae ?? raw.gpde ?? raw.pae
+  );
   const ligandPlddtRaw = Number(raw.ligandPlddt ?? raw.ligand_plddt);
   const ligandPlddt = Number.isFinite(ligandPlddtRaw) ? normalizePlddtValue(ligandPlddtRaw) : null;
   const ligandAtomPlddts = normalizePlddtArray(raw.ligandAtomPlddts ?? raw.ligand_atom_plddts);
@@ -243,6 +245,7 @@ function mapPredictionRuntimeState(raw: unknown): PredictionState | null {
 function inferPredictionRuntimeStateFromStatusPayload(status: { state?: unknown; info?: unknown }): PredictionState | null {
   const direct = mapPredictionRuntimeState(status?.state);
   if (direct === 'SUCCESS' || direct === 'FAILURE') return direct;
+  const pendingLike = direct === 'QUEUED' || direct === 'RUNNING';
   const info = asRecord(status?.info);
   const resultFile = readText(info.result_file || info.resultFile).trim();
   if (resultFile) return 'SUCCESS';
@@ -257,6 +260,7 @@ function inferPredictionRuntimeStateFromStatusPayload(status: { state?: unknown;
       statusText.includes('does not exist') ||
       statusText.includes('not found')
     ) {
+      if (pendingLike) return direct;
       return 'FAILURE';
     }
     if (statusText.includes('failed') || statusText.includes('error') || statusText.includes('timeout')) {
@@ -535,7 +539,16 @@ function extractPredictionMetricsFromStatusInfo(
   const pairPae =
     findPairPae(confidence, targetChain, ligandChain) ??
     findPairPae(affinity, targetChain, ligandChain) ??
-    normalizePae(compact.pair_pae ?? compact.pairPae ?? compact.complex_pde ?? compact.complex_pae ?? compact.pae);
+    normalizePae(
+      compact.pair_pae ??
+        compact.pairPae ??
+        compact.pair_pde ??
+        compact.pair_gpde ??
+        compact.complex_pde ??
+        compact.complex_pae ??
+        compact.gpde ??
+        compact.pae
+    );
   const confidenceLigandAtomPlddts = findLigandAtomPlddts(confidence, ligandChain);
   const compactLigandAtomPlddts = normalizePlddtArray(compact.ligand_atom_plddts ?? compact.ligandAtomPlddts);
   const ligandAtomPlddts = confidenceLigandAtomPlddts.length > 0 ? confidenceLigandAtomPlddts : compactLigandAtomPlddts;

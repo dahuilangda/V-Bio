@@ -11,5 +11,6 @@ numpy
 psutil>=5.9.0
 python-dotenv
 psycopg[binary]
+psycopg2-binary
 gemmi
 rdkit

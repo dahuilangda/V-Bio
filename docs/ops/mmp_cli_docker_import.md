@@ -40,7 +40,7 @@ export PROJECT_ROOT=/data/V-Bio
 export MMP_DSN='postgresql://leadopt:leadopt@172.17.3.200:54330/leadopt_mmp'
 ```
 
-CLI smoke check:
+CLI check:
 
 ```bash
 docker run --rm --network host \

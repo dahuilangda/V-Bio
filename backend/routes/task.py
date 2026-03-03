@@ -84,8 +84,10 @@ def register_task_routes(
                     else:
                         logger.info('Task %s is running per tracker; Celery state PENDING.', task_id)
                 else:
-                    response['info']['status'] = 'Task is waiting in the queue or the task ID does not exist.'
-                    logger.info('Task %s is PENDING or non-existent.', task_id)
+                    waiting_message = 'Task is waiting in the queue.'
+                    response['info']['status'] = waiting_message
+                    response['info']['message'] = waiting_message
+                    logger.info('Task %s is PENDING and waiting for worker pickup.', task_id)
         elif task_result.state == 'SUCCESS':
             response['info'] = info if isinstance(info, dict) else {'result': str(info)}
             if not isinstance(response['info'], dict):

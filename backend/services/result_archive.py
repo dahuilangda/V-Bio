@@ -710,6 +710,9 @@ class ResultArchiveService:
             or payload.get('complex_pae')
             or payload.get('pair_pae')
             or payload.get('pair_pae_min')
+            or payload.get('pair_pde')
+            or payload.get('pair_gpde')
+            or payload.get('gpde')
             or payload.get('pae')
         )
         if direct is not None:
@@ -717,9 +720,13 @@ class ResultArchiveService:
         for key in (
             'pair_chains_pae',
             'pair_chains_pae_min',
+            'pair_chains_pde',
+            'pair_chains_gpde',
             'chain_pair_pae',
             'chain_pair_pae_min',
             'chain_pair_pae_minimum',
+            'chain_pair_pde',
+            'chain_pair_gpde',
         ):
             parsed = self._extract_off_diagonal_extreme(payload.get(key), pick='min')
             if parsed is not None:
