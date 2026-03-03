@@ -94,6 +94,7 @@ interface UseLeadOptMmpQueryMachineParams {
 
 type PredictionState = 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE';
 type ClusterGroupBy = 'to' | 'from' | 'rule_env_radius';
+const LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR = '::';
 const RESULT_HYDRATION_RETRY_BASE_MS = 1200;
 const RESULT_HYDRATION_RETRY_MAX_MS = 10000;
 const RESULT_HYDRATION_MAX_RETRIES = 8;
@@ -120,6 +121,38 @@ export interface LeadOptPredictionRecord {
   structureName?: string;
   error: string;
   updatedAt: number;
+}
+
+export function buildLeadOptPredictionRecordKey(backendInput: unknown, candidateSmilesInput: unknown): string {
+  const backendKey = normalizeBackendKey(backendInput);
+  const normalizedSmiles = readText(candidateSmilesInput).trim();
+  if (!normalizedSmiles) return '';
+  return `${backendKey}${LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR}${encodeURIComponent(normalizedSmiles)}`;
+}
+
+export function parseLeadOptPredictionRecordKey(keyInput: unknown): { backend: string; smiles: string } {
+  const key = readText(keyInput).trim();
+  if (!key) return { backend: '', smiles: '' };
+  const separatorIndex = key.indexOf(LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR);
+  if (separatorIndex < 0) {
+    return { backend: '', smiles: key };
+  }
+  const backendKey = normalizeBackendKey(key.slice(0, separatorIndex));
+  const encodedSmiles = key.slice(separatorIndex + LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR.length);
+  if (!encodedSmiles) {
+    return { backend: backendKey, smiles: '' };
+  }
+  try {
+    return {
+      backend: backendKey,
+      smiles: decodeURIComponent(encodedSmiles)
+    };
+  } catch {
+    return {
+      backend: backendKey,
+      smiles: encodedSmiles
+    };
+  }
 }
 
 function normalizePredictionRecord(value: unknown): LeadOptPredictionRecord | null {
@@ -166,12 +199,22 @@ function normalizePredictionRecord(value: unknown): LeadOptPredictionRecord | nu
 function normalizePredictionMap(value: unknown): Record<string, LeadOptPredictionRecord> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const out: Record<string, LeadOptPredictionRecord> = {};
-  for (const [smiles, rawRecord] of Object.entries(value as Record<string, unknown>)) {
-    const key = String(smiles || '').trim();
-    if (!key) continue;
+  for (const [rawKey, rawRecord] of Object.entries(value as Record<string, unknown>)) {
+    const parsedKey = parseLeadOptPredictionRecordKey(rawKey);
+    const normalizedSmiles = readText(parsedKey.smiles).trim();
+    if (!normalizedSmiles) continue;
     const record = normalizePredictionRecord(rawRecord);
     if (!record) continue;
-    out[key] = record;
+    const normalizedBackend = normalizeBackendKey(record.backend || parsedKey.backend);
+    const canonicalKey = buildLeadOptPredictionRecordKey(normalizedBackend, normalizedSmiles);
+    if (!canonicalKey) continue;
+    const nextRecord: LeadOptPredictionRecord = {
+      ...record,
+      backend: normalizedBackend
+    };
+    const merged = mergePredictionRecordNonRegressive(out[canonicalKey], nextRecord);
+    if (!merged) continue;
+    out[canonicalKey] = merged;
   }
   return out;
 }
@@ -2136,19 +2179,20 @@ export function useLeadOptMmpQueryMachine({
       setLoading(true);
       try {
         const normalizedSmiles = String(candidateSmiles || '').trim();
-        const selectedBackend = String(backendOverride || backend || 'boltz').trim().toLowerCase();
-        const retryTimer = predictionHydrationRetryTimerRef.current[normalizedSmiles];
+        const selectedBackend = normalizeBackendKey(backendOverride || backend || 'boltz');
+        const predictionKey = buildLeadOptPredictionRecordKey(selectedBackend, normalizedSmiles);
+        const retryTimer = predictionHydrationRetryTimerRef.current[predictionKey];
         if (retryTimer) {
           window.clearTimeout(retryTimer);
-          delete predictionHydrationRetryTimerRef.current[normalizedSmiles];
+          delete predictionHydrationRetryTimerRef.current[predictionKey];
         }
-        delete predictionHydrationRetryCountRef.current[normalizedSmiles];
-        const previousRecord = predictionBySmiles[normalizedSmiles];
+        delete predictionHydrationRetryCountRef.current[predictionKey];
+        const previousRecord = predictionBySmiles[predictionKey];
         const localTaskId = `local:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
         setPredictionBySmiles((prev) => ({
           ...prev,
-          [normalizedSmiles]: {
-            ...(prev[normalizedSmiles] || previousRecord || {}),
+          [predictionKey]: {
+            ...(prev[predictionKey] || previousRecord || {}),
             ...buildQueuedPredictionRecord(localTaskId, selectedBackend)
           }
         }));
@@ -2169,7 +2213,7 @@ export function useLeadOptMmpQueryMachine({
         setLastPredictionTaskId(taskId);
         setPredictionBySmiles((prev) => ({
           ...prev,
-          [normalizedSmiles]: {
+          [predictionKey]: {
             ...buildQueuedPredictionRecord(taskId, selectedBackend)
           }
         }));
@@ -2181,14 +2225,15 @@ export function useLeadOptMmpQueryMachine({
         }
       } catch (e) {
         const normalizedSmiles = String(candidateSmiles || '').trim();
-        const selectedBackend = String(backendOverride || backend || 'boltz').trim().toLowerCase();
+        const selectedBackend = normalizeBackendKey(backendOverride || backend || 'boltz');
+        const predictionKey = buildLeadOptPredictionRecordKey(selectedBackend, normalizedSmiles);
         const message = e instanceof Error ? e.message : 'Candidate prediction failed.';
         setPredictionBySmiles((prev) => {
-          const current = prev[normalizedSmiles];
+          const current = prev[predictionKey];
           if (!current) {
             return {
               ...prev,
-              [normalizedSmiles]: {
+              [predictionKey]: {
                 ...buildQueuedPredictionRecord(`local:failed:${Date.now()}`, selectedBackend),
                 state: 'FAILURE',
                 error: message,
@@ -2198,7 +2243,7 @@ export function useLeadOptMmpQueryMachine({
           }
           return {
             ...prev,
-            [normalizedSmiles]: {
+            [predictionKey]: {
               ...current,
               backend: selectedBackend,
               state: 'FAILURE',
@@ -2357,15 +2402,16 @@ export function useLeadOptMmpQueryMachine({
       let success = 0;
       let failure = 0;
       let lastTaskId = '';
-      const selectedBackend = String(backendOverride || backend || 'boltz').trim().toLowerCase();
+      const selectedBackend = normalizeBackendKey(backendOverride || backend || 'boltz');
       try {
         for (const smiles of batch) {
-          const previousRecord = predictionBySmiles[smiles];
+          const predictionKey = buildLeadOptPredictionRecordKey(selectedBackend, smiles);
+          const previousRecord = predictionBySmiles[predictionKey];
           const localTaskId = `local:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
           setPredictionBySmiles((prev) => ({
             ...prev,
-            [smiles]: {
-              ...(prev[smiles] || previousRecord || {}),
+            [predictionKey]: {
+              ...(prev[predictionKey] || previousRecord || {}),
               ...buildQueuedPredictionRecord(localTaskId, selectedBackend)
             }
           }));
@@ -2383,7 +2429,7 @@ export function useLeadOptMmpQueryMachine({
             lastTaskId = taskId;
             setPredictionBySmiles((prev) => ({
               ...prev,
-              [smiles]: {
+              [predictionKey]: {
                 ...buildQueuedPredictionRecord(taskId, selectedBackend)
               }
             }));
@@ -2396,16 +2442,16 @@ export function useLeadOptMmpQueryMachine({
           } catch (_error) {
             failure += 1;
             setPredictionBySmiles((prev) => {
-              const current = prev[smiles];
+              const current = prev[predictionKey];
               if (!current || !String(current.taskId || '').startsWith('local:')) return prev;
               if (previousRecord) {
                 return {
                   ...prev,
-                  [smiles]: previousRecord
+                  [predictionKey]: previousRecord
                 };
               }
               const next = { ...prev };
-              delete next[smiles];
+              delete next[predictionKey];
               return next;
             });
           }
@@ -2424,10 +2470,12 @@ export function useLeadOptMmpQueryMachine({
   );
 
   const ensurePredictionResult = useCallback(
-    async (candidateSmiles: string): Promise<LeadOptPredictionRecord | null> => {
+    async (candidateSmiles: string, backendInput?: string): Promise<LeadOptPredictionRecord | null> => {
       const normalizedSmiles = String(candidateSmiles || '').trim();
       if (!normalizedSmiles) return null;
-      const existing = predictionBySmiles[normalizedSmiles];
+      const predictionKey = buildLeadOptPredictionRecordKey(backendInput || backend, normalizedSmiles);
+      if (!predictionKey) return null;
+      const existing = predictionBySmiles[predictionKey];
       if (!existing) return null;
       if (String(existing.state || '').toUpperCase() !== 'SUCCESS') return existing;
       if (readText(existing.structureText).trim() && existing.pairIptmResolved === true) {
@@ -2450,7 +2498,7 @@ export function useLeadOptMmpQueryMachine({
           };
           setPredictionBySmiles((prev) => ({
             ...prev,
-            [normalizedSmiles]: nextRecord
+            [predictionKey]: nextRecord
           }));
           return nextRecord;
         }
@@ -2464,7 +2512,7 @@ export function useLeadOptMmpQueryMachine({
           };
           setPredictionBySmiles((prev) => ({
             ...prev,
-            [normalizedSmiles]: nextRecord
+            [predictionKey]: nextRecord
           }));
           return nextRecord;
         }
@@ -2495,14 +2543,14 @@ export function useLeadOptMmpQueryMachine({
         };
         setPredictionBySmiles((prev) => ({
           ...prev,
-          [normalizedSmiles]: nextRecord
+          [predictionKey]: nextRecord
         }));
-        const retryTimer = predictionHydrationRetryTimerRef.current[normalizedSmiles];
+        const retryTimer = predictionHydrationRetryTimerRef.current[predictionKey];
         if (retryTimer) {
           window.clearTimeout(retryTimer);
-          delete predictionHydrationRetryTimerRef.current[normalizedSmiles];
+          delete predictionHydrationRetryTimerRef.current[predictionKey];
         }
-        delete predictionHydrationRetryCountRef.current[normalizedSmiles];
+        delete predictionHydrationRetryCountRef.current[predictionKey];
         return nextRecord;
       } catch (error) {
         if (isResultArchiveMissingError(error)) {
@@ -2514,7 +2562,7 @@ export function useLeadOptMmpQueryMachine({
           };
           setPredictionBySmiles((prev) => ({
             ...prev,
-            [normalizedSmiles]: nextRecord
+            [predictionKey]: nextRecord
           }));
           return nextRecord;
         }
@@ -2528,24 +2576,24 @@ export function useLeadOptMmpQueryMachine({
           };
           setPredictionBySmiles((prev) => ({
             ...prev,
-            [normalizedSmiles]: nextRecord
+            [predictionKey]: nextRecord
           }));
-          const attempt = Number(predictionHydrationRetryCountRef.current[normalizedSmiles] || 0) + 1;
+          const attempt = Number(predictionHydrationRetryCountRef.current[predictionKey] || 0) + 1;
           if (attempt > RESULT_HYDRATION_MAX_RETRIES) {
-            delete predictionHydrationRetryCountRef.current[normalizedSmiles];
+            delete predictionHydrationRetryCountRef.current[predictionKey];
             return nextRecord;
           }
-          predictionHydrationRetryCountRef.current[normalizedSmiles] = attempt;
-          if (!predictionHydrationRetryTimerRef.current[normalizedSmiles]) {
+          predictionHydrationRetryCountRef.current[predictionKey] = attempt;
+          if (!predictionHydrationRetryTimerRef.current[predictionKey]) {
             const delayMs = computeHydrationRetryDelayMs(attempt);
-            predictionHydrationRetryTimerRef.current[normalizedSmiles] = window.setTimeout(() => {
-              delete predictionHydrationRetryTimerRef.current[normalizedSmiles];
+            predictionHydrationRetryTimerRef.current[predictionKey] = window.setTimeout(() => {
+              delete predictionHydrationRetryTimerRef.current[predictionKey];
               setPredictionBySmiles((prev) => {
-                const current = prev[normalizedSmiles];
+                const current = prev[predictionKey];
                 if (!current) return prev;
                 return {
                   ...prev,
-                  [normalizedSmiles]: {
+                  [predictionKey]: {
                     ...current,
                     state: pendingState,
                     error: '',
@@ -2561,7 +2609,7 @@ export function useLeadOptMmpQueryMachine({
         return existing;
       }
     },
-    [ligandChain, onError, predictionBySmiles, targetChain]
+    [backend, ligandChain, onError, predictionBySmiles, targetChain]
   );
 
   const ensureReferencePredictionResult = useCallback(

@@ -15,7 +15,7 @@ import {
 import { MemoLigand2DPreview } from '../Ligand2DPreview';
 import { JSMEEditor } from '../JSMEEditor';
 import { loadRDKitModule } from '../../../utils/rdkit';
-import type { LeadOptPredictionRecord } from './hooks/useLeadOptMmpQueryMachine';
+import { buildLeadOptPredictionRecordKey, type LeadOptPredictionRecord } from './hooks/useLeadOptMmpQueryMachine';
 
 function readText(value: unknown): string {
   if (value === null || value === undefined) return '';
@@ -409,10 +409,9 @@ export function LeadOptCandidatesPanel({
   };
 
   const predictionForBackend = (smiles: string): LeadOptPredictionRecord | null => {
-    const record = predictionBySmiles[smiles];
-    if (!record) return null;
-    const recordBackend = normalizeBackend(readText(record.backend));
-    return recordBackend === selectedBackendKey ? record : null;
+    const key = buildLeadOptPredictionRecordKey(selectedBackendKey, smiles);
+    if (!key) return null;
+    return predictionBySmiles[key] || null;
   };
 
   useEffect(() => {

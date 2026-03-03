@@ -22,6 +22,7 @@ import { LeadOptFragmentPanel } from './leadopt/LeadOptFragmentPanel';
 import { LeadOptMolstarViewer } from './leadopt/LeadOptMolstarViewer';
 import { LeadOptReferencePanel } from './leadopt/LeadOptReferencePanel';
 import {
+  buildLeadOptPredictionRecordKey,
   useLeadOptMmpQueryMachine,
   type LeadOptMmpPersistedSnapshot,
   type LeadOptPredictionRecord
@@ -945,12 +946,15 @@ export function LeadOptimizationWorkspace({
         .filter((value): value is string => Boolean(value)),
     [mmp.enumeratedCandidates]
   );
-  const openedPredictionRecord = openedResultSmiles ? mmp.predictionBySmiles[openedResultSmiles] : null;
+  const openedPredictionKey = openedResultSmiles
+    ? buildLeadOptPredictionRecordKey(resultsUiState.selectedBackend, openedResultSmiles)
+    : '';
+  const openedPredictionRecord = openedPredictionKey ? mmp.predictionBySmiles[openedPredictionKey] : null;
   const openedStructureText = readText(openedPredictionRecord?.structureText).trim();
   const openedStructureFormat: 'cif' | 'pdb' =
     readText(openedPredictionRecord?.structureFormat).toLowerCase() === 'pdb' ? 'pdb' : 'cif';
   const openedStructureTaskId = readText(openedPredictionRecord?.taskId).trim();
-  const openedResultViewerKey = `${openedResultSmiles}:${openedStructureTaskId}:${openedStructureFormat}:${viewerPreviewRenderMode}`;
+  const openedResultViewerKey = `${openedResultSmiles}:${resultsUiState.selectedBackend}:${openedStructureTaskId}:${openedStructureFormat}:${viewerPreviewRenderMode}`;
   const openedResultLigandAnchor = useMemo(
     () => inferLigandAnchor(openedStructureText, openedStructureFormat, effectiveLigandChain),
     [effectiveLigandChain, openedStructureFormat, openedStructureText]
@@ -1065,7 +1069,7 @@ export function LeadOptimizationWorkspace({
           ? normalizeAtomIndices(highlightAtomIndices)
           : fallbackHighlight
       );
-      const record = await mmp.ensurePredictionResult(normalizedSmiles);
+      const record = await mmp.ensurePredictionResult(normalizedSmiles, resultsUiState.selectedBackend);
       if (!record || String(record.state || '').toUpperCase() !== 'SUCCESS') return;
       if (!readText(record.structureText).trim()) {
         setError('Prediction completed, but result bundle has no readable structure.');
@@ -1073,7 +1077,7 @@ export function LeadOptimizationWorkspace({
       }
       setError(null);
     },
-    [mmp.ensurePredictionResult, mmp.enumeratedCandidates]
+    [mmp.ensurePredictionResult, mmp.enumeratedCandidates, resultsUiState.selectedBackend]
   );
 
   const handleCandidatesUiStateChange = useCallback(

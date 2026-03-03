@@ -26,7 +26,11 @@ import { usePredictionWorkspaceProps } from './usePredictionWorkspaceProps';
 import { useProjectDetailRuntimeContext } from './useProjectDetailRuntimeContext';
 import { buildLeadOptUploadSnapshotComponents, type LeadOptPersistedUploads } from './projectTaskSnapshot';
 import { buildLeadOptCandidatesUiStateSignature, type LeadOptCandidatesUiState } from '../../components/project/leadopt/LeadOptCandidatesPanel';
-import type { LeadOptPredictionRecord } from '../../components/project/leadopt/hooks/useLeadOptMmpQueryMachine';
+import {
+  buildLeadOptPredictionRecordKey,
+  parseLeadOptPredictionRecordKey,
+  type LeadOptPredictionRecord
+} from '../../components/project/leadopt/hooks/useLeadOptMmpQueryMachine';
 import { readLeadOptTaskSummary } from '../projectTasks/taskDataUtils';
 
 function readText(value: unknown): string {
@@ -135,8 +139,8 @@ function mergePredictionRecordMaps(
   confidenceInput: unknown,
   propertiesInput: unknown
 ): Record<string, LeadOptPredictionRecord> {
-  const confidence = asPredictionRecordMap(confidenceInput);
-  const properties = asPredictionRecordMap(propertiesInput);
+  const confidence = compactLeadOptPredictionMap(asPredictionRecordMap(confidenceInput));
+  const properties = compactLeadOptPredictionMap(asPredictionRecordMap(propertiesInput));
   const merged: Record<string, LeadOptPredictionRecord> = {};
   const keys = new Set<string>([...Object.keys(confidence), ...Object.keys(properties)]);
   for (const key of keys) {
@@ -289,10 +293,20 @@ function compactLeadOptPredictionRecord(value: LeadOptPredictionRecord): LeadOpt
 
 function compactLeadOptPredictionMap(value: Record<string, LeadOptPredictionRecord>): Record<string, LeadOptPredictionRecord> {
   const out: Record<string, LeadOptPredictionRecord> = {};
-  for (const [smiles, record] of Object.entries(value)) {
-    const key = readText(smiles).trim();
+  for (const [rawKey, record] of Object.entries(value)) {
+    const parsedKey = parseLeadOptPredictionRecordKey(rawKey);
+    const normalizedSmiles = readText(parsedKey.smiles).trim();
+    if (!normalizedSmiles) continue;
+    const backend = readText(record.backend).trim().toLowerCase() || parsedKey.backend || 'boltz';
+    const key = buildLeadOptPredictionRecordKey(backend, normalizedSmiles);
     if (!key) continue;
-    out[key] = compactLeadOptPredictionRecord(record);
+    const compactRecord = compactLeadOptPredictionRecord({
+      ...record,
+      backend
+    });
+    const merged = mergePredictionRecordPair(out[key], compactRecord);
+    if (!merged) continue;
+    out[key] = merged;
   }
   return out;
 }
@@ -1565,7 +1579,9 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         )
       );
       const latestCandidateSmiles = latestTaskId
-        ? (Object.entries(records).find(([, record]) => readText(record.taskId).trim() === latestTaskId)?.[0] || '')
+        ? parseLeadOptPredictionRecordKey(
+            Object.entries(records).find(([, record]) => readText(record.taskId).trim() === latestTaskId)?.[0] || ''
+          ).smiles
         : '';
       const summary = summarizeLeadOptPredictions(records);
       const unresolved = summary.queued + summary.running;
