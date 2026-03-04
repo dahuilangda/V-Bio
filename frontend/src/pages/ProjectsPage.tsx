@@ -94,6 +94,13 @@ export function ProjectsPage() {
   const [pageSize, setPageSize] = useState<number>(12);
   const [page, setPage] = useState<number>(1);
   const [filtersHydrated, setFiltersHydrated] = useState(false);
+  const projectsFiltersStorageKey = useMemo(() => {
+    const sessionIdentity =
+      String(session?.userId || '').trim() ||
+      String(session?.username || '').trim().toLowerCase() ||
+      '__anonymous__';
+    return `${PROJECTS_PAGE_FILTERS_STORAGE_KEY}:${sessionIdentity}`;
+  }, [session?.userId, session?.username]);
   const hasActiveRuntime = useMemo(
     () =>
       projects.some((item) => {
@@ -129,12 +136,13 @@ export function ProjectsPage() {
   };
 
   useEffect(() => {
+    setFiltersHydrated(false);
     if (typeof window === 'undefined') {
       setFiltersHydrated(true);
       return;
     }
     try {
-      const raw = window.localStorage.getItem(PROJECTS_PAGE_FILTERS_STORAGE_KEY);
+      const raw = window.localStorage.getItem(projectsFiltersStorageKey);
       if (!raw) return;
       const saved = JSON.parse(raw) as Record<string, unknown>;
       const workflowKeys = new Set<WorkflowKey>(WORKFLOWS.map((item) => item.key));
@@ -174,7 +182,7 @@ export function ProjectsPage() {
     } finally {
       setFiltersHydrated(true);
     }
-  }, [setSearch]);
+  }, [projectsFiltersStorageKey, setSearch]);
 
   useEffect(() => {
     if (!filtersHydrated || typeof window === 'undefined') return;
@@ -191,11 +199,12 @@ export function ProjectsPage() {
       pageSize
     };
     try {
-      window.localStorage.setItem(PROJECTS_PAGE_FILTERS_STORAGE_KEY, JSON.stringify(snapshot));
+      window.localStorage.setItem(projectsFiltersStorageKey, JSON.stringify(snapshot));
     } catch {
       // ignore storage quota errors
     }
   }, [
+    projectsFiltersStorageKey,
     filtersHydrated,
     search,
     typeFilter,

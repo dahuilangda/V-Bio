@@ -445,7 +445,6 @@ export async function listProjectTasksForList(
           'lead_opt_list_prediction_success:properties->lead_opt_list->prediction_summary->>success',
           'lead_opt_list_prediction_failure:properties->lead_opt_list->prediction_summary->>failure',
           'lead_opt_list_selection:properties->lead_opt_list->selection',
-          'lead_opt_list_ui_state:properties->lead_opt_list->ui_state',
           'lead_opt_list_query_result_query_id:properties->lead_opt_list->query_result->>query_id',
           'lead_opt_list_query_result_query_mode:properties->lead_opt_list->query_result->>query_mode',
           'lead_opt_list_query_result_aggregation_type:properties->lead_opt_list->query_result->>aggregation_type',
@@ -559,10 +558,6 @@ export async function listProjectTasksForList(
       row.lead_opt_list_selection && typeof row.lead_opt_list_selection === 'object' && !Array.isArray(row.lead_opt_list_selection)
         ? (row.lead_opt_list_selection as Record<string, unknown>)
         : {};
-    const listUiState =
-      row.lead_opt_list_ui_state && typeof row.lead_opt_list_ui_state === 'object' && !Array.isArray(row.lead_opt_list_ui_state)
-        ? (row.lead_opt_list_ui_state as Record<string, unknown>)
-        : {};
     const listQueryResultGroupedByEnvironment = parseBooleanToken(row.lead_opt_list_query_result_grouped_by_environment);
     const listQueryResult = compactObjectRecord({
       query_id: readText(row.lead_opt_list_query_result_query_id) || listQueryId,
@@ -638,7 +633,6 @@ export async function listProjectTasksForList(
         statePredictionTaskId ||
         statePredictionCandidateSmiles ||
         Object.keys(listSelection).length > 0 ||
-        Object.keys(listUiState).length > 0 ||
         Object.keys(listQueryResult).length > 0 ||
         listEnumeratedCandidates.length > 0 ||
         Object.keys(statePredictionBySmiles).length > 0 ||
@@ -678,7 +672,7 @@ export async function listProjectTasksForList(
         selected_fragment_query: listSelectedFragmentQuery,
         prediction_summary: normalizedPredictionSummary,
         query_result: listQueryResult,
-        ui_state: listUiState,
+        ui_state: {},
         enumerated_candidates: listEnumeratedCandidates
       },
       lead_opt_state: {
@@ -795,7 +789,6 @@ export async function getProjectTaskById(
           'lead_opt_list_prediction_success:properties->lead_opt_list->prediction_summary->>success',
           'lead_opt_list_prediction_failure:properties->lead_opt_list->prediction_summary->>failure',
           'lead_opt_list_selection:properties->lead_opt_list->selection',
-          'lead_opt_list_ui_state:properties->lead_opt_list->ui_state',
           'lead_opt_list_query_result_query_id:properties->lead_opt_list->query_result->>query_id',
           'lead_opt_list_query_result_query_mode:properties->lead_opt_list->query_result->>query_mode',
           'lead_opt_list_query_result_aggregation_type:properties->lead_opt_list->query_result->>aggregation_type',
@@ -999,10 +992,7 @@ export async function getProjectTaskById(
         selected_fragment_query: listSelectedFragmentQuery,
         prediction_summary: normalizedPredictionSummary,
         query_result: listQueryResult,
-        ui_state:
-          rowRecord.lead_opt_list_ui_state && typeof rowRecord.lead_opt_list_ui_state === 'object' && !Array.isArray(rowRecord.lead_opt_list_ui_state)
-            ? rowRecord.lead_opt_list_ui_state
-            : {},
+        ui_state: {},
         enumerated_candidates:
           includeLeadOptCandidates && Array.isArray(rowRecord.lead_opt_list_enumerated_candidates)
             ? rowRecord.lead_opt_list_enumerated_candidates

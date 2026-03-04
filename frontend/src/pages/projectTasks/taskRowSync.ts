@@ -674,15 +674,9 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
     const leadOptMmp = asRecord(workingConfidence.lead_opt_mmp);
     const workingProperties = asRecord(workingRow.properties);
     const leadOptListMetaForPolling = asRecord(workingProperties.lead_opt_list);
-    const leadOptListUiStateForPolling = asRecord(leadOptListMetaForPolling.ui_state);
-    const leadOptMmpUiStateForPolling = asRecord(leadOptMmp.ui_state);
     const leadOptStateMetaForPolling = asRecord(workingProperties.lead_opt_state);
     const selectedPredictionBackend = normalizeLeadOptPredictionBackend(
-      leadOptStateMetaForPolling.selected_backend ||
-      leadOptListUiStateForPolling.selectedBackend ||
-      leadOptListUiStateForPolling.selected_backend ||
-      leadOptMmpUiStateForPolling.selectedBackend ||
-      leadOptMmpUiStateForPolling.selected_backend
+      leadOptStateMetaForPolling.selected_backend
     );
     let predictionMap = mergeLeadOptPredictionMapsByKey(
       mergeLeadOptPredictionMapsByKey(

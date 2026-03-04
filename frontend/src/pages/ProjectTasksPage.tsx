@@ -106,7 +106,9 @@ export function ProjectTasksPage() {
     handleSort,
     sortMark,
     jumpToPage,
-  } = useTaskListFiltering(taskRows);
+  } = useTaskListFiltering(taskRows, {
+    storageScope: session?.userId || session?.username || null
+  });
 
   const {
     openingTaskId,

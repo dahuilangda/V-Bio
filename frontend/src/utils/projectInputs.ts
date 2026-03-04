@@ -10,6 +10,7 @@ import type {
 
 const COMPONENT_KEY = 'vbio_project_input_config_v1';
 const UI_STATE_KEY = 'vbio_project_ui_state_v1';
+const SESSION_KEY = 'vbio_session';
 const TEMPLATE_CONTENT_REF_PREFIX = '@pool:';
 const VALID_MOLECULE_TYPES: MoleculeType[] = ['protein', 'ligand', 'dna', 'rna'];
 const VALID_LIGAND_INPUT_METHODS = new Set(['smiles', 'ccd', 'jsme']);
@@ -532,6 +533,27 @@ function writeStore(data: Record<string, ProjectInputConfig>): void {
   localStorage.setItem(COMPONENT_KEY, JSON.stringify(data));
 }
 
+function readSessionIdentityForStorage(): string {
+  if (typeof localStorage === 'undefined') return '';
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return '';
+    const payload = JSON.parse(raw) as Record<string, unknown>;
+    const userId = typeof payload.userId === 'string' ? payload.userId.trim() : '';
+    const username = typeof payload.username === 'string' ? payload.username.trim().toLowerCase() : '';
+    return userId || username;
+  } catch {
+    return '';
+  }
+}
+
+function buildScopedProjectStorageKey(projectId: string): string {
+  const normalizedProjectId = String(projectId || '').trim();
+  if (!normalizedProjectId) return '';
+  const sessionIdentity = readSessionIdentityForStorage() || '__anonymous__';
+  return `${sessionIdentity}:${normalizedProjectId}`;
+}
+
 function readUiStore(): Record<string, ProjectUiState> {
   try {
     const raw = localStorage.getItem(UI_STATE_KEY);
@@ -678,27 +700,35 @@ function normalizeAffinityUpload(
 }
 
 export function loadProjectInputConfig(projectId: string): ProjectInputConfig | null {
+  const scopedProjectKey = buildScopedProjectStorageKey(projectId);
+  if (!scopedProjectKey) return null;
   const store = readStore();
-  const found = store[projectId];
+  const found = store[scopedProjectKey];
   if (!found || !Array.isArray(found.components)) return null;
   return normalizeConfig(found);
 }
 
 export function saveProjectInputConfig(projectId: string, config: ProjectInputConfig): void {
+  const scopedProjectKey = buildScopedProjectStorageKey(projectId);
+  if (!scopedProjectKey) return;
   const store = readStore();
-  store[projectId] = config;
+  store[scopedProjectKey] = config;
   writeStore(store);
 }
 
 export function removeProjectInputConfig(projectId: string): void {
+  const scopedProjectKey = buildScopedProjectStorageKey(projectId);
+  if (!scopedProjectKey) return;
   const store = readStore();
-  delete store[projectId];
+  delete store[scopedProjectKey];
   writeStore(store);
 }
 
 export function loadProjectUiState(projectId: string): ProjectUiState | null {
+  const scopedProjectKey = buildScopedProjectStorageKey(projectId);
+  if (!scopedProjectKey) return null;
   const store = readUiStore();
-  const found = store[projectId];
+  const found = store[scopedProjectKey];
   if (!found || typeof found !== 'object') return null;
   const templateContentPool = normalizeTemplateContentPool((found as any).templateContentPool);
 
@@ -767,8 +797,10 @@ export function loadProjectUiState(projectId: string): ProjectUiState | null {
 }
 
 export function saveProjectUiState(projectId: string, uiState: ProjectUiState): void {
+  const scopedProjectKey = buildScopedProjectStorageKey(projectId);
+  if (!scopedProjectKey) return;
   const baseStore = readUiStore();
-  const currentStoredState = baseStore[projectId];
+  const currentStoredState = baseStore[scopedProjectKey];
   const contentPool = normalizeTemplateContentPool(uiState.templateContentPool || (currentStoredState as any)?.templateContentPool);
   const usedPoolKeys = new Set<string>();
   const proteinTemplates = serializeProteinTemplates(uiState.proteinTemplates, contentPool, usedPoolKeys);
@@ -806,7 +838,7 @@ export function saveProjectUiState(projectId: string, uiState: ProjectUiState): 
     }
   }
 
-  baseStore[projectId] = {
+  baseStore[scopedProjectKey] = {
     proteinTemplates,
     taskProteinTemplates,
     taskAffinityUploads,
@@ -819,7 +851,7 @@ export function saveProjectUiState(projectId: string, uiState: ProjectUiState): 
   try {
     writeUiStore(baseStore);
   } catch {
-    baseStore[projectId] = {
+    baseStore[scopedProjectKey] = {
       proteinTemplates: {},
       taskProteinTemplates: {},
       taskAffinityUploads: {},
@@ -835,8 +867,10 @@ export function saveProjectUiState(projectId: string, uiState: ProjectUiState): 
 }
 
 export function removeProjectUiState(projectId: string): void {
+  const scopedProjectKey = buildScopedProjectStorageKey(projectId);
+  if (!scopedProjectKey) return;
   const store = readUiStore();
-  delete store[projectId];
+  delete store[scopedProjectKey];
   writeUiStore(store);
 }
 

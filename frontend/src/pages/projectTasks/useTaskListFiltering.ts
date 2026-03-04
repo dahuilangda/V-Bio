@@ -79,7 +79,19 @@ interface UseTaskListFilteringResult {
   jumpToPage: (rawValue: string) => void;
 }
 
-export function useTaskListFiltering(taskRows: TaskListRow[]): UseTaskListFilteringResult {
+interface UseTaskListFilteringOptions {
+  storageScope?: string | null;
+}
+
+export function useTaskListFiltering(
+  taskRows: TaskListRow[],
+  options?: UseTaskListFilteringOptions
+): UseTaskListFilteringResult {
+  const taskFiltersStorageKey = useMemo(() => {
+    const sessionIdentity =
+      String(options?.storageScope || '').trim().toLowerCase() || '__anonymous__';
+    return `${TASKS_PAGE_FILTERS_STORAGE_KEY}:${sessionIdentity}`;
+  }, [options?.storageScope]);
   const [sortKey, setSortKey] = useState<SortKey>('submitted');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [taskSearch, setTaskSearch] = useState('');
@@ -135,12 +147,13 @@ export function useTaskListFiltering(taskRows: TaskListRow[]): UseTaskListFilter
   }, []);
 
   useEffect(() => {
+    setFiltersHydrated(false);
     if (typeof window === 'undefined') {
       setFiltersHydrated(true);
       return;
     }
     try {
-      const raw = window.localStorage.getItem(TASKS_PAGE_FILTERS_STORAGE_KEY);
+      const raw = window.localStorage.getItem(taskFiltersStorageKey);
       if (!raw) return;
       const saved = JSON.parse(raw) as Record<string, unknown>;
       if (typeof saved.taskSearch === 'string') setTaskSearch(saved.taskSearch);
@@ -202,7 +215,7 @@ export function useTaskListFiltering(taskRows: TaskListRow[]): UseTaskListFilter
     } finally {
       setFiltersHydrated(true);
     }
-  }, []);
+  }, [taskFiltersStorageKey]);
 
   useEffect(() => {
     if (!filtersHydrated || typeof window === 'undefined') return;
@@ -225,11 +238,12 @@ export function useTaskListFiltering(taskRows: TaskListRow[]): UseTaskListFilter
       pageSize
     };
     try {
-      window.localStorage.setItem(TASKS_PAGE_FILTERS_STORAGE_KEY, JSON.stringify(snapshot));
+      window.localStorage.setItem(taskFiltersStorageKey, JSON.stringify(snapshot));
     } catch {
       // ignore storage quota errors
     }
   }, [
+    taskFiltersStorageKey,
     filtersHydrated,
     taskSearch,
     stateFilter,

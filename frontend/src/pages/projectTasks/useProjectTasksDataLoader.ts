@@ -99,7 +99,7 @@ function mergeLeadOptProperties(nextValue: unknown, prevValue: unknown): Project
       ...prevList,
       ...nextList,
       query_result: Object.keys(asRecord(nextList.query_result)).length > 0 ? asRecord(nextList.query_result) : asRecord(prevList.query_result),
-      ui_state: Object.keys(asRecord(nextList.ui_state)).length > 0 ? asRecord(nextList.ui_state) : asRecord(prevList.ui_state),
+      ui_state: {},
       selection: Object.keys(asRecord(nextList.selection)).length > 0 ? asRecord(nextList.selection) : asRecord(prevList.selection),
       enumerated_candidates:
         Array.isArray(nextList.enumerated_candidates) && nextList.enumerated_candidates.length > 0

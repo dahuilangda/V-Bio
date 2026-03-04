@@ -323,10 +323,7 @@ function mergeLeadOptProperties(nextValue: unknown, prevValue: unknown): Record<
         Object.keys(asObjectRecord(nextList.query_result)).length > 0
           ? asObjectRecord(nextList.query_result)
           : asObjectRecord(prevList.query_result),
-      ui_state:
-        Object.keys(asObjectRecord(nextList.ui_state)).length > 0
-          ? asObjectRecord(nextList.ui_state)
-          : asObjectRecord(prevList.ui_state),
+      ui_state: {},
       selection:
         Object.keys(asObjectRecord(nextList.selection)).length > 0
           ? asObjectRecord(nextList.selection)
