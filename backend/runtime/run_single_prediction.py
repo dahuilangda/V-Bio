@@ -4914,6 +4914,78 @@ def _build_peptide_candidate_yaml(
     return yaml.safe_dump(yaml_data, sort_keys=False, default_flow_style=False)
 
 
+def _materialize_candidate_template_paths(
+    base_yaml_data: Dict[str, Any],
+    *,
+    candidate_dir: str,
+    temp_dir: str,
+) -> Dict[str, Any]:
+    """
+    Copy template files into candidate-local directory and rewrite template paths.
+    This guarantees each peptide worker can access template files via its own mounted
+    `candidate_dir` without depending on parent-task runtime paths.
+    """
+    yaml_data = copy.deepcopy(base_yaml_data)
+    template_entries = yaml_data.get("templates")
+    if not isinstance(template_entries, list) or not template_entries:
+        return yaml_data
+
+    target_templates_dir = Path(candidate_dir) / "templates"
+    target_templates_dir.mkdir(parents=True, exist_ok=True)
+
+    rewritten_entries: List[Dict[str, Any]] = []
+    for index, entry in enumerate(template_entries):
+        if not isinstance(entry, dict):
+            raise ValueError(f"Invalid templates[{index}] entry: expected mapping, got {type(entry).__name__}.")
+
+        path_key = next(
+            (key for key in ("cif", "mmcif", "pdb") if str(entry.get(key) or "").strip()),
+            None,
+        )
+        if not path_key:
+            raise ValueError(
+                f"Invalid templates[{index}] entry: missing template path key (expected one of cif/mmcif/pdb)."
+            )
+
+        source_text = str(entry.get(path_key) or "").strip()
+        source_path = Path(source_text)
+
+        candidates: List[Path] = []
+        if source_path.is_absolute():
+            candidates.append(source_path)
+        else:
+            # Relative template paths are resolved against task temp root first.
+            candidates.append(Path(temp_dir) / source_path)
+            candidates.append(source_path)
+
+        resolved_source: Optional[Path] = None
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                resolved_source = candidate
+                break
+
+        if resolved_source is None:
+            raise FileNotFoundError(
+                "Peptide design template file is missing before candidate dispatch. "
+                f"templates[{index}] path='{source_text}'."
+            )
+
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "_", resolved_source.stem).strip("._-") or f"template_{index:02d}"
+        suffix = resolved_source.suffix or (".pdb" if path_key == "pdb" else ".cif")
+        destination = target_templates_dir / f"{index:02d}_{stem}{suffix}"
+        shutil.copy2(resolved_source, destination)
+
+        updated_entry = dict(entry)
+        for other_key in ("cif", "mmcif", "pdb"):
+            if other_key != path_key:
+                updated_entry.pop(other_key, None)
+        updated_entry[path_key] = str(destination)
+        rewritten_entries.append(updated_entry)
+
+    yaml_data["templates"] = rewritten_entries
+    return yaml_data
+
+
 def _select_primary_structure_file(results_dir: str) -> Optional[Path]:
     path_obj = Path(results_dir)
     candidates = [p for p in path_obj.glob("*.cif")]
@@ -5374,8 +5446,15 @@ def run_peptide_design_backend(
         generation_jobs: List[Dict[str, Any]] = []
         generation_completed_base = completed_tasks
         for idx, candidate_sequence in enumerate(generation_candidates, start=1):
-            candidate_yaml = _build_peptide_candidate_yaml(
+            candidate_dir = os.path.join(temp_dir, "peptide_design", f"gen_{generation:03d}", f"cand_{idx:03d}")
+            os.makedirs(candidate_dir, exist_ok=True)
+            candidate_base_yaml_data = _materialize_candidate_template_paths(
                 base_yaml_data,
+                candidate_dir=candidate_dir,
+                temp_dir=temp_dir,
+            )
+            candidate_yaml = _build_peptide_candidate_yaml(
+                candidate_base_yaml_data,
                 binder_chain_id=binder_chain_id,
                 binder_sequence=candidate_sequence,
                 design_mode=design_mode,
@@ -5383,8 +5462,6 @@ def run_peptide_design_backend(
                 linker_chain_id=linker_chain_id,
                 linker_atom_map=linker_atom_map,
             )
-            candidate_dir = os.path.join(temp_dir, "peptide_design", f"gen_{generation:03d}", f"cand_{idx:03d}")
-            os.makedirs(candidate_dir, exist_ok=True)
             archive_path = os.path.join(candidate_dir, "result.zip")
 
             per_candidate_args = dict(runtime_predict_args)
