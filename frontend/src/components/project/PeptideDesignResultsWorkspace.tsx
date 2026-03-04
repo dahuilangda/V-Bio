@@ -95,7 +95,26 @@ function readObjectPath(payload: Record<string, unknown>, path: string): unknown
 }
 
 function chainTokenEquals(a: string, b: string): boolean {
-  return normalizeChainToken(a) === normalizeChainToken(b);
+  const left = normalizeChainToken(a);
+  const right = normalizeChainToken(b);
+  if (!left || !right) return false;
+  if (left === right) return true;
+  const compactLeft = left.replace(/[^A-Z0-9]/g, '');
+  const compactRight = right.replace(/[^A-Z0-9]/g, '');
+  if (compactLeft && compactRight && compactLeft === compactRight) return true;
+  const leftTokens = left.split(/[^A-Z0-9]+/).filter(Boolean);
+  if (leftTokens.includes(right) || (compactRight && leftTokens.includes(compactRight))) {
+    return true;
+  }
+  if (compactLeft && compactRight) {
+    if (compactLeft.startsWith(compactRight) || compactLeft.endsWith(compactRight)) {
+      return true;
+    }
+    if (compactRight.startsWith(compactLeft) || compactRight.endsWith(compactLeft)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function chainVariants(chainId: string): string[] {
@@ -149,9 +168,8 @@ function isNumericToken(value: string): boolean {
 
 function readMapValueByChainToken(record: Record<string, unknown>, token: string): unknown {
   if (Object.prototype.hasOwnProperty.call(record, token)) return record[token];
-  const normalized = normalizeChainToken(token);
   for (const [key, value] of Object.entries(record)) {
-    if (normalizeChainToken(key) === normalized) return value;
+    if (chainTokenEquals(key, token) || chainTokenEquals(token, key)) return value;
   }
   return undefined;
 }
@@ -161,24 +179,18 @@ function readPairValueFromNestedMap(mapValue: unknown, chainA: string, chainB: s
   const byChain = mapValue as Record<string, unknown>;
 
   const rowA = readMapValueByChainToken(byChain, chainA);
-  const rowB = readMapValueByChainToken(byChain, chainB);
-  const v1 =
-    rowA && typeof rowA === 'object' && !Array.isArray(rowA)
-      ? normalizeIptm(readFiniteNumber(readMapValueByChainToken(rowA as Record<string, unknown>, chainB)))
-      : null;
-  const v2 =
-    rowB && typeof rowB === 'object' && !Array.isArray(rowB)
-      ? normalizeIptm(readFiniteNumber(readMapValueByChainToken(rowB as Record<string, unknown>, chainA)))
-      : null;
-  if (v1 === null && v2 === null) return null;
-  return Math.max(v1 ?? Number.NEGATIVE_INFINITY, v2 ?? Number.NEGATIVE_INFINITY);
+  if (!rowA || typeof rowA !== 'object' || Array.isArray(rowA)) return null;
+  const direct = normalizeIptm(readFiniteNumber(readMapValueByChainToken(rowA as Record<string, unknown>, chainB)));
+  if (direct !== null) return direct;
+  return null;
 }
 
 function readPairValueFromNumericMap(
   mapValue: unknown,
   chainA: string,
   chainB: string,
-  chainOrderHints: string[]
+  chainOrderHints: string[],
+  preferredDirectionalIptm: number | null
 ): number | null {
   if (!mapValue || typeof mapValue !== 'object' || Array.isArray(mapValue)) return null;
   const byChain = mapValue as Record<string, unknown>;
@@ -188,16 +200,51 @@ function readPairValueFromNumericMap(
   const idxA = chainOrderHints.findIndex((item) => chainTokenEquals(item, chainA));
   const idxB = chainOrderHints.findIndex((item) => chainTokenEquals(item, chainB));
   if (idxA >= 0 && idxB >= 0 && idxA !== idxB) {
-    const mapped = readPairValueFromNestedMap(byChain, String(idxA), String(idxB));
-    if (mapped !== null) return mapped;
+    const ligandToTarget = readPairValueFromNestedMap(byChain, String(idxB), String(idxA));
+    const targetToLigand = readPairValueFromNestedMap(byChain, String(idxA), String(idxB));
+    if (ligandToTarget !== null && targetToLigand !== null && preferredDirectionalIptm !== null) {
+      const ligandDelta = Math.abs(ligandToTarget - preferredDirectionalIptm);
+      const targetDelta = Math.abs(targetToLigand - preferredDirectionalIptm);
+      return ligandDelta <= targetDelta ? ligandToTarget : targetToLigand;
+    }
+    if (ligandToTarget !== null) return ligandToTarget;
+    if (targetToLigand !== null) return targetToLigand;
   }
 
-  if (keys.length === 2) {
+  if (keys.length === 2 && preferredDirectionalIptm !== null) {
     const [first, second] = keys.sort((a, b) => Number(a) - Number(b));
-    const inferred = readPairValueFromNestedMap(byChain, first, second);
-    if (inferred !== null) return inferred;
+    const forward = readPairValueFromNestedMap(byChain, first, second);
+    const backward = readPairValueFromNestedMap(byChain, second, first);
+    if (forward !== null && backward !== null) {
+      const forwardDelta = Math.abs(forward - preferredDirectionalIptm);
+      const backwardDelta = Math.abs(backward - preferredDirectionalIptm);
+      return forwardDelta <= backwardDelta ? forward : backward;
+    }
+    if (forward !== null) return forward;
+    if (backward !== null) return backward;
   }
   return null;
+}
+
+function readPairValueFromAnyTwoKeyMap(
+  mapValue: unknown,
+  preferredDirectionalIptm: number | null
+): number | null {
+  if (!mapValue || typeof mapValue !== 'object' || Array.isArray(mapValue)) return null;
+  if (preferredDirectionalIptm === null) return null;
+  const byChain = mapValue as Record<string, unknown>;
+  const keys = Object.keys(byChain).map((item) => String(item || '').trim()).filter(Boolean);
+  if (keys.length !== 2) return null;
+  const [first, second] = keys;
+  const forward = readPairValueFromNestedMap(byChain, first, second);
+  const backward = readPairValueFromNestedMap(byChain, second, first);
+  if (forward === null && backward === null) return null;
+  if (forward !== null && backward !== null) {
+    const forwardDelta = Math.abs(forward - preferredDirectionalIptm);
+    const backwardDelta = Math.abs(backward - preferredDirectionalIptm);
+    return forwardDelta <= backwardDelta ? forward : backward;
+  }
+  return forward ?? backward;
 }
 
 function readPairIptmForChains(
@@ -207,28 +254,39 @@ function readPairIptmForChains(
   chainOrderHints: string[]
 ): number | null {
   if (!chainA || !chainB || chainTokenEquals(chainA, chainB)) return null;
-  const direct = readPairValueFromNestedMap(payload.pair_chains_iptm, chainA, chainB);
-  if (direct !== null) return direct;
+  const preferredDirectionalIptm = normalizeIptm(firstFiniteMetric(payload, ['ligand_iptm', 'iptm']));
+  const pairMap = payload.pair_chains_iptm;
+  const ligandToTarget = readPairValueFromNestedMap(pairMap, chainB, chainA);
+  if (ligandToTarget !== null) return ligandToTarget;
+  const targetToLigand = readPairValueFromNestedMap(pairMap, chainA, chainB);
+  if (targetToLigand !== null) return targetToLigand;
+
+  const chainIdsRaw = toChainList(payload.chain_ids);
+  const chainIds = chainIdsRaw.length > 0 ? chainIdsRaw : chainOrderHints;
+  const numericMapped = readPairValueFromNumericMap(pairMap, chainA, chainB, chainIds, preferredDirectionalIptm);
+  if (numericMapped !== null) return numericMapped;
+  const twoKeyMapped = readPairValueFromAnyTwoKeyMap(pairMap, preferredDirectionalIptm);
+  if (twoKeyMapped !== null) return twoKeyMapped;
 
   const matrixRaw = payload.chain_pair_iptm ?? payload.chain_pair_iptm_global;
   if (Array.isArray(matrixRaw)) {
-    const chainIdsRaw = toChainList(payload.chain_ids);
-    const chainIds = chainIdsRaw.length > 0 ? chainIdsRaw : chainOrderHints;
     const i = chainIds.findIndex((item) => chainTokenEquals(item, chainA));
     const j = chainIds.findIndex((item) => chainTokenEquals(item, chainB));
-    if (i >= 0 && j >= 0) {
+    if (i >= 0 && j >= 0 && i !== j) {
       const rowI = matrixRaw[i];
       const rowJ = matrixRaw[j];
-      const m1 = Array.isArray(rowI) ? normalizeIptm(readFiniteNumber(rowI[j])) : null;
-      const m2 = Array.isArray(rowJ) ? normalizeIptm(readFiniteNumber(rowJ[i])) : null;
-      if (m1 !== null || m2 !== null) {
-        return Math.max(m1 ?? Number.NEGATIVE_INFINITY, m2 ?? Number.NEGATIVE_INFINITY);
+      const matrixLigandToTarget = Array.isArray(rowJ) ? normalizeIptm(readFiniteNumber(rowJ[i])) : null;
+      const matrixTargetToLigand = Array.isArray(rowI) ? normalizeIptm(readFiniteNumber(rowI[j])) : null;
+      if (matrixLigandToTarget !== null && matrixTargetToLigand !== null && preferredDirectionalIptm !== null) {
+        const ligandDelta = Math.abs(matrixLigandToTarget - preferredDirectionalIptm);
+        const targetDelta = Math.abs(matrixTargetToLigand - preferredDirectionalIptm);
+        return ligandDelta <= targetDelta ? matrixLigandToTarget : matrixTargetToLigand;
       }
+      if (matrixLigandToTarget !== null) return matrixLigandToTarget;
+      if (matrixTargetToLigand !== null) return matrixTargetToLigand;
     }
   }
-
-  const numericMapped = readPairValueFromNumericMap(payload.pair_chains_iptm, chainA, chainB, chainOrderHints);
-  return numericMapped !== null ? normalizeIptm(numericMapped) : null;
+  return null;
 }
 
 function resolvePairIptmForCandidate(
@@ -324,6 +382,8 @@ function resolvePairIptmForCandidate(
       ])
     );
     if (pairScalar !== null) return pairScalar;
+    const globalIptm = normalizeIptm(firstFiniteMetric(payload, ['ligand_iptm', 'iptm', 'protein_iptm']));
+    if (globalIptm !== null) return globalIptm;
   }
   return null;
 }

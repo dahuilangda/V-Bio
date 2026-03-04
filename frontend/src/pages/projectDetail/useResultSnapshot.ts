@@ -533,8 +533,12 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
   }, [snapshotConfidence, selectedResultTargetChainId, selectedResultLigandChainId, resultChainIds]);
 
   const snapshotIptm = useMemo(() => {
-    return snapshotSelectedPairIptm;
-  }, [snapshotSelectedPairIptm]);
+    if (snapshotSelectedPairIptm !== null) return snapshotSelectedPairIptm;
+    if (!snapshotConfidence) return null;
+    const raw = readFirstFiniteMetric(snapshotConfidence, ['iptm', 'ligand_iptm', 'protein_iptm']);
+    if (raw === null) return null;
+    return raw > 1 && raw <= 100 ? raw / 100 : raw;
+  }, [snapshotConfidence, snapshotSelectedPairIptm]);
 
   const snapshotBindingValues = useMemo(() => {
     if (!snapshotAffinity) return null;
