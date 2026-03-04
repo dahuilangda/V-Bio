@@ -288,6 +288,7 @@ class LeadOptMmpService:
         query_id = str(result_payload.get('query_id') or '').strip()
         if not query_id:
             query_id = uuid.uuid4().hex
+        normalized_task_id = str(task_id or '').strip()
         created_at = time.time()
 
         rows = result_payload.get('rows')
@@ -345,6 +346,7 @@ class LeadOptMmpService:
             'mmp_database_id': str(result_payload.get('mmp_database_id') or ''),
             'mmp_database_label': str(result_payload.get('mmp_database_label') or ''),
             'mmp_database_schema': str(result_payload.get('mmp_database_schema') or ''),
+            'task_id': normalized_task_id,
             'property_targets': property_targets,
             'direction': direction,
             'variable_spec': variable_spec,
@@ -377,14 +379,15 @@ class LeadOptMmpService:
                 'rows': evidence_rows,
             }
 
-        if task_id:
-            self.async_query_to_result[str(task_id)] = query_id
+        if normalized_task_id:
+            self.async_query_to_result[normalized_task_id] = query_id
             task_map_payload = {'query_id': query_id}
-            self._redis_set_json(self._async_map_key(str(task_id)), task_map_payload)
-            self._disk_write_json(self._task_disk_path(str(task_id)), task_map_payload)
+            self._redis_set_json(self._async_map_key(normalized_task_id), task_map_payload)
+            self._disk_write_json(self._task_disk_path(normalized_task_id), task_map_payload)
 
         return {
             'query_id': query_id,
+            'task_id': normalized_task_id,
             'query_mode': query_mode,
             'aggregation_type': aggregation_type,
             'grouped_by_environment': grouped_by_environment,

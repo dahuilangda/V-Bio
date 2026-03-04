@@ -1,4 +1,4 @@
-# V-Bio 药物设计平台（前后端一体）
+# V-Bio 药物发现平台
 
 V-Bio 是一个面向药物设计与药物发现流程的计算平台，提供从任务提交、能力路由、集群调度到结果回传的一体化能力。仓库同时包含前端工作台与后端调度执行系统，支持在多台计算服务器上按能力组合部署（如 `boltz2`、`alphafold3`、`protenix`、`pocketxmol`、`lead_opt`）。
 
@@ -39,6 +39,29 @@ Docker 部署入口统一在 `deploy/docker/`，文件名统一使用 `DOCKER_*`
 4. 启动 `frontend`，指向中央 API。
 
 完整可复制命令见：[`docs/deployment/quick-start.md`](docs/deployment/quick-start.md)
+
+## 前端运行前置（Python venv）
+
+`frontend` 的 management API 依赖 Python 环境。`frontend/run.sh` 默认会在以下路径查找虚拟环境：
+
+- `/data/V-Bio/venv`
+- `frontend/venv`
+
+建议在仓库根目录创建：
+
+```bash
+cd /data/V-Bio
+python3 -m venv venv
+source ./venv/bin/activate
+pip install -U pip
+pip install -r requirements.txt
+```
+
+完成后即可使用：
+
+```bash
+bash frontend/run.sh start
+```
 
 ## 一键模板位置
 

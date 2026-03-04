@@ -106,6 +106,7 @@ const RUNTIME_STATUS_IDLE_POLL_DELAY_MS = 12000;
 const RUNTIME_STATUS_HIDDEN_POLL_DELAY_MULTIPLIER = 2;
 const RUNTIME_STATUS_CANDIDATE_BATCH_SIZE = 1;
 const RUNTIME_STATUS_REFERENCE_BATCH_SIZE = 1;
+const RUNTIME_STATUS_MIN_TASK_REPOLL_GAP_MS = 2000;
 
 export interface LeadOptPredictionRecord {
   taskId: string;
@@ -124,7 +125,8 @@ export interface LeadOptPredictionRecord {
 }
 
 export function buildLeadOptPredictionRecordKey(backendInput: unknown, candidateSmilesInput: unknown): string {
-  const backendKey = normalizeBackendKey(backendInput);
+  const backendKey = normalizePredictionBackendStrict(backendInput);
+  if (!backendKey) return '';
   const normalizedSmiles = readText(candidateSmilesInput).trim();
   if (!normalizedSmiles) return '';
   return `${backendKey}${LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR}${encodeURIComponent(normalizedSmiles)}`;
@@ -137,7 +139,7 @@ export function parseLeadOptPredictionRecordKey(keyInput: unknown): { backend: s
   if (separatorIndex < 0) {
     return { backend: '', smiles: key };
   }
-  const backendKey = normalizeBackendKey(key.slice(0, separatorIndex));
+  const backendKey = normalizePredictionBackendStrict(key.slice(0, separatorIndex));
   const encodedSmiles = key.slice(separatorIndex + LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR.length);
   if (!encodedSmiles) {
     return { backend: backendKey, smiles: '' };
@@ -178,7 +180,7 @@ function normalizePredictionRecord(value: unknown): LeadOptPredictionRecord | nu
   return {
     taskId,
     state: normalizedState,
-    backend: readText(raw.backend).trim().toLowerCase() || 'boltz',
+    backend: readText(raw.backend).trim().toLowerCase(),
     pairIptm,
     pairPae,
     pairIptmResolved: pairIptmResolvedRaw === true && hasResolvedMetrics ? true : hasResolvedMetrics,
@@ -207,7 +209,10 @@ function normalizePredictionMap(value: unknown): Record<string, LeadOptPredictio
     if (!normalizedSmiles) continue;
     const record = normalizePredictionRecord(rawRecord);
     if (!record) continue;
-    const normalizedBackend = normalizeBackendKey(record.backend || parsedKey.backend);
+    const backendFromKey = normalizePredictionBackendStrict(parsedKey.backend);
+    // Candidate predictions are strictly keyed by `backend::smiles`.
+    const normalizedBackend = backendFromKey;
+    if (!normalizedBackend) continue;
     const canonicalKey = buildLeadOptPredictionRecordKey(normalizedBackend, normalizedSmiles);
     if (!canonicalKey) continue;
     const nextRecord: LeadOptPredictionRecord = {
@@ -217,6 +222,27 @@ function normalizePredictionMap(value: unknown): Record<string, LeadOptPredictio
     const merged = mergePredictionRecordNonRegressive(out[canonicalKey], nextRecord);
     if (!merged) continue;
     out[canonicalKey] = merged;
+  }
+  return out;
+}
+
+function normalizeReferencePredictionMap(value: unknown): Record<string, LeadOptPredictionRecord> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out: Record<string, LeadOptPredictionRecord> = {};
+  for (const [rawKey, rawRecord] of Object.entries(value as Record<string, unknown>)) {
+    const record = normalizePredictionRecord(rawRecord);
+    if (!record) continue;
+    const backendFromKey = normalizePredictionBackendStrict(rawKey);
+    // Reference predictions are strictly keyed by backend token only.
+    const normalizedBackend = backendFromKey;
+    if (!normalizedBackend) continue;
+    const nextRecord: LeadOptPredictionRecord = {
+      ...record,
+      backend: normalizedBackend
+    };
+    const merged = mergePredictionRecordNonRegressive(out[normalizedBackend], nextRecord);
+    if (!merged) continue;
+    out[normalizedBackend] = merged;
   }
   return out;
 }
@@ -356,7 +382,7 @@ function mergePredictionRecordNonRegressive(
     ...current,
     ...incoming,
     state: mergedState,
-    backend: readText(incoming.backend).trim().toLowerCase() || readText(current.backend).trim().toLowerCase() || 'boltz',
+    backend: readText(incoming.backend).trim().toLowerCase() || readText(current.backend).trim().toLowerCase(),
     pairIptm: incoming.pairIptm ?? current.pairIptm,
     pairPae: incoming.pairPae ?? current.pairPae,
     ligandPlddt: incoming.ligandPlddt ?? current.ligandPlddt,
@@ -393,7 +419,16 @@ function mergePredictionRecordMapsNonRegressive(
 
 function normalizeBackendKey(value: unknown): string {
   const token = String(value || '').trim().toLowerCase();
-  return token === 'alphafold3' || token === 'protenix' || token === 'pocketxmol' ? token : 'boltz';
+  if (token === 'boltz2') return 'boltz';
+  if (token === 'boltz' || token === 'alphafold3' || token === 'protenix' || token === 'pocketxmol') return token;
+  return '';
+}
+
+function normalizePredictionBackendStrict(value: unknown): string {
+  const token = String(value || '').trim().toLowerCase();
+  if (token === 'boltz2') return 'boltz';
+  if (token === 'boltz' || token === 'alphafold3' || token === 'protenix' || token === 'pocketxmol') return token;
+  return '';
 }
 
 function summarizePredictionRecords(records: Record<string, LeadOptPredictionRecord>) {
@@ -426,10 +461,11 @@ function summarizePredictionRecords(records: Record<string, LeadOptPredictionRec
 }
 
 function buildQueuedPredictionRecord(taskId: string, backend: string): LeadOptPredictionRecord {
+  const normalizedBackend = normalizePredictionBackendStrict(backend);
   return {
     taskId,
     state: 'QUEUED',
-    backend: String(backend || '').trim().toLowerCase() || 'boltz',
+    backend: normalizedBackend,
     pairIptm: null,
     pairPae: null,
     pairIptmResolved: false,
@@ -446,11 +482,25 @@ function hasResolvedPredictionMetrics(record: LeadOptPredictionRecord | null | u
   const pairPae = typeof record.pairPae === 'number' && Number.isFinite(record.pairPae);
   const ligandPlddt = typeof record.ligandPlddt === 'number' && Number.isFinite(record.ligandPlddt);
   const ligandAtomPlddts = Array.isArray(record.ligandAtomPlddts) && record.ligandAtomPlddts.length > 0;
-  const backend = normalizeBackendKey(record.backend);
+  const backend = normalizePredictionBackendStrict(record.backend);
   if (backend === 'alphafold3' && !ligandAtomPlddts) {
     return false;
   }
   return record.pairIptmResolved === true && (pairIptm || pairPae || ligandPlddt || ligandAtomPlddts);
+}
+
+function shouldProbeTaskStatus(
+  tracker: Record<string, number>,
+  taskIdInput: unknown,
+  minGapMs = RUNTIME_STATUS_MIN_TASK_REPOLL_GAP_MS
+): boolean {
+  const taskId = readText(taskIdInput).trim();
+  if (!taskId) return false;
+  const now = Date.now();
+  const last = Number(tracker[taskId] || 0);
+  if (Number.isFinite(last) && now - last < minGapMs) return false;
+  tracker[taskId] = now;
+  return true;
 }
 
 function shouldHydratePredictionRecord(record: LeadOptPredictionRecord | null | undefined): boolean {
@@ -1133,10 +1183,11 @@ export function useLeadOptMmpQueryMachine({
         predictionRuntimePollCursorRef.current = nextCursor;
         if (pendingEntries.length === 0) return;
 
-        for (const [smiles, record] of pendingEntries) {
+        for (const [predictionKey, record] of pendingEntries) {
           if (cancelled) return;
           const taskId = readText(record.taskId).trim();
           if (!taskId) continue;
+          if (!shouldProbeTaskStatus(runtimeStatusDirectProbeAtRef.current, taskId)) continue;
           let status: { task_id: string; state: string; info?: Record<string, unknown> } | undefined;
           try {
             status = await getTaskStatus(taskId);
@@ -1150,21 +1201,22 @@ export function useLeadOptMmpQueryMachine({
             if (!runtimeState) continue;
             if (runtimeState === 'SUCCESS') {
               const metrics = extractPredictionMetricsFromStatusInfo(status.info, targetChain, ligandChain);
-              const retryTimer = predictionHydrationRetryTimerRef.current[smiles];
+              delete runtimeStatusDirectProbeAtRef.current[taskId];
+              const retryTimer = predictionHydrationRetryTimerRef.current[predictionKey];
               if (retryTimer) {
                 window.clearTimeout(retryTimer);
-                delete predictionHydrationRetryTimerRef.current[smiles];
+                delete predictionHydrationRetryTimerRef.current[predictionKey];
               }
-              delete predictionHydrationRetryCountRef.current[smiles];
+              delete predictionHydrationRetryCountRef.current[predictionKey];
               setPredictionBySmiles((prev) => {
-                const current = prev[smiles] || record;
+                const current = prev[predictionKey] || record;
                 const nextPairIptm = metrics.hasMetrics ? metrics.pairIptm : current.pairIptm;
                 const nextPairPae = metrics.hasMetrics ? metrics.pairPae : current.pairPae;
                 const nextLigandPlddt = metrics.hasMetrics ? metrics.ligandPlddt : current.ligandPlddt;
                 const nextLigandAtomPlddts = metrics.hasMetrics ? metrics.ligandAtomPlddts : current.ligandAtomPlddts;
                 return {
                   ...prev,
-                  [smiles]: {
+                  [predictionKey]: {
                     ...current,
                     state: 'SUCCESS',
                     pairIptm: nextPairIptm,
@@ -1183,17 +1235,18 @@ export function useLeadOptMmpQueryMachine({
               continue;
             }
             if (runtimeState === 'FAILURE') {
-              const retryTimer = predictionHydrationRetryTimerRef.current[smiles];
+              delete runtimeStatusDirectProbeAtRef.current[taskId];
+              const retryTimer = predictionHydrationRetryTimerRef.current[predictionKey];
               if (retryTimer) {
                 window.clearTimeout(retryTimer);
-                delete predictionHydrationRetryTimerRef.current[smiles];
+                delete predictionHydrationRetryTimerRef.current[predictionKey];
               }
-              delete predictionHydrationRetryCountRef.current[smiles];
+              delete predictionHydrationRetryCountRef.current[predictionKey];
               const errorText = readText(asRecord(status.info).error || asRecord(status.info).message || status.state);
               setPredictionBySmiles((prev) => ({
                 ...prev,
-                [smiles]: {
-                  ...(prev[smiles] || record),
+                [predictionKey]: {
+                  ...(prev[predictionKey] || record),
                   state: 'FAILURE',
                   error: errorText || 'Prediction failed.',
                   updatedAt: Date.now()
@@ -1203,13 +1256,13 @@ export function useLeadOptMmpQueryMachine({
             }
             if (runtimeState !== 'QUEUED' && runtimeState !== 'RUNNING') continue;
             setPredictionBySmiles((prev) => {
-              const current = prev[smiles] || record;
+              const current = prev[predictionKey] || record;
               const nextRuntimeState = resolveNonRegressiveRuntimeState(current.state, runtimeState);
               if (!nextRuntimeState) return prev;
               if (String(current.state || '').toUpperCase() === nextRuntimeState) return prev;
               return {
                 ...prev,
-                [smiles]: {
+                [predictionKey]: {
                   ...current,
                   state: nextRuntimeState,
                   updatedAt: Date.now()
@@ -1277,6 +1330,7 @@ export function useLeadOptMmpQueryMachine({
           if (cancelled) return;
           const taskId = readText(record.taskId).trim();
           if (!taskId) continue;
+          if (!shouldProbeTaskStatus(runtimeStatusDirectProbeAtRef.current, taskId)) continue;
           let status: { task_id: string; state: string; info?: Record<string, unknown> } | undefined;
           try {
             status = await getTaskStatus(taskId);
@@ -1290,6 +1344,7 @@ export function useLeadOptMmpQueryMachine({
             if (!runtimeState) continue;
             if (runtimeState === 'SUCCESS') {
               const metrics = extractPredictionMetricsFromStatusInfo(status.info, targetChain, ligandChain);
+              delete runtimeStatusDirectProbeAtRef.current[taskId];
               const retryTimer = referenceHydrationRetryTimerRef.current[backendKey];
               if (retryTimer) {
                 window.clearTimeout(retryTimer);
@@ -1323,6 +1378,7 @@ export function useLeadOptMmpQueryMachine({
               continue;
             }
             if (runtimeState === 'FAILURE') {
+              delete runtimeStatusDirectProbeAtRef.current[taskId];
               const retryTimer = referenceHydrationRetryTimerRef.current[backendKey];
               if (retryTimer) {
                 window.clearTimeout(retryTimer);
@@ -1821,6 +1877,7 @@ export function useLeadOptMmpQueryMachine({
         if (nextQueryId) {
           const cachePayload = {
             query_id: nextQueryId,
+            task_id: queuedTaskId || readText(response.task_id),
             query_mode: readText(response.query_mode),
             aggregation_type: responseAggregationType,
             grouped_by_environment: responseGroupedByEnvironment,
@@ -1842,6 +1899,7 @@ export function useLeadOptMmpQueryMachine({
           } as Record<string, unknown>;
           queryResultCacheRef.current.set(nextQueryId, cachePayload);
         }
+        const completedTaskId = queuedTaskId || readText(response.task_id);
         let candidateCount = 0;
         let persistedCandidates: Array<Record<string, unknown>> = [];
         if (nextTransforms.length === 0) {
@@ -1856,6 +1914,7 @@ export function useLeadOptMmpQueryMachine({
           try {
             const enumerate = await enumerateLeadOptimizationMmp({
               query_id: nextQueryId,
+              task_id: completedTaskId,
               property_constraints: {},
               max_candidates: 360,
               compact: true
@@ -1886,9 +1945,9 @@ export function useLeadOptMmpQueryMachine({
           count: readNumber(response.count),
           global_count: readNumber(response.global_count),
           min_pairs: Math.max(1, minPairs),
+          task_id: completedTaskId,
           stats: (response.stats as Record<string, unknown>) || {}
         } as Record<string, unknown>;
-        const completedTaskId = queuedTaskId || readText(response.task_id);
         if (completedTaskId && typeof onTaskCompleted === 'function') {
           await onTaskCompleted({
             taskId: completedTaskId,
@@ -1948,6 +2007,10 @@ export function useLeadOptMmpQueryMachine({
         const responseAggregationType =
           readText(queryResultRecord.aggregation_type).trim() || (nextMode === 'many-to-many' ? 'group_by_fragment' : 'individual_transforms');
         const responseGroupedByEnvironment = readBoolean(queryResultRecord.grouped_by_environment, false);
+        const responseTaskId = readText(queryResultRecord.task_id);
+        if (responseTaskId) {
+          setLastMmpTaskId(responseTaskId);
+        }
         const savedGroupBy = readText(queryResultRecord.cluster_group_by).toLowerCase();
         const nextGroupBy = savedGroupBy === 'from' || savedGroupBy === 'rule_env_radius' ? savedGroupBy : 'to';
         setClusterGroupBy(nextGroupBy as ClusterGroupBy);
@@ -1959,6 +2022,7 @@ export function useLeadOptMmpQueryMachine({
         clearSelections();
         queryResultCacheRef.current.set(normalizedId, {
           query_id: normalizedId,
+          task_id: responseTaskId,
           query_mode: nextMode,
           aggregation_type: responseAggregationType,
           grouped_by_environment: responseGroupedByEnvironment,
@@ -2030,6 +2094,7 @@ export function useLeadOptMmpQueryMachine({
     try {
       const result = await enumerateLeadOptimizationMmp({
         query_id: queryId,
+        task_id: lastMmpTaskId,
         transform_ids: selectedTransformIds,
         cluster_ids: selectedClusterIds,
         property_constraints: {},
@@ -2043,7 +2108,7 @@ export function useLeadOptMmpQueryMachine({
     } finally {
       setLoading(false);
     }
-  }, [onError, queryId, selectedClusterIds, selectedTransformIds]);
+  }, [lastMmpTaskId, onError, queryId, selectedClusterIds, selectedTransformIds]);
 
   const setClusterGrouping = useCallback(
     async (groupBy: ClusterGroupBy) => {
@@ -2091,9 +2156,9 @@ export function useLeadOptMmpQueryMachine({
       if (!referenceReady) {
         throw new Error('Please upload reference target+ligand first.');
       }
-      const selectedBackend = String(backendOverride || backend || 'boltz').trim().toLowerCase();
-      if (!['boltz', 'alphafold3', 'protenix', 'pocketxmol'].includes(selectedBackend)) {
-        throw new Error(`Unsupported backend '${selectedBackend}' for lead optimization prediction.`);
+      const selectedBackend = normalizeBackendKey(backendOverride || backend);
+      if (!selectedBackend) {
+        throw new Error(`Unsupported backend '${String(backendOverride || backend || '').trim()}' for lead optimization prediction.`);
       }
       const effectiveProteinSequence = String(referenceProteinSequence || '').trim() || String(proteinSequence || '').trim();
       const normalizedReferenceTargetFilename = String(referenceTargetFilename || '').trim();
@@ -2192,8 +2257,14 @@ export function useLeadOptMmpQueryMachine({
       setLoading(true);
       try {
         const normalizedSmiles = String(candidateSmiles || '').trim();
-        const selectedBackend = normalizeBackendKey(backendOverride || backend || 'boltz');
+        const selectedBackend = normalizeBackendKey(backendOverride || backend);
+        if (!selectedBackend) {
+          throw new Error('Invalid backend for candidate prediction.');
+        }
         const predictionKey = buildLeadOptPredictionRecordKey(selectedBackend, normalizedSmiles);
+        if (!predictionKey) {
+          throw new Error('Invalid prediction key.');
+        }
         const retryTimer = predictionHydrationRetryTimerRef.current[predictionKey];
         if (retryTimer) {
           window.clearTimeout(retryTimer);
@@ -2209,6 +2280,11 @@ export function useLeadOptMmpQueryMachine({
             ...buildQueuedPredictionRecord(localTaskId, selectedBackend)
           }
         }));
+        if (typeof onPredictionQueued === 'function') {
+          void Promise.resolve(onPredictionQueued({ taskId: localTaskId, backend: selectedBackend, candidateSmiles: normalizedSmiles })).catch(() => {
+            // Keep local queue-state persistence best-effort only.
+          });
+        }
         const taskId = await submitPredictCandidateTask({
           candidateSmiles: normalizedSmiles,
           backend: selectedBackend,
@@ -2238,8 +2314,18 @@ export function useLeadOptMmpQueryMachine({
         }
       } catch (e) {
         const normalizedSmiles = String(candidateSmiles || '').trim();
-        const selectedBackend = normalizeBackendKey(backendOverride || backend || 'boltz');
+        const selectedBackend = normalizeBackendKey(backendOverride || backend);
+        if (!selectedBackend) {
+          const message = e instanceof Error ? e.message : 'Candidate prediction failed.';
+          onError(message);
+          return;
+        }
         const predictionKey = buildLeadOptPredictionRecordKey(selectedBackend, normalizedSmiles);
+        if (!predictionKey) {
+          const message = e instanceof Error ? e.message : 'Candidate prediction failed.';
+          onError(message);
+          return;
+        }
         const message = e instanceof Error ? e.message : 'Candidate prediction failed.';
         setPredictionBySmiles((prev) => {
           const current = prev[predictionKey];
@@ -2301,7 +2387,11 @@ export function useLeadOptMmpQueryMachine({
       referenceLigandFilename?: string;
       referenceLigandFileContent?: string;
     }) => {
-      const selectedBackend = normalizeBackendKey(backendOverride || backend || 'boltz');
+      const selectedBackend = normalizeBackendKey(backendOverride || backend);
+      if (!selectedBackend) {
+        onError('Invalid backend for reference prediction.');
+        return;
+      }
       const referenceSmiles = String(candidateSmiles || '').trim();
       if (!referenceSmiles) return;
       const retryTimer = referenceHydrationRetryTimerRef.current[selectedBackend];
@@ -2415,10 +2505,19 @@ export function useLeadOptMmpQueryMachine({
       let success = 0;
       let failure = 0;
       let lastTaskId = '';
-      const selectedBackend = normalizeBackendKey(backendOverride || backend || 'boltz');
+      const selectedBackend = normalizeBackendKey(backendOverride || backend);
+      if (!selectedBackend) {
+        onError('Invalid backend for batch prediction.');
+        setLoading(false);
+        return;
+      }
       try {
         for (const smiles of batch) {
           const predictionKey = buildLeadOptPredictionRecordKey(selectedBackend, smiles);
+          if (!predictionKey) {
+            failure += 1;
+            continue;
+          }
           const previousRecord = predictionBySmiles[predictionKey];
           const localTaskId = `local:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
           setPredictionBySmiles((prev) => ({
@@ -2628,6 +2727,7 @@ export function useLeadOptMmpQueryMachine({
   const ensureReferencePredictionResult = useCallback(
     async (backendKeyInput: string): Promise<LeadOptPredictionRecord | null> => {
       const backendKey = normalizeBackendKey(backendKeyInput);
+      if (!backendKey) return null;
       const existing = referencePredictionByBackend[backendKey];
       if (!existing) return null;
       if (String(existing.state || '').toUpperCase() !== 'SUCCESS') return existing;
@@ -2843,13 +2943,15 @@ export function useLeadOptMmpQueryMachine({
     const queryResult = asRecord(payload.query_result);
     const nextQueryId = readText(queryResult.query_id);
     if (!nextQueryId) return;
+    const nextTaskId = readText(queryResult.task_id || payload.task_id);
     const nextTransforms = asRecordArray(queryResult.transforms);
     const nextClusters = asRecordArray(queryResult.clusters);
     const nextCandidates = asRecordArray(payload.enumerated_candidates);
     const nextPredictions = normalizePredictionMap(payload.prediction_by_smiles);
-    const nextReferenceByBackend = normalizePredictionMap(payload.reference_prediction_by_backend);
+    const nextReferenceByBackend = normalizeReferencePredictionMap(payload.reference_prediction_by_backend);
 
     setQueryId(nextQueryId);
+    setLastMmpTaskId(nextTaskId);
     const nextMode = readText(queryResult.query_mode).toLowerCase() === 'many-to-many' ? 'many-to-many' : 'one-to-many';
     const nextAggregationType =
       readText(queryResult.aggregation_type).trim() || (nextMode === 'many-to-many' ? 'group_by_fragment' : 'individual_transforms');
@@ -2907,6 +3009,7 @@ export function useLeadOptMmpQueryMachine({
       nextGlobalCount > 0 ? nextGlobalCount : shouldMergeRuntimeState ? readNumber(cacheCurrent.global_count) : nextGlobalCount;
     queryResultCacheRef.current.set(nextQueryId, {
       query_id: nextQueryId,
+      task_id: nextTaskId,
       query_mode: nextMode,
       aggregation_type: nextAggregationType,
       grouped_by_environment: nextGroupedByEnvironment,

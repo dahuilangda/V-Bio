@@ -23,6 +23,7 @@ import { LeadOptMolstarViewer } from './leadopt/LeadOptMolstarViewer';
 import { LeadOptReferencePanel } from './leadopt/LeadOptReferencePanel';
 import {
   buildLeadOptPredictionRecordKey,
+  parseLeadOptPredictionRecordKey,
   useLeadOptMmpQueryMachine,
   type LeadOptMmpPersistedSnapshot,
   type LeadOptPredictionRecord
@@ -206,7 +207,9 @@ function normalizeAtomIndices(value: unknown): number[] {
 
 function normalizeBackendKey(value: unknown): string {
   const token = String(value || '').trim().toLowerCase();
-  return token === 'alphafold3' || token === 'protenix' || token === 'pocketxmol' ? token : 'boltz';
+  if (token === 'boltz2') return 'boltz';
+  if (token === 'boltz' || token === 'alphafold3' || token === 'protenix' || token === 'pocketxmol') return token;
+  return '';
 }
 
 function hasResolvedLeadOptPredictionMetrics(record: LeadOptPredictionRecord | null | undefined): boolean {
@@ -486,8 +489,8 @@ export function LeadOptimizationWorkspace({
   const [showMmpRunTransition, setShowMmpRunTransition] = useState(false);
   const snapshotUiState = useMemo(() => {
     const payload = asRecord(initialMmpSnapshot || null);
-    return normalizeLeadOptCandidatesUiState(payload.ui_state, backend);
-  }, [backend, initialMmpSnapshot]);
+    return normalizeLeadOptCandidatesUiState(payload.ui_state, 'pocketxmol');
+  }, [initialMmpSnapshot]);
   const [resultsUiState, setResultsUiState] = useState<LeadOptCandidatesUiState>(snapshotUiState);
   const [viewerPreviewRenderMode, setViewerPreviewRenderMode] = useState<CandidatePreviewRenderMode>(
     snapshotUiState.previewRenderMode
@@ -525,8 +528,9 @@ export function LeadOptimizationWorkspace({
     const snapshot = asRecord(initialMmpSnapshot || null);
     const queryResult = asRecord(snapshot.query_result);
     const queryId = readText(queryResult.query_id).trim();
+    const taskRowId = readText(snapshot.task_row_id).trim();
     const taskId = readText(queryResult.task_id || snapshot.task_id).trim();
-    const key = queryId || taskId || '__initial__';
+    const key = `${taskRowId || '__row__'}|${queryId || '__query__'}|${taskId || '__task__'}`;
     if (hydratedUiStateKeyRef.current === key) return;
     hydratedUiStateKeyRef.current = key;
     setResultsUiState(snapshotUiState);
@@ -1096,12 +1100,13 @@ export function LeadOptimizationWorkspace({
 
   useEffect(() => {
     if (!reference.referenceReady) return;
-    const selectedBackendKey = normalizeBackendKey(resultsUiState.selectedBackend || backend);
+    const selectedBackendKey = normalizeBackendKey(resultsUiState.selectedBackend);
+    if (!selectedBackendKey) return;
     const referenceSmiles = readText(referenceControlSmiles).trim();
     if (!referenceSmiles) return;
-    const hasAnyPredictionForSelectedBackend = Object.values(mmp.predictionBySmiles).some((record) => {
-      if (!record) return false;
-      return normalizeBackendKey(record.backend) === selectedBackendKey;
+    const hasAnyPredictionForSelectedBackend = Object.entries(mmp.predictionBySmiles).some(([predictionKey]) => {
+      const backendFromKey = normalizeBackendKey(parseLeadOptPredictionRecordKey(predictionKey).backend);
+      return backendFromKey === selectedBackendKey;
     });
     if (!hasAnyPredictionForSelectedBackend) return;
 
@@ -1130,7 +1135,6 @@ export function LeadOptimizationWorkspace({
       referenceLigandFileContent: readText(reference.persistedUploads.ligand?.content)
     });
   }, [
-    backend,
     mmp.predictionBySmiles,
     mmp.queryId,
     mmp.referencePredictionByBackend,

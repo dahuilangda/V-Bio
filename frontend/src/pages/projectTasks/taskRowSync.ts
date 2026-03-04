@@ -88,6 +88,7 @@ const RUNTIME_STATUS_LIGHT_POLL_MAX_TASKS = 3;
 const LEADOPT_STATUS_LIGHT_POLL_MAX_ROWS = 3;
 let runtimeStatusPollCursor = 0;
 let leadOptStatusPollCursor = 0;
+const LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR = '::';
 
 function pickRecordFields(source: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
   const next: Record<string, unknown> = {};
@@ -171,6 +172,108 @@ function mergePeptideRuntimeStatusIntoConfidence(
 function readErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error || 'unknown error');
+}
+
+function normalizeLeadOptPredictionBackend(value: unknown): string {
+  const token = String(value || '').trim().toLowerCase();
+  if (token === 'boltz2') return 'boltz';
+  if (token === 'boltz' || token === 'alphafold3' || token === 'protenix' || token === 'pocketxmol') return token;
+  return '';
+}
+
+function buildLeadOptPredictionRecordKey(backendInput: unknown, candidateSmilesInput: unknown): string {
+  const backend = normalizeLeadOptPredictionBackend(backendInput);
+  const smiles = String(candidateSmilesInput || '').trim();
+  if (!backend || !smiles) return '';
+  return `${backend}${LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR}${encodeURIComponent(smiles)}`;
+}
+
+function parseLeadOptPredictionRecordKey(keyInput: unknown): { backend: string; smiles: string } {
+  const key = String(keyInput || '').trim();
+  if (!key) return { backend: '', smiles: '' };
+  const separatorIndex = key.indexOf(LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR);
+  if (separatorIndex < 0) {
+    return { backend: '', smiles: key };
+  }
+  const backend = normalizeLeadOptPredictionBackend(key.slice(0, separatorIndex));
+  const encodedSmiles = key.slice(separatorIndex + LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR.length);
+  if (!encodedSmiles) return { backend, smiles: '' };
+  try {
+    return { backend, smiles: decodeURIComponent(encodedSmiles) };
+  } catch {
+    return { backend, smiles: encodedSmiles };
+  }
+}
+
+function mergeLeadOptPredictionMapsByKey(
+  nextValue: Record<string, unknown>,
+  prevValue: Record<string, unknown>
+): Record<string, unknown> {
+  const next = asRecord(nextValue);
+  const prev = asRecord(prevValue);
+  if (Object.keys(next).length === 0 && Object.keys(prev).length === 0) return {};
+  const merged: Record<string, unknown> = { ...prev };
+  for (const [key, nextRecord] of Object.entries(next)) {
+    const prevRecord = asRecord(merged[key]);
+    if (Object.keys(prevRecord).length === 0) {
+      merged[key] = nextRecord;
+      continue;
+    }
+    const nextUpdatedAt = readFiniteNumber(asRecord(nextRecord).updatedAt ?? asRecord(nextRecord).updated_at) || 0;
+    const prevUpdatedAt = readFiniteNumber(prevRecord.updatedAt ?? prevRecord.updated_at) || 0;
+    merged[key] = nextUpdatedAt >= prevUpdatedAt ? nextRecord : prevRecord;
+  }
+  return merged;
+}
+
+function canonicalizeLeadOptPredictionMap(
+  predictionMapInput: Record<string, unknown>,
+  _preferredBackendInput: unknown
+): { nextMap: Record<string, unknown>; changed: boolean } {
+  const nextMap: Record<string, unknown> = {};
+  let changed = false;
+
+  for (const [rawKey, rawValue] of Object.entries(predictionMapInput)) {
+    const record = asRecord(rawValue);
+    const parsedKey = parseLeadOptPredictionRecordKey(rawKey);
+    const smiles = String(parsedKey.smiles || '').trim();
+    if (!smiles) continue;
+    // Candidate map is strictly keyed by `backend::smiles`.
+    const backend = normalizeLeadOptPredictionBackend(parsedKey.backend);
+    if (!backend) continue;
+    const canonicalKey = buildLeadOptPredictionRecordKey(backend, smiles);
+    if (!canonicalKey) continue;
+    const canonicalRecord: Record<string, unknown> = {
+      ...record,
+      backend
+    };
+    const existing = asRecord(nextMap[canonicalKey]);
+    if (Object.keys(existing).length === 0) {
+      nextMap[canonicalKey] = canonicalRecord;
+    } else {
+      const resolvedState = resolveLeadOptNonRegressiveState(
+        String(existing.state || '').trim().toUpperCase(),
+        String(canonicalRecord.state || '').trim().toUpperCase()
+      );
+      const existingUpdatedAt = readFiniteNumber(existing.updatedAt ?? existing.updated_at) || 0;
+      const incomingUpdatedAt = readFiniteNumber(canonicalRecord.updatedAt ?? canonicalRecord.updated_at) || 0;
+      nextMap[canonicalKey] = {
+        ...existing,
+        ...canonicalRecord,
+        state: resolvedState,
+        backend,
+        updatedAt: Math.max(existingUpdatedAt, incomingUpdatedAt)
+      };
+    }
+    if (canonicalKey !== rawKey || normalizeLeadOptPredictionBackend(record.backend) !== backend) {
+      changed = true;
+    }
+  }
+
+  if (Object.keys(nextMap).length !== Object.keys(predictionMapInput).length) {
+    changed = true;
+  }
+  return { nextMap, changed };
 }
 
 async function persistProjectTaskPatch(task: ProjectTask, patch: Partial<ProjectTask>): Promise<ProjectTask> {
@@ -569,11 +672,32 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
     let workingRow: ProjectTask = row;
     let workingConfidence = asRecord(workingRow.confidence);
     const leadOptMmp = asRecord(workingConfidence.lead_opt_mmp);
-    let predictionMap = asRecord(leadOptMmp.prediction_by_smiles);
-    const leadOptStateMetaForPolling = asRecord(asRecord(workingRow.properties).lead_opt_state);
+    const workingProperties = asRecord(workingRow.properties);
+    const leadOptListMetaForPolling = asRecord(workingProperties.lead_opt_list);
+    const leadOptListUiStateForPolling = asRecord(leadOptListMetaForPolling.ui_state);
+    const leadOptMmpUiStateForPolling = asRecord(leadOptMmp.ui_state);
+    const leadOptStateMetaForPolling = asRecord(workingProperties.lead_opt_state);
+    const selectedPredictionBackend = normalizeLeadOptPredictionBackend(
+      leadOptStateMetaForPolling.selected_backend ||
+      leadOptListUiStateForPolling.selectedBackend ||
+      leadOptListUiStateForPolling.selected_backend ||
+      leadOptMmpUiStateForPolling.selectedBackend ||
+      leadOptMmpUiStateForPolling.selected_backend
+    );
+    let predictionMap = mergeLeadOptPredictionMapsByKey(
+      mergeLeadOptPredictionMapsByKey(
+        asRecord(leadOptMmp.prediction_by_smiles),
+        asRecord(leadOptListMetaForPolling.prediction_by_smiles)
+      ),
+      asRecord(leadOptStateMetaForPolling.prediction_by_smiles)
+    );
+    const canonicalizedPredictionMap = canonicalizeLeadOptPredictionMap(predictionMap, selectedPredictionBackend);
+    if (canonicalizedPredictionMap.changed) {
+      predictionMap = canonicalizedPredictionMap.nextMap;
+    }
     const lightweightPredictionTaskId = String(leadOptStateMetaForPolling.prediction_task_id || '').trim();
     const lightweightPredictionCandidateSmiles = String(leadOptStateMetaForPolling.prediction_candidate_smiles || '').trim();
-    let leadOptChanged = false;
+    let leadOptChanged = canonicalizedPredictionMap.changed;
     let hydrationStructureNamePatch = '';
 
     if (Object.keys(predictionMap).length > 0) {
@@ -609,6 +733,7 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
           ...leadOptMmp,
           stage: nextStage,
           prediction_stage: unresolved > 0 ? (summaryCounts.running > 0 ? 'running' : 'queued') : 'completed',
+          ...(selectedPredictionBackend ? { selected_backend: selectedPredictionBackend } : {}),
           prediction_summary: {
             ...asRecord(leadOptMmp.prediction_summary),
             total: summaryCounts.total,
@@ -717,6 +842,7 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
                 : mappedState === 'QUEUED'
                   ? 'queued'
                   : 'completed',
+            ...(selectedPredictionBackend ? { selected_backend: selectedPredictionBackend } : {}),
             prediction_summary: {
               ...predictionSummary,
               total: nextTotal,
@@ -730,15 +856,24 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
             prediction_task_id: lightweightPredictionTaskId,
             prediction_candidate_smiles: lightweightPredictionCandidateSmiles
           };
-          if (lightweightPredictionCandidateSmiles) {
-            nextLeadOptMmp.prediction_by_smiles = {
-              [lightweightPredictionCandidateSmiles]: {
+          if (lightweightPredictionCandidateSmiles && selectedPredictionBackend) {
+            const lightweightPredictionKey = buildLeadOptPredictionRecordKey(
+              selectedPredictionBackend,
+              lightweightPredictionCandidateSmiles
+            );
+            const lightweightPredictionMap = {
+              [lightweightPredictionKey]: {
                 taskId: lightweightPredictionTaskId,
                 state: mappedState,
+                backend: selectedPredictionBackend,
                 error: errorText,
                 updatedAt: Date.now()
               }
             };
+            nextLeadOptMmp.prediction_by_smiles = mergeLeadOptPredictionMapsByKey(
+              lightweightPredictionMap,
+              predictionMap
+            );
           }
           predictionMap = asRecord(nextLeadOptMmp.prediction_by_smiles);
           workingConfidence = {
@@ -797,6 +932,12 @@ export async function syncRuntimeTaskRows(projectRow: Project, taskRows: Project
         lightweightPredictionCandidateSmiles ||
         String(leadOptStateMeta.prediction_candidate_smiles || '').trim(),
       prediction_summary: predictionSummary,
+      ...(() => {
+        const normalizedSelectedBackend =
+          selectedPredictionBackend ||
+          normalizeLeadOptPredictionBackend(leadOptStateMeta.selected_backend);
+        return normalizedSelectedBackend ? { selected_backend: normalizedSelectedBackend } : {};
+      })(),
       target_chain:
         String(leadOptStateMeta.target_chain || leadOptListMeta.target_chain || leadOptConfidenceMeta.target_chain || '').trim(),
       ligand_chain:

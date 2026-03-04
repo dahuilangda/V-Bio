@@ -273,6 +273,31 @@ function asObjectRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+function readRecordUpdatedAt(value: unknown): number {
+  const record = asObjectRecord(value);
+  const raw = record.updatedAt ?? record.updated_at;
+  const numeric = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN;
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function mergeLeadOptPredictionMapsByKey(nextValue: unknown, prevValue: unknown): Record<string, unknown> {
+  const next = asObjectRecord(nextValue);
+  const prev = asObjectRecord(prevValue);
+  if (Object.keys(next).length === 0 && Object.keys(prev).length === 0) return {};
+  const merged: Record<string, unknown> = { ...prev };
+  for (const [key, nextRecord] of Object.entries(next)) {
+    const prevRecord = merged[key];
+    if (!prevRecord) {
+      merged[key] = nextRecord;
+      continue;
+    }
+    const nextUpdatedAt = readRecordUpdatedAt(nextRecord);
+    const prevUpdatedAt = readRecordUpdatedAt(prevRecord);
+    merged[key] = nextUpdatedAt >= prevUpdatedAt ? nextRecord : prevRecord;
+  }
+  return merged;
+}
+
 function mergeLeadOptProperties(nextValue: unknown, prevValue: unknown): Record<string, unknown> | null {
   const next = asObjectRecord(nextValue);
   const prev = asObjectRecord(prevValue);
@@ -316,14 +341,14 @@ function mergeLeadOptProperties(nextValue: unknown, prevValue: unknown): Record<
     lead_opt_state: {
       ...prevState,
       ...nextState,
-      prediction_by_smiles:
-        Object.keys(asObjectRecord(nextState.prediction_by_smiles)).length > 0
-          ? asObjectRecord(nextState.prediction_by_smiles)
-          : asObjectRecord(prevState.prediction_by_smiles),
-      reference_prediction_by_backend:
-        Object.keys(asObjectRecord(nextState.reference_prediction_by_backend)).length > 0
-          ? asObjectRecord(nextState.reference_prediction_by_backend)
-          : asObjectRecord(prevState.reference_prediction_by_backend)
+      prediction_by_smiles: mergeLeadOptPredictionMapsByKey(
+        nextState.prediction_by_smiles,
+        prevState.prediction_by_smiles
+      ),
+      reference_prediction_by_backend: mergeLeadOptPredictionMapsByKey(
+        nextState.reference_prediction_by_backend,
+        prevState.reference_prediction_by_backend
+      )
     }
   };
 }
@@ -457,6 +482,29 @@ function readLeadOptQueryIdFromRow(row: { properties?: unknown; confidence?: unk
       stateMeta.query_id ||
       leadOptConfidence.query_id ||
       confidenceQueryResult.query_id ||
+      ''
+  ).trim();
+}
+
+function readLeadOptRuntimeTaskIdFromRow(
+  row: { task_id?: string | null; properties?: unknown; confidence?: unknown } | null | undefined
+): string {
+  if (!row) return '';
+  const directTaskId = String(row.task_id || '').trim();
+  if (directTaskId) return directTaskId;
+  const properties = asObjectRecord(row.properties);
+  const listMeta = asObjectRecord(properties.lead_opt_list);
+  const stateMeta = asObjectRecord(properties.lead_opt_state);
+  const listQueryResult = asObjectRecord(listMeta.query_result);
+  const confidence = asObjectRecord(row.confidence);
+  const leadOptConfidence = asObjectRecord(confidence.lead_opt_mmp);
+  const confidenceQueryResult = asObjectRecord(leadOptConfidence.query_result);
+  return String(
+    listMeta.task_id ||
+      stateMeta.task_id ||
+      listQueryResult.task_id ||
+      leadOptConfidence.task_id ||
+      confidenceQueryResult.task_id ||
       ''
   ).trim();
 }
@@ -862,6 +910,7 @@ export function useProjectDetailRuntimeContext() {
           const focusedQueryIdInRows = resolveFocusedQueryId(rowsForUi);
           const focusedRow = resolveFocusedRow(rowsForUi);
           const focusedRowId = String(focusedRow?.id || '').trim();
+          const focusedRuntimeTaskId = readLeadOptRuntimeTaskIdFromRow(focusedRow);
           hasLeadOptCandidates = focusedQueryIdInRows
             ? rowsForUi.some(
                 (row) => readLeadOptQueryIdFromRow(row) === focusedQueryIdInRows && readLeadOptEnumeratedCandidateCount(row) > 0
@@ -920,6 +969,7 @@ export function useProjectDetailRuntimeContext() {
               try {
                 const enumerate = await enumerateLeadOptimizationMmp({
                   query_id: focusedQueryIdInRows,
+                  task_id: focusedRuntimeTaskId,
                   property_constraints: {},
                   max_candidates: 360,
                   compact: true

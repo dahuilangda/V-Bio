@@ -52,6 +52,31 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+function readRecordUpdatedAt(value: unknown): number {
+  const record = asRecord(value);
+  const raw = record.updatedAt ?? record.updated_at;
+  const numeric = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN;
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function mergeLeadOptPredictionMapsByKey(nextValue: unknown, prevValue: unknown): Record<string, unknown> {
+  const next = asRecord(nextValue);
+  const prev = asRecord(prevValue);
+  if (Object.keys(next).length === 0 && Object.keys(prev).length === 0) return {};
+  const merged: Record<string, unknown> = { ...prev };
+  for (const [key, nextRecord] of Object.entries(next)) {
+    const prevRecord = merged[key];
+    if (!prevRecord) {
+      merged[key] = nextRecord;
+      continue;
+    }
+    const nextUpdatedAt = readRecordUpdatedAt(nextRecord);
+    const prevUpdatedAt = readRecordUpdatedAt(prevRecord);
+    merged[key] = nextUpdatedAt >= prevUpdatedAt ? nextRecord : prevRecord;
+  }
+  return merged;
+}
+
 function mergeLeadOptProperties(nextValue: unknown, prevValue: unknown): ProjectTask['properties'] | null {
   const next = asRecord(nextValue);
   const prev = asRecord(prevValue);
@@ -86,14 +111,14 @@ function mergeLeadOptProperties(nextValue: unknown, prevValue: unknown): Project
     lead_opt_state: {
       ...prevState,
       ...nextState,
-      prediction_by_smiles:
-        Object.keys(asRecord(nextState.prediction_by_smiles)).length > 0
-          ? asRecord(nextState.prediction_by_smiles)
-          : asRecord(prevState.prediction_by_smiles),
-      reference_prediction_by_backend:
-        Object.keys(asRecord(nextState.reference_prediction_by_backend)).length > 0
-          ? asRecord(nextState.reference_prediction_by_backend)
-          : asRecord(prevState.reference_prediction_by_backend)
+      prediction_by_smiles: mergeLeadOptPredictionMapsByKey(
+        nextState.prediction_by_smiles,
+        prevState.prediction_by_smiles
+      ),
+      reference_prediction_by_backend: mergeLeadOptPredictionMapsByKey(
+        nextState.reference_prediction_by_backend,
+        prevState.reference_prediction_by_backend
+      )
     }
   } as unknown as ProjectTask['properties'];
 }

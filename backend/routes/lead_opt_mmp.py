@@ -241,6 +241,38 @@ def register_lead_opt_mmp_routes(
     select_queue_for_capability: Callable[[str, str], Dict[str, Any]],
     capability_from_prediction_backend: Callable[[str], str],
 ) -> None:
+    def _recover_query_payload_from_task(task_id: str) -> tuple[str, Optional[Dict[str, Any]]]:
+        """Best-effort recovery path for expired query_id cache using Celery task result."""
+        task_token = str(task_id or '').strip()
+        if not task_token:
+            return '', None
+
+        cached_query_id = str(get_cached_mmp_query_id_for_task(task_token) or '').strip()
+        if cached_query_id:
+            cached_payload = get_cached_mmp_query_payload(cached_query_id)
+            if cached_payload:
+                return cached_query_id, cached_payload
+
+        task_result = AsyncResult(task_token, app=celery_app)
+        state = str(task_result.state or '').strip().upper()
+        if state != 'SUCCESS':
+            return cached_query_id, None
+
+        raw_result = task_result.result
+        if not isinstance(raw_result, dict):
+            return cached_query_id, None
+
+        try:
+            rematerialized = materialize_mmp_query_result_cache(raw_result, task_id=task_token)
+        except Exception as exc:
+            logger.warning('Failed to rematerialize MMP query cache from task_id=%s: %s', task_token, exc)
+            return cached_query_id, None
+
+        recovered_query_id = str(rematerialized.get('query_id') or cached_query_id or '').strip()
+        if not recovered_query_id:
+            return '', None
+        return recovered_query_id, get_cached_mmp_query_payload(recovered_query_id)
+
     @app.route('/api/lead_optimization/mmp_databases', methods=['GET'])
     @require_api_token
     def lead_optimization_mmp_databases():
@@ -427,6 +459,7 @@ def register_lead_opt_mmp_routes(
                 'state': 'SUCCESS',
                 'result': {
                     'query_id': cached_query_id,
+                    'task_id': str(payload.get('task_id') or task_id),
                     'query_mode': query_mode,
                     'aggregation_type': aggregation_type,
                     'grouped_by_environment': grouped_by_environment,
@@ -518,6 +551,7 @@ def register_lead_opt_mmp_routes(
         grouped_by_environment = _normalize_boolean(query_payload.get('grouped_by_environment'), False)
         return jsonify({
             'query_id': query_key,
+            'task_id': str(query_payload.get('task_id') or ''),
             'query_mode': query_mode,
             'aggregation_type': aggregation_type,
             'grouped_by_environment': grouped_by_environment,
@@ -560,15 +594,31 @@ def register_lead_opt_mmp_routes(
     def lead_optimization_mmp_enumerate():
         payload = request.get_json(silent=True) or {}
         query_id = str(payload.get('query_id') or '').strip()
+        task_id = str(payload.get('task_id') or '').strip()
         transform_ids = payload.get('transform_ids') if isinstance(payload.get('transform_ids'), list) else []
         cluster_ids = payload.get('cluster_ids') if isinstance(payload.get('cluster_ids'), list) else []
         property_constraints = safe_json_object(payload.get('property_constraints'))
         max_candidates = min(1000, max(1, int(payload.get('max_candidates') or 200)))
         compact_rows = bool(payload.get('compact') is True)
 
+        if not query_id and not task_id:
+            return jsonify({'error': "'query_id' or 'task_id' is required."}), 400
+
+        resolved_query_id = query_id
         query_payload = get_cached_mmp_query_payload(query_id) if query_id else None
-        if query_id and not query_payload:
-            return jsonify({'error': 'query_id not found or expired.'}), 404
+        if not query_payload and task_id:
+            recovered_query_id, recovered_payload = _recover_query_payload_from_task(task_id)
+            if recovered_payload:
+                query_payload = recovered_payload
+                if recovered_query_id:
+                    resolved_query_id = recovered_query_id
+
+        if not query_payload:
+            return jsonify({
+                'error': 'query payload not found or expired.',
+                'query_id': query_id,
+                'task_id': task_id,
+            }), 404
 
         allowed_transform_ids: set[str] = set()
         for item in transform_ids:
@@ -705,7 +755,8 @@ def register_lead_opt_mmp_routes(
 
         filtered = [item for item in candidates if item['passes_constraints']]
         return jsonify({
-            'query_id': query_id,
+            'query_id': resolved_query_id,
+            'task_id': str(task_id or query_payload.get('task_id') or ''),
             'requested_transform_ids': sorted(allowed_transform_ids),
             'candidate_count': len(filtered),
             'candidates': filtered,

@@ -12,6 +12,24 @@ React + Vite V-Bio frontend with:
   - `GET /results/:task_id`
 - Persistence through `supabase-lite` (Postgres + PostgREST)
 
+## 0) Prepare Python venv (required by management API)
+
+`frontend/run.sh` and `vbio_management_api.py` require a Python virtual environment.
+By default, `run.sh` looks for:
+
+- `/data/V-Bio/venv`
+- `frontend/venv`
+
+Recommended setup:
+
+```bash
+cd /data/V-Bio
+python3 -m venv venv
+source ./venv/bin/activate
+pip install -U pip
+pip install -r requirements.txt
+```
+
 ## 1) Start Supabase-lite
 
 ```bash

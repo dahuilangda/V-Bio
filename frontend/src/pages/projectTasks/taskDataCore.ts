@@ -1612,24 +1612,41 @@ function readLeadOptTaskStateMetaFromProperties(task: ProjectTask): Record<strin
 function readLeadOptTaskSummary(task: ProjectTask): LeadOptTaskSummary | null {
   const leadOptListMeta = readLeadOptTaskListMetaFromProperties(task);
   const leadOptStateMeta = readLeadOptTaskStateMetaFromProperties(task);
+  const leadOptConfidenceMeta =
+    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
+      ? asRecord((task.confidence as Record<string, unknown>).lead_opt_mmp)
+      : {};
   const leadOptMmp = (() => {
-    if (!leadOptListMeta && !leadOptStateMeta) return null;
+    if (!leadOptListMeta && !leadOptStateMeta && Object.keys(leadOptConfidenceMeta).length === 0) return null;
     const fromList = leadOptListMeta || {};
     const fromState = leadOptStateMeta || {};
+    const fromConfidence = leadOptConfidenceMeta || {};
     return {
+      ...fromConfidence,
       ...fromList,
       ...fromState,
-      query_result: asRecord(fromList.query_result),
-      enumerated_candidates: Array.isArray(fromList.enumerated_candidates) ? fromList.enumerated_candidates : [],
+      query_result:
+        Object.keys(asRecord(fromList.query_result)).length > 0
+          ? asRecord(fromList.query_result)
+          : asRecord(fromConfidence.query_result),
+      enumerated_candidates:
+        Array.isArray(fromList.enumerated_candidates) && fromList.enumerated_candidates.length > 0
+          ? fromList.enumerated_candidates
+          : Array.isArray(fromConfidence.enumerated_candidates)
+            ? fromConfidence.enumerated_candidates
+            : [],
       prediction_summary: {
+        ...asRecord(fromConfidence.prediction_summary),
         ...asRecord(fromList.prediction_summary),
         ...asRecord(fromState.prediction_summary),
       },
       prediction_by_smiles: {
+        ...asRecord(fromConfidence.prediction_by_smiles),
         ...asRecord(fromList.prediction_by_smiles),
         ...asRecord(fromState.prediction_by_smiles),
       },
       reference_prediction_by_backend: {
+        ...asRecord(fromConfidence.reference_prediction_by_backend),
         ...asRecord(fromList.reference_prediction_by_backend),
         ...asRecord(fromState.reference_prediction_by_backend),
       },
@@ -1848,7 +1865,15 @@ function hasLeadOptPredictionRuntime(task: ProjectTask): boolean {
     !Array.isArray(stateMeta.prediction_by_smiles)
       ? (stateMeta.prediction_by_smiles as Record<string, unknown>)
       : {};
-  for (const item of Object.values(predictionMap)) {
+  const confidencePredictionMap =
+    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
+      ? asRecord(asRecord((task.confidence as Record<string, unknown>).lead_opt_mmp).prediction_by_smiles)
+      : {};
+  const mergedPredictionMap = {
+    ...confidencePredictionMap,
+    ...predictionMap
+  };
+  for (const item of Object.values(mergedPredictionMap)) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
     const state = String((item as Record<string, unknown>).state || '').trim().toUpperCase();
     if (state === 'QUEUED' || state === 'RUNNING') return true;

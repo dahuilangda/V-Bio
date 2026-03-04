@@ -187,6 +187,13 @@ function normalizeBackend(value: string): string {
   return BACKEND_OPTIONS.some((item) => item.key === token) ? token : 'pocketxmol';
 }
 
+function normalizePredictionBackendStrict(value: unknown): string {
+  const token = String(value || '').trim().toLowerCase();
+  if (token === 'boltz2') return 'boltz';
+  if (token === 'boltz' || token === 'alphafold3' || token === 'protenix' || token === 'pocketxmol') return token;
+  return '';
+}
+
 type CandidateStateFilter = 'all' | 'pending' | 'queued' | 'running' | 'success' | 'failure';
 type CandidateStructureSearchMode = 'exact' | 'substructure';
 export type CandidatePreviewRenderMode = 'confidence' | 'fragment';
@@ -411,7 +418,9 @@ export function LeadOptCandidatesPanel({
   const predictionForBackend = (smiles: string): LeadOptPredictionRecord | null => {
     const key = buildLeadOptPredictionRecordKey(selectedBackendKey, smiles);
     if (!key) return null;
-    return predictionBySmiles[key] || null;
+    const direct = predictionBySmiles[key] || null;
+    if (direct && normalizePredictionBackendStrict(direct.backend) === selectedBackendKey) return direct;
+    return null;
   };
 
   useEffect(() => {
@@ -698,7 +707,11 @@ export function LeadOptCandidatesPanel({
   const cardRows = useMemo(() => renderedRows.slice(0, visibleCardCount), [renderedRows, visibleCardCount]);
   const hasMoreCardRows = cardMode && visibleCardCount < renderedRows.length;
   const matchedCount = useMemo(() => rows.filter((row) => structureSearchMatches[readText(row.smiles).trim()]).length, [rows, structureSearchMatches]);
-  const referencePrediction = referencePredictionByBackend[selectedBackendKey];
+  const referencePrediction = (() => {
+    const direct = referencePredictionByBackend[selectedBackendKey];
+    if (direct && normalizePredictionBackendStrict(direct.backend) === selectedBackendKey) return direct;
+    return null;
+  })();
   const referencePredictionState = normalizeState(referencePrediction?.state);
   const referencePlddt = referencePredictionState === 'SUCCESS' ? referencePrediction?.ligandPlddt ?? null : null;
   const referenceIptm = referencePredictionState === 'SUCCESS' ? referencePrediction?.pairIptm ?? null : null;
@@ -843,7 +856,11 @@ export function LeadOptCandidatesPanel({
             <select
               className="lead-opt-backend-select lead-opt-backend-select--engine"
               value={selectedBackend}
-              onChange={(event) => setSelectedBackend(normalizeBackend(event.target.value))}
+              onChange={(event) => {
+                const nextBackend = normalizeBackend(event.target.value);
+                setSelectedBackend(nextBackend);
+                emitUiStateNow({ selectedBackend: nextBackend });
+              }}
             >
               {BACKEND_OPTIONS.map((option) => (
                 <option
