@@ -149,16 +149,26 @@ export function ProjectTasksPage() {
     }
   }, [project, filteredRows, workspacePairPreference, setError]);
 
-  const isLeadOptimizationProject = useMemo(
-    () => (project ? getWorkflowDefinition(project.task_type).key === 'lead_optimization' : false),
+  const projectWorkflowKey = useMemo(
+    () => (project ? getWorkflowDefinition(project.task_type).key : null),
     [project]
   );
+  const supportsApiAccess = projectWorkflowKey === 'prediction' || projectWorkflowKey === 'affinity';
+  const apiAccessDisabledReason = useMemo(() => {
+    if (projectWorkflowKey === 'lead_optimization') {
+      return 'Lead Optimization does not support API Access.';
+    }
+    if (projectWorkflowKey === 'peptide_design') {
+      return 'Peptide Design does not support API Access.';
+    }
+    return 'API Access is only available for Prediction and Affinity Scoring.';
+  }, [projectWorkflowKey]);
 
   useEffect(() => {
-    if (!isLeadOptimizationProject) return;
+    if (supportsApiAccess) return;
     if (workspaceView !== 'api') return;
     setWorkspaceViewWithUrl('tasks');
-  }, [isLeadOptimizationProject, workspaceView, setWorkspaceViewWithUrl]);
+  }, [supportsApiAccess, workspaceView, setWorkspaceViewWithUrl]);
 
   if (loading && !project) {
     return <div className="centered-page">Loading tasks...</div>;
@@ -193,17 +203,17 @@ export function ProjectTasksPage() {
             void downloadExcel();
           }}
           onOpenApi={() => {
-            if (isLeadOptimizationProject) return;
+            if (!supportsApiAccess) return;
             setWorkspaceViewWithUrl('api');
           }}
-          apiAccessDisabled={isLeadOptimizationProject}
-          apiAccessDisabledReason="Lead Optimization does not support API Access."
+          apiAccessDisabled={!supportsApiAccess}
+          apiAccessDisabledReason={apiAccessDisabledReason}
         />
       )}
 
       {error && workspaceView === 'tasks' && <div className="alert error">{error}</div>}
 
-      {workspaceView === 'api' && !isLeadOptimizationProject ? (
+      {workspaceView === 'api' && supportsApiAccess ? (
         <ApiAccessPage />
       ) : (
         <ProjectTasksWorkspace
