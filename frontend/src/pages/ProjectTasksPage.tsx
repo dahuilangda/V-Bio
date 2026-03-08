@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
 import { terminateTask as terminateBackendTask } from '../api/backendApi';
+import { SharingModal } from '../components/project/SharingModal';
 import { ApiAccessPage } from './ApiAccessPage';
 import { useAuth } from '../hooks/useAuth';
 import { ProjectTasksHeader } from './projectTasks/ProjectTasksHeader';
@@ -13,7 +14,9 @@ import { useTaskListFiltering } from './projectTasks/useTaskListFiltering';
 import { useProjectTasksWorkspaceContext } from './projectTasks/useProjectTasksWorkspaceContext';
 import { useProjectTasksWorkspaceView } from './projectTasks/useProjectTasksWorkspaceView';
 import { useProjectTasksApiContextSync } from './projectTasks/useProjectTasksApiContextSync';
+import { canEditProject, canManageProjectShares } from '../utils/accessControl';
 import { getWorkflowDefinition } from '../utils/workflows';
+import type { ProjectTask } from '../types/models';
 import '../styles/project-tasks.css';
 
 export function ProjectTasksPage() {
@@ -27,6 +30,7 @@ export function ProjectTasksPage() {
   });
 
   const [exportingExcel, setExportingExcel] = useState(false);
+  const [sharedTaskRow, setSharedTaskRow] = useState<ProjectTask | null>(null);
 
   const {
     project,
@@ -41,6 +45,11 @@ export function ProjectTasksPage() {
     sessionUserId: session?.userId || null,
     workspaceView,
   });
+  const canEdit = useMemo(() => Boolean(session) && canEditProject(project), [project, session]);
+  const canManageShares = useMemo(
+    () => canManageProjectShares(project, session?.userId || null),
+    [project, session?.userId]
+  );
 
   const {
     taskCountText,
@@ -126,6 +135,7 @@ export function ProjectTasksPage() {
     removeTask,
   } = useProjectTaskRowActions({
     project,
+    canManageProject: canEdit,
     navigate,
     setError,
     setTasks,
@@ -197,6 +207,7 @@ export function ProjectTasksPage() {
           refreshing={refreshing}
           createTaskHref={createTaskHref}
           backToCurrentTaskHref={backToCurrentTaskHref}
+          canEdit={canEdit}
           exportingExcel={exportingExcel}
           filteredCount={filteredRows.length}
           onDownloadExcel={() => {
@@ -217,6 +228,7 @@ export function ProjectTasksPage() {
         <ApiAccessPage />
       ) : (
         <ProjectTasksWorkspace
+          canManageShares={canManageShares}
           taskSearch={taskSearch}
           onTaskSearchChange={setTaskSearch}
           stateFilter={stateFilter}
@@ -265,6 +277,7 @@ export function ProjectTasksPage() {
           onOpenTask={openTask}
           onTerminateTask={terminateTask}
           onRemoveTask={removeTask}
+          onOpenShareTask={setSharedTaskRow}
           onBeginTaskNameEdit={beginTaskNameEdit}
           onCancelTaskNameEdit={cancelTaskNameEdit}
           onSaveTaskNameEdit={saveTaskNameEdit}
@@ -277,6 +290,18 @@ export function ProjectTasksPage() {
           onJumpToPage={jumpToPage}
         />
       )}
+      {project && session?.userId && sharedTaskRow && canManageShares ? (
+        <SharingModal
+          open={Boolean(sharedTaskRow)}
+          mode="task"
+          projectId={project.id}
+          projectName={project.name}
+          projectTaskId={sharedTaskRow.id}
+          taskLabel={String(sharedTaskRow.name || '').trim() || `Task ${String(sharedTaskRow.task_id || sharedTaskRow.id).slice(0, 8)}`}
+          currentUserId={session.userId}
+          onClose={() => setSharedTaskRow(null)}
+        />
+      ) : null}
     </div>
   );
 }

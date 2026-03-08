@@ -1,4 +1,17 @@
-import type { ApiToken, ApiTokenUsage, ApiTokenUsageDaily, AppUser, Project, ProjectTask, TaskState } from '../types/models';
+import type {
+  ApiToken,
+  ApiTokenUsage,
+  ApiTokenUsageDaily,
+  AppUser,
+  Project,
+  ProjectAccessScope,
+  EffectiveAccessLevel,
+  ProjectShareRecord,
+  ProjectTask,
+  ProjectTaskShareRecord,
+  ShareAccessLevel,
+  TaskState
+} from '../types/models';
 import { ENV } from '../utils/env';
 
 const configuredBaseUrl = ENV.supabaseRestUrl.replace(/\/$/, '');
@@ -66,6 +79,18 @@ function buildQueryString(query?: Record<string, string | undefined>) {
   return params.toString();
 }
 
+function buildInFilter(values: string[]): string | undefined {
+  const normalized = Array.from(
+    new Set(
+      values
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+    )
+  );
+  if (normalized.length === 0) return undefined;
+  return `in.(${normalized.join(',')})`;
+}
+
 function buildSupabaseUrlCandidates(path: string, query?: Record<string, string | undefined>): string[] {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
   const queryString = buildQueryString(query);
@@ -127,6 +152,168 @@ async function request<T>(
   throw new Error(`Supabase-lite request failed. Tried: ${candidates.join(', ')}.${detail}`);
 }
 
+async function listUsersByIds(userIds: string[]): Promise<AppUser[]> {
+  const idFilter = buildInFilter(userIds);
+  if (!idFilter) return [];
+  return request<AppUser[]>('/app_users', undefined, {
+    select: 'id,username,name,email,is_admin,last_login_at,deleted_at,created_at,updated_at,password_hash',
+    id: idFilter,
+    deleted_at: 'is.null'
+  });
+}
+
+async function listProjectTaskMetaByIds(taskIds: string[]): Promise<Array<{
+  id: string;
+  project_id: string;
+  name: string;
+  summary: string;
+  task_id: string;
+}>> {
+  const idFilter = buildInFilter(taskIds);
+  if (!idFilter) return [];
+  return request<Array<{
+    id: string;
+    project_id: string;
+    name: string;
+    summary: string;
+    task_id: string;
+  }>>('/project_tasks_list', undefined, {
+    select: 'id,project_id,name,summary,task_id',
+    id: idFilter
+  });
+}
+
+function normalizeProjectAccessScope(value: unknown): ProjectAccessScope {
+  const token = String(value || '').trim().toLowerCase();
+  if (token === 'project_share') return 'project_share';
+  if (token === 'task_share') return 'task_share';
+  return 'owner';
+}
+
+function normalizeShareAccessLevel(value: unknown): ShareAccessLevel {
+  return String(value || '').trim().toLowerCase() === 'editor' ? 'editor' : 'viewer';
+}
+
+function normalizeEffectiveAccessLevel(value: unknown): EffectiveAccessLevel {
+  const token = String(value || '').trim().toLowerCase();
+  if (token === 'owner') return 'owner';
+  if (token === 'editor') return 'editor';
+  return 'viewer';
+}
+
+function toEffectiveAccessLevel(value: unknown): EffectiveAccessLevel {
+  return normalizeShareAccessLevel(value) === 'editor' ? 'editor' : 'viewer';
+}
+
+function buildEditableTaskIdSet(taskIds: string[]): Set<string> {
+  return new Set(taskIds.map((item) => String(item || '').trim()).filter(Boolean));
+}
+
+function resolveTaskAccessLevel(
+  taskId: string,
+  scope: ProjectAccessScope,
+  accessLevel: EffectiveAccessLevel,
+  editableTaskIdSet?: Set<string>
+): EffectiveAccessLevel {
+  if (scope === 'owner') return 'owner';
+  if (editableTaskIdSet?.has(String(taskId || '').trim())) return 'editor';
+  if (scope === 'project_share' && accessLevel === 'editor') return 'editor';
+  return 'viewer';
+}
+
+function normalizeProjectRow(row: Partial<Project>): Project {
+  const normalizedAccessibleTaskIds = Array.isArray(row.accessible_task_ids)
+    ? Array.from(new Set(row.accessible_task_ids.map((item) => String(item || '').trim()).filter(Boolean)))
+    : [];
+  const normalizedEditableTaskIds = Array.isArray(row.editable_task_ids)
+    ? Array.from(new Set(row.editable_task_ids.map((item) => String(item || '').trim()).filter(Boolean)))
+    : [];
+  return {
+    ...row,
+    protein_sequence: row.protein_sequence || '',
+    ligand_smiles: row.ligand_smiles || '',
+    confidence:
+      row.confidence && typeof row.confidence === 'object' && !Array.isArray(row.confidence)
+        ? row.confidence
+        : {},
+    affinity:
+      row.affinity && typeof row.affinity === 'object' && !Array.isArray(row.affinity)
+        ? row.affinity
+        : {},
+    access_scope: normalizeProjectAccessScope(row.access_scope),
+    access_level: normalizeEffectiveAccessLevel(row.access_level || (String(row.access_scope || '').trim() === 'owner' ? 'owner' : 'viewer')),
+    accessible_task_ids: normalizedAccessibleTaskIds,
+    editable_task_ids: normalizedEditableTaskIds
+  } as Project;
+}
+
+function applyProjectAccess(project: Project, access: { scope: ProjectAccessScope; taskIds: string[]; editableTaskIds?: string[]; accessLevel: EffectiveAccessLevel }): Project {
+  const nextAccessibleTaskIds = access.scope === 'task_share' ? access.taskIds : [];
+  const nextEditableTaskIds = access.scope === 'task_share' ? (access.editableTaskIds || []) : [];
+  return {
+    ...project,
+    access_scope: access.scope,
+    access_level: access.accessLevel,
+    accessible_task_ids: nextAccessibleTaskIds,
+    editable_task_ids: nextEditableTaskIds
+  };
+}
+
+function applyTaskAccess(
+  task: ProjectTask,
+  scope: ProjectAccessScope,
+  accessLevel: EffectiveAccessLevel = scope === 'owner' ? 'owner' : 'viewer',
+  editableTaskIdSet?: Set<string>
+): ProjectTask {
+  return {
+    ...task,
+    access_scope: scope,
+    access_level: resolveTaskAccessLevel(task.id, scope, accessLevel, editableTaskIdSet)
+  };
+}
+
+export function sanitizeProjectForTaskShare(project: Project, tasks: ProjectTask[]): Project {
+  const sanitizedTasks = tasks.filter((task) => String(task.project_id || '').trim() === String(project.id || '').trim());
+  const activeTaskId = String(project.task_id || '').trim();
+  const preferredTask =
+    (activeTaskId
+      ? sanitizedTasks.find((task) => String(task.task_id || '').trim() === activeTaskId) || null
+      : null) ||
+    sanitizedTasks[0] ||
+    null;
+  if (!preferredTask) {
+    return {
+      ...project,
+      task_id: '',
+      task_state: 'DRAFT',
+      status_text: 'Shared task unavailable.',
+      error_text: '',
+      confidence: {},
+      affinity: {},
+      structure_name: ''
+    };
+  }
+  return {
+    ...project,
+    task_id: preferredTask.task_id,
+    task_state: preferredTask.task_state,
+    status_text: preferredTask.status_text,
+    error_text: preferredTask.error_text,
+    submitted_at: preferredTask.submitted_at,
+    completed_at: preferredTask.completed_at,
+    duration_seconds: preferredTask.duration_seconds,
+    confidence:
+      preferredTask.confidence && typeof preferredTask.confidence === 'object' && !Array.isArray(preferredTask.confidence)
+        ? preferredTask.confidence
+        : {},
+    affinity:
+      preferredTask.affinity && typeof preferredTask.affinity === 'object' && !Array.isArray(preferredTask.affinity)
+        ? preferredTask.affinity
+        : {},
+    structure_name: preferredTask.structure_name || ''
+  };
+}
+
 export async function listUsers(): Promise<AppUser[]> {
   return request<AppUser[]>('/app_users', undefined, {
     select: '*',
@@ -143,6 +330,23 @@ export async function findUserByUsername(username: string): Promise<AppUser | nu
     limit: '1'
   });
   return rows[0] || null;
+}
+
+export async function searchUsersForSharing(
+  queryText: string,
+  options?: { excludeUserId?: string | null; limit?: number }
+): Promise<AppUser[]> {
+  const normalizedQuery = String(queryText || '').trim().toLowerCase();
+  if (normalizedQuery.length < 2) return [];
+  const rows = await request<AppUser[]>('/app_users', undefined, {
+    select: 'id,username,name,email,is_admin,last_login_at,deleted_at,created_at,updated_at,password_hash',
+    username: `ilike.*${normalizedQuery}*`,
+    deleted_at: 'is.null',
+    order: 'username.asc',
+    limit: String(Math.max(1, Math.min(12, Number(options?.limit || 8))))
+  });
+  const excludeUserId = String(options?.excludeUserId || '').trim();
+  return rows.filter((row) => String(row.id || '').trim() !== excludeUserId);
 }
 
 export async function findUserByEmail(email: string): Promise<AppUser | null> {
@@ -248,13 +452,7 @@ export async function listProjects(options: ListProjectsOptions = {}): Promise<P
   }
 
   const rows = await request<Array<Partial<Project>>>('/projects', undefined, query);
-  return rows.map((row) => ({
-    protein_sequence: '',
-    ligand_smiles: '',
-    confidence: {},
-    affinity: {},
-    ...row
-  })) as Project[];
+  return rows.map((row) => normalizeProjectRow(row));
 }
 
 interface GetProjectByIdOptions {
@@ -292,20 +490,201 @@ export async function getProjectById(projectId: string, options: GetProjectByIdO
   });
   const row = rows[0];
   if (!row) return null;
-  const normalized = row as Partial<Project>;
-  return {
-    ...normalized,
-    protein_sequence: normalized.protein_sequence || '',
-    ligand_smiles: normalized.ligand_smiles || '',
-    confidence:
-      normalized.confidence && typeof normalized.confidence === 'object' && !Array.isArray(normalized.confidence)
-        ? normalized.confidence
-        : {},
-    affinity:
-      normalized.affinity && typeof normalized.affinity === 'object' && !Array.isArray(normalized.affinity)
-        ? normalized.affinity
-        : {}
-  } as Project;
+  return normalizeProjectRow(row as Partial<Project>);
+}
+
+async function listProjectsByIds(projectIds: string[], options: GetProjectByIdOptions = {}): Promise<Project[]> {
+  const idFilter = buildInFilter(projectIds);
+  if (!idFilter) return [];
+  const selectFields = options.lightweight
+    ? [
+        'id',
+        'user_id',
+        'name',
+        'summary',
+        'backend',
+        'use_msa',
+        'color_mode',
+        'task_type',
+        'task_id',
+        'task_state',
+        'status_text',
+        'error_text',
+        'submitted_at',
+        'completed_at',
+        'duration_seconds',
+        'structure_name',
+        'created_at',
+        'updated_at',
+        'deleted_at'
+      ].join(',')
+    : '*';
+  const rows = await request<Array<Partial<Project>>>('/projects', undefined, {
+    select: selectFields,
+    id: idFilter,
+    deleted_at: 'is.null',
+    order: 'updated_at.desc'
+  });
+  return rows.map((row) => normalizeProjectRow(row));
+}
+
+async function listProjectShareLinksForUser(userId: string): Promise<Array<{ project_id: string; access_level: ShareAccessLevel }>> {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return [];
+  const rows = await request<Array<{ project_id: string; access_level?: string }>>('/project_shares', undefined, {
+    select: '*',
+    user_id: `eq.${normalizedUserId}`
+  });
+  return rows.map((row) => ({
+    project_id: row.project_id,
+    access_level: normalizeShareAccessLevel(row.access_level)
+  }));
+}
+
+async function listProjectTaskShareLinksForUser(
+  userId: string
+): Promise<Array<{ project_id: string; project_task_id: string; access_level: ShareAccessLevel }>> {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return [];
+  const rows = await request<Array<{ project_id: string; project_task_id: string; access_level?: string }>>('/project_task_shares', undefined, {
+    select: '*',
+    user_id: `eq.${normalizedUserId}`
+  });
+  return rows.map((row) => ({
+    project_id: row.project_id,
+    project_task_id: row.project_task_id,
+    access_level: normalizeShareAccessLevel(row.access_level)
+  }));
+}
+
+export async function getProjectAccessInfo(
+  projectId: string,
+  userId: string,
+  ownerUserId?: string | null
+): Promise<{ scope: ProjectAccessScope | null; accessLevel: EffectiveAccessLevel | null; taskIds: string[]; editableTaskIds: string[] }> {
+  const normalizedProjectId = String(projectId || '').trim();
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedProjectId || !normalizedUserId) {
+    return { scope: null, accessLevel: null, taskIds: [], editableTaskIds: [] };
+  }
+  if (String(ownerUserId || '').trim() === normalizedUserId) {
+    return { scope: 'owner', accessLevel: 'owner', taskIds: [], editableTaskIds: [] };
+  }
+  const [projectShareRows, taskShareRows] = await Promise.all([
+    request<Array<{ project_id: string; access_level?: string }>>('/project_shares', undefined, {
+      select: '*',
+      project_id: `eq.${normalizedProjectId}`,
+      user_id: `eq.${normalizedUserId}`,
+      limit: '1'
+    }),
+    request<Array<{ project_task_id: string; access_level?: string }>>('/project_task_shares', undefined, {
+      select: '*',
+      project_id: `eq.${normalizedProjectId}`,
+      user_id: `eq.${normalizedUserId}`,
+      order: 'created_at.asc'
+    })
+  ]);
+  const editableTaskIds = Array.from(
+    new Set(
+      taskShareRows
+        .filter((row) => normalizeShareAccessLevel(row.access_level) === 'editor')
+        .map((row) => String(row.project_task_id || '').trim())
+        .filter(Boolean)
+    )
+  );
+  if (projectShareRows.length > 0) {
+    return {
+      scope: 'project_share',
+      accessLevel: toEffectiveAccessLevel(projectShareRows[0]?.access_level),
+      taskIds: [],
+      editableTaskIds
+    };
+  }
+  const taskIds = Array.from(
+    new Set(taskShareRows.map((row) => String(row.project_task_id || '').trim()).filter(Boolean))
+  );
+  if (taskIds.length > 0) {
+    return {
+      scope: 'task_share',
+      accessLevel: editableTaskIds.length > 0 ? 'editor' : 'viewer',
+      taskIds,
+      editableTaskIds
+    };
+  }
+  return { scope: null, accessLevel: null, taskIds: [], editableTaskIds: [] };
+}
+
+export async function listAccessibleProjects(
+  userId: string,
+  options: ListProjectsOptions = {}
+): Promise<Project[]> {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return [];
+
+  const [ownedProjects, projectShareLinks, taskShareLinks] = await Promise.all([
+    listProjects({
+      ...options,
+      userId: normalizedUserId
+    }),
+    listProjectShareLinksForUser(normalizedUserId),
+    listProjectTaskShareLinksForUser(normalizedUserId)
+  ]);
+
+  const ownedIds = new Set(ownedProjects.map((project) => String(project.id || '').trim()).filter(Boolean));
+  const projectShareByProjectId = new Map(
+    projectShareLinks
+      .map((row) => [String(row.project_id || '').trim(), normalizeShareAccessLevel(row.access_level)] as const)
+      .filter(([projectId]) => Boolean(projectId))
+  );
+  const taskShareIdsByProject = new Map<string, string[]>();
+  const editableTaskIdsByProject = new Map<string, string[]>();
+  for (const row of taskShareLinks) {
+    const projectId = String(row.project_id || '').trim();
+    const taskId = String(row.project_task_id || '').trim();
+    if (!projectId || !taskId) continue;
+    const current = taskShareIdsByProject.get(projectId) || [];
+    current.push(taskId);
+    taskShareIdsByProject.set(projectId, current);
+    if (normalizeShareAccessLevel(row.access_level) === 'editor') {
+      const editable = editableTaskIdsByProject.get(projectId) || [];
+      editable.push(taskId);
+      editableTaskIdsByProject.set(projectId, editable);
+    }
+  }
+
+  const sharedProjectIds = Array.from(
+    new Set([
+      ...Array.from(projectShareByProjectId.keys()),
+      ...Array.from(taskShareIdsByProject.keys())
+    ])
+  ).filter((id) => !ownedIds.has(id));
+
+  const sharedProjects = await listProjectsByIds(sharedProjectIds, { lightweight: options.lightweight });
+  const sharedById = new Map(sharedProjects.map((project) => [project.id, project] as const));
+
+  const rows: Project[] = [];
+  for (const project of ownedProjects) {
+    rows.push(applyProjectAccess(project, { scope: 'owner', taskIds: [], editableTaskIds: [], accessLevel: 'owner' }));
+  }
+  for (const projectId of sharedProjectIds) {
+    const project = sharedById.get(projectId);
+    if (!project) continue;
+    const taskIds = Array.from(new Set(taskShareIdsByProject.get(projectId) || []));
+    const editableTaskIds = Array.from(new Set(editableTaskIdsByProject.get(projectId) || []));
+    const projectShareLevel = projectShareByProjectId.get(projectId);
+    const scope: ProjectAccessScope = projectShareLevel ? 'project_share' : 'task_share';
+    rows.push(
+      applyProjectAccess(project, {
+        scope,
+        taskIds,
+        editableTaskIds,
+        accessLevel: projectShareLevel ? toEffectiveAccessLevel(projectShareLevel) : editableTaskIds.length > 0 ? 'editor' : 'viewer'
+      })
+    );
+  }
+
+  rows.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+  return rows;
 }
 
 export async function insertProject(input: Partial<Project>): Promise<Project> {
@@ -343,15 +722,31 @@ export async function updateProject(projectId: string, patch: Partial<Project>):
   return rows[0];
 }
 
-export async function listProjectTasks(projectId: string): Promise<ProjectTask[]> {
-  return request<ProjectTask[]>('/project_tasks', undefined, {
-    select: '*',
-    project_id: `eq.${projectId}`,
-    order: 'created_at.desc'
-  });
+interface ProjectTaskAccessOptions {
+  taskRowIds?: string[];
+  accessScope?: ProjectAccessScope;
+  accessLevel?: EffectiveAccessLevel;
+  editableTaskIds?: string[];
 }
 
-export async function listProjectTasksCompact(projectId: string): Promise<ProjectTask[]> {
+export async function listProjectTasks(projectId: string, options?: ProjectTaskAccessOptions): Promise<ProjectTask[]> {
+  const taskIdFilter = buildInFilter(options?.taskRowIds || []);
+  const rows = await request<ProjectTask[]>('/project_tasks', undefined, {
+    select: '*',
+    project_id: `eq.${projectId}`,
+    ...(taskIdFilter ? { id: taskIdFilter } : {}),
+    order: 'created_at.desc'
+  });
+  const scope = options?.accessScope || 'owner';
+  const accessLevel = options?.accessLevel || (scope === 'owner' ? 'owner' : 'viewer');
+  const editableTaskIdSet = buildEditableTaskIdSet(options?.editableTaskIds || []);
+  return rows.map((row) => applyTaskAccess(row, scope, accessLevel, editableTaskIdSet));
+}
+
+export async function listProjectTasksCompact(
+  projectId: string,
+  options?: ProjectTaskAccessOptions
+): Promise<ProjectTask[]> {
   const selectFields = [
     'id',
     'project_id',
@@ -372,13 +767,18 @@ export async function listProjectTasksCompact(projectId: string): Promise<Projec
     'created_at',
     'updated_at'
   ].join(',');
+  const taskIdFilter = buildInFilter(options?.taskRowIds || []);
   const rows = await request<Array<Partial<ProjectTask>>>('/project_tasks_list', undefined, {
     select: selectFields,
     project_id: `eq.${projectId}`,
+    ...(taskIdFilter ? { id: taskIdFilter } : {}),
     order: 'created_at.desc'
   });
 
-  return rows.map((row) => ({
+  const scope = options?.accessScope || 'owner';
+  const accessLevel = options?.accessLevel || (scope === 'owner' ? 'owner' : 'viewer');
+  const editableTaskIdSet = buildEditableTaskIdSet(options?.editableTaskIds || []);
+  return rows.map((row) => applyTaskAccess({
     name: '',
     summary: '',
     protein_sequence: '',
@@ -393,7 +793,7 @@ export async function listProjectTasksCompact(projectId: string): Promise<Projec
       binder: null
     },
     ...row
-  })) as ProjectTask[];
+  } as ProjectTask, scope, accessLevel, editableTaskIdSet));
 }
 
 export async function listProjectTasksForList(
@@ -404,6 +804,10 @@ export async function listProjectTasksForList(
     includeProperties?: boolean;
     includeLeadOptSummary?: boolean;
     includeLeadOptCandidates?: boolean;
+    taskRowIds?: string[];
+    accessScope?: ProjectAccessScope;
+    accessLevel?: EffectiveAccessLevel;
+    editableTaskIds?: string[];
   }
 ): Promise<ProjectTask[]> {
   const includeComponents = options?.includeComponents !== false;
@@ -411,6 +815,7 @@ export async function listProjectTasksForList(
   const includeProperties = options?.includeProperties !== false;
   const includeLeadOptSummary = options?.includeLeadOptSummary === true;
   const includeLeadOptCandidates = options?.includeLeadOptCandidates === true;
+  const taskIdFilter = buildInFilter(options?.taskRowIds || []);
   const selectFields = [
     'id',
     'project_id',
@@ -486,12 +891,14 @@ export async function listProjectTasksForList(
   const rows = await request<Array<Partial<ProjectTask>>>('/project_tasks_list', undefined, {
     select: selectFields,
     project_id: `eq.${projectId}`,
+    ...(taskIdFilter ? { id: taskIdFilter } : {}),
     order: 'created_at.desc'
   });
   const detailRows = includeComponents
     ? await request<Array<Partial<ProjectTask>>>('/project_tasks_list', undefined, {
         select: 'id,components',
         project_id: `eq.${projectId}`,
+        ...(taskIdFilter ? { id: taskIdFilter } : {}),
         order: 'created_at.desc'
       })
     : [];
@@ -702,6 +1109,9 @@ export async function listProjectTasksForList(
     };
   });
 
+  const scope = options?.accessScope || 'owner';
+  const accessLevel = options?.accessLevel || (scope === 'owner' ? 'owner' : 'viewer');
+  const editableTaskIdSet = buildEditableTaskIdSet(options?.editableTaskIds || []);
   return mergedRows.map((row) => {
     const normalizedProperties = includeProperties
       ? (row.properties && typeof row.properties === 'object' && !Array.isArray(row.properties)
@@ -715,7 +1125,7 @@ export async function listProjectTasksForList(
       : (row.properties && typeof row.properties === 'object' && !Array.isArray(row.properties)
           ? (row.properties as ProjectTask['properties'])
           : {}) as ProjectTask['properties'];
-    return {
+    return applyTaskAccess({
       name: '',
       summary: '',
       protein_sequence: '',
@@ -724,7 +1134,7 @@ export async function listProjectTasksForList(
       constraints: [],
       ...row,
       properties: normalizedProperties
-    };
+    } as ProjectTask, scope, accessLevel, editableTaskIdSet);
   }) as ProjectTask[];
 }
 
@@ -1159,6 +1569,20 @@ export async function listProjectTaskStatesByProjects(projectIds: string[]): Pro
   return results.flat();
 }
 
+export async function listProjectTaskStatesByTaskRowIds(taskRowIds: string[]): Promise<Array<{
+  id: string;
+  project_id: string;
+  task_id: string;
+  task_state: TaskState;
+}>> {
+  const idFilter = buildInFilter(taskRowIds);
+  if (!idFilter) return [];
+  return request<Array<{ id: string; project_id: string; task_id: string; task_state: TaskState }>>('/project_tasks', undefined, {
+    select: 'id,project_id,task_id,task_state',
+    id: idFilter
+  });
+}
+
 export async function insertProjectTask(input: Partial<ProjectTask>): Promise<ProjectTask> {
   const sanitized = sanitizeProjectTaskWritePayload(input);
   const rows = await request<ProjectTask[]>(
@@ -1247,6 +1671,440 @@ export async function deleteProjectTask(taskRowId: string): Promise<void> {
       id: `eq.${taskRowId}`
     }
   );
+}
+
+export async function listProjectShares(projectId: string): Promise<ProjectShareRecord[]> {
+  const normalizedProjectId = String(projectId || '').trim();
+  if (!normalizedProjectId) return [];
+  const rows = await request<Array<{
+    id: string;
+    project_id: string;
+    user_id: string;
+    granted_by_user_id: string | null;
+    access_level?: string;
+    created_at: string;
+    updated_at: string;
+  }>>('/project_shares', undefined, {
+    select: '*',
+    project_id: `eq.${normalizedProjectId}`,
+    order: 'created_at.asc'
+  });
+  const userIds = Array.from(
+    new Set(
+      rows.flatMap((row) => [String(row.user_id || '').trim(), String(row.granted_by_user_id || '').trim()]).filter(Boolean)
+    )
+  );
+  const users = await listUsersByIds(userIds);
+  const userById = new Map(users.map((user) => [user.id, user] as const));
+  return rows.map((row) => {
+    const target = userById.get(String(row.user_id || '').trim());
+    const grantedBy = userById.get(String(row.granted_by_user_id || '').trim());
+    return {
+      ...row,
+      access_level: normalizeShareAccessLevel(row.access_level),
+      target_username: target?.username || '',
+      target_name: target?.name || '',
+      granted_by_username: grantedBy?.username || '',
+      granted_by_name: grantedBy?.name || ''
+    };
+  });
+}
+
+export async function upsertProjectShare(input: {
+  projectId: string;
+  userId: string;
+  grantedByUserId?: string | null;
+  accessLevel?: ShareAccessLevel;
+}): Promise<ProjectShareRecord> {
+  await request<ProjectShareRecord[]>(
+    '/project_shares',
+    {
+      method: 'POST',
+      headers: {
+        Prefer: 'resolution=merge-duplicates,return=representation'
+      },
+      body: JSON.stringify({
+        project_id: input.projectId,
+        user_id: input.userId,
+        granted_by_user_id: input.grantedByUserId || null,
+        ...(normalizeShareAccessLevel(input.accessLevel) === 'editor'
+          ? { access_level: 'editor' }
+          : {})
+      })
+    },
+    {
+      select: '*',
+      on_conflict: 'project_id,user_id'
+    }
+  );
+  const records = await listProjectShares(input.projectId);
+  const created = records.find((row) => row.project_id === input.projectId && row.user_id === input.userId);
+  if (!created) {
+    throw new Error('Failed to load persisted project share.');
+  }
+  return created;
+}
+
+export async function updateProjectShareAccessLevel(shareId: string, accessLevel: ShareAccessLevel): Promise<ProjectShareRecord> {
+  const rows = await request<ProjectShareRecord[]>(
+    '/project_shares',
+    {
+      method: 'PATCH',
+      headers: {
+        Prefer: 'return=representation'
+      },
+      body: JSON.stringify({
+        access_level: normalizeShareAccessLevel(accessLevel)
+      })
+    },
+    {
+      id: `eq.${shareId}`,
+      select: '*'
+    }
+  );
+  const updated = rows[0];
+  if (!updated) {
+    throw new Error('Failed to update project share access level.');
+  }
+  return updated;
+}
+
+export async function deleteProjectShare(shareId: string): Promise<void> {
+  await request<ProjectShareRecord[]>(
+    '/project_shares',
+    {
+      method: 'DELETE',
+      headers: {
+        Prefer: 'return=minimal'
+      }
+    },
+    {
+      id: `eq.${shareId}`
+    }
+  );
+}
+
+export async function listProjectTaskShares(projectTaskId: string): Promise<ProjectTaskShareRecord[]> {
+  const normalizedTaskId = String(projectTaskId || '').trim();
+  if (!normalizedTaskId) return [];
+  const rows = await request<Array<{
+    id: string;
+    project_id: string;
+    project_task_id: string;
+    user_id: string;
+    granted_by_user_id: string | null;
+    access_level?: string;
+    created_at: string;
+    updated_at: string;
+  }>>('/project_task_shares', undefined, {
+    select: '*',
+    project_task_id: `eq.${normalizedTaskId}`,
+    order: 'created_at.asc'
+  });
+  const task = await getProjectTaskById(normalizedTaskId, {
+    includeComponents: false,
+    includeConstraints: false,
+    includeProperties: false,
+    includeConfidence: false,
+    includeAffinity: false,
+    includeProteinSequence: false
+  });
+  const userIds = Array.from(
+    new Set(
+      rows.flatMap((row) => [String(row.user_id || '').trim(), String(row.granted_by_user_id || '').trim()]).filter(Boolean)
+    )
+  );
+  const users = await listUsersByIds(userIds);
+  const userById = new Map(users.map((user) => [user.id, user] as const));
+  return rows.map((row) => {
+    const target = userById.get(String(row.user_id || '').trim());
+    const grantedBy = userById.get(String(row.granted_by_user_id || '').trim());
+    return {
+      ...row,
+      access_level: normalizeShareAccessLevel(row.access_level),
+      task_name: String(task?.name || '').trim(),
+      task_summary: String(task?.summary || '').trim(),
+      target_username: target?.username || '',
+      target_name: target?.name || '',
+      granted_by_username: grantedBy?.username || '',
+      granted_by_name: grantedBy?.name || ''
+    };
+  });
+}
+
+export async function upsertProjectTaskShare(input: {
+  projectId: string;
+  projectTaskId: string;
+  userId: string;
+  grantedByUserId?: string | null;
+  accessLevel?: ShareAccessLevel;
+}): Promise<ProjectTaskShareRecord> {
+  await request<ProjectTaskShareRecord[]>(
+    '/project_task_shares',
+    {
+      method: 'POST',
+      headers: {
+        Prefer: 'resolution=merge-duplicates,return=representation'
+      },
+      body: JSON.stringify({
+        project_id: input.projectId,
+        project_task_id: input.projectTaskId,
+        user_id: input.userId,
+        granted_by_user_id: input.grantedByUserId || null,
+        ...(normalizeShareAccessLevel(input.accessLevel) === 'editor'
+          ? { access_level: 'editor' }
+          : {})
+      })
+    },
+    {
+      select: '*',
+      on_conflict: 'project_task_id,user_id'
+    }
+  );
+  const records = await listProjectTaskShares(input.projectTaskId);
+  const created = records.find(
+    (row) => row.project_task_id === input.projectTaskId && row.user_id === input.userId
+  );
+  if (!created) {
+    throw new Error('Failed to load persisted task share.');
+  }
+  return created;
+}
+
+export async function updateProjectTaskShareAccessLevel(
+  shareId: string,
+  accessLevel: ShareAccessLevel
+): Promise<ProjectTaskShareRecord> {
+  const rows = await request<ProjectTaskShareRecord[]>(
+    '/project_task_shares',
+    {
+      method: 'PATCH',
+      headers: {
+        Prefer: 'return=representation'
+      },
+      body: JSON.stringify({
+        access_level: normalizeShareAccessLevel(accessLevel)
+      })
+    },
+    {
+      id: `eq.${shareId}`,
+      select: '*'
+    }
+  );
+  const updated = rows[0];
+  if (!updated) {
+    throw new Error('Failed to update task share access level.');
+  }
+  return updated;
+}
+
+export async function deleteProjectTaskShare(shareId: string): Promise<void> {
+  await request<ProjectTaskShareRecord[]>(
+    '/project_task_shares',
+    {
+      method: 'DELETE',
+      headers: {
+        Prefer: 'return=minimal'
+      }
+    },
+    {
+      id: `eq.${shareId}`
+    }
+  );
+}
+
+export async function listIncomingProjectShares(userId: string): Promise<ProjectShareRecord[]> {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return [];
+  const rows = await request<Array<{
+    id: string;
+    project_id: string;
+    user_id: string;
+    granted_by_user_id: string | null;
+    access_level?: string;
+    created_at: string;
+    updated_at: string;
+  }>>('/project_shares', undefined, {
+    select: '*',
+    user_id: `eq.${normalizedUserId}`,
+    order: 'created_at.desc'
+  });
+  const projectIds = Array.from(new Set(rows.map((row) => String(row.project_id || '').trim()).filter(Boolean)));
+  const userIds = Array.from(
+    new Set(
+      rows.flatMap((row) => [String(row.user_id || '').trim(), String(row.granted_by_user_id || '').trim()]).filter(Boolean)
+    )
+  );
+  const [projects, users] = await Promise.all([
+    listProjectsByIds(projectIds, { lightweight: true }),
+    listUsersByIds(userIds)
+  ]);
+  const projectById = new Map(projects.map((project) => [project.id, project] as const));
+  const userById = new Map(users.map((user) => [user.id, user] as const));
+  return rows.map((row) => {
+    const project = projectById.get(String(row.project_id || '').trim());
+    const target = userById.get(String(row.user_id || '').trim());
+    const grantedBy = userById.get(String(row.granted_by_user_id || '').trim());
+    return {
+      ...row,
+      access_level: normalizeShareAccessLevel(row.access_level),
+      project_name: String(project?.name || '').trim(),
+      project_summary: String(project?.summary || '').trim(),
+      target_username: target?.username || '',
+      target_name: target?.name || '',
+      granted_by_username: grantedBy?.username || '',
+      granted_by_name: grantedBy?.name || ''
+    };
+  });
+}
+
+export async function listOutgoingProjectShares(userId: string): Promise<ProjectShareRecord[]> {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return [];
+  const rows = await request<Array<{
+    id: string;
+    project_id: string;
+    user_id: string;
+    granted_by_user_id: string | null;
+    access_level?: string;
+    created_at: string;
+    updated_at: string;
+  }>>('/project_shares', undefined, {
+    select: '*',
+    granted_by_user_id: `eq.${normalizedUserId}`,
+    order: 'created_at.desc'
+  });
+  const projectIds = Array.from(new Set(rows.map((row) => String(row.project_id || '').trim()).filter(Boolean)));
+  const userIds = Array.from(
+    new Set(
+      rows.flatMap((row) => [String(row.user_id || '').trim(), String(row.granted_by_user_id || '').trim()]).filter(Boolean)
+    )
+  );
+  const [projects, users] = await Promise.all([
+    listProjectsByIds(projectIds, { lightweight: true }),
+    listUsersByIds(userIds)
+  ]);
+  const projectById = new Map(projects.map((project) => [project.id, project] as const));
+  const userById = new Map(users.map((user) => [user.id, user] as const));
+  return rows.map((row) => {
+    const project = projectById.get(String(row.project_id || '').trim());
+    const target = userById.get(String(row.user_id || '').trim());
+    const grantedBy = userById.get(String(row.granted_by_user_id || '').trim());
+    return {
+      ...row,
+      access_level: normalizeShareAccessLevel(row.access_level),
+      project_name: String(project?.name || '').trim(),
+      project_summary: String(project?.summary || '').trim(),
+      target_username: target?.username || '',
+      target_name: target?.name || '',
+      granted_by_username: grantedBy?.username || '',
+      granted_by_name: grantedBy?.name || ''
+    };
+  });
+}
+
+export async function listIncomingTaskShares(userId: string): Promise<ProjectTaskShareRecord[]> {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return [];
+  const rows = await request<Array<{
+    id: string;
+    project_id: string;
+    project_task_id: string;
+    user_id: string;
+    granted_by_user_id: string | null;
+    access_level?: string;
+    created_at: string;
+    updated_at: string;
+  }>>('/project_task_shares', undefined, {
+    select: '*',
+    user_id: `eq.${normalizedUserId}`,
+    order: 'created_at.desc'
+  });
+  const projectIds = Array.from(new Set(rows.map((row) => String(row.project_id || '').trim()).filter(Boolean)));
+  const taskIds = Array.from(new Set(rows.map((row) => String(row.project_task_id || '').trim()).filter(Boolean)));
+  const userIds = Array.from(
+    new Set(
+      rows.flatMap((row) => [String(row.user_id || '').trim(), String(row.granted_by_user_id || '').trim()]).filter(Boolean)
+    )
+  );
+  const [projects, tasks, users] = await Promise.all([
+    listProjectsByIds(projectIds, { lightweight: true }),
+    listProjectTaskMetaByIds(taskIds),
+    listUsersByIds(userIds)
+  ]);
+  const projectById = new Map(projects.map((project) => [project.id, project] as const));
+  const taskById = new Map(tasks.map((task) => [String(task.id || '').trim(), task] as const));
+  const userById = new Map(users.map((user) => [user.id, user] as const));
+  return rows.map((row) => {
+    const project = projectById.get(String(row.project_id || '').trim());
+    const task = taskById.get(String(row.project_task_id || '').trim());
+    const target = userById.get(String(row.user_id || '').trim());
+    const grantedBy = userById.get(String(row.granted_by_user_id || '').trim());
+    return {
+      ...row,
+      access_level: normalizeShareAccessLevel(row.access_level),
+      project_name: String(project?.name || '').trim(),
+      project_summary: String(project?.summary || '').trim(),
+      task_name: String(task?.name || '').trim(),
+      task_summary: String(task?.summary || '').trim(),
+      target_username: target?.username || '',
+      target_name: target?.name || '',
+      granted_by_username: grantedBy?.username || '',
+      granted_by_name: grantedBy?.name || ''
+    };
+  });
+}
+
+export async function listOutgoingTaskShares(userId: string): Promise<ProjectTaskShareRecord[]> {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return [];
+  const rows = await request<Array<{
+    id: string;
+    project_id: string;
+    project_task_id: string;
+    user_id: string;
+    granted_by_user_id: string | null;
+    access_level?: string;
+    created_at: string;
+    updated_at: string;
+  }>>('/project_task_shares', undefined, {
+    select: '*',
+    granted_by_user_id: `eq.${normalizedUserId}`,
+    order: 'created_at.desc'
+  });
+  const projectIds = Array.from(new Set(rows.map((row) => String(row.project_id || '').trim()).filter(Boolean)));
+  const taskIds = Array.from(new Set(rows.map((row) => String(row.project_task_id || '').trim()).filter(Boolean)));
+  const userIds = Array.from(
+    new Set(
+      rows.flatMap((row) => [String(row.user_id || '').trim(), String(row.granted_by_user_id || '').trim()]).filter(Boolean)
+    )
+  );
+  const [projects, tasks, users] = await Promise.all([
+    listProjectsByIds(projectIds, { lightweight: true }),
+    listProjectTaskMetaByIds(taskIds),
+    listUsersByIds(userIds)
+  ]);
+  const projectById = new Map(projects.map((project) => [project.id, project] as const));
+  const taskById = new Map(tasks.map((task) => [String(task.id || '').trim(), task] as const));
+  const userById = new Map(users.map((user) => [user.id, user] as const));
+  return rows.map((row) => {
+    const project = projectById.get(String(row.project_id || '').trim());
+    const task = taskById.get(String(row.project_task_id || '').trim());
+    const target = userById.get(String(row.user_id || '').trim());
+    const grantedBy = userById.get(String(row.granted_by_user_id || '').trim());
+    return {
+      ...row,
+      access_level: normalizeShareAccessLevel(row.access_level),
+      project_name: String(project?.name || '').trim(),
+      project_summary: String(project?.summary || '').trim(),
+      task_name: String(task?.name || '').trim(),
+      task_summary: String(task?.summary || '').trim(),
+      target_username: target?.username || '',
+      target_name: target?.name || '',
+      granted_by_username: grantedBy?.username || '',
+      granted_by_name: grantedBy?.name || ''
+    };
+  });
 }
 
 export async function listApiTokens(userId: string): Promise<ApiToken[]> {

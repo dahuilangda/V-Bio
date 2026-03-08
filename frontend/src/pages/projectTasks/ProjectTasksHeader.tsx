@@ -7,6 +7,7 @@ interface ProjectTasksHeaderProps {
   refreshing: boolean;
   createTaskHref: string;
   backToCurrentTaskHref: string;
+  canEdit: boolean;
   exportingExcel: boolean;
   filteredCount: number;
   onDownloadExcel: () => void;
@@ -21,6 +22,7 @@ export function ProjectTasksHeader({
   refreshing,
   createTaskHref,
   backToCurrentTaskHref,
+  canEdit,
   exportingExcel,
   filteredCount,
   onDownloadExcel,
@@ -39,7 +41,18 @@ export function ProjectTasksHeader({
       </div>
       <div className="row gap-8 page-header-actions page-header-actions-minimal">
         <div className="task-header-inline-actions" role="toolbar" aria-label="Task actions">
-          <Link className="task-row-action-btn task-row-action-btn-primary" to={createTaskHref} title="New task" aria-label="New task">
+          <Link
+            className="task-row-action-btn task-row-action-btn-primary"
+            to={createTaskHref}
+            title={canEdit ? 'New task' : 'Shared projects are read-only'}
+            aria-label="New task"
+            onClick={(event) => {
+              if (canEdit) return;
+              event.preventDefault();
+            }}
+            aria-disabled={!canEdit}
+            style={!canEdit ? { pointerEvents: 'none', opacity: 0.5 } : undefined}
+          >
             <Plus size={14} />
           </Link>
           <Link className="task-row-action-btn" to={backToCurrentTaskHref} title="Open current task" aria-label="Open current task">

@@ -26,7 +26,12 @@ export async function exportTaskRowsToExcel({
   if (filteredRows.length === 0) return;
 
   const [{ default: ExcelJS }, rdkit] = await Promise.all([import('exceljs'), loadRDKitModule()]);
-  const authoritativeTasks = await listProjectTasks(project.id);
+  const authoritativeTasks = await listProjectTasks(project.id, {
+    taskRowIds: filteredRows.map((row) => row.task.id),
+    accessScope: project.access_scope || 'owner',
+    accessLevel: project.access_level || 'owner',
+    editableTaskIds: project.editable_task_ids || []
+  });
   const authoritativeTaskMap = new Map(authoritativeTasks.map((task) => [task.id, task] as const));
   const imageWidthPx = 220;
   const imageHeightPx = 132;

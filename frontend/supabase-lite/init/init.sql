@@ -26,6 +26,7 @@ create table if not exists public.app_users (
   username text not null,
   name text not null default '',
   email text,
+  avatar_url text,
   password_hash text not null default '',
   is_admin boolean not null default false,
   last_login_at timestamptz,
@@ -37,6 +38,7 @@ create table if not exists public.app_users (
 alter table public.app_users add column if not exists username text;
 alter table public.app_users add column if not exists name text;
 alter table public.app_users add column if not exists email text;
+alter table public.app_users add column if not exists avatar_url text;
 alter table public.app_users add column if not exists password_hash text;
 alter table public.app_users add column if not exists is_admin boolean;
 alter table public.app_users add column if not exists last_login_at timestamptz;
@@ -257,6 +259,198 @@ BEGIN
   END IF;
 END
 $$;
+
+create table if not exists public.project_shares (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null,
+  user_id uuid not null,
+  granted_by_user_id uuid,
+  access_level text not null default 'viewer',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.project_task_shares (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null,
+  project_task_id uuid not null,
+  user_id uuid not null,
+  granted_by_user_id uuid,
+  access_level text not null default 'viewer',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.project_shares add column if not exists project_id uuid;
+alter table public.project_shares add column if not exists user_id uuid;
+alter table public.project_shares add column if not exists granted_by_user_id uuid;
+alter table public.project_shares add column if not exists access_level text;
+alter table public.project_shares add column if not exists created_at timestamptz;
+alter table public.project_shares add column if not exists updated_at timestamptz;
+
+alter table public.project_task_shares add column if not exists project_id uuid;
+alter table public.project_task_shares add column if not exists project_task_id uuid;
+alter table public.project_task_shares add column if not exists user_id uuid;
+alter table public.project_task_shares add column if not exists granted_by_user_id uuid;
+alter table public.project_task_shares add column if not exists access_level text;
+alter table public.project_task_shares add column if not exists created_at timestamptz;
+alter table public.project_task_shares add column if not exists updated_at timestamptz;
+
+delete from public.project_shares where project_id is null or user_id is null;
+delete from public.project_task_shares where project_id is null or project_task_id is null or user_id is null;
+
+update public.project_shares set created_at = now() where created_at is null;
+update public.project_shares set updated_at = now() where updated_at is null;
+update public.project_shares set access_level = 'viewer' where access_level is null or access_level not in ('viewer', 'editor');
+update public.project_task_shares set created_at = now() where created_at is null;
+update public.project_task_shares set updated_at = now() where updated_at is null;
+update public.project_task_shares set access_level = 'viewer' where access_level is null or access_level not in ('viewer', 'editor');
+
+alter table public.project_shares alter column project_id set not null;
+alter table public.project_shares alter column user_id set not null;
+alter table public.project_shares alter column access_level set not null;
+alter table public.project_shares alter column created_at set not null;
+alter table public.project_shares alter column updated_at set not null;
+alter table public.project_shares alter column access_level set default 'viewer';
+alter table public.project_shares alter column created_at set default now();
+alter table public.project_shares alter column updated_at set default now();
+
+alter table public.project_task_shares alter column project_id set not null;
+alter table public.project_task_shares alter column project_task_id set not null;
+alter table public.project_task_shares alter column user_id set not null;
+alter table public.project_task_shares alter column access_level set not null;
+alter table public.project_task_shares alter column created_at set not null;
+alter table public.project_task_shares alter column updated_at set not null;
+alter table public.project_task_shares alter column access_level set default 'viewer';
+alter table public.project_task_shares alter column created_at set default now();
+alter table public.project_task_shares alter column updated_at set default now();
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'project_shares_project_id_fkey'
+      AND conrelid = 'public.project_shares'::regclass
+  ) THEN
+    ALTER TABLE public.project_shares
+      ADD CONSTRAINT project_shares_project_id_fkey
+      FOREIGN KEY (project_id)
+      REFERENCES public.projects(id)
+      ON DELETE CASCADE;
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'project_shares_user_id_fkey'
+      AND conrelid = 'public.project_shares'::regclass
+  ) THEN
+    ALTER TABLE public.project_shares
+      ADD CONSTRAINT project_shares_user_id_fkey
+      FOREIGN KEY (user_id)
+      REFERENCES public.app_users(id)
+      ON DELETE CASCADE;
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'project_shares_granted_by_user_id_fkey'
+      AND conrelid = 'public.project_shares'::regclass
+  ) THEN
+    ALTER TABLE public.project_shares
+      ADD CONSTRAINT project_shares_granted_by_user_id_fkey
+      FOREIGN KEY (granted_by_user_id)
+      REFERENCES public.app_users(id)
+      ON DELETE SET NULL;
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'project_task_shares_project_id_fkey'
+      AND conrelid = 'public.project_task_shares'::regclass
+  ) THEN
+    ALTER TABLE public.project_task_shares
+      ADD CONSTRAINT project_task_shares_project_id_fkey
+      FOREIGN KEY (project_id)
+      REFERENCES public.projects(id)
+      ON DELETE CASCADE;
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'project_task_shares_project_task_id_fkey'
+      AND conrelid = 'public.project_task_shares'::regclass
+  ) THEN
+    ALTER TABLE public.project_task_shares
+      ADD CONSTRAINT project_task_shares_project_task_id_fkey
+      FOREIGN KEY (project_task_id)
+      REFERENCES public.project_tasks(id)
+      ON DELETE CASCADE;
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'project_task_shares_user_id_fkey'
+      AND conrelid = 'public.project_task_shares'::regclass
+  ) THEN
+    ALTER TABLE public.project_task_shares
+      ADD CONSTRAINT project_task_shares_user_id_fkey
+      FOREIGN KEY (user_id)
+      REFERENCES public.app_users(id)
+      ON DELETE CASCADE;
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'project_task_shares_granted_by_user_id_fkey'
+      AND conrelid = 'public.project_task_shares'::regclass
+  ) THEN
+    ALTER TABLE public.project_task_shares
+      ADD CONSTRAINT project_task_shares_granted_by_user_id_fkey
+      FOREIGN KEY (granted_by_user_id)
+      REFERENCES public.app_users(id)
+      ON DELETE SET NULL;
+  END IF;
+END
+$$;
+
+create unique index if not exists idx_project_shares_project_user on public.project_shares (project_id, user_id);
+create index if not exists idx_project_shares_user_id on public.project_shares (user_id, created_at desc);
+create index if not exists idx_project_shares_project_id on public.project_shares (project_id, created_at desc);
+
+create unique index if not exists idx_project_task_shares_task_user on public.project_task_shares (project_task_id, user_id);
+create index if not exists idx_project_task_shares_user_id on public.project_task_shares (user_id, created_at desc);
+create index if not exists idx_project_task_shares_project_id on public.project_task_shares (project_id, created_at desc);
 
 create table if not exists public.api_tokens (
   id uuid primary key default gen_random_uuid(),
@@ -601,6 +795,18 @@ before update on public.project_tasks
 for each row
 execute procedure public.set_updated_at();
 
+drop trigger if exists trg_project_shares_updated_at on public.project_shares;
+create trigger trg_project_shares_updated_at
+before update on public.project_shares
+for each row
+execute procedure public.set_updated_at();
+
+drop trigger if exists trg_project_task_shares_updated_at on public.project_task_shares;
+create trigger trg_project_task_shares_updated_at
+before update on public.project_task_shares
+for each row
+execute procedure public.set_updated_at();
+
 drop trigger if exists trg_api_tokens_updated_at on public.api_tokens;
 create trigger trg_api_tokens_updated_at
 before update on public.api_tokens
@@ -616,6 +822,8 @@ execute procedure public.project_tasks_compact_components_for_storage();
 alter table public.app_users enable row level security;
 alter table public.projects enable row level security;
 alter table public.project_tasks enable row level security;
+alter table public.project_shares enable row level security;
+alter table public.project_task_shares enable row level security;
 alter table public.api_tokens enable row level security;
 alter table public.api_token_usage enable row level security;
 
@@ -657,6 +865,14 @@ drop policy if exists project_tasks_anon_select on public.project_tasks;
 drop policy if exists project_tasks_anon_insert on public.project_tasks;
 drop policy if exists project_tasks_anon_update on public.project_tasks;
 drop policy if exists project_tasks_anon_delete on public.project_tasks;
+drop policy if exists project_shares_anon_select on public.project_shares;
+drop policy if exists project_shares_anon_insert on public.project_shares;
+drop policy if exists project_shares_anon_update on public.project_shares;
+drop policy if exists project_shares_anon_delete on public.project_shares;
+drop policy if exists project_task_shares_anon_select on public.project_task_shares;
+drop policy if exists project_task_shares_anon_insert on public.project_task_shares;
+drop policy if exists project_task_shares_anon_update on public.project_task_shares;
+drop policy if exists project_task_shares_anon_delete on public.project_task_shares;
 drop policy if exists api_tokens_anon_select on public.api_tokens;
 drop policy if exists api_tokens_anon_insert on public.api_tokens;
 drop policy if exists api_tokens_anon_update on public.api_tokens;
@@ -712,6 +928,56 @@ with check (true);
 
 create policy project_tasks_anon_delete
 on public.project_tasks
+for delete
+to anon
+using (true);
+
+create policy project_shares_anon_select
+on public.project_shares
+for select
+to anon
+using (true);
+
+create policy project_shares_anon_insert
+on public.project_shares
+for insert
+to anon
+with check (true);
+
+create policy project_shares_anon_update
+on public.project_shares
+for update
+to anon
+using (true)
+with check (true);
+
+create policy project_shares_anon_delete
+on public.project_shares
+for delete
+to anon
+using (true);
+
+create policy project_task_shares_anon_select
+on public.project_task_shares
+for select
+to anon
+using (true);
+
+create policy project_task_shares_anon_insert
+on public.project_task_shares
+for insert
+to anon
+with check (true);
+
+create policy project_task_shares_anon_update
+on public.project_task_shares
+for update
+to anon
+using (true)
+with check (true);
+
+create policy project_task_shares_anon_delete
+on public.project_task_shares
 for delete
 to anon
 using (true);
@@ -781,6 +1047,8 @@ grant usage on schema public to anon, authenticated, service_role;
 grant select, insert, update, delete on public.app_users to anon, authenticated, service_role;
 grant select, insert, update, delete on public.projects to anon, authenticated, service_role;
 grant select, insert, update, delete on public.project_tasks to anon, authenticated, service_role;
+grant select, insert, update, delete on public.project_shares to anon, authenticated, service_role;
+grant select, insert, update, delete on public.project_task_shares to anon, authenticated, service_role;
 grant select, insert, update, delete on public.api_tokens to anon, authenticated, service_role;
 grant select, insert, update, delete on public.api_token_usage to anon, authenticated, service_role;
 grant select on public.project_tasks_list to anon, authenticated, service_role;

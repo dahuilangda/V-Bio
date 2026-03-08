@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import type { Project, ProjectTask } from '../../types/models';
-import { getProjectById, listProjectTasksForList } from '../../api/supabaseLite';
+import {
+  getProjectAccessInfo,
+  getProjectById,
+  listProjectTasksForList,
+  sanitizeProjectForTaskShare
+} from '../../api/supabaseLite';
 import { normalizeWorkflowKey } from '../../utils/workflows';
 import {
   hasLeadOptPredictionRuntime,
@@ -308,9 +313,14 @@ export function useProjectTasksDataLoader({
         if (!projectRow || projectRow.deleted_at) {
           throw new Error('Project not found or already deleted.');
         }
-        if (sessionUserId && projectRow.user_id !== sessionUserId) {
+        const accessInfo =
+          sessionUserId
+            ? await getProjectAccessInfo(projectId, sessionUserId, projectRow.user_id)
+            : { scope: 'owner' as const, accessLevel: 'owner' as const, taskIds: [], editableTaskIds: [] };
+        if (sessionUserId && !accessInfo.scope) {
           throw new Error('You do not have permission to access this project.');
         }
+        const projectAccessScope = accessInfo.scope || 'owner';
         const workflowKey = normalizeWorkflowKey(projectRow.task_type);
         const includeComponentsForList = workflowKey === 'prediction';
         const includeConfidenceForList =
@@ -324,12 +334,35 @@ export function useProjectTasksDataLoader({
           includeComponents: includeComponentsForList,
           includeConfidence: includeConfidenceForList,
           includeProperties: includePropertiesForList,
-          includeLeadOptSummary: workflowKey === 'lead_optimization'
+          includeLeadOptSummary: workflowKey === 'lead_optimization',
+          taskRowIds: projectAccessScope === 'task_share' ? accessInfo.taskIds : undefined,
+          accessScope: projectAccessScope,
+          accessLevel: accessInfo.accessLevel || 'owner',
+          editableTaskIds: accessInfo.editableTaskIds
         });
 
         lastFullFetchTsRef.current = Date.now();
         const sortedTaskRows = sortProjectTasks(sanitizeTaskRows(taskRows));
-        const mergedProject = cachedProject ? mergeProjectRuntimeFields(projectRow, cachedProject) : projectRow;
+        const accessibleProjectBase =
+          projectAccessScope === 'task_share'
+            ? sanitizeProjectForTaskShare(
+                {
+                  ...projectRow,
+                  access_scope: projectAccessScope,
+                  access_level: accessInfo.accessLevel || 'viewer',
+                  accessible_task_ids: accessInfo.taskIds,
+                  editable_task_ids: accessInfo.editableTaskIds
+                },
+                sortedTaskRows
+              )
+            : {
+                ...projectRow,
+                access_scope: projectAccessScope,
+                access_level: accessInfo.accessLevel || 'owner',
+                accessible_task_ids: [],
+                editable_task_ids: accessInfo.editableTaskIds
+              };
+        const mergedProject = cachedProject ? mergeProjectRuntimeFields(accessibleProjectBase, cachedProject) : accessibleProjectBase;
         const mergedRows = mergeTaskRowsWithLocal(sortedTaskRows, cachedTasks);
         if (loadSeqRef.current !== loadSeq) return;
         setProject(mergedProject);

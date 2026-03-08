@@ -39,12 +39,8 @@ docker compose up -d
 
 Default PostgREST URL: `http://127.0.0.1:54321`
 
-If you pulled new frontend code on an existing Postgres volume, run schema upgrade once:
-
-```bash
-cd frontend
-npm run db:migrate
-```
+For a clean install, the full schema is created directly from `frontend/supabase-lite/init/init.sql`
+when the Postgres volume is initialized.
 
 One-command startup for production-style frontend stack:
 

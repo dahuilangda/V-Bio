@@ -2487,7 +2487,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     statusInfo: statusInfo || null,
     progressPercent,
     onPeptideRequestStructure: async () => {
-      const contextTask = statusContextTaskRow || activeResultTask;
+      const contextTask = activeResultTask || statusContextTaskRow;
       const taskId = String(contextTask?.task_id || project.task_id || '').trim();
       if (!taskId) return;
       await pullResultForViewer(taskId, {
@@ -2697,6 +2697,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   };
 
   return (
+    <>
     <ProjectDetailLayout
       projectName={project.name}
       canDownloadResult={Boolean(
@@ -2780,5 +2781,6 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       onTaskSummaryChange={handleTaskSummaryChange}
       onWorkspaceFormSubmit={handleWorkspaceFormSubmit}
     />
+    </>
   );
 }

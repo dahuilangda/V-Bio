@@ -231,6 +231,11 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
 
   const activeResultTask = useMemo(() => {
     if (workflowKey !== 'lead_optimization') {
+      // Keep the results panel pinned to an explicitly selected task row.
+      // Status badges/polling may still follow the active runtime task separately.
+      if (requestedStatusTaskRow?.id) {
+        return requestedStatusTaskRow;
+      }
       return statusContextTaskRow || runtimeResultTask;
     }
     if (requestedStatusTaskRow?.id && hasLeadOptSnapshotPayload(requestedStatusTaskRow)) {

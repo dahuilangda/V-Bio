@@ -11,6 +11,7 @@ import {
   updateProject,
   updateProjectTask
 } from '../../api/supabaseLite';
+import { canEditProject } from '../../utils/accessControl';
 import { saveProjectInputConfig } from '../../utils/projectInputs';
 import { validateComponents } from '../../utils/inputValidation';
 import { getWorkflowDefinition, isPredictionLikeWorkflowKey } from '../../utils/workflows';
@@ -579,6 +580,7 @@ export function useProjectDetailRuntimeContext() {
 
   const local = useProjectDetailLocalState();
   const leadOptTabHydrationRef = useRef<Record<string, string>>({});
+  const peptideResultHydrationRef = useRef<Record<string, string>>({});
   const {
     project,
     setProject,
@@ -662,7 +664,7 @@ export function useProjectDetailRuntimeContext() {
 
   const canEdit = useMemo(() => {
     if (!project || !session) return false;
-    return project.user_id === session.userId;
+    return canEditProject(project);
   }, [project, session]);
   const workflowKey = useMemo(() => getWorkflowDefinition(project?.task_type).key, [project?.task_type]);
   const isPredictionWorkflow = isPredictionLikeWorkflowKey(workflowKey);
@@ -794,7 +796,14 @@ export function useProjectDetailRuntimeContext() {
           includeConfidence: false,
           includeProperties: false,
           includeLeadOptSummary: workflowKey === 'lead_optimization',
-          includeLeadOptCandidates: false
+          includeLeadOptCandidates: false,
+          taskRowIds:
+            String(project?.access_scope || 'owner').trim() === 'task_share'
+              ? project?.accessible_task_ids
+              : undefined,
+          accessScope: project?.access_scope || 'owner',
+          accessLevel: project?.access_level || 'owner',
+          editableTaskIds: project?.editable_task_ids || []
         });
         if (cancelled) return;
         const nextRows = sortProjectTasks(rowsRaw).map((row) => normalizeLeadOptRuntimeRow(row));
@@ -1090,6 +1099,10 @@ export function useProjectDetailRuntimeContext() {
       if (timer !== null) window.clearTimeout(timer);
     };
   }, [
+    project?.access_level,
+    project?.access_scope,
+    project?.accessible_task_ids,
+    project?.editable_task_ids,
     location.search,
     project?.id,
     project?.task_id,
@@ -1258,6 +1271,66 @@ export function useProjectDetailRuntimeContext() {
     workflowKey,
     isDraftTaskSnapshot: (task) => isDraftTaskSnapshot(task ?? null),
   });
+
+  useEffect(() => {
+    if (workflowKey !== 'peptide_design') return;
+    if (workspaceTab !== 'results') return;
+
+    const sourceRow = requestedStatusTaskRow || statusContextTaskRow || activeResultTask || null;
+    const sourceRowId = String(sourceRow?.id || '').trim();
+    if (!sourceRowId || sourceRowId.startsWith('local-')) return;
+
+    const sourceTaskState = String(sourceRow?.task_state || '').trim().toUpperCase();
+    if (sourceTaskState !== 'SUCCESS') return;
+
+    const missingConfidence = !hasObjectContent(sourceRow?.confidence);
+    const missingAffinity = !hasObjectContent(sourceRow?.affinity);
+    if (!missingConfidence && !missingAffinity) return;
+
+    const marker = [
+      sourceRowId,
+      String(sourceRow?.updated_at || '').trim(),
+      missingConfidence ? 'confidence' : '',
+      missingAffinity ? 'affinity' : ''
+    ].join('|');
+    if (peptideResultHydrationRef.current[sourceRowId] === marker) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const detailRow = await getProjectTaskById(sourceRowId, {
+          includeComponents: false,
+          includeConstraints: false,
+          includeProperties: true,
+          includeConfidence: true,
+          includeAffinity: true,
+          includeProteinSequence: false
+        });
+        if (cancelled || !detailRow) return;
+        if (!hasObjectContent(detailRow.confidence) && !hasObjectContent(detailRow.affinity)) return;
+        peptideResultHydrationRef.current[sourceRowId] = marker;
+        setProjectTasks((prev) =>
+          prev.map((row) =>
+            String(row.id || '').trim() === sourceRowId ? mergeTaskRuntimeFields(detailRow, row) : row
+          )
+        );
+      } catch {
+        // Keep current snapshot; a later row update can retry hydration.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeResultTask,
+    getProjectTaskById,
+    requestedStatusTaskRow,
+    setProjectTasks,
+    statusContextTaskRow,
+    workflowKey,
+    workspaceTab
+  ]);
   const leadOptPersistedUploads = useMemo(() => {
     const draftUploadSource =
       normalizedDraftComponents.length > 0
@@ -1587,6 +1660,7 @@ export function useProjectDetailRuntimeContext() {
     refreshStatus,
     statusContextTaskRow,
     runtimeResultTask,
+    activeResultTask,
     structureTaskId,
     structureText,
     pullResultForViewer,

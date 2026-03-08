@@ -15,15 +15,18 @@ import {
   Plus,
   RefreshCcw,
   Search,
+  Share2,
   SlidersHorizontal,
   Trash2
 } from 'lucide-react';
+import { SharingModal } from '../components/project/SharingModal';
 import { useAuth } from '../hooks/useAuth';
 import { useProjects } from '../hooks/useProjects';
 import { formatDateTime } from '../utils/date';
+import { canDeleteProject, canEditProject as canEditProjectAccess, canManageProjectShares } from '../utils/accessControl';
 import { buildDefaultInputConfig, saveProjectInputConfig } from '../utils/projectInputs';
 import { getWorkflowDefinition, type WorkflowKey, WORKFLOWS } from '../utils/workflows';
-import type { ProjectTaskCounts, TaskState } from '../types/models';
+import type { Project, ProjectTaskCounts, TaskState } from '../types/models';
 
 const workflowIconMap: Record<WorkflowKey, JSX.Element> = {
   prediction: <Dna size={16} />,
@@ -94,6 +97,7 @@ export function ProjectsPage() {
   const [pageSize, setPageSize] = useState<number>(12);
   const [page, setPage] = useState<number>(1);
   const [filtersHydrated, setFiltersHydrated] = useState(false);
+  const [sharedProject, setSharedProject] = useState<Project | null>(null);
   const projectsFiltersStorageKey = useMemo(() => {
     const sessionIdentity =
       String(session?.userId || '').trim() ||
@@ -656,6 +660,19 @@ export function ProjectsPage() {
                   const projectName = String(project.name || '').trim() || `Project ${String(project.id || '').slice(0, 8)}`;
                   const isEditingProjectName = editingProjectNameId === project.id;
                   const isSavingProjectName = savingProjectNameId === project.id;
+                  const canEditProject = canEditProjectAccess(project);
+                  const canRemoveProject = canDeleteProject(project, session?.userId || null);
+                  const canShareProject = canManageProjectShares(project, session?.userId || null);
+                  const accessLabel =
+                    project.access_scope === 'project_share'
+                      ? project.access_level === 'editor'
+                        ? 'Shared project · Editor'
+                        : 'Shared project · Viewer'
+                      : project.access_scope === 'task_share'
+                        ? project.access_level === 'editor'
+                          ? 'Shared task · Editor'
+                          : 'Shared task · Viewer'
+                        : '';
                   return (
                     <tr key={project.id}>
                       <td className="project-col-name">
@@ -686,13 +703,14 @@ export function ProjectsPage() {
                               type="button"
                               className="project-name-edit-btn"
                               onClick={() => beginProjectNameEdit(project.id, projectName)}
-                              disabled={Boolean(savingProjectNameId)}
-                              title="Edit project name"
+                              disabled={!canEditProject || Boolean(savingProjectNameId)}
+                              title={canEditProject ? 'Edit project name' : 'Shared projects are read-only'}
                             >
                               <span className="project-name-link">{projectName}</span>
                             </button>
                           )}
                         </div>
+                        {accessLabel ? <div className="muted project-row-summary clamp-1">{accessLabel}</div> : null}
                         {project.summary ? <div className="muted project-row-summary clamp-1">{project.summary}</div> : null}
                       </td>
                       <td>
@@ -752,8 +770,20 @@ export function ProjectsPage() {
                             <ExternalLink size={14} />
                             Open
                           </Link>
+                          {canShareProject ? (
+                            <button
+                              type="button"
+                              className="icon-btn"
+                              onClick={() => setSharedProject(project)}
+                              title="Share project"
+                              aria-label="Share project"
+                            >
+                              <Share2 size={15} />
+                            </button>
+                          ) : null}
                           <button
                             className="icon-btn danger"
+                            disabled={!canRemoveProject}
                             onClick={() => {
                               if (window.confirm(`Delete project "${project.name}"?`)) {
                                 if (editingProjectNameId === project.id) {
@@ -763,7 +793,7 @@ export function ProjectsPage() {
                                 void softDeleteProject(project.id);
                               }
                             }}
-                            title="Delete project"
+                            title={canRemoveProject ? 'Delete project' : 'Only the project owner can delete this project'}
                           >
                             <Trash2 size={15} />
                           </button>
@@ -877,6 +907,17 @@ export function ProjectsPage() {
           </div>
         </div>
       )}
+
+      {session?.userId && sharedProject ? (
+        <SharingModal
+          open
+          mode="project"
+          projectId={sharedProject.id}
+          projectName={sharedProject.name}
+          currentUserId={session.userId}
+          onClose={() => setSharedProject(null)}
+        />
+      ) : null}
 
     </div>
   );

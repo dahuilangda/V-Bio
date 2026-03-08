@@ -734,7 +734,7 @@ export async function refreshTaskStatus(params: {
       !statusLooksLikeMmp &&
       !hasLeadOptMmpOnlySnapshot(runtimeTask)
     ) {
-      const resultMode: DownloadResultMode = isPeptideDesignWorkflow ? 'full' : 'view';
+      const resultMode: DownloadResultMode = 'view';
       await pullResultForViewer(activeTaskId, {
         taskRowId: runtimeTask?.id,
         persistProject: isProjectActiveTask,

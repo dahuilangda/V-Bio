@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, useNavigate } from 'react-router-dom';
-import { ChevronDown, Database, FlaskConical, FolderKanban, LogOut, Settings, Users } from 'lucide-react';
+import { ChevronDown, Database, FlaskConical, FolderKanban, LogOut, Settings, Share2, Users } from 'lucide-react';
 import { useAuth } from '../../hooks/useAuth';
 import { getAvatarOverride } from '../../utils/profilePrefs';
 
@@ -45,6 +45,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <NavLink to="/projects" className="top-link">
             <FolderKanban size={16} />
             <span>Projects</span>
+          </NavLink>
+          <NavLink to="/shares" className="top-link">
+            <Share2 size={16} />
+            <span>Shares</span>
           </NavLink>
           {session?.isAdmin && (
             <NavLink to="/admin/users" className="top-link">

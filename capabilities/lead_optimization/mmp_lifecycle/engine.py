@@ -8,6 +8,7 @@ Enhanced with ChEMBL data download capabilities
 
 import argparse
 import csv
+import collections
 import glob
 import json
 import math
@@ -17,6 +18,7 @@ import logging
 import subprocess
 import shutil
 import re
+import threading
 import time
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -229,6 +231,124 @@ def _copy_rows(cursor, copy_sql: str, rows: Sequence[Tuple[object, ...]]) -> Non
 def _is_postgres_dsn(value: str) -> bool:
     token = str(value or "").strip().lower()
     return token.startswith("postgres://") or token.startswith("postgresql://")
+
+
+class _BoundedByteTail:
+    def __init__(self, limit_bytes: int):
+        self.limit_bytes = max(8 * 1024, int(limit_bytes or 0))
+        self.size_bytes = 0
+        self.chunks = collections.deque()
+        self.lock = threading.Lock()
+
+    def append(self, chunk: bytes) -> None:
+        if not chunk:
+            return
+        with self.lock:
+            self.chunks.append(chunk)
+            self.size_bytes += len(chunk)
+            while self.size_bytes > self.limit_bytes and self.chunks:
+                overflow = self.size_bytes - self.limit_bytes
+                head = self.chunks[0]
+                if len(head) <= overflow:
+                    self.chunks.popleft()
+                    self.size_bytes -= len(head)
+                    continue
+                self.chunks[0] = head[overflow:]
+                self.size_bytes -= overflow
+                break
+
+    def text(self) -> str:
+        with self.lock:
+            payload = b"".join(self.chunks)
+        if not payload:
+            return ""
+        text = payload.decode("utf-8", errors="replace")
+        nl_pos = text.find("\n")
+        if nl_pos >= 0 and len(payload) >= self.limit_bytes:
+            text = text[nl_pos + 1 :]
+        return text
+
+
+def _drain_subprocess_stream(stream, tail: "_BoundedByteTail") -> None:
+    try:
+        while True:
+            chunk = stream.read(64 * 1024)
+            if not chunk:
+                break
+            tail.append(chunk)
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+
+def _run_subprocess_with_bounded_output(
+    cmd: Sequence[str],
+    *,
+    env: Optional[Dict[str, str]] = None,
+    cwd: Optional[str] = None,
+    tail_kb: int = 256,
+) -> subprocess.CompletedProcess:
+    tail_bytes = max(64, int(tail_kb or 0)) * 1024
+    stdout_tail = _BoundedByteTail(tail_bytes)
+    stderr_tail = _BoundedByteTail(tail_bytes)
+    proc = subprocess.Popen(
+        list(cmd),
+        env=env,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stdout_thread = threading.Thread(
+        target=_drain_subprocess_stream,
+        args=(proc.stdout, stdout_tail),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_drain_subprocess_stream,
+        args=(proc.stderr, stderr_tail),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    returncode = proc.wait()
+    stdout_thread.join()
+    stderr_thread.join()
+    stdout_text = stdout_tail.text()
+    stderr_text = stderr_tail.text()
+    return subprocess.CompletedProcess(
+        args=list(cmd),
+        returncode=int(returncode),
+        stdout=stdout_text,
+        stderr=stderr_text,
+    )
+
+
+def _system_total_memory_mb() -> int:
+    # Linux path first.
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemTotal:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        kb = int(parts[1])
+                        if kb > 0:
+                            return max(1, kb // 1024)
+    except Exception:
+        pass
+    # POSIX fallback.
+    try:
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+        pages = int(os.sysconf("SC_PHYS_PAGES"))
+        total_bytes = page_size * pages
+        if total_bytes > 0:
+            return max(1, total_bytes // (1024 * 1024))
+    except Exception:
+        pass
+    return 0
+
 
 def setup_logging():
     """Setup logging"""
@@ -532,6 +652,8 @@ def _run_mmpdb_index_with_schema_safe_patch(
     skip_post_index_finalize: bool = False,
     skip_post_index_analyze_only: bool = False,
     commit_every_flushes: int = 0,
+    max_constant_matches: int = 0,
+    max_constant_pairs: int = 0,
 ) -> subprocess.CompletedProcess:
     patch_runner_code = r"""
 import sys
@@ -541,6 +663,8 @@ from mmpdblib import cli, index_writers, schema as mmp_schema, index_algorithm
 _SKIP_FINALIZE = __SKIP_FINALIZE__
 _SKIP_ANALYZE = __SKIP_ANALYZE__
 _COMMIT_EVERY_FLUSHES = max(0, int(__COMMIT_EVERY_FLUSHES__))
+_MAX_CONSTANT_MATCHES = max(0, int(__MAX_CONSTANT_MATCHES__))
+_MAX_CONSTANT_PAIRS = max(0, int(__MAX_CONSTANT_PAIRS__))
 _DELTA_PAIR_IDS_FILE = os.environ.get("LEADOPT_MMP_DELTA_PAIR_IDS_FILE", "").strip()
 _DELTA_PAIR_IDS = set()
 if _DELTA_PAIR_IDS_FILE:
@@ -627,18 +751,27 @@ if _SKIP_FINALIZE:
     index_writers.PostgresIndexWriter.end = _patched_end_skip_finalize
 elif _SKIP_ANALYZE:
     index_writers.PostgresIndexWriter.end = _patched_end_skip_analyze
-if _DELTA_PAIR_IDS:
+if _DELTA_PAIR_IDS or _MAX_CONSTANT_MATCHES > 0 or _MAX_CONSTANT_PAIRS > 0:
     _orig_find_mmp = index_algorithm.find_matched_molecular_pairs
     def _patched_find_matched_molecular_pairs(index, *args, **kwargs):
         _orig_iter_constant_matches = getattr(index, "iter_constant_matches", None)
         if _orig_iter_constant_matches is None:
             for _pair in _orig_find_mmp(index, *args, **kwargs):
-                if (_pair.id1 in _DELTA_PAIR_IDS) or (_pair.id2 in _DELTA_PAIR_IDS):
-                    yield _pair
+                if _DELTA_PAIR_IDS and (_pair.id1 not in _DELTA_PAIR_IDS) and (_pair.id2 not in _DELTA_PAIR_IDS):
+                    continue
+                yield _pair
             return
 
         def _filtered_iter_constant_matches():
             for _num_cuts, _constant_smiles, _constant_symmetry_class, _matches in _orig_iter_constant_matches():
+                _n = len(_matches)
+                if _MAX_CONSTANT_MATCHES > 0 and _n > _MAX_CONSTANT_MATCHES:
+                    continue
+                if _MAX_CONSTANT_PAIRS > 0 and (_n * (_n - 1) // 2) > _MAX_CONSTANT_PAIRS:
+                    continue
+                if not _DELTA_PAIR_IDS:
+                    yield (_num_cuts, _constant_smiles, _constant_symmetry_class, _matches)
+                    continue
                 _delta_positions = [
                     _idx for _idx, _entry in enumerate(_matches)
                     if _entry[0] in _DELTA_PAIR_IDS
@@ -646,7 +779,6 @@ if _DELTA_PAIR_IDS:
                 if not _delta_positions:
                     continue
                 _delta_set = set(_delta_positions)
-                _n = len(_matches)
 
                 for _i in _delta_positions:
                     _entry_i = _matches[_i]
@@ -666,8 +798,9 @@ if _DELTA_PAIR_IDS:
         index.iter_constant_matches = _filtered_iter_constant_matches
         try:
             for _pair in _orig_find_mmp(index, *args, **kwargs):
-                if (_pair.id1 in _DELTA_PAIR_IDS) or (_pair.id2 in _DELTA_PAIR_IDS):
-                    yield _pair
+                if _DELTA_PAIR_IDS and (_pair.id1 not in _DELTA_PAIR_IDS) and (_pair.id2 not in _DELTA_PAIR_IDS):
+                    continue
+                yield _pair
         finally:
             index.iter_constant_matches = _orig_iter_constant_matches
     index_algorithm.find_matched_molecular_pairs = _patched_find_matched_molecular_pairs
@@ -683,9 +816,15 @@ cli.main()
     ).replace(
         "__COMMIT_EVERY_FLUSHES__",
         str(max(0, int(commit_every_flushes or 0))),
+    ).replace(
+        "__MAX_CONSTANT_MATCHES__",
+        str(max(0, int(max_constant_matches or 0))),
+    ).replace(
+        "__MAX_CONSTANT_PAIRS__",
+        str(max(0, int(max_constant_pairs or 0))),
     )
     cmd = [sys.executable, "-c", patch_runner_code, *index_args]
-    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+    return _run_subprocess_with_bounded_output(cmd, env=env)
 
 
 def _summarize_core_tables(rows: List[tuple[str, str]]) -> str:
@@ -726,6 +865,49 @@ def _resolve_index_commit_every_flushes(
     return auto_flushes, True
 
 
+def _resolve_index_constant_match_limits(
+    requested_max_constant_matches: int,
+    requested_max_constant_pairs: int,
+    *,
+    fragments_file: str = "",
+) -> tuple[int, int, bool]:
+    explicit_matches = max(0, int(requested_max_constant_matches or 0))
+    explicit_pairs = max(0, int(requested_max_constant_pairs or 0))
+    if explicit_matches > 0 or explicit_pairs > 0:
+        return explicit_matches, explicit_pairs, False
+
+    if not _env_bool("MMP_LIFECYCLE_AUTO_LIMIT_CONSTANT_MATCHES", default=False):
+        return 0, 0, False
+
+    size_bytes = 0
+    try:
+        token = str(fragments_file or "").strip()
+        if token and os.path.exists(token):
+            size_bytes = int(os.path.getsize(token) or 0)
+    except Exception:
+        size_bytes = 0
+    size_gib = max(0.0, float(size_bytes) / float(1024 ** 3))
+
+    if size_gib >= 8.0:
+        default_matches, default_pairs = 6000, 15000000
+    elif size_gib >= 2.0:
+        default_matches, default_pairs = 8000, 25000000
+    elif size_gib >= 0.75:
+        default_matches, default_pairs = 10000, 40000000
+    else:
+        return 0, 0, False
+
+    auto_matches = max(
+        0,
+        _env_int("MMP_LIFECYCLE_AUTO_MAX_CONSTANT_MATCHES", default_matches),
+    )
+    auto_pairs = max(
+        0,
+        _env_int("MMP_LIFECYCLE_AUTO_MAX_CONSTANT_PAIRS", default_pairs),
+    )
+    return auto_matches, auto_pairs, True
+
+
 def _normalize_index_runtime_tuning(
     *,
     maintenance_work_mem_mb: int,
@@ -733,9 +915,24 @@ def _normalize_index_runtime_tuning(
     parallel_workers: int,
 ) -> tuple[int, int, int]:
     cpu_cap = max(1, int(os.cpu_count() or 8))
-    max_maintenance_mb = max(128, _env_int("MMP_LIFECYCLE_MAX_INDEX_MAINTENANCE_WORK_MEM_MB", 8192))
-    max_work_mb = max(16, _env_int("MMP_LIFECYCLE_MAX_INDEX_WORK_MEM_MB", 512))
-    max_parallel = max(1, _env_int("MMP_LIFECYCLE_MAX_INDEX_PARALLEL_WORKERS", min(8, cpu_cap)))
+    total_mem_mb = _system_total_memory_mb()
+
+    env_maintenance_cap = max(128, _env_int("MMP_LIFECYCLE_MAX_INDEX_MAINTENANCE_WORK_MEM_MB", 8192))
+    env_work_cap = max(16, _env_int("MMP_LIFECYCLE_MAX_INDEX_WORK_MEM_MB", 512))
+    env_parallel_cap = max(1, _env_int("MMP_LIFECYCLE_MAX_INDEX_PARALLEL_WORKERS", min(8, cpu_cap)))
+
+    if total_mem_mb > 0:
+        auto_maintenance_cap = max(512, min(8192, total_mem_mb // 4))
+        auto_work_cap = max(32, min(512, total_mem_mb // 32))
+        auto_parallel_cap = max(1, min(cpu_cap, total_mem_mb // 4096))
+        max_maintenance_mb = min(env_maintenance_cap, auto_maintenance_cap)
+        max_work_mb = min(env_work_cap, auto_work_cap)
+        max_parallel = min(env_parallel_cap, auto_parallel_cap)
+    else:
+        max_maintenance_mb = env_maintenance_cap
+        max_work_mb = env_work_cap
+        max_parallel = env_parallel_cap
+
     norm_maintenance = max(0, min(int(maintenance_work_mem_mb or 0), max_maintenance_mb))
     norm_work = max(0, min(int(work_mem_mb or 0), max_work_mb))
     norm_parallel = max(0, min(int(parallel_workers or 0), max_parallel))
@@ -822,6 +1019,8 @@ def _index_fragments_to_postgres(
     index_work_mem_mb: int = 0,
     index_parallel_workers: int = 0,
     index_commit_every_flushes: int = 0,
+    index_max_constant_matches: int = 0,
+    index_max_constant_pairs: int = 0,
     skip_mmpdb_post_index_finalize: bool = False,
     skip_mmpdb_list_verify: bool = False,
     delta_pair_record_ids: Optional[Sequence[str]] = None,
@@ -942,16 +1141,30 @@ def _index_fragments_to_postgres(
                 index_commit_every_flushes,
                 fragments_file=fragments_file,
             )
+            safe_max_constant_matches, safe_max_constant_pairs, is_auto_constant_limits = _resolve_index_constant_match_limits(
+                index_max_constant_matches,
+                index_max_constant_pairs,
+                fragments_file=fragments_file,
+            )
             logger.info(
                 "mmpdb index commit cadence: every %s flush(es)%s",
                 safe_commit_every_flushes,
                 " [auto]" if is_auto_commit_flushes else "",
             )
+            if safe_max_constant_matches > 0 or safe_max_constant_pairs > 0:
+                logger.warning(
+                    "mmpdb index constant-cluster guard: max_matches=%s max_pairs=%s%s",
+                    safe_max_constant_matches if safe_max_constant_matches > 0 else "disabled",
+                    safe_max_constant_pairs if safe_max_constant_pairs > 0 else "disabled",
+                    " [auto]" if is_auto_constant_limits else "",
+                )
             result = _run_mmpdb_index_with_schema_safe_patch(
                 index_args,
                 index_env,
                 skip_post_index_finalize=skip_mmpdb_post_index_finalize,
                 commit_every_flushes=safe_commit_every_flushes,
+                max_constant_matches=safe_max_constant_matches,
+                max_constant_pairs=safe_max_constant_pairs,
             )
         finally:
             if delta_id_file:
@@ -962,8 +1175,11 @@ def _index_fragments_to_postgres(
                     pass
 
         if result.returncode != 0:
-            logger.error(f"Index creation failed: {result.stderr}")
-            logger.error(f"Index stdout: {result.stdout}")
+            logger.error("Index creation failed (returncode=%s).", result.returncode)
+            if result.stderr:
+                logger.error("Index stderr (tail): %s", result.stderr)
+            if result.stdout:
+                logger.error("Index stdout (tail): %s", result.stdout)
             stderr_text = str(result.stderr or "")
             if "server closed the connection unexpectedly" in stderr_text.lower():
                 logger.error(
@@ -971,6 +1187,13 @@ def _index_fragments_to_postgres(
                     "Likely backend restart/termination under heavy write pressure. "
                     "Try lower pg_index_* settings, keep concurrent batch jobs minimal, "
                     "and increase PostgreSQL WAL capacity (max_wal_size)."
+                )
+            if int(result.returncode or 0) in (-9, 137):
+                logger.error(
+                    "mmpdb index process was killed by SIGKILL/OOM (returncode=%s). "
+                    "Lower pg_index_* memory/parallel settings and set "
+                    "--pg_index_max_constant_matches / --pg_index_max_constant_pairs.",
+                    result.returncode,
                 )
             logger.info(f"Fragments file kept for debugging: {fragments_file}")
             return False
@@ -1029,6 +1252,8 @@ def create_mmp_database(
     index_work_mem_mb: int = 0,
     index_parallel_workers: int = 0,
     index_commit_every_flushes: int = 0,
+    index_max_constant_matches: int = 0,
+    index_max_constant_pairs: int = 0,
     build_construct_tables: bool = True,
     build_constant_smiles_mol_index: bool = True,
 ) -> bool:
@@ -1046,31 +1271,15 @@ def create_mmp_database(
 
         # Step 1: Fragment compounds
         logger.info("Step 1: Fragmenting compounds (this may take a while for large datasets)...")
-        fragment_cmd = [
-            sys.executable, "-m", "mmpdblib", "fragment",
-            smiles_file,
-            "-o", fragments_file,
-            "--max-heavies", str(max_heavy_atoms),
-            "--has-header"  # Our SMILES file has a header
-        ]
         cache_file = str(fragment_cache_file or "").strip()
-        if cache_file and os.path.exists(cache_file):
-            fragment_cmd.extend(["--cache", cache_file])
-            logger.info("Using fragment cache: %s", cache_file)
-        if int(fragment_jobs or 0) > 0:
-            fragment_cmd.extend(["-j", str(int(fragment_jobs))])
-
-        logger.info(f"Running: {' '.join(fragment_cmd)}")
-        result = subprocess.run(fragment_cmd, capture_output=True, text=True)
-
-        if result.returncode != 0:
-            logger.error(f"Fragmentation failed: {result.stderr}")
-            logger.error(f"Fragmentation stdout: {result.stdout}")
+        if not _run_mmpdb_fragment(
+            smiles_file,
+            fragments_file,
+            max_heavy_atoms=max_heavy_atoms,
+            fragment_jobs=fragment_jobs,
+            cache_file=cache_file,
+        ):
             return False
-
-        logger.info("Fragmentation completed successfully")
-        if result.stdout:
-            logger.info(f"Fragment output: {result.stdout[-500:]}")  # Last 500 chars
 
         index_ok = _index_fragments_to_postgres(
             fragments_file,
@@ -1084,6 +1293,8 @@ def create_mmp_database(
             index_work_mem_mb=index_work_mem_mb,
             index_parallel_workers=index_parallel_workers,
             index_commit_every_flushes=index_commit_every_flushes,
+            index_max_constant_matches=index_max_constant_matches,
+            index_max_constant_pairs=index_max_constant_pairs,
             build_construct_tables=build_construct_tables,
             build_constant_smiles_mol_index=build_constant_smiles_mol_index,
         )
@@ -3063,11 +3274,15 @@ def _run_mmpdb_fragment(
     if int(fragment_jobs or 0) > 0:
         cmd.extend(["-j", str(int(fragment_jobs))])
     logger.info("Running fragment: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_subprocess_with_bounded_output(cmd)
     if result.returncode != 0:
-        logger.error("Fragment failed: %s", result.stderr)
+        logger.error("Fragment failed (returncode=%s).", result.returncode)
+        if result.stderr:
+            logger.error("Fragment stderr (tail): %s", result.stderr)
         if result.stdout:
-            logger.error("Fragment stdout: %s", result.stdout[-1000:])
+            logger.error("Fragment stdout (tail): %s", result.stdout)
+        if int(result.returncode or 0) in (-9, 137):
+            logger.error("Fragment process was killed by SIGKILL/OOM.")
         return False
     return True
 
@@ -3087,11 +3302,13 @@ def _run_mmpdb_fragdb_constants(
         output_file,
     ]
     logger.info("Running fragdb_constants: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_subprocess_with_bounded_output(cmd)
     if result.returncode != 0:
-        logger.error("fragdb_constants failed: %s", result.stderr)
+        logger.error("fragdb_constants failed (returncode=%s).", result.returncode)
+        if result.stderr:
+            logger.error("fragdb_constants stderr (tail): %s", result.stderr)
         if result.stdout:
-            logger.error("fragdb_constants stdout: %s", result.stdout[-1000:])
+            logger.error("fragdb_constants stdout (tail): %s", result.stdout)
         return False
     return True
 
@@ -3173,11 +3390,13 @@ def _run_mmpdb_fragdb_partition(
         partition_template,
     ]
     logger.info("Running fragdb_partition: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_subprocess_with_bounded_output(cmd)
     if result.returncode != 0:
-        logger.error("fragdb_partition failed: %s", result.stderr)
+        logger.error("fragdb_partition failed (returncode=%s).", result.returncode)
+        if result.stderr:
+            logger.error("fragdb_partition stderr (tail): %s", result.stderr)
         if result.stdout:
-            logger.error("fragdb_partition stdout: %s", result.stdout[-1000:])
+            logger.error("fragdb_partition stdout (tail): %s", result.stdout)
         return False
 
     partition_files = sorted(glob.glob(f"{output_fragdb}.partition.*.fragdb"))
@@ -3223,11 +3442,13 @@ def _append_delta_fragdb_into_cache(
         merged_file,
     ]
     logger.info("Updating fragment cache by fragdb_merge: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_subprocess_with_bounded_output(cmd)
     if result.returncode != 0:
-        logger.warning("fragdb_merge cache update failed: %s", result.stderr)
+        logger.warning("fragdb_merge cache update failed (returncode=%s).", result.returncode)
+        if result.stderr:
+            logger.warning("fragdb_merge stderr (tail): %s", result.stderr)
         if result.stdout:
-            logger.warning("fragdb_merge cache update stdout: %s", result.stdout[-1000:])
+            logger.warning("fragdb_merge stdout (tail): %s", result.stdout)
         try:
             if os.path.exists(merged_file):
                 os.remove(merged_file)
@@ -4211,8 +4432,8 @@ def _ensure_incremental_lookup_indexes(cursor) -> None:
     _ensure_named_indexes(cursor, statements, existing_indexes=existing)
 
 
-def _should_refresh_incremental_dataset_counts(*, skip_incremental_analyze: bool) -> bool:
-    default_refresh = not bool(skip_incremental_analyze)
+def _should_refresh_incremental_dataset_counts(*, refresh_requested: bool) -> bool:
+    default_refresh = bool(refresh_requested)
     return _env_bool("MMP_LIFECYCLE_INCREMENTAL_REFRESH_DATASET_COUNTS", default=default_refresh)
 
 
@@ -5515,7 +5736,8 @@ def _incremental_reindex_compound_delta(
     build_construct_tables: bool,
     build_constant_smiles_mol_index: bool,
     delta_mode: str,
-    skip_incremental_analyze: bool = False,
+    skip_incremental_analyze: bool = True,
+    refresh_dataset_counts: bool = False,
 ) -> bool:
     logger = logging.getLogger(__name__)
     t_total_start = time.time()
@@ -5557,8 +5779,13 @@ def _incremental_reindex_compound_delta(
     if not unique_smiles:
         logger.info("No structural compound delta rows detected; skipping incremental index.")
         return True
-    refresh_dataset_counts = _should_refresh_incremental_dataset_counts(
-        skip_incremental_analyze=bool(skip_incremental_analyze),
+    effective_refresh_dataset_counts = _should_refresh_incremental_dataset_counts(
+        refresh_requested=bool(refresh_dataset_counts),
+    )
+    logger.info(
+        "Incremental maintenance mode: force_analyze=%s refresh_dataset_counts=%s",
+        not bool(skip_incremental_analyze),
+        effective_refresh_dataset_counts,
     )
 
     unique_smiles_count = len(unique_smiles)
@@ -5571,7 +5798,7 @@ def _incremental_reindex_compound_delta(
             schema=normalized_schema,
             removed_rows=removed_rows,
             analyze_after_update=(not bool(skip_incremental_analyze)),
-            refresh_dataset_counts=refresh_dataset_counts,
+            refresh_dataset_counts=effective_refresh_dataset_counts,
         )
         logger.info(
             "Incremental delete fast-path elapsed=%.2fs removed_smiles=%s matched_compounds=%s deleted_compounds=%s deleted_pairs=%s affected_constants=%s",
@@ -5665,7 +5892,7 @@ def _incremental_reindex_compound_delta(
                     for idx, smiles in enumerate(unique_smiles, start=1)
                 ],
                 analyze_after_update=(not bool(skip_incremental_analyze)),
-                refresh_dataset_counts=refresh_dataset_counts,
+                refresh_dataset_counts=effective_refresh_dataset_counts,
             )
             logger.info(
                 "Incremental add fast-path elapsed=%.2fs (no constants): added_smiles=%s inserted_compounds=%s updated_compounds=%s cp(updated=%s inserted=%s deleted=%s).",
@@ -5863,7 +6090,7 @@ def _incremental_reindex_compound_delta(
                     )
                 if build_construct_tables:
                     _append_construct_tables_postgres_for_inserted_pairs(cursor)
-                if refresh_dataset_counts:
+                if effective_refresh_dataset_counts:
                     _update_dataset_counts(cursor)
                 refresh_stats = _refresh_compound_property_for_smiles(
                     cursor,
@@ -5980,7 +6207,8 @@ def import_compound_batch_postgres(
     incremental_index_jobs: int = 1,
     build_construct_tables: bool = True,
     build_constant_smiles_mol_index: bool = True,
-    skip_incremental_analyze: bool = False,
+    skip_incremental_analyze: bool = True,
+    refresh_dataset_counts: bool = False,
     overwrite_existing_batch: bool = False,
 ) -> bool:
     logger = logging.getLogger(__name__)
@@ -6246,6 +6474,7 @@ def import_compound_batch_postgres(
             build_constant_smiles_mol_index=build_constant_smiles_mol_index,
             delta_mode="add",
             skip_incremental_analyze=skip_incremental_analyze,
+            refresh_dataset_counts=refresh_dataset_counts,
         )
     except Exception as exc:
         try:
@@ -6286,7 +6515,8 @@ def delete_compound_batch_postgres(
     incremental_index_jobs: int = 1,
     build_construct_tables: bool = True,
     build_constant_smiles_mol_index: bool = True,
-    skip_incremental_analyze: bool = False,
+    skip_incremental_analyze: bool = True,
+    refresh_dataset_counts: bool = False,
 ) -> bool:
     logger = logging.getLogger(__name__)
     if not HAS_PSYCOPG:
@@ -6384,6 +6614,7 @@ def delete_compound_batch_postgres(
             build_constant_smiles_mol_index=build_constant_smiles_mol_index,
             delta_mode="delete",
             skip_incremental_analyze=skip_incremental_analyze,
+            refresh_dataset_counts=refresh_dataset_counts,
         )
     except Exception as exc:
         logger.error("Failed deleting compound batch '%s': %s", normalized_batch_id, exc, exc_info=True)
@@ -6941,6 +7172,27 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
     )
 
     parser.add_argument(
+        '--pg_index_commit_every_flushes',
+        type=int,
+        default=0,
+        help='mmpdb index 每 N 次 flush 提交事务一次（0=自动）'
+    )
+
+    parser.add_argument(
+        '--pg_index_max_constant_matches',
+        type=int,
+        default=0,
+        help='限制单个常量簇最大匹配数（0=不限制，工程模式建议显式设置）'
+    )
+
+    parser.add_argument(
+        '--pg_index_max_constant_pairs',
+        type=int,
+        default=0,
+        help='限制单个常量簇最大候选pair数（0=不限制，工程模式建议显式设置）'
+    )
+
+    parser.add_argument(
         '--pg_incremental_index_shards',
         type=int,
         default=1,
@@ -6952,6 +7204,18 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
         type=int,
         default=1,
         help='增量分片索引并发作业数（建议 <= 可用CPU/内存能力）'
+    )
+
+    parser.add_argument(
+        '--pg_incremental_force_analyze',
+        action='store_true',
+        help='增量 batch 后强制 ANALYZE 大表（默认关闭，改用阈值式 auto-analyze）'
+    )
+
+    parser.add_argument(
+        '--pg_incremental_refresh_dataset_counts',
+        action='store_true',
+        help='增量 batch 后精确刷新 dataset 计数（默认关闭，避免全表 COUNT(*)）'
     )
 
     parser.add_argument(
@@ -6976,6 +7240,12 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
         '--resume_from_fragdb',
         action='store_true',
         help='如果存在同名 .fragdb，则跳过 fragment 阶段并直接从该文件继续 index（断点续跑）'
+    )
+
+    parser.add_argument(
+        '--skip_smiles_validation',
+        action='store_true',
+        help='跳过全量 SMILES 预校验；仅当输入文件已验证或由本工具生成时使用'
     )
 
     parser.add_argument(
@@ -7041,6 +7311,12 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
         args.pg_index_work_mem_mb = 0
     if args.pg_index_parallel_workers < 0:
         args.pg_index_parallel_workers = 0
+    if args.pg_index_commit_every_flushes < 0:
+        args.pg_index_commit_every_flushes = 0
+    if args.pg_index_max_constant_matches < 0:
+        args.pg_index_max_constant_matches = 0
+    if args.pg_index_max_constant_pairs < 0:
+        args.pg_index_max_constant_pairs = 0
     if args.pg_incremental_index_shards < 1:
         args.pg_incremental_index_shards = 1
     if args.pg_incremental_index_jobs < 1:
@@ -7164,8 +7440,11 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                         index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
                         index_work_mem_mb=args.pg_index_work_mem_mb,
                         index_parallel_workers=args.pg_index_parallel_workers,
+                        index_commit_every_flushes=args.pg_index_commit_every_flushes,
                         incremental_index_shards=args.pg_incremental_index_shards,
                         incremental_index_jobs=args.pg_incremental_index_jobs,
+                        skip_incremental_analyze=(not args.pg_incremental_force_analyze),
+                        refresh_dataset_counts=bool(args.pg_incremental_refresh_dataset_counts),
                         build_construct_tables=not args.pg_skip_construct_tables,
                         build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
                     ),
@@ -7202,8 +7481,11 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                     index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
                     index_work_mem_mb=args.pg_index_work_mem_mb,
                     index_parallel_workers=args.pg_index_parallel_workers,
+                    index_commit_every_flushes=args.pg_index_commit_every_flushes,
                     incremental_index_shards=args.pg_incremental_index_shards,
                     incremental_index_jobs=args.pg_incremental_index_jobs,
+                    skip_incremental_analyze=(not args.pg_incremental_force_analyze),
+                    refresh_dataset_counts=bool(args.pg_incremental_refresh_dataset_counts),
                     build_construct_tables=not args.pg_skip_construct_tables,
                     build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
                 )
@@ -7250,6 +7532,7 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
         os.makedirs(args.output_dir, exist_ok=True)
 
         smiles_file = None
+        smiles_prevalidated = False
         fragments_input_file = None
         properties_file = str(args.properties_file or "").strip()
         property_metadata_file = str(args.property_metadata_file or "").strip()
@@ -7257,6 +7540,7 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
         if args.create_sample:
             logger.info("Creating sample compound database...")
             smiles_file = create_sample_data(args.output_dir)
+            smiles_prevalidated = True
 
         elif args.download_chembl:
             logger.info("Downloading ChEMBL compound data...")
@@ -7274,6 +7558,8 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
             if not smiles_file:
                 logger.error("Failed to download ChEMBL data")
                 sys.exit(1)
+            # download_chembl_data already canonicalizes and validates rows with RDKit.
+            smiles_prevalidated = True
 
         elif args.smiles_file:
             smiles_file = args.smiles_file
@@ -7313,9 +7599,14 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                 )
 
         # Validate SMILES file (skip in resume-from-fragdb path)
-        if smiles_file and (not fragments_input_file) and not validate_smiles_file(smiles_file):
-            logger.error("SMILES file validation failed")
-            sys.exit(1)
+        if smiles_file and (not fragments_input_file):
+            if args.skip_smiles_validation:
+                logger.info("Skipping SMILES validation due to --skip_smiles_validation: %s", smiles_file)
+            elif smiles_prevalidated:
+                logger.info("Skipping SMILES validation because input was generated and already validated: %s", smiles_file)
+            elif not validate_smiles_file(smiles_file):
+                logger.error("SMILES file validation failed")
+                sys.exit(1)
         if properties_file and not os.path.exists(properties_file):
             logger.error("properties_file not found: %s", properties_file)
             sys.exit(1)
@@ -7338,6 +7629,9 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                     index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
                     index_work_mem_mb=args.pg_index_work_mem_mb,
                     index_parallel_workers=args.pg_index_parallel_workers,
+                    index_commit_every_flushes=args.pg_index_commit_every_flushes,
+                    index_max_constant_matches=args.pg_index_max_constant_matches,
+                    index_max_constant_pairs=args.pg_index_max_constant_pairs,
                     build_construct_tables=not args.pg_skip_construct_tables,
                     build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
                 )
@@ -7391,6 +7685,9 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                     index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
                     index_work_mem_mb=args.pg_index_work_mem_mb,
                     index_parallel_workers=args.pg_index_parallel_workers,
+                    index_commit_every_flushes=args.pg_index_commit_every_flushes,
+                    index_max_constant_matches=args.pg_index_max_constant_matches,
+                    index_max_constant_pairs=args.pg_index_max_constant_pairs,
                     build_construct_tables=not args.pg_skip_construct_tables,
                     build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
                 )

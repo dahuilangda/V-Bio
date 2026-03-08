@@ -4,6 +4,7 @@ import type { NavigateFunction } from 'react-router-dom';
 import type { Project, ProjectTask } from '../../types/models';
 import { getTaskStatus } from '../../api/backendApi';
 import { deleteProjectTask, getProjectTaskById, updateProject, updateProjectTask } from '../../api/supabaseLite';
+import { canEditTask } from '../../utils/accessControl';
 import { getWorkflowDefinition } from '../../utils/workflows';
 import {
   isProjectTaskRow,
@@ -15,6 +16,7 @@ import { inferTaskStateFromStatusPayload } from './taskRuntimeUiUtils';
 
 interface UseProjectTaskRowActionsOptions {
   project: Project | null;
+  canManageProject: boolean;
   navigate: NavigateFunction;
   setError: Dispatch<SetStateAction<string | null>>;
   setTasks: Dispatch<SetStateAction<ProjectTask[]>>;
@@ -43,6 +45,7 @@ function hasObjectContent(value: unknown): boolean {
 
 export function useProjectTaskRowActions({
   project,
+  canManageProject,
   navigate,
   setError,
   setTasks,
@@ -101,19 +104,21 @@ export function useProjectTaskRowActions({
         hasObjectContent(taskForOpen.affinity)
           ? taskForOpen.affinity
           : project.affinity || {};
-      await updateProject(project.id, {
-        task_id: taskForOpen.task_id,
-        task_state: taskForOpen.task_state,
-        status_text: taskForOpen.status_text || '',
-        error_text: taskForOpen.error_text || '',
-        submitted_at: taskForOpen.submitted_at,
-        completed_at: taskForOpen.completed_at,
-        duration_seconds: taskForOpen.duration_seconds,
-        confidence: taskForOpen.confidence || {},
-        affinity: nextAffinity,
-        structure_name: taskForOpen.structure_name || '',
-        backend: taskForOpen.backend || project.backend
-      });
+      if (canManageProject) {
+        await updateProject(project.id, {
+          task_id: taskForOpen.task_id,
+          task_state: taskForOpen.task_state,
+          status_text: taskForOpen.status_text || '',
+          error_text: taskForOpen.error_text || '',
+          submitted_at: taskForOpen.submitted_at,
+          completed_at: taskForOpen.completed_at,
+          duration_seconds: taskForOpen.duration_seconds,
+          confidence: taskForOpen.confidence || {},
+          affinity: nextAffinity,
+          structure_name: taskForOpen.structure_name || '',
+          backend: taskForOpen.backend || project.backend
+        });
+      }
       const hasLeadOptResultPayload =
         workflowKey === 'lead_optimization' && Boolean(readLeadOptTaskSummary(taskForOpen));
       const hasTaskResult = Boolean(
@@ -140,9 +145,10 @@ export function useProjectTaskRowActions({
     } finally {
       setOpeningTaskId(null);
     }
-  }, [project, setError, navigate]);
+  }, [canManageProject, project, setError, navigate]);
 
   const beginTaskNameEdit = useCallback((task: ProjectTask, displayName: string) => {
+    if (!canEditTask(task)) return;
     if (savingTaskNameId) return;
     setEditingTaskNameId(task.id);
     setEditingTaskNameValue(displayName);
@@ -156,6 +162,7 @@ export function useProjectTaskRowActions({
   }, [savingTaskNameId]);
 
   const saveTaskNameEdit = useCallback(async (task: ProjectTask, displayName: string) => {
+    if (!canEditTask(task)) return;
     if (editingTaskNameId !== task.id) return;
     if (savingTaskNameId && savingTaskNameId !== task.id) return;
     const nextName = editingTaskNameValue.trim();
@@ -188,6 +195,7 @@ export function useProjectTaskRowActions({
   }, [editingTaskNameId, savingTaskNameId, editingTaskNameValue, setError, setTasks]);
 
   const terminateTask = useCallback(async (task: ProjectTask) => {
+    if (!canEditTask(task)) return;
     const runtimeTaskId = String(task.task_id || '').trim();
     const runtimeState = await resolveEffectiveRuntimeState(task);
     const isActiveRuntime = runtimeState === 'QUEUED' || runtimeState === 'RUNNING';
@@ -253,6 +261,7 @@ export function useProjectTaskRowActions({
   }, [resolveEffectiveRuntimeState, setError, setTasks, terminateBackendTask, updateProjectTask]);
 
   const removeTask = useCallback(async (task: ProjectTask) => {
+    if (!canEditTask(task)) return;
     const runtimeTaskId = String(task.task_id || '').trim();
     const runtimeState = await resolveEffectiveRuntimeState(task);
     const isRuntimeActiveState = runtimeState === 'QUEUED' || runtimeState === 'RUNNING';

@@ -13,10 +13,12 @@ Behavior note:
 - `compound-import` / `compound-delete` default to incremental MMP re-index (no fallback to full rebuild).
 - You can tune shard count and concurrency with `--pg_incremental_index_shards` and `--pg_incremental_index_jobs`.
 - `--pg_index_commit_every_flushes` defaults to `1` (safer commit cadence on large runs); set `<=0` to use adaptive mode.
+- Large full-build runs should start with conservative PostgreSQL build settings and only scale up after validation; avoid oversized `maintenance_work_mem` / parallel worker values on `chembl36_full`.
 - Incremental add computes affected constants from delta `.fragdb` and rebuilds candidate pairs via `fragdb_partition`, so newly added compounds can correctly grow pair counts.
 - Lifecycle state is deduplicated by `clean_smiles`; incremental validation should be compared against a rebuild of lifecycle state (not raw duplicated input rows).
 - `--pg_incremental_index_jobs` now runs shard prepare/index steps concurrently (merge remains transaction-serialized for correctness).
 - Incremental temp-shard indexing skips global core-table discovery scans to reduce metadata load on large multi-schema PostgreSQL instances.
+- Incremental compound batches default to threshold-based auto-analyze and do not force exact dataset `COUNT(*)` refresh on every batch; this keeps batch latency tied to delta size instead of total library size.
 
 It wraps proven logic from `lead_optimization/mmp_lifecycle/engine.py` and
 `lead_optimization/mmp_database_registry.py` into a clean command surface.
@@ -104,9 +106,10 @@ python -m lead_optimization.mmp_lifecycle db-build \
   --output_dir lead_optimization/data \
   --max_heavy_atoms 60 \
   --fragment_jobs 32 \
-  --pg_index_maintenance_work_mem_mb 65536 \
-  --pg_index_work_mem_mb 512 \
-  --pg_index_parallel_workers 16 \
+  --pg_index_maintenance_work_mem_mb 2048 \
+  --pg_index_work_mem_mb 64 \
+  --pg_index_parallel_workers 2 \
+  --pg_index_commit_every_flushes 1 \
   --attachment_force_recompute \
   --force
 ```
@@ -159,9 +162,10 @@ python -m lead_optimization.mmp_lifecycle db-build \
   --output_dir lead_optimization/data \
   --max_heavy_atoms 60 \
   --fragment_jobs 32 \
-  --pg_index_maintenance_work_mem_mb 65536 \
-  --pg_index_work_mem_mb 512 \
-  --pg_index_parallel_workers 16 \
+  --pg_index_maintenance_work_mem_mb 2048 \
+  --pg_index_work_mem_mb 64 \
+  --pg_index_parallel_workers 2 \
+  --pg_index_commit_every_flushes 1 \
   --attachment_force_recompute \
   --force
 ```
@@ -259,9 +263,10 @@ python -m lead_optimization.mmp_lifecycle db-build \
   --output_dir lead_optimization/data \
   --max_heavy_atoms 60 \
   --fragment_jobs 32 \
-  --pg_index_maintenance_work_mem_mb 65536 \
-  --pg_index_work_mem_mb 512 \
-  --pg_index_parallel_workers 16 \
+  --pg_index_maintenance_work_mem_mb 2048 \
+  --pg_index_work_mem_mb 64 \
+  --pg_index_parallel_workers 2 \
+  --pg_index_commit_every_flushes 1 \
   --attachment_force_recompute \
   --force
 ```
@@ -273,9 +278,79 @@ python -m lead_optimization.mmp_lifecycle db-index-fragdb \
   --fragments_file lead_optimization/data/chembl_compounds.fragdb \
   --postgres_url 'postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp' \
   --postgres_schema chembl36_full \
-  --pg_index_maintenance_work_mem_mb 65536 \
-  --pg_index_work_mem_mb 512 \
-  --pg_index_parallel_workers 16 \
+  --pg_index_maintenance_work_mem_mb 2048 \
+  --pg_index_work_mem_mb 64 \
+  --pg_index_parallel_workers 2 \
+  --pg_index_commit_every_flushes 1 \
+  --attachment_force_recompute \
+  --force
+```
+
+Recommended recovery path after a failed full build:
+
+```bash
+python -m lead_optimization.mmp_lifecycle db-index-fragdb \
+  --fragments_file lead_optimization/data/chembl_compounds.fragdb \
+  --postgres_url 'postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp' \
+  --postgres_schema chembl36_full \
+  --pg_index_maintenance_work_mem_mb 2048 \
+  --pg_index_work_mem_mb 64 \
+  --pg_index_parallel_workers 2 \
+  --pg_index_commit_every_flushes 1 \
+  --attachment_force_recompute \
+  --force
+```
+
+Only enable `--pg_index_max_constant_matches` or `--pg_index_max_constant_pairs` when you explicitly want to cap extremely large constant clusters and accept that those clusters are excluded from pair generation.
+
+### 3.2B `chembl36_full` from `.smi` (recommended first run in this repo)
+
+Use the repo-local package path and keep the generated `.fragdb` so you can resume index without repeating fragmentation:
+
+```bash
+cd /data/V-Bio
+. venv/bin/activate
+
+nohup python -m capabilities.lead_optimization.mmp_lifecycle db-build \
+  --smiles_file capabilities/lead_optimization/data/chembl_compounds.smi \
+  --output_dir capabilities/lead_optimization/data \
+  --postgres_url 'postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp' \
+  --postgres_schema chembl36_full \
+  --max_heavy_atoms 60 \
+  --fragment_jobs 32 \
+  --pg_index_maintenance_work_mem_mb 2048 \
+  --pg_index_work_mem_mb 64 \
+  --pg_index_parallel_workers 2 \
+  --pg_index_commit_every_flushes 1 \
+  --attachment_force_recompute \
+  --keep_fragdb \
+  --force \
+  > /tmp/chembl36.log 2>&1 &
+```
+
+If you want lower peak runtime/memory on the first successful build, add:
+
+```bash
+  --pg_skip_construct_tables \
+  --pg_skip_constant_smiles_mol_index \
+```
+
+### 3.2C `chembl36_full` resume from existing `.fragdb`
+
+If the fragment step already finished and `capabilities/lead_optimization/data/chembl_compounds.fragdb` exists, resume from `.fragdb` directly:
+
+```bash
+cd /data/V-Bio
+. venv/bin/activate
+
+python -m capabilities.lead_optimization.mmp_lifecycle db-index-fragdb \
+  --fragments_file capabilities/lead_optimization/data/chembl_compounds.fragdb \
+  --postgres_url 'postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp' \
+  --postgres_schema chembl36_full \
+  --pg_index_maintenance_work_mem_mb 2048 \
+  --pg_index_work_mem_mb 64 \
+  --pg_index_parallel_workers 2 \
+  --pg_index_commit_every_flushes 1 \
   --attachment_force_recompute \
   --force
 ```
@@ -299,6 +374,20 @@ python -m lead_optimization.mmp_lifecycle compound-delete \
   --batch_id compound_batch_20260221_094933 \
   --pg_incremental_index_shards 4 \
   --pg_incremental_index_jobs 2 \
+  --postgres_url 'postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp' \
+  --postgres_schema bench_herg_inc_0221_043220
+```
+
+If you need exact post-batch global counts or forced planner refresh, enable them explicitly:
+
+```bash
+python -m lead_optimization.mmp_lifecycle compound-import \
+  --file lead_optimization/data/bench_compound_batch_0020_opt.tsv \
+  --batch_label bench_wave \
+  --pg_incremental_index_shards 4 \
+  --pg_incremental_index_jobs 2 \
+  --pg_incremental_force_analyze \
+  --pg_incremental_refresh_dataset_counts \
   --postgres_url 'postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp' \
   --postgres_schema bench_herg_inc_0221_043220
 ```
@@ -503,6 +592,9 @@ Use `registry-delete --drop_data` when you want registry + schema data removed t
 - Incremental compound updates use constant-scoped re-indexing and pair merge.
 - Recent fix ensures transformed constants from temp shard pairs are mapped/inserted,
   so valid new pairs are not dropped during merge.
+- Full `chembl36_full` builds should prefer `--fragments_file` resume/index when a `.fragdb` already exists; this avoids repeating the fragment step.
+- Full ChEMBL download builds skip redundant second-pass SMILES validation because `download_chembl` already validates rows during export.
+- Incremental compound batch defaults are chosen so maintenance cost scales with batch delta, not total schema size. Use `--pg_incremental_force_analyze` and `--pg_incremental_refresh_dataset_counts` only when you explicitly want those full-maintenance costs.
 
 ## 7) Existing / Missing Data Handling
 

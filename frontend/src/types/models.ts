@@ -107,6 +107,10 @@ export interface ProjectTaskCounts {
   other: number;
 }
 
+export type ProjectAccessScope = 'owner' | 'project_share' | 'task_share';
+export type ShareAccessLevel = 'viewer' | 'editor';
+export type EffectiveAccessLevel = 'viewer' | 'editor' | 'owner';
+
 export interface AppUser {
   id: string;
   username: string;
@@ -187,6 +191,10 @@ export interface Project {
   duration_seconds: number | null;
   structure_name: string;
   task_counts?: ProjectTaskCounts;
+  access_scope?: ProjectAccessScope;
+  access_level?: EffectiveAccessLevel;
+  accessible_task_ids?: string[];
+  editable_task_ids?: string[];
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
@@ -214,8 +222,45 @@ export interface ProjectTask {
   submitted_at: string | null;
   completed_at: string | null;
   duration_seconds: number | null;
+  access_scope?: ProjectAccessScope;
+  access_level?: EffectiveAccessLevel;
   created_at: string;
   updated_at: string;
+}
+
+export interface ProjectShareRecord {
+  id: string;
+  project_id: string;
+  user_id: string;
+  granted_by_user_id: string | null;
+  access_level: ShareAccessLevel;
+  created_at: string;
+  updated_at: string;
+  project_name?: string;
+  project_summary?: string;
+  target_username?: string;
+  target_name?: string;
+  granted_by_username?: string;
+  granted_by_name?: string;
+}
+
+export interface ProjectTaskShareRecord {
+  id: string;
+  project_id: string;
+  project_task_id: string;
+  user_id: string;
+  granted_by_user_id: string | null;
+  access_level: ShareAccessLevel;
+  created_at: string;
+  updated_at: string;
+  project_name?: string;
+  project_summary?: string;
+  task_name?: string;
+  task_summary?: string;
+  target_username?: string;
+  target_name?: string;
+  granted_by_username?: string;
+  granted_by_name?: string;
 }
 
 export interface Session {

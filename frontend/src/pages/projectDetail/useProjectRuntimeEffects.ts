@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import type { MutableRefObject } from 'react';
 import type { DownloadResultMode } from '../../api/backendTaskApi';
 
@@ -20,6 +20,24 @@ function hasLeadOptMmpOnlySnapshot(task: RuntimeTaskLike | null): boolean {
   return String(task.status_text || '').toUpperCase().includes('MMP');
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function hasPeptideCandidateRows(confidence: Record<string, unknown> | undefined): boolean {
+  if (!confidence) return false;
+  const peptide = asRecord(confidence.peptide_design);
+  const progress = asRecord(confidence.progress);
+  const peptideProgress = asRecord(peptide.progress);
+  const sources = [confidence, peptide, progress, peptideProgress];
+  return sources.some(
+    (source) =>
+      (Array.isArray(source.best_sequences) && source.best_sequences.length > 0) ||
+      (Array.isArray(source.current_best_sequences) && source.current_best_sequences.length > 0) ||
+      (Array.isArray(source.candidates) && source.candidates.length > 0)
+  );
+}
+
 interface UseProjectRuntimeEffectsInput {
   projectTaskId: string | null;
   projectTaskState: string | null;
@@ -27,6 +45,7 @@ interface UseProjectRuntimeEffectsInput {
   refreshStatus: (options?: { silent?: boolean; taskId?: string }) => Promise<void>;
   statusContextTaskRow: RuntimeTaskLike | null;
   runtimeResultTask: RuntimeTaskLike | null;
+  activeResultTask: RuntimeTaskLike | null;
   structureTaskId: string | null;
   structureText: string;
   pullResultForViewer: (
@@ -50,6 +69,7 @@ export function useProjectRuntimeEffects({
   refreshStatus,
   statusContextTaskRow,
   runtimeResultTask,
+  activeResultTask,
   structureTaskId,
   structureText,
   pullResultForViewer,
@@ -62,6 +82,8 @@ export function useProjectRuntimeEffects({
   setSelectedContactConstraintIds,
   constraintSelectionAnchorRef
 }: UseProjectRuntimeEffectsInput) {
+  const peptideAutoPullAttemptRef = useRef('');
+
   useEffect(() => {
     if (isLeadOptimizationWorkflow) return;
     const pollingTaskId = String(statusContextTaskRow?.task_id || runtimeResultTask?.task_id || projectTaskId || '').trim();
@@ -117,14 +139,28 @@ export function useProjectRuntimeEffects({
   ]);
 
   useEffect(() => {
-    if (isPeptideDesignWorkflow) return;
     if (isLeadOptimizationWorkflow) return;
-    const contextTask = statusContextTaskRow || runtimeResultTask;
+    const contextTask = isPeptideDesignWorkflow
+      ? activeResultTask || statusContextTaskRow || runtimeResultTask
+      : statusContextTaskRow || runtimeResultTask;
     const contextTaskId = String(contextTask?.task_id || '').trim();
     if (!contextTaskId) return;
     if (contextTask?.task_state !== 'SUCCESS') return;
     if (hasLeadOptMmpOnlySnapshot(contextTask)) return;
-    if (structureTaskId === contextTaskId && structureText.trim()) return;
+
+    const hasStructureLoaded = structureTaskId === contextTaskId && structureText.trim().length > 0;
+    if (isPeptideDesignWorkflow) {
+      if (workspaceTab !== 'results') return;
+      if (hasPeptideCandidateRows(contextTask?.confidence)) {
+        peptideAutoPullAttemptRef.current = '';
+        return;
+      }
+      if (peptideAutoPullAttemptRef.current === contextTaskId) return;
+      peptideAutoPullAttemptRef.current = contextTaskId;
+    } else if (hasStructureLoaded) {
+      return;
+    }
+
     const activeRuntimeTaskId = String(projectTaskId || '').trim();
     const resultMode: DownloadResultMode = 'view';
     void pullResultForViewer(contextTaskId, {
@@ -135,12 +171,14 @@ export function useProjectRuntimeEffects({
   }, [
     statusContextTaskRow,
     runtimeResultTask,
+    activeResultTask,
     projectTaskId,
     structureTaskId,
     structureText,
     pullResultForViewer,
     isPeptideDesignWorkflow,
-    isLeadOptimizationWorkflow
+    isLeadOptimizationWorkflow,
+    workspaceTab
   ]);
 
   useEffect(() => {

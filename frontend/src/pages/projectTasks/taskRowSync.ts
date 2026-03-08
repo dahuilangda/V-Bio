@@ -2,6 +2,7 @@ import type { MutableRefObject } from 'react';
 import { downloadResultBlob, getTaskStatus, parseResultBundle } from '../../api/backendApi';
 import { updateProject, updateProjectTask } from '../../api/supabaseLite';
 import type { Project, ProjectTask } from '../../types/models';
+import { canEditProject, canEditTask } from '../../utils/accessControl';
 import { mergePeptidePreviewIntoProperties } from '../../utils/peptideTaskPreview';
 import {
   readLeadOptTaskSummary,
@@ -174,6 +175,10 @@ function readErrorMessage(error: unknown): string {
   return String(error || 'unknown error');
 }
 
+function canPersistProjectChanges(project: Project | null | undefined): boolean {
+  return canEditProject(project);
+}
+
 function normalizeLeadOptPredictionBackend(value: unknown): string {
   const token = String(value || '').trim().toLowerCase();
   if (token === 'boltz2') return 'boltz';
@@ -277,6 +282,12 @@ function canonicalizeLeadOptPredictionMap(
 }
 
 async function persistProjectTaskPatch(task: ProjectTask, patch: Partial<ProjectTask>): Promise<ProjectTask> {
+  if (!canEditTask(task)) {
+    return {
+      ...task,
+      ...patch
+    } as ProjectTask;
+  }
   const patchedTask = await updateProjectTask(task.id, patch);
   if (!isProjectTaskRow(patchedTask)) {
     throw new Error(`updateProjectTask returned invalid row for task row ${task.id}`);
@@ -285,6 +296,12 @@ async function persistProjectTaskPatch(task: ProjectTask, patch: Partial<Project
 }
 
 async function persistProjectPatch(project: Project, patch: Partial<Project>): Promise<Project> {
+  if (!canPersistProjectChanges(project)) {
+    return {
+      ...project,
+      ...patch
+    } as Project;
+  }
   const patchedProject = await updateProject(project.id, patch);
   if (!isProjectRow(patchedProject)) {
     throw new Error(`updateProject returned invalid row for project ${project.id}`);

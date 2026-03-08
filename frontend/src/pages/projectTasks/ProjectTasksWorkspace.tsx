@@ -13,6 +13,7 @@ import type {
 } from './taskListTypes';
 
 interface ProjectTasksWorkspaceProps {
+  canManageShares: boolean;
   taskSearch: string;
   onTaskSearchChange: (value: string) => void;
   stateFilter: 'all' | ProjectTask['task_state'];
@@ -61,6 +62,7 @@ interface ProjectTasksWorkspaceProps {
   onOpenTask: (task: ProjectTask) => void;
   onTerminateTask: (task: ProjectTask) => void;
   onRemoveTask: (task: ProjectTask) => void;
+  onOpenShareTask: (task: ProjectTask) => void;
   onBeginTaskNameEdit: (task: ProjectTask, displayName: string) => void;
   onCancelTaskNameEdit: () => void;
   onSaveTaskNameEdit: (task: ProjectTask, displayName: string) => void;
@@ -74,6 +76,7 @@ interface ProjectTasksWorkspaceProps {
 }
 
 export function ProjectTasksWorkspace({
+  canManageShares,
   taskSearch,
   onTaskSearchChange,
   stateFilter,
@@ -122,6 +125,7 @@ export function ProjectTasksWorkspace({
   onOpenTask,
   onTerminateTask,
   onRemoveTask,
+  onOpenShareTask,
   onBeginTaskNameEdit,
   onCancelTaskNameEdit,
   onSaveTaskNameEdit,
@@ -193,6 +197,7 @@ export function ProjectTasksWorkspace({
       />
 
       <ProjectTasksTable
+        canManageShares={canManageShares}
         filteredCount={filteredCount}
         tableMode={tableMode}
         sortKey={sortKey}
@@ -208,6 +213,7 @@ export function ProjectTasksWorkspace({
         onOpenTask={onOpenTask}
         onTerminateTask={onTerminateTask}
         onRemoveTask={onRemoveTask}
+        onOpenShareTask={onOpenShareTask}
         onBeginTaskNameEdit={onBeginTaskNameEdit}
         onCancelTaskNameEdit={onCancelTaskNameEdit}
         onSaveTaskNameEdit={onSaveTaskNameEdit}

@@ -139,14 +139,6 @@ start_supabase() {
   )
 }
 
-run_db_migrate() {
-  echo "[supabase-lite] running schema migration..."
-  (
-    cd "${VBIO_DIR}"
-    npm run db:migrate >/dev/null
-  )
-}
-
 start_management_api() {
   if is_running "${MGMT_PID_FILE}"; then
     echo "[management-api] already running (pid: $(cat "${MGMT_PID_FILE}"))."
@@ -240,7 +232,6 @@ status_all() {
 
 start_prod() {
   start_supabase
-  run_db_migrate
   start_management_api
   start_frontend_prod
   echo "frontend: http://127.0.0.1:${VBIO_FRONTEND_PORT}"
@@ -249,7 +240,6 @@ start_prod() {
 
 start_dev() {
   start_supabase
-  run_db_migrate
   start_management_api
   start_frontend_dev
   echo "frontend (dev): http://127.0.0.1:${VBIO_FRONTEND_PORT}"
@@ -266,8 +256,8 @@ usage() {
 Usage: bash frontend/run.sh <command>
 
 Commands:
-  start      Start production stack (supabase-lite + db:migrate + management-api + frontend preview)
-  dev        Start development stack (supabase-lite + db:migrate + management-api + frontend dev)
+  start      Start production stack (supabase-lite + management-api + frontend preview)
+  dev        Start development stack (supabase-lite + management-api + frontend dev)
   stop       Stop frontend and management-api launched by this script
   restart    Restart production stack
   status     Show runtime status

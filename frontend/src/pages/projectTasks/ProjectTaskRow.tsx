@@ -1,6 +1,7 @@
-import { ExternalLink, LoaderCircle, Square, Trash2 } from 'lucide-react';
+import { ExternalLink, LoaderCircle, Share2, Square, Trash2 } from 'lucide-react';
 import { Ligand2DPreview } from '../../components/project/Ligand2DPreview';
 import type { InputComponent, ProjectTask } from '../../types/models';
+import { canEditTask } from '../../utils/accessControl';
 import { formatDateTime, formatDuration } from '../../utils/date';
 import { TaskLigandSequencePreview } from './TaskLigandSequencePreview';
 import type { TaskListRow } from './taskListTypes';
@@ -23,6 +24,7 @@ function isSequenceLigandType(type: InputComponent['type'] | null): boolean {
 interface ProjectTaskRowProps {
   row: TaskListRow;
   mode: 'default' | 'lead_opt' | 'peptide';
+  canManageShares: boolean;
   editingTaskNameId: string | null;
   editingTaskNameValue: string;
   savingTaskNameId: string | null;
@@ -32,6 +34,7 @@ interface ProjectTaskRowProps {
   onOpenTask: (task: ProjectTask) => Promise<void> | void;
   onTerminateTask: (task: ProjectTask) => Promise<void> | void;
   onRemoveTask: (task: ProjectTask) => Promise<void> | void;
+  onOpenShareTask: (task: ProjectTask) => Promise<void> | void;
   onBeginTaskNameEdit: (task: ProjectTask, displayName: string) => void;
   onCancelTaskNameEdit: () => void;
   onSaveTaskNameEdit: (task: ProjectTask, displayName: string) => Promise<void> | void;
@@ -52,6 +55,7 @@ function formatPeptideMutationRate(value: number | null): string {
 export function ProjectTaskRow({
   row,
   mode,
+  canManageShares,
   editingTaskNameId,
   editingTaskNameValue,
   savingTaskNameId,
@@ -61,12 +65,14 @@ export function ProjectTaskRow({
   onOpenTask,
   onTerminateTask,
   onRemoveTask,
+  onOpenShareTask,
   onBeginTaskNameEdit,
   onCancelTaskNameEdit,
   onSaveTaskNameEdit,
   onEditingTaskNameValueChange
 }: ProjectTaskRowProps) {
   const { task, metrics } = row;
+  const canEdit = canEditTask(task);
   const runNote = (task.status_text || '').trim();
   const runtimeTaskId = String(task.task_id || '').trim();
   const isDraftTask = String(task.task_state || '').trim().toUpperCase() === 'DRAFT';
@@ -287,8 +293,8 @@ export function ProjectTaskRow({
               type="button"
               className="task-submitted-title task-submitted-title-btn"
               onClick={() => onBeginTaskNameEdit(task, taskName)}
-              disabled={Boolean(savingTaskNameId)}
-              title="Edit task name"
+              disabled={!canEdit || Boolean(savingTaskNameId)}
+              title={canEdit ? 'Edit task name' : 'Shared tasks are read-only'}
             >
               {taskName}
               {isSavingTaskName ? <LoaderCircle size={11} className="spin" /> : null}
@@ -322,12 +328,24 @@ export function ProjectTaskRow({
           >
             {openingTaskId === task.id ? <LoaderCircle size={13} className="spin" /> : <ExternalLink size={14} />}
           </button>
+          {canManageShares ? (
+            <button
+              type="button"
+              className="task-row-action-btn"
+              onClick={() => void onOpenShareTask(task)}
+              disabled={deletingTaskId === task.id || terminatingThisTask}
+              title="Share task"
+              aria-label="Share task"
+            >
+              <Share2 size={14} />
+            </button>
+          ) : null}
           {canTerminateTask || showTerminateHint ? (
             <button
               type="button"
               className="task-row-action-btn"
               onClick={() => void onTerminateTask(task)}
-              disabled={!canTerminateTask || terminatingThisTask || deletingTaskId === task.id}
+              disabled={!canEdit || !canTerminateTask || terminatingThisTask || deletingTaskId === task.id}
               title={
                 !canTerminateTask
                   ? 'Task is active but runtime task ID is missing'
@@ -352,8 +370,8 @@ export function ProjectTaskRow({
             type="button"
             className="task-row-action-btn danger"
             onClick={() => void onRemoveTask(task)}
-            disabled={deletingTaskId === task.id || terminatingThisTask}
-            title="Delete task"
+            disabled={!canEdit || deletingTaskId === task.id || terminatingThisTask}
+            title={canEdit ? 'Delete task' : 'Shared tasks are read-only'}
             aria-label="Delete task"
           >
             {deletingTaskId === task.id ? <LoaderCircle size={13} className="spin" /> : <Trash2 size={14} />}

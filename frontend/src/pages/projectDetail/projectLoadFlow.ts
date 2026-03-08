@@ -1,4 +1,11 @@
-import { getProjectById, getProjectTaskById, listProjectTasksCompact, listProjectTasksForList } from '../../api/supabaseLite';
+import {
+  getProjectAccessInfo,
+  getProjectById,
+  getProjectTaskById,
+  listProjectTasksCompact,
+  listProjectTasksForList,
+  sanitizeProjectForTaskShare
+} from '../../api/supabaseLite';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import type { Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
 import { loadProjectInputConfig, loadProjectUiState } from '../../utils/projectInputs';
@@ -109,9 +116,14 @@ export async function loadProjectFlow(params: {
   if (!next || next.deleted_at) {
     throw new Error('Project not found or already deleted.');
   }
-  if (sessionUserId && next.user_id !== sessionUserId) {
+  const accessInfo =
+    sessionUserId
+      ? await getProjectAccessInfo(projectId, sessionUserId, next.user_id)
+      : { scope: 'owner' as const, accessLevel: 'owner' as const, taskIds: [], editableTaskIds: [] };
+  if (sessionUserId && !accessInfo.scope) {
     throw new Error('You do not have permission to access this project.');
   }
+  const projectAccessScope = accessInfo.scope || 'owner';
 
   const activeTaskId = (next.task_id || '').trim();
   const workflowDef = getWorkflowDefinition(next.task_type);
@@ -142,10 +154,41 @@ export async function loadProjectFlow(params: {
           includeConfidence: shouldIncludeTaskConfidence,
           includeProperties: shouldIncludeTaskProperties,
           includeLeadOptSummary: workflowDef.key === 'lead_optimization',
-          includeLeadOptCandidates: shouldIncludeLeadOptCandidatesForList
+          includeLeadOptCandidates: shouldIncludeLeadOptCandidatesForList,
+          taskRowIds: projectAccessScope === 'task_share' ? accessInfo.taskIds : undefined,
+          accessScope: projectAccessScope,
+          accessLevel: accessInfo.accessLevel || 'owner',
+          editableTaskIds: accessInfo.editableTaskIds
         })
-      : listProjectTasksCompact(next.id))
+      : listProjectTasksCompact(next.id, {
+          taskRowIds: projectAccessScope === 'task_share' ? accessInfo.taskIds : undefined,
+          accessScope: projectAccessScope,
+          accessLevel: accessInfo.accessLevel || 'owner',
+          editableTaskIds: accessInfo.editableTaskIds
+        }))
   );
+  if (projectAccessScope === 'task_share' && requestedTaskRowId && !taskRowsBase.some((row) => row.id === requestedTaskRowId)) {
+    throw new Error('You do not have permission to access this task.');
+  }
+  const accessibleProject =
+    projectAccessScope === 'task_share'
+      ? sanitizeProjectForTaskShare(
+          {
+            ...next,
+            access_scope: projectAccessScope,
+            access_level: accessInfo.accessLevel || 'viewer',
+            accessible_task_ids: accessInfo.taskIds,
+            editable_task_ids: accessInfo.editableTaskIds
+          },
+          taskRowsBase
+        )
+      : {
+          ...next,
+          access_scope: projectAccessScope,
+          access_level: accessInfo.accessLevel || 'owner',
+          accessible_task_ids: [],
+          editable_task_ids: accessInfo.editableTaskIds
+        };
 
   const {
     taskRows,
@@ -163,8 +206,8 @@ export async function loadProjectFlow(params: {
     sortProjectTasks,
   });
 
-  const savedConfig = loadProjectInputConfig(next.id);
-  const baseConfig = requestNewTask ? defaultConfigFromProject(next) : savedConfig || defaultConfigFromProject(next);
+  const savedConfig = loadProjectInputConfig(accessibleProject.id);
+  const baseConfig = requestNewTask ? defaultConfigFromProject(accessibleProject) : savedConfig || defaultConfigFromProject(accessibleProject);
   const taskAlignedConfig = mergeTaskSnapshotIntoConfig(baseConfig, snapshotSourceTaskRow);
   const backendConstraints = filterConstraintsByBackend(taskAlignedConfig.constraints, normalizedBackend);
 
@@ -173,8 +216,8 @@ export async function loadProjectFlow(params: {
     taskName: String(snapshotSourceTaskRow?.name || '').trim(),
     taskSummary: String(snapshotSourceTaskRow?.summary || '').trim(),
     backend: normalizedBackend,
-    use_msa: next.use_msa,
-    color_mode: next.color_mode === 'alphafold' ? 'alphafold' : 'default',
+    use_msa: accessibleProject.use_msa,
+    color_mode: accessibleProject.color_mode === 'alphafold' ? 'alphafold' : 'default',
     inputConfig: {
       ...taskAlignedConfig,
       constraints: backendConstraints,
@@ -206,11 +249,13 @@ export async function loadProjectFlow(params: {
       hasRecordData(defaultContextTask?.affinity)
   );
   const projectHasResult = Boolean(
-    String(next.structure_name || '').trim() || hasRecordData(next.confidence) || hasRecordData(next.affinity)
+    String(accessibleProject.structure_name || '').trim() ||
+      hasRecordData(accessibleProject.confidence) ||
+      hasRecordData(accessibleProject.affinity)
   );
 
   const contextHasLeadOptResult = hasLeadOptResultPayload(defaultContextTask);
-  const projectHasLeadOptResult = hasLeadOptResultPayload(next);
+  const projectHasLeadOptResult = hasLeadOptResultPayload(accessibleProject);
 
   let suggestedWorkspaceTab: 'results' | 'components' | 'basics' | null = null;
   if (!query.get('tab')) {
@@ -233,7 +278,7 @@ export async function loadProjectFlow(params: {
   }
 
   return {
-    project: next,
+    project: accessibleProject,
     projectTasks: taskRows,
     draft: loadedDraft,
     savedDraftFingerprint: createDraftFingerprint(loadedDraft),

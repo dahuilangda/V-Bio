@@ -2,13 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Project, ProjectTask, ProjectTaskCounts, Session, TaskState, TaskStatusResponse } from '../types/models';
 import {
   insertProject,
+  listAccessibleProjects,
   listProjectTaskStatesByProjects,
-  listProjects,
+  listProjectTaskStatesByTaskRowIds,
   updateProject,
   updateProjectTaskByTaskId
 } from '../api/supabaseLite';
 import { getTaskStatus } from '../api/backendApi';
 import { removeProjectInputConfig, removeProjectUiState } from '../utils/projectInputs';
+import { canEditProject } from '../utils/accessControl';
 import { normalizeWorkflowKey } from '../utils/workflows';
 
 const DEFAULT_TASK_TYPE = 'prediction';
@@ -79,6 +81,10 @@ function mergeProjectRuntimeFields(next: Project, prev: Project | null): Project
     completed_at: next.completed_at || prev.completed_at,
     duration_seconds: next.duration_seconds ?? prev.duration_seconds
   };
+}
+
+function canPersistProjectWrites(project: Project | null | undefined): boolean {
+  return canEditProject(project);
 }
 
 function readStatusText(status: { info?: Record<string, unknown>; state: string }): string {
@@ -201,8 +207,7 @@ export function useProjects(session: Session | null) {
       setError(null);
     }
     try {
-      let rows = await listProjects({
-        userId: session.userId,
+      let rows = await listAccessibleProjects(session.userId, {
         lightweight: true
       });
 
@@ -268,9 +273,13 @@ export function useProjects(session: Session | null) {
           if (patchById.size > 0) {
             rows = rows.map((row) => (patchById.has(row.id) ? { ...row, ...patchById.get(row.id)! } : row));
             for (const [projectId, patch] of patchById.entries()) {
+              const target = rows.find((row) => row.id === projectId) || null;
+              if (!canPersistProjectWrites(target)) continue;
               void updateProject(projectId, patch).catch(() => undefined);
             }
             for (const taskPatch of taskPatches) {
+              const target = rows.find((row) => row.id === taskPatch.projectId) || null;
+              if (!canPersistProjectWrites(target)) continue;
               void updateProjectTaskByTaskId(taskPatch.taskId, taskPatch.patch, taskPatch.projectId).catch(() => undefined);
             }
           }
@@ -328,9 +337,40 @@ export function useProjects(session: Session | null) {
 
       void (async () => {
         try {
-          const taskStates = await listProjectTaskStatesByProjects(projectIds);
-          const countsByProject = countProjectTaskStates(projectIds, taskStates);
-          const taskStateByProjectAndTaskId = new Map(taskStates.map((item) => [`${item.project_id}:${item.task_id}`, item.task_state]));
+          const fullAccessProjectIds = rows
+            .filter((row) => String(row.access_scope || 'owner') !== 'task_share')
+            .map((row) => row.id);
+          const taskSharedProjects = rows.filter((row) => String(row.access_scope || 'owner') === 'task_share');
+          const [fullAccessStates, taskShareStates] = await Promise.all([
+            listProjectTaskStatesByProjects(fullAccessProjectIds),
+            listProjectTaskStatesByTaskRowIds(
+              taskSharedProjects.flatMap((row) => row.accessible_task_ids || [])
+            )
+          ]);
+          const countsByProject = countProjectTaskStates(fullAccessProjectIds, fullAccessStates);
+          for (const projectRow of taskSharedProjects) {
+            const taskIds = new Set((projectRow.accessible_task_ids || []).map((item) => String(item || '').trim()).filter(Boolean));
+            const scopedStates = taskShareStates.filter((item) => taskIds.has(String(item.id || '').trim()));
+            countsByProject.set(
+              projectRow.id,
+              countProjectTaskStates([projectRow.id], scopedStates.map((item) => ({
+                project_id: item.project_id,
+                task_id: item.task_id,
+                task_state: item.task_state
+              })) ).get(projectRow.id) || fallbackCountsFromState(projectRow.task_state, Boolean(projectRow.task_id))
+            );
+          }
+          const combinedTaskStates = [
+            ...fullAccessStates,
+            ...taskShareStates.map((item) => ({
+              project_id: item.project_id,
+              task_id: item.task_id,
+              task_state: item.task_state
+            }))
+          ];
+          const taskStateByProjectAndTaskId = new Map(
+            combinedTaskStates.map((item) => [`${item.project_id}:${item.task_id}`, item.task_state] as const)
+          );
           rows.forEach((projectRow) => {
             const activeTaskId = String(projectRow.task_id || '').trim();
             if (!activeTaskId) return;

@@ -1589,12 +1589,6 @@ export function PeptideDesignResultsWorkspace({
     const liveRows = runtimeContext.liveCandidateRows;
     const liveDefaultState = runtimeContext.state === 'UNSCORED' ? 'RUNNING' : runtimeContext.state;
 
-    const fallbackPairIptm = resolvePairIptmForCandidate(
-      snapshotConfidence || {},
-      selectedResultTargetChainId || undefined,
-      selectedResultLigandChainId || undefined
-    );
-
     const merged = mergeCandidateRows([
       ...parseCandidateRows(
         finalizedRows,
@@ -1621,28 +1615,7 @@ export function PeptideDesignResultsWorkspace({
       })
       .map((item, index) => ({ ...item, rank: index + 1 }));
 
-    if (merged.length > 0) return merged;
-
-    const fallbackStructure = readText(displayStructureText).trim();
-    if (!fallbackStructure) return [];
-    return [
-      {
-        id: 'peptide-design-fallback',
-        rank: 1,
-        sequence: '',
-        score: null,
-        plddt: normalizePlddt(fallbackPlddt),
-        residuePlddts: [],
-        iptm: fallbackPairIptm,
-        generation: null,
-        modelLabel: runtimeModelLabel,
-        structureText: fallbackStructure,
-        structureFormat: displayStructureFormat,
-        structureName: 'Current result',
-        runtimeState: runtimeContext.state,
-        source: 'result'
-      }
-    ];
+    return merged;
   }, [
     snapshotConfidence,
     selectedResultTargetChainId,

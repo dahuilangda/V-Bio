@@ -4,6 +4,7 @@ import { ProjectTaskRow } from './ProjectTaskRow';
 import type { SortKey, TaskListRow, TaskTableMode } from './taskListTypes';
 
 interface ProjectTasksTableProps {
+  canManageShares: boolean;
   filteredCount: number;
   tableMode: TaskTableMode;
   sortKey: SortKey;
@@ -19,6 +20,7 @@ interface ProjectTasksTableProps {
   onOpenTask: (task: ProjectTask) => void;
   onTerminateTask: (task: ProjectTask) => void;
   onRemoveTask: (task: ProjectTask) => void;
+  onOpenShareTask: (task: ProjectTask) => void;
   onBeginTaskNameEdit: (task: ProjectTask, displayName: string) => void;
   onCancelTaskNameEdit: () => void;
   onSaveTaskNameEdit: (task: ProjectTask, displayName: string) => void;
@@ -32,6 +34,7 @@ interface ProjectTasksTableProps {
 }
 
 export function ProjectTasksTable({
+  canManageShares,
   filteredCount,
   tableMode,
   sortKey,
@@ -47,6 +50,7 @@ export function ProjectTasksTable({
   onOpenTask,
   onTerminateTask,
   onRemoveTask,
+  onOpenShareTask,
   onBeginTaskNameEdit,
   onCancelTaskNameEdit,
   onSaveTaskNameEdit,
@@ -150,6 +154,7 @@ export function ProjectTasksTable({
                   key={row.task.id}
                   row={row}
                   mode={tableMode}
+                  canManageShares={canManageShares}
                   editingTaskNameId={editingTaskNameId}
                   editingTaskNameValue={editingTaskNameValue}
                   savingTaskNameId={savingTaskNameId}
@@ -159,6 +164,7 @@ export function ProjectTasksTable({
                   onOpenTask={onOpenTask}
                   onTerminateTask={onTerminateTask}
                   onRemoveTask={onRemoveTask}
+                  onOpenShareTask={onOpenShareTask}
                   onBeginTaskNameEdit={onBeginTaskNameEdit}
                   onCancelTaskNameEdit={onCancelTaskNameEdit}
                   onSaveTaskNameEdit={onSaveTaskNameEdit}

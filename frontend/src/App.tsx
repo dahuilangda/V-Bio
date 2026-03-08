@@ -6,6 +6,7 @@ import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
 
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage').then((m) => ({ default: m.ProjectsPage })));
+const SharesPage = lazy(() => import('./pages/SharesPage').then((m) => ({ default: m.SharesPage })));
 const ProjectDetailPage = lazy(() => import('./pages/ProjectDetailPage').then((m) => ({ default: m.ProjectDetailPage })));
 const ProjectTasksPage = lazy(() => import('./pages/ProjectTasksPage').then((m) => ({ default: m.ProjectTasksPage })));
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
@@ -42,6 +43,18 @@ export default function App() {
             <ShellPage>
               <Suspense fallback={<PageLoading />}>
                 <ProjectsPage />
+              </Suspense>
+            </ShellPage>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/shares"
+        element={
+          <ProtectedRoute>
+            <ShellPage>
+              <Suspense fallback={<PageLoading />}>
+                <SharesPage />
               </Suspense>
             </ShellPage>
           </ProtectedRoute>
