@@ -145,6 +145,7 @@ start_management_api() {
     return 0
   fi
 
+  force_clear_listeners_on_port "${VBIO_MGMT_PORT}"
   load_frontend_env
   activate_python_env
 

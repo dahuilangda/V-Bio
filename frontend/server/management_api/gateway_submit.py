@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from typing import Any, Dict, Optional, Tuple
 
 import requests
@@ -20,6 +21,36 @@ def _build_submit_snapshot(gateway: Any, upstream_path: str) -> Dict[str, Any]:
     if upstream_path == "/predict":
         return build_prediction_task_snapshot_from_yaml(request, gateway.logger)
     return build_affinity_task_snapshot(request, upstream_path)
+
+
+def _persist_submit_snapshot_async(
+    gateway: Any,
+    *,
+    project_id: str,
+    task_id: str,
+    task_name: str,
+    task_summary: str,
+    backend: str,
+    seed: Optional[int],
+    extra_snapshot_payload: Dict[str, Any],
+) -> None:
+    try:
+        gateway.task_store.insert_snapshot(
+            project_id=project_id,
+            task_id=task_id,
+            task_name=task_name,
+            task_summary=task_summary,
+            backend=backend,
+            seed=seed,
+            extra_payload=extra_snapshot_payload,
+        )
+    except Exception as exc:  # noqa: BLE001
+        gateway.logger.warning(
+            "Failed to persist API submit snapshot for task %s in project %s: %s",
+            task_id,
+            project_id,
+            exc,
+        )
 
 
 def forward_submit(gateway: Any, upstream_path: str, action: str) -> Tuple[Response, int]:
@@ -47,19 +78,29 @@ def forward_submit(gateway: Any, upstream_path: str, action: str) -> Tuple[Respo
                 task_id = None
 
             if task_id:
-                gateway.task_store.insert_snapshot(
-                    project_id=project_id,
-                    task_id=task_id,
-                    task_name=read_task_name(request, task_id),
-                    task_summary=read_task_summary(request),
+                task_name = read_task_name(request, task_id)
+                task_summary = read_task_summary(request)
+                seed = read_seed(
+                    request,
                     backend=backend,
-                    seed=read_seed(
-                        request,
-                        backend=backend,
-                        default_protenix_predict_seed=gateway.default_protenix_predict_seed,
-                    ),
-                    extra_payload=extra_snapshot_payload,
+                    default_protenix_predict_seed=gateway.default_protenix_predict_seed,
                 )
+                gateway.task_store.remember_task_alias(project_id, task_id)
+                threading.Thread(
+                    target=_persist_submit_snapshot_async,
+                    kwargs={
+                        "gateway": gateway,
+                        "project_id": project_id,
+                        "task_id": task_id,
+                        "task_name": task_name,
+                        "task_summary": task_summary,
+                        "backend": backend,
+                        "seed": seed,
+                        "extra_snapshot_payload": extra_snapshot_payload,
+                    },
+                    daemon=True,
+                    name="vbio-task-snapshot",
+                ).start()
 
         gateway._record_usage(
             token,

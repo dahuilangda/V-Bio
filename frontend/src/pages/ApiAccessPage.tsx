@@ -1523,19 +1523,14 @@ export function ApiAccessPage() {
       : '';
   const predictionPairHint =
     isPredictionWorkflow && !predictionPairReady
-      ? '\n# Prediction requires both target_chain and ligand_chain.'
+      ? '\n# Prediction chain pairing must be encoded inside yaml_file properties.'
       : '';
   const predictionAffinityHint =
-    isPredictionWorkflow && predictionAffinityEnabled && !predictionAffinityAvailable
-      ? '\n# Affinity compute requires the selected ligand chain to be a small molecule.'
+    isPredictionWorkflow && predictionAffinityEnabled
+      ? (predictionAffinityAvailable
+        ? '\n# Prediction affinity settings are taken from yaml_file properties.'
+        : '\n# Prediction affinity in yaml_file requires the selected ligand chain to be a small molecule.')
       : '';
-  const predictionPairFlags = predictionPairReady
-    ? ` \\\n  -F "target_chain=${escapeForDoubleQuotedShell(predictionPairTargetChain)}" \\
-  -F "ligand_chain=${escapeForDoubleQuotedShell(predictionPairLigandChain)}"`
-    : '';
-  const predictionAffinityFlags = predictionAffinityEnabled && predictionAffinityAvailable
-    ? ` \\\n  -F "enable_affinity=true"`
-    : '';
   const leadOptInputCompound = String(builderLeadOptInputCompound || '').trim();
   const leadOptHint =
     LEAD_OPT_API_ACCESS_ENABLED && isLeadOptimizationWorkflow && !leadOptInputCompound
@@ -1554,7 +1549,7 @@ fi
   -H "X-API-Token: ${curlToken}" \\
   -F "project_id=${selectedTokenProjectId}"${submitTaskMetaFlags} \\
   -F "yaml_file=@${escapedYamlPath}" \\
-  -F "backend=${effectivePredictionBackend}"${predictionTemplateFlags}${predictionPairFlags}${predictionAffinityFlags})
+  -F "backend=${effectivePredictionBackend}"${predictionTemplateFlags})
 ${submitTaskIdCapture}`;
   const commandSubmitAffinityBoltz = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/api/boltz2score" \\
   -H "X-API-Token: ${curlToken}" \\

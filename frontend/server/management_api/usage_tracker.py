@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
@@ -18,6 +19,28 @@ class UsageTracker:
     def __init__(self, postgrest: PostgrestClient, logger: Any) -> None:
         self.postgrest = postgrest
         self.logger = logger
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="vbio-usage")
+
+    def _persist_usage(self, payload: Dict[str, Any], *, token_id: Optional[str], succeeded: bool) -> None:
+        try:
+            self.postgrest.request(
+                "POST",
+                "api_token_usage",
+                payload=payload,
+                headers={"Prefer": "return=minimal"},
+                expect_json=False,
+            )
+            if token_id and succeeded:
+                self.postgrest.request(
+                    "PATCH",
+                    "api_tokens",
+                    query={"id": f"eq.{token_id}"},
+                    payload={"last_used_at": _now_iso()},
+                    headers={"Prefer": "return=minimal"},
+                    expect_json=False,
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("Failed to record API token usage: %s", exc)
 
     def record_usage(
         self,
@@ -52,24 +75,14 @@ class UsageTracker:
         }
 
         try:
-            self.postgrest.request(
-                "POST",
-                "api_token_usage",
-                payload=payload,
-                headers={"Prefer": "return=minimal"},
-                expect_json=False,
+            self._executor.submit(
+                self._persist_usage,
+                payload,
+                token_id=token.token_id if token else None,
+                succeeded=bool(succeeded),
             )
-            if token and succeeded:
-                self.postgrest.request(
-                    "PATCH",
-                    "api_tokens",
-                    query={"id": f"eq.{token.token_id}"},
-                    payload={"last_used_at": _now_iso()},
-                    headers={"Prefer": "return=minimal"},
-                    expect_json=False,
-                )
-        except Exception as exc:  # noqa: BLE001
-            self.logger.warning("Failed to record API token usage: %s", exc)
+        except RuntimeError:
+            self._persist_usage(payload, token_id=token.token_id if token else None, succeeded=bool(succeeded))
 
     def forbidden(
         self,
