@@ -11,7 +11,7 @@ import {
   updateProject,
   updateProjectTask
 } from '../../api/supabaseLite';
-import { canEditProject } from '../../utils/accessControl';
+import { canEditProject, isTaskEditableForProject } from '../../utils/accessControl';
 import { saveProjectInputConfig } from '../../utils/projectInputs';
 import { validateComponents } from '../../utils/inputValidation';
 import { getWorkflowDefinition, isPredictionLikeWorkflowKey } from '../../utils/workflows';
@@ -27,6 +27,7 @@ import {
   readLeadOptUploadsFromComponents,
 } from './projectTaskSnapshot';
 import {
+  createAffinityUploadsFingerprint,
   computeUseMsaFlag,
   createComputationFingerprint,
   createDraftFingerprint,
@@ -616,6 +617,8 @@ export function useProjectDetailRuntimeContext() {
     setSavedComputationFingerprint,
     savedTemplateFingerprint,
     setSavedTemplateFingerprint,
+    savedAffinityUploadsFingerprint,
+    setSavedAffinityUploadsFingerprint,
     runMenuOpen,
     setRunMenuOpen,
     proteinTemplates,
@@ -662,10 +665,30 @@ export function useProjectDetailRuntimeContext() {
     }
   }, [location.search, projectId]);
 
+  useEffect(() => {
+    if (!projectId || !project || !draft) return;
+    const query = new URLSearchParams(location.search);
+    const currentTab = String(query.get('tab') || '').trim().toLowerCase();
+    if (currentTab === workspaceTab) return;
+    query.set('tab', workspaceTab);
+    navigate(`/projects/${projectId}?${query.toString()}`, { replace: true });
+  }, [draft, location.search, navigate, project, projectId, workspaceTab]);
+
   const canEdit = useMemo(() => {
     if (!project || !session) return false;
-    return canEditProject(project);
-  }, [project, session]);
+    if (canEditProject(project)) return true;
+
+    const requestedTaskRowId = String(new URLSearchParams(location.search).get('task_row_id') || '').trim();
+    if (requestedTaskRowId) {
+      return isTaskEditableForProject(project, requestedTaskRowId);
+    }
+
+    const activeTaskId = String(project.task_id || '').trim();
+    if (!activeTaskId) return false;
+    const activeTaskRowId =
+      projectTasks.find((item) => String(item.task_id || '').trim() === activeTaskId)?.id || '';
+    return isTaskEditableForProject(project, activeTaskRowId);
+  }, [project, projectTasks, session, location.search]);
   const workflowKey = useMemo(() => getWorkflowDefinition(project?.task_type).key, [project?.task_type]);
   const isPredictionWorkflow = isPredictionLikeWorkflowKey(workflowKey);
   const isPeptideDesignWorkflow = workflowKey === 'peptide_design';
@@ -1443,6 +1466,7 @@ export function useProjectDetailRuntimeContext() {
     setSavedDraftFingerprint,
     setSavedComputationFingerprint,
     setSavedTemplateFingerprint,
+    setSavedAffinityUploadsFingerprint,
     setRunMenuOpen,
     setProteinTemplates,
     setTaskProteinTemplates,
@@ -1508,12 +1532,15 @@ export function useProjectDetailRuntimeContext() {
   const { metadataOnlyDraftDirty, hasUnsavedChanges } = useProjectDirtyState({
     draft,
     proteinTemplates,
+    affinityUploads: affinityCurrentUploads,
     savedDraftFingerprint,
     savedComputationFingerprint,
     savedTemplateFingerprint,
+    savedAffinityUploadsFingerprint,
     createDraftFingerprint,
     createComputationFingerprint,
-    createProteinTemplatesFingerprint
+    createProteinTemplatesFingerprint,
+    createAffinityUploadsFingerprint
   });
 
   const {
@@ -1552,6 +1579,7 @@ export function useProjectDetailRuntimeContext() {
     createDraftFingerprint,
     createComputationFingerprint,
     createProteinTemplatesFingerprint,
+    createAffinityUploadsFingerprint,
     buildAffinityUploadSnapshotComponents,
     addTemplatesToTaskSnapshotComponents,
     rememberTemplatesForTaskRow,
@@ -1564,6 +1592,7 @@ export function useProjectDetailRuntimeContext() {
     setSavedDraftFingerprint,
     setSavedComputationFingerprint,
     setSavedTemplateFingerprint,
+    setSavedAffinityUploadsFingerprint,
     setRunMenuOpen,
     navigate,
     setStructureText,
@@ -1612,6 +1641,7 @@ export function useProjectDetailRuntimeContext() {
     setSavedDraftFingerprint,
     setSavedComputationFingerprint,
     setSavedTemplateFingerprint,
+    setSavedAffinityUploadsFingerprint,
     setRunMenuOpen,
     setProjectTasks,
     setProject,
@@ -1622,6 +1652,7 @@ export function useProjectDetailRuntimeContext() {
     createDraftFingerprint,
     createComputationFingerprint,
     createProteinTemplatesFingerprint,
+    createAffinityUploadsFingerprint,
     buildAffinityUploadSnapshotComponents,
     addTemplatesToTaskSnapshotComponents,
     persistDraftTaskSnapshot,

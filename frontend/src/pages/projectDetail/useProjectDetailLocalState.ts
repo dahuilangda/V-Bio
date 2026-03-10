@@ -26,6 +26,7 @@ export function useProjectDetailLocalState() {
   const [savedDraftFingerprint, setSavedDraftFingerprint] = useState('');
   const [savedComputationFingerprint, setSavedComputationFingerprint] = useState('');
   const [savedTemplateFingerprint, setSavedTemplateFingerprint] = useState('');
+  const [savedAffinityUploadsFingerprint, setSavedAffinityUploadsFingerprint] = useState('');
   const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [proteinTemplates, setProteinTemplates] = useState<Record<string, ProteinTemplateUpload>>({});
   const {
@@ -100,6 +101,8 @@ export function useProjectDetailLocalState() {
     setSavedComputationFingerprint,
     savedTemplateFingerprint,
     setSavedTemplateFingerprint,
+    savedAffinityUploadsFingerprint,
+    setSavedAffinityUploadsFingerprint,
     runMenuOpen,
     setRunMenuOpen,
     proteinTemplates,

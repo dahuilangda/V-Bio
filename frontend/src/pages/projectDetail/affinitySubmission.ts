@@ -44,6 +44,7 @@ export interface AffinitySubmitDeps {
   setSavedDraftFingerprint: (value: string) => void;
   setSavedComputationFingerprint: (value: string) => void;
   setSavedTemplateFingerprint: (value: string) => void;
+  setSavedAffinityUploadsFingerprint: (value: string) => void;
   setRunMenuOpen: (value: boolean) => void;
   setProjectTasks: (updater: (prev: ProjectTask[]) => ProjectTask[]) => void;
   setProject: (updater: (prev: Project | null) => Project | null) => void;
@@ -54,6 +55,7 @@ export interface AffinitySubmitDeps {
   createDraftFingerprint: (draft: AffinityDraftFields) => string;
   createComputationFingerprint: (draft: AffinityDraftFields) => string;
   createProteinTemplatesFingerprint: (templates: Record<string, ProteinTemplateUpload>) => string;
+  createAffinityUploadsFingerprint: (uploads: AffinityPersistedUploads) => string;
   buildAffinityUploadSnapshotComponents: (
     baseComponents: InputComponent[],
     targetFile: File | null,
@@ -109,6 +111,7 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
     setSavedDraftFingerprint,
     setSavedComputationFingerprint,
     setSavedTemplateFingerprint,
+    setSavedAffinityUploadsFingerprint,
     setRunMenuOpen,
     setProjectTasks,
     setProject,
@@ -119,6 +122,7 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
     createDraftFingerprint,
     createComputationFingerprint,
     createProteinTemplatesFingerprint,
+    createAffinityUploadsFingerprint,
     buildAffinityUploadSnapshotComponents,
     persistDraftTaskSnapshot,
     resolveEditableDraftTaskRowId,
@@ -223,6 +227,7 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
     setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
     setSavedComputationFingerprint(createComputationFingerprint(nextDraft));
     setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
+    setSavedAffinityUploadsFingerprint(createAffinityUploadsFingerprint(affinityCurrentUploads));
     setRunMenuOpen(false);
 
     try {

@@ -32,6 +32,7 @@ export interface SaveDraftDeps {
   createDraftFingerprint: (draft: SaveDraftFields) => string;
   createComputationFingerprint: (draft: SaveDraftFields) => string;
   createProteinTemplatesFingerprint: (templates: Record<string, ProteinTemplateUpload>) => string;
+  createAffinityUploadsFingerprint: (uploads: AffinityPersistedUploads) => string;
   buildAffinityUploadSnapshotComponents: (
     baseComponents: InputComponent[],
     targetFile: File | null,
@@ -62,6 +63,7 @@ export interface SaveDraftDeps {
   setSavedDraftFingerprint: (value: string) => void;
   setSavedComputationFingerprint: (value: string) => void;
   setSavedTemplateFingerprint: (value: string) => void;
+  setSavedAffinityUploadsFingerprint: (value: string) => void;
   setRunMenuOpen: (value: boolean) => void;
   navigate: (path: string, options?: { replace?: boolean }) => void;
 }
@@ -86,6 +88,7 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
     createDraftFingerprint,
     createComputationFingerprint,
     createProteinTemplatesFingerprint,
+    createAffinityUploadsFingerprint,
     buildAffinityUploadSnapshotComponents,
     addTemplatesToTaskSnapshotComponents,
     persistDraftTaskSnapshot,
@@ -99,6 +102,7 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
     setSavedDraftFingerprint,
     setSavedComputationFingerprint,
     setSavedTemplateFingerprint,
+    setSavedAffinityUploadsFingerprint,
     setRunMenuOpen,
     navigate,
   } = deps;
@@ -154,6 +158,7 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
     setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
     setSavedComputationFingerprint(createComputationFingerprint(nextDraft));
     setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
+    setSavedAffinityUploadsFingerprint(createAffinityUploadsFingerprint(affinityCurrentUploads));
     setRunMenuOpen(false);
     return;
   }
@@ -189,6 +194,7 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
   setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
   setSavedComputationFingerprint(createComputationFingerprint(nextDraft));
   setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
+  setSavedAffinityUploadsFingerprint(createAffinityUploadsFingerprint(affinityCurrentUploads));
   setRunMenuOpen(false);
   const nextTab =
     workspaceTab === 'basics' ? 'basics' : isPredictionLikeWorkflowKey(workflowDef.key) ? 'components' : 'basics';

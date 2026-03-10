@@ -25,6 +25,7 @@ export async function loadProjectIntoWorkspace<TDraft extends DraftLike>(params:
   setSavedDraftFingerprint: Dispatch<SetStateAction<string>>;
   setSavedComputationFingerprint: Dispatch<SetStateAction<string>>;
   setSavedTemplateFingerprint: Dispatch<SetStateAction<string>>;
+  setSavedAffinityUploadsFingerprint: Dispatch<SetStateAction<string>>;
   setRunMenuOpen: Dispatch<SetStateAction<boolean>>;
   setProteinTemplates: Dispatch<SetStateAction<Record<string, ProteinTemplateUpload>>>;
   setTaskProteinTemplates: Dispatch<SetStateAction<Record<string, Record<string, ProteinTemplateUpload>>>>;
@@ -49,6 +50,7 @@ export async function loadProjectIntoWorkspace<TDraft extends DraftLike>(params:
     setSavedDraftFingerprint,
     setSavedComputationFingerprint,
     setSavedTemplateFingerprint,
+    setSavedAffinityUploadsFingerprint,
     setRunMenuOpen,
     setProteinTemplates,
     setTaskProteinTemplates,
@@ -81,6 +83,7 @@ export async function loadProjectIntoWorkspace<TDraft extends DraftLike>(params:
     setSavedDraftFingerprint(loaded.savedDraftFingerprint);
     setSavedComputationFingerprint(loaded.savedComputationFingerprint);
     setSavedTemplateFingerprint(loaded.savedTemplateFingerprint);
+    setSavedAffinityUploadsFingerprint(loaded.savedAffinityUploadsFingerprint);
     setRunMenuOpen(false);
     setProteinTemplates(loaded.proteinTemplates);
     setTaskProteinTemplates(loaded.taskProteinTemplates);

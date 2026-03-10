@@ -6,6 +6,7 @@ import type {
   ProjectTask,
   ProteinTemplateUpload,
 } from '../../types/models';
+import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import { normalizeInputComponents } from '../../utils/projectInputs';
 
 export interface DraftFingerprintFields {
@@ -135,6 +136,23 @@ export function createProteinTemplatesFingerprint(templates: Record<string, Prot
       )
     }));
   return JSON.stringify(normalized);
+}
+
+export function createAffinityUploadsFingerprint(uploads: AffinityPersistedUploads | null | undefined): string {
+  return JSON.stringify({
+    target: uploads?.target
+      ? {
+          fileName: String(uploads.target.fileName || ''),
+          content: String(uploads.target.content || '')
+        }
+      : null,
+    ligand: uploads?.ligand
+      ? {
+          fileName: String(uploads.ligand.fileName || ''),
+          content: String(uploads.ligand.content || '')
+        }
+      : null
+  });
 }
 
 export function hasProteinTemplates(templates: Record<string, ProteinTemplateUpload> | null | undefined): boolean {

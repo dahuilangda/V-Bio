@@ -19,6 +19,7 @@ import {
   resolveAffinityUploadStorageTaskRowId,
 } from './projectTaskSnapshot';
 import {
+  createAffinityUploadsFingerprint,
   createComputationFingerprint,
   createDraftFingerprint,
   createProteinTemplatesFingerprint,
@@ -96,6 +97,7 @@ export interface ProjectLoadFlowResult {
   savedDraftFingerprint: string;
   savedComputationFingerprint: string;
   savedTemplateFingerprint: string;
+  savedAffinityUploadsFingerprint: string;
   proteinTemplates: Record<string, ProteinTemplateUpload>;
   taskProteinTemplates: Record<string, Record<string, ProteinTemplateUpload>>;
   taskAffinityUploads: Record<string, AffinityPersistedUploads>;
@@ -228,6 +230,7 @@ export async function loadProjectFlow(params: {
     restoredTemplates,
     savedTaskTemplates,
     hydratedTaskAffinityUploads,
+    restoredAffinityUploads,
   } = resolveRestoredEditorState({
     requestNewTask,
     loadedComponents: loadedDraft.inputConfig.components,
@@ -284,6 +287,7 @@ export async function loadProjectFlow(params: {
     savedDraftFingerprint: createDraftFingerprint(loadedDraft),
     savedComputationFingerprint: createComputationFingerprint(loadedDraft),
     savedTemplateFingerprint: createProteinTemplatesFingerprint(restoredTemplates),
+    savedAffinityUploadsFingerprint: createAffinityUploadsFingerprint(restoredAffinityUploads),
     proteinTemplates: restoredTemplates,
     taskProteinTemplates: savedTaskTemplates,
     taskAffinityUploads: hydratedTaskAffinityUploads,

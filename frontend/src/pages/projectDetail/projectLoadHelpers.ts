@@ -132,6 +132,7 @@ export function resolveRestoredEditorState(params: {
   restoredTemplates: Record<string, ProteinTemplateUpload>;
   savedTaskTemplates: Record<string, Record<string, ProteinTemplateUpload>>;
   hydratedTaskAffinityUploads: Record<string, AffinityPersistedUploads>;
+  restoredAffinityUploads: AffinityPersistedUploads;
 } {
   const {
     requestNewTask,
@@ -232,5 +233,6 @@ export function resolveRestoredEditorState(params: {
     restoredTemplates,
     savedTaskTemplates,
     hydratedTaskAffinityUploads,
+    restoredAffinityUploads,
   };
 }

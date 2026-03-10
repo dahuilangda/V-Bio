@@ -24,6 +24,7 @@ interface UseProjectWorkspaceLoaderOptions<TDraft extends ProjectWorkspaceDraft>
   setSavedDraftFingerprint: Dispatch<SetStateAction<string>>;
   setSavedComputationFingerprint: Dispatch<SetStateAction<string>>;
   setSavedTemplateFingerprint: Dispatch<SetStateAction<string>>;
+  setSavedAffinityUploadsFingerprint: Dispatch<SetStateAction<string>>;
   setRunMenuOpen: Dispatch<SetStateAction<boolean>>;
   setProteinTemplates: Dispatch<SetStateAction<Record<string, ProteinTemplateUpload>>>;
   setTaskProteinTemplates: Dispatch<SetStateAction<Record<string, Record<string, ProteinTemplateUpload>>>>;
@@ -50,6 +51,7 @@ export function useProjectWorkspaceLoader<TDraft extends ProjectWorkspaceDraft>(
   setSavedDraftFingerprint,
   setSavedComputationFingerprint,
   setSavedTemplateFingerprint,
+  setSavedAffinityUploadsFingerprint,
   setRunMenuOpen,
   setProteinTemplates,
   setTaskProteinTemplates,
@@ -75,6 +77,7 @@ export function useProjectWorkspaceLoader<TDraft extends ProjectWorkspaceDraft>(
       setSavedDraftFingerprint,
       setSavedComputationFingerprint,
       setSavedTemplateFingerprint,
+      setSavedAffinityUploadsFingerprint,
       setRunMenuOpen,
       setProteinTemplates,
       setTaskProteinTemplates,
@@ -99,6 +102,7 @@ export function useProjectWorkspaceLoader<TDraft extends ProjectWorkspaceDraft>(
     setSavedDraftFingerprint,
     setSavedComputationFingerprint,
     setSavedTemplateFingerprint,
+    setSavedAffinityUploadsFingerprint,
     setRunMenuOpen,
     setProteinTemplates,
     setTaskProteinTemplates,

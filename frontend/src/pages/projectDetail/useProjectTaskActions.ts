@@ -51,6 +51,7 @@ interface UseProjectTaskActionsInput {
   createDraftFingerprint: (draft: SaveDraftFields) => string;
   createComputationFingerprint: (draft: SaveDraftFields) => string;
   createProteinTemplatesFingerprint: (templates: Record<string, ProteinTemplateUpload>) => string;
+  createAffinityUploadsFingerprint: (uploads: AffinityPersistedUploads) => string;
   buildAffinityUploadSnapshotComponents: (
     baseComponents: InputComponent[],
     targetFile: File | null,
@@ -71,6 +72,7 @@ interface UseProjectTaskActionsInput {
   setSavedDraftFingerprint: (value: string) => void;
   setSavedComputationFingerprint: (value: string) => void;
   setSavedTemplateFingerprint: (value: string) => void;
+  setSavedAffinityUploadsFingerprint: (value: string) => void;
   setRunMenuOpen: (value: boolean) => void;
   navigate: (path: string, options?: { replace?: boolean }) => void;
   setStructureText: (value: string) => void;
@@ -132,6 +134,7 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
     createDraftFingerprint,
     createComputationFingerprint,
     createProteinTemplatesFingerprint,
+    createAffinityUploadsFingerprint,
     buildAffinityUploadSnapshotComponents,
     addTemplatesToTaskSnapshotComponents,
     rememberTemplatesForTaskRow,
@@ -144,6 +147,7 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
     setSavedDraftFingerprint,
     setSavedComputationFingerprint,
     setSavedTemplateFingerprint,
+    setSavedAffinityUploadsFingerprint,
     setRunMenuOpen,
     navigate,
     setStructureText,
@@ -249,6 +253,7 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
           createDraftFingerprint,
           createComputationFingerprint,
           createProteinTemplatesFingerprint,
+          createAffinityUploadsFingerprint,
           buildAffinityUploadSnapshotComponents,
           addTemplatesToTaskSnapshotComponents,
           persistDraftTaskSnapshot,
@@ -262,6 +267,7 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
           setSavedDraftFingerprint,
           setSavedComputationFingerprint,
           setSavedTemplateFingerprint,
+          setSavedAffinityUploadsFingerprint,
           setRunMenuOpen,
           navigate
         });
@@ -290,6 +296,7 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
       createDraftFingerprint,
       createComputationFingerprint,
       createProteinTemplatesFingerprint,
+      createAffinityUploadsFingerprint,
       buildAffinityUploadSnapshotComponents,
       addTemplatesToTaskSnapshotComponents,
       persistDraftTaskSnapshot,
@@ -303,6 +310,7 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
       setSavedDraftFingerprint,
       setSavedComputationFingerprint,
       setSavedTemplateFingerprint,
+      setSavedAffinityUploadsFingerprint,
       setRunMenuOpen,
       navigate,
       setSaving,
