@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { Link } from 'react-router-dom';
 import type { PredictionConstraint, ProjectTask } from '../../types/models';
-import { downloadResultFile, terminateTask as terminateBackendTask } from '../../api/backendApi';
+import { downloadResultBlob, downloadResultFile, terminateTask as terminateBackendTask } from '../../api/backendApi';
 import { createInputComponent } from '../../utils/projectInputs';
 import { getWorkflowDefinition } from '../../utils/workflows';
 import { ProjectDetailLayout } from './ProjectDetailLayout';
@@ -860,6 +860,139 @@ function resolveLeadOptSnapshotFromTask(taskInput: unknown): Record<string, unkn
   };
 }
 
+function resolveLeadOptDownloadTaskId(taskInput: unknown, structureTaskIdInput: unknown): string {
+  const viewerTaskId = readText(structureTaskIdInput).trim();
+  if (viewerTaskId) return viewerTaskId;
+
+  const task = asRecord(taskInput);
+  if (Object.keys(task).length === 0) return '';
+
+  const snapshot = resolveLeadOptSnapshotFromTask(task);
+  const snapshotPredictionTaskId = readText(
+    snapshot.prediction_task_id || asRecord(snapshot.prediction_summary).latest_task_id
+  ).trim();
+  if (snapshotPredictionTaskId) return snapshotPredictionTaskId;
+
+  const taskId = readText(task.task_id).trim();
+  const structureName = readText(task.structure_name).trim();
+  if (taskId && structureName && Object.keys(snapshot).length === 0) return taskId;
+
+  return '';
+}
+
+function sanitizeArchiveNamePart(value: unknown, fallback = 'item'): string {
+  const text = readText(value).trim();
+  if (!text) return fallback;
+  const normalized = text
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  if (!normalized) return fallback;
+  return normalized.slice(0, 80);
+}
+
+function collectLeadOptDownloadRecords(
+  predictionMapInput: unknown,
+  preferredBackendInput: unknown
+): Array<{ key: string; backend: string; smiles: string; record: LeadOptPredictionRecord }> {
+  const predictionMap = asPredictionRecordMap(predictionMapInput);
+  const preferredBackend = normalizePredictionBackendStrict(preferredBackendInput);
+  const allSuccess = Object.entries(predictionMap)
+    .map(([key, record]) => {
+      const parsed = parseLeadOptPredictionRecordKey(key);
+      const backend = normalizePredictionBackendStrict(record.backend || parsed.backend);
+      const smiles = readText(parsed.smiles).trim();
+      return { key, backend, smiles, record };
+    })
+    .filter(({ backend, record }) => {
+      const taskId = readText(record.taskId).trim();
+      const state = readText(record.state).trim().toUpperCase();
+      return Boolean(taskId && !taskId.startsWith('local:') && backend && state === 'SUCCESS');
+    });
+  if (!preferredBackend) return allSuccess;
+  const preferred = allSuccess.filter(({ backend }) => backend === preferredBackend);
+  return preferred.length > 0 ? preferred : allSuccess;
+}
+
+async function downloadLeadOptCombinedArchive(params: {
+  predictionMap: unknown;
+  preferredBackend?: unknown;
+  projectName: string;
+  queryId?: string;
+  fallbackTaskId?: string;
+}): Promise<void> {
+  const records = collectLeadOptDownloadRecords(params.predictionMap, params.preferredBackend);
+  if (records.length === 0) {
+    const fallbackTaskId = readText(params.fallbackTaskId).trim();
+    if (!fallbackTaskId) {
+      throw new Error('No successful lead-opt prediction results are available for download yet.');
+    }
+    await downloadResultFile(fallbackTaskId);
+    return;
+  }
+
+  const { default: JSZipLib } = await import('jszip');
+  const bundleZip = new JSZipLib();
+  const manifest: Array<Record<string, unknown>> = [];
+  const sortedRecords = [...records].sort((left, right) => {
+    const leftBackend = readText(left.backend).trim();
+    const rightBackend = readText(right.backend).trim();
+    if (leftBackend !== rightBackend) return leftBackend.localeCompare(rightBackend);
+    return left.smiles.localeCompare(right.smiles);
+  });
+
+  for (let index = 0; index < sortedRecords.length; index += 1) {
+    const item = sortedRecords[index];
+    const taskId = readText(item.record.taskId).trim();
+    const sourceBlob = await downloadResultBlob(taskId, { mode: 'full' });
+    const sourceZip = await JSZipLib.loadAsync(sourceBlob);
+    const folderName = [
+      String(index + 1).padStart(3, '0'),
+      sanitizeArchiveNamePart(item.backend, 'backend'),
+      sanitizeArchiveNamePart(item.smiles, 'compound'),
+      sanitizeArchiveNamePart(taskId, 'task')
+    ].join('_');
+    for (const [path, entry] of Object.entries(sourceZip.files)) {
+      if (entry.dir) continue;
+      bundleZip.file(`${folderName}/${path}`, await entry.async('blob'));
+    }
+    manifest.push({
+      index: index + 1,
+      task_id: taskId,
+      backend: item.backend,
+      smiles: item.smiles,
+      structure_name: readText(item.record.structureName).trim(),
+      source_folder: folderName,
+    });
+  }
+
+  bundleZip.file(
+    'manifest.json',
+    JSON.stringify(
+      {
+        project_name: readText(params.projectName).trim(),
+        query_id: readText(params.queryId).trim(),
+        compound_count: sortedRecords.length,
+        generated_at: new Date().toISOString(),
+        records: manifest,
+      },
+      null,
+      2
+    )
+  );
+
+  const archiveBlob = await bundleZip.generateAsync({ type: 'blob' });
+  const href = URL.createObjectURL(archiveBlob);
+  const anchor = document.createElement('a');
+  const projectNamePart = sanitizeArchiveNamePart(params.projectName, 'lead_opt');
+  const queryIdPart = sanitizeArchiveNamePart(params.queryId, 'query');
+  anchor.href = href;
+  anchor.download = `${projectNamePart}_${queryIdPart}_lead_opt_results.zip`;
+  anchor.click();
+  URL.revokeObjectURL(href);
+}
+
 function readLeadOptTaskRowTimestamp(taskInput: unknown): number {
   const task = asRecord(taskInput);
   return new Date(
@@ -1611,6 +1744,19 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     return compactLeadOptPredictionMap(merged);
   }, [projectTasks]);
 
+  const leadOptDownloadTaskId = useMemo(
+    () => resolveLeadOptDownloadTaskId(activeResultTask, structureTaskId),
+    [activeResultTask, structureTaskId]
+  );
+  const defaultDownloadTaskId = useMemo(() => {
+    const viewerTaskId = readText(structureTaskId).trim();
+    if (viewerTaskId) return viewerTaskId;
+    const activeTaskId = readText(activeResultTask?.task_id).trim();
+    const activeStructureName = readText(activeResultTask?.structure_name).trim();
+    if (activeStructureName && activeTaskId) return activeTaskId;
+    return readText(project.task_id).trim();
+  }, [activeResultTask?.structure_name, activeResultTask?.task_id, project.task_id, structureTaskId]);
+
   const aggregatedLeadOptSnapshot = useMemo(
     () =>
       buildLeadOptAggregatedSnapshot({
@@ -1630,6 +1776,14 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     ]
   );
   const aggregatedLeadOptSnapshotRecord = asRecord(aggregatedLeadOptSnapshot);
+  const leadOptDownloadRecords = useMemo(
+    () =>
+      collectLeadOptDownloadRecords(
+        aggregatedLeadOptSnapshotRecord.prediction_by_smiles,
+        aggregatedLeadOptSnapshotRecord.selected_backend
+      ),
+    [aggregatedLeadOptSnapshotRecord]
+  );
   const leadOptActiveTaskRowId = resolveLeadOptTaskRowId();
   const leadOptActiveQueryId = readText(
     aggregatedLeadOptSnapshotRecord.query_id || asRecord(aggregatedLeadOptSnapshotRecord.query_result).query_id
@@ -2701,9 +2855,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     <ProjectDetailLayout
       projectName={project.name}
       canDownloadResult={Boolean(
-        readText(structureTaskId).trim() ||
-          (readText(activeResultTask?.structure_name).trim() && readText(activeResultTask?.task_id).trim()) ||
-          (!isLeadOptimizationWorkflow && readText(project.task_id).trim())
+        isLeadOptimizationWorkflow ? (leadOptDownloadRecords.length > 0 || leadOptDownloadTaskId) : defaultDownloadTaskId
       )}
       workflow={{
         shortTitle: workflow.shortTitle,
@@ -2754,17 +2906,23 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       topRunButtonRef={topRunButtonRef as RefObject<HTMLButtonElement>}
       onOpenTaskHistory={handleOpenTaskHistory}
       onDownloadResult={() => {
-        const viewerTaskId = readText(structureTaskId).trim();
-        const activeTaskId = readText(activeResultTask?.task_id).trim();
-        const activeStructureName = readText(activeResultTask?.structure_name).trim();
-        const projectTaskId = readText(project.task_id).trim();
-        const downloadTaskId =
-          viewerTaskId ||
-          (activeStructureName ? activeTaskId : '') ||
-          (isLeadOptimizationWorkflow ? '' : projectTaskId);
-        if (!downloadTaskId) return;
         setError(null);
-        void downloadResultFile(downloadTaskId).catch((err) => {
+        if (isLeadOptimizationWorkflow) {
+          void downloadLeadOptCombinedArchive({
+            predictionMap: aggregatedLeadOptSnapshotRecord.prediction_by_smiles,
+            preferredBackend: aggregatedLeadOptSnapshotRecord.selected_backend,
+            projectName: project.name,
+            queryId:
+              readText(aggregatedLeadOptSnapshotRecord.query_id).trim() ||
+              readText(asRecord(aggregatedLeadOptSnapshotRecord.query_result).query_id).trim(),
+            fallbackTaskId: leadOptDownloadTaskId,
+          }).catch((err) => {
+            setError(err instanceof Error ? err.message : 'Failed to download lead-opt result archive.');
+          });
+          return;
+        }
+        if (!defaultDownloadTaskId) return;
+        void downloadResultFile(defaultDownloadTaskId).catch((err) => {
           setError(err instanceof Error ? err.message : 'Failed to download result archive.');
         });
       }}
