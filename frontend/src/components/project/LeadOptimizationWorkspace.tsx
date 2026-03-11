@@ -143,6 +143,9 @@ function buildLeadOptPredictionHydrationSignature(value: unknown): string {
       const ligandAtomPlddts = Array.isArray(record.ligandAtomPlddts ?? record.ligand_atom_plddts)
         ? ((record.ligandAtomPlddts ?? record.ligand_atom_plddts) as unknown[])
         : [];
+      const ligandRenderAtomPlddts = Array.isArray(record.ligandRenderAtomPlddts ?? record.ligand_render_atom_plddts)
+        ? ((record.ligandRenderAtomPlddts ?? record.ligand_render_atom_plddts) as unknown[])
+        : [];
       return [
         readText(key).trim(),
         readText(record.taskId || record.task_id).trim(),
@@ -151,7 +154,9 @@ function buildLeadOptPredictionHydrationSignature(value: unknown): string {
         Number.isFinite(Number(record.pairIptm ?? record.pair_iptm)) ? 'iptm' : '',
         Number.isFinite(Number(record.pairPae ?? record.pair_pae ?? record.pae)) ? 'pae' : '',
         Number.isFinite(Number(record.ligandPlddt ?? record.ligand_plddt)) ? 'plddt' : '',
-        String(ligandAtomPlddts.length)
+        String(ligandAtomPlddts.length),
+        readText(record.ligandRenderSmiles ?? record.ligand_render_smiles).trim(),
+        String(ligandRenderAtomPlddts.length)
       ].join(':');
     })
     .sort((left, right) => left.localeCompare(right));

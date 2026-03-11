@@ -3,7 +3,11 @@ import { Ligand2DPreview } from '../../components/project/Ligand2DPreview';
 import { ensureStructureConfidenceColoringData } from '../../api/backendApi';
 import type { InputComponent } from '../../types/models';
 import type { MetricTone } from './projectMetrics';
-import { buildSnapshotCards, resolveAffinityResultLigandSmiles } from './resultPresentation';
+import {
+  buildSnapshotCards,
+  resolveAffinityResultLigandSmiles,
+  resolveExactLigandConfidencePreview
+} from './resultPresentation';
 import { componentTypeLabel } from '../../utils/projectInputs';
 import { isSequenceLigandType, OverviewLigandSequencePreview } from './OverviewLigandSequencePreview';
 
@@ -69,6 +73,7 @@ interface UseProjectResultDisplayResult {
   affinityPreviewLigandOverlayText: string;
   affinityPreviewLigandOverlayFormat: 'cif' | 'pdb';
   affinityResultLigandSmiles: string;
+  affinityResultLigandAtomPlddts: number[];
   predictionLigandPreview: ReactNode;
   predictionLigandRadarSmiles: string;
   affinityDisplayStructureText: string;
@@ -182,8 +187,17 @@ export function useProjectResultDisplay({
     snapshotLigandAtomPlddts,
     affinityLigandSmiles,
   });
+  const exactLigandConfidencePreview = resolveExactLigandConfidencePreview({
+    snapshotAffinity,
+    snapshotConfidence,
+    selectedResultLigandChainId,
+    statusContextLigandSmiles,
+    activeResultLigandSmiles,
+    affinityLigandSmiles
+  });
 
   const predictionLigandPreviewSmiles = (
+    exactLigandConfidencePreview.smiles.trim() ||
     affinityResultLigandSmiles.trim() ||
     (overviewPrimaryLigand.isSmiles ? overviewPrimaryLigand.smiles : '')
   ).trim();
@@ -198,7 +212,7 @@ export function useProjectResultDisplay({
     predictionLigandPreviewSmiles ? (
       <Ligand2DPreview
         smiles={predictionLigandPreviewSmiles}
-        atomConfidences={snapshotLigandAtomPlddts}
+        atomConfidences={exactLigandConfidencePreview.atomPlddts}
         confidenceHint={snapshotPlddt}
       />
     ) : selectedResultLigandSequence && isSequenceLigandType(selectedResultLigandComponentType || null) ? (
@@ -227,6 +241,7 @@ export function useProjectResultDisplay({
     affinityPreviewLigandOverlayText,
     affinityPreviewLigandOverlayFormat,
     affinityResultLigandSmiles,
+    affinityResultLigandAtomPlddts: exactLigandConfidencePreview.atomPlddts,
     predictionLigandPreview,
     predictionLigandRadarSmiles: predictionLigandPreviewSmiles,
     affinityDisplayStructureText,

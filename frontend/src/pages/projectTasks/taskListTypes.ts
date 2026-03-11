@@ -44,8 +44,10 @@ export interface TaskListRow {
   backendValue: string;
   durationValue: number | null;
   ligandSmiles: string;
+  ligandRenderSmiles: string;
   ligandIsSmiles: boolean;
   ligandAtomPlddts: number[] | null;
+  ligandRenderAtomPlddts: number[] | null;
   ligandSequence: string;
   ligandSequenceType: InputComponent['type'] | null;
   ligandResiduePlddts: number[] | null;

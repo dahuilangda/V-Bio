@@ -953,6 +953,8 @@ def register_lead_opt_mmp_routes(
             "backend": backend,
             "seed": parse_int(str(seed_value), None) if seed_value is not None else None,
         }
+        if backend == "boltz":
+            predict_args["strict_ligand_confidence_contract"] = True
         if has_reference_template and backend in {"boltz", "alphafold3"}:
             template_file_name = f"leadopt_reference_template.{resolved_reference_template_format}"
             predict_args["template_inputs"] = [

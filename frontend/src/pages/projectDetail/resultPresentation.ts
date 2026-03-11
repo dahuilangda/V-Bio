@@ -1,5 +1,11 @@
 import type { MetricTone } from './projectMetrics';
 import { readFirstNonEmptyStringMetric, readLigandSmilesFromMap } from './projectMetrics';
+import {
+  readAlignedLigandAtomPlddtsFromConfidence,
+  readAlignedLigandSmilesFromConfidence,
+  readLigandDisplayAtomPlddtsFromConfidence,
+  readLigandRenderSmilesFromConfidence
+} from './projectConfidence';
 
 export interface SnapshotCard {
   key: string;
@@ -108,6 +114,8 @@ export function resolveAffinityResultLigandSmiles(params: {
     snapshotLigandAtomPlddts,
     affinityLigandSmiles,
   } = params;
+  const fromConfidenceDisplay = readLigandRenderSmilesFromConfidence(snapshotConfidence);
+  const fromAffinityDisplay = readLigandRenderSmilesFromConfidence(snapshotAffinity);
   const fromAffinityMap = readLigandSmilesFromMap(snapshotAffinity, selectedResultLigandChainId);
   const fromConfidenceMap = readLigandSmilesFromMap(snapshotConfidence, selectedResultLigandChainId);
   const fromAffinityMetrics = readFirstNonEmptyStringMetric(snapshotAffinity, [
@@ -126,6 +134,8 @@ export function resolveAffinityResultLigandSmiles(params: {
   const preferConfidenceAlignedSmiles = snapshotLigandAtomPlddts.length > 0;
   if (preferConfidenceAlignedSmiles) {
     return (
+      fromConfidenceDisplay ||
+      fromAffinityDisplay ||
       fromConfidenceMap ||
       fromConfidenceMetrics ||
       fromAffinityMap ||
@@ -135,6 +145,8 @@ export function resolveAffinityResultLigandSmiles(params: {
     );
   }
   return (
+    fromConfidenceDisplay ||
+    fromAffinityDisplay ||
     fromTaskRows ||
     fromAffinityMap ||
     fromConfidenceMap ||
@@ -142,4 +154,73 @@ export function resolveAffinityResultLigandSmiles(params: {
     fromConfidenceMetrics ||
     affinityLigandSmiles.trim()
   );
+}
+
+export function resolveExactLigandConfidencePreview(params: {
+  snapshotAffinity: Record<string, unknown> | null;
+  snapshotConfidence: Record<string, unknown> | null;
+  selectedResultLigandChainId: string | null;
+  statusContextLigandSmiles: string;
+  activeResultLigandSmiles: string;
+  affinityLigandSmiles: string;
+}): { smiles: string; atomPlddts: number[] } {
+  const {
+    snapshotAffinity,
+    snapshotConfidence,
+    selectedResultLigandChainId,
+    statusContextLigandSmiles,
+    activeResultLigandSmiles,
+    affinityLigandSmiles
+  } = params;
+
+  const exactDisplayContracts = [
+    {
+      smiles: readLigandRenderSmilesFromConfidence(snapshotConfidence),
+      atomPlddts: readLigandDisplayAtomPlddtsFromConfidence(snapshotConfidence, selectedResultLigandChainId)
+    },
+    {
+      smiles: readLigandRenderSmilesFromConfidence(snapshotAffinity),
+      atomPlddts: readLigandDisplayAtomPlddtsFromConfidence(snapshotAffinity, selectedResultLigandChainId)
+    }
+  ];
+  for (const contract of exactDisplayContracts) {
+    if (contract.smiles.trim() && contract.atomPlddts.length > 0) {
+      return {
+        smiles: contract.smiles.trim(),
+        atomPlddts: contract.atomPlddts
+      };
+    }
+  }
+
+  const exactAlignedContracts = [
+    {
+      smiles: readAlignedLigandSmilesFromConfidence(snapshotConfidence),
+      atomPlddts: readAlignedLigandAtomPlddtsFromConfidence(snapshotConfidence, selectedResultLigandChainId)
+    },
+    {
+      smiles: readAlignedLigandSmilesFromConfidence(snapshotAffinity),
+      atomPlddts: readAlignedLigandAtomPlddtsFromConfidence(snapshotAffinity, selectedResultLigandChainId)
+    }
+  ];
+  for (const contract of exactAlignedContracts) {
+    if (contract.smiles.trim() && contract.atomPlddts.length > 0) {
+      return {
+        smiles: contract.smiles.trim(),
+        atomPlddts: contract.atomPlddts
+      };
+    }
+  }
+
+  return {
+    smiles: resolveAffinityResultLigandSmiles({
+      snapshotAffinity,
+      snapshotConfidence,
+      selectedResultLigandChainId,
+      statusContextLigandSmiles,
+      activeResultLigandSmiles,
+      snapshotLigandAtomPlddts: [],
+      affinityLigandSmiles
+    }),
+    atomPlddts: []
+  };
 }

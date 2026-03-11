@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -20,7 +21,14 @@ Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
 from boltz.main import get_cache_path
 from boltz.data import const
 from boltz.data.types import StructureV2
-from capabilities.boltz2score.prepare_boltz2score_inputs import prepare_inputs
+from capabilities.boltz2score.mapping_utils import (
+    resolve_model_ligand_chain_id_by_atom_names,
+)
+from capabilities.boltz2score.prepare_boltz2score_inputs import (
+    _assign_bond_orders,
+    _assign_stereochemistry_from_3d_if_possible,
+    prepare_inputs,
+)
 from capabilities.boltz2score.run_boltz2score import run_scoring
 
 WATER_RESNAMES = {"HOH", "WAT", "H2O"}
@@ -81,6 +89,15 @@ def _normalize_atom_name(name: str) -> str:
     return "".join(ch for ch in name.strip().upper() if ch.isalnum())
 
 
+def _normalize_preserved_atom_name(name: str) -> str:
+    token = str(name or "").strip().upper()
+    if not token:
+        return ""
+    if any(ord(ch) < 33 or ord(ch) > 95 for ch in token):
+        return ""
+    return token
+
+
 def _element_prefix_for_atom(atom: Chem.Atom) -> str:
     """Return a compact element-aware prefix for generated atom names."""
     symbol = _normalize_atom_name(atom.GetSymbol() or "")
@@ -131,11 +148,11 @@ def _ensure_unique_ligand_atom_names(mol: Chem.Mol) -> tuple[Chem.Mol, int]:
 
     for atom in mol.GetAtoms():
         preferred_raw = _extract_atom_preferred_name(atom)
-        normalized = _normalize_atom_name(preferred_raw or "")
+        preserved = _normalize_preserved_atom_name(preferred_raw or "")
 
         candidate = None
-        if normalized and len(normalized) <= 4 and normalized not in used:
-            candidate = normalized
+        if preserved and len(preserved) <= 4 and preserved not in used:
+            candidate = preserved
         else:
             prefix = _element_prefix_for_atom(atom)
             serial = serial_by_prefix.get(prefix, 1)
@@ -173,6 +190,89 @@ def _restore_conformer_positions(mol: Chem.Mol, positions: list[tuple[float, flo
     conf = mol.GetConformer()
     for idx, (x, y, z) in enumerate(positions):
         conf.SetAtomPosition(idx, (x, y, z))
+
+
+def _restore_ligand_atom_props(
+    mol: Chem.Mol,
+    atom_props: list[dict[str, str]],
+) -> None:
+    if len(atom_props) != mol.GetNumAtoms():
+        return
+    for idx, props in enumerate(atom_props):
+        atom = mol.GetAtomWithIdx(idx)
+        for key, value in props.items():
+            atom.SetProp(key, value)
+
+
+def _collect_ligand_atom_props(
+    mol: Chem.Mol,
+    *,
+    heavy_only: bool = False,
+) -> list[dict[str, str]]:
+    atom_props: list[dict[str, str]] = []
+    for atom in mol.GetAtoms():
+        if heavy_only and atom.GetAtomicNum() == 1:
+            continue
+        props: dict[str, str] = {}
+        for key in ("name", "_original_atom_name", "_source_atom_name"):
+            if atom.HasProp(key):
+                props[key] = atom.GetProp(key)
+        atom_props.append(props)
+    return atom_props
+
+
+def _remove_ligand_hydrogens_preserve_props(mol: Chem.Mol) -> Chem.Mol:
+    heavy_atom_props = _collect_ligand_atom_props(mol, heavy_only=True)
+    try:
+        without_h = Chem.RemoveHs(Chem.Mol(mol), sanitize=False)
+    except Exception:
+        return mol
+    if without_h.GetNumAtoms() == mol.GetNumAtoms():
+        return mol
+    _restore_ligand_atom_props(without_h, heavy_atom_props)
+    return without_h
+
+
+def _finalize_loaded_ligand_mol(
+    mol: Chem.Mol,
+    *,
+    infer_bond_orders: bool = False,
+) -> Chem.Mol:
+    """Recover chemistry details that Boltz2 uses directly from the ligand Mol."""
+    atom_props = _collect_ligand_atom_props(mol, heavy_only=True)
+
+    finalized = Chem.Mol(mol)
+    if infer_bond_orders:
+        try:
+            finalized = _assign_bond_orders(finalized)
+        except Exception:
+            finalized = Chem.Mol(mol)
+
+    try:
+        Chem.SanitizeMol(finalized)
+    except Exception:
+        pass
+
+    finalized = _assign_stereochemistry_from_3d_if_possible(finalized)
+    try:
+        Chem.AssignStereochemistry(finalized, force=True, cleanIt=False)
+    except Exception:
+        pass
+
+    finalized = _remove_ligand_hydrogens_preserve_props(finalized)
+    try:
+        Chem.SanitizeMol(finalized)
+    except Exception:
+        pass
+
+    finalized = _assign_stereochemistry_from_3d_if_possible(finalized)
+    try:
+        Chem.AssignStereochemistry(finalized, force=True, cleanIt=False)
+    except Exception:
+        pass
+
+    _restore_ligand_atom_props(finalized, atom_props)
+    return finalized
 
 
 def _load_ligand_from_file(ligand_path: Path):
@@ -223,6 +323,7 @@ def _load_ligand_from_file(ligand_path: Path):
         original_positions = _snapshot_conformer_positions(mol)
         if not original_positions:
             raise ValueError(f"MOL2 ligand has no 3D conformer: {ligand_path}")
+        mol = _finalize_loaded_ligand_mol(mol)
         mol, renamed = _ensure_unique_ligand_atom_names(mol)
         _restore_conformer_positions(mol, original_positions)
         print(f"Loaded ligand from MOL2: {mol.GetNumAtoms()} atoms (renamed: {renamed})")
@@ -242,6 +343,7 @@ def _load_ligand_from_file(ligand_path: Path):
         original_positions = _snapshot_conformer_positions(mol)
         if not original_positions:
             raise ValueError(f"SDF ligand has no 3D conformer: {ligand_path}")
+        mol = _finalize_loaded_ligand_mol(mol)
         mol, renamed = _ensure_unique_ligand_atom_names(mol)
         _restore_conformer_positions(mol, original_positions)
         print(f"Loaded ligand from SDF: {mol.GetNumAtoms()} atoms (renamed: {renamed})")
@@ -254,6 +356,7 @@ def _load_ligand_from_file(ligand_path: Path):
         original_positions = _snapshot_conformer_positions(mol)
         if not original_positions:
             raise ValueError(f"MOL ligand has no 3D conformer: {ligand_path}")
+        mol = _finalize_loaded_ligand_mol(mol)
         mol, renamed = _ensure_unique_ligand_atom_names(mol)
         _restore_conformer_positions(mol, original_positions)
         print(f"Loaded ligand from MOL: {mol.GetNumAtoms()} atoms (renamed: {renamed})")
@@ -279,6 +382,7 @@ def _load_ligand_from_file(ligand_path: Path):
         original_positions = _snapshot_conformer_positions(mol)
         if not original_positions:
             raise ValueError(f"PDB ligand has no 3D conformer: {ligand_path}")
+        mol = _finalize_loaded_ligand_mol(mol, infer_bond_orders=True)
         mol, renamed = _ensure_unique_ligand_atom_names(mol)
         _restore_conformer_positions(mol, original_positions)
         print(f"Loaded ligand from PDB: {mol.GetNumAtoms()} atoms (renamed: {renamed})")
@@ -292,6 +396,11 @@ def _canonical_isomeric_smiles_from_mol(mol: Chem.Mol) -> str:
     """Build a canonical isomeric SMILES from a ligand molecule."""
     try:
         base = Chem.RemoveHs(Chem.Mol(mol), sanitize=False)
+        if base.GetNumConformers() > 0:
+            try:
+                Chem.AssignStereochemistryFrom3D(base)
+            except Exception:
+                pass
         Chem.AssignStereochemistry(base, cleanIt=True, force=True)
         return Chem.MolToSmiles(base, canonical=True, isomericSmiles=True)
     except Exception:
@@ -304,11 +413,11 @@ def _is_hydrogen_like(element_or_name: str) -> bool:
 
 
 def _normalize_name_key(name: str) -> str:
-    return "".join(ch for ch in str(name or "").strip().upper() if ch.isalnum())
+    return str(name or "").strip()
 
 
 def _extract_ligand_bfactors_by_chain(structure_path: Path) -> dict[str, dict[str, float]]:
-    """Read first non-polymer ligand residue per chain and return heavy-atom B-factors by atom name."""
+    """Read heavy-atom B-factors for exactly one non-polymer ligand residue per chain."""
     structure = gemmi.read_structure(str(structure_path))
     structure.setup_entities()
     entity_types = {
@@ -326,6 +435,7 @@ def _extract_ligand_bfactors_by_chain(structure_path: Path) -> dict[str, dict[st
         chain_name = str(chain.name).strip()
         if not chain_name:
             continue
+        chain_residue_values: list[tuple[str, dict[str, float]]] = []
         for residue in chain:
             if entity_types.get(residue.subchain) not in {"NonPolymer", "Branched"}:
                 continue
@@ -349,8 +459,17 @@ def _extract_ligand_bfactors_by_chain(structure_path: Path) -> dict[str, dict[st
                 values[key] = float(atom.b_iso)
 
             if values:
-                by_chain[chain_name] = values
-                break
+                chain_residue_values.append((resname, values))
+
+        if len(chain_residue_values) > 1:
+            residue_names = [item[0] for item in chain_residue_values]
+            raise RuntimeError(
+                "Output ligand chain contains multiple non-polymer residues, which is "
+                "ambiguous for strict atom-confidence alignment: "
+                f"chain={chain_name}, residues={residue_names}."
+            )
+        if len(chain_residue_values) == 1:
+            by_chain[chain_name] = chain_residue_values[0][1]
 
     return by_chain
 
@@ -365,16 +484,16 @@ def _resolve_model_ligand_chain_id(
     if requested_ligand_chain_id:
         requested = requested_ligand_chain_id.strip()
         if requested:
-            requested_upper = requested.upper()
-            for chain_id in available_chain_ids:
-                if chain_id.upper() == requested_upper:
-                    return chain_id
-            for chain_id in available_chain_ids:
-                chain_upper = chain_id.upper()
-                if chain_upper.startswith(f"{requested_upper}X"):
-                    return chain_id
-                if requested_upper.startswith(f"{chain_upper}X"):
-                    return chain_id
+            exact_matches = [
+                chain_id for chain_id in available_chain_ids if chain_id == requested
+            ]
+            if len(exact_matches) == 1:
+                return exact_matches[0]
+            if len(exact_matches) > 1:
+                raise RuntimeError(
+                    "Requested ligand chain id matched multiple output chains exactly: "
+                    f"{requested!r} -> {exact_matches}."
+                )
 
     if len(available_chain_ids) == 1:
         return available_chain_ids[0]
@@ -386,12 +505,10 @@ def _resolve_model_ligand_chain_id(
     )
 
 
-def _build_smiles_order_from_ligand_mol(mol: Chem.Mol) -> tuple[str, list[int], list[str]]:
-    """Return non-canonical SMILES plus mapping from SMILES atom order to heavy-atom index."""
+def _extract_heavy_atom_name_keys(mol: Chem.Mol) -> tuple[Chem.Mol, list[str]]:
     heavy = Chem.RemoveHs(Chem.Mol(mol), sanitize=False)
     if heavy.GetNumAtoms() == 0:
         raise RuntimeError("Reference ligand has no heavy atoms.")
-
     heavy_name_keys: list[str] = []
     seen_name_keys: set[str] = set()
     for atom in heavy.GetAtoms():
@@ -403,10 +520,18 @@ def _build_smiles_order_from_ligand_mol(mol: Chem.Mol) -> tuple[str, list[int], 
             raise RuntimeError(f"Duplicate reference ligand atom name: {preferred}")
         seen_name_keys.add(key)
         heavy_name_keys.append(key)
+    return heavy, heavy_name_keys
 
-    for idx, atom in enumerate(heavy.GetAtoms(), start=1):
+
+def _mapped_smiles_to_heavy_order(
+    heavy: Chem.Mol,
+    *,
+    canonical: bool,
+) -> tuple[str, list[int]]:
+    tagged = Chem.Mol(heavy)
+    for idx, atom in enumerate(tagged.GetAtoms(), start=1):
         atom.SetAtomMapNum(idx)
-    mapped_smiles = Chem.MolToSmiles(heavy, canonical=False, isomericSmiles=True)
+    mapped_smiles = Chem.MolToSmiles(tagged, canonical=canonical, isomericSmiles=True)
     mapped = Chem.MolFromSmiles(mapped_smiles)
     if mapped is None or mapped.GetNumAtoms() != heavy.GetNumAtoms():
         raise RuntimeError("Failed to build mapped ligand SMILES from reference ligand.")
@@ -429,7 +554,76 @@ def _build_smiles_order_from_ligand_mol(mol: Chem.Mol) -> tuple[str, list[int], 
     smiles = Chem.MolToSmiles(mapped, canonical=False, isomericSmiles=True)
     if not smiles:
         raise RuntimeError("Failed to build ligand SMILES without atom maps.")
+    return smiles, smiles_to_heavy
 
+
+def _mapped_smiles_to_heavy_order_with_preferred_order(
+    heavy: Chem.Mol,
+    preferred_heavy_order: list[int],
+) -> tuple[str, list[int]]:
+    """Build a non-canonical SMILES whose parsed atom order is mapped exactly.
+
+    RDKit can reorder atoms while serializing non-canonical SMILES, especially for
+    symmetric rings. We therefore:
+    1. renumber to the preferred display order,
+    2. serialize with atom-map numbers,
+    3. reparse that mapped SMILES to recover the true SMILES traversal order,
+    4. strip only the atom-map annotations from the original mapped SMILES text.
+    """
+    if len(preferred_heavy_order) != heavy.GetNumAtoms():
+        raise RuntimeError("Preferred ligand display order length mismatch.")
+    if sorted(preferred_heavy_order) != list(range(heavy.GetNumAtoms())):
+        raise RuntimeError("Preferred ligand display order is not a valid permutation.")
+
+    preferred = Chem.RenumberAtoms(heavy, preferred_heavy_order)
+    tagged = Chem.Mol(preferred)
+    for idx, atom in enumerate(tagged.GetAtoms(), start=1):
+        atom.SetAtomMapNum(idx)
+
+    mapped_smiles = Chem.MolToSmiles(tagged, canonical=False, isomericSmiles=True)
+    mapped = Chem.MolFromSmiles(mapped_smiles)
+    if mapped is None or mapped.GetNumAtoms() != heavy.GetNumAtoms():
+        raise RuntimeError("Failed to build mapped ligand display SMILES from reference ligand.")
+
+    smiles_to_preferred: list[int] = []
+    seen_indices: set[int] = set()
+    for atom in mapped.GetAtoms():
+        mapped_idx = atom.GetAtomMapNum() - 1
+        if mapped_idx < 0 or mapped_idx >= heavy.GetNumAtoms():
+            raise RuntimeError("Invalid atom-map index while building ligand display SMILES order.")
+        if mapped_idx in seen_indices:
+            raise RuntimeError("Duplicate atom-map index while building ligand display SMILES order.")
+        seen_indices.add(mapped_idx)
+        smiles_to_preferred.append(mapped_idx)
+
+    if len(smiles_to_preferred) != heavy.GetNumAtoms():
+        raise RuntimeError("Incomplete ligand display SMILES order mapping.")
+
+    smiles_to_heavy = [preferred_heavy_order[idx] for idx in smiles_to_preferred]
+    smiles = re.sub(r":\d+(?=])", "", mapped_smiles)
+    if not smiles:
+        raise RuntimeError("Failed to strip atom maps from ligand display SMILES.")
+    return smiles, smiles_to_heavy
+
+
+def _build_smiles_order_from_ligand_mol(mol: Chem.Mol) -> tuple[str, list[int], list[str]]:
+    """Return alignment SMILES plus mapping from SMILES atom order to heavy-atom index."""
+    heavy, heavy_name_keys = _extract_heavy_atom_name_keys(mol)
+    smiles, smiles_to_heavy = _mapped_smiles_to_heavy_order(heavy, canonical=False)
+    return smiles, smiles_to_heavy, heavy_name_keys
+
+
+def _build_display_smiles_order_from_ligand_mol(mol: Chem.Mol) -> tuple[str, list[int], list[str]]:
+    """Return display SMILES plus mapping from display atom order to heavy-atom index."""
+    heavy, heavy_name_keys = _extract_heavy_atom_name_keys(mol)
+    ranks = list(Chem.CanonicalRankAtoms(heavy, breakTies=True, includeChirality=True))
+    if len(ranks) != heavy.GetNumAtoms():
+        raise RuntimeError("Failed to build canonical ligand display order.")
+    preferred_heavy_order = sorted(range(len(ranks)), key=lambda idx: (ranks[idx], idx))
+    smiles, smiles_to_heavy = _mapped_smiles_to_heavy_order_with_preferred_order(
+        heavy,
+        preferred_heavy_order,
+    )
     return smiles, smiles_to_heavy, heavy_name_keys
 
 
@@ -976,19 +1170,19 @@ def _write_atom_coverage(
         aligned_ligand_chain_id = ""
         aligned_ligand_atom_name_keys: list[str] = []
         aligned_ligand_atom_plddts_by_name: dict[str, float] = {}
+        display_ligand_smiles = ""
+        display_ligand_plddts: list[float] = []
+        display_ligand_atom_name_keys: list[str] = []
+        display_to_heavy: list[int] = []
         if reference_ligand_mol is not None:
-            ligand_chains = [
-                str(item.get("chain") or "").strip()
-                for item in coverage.get("ligand_atom_coverage", [])
-                if isinstance(item, dict) and str(item.get("chain") or "").strip()
-            ]
-            aligned_ligand_chain_id = _resolve_model_ligand_chain_id(
-                ligand_chains,
-                requested_ligand_chain_id,
-            )
             aligned_ligand_smiles, smiles_to_heavy, heavy_name_keys = _build_smiles_order_from_ligand_mol(
                 reference_ligand_mol
             )
+            display_ligand_smiles, display_to_heavy, display_heavy_name_keys = _build_display_smiles_order_from_ligand_mol(
+                reference_ligand_mol
+            )
+            if display_heavy_name_keys != heavy_name_keys:
+                raise RuntimeError("Display ligand order changed heavy-atom identity set.")
 
         normalized_map: dict[str, str] = {}
         if isinstance(ligand_smiles_map, dict) and ligand_smiles_map:
@@ -1012,14 +1206,7 @@ def _write_atom_coverage(
         if aligned_ligand_smiles:
             selected_ligand_smiles = aligned_ligand_smiles
         elif requested_chain and normalized_map:
-            selected_ligand_smiles = (
-                normalized_map.get(requested_chain)
-                or normalized_map.get(requested_chain.upper())
-                or normalized_map.get(requested_chain.lower())
-                or ""
-            )
-        if not selected_ligand_smiles and len(normalized_map) == 1:
-            selected_ligand_smiles = next(iter(normalized_map.values()))
+            selected_ligand_smiles = normalized_map.get(requested_chain) or ""
 
         for conf_path in sorted(struct_dir.glob(f"confidence_{record_id}_model_*.json")):
             try:
@@ -1041,6 +1228,17 @@ def _write_atom_coverage(
                         f"Cannot find structure file for confidence: {conf_path.name}"
                     )
                 by_chain = _extract_ligand_bfactors_by_chain(structure_file)
+                resolved_chain_id = resolve_model_ligand_chain_id_by_atom_names(
+                    by_chain=by_chain,
+                    heavy_name_keys=heavy_name_keys,
+                    requested_ligand_chain_id=requested_ligand_chain_id,
+                )
+                if aligned_ligand_chain_id and aligned_ligand_chain_id != resolved_chain_id:
+                    raise RuntimeError(
+                        "Resolved ligand chain changed across model outputs: "
+                        f"{aligned_ligand_chain_id!r} vs {resolved_chain_id!r}."
+                    )
+                aligned_ligand_chain_id = resolved_chain_id
                 if aligned_ligand_chain_id not in by_chain:
                     raise RuntimeError(
                         "Model ligand chain not found in structure for confidence alignment: "
@@ -1066,6 +1264,8 @@ def _write_atom_coverage(
                     )
                 aligned_ligand_plddts = [heavy_bfactors[idx] for idx in smiles_to_heavy]
                 aligned_ligand_atom_name_keys = [heavy_name_keys[idx] for idx in smiles_to_heavy]
+                display_ligand_plddts = [heavy_bfactors[idx] for idx in display_to_heavy]
+                display_ligand_atom_name_keys = [heavy_name_keys[idx] for idx in display_to_heavy]
                 aligned_ligand_atom_plddts_by_name = {
                     aligned_ligand_atom_name_keys[idx]: float(aligned_ligand_plddts[idx])
                     for idx in range(len(aligned_ligand_atom_name_keys))
@@ -1085,6 +1285,18 @@ def _write_atom_coverage(
                     }
                 data["ligand_atom_plddts"] = aligned_ligand_plddts
                 data["ligand_smiles"] = aligned_ligand_smiles
+                if display_ligand_smiles:
+                    data["ligand_display_smiles"] = display_ligand_smiles
+                if display_ligand_plddts:
+                    data["ligand_display_atom_plddts"] = display_ligand_plddts
+                    data["ligand_display_atom_plddts_by_chain"] = {
+                        aligned_ligand_chain_id: display_ligand_plddts
+                    }
+                if display_ligand_atom_name_keys:
+                    data["ligand_display_atom_name_keys"] = display_ligand_atom_name_keys
+                    data["ligand_display_atom_name_keys_by_chain"] = {
+                        aligned_ligand_chain_id: display_ligand_atom_name_keys
+                    }
 
             data["ligand_atom_coverage"] = coverage["ligand_atom_coverage"]
             data["chain_atom_coverage"] = coverage["chain_atom_coverage"]
@@ -1099,6 +1311,8 @@ def _write_atom_coverage(
         alignment_payload: dict[str, object] = {}
         if selected_ligand_smiles:
             alignment_payload["ligand_smiles"] = selected_ligand_smiles
+        if display_ligand_smiles:
+            alignment_payload["ligand_display_smiles"] = display_ligand_smiles
         if aligned_ligand_chain_id:
             alignment_payload["model_ligand_chain_id"] = aligned_ligand_chain_id
         if requested_chain:
@@ -1111,10 +1325,22 @@ def _write_atom_coverage(
                 alignment_payload["ligand_atom_name_keys_by_chain"] = {
                     aligned_ligand_chain_id: aligned_ligand_atom_name_keys
                 }
+        if display_ligand_atom_name_keys:
+            alignment_payload["ligand_display_atom_name_keys"] = display_ligand_atom_name_keys
+            if aligned_ligand_chain_id:
+                alignment_payload["ligand_display_atom_name_keys_by_chain"] = {
+                    aligned_ligand_chain_id: display_ligand_atom_name_keys
+                }
         if aligned_ligand_atom_plddts_by_name and aligned_ligand_chain_id:
             alignment_payload["ligand_atom_plddts_by_chain_and_name"] = {
                 aligned_ligand_chain_id: aligned_ligand_atom_plddts_by_name
             }
+        if display_ligand_plddts:
+            alignment_payload["ligand_display_atom_plddts"] = display_ligand_plddts
+            if aligned_ligand_chain_id:
+                alignment_payload["ligand_display_atom_plddts_by_chain"] = {
+                    aligned_ligand_chain_id: display_ligand_plddts
+                }
         return alignment_payload or None
     except Exception as exc:  # noqa: BLE001
         if reference_ligand_mol is not None:

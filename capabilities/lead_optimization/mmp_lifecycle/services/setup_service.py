@@ -99,6 +99,10 @@ def build_database_from_smiles(
     index_work_mem_mb: int = 0,
     index_parallel_workers: int = 0,
     index_commit_every_flushes: int = 0,
+    index_max_constant_matches: int = 0,
+    index_max_constant_pairs: int = 0,
+    full_index_shards: int = 1,
+    full_index_jobs: int = 1,
     build_construct_tables: bool = True,
     build_constant_smiles_mol_index: bool = True,
 ) -> bool:
@@ -119,6 +123,10 @@ def build_database_from_smiles(
             index_work_mem_mb=index_work_mem_mb,
             index_parallel_workers=index_parallel_workers,
             index_commit_every_flushes=index_commit_every_flushes,
+            index_max_constant_matches=index_max_constant_matches,
+            index_max_constant_pairs=index_max_constant_pairs,
+            full_index_shards=full_index_shards,
+            full_index_jobs=full_index_jobs,
             build_construct_tables=build_construct_tables,
             build_constant_smiles_mol_index=build_constant_smiles_mol_index,
         )
@@ -142,6 +150,10 @@ def index_fragdb_into_database(
     index_work_mem_mb: int = 0,
     index_parallel_workers: int = 0,
     index_commit_every_flushes: int = 0,
+    index_max_constant_matches: int = 0,
+    index_max_constant_pairs: int = 0,
+    full_index_shards: int = 1,
+    full_index_jobs: int = 1,
     build_construct_tables: bool = True,
     build_constant_smiles_mol_index: bool = True,
 ) -> bool:
@@ -158,6 +170,10 @@ def index_fragdb_into_database(
             index_work_mem_mb=index_work_mem_mb,
             index_parallel_workers=index_parallel_workers,
             index_commit_every_flushes=index_commit_every_flushes,
+            index_max_constant_matches=index_max_constant_matches,
+            index_max_constant_pairs=index_max_constant_pairs,
+            full_index_shards=full_index_shards,
+            full_index_jobs=full_index_jobs,
             build_construct_tables=build_construct_tables,
             build_constant_smiles_mol_index=build_constant_smiles_mol_index,
         )

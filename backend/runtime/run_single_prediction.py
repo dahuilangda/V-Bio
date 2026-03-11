@@ -5744,6 +5744,7 @@ def run_boltz_backend(
     predict_args: dict,
     model_name: Optional[str],
     task_id: Optional[str] = None,
+    strict_ligand_confidence_contract: bool = False,
 ) -> None:
     msa_server_url = _assert_msa_server_configured("boltz")
     normalized_yaml = _normalize_ligand_chain_collisions(yaml_content)
@@ -5757,6 +5758,8 @@ def run_boltz_backend(
     if model_name:
         cli_args['model'] = model_name
         print(f"DEBUG: Using model: {model_name}", file=sys.stderr)
+    if strict_ligand_confidence_contract:
+        cli_args["strict_ligand_confidence_contract"] = True
 
     if 'diffusion_samples' not in cli_args or cli_args['diffusion_samples'] is None:
         effective_model = str(cli_args.get('model') or model_name or 'boltz2').lower()
@@ -6490,6 +6493,12 @@ def main():
         seed = predict_args.pop("seed", None)
         template_inputs = predict_args.pop("template_inputs", None)
         pocketxmol_inputs = predict_args.pop("pocketxmol_inputs", {})
+        strict_ligand_confidence_contract = _read_bool_option(
+            predict_args,
+            "strict_ligand_confidence_contract",
+            False,
+        )
+        predict_args.pop("strict_ligand_confidence_contract", None)
 
         use_msa_raw = predict_args.get("use_msa_server", True)
         if isinstance(use_msa_raw, bool):
@@ -6589,6 +6598,7 @@ def main():
                     predict_args,
                     model_name,
                     task_id=runtime_task_id,
+                    strict_ligand_confidence_contract=strict_ligand_confidence_contract,
                 )
 
             if not os.path.exists(output_archive_path):

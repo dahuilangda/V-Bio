@@ -258,6 +258,34 @@ bash frontend/run.sh dev
 
 中央能力快照：
 
+## 9. 一键重建
+
+如果你已经按本文完成过 `.env` 配置，之后代码更新可以直接一键重建：
+
+```bash
+cd /data/V-Bio
+bash deploy/scripts/rebuild_single_node_all_apps.sh
+```
+
+默认行为：
+- 复用现有 `deploy/docker/*.env`
+- 重建并重启 Redis / ColabFold / MMP PostgreSQL / Central / GPU workers / CPU worker
+- 重新构建 `vbio-boltz2-runtime`
+- 重启 `supabase-lite` 和前端 `dev` 服务
+
+可选参数：
+
+```bash
+# 前端改成 preview/prod 风格启动
+bash deploy/scripts/rebuild_single_node_all_apps.sh --prod-frontend
+
+# 跳过前端，只重建后端和 worker
+bash deploy/scripts/rebuild_single_node_all_apps.sh --skip-frontend
+
+# 跳过 vbio-boltz2-runtime 镜像重建
+bash deploy/scripts/rebuild_single_node_all_apps.sh --skip-runtime-image
+```
+
 ```bash
 curl -H "X-API-Token: ${API_TOKEN}" "http://${HOST_IP}:5000/workers/capabilities"
 curl -H "X-API-Token: ${API_TOKEN}" "http://${HOST_IP}:5000/workers/cluster_status"

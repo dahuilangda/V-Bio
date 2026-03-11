@@ -634,10 +634,7 @@ function isHydrogenLikeElement(raw: string): boolean {
 }
 
 function normalizeAtomNameKey(raw: string): string {
-  return String(raw || '')
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, '');
+  return String(raw || '').trim();
 }
 
 function toFiniteNumberArray(value: unknown): number[] {

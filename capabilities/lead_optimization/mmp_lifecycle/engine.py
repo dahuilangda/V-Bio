@@ -1006,6 +1006,289 @@ sys.exit(0 if exists else 4)
     return False
 
 
+def _index_fragments_to_postgres_sharded(
+    fragments_file: str,
+    postgres_url: str,
+    *,
+    postgres_schema: str = "public",
+    force_rebuild_schema: bool = False,
+    properties_file: Optional[str] = None,
+    skip_attachment_enrichment: bool = False,
+    attachment_force_recompute: bool = False,
+    index_maintenance_work_mem_mb: int = 0,
+    index_work_mem_mb: int = 0,
+    index_parallel_workers: int = 0,
+    index_commit_every_flushes: int = 0,
+    index_max_constant_matches: int = 0,
+    index_max_constant_pairs: int = 0,
+    full_index_shards: int = 1,
+    full_index_jobs: int = 1,
+    build_construct_tables: bool = True,
+    build_constant_smiles_mol_index: bool = True,
+) -> bool:
+    logger = logging.getLogger(__name__)
+    normalized_schema = _validate_pg_schema(postgres_schema)
+    shard_total, jobs_effective = _normalize_full_index_shard_settings(full_index_shards, full_index_jobs)
+    if shard_total <= 1:
+        raise ValueError("Sharded full index requires shard count > 1.")
+    if properties_file:
+        raise RuntimeError("Sharded full index currently does not support properties_file. Use unsharded build for property-aware base index.")
+    if not os.path.exists(fragments_file):
+        logger.error("Fragments file not found: %s", fragments_file)
+        return False
+    if not _verify_mmpdb_runtime_resources(logger):
+        logger.info("Fragments file kept for debugging: %s", fragments_file)
+        return False
+
+    output_dir = os.path.dirname(os.path.abspath(fragments_file)) or "."
+    try:
+        _assert_full_sharded_build_meta(
+            output_dir=output_dir,
+            fragments_file=fragments_file,
+            schema=normalized_schema,
+            shard_count=shard_total,
+        )
+    except Exception as exc:
+        logger.error("Refusing sharded full-index resume due to incompatible state: %s", exc)
+        return False
+
+    constants_file = os.path.join(output_dir, f"{normalized_schema}_full_sharded.constants.tsv")
+    if not os.path.exists(constants_file):
+        if not _run_mmpdb_fragdb_constants(fragments_file, constants_file):
+            return False
+    constant_counts = _load_constant_counts_from_constants_file(constants_file)
+    all_constants = sorted(constant_counts.keys())
+    if not all_constants:
+        logger.error("No constants found in fragments file for sharded full index: %s", fragments_file)
+        return False
+    shard_groups = _split_constants_into_shards(
+        all_constants,
+        shard_total,
+        weights=constant_counts,
+    )
+    if not shard_groups:
+        logger.error("Failed to derive shard groups for full index.")
+        return False
+
+    shard_specs: List[Tuple[int, List[str], str, str, str]] = []
+    for shard_seq, shard_constants in enumerate(shard_groups, start=1):
+        constants_list = [str(token or "").strip() for token in shard_constants if str(token or "").strip()]
+        if not constants_list:
+            continue
+        shard_constants_file, shard_fragdb_file = _full_sharded_build_paths(
+            output_dir=output_dir,
+            schema=normalized_schema,
+            shard_count=shard_total,
+            shard_seq=shard_seq,
+        )
+        shard_temp_schema = _full_sharded_temp_schema_name(
+            normalized_schema,
+            shard_count=shard_total,
+            shard_seq=shard_seq,
+        )
+        shard_specs.append(
+            (
+                shard_seq,
+                constants_list,
+                shard_constants_file,
+                shard_fragdb_file,
+                shard_temp_schema,
+            )
+        )
+    if not shard_specs:
+        logger.error("No shard specifications created for full index.")
+        return False
+
+    logger.info(
+        "Full sharded index enabled: schema=%s shards=%s jobs=%s constants=%s",
+        normalized_schema,
+        len(shard_specs),
+        jobs_effective,
+        len(all_constants),
+    )
+
+    def _prepare_full_shard(
+        spec: Tuple[int, List[str], str, str, str]
+    ) -> Tuple[int, bool, str]:
+        shard_seq, shard_constants, shard_constants_file, shard_fragdb_file, shard_temp_schema = spec
+        if _schema_has_ready_mmpdb_core_tables(postgres_url, shard_temp_schema):
+            logger.info(
+                "Reusing completed full-index shard schema: shard=%s schema=%s",
+                shard_seq,
+                shard_temp_schema,
+            )
+            return shard_seq, True, ""
+        shard_constant_count = _write_constants_file(
+            shard_constants_file,
+            shard_constants,
+            counts=constant_counts,
+        )
+        if shard_constant_count <= 0:
+            return shard_seq, False, "empty constants"
+        if not os.path.exists(shard_fragdb_file):
+            if not _run_mmpdb_fragdb_partition_inputs(
+                fragdb_inputs=[fragments_file],
+                constants_file=shard_constants_file,
+                output_fragdb=shard_fragdb_file,
+            ):
+                return shard_seq, False, "fragdb_partition failed"
+        ok = _index_fragments_to_postgres(
+            shard_fragdb_file,
+            postgres_url,
+            postgres_schema=shard_temp_schema,
+            force_rebuild_schema=True,
+            properties_file=None,
+            skip_attachment_enrichment=True,
+            attachment_force_recompute=False,
+            index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+            index_work_mem_mb=index_work_mem_mb,
+            index_parallel_workers=index_parallel_workers,
+            index_commit_every_flushes=index_commit_every_flushes,
+            index_max_constant_matches=index_max_constant_matches,
+            index_max_constant_pairs=index_max_constant_pairs,
+            skip_mmpdb_post_index_finalize=True,
+            skip_mmpdb_list_verify=True,
+            build_construct_tables=False,
+            build_constant_smiles_mol_index=False,
+            detect_existing_core_tables=False,
+            full_index_shards=1,
+            full_index_jobs=1,
+        )
+        if not ok:
+            return shard_seq, False, "index_fragments_to_postgres failed"
+        return shard_seq, True, ""
+
+    shard_prepare_errors: List[str] = []
+    if jobs_effective > 1 and len(shard_specs) > 1:
+        logger.info(
+            "Full shard indexing concurrency enabled: shards=%s jobs=%s",
+            len(shard_specs),
+            jobs_effective,
+        )
+        with ThreadPoolExecutor(max_workers=jobs_effective) as executor:
+            future_map = {
+                executor.submit(_prepare_full_shard, spec): spec[0]
+                for spec in shard_specs
+            }
+            for future in as_completed(future_map):
+                shard_seq = future_map[future]
+                try:
+                    seq, ok, reason = future.result()
+                except Exception as exc:
+                    shard_prepare_errors.append(f"shard={shard_seq} exception={exc}")
+                    continue
+                if not ok:
+                    shard_prepare_errors.append(f"shard={seq} reason={reason}")
+    else:
+        for spec in shard_specs:
+            seq, ok, reason = _prepare_full_shard(spec)
+            if not ok:
+                shard_prepare_errors.append(f"shard={seq} reason={reason}")
+                break
+
+    if shard_prepare_errors:
+        logger.error("Full shard preparation failed: %s", "; ".join(shard_prepare_errors))
+        return False
+
+    existing_target_tables = _find_mmpdb_core_tables_in_schema(postgres_url, normalized_schema)
+    if existing_target_tables and not force_rebuild_schema:
+        logger.error(
+            "Target schema '%s' already contains mmpdb core tables: %s. Use --force to rebuild.",
+            normalized_schema,
+            ", ".join(existing_target_tables),
+        )
+        return False
+
+    try:
+        _create_postgres_bigint_core_schema(
+            postgres_url,
+            schema=normalized_schema,
+            drop_existing_core_tables=True,
+        )
+    except Exception as exc:
+        logger.error("Failed initializing target schema for sharded full index: %s", exc)
+        return False
+
+    try:
+        with psycopg.connect(postgres_url, autocommit=False) as conn:
+            with conn.cursor() as cursor:
+                _pg_set_search_path(cursor, normalized_schema)
+                for merge_seq, spec in enumerate(sorted(shard_specs, key=lambda item: item[0])):
+                    shard_seq, shard_constants, _, _, shard_temp_schema = spec
+                    shard_active_rows = _load_used_compounds_from_schema(
+                        cursor,
+                        schema=shard_temp_schema,
+                    )
+                    shard_candidate_smiles = [row[0] for row in shard_active_rows]
+                    logger.info(
+                        "Merging full-index shard into target: shard=%s schema=%s compounds=%s constants=%s",
+                        shard_seq,
+                        shard_temp_schema,
+                        len(shard_candidate_smiles),
+                        len(shard_constants),
+                    )
+                    _merge_incremental_temp_schema_into_target(
+                        cursor,
+                        temp_schema=shard_temp_schema,
+                        affected_constants=list(shard_constants),
+                        candidate_smiles=shard_candidate_smiles,
+                        active_rows=shard_active_rows,
+                        replace_existing_pairs_for_constants=False,
+                        skip_finalize=True,
+                        align_sequences=(merge_seq == 0),
+                    )
+                _update_dataset_counts(cursor)
+                conn.commit()
+    except Exception as exc:
+        logger.error("Failed merging sharded full-index schemas into target '%s': %s", normalized_schema, exc, exc_info=True)
+        return False
+
+    if not skip_attachment_enrichment:
+        enrich_ok = finalize_postgres_database(
+            postgres_url,
+            schema=normalized_schema,
+            force_recompute_num_frags=attachment_force_recompute,
+            index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+            index_work_mem_mb=index_work_mem_mb,
+            index_parallel_workers=index_parallel_workers,
+            build_construct_tables=build_construct_tables,
+            build_constant_smiles_mol_index=build_constant_smiles_mol_index,
+        )
+        if not enrich_ok:
+            logger.warning(
+                "Attachment/index enrichment failed after sharded full build; base MMP data exists but lead-opt query quality/performance may degrade."
+            )
+            return False
+    else:
+        try:
+            with psycopg.connect(postgres_url, autocommit=False) as conn:
+                with conn.cursor() as cursor:
+                    _pg_set_search_path(cursor, normalized_schema)
+                    _apply_postgres_build_tuning(
+                        cursor,
+                        maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+                        work_mem_mb=index_work_mem_mb,
+                        parallel_maintenance_workers=index_parallel_workers,
+                    )
+                    _create_postgres_core_indexes(
+                        cursor,
+                        normalized_schema,
+                        enable_constant_smiles_mol_index=build_constant_smiles_mol_index,
+                    )
+                    cursor.execute("ANALYZE")
+                conn.commit()
+        except Exception as exc:
+            logger.error("Failed building core indexes for sharded full build '%s': %s", normalized_schema, exc, exc_info=True)
+            return False
+
+    for _, _, _, _, shard_temp_schema in shard_specs:
+        try:
+            _drop_postgres_schema_if_exists(postgres_url, shard_temp_schema)
+        except Exception as exc:
+            logger.warning("Failed dropping completed full-index shard schema '%s': %s", shard_temp_schema, exc)
+    return True
+
+
 def _index_fragments_to_postgres(
     fragments_file: str,
     postgres_url: str,
@@ -1021,6 +1304,8 @@ def _index_fragments_to_postgres(
     index_commit_every_flushes: int = 0,
     index_max_constant_matches: int = 0,
     index_max_constant_pairs: int = 0,
+    full_index_shards: int = 1,
+    full_index_jobs: int = 1,
     skip_mmpdb_post_index_finalize: bool = False,
     skip_mmpdb_list_verify: bool = False,
     delta_pair_record_ids: Optional[Sequence[str]] = None,
@@ -1032,6 +1317,36 @@ def _index_fragments_to_postgres(
     logger = logging.getLogger(__name__)
     normalized_schema = _validate_pg_schema(postgres_schema)
     try:
+        normalized_full_shards, normalized_full_jobs = _normalize_full_index_shard_settings(
+            full_index_shards,
+            full_index_jobs,
+        )
+        if (
+            normalized_full_shards > 1
+            and not delta_pair_record_ids
+            and not skip_mmpdb_post_index_finalize
+            and not skip_mmpdb_list_verify
+        ):
+            return _index_fragments_to_postgres_sharded(
+                fragments_file,
+                postgres_url,
+                postgres_schema=normalized_schema,
+                force_rebuild_schema=force_rebuild_schema,
+                properties_file=properties_file,
+                skip_attachment_enrichment=skip_attachment_enrichment,
+                attachment_force_recompute=attachment_force_recompute,
+                index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+                index_work_mem_mb=index_work_mem_mb,
+                index_parallel_workers=index_parallel_workers,
+                index_commit_every_flushes=index_commit_every_flushes,
+                index_max_constant_matches=index_max_constant_matches,
+                index_max_constant_pairs=index_max_constant_pairs,
+                full_index_shards=normalized_full_shards,
+                full_index_jobs=normalized_full_jobs,
+                build_construct_tables=build_construct_tables,
+                build_constant_smiles_mol_index=build_constant_smiles_mol_index,
+            )
+
         if not _is_postgres_dsn(str(postgres_url or "").strip()):
             logger.error("PostgreSQL DSN is required. Received: %s", postgres_url)
             return False
@@ -1254,6 +1569,8 @@ def create_mmp_database(
     index_commit_every_flushes: int = 0,
     index_max_constant_matches: int = 0,
     index_max_constant_pairs: int = 0,
+    full_index_shards: int = 1,
+    full_index_jobs: int = 1,
     build_construct_tables: bool = True,
     build_constant_smiles_mol_index: bool = True,
 ) -> bool:
@@ -1295,6 +1612,8 @@ def create_mmp_database(
             index_commit_every_flushes=index_commit_every_flushes,
             index_max_constant_matches=index_max_constant_matches,
             index_max_constant_pairs=index_max_constant_pairs,
+            full_index_shards=full_index_shards,
+            full_index_jobs=full_index_jobs,
             build_construct_tables=build_construct_tables,
             build_constant_smiles_mol_index=build_constant_smiles_mol_index,
         )
@@ -1369,6 +1688,91 @@ def _find_mmpdb_core_tables_in_schema(postgres_url: str, schema: str) -> List[st
         with conn.cursor() as cursor:
             cursor.execute(query, [normalized_schema, *list(MMPDB_CORE_TABLE_NAMES)])
             return [str(row[0]) for row in cursor.fetchall()]
+
+
+def _schema_has_ready_mmpdb_core_tables(postgres_url: str, schema: str) -> bool:
+    table_names = set(_find_mmpdb_core_tables_in_schema(postgres_url, schema))
+    return set(MMPDB_CORE_TABLE_NAMES).issubset(table_names)
+
+
+def _drop_postgres_schema_if_exists(postgres_url: str, schema: str) -> None:
+    if not HAS_PSYCOPG:
+        raise RuntimeError("psycopg is required for PostgreSQL schema cleanup.")
+    normalized_schema = _validate_pg_schema(schema)
+    with psycopg.connect(postgres_url, autocommit=True) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(Identifier(normalized_schema)))
+
+
+def _create_postgres_bigint_core_schema(
+    postgres_url: str,
+    *,
+    schema: str,
+    drop_existing_core_tables: bool = True,
+) -> None:
+    if not HAS_PSYCOPG:
+        raise RuntimeError("psycopg is required for PostgreSQL schema initialization.")
+    from mmpdblib import schema as mmp_schema
+
+    normalized_schema = _validate_pg_schema(schema)
+    with psycopg.connect(postgres_url, autocommit=False) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                SQL("CREATE SCHEMA IF NOT EXISTS {}").format(Identifier(normalized_schema))
+            )
+            if drop_existing_core_tables:
+                existing_tables = _find_mmpdb_core_tables_in_schema(postgres_url, normalized_schema)
+                for table_name in existing_tables:
+                    cursor.execute(
+                        SQL("DROP TABLE {}.{} CASCADE").format(
+                            Identifier(normalized_schema),
+                            Identifier(table_name),
+                        )
+                    )
+            _pg_set_search_path(cursor, normalized_schema)
+            schema_sql = mmp_schema.get_schema_for_database(mmp_schema.PostgresConfig)
+            schema_sql = schema_sql.replace("SERIAL PRIMARY KEY", "BIGSERIAL PRIMARY KEY")
+            schema_sql = schema_sql.replace(" INTEGER", " BIGINT")
+            mmp_schema._execute_sql(cursor, schema_sql)
+        conn.commit()
+
+
+def _load_used_compounds_from_schema(
+    cursor,
+    *,
+    schema: str,
+) -> List[Tuple[str, str, str]]:
+    normalized_schema = _validate_pg_schema(schema)
+    cursor.execute(
+        f"""
+        WITH used_compounds AS (
+            SELECT DISTINCT compound1_id AS id
+            FROM {normalized_schema}.pair
+            UNION
+            SELECT DISTINCT compound2_id AS id
+            FROM {normalized_schema}.pair
+        )
+        SELECT DISTINCT
+            c.clean_smiles,
+            COALESCE(NULLIF(c.public_id, ''), 'CMPD_' || SUBSTRING(md5(c.clean_smiles) FROM 1 FOR 16)) AS public_id,
+            COALESCE(NULLIF(c.input_smiles, ''), c.clean_smiles) AS input_smiles
+        FROM {normalized_schema}.compound c
+        INNER JOIN used_compounds u
+                ON u.id = c.id
+        WHERE c.clean_smiles IS NOT NULL
+          AND c.clean_smiles <> ''
+        ORDER BY c.clean_smiles
+        """
+    )
+    return [
+        (
+            str(row[0] or "").strip(),
+            str(row[1] or "").strip(),
+            str(row[2] or "").strip(),
+        )
+        for row in cursor.fetchall()
+        if str(row[0] or "").strip()
+    ]
 
 
 def _pg_set_search_path(cursor, schema: str) -> None:
@@ -3372,7 +3776,28 @@ def _run_mmpdb_fragdb_partition(
     constants_file: str,
     output_fragdb: str,
 ) -> bool:
+    return _run_mmpdb_fragdb_partition_inputs(
+        fragdb_inputs=[cache_fragdb, delta_fragdb],
+        constants_file=constants_file,
+        output_fragdb=output_fragdb,
+    )
+
+
+def _run_mmpdb_fragdb_partition_inputs(
+    *,
+    fragdb_inputs: Sequence[str],
+    constants_file: str,
+    output_fragdb: str,
+) -> bool:
     logger = logging.getLogger(__name__)
+    input_files = [
+        str(item or "").strip()
+        for item in (fragdb_inputs or [])
+        if str(item or "").strip()
+    ]
+    if not input_files:
+        logger.error("fragdb_partition requires at least one input fragdb file.")
+        return False
     os.makedirs(os.path.dirname(output_fragdb) or ".", exist_ok=True)
     partition_template = f"{output_fragdb}.partition.{{i:04}}.fragdb"
     cmd = [
@@ -3380,8 +3805,7 @@ def _run_mmpdb_fragdb_partition(
         "-m",
         "mmpdblib",
         "fragdb_partition",
-        cache_fragdb,
-        delta_fragdb,
+        *input_files,
         "-c",
         constants_file,
         "-n",
@@ -3753,6 +4177,122 @@ def _split_constants_into_shards(
         shards[shard_idx].append(token)
         shard_loads[shard_idx] += token_weight
     return [sorted(chunk) for chunk in shards if chunk]
+
+
+def _normalize_full_index_shard_settings(
+    shard_count: int,
+    shard_jobs: int,
+) -> Tuple[int, int]:
+    normalized_shards = max(1, int(shard_count or 1))
+    normalized_jobs = max(1, int(shard_jobs or 1))
+    return normalized_shards, min(normalized_jobs, normalized_shards)
+
+
+def _fragment_file_signature(path: str) -> Dict[str, object]:
+    token = str(path or "").strip()
+    if not token:
+        raise ValueError("Fragment file path is required.")
+    if not os.path.exists(token):
+        raise FileNotFoundError(f"Fragment file not found: {token}")
+    stat = os.stat(token)
+    return {
+        "path": os.path.abspath(token),
+        "size": int(stat.st_size or 0),
+        "mtime_ns": int(getattr(stat, "st_mtime_ns", int(float(stat.st_mtime) * 1_000_000_000))),
+    }
+
+
+def _full_sharded_build_meta_path(output_dir: str, schema: str) -> str:
+    normalized_schema = _validate_pg_schema(schema)
+    return os.path.join(str(output_dir or "").strip() or ".", f"{normalized_schema}_full_sharded_build.meta.json")
+
+
+def _read_json_payload(path: str) -> Dict[str, object]:
+    token = str(path or "").strip()
+    if not token or not os.path.exists(token):
+        return {}
+    try:
+        with open(token, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_json_payload(path: str, payload: Dict[str, object]) -> None:
+    token = str(path or "").strip()
+    if not token:
+        raise ValueError("JSON payload path is required.")
+    os.makedirs(os.path.dirname(token) or ".", exist_ok=True)
+    with open(token, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _full_sharded_build_meta(
+    *,
+    fragments_file: str,
+    schema: str,
+    shard_count: int,
+) -> Dict[str, object]:
+    normalized_schema = _validate_pg_schema(schema)
+    normalized_shards = max(1, int(shard_count or 1))
+    return {
+        "mode": "full_sharded_index",
+        "schema": normalized_schema,
+        "shard_count": normalized_shards,
+        "fragment_file": _fragment_file_signature(fragments_file),
+    }
+
+
+def _assert_full_sharded_build_meta(
+    *,
+    output_dir: str,
+    fragments_file: str,
+    schema: str,
+    shard_count: int,
+) -> str:
+    meta_path = _full_sharded_build_meta_path(output_dir, schema)
+    expected = _full_sharded_build_meta(
+        fragments_file=fragments_file,
+        schema=schema,
+        shard_count=shard_count,
+    )
+    existing = _read_json_payload(meta_path)
+    if existing and existing != expected:
+        raise RuntimeError(
+            "Existing sharded full-build state does not match the current fragments file or shard settings. "
+            f"State file: {meta_path}"
+        )
+    if not existing:
+        _write_json_payload(meta_path, expected)
+    return meta_path
+
+
+def _full_sharded_build_paths(
+    *,
+    output_dir: str,
+    schema: str,
+    shard_count: int,
+    shard_seq: int,
+) -> Tuple[str, str]:
+    normalized_schema = _validate_pg_schema(schema)
+    normalized_shards = max(1, int(shard_count or 1))
+    normalized_seq = max(1, int(shard_seq or 1))
+    prefix = os.path.join(
+        str(output_dir or "").strip() or ".",
+        f"{normalized_schema}_full_shard_s{normalized_shards:03d}",
+    )
+    constants_file = f"{prefix}.constants.s{normalized_seq:04d}.tsv"
+    shard_fragdb = f"{prefix}.s{normalized_seq:04d}.fragdb"
+    return constants_file, shard_fragdb
+
+
+def _full_sharded_temp_schema_name(schema: str, *, shard_count: int, shard_seq: int) -> str:
+    normalized_schema = _validate_pg_schema(schema)
+    suffix = f"fsh{max(1, int(shard_count or 1)):03d}_{max(1, int(shard_seq or 1)):04d}"
+    max_prefix_len = max(1, 63 - 1 - len(suffix))
+    prefix = normalized_schema[:max_prefix_len] or "mmp"
+    return _validate_pg_schema(f"{prefix}_{suffix}")
 
 
 def _load_active_compounds_for_smiles(
@@ -7193,6 +7733,20 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
     )
 
     parser.add_argument(
+        '--pg_full_index_shards',
+        type=int,
+        default=1,
+        help='全量 fragdb 索引按常量分片数量（>1 启用可重试的 full-build 分片模式）'
+    )
+
+    parser.add_argument(
+        '--pg_full_index_jobs',
+        type=int,
+        default=1,
+        help='全量分片索引并发作业数（建议 <= PostgreSQL/磁盘可承受能力）'
+    )
+
+    parser.add_argument(
         '--pg_incremental_index_shards',
         type=int,
         default=1,
@@ -7317,6 +7871,10 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
         args.pg_index_max_constant_matches = 0
     if args.pg_index_max_constant_pairs < 0:
         args.pg_index_max_constant_pairs = 0
+    if args.pg_full_index_shards < 1:
+        args.pg_full_index_shards = 1
+    if args.pg_full_index_jobs < 1:
+        args.pg_full_index_jobs = 1
     if args.pg_incremental_index_shards < 1:
         args.pg_incremental_index_shards = 1
     if args.pg_incremental_index_jobs < 1:
@@ -7632,6 +8190,8 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                     index_commit_every_flushes=args.pg_index_commit_every_flushes,
                     index_max_constant_matches=args.pg_index_max_constant_matches,
                     index_max_constant_pairs=args.pg_index_max_constant_pairs,
+                    full_index_shards=args.pg_full_index_shards,
+                    full_index_jobs=args.pg_full_index_jobs,
                     build_construct_tables=not args.pg_skip_construct_tables,
                     build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
                 )
@@ -7688,6 +8248,8 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                     index_commit_every_flushes=args.pg_index_commit_every_flushes,
                     index_max_constant_matches=args.pg_index_max_constant_matches,
                     index_max_constant_pairs=args.pg_index_max_constant_pairs,
+                    full_index_shards=args.pg_full_index_shards,
+                    full_index_jobs=args.pg_full_index_jobs,
                     build_construct_tables=not args.pg_skip_construct_tables,
                     build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
                 )

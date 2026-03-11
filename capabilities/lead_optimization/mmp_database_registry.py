@@ -37,6 +37,8 @@ _CATALOG_CACHE: Dict[Tuple[bool, bool, bool], Tuple[float, Dict[str, Any]]] = {}
 _STATUS_VALUES = {"ready", "building", "failed"}
 _LOCALHOST_DSN_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _DEFAULT_PG_PORT = 5432
+_INCREMENTAL_TRANSIENT_SCHEMA_RE = re.compile(r"_incs_[0-9]{8,}_[0-9]{2}$", re.IGNORECASE)
+_FULL_SHARD_TRANSIENT_SCHEMA_RE = re.compile(r"_fsh[0-9]{3}_[0-9]{4}$", re.IGNORECASE)
 
 
 def _is_postgres_dsn(candidate: str) -> bool:
@@ -342,6 +344,21 @@ def _to_int_or_none(value: Any) -> Optional[int]:
         return int(value)
     except Exception:
         return None
+
+
+def _is_internal_transient_schema_name(value: Any) -> bool:
+    token = str(value or "").strip().lower()
+    if not token:
+        return False
+    return bool(
+        _INCREMENTAL_TRANSIENT_SCHEMA_RE.search(token)
+        or _FULL_SHARD_TRANSIENT_SCHEMA_RE.search(token)
+    )
+
+
+def _is_internal_transient_database_entry(item: Dict[str, Any]) -> bool:
+    row = item if isinstance(item, dict) else {}
+    return _is_internal_transient_schema_name(row.get("schema")) or _is_internal_transient_schema_name(row.get("label"))
 
 
 def _get_pg_dataset_counts(conn: Any, schema: str) -> Dict[str, Optional[int]]:
@@ -669,6 +686,7 @@ def get_mmp_database_catalog(
         item["status_message"] = str(item.get("status_message") or "").strip()
         item["status_updated_at"] = str(item.get("status_updated_at") or "").strip()
         item["status_token"] = str(item.get("status_token") or "").strip()
+    entries = [item for item in entries if not _is_internal_transient_database_entry(item)]
     entries.sort(key=lambda item: (0 if bool(item.get("is_default")) else 1, str(item.get("label") or item.get("id") or "")))
 
     default_id = ""

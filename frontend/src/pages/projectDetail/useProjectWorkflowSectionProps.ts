@@ -52,6 +52,7 @@ interface UseProjectWorkflowSectionPropsInput {
   affinityDisplayStructureText: string;
   affinityDisplayStructureFormat: 'pdb' | 'cif';
   affinityResultLigandSmiles: string;
+  affinityResultLigandAtomPlddts: number[];
   affinityTargetChainIds: string[];
   affinityLigandChainId: string;
   snapshotLigandAtomPlddts: number[];
@@ -213,6 +214,7 @@ export function useProjectWorkflowSectionProps({
   affinityDisplayStructureText,
   affinityDisplayStructureFormat,
   affinityResultLigandSmiles,
+  affinityResultLigandAtomPlddts,
   affinityTargetChainIds,
   affinityLigandChainId,
   snapshotLigandAtomPlddts,
@@ -310,6 +312,7 @@ export function useProjectWorkflowSectionProps({
   onPeptideBicyclicCys3PosChange
 }: UseProjectWorkflowSectionPropsInput): UseProjectWorkflowSectionPropsResult {
   void snapshotIptm;
+  void snapshotLigandAtomPlddts;
   const onLeadOptimizationLigandSmilesChange = (value: string) => {
     handleLeadOptimizationLigandSmilesChangeAction({
       value,
@@ -350,7 +353,7 @@ export function useProjectWorkflowSectionProps({
     affinityDisplayStructureFormat,
     affinityLigandSmiles: affinityResultLigandSmiles,
     affinityPrimaryTargetChainId: affinityTargetChainIds[0] || null,
-    affinityLigandAtomPlddts: snapshotLigandAtomPlddts,
+    affinityLigandAtomPlddts: affinityResultLigandAtomPlddts,
     affinityLigandConfidenceHint: snapshotPlddt,
     selectedResultLigandSequence,
     peptideFallbackPlddt: snapshotPlddt,

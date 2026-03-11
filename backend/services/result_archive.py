@@ -689,6 +689,51 @@ class ResultArchiveService:
             return []
         return ligand_values[:max_atoms]
 
+    @staticmethod
+    def _extract_first_non_empty_string(payload: Dict[str, Any], *keys: str) -> str:
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, str):
+                trimmed = value.strip()
+                if trimmed:
+                    return trimmed
+        return ""
+
+    def _extract_ligand_display_smiles(self, payload: Dict[str, Any]) -> str:
+        return self._extract_first_non_empty_string(
+            payload,
+            'ligand_display_smiles',
+            'ligandDisplaySmiles',
+        )
+
+    def _extract_ligand_smiles(self, payload: Dict[str, Any]) -> str:
+        return self._extract_first_non_empty_string(
+            payload,
+            'ligand_smiles',
+            'ligandSmiles',
+        )
+
+    def _extract_ligand_display_atom_plddts(self, payload: Dict[str, Any]) -> list[float]:
+        max_atoms = 512
+
+        def normalize_values(raw_values: Any) -> list[float]:
+            values = [self._normalize_01_or_100(item) for item in self._collect_finite_floats(raw_values, limit=max_atoms)]
+            return values[:max_atoms]
+
+        for key in ('ligand_display_atom_plddts', 'ligandDisplayAtomPlddts'):
+            values = normalize_values(payload.get(key))
+            if values:
+                return values
+
+        by_chain_raw = payload.get('ligand_display_atom_plddts_by_chain')
+        if isinstance(by_chain_raw, dict):
+            entries = [normalize_values(value) for value in by_chain_raw.values()]
+            entries = [entry for entry in entries if entry]
+            if entries:
+                entries.sort(key=lambda item: len(item), reverse=True)
+                return entries[0]
+        return []
+
     def _extract_pair_iptm(self, payload: Dict[str, Any]) -> Optional[float]:
         direct = self._to_finite_float(
             payload.get('pair_iptm_target_binder')
@@ -792,6 +837,9 @@ class ResultArchiveService:
                     pair_iptm = self._extract_pair_iptm(payload)
                     pair_pae = self._extract_pair_pae(payload)
                     ligand_atom_plddts = self._extract_ligand_atom_plddts(payload)
+                    ligand_smiles = self._extract_ligand_smiles(payload)
+                    ligand_display_smiles = self._extract_ligand_display_smiles(payload)
+                    ligand_display_atom_plddts = self._extract_ligand_display_atom_plddts(payload)
                     ligand_plddt = self._extract_ligand_plddt(payload, ligand_atom_plddts=ligand_atom_plddts)
                     coverage = int(pair_iptm is not None) + int(pair_pae is not None) + int(ligand_plddt is not None)
                     if coverage <= 0:
@@ -805,6 +853,9 @@ class ResultArchiveService:
                                 'pair_pae': pair_pae,
                                 'ligand_plddt': ligand_plddt,
                                 'ligand_atom_plddts': ligand_atom_plddts,
+                                'ligand_smiles': ligand_smiles,
+                                'ligand_display_smiles': ligand_display_smiles,
+                                'ligand_display_atom_plddts': ligand_display_atom_plddts,
                             }
                         ))
                         continue
@@ -814,22 +865,41 @@ class ResultArchiveService:
                         'pair_pae': pair_pae,
                         'ligand_plddt': ligand_plddt,
                         'ligand_atom_plddts': ligand_atom_plddts,
+                        'ligand_smiles': ligand_smiles,
+                        'ligand_display_smiles': ligand_display_smiles,
+                        'ligand_display_atom_plddts': ligand_display_atom_plddts,
                     }
                     parsed_entries.append((score, dict(best)))
                 if not best:
                     return None
                 merged: Dict[str, Any] = {k: v for k, v in best.items() if v is not None}
-                for metric_key in ('pair_iptm', 'pair_pae', 'ligand_plddt', 'ligand_atom_plddts'):
+                for metric_key in (
+                    'pair_iptm',
+                    'pair_pae',
+                    'ligand_plddt',
+                    'ligand_atom_plddts',
+                    'ligand_smiles',
+                    'ligand_display_smiles',
+                    'ligand_display_atom_plddts',
+                ):
                     if metric_key in merged:
                         continue
                     best_metric_score = -1
                     best_metric_value: Optional[Any] = None
                     for metric_score, metrics in parsed_entries:
-                        if metric_key == 'ligand_atom_plddts':
+                        if metric_key in {'ligand_atom_plddts', 'ligand_display_atom_plddts'}:
                             values = metrics.get(metric_key)
                             if not isinstance(values, list) or len(values) == 0:
                                 continue
                             value = values
+                        elif metric_key == 'ligand_smiles':
+                            value = str(metrics.get(metric_key) or '').strip()
+                            if not value:
+                                continue
+                        elif metric_key == 'ligand_display_smiles':
+                            value = str(metrics.get(metric_key) or '').strip()
+                            if not value:
+                                continue
                         else:
                             value = self._to_finite_float(metrics.get(metric_key))
                             if value is None:

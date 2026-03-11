@@ -5,6 +5,7 @@ import { renderLigand2DSvg } from '../../utils/ligand2d';
 import { loadRDKitModule } from '../../utils/rdkit';
 import {
   readTaskLigandAtomPlddts,
+  readTaskLigandRenderSmiles,
   resolveTaskSelectionContext,
   sanitizeFileName,
   toBase64FromBytes
@@ -108,11 +109,11 @@ export async function exportTaskRowsToExcel({
     const { metrics } = row;
     const task = authoritativeTaskMap.get(row.task.id) || row.task;
     const selection = resolveTaskSelectionContext(task, workspacePairPreference, row.workflowKey);
-    const ligandSmiles = selection.ligandSmiles;
+    const ligandSmiles = readTaskLigandRenderSmiles(task, selection.ligandChainId) || selection.ligandSmiles;
     const ligandIsSmiles = selection.ligandIsSmiles;
     const ligandAtomPlddts =
       readTaskLigandAtomPlddts(task, selection.ligandChainId, selection.ligandComponentCount <= 1) ??
-      row.ligandAtomPlddts;
+      row.ligandRenderAtomPlddts;
     const submittedText = formatDateTime(task.submitted_at || task.created_at);
     const runtimeTaskId = String(task.task_id || '').trim();
     let imageBytes: Uint8Array | null = null;

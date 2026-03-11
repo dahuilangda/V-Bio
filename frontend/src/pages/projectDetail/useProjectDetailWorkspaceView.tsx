@@ -78,6 +78,34 @@ function hasPredictionRecordStructure(record: LeadOptPredictionRecord | null | u
   return readText(record.structureText).trim().length > 0;
 }
 
+function hasExactPredictionRenderContract(record: LeadOptPredictionRecord | null | undefined): boolean {
+  if (!record) return false;
+  const renderSmiles = readText(record.ligandRenderSmiles).trim();
+  return renderSmiles.length > 0 && Array.isArray(record.ligandRenderAtomPlddts) && record.ligandRenderAtomPlddts.length > 0;
+}
+
+function pickPredictionRenderContract(
+  primary: LeadOptPredictionRecord | null | undefined,
+  secondary: LeadOptPredictionRecord | null | undefined
+): { ligandRenderSmiles: string; ligandRenderAtomPlddts: number[] } {
+  if (hasExactPredictionRenderContract(primary)) {
+    return {
+      ligandRenderSmiles: readText(primary?.ligandRenderSmiles).trim(),
+      ligandRenderAtomPlddts: Array.isArray(primary?.ligandRenderAtomPlddts) ? primary!.ligandRenderAtomPlddts : []
+    };
+  }
+  if (hasExactPredictionRenderContract(secondary)) {
+    return {
+      ligandRenderSmiles: readText(secondary?.ligandRenderSmiles).trim(),
+      ligandRenderAtomPlddts: Array.isArray(secondary?.ligandRenderAtomPlddts) ? secondary!.ligandRenderAtomPlddts : []
+    };
+  }
+  return {
+    ligandRenderSmiles: '',
+    ligandRenderAtomPlddts: []
+  };
+}
+
 function choosePreferredPredictionRecord(
   left: LeadOptPredictionRecord,
   right: LeadOptPredictionRecord
@@ -114,6 +142,7 @@ function mergePredictionRecordPair(
   if (!fromProperties) return fromConfidence;
   const primary = choosePreferredPredictionRecord(fromConfidence, fromProperties);
   const secondary = primary === fromConfidence ? fromProperties : fromConfidence;
+  const renderContract = pickPredictionRenderContract(primary, secondary);
   return {
     ...secondary,
     ...primary,
@@ -133,6 +162,8 @@ function mergePredictionRecordPair(
       : Array.isArray(secondary.ligandAtomPlddts)
         ? secondary.ligandAtomPlddts
         : [],
+    ligandRenderSmiles: renderContract.ligandRenderSmiles,
+    ligandRenderAtomPlddts: renderContract.ligandRenderAtomPlddts,
     updatedAt: Math.max(
       Number.isFinite(Number(primary.updatedAt)) ? Number(primary.updatedAt) : 0,
       Number.isFinite(Number(secondary.updatedAt)) ? Number(secondary.updatedAt) : 0
@@ -218,6 +249,7 @@ function hydratePredictionRecordMetricsFromHistory(
   if (!current && !historical) return null;
   if (!current) return historical || null;
   if (!historical) return current;
+  const renderContract = pickPredictionRenderContract(current, historical);
   return {
     ...current,
     pairIptm: toFiniteNumber(current.pairIptm) ?? toFiniteNumber(historical.pairIptm),
@@ -234,6 +266,8 @@ function hydratePredictionRecordMetricsFromHistory(
         : Array.isArray(historical.ligandAtomPlddts)
           ? historical.ligandAtomPlddts
           : [],
+    ligandRenderSmiles: renderContract.ligandRenderSmiles,
+    ligandRenderAtomPlddts: renderContract.ligandRenderAtomPlddts,
     structureText: readText(current.structureText).trim() || readText(historical.structureText).trim(),
     structureFormat:
       readText(current.structureText).trim()
@@ -357,6 +391,7 @@ function writeLeadOptUiStateToLocal(scopeKey: string, uiState: LeadOptCandidates
 
 function compactLeadOptPredictionRecord(value: LeadOptPredictionRecord): LeadOptPredictionRecord {
   const backend = normalizePredictionBackendStrict(value.backend);
+  const renderContract = pickPredictionRenderContract(value, null);
   return {
     taskId: readText(value.taskId).trim(),
     state: value.state,
@@ -366,6 +401,8 @@ function compactLeadOptPredictionRecord(value: LeadOptPredictionRecord): LeadOpt
     pairIptmResolved: value.pairIptmResolved === true,
     ligandPlddt: normalizePlddtMetric(value.ligandPlddt),
     ligandAtomPlddts: compactLigandAtomPlddts(value.ligandAtomPlddts),
+    ligandRenderSmiles: renderContract.ligandRenderSmiles,
+    ligandRenderAtomPlddts: compactLigandAtomPlddts(renderContract.ligandRenderAtomPlddts),
     structureText: '',
     structureFormat: readText(value.structureFormat).toLowerCase() === 'pdb' ? 'pdb' : 'cif',
     structureName: readText(value.structureName).trim(),
@@ -494,6 +531,50 @@ function readLeadOptIntegerArray(value: unknown): number[] {
   );
 }
 
+function compactLeadOptVariableItems(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      const record = asRecord(item);
+      const query = readText(record.query).trim();
+      const fragmentId = readText(record.fragment_id).trim();
+      const atomIndices = readLeadOptIntegerArray(record.atom_indices);
+      if (!query && !fragmentId && atomIndices.length === 0) return null;
+      return {
+        query,
+        mode: readText(record.mode).trim() || 'substructure',
+        fragment_id: fragmentId,
+        atom_indices: atomIndices
+      } as Record<string, unknown>;
+    })
+    .filter((item): item is Record<string, unknown> => Boolean(item));
+}
+
+function compactLeadOptQueryPayload(value: unknown): Record<string, unknown> {
+  const payload = asRecord(value);
+  const variableSpec = asRecord(payload.variable_spec);
+  return {
+    query_mol: readText(payload.query_mol).trim(),
+    variable_spec: {
+      mode: readText(variableSpec.mode).trim() || 'substructure',
+      items: compactLeadOptVariableItems(variableSpec.items)
+    },
+    selected_fragment_ids: readLeadOptStringArray(payload.selected_fragment_ids),
+    selected_fragment_atom_indices: readLeadOptIntegerArray(payload.selected_fragment_atom_indices),
+    constant_spec: asRecord(payload.constant_spec),
+    property_targets: asRecord(payload.property_targets),
+    mmp_database_id: readText(payload.mmp_database_id).trim(),
+    mmp_database_label: readText(payload.mmp_database_label).trim(),
+    mmp_database_schema: readText(payload.mmp_database_schema).trim(),
+    query_mode: readText(payload.query_mode).trim(),
+    aggregation_type: readText(payload.aggregation_type).trim(),
+    grouped_by_environment: readBooleanToken(payload.grouped_by_environment),
+    min_pairs: toFiniteNumber(payload.min_pairs),
+    rule_env_radius: toFiniteNumber(payload.rule_env_radius),
+    max_results: toFiniteNumber(payload.max_results)
+  };
+}
+
 function buildLeadOptListMeta(leadOptMmpInput: unknown): Record<string, unknown> {
   const leadOptMmp = asRecord(leadOptMmpInput);
   const queryResult = asRecord(leadOptMmp.query_result);
@@ -525,9 +606,12 @@ function buildLeadOptListMeta(leadOptMmpInput: unknown): Record<string, unknown>
   const selectedFragmentAtomIndices = readLeadOptIntegerArray(
     selection.selected_fragment_atom_indices ?? leadOptMmp.selected_fragment_atom_indices
   );
+  const variableItems = compactLeadOptVariableItems(selection.variable_items ?? leadOptMmp.variable_items);
   const selectedFragmentQuery =
     readLeadOptStringArray(selection.variable_queries ?? leadOptMmp.variable_queries)[0] ||
     readText(leadOptMmp.selected_fragment_query).trim();
+  const directionToken = readText(selection.direction ?? leadOptMmp.direction).trim().toLowerCase();
+  const direction = directionToken === 'increase' || directionToken === 'decrease' ? directionToken : '';
   return {
     stage: readText(leadOptMmp.stage).trim(),
     prediction_stage: readText(leadOptMmp.prediction_stage).trim(),
@@ -545,11 +629,16 @@ function buildLeadOptListMeta(leadOptMmpInput: unknown): Record<string, unknown>
     selection: {
       selected_fragment_ids: selectedFragmentIds,
       selected_fragment_atom_indices: selectedFragmentAtomIndices,
-      variable_queries: selectedFragmentQuery ? [selectedFragmentQuery] : []
+      variable_queries: selectedFragmentQuery ? [selectedFragmentQuery] : [],
+      variable_items: variableItems,
+      grouped_by_environment_mode: readText(selection.grouped_by_environment_mode).trim().toLowerCase(),
+      query_property: readText(selection.query_property).trim(),
+      direction
     },
     selected_fragment_ids: selectedFragmentIds,
     selected_fragment_atom_indices: selectedFragmentAtomIndices,
     selected_fragment_query: selectedFragmentQuery,
+    query_payload: compactLeadOptQueryPayload(leadOptMmp.query_payload),
     prediction_summary: {
       total: predictionTotal,
       queued: toFiniteNumber(predictionSummary.queued),
@@ -709,6 +798,39 @@ function mergeLeadOptStateForPersist(nextValue: unknown, prevValue: unknown): Re
   return {
     ...prev,
     ...next,
+    prediction_by_smiles: mergeLeadOptPersistRecordMap(next.prediction_by_smiles, prev.prediction_by_smiles),
+    reference_prediction_by_backend: mergeLeadOptPersistRecordMap(
+      next.reference_prediction_by_backend,
+      prev.reference_prediction_by_backend
+    )
+  };
+}
+
+function mergeLeadOptSnapshotForPersist(nextValue: unknown, prevValue: unknown): Record<string, unknown> {
+  const next = asRecord(nextValue);
+  const prev = asRecord(prevValue);
+  if (Object.keys(next).length === 0 && Object.keys(prev).length === 0) return {};
+  return {
+    ...prev,
+    ...next,
+    query_result:
+      Object.keys(asRecord(next.query_result)).length > 0
+        ? asRecord(next.query_result)
+        : asRecord(prev.query_result),
+    selection:
+      Object.keys(asRecord(next.selection)).length > 0
+        ? asRecord(next.selection)
+        : asRecord(prev.selection),
+    query_payload:
+      Object.keys(asRecord(next.query_payload)).length > 0
+        ? asRecord(next.query_payload)
+        : asRecord(prev.query_payload),
+    enumerated_candidates:
+      Array.isArray(next.enumerated_candidates) && next.enumerated_candidates.length > 0
+        ? compactLeadOptEnumeratedCandidates(next.enumerated_candidates)
+        : Array.isArray(prev.enumerated_candidates)
+          ? compactLeadOptEnumeratedCandidates(prev.enumerated_candidates)
+          : [],
     prediction_by_smiles: mergeLeadOptPersistRecordMap(next.prediction_by_smiles, prev.prediction_by_smiles),
     reference_prediction_by_backend: mergeLeadOptPersistRecordMap(
       next.reference_prediction_by_backend,
@@ -1575,6 +1697,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     patchPayload: Record<string, unknown>;
   }>>({});
   const leadOptPredictionPersistShadowByTaskRowRef = useRef<Record<string, Record<string, unknown>>>({});
+  const leadOptPersistSnapshotByTaskRowRef = useRef<Record<string, Record<string, unknown>>>({});
   const leadOptUiStatePersistKeyRef = useRef('');
   const leadOptMmpContextByTaskIdRef = useRef<Record<string, Record<string, unknown>>>({});
 
@@ -1933,6 +2056,10 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       reference_prediction_by_backend: inheritedReferenceRecords,
       ...mmpContext
     } as Record<string, unknown>;
+    leadOptPersistSnapshotByTaskRowRef.current[taskRowId] = mergeLeadOptSnapshotForPersist(
+      leadOptPayload,
+      leadOptPersistSnapshotByTaskRowRef.current[taskRowId]
+    );
     const sourceTask = resolveLeadOptSourceTask(taskRowId);
     await patchTask(taskRowId, {
       task_state: 'SUCCESS',
@@ -2007,7 +2134,10 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       leadOptActiveTaskRowIdRef.current = taskRowId;
       leadOptPredictionTaskRowMapRef.current[taskId] = taskRowId;
       const sourceTask = resolveLeadOptSourceTask(taskRowId);
-      const sourceLeadOpt = resolveLeadOptSnapshotFromTask(sourceTask);
+      const sourceLeadOpt = mergeLeadOptSnapshotForPersist(
+        resolveLeadOptSnapshotFromTask(sourceTask),
+        leadOptPersistSnapshotByTaskRowRef.current[taskRowId]
+      );
       const sourceQueryResult = asRecord(sourceLeadOpt.query_result);
       const sourceLeadOptQueryId = readText(sourceLeadOpt.query_id || sourceQueryResult.query_id).trim();
       const nextPredictionMap = compactLeadOptPredictionMap(
@@ -2050,6 +2180,10 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         prediction_by_smiles: nextPredictionMap,
         reference_prediction_by_backend: referenceRecords
       } as Record<string, unknown>;
+      leadOptPersistSnapshotByTaskRowRef.current[taskRowId] = mergeLeadOptSnapshotForPersist(
+        nextLeadOpt,
+        leadOptPersistSnapshotByTaskRowRef.current[taskRowId]
+      );
       const lightweightStateForProperties = {
         stage: nextLeadOpt.stage,
         prediction_stage: nextLeadOpt.prediction_stage,
@@ -2140,7 +2274,10 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         return;
       }
       const sourceTask = resolveLeadOptSourceTask(taskRowId);
-      const sourceLeadOpt = resolveLeadOptSnapshotFromTask(sourceTask);
+      const sourceLeadOpt = mergeLeadOptSnapshotForPersist(
+        resolveLeadOptSnapshotFromTask(sourceTask),
+        leadOptPersistSnapshotByTaskRowRef.current[taskRowId]
+      );
       const sourceQueryResult = asRecord(sourceLeadOpt.query_result);
       const sourceLeadOptQueryId = readText(sourceLeadOpt.query_id || sourceQueryResult.query_id).trim();
       const preferredSelectedBackend =
@@ -2188,6 +2325,10 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         prediction_by_smiles: records,
         reference_prediction_by_backend: referenceRecords
       } as Record<string, unknown>;
+      leadOptPersistSnapshotByTaskRowRef.current[taskRowId] = mergeLeadOptSnapshotForPersist(
+        nextLeadOpt,
+        leadOptPersistSnapshotByTaskRowRef.current[taskRowId]
+      );
       const persistKey = [
         taskRowId,
         statusText,
@@ -2483,6 +2624,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     affinityPreviewLigandOverlayText,
     affinityPreviewLigandOverlayFormat,
     affinityResultLigandSmiles,
+    affinityResultLigandAtomPlddts,
     predictionLigandPreview,
     predictionLigandRadarSmiles,
     affinityDisplayStructureText,
@@ -2672,6 +2814,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     affinityDisplayStructureText,
     affinityDisplayStructureFormat,
     affinityResultLigandSmiles,
+    affinityResultLigandAtomPlddts,
     affinityTargetChainIds,
     affinityLigandChainId,
     snapshotLigandAtomPlddts,

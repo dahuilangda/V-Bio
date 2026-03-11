@@ -14,6 +14,7 @@ import {
   readLeadOptTaskSummary,
   readTaskConfidenceMetrics,
   readTaskLigandAtomPlddts,
+  readTaskLigandRenderSmiles,
   readTaskLigandResiduePlddts,
   resolveTaskBackendValue,
   resolveTaskSelectionContext,
@@ -119,6 +120,12 @@ export function useProjectTasksWorkspaceContext({
           : 'prediction';
       const selection = resolveTaskSelectionContext(task, workspacePairPreference, workflowKey);
       const ligandAtomPlddts = readTaskLigandAtomPlddts(task, selection.ligandChainId, selection.ligandComponentCount <= 1);
+      const ligandRenderSmiles =
+        workflowKey === 'peptide_design'
+          ? ''
+          : workflowKey === 'prediction' || workflowKey === 'affinity'
+            ? readTaskLigandRenderSmiles(task, selection.ligandChainId) || selection.ligandSmiles
+            : selection.ligandSmiles;
       const peptideBest = workflowKey === 'peptide_design' ? readPeptideBestCandidatePreview(task) : null;
       const resolvedLigandSequence =
         workflowKey === 'peptide_design' && peptideBest?.sequence
@@ -166,8 +173,10 @@ export function useProjectTasksWorkspaceContext({
         backendValue: resolveTaskBackendValue(task, project?.backend || ''),
         durationValue,
         ligandSmiles: workflowKey === 'peptide_design' ? '' : selection.ligandSmiles,
+        ligandRenderSmiles,
         ligandIsSmiles: workflowKey === 'peptide_design' ? false : selection.ligandIsSmiles,
         ligandAtomPlddts,
+        ligandRenderAtomPlddts: ligandAtomPlddts,
         ligandSequence: resolvedLigandSequence,
         ligandSequenceType: resolvedLigandSequenceType,
         ligandResiduePlddts,

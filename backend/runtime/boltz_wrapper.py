@@ -6,18 +6,21 @@ import tarfile
 import urllib.request
 import warnings
 import time
+import json
 from dataclasses import asdict, dataclass
 from functools import partial
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 import click
 import torch
+import yaml
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.utilities import rank_zero_only
 from rdkit import Chem
+from rdkit.Chem import AllChem, Descriptors
 from tqdm import tqdm
 
 from boltz.data import const
@@ -51,6 +54,204 @@ BOLTZ2_AFFINITY_URL_WITH_FALLBACK = [
     "https://model-gateway.boltz.bio/boltz2_aff.ckpt",
     "https://huggingface.co/boltz-community/boltz-2/resolve/main/boltz2_aff.ckpt",
 ]
+
+# Some runtime RDKit builds expose MolWt under rdkit.Chem.Descriptors only,
+# while the bundled Boltz parser expects AllChem.Descriptors.MolWt.
+if not hasattr(AllChem, "Descriptors"):
+    AllChem.Descriptors = Descriptors
+
+
+def _read_chain_ids(raw_ids: Any) -> list[str]:
+    if isinstance(raw_ids, list):
+        return [str(item or "").strip() for item in raw_ids if str(item or "").strip()]
+    token = str(raw_ids or "").strip()
+    return [token] if token else []
+
+
+def _extract_single_smiles_ligand_contract_request(yaml_path: Path) -> tuple[str, str, bool]:
+    try:
+        payload = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Failed to parse Boltz YAML for ligand contract: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Boltz YAML payload is not a mapping.")
+
+    affinity_enabled = any(
+        isinstance(item, dict) and isinstance(item.get("affinity"), dict)
+        for item in (payload.get("properties") or [])
+    )
+
+    ligand_entries: list[tuple[str, str]] = []
+    for entry in payload.get("sequences") or []:
+        if not isinstance(entry, dict):
+            continue
+        ligand = entry.get("ligand")
+        if not isinstance(ligand, dict):
+            continue
+        smiles = str(ligand.get("smiles") or "").strip()
+        if not smiles:
+            continue
+        chain_ids = _read_chain_ids(ligand.get("id"))
+        if len(chain_ids) != 1:
+            raise RuntimeError(
+                "Strict ligand confidence contract requires exactly one ligand chain id. "
+                f"Got {chain_ids!r}."
+            )
+        ligand_entries.append((chain_ids[0], smiles))
+
+    if len(ligand_entries) != 1:
+        raise RuntimeError(
+            "Strict ligand confidence contract requires exactly one SMILES ligand entry. "
+            f"Found {len(ligand_entries)}."
+        )
+    return ligand_entries[0][0], ligand_entries[0][1], affinity_enabled
+
+
+def _build_boltz_named_ligand_from_smiles(smiles: str, *, affinity_enabled: bool) -> Chem.Mol:
+    effective_smiles = str(smiles or "").strip()
+    if not effective_smiles:
+        raise RuntimeError("Ligand SMILES is empty for strict confidence contract.")
+    if affinity_enabled:
+        from boltz.data.parse.schema import standardize as boltz_standardize
+
+        standardized = boltz_standardize(effective_smiles)
+        effective_smiles = str(standardized or "").strip()
+        if not effective_smiles:
+            raise RuntimeError("Boltz standardize() returned empty ligand SMILES.")
+
+    mol = AllChem.MolFromSmiles(effective_smiles)
+    if mol is None:
+        raise RuntimeError(f"Boltz failed to parse ligand SMILES: {effective_smiles}")
+    mol = AllChem.AddHs(mol)
+    canonical_order = list(AllChem.CanonicalRankAtoms(mol))
+    Chem.AssignStereochemistry(mol, force=True, cleanIt=True)
+    if len(canonical_order) != mol.GetNumAtoms():
+        raise RuntimeError("Boltz canonical atom ranking length mismatch.")
+    for atom, can_idx in zip(mol.GetAtoms(), canonical_order):
+        atom_name = atom.GetSymbol().upper() + str(int(can_idx) + 1)
+        if len(atom_name) > 4:
+            raise RuntimeError(
+                "Boltz ligand atom name exceeds 4 characters after canonical naming: "
+                f"{atom_name}."
+            )
+        atom.SetProp("name", atom_name)
+    return mol
+
+
+def _write_strict_ligand_confidence_contract(data: str, out_dir: str) -> None:
+    from capabilities.boltz2score.boltz2score import (
+        _build_display_smiles_order_from_ligand_mol,
+        _build_smiles_order_from_ligand_mol,
+        _extract_ligand_bfactors_by_chain,
+    )
+    from capabilities.boltz2score.mapping_utils import (
+        resolve_model_ligand_chain_id_by_atom_names,
+    )
+
+    yaml_path = Path(data).expanduser().resolve()
+    out_root = Path(out_dir).expanduser().resolve()
+    requested_chain_id, ligand_smiles, affinity_enabled = _extract_single_smiles_ligand_contract_request(yaml_path)
+    reference_ligand = _build_boltz_named_ligand_from_smiles(
+        ligand_smiles,
+        affinity_enabled=affinity_enabled,
+    )
+    aligned_smiles, smiles_to_heavy, heavy_name_keys = _build_smiles_order_from_ligand_mol(reference_ligand)
+    display_smiles, display_to_heavy, display_heavy_name_keys = _build_display_smiles_order_from_ligand_mol(
+        reference_ligand
+    )
+    if display_heavy_name_keys != heavy_name_keys:
+        raise RuntimeError("Display ligand order changed heavy-atom identity set.")
+
+    prediction_root = out_root / "predictions"
+    if not prediction_root.is_dir():
+        raise RuntimeError(f"Boltz prediction directory not found: {prediction_root}")
+
+    prediction_dirs = [path for path in prediction_root.iterdir() if path.is_dir()]
+    if len(prediction_dirs) != 1:
+        raise RuntimeError(
+            "Strict ligand confidence contract expects exactly one Boltz prediction directory. "
+            f"Found {[path.name for path in prediction_dirs]}."
+        )
+    prediction_dir = prediction_dirs[0]
+    confidence_files = sorted(prediction_dir.glob("confidence_data_model_*.json"))
+    if not confidence_files:
+        raise RuntimeError(f"No confidence_data_model_*.json files found in {prediction_dir}")
+
+    resolved_chain_id = ""
+    for conf_path in confidence_files:
+        suffix = conf_path.stem.removeprefix("confidence_")
+        structure_file: Path | None = None
+        for ext in (".cif", ".mmcif", ".pdb"):
+            candidate = prediction_dir / f"{suffix}{ext}"
+            if candidate.exists():
+                structure_file = candidate
+                break
+        if structure_file is None:
+            raise RuntimeError(
+                f"Cannot find matching structure file for confidence payload {conf_path.name}."
+            )
+
+        try:
+            payload = json.loads(conf_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Failed to parse {conf_path.name}: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"Confidence payload {conf_path.name} is not a JSON object.")
+
+        by_chain = _extract_ligand_bfactors_by_chain(structure_file)
+        current_chain_id = resolve_model_ligand_chain_id_by_atom_names(
+            by_chain=by_chain,
+            heavy_name_keys=heavy_name_keys,
+            requested_ligand_chain_id=requested_chain_id,
+        )
+        if resolved_chain_id and resolved_chain_id != current_chain_id:
+            raise RuntimeError(
+                "Resolved ligand chain changed across Boltz model outputs: "
+                f"{resolved_chain_id!r} vs {current_chain_id!r}."
+            )
+        resolved_chain_id = current_chain_id
+        if resolved_chain_id not in by_chain:
+            raise RuntimeError(
+                f"Resolved ligand chain {resolved_chain_id!r} not present in {structure_file.name}."
+            )
+        bfactor_by_name = by_chain[resolved_chain_id]
+        missing_name_keys = [key for key in heavy_name_keys if key not in bfactor_by_name]
+        if missing_name_keys:
+            raise RuntimeError(
+                "Boltz structure is missing reference ligand atom names required for exact mapping: "
+                f"{missing_name_keys[:10]}"
+            )
+
+        heavy_bfactors = [float(bfactor_by_name[key]) for key in heavy_name_keys]
+        aligned_atom_plddts = [heavy_bfactors[idx] for idx in smiles_to_heavy]
+        aligned_atom_name_keys = [heavy_name_keys[idx] for idx in smiles_to_heavy]
+        display_atom_plddts = [heavy_bfactors[idx] for idx in display_to_heavy]
+        display_atom_name_keys = [heavy_name_keys[idx] for idx in display_to_heavy]
+        aligned_by_name = {
+            aligned_atom_name_keys[idx]: float(aligned_atom_plddts[idx])
+            for idx in range(len(aligned_atom_name_keys))
+        }
+
+        payload["requested_ligand_chain_id"] = requested_chain_id
+        payload["model_ligand_chain_id"] = resolved_chain_id
+        payload["ligand_smiles_map"] = {requested_chain_id: aligned_smiles}
+        payload["ligand_smiles"] = aligned_smiles
+        payload["ligand_atom_plddts"] = aligned_atom_plddts
+        payload["ligand_atom_plddts_by_chain"] = {resolved_chain_id: aligned_atom_plddts}
+        payload["ligand_atom_name_keys"] = aligned_atom_name_keys
+        payload["ligand_atom_name_keys_by_chain"] = {resolved_chain_id: aligned_atom_name_keys}
+        payload["ligand_atom_plddts_by_chain_and_name"] = {resolved_chain_id: aligned_by_name}
+        payload["ligand_display_smiles"] = display_smiles
+        payload["ligand_display_atom_plddts"] = display_atom_plddts
+        payload["ligand_display_atom_plddts_by_chain"] = {resolved_chain_id: display_atom_plddts}
+        payload["ligand_display_atom_name_keys"] = display_atom_name_keys
+        payload["ligand_display_atom_name_keys_by_chain"] = {resolved_chain_id: display_atom_name_keys}
+        conf_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    click.echo(
+        "Wrote strict ligand confidence contract for Boltz prediction "
+        f"(requested={requested_chain_id}, resolved={resolved_chain_id}, prediction_dir={prediction_dir})."
+    )
 
 
 def _unique_url_list(urls: list[str]) -> list[str]:
@@ -1101,6 +1302,11 @@ def cli() -> None:
     ),
     default=None,
 )
+@click.option(
+    "--strict_ligand_confidence_contract",
+    is_flag=True,
+    help="Write exact ligand 2D/3D confidence mapping contract into Boltz confidence JSON files.",
+)
 def predict(  # noqa: C901, PLR0915, PLR0912
     data: str,
     out_dir: str,
@@ -1140,6 +1346,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     no_kernels: bool = False,
     write_embeddings: bool = False,
     trainer_precision: Optional[str] = None,
+    strict_ligand_confidence_contract: bool = False,
 ) -> None:
     """Run predictions with Boltz."""
     # If cpu, write a friendly warning
@@ -1192,7 +1399,8 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             click.echo("MSA server authentication: no credentials provided")
 
     # Create output directories
-    data = Path(data).expanduser()
+    input_data_path = Path(data).expanduser()
+    data = input_data_path
     out_dir = Path(out_dir).expanduser()
     out_dir = out_dir / f"boltz_results_{data.stem}"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1481,6 +1689,9 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             datamodule=data_module,
             return_predictions=False,
         )
+
+    if strict_ligand_confidence_contract:
+        _write_strict_ligand_confidence_contract(str(input_data_path), str(out_dir))
 
 
 if __name__ == "__main__":

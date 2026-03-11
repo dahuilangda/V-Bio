@@ -20,3 +20,17 @@ services:
       - ./DOCKER_CAP_MMP_POSTGRES.init.sql:/docker-entrypoint-initdb.d/01-extensions.sql:ro
     ports:
       - "${LEADOPT_MMP_POSTGRES_PORT:-54330}:5432"
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${MMP_POSTGRES_SHARED_BUFFERS:-64GB}
+      - -c
+      - effective_cache_size=${MMP_POSTGRES_EFFECTIVE_CACHE_SIZE:-320GB}
+      - -c
+      - max_wal_size=${MMP_POSTGRES_MAX_WAL_SIZE:-64GB}
+      - -c
+      - checkpoint_timeout=${MMP_POSTGRES_CHECKPOINT_TIMEOUT:-30min}
+      - -c
+      - wal_buffers=${MMP_POSTGRES_WAL_BUFFERS:-16MB}
+      - -c
+      - max_parallel_maintenance_workers=${MMP_POSTGRES_MAX_PARALLEL_MAINTENANCE_WORKERS:-8}

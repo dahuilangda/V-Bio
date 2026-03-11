@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import type {
   Project,
@@ -63,10 +63,22 @@ export function useProjectWorkspaceLoader<TDraft extends ProjectWorkspaceDraft>(
   setPickedResidue,
   setProject,
 }: UseProjectWorkspaceLoaderOptions<TDraft>): () => Promise<void> {
+  const latestLocationSearchRef = useRef(locationSearch);
+  useEffect(() => {
+    latestLocationSearchRef.current = locationSearch;
+  }, [locationSearch]);
+
+  const loadContextSearchKey = useMemo(() => {
+    const query = new URLSearchParams(locationSearch);
+    query.delete('tab');
+    const next = query.toString();
+    return next ? `?${next}` : '';
+  }, [locationSearch]);
+
   const loadProject = useCallback(async () => {
     await loadProjectIntoWorkspace({
       projectId,
-      locationSearch,
+      locationSearch: latestLocationSearchRef.current,
       requestNewTask,
       sessionUserId,
       setLoading,
@@ -91,7 +103,7 @@ export function useProjectWorkspaceLoader<TDraft extends ProjectWorkspaceDraft>(
     });
   }, [
     projectId,
-    locationSearch,
+    loadContextSearchKey,
     requestNewTask,
     sessionUserId,
     setLoading,

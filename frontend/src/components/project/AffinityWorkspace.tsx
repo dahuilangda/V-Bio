@@ -1,13 +1,18 @@
 import { useEffect, useMemo, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
 import { CircleCheck, Dna, Eye, FlaskConical, Target } from 'lucide-react';
-import { MolstarViewer } from './MolstarViewer';
+import { MolstarViewer, type MolstarAtomHighlight, type MolstarResiduePick } from './MolstarViewer';
 import { JSMEEditor } from './JSMEEditor';
 import { Ligand2DPreview } from './Ligand2DPreview';
 import { LigandPropertyGrid } from './LigandPropertyGrid';
 import { MetricsPanel } from './MetricsPanel';
+import { resolveExactLigandAtomLinks } from './affinityAtomLinking';
 
 export type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
 export type ResultsGridStyle = CSSProperties & { '--results-main-width'?: string };
+
+function normalizeChainToken(value: string | null | undefined): string {
+  return String(value || '').trim().toUpperCase();
+}
 
 export interface AffinitySignalCard {
   key: string;
@@ -249,10 +254,71 @@ export function AffinityResultsWorkspace({
     [colorMode]
   );
   const [viewerColorMode, setViewerColorMode] = useState<'default' | 'alphafold'>(initialViewerColorMode);
+  const exactLigandAtomLinks = useMemo(
+    () =>
+      resolveExactLigandAtomLinks({
+        confidence: snapshotConfidence || null,
+        renderedSmiles: ligandSmiles,
+        structureText,
+        structureFormat,
+        selectedLigandChainId
+      }),
+    [ligandSmiles, selectedLigandChainId, snapshotConfidence, structureFormat, structureText]
+  );
+  const [selectedLigandAtomIndex, setSelectedLigandAtomIndex] = useState<number | null>(null);
 
   useEffect(() => {
     setViewerColorMode(initialViewerColorMode);
   }, [initialViewerColorMode, structureText]);
+
+  useEffect(() => {
+    if (!exactLigandAtomLinks) {
+      setSelectedLigandAtomIndex(null);
+      return;
+    }
+    if (
+      selectedLigandAtomIndex === null ||
+      selectedLigandAtomIndex < 0 ||
+      selectedLigandAtomIndex >= exactLigandAtomLinks.atoms.length
+    ) {
+      setSelectedLigandAtomIndex(null);
+    }
+  }, [exactLigandAtomLinks, selectedLigandAtomIndex]);
+
+  const activeLigandAtom = useMemo<MolstarAtomHighlight | null>(() => {
+    if (!exactLigandAtomLinks) return null;
+    if (selectedLigandAtomIndex === null) return null;
+    const entry = exactLigandAtomLinks.atoms[selectedLigandAtomIndex];
+    if (!entry) return null;
+    return {
+      chainId: entry.chainId,
+      residue: entry.residue,
+      atomName: entry.atomName,
+      emphasis: 'active'
+    };
+  }, [exactLigandAtomLinks, selectedLigandAtomIndex]);
+
+  const highlightedLigandAtoms = useMemo<MolstarAtomHighlight[]>(
+    () => (activeLigandAtom ? [activeLigandAtom] : []),
+    [activeLigandAtom]
+  );
+
+  const handleLigand2DAtomClick = (atomIndex: number) => {
+    if (!exactLigandAtomLinks) return;
+    if (!Number.isFinite(atomIndex) || atomIndex < 0 || atomIndex >= exactLigandAtomLinks.atoms.length) return;
+    setSelectedLigandAtomIndex((current) => (current === atomIndex ? null : atomIndex));
+  };
+
+  const handleLigand3DPick = (pick: MolstarResiduePick) => {
+    if (!exactLigandAtomLinks) return;
+    const atomName = String(pick.atomName || '').trim();
+    if (!atomName) return;
+    if (normalizeChainToken(pick.chainId) !== normalizeChainToken(exactLigandAtomLinks.chainId)) return;
+    if (pick.residue !== exactLigandAtomLinks.residue) return;
+    const atomIndex = exactLigandAtomLinks.displayAtomIndexByAtomName.get(atomName);
+    if (typeof atomIndex !== 'number') return;
+    setSelectedLigandAtomIndex((current) => (current === atomIndex ? null : atomIndex));
+  };
 
   return (
     <>
@@ -269,6 +335,9 @@ export function AffinityResultsWorkspace({
               leadOptStyleVariant="results"
               ligandFocusChainId={selectedLigandChainId || ''}
               interactionGranularity="element"
+              onResiduePick={exactLigandAtomLinks ? handleLigand3DPick : undefined}
+              highlightAtoms={highlightedLigandAtoms}
+              activeAtom={activeLigandAtom}
               suppressAutoFocus={false}
               showSequence={false}
             />
@@ -319,8 +388,14 @@ export function AffinityResultsWorkspace({
                 smiles={ligandSmiles}
                 atomConfidences={ligandAtomPlddts}
                 confidenceHint={ligandConfidenceHint}
+                highlightAtomIndices={selectedLigandAtomIndex === null ? null : [selectedLigandAtomIndex]}
+                onAtomClick={exactLigandAtomLinks ? handleLigand2DAtomClick : undefined}
+                onBackgroundClick={exactLigandAtomLinks ? () => setSelectedLigandAtomIndex(null) : undefined}
               />
             </div>
+            {exactLigandAtomLinks ? (
+              <div className="muted small top-margin">Click a ligand atom in 2D or 3D to inspect the same exact atom.</div>
+            ) : null}
           </section>
 
           <section className="result-aside-block">

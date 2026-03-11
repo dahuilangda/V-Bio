@@ -139,6 +139,14 @@ def get_mol(ccd: str, mols: dict[str, mol.Mol], moldir: Path) -> mol.Mol:
             raise e
 
 
+def _require_atom_name(atom, context: str) -> str:
+    if atom.HasProp("name"):
+        name = str(atom.GetProp("name")).strip()
+        if name:
+            return name
+    raise ValueError(f"{context} is missing an exact atom name.")
+
+
 def get_dates(block: gemmi.cif.Block) -> tuple[str, str, str]:
     """Get the deposited, released, and last revision dates.
 
@@ -440,11 +448,7 @@ def parse_ccd_residue(  # noqa: PLR0915, C901
             )
             bfactor = gemmi_mol[0].b_iso
         ref_atom = ref_mol.GetAtoms()[0]
-        if ref_atom.HasProp("name"):
-            atom_name = ref_atom.GetProp("name")
-        else:
-            # Fallback to element symbol if name property is missing
-            atom_name = ref_atom.GetSymbol()
+        atom_name = _require_atom_name(ref_atom, f"CCD residue {name}")
         
         atom = ParsedAtom(
             name=atom_name,
@@ -484,11 +488,7 @@ def parse_ccd_residue(  # noqa: PLR0915, C901
 
     for i, atom in enumerate(ref_mol.GetAtoms()):
         # Get atom name, charge, element and reference coordinates
-        if atom.HasProp("name"):
-            atom_name = atom.GetProp("name")
-        else:
-            # Fallback to element symbol + index if name property is missing
-            atom_name = f"{atom.GetSymbol()}{i+1}"
+        atom_name = _require_atom_name(atom, f"CCD residue {name}")
 
         # If the atom is a leaving atom, skip if not in the PDB and is_covalent
         if (
@@ -660,11 +660,7 @@ def parse_polymer(  # noqa: C901, PLR0915, PLR0912
         # Only use reference atoms set in constants
         ref_name_to_atom = {}
         for a in ref_mol.GetAtoms():
-            if a.HasProp("name"):
-                name = a.GetProp("name")
-            else:
-                # Fallback to element symbol + index if name property is missing
-                name = f"{a.GetSymbol()}{a.GetIdx()}"
+            name = _require_atom_name(a, f"Reference residue {res_name}")
             ref_name_to_atom[name] = a
         ref_atoms = []
         missing_ref = []
@@ -684,11 +680,8 @@ def parse_polymer(  # noqa: C901, PLR0915, PLR0912
             # Get atom name
             if use_ref_atom_names:
                 atom_name = ref_atom
-            elif ref_atom.HasProp("name"):
-                atom_name = ref_atom.GetProp("name")
             else:
-                # Fallback to element symbol + index if name property is missing
-                atom_name = f"{ref_atom.GetSymbol()}{ref_atom.GetIdx()}"
+                atom_name = _require_atom_name(ref_atom, f"Reference residue {res_name}")
 
             # Get coordinates from PDB
             if atom_name in name_to_atom:

@@ -324,6 +324,39 @@ function readTaskLigandSmilesHint(task: ProjectTask, preferredLigandChainId: str
   return normalizeComponentSequence('ligand', readLigandSmilesFromMap(affinityData, preferredLigandChainId));
 }
 
+function readTaskLigandRenderSmiles(task: ProjectTask, _preferredLigandChainId: string | null = null): string {
+  const confidenceData =
+    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
+      ? (task.confidence as Record<string, unknown>)
+      : null;
+  const affinityData =
+    task.affinity && typeof task.affinity === 'object' && !Array.isArray(task.affinity)
+      ? (task.affinity as Record<string, unknown>)
+      : null;
+
+  const fromConfidence = normalizeComponentSequence(
+    'ligand',
+    readFirstNonEmptyStringMetric(confidenceData, [
+      'ligand_display_smiles',
+      'ligand.display_smiles',
+      'ligandDisplaySmiles'
+    ])
+  );
+  if (fromConfidence) return fromConfidence;
+
+  const fromAffinity = normalizeComponentSequence(
+    'ligand',
+    readFirstNonEmptyStringMetric(affinityData, [
+      'ligand_display_smiles',
+      'ligand.display_smiles',
+      'ligandDisplaySmiles'
+    ])
+  );
+  if (fromAffinity) return fromAffinity;
+
+  return '';
+}
+
 function splitChainTokens(value: string): string[] {
   return String(value || '')
     .split(',')
@@ -2151,6 +2184,9 @@ function readTaskLigandAtomPlddts(
   const confidence = (task.confidence || {}) as Record<string, unknown>;
   const preferredChainKeys = collectTaskPreferredLigandChainKeys(confidence, preferredLigandChainId);
   const byChainCandidates: unknown[] = [
+    confidence.ligand_display_atom_plddts_by_chain,
+    readObjectPath(confidence, 'ligand.display_atom_plddts_by_chain'),
+    readObjectPath(confidence, 'ligand_display.atom_plddts_by_chain'),
     confidence.ligand_atom_plddts_by_chain,
     readObjectPath(confidence, 'ligand.atom_plddts_by_chain'),
     readObjectPath(confidence, 'ligand_confidence.atom_plddts_by_chain')
@@ -2173,6 +2209,9 @@ function readTaskLigandAtomPlddts(
   if (!allowFlatFallback) return null;
 
   const candidates: unknown[] = [
+    confidence.ligand_display_atom_plddts,
+    readObjectPath(confidence, 'ligand.display_atom_plddts'),
+    readObjectPath(confidence, 'ligand_display.atom_plddts'),
     confidence.ligand_atom_plddts,
     confidence.ligand_atom_plddt,
     readObjectPath(confidence, 'ligand.atom_plddts'),
@@ -2219,6 +2258,7 @@ export {
   hasTaskSummaryMetrics,
   hasTaskLigandAtomPlddts,
   readTaskLigandAtomPlddts,
+  readTaskLigandRenderSmiles,
   readTaskLigandResiduePlddts,
   readTaskConfidenceMetrics,
   readPeptideTaskSummary,

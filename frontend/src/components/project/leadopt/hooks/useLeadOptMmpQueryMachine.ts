@@ -92,14 +92,49 @@ interface UseLeadOptMmpQueryMachineParams {
   }) => void | Promise<void>;
 }
 
+interface LeadOptPredictionRenderPayload {
+  ligandRenderSmiles: string;
+  ligandRenderAtomPlddts: number[];
+}
+
+function hasExactPredictionRenderContract(
+  value: { ligandRenderSmiles?: string; ligandRenderAtomPlddts?: number[] } | null | undefined
+): boolean {
+  if (!value) return false;
+  const renderSmiles = readText(value.ligandRenderSmiles).trim();
+  return renderSmiles.length > 0 && Array.isArray(value.ligandRenderAtomPlddts) && value.ligandRenderAtomPlddts.length > 0;
+}
+
+function pickPredictionRenderContract(
+  primary: { ligandRenderSmiles?: string; ligandRenderAtomPlddts?: number[] } | null | undefined,
+  secondary: { ligandRenderSmiles?: string; ligandRenderAtomPlddts?: number[] } | null | undefined
+): LeadOptPredictionRenderPayload {
+  if (hasExactPredictionRenderContract(primary)) {
+    return {
+      ligandRenderSmiles: readText(primary?.ligandRenderSmiles).trim(),
+      ligandRenderAtomPlddts: Array.isArray(primary?.ligandRenderAtomPlddts) ? primary!.ligandRenderAtomPlddts : []
+    };
+  }
+  if (hasExactPredictionRenderContract(secondary)) {
+    return {
+      ligandRenderSmiles: readText(secondary?.ligandRenderSmiles).trim(),
+      ligandRenderAtomPlddts: Array.isArray(secondary?.ligandRenderAtomPlddts) ? secondary!.ligandRenderAtomPlddts : []
+    };
+  }
+  return {
+    ligandRenderSmiles: '',
+    ligandRenderAtomPlddts: []
+  };
+}
+
 type PredictionState = 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE';
 type ClusterGroupBy = 'to' | 'from' | 'rule_env_radius';
 const LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR = '::';
 const RESULT_HYDRATION_RETRY_BASE_MS = 1200;
 const RESULT_HYDRATION_RETRY_MAX_MS = 10000;
 const RESULT_HYDRATION_MAX_RETRIES = 8;
-const ENABLE_BACKGROUND_CANDIDATE_RESULT_HYDRATION = false;
-const ENABLE_BACKGROUND_REFERENCE_RESULT_HYDRATION = false;
+const ENABLE_BACKGROUND_CANDIDATE_RESULT_HYDRATION = true;
+const ENABLE_BACKGROUND_REFERENCE_RESULT_HYDRATION = true;
 const RUNTIME_STATUS_RUNNING_POLL_DELAY_MS = 3500;
 const RUNTIME_STATUS_QUEUED_POLL_DELAY_MS = 6500;
 const RUNTIME_STATUS_IDLE_POLL_DELAY_MS = 12000;
@@ -117,6 +152,8 @@ export interface LeadOptPredictionRecord {
   pairIptmResolved?: boolean;
   ligandPlddt: number | null;
   ligandAtomPlddts: number[];
+  ligandRenderSmiles?: string;
+  ligandRenderAtomPlddts?: number[];
   structureText?: string;
   structureFormat?: 'cif' | 'pdb';
   structureName?: string;
@@ -175,6 +212,11 @@ function normalizePredictionRecord(value: unknown): LeadOptPredictionRecord | nu
   const ligandPlddtRaw = Number(raw.ligandPlddt ?? raw.ligand_plddt);
   const ligandPlddt = Number.isFinite(ligandPlddtRaw) ? normalizePlddtValue(ligandPlddtRaw) : null;
   const ligandAtomPlddts = normalizePlddtArray(raw.ligandAtomPlddts ?? raw.ligand_atom_plddts);
+  const ligandRenderSmiles = readText(raw.ligandRenderSmiles ?? raw.ligand_render_smiles ?? raw.ligand_display_smiles).trim();
+  const ligandRenderAtomPlddts = normalizePlddtArray(
+    raw.ligandRenderAtomPlddts ?? raw.ligand_render_atom_plddts ?? raw.ligand_display_atom_plddts
+  );
+  const hasExactRenderContract = ligandRenderSmiles.length > 0 && ligandRenderAtomPlddts.length > 0;
   const hasResolvedMetrics = pairIptm !== null || pairPae !== null || ligandPlddt !== null || ligandAtomPlddts.length > 0;
   const pairIptmResolvedRaw = raw.pairIptmResolved ?? raw.pair_iptm_resolved;
   return {
@@ -186,6 +228,7 @@ function normalizePredictionRecord(value: unknown): LeadOptPredictionRecord | nu
     pairIptmResolved: pairIptmResolvedRaw === true && hasResolvedMetrics ? true : hasResolvedMetrics,
     ligandPlddt,
     ligandAtomPlddts,
+    ...(hasExactRenderContract ? { ligandRenderSmiles, ligandRenderAtomPlddts } : {}),
     ...(structureText.trim()
       ? {
           structureText,
@@ -378,6 +421,7 @@ function mergePredictionRecordNonRegressive(
   const mergedState = resolveNonRegressiveRuntimeState(current.state, incoming.state) || current.state;
   const incomingHasMetrics = hasResolvedPredictionMetrics(incoming);
   const currentHasMetrics = hasResolvedPredictionMetrics(current);
+  const renderContract = pickPredictionRenderContract(incoming, current);
   return {
     ...current,
     ...incoming,
@@ -390,6 +434,8 @@ function mergePredictionRecordNonRegressive(
       Array.isArray(incoming.ligandAtomPlddts) && incoming.ligandAtomPlddts.length > 0
         ? incoming.ligandAtomPlddts
         : current.ligandAtomPlddts,
+    ...(renderContract.ligandRenderSmiles ? { ligandRenderSmiles: renderContract.ligandRenderSmiles } : {}),
+    ...(renderContract.ligandRenderAtomPlddts.length > 0 ? { ligandRenderAtomPlddts: renderContract.ligandRenderAtomPlddts } : {}),
     structureText: readText(incoming.structureText).trim() ? incoming.structureText : current.structureText,
     structureFormat: readText(incoming.structureText).trim() ? incoming.structureFormat : current.structureFormat,
     structureName: readText(incoming.structureText).trim() ? incoming.structureName : current.structureName,
@@ -489,6 +535,18 @@ function hasResolvedPredictionMetrics(record: LeadOptPredictionRecord | null | u
   return record.pairIptmResolved === true && (pairIptm || pairPae || ligandPlddt || ligandAtomPlddts);
 }
 
+function hasHydratedPredictionVisualization(record: LeadOptPredictionRecord | null | undefined): boolean {
+  if (!record) return false;
+  const ligandAtomPlddts = Array.isArray(record.ligandAtomPlddts) && record.ligandAtomPlddts.length > 0;
+  if (!ligandAtomPlddts) return false;
+  return hasExactPredictionRenderContract(record);
+}
+
+function hasHydratedPredictionResult(record: LeadOptPredictionRecord | null | undefined): boolean {
+  if (!record) return false;
+  return hasResolvedPredictionMetrics(record) && hasHydratedPredictionVisualization(record);
+}
+
 function shouldProbeTaskStatus(
   tracker: Record<string, number>,
   taskIdInput: unknown,
@@ -508,7 +566,7 @@ function shouldHydratePredictionRecord(record: LeadOptPredictionRecord | null | 
   if (String(record.state || '').toUpperCase() !== 'SUCCESS') return false;
   const taskId = String(record.taskId || '').trim();
   if (!taskId || taskId.startsWith('local:')) return false;
-  return !hasResolvedPredictionMetrics(record);
+  return !hasHydratedPredictionResult(record);
 }
 
 function isResultArchivePendingError(error: unknown): boolean {
@@ -576,12 +634,16 @@ function extractPredictionMetricsFromStatusInfo(
   pairPae: number | null;
   ligandPlddt: number | null;
   ligandAtomPlddts: number[];
+  ligandRenderSmiles: string;
+  ligandRenderAtomPlddts: number[];
   hasMetrics: boolean;
 } {
   const statusInfo = asRecord(statusInfoInput);
   const compact = asRecord(statusInfo.lead_opt_metrics || statusInfo.compact_metrics || statusInfo.prediction_metrics);
   const confidence = asRecord(statusInfo.confidence);
   const affinity = asRecord(statusInfo.affinity);
+  const candidateSmiles = readText(statusInfo.candidate_smiles ?? statusInfo.smiles ?? compact.smiles).trim();
+  const renderPayload = extractPredictionRenderPayload(confidence, compact, ligandChain, candidateSmiles);
   const pairIptm =
     findPairIptm(confidence, targetChain, ligandChain) ??
     findPairIptm(affinity, targetChain, ligandChain) ??
@@ -612,6 +674,8 @@ function extractPredictionMetricsFromStatusInfo(
     pairPae,
     ligandPlddt,
     ligandAtomPlddts,
+    ligandRenderSmiles: renderPayload.ligandRenderSmiles,
+    ligandRenderAtomPlddts: renderPayload.ligandRenderAtomPlddts,
     hasMetrics
   };
 }
@@ -756,6 +820,107 @@ function normalizePlddtArray(value: unknown): number[] {
 function mean(values: number[]): number | null {
   if (values.length === 0) return null;
   return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function readExactRenderSmiles(payload: Record<string, unknown>): string {
+  const candidates = [
+    payload.ligand_display_smiles,
+    payload.ligandDisplaySmiles,
+    readObjectPath(payload, 'ligand.display_smiles'),
+    readObjectPath(payload, 'ligandDisplaySmiles')
+  ];
+  for (const candidate of candidates) {
+    const text = readText(candidate).trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+function readAlignedLigandSmiles(payload: Record<string, unknown>): string {
+  const candidates = [
+    payload.ligand_smiles,
+    payload.ligandSmiles,
+    readObjectPath(payload, 'ligand.smiles'),
+    readObjectPath(payload, 'ligandSmiles')
+  ];
+  for (const candidate of candidates) {
+    const text = readText(candidate).trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+function findLigandRenderAtomPlddts(payload: Record<string, unknown>, ligandChain: string): number[] {
+  const preferred = String(ligandChain || '').trim();
+  const byChainRaw =
+    payload.ligand_display_atom_plddts_by_chain ??
+    readObjectPath(payload, 'ligand.display_atom_plddts_by_chain') ??
+    readObjectPath(payload, 'ligand_display.atom_plddts_by_chain');
+  if (byChainRaw && typeof byChainRaw === 'object' && !Array.isArray(byChainRaw)) {
+    const byChain = byChainRaw as Record<string, unknown>;
+    if (preferred) {
+      const direct = normalizePlddtArray(byChain[preferred] ?? byChain[preferred.toUpperCase()] ?? byChain[preferred.toLowerCase()]);
+      if (direct.length > 0) return direct;
+    }
+    const entries = Object.values(byChain).map((item) => normalizePlddtArray(item)).filter((item) => item.length > 0);
+    if (entries.length > 0) {
+      entries.sort((a, b) => b.length - a.length);
+      return entries[0];
+    }
+  }
+  const direct = normalizePlddtArray(
+    payload.ligand_display_atom_plddts ??
+      payload.ligandDisplayAtomPlddts ??
+      readObjectPath(payload, 'ligand.display_atom_plddts') ??
+      readObjectPath(payload, 'ligandDisplayAtomPlddts')
+  );
+  if (direct.length > 0) return direct;
+  return [];
+}
+
+function extractPredictionRenderPayload(
+  confidence: Record<string, unknown>,
+  compact: Record<string, unknown>,
+  ligandChain: string,
+  candidateSmilesInput?: unknown
+): LeadOptPredictionRenderPayload {
+  void candidateSmilesInput;
+  const confidenceRenderSmiles = readExactRenderSmiles(confidence);
+  const confidenceRenderAtomPlddts = findLigandRenderAtomPlddts(confidence, ligandChain);
+  if (confidenceRenderSmiles && confidenceRenderAtomPlddts.length > 0) {
+    return {
+      ligandRenderSmiles: confidenceRenderSmiles,
+      ligandRenderAtomPlddts: confidenceRenderAtomPlddts
+    };
+  }
+  const compactRenderSmiles = readExactRenderSmiles(compact);
+  const compactRenderAtomPlddts = findLigandRenderAtomPlddts(compact, ligandChain);
+  if (compactRenderSmiles && compactRenderAtomPlddts.length > 0) {
+    return {
+      ligandRenderSmiles: compactRenderSmiles,
+      ligandRenderAtomPlddts: compactRenderAtomPlddts
+    };
+  }
+  const confidenceAlignedSmiles = readAlignedLigandSmiles(confidence);
+  const confidenceAlignedAtomPlddts = findLigandAtomPlddts(confidence, ligandChain);
+  if (confidenceAlignedSmiles && confidenceAlignedAtomPlddts.length > 0) {
+    return {
+      ligandRenderSmiles: confidenceAlignedSmiles,
+      ligandRenderAtomPlddts: confidenceAlignedAtomPlddts
+    };
+  }
+  const compactAlignedSmiles = readAlignedLigandSmiles(compact);
+  const compactAlignedAtomPlddts = normalizePlddtArray(compact.ligand_atom_plddts ?? compact.ligandAtomPlddts);
+  if (compactAlignedSmiles && compactAlignedAtomPlddts.length > 0) {
+    return {
+      ligandRenderSmiles: compactAlignedSmiles,
+      ligandRenderAtomPlddts: compactAlignedAtomPlddts
+    };
+  }
+  return {
+    ligandRenderSmiles: '',
+    ligandRenderAtomPlddts: []
+  };
 }
 
 function findLigandAtomPlddts(confidence: Record<string, unknown>, ligandChain: string): number[] {
@@ -1024,18 +1189,23 @@ function findPairPae(confidence: Record<string, unknown>, targetChain: string, l
 function extractPredictionResultPayload(
   parsed: ParsedResultBundle | null,
   targetChain: string,
-  ligandChain: string
+  ligandChain: string,
+  candidateSmilesInput?: unknown
 ): {
   pairIptm: number | null;
   pairPae: number | null;
   ligandPlddt: number | null;
   ligandAtomPlddts: number[];
+  ligandRenderSmiles: string;
+  ligandRenderAtomPlddts: number[];
   structureText: string;
   structureFormat: 'cif' | 'pdb';
   structureName: string;
 } {
   const confidence = asRecord(parsed?.confidence);
   const affinity = asRecord(parsed?.affinity);
+  const candidateSmiles = readText(candidateSmilesInput).trim();
+  const renderPayload = extractPredictionRenderPayload(confidence, asRecord({}), ligandChain, candidateSmiles);
   const pairIptm = findPairIptm(confidence, targetChain, ligandChain) ?? findPairIptm(affinity, targetChain, ligandChain);
   const pairPae = findPairPae(confidence, targetChain, ligandChain) ?? findPairPae(affinity, targetChain, ligandChain);
   const ligandAtomPlddts = findLigandAtomPlddts(confidence, ligandChain);
@@ -1045,6 +1215,8 @@ function extractPredictionResultPayload(
     pairPae,
     ligandPlddt: mean(ligandAtomPlddts),
     ligandAtomPlddts,
+    ligandRenderSmiles: renderPayload.ligandRenderSmiles,
+    ligandRenderAtomPlddts: renderPayload.ligandRenderAtomPlddts,
     structureText,
     structureFormat: readText(parsed?.structureFormat).toLowerCase() === 'pdb' ? 'pdb' : 'cif',
     structureName: readText(parsed?.structureName)
@@ -1214,6 +1386,7 @@ export function useLeadOptMmpQueryMachine({
                 const nextPairPae = metrics.hasMetrics ? metrics.pairPae : current.pairPae;
                 const nextLigandPlddt = metrics.hasMetrics ? metrics.ligandPlddt : current.ligandPlddt;
                 const nextLigandAtomPlddts = metrics.hasMetrics ? metrics.ligandAtomPlddts : current.ligandAtomPlddts;
+                const renderContract = pickPredictionRenderContract(metrics, current);
                 return {
                   ...prev,
                   [predictionKey]: {
@@ -1224,9 +1397,11 @@ export function useLeadOptMmpQueryMachine({
                     pairIptmResolved:
                       metrics.hasMetrics ||
                       current.pairIptmResolved === true ||
-                      hasResolvedPredictionMetrics(current),
+                    hasResolvedPredictionMetrics(current),
                     ligandPlddt: nextLigandPlddt,
                     ligandAtomPlddts: nextLigandAtomPlddts,
+                    ...(renderContract.ligandRenderSmiles ? { ligandRenderSmiles: renderContract.ligandRenderSmiles } : {}),
+                    ...(renderContract.ligandRenderAtomPlddts.length > 0 ? { ligandRenderAtomPlddts: renderContract.ligandRenderAtomPlddts } : {}),
                     error: '',
                     updatedAt: Date.now()
                   }
@@ -1357,6 +1532,7 @@ export function useLeadOptMmpQueryMachine({
                 const nextPairPae = metrics.hasMetrics ? metrics.pairPae : current.pairPae;
                 const nextLigandPlddt = metrics.hasMetrics ? metrics.ligandPlddt : current.ligandPlddt;
                 const nextLigandAtomPlddts = metrics.hasMetrics ? metrics.ligandAtomPlddts : current.ligandAtomPlddts;
+                const renderContract = pickPredictionRenderContract(metrics, current);
                 return {
                   ...prev,
                   [backendKey]: {
@@ -1370,6 +1546,8 @@ export function useLeadOptMmpQueryMachine({
                       hasResolvedPredictionMetrics(current),
                     ligandPlddt: nextLigandPlddt,
                     ligandAtomPlddts: nextLigandAtomPlddts,
+                    ...(renderContract.ligandRenderSmiles ? { ligandRenderSmiles: renderContract.ligandRenderSmiles } : {}),
+                    ...(renderContract.ligandRenderAtomPlddts.length > 0 ? { ligandRenderAtomPlddts: renderContract.ligandRenderAtomPlddts } : {}),
                     error: '',
                     updatedAt: Date.now()
                   }
@@ -1474,10 +1652,11 @@ export function useLeadOptMmpQueryMachine({
             if (cancelled) return;
             const parsed = await parseResultBundle(blob);
             if (!parsed) continue;
-            const resultPayload = extractPredictionResultPayload(parsed, targetChain, ligandChain);
+            const resultPayload = extractPredictionResultPayload(parsed, targetChain, ligandChain, smiles);
             setPredictionBySmiles((prev) => {
               const current = prev[smiles] || record;
               if (!current) return prev;
+              const renderContract = pickPredictionRenderContract(resultPayload, current);
               return {
                 ...prev,
                 [smiles]: {
@@ -1488,6 +1667,8 @@ export function useLeadOptMmpQueryMachine({
                   pairIptmResolved: true,
                   ligandPlddt: resultPayload.ligandPlddt,
                   ligandAtomPlddts: resultPayload.ligandAtomPlddts,
+                  ...(renderContract.ligandRenderSmiles ? { ligandRenderSmiles: renderContract.ligandRenderSmiles } : {}),
+                  ...(renderContract.ligandRenderAtomPlddts.length > 0 ? { ligandRenderAtomPlddts: renderContract.ligandRenderAtomPlddts } : {}),
                   ...(resultPayload.structureText.trim()
                     ? {
                         structureText: resultPayload.structureText,
@@ -1602,6 +1783,7 @@ export function useLeadOptMmpQueryMachine({
             setReferencePredictionByBackend((prev) => {
               const current = prev[backendKey] || record;
               if (!current) return prev;
+              const renderContract = pickPredictionRenderContract(resultPayload, current);
               return {
                 ...prev,
                 [backendKey]: {
@@ -1612,6 +1794,8 @@ export function useLeadOptMmpQueryMachine({
                   pairIptmResolved: true,
                   ligandPlddt: resultPayload.ligandPlddt,
                   ligandAtomPlddts: resultPayload.ligandAtomPlddts,
+                  ...(renderContract.ligandRenderSmiles ? { ligandRenderSmiles: renderContract.ligandRenderSmiles } : {}),
+                  ...(renderContract.ligandRenderAtomPlddts.length > 0 ? { ligandRenderAtomPlddts: renderContract.ligandRenderAtomPlddts } : {}),
                   ...(resultPayload.structureText.trim()
                     ? {
                         structureText: resultPayload.structureText,
@@ -2404,12 +2588,7 @@ export function useLeadOptMmpQueryMachine({
       const existingState = String(existing?.state || '').toUpperCase();
       if (existingState === 'QUEUED' || existingState === 'RUNNING') return;
       if (existingState === 'SUCCESS') {
-        const hasMetrics =
-          existing.pairIptmResolved === true ||
-          existing.pairIptm !== null ||
-          existing.pairPae !== null ||
-          existing.ligandPlddt !== null ||
-          (Array.isArray(existing.ligandAtomPlddts) && existing.ligandAtomPlddts.length > 0);
+        const hasMetrics = hasHydratedPredictionResult(existing);
         if (existing && hasMetrics) return;
       }
 
@@ -2590,7 +2769,7 @@ export function useLeadOptMmpQueryMachine({
       const existing = predictionBySmiles[predictionKey];
       if (!existing) return null;
       if (String(existing.state || '').toUpperCase() !== 'SUCCESS') return existing;
-      if (readText(existing.structureText).trim() && existing.pairIptmResolved === true) {
+      if (readText(existing.structureText).trim() && hasHydratedPredictionResult(existing)) {
         return existing;
       }
 
@@ -2634,7 +2813,8 @@ export function useLeadOptMmpQueryMachine({
       try {
         const blob = await downloadResultBlob(taskId, { mode: 'view' });
         const parsed = await parseResultBundle(blob);
-        const resultPayload = extractPredictionResultPayload(parsed, targetChain, ligandChain);
+        const resultPayload = extractPredictionResultPayload(parsed, targetChain, ligandChain, normalizedSmiles);
+        const renderContract = pickPredictionRenderContract(resultPayload, existing);
         const nextRecord: LeadOptPredictionRecord = {
           ...existing,
           state: 'SUCCESS',
@@ -2643,6 +2823,8 @@ export function useLeadOptMmpQueryMachine({
           pairIptmResolved: true,
           ligandPlddt: resultPayload.ligandPlddt,
           ligandAtomPlddts: resultPayload.ligandAtomPlddts,
+          ...(renderContract.ligandRenderSmiles ? { ligandRenderSmiles: renderContract.ligandRenderSmiles } : {}),
+          ...(renderContract.ligandRenderAtomPlddts.length > 0 ? { ligandRenderAtomPlddts: renderContract.ligandRenderAtomPlddts } : {}),
           ...(resultPayload.structureText.trim()
             ? {
                 structureText: resultPayload.structureText,
@@ -2731,7 +2913,7 @@ export function useLeadOptMmpQueryMachine({
       const existing = referencePredictionByBackend[backendKey];
       if (!existing) return null;
       if (String(existing.state || '').toUpperCase() !== 'SUCCESS') return existing;
-      if (readText(existing.structureText).trim() && existing.pairIptmResolved === true) {
+      if (readText(existing.structureText).trim() && hasHydratedPredictionResult(existing)) {
         return existing;
       }
 
@@ -2776,6 +2958,7 @@ export function useLeadOptMmpQueryMachine({
         const blob = await downloadResultBlob(taskId, { mode: 'view' });
         const parsed = await parseResultBundle(blob);
         const resultPayload = extractPredictionResultPayload(parsed, targetChain, ligandChain);
+        const renderContract = pickPredictionRenderContract(resultPayload, existing);
         const nextRecord: LeadOptPredictionRecord = {
           ...existing,
           state: 'SUCCESS',
@@ -2784,6 +2967,8 @@ export function useLeadOptMmpQueryMachine({
           pairIptmResolved: true,
           ligandPlddt: resultPayload.ligandPlddt,
           ligandAtomPlddts: resultPayload.ligandAtomPlddts,
+          ...(renderContract.ligandRenderSmiles ? { ligandRenderSmiles: renderContract.ligandRenderSmiles } : {}),
+          ...(renderContract.ligandRenderAtomPlddts.length > 0 ? { ligandRenderAtomPlddts: renderContract.ligandRenderAtomPlddts } : {}),
           ...(resultPayload.structureText.trim()
             ? {
                 structureText: resultPayload.structureText,

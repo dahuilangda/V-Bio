@@ -13,7 +13,7 @@ Behavior note:
 - `compound-import` / `compound-delete` default to incremental MMP re-index (no fallback to full rebuild).
 - You can tune shard count and concurrency with `--pg_incremental_index_shards` and `--pg_incremental_index_jobs`.
 - `--pg_index_commit_every_flushes` defaults to `1` (safer commit cadence on large runs); set `<=0` to use adaptive mode.
-- Large full-build runs should start with conservative PostgreSQL build settings and only scale up after validation; avoid oversized `maintenance_work_mem` / parallel worker values on `chembl36_full`.
+- Large exact full-build runs on `chembl36_full` should prefer sharded full-index (`--pg_full_index_shards` / `--pg_full_index_jobs`) over constant-cluster caps.
 - Incremental add computes affected constants from delta `.fragdb` and rebuilds candidate pairs via `fragdb_partition`, so newly added compounds can correctly grow pair counts.
 - Lifecycle state is deduplicated by `clean_smiles`; incremental validation should be compared against a rebuild of lifecycle state (not raw duplicated input rows).
 - `--pg_incremental_index_jobs` now runs shard prepare/index steps concurrently (merge remains transaction-serialized for correctness).
@@ -68,12 +68,29 @@ Set backend MMP routing in your backend stack env (for example `deploy/docker/DO
 ```env
 LEAD_OPT_MMP_DB_URL=postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp
 LEAD_OPT_MMP_DB_SCHEMA=chembl_cyp3a4_herg
+MMP_LIFECYCLE_MAX_INDEX_MAINTENANCE_WORK_MEM_MB=32768
+MMP_LIFECYCLE_MAX_INDEX_WORK_MEM_MB=1024
+MMP_LIFECYCLE_MAX_INDEX_PARALLEL_WORKERS=16
 ```
 
 Notes:
 
 - This is backend env, not frontend `VITE_*`.
 - `frontend/.env` should not be used for backend MMP DB routing.
+- `MMP_LIFECYCLE_MAX_INDEX_*` clamp the maximum per-run index tuning used by `engine.py`. Put them in the worker stack env, not the PostgreSQL env.
+
+Recommended persistent PostgreSQL env (for example `deploy/docker/DOCKER_CAP_MMP_POSTGRES.env`):
+
+```env
+MMP_POSTGRES_SHARED_BUFFERS=64GB
+MMP_POSTGRES_EFFECTIVE_CACHE_SIZE=320GB
+MMP_POSTGRES_MAX_WAL_SIZE=64GB
+MMP_POSTGRES_CHECKPOINT_TIMEOUT=30min
+MMP_POSTGRES_WAL_BUFFERS=16MB
+MMP_POSTGRES_MAX_PARALLEL_MAINTENANCE_WORKERS=8
+```
+
+`deploy/docker/DOCKER_CAP_MMP_POSTGRES.compose.yml` injects these at container start, so recreating the container keeps the same PostgreSQL tuning without manual `ALTER SYSTEM`.
 
 ## 3) Full Lifecycle Cookbook
 
@@ -303,9 +320,9 @@ python -m lead_optimization.mmp_lifecycle db-index-fragdb \
 
 Only enable `--pg_index_max_constant_matches` or `--pg_index_max_constant_pairs` when you explicitly want to cap extremely large constant clusters and accept that those clusters are excluded from pair generation.
 
-### 3.2B `chembl36_full` from `.smi` (recommended first run in this repo)
+### 3.2B `chembl36_full` from `.smi` (exact full build, sharded)
 
-Use the repo-local package path and keep the generated `.fragdb` so you can resume index without repeating fragmentation:
+Use the repo-local package path and keep the generated `.fragdb` so you can resume/retry shard index without repeating fragmentation. For an exact full build, do not set `--pg_index_max_constant_matches` or `--pg_index_max_constant_pairs`.
 
 ```bash
 cd /data/V-Bio
@@ -314,13 +331,15 @@ cd /data/V-Bio
 nohup python -m capabilities.lead_optimization.mmp_lifecycle db-build \
   --smiles_file capabilities/lead_optimization/data/chembl_compounds.smi \
   --output_dir capabilities/lead_optimization/data \
-  --postgres_url 'postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp' \
+  --postgres_url 'postgresql://leadopt:leadopt@172.17.3.200:54330/leadopt_mmp' \
   --postgres_schema chembl36_full \
   --max_heavy_atoms 60 \
   --fragment_jobs 32 \
-  --pg_index_maintenance_work_mem_mb 2048 \
-  --pg_index_work_mem_mb 64 \
-  --pg_index_parallel_workers 2 \
+  --pg_full_index_shards 8 \
+  --pg_full_index_jobs 4 \
+  --pg_index_maintenance_work_mem_mb 16384 \
+  --pg_index_work_mem_mb 256 \
+  --pg_index_parallel_workers 8 \
   --pg_index_commit_every_flushes 1 \
   --attachment_force_recompute \
   --keep_fragdb \
@@ -335,9 +354,9 @@ If you want lower peak runtime/memory on the first successful build, add:
   --pg_skip_constant_smiles_mol_index \
 ```
 
-### 3.2C `chembl36_full` resume from existing `.fragdb`
+### 3.2C `chembl36_full` resume from existing `.fragdb` (recommended)
 
-If the fragment step already finished and `capabilities/lead_optimization/data/chembl_compounds.fragdb` exists, resume from `.fragdb` directly:
+If the fragment step already finished and `capabilities/lead_optimization/data/chembl_compounds.fragdb` exists, resume from `.fragdb` directly using the resumable sharded full-index path:
 
 ```bash
 cd /data/V-Bio
@@ -345,15 +364,23 @@ cd /data/V-Bio
 
 python -m capabilities.lead_optimization.mmp_lifecycle db-index-fragdb \
   --fragments_file capabilities/lead_optimization/data/chembl_compounds.fragdb \
-  --postgres_url 'postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp' \
+  --postgres_url 'postgresql://leadopt:leadopt@172.17.3.200:54330/leadopt_mmp' \
   --postgres_schema chembl36_full \
-  --pg_index_maintenance_work_mem_mb 2048 \
-  --pg_index_work_mem_mb 64 \
-  --pg_index_parallel_workers 2 \
+  --pg_full_index_shards 8 \
+  --pg_full_index_jobs 4 \
+  --pg_index_maintenance_work_mem_mb 16384 \
+  --pg_index_work_mem_mb 256 \
+  --pg_index_parallel_workers 8 \
   --pg_index_commit_every_flushes 1 \
   --attachment_force_recompute \
   --force
 ```
+
+Notes:
+
+- Each full shard indexes into its own temporary PostgreSQL schema and merge happens only after shard index succeeds.
+- If one or more shards fail, rerun the exact same command. Completed shard schemas are reused.
+- Shard resume is strict: changing the input `.fragdb` or `--pg_full_index_shards` invalidates the saved shard state instead of mixing old and new shards.
 
 ### 3.3 Incremental compound add
 
@@ -593,6 +620,7 @@ Use `registry-delete --drop_data` when you want registry + schema data removed t
 - Recent fix ensures transformed constants from temp shard pairs are mapped/inserted,
   so valid new pairs are not dropped during merge.
 - Full `chembl36_full` builds should prefer `--fragments_file` resume/index when a `.fragdb` already exists; this avoids repeating the fragment step.
+- Exact `chembl36_full` builds should prefer `--pg_full_index_shards` / `--pg_full_index_jobs` and keep `--pg_index_max_constant_matches` / `--pg_index_max_constant_pairs` unset.
 - Full ChEMBL download builds skip redundant second-pass SMILES validation because `download_chembl` already validates rows during export.
 - Incremental compound batch defaults are chosen so maintenance cost scales with batch delta, not total schema size. Use `--pg_incremental_force_analyze` and `--pg_incremental_refresh_dataset_counts` only when you explicitly want those full-maintenance costs.
 

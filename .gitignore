@@ -91,3 +91,7 @@ capabilities/lead_optimization/data/bench_herg_*
 capabilities/lead_optimization/data/*_compound_state.cache.fragdb
 capabilities/lead_optimization/mmp_lifecycle/matcher/
 BioPhi
+capabilities/lead_optimization/data/
+capabilities/affinity/tests/
+capabilities/boltz2score/tests/
+capabilities/lead_optimization/tests/

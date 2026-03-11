@@ -21,6 +21,10 @@ from capabilities.affinity.boltzina.affinity.predict_affinity import load_boltz2
 from boltz.main import get_cache_path, MSAModuleArgs
 
 import gemmi
+from capabilities.affinity.ligand_mapping import (
+    ensure_unique_ligand_atom_names,
+    ligand_occurrence_signature,
+)
 
 # CCD名称管理器，确保同一批次运行的不要使用相同的CCD名称
 import redis
@@ -181,69 +185,32 @@ class Boltzina:
         else:
             return {}
 
-    def _sanitize_atom_name(self, name: str) -> str:
-        """Sanitize atom names to ASCII 32..95 and uppercase for featurizer compatibility."""
-        if name is None:
-            return "X"
-        cleaned = str(name).strip().upper()
-        if not cleaned:
-            return "X"
-        safe_chars = []
-        for ch in cleaned:
-            code = ord(ch)
-            if 32 <= code <= 95:
-                safe_chars.append(ch)
-            else:
-                safe_chars.append("X")
-        return "".join(safe_chars)[:4] or "X"
-    
     def _add_temporary_ligand_to_ccd(self, ligand_name: str, ligand_mol):
-        """Temporarily add a custom ligand to CCD for processing with original naming.
+        """Temporarily add a custom ligand to CCD with exact or deterministic atom naming.
 
         Args:
             ligand_name: Original name of the ligand from the structure file (e.g., "Z91")
             ligand_mol: RDKit molecule object of the ligand or wrapped molecule
         """
-        # Ensure all atoms have proper "name" property for CCD compatibility
-        # This is critical for prepare_boltz2score_inputs.py's _ccd_matches_residue function
+        ligand_mol = Chem.Mol(ligand_mol)
+        ligand_mol, renamed = ensure_unique_ligand_atom_names(
+            ligand_mol,
+            context=f"custom ligand {ligand_name}",
+        )
+
         atom_names = []
         for atom in ligand_mol.GetAtoms():
-            # Check for original atom name first (from MOL2)
-            if atom.HasProp("_original_atom_name"):
-                original_name = atom.GetProp("_original_atom_name").strip()
-                if original_name:
-                    # Use the sanitized version of original name
-                    sanitized_name = self._sanitize_atom_name(original_name)
-                    atom.SetProp("name", sanitized_name)
-                    atom_names.append(sanitized_name)
-                    continue
-
-            # Fallback to existing properties
-            found_name = None
-            for prop in ("name", "_TriposAtomName", "_atomName"):
-                if atom.HasProp(prop):
-                    value = atom.GetProp(prop).strip()
-                    if value:
-                        found_name = value
-                        break
-
-            if found_name:
-                atom.SetProp("name", found_name)
-                atom_names.append(found_name)
-            else:
-                # Last resort: generate name based on element and index
-                element = atom.GetSymbol()
-                idx = atom.GetIdx()
-                generated_name = f"{element}{idx + 1}"
-                atom.SetProp("name", generated_name)
-                atom_names.append(generated_name)
+            atom_names.append(atom.GetProp("name"))
 
         # Ensure molecule has required properties
         ligand_mol.SetProp("_Name", ligand_name)
         ligand_mol.SetProp("name", ligand_name)
         ligand_mol.SetProp("id", ligand_name)
 
-        print(f"Set 'name' property for {len(atom_names)} atoms in ligand '{ligand_name}'")
+        print(
+            f"Set deterministic atom names for {len(atom_names)} atoms in ligand "
+            f"'{ligand_name}' (renamed={renamed})"
+        )
         if len(atom_names) <= 5:
             print(f"  Atom names: {atom_names}")
 
@@ -383,6 +350,28 @@ class Boltzina:
         except Exception as e:
             print(f"⚠️  Failed to write record-specific custom ligands for '{record_id}': {e}")
 
+    def _allocate_unique_ligand_resname(self, seed: str, used: set[str]) -> str:
+        token = re.sub(r"[^A-Za-z0-9]", "", str(seed or "").strip().upper()) or "LIG"
+        prefixes = [token[:2], token[:1], "L"]
+        digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        for prefix in prefixes:
+            width = 3 - len(prefix)
+            if width <= 0:
+                prefix = prefix[:2]
+                width = 1
+            limit = 36 ** width
+            for idx in range(limit):
+                suffix = ""
+                value = idx
+                for _ in range(width):
+                    value, rem = divmod(value, 36)
+                    suffix = digits[rem] + suffix
+                candidate = f"{prefix}{suffix.rjust(width, '0')}"[:3]
+                if candidate not in used:
+                    used.add(candidate)
+                    return candidate
+        raise RuntimeError(f"Unable to allocate a unique ligand residue name for {seed!r}.")
+
     def _extract_ligand_name_from_error(self, error_message: str) -> Optional[str]:
         """Extract ligand name from CCD error message."""
         import re
@@ -506,15 +495,7 @@ class Boltzina:
                                 
                             except Exception as e2:
                                 print(f"Permissive sanitization also failed: {e2}")
-                                # Last resort: create a very basic molecule representation
-                                try:
-                                    # Create minimal molecule just for structure processing
-                                    mol = Chem.MolFromMolFile(temp_sdf.name, sanitize=False)
-                                    # Don't sanitize at all, just use raw coordinates
-                                    print(f"Using unsanitized molecule for '{ligand_name}' as last resort")
-                                except Exception as e3:
-                                    print(f"Even raw molecule creation failed: {e3}")
-                                    return False
+                                return False
                         
                         if mol is not None:
                             # Add essential molecule properties
@@ -522,17 +503,19 @@ class Boltzina:
                             mol.SetProp('name', ligand_name)
                             mol.SetProp('id', ligand_name)
                             mol.SetProp('resname', ligand_name)
-                            
-                            # CRITICAL: Set atom names for each atom in the molecule
+
                             for i, atom in enumerate(mol.GetAtoms()):
-                                if i < len(atom_names):
-                                    atom.SetProp('name', self._sanitize_atom_name(atom_names[i]))
-                                else:
-                                    # Fallback naming
-                                    element = atom.GetSymbol()
-                                    atom.SetProp('name', self._sanitize_atom_name(f"{element}{i+1}"))
-                            
-                            print(f"Set atom names for {mol.GetNumAtoms()} atoms in custom ligand")
+                                if i < len(atom_names) and str(atom_names[i] or "").strip():
+                                    atom.SetProp('name', str(atom_names[i]).strip())
+
+                            mol, renamed = ensure_unique_ligand_atom_names(
+                                mol,
+                                context=f"custom ligand {ligand_name}",
+                            )
+                            print(
+                                f"Set deterministic atom names for {mol.GetNumAtoms()} atoms "
+                                f"in custom ligand '{ligand_name}' (renamed={renamed})"
+                            )
                             
                             # Add to CCD temporarily with unique name
                             unique_ligand_name = self._add_temporary_ligand_to_ccd(ligand_name, mol)
@@ -726,13 +709,13 @@ class Boltzina:
             print(f"Processing ligand: {ligand_path.name}")
             print(f"Using unique ligand identifier: {self.unique_ligand_name}")
 
-            # Create combined complex structure as standard PDB
-            complex_file = self._create_standard_complex_pdb(protein_path, ligand_path, output_prefix)
+            # Create combined complex directly as mmCIF to preserve exact atom names.
+            complex_cif = self._create_standard_complex_cif_with_gemmi(
+                protein_path,
+                ligand_path,
+                output_prefix,
+            )
 
-            # Convert the PDB to CIF for proper processing
-            complex_cif = self._convert_complex_pdb_to_cif(complex_file)
-
-            # Use standard complex prediction pipeline with CIF file
             self.predict([str(complex_cif)])
             
         except Exception as e:
@@ -760,6 +743,11 @@ class Boltzina:
         Create a standard PDB complex file from separate protein and ligand files.
         This method preserves the original coordinates from both files.
         """
+        raise ValueError(
+            "Strict affinity mode does not support PDB-intermediate ligand merging. "
+            "Use direct mmCIF assembly instead."
+        )
+
         combined_dir = self.output_dir / "combined_complexes"
         combined_dir.mkdir(exist_ok=True)
         
@@ -863,14 +851,26 @@ class Boltzina:
         else:
             raise ValueError(f"Unsupported protein file format: {protein_path.suffix}")
 
-        # Add ligand as a separate chain BEFORE setting up entities
-        # Use a chain ID that won't conflict with protein chains
-        ligand_chain = gemmi.Chain("B")
+        used_chain_ids = {
+            str(chain.name or "").strip()
+            for chain in protein_structure[0]
+            if str(chain.name or "").strip()
+        }
+        ligand_chain_id = "L"
+        if ligand_chain_id in used_chain_ids:
+            for code in "LMNOPQRSTUVWXYZ":
+                if code not in used_chain_ids:
+                    ligand_chain_id = code
+                    break
+            else:
+                raise ValueError("Unable to allocate a unique ligand chain ID for separate-input complex.")
+
+        # Add ligand as a separate chain BEFORE setting up entities.
+        ligand_chain = gemmi.Chain(ligand_chain_id)
         residue = gemmi.Residue()
         residue.name = target_resname
         residue.seqid = gemmi.SeqId(1, " ")
-        # Explicitly set subchain to avoid gemmi's auto-generated IDs
-        residue.subchain = "L1"
+        residue.subchain = f"{ligand_chain_id}1"
 
         # Add atoms from ligand molecule
         conf = ligand_mol.GetConformer()
@@ -878,13 +878,12 @@ class Boltzina:
             atom = ligand_mol.GetAtomWithIdx(i)
             pos = conf.GetAtomPosition(i)
             gemmi_atom = gemmi.Atom()
-            # Get atom name - prefer original atom name
             if atom.HasProp("_original_atom_name"):
                 gemmi_atom.name = atom.GetProp("_original_atom_name")
             elif atom.HasProp("name"):
                 gemmi_atom.name = atom.GetProp("name")
             else:
-                gemmi_atom.name = atom.GetSymbol()
+                raise ValueError("Ligand atom is missing a deterministic atom name.")
             gemmi_atom.element = gemmi.Element(atom.GetSymbol())
             gemmi_atom.pos = gemmi.Position(pos.x, pos.y, pos.z)
             residue.add_atom(gemmi_atom)
@@ -1692,15 +1691,12 @@ class Boltzina:
                     raise ValueError(
                         f"MOL2 atom names are missing or atom count mismatched for {ligand_file.name}."
                     )
-                # Set atom names - use sanitized name but store original as well
+                # Preserve exact MOL2 atom names before deterministic validation.
                 for atom, name in zip(mol.GetAtoms(), atom_names):
                     if name:
-                        # Store original atom name for reference
-                        atom.SetProp("_original_atom_name", name)
-                        # Also store sanitized name for compatibility
-                        safe_name = self._sanitize_atom_name(name)
-                        atom.SetProp("_TriposAtomName", safe_name)
-                        atom.SetProp("name", safe_name)
+                        atom.SetProp("_original_atom_name", str(name).strip())
+                        atom.SetProp("_TriposAtomName", str(name).strip())
+                        atom.SetProp("name", str(name).strip())
 
                 has_valid_3d_coords = True
                 print(f"Restored MOL2 coordinates and atom names from {ligand_file.name}")
@@ -1710,30 +1706,14 @@ class Boltzina:
                     mol.SetProp("_bond_info", str(bond_info))
                     print(f"Preserved {len(bond_info)} bond records from MOL2 file")
 
-            # Ensure atom names are set (use original names from MOL2 if available)
-            for idx, atom in enumerate(mol.GetAtoms()):
-                # Check for original atom name first (from MOL2)
-                if atom.HasProp("_original_atom_name"):
-                    # Use the sanitized version of original name
-                    original = atom.GetProp("_original_atom_name")
-                    safe_name = self._sanitize_atom_name(original)
-                    atom.SetProp("name", safe_name)
-                    continue
-
-                # Otherwise, try other properties
-                preferred = None
-                for prop in ("name", "_TriposAtomName", "_atomName"):
-                    if atom.HasProp(prop):
-                        value = atom.GetProp(prop).strip()
-                        if value:
-                            preferred = value
-                            break
-                if not preferred:
-                    preferred = f"{atom.GetSymbol()}{idx + 1}"
-                safe_name = self._sanitize_atom_name(preferred)
-                atom.SetProp("name", safe_name)
-                if atom.HasProp("_TriposAtomName"):
-                    atom.SetProp("_TriposAtomName", safe_name)
+            mol, renamed = ensure_unique_ligand_atom_names(
+                mol,
+                context=f"ligand file {ligand_file.name}",
+            )
+            print(
+                f"Prepared ligand atom names for {ligand_file.name}: "
+                f"atoms={mol.GetNumAtoms()}, renamed={renamed}"
+            )
 
             if not has_valid_3d_coords:
                 raise ValueError(
@@ -2001,7 +1981,6 @@ class Boltzina:
                 # For PDB files, convert to CIF first
                 structure = gemmi.read_structure(str(complex_file))
             
-            # Identify non-standard residues (potential ligands)
             standard_residues = {
                 'ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 
                 'HIS', 'ILE', 'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER', 
@@ -2010,161 +1989,100 @@ class Boltzina:
                 'HOH', 'WAT', 'H2O',  # Water
                 'NA', 'CL', 'MG', 'CA', 'K', 'ZN', 'FE'  # Common ions
             }
-            
-            # Find ligands and create unified naming strategy
-            ligand_residues = {}
-            ligand_name_mapping = {}
-            ligand_types = {}  # Track different ligand types
-            lig_counter = 0
-            
-            # First pass: identify all unique ligand types
+
+            used_resnames = {
+                str(residue.name or "").strip()
+                for model in structure
+                for chain in model
+                for residue in chain
+                if str(residue.name or "").strip()
+            }
+            entries: list[dict[str, object]] = []
             for model in structure:
                 for chain in model:
                     for residue in chain:
-                        if residue.name not in standard_residues:
-                            if residue.name not in ligand_types:
-                                # Extract ligand molecule for comparison
-                                ligand_mol = self._extract_ligand_from_residue(residue)
-                                if ligand_mol is not None:
-                                    ligand_types[residue.name] = ligand_mol
-            
-            # Second pass: create unified naming strategy
-            for original_name, ligand_mol in ligand_types.items():
-                # Try to use "LIG" as the preferred residue name
-                target_resname = "LIG"
-                
-                # Check if "LIG" is already in use by another ligand type or conflicts
-                conflict_detected = False
-                
-                # Check if "LIG" already exists in the structure
-                for model in structure:
-                    for chain in model:
-                        for residue in chain:
-                            if residue.name == "LIG" and residue.name != original_name:
-                                conflict_detected = True
-                                break
-                        if conflict_detected:
-                            break
-                    if conflict_detected:
-                        break
-                
-                # Also check if "LIG" is already mapped to a different ligand type
-                for mapped_orig, mapped_target in ligand_name_mapping.items():
-                    if mapped_target == "LIG" and mapped_orig != original_name:
-                        conflict_detected = True
-                        break
-                
-                # If conflict detected, use Z-prefix unique name
-                if conflict_detected:
-                    # Generate unique CCD name and add to CCD
-                    unique_ccd_name = self._add_temporary_ligand_to_ccd(original_name, ligand_mol)
-                    
-                    # Generate Z-prefix residue name
-                    if '_' in unique_ccd_name:
-                        unique_part = unique_ccd_name.split('_')[-1]
-                        try:
-                            hex_value = int(unique_part[:6], 16) % 100
-                            target_resname = f"Z{hex_value:02d}"
-                        except ValueError:
-                            hash_val = hash(unique_part) % 100
-                            target_resname = f"Z{hash_val:02d}"
-                    else:
-                        hash_val = hash(unique_ccd_name) % 100
-                        target_resname = f"Z{hash_val:02d}"
-                    
-                    # Ensure the safe residue name is different from the original
-                    attempt = 0
-                    while target_resname == original_name and attempt < 100:
-                        attempt += 1
-                        hash_val = (hash(unique_ccd_name + str(attempt)) % 100)
-                        target_resname = f"Z{hash_val:02d}"
-                    
-                    ligand_residues[original_name] = (unique_ccd_name, target_resname)
-                    print(f"Conflict detected: Mapping ligand '{original_name}' -> CCD:'{unique_ccd_name}' -> PDB:'{target_resname}'")
-                else:
-                    # No conflict, use "LIG" as residue name
-                    unique_ccd_name = self._add_temporary_ligand_to_ccd("LIG", ligand_mol)
-                    ligand_residues[original_name] = (unique_ccd_name, "LIG")
-                    print(f"Unified naming: Mapping ligand '{original_name}' -> CCD:'{unique_ccd_name}' -> PDB:'LIG'")
-                
-                ligand_name_mapping[original_name] = target_resname
-            
-            # If no ligands found, return original file
-            if not ligand_name_mapping:
+                        if residue.name in standard_residues:
+                            continue
+                        ligand_mol = self._extract_ligand_from_residue(residue)
+                        if ligand_mol is None:
+                            raise ValueError(
+                                f"Failed to extract non-polymer residue {residue.name!r} "
+                                "for strict ligand remapping."
+                            )
+                        entries.append(
+                            {
+                                "residue": residue,
+                                "original_name": str(residue.name),
+                                "ligand_mol": ligand_mol,
+                                "signature": ligand_occurrence_signature(residue, ligand_mol),
+                            }
+                        )
+
+            if not entries:
                 print(f"No ligands detected in {complex_file.name}, using original file")
                 return complex_file
-            
-            # Rewrite the structure with new residue names
-            for model in structure:
-                for chain in model:
-                    for residue in chain:
-                        if residue.name in ligand_name_mapping:
-                            residue.name = ligand_name_mapping[residue.name]
-            
-            # Ensure the new residue names are also registered in CCD
-            for original_name, (unique_ccd_name, target_resname) in ligand_residues.items():
-                if target_resname not in self.ccd and unique_ccd_name in self.ccd:
-                    # Add the target residue name as an alias to the unique CCD name
-                    self.ccd[target_resname] = self.ccd[unique_ccd_name]
-                    self.custom_ligands.add(target_resname)
-                    print(f"Added alias '{target_resname}' for CCD entry '{unique_ccd_name}'")
-                    
-                    # Also write the alias to local mols directory
-                    self._write_custom_ligand_to_local_mols_dir(target_resname, self.ccd[target_resname])
+
+            grouped_entries: dict[str, list[dict[str, object]]] = {}
+            for entry in entries:
+                grouped_entries.setdefault(str(entry["original_name"]), []).append(entry)
+
+            mappings: list[tuple[str, str]] = []
+            for original_name, original_entries in grouped_entries.items():
+                signature_to_entries: dict[tuple, list[dict[str, object]]] = {}
+                for entry in original_entries:
+                    signature_to_entries.setdefault(entry["signature"], []).append(entry)
+
+                effective_names: dict[tuple, str] = {}
+                if len(signature_to_entries) == 1:
+                    effective_names[next(iter(signature_to_entries.keys()))] = original_name
+                else:
+                    for signature in signature_to_entries:
+                        effective_names[signature] = self._allocate_unique_ligand_resname(
+                            original_name,
+                            used_resnames,
+                        )
+
+                for entry in original_entries:
+                    residue = entry["residue"]
+                    ligand_mol = entry["ligand_mol"]
+                    signature = entry["signature"]
+                    effective_name = effective_names[signature]
+                    assert isinstance(residue, gemmi.Residue)
+                    assert isinstance(ligand_mol, Chem.Mol)
+
+                    residue.name = effective_name
+                    self._add_temporary_ligand_to_ccd(effective_name, ligand_mol)
+                    mappings.append((original_name, effective_name))
             
             # Write the modified structure to a new file
             rewritten_dir = self.work_dir / "rewritten_complexes"
             rewritten_dir.mkdir(parents=True, exist_ok=True)
             
             rewritten_file = rewritten_dir / f"{record_id}_{complex_file.stem}_unified.cif"
-            
-            # Write as mmCIF format for consistency
+
             try:
-                # Try different gemmi write methods
-                if hasattr(structure, 'write_cif'):
-                    structure.write_cif(str(rewritten_file))
-                elif hasattr(structure, 'make_mmcif_document'):
-                    doc = structure.make_mmcif_document()
-                    doc.write_file(str(rewritten_file))
-                else:
-                    # Fallback: write as PDB and convert
-                    temp_pdb = rewritten_file.with_suffix('.pdb')
-                    structure.write_pdb(str(temp_pdb))
-                    
-                    # Convert PDB back to CIF using maxit if available
-                    try:
-                        import subprocess
-                        subprocess.run(["maxit", "-input", str(temp_pdb), "-output", str(rewritten_file), "-o", "1"], 
-                                     check=True, capture_output=True)
-                        temp_pdb.unlink()  # Clean up temp PDB
-                    except:
-                        # If maxit fails, just use the PDB file
-                        rewritten_file = temp_pdb
-                        
+                doc = structure.make_mmcif_document()
+                doc.write_file(str(rewritten_file))
             except Exception as write_error:
-                print(f"Warning: Failed to write structure file: {write_error}")
-                return complex_file
+                raise ValueError(
+                    f"Failed to write rewritten mmCIF for strict ligand remapping: {write_error}"
+                ) from write_error
             
-            print(f"✓ Rewrote complex structure with unified ligand naming strategy")
+            print(f"✓ Rewrote complex structure with strict ligand naming strategy")
             print(f"  Original: {complex_file}")
             print(f"  Rewritten: {rewritten_file}")
-            print(f"  Ligand mappings: {len(ligand_name_mapping)} ligand type(s)")
-            for orig, target in ligand_name_mapping.items():
-                if target == "LIG":
-                    print(f"    '{orig}' -> 'LIG' (unified naming)")
-                else:
-                    print(f"    '{orig}' -> '{target}' (conflict resolution)")
+            print(f"  Ligand mappings: {len(mappings)} residue occurrence(s)")
+            for orig, target in mappings:
+                print(f"    '{orig}' -> '{target}'")
             
             return rewritten_file
             
         except ImportError:
-            print("Warning: gemmi not available, cannot rewrite complex structure")
-            return complex_file
+            raise ValueError("gemmi is required for strict ligand remapping in affinity mode.")
         except Exception as e:
-            print(f"Warning: Failed to rewrite complex structure: {e}")
-            import traceback
-            traceback.print_exc()
-            return complex_file
+            raise ValueError(
+                f"Failed to rewrite complex structure with strict ligand remapping: {e}"
+            ) from e
     
     def _extract_ligand_from_residue(self, residue) -> Optional[object]:
         """
@@ -2207,8 +2125,8 @@ class Boltzina:
                 for i, atom in enumerate(atoms):
                     if i < mol.GetNumAtoms():
                         mol_atom = mol.GetAtomWithIdx(i)
-                        mol_atom.SetProp('name', atom.name)
-                
+                        mol_atom.SetProp('name', str(atom.name).strip())
+
                 # Try basic sanitization
                 try:
                     Chem.SanitizeMol(mol, sanitizeOps=Chem.SANITIZE_ALL)
@@ -2220,9 +2138,12 @@ class Boltzina:
                                       Chem.SANITIZE_KEKULIZE)
                         Chem.SanitizeMol(mol, sanitizeOps=sanitize_ops)
                     except:
-                        # Last resort: use unsanitized
-                        pass
-                
+                        return None
+
+                mol, _ = ensure_unique_ligand_atom_names(
+                    mol,
+                    context=f"residue {residue.name}",
+                )
                 return mol
             
         except Exception as e:

@@ -169,13 +169,13 @@ export function ProjectTaskRow({
           title={actionTitle}
           aria-label={actionTitle}
         >
-          {row.ligandSmiles && row.ligandIsSmiles ? (
+          {row.ligandRenderSmiles && row.ligandIsSmiles ? (
             <div className="task-ligand-thumb">
               <Ligand2DPreview
-                smiles={row.ligandSmiles}
+                smiles={row.ligandRenderSmiles}
                 width={ligandPreviewWidth}
                 height={120}
-                atomConfidences={row.ligandAtomPlddts}
+                atomConfidences={row.ligandRenderAtomPlddts}
                 confidenceHint={metrics.plddt}
                 highlightQuery={isLeadOptMode ? row.leadOptSelectedFragmentQuery || null : null}
                 highlightAtomIndices={isLeadOptMode ? row.leadOptSelectedAtomIndices : null}

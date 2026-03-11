@@ -85,6 +85,32 @@ function normalizeAtomIndices(value: unknown): number[] {
   );
 }
 
+function resolvePredictionConfidencePreview(
+  prediction: LeadOptPredictionRecord | null | undefined,
+  candidateSmilesInput: unknown,
+  previewRenderMode: CandidatePreviewRenderMode
+): { smiles: string; atomConfidences: number[] | null } {
+  const candidateSmiles = readText(candidateSmilesInput).trim();
+  if (previewRenderMode !== 'confidence') {
+    return { smiles: candidateSmiles, atomConfidences: null };
+  }
+  const renderSmiles = readText(prediction?.ligandRenderSmiles).trim();
+  const renderAtomPlddts =
+    Array.isArray(prediction?.ligandRenderAtomPlddts) && prediction.ligandRenderAtomPlddts.length > 0
+      ? prediction.ligandRenderAtomPlddts
+      : null;
+  if (renderSmiles && renderAtomPlddts) {
+    return {
+      smiles: renderSmiles,
+      atomConfidences: renderAtomPlddts
+    };
+  }
+  return {
+    smiles: candidateSmiles,
+    atomConfidences: null
+  };
+}
+
 function deriveReferenceProperty(row: Record<string, unknown>, key: 'mw' | 'logp' | 'tpsa'): number | null {
   const props = (row.properties as Record<string, unknown>) || {};
   const deltas = (row.property_deltas as Record<string, unknown>) || {};
@@ -1083,6 +1109,7 @@ export function LeadOptCandidatesPanel({
               const paeValue = prediction?.pairPae ?? null;
               const plddtTone = resolveConfidenceTone(plddtValue);
               const useConfidenceRender = previewRenderMode === 'confidence';
+              const confidencePreview = resolvePredictionConfidencePreview(prediction, smiles, previewRenderMode);
               const isActive = activeSmiles === smiles;
               const rowDelta = readNumberOrNull(row.median_delta);
               const rowDeltaTone = resolveDeltaTone(rowDelta);
@@ -1122,11 +1149,11 @@ export function LeadOptCandidatesPanel({
                       title="Click card to open 3D model"
                     >
                       <MemoLigand2DPreview
-                        smiles={smiles}
+                        smiles={confidencePreview.smiles}
                         width={CARD_CANDIDATE_2D_WIDTH}
                         height={CARD_PREVIEW_2D_HEIGHT}
                         highlightAtomIndices={useConfidenceRender ? null : highlightAtomIndices}
-                        atomConfidences={useConfidenceRender ? prediction?.ligandAtomPlddts || null : null}
+                        atomConfidences={confidencePreview.atomConfidences}
                         confidenceHint={useConfidenceRender ? prediction?.ligandPlddt ?? null : null}
                       />
                     </div>
@@ -1212,6 +1239,7 @@ export function LeadOptCandidatesPanel({
                   const paeDeltaTone = resolveDeltaTone(paeDelta === null ? null : -paeDelta);
                   const isActive = activeSmiles === smiles;
                   const useConfidenceRender = previewRenderMode === 'confidence';
+                  const confidencePreview = resolvePredictionConfidencePreview(prediction, smiles, previewRenderMode);
                   const mwDelta = readNumberOrNull(deltas.mw);
                   const logpDelta = readNumberOrNull(deltas.logp);
                   const tpsaDelta = readNumberOrNull(deltas.tpsa);
@@ -1237,11 +1265,11 @@ export function LeadOptCandidatesPanel({
                           title={predictionState === 'SUCCESS' ? 'Open 3D model' : 'Select candidate'}
                         >
                           <MemoLigand2DPreview
-                            smiles={smiles}
+                            smiles={confidencePreview.smiles}
                             width={TABLE_CANDIDATE_2D_WIDTH}
                             height={PREVIEW_2D_HEIGHT}
                             highlightAtomIndices={useConfidenceRender ? null : highlightAtomIndices}
-                            atomConfidences={useConfidenceRender ? prediction?.ligandAtomPlddts || null : null}
+                            atomConfidences={confidencePreview.atomConfidences}
                             confidenceHint={useConfidenceRender ? prediction?.ligandPlddt ?? null : null}
                           />
                         </button>

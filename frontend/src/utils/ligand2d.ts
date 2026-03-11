@@ -299,26 +299,24 @@ export function renderLigand2DSvg(
         }
 
         if (explicitHighlightAtoms.length > 0) {
-          if (perAtomConfidence.length === 0) {
-            const highlightAtoms = Array.isArray(details.highlightAtoms)
-              ? ([...details.highlightAtoms] as number[])
-              : [];
-            const highlightAtomColors = (details.highlightAtomColors || {}) as Record<number, [number, number, number]>;
-            const highlightAtomRadii = (details.highlightAtomRadii || {}) as Record<number, number>;
-            explicitHighlightAtoms.forEach((atomIdx) => {
-              if (!highlightAtoms.includes(atomIdx)) highlightAtoms.push(atomIdx);
-              highlightAtomColors[atomIdx] = [0.95, 0.79, 0.43];
-              highlightAtomRadii[atomIdx] = 0.34;
-            });
-            details.atoms = highlightAtoms;
-            details.highlightAtoms = highlightAtoms;
-            details.highlightAtomColors = highlightAtomColors;
-            details.highlightAtomRadii = highlightAtomRadii;
-            details.highlightRadii = highlightAtomRadii;
-            details.fillHighlights = false;
-            details.atomHighlightsAreCircles = true;
-            details.highlightBonds = [];
-          }
+          const highlightAtoms = Array.isArray(details.highlightAtoms)
+            ? ([...details.highlightAtoms] as number[])
+            : [];
+          const highlightAtomColors = (details.highlightAtomColors || {}) as Record<number, [number, number, number]>;
+          const highlightAtomRadii = (details.highlightAtomRadii || {}) as Record<number, number>;
+          explicitHighlightAtoms.forEach((atomIdx) => {
+            if (!highlightAtoms.includes(atomIdx)) highlightAtoms.push(atomIdx);
+            highlightAtomColors[atomIdx] = perAtomConfidence.length > 0 ? [0.90, 0.42, 0.12] : [0.95, 0.79, 0.43];
+            highlightAtomRadii[atomIdx] = perAtomConfidence.length > 0 ? 0.38 : 0.34;
+          });
+          details.atoms = highlightAtoms;
+          details.highlightAtoms = highlightAtoms;
+          details.highlightAtomColors = highlightAtomColors;
+          details.highlightAtomRadii = highlightAtomRadii;
+          details.highlightRadii = highlightAtomRadii;
+          details.fillHighlights = perAtomConfidence.length > 0;
+          details.atomHighlightsAreCircles = true;
+          details.highlightBonds = [];
         } else if (highlightQuery && highlightQuery.trim()) {
           const queryMol =
             (typeof rdkit.get_qmol === 'function' ? rdkit.get_qmol(highlightQuery.trim()) : null) ||

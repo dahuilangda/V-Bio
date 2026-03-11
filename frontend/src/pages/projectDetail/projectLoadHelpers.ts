@@ -153,20 +153,23 @@ export function resolveRestoredEditorState(params: {
   );
 
   const savedTaskTemplates = savedUiState?.taskProteinTemplates || {};
+  const savedProjectTemplates = savedUiState?.proteinTemplates || {};
   const readSavedTaskTemplates = (task: ProjectTask | null) => {
     if (!task) return {};
     return savedTaskTemplates[task.id] || {};
   };
 
   const templateSource = (() => {
+    const projectScopedTemplates = hasProteinTemplates(savedProjectTemplates) ? savedProjectTemplates : {};
     if (requestNewTask) {
-      return {};
+      return projectScopedTemplates;
     }
     if (requestedTaskRow) {
       const requestedEmbedded = readTaskProteinTemplates(requestedTaskRow);
       if (hasProteinTemplates(requestedEmbedded)) return requestedEmbedded;
       const requestedCached = readSavedTaskTemplates(requestedTaskRow);
       if (hasProteinTemplates(requestedCached)) return requestedCached;
+      if (hasProteinTemplates(projectScopedTemplates)) return projectScopedTemplates;
       return {};
     }
 
@@ -175,6 +178,7 @@ export function resolveRestoredEditorState(params: {
       if (hasProteinTemplates(activeEmbedded)) return activeEmbedded;
       const activeCached = readSavedTaskTemplates(activeTaskRow);
       if (hasProteinTemplates(activeCached)) return activeCached;
+      if (hasProteinTemplates(projectScopedTemplates)) return projectScopedTemplates;
       return {};
     }
 
@@ -183,10 +187,11 @@ export function resolveRestoredEditorState(params: {
       if (hasProteinTemplates(latestDraftEmbedded)) return latestDraftEmbedded;
       const latestDraftCached = readSavedTaskTemplates(latestDraftTask);
       if (hasProteinTemplates(latestDraftCached)) return latestDraftCached;
+      if (hasProteinTemplates(projectScopedTemplates)) return projectScopedTemplates;
       return {};
     }
 
-    return savedUiState?.proteinTemplates || {};
+    return projectScopedTemplates;
   })();
 
   const restoredTemplates = Object.fromEntries(

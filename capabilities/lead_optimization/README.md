@@ -49,11 +49,15 @@ Recommended: set these in your stack env file (for example `deploy/docker/DOCKER
 ```env
 LEAD_OPT_MMP_DB_URL=postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp
 LEAD_OPT_MMP_DB_SCHEMA=chembl_cyp3a4_herg
+MMP_LIFECYCLE_MAX_INDEX_MAINTENANCE_WORK_MEM_MB=32768
+MMP_LIFECYCLE_MAX_INDEX_WORK_MEM_MB=1024
+MMP_LIFECYCLE_MAX_INDEX_PARALLEL_WORKERS=16
 ```
 
 Notes:
 
 - `LEAD_OPT_MMP_DB_*` are backend runtime variables (read by Python services), not browser-side Vite vars.
+- `MMP_LIFECYCLE_MAX_INDEX_*` are backend-side clamp values for large `mmpdb index` runs. They should be set in the worker stack env (for example `deploy/docker/DOCKER_STACK_WORKER_CPU.env`), not in browser/frontend env.
 - `frontend/.env` only configures frontend `VITE_*` options; backend DB routing should be set in backend stack env.
 - Temporary shell `export` is still valid, but stack env files are the persistent recommended way.
 
@@ -73,6 +77,19 @@ cp DOCKER_CAP_MMP_POSTGRES.env.example DOCKER_CAP_MMP_POSTGRES.env
 docker compose -f DOCKER_CAP_MMP_POSTGRES.compose.yml --env-file DOCKER_CAP_MMP_POSTGRES.env up -d --build
 ```
 
+Recommended persistent PostgreSQL tuning lives in `deploy/docker/DOCKER_CAP_MMP_POSTGRES.env`:
+
+```env
+MMP_POSTGRES_SHARED_BUFFERS=64GB
+MMP_POSTGRES_EFFECTIVE_CACHE_SIZE=320GB
+MMP_POSTGRES_MAX_WAL_SIZE=64GB
+MMP_POSTGRES_CHECKPOINT_TIMEOUT=30min
+MMP_POSTGRES_WAL_BUFFERS=16MB
+MMP_POSTGRES_MAX_PARALLEL_MAINTENANCE_WORKERS=8
+```
+
+These are injected by `deploy/docker/DOCKER_CAP_MMP_POSTGRES.compose.yml` at container start, so you do not need to run manual `ALTER SYSTEM` after each recreate.
+
 ### 2) Import a structures/properties dataset into PostgreSQL schema
 
 ```bash
@@ -86,42 +103,55 @@ python -m lead_optimization.mmp_lifecycle.engine \
   --output_dir lead_optimization/data
 ```
 
-### 2.1) Full ChEMBL build example (download + build + import)
+### 2.1) Full `chembl36_full` build example (exact build, download + fragment + sharded index)
 
-Use this when you want `lead_optimization.mmp_lifecycle.engine` to download/process ChEMBL and build directly into PostgreSQL in one run:
+Use this when you want a complete `chembl36_full` build and are willing to keep the generated `.fragdb` for resume/retry. For an exact full build, do not set `--pg_index_max_constant_matches` or `--pg_index_max_constant_pairs`.
 
 ```bash
 cd /data/V-Bio
-python -m lead_optimization.mmp_lifecycle.engine \
+python -m capabilities.lead_optimization.mmp_lifecycle.engine \
   --download_chembl \
-  --output_dir lead_optimization/data \
+  --output_dir capabilities/lead_optimization/data \
   --max_heavy_atoms 60 \
   --force \
   --attachment_force_recompute \
   --fragment_jobs 32 \
-  --pg_index_maintenance_work_mem_mb 65536 \
-  --pg_index_work_mem_mb 512 \
-  --pg_index_parallel_workers 16 \
-  --postgres_url 'postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp' \
+  --pg_full_index_shards 8 \
+  --pg_full_index_jobs 4 \
+  --pg_index_maintenance_work_mem_mb 16384 \
+  --pg_index_work_mem_mb 256 \
+  --pg_index_parallel_workers 8 \
+  --pg_index_commit_every_flushes 1 \
+  --keep_fragdb \
+  --postgres_url 'postgresql://leadopt:leadopt@172.17.3.200:54330/leadopt_mmp' \
   --postgres_schema chembl36_full
 ```
 
-### 2.2) Resume from existing `.fragdb` (skip fragment step)
+### 2.2) Resume from existing `.fragdb` (recommended for `chembl36_full`)
 
-If fragmenting already finished (for example `lead_optimization/data/chembl_compounds.fragdb`), resume directly:
+If fragmenting already finished (for example `capabilities/lead_optimization/data/chembl_compounds.fragdb`), skip the fragment step and run the resumable sharded full-index path directly:
 
 ```bash
 cd /data/V-Bio
-python -m lead_optimization.mmp_lifecycle.engine \
-  --fragments_file lead_optimization/data/chembl_compounds.fragdb \
+python -m capabilities.lead_optimization.mmp_lifecycle.engine \
+  --fragments_file capabilities/lead_optimization/data/chembl_compounds.fragdb \
   --attachment_force_recompute \
-  --pg_index_maintenance_work_mem_mb 65536 \
-  --pg_index_work_mem_mb 512 \
-  --pg_index_parallel_workers 16 \
-  --postgres_url 'postgresql://leadopt:leadopt@127.0.0.1:54330/leadopt_mmp' \
+  --pg_full_index_shards 8 \
+  --pg_full_index_jobs 4 \
+  --pg_index_maintenance_work_mem_mb 16384 \
+  --pg_index_work_mem_mb 256 \
+  --pg_index_parallel_workers 8 \
+  --pg_index_commit_every_flushes 1 \
+  --postgres_url 'postgresql://leadopt:leadopt@172.17.3.200:54330/leadopt_mmp' \
   --postgres_schema chembl36_full \
   --force
 ```
+
+Notes:
+
+- This path shards the full constant space into independent temporary schemas, then merges them back into `chembl36_full`.
+- If one or more shards fail, rerun the exact same command. Completed shard schemas are reused; the run does not restart from shard 0.
+- Shard resume is strict: if you change the input `.fragdb` or `--pg_full_index_shards`, the build state is rejected instead of being mixed with old shards.
 
 ### 2.3) If index fails with `UndefinedTable: table "dataset" does not exist`
 
@@ -480,9 +510,13 @@ Parameter notes:
 - `--force`: rebuild intermediate outputs even if files already exist.
 - `--attachment_force_recompute`: force recompute attachment/fragment metadata for consistency.
 - `--fragment_jobs 32`: `mmpdb fragment` parallel workers (CPU scaling happens mainly here).
-- `--pg_index_maintenance_work_mem_mb 65536`: PostgreSQL index-build memory budget (`maintenance_work_mem=64GB`).
-- `--pg_index_work_mem_mb 512`: per-operation work memory (`work_mem=512MB`).
-- `--pg_index_parallel_workers 16`: PostgreSQL index parallelism (`max_parallel_maintenance_workers`).
+- `--pg_index_maintenance_work_mem_mb`: per-shard PostgreSQL maintenance memory budget.
+- `--pg_index_work_mem_mb`: per-shard PostgreSQL work memory budget.
+- `--pg_index_parallel_workers`: per-shard PostgreSQL index parallelism.
+- `--pg_index_commit_every_flushes 1`: commit every flush to keep WAL / transaction growth bounded.
+- `--pg_full_index_shards`: split a full `.fragdb` build into constant-balanced shards; this is the recommended way to build large exact schemas like `chembl36_full`.
+- `--pg_full_index_jobs`: concurrent shard-index jobs for the full build path.
+- `--pg_index_max_constant_matches` / `--pg_index_max_constant_pairs`: only use these when you explicitly accept an inexact build that drops oversized constant clusters.
 - `--pg_incremental_index_shards 1`: split affected constants into N shards for incremental index.
 - `--pg_incremental_index_jobs 1`: run shard index tasks in parallel (recommended to keep `jobs <= shards`).
   Internally each shard is load-balanced by fragment weight to reduce tail latency.
@@ -491,11 +525,17 @@ Parameter notes:
 
 Practical tuning:
 
-- For a 512GB host with up to 256GB available for this job, start with:
-  - `--pg_index_maintenance_work_mem_mb 65536`
-  - `--pg_index_work_mem_mb 512`
-  - `--pg_index_parallel_workers 16`
-  - `--fragment_jobs 32`
+- For an exact full `chembl36_full` build in this repo, prefer:
+  - `--fragments_file capabilities/lead_optimization/data/chembl_compounds.fragdb`
+  - `--pg_full_index_shards 8`
+  - `--pg_full_index_jobs 4`
+  - `--pg_index_maintenance_work_mem_mb 16384`
+  - `--pg_index_work_mem_mb 256`
+  - `--pg_index_parallel_workers 8`
+  - `--pg_index_commit_every_flushes 1`
+  - no `--pg_index_max_constant_matches`
+  - no `--pg_index_max_constant_pairs`
+- If a full shard run fails, rerun the exact same command first. Do not change shard count mid-retry.
 - For heavy incremental updates, enable shard mode first:
   - `--pg_incremental_index_shards 4`
   - `--pg_incremental_index_jobs 2`

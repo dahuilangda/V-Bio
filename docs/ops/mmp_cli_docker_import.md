@@ -100,9 +100,12 @@ docker run --rm --network host \
   --fragments_file capabilities/lead_optimization/data/chembl_compounds.fragdb \
   --postgres_url "${MMP_DSN}" \
   --postgres_schema chembl36_full \
-  --pg_index_maintenance_work_mem_mb 65536 \
-  --pg_index_work_mem_mb 512 \
-  --pg_index_parallel_workers 16 \
+  --pg_index_maintenance_work_mem_mb 2048 \
+  --pg_index_work_mem_mb 64 \
+  --pg_index_parallel_workers 2 \
+  --pg_index_commit_every_flushes 1 \
+  --pg_index_max_constant_matches 6000 \
+  --pg_index_max_constant_pairs 15000000 \
   --attachment_force_recompute \
   --force
 ```

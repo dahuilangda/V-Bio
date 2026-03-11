@@ -169,6 +169,138 @@ export function readLigandAtomPlddtsFromConfidence(
 ): number[] {
   if (!confidence) return [];
   const byChainCandidates: unknown[] = [
+    confidence.ligand_display_atom_plddts_by_chain,
+    readObjectPath(confidence, 'ligand.display_atom_plddts_by_chain'),
+    readObjectPath(confidence, 'ligand_display.atom_plddts_by_chain'),
+    confidence.ligand_atom_plddts_by_chain,
+    readObjectPath(confidence, 'ligand.atom_plddts_by_chain'),
+    readObjectPath(confidence, 'ligand_confidence.atom_plddts_by_chain')
+  ];
+  const preferredKeys = collectPreferredLigandChainKeys(confidence, preferredLigandChainId);
+  const ligandCoverageKeys = readLigandCoverageChainKeys(confidence);
+  for (const candidate of byChainCandidates) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+    const parsedEntries = Object.entries(candidate as Record<string, unknown>)
+      .map(([chainId, chainValues]) => {
+        if (!Array.isArray(chainValues)) return null;
+        const values = chainValues
+          .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+          .map((value) => normalizePlddtValue(value));
+        if (values.length === 0) return null;
+        return { chainId: normalizeChainKey(chainId), values };
+      })
+      .filter((entry): entry is { chainId: string; values: number[] } => entry !== null);
+    if (parsedEntries.length === 0) continue;
+
+    if (preferredKeys.size > 0) {
+      const matched = parsedEntries
+        .filter((entry) =>
+          Array.from(preferredKeys).some((preferred) => chainKeysMatch(entry.chainId, preferred) || chainKeysMatch(preferred, entry.chainId))
+        )
+        .map((entry) => entry.values);
+      if (matched.length > 0) return pickLongestConfidenceSeries(matched);
+    }
+
+    if (ligandCoverageKeys.size > 0) {
+      const matchedByCoverage = parsedEntries
+        .filter((entry) =>
+          Array.from(ligandCoverageKeys).some((preferred) => chainKeysMatch(entry.chainId, preferred) || chainKeysMatch(preferred, entry.chainId))
+        )
+        .map((entry) => entry.values);
+      if (matchedByCoverage.length > 0) return pickLongestConfidenceSeries(matchedByCoverage);
+    }
+
+    return pickLongestConfidenceSeries(parsedEntries.map((entry) => entry.values));
+  }
+
+  const candidates: unknown[] = [
+    confidence.ligand_display_atom_plddts,
+    readObjectPath(confidence, 'ligand.display_atom_plddts'),
+    readObjectPath(confidence, 'ligand_display.atom_plddts'),
+    confidence.ligand_atom_plddts,
+    confidence.ligand_atom_plddt,
+    readObjectPath(confidence, 'ligand.atom_plddts'),
+    readObjectPath(confidence, 'ligand.atom_plddt'),
+    readObjectPath(confidence, 'ligand_confidence.atom_plddts')
+  ];
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue;
+    const values = candidate
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+      .map((value) => normalizePlddtValue(value));
+    if (values.length > 0) return values;
+  }
+  return [];
+}
+
+export function readLigandDisplayAtomPlddtsFromConfidence(
+  confidence: Record<string, unknown> | null,
+  preferredLigandChainId: string | null = null
+): number[] {
+  if (!confidence) return [];
+  const byChainCandidates: unknown[] = [
+    confidence.ligand_display_atom_plddts_by_chain,
+    readObjectPath(confidence, 'ligand.display_atom_plddts_by_chain'),
+    readObjectPath(confidence, 'ligand_display.atom_plddts_by_chain')
+  ];
+  const preferredKeys = collectPreferredLigandChainKeys(confidence, preferredLigandChainId);
+  const ligandCoverageKeys = readLigandCoverageChainKeys(confidence);
+  for (const candidate of byChainCandidates) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+    const parsedEntries = Object.entries(candidate as Record<string, unknown>)
+      .map(([chainId, chainValues]) => {
+        if (!Array.isArray(chainValues)) return null;
+        const values = chainValues
+          .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+          .map((value) => normalizePlddtValue(value));
+        if (values.length === 0) return null;
+        return { chainId: normalizeChainKey(chainId), values };
+      })
+      .filter((entry): entry is { chainId: string; values: number[] } => entry !== null);
+    if (parsedEntries.length === 0) continue;
+
+    if (preferredKeys.size > 0) {
+      const matched = parsedEntries
+        .filter((entry) =>
+          Array.from(preferredKeys).some((preferred) => chainKeysMatch(entry.chainId, preferred) || chainKeysMatch(preferred, entry.chainId))
+        )
+        .map((entry) => entry.values);
+      if (matched.length > 0) return pickLongestConfidenceSeries(matched);
+    }
+
+    if (ligandCoverageKeys.size > 0) {
+      const matchedByCoverage = parsedEntries
+        .filter((entry) =>
+          Array.from(ligandCoverageKeys).some((preferred) => chainKeysMatch(entry.chainId, preferred) || chainKeysMatch(preferred, entry.chainId))
+        )
+        .map((entry) => entry.values);
+      if (matchedByCoverage.length > 0) return pickLongestConfidenceSeries(matchedByCoverage);
+    }
+
+    return pickLongestConfidenceSeries(parsedEntries.map((entry) => entry.values));
+  }
+
+  const candidates: unknown[] = [
+    confidence.ligand_display_atom_plddts,
+    readObjectPath(confidence, 'ligand.display_atom_plddts'),
+    readObjectPath(confidence, 'ligand_display.atom_plddts')
+  ];
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue;
+    const values = candidate
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+      .map((value) => normalizePlddtValue(value));
+    if (values.length > 0) return values;
+  }
+  return [];
+}
+
+export function readAlignedLigandAtomPlddtsFromConfidence(
+  confidence: Record<string, unknown> | null,
+  preferredLigandChainId: string | null = null
+): number[] {
+  if (!confidence) return [];
+  const byChainCandidates: unknown[] = [
     confidence.ligand_atom_plddts_by_chain,
     readObjectPath(confidence, 'ligand.atom_plddts_by_chain'),
     readObjectPath(confidence, 'ligand_confidence.atom_plddts_by_chain')
@@ -225,6 +357,36 @@ export function readLigandAtomPlddtsFromConfidence(
     if (values.length > 0) return values;
   }
   return [];
+}
+
+export function readLigandRenderSmilesFromConfidence(confidence: Record<string, unknown> | null): string {
+  if (!confidence) return '';
+  const candidates: unknown[] = [
+    confidence.ligand_display_smiles,
+    readObjectPath(confidence, 'ligand.display_smiles'),
+    readObjectPath(confidence, 'ligandDisplaySmiles')
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue;
+    const trimmed = candidate.trim();
+    if (trimmed) return trimmed;
+  }
+  return '';
+}
+
+export function readAlignedLigandSmilesFromConfidence(confidence: Record<string, unknown> | null): string {
+  if (!confidence) return '';
+  const candidates: unknown[] = [
+    confidence.ligand_smiles,
+    readObjectPath(confidence, 'ligand.smiles'),
+    readObjectPath(confidence, 'ligandSmiles')
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue;
+    const trimmed = candidate.trim();
+    if (trimmed) return trimmed;
+  }
+  return '';
 }
 
 export function alignConfidenceSeriesToLength(values: number[] | null, sequenceLength: number): number[] | null {

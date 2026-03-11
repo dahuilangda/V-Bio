@@ -43,6 +43,10 @@ def _cmd_db_build(args: argparse.Namespace) -> int:
         index_work_mem_mb=args.pg_index_work_mem_mb,
         index_parallel_workers=args.pg_index_parallel_workers,
         index_commit_every_flushes=args.pg_index_commit_every_flushes,
+        index_max_constant_matches=args.pg_index_max_constant_matches,
+        index_max_constant_pairs=args.pg_index_max_constant_pairs,
+        full_index_shards=args.pg_full_index_shards,
+        full_index_jobs=args.pg_full_index_jobs,
         build_construct_tables=not args.pg_skip_construct_tables,
         build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
     )
@@ -67,6 +71,10 @@ def _cmd_db_index_fragdb(args: argparse.Namespace) -> int:
         index_work_mem_mb=args.pg_index_work_mem_mb,
         index_parallel_workers=args.pg_index_parallel_workers,
         index_commit_every_flushes=args.pg_index_commit_every_flushes,
+        index_max_constant_matches=args.pg_index_max_constant_matches,
+        index_max_constant_pairs=args.pg_index_max_constant_pairs,
+        full_index_shards=args.pg_full_index_shards,
+        full_index_jobs=args.pg_full_index_jobs,
         build_construct_tables=not args.pg_skip_construct_tables,
         build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
     )
@@ -347,6 +355,30 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Commit cadence for mmpdb index flushes (<=0: auto-adaptive).",
     )
+    p_build.add_argument(
+        "--pg_index_max_constant_matches",
+        default=0,
+        type=int,
+        help="Max matches for a single constant cluster (0: unlimited).",
+    )
+    p_build.add_argument(
+        "--pg_index_max_constant_pairs",
+        default=0,
+        type=int,
+        help="Max candidate pairs for a single constant cluster (0: unlimited).",
+    )
+    p_build.add_argument(
+        "--pg_full_index_shards",
+        default=1,
+        type=int,
+        help="Shard full fragdb index by constant buckets for resumable/retriable builds.",
+    )
+    p_build.add_argument(
+        "--pg_full_index_jobs",
+        default=1,
+        type=int,
+        help="Concurrent shard index jobs for full fragdb build.",
+    )
     p_build.add_argument("--pg_skip_construct_tables", action="store_true")
     p_build.add_argument("--pg_skip_constant_smiles_mol_index", action="store_true")
     p_build.set_defaults(func=_cmd_db_build)
@@ -367,6 +399,30 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         type=int,
         help="Commit cadence for mmpdb index flushes (<=0: auto-adaptive).",
+    )
+    p_index.add_argument(
+        "--pg_index_max_constant_matches",
+        default=0,
+        type=int,
+        help="Max matches for a single constant cluster (0: unlimited).",
+    )
+    p_index.add_argument(
+        "--pg_index_max_constant_pairs",
+        default=0,
+        type=int,
+        help="Max candidate pairs for a single constant cluster (0: unlimited).",
+    )
+    p_index.add_argument(
+        "--pg_full_index_shards",
+        default=1,
+        type=int,
+        help="Shard full fragdb index by constant buckets for resumable/retriable builds.",
+    )
+    p_index.add_argument(
+        "--pg_full_index_jobs",
+        default=1,
+        type=int,
+        help="Concurrent shard index jobs for full fragdb build.",
     )
     p_index.add_argument("--pg_skip_construct_tables", action="store_true")
     p_index.add_argument("--pg_skip_constant_smiles_mol_index", action="store_true")
