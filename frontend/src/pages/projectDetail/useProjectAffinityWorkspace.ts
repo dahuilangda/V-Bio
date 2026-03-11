@@ -14,6 +14,7 @@ interface UseProjectAffinityWorkspaceInput {
   setDraft: Dispatch<SetStateAction<any>>;
   affinityUploadScopeTaskRowId: string | null;
   taskAffinityUploads: Record<string, AffinityPersistedUploads>;
+  requestedStatusTaskRow: ProjectTask | null;
   statusContextTaskRow: ProjectTask | null;
   activeResultTask: ProjectTask | null;
   computeUseMsaFlag: (components: InputComponent[], fallback?: boolean) => boolean;
@@ -28,6 +29,7 @@ export function useProjectAffinityWorkspace({
   setDraft,
   affinityUploadScopeTaskRowId,
   taskAffinityUploads,
+  requestedStatusTaskRow,
   statusContextTaskRow,
   activeResultTask,
   computeUseMsaFlag,
@@ -65,19 +67,27 @@ export function useProjectAffinityWorkspace({
     }
     const storageTaskRowId = resolveAffinityUploadStorageTaskRowId(affinityUploadScopeTaskRowId);
     const savedByScope = storageTaskRowId ? taskAffinityUploads[storageTaskRowId] || null : null;
-    const sourceTask = statusContextTaskRow || activeResultTask || null;
+    const sourceTask = requestedStatusTaskRow || activeResultTask || statusContextTaskRow || null;
     const fromTask = sourceTask ? readTaskAffinityUploads(sourceTask) : { target: null, ligand: null };
     return {
       target: savedByScope?.target || fromTask.target,
       ligand: savedByScope?.ligand || fromTask.ligand
     };
-  }, [isAffinityWorkflow, taskAffinityUploads, affinityUploadScopeTaskRowId, statusContextTaskRow, activeResultTask]);
+  }, [
+    isAffinityWorkflow,
+    taskAffinityUploads,
+    affinityUploadScopeTaskRowId,
+    requestedStatusTaskRow,
+    statusContextTaskRow,
+    activeResultTask
+  ]);
 
   const affinityWorkflow = useAffinityWorkflow({
     enabled: isAffinityWorkflow && workspaceTab === 'components',
     scopeKey: `${projectId || ''}:${affinityUploadScopeTaskRowId}`,
     preferredConfidenceOnly: !Boolean(draft?.inputConfig.properties.affinity),
-    persistedLigandSmiles: statusContextTaskRow?.ligand_smiles || activeResultTask?.ligand_smiles || '',
+    persistedLigandSmiles:
+      requestedStatusTaskRow?.ligand_smiles || activeResultTask?.ligand_smiles || statusContextTaskRow?.ligand_smiles || '',
     persistedUploads: affinityPersistedUploads,
     onChainsResolved: onAffinityChainsResolved
   });

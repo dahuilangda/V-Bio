@@ -76,10 +76,8 @@ export function resolveEditableDraftTaskRowIdFromContext(params: {
   project: Project | null;
   projectTasks: ProjectTask[];
   isDraftTaskSnapshot: (task: ProjectTask | null) => boolean;
-  allowLatestDraftFallback?: boolean;
 }): string | null {
   const { requestNewTask, locationSearch, project, projectTasks, isDraftTaskSnapshot } = params;
-  const allowLatestDraftFallback = params.allowLatestDraftFallback !== false;
   if (requestNewTask) return null;
 
   const requestedTaskRowId = new URLSearchParams(locationSearch).get('task_row_id');
@@ -99,10 +97,7 @@ export function resolveEditableDraftTaskRowIdFromContext(params: {
     }
     return null;
   }
-
-  if (!allowLatestDraftFallback) return null;
-  const latestDraft = projectTasks.find((item) => isDraftTaskSnapshot(item)) || null;
-  return latestDraft ? latestDraft.id : null;
+  return null;
 }
 
 export function resolveRuntimeTaskRowIdFromContext(params: {

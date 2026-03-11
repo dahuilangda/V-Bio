@@ -46,6 +46,7 @@ export interface AffinitySubmitDeps {
   setSavedTemplateFingerprint: (value: string) => void;
   setSavedAffinityUploadsFingerprint: (value: string) => void;
   setRunMenuOpen: (value: boolean) => void;
+  syncWorkspaceTaskRow: (taskRowId: string) => void;
   setProjectTasks: (updater: (prev: ProjectTask[]) => ProjectTask[]) => void;
   setProject: (updater: (prev: Project | null) => Project | null) => void;
   setStatusInfo: (value: Record<string, unknown> | null) => void;
@@ -72,7 +73,7 @@ export interface AffinitySubmitDeps {
       ligandSmilesOverride?: string;
     }
   ) => Promise<ProjectTask>;
-  resolveEditableDraftTaskRowId: (options?: { allowLatestDraftFallback?: boolean }) => string | null;
+  resolveEditableDraftTaskRowId: () => string | null;
   rememberAffinityUploadsForTaskRow: (taskRowId: string | null, uploads: AffinityPersistedUploads) => void;
   patch: (payload: Partial<Project>) => Promise<Project | null>;
   patchTask: (taskRowId: string, payload: Partial<ProjectTask>) => Promise<ProjectTask | null>;
@@ -113,6 +114,7 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
     setSavedTemplateFingerprint,
     setSavedAffinityUploadsFingerprint,
     setRunMenuOpen,
+    syncWorkspaceTaskRow,
     setProjectTasks,
     setProject,
     setStatusInfo,
@@ -247,7 +249,7 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
 
     const draftTaskRow = await persistDraftTaskSnapshot(configWithAffinityTaskOptions, {
       statusText: 'Affinity draft snapshot prepared for run',
-      reuseTaskRowId: resolveEditableDraftTaskRowId({ allowLatestDraftFallback: false }),
+      reuseTaskRowId: resolveEditableDraftTaskRowId(),
       snapshotComponents,
       proteinSequenceOverride: '',
       ligandSmilesOverride: storedLigandSmiles
@@ -339,6 +341,7 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
       setRunRedirectTaskId(taskId);
     } else {
       setRunRedirectTaskId(null);
+      syncWorkspaceTaskRow(draftTaskRow.id);
     }
     if (persistenceWarnings.length > 0) {
       showRunQueuedNotice(`Task ${taskId.slice(0, 8)} queued with sync warning.`);

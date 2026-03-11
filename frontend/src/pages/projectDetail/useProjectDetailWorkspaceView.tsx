@@ -2405,8 +2405,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       const ligandName = readText(uploads.ligand?.fileName).trim();
       const ligandSize = readText(uploads.ligand?.content).length;
       const contextDraftRowId =
-        String(statusContextTaskRow?.task_state || '').toUpperCase() === 'DRAFT'
-          ? readText(statusContextTaskRow?.id).trim()
+        String((requestedStatusTaskRow || statusContextTaskRow)?.task_state || '').toUpperCase() === 'DRAFT'
+          ? readText((requestedStatusTaskRow || statusContextTaskRow)?.id).trim()
           : '';
       const editableDraftRowId = contextDraftRowId;
       const effectiveLeadOptLigandSmiles = readText(leadOptPrimary.ligandSmiles).trim();
@@ -2447,6 +2447,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       patchTask,
       project,
       setDraft,
+      requestedStatusTaskRow,
       statusContextTaskRow,
       workspaceTab
     ]

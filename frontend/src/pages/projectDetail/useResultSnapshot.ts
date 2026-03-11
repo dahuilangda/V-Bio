@@ -260,11 +260,8 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
       return `${AFFINITY_UPLOAD_SCOPE_PREFIX}${statusContextTaskRow.id}`;
     }
     if (runtimeResultTask?.id && isDraftTaskSnapshot(runtimeResultTask)) return runtimeResultTask.id;
-    const latestDraftTask =
-      projectTasks.find((item) => item.task_state === 'DRAFT' && !String(item.task_id || '').trim()) || null;
-    if (latestDraftTask?.id) return latestDraftTask.id;
     return '__new__';
-  }, [requestedStatusTaskRow, statusContextTaskRow, runtimeResultTask, projectTasks, isDraftTaskSnapshot]);
+  }, [requestedStatusTaskRow, statusContextTaskRow, runtimeResultTask, isDraftTaskSnapshot]);
 
   const resultOverviewComponents = useMemo(() => {
     const taskComponents = readTaskComponents(activeResultTask);

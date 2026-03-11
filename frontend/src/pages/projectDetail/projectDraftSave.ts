@@ -18,6 +18,7 @@ export interface SaveDraftDeps {
   draft: SaveDraftFields;
   workspaceTab: 'results' | 'basics' | 'components' | 'constraints';
   metadataOnlyDraftDirty: boolean;
+  sourceTaskRowId: string | null;
   affinityLigandSmiles: string;
   affinityPreviewLigandSmiles: string;
   affinityTargetFile: File | null;
@@ -53,7 +54,7 @@ export interface SaveDraftDeps {
       ligandSmilesOverride?: string;
     }
   ) => Promise<ProjectTask>;
-  resolveEditableDraftTaskRowId: (options?: { allowLatestDraftFallback?: boolean }) => string | null;
+  resolveEditableDraftTaskRowId: () => string | null;
   resolveRuntimeTaskRowId: () => string | null;
   patch: (payload: Partial<Project>) => Promise<Project | null>;
   patchTask: (taskRowId: string, payload: Partial<ProjectTask>) => Promise<ProjectTask | null>;
@@ -74,6 +75,7 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
     draft,
     workspaceTab,
     metadataOnlyDraftDirty,
+    sourceTaskRowId,
     affinityLigandSmiles,
     affinityPreviewLigandSmiles,
     affinityTargetFile,
@@ -144,10 +146,11 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
 
   if (metadataOnlyDraftDirty) {
     const metadataTaskRowId =
+      sourceTaskRowId ||
       requestedStatusTaskRowId ||
       activeStatusTaskRowId ||
       resolveRuntimeTaskRowId() ||
-      resolveEditableDraftTaskRowId({ allowLatestDraftFallback: false });
+      resolveEditableDraftTaskRowId();
     if (metadataTaskRowId) {
       await patchTask(metadataTaskRowId, {
         name: nextDraft.taskName,
@@ -163,9 +166,7 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
     return;
   }
 
-  const reusableDraftTaskRowId = resolveEditableDraftTaskRowId({
-    allowLatestDraftFallback: workflowDef.key !== 'affinity',
-  });
+  const reusableDraftTaskRowId = resolveEditableDraftTaskRowId();
   const normalizedConfigWithTaskOptions: ProjectInputConfig = {
     ...normalizedConfig,
     properties: mergeTaskInputOptionsIntoProperties(normalizedConfig.properties, normalizedConfig.options)

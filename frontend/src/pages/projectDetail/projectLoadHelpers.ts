@@ -42,13 +42,18 @@ export async function resolveTaskSnapshotContext(params: {
 
   const query = new URLSearchParams(locationSearch);
   const requestedTaskRowId = query.get('task_row_id');
+  const sourceTaskRowId = query.get('source_task_row_id');
   const requestedTab = String(query.get('tab') || '').trim().toLowerCase();
   const requestedTaskRow =
     requestedTaskRowId && requestedTaskRowId.trim()
       ? taskRowsBase.find((item) => String(item.id || '').trim() === requestedTaskRowId.trim()) || null
       : null;
+  const sourceTaskRow =
+    sourceTaskRowId && sourceTaskRowId.trim()
+      ? taskRowsBase.find((item) => String(item.id || '').trim() === sourceTaskRowId.trim()) || null
+      : null;
 
-  const snapshotSourceTaskRowBase = requestNewTask ? null : requestedTaskRow || activeTaskRow;
+  const snapshotSourceTaskRowBase = requestNewTask ? sourceTaskRow || null : requestedTaskRow || activeTaskRow;
   const latestDraftTask = requestNewTask
     ? null
     : (() => {
@@ -162,6 +167,12 @@ export function resolveRestoredEditorState(params: {
   const templateSource = (() => {
     const projectScopedTemplates = hasProteinTemplates(savedProjectTemplates) ? savedProjectTemplates : {};
     if (requestNewTask) {
+      if (snapshotSourceTaskRow) {
+        const snapshotEmbedded = readTaskProteinTemplates(snapshotSourceTaskRow);
+        if (hasProteinTemplates(snapshotEmbedded)) return snapshotEmbedded;
+        const snapshotCached = readSavedTaskTemplates(snapshotSourceTaskRow);
+        if (hasProteinTemplates(snapshotCached)) return snapshotCached;
+      }
       return projectScopedTemplates;
     }
     if (requestedTaskRow) {

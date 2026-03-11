@@ -27,6 +27,7 @@ interface UseProjectTaskActionsInput {
   locationSearch: string;
   workspaceTab: 'results' | 'basics' | 'components' | 'constraints';
   metadataOnlyDraftDirty: boolean;
+  sourceTaskRowId: string | null;
   affinityLigandSmiles: string;
   affinityPreviewLigandSmiles: string;
   affinityTargetFile: File | null;
@@ -85,7 +86,7 @@ interface UseProjectTaskActionsInput {
 interface UseProjectTaskActionsOutput {
   patch: (payload: Partial<Project>) => Promise<Project | null>;
   patchTask: (taskRowId: string, payload: Partial<ProjectTask>) => Promise<ProjectTask | null>;
-  resolveEditableDraftTaskRowId: (options?: { allowLatestDraftFallback?: boolean }) => string | null;
+  resolveEditableDraftTaskRowId: () => string | null;
   resolveRuntimeTaskRowId: () => string | null;
   persistDraftTaskSnapshot: (
     normalizedConfig: ProjectInputConfig,
@@ -114,6 +115,7 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
     locationSearch,
     workspaceTab,
     metadataOnlyDraftDirty,
+    sourceTaskRowId,
     affinityLigandSmiles,
     affinityPreviewLigandSmiles,
     affinityTargetFile,
@@ -181,14 +183,13 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
   );
 
   const resolveEditableDraftTaskRowId = useCallback(
-    (options?: { allowLatestDraftFallback?: boolean }): string | null =>
+    (): string | null =>
       resolveEditableDraftTaskRowIdFromContext({
         requestNewTask,
         locationSearch,
         project,
         projectTasks,
-        isDraftTaskSnapshot,
-        allowLatestDraftFallback: options?.allowLatestDraftFallback
+        isDraftTaskSnapshot
       }),
     [requestNewTask, locationSearch, project, projectTasks, isDraftTaskSnapshot]
   );
@@ -239,6 +240,7 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
           draft,
           workspaceTab,
           metadataOnlyDraftDirty,
+          sourceTaskRowId,
           affinityLigandSmiles,
           affinityPreviewLigandSmiles,
           affinityTargetFile,
@@ -282,6 +284,7 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
       draft,
       workspaceTab,
       metadataOnlyDraftDirty,
+      sourceTaskRowId,
       affinityLigandSmiles,
       affinityPreviewLigandSmiles,
       affinityTargetFile,

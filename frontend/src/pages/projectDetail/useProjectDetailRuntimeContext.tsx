@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import type { InputComponent } from '../../types/models';
 import { enumerateLeadOptimizationMmp, getTaskStatus } from '../../api/backendApi';
@@ -578,6 +578,10 @@ export function useProjectDetailRuntimeContext() {
     const query = new URLSearchParams(location.search);
     return query.get('new_task') === '1';
   }, [location.search]);
+  const sourceTaskRowId = useMemo(() => {
+    const query = new URLSearchParams(location.search);
+    return String(query.get('source_task_row_id') || '').trim();
+  }, [location.search]);
 
   const local = useProjectDetailLocalState();
   const leadOptTabHydrationRef = useRef<Record<string, string>>({});
@@ -674,13 +678,60 @@ export function useProjectDetailRuntimeContext() {
     navigate(`/projects/${projectId}?${query.toString()}`, { replace: true });
   }, [draft, location.search, navigate, project, projectId, workspaceTab]);
 
+  useEffect(() => {
+    if (!projectId || !project) return;
+    if (!(isPredictionLikeWorkflowKey(getWorkflowDefinition(project.task_type).key) || getWorkflowDefinition(project.task_type).key === 'affinity')) {
+      return;
+    }
+    const query = new URLSearchParams(location.search);
+    const requestedTaskRowId = String(query.get('task_row_id') || '').trim();
+    const currentSourceTaskRowId = String(query.get('source_task_row_id') || '').trim();
+    const requestedRow =
+      requestedTaskRowId
+        ? projectTasks.find((item) => String(item.id || '').trim() === requestedTaskRowId) || null
+        : null;
+    const sourceRow =
+      currentSourceTaskRowId
+        ? projectTasks.find((item) => String(item.id || '').trim() === currentSourceTaskRowId) || null
+        : null;
+
+    if (!requestNewTask && (workspaceTab === 'components' || workspaceTab === 'constraints')) {
+      if (requestedRow && !isDraftTaskSnapshot(requestedRow)) {
+        query.delete('task_row_id');
+        query.set('new_task', '1');
+        query.set('source_task_row_id', requestedRow.id);
+        query.set('tab', workspaceTab);
+        navigate(`/projects/${projectId}?${query.toString()}`, { replace: true });
+      }
+      return;
+    }
+
+    if (
+      requestNewTask &&
+      !requestedTaskRowId &&
+      currentSourceTaskRowId &&
+      sourceRow &&
+      !isDraftTaskSnapshot(sourceRow) &&
+      (workspaceTab === 'basics' || workspaceTab === 'results')
+    ) {
+      query.delete('new_task');
+      query.delete('source_task_row_id');
+      query.set('task_row_id', sourceRow.id);
+      query.set('tab', workspaceTab);
+      navigate(`/projects/${projectId}?${query.toString()}`, { replace: true });
+    }
+  }, [location.search, navigate, project, projectId, projectTasks, requestNewTask, workspaceTab]);
+
   const canEdit = useMemo(() => {
-    if (!project || !session) return false;
+    if (!project) return false;
     if (canEditProject(project)) return true;
 
     const requestedTaskRowId = String(new URLSearchParams(location.search).get('task_row_id') || '').trim();
     if (requestedTaskRowId) {
       return isTaskEditableForProject(project, requestedTaskRowId);
+    }
+    if (requestNewTask && sourceTaskRowId) {
+      return isTaskEditableForProject(project, sourceTaskRowId);
     }
 
     const activeTaskId = String(project.task_id || '').trim();
@@ -688,7 +739,7 @@ export function useProjectDetailRuntimeContext() {
     const activeTaskRowId =
       projectTasks.find((item) => String(item.task_id || '').trim() === activeTaskId)?.id || '';
     return isTaskEditableForProject(project, activeTaskRowId);
-  }, [project, projectTasks, session, location.search]);
+  }, [project, projectTasks, location.search, requestNewTask, sourceTaskRowId]);
   const workflowKey = useMemo(() => getWorkflowDefinition(project?.task_type).key, [project?.task_type]);
   const isPredictionWorkflow = isPredictionLikeWorkflowKey(workflowKey);
   const isPeptideDesignWorkflow = workflowKey === 'peptide_design';
@@ -1523,6 +1574,7 @@ export function useProjectDetailRuntimeContext() {
     setDraft,
     affinityUploadScopeTaskRowId,
     taskAffinityUploads,
+    requestedStatusTaskRow,
     statusContextTaskRow,
     activeResultTask,
     computeUseMsaFlag,
@@ -1559,6 +1611,7 @@ export function useProjectDetailRuntimeContext() {
     locationSearch: location.search,
     workspaceTab,
     metadataOnlyDraftDirty,
+    sourceTaskRowId: sourceTaskRowId || null,
     affinityLigandSmiles,
     affinityPreviewLigandSmiles: String(affinityPreview?.ligandSmiles || ''),
     affinityTargetFile,
@@ -1610,6 +1663,21 @@ export function useProjectDetailRuntimeContext() {
     });
   };
 
+  const syncWorkspaceTaskRow = useCallback(
+    (taskRowId: string) => {
+      const normalizedTaskRowId = String(taskRowId || '').trim();
+      if (!projectId || !normalizedTaskRowId) return;
+      const query = new URLSearchParams(location.search);
+      if (query.get('task_row_id') === normalizedTaskRowId && query.get('new_task') !== '1') return;
+      query.delete('new_task');
+      query.delete('source_task_row_id');
+      query.set('tab', workspaceTab);
+      query.set('task_row_id', normalizedTaskRowId);
+      navigate(`/projects/${projectId}?${query.toString()}`, { replace: true });
+    },
+    [location.search, navigate, projectId, workspaceTab]
+  );
+
   const { submitAffinityTask, submitPredictionTask } = createWorkflowSubmitters({
     project,
     draft,
@@ -1643,6 +1711,7 @@ export function useProjectDetailRuntimeContext() {
     setSavedTemplateFingerprint,
     setSavedAffinityUploadsFingerprint,
     setRunMenuOpen,
+    syncWorkspaceTaskRow,
     setProjectTasks,
     setProject,
     setStatusInfo,

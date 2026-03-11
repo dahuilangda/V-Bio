@@ -36,6 +36,7 @@ export interface PredictionSubmitDeps {
   setSavedComputationFingerprint: (value: string) => void;
   setSavedTemplateFingerprint: (value: string) => void;
   setRunMenuOpen: (value: boolean) => void;
+  syncWorkspaceTaskRow: (taskRowId: string) => void;
   setProjectTasks: (updater: (prev: ProjectTask[]) => ProjectTask[]) => void;
   setProject: (updater: (prev: Project | null) => Project | null) => void;
   setStatusInfo: (value: Record<string, unknown> | null) => void;
@@ -177,6 +178,7 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
     setSavedComputationFingerprint,
     setSavedTemplateFingerprint,
     setRunMenuOpen,
+    syncWorkspaceTaskRow,
     setProjectTasks,
     setProject,
     setStatusInfo,
@@ -403,6 +405,7 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
       setRunRedirectTaskId(taskId);
     } else {
       setRunRedirectTaskId(null);
+      syncWorkspaceTaskRow(draftTaskRow.id);
     }
     if (persistenceWarnings.length > 0) {
       showRunQueuedNotice(`Task ${taskId.slice(0, 8)} queued with sync warning.`);
