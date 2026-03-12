@@ -249,7 +249,7 @@ function normalizeProjectRow(row: Partial<Project>): Project {
 
 function applyProjectAccess(project: Project, access: { scope: ProjectAccessScope; taskIds: string[]; editableTaskIds?: string[]; accessLevel: EffectiveAccessLevel }): Project {
   const nextAccessibleTaskIds = access.scope === 'task_share' ? access.taskIds : [];
-  const nextEditableTaskIds = access.scope === 'task_share' ? (access.editableTaskIds || []) : [];
+  const nextEditableTaskIds = access.editableTaskIds || [];
   return {
     ...project,
     access_scope: access.scope,

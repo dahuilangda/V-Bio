@@ -17,6 +17,8 @@ interface UseProjectWorkspaceLoaderOptions<TDraft extends ProjectWorkspaceDraft>
   requestNewTask: boolean;
   sessionUserId?: string;
   setLoading: Dispatch<SetStateAction<boolean>>;
+  setSaving: Dispatch<SetStateAction<boolean>>;
+  setSubmitting: Dispatch<SetStateAction<boolean>>;
   setError: Dispatch<SetStateAction<string | null>>;
   setProjectTasks: Dispatch<SetStateAction<ProjectTask[]>>;
   setWorkspaceTab: Dispatch<SetStateAction<WorkspaceTab>>;
@@ -44,6 +46,8 @@ export function useProjectWorkspaceLoader<TDraft extends ProjectWorkspaceDraft>(
   requestNewTask,
   sessionUserId,
   setLoading,
+  setSaving,
+  setSubmitting,
   setError,
   setProjectTasks,
   setWorkspaceTab,
@@ -82,6 +86,8 @@ export function useProjectWorkspaceLoader<TDraft extends ProjectWorkspaceDraft>(
       requestNewTask,
       sessionUserId,
       setLoading,
+      setSaving,
+      setSubmitting,
       setError,
       setProjectTasks,
       setWorkspaceTab,
@@ -107,6 +113,8 @@ export function useProjectWorkspaceLoader<TDraft extends ProjectWorkspaceDraft>(
     requestNewTask,
     sessionUserId,
     setLoading,
+    setSaving,
+    setSubmitting,
     setError,
     setProjectTasks,
     setWorkspaceTab,

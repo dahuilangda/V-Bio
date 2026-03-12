@@ -19,8 +19,16 @@ export async function patchProjectRecord(params: {
   const { project, payload, updateProject, setProject } = params;
   if (!project) return null;
   const next = await updateProject(project.id, payload);
-  setProject(next);
-  return next;
+  const merged = {
+    ...project,
+    ...next,
+    access_scope: project.access_scope,
+    access_level: project.access_level,
+    accessible_task_ids: project.accessible_task_ids || [],
+    editable_task_ids: project.editable_task_ids || []
+  } as Project;
+  setProject(merged);
+  return merged;
 }
 
 export async function patchTaskRecord(params: {

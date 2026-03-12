@@ -18,6 +18,8 @@ export async function loadProjectIntoWorkspace<TDraft extends DraftLike>(params:
   requestNewTask: boolean;
   sessionUserId?: string;
   setLoading: Dispatch<SetStateAction<boolean>>;
+  setSaving: Dispatch<SetStateAction<boolean>>;
+  setSubmitting: Dispatch<SetStateAction<boolean>>;
   setError: Dispatch<SetStateAction<string | null>>;
   setProjectTasks: Dispatch<SetStateAction<ProjectTask[]>>;
   setWorkspaceTab: Dispatch<SetStateAction<any>>;
@@ -43,6 +45,8 @@ export async function loadProjectIntoWorkspace<TDraft extends DraftLike>(params:
     requestNewTask,
     sessionUserId,
     setLoading,
+    setSaving,
+    setSubmitting,
     setError,
     setProjectTasks,
     setWorkspaceTab,
@@ -64,6 +68,8 @@ export async function loadProjectIntoWorkspace<TDraft extends DraftLike>(params:
   } = params;
 
   setLoading(true);
+  setSaving(false);
+  setSubmitting(false);
   setError(null);
   setProjectTasks([]);
 

@@ -652,6 +652,27 @@ export function useProjectDetailRuntimeContext() {
     activeComponentId,
     setActiveComponentId,
   } = local;
+  const fallbackEditableTaskRowId = useMemo(() => {
+    if (!project) return '';
+    const requestedTaskRowId = String(new URLSearchParams(location.search).get('task_row_id') || '').trim();
+    if (requestedTaskRowId && isTaskEditableForProject(project, requestedTaskRowId)) {
+      return requestedTaskRowId;
+    }
+    if (sourceTaskRowId && isTaskEditableForProject(project, sourceTaskRowId)) {
+      return sourceTaskRowId;
+    }
+
+    const activeTaskId = String(project.task_id || '').trim();
+    if (activeTaskId) {
+      const activeTaskRowId =
+        projectTasks.find((item) => String(item.task_id || '').trim() === activeTaskId)?.id || '';
+      if (activeTaskRowId && isTaskEditableForProject(project, activeTaskRowId)) {
+        return activeTaskRowId;
+      }
+    }
+
+    return projectTasks.find((item) => isTaskEditableForProject(project, item.id))?.id || '';
+  }, [project, projectTasks, location.search, sourceTaskRowId]);
   const entryRoutingResolved = useEntryRoutingResolution({
     projectId,
     hasExplicitWorkspaceQuery,
@@ -695,6 +716,14 @@ export function useProjectDetailRuntimeContext() {
         ? projectTasks.find((item) => String(item.id || '').trim() === currentSourceTaskRowId) || null
         : null;
 
+    if (requestNewTask && !currentSourceTaskRowId && fallbackEditableTaskRowId) {
+      query.set('new_task', '1');
+      query.set('source_task_row_id', fallbackEditableTaskRowId);
+      query.set('tab', workspaceTab);
+      navigate(`/projects/${projectId}?${query.toString()}`, { replace: true });
+      return;
+    }
+
     if (!requestNewTask && (workspaceTab === 'components' || workspaceTab === 'constraints')) {
       if (requestedRow && !isDraftTaskSnapshot(requestedRow)) {
         query.delete('task_row_id');
@@ -720,7 +749,7 @@ export function useProjectDetailRuntimeContext() {
       query.set('tab', workspaceTab);
       navigate(`/projects/${projectId}?${query.toString()}`, { replace: true });
     }
-  }, [location.search, navigate, project, projectId, projectTasks, requestNewTask, workspaceTab]);
+  }, [fallbackEditableTaskRowId, location.search, navigate, project, projectId, projectTasks, requestNewTask, workspaceTab]);
 
   const canEdit = useMemo(() => {
     if (!project) return false;
@@ -730,8 +759,11 @@ export function useProjectDetailRuntimeContext() {
     if (requestedTaskRowId) {
       return isTaskEditableForProject(project, requestedTaskRowId);
     }
-    if (requestNewTask && sourceTaskRowId) {
-      return isTaskEditableForProject(project, sourceTaskRowId);
+    if (requestNewTask) {
+      const effectiveSourceTaskRowId = sourceTaskRowId || fallbackEditableTaskRowId;
+      if (effectiveSourceTaskRowId) {
+        return isTaskEditableForProject(project, effectiveSourceTaskRowId);
+      }
     }
 
     const activeTaskId = String(project.task_id || '').trim();
@@ -739,7 +771,7 @@ export function useProjectDetailRuntimeContext() {
     const activeTaskRowId =
       projectTasks.find((item) => String(item.task_id || '').trim() === activeTaskId)?.id || '';
     return isTaskEditableForProject(project, activeTaskRowId);
-  }, [project, projectTasks, location.search, requestNewTask, sourceTaskRowId]);
+  }, [project, projectTasks, location.search, requestNewTask, sourceTaskRowId, fallbackEditableTaskRowId]);
   const workflowKey = useMemo(() => getWorkflowDefinition(project?.task_type).key, [project?.task_type]);
   const isPredictionWorkflow = isPredictionLikeWorkflowKey(workflowKey);
   const isPeptideDesignWorkflow = workflowKey === 'peptide_design';
@@ -1510,6 +1542,8 @@ export function useProjectDetailRuntimeContext() {
     requestNewTask,
     sessionUserId: session?.userId,
     setLoading,
+    setSaving,
+    setSubmitting,
     setError,
     setProjectTasks,
     setWorkspaceTab,

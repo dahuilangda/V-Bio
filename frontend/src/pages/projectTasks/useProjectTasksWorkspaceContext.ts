@@ -1,7 +1,9 @@
 import { useMemo } from 'react';
 import type { Project, ProjectTask } from '../../types/models';
 import { loadProjectInputConfig } from '../../utils/projectInputs';
+import { canEditTask } from '../../utils/accessControl';
 import { getWorkflowDefinition } from '../../utils/workflows';
+import { isDraftTaskSnapshot } from '../projectDetail/projectTaskSnapshot';
 import type { TaskListRow, TaskWorkflowFilter, WorkspacePairPreference } from './taskListTypes';
 import { resolveTaskWorkflowKey } from './taskPresentation';
 import {
@@ -70,13 +72,29 @@ export function useProjectTasksWorkspaceContext({
     return `/projects/${project.id}?${params.toString()}`;
   }, [project, currentTaskRow]);
 
+  const createTaskSourceRowId = useMemo(() => {
+    const sanitizedTasks = sanitizeTaskRows(tasks);
+    const preferredCurrentRow =
+      currentTaskRow && canEditTask(currentTaskRow) && !isDraftTaskSnapshot(currentTaskRow)
+        ? currentTaskRow
+        : null;
+    if (preferredCurrentRow?.id) return preferredCurrentRow.id;
+    return (
+      sanitizedTasks.find((row) => canEditTask(row) && !isDraftTaskSnapshot(row))?.id ||
+      ''
+    );
+  }, [currentTaskRow, tasks]);
+
   const createTaskHref = useMemo(() => {
     if (!project) return '/projects';
     const params = new URLSearchParams();
     params.set('tab', 'components');
     params.set('new_task', '1');
+    if (createTaskSourceRowId) {
+      params.set('source_task_row_id', createTaskSourceRowId);
+    }
     return `/projects/${project.id}?${params.toString()}`;
-  }, [project]);
+  }, [project, createTaskSourceRowId]);
 
   const workspacePairPreference = useMemo<WorkspacePairPreference>(() => {
     if (!project) {

@@ -443,6 +443,10 @@ export function useProjects(session: Session | null) {
       setProjects((prev) => [
         {
           ...created,
+          access_scope: 'owner',
+          access_level: 'owner',
+          accessible_task_ids: [],
+          editable_task_ids: [],
           task_counts: emptyProjectTaskCounts()
         },
         ...prev

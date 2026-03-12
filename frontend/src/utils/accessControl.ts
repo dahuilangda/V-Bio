@@ -43,7 +43,6 @@ export function isTaskEditableForProject(
 ): boolean {
   if (!project) return false;
   if (canEditProject(project)) return true;
-  if (String(project.access_scope || 'owner').trim() !== 'task_share') return false;
   const normalizedTaskId = String(taskId || '').trim();
   if (!normalizedTaskId) return false;
   return (project.editable_task_ids || []).some((item) => String(item || '').trim() === normalizedTaskId);
