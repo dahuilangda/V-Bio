@@ -24,6 +24,7 @@
 
 补充：
 - 多肽设计父编排任务建议像 `lead_opt` 一样由 CPU worker 承接（`CPU_WORKER_CAPABILITIES=lead_opt,peptide_design`）。
+- 如多肽设计任务规模较大，可在 `DOCKER_STACK_WORKER_CPU.env` 调整 `PEPTIDE_PARENT_SUBPROCESS_TIMEOUT_SECONDS` 及相关 wave/buffer 参数，避免父编排任务沿用单次预测的超时预算。
 
 ## 2. 功能镜像
 

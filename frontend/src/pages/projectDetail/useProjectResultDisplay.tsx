@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import { Ligand2DPreview } from '../../components/project/Ligand2DPreview';
 import { ensureStructureConfidenceColoringData } from '../../api/backendApi';
 import type { InputComponent } from '../../types/models';
@@ -12,6 +12,11 @@ import { componentTypeLabel } from '../../utils/projectInputs';
 import { isSequenceLigandType, OverviewLigandSequencePreview } from './OverviewLigandSequencePreview';
 
 interface UseProjectResultDisplayOptions {
+  shouldPrepareResultStructure: boolean;
+  shouldPrepareConstraintStructure: boolean;
+  shouldPrepareSnapshotCards: boolean;
+  shouldPreparePredictionLigandPreview: boolean;
+  shouldPrepareAffinityResultDisplay: boolean;
   structureText: string;
   structureFormat: 'cif' | 'pdb';
   confidenceBackend: string;
@@ -82,6 +87,11 @@ interface UseProjectResultDisplayResult {
 }
 
 export function useProjectResultDisplay({
+  shouldPrepareResultStructure,
+  shouldPrepareConstraintStructure,
+  shouldPrepareSnapshotCards,
+  shouldPreparePredictionLigandPreview,
+  shouldPrepareAffinityResultDisplay,
   structureText,
   structureFormat,
   confidenceBackend,
@@ -124,10 +134,14 @@ export function useProjectResultDisplay({
   selectedResultLigandComponentType,
   snapshotLigandResiduePlddts,
 }: UseProjectResultDisplayOptions): UseProjectResultDisplayResult {
-  const displayStructureText = ensureStructureConfidenceColoringData(
-    structureText,
-    structureFormat,
-    confidenceBackend || projectBackend
+  const shouldPrepareAnyResultStructure = shouldPrepareResultStructure || shouldPrepareAffinityResultDisplay;
+  const shouldPrepareAnyResultLigand = shouldPreparePredictionLigandPreview || shouldPrepareAffinityResultDisplay;
+  const displayStructureText = useMemo(
+    () =>
+      shouldPrepareAnyResultStructure
+        ? ensureStructureConfidenceColoringData(structureText, structureFormat, confidenceBackend || projectBackend)
+        : '',
+    [shouldPrepareAnyResultStructure, structureText, structureFormat, confidenceBackend, projectBackend]
   );
   const displayStructureFormat: 'cif' | 'pdb' = structureFormat;
   const displayStructureName = activeResultTaskStructureName || projectStructureName || '-';
@@ -141,7 +155,7 @@ export function useProjectResultDisplay({
       ? 'alphafold'
       : 'default';
 
-  const constraintStructureText = selectedTemplatePreviewContent || '';
+  const constraintStructureText = shouldPrepareConstraintStructure ? selectedTemplatePreviewContent || '' : '';
   const constraintStructureFormat: 'cif' | 'pdb' = selectedTemplatePreviewFormat || 'pdb';
   const hasConstraintStructure = Boolean(constraintStructureText.trim());
 
@@ -153,8 +167,30 @@ export function useProjectResultDisplay({
     : 'Comp 1';
   const selectedResultPairLabel = `${selectedResultTargetLabel} ↔ ${selectedResultLigandLabel}`;
 
-  const snapshotCards: Array<{ key: string; label: string; value: string; detail: string; tone: MetricTone }> =
-    buildSnapshotCards({
+  const snapshotCards: Array<{ key: string; label: string; value: string; detail: string; tone: MetricTone }> = useMemo(
+    () =>
+      shouldPrepareSnapshotCards
+        ? buildSnapshotCards({
+            snapshotPlddt,
+            snapshotSelectedLigandChainPlddt,
+            snapshotLigandMeanPlddt,
+            snapshotPlddtTone,
+            snapshotIptm,
+            snapshotSelectedPairIptm,
+            snapshotIptmTone,
+            snapshotIc50Um,
+            snapshotIc50Error,
+            snapshotIc50Tone,
+            snapshotBindingProbability,
+            snapshotBindingStd,
+            snapshotBindingTone,
+            selectedResultTargetLabel,
+            selectedResultLigandLabel,
+            selectedResultPairLabel,
+          })
+        : [],
+    [
+      shouldPrepareSnapshotCards,
       snapshotPlddt,
       snapshotSelectedLigandChainPlddt,
       snapshotLigandMeanPlddt,
@@ -170,62 +206,99 @@ export function useProjectResultDisplay({
       snapshotBindingTone,
       selectedResultTargetLabel,
       selectedResultLigandLabel,
-      selectedResultPairLabel,
-    });
+      selectedResultPairLabel
+    ]
+  );
 
   const affinityPreviewStructureText = affinityPreviewTargetStructureText;
   const affinityPreviewStructureFormat: 'cif' | 'pdb' = affinityPreviewTargetStructureFormat;
   const affinityPreviewLigandOverlayText = affinityPreviewLigandStructureText;
   const affinityPreviewLigandOverlayFormat: 'cif' | 'pdb' = affinityPreviewLigandStructureFormat;
 
-  const affinityResultLigandSmiles = resolveAffinityResultLigandSmiles({
-    snapshotAffinity,
-    snapshotConfidence,
-    selectedResultLigandChainId,
-    statusContextLigandSmiles,
-    activeResultLigandSmiles,
-    snapshotLigandAtomPlddts,
-    affinityLigandSmiles,
-  });
-  const exactLigandConfidencePreview = resolveExactLigandConfidencePreview({
-    snapshotAffinity,
-    snapshotConfidence,
-    selectedResultLigandChainId,
-    statusContextLigandSmiles,
-    activeResultLigandSmiles,
-    affinityLigandSmiles
-  });
+  const affinityResultLigandSmiles = useMemo(
+    () =>
+      shouldPrepareAnyResultLigand
+        ? resolveAffinityResultLigandSmiles({
+            snapshotAffinity,
+            snapshotConfidence,
+            selectedResultLigandChainId,
+            statusContextLigandSmiles,
+            activeResultLigandSmiles,
+            snapshotLigandAtomPlddts,
+            affinityLigandSmiles,
+          })
+        : '',
+    [
+      shouldPrepareAnyResultLigand,
+      snapshotAffinity,
+      snapshotConfidence,
+      selectedResultLigandChainId,
+      statusContextLigandSmiles,
+      activeResultLigandSmiles,
+      snapshotLigandAtomPlddts,
+      affinityLigandSmiles
+    ]
+  );
+  const exactLigandConfidencePreview = useMemo(
+    () =>
+      shouldPrepareAnyResultLigand
+        ? resolveExactLigandConfidencePreview({
+            snapshotAffinity,
+            snapshotConfidence,
+            selectedResultLigandChainId,
+            statusContextLigandSmiles,
+            activeResultLigandSmiles,
+            affinityLigandSmiles
+          })
+        : { smiles: '', atomPlddts: [] as number[] },
+    [
+      shouldPrepareAnyResultLigand,
+      snapshotAffinity,
+      snapshotConfidence,
+      selectedResultLigandChainId,
+      statusContextLigandSmiles,
+      activeResultLigandSmiles,
+      affinityLigandSmiles
+    ]
+  );
 
-  const predictionLigandPreviewSmiles = (
-    exactLigandConfidencePreview.smiles.trim() ||
-    affinityResultLigandSmiles.trim() ||
-    (overviewPrimaryLigand.isSmiles ? overviewPrimaryLigand.smiles : '')
-  ).trim();
+  const predictionLigandPreviewSmiles = shouldPreparePredictionLigandPreview
+    ? (
+        exactLigandConfidencePreview.smiles.trim() ||
+        affinityResultLigandSmiles.trim() ||
+        (overviewPrimaryLigand.isSmiles ? overviewPrimaryLigand.smiles : '')
+      ).trim()
+    : '';
 
-  const affinityDisplayStructureText = displayStructureText.trim() ? displayStructureText : affinityPreviewStructureText;
+  const affinityDisplayStructureText = shouldPrepareAffinityResultDisplay
+    ? displayStructureText.trim()
+      ? displayStructureText
+      : affinityPreviewStructureText
+    : '';
   const affinityDisplayStructureFormat: 'cif' | 'pdb' = displayStructureText.trim()
     ? displayStructureFormat
     : affinityPreviewStructureFormat;
   const hasAffinityDisplayStructure = Boolean(affinityDisplayStructureText.trim());
 
-  const predictionLigandPreview =
-    predictionLigandPreviewSmiles ? (
-      <Ligand2DPreview
-        smiles={predictionLigandPreviewSmiles}
-        atomConfidences={exactLigandConfidencePreview.atomPlddts}
-        confidenceHint={snapshotPlddt}
-      />
-    ) : selectedResultLigandSequence && isSequenceLigandType(selectedResultLigandComponentType || null) ? (
-      <OverviewLigandSequencePreview sequence={selectedResultLigandSequence} residuePlddts={snapshotLigandResiduePlddts} />
-    ) : (
-      <div className="ligand-preview-empty">
-        {overviewPrimaryLigand.selectedComponentType && overviewPrimaryLigand.selectedComponentType !== 'ligand'
-          ? `Selected binding ligand component is ${componentTypeLabel(overviewPrimaryLigand.selectedComponentType)}.`
-          : overviewPrimaryLigand.smiles
-            ? '2D preview requires SMILES input.'
-            : 'No ligand input.'}
-      </div>
-    );
+  const predictionLigandPreview = shouldPreparePredictionLigandPreview
+    ? predictionLigandPreviewSmiles ? (
+        <Ligand2DPreview
+          smiles={predictionLigandPreviewSmiles}
+          atomConfidences={exactLigandConfidencePreview.atomPlddts}
+          confidenceHint={snapshotPlddt}
+        />
+      ) : selectedResultLigandSequence && isSequenceLigandType(selectedResultLigandComponentType || null) ? (
+        <OverviewLigandSequencePreview sequence={selectedResultLigandSequence} residuePlddts={snapshotLigandResiduePlddts} />
+      ) : (
+        <div className="ligand-preview-empty">
+          {overviewPrimaryLigand.selectedComponentType && overviewPrimaryLigand.selectedComponentType !== 'ligand'
+            ? `Selected binding ligand component is ${componentTypeLabel(overviewPrimaryLigand.selectedComponentType)}.`
+            : overviewPrimaryLigand.smiles
+              ? '2D preview requires SMILES input.'
+              : 'No ligand input.'}
+        </div>
+      )
+    : null;
 
   return {
     displayStructureText,

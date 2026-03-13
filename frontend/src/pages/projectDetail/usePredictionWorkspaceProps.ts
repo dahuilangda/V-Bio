@@ -19,8 +19,10 @@ import {
   buildPredictionComponentsSidebarProps,
   buildPredictionConstraintsWorkspaceProps
 } from './workflowSectionProps';
+import type { WorkspaceTab } from './workspaceTypes';
 
 interface UsePredictionWorkspacePropsInput {
+  workspaceTab: WorkspaceTab;
   draft: ProjectWorkspaceDraft;
   setDraft: Dispatch<SetStateAction<ProjectWorkspaceDraft | null>>;
   filterConstraintsByBackend: (
@@ -92,7 +94,11 @@ interface UsePredictionWorkspacePropsResult {
   predictionComponentsSidebarProps: ReturnType<typeof buildPredictionComponentsSidebarProps>;
 }
 
+const EMPTY_PREDICTION_CONSTRAINTS_WORKSPACE_PROPS = {} as ReturnType<typeof buildPredictionConstraintsWorkspaceProps>;
+const EMPTY_PREDICTION_COMPONENTS_SIDEBAR_PROPS = {} as ReturnType<typeof buildPredictionComponentsSidebarProps>;
+
 export function usePredictionWorkspaceProps({
+  workspaceTab,
   draft,
   setDraft,
   filterConstraintsByBackend,
@@ -152,99 +158,103 @@ export function usePredictionWorkspaceProps({
   affinityEnableDisabledReason,
   showAffinityComputeToggle
 }: UsePredictionWorkspacePropsInput): UsePredictionWorkspacePropsResult {
-  const predictionConstraintsWorkspaceProps = buildPredictionConstraintsWorkspaceProps({
-    constraintsWorkspaceRef,
-    isConstraintsResizing,
-    constraintsGridStyle,
-    constraintCount,
-    activeConstraintIndex,
-    constraintTemplateOptions,
-    selectedTemplatePreview,
-    setSelectedConstraintTemplateComponentId,
-    constraintPickModeEnabled,
-    setConstraintPickModeEnabled,
-    canEdit,
-    setWorkspaceTab,
-    navigateConstraint,
-    pickedResidue,
-    hasConstraintStructure,
-    constraintStructureText,
-    constraintStructureFormat,
-    constraintViewerHighlightResidues,
-    constraintViewerActiveResidue,
-    applyPickToSelectedConstraint,
-    handleConstraintsResizerPointerDown,
-    handleConstraintsResizerKeyDown,
-    clearConstraintSelection,
-    components: draft.inputConfig.components,
-    constraints: draft.inputConfig.constraints,
-    properties: draft.inputConfig.properties,
-    activeConstraintId,
-    selectedContactConstraintIds,
-    selectConstraint,
-    allowedConstraintTypes,
-    isBondOnlyBackend,
-    onConstraintsChange: (constraints: PredictionConstraint[]) =>
-      setDraft((d) =>
-        d
-          ? {
-              ...d,
-              inputConfig: {
-                ...d.inputConfig,
-                constraints: filterConstraintsByBackend(constraints, d.backend)
-              }
-            }
-          : d
-      ),
-    onPropertiesChange: (properties: ProjectInputConfig['properties']) =>
-      setDraft((d) =>
-        d
-          ? {
-              ...d,
-              inputConfig: {
-                ...d.inputConfig,
-                properties
-              }
-            }
-          : d
-      ),
-  });
+  const predictionConstraintsWorkspaceProps = workspaceTab === 'constraints'
+    ? buildPredictionConstraintsWorkspaceProps({
+        constraintsWorkspaceRef,
+        isConstraintsResizing,
+        constraintsGridStyle,
+        constraintCount,
+        activeConstraintIndex,
+        constraintTemplateOptions,
+        selectedTemplatePreview,
+        setSelectedConstraintTemplateComponentId,
+        constraintPickModeEnabled,
+        setConstraintPickModeEnabled,
+        canEdit,
+        setWorkspaceTab,
+        navigateConstraint,
+        pickedResidue,
+        hasConstraintStructure,
+        constraintStructureText,
+        constraintStructureFormat,
+        constraintViewerHighlightResidues,
+        constraintViewerActiveResidue,
+        applyPickToSelectedConstraint,
+        handleConstraintsResizerPointerDown,
+        handleConstraintsResizerKeyDown,
+        clearConstraintSelection,
+        components: draft.inputConfig.components,
+        constraints: draft.inputConfig.constraints,
+        properties: draft.inputConfig.properties,
+        activeConstraintId,
+        selectedContactConstraintIds,
+        selectConstraint,
+        allowedConstraintTypes,
+        isBondOnlyBackend,
+        onConstraintsChange: (constraints: PredictionConstraint[]) =>
+          setDraft((d) =>
+            d
+              ? {
+                  ...d,
+                  inputConfig: {
+                    ...d.inputConfig,
+                    constraints: filterConstraintsByBackend(constraints, d.backend)
+                  }
+                }
+              : d
+          ),
+        onPropertiesChange: (properties: ProjectInputConfig['properties']) =>
+          setDraft((d) =>
+            d
+              ? {
+                  ...d,
+                  inputConfig: {
+                    ...d.inputConfig,
+                    properties
+                  }
+                }
+              : d
+          ),
+      })
+    : EMPTY_PREDICTION_CONSTRAINTS_WORKSPACE_PROPS;
 
-  const predictionComponentsSidebarProps = buildPredictionComponentsSidebarProps({
-    canEdit,
-    components: draft.inputConfig.components,
-    hasIncompleteComponents,
-    componentCompletion,
-    sidebarTypeOrder,
-    componentTypeBuckets,
-    sidebarTypeOpen,
-    setSidebarTypeOpen,
-    addComponentToDraft,
-    activeComponentId,
-    jumpToComponent,
-    sidebarConstraintsOpen,
-    setSidebarConstraintsOpen,
-    constraintCount,
-    addConstraintFromSidebar,
-    hasActiveChains,
-    constraints: draft.inputConfig.constraints,
-    activeConstraintId,
-    selectedContactConstraintIdSet,
-    jumpToConstraint,
-    constraintLabel,
-    formatConstraintCombo,
-    formatConstraintDetail,
-    properties: draft.inputConfig.properties,
-    canEnableAffinityFromWorkspace,
-    setAffinityEnabledFromWorkspace,
-    selectedWorkspaceTarget,
-    selectedWorkspaceLigand,
-    workspaceTargetOptions,
-    workspaceLigandSelectableOptions,
-    setAffinityComponentFromWorkspace,
-    affinityEnableDisabledReason,
-    showAffinityComputeToggle
-  });
+  const predictionComponentsSidebarProps = workspaceTab === 'components'
+    ? buildPredictionComponentsSidebarProps({
+        canEdit,
+        components: draft.inputConfig.components,
+        hasIncompleteComponents,
+        componentCompletion,
+        sidebarTypeOrder,
+        componentTypeBuckets,
+        sidebarTypeOpen,
+        setSidebarTypeOpen,
+        addComponentToDraft,
+        activeComponentId,
+        jumpToComponent,
+        sidebarConstraintsOpen,
+        setSidebarConstraintsOpen,
+        constraintCount,
+        addConstraintFromSidebar,
+        hasActiveChains,
+        constraints: draft.inputConfig.constraints,
+        activeConstraintId,
+        selectedContactConstraintIdSet,
+        jumpToConstraint,
+        constraintLabel,
+        formatConstraintCombo,
+        formatConstraintDetail,
+        properties: draft.inputConfig.properties,
+        canEnableAffinityFromWorkspace,
+        setAffinityEnabledFromWorkspace,
+        selectedWorkspaceTarget,
+        selectedWorkspaceLigand,
+        workspaceTargetOptions,
+        workspaceLigandSelectableOptions,
+        setAffinityComponentFromWorkspace,
+        affinityEnableDisabledReason,
+        showAffinityComputeToggle
+      })
+    : EMPTY_PREDICTION_COMPONENTS_SIDEBAR_PROPS;
 
   return {
     predictionConstraintsWorkspaceProps,

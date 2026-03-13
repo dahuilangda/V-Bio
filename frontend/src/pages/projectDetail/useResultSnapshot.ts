@@ -36,6 +36,7 @@ export interface UseResultSnapshotParams {
   requestedStatusTaskRow: ProjectTask | null;
   normalizedDraftComponents: InputComponent[];
   workflowKey: string;
+  shouldComputeResultMetrics: boolean;
   isDraftTaskSnapshot: (task: ProjectTask | null | undefined) => boolean;
 }
 
@@ -206,6 +207,7 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     requestedStatusTaskRow,
     normalizedDraftComponents,
     workflowKey,
+    shouldComputeResultMetrics,
     isDraftTaskSnapshot,
   } = params;
 
@@ -487,25 +489,30 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
   }, [activeResultTask?.affinity, project?.affinity, workflowKey]);
 
   const snapshotLigandAtomPlddts = useMemo(() => {
+    if (!shouldComputeResultMetrics) return [];
     return readLigandAtomPlddtsFromConfidence(snapshotConfidence, selectedResultLigandChainId);
-  }, [snapshotConfidence, selectedResultLigandChainId]);
+  }, [shouldComputeResultMetrics, snapshotConfidence, selectedResultLigandChainId]);
 
   const snapshotLigandResiduePlddts = useMemo(() => {
+    if (!shouldComputeResultMetrics) return null;
     if (!selectedResultLigandSequence || !selectedResultLigandChainId) return null;
     const raw = readResiduePlddtsForChain(snapshotConfidence, selectedResultLigandChainId);
     return alignConfidenceSeriesToLength(raw, selectedResultLigandSequence.length);
-  }, [snapshotConfidence, selectedResultLigandChainId, selectedResultLigandSequence]);
+  }, [shouldComputeResultMetrics, snapshotConfidence, selectedResultLigandChainId, selectedResultLigandSequence]);
 
   const snapshotLigandMeanPlddt = useMemo(() => {
+    if (!shouldComputeResultMetrics) return null;
     if (!snapshotLigandAtomPlddts.length) return null;
     return mean(snapshotLigandAtomPlddts);
-  }, [snapshotLigandAtomPlddts]);
+  }, [shouldComputeResultMetrics, snapshotLigandAtomPlddts]);
 
   const snapshotSelectedLigandChainPlddt = useMemo(() => {
+    if (!shouldComputeResultMetrics) return null;
     return readChainMeanPlddtForChain(snapshotConfidence, selectedResultLigandChainId);
-  }, [snapshotConfidence, selectedResultLigandChainId]);
+  }, [shouldComputeResultMetrics, snapshotConfidence, selectedResultLigandChainId]);
 
   const snapshotPlddt = useMemo(() => {
+    if (!shouldComputeResultMetrics) return null;
     if (snapshotSelectedLigandChainPlddt !== null) {
       return snapshotSelectedLigandChainPlddt;
     }
@@ -523,26 +530,29 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     ]);
     if (raw === null) return null;
     return raw <= 1 ? raw * 100 : raw;
-  }, [snapshotConfidence, snapshotLigandMeanPlddt, snapshotSelectedLigandChainPlddt]);
+  }, [shouldComputeResultMetrics, snapshotConfidence, snapshotLigandMeanPlddt, snapshotSelectedLigandChainPlddt]);
 
   const snapshotSelectedPairIptm = useMemo(() => {
+    if (!shouldComputeResultMetrics) return null;
     return readPairIptmForChains(
       snapshotConfidence,
       selectedResultTargetChainId,
       selectedResultLigandChainId,
       resultChainIds
     );
-  }, [snapshotConfidence, selectedResultTargetChainId, selectedResultLigandChainId, resultChainIds]);
+  }, [shouldComputeResultMetrics, snapshotConfidence, selectedResultTargetChainId, selectedResultLigandChainId, resultChainIds]);
 
   const snapshotIptm = useMemo(() => {
+    if (!shouldComputeResultMetrics) return null;
     if (snapshotSelectedPairIptm !== null) return snapshotSelectedPairIptm;
     if (!snapshotConfidence) return null;
     const raw = readFirstFiniteMetric(snapshotConfidence, ['iptm', 'ligand_iptm', 'protein_iptm']);
     if (raw === null) return null;
     return raw > 1 && raw <= 100 ? raw / 100 : raw;
-  }, [snapshotConfidence, snapshotSelectedPairIptm]);
+  }, [shouldComputeResultMetrics, snapshotConfidence, snapshotSelectedPairIptm]);
 
   const snapshotBindingValues = useMemo(() => {
+    if (!shouldComputeResultMetrics) return null;
     if (!snapshotAffinity) return null;
     const values = readFiniteMetricSeries(snapshotAffinity, [
       'affinity_probability_binary',
@@ -552,19 +562,22 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     const normalized = values.filter((value) => Number.isFinite(value) && value >= 0 && value <= 1);
     if (normalized.length === 0) return null;
     return normalized;
-  }, [snapshotAffinity]);
+  }, [shouldComputeResultMetrics, snapshotAffinity]);
 
   const snapshotBindingProbability = useMemo(() => {
+    if (!shouldComputeResultMetrics) return null;
     if (!snapshotBindingValues?.length) return null;
     return Math.max(0, Math.min(1, mean(snapshotBindingValues)));
-  }, [snapshotBindingValues]);
+  }, [shouldComputeResultMetrics, snapshotBindingValues]);
 
   const snapshotBindingStd = useMemo(() => {
+    if (!shouldComputeResultMetrics) return null;
     if (!snapshotBindingValues?.length) return null;
     return std(snapshotBindingValues);
-  }, [snapshotBindingValues]);
+  }, [shouldComputeResultMetrics, snapshotBindingValues]);
 
   const snapshotLogIc50Values = useMemo(() => {
+    if (!shouldComputeResultMetrics) return null;
     if (!snapshotAffinity) return null;
     const logValues = readFiniteMetricSeries(snapshotAffinity, [
       'affinity_pred_value',
@@ -573,14 +586,16 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     ]);
     if (logValues.length === 0) return null;
     return logValues;
-  }, [snapshotAffinity]);
+  }, [shouldComputeResultMetrics, snapshotAffinity]);
 
   const snapshotIc50Um = useMemo(() => {
+    if (!shouldComputeResultMetrics) return null;
     if (!snapshotLogIc50Values?.length) return null;
     return 10 ** mean(snapshotLogIc50Values);
-  }, [snapshotLogIc50Values]);
+  }, [shouldComputeResultMetrics, snapshotLogIc50Values]);
 
   const snapshotIc50Error = useMemo(() => {
+    if (!shouldComputeResultMetrics) return null;
     if (!snapshotLogIc50Values?.length || snapshotLogIc50Values.length <= 1) return null;
     const meanLog = mean(snapshotLogIc50Values);
     const stdLog = std(snapshotLogIc50Values);
@@ -591,7 +606,7 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
       plus: Math.max(0, upper - center),
       minus: Math.max(0, center - lower)
     };
-  }, [snapshotLogIc50Values]);
+  }, [shouldComputeResultMetrics, snapshotLogIc50Values]);
 
   const snapshotPlddtTone = useMemo(() => toneForPlddt(snapshotPlddt), [snapshotPlddt]);
   const snapshotIptmTone = useMemo(() => toneForIptm(snapshotIptm), [snapshotIptm]);

@@ -29,6 +29,13 @@ CPU_WORKER_CAPABILITIES=
 - `CPU_WORKER_CAPABILITIES=` 留空：CPU worker 默认具备全部 CPU 功能。
 - `GPU_POOL_NAMESPACE=`：可选；为 GPU 池 Redis 键加命名空间（多 capability 微服务并行时建议设置）。
 
+多肽设计相关超时：
+- `PREDICTION_SUBPROCESS_TIMEOUT_SECONDS=10800`：常规单次预测/评分任务的默认子进程超时。
+- `PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT_SECONDS=10800`：单个多肽候选子任务超时，默认跟随常规预测。
+- `PEPTIDE_PARENT_SUBPROCESS_TIMEOUT_SECONDS=86400`：多肽父编排任务的总超时上限，默认 24 小时。
+- `PEPTIDE_PARENT_TIMEOUT_PER_WAVE_SECONDS=1800`：多肽父任务估算超时时，每个并行 wave 预留秒数。
+- `PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS=1800`：多肽父任务估算超时时附加的固定缓冲秒数。
+
 功能代码目录默认在 `capabilities/`（例如 `lead_optimization`、`pocketxmol`）。
 ColabFold MSA 服务的 Docker 入口统一在 `deploy/docker/DOCKER_CAP_COLABFOLD_SERVER.*`。
 
@@ -56,6 +63,7 @@ GPU_WORKER_CAPABILITIES=alphafold3,protenix,pocketxmol
 CPU_WORKER_CAPABILITIES=lead_opt,peptide_design
 BOLTZ2_DOCKER_IMAGE=vbio-boltz2-runtime
 BOLTZ2_HOST_CACHE_DIR=/data/boltz_cache
+PEPTIDE_PARENT_SUBPROCESS_TIMEOUT_SECONDS=86400
 ```
 
 一个 worker 可声明多个功能；系统会自动展开为多个 `cap.*` 队列监听。

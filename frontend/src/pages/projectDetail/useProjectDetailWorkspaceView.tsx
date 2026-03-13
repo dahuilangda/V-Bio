@@ -1481,7 +1481,8 @@ export function useProjectDetailWorkspaceView() {
 
   if (!entryRoutingResolved || loading) {
     const query = new URLSearchParams(locationSearch);
-    const requestedTaskRowId = String(query.get('task_row_id') || '').trim();
+    const requestedTaskRowId =
+      String(query.get('task_row_id') || '').trim() || String(query.get('source_task_row_id') || '').trim();
     const loadingLabel =
       !entryRoutingResolved
         ? 'Loading project...'
@@ -1515,7 +1516,10 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   const [leadOptHeaderRunPending, setLeadOptHeaderRunPending] = useState(false);
   const [headerStopRunPending, setHeaderStopRunPending] = useState(false);
   const explicitRequestedTaskRowId = useMemo(
-    () => String(new URLSearchParams(runtime.locationSearch).get('task_row_id') || '').trim(),
+    () => {
+      const query = new URLSearchParams(runtime.locationSearch);
+      return String(query.get('task_row_id') || '').trim() || String(query.get('source_task_row_id') || '').trim();
+    },
     [runtime.locationSearch]
   );
   const handleRegisterLeadOptHeaderRunAction = useCallback((action: (() => void | Promise<void>) | null) => {
@@ -2632,6 +2636,11 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     affinityDisplayStructureFormat,
     hasAffinityDisplayStructure,
   } = useProjectResultDisplay({
+    shouldPrepareResultStructure: workspaceTab === 'results' && (isPredictionWorkflow || isPeptideDesignWorkflow),
+    shouldPrepareConstraintStructure: workspaceTab === 'constraints',
+    shouldPrepareSnapshotCards: workspaceTab === 'results' && (isPredictionWorkflow || isAffinityWorkflow),
+    shouldPreparePredictionLigandPreview: workspaceTab === 'results' && isPredictionWorkflow,
+    shouldPrepareAffinityResultDisplay: workspaceTab === 'results' && isAffinityWorkflow,
     structureText,
     structureFormat,
     confidenceBackend,
@@ -2705,6 +2714,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     filterConstraintsByBackend
   });
   const { predictionConstraintsWorkspaceProps, predictionComponentsSidebarProps } = usePredictionWorkspaceProps({
+    workspaceTab,
     draft,
     setDraft,
     filterConstraintsByBackend,
@@ -2774,6 +2784,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     isPredictionWorkflow,
     isPeptideDesignWorkflow,
     isAffinityWorkflow,
+    isLeadOptimizationWorkflow,
     workflowTitle: workflow.title,
     workflowShortTitle: workflow.shortTitle,
     projectTaskState: displayTaskState || project.task_state || '',

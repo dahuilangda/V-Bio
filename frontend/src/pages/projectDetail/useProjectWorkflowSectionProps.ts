@@ -23,6 +23,7 @@ interface UseProjectWorkflowSectionPropsInput {
   isPredictionWorkflow: boolean;
   isPeptideDesignWorkflow: boolean;
   isAffinityWorkflow: boolean;
+  isLeadOptimizationWorkflow: boolean;
   workflowTitle: string;
   workflowShortTitle: string;
   projectTaskState: string;
@@ -181,10 +182,19 @@ interface UseProjectWorkflowSectionPropsResult {
   workflowRuntimeSettingsSectionProps: ReturnType<typeof buildWorkflowRuntimeSettingsSectionProps>;
 }
 
+const EMPTY_PROJECT_RESULTS_SECTION_PROPS = {} as ReturnType<typeof buildProjectResultsSectionProps>;
+const EMPTY_AFFINITY_WORKFLOW_SECTION_PROPS = {} as ReturnType<typeof buildAffinityWorkflowSectionProps>;
+const EMPTY_LEAD_OPTIMIZATION_WORKFLOW_SECTION_PROPS = {} as ReturnType<
+  typeof buildLeadOptimizationWorkflowSectionProps
+>;
+const EMPTY_PREDICTION_WORKFLOW_SECTION_PROPS = {} as ReturnType<typeof buildPredictionWorkflowSectionProps>;
+const EMPTY_WORKFLOW_RUNTIME_SETTINGS_SECTION_PROPS = {} as ReturnType<typeof buildWorkflowRuntimeSettingsSectionProps>;
+
 export function useProjectWorkflowSectionProps({
   isPredictionWorkflow,
   isPeptideDesignWorkflow,
   isAffinityWorkflow,
+  isLeadOptimizationWorkflow,
   workflowTitle,
   workflowShortTitle,
   projectTaskState,
@@ -321,163 +331,182 @@ export function useProjectWorkflowSectionProps({
     });
   };
   const affinityEffectiveLigandSmiles = affinityLigandSmiles.trim() || affinityPreviewLigandSmiles.trim();
+  const shouldBuildProjectResultsSection = workspaceTab === 'results' && !isLeadOptimizationWorkflow;
+  const shouldBuildAffinityWorkflowSection = isAffinityWorkflow && workspaceTab === 'components';
+  const shouldBuildLeadOptimizationWorkflowSection =
+    isLeadOptimizationWorkflow && (workspaceTab === 'components' || workspaceTab === 'results');
+  const shouldBuildPredictionWorkflowSection =
+    isPredictionWorkflow && (workspaceTab === 'components' || workspaceTab === 'constraints');
+  const shouldBuildWorkflowRuntimeSettingsSection =
+    (workspaceTab === 'components' && !isLeadOptimizationWorkflow && !isPeptideDesignWorkflow) ||
+    (workspaceTab === 'basics' && isPeptideDesignWorkflow);
 
-  const projectResultsSectionProps = buildProjectResultsSectionProps({
-    isPredictionWorkflow,
-    isPeptideDesignWorkflow,
-    isAffinityWorkflow,
-    workflowTitle,
-    workflowShortTitle,
-    projectTaskState,
-    projectTaskId,
-    resultsGridRef,
-    isResultsResizing,
-    resultsGridStyle,
-    onResizerPointerDown: onResultsResizerPointerDown,
-    onResizerKeyDown: onResultsResizerKeyDown,
-    snapshotCards,
-    snapshotConfidence: snapshotConfidence || {},
-    resultChainIds,
-    selectedResultTargetChainId,
-    selectedResultLigandChainId,
-    displayStructureText,
-    displayStructureFormat,
-    displayStructureColorMode,
-    displayStructureName,
-    confidenceBackend,
-    projectBackend,
-    predictionLigandPreview,
-    predictionLigandRadarSmiles,
-    hasAffinityDisplayStructure,
-    affinityDisplayStructureText,
-    affinityDisplayStructureFormat,
-    affinityLigandSmiles: affinityResultLigandSmiles,
-    affinityPrimaryTargetChainId: affinityTargetChainIds[0] || null,
-    affinityLigandAtomPlddts: affinityResultLigandAtomPlddts,
-    affinityLigandConfidenceHint: snapshotPlddt,
-    selectedResultLigandSequence,
-    peptideFallbackPlddt: snapshotPlddt,
-    peptideFallbackIptm: snapshotSelectedPairIptm,
-    statusInfo,
-    progressPercent,
-    onPeptideRequestStructure
-  });
-  const affinityWorkflowSectionProps = buildAffinityWorkflowSectionProps({
-    canEdit,
-    submitting,
-    backend,
-    targetFileName: affinityTargetFileName,
-    ligandFileName: affinityLigandFileName,
-    ligandSmiles: affinityEffectiveLigandSmiles,
-    ligandEditorInput: affinityEffectiveLigandSmiles,
-    useMsa: affinityUseMsa,
-    confidenceOnly: affinityConfidenceOnlyUiValue,
-    confidenceOnlyLocked: affinityConfidenceOnlyUiLocked,
-    confidenceOnlyHint: affinityConfidenceOnlyUiLocked
-      ? affinityHasLigand
-        ? 'Only small-molecule ligand supports activity.'
-        : 'No ligand uploaded: confidence only.'
-      : '',
-    previewTargetStructureText: affinityPreviewStructureText,
-    previewTargetStructureFormat: affinityPreviewStructureFormat,
-    previewLigandStructureText: affinityPreviewLigandOverlayText,
-    previewLigandStructureFormat: affinityPreviewLigandOverlayFormat,
-    previewLigandChainId: affinityLigandChainId,
-    resultsGridRef,
-    isResultsResizing,
-    resultsGridStyle,
-    onTargetFileChange: onAffinityTargetFileChange,
-    onLigandFileChange: onAffinityLigandFileChange,
-    onUseMsaChange: onAffinityUseMsaChange,
-    onConfidenceOnlyChange: onAffinityConfidenceOnlyChange,
-    onBackendChange,
-    onLigandSmilesChange: setAffinityLigandSmiles,
-    onResizerPointerDown: onResultsResizerPointerDown,
-    onResizerKeyDown: onResultsResizerKeyDown
-  });
-  const leadOptimizationWorkflowSectionProps = buildLeadOptimizationWorkflowSectionProps({
-    workspaceTab,
-    canEdit,
-    submitting,
-    backend,
-    onNavigateToResults: onLeadOptNavigateToResults || (() => setWorkspaceTab('results')),
-    onRegisterHeaderRunAction: onRegisterLeadOptHeaderRunAction,
-    proteinSequence: leadOptProteinSequence,
-    ligandSmiles: leadOptLigandSmiles,
-    targetChain: leadOptTargetChain,
-    ligandChain: leadOptLigandChain,
-    onLigandSmilesChange: onLeadOptimizationLigandSmilesChange,
-    referenceScopeKey: leadOptReferenceScopeKey,
-    persistedReferenceUploads: leadOptPersistedReferenceUploads,
-    onReferenceUploadsChange: onLeadOptReferenceUploadsChange,
-    onMmpTaskQueued: onLeadOptMmpTaskQueued,
-    onMmpTaskCompleted: onLeadOptMmpTaskCompleted,
-    onMmpTaskFailed: onLeadOptMmpTaskFailed,
-    onMmpUiStateChange: onLeadOptUiStateChange,
-    onPredictionQueued: onLeadOptPredictionQueued,
-    onPredictionStateChange: onLeadOptPredictionStateChange,
-    initialMmpSnapshot: leadOptInitialMmpSnapshot
-  });
-  const predictionWorkflowSectionProps = buildPredictionWorkflowSectionProps({
-    workspaceTab,
-    canEdit,
-    componentsWorkspaceRef,
-    isComponentsResizing,
-    componentsGridStyle,
-    onComponentsResizerPointerDown,
-    onComponentsResizerKeyDown,
-    components,
-    onComponentsChange,
-    proteinTemplates,
-    onProteinTemplateChange,
-    activeComponentId,
-    onActiveComponentIdChange: (id: string | null) => setActiveComponentId(id),
-    onProteinTemplateResiduePick,
-    constraintsWorkspaceProps: predictionConstraintsWorkspaceProps,
-    componentsSidebarProps: predictionComponentsSidebarProps
-  });
-  const workflowRuntimeSettingsSectionProps = buildWorkflowRuntimeSettingsSectionProps({
-    canEdit,
-    isPredictionWorkflow,
-    isPeptideDesignWorkflow,
-    isAffinityWorkflow,
-    backend,
-    seed: seed ?? null,
-    peptideDesignMode,
-    peptideBinderLength,
-    peptideUseInitialSequence,
-    peptideInitialSequence,
-    peptideSequenceMask,
-    peptideIterations,
-    peptidePopulationSize,
-    peptideEliteSize,
-    peptideMutationRate,
-    peptideBicyclicLinkerCcd,
-    peptideBicyclicCysPositionMode,
-    peptideBicyclicFixTerminalCys,
-    peptideBicyclicIncludeExtraCys,
-    peptideBicyclicCys1Pos,
-    peptideBicyclicCys2Pos,
-    peptideBicyclicCys3Pos,
-    onBackendChange,
-    onSeedChange,
-    onPeptideDesignModeChange,
-    onPeptideBinderLengthChange,
-    onPeptideUseInitialSequenceChange,
-    onPeptideInitialSequenceChange,
-    onPeptideSequenceMaskChange,
-    onPeptideIterationsChange,
-    onPeptidePopulationSizeChange,
-    onPeptideEliteSizeChange,
-    onPeptideMutationRateChange,
-    onPeptideBicyclicLinkerCcdChange,
-    onPeptideBicyclicCysPositionModeChange,
-    onPeptideBicyclicFixTerminalCysChange,
-    onPeptideBicyclicIncludeExtraCysChange,
-    onPeptideBicyclicCys1PosChange,
-    onPeptideBicyclicCys2PosChange,
-    onPeptideBicyclicCys3PosChange
-  });
+  const projectResultsSectionProps = shouldBuildProjectResultsSection
+    ? buildProjectResultsSectionProps({
+        isPredictionWorkflow,
+        isPeptideDesignWorkflow,
+        isAffinityWorkflow,
+        workflowTitle,
+        workflowShortTitle,
+        projectTaskState,
+        projectTaskId,
+        resultsGridRef,
+        isResultsResizing,
+        resultsGridStyle,
+        onResizerPointerDown: onResultsResizerPointerDown,
+        onResizerKeyDown: onResultsResizerKeyDown,
+        snapshotCards,
+        snapshotConfidence: snapshotConfidence || {},
+        resultChainIds,
+        selectedResultTargetChainId,
+        selectedResultLigandChainId,
+        displayStructureText,
+        displayStructureFormat,
+        displayStructureColorMode,
+        displayStructureName,
+        confidenceBackend,
+        projectBackend,
+        predictionLigandPreview,
+        predictionLigandRadarSmiles,
+        hasAffinityDisplayStructure,
+        affinityDisplayStructureText,
+        affinityDisplayStructureFormat,
+        affinityLigandSmiles: affinityResultLigandSmiles,
+        affinityPrimaryTargetChainId: affinityTargetChainIds[0] || null,
+        affinityLigandAtomPlddts: affinityResultLigandAtomPlddts,
+        affinityLigandConfidenceHint: snapshotPlddt,
+        selectedResultLigandSequence,
+        peptideFallbackPlddt: snapshotPlddt,
+        peptideFallbackIptm: snapshotSelectedPairIptm,
+        statusInfo,
+        progressPercent,
+        onPeptideRequestStructure
+      })
+    : EMPTY_PROJECT_RESULTS_SECTION_PROPS;
+  const affinityWorkflowSectionProps = shouldBuildAffinityWorkflowSection
+    ? buildAffinityWorkflowSectionProps({
+        canEdit,
+        submitting,
+        backend,
+        targetFileName: affinityTargetFileName,
+        ligandFileName: affinityLigandFileName,
+        ligandSmiles: affinityEffectiveLigandSmiles,
+        ligandEditorInput: affinityEffectiveLigandSmiles,
+        useMsa: affinityUseMsa,
+        confidenceOnly: affinityConfidenceOnlyUiValue,
+        confidenceOnlyLocked: affinityConfidenceOnlyUiLocked,
+        confidenceOnlyHint: affinityConfidenceOnlyUiLocked
+          ? affinityHasLigand
+            ? 'Only small-molecule ligand supports activity.'
+            : 'No ligand uploaded: confidence only.'
+          : '',
+        previewTargetStructureText: affinityPreviewStructureText,
+        previewTargetStructureFormat: affinityPreviewStructureFormat,
+        previewLigandStructureText: affinityPreviewLigandOverlayText,
+        previewLigandStructureFormat: affinityPreviewLigandOverlayFormat,
+        previewLigandChainId: affinityLigandChainId,
+        resultsGridRef,
+        isResultsResizing,
+        resultsGridStyle,
+        onTargetFileChange: onAffinityTargetFileChange,
+        onLigandFileChange: onAffinityLigandFileChange,
+        onUseMsaChange: onAffinityUseMsaChange,
+        onConfidenceOnlyChange: onAffinityConfidenceOnlyChange,
+        onBackendChange,
+        onLigandSmilesChange: setAffinityLigandSmiles,
+        onResizerPointerDown: onResultsResizerPointerDown,
+        onResizerKeyDown: onResultsResizerKeyDown
+      })
+    : EMPTY_AFFINITY_WORKFLOW_SECTION_PROPS;
+  const leadOptimizationWorkflowSectionProps = shouldBuildLeadOptimizationWorkflowSection
+    ? buildLeadOptimizationWorkflowSectionProps({
+        workspaceTab,
+        canEdit,
+        submitting,
+        backend,
+        onNavigateToResults: onLeadOptNavigateToResults || (() => setWorkspaceTab('results')),
+        onRegisterHeaderRunAction: onRegisterLeadOptHeaderRunAction,
+        proteinSequence: leadOptProteinSequence,
+        ligandSmiles: leadOptLigandSmiles,
+        targetChain: leadOptTargetChain,
+        ligandChain: leadOptLigandChain,
+        onLigandSmilesChange: onLeadOptimizationLigandSmilesChange,
+        referenceScopeKey: leadOptReferenceScopeKey,
+        persistedReferenceUploads: leadOptPersistedReferenceUploads,
+        onReferenceUploadsChange: onLeadOptReferenceUploadsChange,
+        onMmpTaskQueued: onLeadOptMmpTaskQueued,
+        onMmpTaskCompleted: onLeadOptMmpTaskCompleted,
+        onMmpTaskFailed: onLeadOptMmpTaskFailed,
+        onMmpUiStateChange: onLeadOptUiStateChange,
+        onPredictionQueued: onLeadOptPredictionQueued,
+        onPredictionStateChange: onLeadOptPredictionStateChange,
+        initialMmpSnapshot: leadOptInitialMmpSnapshot
+      })
+    : EMPTY_LEAD_OPTIMIZATION_WORKFLOW_SECTION_PROPS;
+  const predictionWorkflowSectionProps = shouldBuildPredictionWorkflowSection
+    ? buildPredictionWorkflowSectionProps({
+        workspaceTab,
+        canEdit,
+        componentsWorkspaceRef,
+        isComponentsResizing,
+        componentsGridStyle,
+        onComponentsResizerPointerDown,
+        onComponentsResizerKeyDown,
+        components,
+        onComponentsChange,
+        proteinTemplates,
+        onProteinTemplateChange,
+        activeComponentId,
+        onActiveComponentIdChange: (id: string | null) => setActiveComponentId(id),
+        onProteinTemplateResiduePick,
+        constraintsWorkspaceProps: predictionConstraintsWorkspaceProps,
+        componentsSidebarProps: predictionComponentsSidebarProps
+      })
+    : EMPTY_PREDICTION_WORKFLOW_SECTION_PROPS;
+  const workflowRuntimeSettingsSectionProps = shouldBuildWorkflowRuntimeSettingsSection
+    ? buildWorkflowRuntimeSettingsSectionProps({
+        canEdit,
+        isPredictionWorkflow,
+        isPeptideDesignWorkflow,
+        isAffinityWorkflow,
+        backend,
+        seed: seed ?? null,
+        peptideDesignMode,
+        peptideBinderLength,
+        peptideUseInitialSequence,
+        peptideInitialSequence,
+        peptideSequenceMask,
+        peptideIterations,
+        peptidePopulationSize,
+        peptideEliteSize,
+        peptideMutationRate,
+        peptideBicyclicLinkerCcd,
+        peptideBicyclicCysPositionMode,
+        peptideBicyclicFixTerminalCys,
+        peptideBicyclicIncludeExtraCys,
+        peptideBicyclicCys1Pos,
+        peptideBicyclicCys2Pos,
+        peptideBicyclicCys3Pos,
+        onBackendChange,
+        onSeedChange,
+        onPeptideDesignModeChange,
+        onPeptideBinderLengthChange,
+        onPeptideUseInitialSequenceChange,
+        onPeptideInitialSequenceChange,
+        onPeptideSequenceMaskChange,
+        onPeptideIterationsChange,
+        onPeptidePopulationSizeChange,
+        onPeptideEliteSizeChange,
+        onPeptideMutationRateChange,
+        onPeptideBicyclicLinkerCcdChange,
+        onPeptideBicyclicCysPositionModeChange,
+        onPeptideBicyclicFixTerminalCysChange,
+        onPeptideBicyclicIncludeExtraCysChange,
+        onPeptideBicyclicCys1PosChange,
+        onPeptideBicyclicCys2PosChange,
+        onPeptideBicyclicCys3PosChange
+      })
+    : EMPTY_WORKFLOW_RUNTIME_SETTINGS_SECTION_PROPS;
 
   return {
     projectResultsSectionProps,

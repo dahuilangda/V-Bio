@@ -84,7 +84,7 @@ export function PredictionWorkflowSection({
           />
         )}
 
-        <PredictionConstraintsWorkspace visible={workspaceTab === 'constraints'} {...constraintsWorkspaceProps} />
+        {workspaceTab === 'constraints' ? <PredictionConstraintsWorkspace visible {...constraintsWorkspaceProps} /> : null}
       </div>
 
       {workspaceTab === 'components' && (
@@ -99,7 +99,7 @@ export function PredictionWorkflowSection({
         />
       )}
 
-      <PredictionComponentsSidebar visible={workspaceTab === 'components'} {...componentsSidebarProps} />
+      {workspaceTab === 'components' ? <PredictionComponentsSidebar visible {...componentsSidebarProps} /> : null}
     </div>
   );
 }

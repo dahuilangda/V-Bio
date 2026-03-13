@@ -103,6 +103,38 @@ MAX_CONCURRENT_TASKS = int(os.environ.get("MAX_CONCURRENT_TASKS", -1))
 # 0 表示自动使用本机全部 CPU 核心。
 CPU_MAX_CONCURRENT_TASKS = int(os.environ.get("CPU_MAX_CONCURRENT_TASKS", 0))
 
+# -- Worker 子进程超时 --
+# 常规单次预测/评分任务默认允许 3 小时。
+PREDICTION_SUBPROCESS_TIMEOUT_SECONDS = _parse_int_env(
+    "PREDICTION_SUBPROCESS_TIMEOUT_SECONDS",
+    3 * 60 * 60,
+    minimum=60,
+)
+# 多肽候选子任务默认沿用单次预测超时。
+PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT_SECONDS = _parse_int_env(
+    "PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT_SECONDS",
+    PREDICTION_SUBPROCESS_TIMEOUT_SECONDS,
+    minimum=60,
+)
+# 多肽父编排任务只是调度/等待一批候选子任务，默认放宽到 24 小时。
+PEPTIDE_PARENT_SUBPROCESS_TIMEOUT_SECONDS = _parse_int_env(
+    "PEPTIDE_PARENT_SUBPROCESS_TIMEOUT_SECONDS",
+    24 * 60 * 60,
+    minimum=PREDICTION_SUBPROCESS_TIMEOUT_SECONDS,
+)
+# 估算多肽父任务超时预算时，每一轮并行 wave 预留的秒数。
+PEPTIDE_PARENT_TIMEOUT_PER_WAVE_SECONDS = _parse_int_env(
+    "PEPTIDE_PARENT_TIMEOUT_PER_WAVE_SECONDS",
+    30 * 60,
+    minimum=60,
+)
+# 多肽父任务总预算的固定缓冲时间。
+PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS = _parse_int_env(
+    "PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS",
+    30 * 60,
+    minimum=0,
+)
+
 # -- GPU 设备选择 --
 # 通过环境变量 GPU_DEVICE_IDS 指定可用的 GPU ID 列表（例如："0,1,3"）。
 # 如果未设置，则在初始化时自动探测所有可用 GPU。

@@ -1042,11 +1042,14 @@ def _index_fragments_to_postgres_sharded(
 
     output_dir = os.path.dirname(os.path.abspath(fragments_file)) or "."
     try:
-        _assert_full_sharded_build_meta(
+        _prepare_full_sharded_build_state(
             output_dir=output_dir,
             fragments_file=fragments_file,
             schema=normalized_schema,
             shard_count=shard_total,
+            postgres_url=postgres_url,
+            force_rebuild=force_rebuild_schema,
+            logger=logger,
         )
     except Exception as exc:
         logger.error("Refusing sharded full-index resume due to incompatible state: %s", exc)
@@ -4266,6 +4269,111 @@ def _assert_full_sharded_build_meta(
     if not existing:
         _write_json_payload(meta_path, expected)
     return meta_path
+
+
+def _reset_full_sharded_build_state(
+    *,
+    output_dir: str,
+    schema: str,
+    postgres_url: str = "",
+    shard_counts: Optional[Sequence[int]] = None,
+    logger: Optional[logging.Logger] = None,
+) -> None:
+    normalized_schema = _validate_pg_schema(schema)
+    base_dir = str(output_dir or "").strip() or "."
+    file_patterns = [
+        _full_sharded_build_meta_path(base_dir, normalized_schema),
+        os.path.join(base_dir, f"{normalized_schema}_full_sharded.constants.tsv"),
+        os.path.join(base_dir, f"{normalized_schema}_full_shard_s*.constants.s*.tsv"),
+        os.path.join(base_dir, f"{normalized_schema}_full_shard_s*.s*.fragdb"),
+    ]
+    removed_files = 0
+    for pattern in file_patterns:
+        for path in sorted(set(glob.glob(pattern))):
+            try:
+                os.remove(path)
+                removed_files += 1
+            except FileNotFoundError:
+                continue
+    if logger and removed_files:
+        logger.info(
+            "Removed stale sharded full-index state files for schema '%s': files=%s",
+            normalized_schema,
+            removed_files,
+        )
+
+    if postgres_url and HAS_PSYCOPG:
+        unique_shard_counts = sorted(
+            {
+                max(1, int(value or 1))
+                for value in (shard_counts or [])
+                if str(value or "").strip()
+            }
+        )
+        dropped_schemas = 0
+        for shard_count in unique_shard_counts:
+            for shard_seq in range(1, shard_count + 1):
+                temp_schema = _full_sharded_temp_schema_name(
+                    normalized_schema,
+                    shard_count=shard_count,
+                    shard_seq=shard_seq,
+                )
+                _drop_postgres_schema_if_exists(postgres_url, temp_schema)
+                dropped_schemas += 1
+        if logger and dropped_schemas:
+            logger.info(
+                "Dropped stale sharded full-index temp schemas for schema '%s': schemas=%s",
+                normalized_schema,
+                dropped_schemas,
+            )
+
+
+def _prepare_full_sharded_build_state(
+    *,
+    output_dir: str,
+    fragments_file: str,
+    schema: str,
+    shard_count: int,
+    postgres_url: str,
+    force_rebuild: bool,
+    logger: Optional[logging.Logger] = None,
+) -> str:
+    meta_path = _full_sharded_build_meta_path(output_dir, schema)
+    expected = _full_sharded_build_meta(
+        fragments_file=fragments_file,
+        schema=schema,
+        shard_count=shard_count,
+    )
+    existing = _read_json_payload(meta_path)
+    if existing and existing != expected:
+        if not force_rebuild:
+            raise RuntimeError(
+                "Existing sharded full-build state does not match the current fragments file or shard settings. "
+                f"State file: {meta_path}"
+            )
+        existing_shard_count = existing.get("shard_count") if isinstance(existing, dict) else None
+        shard_counts_to_reset = [shard_count]
+        if existing_shard_count is not None:
+            shard_counts_to_reset.append(int(existing_shard_count))
+        if logger:
+            logger.warning(
+                "Resetting stale sharded full-index state due to --force: schema=%s state=%s",
+                _validate_pg_schema(schema),
+                meta_path,
+            )
+        _reset_full_sharded_build_state(
+            output_dir=output_dir,
+            schema=schema,
+            postgres_url=postgres_url,
+            shard_counts=shard_counts_to_reset,
+            logger=logger,
+        )
+    return _assert_full_sharded_build_meta(
+        output_dir=output_dir,
+        fragments_file=fragments_file,
+        schema=schema,
+        shard_count=shard_count,
+    )
 
 
 def _full_sharded_build_paths(

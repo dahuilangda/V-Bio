@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import type { InputComponent } from '../../types/models';
+import type { InputComponent, ProjectTask } from '../../types/models';
 import { enumerateLeadOptimizationMmp, getTaskStatus } from '../../api/backendApi';
 import { useAuth } from '../../hooks/useAuth';
 import {
@@ -151,6 +151,73 @@ const TASK_STATE_PRIORITY: Record<string, number> = {
 const RUNTIME_STATUS_LIGHT_POLL_MAX_TASKS = 3;
 const LEADOPT_CANDIDATE_HYDRATION_RETRY_MS = 15000;
 const LEADOPT_CANDIDATE_REPAIR_RETRY_MS = 60000;
+
+type ProjectTaskDetailOptions = {
+  includeComponents?: boolean;
+  includeConstraints?: boolean;
+  includeProperties?: boolean;
+  includeLeadOptSummary?: boolean;
+  includeLeadOptCandidates?: boolean;
+  includeConfidence?: boolean;
+  includeAffinity?: boolean;
+  includeProteinSequence?: boolean;
+};
+
+type NormalizedProjectTaskDetailOptions = Required<ProjectTaskDetailOptions>;
+
+type CachedProjectTaskDetail = {
+  updatedAt: string;
+  options: NormalizedProjectTaskDetailOptions;
+  task: ProjectTask;
+};
+
+function normalizeProjectTaskDetailOptions(options?: ProjectTaskDetailOptions): NormalizedProjectTaskDetailOptions {
+  return {
+    includeComponents: options?.includeComponents !== false,
+    includeConstraints: options?.includeConstraints !== false,
+    includeProperties: options?.includeProperties !== false,
+    includeLeadOptSummary: options?.includeLeadOptSummary === true,
+    includeLeadOptCandidates: options?.includeLeadOptCandidates === true,
+    includeConfidence: options?.includeConfidence !== false,
+    includeAffinity: options?.includeAffinity !== false,
+    includeProteinSequence: options?.includeProteinSequence !== false,
+  };
+}
+
+function mergeProjectTaskDetailOptions(
+  left?: ProjectTaskDetailOptions,
+  right?: ProjectTaskDetailOptions
+): NormalizedProjectTaskDetailOptions {
+  const a = normalizeProjectTaskDetailOptions(left);
+  const b = normalizeProjectTaskDetailOptions(right);
+  return {
+    includeComponents: a.includeComponents || b.includeComponents,
+    includeConstraints: a.includeConstraints || b.includeConstraints,
+    includeProperties: a.includeProperties || b.includeProperties,
+    includeLeadOptSummary: a.includeLeadOptSummary || b.includeLeadOptSummary,
+    includeLeadOptCandidates: a.includeLeadOptCandidates || b.includeLeadOptCandidates,
+    includeConfidence: a.includeConfidence || b.includeConfidence,
+    includeAffinity: a.includeAffinity || b.includeAffinity,
+    includeProteinSequence: a.includeProteinSequence || b.includeProteinSequence,
+  };
+}
+
+function projectTaskDetailOptionsCover(
+  available: NormalizedProjectTaskDetailOptions,
+  requested?: ProjectTaskDetailOptions
+): boolean {
+  const need = normalizeProjectTaskDetailOptions(requested);
+  return (
+    (!need.includeComponents || available.includeComponents) &&
+    (!need.includeConstraints || available.includeConstraints) &&
+    (!need.includeProperties || available.includeProperties) &&
+    (!need.includeLeadOptSummary || available.includeLeadOptSummary) &&
+    (!need.includeLeadOptCandidates || available.includeLeadOptCandidates) &&
+    (!need.includeConfidence || available.includeConfidence) &&
+    (!need.includeAffinity || available.includeAffinity) &&
+    (!need.includeProteinSequence || available.includeProteinSequence)
+  );
+}
 
 function taskStatePriority(value: unknown): number {
   return TASK_STATE_PRIORITY[String(value || '').trim().toUpperCase()] ?? 0;
@@ -705,16 +772,7 @@ export function useProjectDetailRuntimeContext() {
       return;
     }
     const query = new URLSearchParams(location.search);
-    const requestedTaskRowId = String(query.get('task_row_id') || '').trim();
     const currentSourceTaskRowId = String(query.get('source_task_row_id') || '').trim();
-    const requestedRow =
-      requestedTaskRowId
-        ? projectTasks.find((item) => String(item.id || '').trim() === requestedTaskRowId) || null
-        : null;
-    const sourceRow =
-      currentSourceTaskRowId
-        ? projectTasks.find((item) => String(item.id || '').trim() === currentSourceTaskRowId) || null
-        : null;
 
     if (requestNewTask && !currentSourceTaskRowId && fallbackEditableTaskRowId) {
       query.set('new_task', '1');
@@ -722,32 +780,6 @@ export function useProjectDetailRuntimeContext() {
       query.set('tab', workspaceTab);
       navigate(`/projects/${projectId}?${query.toString()}`, { replace: true });
       return;
-    }
-
-    if (!requestNewTask && (workspaceTab === 'components' || workspaceTab === 'constraints')) {
-      if (requestedRow && !isDraftTaskSnapshot(requestedRow)) {
-        query.delete('task_row_id');
-        query.set('new_task', '1');
-        query.set('source_task_row_id', requestedRow.id);
-        query.set('tab', workspaceTab);
-        navigate(`/projects/${projectId}?${query.toString()}`, { replace: true });
-      }
-      return;
-    }
-
-    if (
-      requestNewTask &&
-      !requestedTaskRowId &&
-      currentSourceTaskRowId &&
-      sourceRow &&
-      !isDraftTaskSnapshot(sourceRow) &&
-      (workspaceTab === 'basics' || workspaceTab === 'results')
-    ) {
-      query.delete('new_task');
-      query.delete('source_task_row_id');
-      query.set('task_row_id', sourceRow.id);
-      query.set('tab', workspaceTab);
-      navigate(`/projects/${projectId}?${query.toString()}`, { replace: true });
     }
   }, [fallbackEditableTaskRowId, location.search, navigate, project, projectId, projectTasks, requestNewTask, workspaceTab]);
 
@@ -815,19 +847,78 @@ export function useProjectDetailRuntimeContext() {
   const leadOptCandidateRepairAtRef = useRef<Record<string, number>>({});
   const runtimeTaskStatusCursorRef = useRef(0);
   const runtimeTerminalStatusByTaskIdRef = useRef<Record<string, { task_id: string; state: string; info?: Record<string, unknown> }>>({});
+  const projectTaskDetailCacheRef = useRef<Record<string, CachedProjectTaskDetail>>({});
+  const projectTaskDetailInFlightRef = useRef<
+    Record<string, { options: NormalizedProjectTaskDetailOptions; promise: Promise<ProjectTask | null> }>
+  >({});
+
+  const getProjectTaskDetailCached = useCallback(
+    async (taskRowId: string, options?: ProjectTaskDetailOptions): Promise<ProjectTask | null> => {
+      const normalizedTaskRowId = String(taskRowId || '').trim();
+      if (!normalizedTaskRowId) return null;
+
+      const requestedOptions = normalizeProjectTaskDetailOptions(options);
+      const currentRow =
+        projectTasks.find((row) => String(row.id || '').trim() === normalizedTaskRowId) || null;
+      const currentUpdatedAt = String(currentRow?.updated_at || '').trim();
+      const cached = projectTaskDetailCacheRef.current[normalizedTaskRowId];
+      if (
+        cached &&
+        cached.updatedAt === currentUpdatedAt &&
+        projectTaskDetailOptionsCover(cached.options, requestedOptions)
+      ) {
+        return currentRow ? mergeTaskRuntimeFields(cached.task, currentRow) : cached.task;
+      }
+
+      const inFlight = projectTaskDetailInFlightRef.current[normalizedTaskRowId];
+      if (inFlight && projectTaskDetailOptionsCover(inFlight.options, requestedOptions)) {
+        return await inFlight.promise;
+      }
+
+      const mergedOptions = mergeProjectTaskDetailOptions(inFlight?.options, requestedOptions);
+      const promise = getProjectTaskById(normalizedTaskRowId, mergedOptions)
+        .then((detailRow) => {
+          if (!detailRow) return null;
+          const latestRow =
+            projectTasks.find((row) => String(row.id || '').trim() === normalizedTaskRowId) || null;
+          const mergedRow = latestRow ? mergeTaskRuntimeFields(detailRow, latestRow) : detailRow;
+          projectTaskDetailCacheRef.current[normalizedTaskRowId] = {
+            updatedAt: String(mergedRow.updated_at || '').trim(),
+            options: mergedOptions,
+            task: mergedRow,
+          };
+          return mergedRow;
+        })
+        .finally(() => {
+          const currentInFlight = projectTaskDetailInFlightRef.current[normalizedTaskRowId];
+          if (currentInFlight?.promise === promise) {
+            delete projectTaskDetailInFlightRef.current[normalizedTaskRowId];
+          }
+        });
+
+      projectTaskDetailInFlightRef.current[normalizedTaskRowId] = {
+        options: mergedOptions,
+        promise,
+      };
+      return await promise;
+    },
+    [projectTasks]
+  );
 
   useEffect(() => {
     const projectIdValue = String(project?.id || '').trim();
     if (!projectIdValue) return;
     const shouldHydrateLeadOptSnapshot = workflowKey === 'lead_optimization';
     if (!runtimePollingSummary.hasRuntimeTasks && !shouldHydrateLeadOptSnapshot) return;
-    const requestedTaskRowId = String(new URLSearchParams(location.search).get('task_row_id') || '').trim();
+    const query = new URLSearchParams(location.search);
+    const requestedTaskRowId = String(query.get('task_row_id') || '').trim();
+    const effectiveContextTaskRowId = requestedTaskRowId || String(query.get('source_task_row_id') || '').trim();
     const activeTaskId = String(project?.task_id || '').trim();
     const resolveFocusedRow = (
       rows: Array<{ id?: string | null; task_id?: string | null; properties?: unknown; confidence?: unknown }>
     ) => {
-      const requestedRow = requestedTaskRowId
-        ? rows.find((row) => String(row.id || '').trim() === requestedTaskRowId) || null
+      const requestedRow = effectiveContextTaskRowId
+        ? rows.find((row) => String(row.id || '').trim() === effectiveContextTaskRowId) || null
         : null;
       const activeRow = activeTaskId
         ? rows.find((row) => String(row.task_id || '').trim() === activeTaskId) || null
@@ -1039,7 +1130,7 @@ export function useProjectDetailRuntimeContext() {
             if (!Number.isFinite(lastAt) || nowTs - lastAt >= LEADOPT_CANDIDATE_HYDRATION_RETRY_MS) {
               leadOptCandidateHydrationAtRef.current[focusedRowId] = nowTs;
               try {
-                const detailRow = await getProjectTaskById(focusedRowId, {
+                const detailRow = await getProjectTaskDetailCached(focusedRowId, {
                   includeComponents: false,
                   includeConstraints: false,
                   includeProperties: false,
@@ -1234,10 +1325,11 @@ export function useProjectDetailRuntimeContext() {
 
     const query = new URLSearchParams(location.search);
     const requestedTaskRowId = String(query.get('task_row_id') || '').trim();
+    const effectiveContextTaskRowId = requestedTaskRowId || String(query.get('source_task_row_id') || '').trim();
     const activeTaskId = String(project?.task_id || '').trim();
     const sourceRow =
-      (requestedTaskRowId
-        ? projectTasks.find((row) => String(row.id || '').trim() === requestedTaskRowId)
+      (effectiveContextTaskRowId
+        ? projectTasks.find((row) => String(row.id || '').trim() === effectiveContextTaskRowId)
         : undefined) ||
       (activeTaskId ? projectTasks.find((row) => String(row.task_id || '').trim() === activeTaskId) : undefined) ||
       null;
@@ -1249,7 +1341,7 @@ export function useProjectDetailRuntimeContext() {
     let cancelled = false;
     void (async () => {
       try {
-        const detailRow = await getProjectTaskById(sourceRowId, {
+        const detailRow = await getProjectTaskDetailCached(sourceRowId, {
           includeComponents: true,
           includeConstraints: true,
           includeProperties: true,
@@ -1316,6 +1408,63 @@ export function useProjectDetailRuntimeContext() {
   });
 
   useEffect(() => {
+    if (workflowKey !== 'lead_optimization') return;
+    if (workspaceTab === 'components' || workspaceTab === 'constraints') return;
+
+    const query = new URLSearchParams(location.search);
+    const explicitTaskRowId =
+      String(query.get('task_row_id') || '').trim() || String(query.get('source_task_row_id') || '').trim();
+    const activeTaskId = String(project?.task_id || '').trim();
+    const focusedRow =
+      (explicitTaskRowId
+        ? projectTasks.find((row) => String(row.id || '').trim() === explicitTaskRowId)
+        : undefined) ||
+      (activeTaskId ? projectTasks.find((row) => String(row.task_id || '').trim() === activeTaskId) : undefined) ||
+      null;
+    const focusedRowId = String(focusedRow?.id || '').trim();
+    if (!focusedRowId || focusedRowId.startsWith('local-')) return;
+
+    const needsDetailWarmup =
+      !Array.isArray(focusedRow?.components) ||
+      focusedRow.components.length === 0 ||
+      !Array.isArray(focusedRow?.constraints) ||
+      !hasObjectContent(focusedRow?.properties) ||
+      !String(focusedRow?.protein_sequence || '').trim();
+    if (!needsDetailWarmup) return;
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const detailRow = await getProjectTaskDetailCached(focusedRowId, {
+            includeComponents: true,
+            includeConstraints: true,
+            includeProperties: true,
+            includeLeadOptSummary: true,
+            includeLeadOptCandidates: false,
+            includeConfidence: false,
+            includeAffinity: false,
+            includeProteinSequence: true,
+          });
+          if (cancelled || !detailRow) return;
+          setProjectTasks((prev) =>
+            prev.map((row) =>
+              String(row.id || '').trim() === focusedRowId ? mergeTaskRuntimeFields(detailRow, row) : row
+            )
+          );
+        } catch {
+          // Keep current lightweight row if warmup fails.
+        }
+      })();
+    }, 240);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [getProjectTaskDetailCached, location.search, project?.task_id, projectTasks, setProjectTasks, workflowKey, workspaceTab]);
+
+  useEffect(() => {
     const templateContextTask = requestedStatusTaskRow || activeStatusTaskRow;
     if (!templateContextTask || !isDraftTaskSnapshot(templateContextTask)) return;
     rememberTemplatesForTaskRow(templateContextTask.id, proteinTemplates);
@@ -1375,6 +1524,7 @@ export function useProjectDetailRuntimeContext() {
     requestedStatusTaskRow,
     normalizedDraftComponents,
     workflowKey,
+    shouldComputeResultMetrics: workspaceTab === 'results',
     isDraftTaskSnapshot: (task) => isDraftTaskSnapshot(task ?? null),
   });
 
@@ -1404,7 +1554,7 @@ export function useProjectDetailRuntimeContext() {
     let cancelled = false;
     void (async () => {
       try {
-        const detailRow = await getProjectTaskById(sourceRowId, {
+        const detailRow = await getProjectTaskDetailCached(sourceRowId, {
           includeComponents: false,
           includeConstraints: false,
           includeProperties: true,
@@ -1430,7 +1580,7 @@ export function useProjectDetailRuntimeContext() {
     };
   }, [
     activeResultTask,
-    getProjectTaskById,
+    getProjectTaskDetailCached,
     requestedStatusTaskRow,
     setProjectTasks,
     statusContextTaskRow,

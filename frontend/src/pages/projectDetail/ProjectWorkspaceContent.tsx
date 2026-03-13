@@ -55,6 +55,8 @@ export function ProjectWorkspaceContent({
   const isPeptideDesignWorkflow = runtimeSettingsProps.isPeptideDesignWorkflow;
   const showRuntimeSettingsInComponents = workspaceTab === 'components' && !isLeadOptimizationWorkflow && !isPeptideDesignWorkflow;
   const showPeptideModeInBasics = workspaceTab === 'basics' && isPeptideDesignWorkflow;
+  const showPredictionSection = isPredictionWorkflow && (workspaceTab === 'components' || workspaceTab === 'constraints');
+  const showAffinitySection = workspaceTab === 'components' && isAffinityWorkflow;
 
   if (showLeadOptWorkspace) {
     return (
@@ -83,10 +85,9 @@ export function ProjectWorkspaceContent({
         <form className="form-grid" onSubmit={onSaveDraft}>
           {showFlatPredictionWorkspace && <PredictionWorkflowSection visible {...predictionSectionProps} />}
           {showFlatAffinityWorkspace && <AffinityWorkflowSection visible {...affinitySectionProps} />}
-          <WorkflowRuntimeSettingsSection
-            visible={showFlatPredictionWorkspace && showRuntimeSettingsInComponents}
-            {...runtimeSettingsProps}
-          />
+          {showFlatPredictionWorkspace && showRuntimeSettingsInComponents ? (
+            <WorkflowRuntimeSettingsSection visible {...runtimeSettingsProps} />
+          ) : null}
         </form>
       )}
 
@@ -105,24 +106,23 @@ export function ProjectWorkspaceContent({
               />
             )}
 
-            <AffinityWorkflowSection visible={workspaceTab === 'components' && isAffinityWorkflow} {...affinitySectionProps} />
+            {showAffinitySection ? <AffinityWorkflowSection visible {...affinitySectionProps} /> : null}
 
-            {isPredictionWorkflow ? (
+            {showPredictionSection ? (
               <PredictionWorkflowSection visible {...predictionSectionProps} />
             ) : isAffinityWorkflow || isLeadOptimizationWorkflow ? null : (
               <div className="workflow-note">{workflowDescription}</div>
             )}
 
-            <WorkflowRuntimeSettingsSection
-              visible={showRuntimeSettingsInComponents}
-              {...runtimeSettingsProps}
-            />
+            {showRuntimeSettingsInComponents ? <WorkflowRuntimeSettingsSection visible {...runtimeSettingsProps} /> : null}
 
-            <WorkflowRuntimeSettingsSection
-              visible={showPeptideModeInBasics}
-              displayMode="peptide_mode_only"
-              {...runtimeSettingsProps}
-            />
+            {showPeptideModeInBasics ? (
+              <WorkflowRuntimeSettingsSection
+                visible
+                displayMode="peptide_mode_only"
+                {...runtimeSettingsProps}
+              />
+            ) : null}
           </form>
         </section>
       )}

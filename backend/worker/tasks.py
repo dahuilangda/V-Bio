@@ -88,8 +88,21 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Subprocess timeout in seconds (e.g., 3 hours)
-SUBPROCESS_TIMEOUT = 10800  # 增加到3小时
+# Subprocess timeout defaults. Peptide parent orchestration gets a dedicated,
+# larger budget because it mainly waits for many candidate subtasks to finish.
+SUBPROCESS_TIMEOUT = int(getattr(config, "PREDICTION_SUBPROCESS_TIMEOUT_SECONDS", 10800) or 10800)
+PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT = int(
+    getattr(config, "PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT_SECONDS", SUBPROCESS_TIMEOUT) or SUBPROCESS_TIMEOUT
+)
+PEPTIDE_PARENT_SUBPROCESS_TIMEOUT = int(
+    getattr(config, "PEPTIDE_PARENT_SUBPROCESS_TIMEOUT_SECONDS", 24 * 60 * 60) or (24 * 60 * 60)
+)
+PEPTIDE_PARENT_TIMEOUT_PER_WAVE_SECONDS = int(
+    getattr(config, "PEPTIDE_PARENT_TIMEOUT_PER_WAVE_SECONDS", 30 * 60) or (30 * 60)
+)
+PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS = int(
+    getattr(config, "PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS", 30 * 60) or (30 * 60)
+)
 HEARTBEAT_INTERVAL = 60  # 心跳间隔（秒）
 PROGRESS_TTL_SECONDS = 3600
 TASK_STATUS_TTL_SECONDS = 24 * 3600
@@ -120,6 +133,51 @@ def _mk_task_temp_dir(prefix: str) -> str:
     temp_root = _resolve_worker_temp_root()
     os.makedirs(temp_root, exist_ok=True)
     return tempfile.mkdtemp(prefix=prefix, dir=temp_root)
+
+
+def _revoke_registered_peptide_subtasks(parent_task_id: str, *, terminate: bool = True) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {
+        "found": [],
+        "revoked": [],
+        "failed": [],
+    }
+    task_token = str(parent_task_id or "").strip()
+    if not task_token:
+        return result
+
+    try:
+        redis_client = get_redis_client()
+    except Exception as exc:
+        result["failed"].append(f"redis_unavailable:{exc}")
+        return result
+
+    key = f"{config.PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX}{task_token}"
+    try:
+        raw_members = redis_client.smembers(key) or set()
+    except Exception as exc:
+        result["failed"].append(f"registry_read_failed:{exc}")
+        return result
+
+    subtask_ids = [str(item or "").strip() for item in raw_members if str(item or "").strip()]
+    result["found"] = subtask_ids
+    for subtask_id in subtask_ids:
+        try:
+            celery_app.control.revoke(
+                subtask_id,
+                terminate=terminate,
+                signal="SIGTERM" if terminate else None,
+                send_event=True,
+            )
+            result["revoked"].append(subtask_id)
+        except Exception as exc:
+            result["failed"].append(f"{subtask_id}:{exc}")
+
+    try:
+        redis_client.delete(key)
+    except Exception:
+        pass
+
+    return result
 
 
 def _acquire_gpu_with_non_peptide_wait_registration(task_id: str, timeout: int = 3600) -> int:
@@ -633,6 +691,42 @@ def _build_peptide_runtime_meta(predict_args: dict, gpu_info: Any) -> dict:
     return runtime_meta
 
 
+def _resolve_peptide_parent_subprocess_timeout(predict_args: dict) -> int:
+    options = predict_args.get('peptide_design_options')
+    if not isinstance(options, dict):
+        options = {}
+
+    iterations = _read_int_metric(options.get('peptideIterations', options.get('peptide_iterations')))
+    population_size = _read_int_metric(options.get('peptidePopulationSize', options.get('peptide_population_size')))
+    safe_iterations = max(1, iterations if isinstance(iterations, int) else 12)
+    safe_population = max(1, population_size if isinstance(population_size, int) else 16)
+    total_candidates = safe_iterations * safe_population
+
+    requested_gpu_ids = _normalize_peptide_gpu_ids(predict_args.get('peptide_gpu_ids', []))
+    parallel_workers = _resolve_peptide_parallel_workers(options, requested_gpu_ids, safe_population)
+    safe_workers = max(1, int(parallel_workers or 1))
+    wave_count = max(1, (total_candidates + safe_workers - 1) // safe_workers)
+    estimated_timeout = (
+        wave_count * max(60, PEPTIDE_PARENT_TIMEOUT_PER_WAVE_SECONDS)
+        + max(0, PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS)
+    )
+    effective_timeout = max(SUBPROCESS_TIMEOUT, min(estimated_timeout, PEPTIDE_PARENT_SUBPROCESS_TIMEOUT))
+
+    if estimated_timeout > PEPTIDE_PARENT_SUBPROCESS_TIMEOUT:
+        logger.warning(
+            "Peptide parent timeout estimate (%ss) exceeds configured cap (%ss). "
+            "Using capped timeout. iterations=%s population=%s workers=%s total_candidates=%s",
+            estimated_timeout,
+            PEPTIDE_PARENT_SUBPROCESS_TIMEOUT,
+            safe_iterations,
+            safe_population,
+            safe_workers,
+            total_candidates,
+        )
+
+    return effective_timeout
+
+
 def _write_base64_file(encoded_content: str, path: str, text_mode: bool = False) -> None:
     """Write base64 encoded content to disk."""
     raw = base64.b64decode(encoded_content)
@@ -857,6 +951,7 @@ def predict_task(self, predict_args: dict):
     task_id = self.request.id
     task_temp_dir = None 
     tracker = None
+    subprocess_timeout = SUBPROCESS_TIMEOUT
 
     try:
         # 初始化进度跟踪器
@@ -865,6 +960,8 @@ def predict_task(self, predict_args: dict):
         tracker.start_heartbeat()
         tracker.update_status("starting", "Initializing task")
         is_peptide_design = str(predict_args.get('workflow', '')).strip().lower() == 'peptide_design'
+        if is_peptide_design:
+            subprocess_timeout = _resolve_peptide_parent_subprocess_timeout(predict_args)
         if is_peptide_design:
             logger.info(
                 f"Task {task_id}: Peptide workflow detected. "
@@ -919,9 +1016,10 @@ def predict_task(self, predict_args: dict):
         if is_peptide_design:
             logger.info(
                 f"Task {task_id}: Running peptide orchestration subprocess. "
-                f"Subprocess timeout: {SUBPROCESS_TIMEOUT}s. Command: {' '.join(command)}"
+                f"Subprocess timeout: {subprocess_timeout}s. Command: {' '.join(command)}"
             )
             initial_runtime_meta = _build_peptide_runtime_meta(predict_args, allocated_gpu_ids)
+            initial_runtime_meta['subprocess_timeout_seconds'] = subprocess_timeout
             self.update_state(state='PROGRESS', meta=initial_runtime_meta)
             tracker.update_status(
                 "running",
@@ -932,7 +1030,7 @@ def predict_task(self, predict_args: dict):
             gpu_log_text = str(gpu_id)
             logger.info(
                 f"Task {task_id}: Running prediction on GPU {gpu_log_text}. "
-                f"Subprocess timeout: {SUBPROCESS_TIMEOUT}s. Command: {' '.join(command)}"
+                f"Subprocess timeout: {subprocess_timeout}s. Command: {' '.join(command)}"
             )
             self.update_state(state='PROGRESS', meta={'status': f'Running prediction on GPU {gpu_id}'})
             tracker.update_status("running", f"Executing prediction with GPU {gpu_id}")
@@ -977,17 +1075,29 @@ def predict_task(self, predict_args: dict):
         stdout = ''
         stderr = ''
         try:
-            stdout, stderr = process.communicate(timeout=SUBPROCESS_TIMEOUT)
+            stdout, stderr = process.communicate(timeout=subprocess_timeout)
         except subprocess.TimeoutExpired as e:
             process.kill()
             stdout, stderr = process.communicate()
+            revoked_summary = None
+            if is_peptide_design:
+                revoked_summary = _revoke_registered_peptide_subtasks(task_id, terminate=True)
             error_message = (
-                f"Subprocess for task {task_id} timed out after {SUBPROCESS_TIMEOUT} seconds.\n"
+                f"Subprocess for task {task_id} timed out after {subprocess_timeout} seconds.\n"
                 f"Stderr (tail):\n{_truncate_text(stderr, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}\n"
                 f"Stdout (tail):\n{_truncate_text(stdout, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}"
             )
+            if revoked_summary and (
+                revoked_summary.get("found")
+                or revoked_summary.get("revoked")
+                or revoked_summary.get("failed")
+            ):
+                error_message = (
+                    f"{error_message}\n"
+                    f"Revoked peptide subtasks: {json.dumps(revoked_summary, ensure_ascii=False)}"
+                )
             logger.error(error_message)
-            tracker.update_status("timeout", f"Process timeout after {SUBPROCESS_TIMEOUT}s")
+            tracker.update_status("timeout", f"Process timeout after {subprocess_timeout}s")
             raise TimeoutError(error_message) from e
         finally:
             progress_stop_event.set()
@@ -1124,12 +1234,12 @@ def peptide_candidate_worker_task(self, worker_payload: dict):
     )
 
     try:
-        stdout, stderr = process.communicate(timeout=SUBPROCESS_TIMEOUT)
+        stdout, stderr = process.communicate(timeout=PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT)
     except subprocess.TimeoutExpired as exc:
         process.kill()
         stdout, stderr = process.communicate()
         raise TimeoutError(
-            f"Peptide candidate task {task_id} timed out after {SUBPROCESS_TIMEOUT}s.\n"
+            f"Peptide candidate task {task_id} timed out after {PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT}s.\n"
             f"Stderr (tail):\n{_truncate_text(stderr, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}\n"
             f"Stdout (tail):\n{_truncate_text(stdout, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}"
         ) from exc

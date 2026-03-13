@@ -32,9 +32,12 @@ export function useProjectTaskStatusContext({
   nowTs
 }: UseProjectTaskStatusContextInput): ProjectTaskStatusContext {
   const requestedStatusTaskRow = useMemo(() => {
-    const requestedTaskRowId = new URLSearchParams(locationSearch).get('task_row_id');
-    if (!requestedTaskRowId || !requestedTaskRowId.trim()) return null;
-    return projectTasks.find((item) => String(item.id || '').trim() === requestedTaskRowId.trim()) || null;
+    const query = new URLSearchParams(locationSearch);
+    const requestedTaskRowId = String(query.get('task_row_id') || '').trim();
+    const sourceTaskRowId = String(query.get('source_task_row_id') || '').trim();
+    const effectiveTaskRowId = requestedTaskRowId || sourceTaskRowId;
+    if (!effectiveTaskRowId) return null;
+    return projectTasks.find((item) => String(item.id || '').trim() === effectiveTaskRowId) || null;
   }, [locationSearch, projectTasks]);
 
   const activeStatusTaskRow = useMemo(() => {
