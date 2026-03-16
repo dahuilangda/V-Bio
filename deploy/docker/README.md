@@ -24,7 +24,8 @@
 
 补充：
 - 多肽设计父编排任务建议像 `lead_opt` 一样由 CPU worker 承接（`CPU_WORKER_CAPABILITIES=lead_opt,peptide_design`）。
-- 如多肽设计任务规模较大，可在 `DOCKER_STACK_WORKER_CPU.env` 调整 `PEPTIDE_PARENT_SUBPROCESS_TIMEOUT_SECONDS` 及相关 wave/buffer 参数，避免父编排任务沿用单次预测的超时预算。
+- 多肽设计默认建议将 `PEPTIDE_PARENT_SUBPROCESS_TIMEOUT_SECONDS=0`、`PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT_SECONDS=0`、`PEPTIDE_GPU_ACQUIRE_TIMEOUT_SECONDS=0`，避免多父任务/多子任务共享 GPU 时因排队被误判超时。
+- 如你仍需要兜底超时，可在 `DOCKER_STACK_WORKER_CPU.env` 重新设置上述参数为正整数，并结合 `PEPTIDE_PARENT_TIMEOUT_PER_WAVE_SECONDS`、`PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS` 调整预算。
 
 ## 2. 功能镜像
 

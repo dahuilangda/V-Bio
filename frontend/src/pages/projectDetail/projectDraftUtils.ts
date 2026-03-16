@@ -76,8 +76,15 @@ export function listConstraintResidues(constraint: PredictionConstraint): Array<
 const ALL_CONSTRAINT_TYPES: PredictionConstraintType[] = ['contact', 'bond', 'pocket'];
 const AF3_CONSTRAINT_TYPES: PredictionConstraintType[] = ['bond'];
 
+export function normalizePredictionBackend(value: unknown): 'boltz' | 'alphafold3' | 'protenix' {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'alphafold3' || normalized === 'protenix') return normalized;
+  if (normalized === 'boltz' || normalized === 'boltz2' || normalized === 'boltz-2') return 'boltz';
+  return 'boltz';
+}
+
 export function allowedConstraintTypesForBackend(backend: string): PredictionConstraintType[] {
-  const normalized = String(backend || '').trim().toLowerCase();
+  const normalized = normalizePredictionBackend(backend);
   if (normalized === 'alphafold3' || normalized === 'protenix') {
     return AF3_CONSTRAINT_TYPES;
   }

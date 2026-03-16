@@ -88,14 +88,14 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Subprocess timeout defaults. Peptide parent orchestration gets a dedicated,
-# larger budget because it mainly waits for many candidate subtasks to finish.
+# Subprocess timeout defaults. Peptide parent/candidate workflows support
+# disabling hard timeouts entirely so queue contention does not kill long runs.
 SUBPROCESS_TIMEOUT = int(getattr(config, "PREDICTION_SUBPROCESS_TIMEOUT_SECONDS", 10800) or 10800)
 PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT = int(
-    getattr(config, "PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT_SECONDS", SUBPROCESS_TIMEOUT) or SUBPROCESS_TIMEOUT
+    getattr(config, "PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT_SECONDS", 0) or 0
 )
 PEPTIDE_PARENT_SUBPROCESS_TIMEOUT = int(
-    getattr(config, "PEPTIDE_PARENT_SUBPROCESS_TIMEOUT_SECONDS", 24 * 60 * 60) or (24 * 60 * 60)
+    getattr(config, "PEPTIDE_PARENT_SUBPROCESS_TIMEOUT_SECONDS", 0) or 0
 )
 PEPTIDE_PARENT_TIMEOUT_PER_WAVE_SECONDS = int(
     getattr(config, "PEPTIDE_PARENT_TIMEOUT_PER_WAVE_SECONDS", 30 * 60) or (30 * 60)
@@ -568,6 +568,71 @@ def _read_float_metric(value: Any) -> Optional[float]:
     return parsed
 
 
+def _normalize_peptide_gpu_ids(raw_gpu_ids: Any) -> list[int]:
+    if isinstance(raw_gpu_ids, int):
+        return [raw_gpu_ids] if raw_gpu_ids >= 0 else []
+
+    values: list[Any]
+    if isinstance(raw_gpu_ids, str):
+        values = [token for token in re.split(r"[\s,]+", raw_gpu_ids) if token]
+    elif isinstance(raw_gpu_ids, (list, tuple, set)):
+        values = list(raw_gpu_ids)
+    else:
+        return []
+
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for item in values:
+        try:
+            parsed = int(item)
+        except (TypeError, ValueError):
+            continue
+        if parsed < 0 or parsed in seen:
+            continue
+        seen.add(parsed)
+        normalized.append(parsed)
+    return normalized
+
+
+def _detect_peptide_gpu_pool_capacity() -> Optional[int]:
+    try:
+        from gpu_manager import get_gpu_status as get_gpu_status_fn
+
+        status = get_gpu_status_fn()
+        if isinstance(status, dict):
+            available_count = int(status.get("available_count") or 0)
+            in_use_count = int(status.get("in_use_count") or 0)
+            total = available_count + in_use_count
+            if total > 0:
+                return total
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_peptide_parallel_workers_for_timeout(
+    requested_gpu_ids: list[int],
+    population_size: int,
+) -> tuple[int, str]:
+    upper_bound = min(max(1, population_size), 64)
+    if requested_gpu_ids:
+        return min(max(1, len(requested_gpu_ids)), upper_bound), "requested_gpu_ids"
+
+    detected_pool_capacity = _detect_peptide_gpu_pool_capacity()
+    if isinstance(detected_pool_capacity, int) and detected_pool_capacity > 0:
+        return min(max(1, detected_pool_capacity), upper_bound), "gpu_pool_capacity"
+
+    configured_gpu_ids = list(getattr(config, "GPU_DEVICE_IDS", None) or [])
+    if configured_gpu_ids:
+        return min(max(1, len(configured_gpu_ids)), upper_bound), "config_gpu_device_ids"
+
+    configured_max_concurrent = int(getattr(config, "MAX_CONCURRENT_TASKS", 0) or 0)
+    if configured_max_concurrent > 0:
+        return min(configured_max_concurrent, upper_bound), "config_max_concurrent_tasks"
+
+    return 1, "fallback_single_worker"
+
+
 def _collect_peptide_design_setup_meta(predict_args: dict) -> dict:
     options = predict_args.get('peptide_design_options')
     if not isinstance(options, dict):
@@ -691,6 +756,15 @@ def _build_peptide_runtime_meta(predict_args: dict, gpu_info: Any) -> dict:
     return runtime_meta
 
 
+def _normalize_prediction_workflow(raw_workflow: Any) -> str:
+    workflow = str(raw_workflow or '').strip().lower()
+    if workflow in {'peptide', 'peptide_designer', 'designer'}:
+        return 'peptide_design'
+    if workflow == 'peptide_design':
+        return workflow
+    return 'prediction'
+
+
 def _resolve_peptide_parent_subprocess_timeout(predict_args: dict) -> int:
     options = predict_args.get('peptide_design_options')
     if not isinstance(options, dict):
@@ -703,28 +777,72 @@ def _resolve_peptide_parent_subprocess_timeout(predict_args: dict) -> int:
     total_candidates = safe_iterations * safe_population
 
     requested_gpu_ids = _normalize_peptide_gpu_ids(predict_args.get('peptide_gpu_ids', []))
-    parallel_workers = _resolve_peptide_parallel_workers(options, requested_gpu_ids, safe_population)
-    safe_workers = max(1, int(parallel_workers or 1))
+    safe_workers, worker_source = _resolve_peptide_parallel_workers_for_timeout(
+        requested_gpu_ids,
+        safe_population,
+    )
     wave_count = max(1, (total_candidates + safe_workers - 1) // safe_workers)
+    per_wave_timeout = max(
+        60,
+        PEPTIDE_PARENT_TIMEOUT_PER_WAVE_SECONDS,
+        PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT,
+    )
     estimated_timeout = (
-        wave_count * max(60, PEPTIDE_PARENT_TIMEOUT_PER_WAVE_SECONDS)
+        wave_count * per_wave_timeout
         + max(0, PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS)
     )
+    if PEPTIDE_PARENT_SUBPROCESS_TIMEOUT <= 0:
+        logger.info(
+            "Resolved peptide parent subprocess timeout: disabled "
+            "(estimated=%ss iterations=%s population=%s total_candidates=%s workers=%s source=%s per_wave=%ss buffer=%ss)",
+            estimated_timeout,
+            safe_iterations,
+            safe_population,
+            total_candidates,
+            safe_workers,
+            worker_source,
+            per_wave_timeout,
+            PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS,
+        )
+        return 0
+
     effective_timeout = max(SUBPROCESS_TIMEOUT, min(estimated_timeout, PEPTIDE_PARENT_SUBPROCESS_TIMEOUT))
+
+    logger.info(
+        "Resolved peptide parent subprocess timeout: effective=%ss estimated=%ss cap=%ss "
+        "(iterations=%s population=%s total_candidates=%s workers=%s source=%s per_wave=%ss buffer=%ss)",
+        effective_timeout,
+        estimated_timeout,
+        PEPTIDE_PARENT_SUBPROCESS_TIMEOUT,
+        safe_iterations,
+        safe_population,
+        total_candidates,
+        safe_workers,
+        worker_source,
+        per_wave_timeout,
+        PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS,
+    )
 
     if estimated_timeout > PEPTIDE_PARENT_SUBPROCESS_TIMEOUT:
         logger.warning(
             "Peptide parent timeout estimate (%ss) exceeds configured cap (%ss). "
-            "Using capped timeout. iterations=%s population=%s workers=%s total_candidates=%s",
+            "Using capped timeout. iterations=%s population=%s workers=%s total_candidates=%s source=%s",
             estimated_timeout,
             PEPTIDE_PARENT_SUBPROCESS_TIMEOUT,
             safe_iterations,
             safe_population,
             safe_workers,
             total_candidates,
+            worker_source,
         )
 
     return effective_timeout
+
+
+def _communicate_with_optional_timeout(process: subprocess.Popen, timeout_seconds: int) -> tuple[str, str]:
+    if int(timeout_seconds or 0) <= 0:
+        return process.communicate()
+    return process.communicate(timeout=timeout_seconds)
 
 
 def _write_base64_file(encoded_content: str, path: str, text_mode: bool = False) -> None:
@@ -959,7 +1077,8 @@ def predict_task(self, predict_args: dict):
         tracker = TaskProgressTracker(task_id, redis_client)
         tracker.start_heartbeat()
         tracker.update_status("starting", "Initializing task")
-        is_peptide_design = str(predict_args.get('workflow', '')).strip().lower() == 'peptide_design'
+        normalized_workflow = _normalize_prediction_workflow(predict_args.get('workflow'))
+        is_peptide_design = normalized_workflow == 'peptide_design'
         if is_peptide_design:
             subprocess_timeout = _resolve_peptide_parent_subprocess_timeout(predict_args)
         if is_peptide_design:
@@ -985,7 +1104,7 @@ def predict_task(self, predict_args: dict):
         output_archive_path = os.path.join(task_temp_dir, f"{task_id}_results.zip")
         predict_args['output_archive_path'] = output_archive_path
         predict_args['task_id'] = task_id
-        if str(predict_args.get('workflow', '')).strip().lower() == 'peptide_design':
+        if is_peptide_design:
             predict_args['peptide_progress_path'] = os.path.join(task_temp_dir, "peptide_progress.json")
 
         args_file_path = os.path.join(task_temp_dir, 'args.json')
@@ -1016,7 +1135,8 @@ def predict_task(self, predict_args: dict):
         if is_peptide_design:
             logger.info(
                 f"Task {task_id}: Running peptide orchestration subprocess. "
-                f"Subprocess timeout: {subprocess_timeout}s. Command: {' '.join(command)}"
+                f"Subprocess timeout: {'disabled' if subprocess_timeout <= 0 else f'{subprocess_timeout}s'}. "
+                f"Command: {' '.join(command)}"
             )
             initial_runtime_meta = _build_peptide_runtime_meta(predict_args, allocated_gpu_ids)
             initial_runtime_meta['subprocess_timeout_seconds'] = subprocess_timeout
@@ -1075,7 +1195,7 @@ def predict_task(self, predict_args: dict):
         stdout = ''
         stderr = ''
         try:
-            stdout, stderr = process.communicate(timeout=subprocess_timeout)
+            stdout, stderr = _communicate_with_optional_timeout(process, subprocess_timeout)
         except subprocess.TimeoutExpired as e:
             process.kill()
             stdout, stderr = process.communicate()
@@ -1124,7 +1244,7 @@ def predict_task(self, predict_args: dict):
         tracker.update_status("uploading", "Uploading results to central API")
 
         design_runtime_meta = {}
-        if str(predict_args.get('workflow', '')).strip().lower() == 'peptide_design':
+        if is_peptide_design:
             try:
                 parsed_progress = _read_json_record(str(predict_args.get('peptide_progress_path') or '').strip())
                 if isinstance(parsed_progress, dict):
@@ -1234,7 +1354,7 @@ def peptide_candidate_worker_task(self, worker_payload: dict):
     )
 
     try:
-        stdout, stderr = process.communicate(timeout=PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT)
+        stdout, stderr = _communicate_with_optional_timeout(process, PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT)
     except subprocess.TimeoutExpired as exc:
         process.kill()
         stdout, stderr = process.communicate()

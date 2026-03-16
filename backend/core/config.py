@@ -110,17 +110,19 @@ PREDICTION_SUBPROCESS_TIMEOUT_SECONDS = _parse_int_env(
     3 * 60 * 60,
     minimum=60,
 )
-# 多肽候选子任务默认沿用单次预测超时。
+# 多肽候选子任务默认不设置硬超时，避免在多父任务/多子任务排队场景下被误杀。
+# >0: 启用硬超时；<=0: 禁用硬超时。
 PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT_SECONDS = _parse_int_env(
     "PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT_SECONDS",
-    PREDICTION_SUBPROCESS_TIMEOUT_SECONDS,
-    minimum=60,
+    0,
+    minimum=0,
 )
-# 多肽父编排任务只是调度/等待一批候选子任务，默认放宽到 24 小时。
+# 多肽父编排任务默认不设置硬超时。
+# >0: 启用父任务总超时上限；<=0: 禁用硬超时。
 PEPTIDE_PARENT_SUBPROCESS_TIMEOUT_SECONDS = _parse_int_env(
     "PEPTIDE_PARENT_SUBPROCESS_TIMEOUT_SECONDS",
-    24 * 60 * 60,
-    minimum=PREDICTION_SUBPROCESS_TIMEOUT_SECONDS,
+    0,
+    minimum=0,
 )
 # 估算多肽父任务超时预算时，每一轮并行 wave 预留的秒数。
 PEPTIDE_PARENT_TIMEOUT_PER_WAVE_SECONDS = _parse_int_env(
@@ -132,6 +134,13 @@ PEPTIDE_PARENT_TIMEOUT_PER_WAVE_SECONDS = _parse_int_env(
 PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS = _parse_int_env(
     "PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS",
     30 * 60,
+    minimum=0,
+)
+# 多肽候选子任务等待 GPU 的最长时间。
+# >0: 超过后报错；<=0: 一直等待，适合父任务很多时避免排队超时。
+PEPTIDE_GPU_ACQUIRE_TIMEOUT_SECONDS = _parse_int_env(
+    "PEPTIDE_GPU_ACQUIRE_TIMEOUT_SECONDS",
+    0,
     minimum=0,
 )
 

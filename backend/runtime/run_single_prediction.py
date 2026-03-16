@@ -72,6 +72,7 @@ from backend.core.config import (
     POCKETXMOL_CONFIG_MODEL,
     POCKETXMOL_DEVICE,
     POCKETXMOL_BATCH_SIZE,
+    PEPTIDE_GPU_ACQUIRE_TIMEOUT_SECONDS,
     PEPTIDE_SUBTASK_REGISTRY_KEY_PREFIX,
     RESULTS_BASE_DIR,
 )
@@ -1346,6 +1347,64 @@ def sanitize_a3m_file(path: str, context: str = "") -> None:
             print(f"⚠️ 无法写入清理后的 A3M 文件: {path}, {e}", file=sys.stderr)
 
 
+def _build_query_only_a3m(sequence: str, header: str = "query") -> str:
+    normalized_sequence = "".join(str(sequence or "").split()).strip()
+    if not normalized_sequence:
+        return ""
+    normalized_header = str(header or "query").strip() or "query"
+    return f">{normalized_header}\n{normalized_sequence}\n"
+
+
+def _a3m_has_sequence_content(content: str) -> bool:
+    saw_header = False
+    for raw_line in sanitize_a3m_content(content).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(">"):
+            saw_header = True
+            continue
+        if saw_header and any(ch not in {"-", "."} for ch in line):
+            return True
+    return False
+
+
+def _ensure_nonempty_a3m_file(path: str, sequence: str, context: str = "", header: str = "query") -> bool:
+    existing_content = ""
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                existing_content = f.read()
+        except OSError as exc:
+            print(f"⚠️ 无法读取 A3M 文件 {path}: {exc}", file=sys.stderr)
+
+    sanitized = sanitize_a3m_content(existing_content, context=context or path)
+    if sanitized and _a3m_has_sequence_content(sanitized):
+        if sanitized != existing_content:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(sanitized)
+            except OSError as exc:
+                print(f"⚠️ 无法写回清理后的 A3M 文件 {path}: {exc}", file=sys.stderr)
+                return False
+        return True
+
+    dummy_a3m = _build_query_only_a3m(sequence, header=header)
+    if not dummy_a3m:
+        return False
+
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(dummy_a3m)
+        msg_context = f" ({context})" if context else ""
+        print(f"⚠️ 检测到空 MSA，已回退为 query-only A3M: {path}{msg_context}", file=sys.stderr)
+        return True
+    except OSError as exc:
+        print(f"⚠️ 无法写入 query-only A3M 文件 {path}: {exc}", file=sys.stderr)
+        return False
+
+
 def _iter_affinity_entries(properties: Any) -> Iterable[Dict[str, Any]]:
     """标准化 properties 字段，支持 list / dict 等多种写法。"""
     if properties is None:
@@ -2217,10 +2276,16 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
             # 检查临时目录中是否已经存在
             output_path = os.path.join(temp_dir, f"{protein_id}_msa.a3m")
             if os.path.exists(output_path):
-                print(f"✅ 临时目录中已存在 MSA 文件: {output_path}", file=sys.stderr)
-                sanitize_a3m_file(output_path, context=f"{protein_id} 临时文件")
-                success_count += 1
-                continue
+                if _ensure_nonempty_a3m_file(
+                    output_path,
+                    sequence,
+                    context=f"{protein_id} 临时文件",
+                    header=protein_id,
+                ):
+                    print(f"✅ 临时目录中已存在可用 MSA 文件: {output_path}", file=sys.stderr)
+                    success_count += 1
+                    continue
+                print(f"⚠️ 临时目录中的 MSA 文件不可用，准备重新生成: {output_path}", file=sys.stderr)
             
             # 检查缓存（统一使用 msa_ 前缀）
             sequence_hash = get_sequence_hash(sequence)
@@ -2232,28 +2297,64 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
                 sanitize_a3m_file(cached_msa_path, context=f"{protein_id} 缓存原文件")
                 # 复制到临时目录
                 shutil.copy2(cached_msa_path, output_path)
-                sanitize_a3m_file(output_path, context=f"{protein_id} 缓存复制")
-                success_count += 1
-                continue
+                if _ensure_nonempty_a3m_file(
+                    output_path,
+                    sequence,
+                    context=f"{protein_id} 缓存复制",
+                    header=protein_id,
+                ):
+                    success_count += 1
+                    continue
+                print(f"⚠️ 缓存中的 MSA 文件为空，准备重新生成: {cached_msa_path}", file=sys.stderr)
             
             # 从服务器请求 MSA
             msa_result = request_msa_from_server(sequence, timeout=msa_timeout)
             if msa_result:
                 # 保存到临时目录
                 if save_msa_result_to_file(msa_result, output_path):
-                    sanitize_a3m_file(output_path, context=f"{protein_id} 下载写入")
-                    success_count += 1
+                    if _ensure_nonempty_a3m_file(
+                        output_path,
+                        sequence,
+                        context=f"{protein_id} 下载写入",
+                        header=protein_id,
+                    ):
+                        success_count += 1
                     
-                    # 缓存结果（统一使用 msa_ 前缀）
-                    if MSA_CACHE_CONFIG['enable_cache']:
-                        os.makedirs(cache_dir, exist_ok=True)
-                        shutil.copy2(output_path, cached_msa_path)
-                        sanitize_a3m_file(cached_msa_path, context=f"{protein_id} 缓存写入")
-                        print(f"💾 MSA 结果已缓存: {cached_msa_path}", file=sys.stderr)
+                        # 缓存结果（统一使用 msa_ 前缀）
+                        if MSA_CACHE_CONFIG['enable_cache']:
+                            os.makedirs(cache_dir, exist_ok=True)
+                            shutil.copy2(output_path, cached_msa_path)
+                            _ensure_nonempty_a3m_file(
+                                cached_msa_path,
+                                sequence,
+                                context=f"{protein_id} 缓存写入",
+                                header=protein_id,
+                            )
+                            print(f"💾 MSA 结果已缓存: {cached_msa_path}", file=sys.stderr)
+                    else:
+                        print(f"❌ 保存后的 MSA 文件仍不可用: {protein_id}", file=sys.stderr)
                 else:
                     print(f"❌ 保存 MSA 文件失败: {protein_id}", file=sys.stderr)
             else:
-                print(f"❌ 获取 MSA 失败: {protein_id}", file=sys.stderr)
+                print(f"⚠️ 获取 MSA 失败，回退到 query-only A3M: {protein_id}", file=sys.stderr)
+                if _ensure_nonempty_a3m_file(
+                    output_path,
+                    sequence,
+                    context=f"{protein_id} 回退写入",
+                    header=protein_id,
+                ):
+                    success_count += 1
+                    if MSA_CACHE_CONFIG['enable_cache']:
+                        os.makedirs(cache_dir, exist_ok=True)
+                        shutil.copy2(output_path, cached_msa_path)
+                        _ensure_nonempty_a3m_file(
+                            cached_msa_path,
+                            sequence,
+                            context=f"{protein_id} 回退缓存",
+                            header=protein_id,
+                        )
+                else:
+                    print(f"❌ query-only A3M 回退失败: {protein_id}", file=sys.stderr)
         
         total_sequences = len(protein_sequences)
         print(f"✅ MSA 生成完成: {success_count}/{total_sequences} 个成功", file=sys.stderr)
@@ -2322,6 +2423,13 @@ def _inject_local_msa_paths_into_yaml(yaml_content: str, temp_dir: str) -> Tuple
             for candidate in candidates:
                 candidate_path = local_files.get(candidate, "")
                 if candidate_path:
+                    if candidate_path.endswith(".a3m") and not _ensure_nonempty_a3m_file(
+                        candidate_path,
+                        protein.get("sequence", ""),
+                        context=f"{chain_id} 注入校验",
+                        header=chain_id,
+                    ):
+                        continue
                     selected_path = candidate_path
                     break
             if selected_path:
@@ -4740,6 +4848,19 @@ def _normalize_peptide_design_mode(raw: Any) -> str:
     return "cyclic"
 
 
+def _normalize_peptide_backend(raw: Any) -> str:
+    token = str(raw or "").strip().lower()
+    if token in {"alphafold3", "protenix"}:
+        return token
+    return "boltz"
+
+
+def _peptide_backend_supports_design_mode(backend: str, design_mode: str) -> bool:
+    if design_mode == "linear":
+        return True
+    return _normalize_peptide_backend(backend) == "boltz"
+
+
 def _extract_chain_ids_from_yaml(yaml_data: Dict[str, Any]) -> List[str]:
     chain_ids: List[str] = []
     for seq_block in yaml_data.get("sequences", []) or []:
@@ -5254,6 +5375,7 @@ def run_peptide_design_backend(
     temp_dir: str,
     yaml_content: str,
     output_archive_path: str,
+    backend: str,
     predict_args: Dict[str, Any],
     model_name: Optional[str],
     seed: Optional[int],
@@ -5279,7 +5401,12 @@ def run_peptide_design_backend(
     random_seed = seed if isinstance(seed, int) else int(time.time())
     random.seed(random_seed)
 
-    design_mode = _normalize_peptide_design_mode(options.get("peptideDesignMode"))
+    peptide_backend = _normalize_peptide_backend(backend)
+    design_mode = _normalize_peptide_design_mode(options.get("peptideDesignMode") or options.get("peptide_design_mode"))
+    if not _peptide_backend_supports_design_mode(peptide_backend, design_mode):
+        raise ValueError(
+            f"Peptide design backend '{peptide_backend}' supports linear peptides only; requested mode='{design_mode}'."
+        )
     min_binder_len = 8 if design_mode == "bicyclic" else 5
     binder_length = _read_int_option(
         options,
@@ -5371,7 +5498,10 @@ def run_peptide_design_backend(
     runtime_predict_args.pop("peptideParallelGpus", None)
 
     worker_entry_path = str(Path(__file__).resolve())
-    resolved_subtask_queue = str(subtask_queue or "").strip() or build_capability_queue("boltz2", "default")
+    resolved_subtask_queue = str(subtask_queue or "").strip() or build_capability_queue(
+        "boltz2" if peptide_backend == "boltz" else peptide_backend,
+        "default",
+    )
     peptide_gpu_ids = _normalize_peptide_gpu_ids(gpu_ids)
     parallel_workers = _resolve_peptide_parallel_workers(options, peptide_gpu_ids, population_size)
     parent_task_id = str(os.environ.get("BOLTZ_TASK_ID") or "peptide-design").strip() or "peptide-design"
@@ -5478,7 +5608,7 @@ def run_peptide_design_backend(
                     "archive_path": archive_path,
                     "predict_args": per_candidate_args,
                     "model_name": model_name,
-                    "backend": "boltz",
+                    "backend": peptide_backend,
                     "worker_task_id": f"{parent_task_id}:g{generation:03d}:c{idx:03d}",
                     "worker_args_path": os.path.join(candidate_dir, "worker_args.json"),
                 }
@@ -5555,10 +5685,18 @@ def run_peptide_design_backend(
                 if isinstance(pair_iptm_target_linker_raw, (int, float))
                 else None
             )
-            pair_iptm = pair_iptm_target_binder
-            pair_iptm_formula = "target_vs_peptide_chain"
+            global_iptm_raw = metrics.get("iptm")
+            global_iptm = float(global_iptm_raw) if isinstance(global_iptm_raw, (int, float)) else None
+            pair_iptm = pair_iptm_target_binder if pair_iptm_target_binder is not None else global_iptm
+            pair_iptm_formula = "target_vs_peptide_chain" if pair_iptm_target_binder is not None else "global_iptm"
             binder_avg_plddt = float(metrics.get("binder_avg_plddt") or 0.0)
-            composite_score = (0.7 * pair_iptm) + (0.3 * (binder_avg_plddt / 100.0)) if pair_iptm is not None else None
+            if pair_iptm is not None:
+                composite_score = (0.7 * pair_iptm) + (0.3 * (binder_avg_plddt / 100.0))
+            elif binder_avg_plddt > 0:
+                composite_score = binder_avg_plddt / 100.0
+                pair_iptm_formula = "binder_avg_plddt_only"
+            else:
+                composite_score = None
             structure_file = _select_primary_structure_file(result_dir)
             result_row = {
                 "sequence": candidate_sequence,
@@ -5573,7 +5711,8 @@ def run_peptide_design_backend(
                 "composite_score": composite_score,
                 "score": composite_score,
                 "plddt": binder_avg_plddt,
-                "model": "Boltz",
+                "model": "Boltz" if peptide_backend == "boltz" else ("AlphaFold3" if peptide_backend == "alphafold3" else "Protenix"),
+                "backend": peptide_backend,
                 "target_chain_id": resolved_target_chain_id,
                 "binder_chain_id": binder_chain_id,
                 "linker_chain_id": linker_chain_id if design_mode == "bicyclic" else "",
@@ -5673,6 +5812,7 @@ def run_peptide_design_backend(
 
         summary_payload = {
             "summary": {
+                "backend": peptide_backend,
                 "design_mode": design_mode,
                 "binder_length": binder_length,
                 "iterations": iterations,
@@ -5684,6 +5824,7 @@ def run_peptide_design_backend(
                 "best_score": zip_rows[0].get("composite_score") if zip_rows else 0.0,
             },
             "peptide_design": {
+                "backend": peptide_backend,
                 "design_mode": design_mode,
                 "binder_length": binder_length,
                 "iterations": iterations,
@@ -6429,7 +6570,7 @@ def main():
             worker_output_archive_path = str(predict_args.pop("output_archive_path"))
             worker_predict_args = predict_args.pop("predict_args", {})
             worker_model_name = predict_args.pop("model_name", None)
-            worker_backend = str(predict_args.pop("backend", "boltz")).strip().lower() or "boltz"
+            worker_backend = _normalize_peptide_backend(predict_args.pop("backend", "boltz"))
             worker_acquire_gpu = bool(predict_args.pop("__peptide_worker_acquire_gpu__", True))
             worker_task_id = str(predict_args.pop("__peptide_worker_task_id__", "")).strip() or "peptide-candidate-worker"
             if not isinstance(worker_predict_args, dict):
@@ -6444,21 +6585,52 @@ def main():
                         release_gpu as worker_release_gpu_fn,
                     )
                     worker_release_gpu = worker_release_gpu_fn
-                    worker_gpu_id = worker_acquire_gpu_fn(task_id=worker_task_id, timeout=3600)
+                    worker_gpu_id = worker_acquire_gpu_fn(
+                        task_id=worker_task_id,
+                        timeout=PEPTIDE_GPU_ACQUIRE_TIMEOUT_SECONDS,
+                    )
                     os.environ["CUDA_VISIBLE_DEVICES"] = str(worker_gpu_id)
 
-                if worker_backend != "boltz":
-                    raise ValueError(
-                        f"Peptide candidate worker currently supports boltz backend only. Requested backend: '{worker_backend}'."
+                worker_seed = worker_predict_args.pop("seed", None)
+                use_msa_raw = worker_predict_args.get("use_msa_server", True)
+                if isinstance(use_msa_raw, bool):
+                    worker_use_msa_server = use_msa_raw
+                elif isinstance(use_msa_raw, (int, float)):
+                    worker_use_msa_server = bool(use_msa_raw)
+                else:
+                    worker_use_msa_server = str(use_msa_raw).strip().lower() in {"1", "true", "yes", "y"}
+
+                if worker_backend == "alphafold3":
+                    run_alphafold3_backend(
+                        worker_temp_dir,
+                        worker_yaml_content,
+                        worker_output_archive_path,
+                        worker_use_msa_server,
+                        seed=worker_seed,
+                        task_id=worker_task_id,
                     )
-                run_boltz_backend(
-                    worker_temp_dir,
-                    worker_yaml_content,
-                    worker_output_archive_path,
-                    worker_predict_args,
-                    worker_model_name,
-                    task_id=worker_task_id,
-                )
+                elif worker_backend == "protenix":
+                    run_protenix_backend(
+                        temp_dir=worker_temp_dir,
+                        yaml_content=worker_yaml_content,
+                        output_archive_path=worker_output_archive_path,
+                        use_msa_server=worker_use_msa_server,
+                        seed=worker_seed,
+                        task_id=worker_task_id,
+                    )
+                elif worker_backend == "boltz":
+                    if worker_seed is not None:
+                        worker_predict_args["seed"] = worker_seed
+                    run_boltz_backend(
+                        worker_temp_dir,
+                        worker_yaml_content,
+                        worker_output_archive_path,
+                        worker_predict_args,
+                        worker_model_name,
+                        task_id=worker_task_id,
+                    )
+                else:
+                    raise ValueError(f"Unsupported peptide candidate backend: '{worker_backend}'.")
             finally:
                 if worker_gpu_id != -1 and callable(worker_release_gpu):
                     worker_release_gpu(gpu_id=worker_gpu_id, task_id=worker_task_id)
@@ -6530,9 +6702,12 @@ def main():
                     str(template_work_root),
                 )
             if workflow == "peptide_design":
-                if backend != "boltz":
+                peptide_design_mode = _normalize_peptide_design_mode(
+                    peptide_design_options.get("peptideDesignMode") or peptide_design_options.get("peptide_design_mode")
+                )
+                if not _peptide_backend_supports_design_mode(backend, peptide_design_mode):
                     raise ValueError(
-                        f"Peptide design currently supports Boltz backend only. Requested backend: '{backend}'."
+                        f"Peptide design backend '{backend}' supports linear peptides only. Requested mode: '{peptide_design_mode}'."
                     )
                 validate_template_paths(processed_yaml)
                 peptide_parent_task_id = str(runtime_task_id or os.environ.get("BOLTZ_TASK_ID") or "").strip()
@@ -6541,6 +6716,7 @@ def main():
                         temp_dir=temp_dir,
                         yaml_content=processed_yaml,
                         output_archive_path=output_archive_path,
+                        backend=backend,
                         predict_args=predict_args,
                         model_name=model_name,
                         seed=seed,

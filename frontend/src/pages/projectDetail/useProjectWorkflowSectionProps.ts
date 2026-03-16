@@ -338,8 +338,7 @@ export function useProjectWorkflowSectionProps({
   const shouldBuildPredictionWorkflowSection =
     isPredictionWorkflow && (workspaceTab === 'components' || workspaceTab === 'constraints');
   const shouldBuildWorkflowRuntimeSettingsSection =
-    (workspaceTab === 'components' && !isLeadOptimizationWorkflow && !isPeptideDesignWorkflow) ||
-    (workspaceTab === 'basics' && isPeptideDesignWorkflow);
+    workspaceTab === 'components' && !isLeadOptimizationWorkflow;
 
   const projectResultsSectionProps = shouldBuildProjectResultsSection
     ? buildProjectResultsSectionProps({

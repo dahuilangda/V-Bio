@@ -775,6 +775,62 @@ def parse_confidence_metrics(
                     continue
         return plddts
 
+    def _extract_plddts_from_pdb(pdb_path: Path, chain_id: str) -> List[float]:
+        try:
+            lines = pdb_path.read_text().splitlines()
+        except Exception as exc:
+            logger.warning(f"Unable to read PDB file {pdb_path}: {exc}")
+            return []
+
+        plddts = []
+        last_res_id = None
+        for line in lines:
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+            if len(line) < 66:
+                continue
+            chain_value = line[21].strip()
+            if chain_value != chain_id:
+                continue
+            res_value = f"{line[22:26].strip()}:{line[26].strip()}"
+            if res_value == last_res_id:
+                continue
+            try:
+                plddts.append(float(line[60:66].strip()))
+                last_res_id = res_value
+            except ValueError:
+                continue
+        return plddts
+
+    def _extract_plddts_from_structure(structure_path: Path, chain_id: str) -> List[float]:
+        suffix = structure_path.suffix.lower()
+        if suffix == ".pdb":
+            return _extract_plddts_from_pdb(structure_path, chain_id)
+        return _extract_plddts_from_cif(structure_path, chain_id)
+
+    def _load_json_payload(json_path: Path):
+        try:
+            with json_path.open('r') as f:
+                return json.load(f)
+        except Exception as exc:
+            logger.warning(f"Failed to load JSON payload from {json_path}: {exc}")
+            return None
+
+    def _find_numeric_value(payload, keys: List[str]) -> Optional[float]:
+        normalized_keys = {str(key).strip().lower() for key in keys if str(key).strip()}
+        stack = [payload]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, dict):
+                for key, value in current.items():
+                    key_text = str(key).strip().lower()
+                    if key_text in normalized_keys and isinstance(value, (int, float)):
+                        return float(value)
+                    stack.append(value)
+            elif isinstance(current, list):
+                stack.extend(current)
+        return None
+
     def _prefer_aggregate_file(candidates: List[Path]) -> Optional[Path]:
         """优先选择不包含 seed- 的聚合文件。"""
         for candidate in sorted(candidates):
@@ -877,6 +933,70 @@ def parse_confidence_metrics(
 
         return metrics
 
+    protenix_dir = root_path / "protenix"
+    if protenix_dir.is_dir():
+        metrics['backend'] = 'protenix'
+        output_root = protenix_dir / "output" if (protenix_dir / "output").is_dir() else protenix_dir
+
+        ranking_file = _prefer_aggregate_file(list(output_root.glob("**/confidence_ranking.csv")))
+        if ranking_file and ranking_file.exists():
+            try:
+                import csv
+
+                with ranking_file.open('r', encoding='utf-8', newline='') as f:
+                    first_row = next(csv.DictReader(f), None)
+                if isinstance(first_row, dict):
+                    for key, target_key in (
+                        ("ptm", "ptm"),
+                        ("iptm", "iptm"),
+                        ("ranking_score", "ranking_score"),
+                        ("plddt", "complex_plddt"),
+                        ("complex_plddt", "complex_plddt"),
+                    ):
+                        raw_value = first_row.get(key)
+                        if raw_value in (None, ""):
+                            continue
+                        try:
+                            metrics[target_key] = float(raw_value)
+                        except (TypeError, ValueError):
+                            continue
+            except Exception as exc:
+                logger.warning(f"Failed to parse Protenix confidence ranking from {ranking_file}: {exc}")
+
+        json_candidates = sorted(output_root.glob("**/*.json"))
+        for json_path in json_candidates:
+            payload = _load_json_payload(json_path)
+            if payload is None:
+                continue
+            if not isinstance(metrics.get('ptm'), (int, float)) or float(metrics.get('ptm') or 0.0) == 0.0:
+                ptm = _find_numeric_value(payload, ["ptm"])
+                if ptm is not None:
+                    metrics['ptm'] = ptm
+            if not isinstance(metrics.get('iptm'), (int, float)) or float(metrics.get('iptm') or 0.0) == 0.0:
+                iptm = _find_numeric_value(payload, ["iptm", "iptm_score", "ip_tm"])
+                if iptm is not None:
+                    metrics['iptm'] = iptm
+            if 'ranking_score' not in metrics:
+                ranking_score = _find_numeric_value(payload, ["ranking_score", "score"])
+                if ranking_score is not None:
+                    metrics['ranking_score'] = ranking_score
+            if not isinstance(metrics.get('complex_plddt'), (int, float)) or float(metrics.get('complex_plddt') or 0.0) == 0.0:
+                complex_plddt = _find_numeric_value(payload, ["complex_plddt", "plddt", "avg_plddt", "mean_plddt"])
+                if complex_plddt is not None:
+                    metrics['complex_plddt'] = complex_plddt
+
+        structure_candidates = list(output_root.glob("**/*.cif")) + list(output_root.glob("**/*.pdb"))
+        model_path = _prefer_aggregate_file(structure_candidates)
+        if model_path and model_path.exists():
+            binder_plddts = _extract_plddts_from_structure(model_path, binder_chain_id)
+            if binder_plddts:
+                metrics['plddts'] = binder_plddts
+                metrics['binder_avg_plddt'] = float(np.mean(binder_plddts))
+                if float(metrics.get('complex_plddt') or 0.0) <= 0.0:
+                    metrics['complex_plddt'] = metrics['binder_avg_plddt']
+
+        return metrics
+
     # --- Boltz 默认结果解析 ---
     try:
         json_path = next(
@@ -924,7 +1044,7 @@ def parse_confidence_metrics(
         if cif_files:
             rank_1_cif = next((f for f in cif_files if 'rank_1' in f), cif_files[0])
             cif_path = root_path / rank_1_cif
-            binder_plddts = _extract_plddts_from_cif(cif_path, binder_chain_id)
+            binder_plddts = _extract_plddts_from_structure(cif_path, binder_chain_id)
             if binder_plddts:
                 metrics['plddts'] = binder_plddts
                 metrics['binder_avg_plddt'] = float(np.mean(binder_plddts))

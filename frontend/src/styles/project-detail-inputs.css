@@ -114,6 +114,11 @@
   min-width: 0;
 }
 
+.peptide-runtime-backend-hint {
+  grid-column: 1 / -1;
+  margin: -2px 0 0;
+}
+
 .peptide-bicyclic-layout {
   display: grid;
   grid-template-columns: minmax(0, 2.35fr) minmax(240px, 1fr);
@@ -302,12 +307,14 @@
 }
 
 .peptide-runtime-grid-cys {
-  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   padding: 8px;
   border: 1px dashed #c7ddcf;
   border-radius: 10px;
   background: #fcfffd;
   min-width: 0;
+  width: 100%;
+  max-width: 100%;
 }
 
 .peptide-runtime-grid-cys.is-disabled {
@@ -339,6 +346,7 @@
   display: grid;
   gap: 8px;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-width: 0;
 }
 
 .peptide-cys-slot-tab {
@@ -379,6 +387,9 @@
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(34px, 1fr));
   gap: 6px;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
 }
 
 .peptide-position-dot {

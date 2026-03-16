@@ -101,6 +101,24 @@ def register_prediction_routes(
                         peptide_design_options = parsed
                 except json.JSONDecodeError:
                     logger.warning('Invalid peptide_design_options JSON provided; ignoring design options.')
+            design_mode_raw = (
+                peptide_design_options.get('peptideDesignMode')
+                or peptide_design_options.get('peptide_design_mode')
+                or 'cyclic'
+            )
+            design_mode = str(design_mode_raw).strip().lower()
+            if design_mode in {'cycle', 'ring'}:
+                design_mode = 'cyclic'
+            elif design_mode in {'bicycle', 'bi-cyclic'}:
+                design_mode = 'bicyclic'
+            elif design_mode != 'linear':
+                design_mode = 'cyclic'
+            if backend in {'alphafold3', 'protenix'} and design_mode != 'linear':
+                return jsonify({
+                    'error': f"Backend '{backend}' supports linear peptide design only.",
+                    'backend': backend,
+                    'design_mode': design_mode,
+                }), 400
 
         priority = request.form.get('priority', 'default').lower()
         if priority not in ['high', 'default']:

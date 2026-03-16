@@ -3,8 +3,10 @@ import type { MolstarResiduePick } from '../../components/project/MolstarViewer'
 import type { InputComponent, PredictionConstraint } from '../../types/models';
 import type { ProteinTemplateUpload } from '../../types/models';
 import { PEPTIDE_DESIGNED_LIGAND_TOKEN } from '../../utils/projectInputs';
+import { normalizePredictionBackend } from './projectDraftUtils';
 
 interface DraftLike {
+  backend: string;
   inputConfig: {
     version: number;
     components: InputComponent[];
@@ -138,6 +140,37 @@ function normalizePeptideInitializationOptions(
     peptideInitialSequence: normalizePeptideInitialSequence(options.peptideInitialSequence, binderLength),
     peptideSequenceMask: normalizePeptideMask(options.peptideSequenceMask, binderLength)
   };
+}
+
+function normalizePeptideBackendValue(value: unknown): 'boltz' | 'alphafold3' | 'protenix' {
+  return normalizePredictionBackend(value);
+}
+
+function normalizePeptideModeValue(value: unknown): 'linear' | 'cyclic' | 'bicyclic' {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'linear' || normalized === 'cyclic' || normalized === 'bicyclic') return normalized;
+  return 'cyclic';
+}
+
+function peptideBackendSupportsMode(backend: string, mode: 'linear' | 'cyclic' | 'bicyclic'): boolean {
+  if (mode === 'linear') return true;
+  return normalizePeptideBackendValue(backend) === 'boltz';
+}
+
+function hasPeptideDesignOptions(options: NonNullable<DraftLike['inputConfig']['options']>): boolean {
+  return (
+    typeof options.peptideDesignMode === 'string' ||
+    options.peptideBinderLength !== undefined ||
+    options.peptideIterations !== undefined ||
+    options.peptidePopulationSize !== undefined ||
+    options.peptideEliteSize !== undefined ||
+    options.peptideMutationRate !== undefined ||
+    options.peptideUseInitialSequence !== undefined ||
+    options.peptideInitialSequence !== undefined ||
+    options.peptideSequenceMask !== undefined ||
+    options.peptideBicyclicLinkerCcd !== undefined ||
+    options.peptideBicyclicCysPositionMode !== undefined
+  );
 }
 
 export function scrollToEditorBlock(elementId: string): void {
@@ -295,20 +328,45 @@ export function setAffinityComponentFromWorkspaceAction<TDraft extends DraftLike
 
 export function handleRuntimeBackendChangeAction<TDraft extends DraftLike>(params: {
   backend: string;
+  isPeptideDesignWorkflow: boolean;
   setDraft: Dispatch<SetStateAction<TDraft | null>>;
   filterConstraintsByBackend: (constraints: PredictionConstraint[], backend: string) => PredictionConstraint[];
 }): void {
-  const { backend, setDraft, filterConstraintsByBackend } = params;
+  const { backend, isPeptideDesignWorkflow, setDraft, filterConstraintsByBackend } = params;
   setDraft((d) =>
     d
-      ? {
-          ...d,
-          backend,
-          inputConfig: {
-            ...d.inputConfig,
-            constraints: filterConstraintsByBackend(d.inputConfig.constraints, backend),
-          },
-        }
+      ? (() => {
+          const options = ((d.inputConfig as any).options || {}) as NonNullable<DraftLike['inputConfig']['options']>;
+          const shouldApplyPeptideBackendRules = isPeptideDesignWorkflow && hasPeptideDesignOptions(options);
+          const nextBackend = shouldApplyPeptideBackendRules
+            ? peptideBackendSupportsMode(backend, normalizePeptideModeValue(options.peptideDesignMode))
+              ? normalizePeptideBackendValue(backend)
+              : 'boltz'
+            : normalizePredictionBackend(backend);
+          const nextOptions = shouldApplyPeptideBackendRules
+            ? (() => {
+                const nextMode = nextBackend === 'boltz' ? normalizePeptideModeValue(options.peptideDesignMode) : 'linear';
+                const updatedOptions = {
+                  ...options,
+                  peptideDesignMode: nextMode
+                };
+                return {
+                  ...updatedOptions,
+                  ...normalizePeptideInitializationOptions(updatedOptions),
+                  ...normalizeBicyclicPositions(updatedOptions)
+                };
+              })()
+            : options;
+          return {
+            ...d,
+            backend: nextBackend,
+            inputConfig: {
+              ...d.inputConfig,
+              constraints: filterConstraintsByBackend(d.inputConfig.constraints, nextBackend),
+              options: nextOptions,
+            },
+          };
+        })()
       : d
   );
 }
@@ -329,7 +387,9 @@ export function handleRuntimePeptideDesignModeChangeAction<TDraft extends DraftL
   setDraft: Dispatch<SetStateAction<TDraft | null>>;
 }): void {
   const { peptideDesignMode, setDraft } = params;
-  patchDraftOptions(setDraft, (options) => {
+  setDraft((d) => {
+    if (!d) return d;
+    const options = ((d.inputConfig as any).options || {}) as NonNullable<DraftLike['inputConfig']['options']>;
     const currentLength = Number(options.peptideBinderLength);
     const minLength = peptideDesignMode === 'bicyclic' ? 8 : 5;
     const fallbackLength = peptideDesignMode === 'bicyclic' ? 15 : 20;
@@ -348,10 +408,21 @@ export function handleRuntimePeptideDesignModeChangeAction<TDraft extends DraftL
       peptideBicyclicFixTerminalCys: options.peptideBicyclicFixTerminalCys !== false,
       peptideBicyclicIncludeExtraCys: options.peptideBicyclicIncludeExtraCys === true
     };
-    return {
+    const normalizedOptions = {
       ...nextOptions,
       ...normalizePeptideInitializationOptions(nextOptions),
       ...normalizeBicyclicPositions(nextOptions)
+    };
+    const nextBackend = peptideBackendSupportsMode(d.backend, peptideDesignMode)
+      ? normalizePeptideBackendValue(d.backend)
+      : 'boltz';
+    return {
+      ...d,
+      backend: nextBackend,
+      inputConfig: {
+        ...d.inputConfig,
+        options: normalizedOptions
+      }
     };
   });
 }

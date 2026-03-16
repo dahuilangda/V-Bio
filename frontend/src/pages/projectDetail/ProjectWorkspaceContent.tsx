@@ -52,9 +52,7 @@ export function ProjectWorkspaceContent({
     isPredictionWorkflow && (workspaceTab === 'components' || workspaceTab === 'constraints');
   const showFlatAffinityWorkspace = isAffinityWorkflow && workspaceTab === 'components';
   const showFlatWorkspace = showFlatPredictionWorkspace || showFlatAffinityWorkspace;
-  const isPeptideDesignWorkflow = runtimeSettingsProps.isPeptideDesignWorkflow;
-  const showRuntimeSettingsInComponents = workspaceTab === 'components' && !isLeadOptimizationWorkflow && !isPeptideDesignWorkflow;
-  const showPeptideModeInBasics = workspaceTab === 'basics' && isPeptideDesignWorkflow;
+  const showRuntimeSettingsInComponents = workspaceTab === 'components' && !isLeadOptimizationWorkflow;
   const showPredictionSection = isPredictionWorkflow && (workspaceTab === 'components' || workspaceTab === 'constraints');
   const showAffinitySection = workspaceTab === 'components' && isAffinityWorkflow;
 
@@ -115,14 +113,6 @@ export function ProjectWorkspaceContent({
             )}
 
             {showRuntimeSettingsInComponents ? <WorkflowRuntimeSettingsSection visible {...runtimeSettingsProps} /> : null}
-
-            {showPeptideModeInBasics ? (
-              <WorkflowRuntimeSettingsSection
-                visible
-                displayMode="peptide_mode_only"
-                {...runtimeSettingsProps}
-              />
-            ) : null}
           </form>
         </section>
       )}

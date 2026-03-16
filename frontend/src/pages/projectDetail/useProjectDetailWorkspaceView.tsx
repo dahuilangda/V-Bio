@@ -2708,6 +2708,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     handleTaskNameChange,
     handleTaskSummaryChange
   } = useProjectEditorHandlers({
+    isPeptideDesignWorkflow,
     setDraft,
     setPickedResidue,
     setProteinTemplates,

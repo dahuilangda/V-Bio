@@ -26,6 +26,7 @@ import {
   filterConstraintsByBackend,
   hasProteinTemplates,
   hasRecordData,
+  normalizePredictionBackend,
   sortProjectTasks,
 } from './projectDraftUtils';
 
@@ -130,7 +131,7 @@ export async function loadProjectFlow(params: {
   const activeTaskId = (next.task_id || '').trim();
   const workflowDef = getWorkflowDefinition(next.task_type);
   const isPredictionLikeWorkflow = isPredictionLikeWorkflowKey(workflowDef.key);
-  const normalizedBackend = workflowDef.key === 'affinity' ? 'boltz' : next.backend;
+  const normalizedBackend = workflowDef.key === 'affinity' ? 'boltz' : normalizePredictionBackend(next.backend);
   const query = new URLSearchParams(locationSearch);
   const requestedTab = String(query.get('tab') || '').trim().toLowerCase();
   const requestedTaskRowId = String(query.get('task_row_id') || '').trim();

@@ -334,30 +334,44 @@ def get_non_peptide_gpu_waiter_count() -> int:
         return 0
 
 
-def acquire_gpu_for_peptide_worker(task_id: str, timeout: int = 3600, poll_interval: float = 1.0) -> int:
+def acquire_gpu_for_peptide_worker(task_id: str, timeout: int = 0, poll_interval: float = 1.0) -> int:
     """
     Fair GPU acquire for peptide candidate workers.
     If any non-peptide tasks are waiting for GPU, peptide workers yield and retry.
     """
     client = get_redis_client()
-    deadline = time.monotonic() + max(1, int(timeout))
+    timeout_seconds = int(timeout or 0)
+    deadline = None if timeout_seconds <= 0 else (time.monotonic() + max(1, timeout_seconds))
     sleep_step = max(0.2, float(poll_interval))
-    logger.info(f"任务 {task_id}: 多肽子任务开始公平获取 GPU (timeout={timeout}s)。")
+    logger.info(
+        "任务 %s: 多肽子任务开始公平获取 GPU (timeout=%s)。",
+        task_id,
+        "disabled" if deadline is None else f"{timeout_seconds}s",
+    )
 
     while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError(f"任务 {task_id}: 多肽子任务在 {timeout}s 内未能获取 GPU。")
+        if deadline is None:
+            remaining = None
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"任务 {task_id}: 多肽子任务在 {timeout_seconds}s 内未能获取 GPU。")
 
         try:
             waiting_non_peptide = int(client.scard(config.GPU_WAITING_NON_PEPTIDE_SET_KEY) or 0)
         except Exception:
             waiting_non_peptide = 0
         if waiting_non_peptide > 0:
-            time.sleep(min(sleep_step, max(0.2, remaining)))
+            if remaining is None:
+                time.sleep(sleep_step)
+            else:
+                time.sleep(min(sleep_step, max(0.2, remaining)))
             continue
 
-        blpop_timeout = max(1, min(int(remaining), int(round(sleep_step))))
+        if remaining is None:
+            blpop_timeout = max(1, int(round(sleep_step)))
+        else:
+            blpop_timeout = max(1, min(int(remaining), int(round(sleep_step))))
         result = client.blpop(config.GPU_POOL_KEY, timeout=blpop_timeout)
         if result is None:
             continue

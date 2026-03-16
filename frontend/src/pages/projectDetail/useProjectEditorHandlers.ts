@@ -34,6 +34,7 @@ import {
 import type { ProjectWorkspaceDraft } from './workspaceTypes';
 
 interface UseProjectEditorHandlersParams<TDraft extends ProjectWorkspaceDraft> {
+  isPeptideDesignWorkflow: boolean;
   setDraft: Dispatch<SetStateAction<TDraft | null>>;
   setPickedResidue: Dispatch<SetStateAction<ConstraintResiduePick | null>>;
   setProteinTemplates: Dispatch<SetStateAction<Record<string, ProteinTemplateUpload>>>;
@@ -70,6 +71,7 @@ export interface UseProjectEditorHandlersResult {
 }
 
 export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
+  isPeptideDesignWorkflow,
   setDraft,
   setPickedResidue,
   setProteinTemplates,
@@ -101,6 +103,7 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
   const handleRuntimeBackendChange = (backend: string) => {
     handleRuntimeBackendChangeAction({
       backend,
+      isPeptideDesignWorkflow,
       setDraft,
       filterConstraintsByBackend
     });

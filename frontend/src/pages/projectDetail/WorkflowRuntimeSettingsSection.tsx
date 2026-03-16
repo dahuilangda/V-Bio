@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { MemoLigand2DPreview } from '../../components/project/Ligand2DPreview';
+import { normalizePredictionBackend } from './projectDraftUtils';
 
 type CysSlot = 'cys1' | 'cys2' | 'cys3';
 type BicyclicLinkerType = 'SEZ' | '29N' | 'BS3';
@@ -102,7 +103,10 @@ export function WorkflowRuntimeSettingsSection({
 }: WorkflowRuntimeSettingsSectionProps) {
   const [activeCysSlot, setActiveCysSlot] = useState<CysSlot>('cys1');
   const showFullFields = displayMode === 'full';
-  const normalizedBackend = isAffinityWorkflow ? 'boltz' : backend;
+  const normalizedBackend = isAffinityWorkflow ? 'boltz' : normalizePredictionBackend(backend);
+  const canEditRuntimeIdentity = canEdit || isPredictionWorkflow || isPeptideDesignWorkflow || isAffinityWorkflow;
+  const isLinearOnlyPeptideBackend =
+    isPeptideDesignWorkflow && (normalizedBackend === 'alphafold3' || normalizedBackend === 'protenix');
   const isBicyclicMode = isPeptideDesignWorkflow && peptideDesignMode === 'bicyclic';
   const cys2Max = peptideBicyclicFixTerminalCys
     ? Math.max(1, peptideBinderLength - 2)
@@ -193,18 +197,23 @@ export function WorkflowRuntimeSettingsSection({
             <span>
               Backend <span className="required-mark">*</span>
             </span>
-            <select required value={normalizedBackend} onChange={(e) => onBackendChange(e.target.value)} disabled={!canEdit}>
+            <select
+              required
+              value={normalizedBackend}
+              onChange={(e) => onBackendChange(e.target.value)}
+              disabled={!canEditRuntimeIdentity}
+            >
               {(isAffinityWorkflow
                 ? [
                     { value: 'boltz', label: 'Boltz-2' }
                   ]
                 : [
                     { value: 'boltz', label: 'Boltz-2' },
-                    { value: 'alphafold3', label: 'AlphaFold3' },
-                    { value: 'protenix', label: 'Protenix' }
+                    { value: 'alphafold3', label: 'AlphaFold3', disabled: isPeptideDesignWorkflow && peptideDesignMode !== 'linear' },
+                    { value: 'protenix', label: 'Protenix', disabled: isPeptideDesignWorkflow && peptideDesignMode !== 'linear' }
                   ]
               ).map((option) => (
-                <option key={option.value} value={option.value}>
+                <option key={option.value} value={option.value} disabled={Boolean((option as { disabled?: boolean }).disabled)}>
                   {option.label}
                 </option>
               ))}
@@ -212,9 +221,9 @@ export function WorkflowRuntimeSettingsSection({
           </label>
         )}
 
-        {showFullFields && isPredictionWorkflow && (
+        {showFullFields && (isPredictionWorkflow || isPeptideDesignWorkflow) && (
           <label className="field">
-            <span>Random Seed (optional)</span>
+            <span>Seed (optional)</span>
             <input
               type="number"
               min={0}
@@ -224,7 +233,7 @@ export function WorkflowRuntimeSettingsSection({
                 const nextSeed = value === '' ? null : Math.max(0, Math.floor(Number(value) || 0));
                 onSeedChange(nextSeed);
               }}
-              disabled={!canEdit}
+              disabled={!canEditRuntimeIdentity}
               placeholder="Default: 42"
             />
           </label>
@@ -245,8 +254,12 @@ export function WorkflowRuntimeSettingsSection({
                     disabled={!canEdit}
                   >
                     <option value="linear">Linear</option>
-                    <option value="cyclic">Cyclic</option>
-                    <option value="bicyclic">Bicyclic</option>
+                    <option value="cyclic" disabled={isLinearOnlyPeptideBackend}>
+                      Cyclic
+                    </option>
+                    <option value="bicyclic" disabled={isLinearOnlyPeptideBackend}>
+                      Bicyclic
+                    </option>
                   </select>
                 </label>
                 <label className="field">
@@ -260,6 +273,9 @@ export function WorkflowRuntimeSettingsSection({
                     disabled={!canEdit}
                   />
                 </label>
+                <div className="muted small peptide-runtime-backend-hint">
+                  AlphaFold3 and Protenix support linear peptides only. Cyclic and bicyclic designs run on Boltz-2.
+                </div>
                 <label className="switch-field peptide-runtime-switch peptide-initial-seq-toggle">
                   <input
                     type="checkbox"
