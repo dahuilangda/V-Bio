@@ -50,6 +50,7 @@ interface ProjectTasksWorkspaceProps {
   onClearAdvancedFilters: () => void;
   sortKey: SortKey;
   sortMark: (key: SortKey) => string;
+  onNormalizeSortKey: (key: SortKey) => void;
   onSort: (key: SortKey) => void;
   filteredRows: TaskListRow[];
   pagedRows: TaskListRow[];
@@ -113,6 +114,7 @@ export function ProjectTasksWorkspace({
   onClearAdvancedFilters,
   sortKey,
   sortMark,
+  onNormalizeSortKey,
   onSort,
   filteredRows,
   pagedRows,
@@ -152,8 +154,8 @@ export function ProjectTasksWorkspace({
   useEffect(() => {
     if (!compactMetricsView) return;
     if (sortKey === 'submitted') return;
-    onSort('submitted');
-  }, [compactMetricsView, onSort, sortKey]);
+    onNormalizeSortKey('submitted');
+  }, [compactMetricsView, onNormalizeSortKey, sortKey]);
 
   return (
     <section className="panel">

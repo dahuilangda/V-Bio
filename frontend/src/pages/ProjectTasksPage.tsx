@@ -98,6 +98,7 @@ export function ProjectTasksPage() {
     structureSearchLoading,
     structureSearchError,
     pageSize,
+    page,
     advancedFilterCount,
     filteredRows,
     pagedRows,
@@ -119,21 +120,25 @@ export function ProjectTasksPage() {
     setPageSize,
     setPage,
     clearAdvancedFilters,
+    normalizeSortKey,
     handleSort,
     sortMark,
     jumpToPage,
   } = useTaskListFiltering(taskRows, {
     storageScope: session?.userId || session?.username || null,
-    initialPage
+    initialPage,
+    suspendPageNormalization: loading || !project
   });
 
   useEffect(() => {
+    if (loading || !project) return;
     const query = new URLSearchParams(location.search);
     const currentQueryPage = Number(query.get('page') || '');
     const normalizedQueryPage = Number.isFinite(currentQueryPage) && currentQueryPage >= 1 ? Math.floor(currentQueryPage) : 1;
-    if (normalizedQueryPage === currentPage) return;
-    if (currentPage > 1) {
-      query.set('page', String(currentPage));
+    const nextPage = Math.max(1, page);
+    if (normalizedQueryPage === nextPage) return;
+    if (nextPage > 1) {
+      query.set('page', String(nextPage));
     } else {
       query.delete('page');
     }
@@ -145,7 +150,7 @@ export function ProjectTasksPage() {
       },
       { replace: true }
     );
-  }, [currentPage, location.pathname, location.search, navigate]);
+  }, [loading, location.pathname, location.search, navigate, page, project]);
 
   useEffect(() => {
     const nextPriorityTaskRowIds = pagedRows
@@ -306,6 +311,7 @@ export function ProjectTasksPage() {
           onClearAdvancedFilters={clearAdvancedFilters}
           sortKey={sortKey}
           sortMark={sortMark}
+          onNormalizeSortKey={normalizeSortKey}
           onSort={handleSort}
           filteredRows={filteredRows}
           pagedRows={pagedRows}

@@ -74,6 +74,7 @@ interface UseTaskListFilteringResult {
   setPageSize: Dispatch<SetStateAction<number>>;
   setPage: Dispatch<SetStateAction<number>>;
   clearAdvancedFilters: () => void;
+  normalizeSortKey: (key: SortKey) => void;
   handleSort: (key: SortKey) => void;
   sortMark: (key: SortKey) => string;
   jumpToPage: (rawValue: string) => void;
@@ -82,6 +83,7 @@ interface UseTaskListFilteringResult {
 interface UseTaskListFilteringOptions {
   storageScope?: string | null;
   initialPage?: number;
+  suspendPageNormalization?: boolean;
 }
 
 function normalizeTaskListPage(value: unknown): number {
@@ -95,6 +97,7 @@ export function useTaskListFiltering(
   options?: UseTaskListFilteringOptions
 ): UseTaskListFilteringResult {
   const initialPage = normalizeTaskListPage(options?.initialPage);
+  const suspendPageNormalization = options?.suspendPageNormalization === true;
   const taskFiltersStorageKey = useMemo(() => {
     const sessionIdentity =
       String(options?.storageScope || '').trim().toLowerCase() || '__anonymous__';
@@ -142,6 +145,7 @@ export function useTaskListFiltering(
   }, [taskRows, workflowFilter, submittedWithinDays, seedFilter, failureOnly, minPlddt, minIptm, maxPae, structureSearchQuery]);
 
   const clearAdvancedFilters = useCallback(() => {
+    setPage(1);
     setSubmittedWithinDays('all');
     setSeedFilter('all');
     setFailureOnly(false);
@@ -228,6 +232,81 @@ export function useTaskListFiltering(
   useEffect(() => {
     setPage((prev) => (prev === initialPage ? prev : initialPage));
   }, [initialPage]);
+
+  const setSortKeyWithPageReset = useCallback<Dispatch<SetStateAction<SortKey>>>((value) => {
+    setPage(1);
+    setSortKey(value);
+  }, []);
+
+  const setSortDirectionWithPageReset = useCallback<Dispatch<SetStateAction<SortDirection>>>((value) => {
+    setPage(1);
+    setSortDirection(value);
+  }, []);
+
+  const setTaskSearchWithPageReset = useCallback<Dispatch<SetStateAction<string>>>((value) => {
+    setPage(1);
+    setTaskSearch(value);
+  }, []);
+
+  const setStateFilterWithPageReset = useCallback<Dispatch<SetStateAction<'all' | ProjectTask['task_state']>>>((value) => {
+    setPage(1);
+    setStateFilter(value);
+  }, []);
+
+  const setWorkflowFilterWithPageReset = useCallback<Dispatch<SetStateAction<TaskWorkflowFilter>>>((value) => {
+    setPage(1);
+    setWorkflowFilter(value);
+  }, []);
+
+  const setBackendFilterWithPageReset = useCallback<Dispatch<SetStateAction<'all' | string>>>((value) => {
+    setPage(1);
+    setBackendFilter(value);
+  }, []);
+
+  const setSubmittedWithinDaysWithPageReset = useCallback<Dispatch<SetStateAction<SubmittedWithinDaysOption>>>((value) => {
+    setPage(1);
+    setSubmittedWithinDays(value);
+  }, []);
+
+  const setSeedFilterWithPageReset = useCallback<Dispatch<SetStateAction<SeedFilterOption>>>((value) => {
+    setPage(1);
+    setSeedFilter(value);
+  }, []);
+
+  const setFailureOnlyWithPageReset = useCallback<Dispatch<SetStateAction<boolean>>>((value) => {
+    setPage(1);
+    setFailureOnly(value);
+  }, []);
+
+  const setMinPlddtWithPageReset = useCallback<Dispatch<SetStateAction<string>>>((value) => {
+    setPage(1);
+    setMinPlddt(value);
+  }, []);
+
+  const setMinIptmWithPageReset = useCallback<Dispatch<SetStateAction<string>>>((value) => {
+    setPage(1);
+    setMinIptm(value);
+  }, []);
+
+  const setMaxPaeWithPageReset = useCallback<Dispatch<SetStateAction<string>>>((value) => {
+    setPage(1);
+    setMaxPae(value);
+  }, []);
+
+  const setStructureSearchModeWithPageReset = useCallback<Dispatch<SetStateAction<StructureSearchMode>>>((value) => {
+    setPage(1);
+    setStructureSearchMode(value);
+  }, []);
+
+  const setStructureSearchQueryWithPageReset = useCallback<Dispatch<SetStateAction<string>>>((value) => {
+    setPage(1);
+    setStructureSearchQuery(value);
+  }, []);
+
+  const setPageSizeWithPageReset = useCallback<Dispatch<SetStateAction<number>>>((value) => {
+    setPage(1);
+    setPageSize(value);
+  }, []);
 
   useEffect(() => {
     if (!filtersHydrated || typeof window === 'undefined') return;
@@ -466,7 +545,7 @@ export function useTaskListFiltering(
   ]);
 
   const totalPages = useMemo(() => Math.max(1, Math.ceil(filteredRows.length / pageSize)), [filteredRows.length, pageSize]);
-  const currentPage = Math.min(page, totalPages);
+  const currentPage = suspendPageNormalization ? Math.max(1, page) : Math.min(page, totalPages);
 
   const jumpToPage = useCallback(
     (rawValue: string) => {
@@ -483,30 +562,17 @@ export function useTaskListFiltering(
   }, [filteredRows, currentPage, pageSize]);
 
   useEffect(() => {
-    setPage(1);
-  }, [
-    sortKey,
-    sortDirection,
-    pageSize,
-    taskSearch,
-    stateFilter,
-    workflowFilter,
-    backendFilter,
-    submittedWithinDays,
-    seedFilter,
-    failureOnly,
-    minPlddt,
-    minIptm,
-    maxPae,
-    structureSearchMode,
-    structureSearchQuery
-  ]);
-
-  useEffect(() => {
+    if (suspendPageNormalization) return;
     if (page > totalPages) setPage(totalPages);
-  }, [page, totalPages]);
+  }, [page, suspendPageNormalization, totalPages]);
+
+  const normalizeSortKey = useCallback((key: SortKey) => {
+    setSortKey(key);
+    setSortDirection(defaultSortDirection(key));
+  }, []);
 
   const handleSort = useCallback((key: SortKey) => {
+    setPage(1);
     if (sortKey === key) {
       setSortDirection((prev) => nextSortDirection(prev));
       return;
@@ -549,24 +615,25 @@ export function useTaskListFiltering(
     pagedRows,
     totalPages,
     currentPage,
-    setSortKey,
-    setSortDirection,
-    setTaskSearch,
-    setStateFilter,
-    setWorkflowFilter,
-    setBackendFilter,
+    setSortKey: setSortKeyWithPageReset,
+    setSortDirection: setSortDirectionWithPageReset,
+    setTaskSearch: setTaskSearchWithPageReset,
+    setStateFilter: setStateFilterWithPageReset,
+    setWorkflowFilter: setWorkflowFilterWithPageReset,
+    setBackendFilter: setBackendFilterWithPageReset,
     setShowAdvancedFilters,
-    setSubmittedWithinDays,
-    setSeedFilter,
-    setFailureOnly,
-    setMinPlddt,
-    setMinIptm,
-    setMaxPae,
-    setStructureSearchMode,
-    setStructureSearchQuery,
-    setPageSize,
+    setSubmittedWithinDays: setSubmittedWithinDaysWithPageReset,
+    setSeedFilter: setSeedFilterWithPageReset,
+    setFailureOnly: setFailureOnlyWithPageReset,
+    setMinPlddt: setMinPlddtWithPageReset,
+    setMinIptm: setMinIptmWithPageReset,
+    setMaxPae: setMaxPaeWithPageReset,
+    setStructureSearchMode: setStructureSearchModeWithPageReset,
+    setStructureSearchQuery: setStructureSearchQueryWithPageReset,
+    setPageSize: setPageSizeWithPageReset,
     setPage,
     clearAdvancedFilters,
+    normalizeSortKey,
     handleSort,
     sortMark,
     jumpToPage,
