@@ -34,6 +34,7 @@ export interface UseResultSnapshotParams {
   draftProperties: ProjectInputConfig['properties'] | null | undefined;
   statusContextTaskRow: ProjectTask | null;
   requestedStatusTaskRow: ProjectTask | null;
+  viewerTaskId?: string | null;
   normalizedDraftComponents: InputComponent[];
   workflowKey: string;
   shouldComputeResultMetrics: boolean;
@@ -205,6 +206,7 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     draftProperties,
     statusContextTaskRow,
     requestedStatusTaskRow,
+    viewerTaskId,
     normalizedDraftComponents,
     workflowKey,
     shouldComputeResultMetrics,
@@ -231,7 +233,16 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     return preferredLeadOptSnapshotTask || taskByProjectTaskId;
   }, [preferredLeadOptSnapshotTask, project?.task_id, projectTasks, workflowKey]);
 
+  const viewerResultTask = useMemo(() => {
+    const normalizedViewerTaskId = String(viewerTaskId || '').trim();
+    if (!normalizedViewerTaskId) return null;
+    return projectTasks.find((item) => String(item.task_id || '').trim() === normalizedViewerTaskId) || null;
+  }, [projectTasks, viewerTaskId]);
+
   const activeResultTask = useMemo(() => {
+    if (viewerResultTask) {
+      return viewerResultTask;
+    }
     if (workflowKey !== 'lead_optimization') {
       // Keep the results panel pinned to an explicitly selected task row.
       // Status badges/polling may still follow the active runtime task separately.
@@ -250,7 +261,7 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
       return statusContextTaskRow || runtimeResultTask;
     }
     return runtimeResultTask || statusContextTaskRow || requestedStatusTaskRow;
-  }, [preferredLeadOptSnapshotTask, requestedStatusTaskRow, runtimeResultTask, statusContextTaskRow, workflowKey]);
+  }, [preferredLeadOptSnapshotTask, requestedStatusTaskRow, runtimeResultTask, statusContextTaskRow, viewerResultTask, workflowKey]);
 
   const affinityUploadScopeTaskRowId = useMemo(() => {
     if (requestedStatusTaskRow?.id) {

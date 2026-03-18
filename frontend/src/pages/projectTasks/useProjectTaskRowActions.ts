@@ -17,6 +17,7 @@ import { inferTaskStateFromStatusPayload } from './taskRuntimeUiUtils';
 interface UseProjectTaskRowActionsOptions {
   project: Project | null;
   canManageProject: boolean;
+  taskListPage: number;
   navigate: NavigateFunction;
   setError: Dispatch<SetStateAction<string | null>>;
   setTasks: Dispatch<SetStateAction<ProjectTask[]>>;
@@ -46,6 +47,7 @@ function hasObjectContent(value: unknown): boolean {
 export function useProjectTaskRowActions({
   project,
   canManageProject,
+  taskListPage,
   navigate,
   setError,
   setTasks,
@@ -89,7 +91,11 @@ export function useProjectTaskRowActions({
           tab: 'components',
           task_row_id: task.id
         }).toString();
-        navigate(`/projects/${project.id}?${query}`);
+        const params = new URLSearchParams(query);
+        if (taskListPage > 1) {
+          params.set('task_list_page', String(taskListPage));
+        }
+        navigate(`/projects/${project.id}?${params.toString()}`);
         return;
       }
       let taskForOpen = task;
@@ -128,24 +134,30 @@ export function useProjectTaskRowActions({
             hasObjectContent(taskForOpen.affinity))
       );
       if (hasLeadOptResultPayload || hasTaskResult) {
-        const query = new URLSearchParams({
+        const params = new URLSearchParams({
           tab: 'results',
           task_row_id: task.id
-        }).toString();
-        navigate(`/projects/${project.id}?${query}`);
+        });
+        if (taskListPage > 1) {
+          params.set('task_list_page', String(taskListPage));
+        }
+        navigate(`/projects/${project.id}?${params.toString()}`);
       } else {
-        const query = new URLSearchParams({
+        const params = new URLSearchParams({
           tab: 'components',
           task_row_id: task.id
-        }).toString();
-        navigate(`/projects/${project.id}?${query}`);
+        });
+        if (taskListPage > 1) {
+          params.set('task_list_page', String(taskListPage));
+        }
+        navigate(`/projects/${project.id}?${params.toString()}`);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to open selected task.');
     } finally {
       setOpeningTaskId(null);
     }
-  }, [canManageProject, project, setError, navigate]);
+  }, [canManageProject, navigate, project, setError, taskListPage]);
 
   const beginTaskNameEdit = useCallback((task: ProjectTask, displayName: string) => {
     if (!canEditTask(task)) return;

@@ -293,7 +293,9 @@ export function useProjectResultDisplay({
         <div className="ligand-preview-empty">
           {overviewPrimaryLigand.selectedComponentType && overviewPrimaryLigand.selectedComponentType !== 'ligand'
             ? `Selected binding ligand component is ${componentTypeLabel(overviewPrimaryLigand.selectedComponentType)}.`
-            : overviewPrimaryLigand.smiles
+            : overviewPrimaryLigand.selectedComponentType === 'ligand'
+              ? '2D preview requires SMILES input.'
+              : overviewPrimaryLigand.smiles
               ? '2D preview requires SMILES input.'
               : 'No ligand input.'}
         </div>

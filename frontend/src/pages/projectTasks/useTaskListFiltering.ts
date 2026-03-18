@@ -81,12 +81,20 @@ interface UseTaskListFilteringResult {
 
 interface UseTaskListFilteringOptions {
   storageScope?: string | null;
+  initialPage?: number;
+}
+
+function normalizeTaskListPage(value: unknown): number {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value.trim()) : Number.NaN;
+  if (!Number.isFinite(parsed)) return 1;
+  return Math.max(1, Math.floor(parsed));
 }
 
 export function useTaskListFiltering(
   taskRows: TaskListRow[],
   options?: UseTaskListFilteringOptions
 ): UseTaskListFilteringResult {
+  const initialPage = normalizeTaskListPage(options?.initialPage);
   const taskFiltersStorageKey = useMemo(() => {
     const sessionIdentity =
       String(options?.storageScope || '').trim().toLowerCase() || '__anonymous__';
@@ -111,7 +119,7 @@ export function useTaskListFiltering(
   const [structureSearchLoading, setStructureSearchLoading] = useState(false);
   const [structureSearchError, setStructureSearchError] = useState<string | null>(null);
   const [pageSize, setPageSize] = useState<number>(12);
-  const [page, setPage] = useState<number>(1);
+  const [page, setPage] = useState<number>(initialPage);
   const [filtersHydrated, setFiltersHydrated] = useState(false);
 
   const advancedFilterCount = useMemo(() => {
@@ -216,6 +224,10 @@ export function useTaskListFiltering(
       setFiltersHydrated(true);
     }
   }, [taskFiltersStorageKey]);
+
+  useEffect(() => {
+    setPage((prev) => (prev === initialPage ? prev : initialPage));
+  }, [initialPage]);
 
   useEffect(() => {
     if (!filtersHydrated || typeof window === 'undefined') return;

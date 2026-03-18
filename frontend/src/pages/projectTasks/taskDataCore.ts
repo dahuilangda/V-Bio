@@ -863,6 +863,11 @@ function resolveTaskSelectionContext(
         const resolved = resolveComponentFromCandidate(candidate, { allowAnyType: true });
         if (resolved) return resolved;
       }
+      const firstLigandComponent =
+        componentOptions.find((item) => item.type === 'ligand' && item.chainId && item.isSmiles) ||
+        componentOptions.find((item) => item.type === 'ligand' && item.chainId) ||
+        null;
+      if (firstLigandComponent) return firstLigandComponent;
       return null;
     }
     if (workflow === 'affinity') return resolveWorkflowUploadLigandComponent('affinity');

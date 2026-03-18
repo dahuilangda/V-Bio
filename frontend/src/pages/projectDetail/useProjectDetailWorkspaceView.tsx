@@ -2928,7 +2928,20 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     onPeptideBicyclicCys2PosChange: handleRuntimePeptideBicyclicCys2PosChange,
     onPeptideBicyclicCys3PosChange: handleRuntimePeptideBicyclicCys3PosChange
   });
-  const taskHistoryPath = `/projects/${project.id}/tasks`;
+  const taskListPage = useMemo(() => {
+    const query = new URLSearchParams(runtime.locationSearch);
+    const parsed = Number(query.get('task_list_page') || '');
+    if (!Number.isFinite(parsed)) return 1;
+    return Math.max(1, Math.floor(parsed));
+  }, [runtime.locationSearch]);
+  const taskHistoryPath = useMemo(() => {
+    const query = new URLSearchParams();
+    if (taskListPage > 1) {
+      query.set('page', String(taskListPage));
+    }
+    const search = query.toString();
+    return `/projects/${project.id}/tasks${search ? `?${search}` : ''}`;
+  }, [project.id, taskListPage]);
   const {
     handleRunAction,
     handleRunCurrentDraft,

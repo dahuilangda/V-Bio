@@ -32,6 +32,11 @@ export function ProjectTasksPage() {
   const [exportingExcel, setExportingExcel] = useState(false);
   const [sharedTaskRow, setSharedTaskRow] = useState<ProjectTask | null>(null);
   const [priorityTaskRowIds, setPriorityTaskRowIds] = useState<string[]>([]);
+  const initialPage = useMemo(() => {
+    const parsed = Number(new URLSearchParams(location.search).get('page') || '');
+    if (!Number.isFinite(parsed)) return 1;
+    return Math.max(1, Math.floor(parsed));
+  }, [location.search]);
 
   const {
     project,
@@ -118,8 +123,29 @@ export function ProjectTasksPage() {
     sortMark,
     jumpToPage,
   } = useTaskListFiltering(taskRows, {
-    storageScope: session?.userId || session?.username || null
+    storageScope: session?.userId || session?.username || null,
+    initialPage
   });
+
+  useEffect(() => {
+    const query = new URLSearchParams(location.search);
+    const currentQueryPage = Number(query.get('page') || '');
+    const normalizedQueryPage = Number.isFinite(currentQueryPage) && currentQueryPage >= 1 ? Math.floor(currentQueryPage) : 1;
+    if (normalizedQueryPage === currentPage) return;
+    if (currentPage > 1) {
+      query.set('page', String(currentPage));
+    } else {
+      query.delete('page');
+    }
+    const nextSearch = query.toString();
+    navigate(
+      {
+        pathname: location.pathname,
+        search: nextSearch ? `?${nextSearch}` : ''
+      },
+      { replace: true }
+    );
+  }, [currentPage, location.pathname, location.search, navigate]);
 
   useEffect(() => {
     const nextPriorityTaskRowIds = pagedRows
@@ -150,6 +176,7 @@ export function ProjectTasksPage() {
   } = useProjectTaskRowActions({
     project,
     canManageProject: canEdit,
+    taskListPage: currentPage,
     navigate,
     setError,
     setTasks,

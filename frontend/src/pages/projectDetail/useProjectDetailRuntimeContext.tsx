@@ -338,6 +338,19 @@ function hasObjectContent(value: unknown): boolean {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length > 0);
 }
 
+function hasTaskInputSnapshotPayload(
+  task: {
+    protein_sequence?: string | null;
+    ligand_smiles?: string | null;
+    components?: unknown;
+  } | null | undefined
+): boolean {
+  if (!task) return false;
+  if (String(task.protein_sequence || '').trim()) return true;
+  if (String(task.ligand_smiles || '').trim()) return true;
+  return Array.isArray(task.components) && task.components.length > 0;
+}
+
 function asObjectRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
@@ -423,6 +436,21 @@ function mergePayloadFields<T extends object, U extends object>(next: T, prev: U
   const nextAny = next as Record<string, unknown>;
   const prevAny = prev as Record<string, unknown>;
   const merged = { ...nextAny };
+  const preserveNonEmptyScalarField = (key: string) => {
+    if (!Object.prototype.hasOwnProperty.call(nextAny, key) && !Object.prototype.hasOwnProperty.call(prevAny, key)) {
+      return;
+    }
+    const nextValue = nextAny[key];
+    if (typeof nextValue === 'string') {
+      merged[key] = nextValue.trim().length > 0 ? nextValue : prevAny[key];
+      return;
+    }
+    if (nextValue !== undefined && nextValue !== null) {
+      merged[key] = nextValue;
+      return;
+    }
+    merged[key] = prevAny[key];
+  };
   if (Object.prototype.hasOwnProperty.call(nextAny, 'confidence') || Object.prototype.hasOwnProperty.call(prevAny, 'confidence')) {
     merged.confidence = hasObjectContent(nextAny.confidence) ? nextAny.confidence : prevAny.confidence;
   }
@@ -442,6 +470,9 @@ function mergePayloadFields<T extends object, U extends object>(next: T, prev: U
     const nextConstraints = Array.isArray(nextAny.constraints) ? nextAny.constraints : [];
     merged.constraints = nextConstraints.length > 0 ? nextConstraints : prevAny.constraints;
   }
+  preserveNonEmptyScalarField('ligand_smiles');
+  preserveNonEmptyScalarField('protein_sequence');
+  preserveNonEmptyScalarField('structure_name');
   return merged as T;
 }
 
@@ -653,6 +684,7 @@ export function useProjectDetailRuntimeContext() {
   const local = useProjectDetailLocalState();
   const leadOptTabHydrationRef = useRef<Record<string, string>>({});
   const peptideResultHydrationRef = useRef<Record<string, string>>({});
+  const viewerResultHydrationRef = useRef<Record<string, string>>({});
   const {
     project,
     setProject,
@@ -1518,11 +1550,51 @@ export function useProjectDetailRuntimeContext() {
     draftProperties: draft?.inputConfig.properties,
     statusContextTaskRow,
     requestedStatusTaskRow,
+    viewerTaskId: structureTaskId,
     normalizedDraftComponents,
     workflowKey,
     shouldComputeResultMetrics: workspaceTab === 'results',
     isDraftTaskSnapshot: (task) => isDraftTaskSnapshot(task ?? null),
   });
+
+  useEffect(() => {
+    if (workspaceTab !== 'results') return;
+    const sourceRow = activeResultTask || null;
+    const sourceRowId = String(sourceRow?.id || '').trim();
+    if (!sourceRowId || sourceRowId.startsWith('local-')) return;
+    if (hasTaskInputSnapshotPayload(sourceRow)) return;
+
+    const marker = [sourceRowId, String(sourceRow?.updated_at || '').trim(), String(sourceRow?.task_id || '').trim()].join('|');
+    if (viewerResultHydrationRef.current[sourceRowId] === marker) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const detailRow = await getProjectTaskDetailCached(sourceRowId, {
+          includeComponents: true,
+          includeConstraints: false,
+          includeProperties: true,
+          includeConfidence: true,
+          includeAffinity: true,
+          includeProteinSequence: true
+        });
+        if (cancelled || !detailRow) return;
+        if (!hasTaskInputSnapshotPayload(detailRow)) return;
+        viewerResultHydrationRef.current[sourceRowId] = marker;
+        setProjectTasks((prev) =>
+          prev.map((row) =>
+            String(row.id || '').trim() === sourceRowId ? mergeTaskRuntimeFields(detailRow, row) : row
+          )
+        );
+      } catch {
+        // Keep the current snapshot; a later detail refresh can retry hydration.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeResultTask, getProjectTaskDetailCached, setProjectTasks, workspaceTab]);
 
   useEffect(() => {
     if (workflowKey !== 'peptide_design') return;
