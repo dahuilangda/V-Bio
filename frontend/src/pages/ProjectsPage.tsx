@@ -24,7 +24,6 @@ import { useAuth } from '../hooks/useAuth';
 import { useProjects } from '../hooks/useProjects';
 import { formatDateTime } from '../utils/date';
 import { canDeleteProject, canEditProject as canEditProjectAccess, canManageProjectShares } from '../utils/accessControl';
-import { buildDefaultInputConfig, saveProjectInputConfig } from '../utils/projectInputs';
 import { getWorkflowDefinition, type WorkflowKey, WORKFLOWS } from '../utils/workflows';
 import type { Project, ProjectTaskCounts, TaskState } from '../types/models';
 
@@ -380,7 +379,6 @@ export function ProjectsPage() {
       if (!created?.id) {
         throw new Error('Project was created but no project ID was returned from PostgREST.');
       }
-      saveProjectInputConfig(created.id, buildDefaultInputConfig(workflow));
       setShowCreate(false);
       navigate(`/projects/${created.id}?tab=inputs`);
     } catch (err) {

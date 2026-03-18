@@ -10,8 +10,11 @@ import type {
 
 const COMPONENT_KEY = 'vbio_project_input_config_v1';
 const UI_STATE_KEY = 'vbio_project_ui_state_v1';
+const COMPONENT_ITEM_KEY_PREFIX = `${COMPONENT_KEY}:`;
+const UI_STATE_ITEM_KEY_PREFIX = `${UI_STATE_KEY}:`;
 const SESSION_KEY = 'vbio_session';
 const TEMPLATE_CONTENT_REF_PREFIX = '@pool:';
+const QUOTA_ERROR_NAMES = new Set(['QuotaExceededError', 'NS_ERROR_DOM_QUOTA_REACHED']);
 const VALID_MOLECULE_TYPES: MoleculeType[] = ['protein', 'ligand', 'dna', 'rna'];
 const VALID_LIGAND_INPUT_METHODS = new Set(['smiles', 'ccd', 'jsme']);
 const INVALID_COMPONENT_ID_TOKENS = new Set(['undefined', 'null', 'nan']);
@@ -554,6 +557,92 @@ function buildScopedProjectStorageKey(projectId: string): string {
   return `${sessionIdentity}:${normalizedProjectId}`;
 }
 
+function buildScopedStorageItemKey(prefix: string, projectId: string): string {
+  const scopedProjectKey = buildScopedProjectStorageKey(projectId);
+  if (!scopedProjectKey) return '';
+  return `${prefix}${scopedProjectKey}`;
+}
+
+function buildStorageItemKeyFromScopedKey(prefix: string, scopedProjectKey: string): string {
+  const normalizedScopedProjectKey = String(scopedProjectKey || '').trim();
+  if (!normalizedScopedProjectKey) return '';
+  return `${prefix}${normalizedScopedProjectKey}`;
+}
+
+function readScopedStorageItem<T>(storageKey: string): T | null {
+  if (typeof localStorage === 'undefined' || !storageKey) return null;
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return null;
+    const data = JSON.parse(raw) as T;
+    if (data && typeof data === 'object') {
+      return data;
+    }
+  } catch {
+    // ignore malformed storage
+  }
+  return null;
+}
+
+function isQuotaExceededError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const name = typeof (error as { name?: unknown }).name === 'string' ? (error as { name: string }).name : '';
+  const code = typeof (error as { code?: unknown }).code === 'number' ? (error as { code: number }).code : null;
+  return QUOTA_ERROR_NAMES.has(name) || code === 22 || code === 1014;
+}
+
+function writeScopedStorageItem(
+  storageKey: string,
+  value: unknown,
+  options?: {
+    legacyStoreKey?: string;
+    fallbackValue?: unknown;
+  }
+): boolean {
+  if (typeof localStorage === 'undefined' || !storageKey) return false;
+  const payload = JSON.stringify(value);
+  const hasFallbackValue = Boolean(options && 'fallbackValue' in options);
+  const fallbackPayload = hasFallbackValue ? JSON.stringify(options?.fallbackValue) : '';
+
+  try {
+    localStorage.setItem(storageKey, payload);
+    return true;
+  } catch (error) {
+    if (!isQuotaExceededError(error)) {
+      console.warn(`Failed to persist storage item "${storageKey}".`, error);
+      return false;
+    }
+  }
+
+  if (options?.legacyStoreKey) {
+    try {
+      localStorage.removeItem(options.legacyStoreKey);
+      localStorage.setItem(storageKey, payload);
+      return true;
+    } catch (error) {
+      if (!isQuotaExceededError(error)) {
+        console.warn(`Failed to persist storage item "${storageKey}" after clearing legacy store.`, error);
+        return false;
+      }
+    }
+  }
+
+  if (hasFallbackValue) {
+    try {
+      localStorage.setItem(storageKey, fallbackPayload);
+      return true;
+    } catch (error) {
+      if (!isQuotaExceededError(error)) {
+        console.warn(`Failed to persist fallback storage item "${storageKey}".`, error);
+        return false;
+      }
+    }
+  }
+
+  console.warn(`Skipped persisting storage item "${storageKey}" because browser storage quota was exceeded.`);
+  return false;
+}
+
 function readUiStore(): Record<string, ProjectUiState> {
   try {
     const raw = localStorage.getItem(UI_STATE_KEY);
@@ -702,21 +791,28 @@ function normalizeAffinityUpload(
 export function loadProjectInputConfig(projectId: string): ProjectInputConfig | null {
   const scopedProjectKey = buildScopedProjectStorageKey(projectId);
   if (!scopedProjectKey) return null;
-  const store = readStore();
-  const found = store[scopedProjectKey];
+  const directStorageKey = buildStorageItemKeyFromScopedKey(COMPONENT_ITEM_KEY_PREFIX, scopedProjectKey);
+  const directConfig = readScopedStorageItem<ProjectInputConfig>(directStorageKey);
+  const found = directConfig || readStore()[scopedProjectKey];
   if (!found || !Array.isArray(found.components)) return null;
   return normalizeConfig(found);
 }
 
 export function saveProjectInputConfig(projectId: string, config: ProjectInputConfig): void {
-  const scopedProjectKey = buildScopedProjectStorageKey(projectId);
-  if (!scopedProjectKey) return;
-  const store = readStore();
-  store[scopedProjectKey] = config;
-  writeStore(store);
+  const storageKey = buildScopedStorageItemKey(COMPONENT_ITEM_KEY_PREFIX, projectId);
+  if (!storageKey) return;
+  writeScopedStorageItem(storageKey, config, { legacyStoreKey: COMPONENT_KEY });
 }
 
 export function removeProjectInputConfig(projectId: string): void {
+  const storageKey = buildScopedStorageItemKey(COMPONENT_ITEM_KEY_PREFIX, projectId);
+  if (storageKey && typeof localStorage !== 'undefined') {
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      // ignore storage cleanup errors
+    }
+  }
   const scopedProjectKey = buildScopedProjectStorageKey(projectId);
   if (!scopedProjectKey) return;
   const store = readStore();
@@ -727,8 +823,9 @@ export function removeProjectInputConfig(projectId: string): void {
 export function loadProjectUiState(projectId: string): ProjectUiState | null {
   const scopedProjectKey = buildScopedProjectStorageKey(projectId);
   if (!scopedProjectKey) return null;
-  const store = readUiStore();
-  const found = store[scopedProjectKey];
+  const directStorageKey = buildStorageItemKeyFromScopedKey(UI_STATE_ITEM_KEY_PREFIX, scopedProjectKey);
+  const directState = readScopedStorageItem<ProjectUiState>(directStorageKey);
+  const found = directState || readUiStore()[scopedProjectKey];
   if (!found || typeof found !== 'object') return null;
   const templateContentPool = normalizeTemplateContentPool((found as any).templateContentPool);
 
@@ -799,8 +896,9 @@ export function loadProjectUiState(projectId: string): ProjectUiState | null {
 export function saveProjectUiState(projectId: string, uiState: ProjectUiState): void {
   const scopedProjectKey = buildScopedProjectStorageKey(projectId);
   if (!scopedProjectKey) return;
-  const baseStore = readUiStore();
-  const currentStoredState = baseStore[scopedProjectKey];
+  const storageKey = buildStorageItemKeyFromScopedKey(UI_STATE_ITEM_KEY_PREFIX, scopedProjectKey);
+  const currentStoredState =
+    readScopedStorageItem<Record<string, unknown>>(storageKey) || readUiStore()[scopedProjectKey] || null;
   const contentPool = normalizeTemplateContentPool(uiState.templateContentPool || (currentStoredState as any)?.templateContentPool);
   const usedPoolKeys = new Set<string>();
   const proteinTemplates = serializeProteinTemplates(uiState.proteinTemplates, contentPool, usedPoolKeys);
@@ -838,7 +936,7 @@ export function saveProjectUiState(projectId: string, uiState: ProjectUiState): 
     }
   }
 
-  baseStore[scopedProjectKey] = {
+  const serializedState: ProjectUiState = {
     proteinTemplates,
     taskProteinTemplates,
     taskAffinityUploads,
@@ -847,26 +945,33 @@ export function saveProjectUiState(projectId: string, uiState: ProjectUiState): 
     activeConstraintId: uiState.activeConstraintId || null,
     selectedConstraintTemplateComponentId: uiState.selectedConstraintTemplateComponentId || null
   };
+  const fallbackState: ProjectUiState = {
+    proteinTemplates: {},
+    taskProteinTemplates: {},
+    taskAffinityUploads: {},
+    affinityUploads: {
+      target: null,
+      ligand: null
+    },
+    activeConstraintId: uiState.activeConstraintId || null,
+    selectedConstraintTemplateComponentId: uiState.selectedConstraintTemplateComponentId || null
+  };
 
-  try {
-    writeUiStore(baseStore);
-  } catch {
-    baseStore[scopedProjectKey] = {
-      proteinTemplates: {},
-      taskProteinTemplates: {},
-      taskAffinityUploads: {},
-      affinityUploads: {
-        target: null,
-        ligand: null
-      },
-      activeConstraintId: uiState.activeConstraintId || null,
-      selectedConstraintTemplateComponentId: uiState.selectedConstraintTemplateComponentId || null
-    };
-    writeUiStore(baseStore);
-  }
+  writeScopedStorageItem(storageKey, serializedState, {
+    legacyStoreKey: UI_STATE_KEY,
+    fallbackValue: fallbackState
+  });
 }
 
 export function removeProjectUiState(projectId: string): void {
+  const storageKey = buildScopedStorageItemKey(UI_STATE_ITEM_KEY_PREFIX, projectId);
+  if (storageKey && typeof localStorage !== 'undefined') {
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      // ignore storage cleanup errors
+    }
+  }
   const scopedProjectKey = buildScopedProjectStorageKey(projectId);
   if (!scopedProjectKey) return;
   const store = readUiStore();
