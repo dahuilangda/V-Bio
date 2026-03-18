@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import type { InputComponent, ProjectTask } from '../../types/models';
-import { enumerateLeadOptimizationMmp, getTaskStatus } from '../../api/backendApi';
+import { enumerateLeadOptimizationMmp, getTaskStatuses } from '../../api/backendApi';
 import { useAuth } from '../../hooks/useAuth';
 import {
   getProjectTaskById,
@@ -148,7 +148,7 @@ const TASK_STATE_PRIORITY: Record<string, number> = {
   FAILURE: 3,
   REVOKED: 3,
 };
-const RUNTIME_STATUS_LIGHT_POLL_MAX_TASKS = 3;
+const RUNTIME_STATUS_LIGHT_POLL_MAX_TASKS = 24;
 const LEADOPT_CANDIDATE_HYDRATION_RETRY_MS = 15000;
 const LEADOPT_CANDIDATE_REPAIR_RETRY_MS = 60000;
 
@@ -1049,20 +1049,16 @@ export function useProjectDetailRuntimeContext() {
               taskIdsForPoll.push(runtimeTaskIds[(startCursor + i) % runtimeTaskIds.length]);
             }
             runtimeTaskStatusCursorRef.current = (startCursor + pollSize) % runtimeTaskIds.length;
-            const statusEntries = await Promise.all(
-              taskIdsForPoll.map(async (taskId) => {
-                try {
-                  const status = await getTaskStatus(taskId);
-                  return [taskId, status] as const;
-                } catch {
-                  return null;
-                }
-              })
-            );
             const statusByTaskId: Record<string, { task_id: string; state: string; info?: Record<string, unknown> }> = {};
-            for (const entry of statusEntries) {
-              if (!entry) continue;
-              const [taskId, status] = entry;
+            for (let i = 0; i < taskIdsForPoll.length; i += 64) {
+              const chunk = taskIdsForPoll.slice(i, i + 64);
+              try {
+                Object.assign(statusByTaskId, await getTaskStatuses(chunk));
+              } catch {
+                // Keep partial successes from other chunks.
+              }
+            }
+            for (const [taskId, status] of Object.entries(statusByTaskId)) {
               const inferred = inferTaskStateFromStatusPayload(status);
               if (inferred === 'SUCCESS' || inferred === 'FAILURE' || inferred === 'REVOKED') {
                 runtimeTerminalStatusByTaskIdRef.current[taskId] = status;

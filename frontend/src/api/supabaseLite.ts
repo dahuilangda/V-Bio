@@ -1541,13 +1541,19 @@ function sanitizeProjectTaskWritePayload(payload: Partial<ProjectTask>): Partial
   };
 }
 
-interface ProjectTaskStateRow {
+export interface ProjectTaskRuntimeRow {
+  id: string;
   project_id: string;
   task_id: string;
   task_state: TaskState;
+  status_text: string;
+  error_text: string;
+  submitted_at: string | null;
+  completed_at: string | null;
+  duration_seconds: number | null;
 }
 
-export async function listProjectTaskStatesByProjects(projectIds: string[]): Promise<ProjectTaskStateRow[]> {
+export async function listProjectTaskStatesByProjects(projectIds: string[]): Promise<ProjectTaskRuntimeRow[]> {
   const normalizedIds = Array.from(new Set(projectIds.map((id) => id.trim()).filter(Boolean)));
   if (normalizedIds.length === 0) return [];
 
@@ -1560,8 +1566,8 @@ export async function listProjectTaskStatesByProjects(projectIds: string[]): Pro
 
   const results = await Promise.all(
     chunks.map((chunk) =>
-      request<ProjectTaskStateRow[]>('/project_tasks', undefined, {
-        select: 'project_id,task_id,task_state',
+      request<ProjectTaskRuntimeRow[]>('/project_tasks', undefined, {
+        select: 'id,project_id,task_id,task_state,status_text,error_text,submitted_at,completed_at,duration_seconds',
         project_id: `in.(${chunk.join(',')})`
       })
     )
@@ -1569,16 +1575,11 @@ export async function listProjectTaskStatesByProjects(projectIds: string[]): Pro
   return results.flat();
 }
 
-export async function listProjectTaskStatesByTaskRowIds(taskRowIds: string[]): Promise<Array<{
-  id: string;
-  project_id: string;
-  task_id: string;
-  task_state: TaskState;
-}>> {
+export async function listProjectTaskStatesByTaskRowIds(taskRowIds: string[]): Promise<ProjectTaskRuntimeRow[]> {
   const idFilter = buildInFilter(taskRowIds);
   if (!idFilter) return [];
-  return request<Array<{ id: string; project_id: string; task_id: string; task_state: TaskState }>>('/project_tasks', undefined, {
-    select: 'id,project_id,task_id,task_state',
+  return request<ProjectTaskRuntimeRow[]>('/project_tasks', undefined, {
+    select: 'id,project_id,task_id,task_state,status_text,error_text,submitted_at,completed_at,duration_seconds',
     id: idFilter
   });
 }

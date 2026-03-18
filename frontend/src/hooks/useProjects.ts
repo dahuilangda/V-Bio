@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Project, ProjectTask, ProjectTaskCounts, Session, TaskState, TaskStatusResponse } from '../types/models';
+import type { Project, ProjectTaskCounts, Session, TaskStatusResponse } from '../types/models';
 import {
   insertProject,
   listAccessibleProjects,
   listProjectTaskStatesByProjects,
   listProjectTaskStatesByTaskRowIds,
   updateProject,
-  updateProjectTaskByTaskId
+  updateProjectTask,
+  type ProjectTaskRuntimeRow
 } from '../api/supabaseLite';
-import { getTaskStatus } from '../api/backendApi';
+import { getTaskStatuses } from '../api/backendApi';
 import { removeProjectInputConfig, removeProjectUiState } from '../utils/projectInputs';
 import { canEditProject } from '../utils/accessControl';
+import { inferTaskStateFromStatusPayload, readTaskRuntimeStatusText } from '../utils/taskRuntime';
 import { normalizeWorkflowKey } from '../utils/workflows';
 
 const DEFAULT_TASK_TYPE = 'prediction';
@@ -23,7 +25,6 @@ const TASK_STATE_PRIORITY: Record<string, number> = {
   FAILURE: 3,
   REVOKED: 3
 };
-const TASK_STATUS_POLL_MAX_TASKS = 24;
 const TASK_STATUS_POLL_CHUNK_SIZE = 3;
 
 export interface CreateProjectInput {
@@ -40,16 +41,6 @@ interface LoadProjectsOptions {
   silent?: boolean;
   statusOnly?: boolean;
   preferBackendStatus?: boolean;
-}
-
-function mapTaskState(raw: string): Project['task_state'] {
-  const normalized = raw.toUpperCase();
-  if (normalized === 'SUCCESS') return 'SUCCESS';
-  if (normalized === 'FAILURE') return 'FAILURE';
-  if (normalized === 'REVOKED') return 'REVOKED';
-  if (normalized === 'PENDING' || normalized === 'RECEIVED' || normalized === 'RETRY') return 'QUEUED';
-  if (normalized === 'STARTED' || normalized === 'RUNNING' || normalized === 'PROGRESS') return 'RUNNING';
-  return 'QUEUED';
 }
 
 function taskStatePriority(value: unknown): number {
@@ -87,15 +78,6 @@ function canPersistProjectWrites(project: Project | null | undefined): boolean {
   return canEditProject(project);
 }
 
-function readStatusText(status: { info?: Record<string, unknown>; state: string }): string {
-  if (!status.info) return status.state;
-  const s1 = status.info.status;
-  const s2 = status.info.message;
-  if (typeof s1 === 'string' && s1.trim()) return s1;
-  if (typeof s2 === 'string' && s2.trim()) return s2;
-  return status.state;
-}
-
 async function fetchRuntimeStatusesByTaskId(taskIds: string[]): Promise<Record<string, TaskStatusResponse>> {
   const normalizedTaskIds = Array.from(
     new Set(
@@ -103,25 +85,16 @@ async function fetchRuntimeStatusesByTaskId(taskIds: string[]): Promise<Record<s
         .map((item) => String(item || '').trim())
         .filter(Boolean)
     )
-  ).slice(0, TASK_STATUS_POLL_MAX_TASKS);
+  );
   if (normalizedTaskIds.length === 0) return {};
 
   const byTaskId: Record<string, TaskStatusResponse> = {};
-  for (let i = 0; i < normalizedTaskIds.length; i += TASK_STATUS_POLL_CHUNK_SIZE) {
-    const chunk = normalizedTaskIds.slice(i, i + TASK_STATUS_POLL_CHUNK_SIZE);
-    const responses = await Promise.all(
-      chunk.map(async (taskId) => {
-        try {
-          return await getTaskStatus(taskId);
-        } catch {
-          return null;
-        }
-      })
-    );
-    for (const response of responses) {
-      const responseTaskId = String(response?.task_id || '').trim();
-      if (!responseTaskId || !response) continue;
-      byTaskId[responseTaskId] = response;
+  for (let i = 0; i < normalizedTaskIds.length; i += Math.max(TASK_STATUS_POLL_CHUNK_SIZE, 64)) {
+    const chunk = normalizedTaskIds.slice(i, i + Math.max(TASK_STATUS_POLL_CHUNK_SIZE, 64));
+    try {
+      Object.assign(byTaskId, await getTaskStatuses(chunk));
+    } catch {
+      // Keep partial successes from other chunks.
     }
   }
 
@@ -139,21 +112,9 @@ function emptyProjectTaskCounts(): ProjectTaskCounts {
   };
 }
 
-function fallbackCountsFromState(state: TaskState, hasTaskId: boolean): ProjectTaskCounts {
-  const counts = emptyProjectTaskCounts();
-  if (!hasTaskId && state === 'DRAFT') return counts;
-  counts.total = 1;
-  if (state === 'RUNNING') counts.running = 1;
-  else if (state === 'SUCCESS') counts.success = 1;
-  else if (state === 'FAILURE') counts.failure = 1;
-  else if (state === 'QUEUED') counts.queued = 1;
-  else counts.other = 1;
-  return counts;
-}
-
 function countProjectTaskStates(
   projectIds: string[],
-  rows: Array<{ project_id: string; task_id: string; task_state: TaskState }>
+  rows: ProjectTaskRuntimeRow[]
 ): Map<string, ProjectTaskCounts> {
   const map = new Map<string, ProjectTaskCounts>();
   projectIds.forEach((id) => map.set(id, emptyProjectTaskCounts()));
@@ -170,19 +131,77 @@ function countProjectTaskStates(
   return map;
 }
 
-function stateBucket(state: TaskState): keyof Pick<ProjectTaskCounts, 'running' | 'success' | 'failure' | 'queued' | 'other'> {
-  if (state === 'RUNNING') return 'running';
-  if (state === 'SUCCESS') return 'success';
-  if (state === 'FAILURE') return 'failure';
-  if (state === 'QUEUED') return 'queued';
-  return 'other';
+function applyRuntimeStatusToTaskRow(
+  row: ProjectTaskRuntimeRow,
+  statusPayload: TaskStatusResponse | null | undefined
+): ProjectTaskRuntimeRow {
+  if (!statusPayload) return row;
+  const taskState = inferTaskStateFromStatusPayload(statusPayload, row.task_state);
+  const statusText = readTaskRuntimeStatusText(statusPayload);
+  const errorText = taskState === 'FAILURE' ? statusText : '';
+  const terminal = taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED';
+  const completedAt = terminal ? row.completed_at || new Date().toISOString() : null;
+  const durationSeconds =
+    terminal && row.submitted_at
+      ? Math.max(0, (new Date(completedAt || Date.now()).getTime() - new Date(row.submitted_at).getTime()) / 1000)
+      : null;
+
+  return {
+    ...row,
+    task_state: taskState,
+    status_text: statusText,
+    error_text: errorText,
+    completed_at: completedAt,
+    duration_seconds: Number.isFinite(durationSeconds as number) ? durationSeconds : null
+  };
 }
 
-function withFallbackCounts(rows: Project[], existingCounts?: Map<string, ProjectTaskCounts | undefined>): Project[] {
-  return rows.map((row) => ({
+function applyRuntimeStatusToProjectRow(
+  row: Project,
+  statusPayload: TaskStatusResponse | null | undefined
+): Project {
+  if (!statusPayload) return row;
+  const taskState = inferTaskStateFromStatusPayload(statusPayload, row.task_state);
+  const statusText = readTaskRuntimeStatusText(statusPayload);
+  const errorText = taskState === 'FAILURE' ? statusText : '';
+  const terminal = taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED';
+  const completedAt = terminal ? row.completed_at || new Date().toISOString() : null;
+  const durationSeconds =
+    terminal && row.submitted_at
+      ? Math.max(0, (new Date(completedAt || Date.now()).getTime() - new Date(row.submitted_at).getTime()) / 1000)
+      : null;
+
+  return {
     ...row,
-    task_counts: existingCounts?.get(row.id) || fallbackCountsFromState(row.task_state, Boolean(row.task_id))
-  }));
+    task_state: taskState,
+    status_text: statusText,
+    error_text: errorText,
+    completed_at: completedAt,
+    duration_seconds: Number.isFinite(durationSeconds as number) ? durationSeconds : null
+  };
+}
+
+function sameProjectRuntime(a: Project, b: Project): boolean {
+  return (
+    a.task_id === b.task_id &&
+    a.task_state === b.task_state &&
+    a.status_text === b.status_text &&
+    a.error_text === b.error_text &&
+    a.submitted_at === b.submitted_at &&
+    a.completed_at === b.completed_at &&
+    a.duration_seconds === b.duration_seconds
+  );
+}
+
+function sameTaskRuntimeRow(a: ProjectTaskRuntimeRow, b: ProjectTaskRuntimeRow): boolean {
+  return (
+    a.task_state === b.task_state &&
+    a.status_text === b.status_text &&
+    a.error_text === b.error_text &&
+    a.submitted_at === b.submitted_at &&
+    a.completed_at === b.completed_at &&
+    a.duration_seconds === b.duration_seconds
+  );
 }
 
 export function useProjects(session: Session | null) {
@@ -195,7 +214,6 @@ export function useProjects(session: Session | null) {
   const load = useCallback(async (options?: LoadProjectsOptions) => {
     const loadSeq = ++loadSeqRef.current;
     const silent = Boolean(options?.silent);
-    const statusOnly = Boolean(options?.statusOnly);
     const preferBackendStatus = Boolean(options?.preferBackendStatus);
 
     if (!session) {
@@ -207,202 +225,108 @@ export function useProjects(session: Session | null) {
       setError(null);
     }
     try {
-      let rows = await listAccessibleProjects(session.userId, {
+      const rows = await listAccessibleProjects(session.userId, {
         lightweight: true
+      });
+      if (loadSeqRef.current !== loadSeq) return;
+
+      const fullAccessProjectIds = rows
+        .filter((row) => String(row.access_scope || 'owner') !== 'task_share')
+        .map((row) => row.id);
+      const taskSharedProjects = rows.filter((row) => String(row.access_scope || 'owner') === 'task_share');
+      const [fullAccessTaskRows, taskShareTaskRows] = await Promise.all([
+        listProjectTaskStatesByProjects(fullAccessProjectIds),
+        listProjectTaskStatesByTaskRowIds(taskSharedProjects.flatMap((row) => row.accessible_task_ids || []))
+      ]);
+      if (loadSeqRef.current !== loadSeq) return;
+
+      const accessibleTaskRowIdSetByProject = new Map(
+        taskSharedProjects.map((row) => [
+          row.id,
+          new Set((row.accessible_task_ids || []).map((item) => String(item || '').trim()).filter(Boolean))
+        ] as const)
+      );
+
+      const scopedTaskRows = [
+        ...fullAccessTaskRows,
+        ...taskShareTaskRows.filter((row) => {
+          const scopedIds = accessibleTaskRowIdSetByProject.get(row.project_id);
+          return scopedIds ? scopedIds.has(String(row.id || '').trim()) : true;
+        })
+      ];
+
+      const runtimeTaskIds = preferBackendStatus
+        ? scopedTaskRows
+            .filter((row) => {
+              const taskId = String(row.task_id || '').trim();
+              const taskState = String(row.task_state || '').trim().toUpperCase();
+              return Boolean(taskId) && (taskState === 'QUEUED' || taskState === 'RUNNING');
+            })
+            .map((row) => String(row.task_id || '').trim())
+        : [];
+      const statusByTaskId = preferBackendStatus ? await fetchRuntimeStatusesByTaskId(runtimeTaskIds) : {};
+      if (loadSeqRef.current !== loadSeq) return;
+
+      const liveTaskRows = scopedTaskRows.map((row) =>
+        applyRuntimeStatusToTaskRow(row, statusByTaskId[String(row.task_id || '').trim()] || null)
+      );
+      const countsByProject = countProjectTaskStates(
+        rows.map((row) => row.id).filter(Boolean),
+        liveTaskRows
+      );
+      const liveProjects = rows.map((row) => {
+        const activeTaskId = String(row.task_id || '').trim();
+        const runtimeProject = preferBackendStatus
+          ? applyRuntimeStatusToProjectRow(row, statusByTaskId[activeTaskId] || null)
+          : row;
+        return {
+          ...runtimeProject,
+          task_counts: countsByProject.get(row.id) || emptyProjectTaskCounts()
+        };
       });
 
       if (preferBackendStatus) {
-        const runtimeRows = rows.filter((row) => Boolean(row.task_id) && (row.task_state === 'QUEUED' || row.task_state === 'RUNNING'));
-        if (runtimeRows.length > 0) {
-          let statusByTaskId: Record<string, { task_id: string; state: string; info?: Record<string, unknown> }> = {};
-          try {
-            statusByTaskId = await fetchRuntimeStatusesByTaskId(runtimeRows.map((row) => String(row.task_id || '').trim()));
-          } catch {
-            statusByTaskId = {};
-          }
-          const patchById = new Map<string, Partial<Project>>();
-          const taskPatches: Array<{ projectId: string; taskId: string; patch: Partial<ProjectTask> }> = [];
+        const originalProjectById = new Map(rows.map((row) => [row.id, row] as const));
+        const originalTaskRowById = new Map(scopedTaskRows.map((row) => [row.id, row] as const));
 
-          runtimeRows.forEach((source) => {
-            const sourceTaskId = String(source.task_id || '').trim();
-            if (!sourceTaskId) return;
-            const statusPayload = statusByTaskId[sourceTaskId];
-            if (!statusPayload) return;
-            const taskState = mapTaskState(statusPayload.state);
-            const statusText = readStatusText(statusPayload);
-            const errorText = taskState === 'FAILURE' ? statusText : '';
-            const terminal = taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED';
-            const completedAt = terminal ? source.completed_at || new Date().toISOString() : source.completed_at;
-            const durationSeconds =
-              terminal && source.submitted_at
-                ? Math.max(0, (new Date(completedAt || Date.now()).getTime() - new Date(source.submitted_at).getTime()) / 1000)
-                : source.duration_seconds;
+        for (const liveTaskRow of liveTaskRows) {
+          const sourceTaskRow = originalTaskRowById.get(liveTaskRow.id);
+          if (!sourceTaskRow || sameTaskRuntimeRow(sourceTaskRow, liveTaskRow)) continue;
+          const parentProject = originalProjectById.get(liveTaskRow.project_id) || null;
+          if (!canPersistProjectWrites(parentProject)) continue;
+          const taskPatch = {
+            task_state: liveTaskRow.task_state,
+            status_text: liveTaskRow.status_text,
+            error_text: liveTaskRow.error_text,
+            completed_at: liveTaskRow.completed_at,
+            duration_seconds: liveTaskRow.duration_seconds
+          };
+          void updateProjectTask(liveTaskRow.id, taskPatch, { minimalReturn: true }).catch(() => undefined);
+        }
 
-            if (
-              source.task_state === taskState &&
-              (source.status_text || '') === statusText &&
-              (source.error_text || '') === errorText &&
-              source.completed_at === completedAt &&
-              source.duration_seconds === durationSeconds
-            ) {
-              return;
-            }
-
-            const projectPatch: Partial<Project> = {
-              task_state: taskState,
-              status_text: statusText,
-              error_text: errorText,
-              completed_at: completedAt,
-              duration_seconds: Number.isFinite(durationSeconds as number) ? durationSeconds : null
-            };
-            const taskPatch: Partial<ProjectTask> = {
-              task_state: taskState,
-              status_text: statusText,
-              error_text: errorText,
-              completed_at: completedAt,
-              duration_seconds: Number.isFinite(durationSeconds as number) ? durationSeconds : null
-            };
-            patchById.set(source.id, projectPatch);
-            taskPatches.push({
-              projectId: source.id,
-              taskId: source.task_id,
-              patch: taskPatch
-            });
-          });
-
-          if (patchById.size > 0) {
-            rows = rows.map((row) => (patchById.has(row.id) ? { ...row, ...patchById.get(row.id)! } : row));
-            for (const [projectId, patch] of patchById.entries()) {
-              const target = rows.find((row) => row.id === projectId) || null;
-              if (!canPersistProjectWrites(target)) continue;
-              void updateProject(projectId, patch).catch(() => undefined);
-            }
-            for (const taskPatch of taskPatches) {
-              const target = rows.find((row) => row.id === taskPatch.projectId) || null;
-              if (!canPersistProjectWrites(target)) continue;
-              void updateProjectTaskByTaskId(taskPatch.taskId, taskPatch.patch, taskPatch.projectId).catch(() => undefined);
-            }
-          }
+        for (const liveProject of liveProjects) {
+          const sourceProject = originalProjectById.get(liveProject.id);
+          if (!sourceProject || sameProjectRuntime(sourceProject, liveProject)) continue;
+          if (!canPersistProjectWrites(sourceProject)) continue;
+          const projectPatch = {
+            task_state: liveProject.task_state,
+            status_text: liveProject.status_text,
+            error_text: liveProject.error_text,
+            completed_at: liveProject.completed_at,
+            duration_seconds: liveProject.duration_seconds
+          };
+          void updateProject(liveProject.id, projectPatch).catch(() => undefined);
         }
       }
+
       if (loadSeqRef.current !== loadSeq) return;
-
-      if (!statusOnly) {
-        setProjects((prev) => {
-          const prevById = new Map(prev.map((item) => [item.id, item] as const));
-          const mergedRows = rows.map((row) => mergeProjectRuntimeFields(row, prevById.get(row.id) || null));
-          const countsByProjectId = new Map(prev.map((item) => [item.id, item.task_counts]));
-          return withFallbackCounts(mergedRows, countsByProjectId);
-        });
-      }
-
-      const rowById = new Map(rows.map((row) => [row.id, row]));
-      if (statusOnly) {
-        if (loadSeqRef.current !== loadSeq) return;
-        setProjects((prev) =>
-          prev.map((project) => {
-            const next = rowById.get(project.id);
-            if (!next) return project;
-            const mergedNext = mergeProjectRuntimeFields(next, project);
-
-            if (
-              project.task_state === mergedNext.task_state &&
-              project.task_id === mergedNext.task_id &&
-              project.status_text === mergedNext.status_text &&
-              project.error_text === mergedNext.error_text &&
-              project.submitted_at === mergedNext.submitted_at &&
-              project.completed_at === mergedNext.completed_at &&
-              project.duration_seconds === mergedNext.duration_seconds
-            ) {
-              return project;
-            }
-
-            return {
-              ...project,
-              task_state: mergedNext.task_state,
-              task_id: mergedNext.task_id,
-              status_text: mergedNext.status_text,
-              error_text: mergedNext.error_text,
-              submitted_at: mergedNext.submitted_at,
-              completed_at: mergedNext.completed_at,
-              duration_seconds: mergedNext.duration_seconds
-            };
-          })
-        );
-        return;
-      }
-
-      const projectIds = rows.map((row) => row.id).filter(Boolean);
-      if (projectIds.length === 0) return;
-
-      void (async () => {
-        try {
-          const fullAccessProjectIds = rows
-            .filter((row) => String(row.access_scope || 'owner') !== 'task_share')
-            .map((row) => row.id);
-          const taskSharedProjects = rows.filter((row) => String(row.access_scope || 'owner') === 'task_share');
-          const [fullAccessStates, taskShareStates] = await Promise.all([
-            listProjectTaskStatesByProjects(fullAccessProjectIds),
-            listProjectTaskStatesByTaskRowIds(
-              taskSharedProjects.flatMap((row) => row.accessible_task_ids || [])
-            )
-          ]);
-          const countsByProject = countProjectTaskStates(fullAccessProjectIds, fullAccessStates);
-          for (const projectRow of taskSharedProjects) {
-            const taskIds = new Set((projectRow.accessible_task_ids || []).map((item) => String(item || '').trim()).filter(Boolean));
-            const scopedStates = taskShareStates.filter((item) => taskIds.has(String(item.id || '').trim()));
-            countsByProject.set(
-              projectRow.id,
-              countProjectTaskStates([projectRow.id], scopedStates.map((item) => ({
-                project_id: item.project_id,
-                task_id: item.task_id,
-                task_state: item.task_state
-              })) ).get(projectRow.id) || fallbackCountsFromState(projectRow.task_state, Boolean(projectRow.task_id))
-            );
-          }
-          const combinedTaskStates = [
-            ...fullAccessStates,
-            ...taskShareStates.map((item) => ({
-              project_id: item.project_id,
-              task_id: item.task_id,
-              task_state: item.task_state
-            }))
-          ];
-          const taskStateByProjectAndTaskId = new Map(
-            combinedTaskStates.map((item) => [`${item.project_id}:${item.task_id}`, item.task_state] as const)
-          );
-          rows.forEach((projectRow) => {
-            const activeTaskId = String(projectRow.task_id || '').trim();
-            if (!activeTaskId) return;
-            const counts = countsByProject.get(projectRow.id);
-            if (!counts) return;
-            const rowState = taskStateByProjectAndTaskId.get(`${projectRow.id}:${activeTaskId}`);
-            if (!rowState || rowState === projectRow.task_state) return;
-            const sourceBucket = stateBucket(rowState);
-            const targetBucket = stateBucket(projectRow.task_state);
-            if (sourceBucket === targetBucket) return;
-            counts[sourceBucket] = Math.max(0, counts[sourceBucket] - 1);
-            counts[targetBucket] += 1;
-          });
-          const rowsWithCounts = rows.map((row) => {
-            const counted = countsByProject.get(row.id);
-            if (!counted || counted.total <= 0) {
-              return {
-                ...row,
-                task_counts: fallbackCountsFromState(row.task_state, Boolean(row.task_id))
-              };
-            }
-            return {
-              ...row,
-              task_counts: counted
-            };
-          });
-          if (loadSeqRef.current !== loadSeq) return;
-          setProjects(rowsWithCounts);
-        } catch {
-          // Keep fallback counts if heavy count query fails.
-        }
-      })();
+      setProjects((prev) => {
+        const prevById = new Map(prev.map((item) => [item.id, item] as const));
+        return liveProjects.map((row) => ({
+          ...mergeProjectRuntimeFields(row, prevById.get(row.id) || null),
+          task_counts: row.task_counts
+        }));
+      });
     } catch (e) {
       if (!silent) {
         setError(e instanceof Error ? e.message : 'Failed to load projects.');

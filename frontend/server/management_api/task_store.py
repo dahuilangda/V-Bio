@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from management_api.postgrest_client import PostgrestClient
 
@@ -122,6 +122,51 @@ class ProjectTaskStore:
                 "project_id": normalized_project_id,
                 "task_id": normalized_task_id,
             }
+
+    def find_project_tasks(self, task_ids: List[str], project_id: str) -> Dict[str, Dict[str, Any]]:
+        normalized_project_id = str(project_id or "").strip()
+        normalized_task_ids = list(dict.fromkeys(str(task_id or "").strip() for task_id in task_ids if str(task_id or "").strip()))
+        if not normalized_project_id or not normalized_task_ids:
+            return {}
+
+        results: Dict[str, Dict[str, Any]] = {}
+        chunk_size = 100
+        for index in range(0, len(normalized_task_ids), chunk_size):
+            chunk = normalized_task_ids[index:index + chunk_size]
+            rows = self.postgrest.request(
+                "GET",
+                "project_tasks",
+                query={
+                    "select": "id,project_id,task_id",
+                    "task_id": f"in.({','.join(chunk)})",
+                    "project_id": f"eq.{normalized_project_id}",
+                    "order": "created_at.desc",
+                },
+            )
+            for row in rows or []:
+                task_id = str((row or {}).get("task_id") or "").strip()
+                if task_id and task_id not in results:
+                    results[task_id] = row
+
+        now = time.time()
+        with self._alias_lock:
+            self._cleanup_task_aliases_locked(now)
+            for normalized_task_id in normalized_task_ids:
+                if normalized_task_id in results:
+                    continue
+                alias = self._task_aliases.get(normalized_task_id)
+                if not alias:
+                    continue
+                if str(alias.get("project_id") or "").strip() != normalized_project_id:
+                    continue
+                alias["updated_at"] = now
+                results[normalized_task_id] = {
+                    "id": f"alias:{normalized_task_id}",
+                    "project_id": normalized_project_id,
+                    "task_id": normalized_task_id,
+                }
+
+        return results
 
     def mark_task_cancelled(self, task_row_id: str) -> None:
         normalized_task_row_id = str(task_row_id or "").strip()

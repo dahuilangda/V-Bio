@@ -1,68 +1,25 @@
 import type { TaskState } from '../../types/models';
+import {
+  inferTaskStateFromStatusPayload as inferRuntimeTaskStateFromStatusPayload,
+  mapBackendTaskState,
+  readTaskRuntimeStatusText
+} from '../../utils/taskRuntime';
 
 export type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
 
 export function mapTaskState(raw: string): TaskState {
-  const normalized = raw.toUpperCase();
-  if (normalized === 'SUCCESS') return 'SUCCESS';
-  if (normalized === 'FAILURE') return 'FAILURE';
-  if (normalized === 'REVOKED') return 'REVOKED';
-  if (normalized === 'PENDING' || normalized === 'RECEIVED' || normalized === 'RETRY') return 'QUEUED';
-  if (normalized === 'STARTED' || normalized === 'RUNNING' || normalized === 'PROGRESS') return 'RUNNING';
-  return 'QUEUED';
-}
-
-function resolveNonRegressiveTaskState(currentStateInput: unknown, incomingState: TaskState): TaskState {
-  const current = String(currentStateInput || '').trim().toUpperCase();
-  if (!current) return incomingState;
-  if (current === 'RUNNING' && incomingState === 'QUEUED') return 'RUNNING';
-  if ((current === 'SUCCESS' || current === 'FAILURE' || current === 'REVOKED') && (incomingState === 'QUEUED' || incomingState === 'RUNNING')) {
-    return current as TaskState;
-  }
-  return incomingState;
+  return mapBackendTaskState(raw);
 }
 
 export function readStatusText(task: { info?: Record<string, unknown>; state: string }) {
-  if (!task.info) return task.state;
-  const s1 = task.info.status;
-  const s2 = task.info.message;
-  if (typeof s1 === 'string' && s1.trim()) return s1;
-  if (typeof s2 === 'string' && s2.trim()) return s2;
-  return task.state;
+  return readTaskRuntimeStatusText(task);
 }
 
 export function inferTaskStateFromStatusPayload(
   task: { info?: Record<string, unknown>; state: string },
   currentStateInput?: unknown
 ): TaskState {
-  const mapped = mapTaskState(task.state);
-  const statusText = readStatusText(task).trim().toLowerCase();
-  const pendingLike = mapped === 'QUEUED' || mapped === 'RUNNING';
-  if (
-    statusText.includes('non-existent') ||
-    statusText.includes('does not exist') ||
-    statusText.includes('not found') ||
-    statusText.includes('unknown task') ||
-    statusText.includes('expired')
-  ) {
-    if (pendingLike) {
-      return resolveNonRegressiveTaskState(currentStateInput, mapped);
-    }
-    return resolveNonRegressiveTaskState(currentStateInput, 'FAILURE');
-  }
-  const hinted =
-    mapped === 'QUEUED' &&
-    (statusText.includes('running') ||
-      statusText.includes('started') ||
-      statusText.includes('starting') ||
-      statusText.includes('acquiring') ||
-      statusText.includes('preparing') ||
-      statusText.includes('uploading') ||
-      statusText.includes('processing') ||
-      statusText.includes('termination in progress'))
-      ? 'RUNNING'
-      : mapped;
-  return resolveNonRegressiveTaskState(currentStateInput, hinted);
+  return inferRuntimeTaskStateFromStatusPayload(task, currentStateInput);
 }
 
 export function findProgressPercent(data: unknown): number | null {

@@ -22,6 +22,7 @@ interface UseProjectTasksDataLoaderOptions {
   projectId: string;
   sessionUserId: string | null;
   workspaceView: 'tasks' | 'api';
+  priorityTaskRowIds?: string[];
 }
 
 interface UseProjectTasksDataLoaderResult {
@@ -219,6 +220,7 @@ export function useProjectTasksDataLoader({
   projectId,
   sessionUserId,
   workspaceView,
+  priorityTaskRowIds,
 }: UseProjectTasksDataLoaderOptions): UseProjectTasksDataLoaderResult {
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<ProjectTask[]>([]);
@@ -244,8 +246,11 @@ export function useProjectTasksDataLoader({
   }, [tasks]);
 
   const syncRuntimeTasks = useCallback(
-    async (projectRow: Project, taskRows: ProjectTask[]) => syncRuntimeTaskRows(projectRow, taskRows),
-    []
+    async (projectRow: Project, taskRows: ProjectTask[]) =>
+      syncRuntimeTaskRows(projectRow, taskRows, {
+        priorityTaskRowIds
+      }),
+    [priorityTaskRowIds]
   );
 
   const hydrateTaskMetricsFromResults = useCallback(
@@ -455,7 +460,7 @@ export function useProjectTasksDataLoader({
     let timer: number | null = null;
     let inFlight = false;
     const computeDelayMs = () => {
-      const baseDelay = runtimePollState.hasRunning ? 5000 : runtimePollState.hasQueued ? 9000 : 12000;
+      const baseDelay = runtimePollState.hasRunning ? 2500 : runtimePollState.hasQueued ? 4000 : 9000;
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
         return baseDelay * 2;
       }

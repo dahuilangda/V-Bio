@@ -68,8 +68,8 @@ export type {
 
 export { previewAffinityComplex, submitAffinityScoring } from './backendAffinityApi';
 
-export { downloadResultBlob, getTaskStatus, terminateTask } from './backendTaskApi';
-export type { DownloadResultMode } from './backendTaskApi';
+export { downloadResultBlob, getTaskRuntimeIndex, getTaskStatus, getTaskStatuses, terminateTask } from './backendTaskApi';
+export type { DownloadResultMode, TaskRuntimeIndexResponse } from './backendTaskApi';
 
 export {
   compactResultConfidenceForStorage,

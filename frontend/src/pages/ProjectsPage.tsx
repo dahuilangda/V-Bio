@@ -25,7 +25,7 @@ import { useProjects } from '../hooks/useProjects';
 import { formatDateTime } from '../utils/date';
 import { canDeleteProject, canEditProject as canEditProjectAccess, canManageProjectShares } from '../utils/accessControl';
 import { getWorkflowDefinition, type WorkflowKey, WORKFLOWS } from '../utils/workflows';
-import type { Project, ProjectTaskCounts, TaskState } from '../types/models';
+import type { Project, TaskState } from '../types/models';
 
 const workflowIconMap: Record<WorkflowKey, JSX.Element> = {
   prediction: <Dna size={16} />,
@@ -33,25 +33,6 @@ const workflowIconMap: Record<WorkflowKey, JSX.Element> = {
   lead_optimization: <FlaskConical size={16} />,
   affinity: <Beaker size={16} />
 };
-
-function fallbackCounts(taskState: TaskState, hasTaskId: boolean): ProjectTaskCounts {
-  const counts: ProjectTaskCounts = {
-    total: 0,
-    running: 0,
-    success: 0,
-    failure: 0,
-    queued: 0,
-    other: 0
-  };
-  if (!hasTaskId && taskState === 'DRAFT') return counts;
-  counts.total = 1;
-  if (taskState === 'RUNNING') counts.running = 1;
-  else if (taskState === 'SUCCESS') counts.success = 1;
-  else if (taskState === 'FAILURE') counts.failure = 1;
-  else if (taskState === 'QUEUED') counts.queued = 1;
-  else counts.other = 1;
-  return counts;
-}
 
 type ProjectActivityFilter = 'all' | 'active' | 'completed' | 'failed' | 'no_tasks';
 type ProjectSortBy = 'updated_desc' | 'updated_asc' | 'created_desc' | 'created_asc' | 'name_asc' | 'name_desc';
@@ -107,7 +88,7 @@ export function ProjectsPage() {
   const hasActiveRuntime = useMemo(
     () =>
       projects.some((item) => {
-        const counts = item.task_counts || fallbackCounts(item.task_state, Boolean(item.task_id));
+        const counts = item.task_counts!;
         return counts.queued > 0 || counts.running > 0 || item.task_state === 'QUEUED' || item.task_state === 'RUNNING';
       }),
     [projects]
@@ -228,7 +209,7 @@ export function ProjectsPage() {
     const updatedCutoff = updatedWindowMs === null ? null : Date.now() - updatedWindowMs;
     const filtered = projects.filter((project) => {
       const workflowDef = getWorkflowDefinition(project.task_type);
-      const counts = project.task_counts || fallbackCounts(project.task_state, Boolean(project.task_id));
+      const counts = project.task_counts!;
       const backendValue = String(project.backend || '').trim().toLowerCase();
       const hasActiveRuntime = counts.queued > 0 || counts.running > 0;
       if (typeFilter !== 'all' && workflowDef.key !== typeFilter) return false;
@@ -654,7 +635,7 @@ export function ProjectsPage() {
               <tbody>
                 {pagedProjects.map((project) => {
                   const workflowDef = getWorkflowDefinition(project.task_type);
-                  const counts = project.task_counts || fallbackCounts(project.task_state, Boolean(project.task_id));
+                  const counts = project.task_counts!;
                   const projectName = String(project.name || '').trim() || `Project ${String(project.id || '').slice(0, 8)}`;
                   const isEditingProjectName = editingProjectNameId === project.id;
                   const isSavingProjectName = savingProjectNameId === project.id;

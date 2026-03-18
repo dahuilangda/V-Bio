@@ -31,6 +31,7 @@ export function ProjectTasksPage() {
 
   const [exportingExcel, setExportingExcel] = useState(false);
   const [sharedTaskRow, setSharedTaskRow] = useState<ProjectTask | null>(null);
+  const [priorityTaskRowIds, setPriorityTaskRowIds] = useState<string[]>([]);
 
   const {
     project,
@@ -44,6 +45,7 @@ export function ProjectTasksPage() {
     projectId,
     sessionUserId: session?.userId || null,
     workspaceView,
+    priorityTaskRowIds
   });
   const canEdit = useMemo(() => Boolean(session) && canEditProject(project), [project, session]);
   const canManageShares = useMemo(
@@ -118,6 +120,18 @@ export function ProjectTasksPage() {
   } = useTaskListFiltering(taskRows, {
     storageScope: session?.userId || session?.username || null
   });
+
+  useEffect(() => {
+    const nextPriorityTaskRowIds = pagedRows
+      .map((row) => String(row.task.id || '').trim())
+      .filter(Boolean);
+    setPriorityTaskRowIds((prev) => {
+      if (prev.length === nextPriorityTaskRowIds.length && prev.every((value, index) => value === nextPriorityTaskRowIds[index])) {
+        return prev;
+      }
+      return nextPriorityTaskRowIds;
+    });
+  }, [pagedRows]);
 
   const {
     openingTaskId,

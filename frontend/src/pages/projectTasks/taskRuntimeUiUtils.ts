@@ -1,5 +1,10 @@
 import { getTaskStatus } from '../../api/backendApi';
 import type { ProjectTask } from '../../types/models';
+import {
+  inferTaskStateFromStatusPayload,
+  mapBackendTaskState,
+  readTaskRuntimeStatusText
+} from '../../utils/taskRuntime';
 import type { SortDirection, SortKey } from './taskListTypes';
 
 function compareNullableNumber(a: number | null, b: number | null, ascending: boolean): number {
@@ -19,51 +24,7 @@ function nextSortDirection(current: SortDirection): SortDirection {
 }
 
 function mapTaskState(raw: string): ProjectTask['task_state'] {
-  const normalized = raw.toUpperCase();
-  if (normalized === 'SUCCESS') return 'SUCCESS';
-  if (normalized === 'FAILURE') return 'FAILURE';
-  if (normalized === 'REVOKED') return 'REVOKED';
-  if (normalized === 'PENDING' || normalized === 'RECEIVED' || normalized === 'RETRY') return 'QUEUED';
-  if (normalized === 'STARTED' || normalized === 'RUNNING' || normalized === 'PROGRESS') return 'RUNNING';
-  return 'QUEUED';
-}
-
-function resolveNonRegressiveTaskState(
-  currentStateInput: unknown,
-  incomingState: ProjectTask['task_state']
-): ProjectTask['task_state'] {
-  const current = String(currentStateInput || '').trim().toUpperCase();
-  if (!current) return incomingState;
-  if (current === 'RUNNING' && incomingState === 'QUEUED') return 'RUNNING';
-  if ((current === 'SUCCESS' || current === 'FAILURE' || current === 'REVOKED') && (incomingState === 'QUEUED' || incomingState === 'RUNNING')) {
-    return current as ProjectTask['task_state'];
-  }
-  return incomingState;
-}
-
-function inferRunningHintFromStatusText(statusText: string): boolean {
-  const text = String(statusText || '').trim().toLowerCase();
-  if (!text) return false;
-  return (
-    text.includes('running') ||
-    text.includes('started') ||
-    text.includes('starting') ||
-    text.includes('acquiring') ||
-    text.includes('preparing') ||
-    text.includes('uploading') ||
-    text.includes('processing') ||
-    text.includes('termination in progress')
-  );
-}
-
-function inferTaskStateFromStatusPayload(
-  status: { info?: Record<string, unknown>; state: string },
-  currentStateInput?: unknown
-): ProjectTask['task_state'] {
-  const mapped = mapTaskState(String(status.state || ''));
-  const statusText = readStatusText(status);
-  const hinted = mapped === 'QUEUED' && inferRunningHintFromStatusText(statusText) ? 'RUNNING' : mapped;
-  return resolveNonRegressiveTaskState(currentStateInput, hinted);
+  return mapBackendTaskState(raw);
 }
 
 async function waitForRuntimeTaskToStop(taskId: string, timeoutMs = 12000, intervalMs = 900): Promise<ProjectTask['task_state'] | null> {
@@ -95,12 +56,7 @@ async function waitForRuntimeTaskToStop(taskId: string, timeoutMs = 12000, inter
 }
 
 function readStatusText(status: { info?: Record<string, unknown>; state: string }): string {
-  if (!status.info) return status.state;
-  const s1 = status.info.status;
-  const s2 = status.info.message;
-  if (typeof s1 === 'string' && s1.trim()) return s1;
-  if (typeof s2 === 'string' && s2.trim()) return s2;
-  return status.state;
+  return readTaskRuntimeStatusText(status);
 }
 
 function resolveTaskBackendValue(task: ProjectTask, fallbackBackend = ''): string {

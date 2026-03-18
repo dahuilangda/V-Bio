@@ -26,9 +26,7 @@ def register_task_routes(
     list_known_queues: Callable[[], list[str]],
     get_worker_capability_snapshot: Callable[[], Dict[str, Any]],
 ) -> None:
-    @app.route('/status/<task_id>', methods=['GET'])
-    def get_task_status(task_id):
-        logger.info('Received status request for task ID: %s', task_id)
+    def build_task_status_response(task_id: str) -> Dict[str, Any]:
         task_result = AsyncResult(task_id, app=celery_app)
 
         response: Dict[str, Any] = {'task_id': task_id, 'state': task_result.state, 'info': {}}
@@ -197,7 +195,29 @@ def register_task_routes(
                         response['info']['message'] = tracker_message
                     logger.info('Task %s is in state: %s.', task_id, task_result.state)
 
-        return jsonify(response)
+        return response
+
+    @app.route('/status/<task_id>', methods=['GET'])
+    def get_task_status(task_id):
+        logger.info('Received status request for task ID: %s', task_id)
+        return jsonify(build_task_status_response(task_id))
+
+    @app.route('/status/batch', methods=['POST'])
+    def get_task_status_batch():
+        payload = request.get_json(silent=True) or {}
+        task_ids_input = payload.get('task_ids')
+        task_ids = []
+        if isinstance(task_ids_input, list):
+            task_ids = [str(item or '').strip() for item in task_ids_input if str(item or '').strip()]
+        unique_task_ids = list(dict.fromkeys(task_ids))
+        if not unique_task_ids:
+            return jsonify({'statuses': []}), 200
+        limit = min(len(unique_task_ids), 2000)
+        trimmed_task_ids = unique_task_ids[:limit]
+        logger.info('Received batch status request for %s task IDs.', len(trimmed_task_ids))
+        return jsonify({
+            'statuses': [build_task_status_response(task_id) for task_id in trimmed_task_ids]
+        })
 
     @app.route('/results/<task_id>', methods=['GET'])
     def download_results(task_id):
@@ -337,6 +357,48 @@ def register_task_routes(
             logger.exception('Error inspecting Celery workers: %s. Ensure workers are running and reachable.', exc)
             return jsonify({
                 'error': 'Could not inspect Celery workers. Ensure workers are running and reachable.',
+                'details': str(exc),
+            }), 500
+
+    @app.route('/tasks/runtime_index', methods=['GET'])
+    @require_api_token
+    def list_task_runtime_index():
+        logger.info('Received request to list runtime task index.')
+        inspector = celery_app.control.inspect(timeout=1.0)
+
+        def collect_task_ids(payload):
+            task_ids = []
+            if not isinstance(payload, dict):
+                return task_ids
+            for worker_tasks in payload.values():
+                if not isinstance(worker_tasks, list):
+                    continue
+                for task in worker_tasks:
+                    task_id = str((task or {}).get('id') or '').strip()
+                    if task_id:
+                        task_ids.append(task_id)
+            return list(dict.fromkeys(task_ids))
+
+        try:
+            active = inspector.active() or {}
+            reserved = inspector.reserved() or {}
+            scheduled = inspector.scheduled() or {}
+            payload = {
+                'active_task_ids': collect_task_ids(active),
+                'reserved_task_ids': collect_task_ids(reserved),
+                'scheduled_task_ids': collect_task_ids(scheduled),
+            }
+            logger.info(
+                'Runtime task index collected. Active: %s, Reserved: %s, Scheduled: %s',
+                len(payload['active_task_ids']),
+                len(payload['reserved_task_ids']),
+                len(payload['scheduled_task_ids']),
+            )
+            return jsonify(payload)
+        except Exception as exc:
+            logger.exception('Error collecting runtime task index: %s', exc)
+            return jsonify({
+                'error': 'Could not collect runtime task index.',
                 'details': str(exc),
             }), 500
 

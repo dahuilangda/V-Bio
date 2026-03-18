@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import quote
 
 import requests
@@ -72,6 +72,80 @@ def forward_task_read(gateway: Any, task_id: str, upstream_prefix: str, action: 
             started_at=started,
             project_id=project_id,
             task_id=task_id,
+        )
+        return jsonify({"error": str(exc)}), 500
+
+
+def forward_task_status_batch(gateway: Any) -> Tuple[Response, int]:
+    started = time.perf_counter()
+    project_id: Optional[str] = None
+    token = None
+
+    try:
+        project_id = gateway._read_project_id_from_query()
+        token_plain = (request.headers.get("X-API-Token") or "").strip()
+        token = gateway._authorize_project_read(project_id, token_plain)
+
+        payload = request.get_json(silent=True) or {}
+        task_ids_input = payload.get("task_ids")
+        if not isinstance(task_ids_input, list):
+            raise PermissionError("task_ids must be a list")
+        task_ids = list(dict.fromkeys(str(item or "").strip() for item in task_ids_input if str(item or "").strip()))
+        if not task_ids:
+            return jsonify({"statuses": []}), 200
+
+        found_by_task_id: Dict[str, Dict[str, Any]] = gateway.task_store.find_project_tasks(task_ids, project_id)
+        missing = [task_id for task_id in task_ids if task_id not in found_by_task_id]
+        if missing:
+            raise PermissionError("One or more tasks were not found in this project")
+
+        upstream = gateway._proxy_post_json("/status/batch", {"task_ids": task_ids})
+        response, status_code = gateway._build_flask_response(upstream)
+        succeeded = 200 <= status_code < 300
+        gateway._record_usage(
+            token,
+            action="read_status_batch",
+            status_code=status_code,
+            succeeded=succeeded,
+            started_at=started,
+            project_id=project_id,
+            task_id=None,
+        )
+        return response, status_code
+    except PermissionError as exc:
+        return gateway._forbidden(str(exc), token, "read_status_batch", started, project_id)
+    except requests.Timeout:
+        gateway._record_usage(
+            token,
+            action="read_status_batch",
+            status_code=504,
+            succeeded=False,
+            started_at=started,
+            project_id=project_id,
+            task_id=None,
+        )
+        return jsonify({"error": "Upstream runtime request timed out"}), 504
+    except RuntimeProxyBusyError as exc:
+        gateway._record_usage(
+            token,
+            action="read_status_batch",
+            status_code=429,
+            succeeded=False,
+            started_at=started,
+            project_id=project_id,
+            task_id=None,
+        )
+        return jsonify({"error": str(exc)}), 429
+    except Exception as exc:  # noqa: BLE001
+        gateway.logger.exception("Task batch read forward failed")
+        gateway._record_usage(
+            token,
+            action="read_status_batch",
+            status_code=500,
+            succeeded=False,
+            started_at=started,
+            project_id=project_id,
+            task_id=None,
         )
         return jsonify({"error": str(exc)}), 500
 
