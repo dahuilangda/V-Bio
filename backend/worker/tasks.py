@@ -1066,6 +1066,8 @@ def predict_task(self, predict_args: dict):
     """
     gpu_id = -1
     allocated_gpu_ids: list[int] = []
+    reported_gpu_id = -1
+    reported_gpu_ids: list[int] = []
     task_id = self.request.id
     task_temp_dir = None 
     tracker = None
@@ -1096,6 +1098,8 @@ def predict_task(self, predict_args: dict):
             tracker.update_status("acquiring_gpu", "Waiting for GPU allocation")
             gpu_id = _acquire_gpu_with_non_peptide_wait_registration(task_id=task_id, timeout=3600)
             allocated_gpu_ids = [gpu_id]
+            reported_gpu_id = gpu_id
+            reported_gpu_ids = [gpu_id]
             self.update_state(state='PROGRESS', meta={'status': f'Acquired GPU {gpu_id}. Starting computation.'})
             logger.info(f"Task {task_id}: Acquired GPU {gpu_id}. Creating temporary directory.")
             tracker.update_status("gpu_acquired", f"Using GPU {gpu_id}")
@@ -1243,6 +1247,18 @@ def predict_task(self, predict_args: dict):
         logger.info(f"Task {task_id}: Results archive found at '{output_archive_path}'. Initiating upload.")
         tracker.update_status("uploading", "Uploading results to central API")
 
+        if allocated_gpu_ids:
+            released = sorted(set(allocated_gpu_ids))
+            for allocated_gpu in released:
+                release_gpu(gpu_id=allocated_gpu, task_id=task_id)
+            logger.info(f"Task {task_id}: Released GPUs {released} before result upload.")
+            allocated_gpu_ids = []
+            gpu_id = -1
+        elif gpu_id != -1:
+            release_gpu(gpu_id=gpu_id, task_id=task_id)
+            logger.info(f"Task {task_id}: Released GPU {gpu_id} before result upload.")
+            gpu_id = -1
+
         design_runtime_meta = {}
         if is_peptide_design:
             try:
@@ -1256,8 +1272,8 @@ def predict_task(self, predict_args: dict):
         
         final_meta = {
             'status': 'Complete', 
-            'gpu_id': gpu_id, 
-            'gpu_ids': allocated_gpu_ids or ([gpu_id] if gpu_id != -1 else []),
+            'gpu_id': reported_gpu_id,
+            'gpu_ids': reported_gpu_ids,
             'upload_info': upload_response,
             'result_file': os.path.basename(output_archive_path) 
         }
@@ -1484,6 +1500,7 @@ def affinity_task(self, affinity_args: dict):
     Celery task for running affinity prediction.
     """
     gpu_id = -1
+    reported_gpu_id = -1
     task_id = self.request.id
     task_temp_dir = None
     tracker = None
@@ -1498,6 +1515,7 @@ def affinity_task(self, affinity_args: dict):
         tracker.update_status("acquiring_gpu", "Waiting for GPU allocation")
 
         gpu_id = _acquire_gpu_with_non_peptide_wait_registration(task_id=task_id, timeout=3600)
+        reported_gpu_id = gpu_id
         self.update_state(state='PROGRESS', meta={'status': f'Acquired GPU {gpu_id}. Starting affinity prediction.'})
         logger.info(f"Task {task_id}: Acquired GPU {gpu_id}. Creating temporary directory.")
         tracker.update_status("gpu_acquired", f"Using GPU {gpu_id}")
@@ -1745,12 +1763,19 @@ def affinity_task(self, affinity_args: dict):
                 zipf.write(input_file_path, os.path.basename(input_file_path))
 
         logger.info(f"Task {task_id}: Results archived to '{output_archive_path}'.")
+        self.update_state(state='PROGRESS', meta={'status': f'Uploading results for task {task_id}'})
+        tracker.update_status("uploading", "Uploading results to central API")
+
+        if gpu_id != -1:
+            release_gpu(gpu_id=gpu_id, task_id=task_id)
+            logger.info(f"Task {task_id}: Released GPU {gpu_id} before result upload.")
+            gpu_id = -1
 
         upload_response = upload_result_to_central_api(task_id, output_archive_path, os.path.basename(output_archive_path))
 
         final_meta = {
             'status': 'Complete',
-            'gpu_id': gpu_id,
+            'gpu_id': reported_gpu_id,
             'upload_info': upload_response,
             'result_file': os.path.basename(output_archive_path)
         }
@@ -1788,6 +1813,7 @@ def boltz2score_task(self, score_args: dict):
     Celery task for running Boltz2Score (confidence; optional affinity).
     """
     gpu_id = -1
+    reported_gpu_id = -1
     task_id = self.request.id
     task_temp_dir = None
     tracker = None
@@ -1802,6 +1828,7 @@ def boltz2score_task(self, score_args: dict):
         tracker.update_status("acquiring_gpu", "Waiting for GPU allocation")
 
         gpu_id = _acquire_gpu_with_non_peptide_wait_registration(task_id=task_id, timeout=3600)
+        reported_gpu_id = gpu_id
         self.update_state(state='PROGRESS', meta={'status': f'Acquired GPU {gpu_id}. Starting Boltz2Score.'})
         logger.info(f"Task {task_id}: Acquired GPU {gpu_id}. Creating temporary directory.")
         tracker.update_status("gpu_acquired", f"Using GPU {gpu_id}")
@@ -2072,11 +2099,19 @@ def boltz2score_task(self, score_args: dict):
                     arcname = os.path.basename(file_path)
                 zipf.write(file_path, arcname)
 
+        self.update_state(state='PROGRESS', meta={'status': f'Uploading results for task {task_id}'})
+        tracker.update_status("uploading", "Uploading results to central API")
+
+        if gpu_id != -1:
+            release_gpu(gpu_id=gpu_id, task_id=task_id)
+            logger.info(f"Task {task_id}: Released GPU {gpu_id} before result upload.")
+            gpu_id = -1
+
         upload_response = upload_result_to_central_api(task_id, output_archive_path, os.path.basename(output_archive_path))
 
         final_meta = {
             'status': 'Complete',
-            'gpu_id': gpu_id,
+            'gpu_id': reported_gpu_id,
             'upload_info': upload_response,
             'result_file': os.path.basename(output_archive_path)
         }

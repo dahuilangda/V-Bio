@@ -13,6 +13,7 @@ import type {
 } from './taskListTypes';
 
 interface ProjectTasksWorkspaceProps {
+  totalRowCount: number;
   canManageShares: boolean;
   taskSearch: string;
   onTaskSearchChange: (value: string) => void;
@@ -77,6 +78,7 @@ interface ProjectTasksWorkspaceProps {
 }
 
 export function ProjectTasksWorkspace({
+  totalRowCount,
   canManageShares,
   taskSearch,
   onTaskSearchChange,
@@ -199,6 +201,7 @@ export function ProjectTasksWorkspace({
       />
 
       <ProjectTasksTable
+        totalRowCount={totalRowCount}
         canManageShares={canManageShares}
         filteredCount={filteredCount}
         tableMode={tableMode}

@@ -44,7 +44,7 @@ def register_task_routes(
                 if isinstance(compact_metrics, dict) and compact_metrics:
                     response['info']['compact_metrics'] = compact_metrics
                     response['info']['lead_opt_metrics'] = compact_metrics
-                logger.info("Task %s marked SUCCESS via result archive '%s'.", task_id, archive_name)
+                    logger.debug("Task %s marked SUCCESS via result archive '%s'.", task_id, archive_name)
             else:
                 tracker_status, heartbeat = get_tracker_status(task_id)
                 if tracker_status or heartbeat:
@@ -76,16 +76,16 @@ def register_task_routes(
                             if isinstance(compact_metrics, dict) and compact_metrics:
                                 response['info']['compact_metrics'] = compact_metrics
                                 response['info']['lead_opt_metrics'] = compact_metrics
-                        logger.info('Task %s inferred SUCCESS from tracker status while Celery state PENDING.', task_id)
+                        logger.debug('Task %s inferred SUCCESS from tracker status while Celery state PENDING.', task_id)
                     elif response['state'] == 'FAILURE':
                         logger.warning('Task %s inferred FAILURE from tracker status while Celery state PENDING.', task_id)
                     else:
-                        logger.info('Task %s is running per tracker; Celery state PENDING.', task_id)
+                        logger.debug('Task %s is running per tracker; Celery state PENDING.', task_id)
                 else:
                     waiting_message = 'Task is waiting in the queue.'
                     response['info']['status'] = waiting_message
                     response['info']['message'] = waiting_message
-                    logger.info('Task %s is PENDING and waiting for worker pickup.', task_id)
+                    logger.debug('Task %s is PENDING and waiting for worker pickup.', task_id)
         elif task_result.state == 'SUCCESS':
             response['info'] = info if isinstance(info, dict) else {'result': str(info)}
             if not isinstance(response['info'], dict):
@@ -105,7 +105,7 @@ def register_task_routes(
                 response['info']['compact_metrics'] = compact_metrics
                 response['info']['lead_opt_metrics'] = compact_metrics
             response['info']['status'] = 'Task completed successfully.'
-            logger.info('Task %s is SUCCESS.', task_id)
+            logger.debug('Task %s is SUCCESS.', task_id)
         elif task_result.state == 'FAILURE':
             response['info'] = (
                 {'exc_type': type(info).__name__, 'exc_message': str(info)}
@@ -149,7 +149,7 @@ def register_task_routes(
                     response['info']['compact_metrics'] = compact_metrics
                     response['info']['lead_opt_metrics'] = compact_metrics
                 response['info']['status'] = 'Task completed successfully.'
-                logger.info("Task %s marked SUCCESS via result archive '%s' from state %s.", task_id, archive_name, task_result.state)
+                logger.debug("Task %s marked SUCCESS via result archive '%s' from state %s.", task_id, archive_name, task_result.state)
             else:
                 tracker_status, heartbeat = get_tracker_status(task_id)
                 tracker_message = ''
@@ -193,13 +193,13 @@ def register_task_routes(
                     if tracker_message:
                         response['info']['status'] = tracker_message
                         response['info']['message'] = tracker_message
-                    logger.info('Task %s is in state: %s.', task_id, task_result.state)
+                    logger.debug('Task %s is in state: %s.', task_id, task_result.state)
 
         return response
 
     @app.route('/status/<task_id>', methods=['GET'])
     def get_task_status(task_id):
-        logger.info('Received status request for task ID: %s', task_id)
+        logger.debug('Received status request for task ID: %s', task_id)
         return jsonify(build_task_status_response(task_id))
 
     @app.route('/status/batch', methods=['POST'])
@@ -214,7 +214,7 @@ def register_task_routes(
             return jsonify({'statuses': []}), 200
         limit = min(len(unique_task_ids), 2000)
         trimmed_task_ids = unique_task_ids[:limit]
-        logger.info('Received batch status request for %s task IDs.', len(trimmed_task_ids))
+        logger.debug('Received batch status request for %s task IDs.', len(trimmed_task_ids))
         return jsonify({
             'statuses': [build_task_status_response(task_id) for task_id in trimmed_task_ids]
         })
@@ -333,7 +333,7 @@ def register_task_routes(
     @app.route('/tasks', methods=['GET'])
     @require_api_token
     def list_tasks():
-        logger.info('Received request to list all tasks.')
+        logger.debug('Received request to list all tasks.')
         inspector = celery_app.control.inspect()
 
         try:
@@ -363,7 +363,7 @@ def register_task_routes(
     @app.route('/tasks/runtime_index', methods=['GET'])
     @require_api_token
     def list_task_runtime_index():
-        logger.info('Received request to list runtime task index.')
+        logger.debug('Received request to list runtime task index.')
         inspector = celery_app.control.inspect(timeout=1.0)
 
         def collect_task_ids(payload):
@@ -388,7 +388,7 @@ def register_task_routes(
                 'reserved_task_ids': collect_task_ids(reserved),
                 'scheduled_task_ids': collect_task_ids(scheduled),
             }
-            logger.info(
+            logger.debug(
                 'Runtime task index collected. Active: %s, Reserved: %s, Scheduled: %s',
                 len(payload['active_task_ids']),
                 len(payload['reserved_task_ids']),

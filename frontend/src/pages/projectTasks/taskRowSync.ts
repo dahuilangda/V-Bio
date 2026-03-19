@@ -1,9 +1,16 @@
 import type { MutableRefObject } from 'react';
-import { downloadResultBlob, getTaskRuntimeIndex, getTaskStatus, getTaskStatuses, parseResultBundle } from '../../api/backendApi';
+import {
+  downloadResultBlob,
+  getTaskRuntimeIndex,
+  getTaskStatus,
+  getTaskStatuses,
+  parseResultBundle
+} from '../../api/backendApi';
 import { updateProject, updateProjectTask } from '../../api/supabaseLite';
 import type { Project, ProjectTask } from '../../types/models';
 import { canEditProject, canEditTask } from '../../utils/accessControl';
 import { mergePeptidePreviewIntoProperties } from '../../utils/peptideTaskPreview';
+import { derivePersistedResultConfidences } from '../../utils/resultConfidenceStorage';
 import {
   readLeadOptTaskSummary,
   readTaskConfidenceMetrics,
@@ -87,6 +94,7 @@ const PEPTIDE_RUNTIME_PROGRESS_KEYS = [
 ] as const;
 const RUNTIME_STATUS_BATCH_CHUNK_SIZE = 128;
 const ACTIVE_RUNTIME_STATUS_POLL_MAX_TASKS = 32;
+const RUNNING_RUNTIME_STATUS_POLL_MAX_TASKS = 256;
 const PRIORITY_RUNTIME_STATUS_POLL_MAX_TASKS = 48;
 const BACKGROUND_RUNTIME_STATUS_POLL_MAX_TASKS = 128;
 const LEADOPT_STATUS_LIGHT_POLL_MAX_ROWS = 3;
@@ -96,6 +104,26 @@ const LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR = '::';
 
 interface SyncRuntimeTaskRowsOptions {
   priorityTaskRowIds?: string[];
+}
+
+function collectRuntimeTaskIndexSets(runtimeTaskIndex: { active_task_ids?: string[]; reserved_task_ids?: string[]; scheduled_task_ids?: string[] } | null) {
+  const activeTaskIdSet = new Set(
+    (Array.isArray(runtimeTaskIndex?.active_task_ids) ? runtimeTaskIndex.active_task_ids : [])
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+  );
+  const queuedTaskIdSet = new Set(
+    [
+      ...(Array.isArray(runtimeTaskIndex?.reserved_task_ids) ? runtimeTaskIndex.reserved_task_ids : []),
+      ...(Array.isArray(runtimeTaskIndex?.scheduled_task_ids) ? runtimeTaskIndex.scheduled_task_ids : [])
+    ]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+  );
+  return {
+    activeTaskIdSet,
+    queuedTaskIdSet
+  };
 }
 
 function pickRecordFields(source: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
@@ -1095,6 +1123,14 @@ export async function syncRuntimeTaskRows(
         .filter(Boolean)
     )
   );
+  const runningRuntimeTaskIds = Array.from(
+    new Set(
+      runtimeRows
+        .filter((row) => String(row.task_state || '').trim().toUpperCase() === 'RUNNING')
+        .map((row) => String(row.task_id || '').trim())
+        .filter(Boolean)
+    )
+  );
   const remainingRuntimeTaskIds = Array.from(
     new Set(
       runtimeRows
@@ -1104,19 +1140,7 @@ export async function syncRuntimeTaskRows(
     )
   );
   const runtimeTaskIndex = await getTaskRuntimeIndex().catch(() => null);
-  const activeTaskIdSet = new Set(
-    (Array.isArray(runtimeTaskIndex?.active_task_ids) ? runtimeTaskIndex.active_task_ids : [])
-      .map((value) => String(value || '').trim())
-      .filter(Boolean)
-  );
-  const queuedTaskIdSet = new Set(
-    [
-      ...(Array.isArray(runtimeTaskIndex?.reserved_task_ids) ? runtimeTaskIndex.reserved_task_ids : []),
-      ...(Array.isArray(runtimeTaskIndex?.scheduled_task_ids) ? runtimeTaskIndex.scheduled_task_ids : [])
-    ]
-      .map((value) => String(value || '').trim())
-      .filter(Boolean)
-  );
+  const { activeTaskIdSet, queuedTaskIdSet } = collectRuntimeTaskIndexSets(runtimeTaskIndex);
   const activeRuntimeTaskIds = Array.from(
     new Set(
       runtimeRows
@@ -1125,11 +1149,17 @@ export async function syncRuntimeTaskRows(
         .filter(Boolean)
     )
   ).slice(0, ACTIVE_RUNTIME_STATUS_POLL_MAX_TASKS);
+  const runningTaskIdsForPoll = runningRuntimeTaskIds
+    .filter((taskId) => !activeRuntimeTaskIds.includes(taskId))
+    .slice(0, RUNNING_RUNTIME_STATUS_POLL_MAX_TASKS);
   const prioritizedTaskIdsForPoll = prioritizedRuntimeTaskIds
-    .filter((taskId) => !activeTaskIdSet.has(taskId))
+    .filter((taskId) => !activeTaskIdSet.has(taskId) && !runningTaskIdsForPoll.includes(taskId))
     .slice(0, PRIORITY_RUNTIME_STATUS_POLL_MAX_TASKS);
   const backgroundRuntimeTaskIds = remainingRuntimeTaskIds.filter(
-    (taskId) => !activeTaskIdSet.has(taskId) && !prioritizedTaskIdsForPoll.includes(taskId)
+    (taskId) =>
+      !activeTaskIdSet.has(taskId) &&
+      !runningTaskIdsForPoll.includes(taskId) &&
+      !prioritizedTaskIdsForPoll.includes(taskId)
   );
   const backgroundPollSize = Math.min(BACKGROUND_RUNTIME_STATUS_POLL_MAX_TASKS, backgroundRuntimeTaskIds.length);
   const backgroundStartCursor =
@@ -1143,7 +1173,7 @@ export async function syncRuntimeTaskRows(
   runtimeStatusPollCursor =
     backgroundRuntimeTaskIds.length > 0 ? (backgroundStartCursor + backgroundPollSize) % backgroundRuntimeTaskIds.length : 0;
   const taskIdsForPoll = Array.from(
-    new Set([...activeRuntimeTaskIds, ...prioritizedTaskIdsForPoll, ...backgroundTaskIdsForPoll])
+    new Set([...activeRuntimeTaskIds, ...runningTaskIdsForPoll, ...prioritizedTaskIdsForPoll, ...backgroundTaskIdsForPoll])
   );
 
   const statusByTaskId: Record<string, { task_id: string; state: string; info?: Record<string, unknown> }> = {};
@@ -1294,6 +1324,152 @@ export async function syncRuntimeTaskRows(
   };
 }
 
+export async function syncInitialRuntimeTaskRows(
+  projectRow: Project,
+  taskRows: ProjectTask[]
+) {
+  const safeTaskRows = sanitizeTaskRows(taskRows);
+  let nextProject = projectRow;
+  let nextTaskRows = [...safeTaskRows];
+
+  const runtimeRows = nextTaskRows.filter(
+    (row) =>
+      Boolean(row.task_id) &&
+      (row.task_state === 'QUEUED' || row.task_state === 'RUNNING') &&
+      !readLeadOptTaskSummary(row)
+  );
+  if (runtimeRows.length === 0) {
+    return {
+      project: nextProject,
+      taskRows: sortProjectTasks(sanitizeTaskRows(nextTaskRows))
+    };
+  }
+
+  const runtimeTaskIndex = await getTaskRuntimeIndex().catch(() => null);
+  const { activeTaskIdSet, queuedTaskIdSet } = collectRuntimeTaskIndexSets(runtimeTaskIndex);
+  const taskIdsForStatus = Array.from(
+    new Set(
+      runtimeRows
+        .filter((row) => {
+          const taskId = String(row.task_id || '').trim();
+          if (!taskId) return false;
+          if (activeTaskIdSet.has(taskId)) return true;
+          return String(row.task_state || '').trim().toUpperCase() === 'RUNNING';
+        })
+        .map((row) => String(row.task_id || '').trim())
+        .filter(Boolean)
+    )
+  );
+
+  const statusByTaskId =
+    taskIdsForStatus.length > 0
+      ? await getTaskStatuses(taskIdsForStatus).catch(() => ({} as Record<string, { task_id: string; state: string; info?: Record<string, unknown> }>))
+      : {};
+
+  for (const runtimeTask of runtimeRows) {
+    const runtimeTaskId = String(runtimeTask.task_id || '').trim();
+    if (!runtimeTaskId) continue;
+    const statusPayload = statusByTaskId[runtimeTaskId];
+    const currentTaskState = String(runtimeTask.task_state || '').trim().toUpperCase();
+    const queuePresenceState: ProjectTask['task_state'] | null =
+      activeTaskIdSet.has(runtimeTaskId) ? 'RUNNING' : queuedTaskIdSet.has(runtimeTaskId) ? 'QUEUED' : null;
+    if (!statusPayload && !queuePresenceState) continue;
+
+    const taskState =
+      !statusPayload
+        ? queuePresenceState!
+        : (() => {
+            const inferred = inferTaskStateFromStatusPayload(statusPayload, runtimeTask.task_state);
+            if (inferred === 'QUEUED' && activeTaskIdSet.has(runtimeTaskId)) {
+              return 'RUNNING' as ProjectTask['task_state'];
+            }
+            return inferred;
+          })();
+    const statusText = statusPayload
+      ? readStatusText(statusPayload)
+      : taskState === 'RUNNING'
+        ? currentTaskState === 'RUNNING' && String(runtimeTask.status_text || '').trim()
+          ? String(runtimeTask.status_text || '').trim()
+          : 'Task is running.'
+        : currentTaskState === 'QUEUED' && String(runtimeTask.status_text || '').trim()
+          ? String(runtimeTask.status_text || '').trim()
+          : 'Task is waiting in the queue.';
+    const errorText = taskState === 'FAILURE' ? statusText : '';
+    const terminal = taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED';
+    const completedAt = terminal ? runtimeTask.completed_at || new Date().toISOString() : null;
+    const submittedAt = runtimeTask.submitted_at || (nextProject.task_id === runtimeTask.task_id ? nextProject.submitted_at : null);
+    const durationSeconds =
+      terminal && submittedAt
+        ? (() => {
+            const duration = (new Date(completedAt || Date.now()).getTime() - new Date(submittedAt).getTime()) / 1000;
+            return Number.isFinite(duration) && duration >= 0 ? duration : null;
+          })()
+        : null;
+
+    const taskNeedsPatch =
+      runtimeTask.task_state !== taskState ||
+      (runtimeTask.status_text || '') !== statusText ||
+      (runtimeTask.error_text || '') !== errorText ||
+      runtimeTask.completed_at !== completedAt ||
+      runtimeTask.duration_seconds !== durationSeconds;
+
+    if (taskNeedsPatch) {
+      const taskPatch: Partial<ProjectTask> = {
+        task_state: taskState,
+        status_text: statusText,
+        error_text: errorText,
+        completed_at: completedAt,
+        duration_seconds: durationSeconds
+      };
+
+      const localTask: ProjectTask = {
+        ...runtimeTask,
+        ...taskPatch
+      } as ProjectTask;
+      nextTaskRows = nextTaskRows.map((row) => (row.id === runtimeTask.id ? localTask : row));
+
+      try {
+        const nextTask = await persistProjectTaskPatch(runtimeTask, taskPatch);
+        nextTaskRows = nextTaskRows.map((row) => (row.id === runtimeTask.id ? nextTask : row));
+      } catch {
+        // Keep local correction even if persistence temporarily fails.
+      }
+    }
+
+    if (nextProject.task_id === runtimeTask.task_id) {
+      const projectNeedsPatch =
+        nextProject.task_state !== taskState ||
+        (nextProject.status_text || '') !== statusText ||
+        (nextProject.error_text || '') !== errorText ||
+        nextProject.completed_at !== completedAt ||
+        nextProject.duration_seconds !== durationSeconds;
+      if (projectNeedsPatch) {
+        const projectPatch: Partial<Project> = {
+          task_state: taskState,
+          status_text: statusText,
+          error_text: errorText,
+          completed_at: completedAt,
+          duration_seconds: durationSeconds
+        };
+        nextProject = {
+          ...nextProject,
+          ...projectPatch
+        } as Project;
+        try {
+          nextProject = await persistProjectPatch(nextProject, projectPatch);
+        } catch {
+          // Keep local correction even if persistence temporarily fails.
+        }
+      }
+    }
+  }
+
+  return {
+    project: nextProject,
+    taskRows: sortProjectTasks(sanitizeTaskRows(nextTaskRows))
+  };
+}
+
 interface HydrationRefs {
   resultHydrationInFlightRef: MutableRefObject<Set<string>>;
   resultHydrationDoneRef: MutableRefObject<Set<string>>;
@@ -1386,10 +1562,18 @@ export async function hydrateTaskMetricsFromResultRows(
       const parsed = await parseResultBundle(resultBlob);
       if (!parsed) continue;
 
+      const persistedConfidence = derivePersistedResultConfidences({
+        parsedConfidenceValue: parsed.confidence,
+        baseProjectConfidenceValue: nextProject.task_id === taskId ? nextProject.confidence : null,
+        baseTaskConfidenceValue: task.confidence
+      });
+      const propertiesPatch = mergePeptidePreviewIntoProperties(task.properties || {}, persistedConfidence.taskConfidence);
+
       const taskPatch: Partial<ProjectTask> = {
-        confidence: parsed.confidence || {},
+        confidence: persistedConfidence.taskConfidence,
         affinity: parsed.affinity || {},
-        structure_name: parsed.structureName || task.structure_name || ''
+        structure_name: parsed.structureName || task.structure_name || '',
+        ...(propertiesPatch ? { properties: propertiesPatch as unknown as ProjectTask['properties'] } : {})
       };
       let nextTask: ProjectTask;
       try {
@@ -1406,7 +1590,7 @@ export async function hydrateTaskMetricsFromResultRows(
 
       if (nextProject.task_id === taskId) {
         const projectPatch: Partial<Project> = {
-          confidence: taskPatch.confidence || {},
+          confidence: persistedConfidence.projectConfidence,
           affinity: taskPatch.affinity || {},
           structure_name: taskPatch.structure_name || ''
         };

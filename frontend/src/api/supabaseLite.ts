@@ -801,7 +801,9 @@ export async function listProjectTasksForList(
   options?: {
     includeComponents?: boolean;
     includeConfidence?: boolean;
+    includeConfidenceSummary?: boolean;
     includeProperties?: boolean;
+    includePropertiesSummary?: boolean;
     includeLeadOptSummary?: boolean;
     includeLeadOptCandidates?: boolean;
     taskRowIds?: string[];
@@ -812,7 +814,9 @@ export async function listProjectTasksForList(
 ): Promise<ProjectTask[]> {
   const includeComponents = options?.includeComponents !== false;
   const includeConfidence = options?.includeConfidence !== false;
+  const includeConfidenceSummary = !includeConfidence && options?.includeConfidenceSummary === true;
   const includeProperties = options?.includeProperties !== false;
+  const includePropertiesSummary = !includeProperties && options?.includePropertiesSummary === true;
   const includeLeadOptSummary = options?.includeLeadOptSummary === true;
   const includeLeadOptCandidates = options?.includeLeadOptCandidates === true;
   const taskIdFilter = buildInFilter(options?.taskRowIds || []);
@@ -828,7 +832,48 @@ export async function listProjectTasksForList(
     'backend',
     'seed',
     'ligand_smiles',
+    ...(includePropertiesSummary
+      ? [
+          'properties_target:properties->>target',
+          'properties_ligand:properties->>ligand',
+          'properties_binder:properties->>binder'
+        ]
+      : []),
     ...(includeProperties ? ['properties'] : []),
+    ...(includeConfidenceSummary
+      ? [
+          'confidence_ligand_smiles:confidence->>ligand_smiles',
+          'confidence_ligand_display_smiles:confidence->>ligand_display_smiles',
+          'confidence_requested_target_chain_id:confidence->>requested_target_chain_id',
+          'confidence_target_chain_id:confidence->>target_chain_id',
+          'confidence_target_chain:confidence->>target_chain',
+          'confidence_protein_chain_id:confidence->>protein_chain_id',
+          'confidence_requested_ligand_chain_id:confidence->>requested_ligand_chain_id',
+          'confidence_ligand_chain_id:confidence->>ligand_chain_id',
+          'confidence_model_ligand_chain_id:confidence->>model_ligand_chain_id',
+          'confidence_binder_chain_id:confidence->>binder_chain_id',
+          'confidence_chain_ids:confidence->chain_ids',
+          'confidence_chain_mean_plddt:confidence->chain_mean_plddt',
+          'confidence_pair_chains_iptm:confidence->pair_chains_iptm',
+          'confidence_ligand_display_atom_plddts_by_chain:confidence->ligand_display_atom_plddts_by_chain',
+          'confidence_ligand_atom_plddts_by_chain:confidence->ligand_atom_plddts_by_chain',
+          'confidence_ligand_display_atom_plddts:confidence->ligand_display_atom_plddts',
+          'confidence_ligand_atom_plddts:confidence->ligand_atom_plddts',
+          'confidence_ligand_plddt:confidence->>ligand_plddt',
+          'confidence_ligand_mean_plddt:confidence->>ligand_mean_plddt',
+          'confidence_complex_iplddt:confidence->>complex_iplddt',
+          'confidence_complex_plddt_protein:confidence->>complex_plddt_protein',
+          'confidence_complex_plddt:confidence->>complex_plddt',
+          'confidence_plddt:confidence->>plddt',
+          'confidence_iptm:confidence->>iptm',
+          'confidence_ligand_iptm:confidence->>ligand_iptm',
+          'confidence_protein_iptm:confidence->>protein_iptm',
+          'confidence_complex_pde:confidence->>complex_pde',
+          'confidence_complex_pae:confidence->>complex_pae',
+          'confidence_gpde:confidence->>gpde',
+          'confidence_pae:confidence->>pae'
+        ]
+      : []),
     ...(includeConfidence ? ['confidence'] : []),
     ...(includeLeadOptSummary
       ? [
@@ -1099,13 +1144,126 @@ export async function listProjectTasksForList(
     const detail = detailById.get(String(row.id || '').trim()) || {};
     const rowRecord = row as unknown as Record<string, unknown>;
     const leadOptSummaryProperties = includeLeadOptSummary ? buildLeadOptSummaryProperties(rowRecord) : null;
+    const summaryProperties = includePropertiesSummary
+      ? compactObjectRecord({
+          target: readText(rowRecord.properties_target),
+          ligand: readText(rowRecord.properties_ligand),
+          binder: readText(rowRecord.properties_binder)
+        })
+      : {};
+    const summaryConfidence = (() => {
+      if (!includeConfidenceSummary) return {};
+      const next: Record<string, unknown> = {};
+      const chainMeanPlddt = asObjectRecord(rowRecord.confidence_chain_mean_plddt);
+      const pairChainsIptm = asObjectRecord(rowRecord.confidence_pair_chains_iptm);
+      const ligandDisplayAtomPlddtsByChain = asObjectRecord(rowRecord.confidence_ligand_display_atom_plddts_by_chain);
+      const ligandAtomPlddtsByChain = asObjectRecord(rowRecord.confidence_ligand_atom_plddts_by_chain);
+      const chainIdsFromSummary = Array.from(
+        new Set(
+          [
+            ...(Array.isArray(rowRecord.confidence_chain_ids)
+              ? rowRecord.confidence_chain_ids.map((value: unknown) => readText(value)).filter(Boolean)
+              : []),
+            ...Object.keys(chainMeanPlddt).map((value) => readText(value)).filter(Boolean),
+            ...Object.keys(ligandDisplayAtomPlddtsByChain).map((value) => readText(value)).filter(Boolean),
+            ...Object.keys(ligandAtomPlddtsByChain).map((value) => readText(value)).filter(Boolean)
+          ]
+        )
+      );
+      const explicitLigandChainId =
+        readText(rowRecord.confidence_ligand_chain_id) ||
+        readText(rowRecord.confidence_model_ligand_chain_id) ||
+        readText(rowRecord.confidence_binder_chain_id) ||
+        readText(rowRecord.confidence_requested_ligand_chain_id);
+      const derivedLigandChainId =
+        explicitLigandChainId ||
+        (Object.keys(ligandDisplayAtomPlddtsByChain).length === 1
+          ? readText(Object.keys(ligandDisplayAtomPlddtsByChain)[0])
+          : Object.keys(ligandAtomPlddtsByChain).length === 1
+            ? readText(Object.keys(ligandAtomPlddtsByChain)[0])
+            : '');
+      const explicitTargetChainId =
+        readText(rowRecord.confidence_target_chain) ||
+        readText(rowRecord.confidence_target_chain_id) ||
+        readText(rowRecord.confidence_requested_target_chain_id) ||
+        readText(rowRecord.confidence_protein_chain_id);
+      const derivedTargetChainId =
+        explicitTargetChainId ||
+        chainIdsFromSummary.find((chainId) => !derivedLigandChainId || chainId !== derivedLigandChainId) ||
+        '';
+      const assignText = (key: string, value: unknown) => {
+        const text = readText(value);
+        if (text) next[key] = text;
+      };
+      const assignNumber = (key: string, value: unknown) => {
+        const numeric = readFiniteNumber(value);
+        if (numeric !== null) next[key] = numeric;
+      };
+      const assignObject = (key: string, value: unknown) => {
+        const objectValue = asObjectRecord(value);
+        if (Object.keys(objectValue).length > 0) next[key] = objectValue;
+      };
+      const assignArray = (key: string, value: unknown) => {
+        if (Array.isArray(value) && value.length > 0) next[key] = value;
+      };
+
+      assignText('ligand_smiles', rowRecord.confidence_ligand_smiles);
+      assignText('ligand_display_smiles', rowRecord.confidence_ligand_display_smiles);
+      assignText('requested_target_chain_id', rowRecord.confidence_requested_target_chain_id);
+      assignText('target_chain_id', rowRecord.confidence_target_chain_id || derivedTargetChainId);
+      assignText('target_chain', rowRecord.confidence_target_chain || derivedTargetChainId);
+      assignText('protein_chain_id', rowRecord.confidence_protein_chain_id || derivedTargetChainId);
+      assignText('requested_ligand_chain_id', rowRecord.confidence_requested_ligand_chain_id || derivedLigandChainId);
+      assignText('ligand_chain_id', rowRecord.confidence_ligand_chain_id || derivedLigandChainId);
+      assignText('model_ligand_chain_id', rowRecord.confidence_model_ligand_chain_id || derivedLigandChainId);
+      assignText('binder_chain_id', rowRecord.confidence_binder_chain_id || derivedLigandChainId);
+      assignArray('chain_ids', chainIdsFromSummary);
+      assignObject('chain_mean_plddt', chainMeanPlddt);
+      assignObject('pair_chains_iptm', pairChainsIptm);
+      assignObject('ligand_display_atom_plddts_by_chain', ligandDisplayAtomPlddtsByChain);
+      assignObject('ligand_atom_plddts_by_chain', ligandAtomPlddtsByChain);
+      assignNumber('ligand_plddt', rowRecord.confidence_ligand_plddt);
+      assignNumber('ligand_mean_plddt', rowRecord.confidence_ligand_mean_plddt);
+      assignNumber('complex_iplddt', rowRecord.confidence_complex_iplddt);
+      assignNumber('complex_plddt_protein', rowRecord.confidence_complex_plddt_protein);
+      assignNumber('complex_plddt', rowRecord.confidence_complex_plddt);
+      assignNumber('plddt', rowRecord.confidence_plddt);
+      assignNumber('iptm', rowRecord.confidence_iptm);
+      assignNumber('ligand_iptm', rowRecord.confidence_ligand_iptm);
+      assignNumber('protein_iptm', rowRecord.confidence_protein_iptm);
+      assignNumber('complex_pde', rowRecord.confidence_complex_pde);
+      assignNumber('complex_pae', rowRecord.confidence_complex_pae);
+      assignNumber('gpde', rowRecord.confidence_gpde);
+      assignNumber('pae', rowRecord.confidence_pae);
+
+      const ligandDisplay: Record<string, unknown> = {};
+      const displaySmiles = readText(rowRecord.confidence_ligand_display_smiles);
+      if (displaySmiles) ligandDisplay.smiles = displaySmiles;
+      if (Object.keys(ligandDisplayAtomPlddtsByChain).length > 0) ligandDisplay.atom_plddts_by_chain = ligandDisplayAtomPlddtsByChain;
+      if (Array.isArray(rowRecord.confidence_ligand_display_atom_plddts) && rowRecord.confidence_ligand_display_atom_plddts.length > 0) {
+        ligandDisplay.atom_plddts = rowRecord.confidence_ligand_display_atom_plddts;
+      }
+      if (Object.keys(ligandDisplay).length > 0) next.ligand_display = ligandDisplay;
+
+      const ligand: Record<string, unknown> = {};
+      const ligandSmiles = readText(rowRecord.confidence_ligand_smiles);
+      if (ligandSmiles) ligand.smiles = ligandSmiles;
+      if (Object.keys(ligandAtomPlddtsByChain).length > 0) ligand.atom_plddts_by_chain = ligandAtomPlddtsByChain;
+      if (Array.isArray(rowRecord.confidence_ligand_atom_plddts) && rowRecord.confidence_ligand_atom_plddts.length > 0) {
+        ligand.atom_plddts = rowRecord.confidence_ligand_atom_plddts;
+      }
+      if (Object.keys(ligand).length > 0) next.ligand = ligand;
+
+      return next;
+    })();
     return {
       ...row,
       components: Array.isArray((detail as any).components) ? (detail as any).components : [],
       properties:
         includeProperties
           ? row.properties
-          : leadOptSummaryProperties || {}
+          : leadOptSummaryProperties || summaryProperties,
+      confidence: includeConfidence ? row.confidence : summaryConfidence,
     };
   });
 
@@ -1129,10 +1287,13 @@ export async function listProjectTasksForList(
       name: '',
       summary: '',
       protein_sequence: '',
-      confidence: {},
       affinity: {},
       constraints: [],
       ...row,
+      confidence:
+        row.confidence && typeof row.confidence === 'object' && !Array.isArray(row.confidence)
+          ? (row.confidence as ProjectTask['confidence'])
+          : ({} as ProjectTask['confidence']),
       properties: normalizedProperties
     } as ProjectTask, scope, accessLevel, editableTaskIdSet);
   }) as ProjectTask[];
@@ -1674,6 +1835,23 @@ export async function deleteProjectTask(taskRowId: string): Promise<void> {
   );
 }
 
+export async function deleteProjectTasksByProjectId(projectId: string): Promise<void> {
+  const normalizedProjectId = String(projectId || '').trim();
+  if (!normalizedProjectId) return;
+  await request<ProjectTask[]>(
+    '/project_tasks',
+    {
+      method: 'DELETE',
+      headers: {
+        Prefer: 'return=minimal'
+      }
+    },
+    {
+      project_id: `eq.${normalizedProjectId}`
+    }
+  );
+}
+
 export async function listProjectShares(projectId: string): Promise<ProjectShareRecord[]> {
   const normalizedProjectId = String(projectId || '').trim();
   if (!normalizedProjectId) return [];
@@ -1781,6 +1959,23 @@ export async function deleteProjectShare(shareId: string): Promise<void> {
     },
     {
       id: `eq.${shareId}`
+    }
+  );
+}
+
+export async function deleteProjectSharesByProjectId(projectId: string): Promise<void> {
+  const normalizedProjectId = String(projectId || '').trim();
+  if (!normalizedProjectId) return;
+  await request<ProjectShareRecord[]>(
+    '/project_shares',
+    {
+      method: 'DELETE',
+      headers: {
+        Prefer: 'return=minimal'
+      }
+    },
+    {
+      project_id: `eq.${normalizedProjectId}`
     }
   );
 }
@@ -1910,6 +2105,23 @@ export async function deleteProjectTaskShare(shareId: string): Promise<void> {
     },
     {
       id: `eq.${shareId}`
+    }
+  );
+}
+
+export async function deleteProjectTaskSharesByProjectId(projectId: string): Promise<void> {
+  const normalizedProjectId = String(projectId || '').trim();
+  if (!normalizedProjectId) return;
+  await request<ProjectTaskShareRecord[]>(
+    '/project_task_shares',
+    {
+      method: 'DELETE',
+      headers: {
+        Prefer: 'return=minimal'
+      }
+    },
+    {
+      project_id: `eq.${normalizedProjectId}`
     }
   );
 }

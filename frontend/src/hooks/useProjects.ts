@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Project, ProjectTaskCounts, Session, TaskStatusResponse } from '../types/models';
 import {
+  deleteProjectSharesByProjectId,
+  deleteProjectTaskSharesByProjectId,
+  deleteProjectTasksByProjectId,
   insertProject,
   listAccessibleProjects,
   listProjectTaskStatesByProjects,
@@ -9,7 +12,7 @@ import {
   updateProjectTask,
   type ProjectTaskRuntimeRow
 } from '../api/supabaseLite';
-import { getTaskStatuses } from '../api/backendApi';
+import { getTaskStatuses, terminateTask } from '../api/backendApi';
 import { removeProjectInputConfig, removeProjectUiState } from '../utils/projectInputs';
 import { canEditProject } from '../utils/accessControl';
 import { inferTaskStateFromStatusPayload, readTaskRuntimeStatusText } from '../utils/taskRuntime';
@@ -26,6 +29,9 @@ const TASK_STATE_PRIORITY: Record<string, number> = {
   REVOKED: 3
 };
 const TASK_STATUS_POLL_CHUNK_SIZE = 3;
+const PROJECT_DELETE_TERMINATE_CONCURRENCY = 6;
+const PROJECT_DELETE_STOP_POLL_INTERVAL_MS = 700;
+const PROJECT_DELETE_STOP_POLL_TIMEOUT_MS = 12000;
 
 export interface CreateProjectInput {
   name: string;
@@ -110,6 +116,83 @@ function emptyProjectTaskCounts(): ProjectTaskCounts {
     queued: 0,
     other: 0
   };
+}
+
+function isRuntimePendingState(value: unknown): boolean {
+  const token = String(value || '').trim().toUpperCase();
+  return token === 'QUEUED' || token === 'RUNNING';
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+async function runWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>
+): Promise<void> {
+  const normalizedLimit = Math.max(1, Math.floor(limit));
+  let cursor = 0;
+  const runners = Array.from({ length: Math.min(normalizedLimit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const currentIndex = cursor;
+      cursor += 1;
+      await worker(items[currentIndex]);
+    }
+  });
+  await Promise.all(runners);
+}
+
+async function stopProjectRuntimeTasks(taskRows: ProjectTaskRuntimeRow[]): Promise<void> {
+  const candidateRows = taskRows.filter((row) => Boolean(String(row.task_id || '').trim()) && isRuntimePendingState(row.task_state));
+  if (candidateRows.length === 0) return;
+
+  const candidateTaskIds = Array.from(new Set(candidateRows.map((row) => String(row.task_id || '').trim()).filter(Boolean)));
+  const statusByTaskId = await fetchRuntimeStatusesByTaskId(candidateTaskIds);
+  const activeTaskIds = candidateTaskIds.filter((taskId) => {
+    const row = candidateRows.find((item) => String(item.task_id || '').trim() === taskId) || null;
+    const statusPayload = statusByTaskId[taskId];
+    if (!statusPayload) return true;
+    return isRuntimePendingState(inferTaskStateFromStatusPayload(statusPayload, row?.task_state || 'QUEUED'));
+  });
+  if (activeTaskIds.length === 0) return;
+
+  await runWithConcurrency(activeTaskIds, PROJECT_DELETE_TERMINATE_CONCURRENCY, async (taskId) => {
+    try {
+      await terminateTask(taskId);
+      return;
+    } catch {
+      const currentStatus = await fetchRuntimeStatusesByTaskId([taskId]).catch(
+        () => ({} as Record<string, TaskStatusResponse>)
+      );
+      const statusPayload = currentStatus[taskId];
+      const currentState = statusPayload ? inferTaskStateFromStatusPayload(statusPayload, 'QUEUED') : 'REVOKED';
+      if (isRuntimePendingState(currentState)) {
+        throw new Error(`Task ${taskId} is still active.`);
+      }
+    }
+  });
+
+  const deadline = Date.now() + PROJECT_DELETE_STOP_POLL_TIMEOUT_MS;
+  let remainingTaskIds = [...activeTaskIds];
+  while (remainingTaskIds.length > 0 && Date.now() < deadline) {
+    await sleep(PROJECT_DELETE_STOP_POLL_INTERVAL_MS);
+    const currentStatus = await fetchRuntimeStatusesByTaskId(remainingTaskIds).catch(
+      () => ({} as Record<string, TaskStatusResponse>)
+    );
+    remainingTaskIds = remainingTaskIds.filter((taskId) => {
+      const statusPayload = currentStatus[taskId];
+      if (!statusPayload) return false;
+      return isRuntimePendingState(inferTaskStateFromStatusPayload(statusPayload, 'QUEUED'));
+    });
+  }
+
+  if (remainingTaskIds.length > 0) {
+    throw new Error(`Failed to stop ${remainingTaskIds.length} active task(s) before deleting the project.`);
+  }
 }
 
 function countProjectTaskStates(
@@ -210,16 +293,18 @@ export function useProjects(session: Session | null) {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const loadSeqRef = useRef(0);
+  const loadInFlightRef = useRef(false);
 
   const load = useCallback(async (options?: LoadProjectsOptions) => {
-    const loadSeq = ++loadSeqRef.current;
-    const silent = Boolean(options?.silent);
-    const preferBackendStatus = Boolean(options?.preferBackendStatus);
-
     if (!session) {
       setProjects([]);
       return;
     }
+    if (loadInFlightRef.current) return;
+    loadInFlightRef.current = true;
+    const loadSeq = ++loadSeqRef.current;
+    const silent = Boolean(options?.silent);
+    const preferBackendStatus = Boolean(options?.preferBackendStatus);
     if (!silent) {
       setLoading(true);
       setError(null);
@@ -332,6 +417,7 @@ export function useProjects(session: Session | null) {
         setError(e instanceof Error ? e.message : 'Failed to load projects.');
       }
     } finally {
+      loadInFlightRef.current = false;
       if (!silent) {
         setLoading(false);
       }
@@ -388,14 +474,32 @@ export function useProjects(session: Session | null) {
 
   const softDeleteProject = useCallback(
     async (id: string) => {
-      await patchProject(id, {
-        deleted_at: new Date().toISOString(),
-        task_state: 'DRAFT',
-        task_id: ''
-      });
-      removeProjectInputConfig(id);
-      removeProjectUiState(id);
-      setProjects((prev) => prev.filter((p) => p.id !== id));
+      setError(null);
+      try {
+        const deletedAt = new Date().toISOString();
+        const projectTaskRows = (await listProjectTaskStatesByProjects([id])).filter((row) => row.project_id === id);
+
+        await stopProjectRuntimeTasks(projectTaskRows);
+        await deleteProjectTaskSharesByProjectId(id);
+        await deleteProjectSharesByProjectId(id);
+        await deleteProjectTasksByProjectId(id);
+        await patchProject(id, {
+          deleted_at: deletedAt,
+          task_state: 'DRAFT',
+          task_id: '',
+          status_text: '',
+          error_text: '',
+          submitted_at: null,
+          completed_at: null,
+          duration_seconds: null
+        });
+
+        removeProjectInputConfig(id);
+        removeProjectUiState(id);
+        setProjects((prev) => prev.filter((p) => p.id !== id));
+      } catch (error) {
+        setError(error instanceof Error ? error.message : 'Failed to delete project.');
+      }
     },
     [patchProject]
   );

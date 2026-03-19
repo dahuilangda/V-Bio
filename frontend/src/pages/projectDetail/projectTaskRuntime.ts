@@ -8,6 +8,11 @@ import {
 import type { DownloadResultMode } from '../../api/backendTaskApi';
 import type { Project, ProjectTask, TaskState } from '../../types/models';
 import { mergePeptidePreviewIntoProperties } from '../../utils/peptideTaskPreview';
+import {
+  hasMeaningfulValue,
+  hasPeptideSummaryFields,
+  mergePeptideSummaryIntoParsedConfidence
+} from '../../utils/resultConfidenceStorage';
 import { normalizeWorkflowKey } from '../../utils/workflows';
 import { inferTaskStateFromStatusPayload, readStatusText } from './projectMetrics';
 
@@ -52,21 +57,6 @@ const PEPTIDE_RUNTIME_PROGRESS_KEYS = [
 ] as const;
 
 const PEPTIDE_CANDIDATE_ROW_KEYS = ['current_best_sequences', 'best_sequences', 'candidates'] as const;
-
-const PEPTIDE_REQUEST_OPTION_KEYS = [
-  'peptideDesignMode',
-  'peptide_design_mode',
-  'peptideBinderLength',
-  'peptide_binder_length',
-  'peptideIterations',
-  'peptide_iterations',
-  'peptidePopulationSize',
-  'peptide_population_size',
-  'peptideEliteSize',
-  'peptide_elite_size',
-  'peptideMutationRate',
-  'peptide_mutation_rate'
-] as const;
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -240,101 +230,6 @@ function pickRecordFields(source: Record<string, unknown>, keys: readonly string
     next[key] = value;
   }
   return next;
-}
-
-function hasMeaningfulValue(value: unknown): boolean {
-  if (value === undefined || value === null) return false;
-  if (typeof value === 'string') return value.trim().length > 0;
-  if (Array.isArray(value)) return value.length > 0;
-  if (typeof value === 'object') return Object.keys(asRecord(value)).length > 0;
-  return true;
-}
-
-function copyMissingFields(
-  target: Record<string, unknown>,
-  source: Record<string, unknown>,
-  keys: readonly string[]
-): boolean {
-  let changed = false;
-  for (const key of keys) {
-    const sourceValue = source[key];
-    if (!hasMeaningfulValue(sourceValue)) continue;
-    if (hasMeaningfulValue(target[key])) continue;
-    target[key] = sourceValue;
-    changed = true;
-  }
-  return changed;
-}
-
-function hasPeptideSummaryFields(value: Record<string, unknown>): boolean {
-  if (Object.keys(asRecord(value.peptide_design)).length > 0) return true;
-  if (Object.keys(asRecord(value.progress)).length > 0) return true;
-  const requestOptions = asRecord(asRecord(value.request).options);
-  return PEPTIDE_REQUEST_OPTION_KEYS.some((key) => hasMeaningfulValue(requestOptions[key]));
-}
-
-function mergePeptideSummaryIntoParsedConfidence(
-  parsedConfidenceValue: Record<string, unknown>,
-  baseConfidenceValue: Record<string, unknown> | null | undefined
-): Record<string, unknown> {
-  const baseConfidence = asRecord(baseConfidenceValue);
-  if (Object.keys(baseConfidence).length === 0 || !hasPeptideSummaryFields(baseConfidence)) {
-    return parsedConfidenceValue;
-  }
-
-  const merged: Record<string, unknown> = { ...parsedConfidenceValue };
-
-  const mergedRequest = asRecord(merged.request);
-  const mergedRequestOptions = { ...asRecord(mergedRequest.options) };
-  const baseRequestOptions = asRecord(asRecord(baseConfidence.request).options);
-  const requestChanged = copyMissingFields(mergedRequestOptions, baseRequestOptions, PEPTIDE_REQUEST_OPTION_KEYS);
-  if (requestChanged) {
-    merged.request = {
-      ...mergedRequest,
-      options: mergedRequestOptions
-    };
-  }
-
-  const mergedPeptide = { ...asRecord(merged.peptide_design) };
-  const basePeptide = asRecord(baseConfidence.peptide_design);
-  const peptideChangedBySetup = copyMissingFields(mergedPeptide, basePeptide, PEPTIDE_RUNTIME_SETUP_KEYS);
-  const peptideChangedByProgress = copyMissingFields(mergedPeptide, basePeptide, PEPTIDE_RUNTIME_PROGRESS_KEYS);
-
-  const mergedPeptideProgress = { ...asRecord(mergedPeptide.progress) };
-  const basePeptideProgress = asRecord(basePeptide.progress);
-  const baseTopProgress = asRecord(baseConfidence.progress);
-  const peptideProgressChanged =
-    copyMissingFields(mergedPeptideProgress, basePeptideProgress, PEPTIDE_RUNTIME_PROGRESS_KEYS) ||
-    copyMissingFields(mergedPeptideProgress, baseTopProgress, PEPTIDE_RUNTIME_PROGRESS_KEYS);
-  if (peptideProgressChanged) {
-    mergedPeptide.progress = mergedPeptideProgress;
-  }
-
-  if (
-    peptideChangedBySetup ||
-    peptideChangedByProgress ||
-    peptideProgressChanged ||
-    (Object.keys(mergedPeptide).length === 0 && Object.keys(basePeptide).length > 0)
-  ) {
-    merged.peptide_design = mergedPeptide;
-  }
-
-  const mergedProgress = { ...asRecord(merged.progress) };
-  const topProgressChanged =
-    copyMissingFields(mergedProgress, baseTopProgress, PEPTIDE_RUNTIME_PROGRESS_KEYS) ||
-    copyMissingFields(mergedProgress, mergedPeptideProgress, PEPTIDE_RUNTIME_PROGRESS_KEYS);
-  if (topProgressChanged) {
-    merged.progress = mergedProgress;
-  }
-
-  if (!hasMeaningfulValue(merged.best_sequences) && hasMeaningfulValue(baseConfidence.best_sequences)) {
-    merged.best_sequences = baseConfidence.best_sequences;
-  }
-  if (!hasMeaningfulValue(merged.current_best_sequences) && hasMeaningfulValue(baseConfidence.current_best_sequences)) {
-    merged.current_best_sequences = baseConfidence.current_best_sequences;
-  }
-
-  return merged;
 }
 
 function mergePeptideRuntimeStatusIntoConfidence(

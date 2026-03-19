@@ -125,7 +125,7 @@ export function ProjectTasksPage() {
     sortMark,
     jumpToPage,
   } = useTaskListFiltering(taskRows, {
-    storageScope: session?.userId || session?.username || null,
+    storageScope: [session?.userId || session?.username || '__anonymous__', projectId].join(':'),
     initialPage,
     suspendPageNormalization: loading || !project
   });
@@ -274,6 +274,7 @@ export function ProjectTasksPage() {
         <ApiAccessPage />
       ) : (
         <ProjectTasksWorkspace
+          totalRowCount={taskRows.length}
           canManageShares={canManageShares}
           taskSearch={taskSearch}
           onTaskSearchChange={setTaskSearch}

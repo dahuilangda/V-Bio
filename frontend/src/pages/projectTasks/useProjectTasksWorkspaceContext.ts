@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useRef } from 'react';
 import type { Project, ProjectTask } from '../../types/models';
 import { loadProjectInputConfig } from '../../utils/projectInputs';
 import { canEditTask } from '../../utils/accessControl';
@@ -43,6 +43,16 @@ export function useProjectTasksWorkspaceContext({
   project,
   tasks
 }: UseProjectTasksWorkspaceContextInput): UseProjectTasksWorkspaceContextResult {
+  const taskRowCacheRef = useRef<
+    Map<
+      string,
+      {
+        taskRef: ProjectTask;
+        cacheKey: string;
+        row: TaskListRow;
+      }
+    >
+  >(new Map());
   const taskCountText = useMemo(() => `${sanitizeTaskRows(tasks).length} tasks`, [tasks]);
 
   const currentTaskRow = useMemo(() => {
@@ -123,7 +133,28 @@ export function useProjectTasksWorkspaceContext({
   }, [project, currentTaskRow]);
 
   const taskRows = useMemo<TaskListRow[]>(() => {
-    return sanitizeTaskRows(tasks).map((task) => {
+    const cacheKey = [
+      String(project?.backend || '').trim(),
+      String(project?.task_type || '').trim(),
+      String(workspacePairPreference.targetChainId || '').trim(),
+      String(workspacePairPreference.ligandChainId || '').trim()
+    ].join('|');
+    const nextCache = new Map<
+      string,
+      {
+        taskRef: ProjectTask;
+        cacheKey: string;
+        row: TaskListRow;
+      }
+    >();
+    const rows = sanitizeTaskRows(tasks).map((task) => {
+      const taskRowId = String(task.id || '').trim();
+      const cached = taskRowCacheRef.current.get(taskRowId);
+      if (cached && cached.taskRef === task && cached.cacheKey === cacheKey) {
+        nextCache.set(taskRowId, cached);
+        return cached.row;
+      }
+
       const submittedTs = new Date(task.submitted_at || task.created_at).getTime();
       const durationValue =
         typeof task.duration_seconds === 'number' && Number.isFinite(task.duration_seconds)
@@ -180,7 +211,7 @@ export function useProjectTasksWorkspaceContext({
         workflowKey === 'lead_optimization' && leadOpt
           ? leadOpt.bucketCount
           : null;
-      return {
+      const row: TaskListRow = {
         task,
         metrics: {
           ...metrics,
@@ -232,7 +263,15 @@ export function useProjectTasksWorkspaceContext({
         peptideStage: peptide?.stage || '',
         peptideStatusMessage: peptide?.statusMessage || ''
       };
+      nextCache.set(taskRowId, {
+        taskRef: task,
+        cacheKey,
+        row
+      });
+      return row;
     });
+    taskRowCacheRef.current = nextCache;
+    return rows;
   }, [tasks, workspacePairPreference, project?.backend, project?.task_type]);
 
   const workflowOptions = useMemo<TaskWorkflowFilter[]>(

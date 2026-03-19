@@ -10,13 +10,12 @@ import {
 import { normalizeWorkflowKey } from '../../utils/workflows';
 import {
   hasLeadOptPredictionRuntime,
-  SILENT_CACHE_SYNC_WINDOW_MS,
   isProjectTaskRow,
   sanitizeTaskRows,
   sortProjectTasks,
   type LoadTaskDataOptions,
 } from './taskDataUtils';
-import { hydrateTaskMetricsFromResultRows, syncRuntimeTaskRows } from './taskRowSync';
+import { hydrateTaskMetricsFromResultRows, syncInitialRuntimeTaskRows, syncRuntimeTaskRows } from './taskRowSync';
 
 interface UseProjectTasksDataLoaderOptions {
   projectId: string;
@@ -35,6 +34,12 @@ interface UseProjectTasksDataLoaderResult {
   setTasks: Dispatch<SetStateAction<ProjectTask[]>>;
   setError: Dispatch<SetStateAction<string | null>>;
   loadData: (options?: LoadTaskDataOptions) => Promise<void>;
+}
+
+interface TaskListAccessContext {
+  scope: 'owner' | 'project_share' | 'task_share';
+  accessLevel: 'owner' | 'editor' | 'viewer';
+  editableTaskIds: string[];
 }
 
 const TASK_STATE_PRIORITY: Record<string, number> = {
@@ -233,6 +238,8 @@ export function useProjectTasksDataLoader({
   const lastFullFetchTsRef = useRef(0);
   const projectRef = useRef<Project | null>(null);
   const tasksRef = useRef<ProjectTask[]>([]);
+  const taskListAccessContextRef = useRef<TaskListAccessContext | null>(null);
+  const detailHydrationInFlightRef = useRef<Set<string>>(new Set());
   const resultHydrationInFlightRef = useRef<Set<string>>(new Set());
   const resultHydrationDoneRef = useRef<Set<string>>(new Set());
   const resultHydrationAttemptsRef = useRef<Map<string, number>>(new Map());
@@ -245,12 +252,22 @@ export function useProjectTasksDataLoader({
     tasksRef.current = sanitizeTaskRows(tasks);
   }, [tasks]);
 
+  useEffect(() => {
+    detailHydrationInFlightRef.current.clear();
+    taskListAccessContextRef.current = null;
+  }, [projectId]);
+
   const syncRuntimeTasks = useCallback(
     async (projectRow: Project, taskRows: ProjectTask[]) =>
       syncRuntimeTaskRows(projectRow, taskRows, {
         priorityTaskRowIds
       }),
     [priorityTaskRowIds]
+  );
+
+  const syncInitialRuntimeTasks = useCallback(
+    async (projectRow: Project, taskRows: ProjectTask[]) => syncInitialRuntimeTaskRows(projectRow, taskRows),
+    []
   );
 
   const hydrateTaskMetricsFromResults = useCallback(
@@ -261,6 +278,31 @@ export function useProjectTasksDataLoader({
         resultHydrationAttemptsRef
       }),
     []
+  );
+
+  const syncCachedRuntimeState = useCallback(
+    async (options?: { hydrateResults?: boolean }) => {
+      const cachedProject = projectRef.current;
+      const cachedTasks = sanitizeTaskRows(tasksRef.current);
+      if (!cachedProject || cachedTasks.length === 0) return;
+
+      const synced = await syncRuntimeTasks(cachedProject, cachedTasks);
+      setProject(synced.project);
+      setTasks(sanitizeTaskRows(synced.taskRows));
+
+      if (options?.hydrateResults === false) return;
+
+      void (async () => {
+        try {
+          const hydrated = await hydrateTaskMetricsFromResults(synced.project, synced.taskRows);
+          setProject(hydrated.project);
+          setTasks(sanitizeTaskRows(hydrated.taskRows));
+        } catch {
+          // Keep runtime-synced state if result hydration fails.
+        }
+      })();
+    },
+    [hydrateTaskMetricsFromResults, syncRuntimeTasks]
   );
 
   const loadData = useCallback(
@@ -282,16 +324,13 @@ export function useProjectTasksDataLoader({
       }
 
       try {
-        const now = Date.now();
         const cachedProject = projectRef.current;
         const cachedTasks = sanitizeTaskRows(tasksRef.current);
-        const withinCacheWindow = now - lastFullFetchTsRef.current <= SILENT_CACHE_SYNC_WINDOW_MS;
         const hasLeadOptRuntimeInCache = cachedTasks.some((row) => hasLeadOptPredictionRuntime(row));
         const canUseCachedSync =
           silent &&
           !forceRefetch &&
           preferBackendStatus &&
-          withinCacheWindow &&
           cachedProject &&
           cachedTasks.length > 0 &&
           !hasLeadOptRuntimeInCache;
@@ -326,19 +365,36 @@ export function useProjectTasksDataLoader({
           throw new Error('You do not have permission to access this project.');
         }
         const projectAccessScope = accessInfo.scope || 'owner';
+        taskListAccessContextRef.current = {
+          scope: projectAccessScope,
+          accessLevel: accessInfo.accessLevel || 'owner',
+          editableTaskIds: accessInfo.editableTaskIds
+        };
         const workflowKey = normalizeWorkflowKey(projectRow.task_type);
-        const includeComponentsForList = workflowKey === 'prediction';
+        const useLightweightPredictionRows = workflowKey === 'prediction';
+        const includeComponentsForList = false;
         const includeConfidenceForList =
           workflowKey === 'lead_optimization'
             ? false
             : workflowKey === 'peptide_design'
             ? !silent || cachedTasks.length === 0
-            : !(silent && cachedTasks.length > 0);
-        const includePropertiesForList = workflowKey === 'lead_optimization' ? false : true;
+            : useLightweightPredictionRows
+              ? false
+              : !(silent && cachedTasks.length > 0);
+        const includeConfidenceSummaryForList = useLightweightPredictionRows && !includeConfidenceForList;
+        const includePropertiesForList =
+          workflowKey === 'lead_optimization'
+            ? false
+            : useLightweightPredictionRows
+              ? false
+              : true;
+        const includePropertiesSummaryForList = useLightweightPredictionRows && !includePropertiesForList;
         const taskRows = await listProjectTasksForList(projectId, {
           includeComponents: includeComponentsForList,
           includeConfidence: includeConfidenceForList,
+          includeConfidenceSummary: includeConfidenceSummaryForList,
           includeProperties: includePropertiesForList,
+          includePropertiesSummary: includePropertiesSummaryForList,
           includeLeadOptSummary: workflowKey === 'lead_optimization',
           taskRowIds: projectAccessScope === 'task_share' ? accessInfo.taskIds : undefined,
           accessScope: projectAccessScope,
@@ -367,11 +423,12 @@ export function useProjectTasksDataLoader({
                 accessible_task_ids: [],
                 editable_task_ids: accessInfo.editableTaskIds
               };
-        const mergedProject = cachedProject ? mergeProjectRuntimeFields(accessibleProjectBase, cachedProject) : accessibleProjectBase;
-        const mergedRows = mergeTaskRowsWithLocal(sortedTaskRows, cachedTasks);
+        let nextProject = cachedProject ? mergeProjectRuntimeFields(accessibleProjectBase, cachedProject) : accessibleProjectBase;
+        let nextRows = mergeTaskRowsWithLocal(sortedTaskRows, cachedTasks);
+
         if (loadSeqRef.current !== loadSeq) return;
-        setProject(mergedProject);
-        setTasks(sanitizeTaskRows(mergedRows));
+        setProject(nextProject);
+        setTasks(sanitizeTaskRows(nextRows));
 
         if (!preferBackendStatus) {
           return;
@@ -379,17 +436,30 @@ export function useProjectTasksDataLoader({
 
         void (async () => {
           try {
-            const synced = await syncRuntimeTasks(mergedProject, mergedRows);
-            if (loadSeqRef.current !== loadSeq) return;
-            setProject(synced.project);
-            setTasks(sanitizeTaskRows(synced.taskRows));
+            let runtimeSettledProject = nextProject;
+            let runtimeSettledRows = nextRows;
+            if (!silent) {
+              const initialSynced = await syncInitialRuntimeTasks(runtimeSettledProject, runtimeSettledRows);
+              if (loadSeqRef.current !== loadSeq) return;
+              runtimeSettledProject = initialSynced.project;
+              runtimeSettledRows = sanitizeTaskRows(initialSynced.taskRows);
+              setProject(runtimeSettledProject);
+              setTasks(runtimeSettledRows);
 
-            const hydrated = await hydrateTaskMetricsFromResults(synced.project, synced.taskRows);
+              const fullySynced = await syncRuntimeTasks(runtimeSettledProject, runtimeSettledRows);
+              if (loadSeqRef.current !== loadSeq) return;
+              runtimeSettledProject = fullySynced.project;
+              runtimeSettledRows = sanitizeTaskRows(fullySynced.taskRows);
+              setProject(runtimeSettledProject);
+              setTasks(runtimeSettledRows);
+            }
+
+            const hydrated = await hydrateTaskMetricsFromResults(runtimeSettledProject, runtimeSettledRows);
             if (loadSeqRef.current !== loadSeq) return;
             setProject(hydrated.project);
             setTasks(sanitizeTaskRows(hydrated.taskRows));
           } catch {
-            // Keep base rows rendered; background refinement is best-effort.
+            // Keep runtime-synced rows if result hydration fails.
           }
         })();
       } catch (err) {
@@ -403,7 +473,7 @@ export function useProjectTasksDataLoader({
         loadInFlightRef.current = false;
       }
     },
-    [projectId, sessionUserId, syncRuntimeTasks, hydrateTaskMetricsFromResults]
+    [projectId, sessionUserId, syncInitialRuntimeTasks, syncRuntimeTasks, hydrateTaskMetricsFromResults]
   );
 
   useEffect(() => {
@@ -476,7 +546,7 @@ export function useProjectTasksDataLoader({
       if (cancelled || inFlight) return;
       inFlight = true;
       try {
-        await loadData({ silent: true, showRefreshing: false });
+        await syncCachedRuntimeState({ hydrateResults: true });
       } finally {
         inFlight = false;
         scheduleNext();
@@ -487,7 +557,76 @@ export function useProjectTasksDataLoader({
       cancelled = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [loadData, runtimePollState.hasActiveRuntime, runtimePollState.hasQueued, runtimePollState.hasRunning, workspaceView]);
+  }, [runtimePollState.hasActiveRuntime, runtimePollState.hasQueued, runtimePollState.hasRunning, syncCachedRuntimeState, workspaceView]);
+
+  useEffect(() => {
+    if (workspaceView !== 'tasks') return;
+    const projectRow = projectRef.current;
+    if (!projectRow) return;
+    if (normalizeWorkflowKey(projectRow.task_type) !== 'prediction') return;
+    const accessContext = taskListAccessContextRef.current;
+    if (!accessContext) return;
+
+    const priorityIds = Array.from(
+      new Set(
+        (priorityTaskRowIds || [])
+          .map((value) => String(value || '').trim())
+          .filter(Boolean)
+      )
+    );
+    if (priorityIds.length === 0) return;
+
+    const currentRows = sanitizeTaskRows(tasksRef.current);
+    const taskIdsToHydrate = priorityIds.filter((taskRowId) => {
+      if (detailHydrationInFlightRef.current.has(taskRowId)) return false;
+      const row = currentRows.find((item) => String(item.id || '').trim() === taskRowId);
+      if (!row) return false;
+      const hasConfidence = Boolean(row.confidence && typeof row.confidence === 'object' && !Array.isArray(row.confidence) && Object.keys(row.confidence as Record<string, unknown>).length > 0);
+      const hasProperties = Boolean(row.properties && typeof row.properties === 'object' && !Array.isArray(row.properties) && Object.keys(asRecord(row.properties)).length > 0);
+      return !(hasConfidence && hasProperties);
+    });
+    if (taskIdsToHydrate.length === 0) return;
+
+    taskIdsToHydrate.forEach((taskRowId) => detailHydrationInFlightRef.current.add(taskRowId));
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const detailedRows = await listProjectTasksForList(projectId, {
+          includeComponents: false,
+          includeConfidence: true,
+          includeProperties: true,
+          taskRowIds: taskIdsToHydrate,
+          accessScope: accessContext.scope,
+          accessLevel: accessContext.accessLevel,
+          editableTaskIds: accessContext.editableTaskIds
+        });
+        if (cancelled || detailedRows.length === 0) return;
+        const detailById = new Map(
+          detailedRows
+            .map((row) => [String(row.id || '').trim(), row] as const)
+            .filter(([id]) => Boolean(id))
+        );
+        setTasks((prev) =>
+          sanitizeTaskRows(
+            prev.map((row) => {
+              const detail = detailById.get(String(row.id || '').trim());
+              if (!detail) return row;
+              return mergeTaskRuntimeFields(detail, row);
+            })
+          )
+        );
+      } catch {
+        // Keep lightweight rows if visible-row hydration fails.
+      } finally {
+        taskIdsToHydrate.forEach((taskRowId) => detailHydrationInFlightRef.current.delete(taskRowId));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [priorityTaskRowIds, projectId, workspaceView]);
 
   return {
     project,

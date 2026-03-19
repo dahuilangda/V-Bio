@@ -749,12 +749,13 @@ function resolveTaskSelectionContext(
         fallbackChainIds.find((chainId) => !chainKeysMatch(chainId, resolvedLigandChainId)) ||
         resolvedTargetChainId;
     }
+    const fallbackLigandSmiles = taskLigandSmiles;
     return {
       chainIds: fallbackChainIds,
       targetChainId: resolvedTargetChainId || targetCandidate || null,
       ligandChainId: resolvedLigandChainId,
-      ligandSmiles: preferTaskSmilesLigand ? taskLigandSmiles : '',
-      ligandIsSmiles: preferTaskSmilesLigand ? Boolean(taskLigandSmiles) : false,
+      ligandSmiles: fallbackLigandSmiles,
+      ligandIsSmiles: Boolean(fallbackLigandSmiles),
       ligandComponentCount,
       ligandSequence: '',
       ligandSequenceType: null

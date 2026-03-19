@@ -160,6 +160,26 @@ export function useTaskListFiltering(
 
   useEffect(() => {
     setFiltersHydrated(false);
+    setSortKey('submitted');
+    setSortDirection('desc');
+    setTaskSearch('');
+    setStateFilter('all');
+    setWorkflowFilter('all');
+    setBackendFilter('all');
+    setShowAdvancedFilters(false);
+    setSubmittedWithinDays('all');
+    setSeedFilter('all');
+    setFailureOnly(false);
+    setMinPlddt('');
+    setMinIptm('');
+    setMaxPae('');
+    setStructureSearchMode('exact');
+    setStructureSearchQuery('');
+    setStructureSearchMatches({});
+    setStructureSearchLoading(false);
+    setStructureSearchError(null);
+    setPageSize(12);
+    setPage(initialPage);
     if (typeof window === 'undefined') {
       setFiltersHydrated(true);
       return;

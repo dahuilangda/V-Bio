@@ -4,6 +4,7 @@ import { ProjectTaskRow } from './ProjectTaskRow';
 import type { SortKey, TaskListRow, TaskTableMode } from './taskListTypes';
 
 interface ProjectTasksTableProps {
+  totalRowCount: number;
   canManageShares: boolean;
   filteredCount: number;
   tableMode: TaskTableMode;
@@ -34,6 +35,7 @@ interface ProjectTasksTableProps {
 }
 
 export function ProjectTasksTable({
+  totalRowCount,
   canManageShares,
   filteredCount,
   tableMode,
@@ -71,7 +73,7 @@ export function ProjectTasksTable({
   return (
     <>
       {filteredCount === 0 ? (
-        <div className="empty-state">No task runs yet.</div>
+        <div className="empty-state">{totalRowCount > 0 ? 'No tasks match current filters.' : 'No task runs yet.'}</div>
       ) : (
         <div className="table-wrap project-table-wrap task-table-wrap">
           <table className={tableClass}>
