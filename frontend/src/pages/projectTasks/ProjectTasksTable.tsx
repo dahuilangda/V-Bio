@@ -1,13 +1,21 @@
 import { Clock3 } from 'lucide-react';
 import type { ProjectTask } from '../../types/models';
 import { ProjectTaskRow } from './ProjectTaskRow';
-import type { SortKey, TaskListRow, TaskTableMode } from './taskListTypes';
+import type { SortKey, TaskListRow, TaskMetricColumnKey, TaskTableMode } from './taskListTypes';
+
+const METRIC_COLUMN_LABELS: Record<TaskMetricColumnKey, string> = {
+  plddt: 'pLDDT',
+  ipsae: 'IPSAE',
+  iptm: 'ipTM',
+  pae: 'PAE'
+};
 
 interface ProjectTasksTableProps {
   totalRowCount: number;
   canManageShares: boolean;
   filteredCount: number;
   tableMode: TaskTableMode;
+  visibleMetricColumns: TaskMetricColumnKey[];
   sortKey: SortKey;
   sortMark: (key: SortKey) => string;
   onSort: (key: SortKey) => void;
@@ -39,6 +47,7 @@ export function ProjectTasksTable({
   canManageShares,
   filteredCount,
   tableMode,
+  visibleMetricColumns,
   sortKey,
   sortMark,
   onSort,
@@ -102,21 +111,19 @@ export function ProjectTasksTable({
                   </>
                 ) : (
                   <>
-                    <th>
-                      <button type="button" className={`task-th-sort ${sortKey === 'plddt' ? 'active' : ''}`} onClick={() => onSort('plddt')}>
-                        <span className="project-th">pLDDT <span className="task-th-arrow">{sortMark('plddt')}</span></span>
-                      </button>
-                    </th>
-                    <th>
-                      <button type="button" className={`task-th-sort ${sortKey === 'iptm' ? 'active' : ''}`} onClick={() => onSort('iptm')}>
-                        <span className="project-th">iPTM <span className="task-th-arrow">{sortMark('iptm')}</span></span>
-                      </button>
-                    </th>
-                    <th>
-                      <button type="button" className={`task-th-sort ${sortKey === 'pae' ? 'active' : ''}`} onClick={() => onSort('pae')}>
-                        <span className="project-th">PAE <span className="task-th-arrow">{sortMark('pae')}</span></span>
-                      </button>
-                    </th>
+                    {visibleMetricColumns.map((metricKey) => (
+                      <th key={metricKey} className={`task-th-metric task-th-metric-${metricKey}`}>
+                        <button
+                          type="button"
+                          className={`task-th-sort ${sortKey === metricKey ? 'active' : ''}`}
+                          onClick={() => onSort(metricKey)}
+                        >
+                          <span className="project-th">
+                            {METRIC_COLUMN_LABELS[metricKey]} <span className="task-th-arrow">{sortMark(metricKey)}</span>
+                          </span>
+                        </button>
+                      </th>
+                    ))}
                   </>
                 )}
                 <th>
@@ -125,21 +132,21 @@ export function ProjectTasksTable({
                   </button>
                 </th>
                 {!isLeadOptMode && !isPeptideMode && (
-                  <th>
+                  <th className="task-th-backend">
                     <button type="button" className={`task-th-sort ${sortKey === 'backend' ? 'active' : ''}`} onClick={() => onSort('backend')}>
                       <span className="project-th">Backend <span className="task-th-arrow">{sortMark('backend')}</span></span>
                     </button>
                   </th>
                 )}
                 {!isLeadOptMode && !isPeptideMode && (
-                  <th>
+                  <th className="task-th-seed">
                     <button type="button" className={`task-th-sort ${sortKey === 'seed' ? 'active' : ''}`} onClick={() => onSort('seed')}>
                       <span className="project-th">Seed <span className="task-th-arrow">{sortMark('seed')}</span></span>
                     </button>
                   </th>
                 )}
                 {!isLeadOptMode && !isPeptideMode && (
-                  <th>
+                  <th className="task-th-duration">
                     <button type="button" className={`task-th-sort ${sortKey === 'duration' ? 'active' : ''}`} onClick={() => onSort('duration')}>
                       <span className="project-th">Duration <span className="task-th-arrow">{sortMark('duration')}</span></span>
                     </button>
@@ -156,6 +163,7 @@ export function ProjectTasksTable({
                   key={row.task.id}
                   row={row}
                   mode={tableMode}
+                  visibleMetricColumns={visibleMetricColumns}
                   canManageShares={canManageShares}
                   editingTaskNameId={editingTaskNameId}
                   editingTaskNameValue={editingTaskNameValue}

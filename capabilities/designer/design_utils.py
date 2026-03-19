@@ -691,6 +691,65 @@ def _read_pair_chains_iptm_from_map(
     return None
 
 
+def _normalize_probability_metric(value: Optional[float]) -> Optional[float]:
+    if not isinstance(value, (int, float)):
+        return None
+    normalized = float(value)
+    if not math.isfinite(normalized):
+        return None
+    if normalized > 1.0 and normalized <= 100.0:
+        normalized = normalized / 100.0
+    if normalized < 0.0:
+        return None
+    return normalized
+
+
+def resolve_preferred_interface_metric(metrics: Optional[dict]) -> Dict[str, Optional[float] | str]:
+    payload = metrics if isinstance(metrics, dict) else {}
+    ligand_ipsae_max = _normalize_probability_metric(payload.get("ligand_ipsae_max"))
+    if ligand_ipsae_max is not None:
+        return {
+            "value": ligand_ipsae_max,
+            "label": "IPSAE",
+            "source": "ipsae",
+            "kind": "ligand_ipsae_max",
+        }
+
+    ipsae_dom = _normalize_probability_metric(payload.get("ipsae_dom"))
+    if ipsae_dom is not None:
+        return {
+            "value": ipsae_dom,
+            "label": "IPSAE",
+            "source": "ipsae",
+            "kind": "ipsae_dom",
+        }
+
+    pair_iptm = _normalize_probability_metric(payload.get("pair_iptm"))
+    if pair_iptm is not None:
+        return {
+            "value": pair_iptm,
+            "label": "ipTM",
+            "source": "iptm",
+            "kind": "pair_iptm",
+        }
+
+    iptm = _normalize_probability_metric(payload.get("iptm"))
+    if iptm is not None:
+        return {
+            "value": iptm,
+            "label": "ipTM",
+            "source": "iptm",
+            "kind": "iptm",
+        }
+
+    return {
+        "value": None,
+        "label": "IPSAE",
+        "source": "none",
+        "kind": "none",
+    }
+
+
 def parse_confidence_metrics(
     results_path: str,
     binder_chain_id: str,
@@ -711,6 +770,12 @@ def parse_confidence_metrics(
         'iptm': 0.0,
         'pair_iptm': None,
         'pair_iptm_by_chain': {},
+        'ipsae_dom': None,
+        'ligand_ipsae_max': None,
+        'interface_metric': None,
+        'interface_metric_label': 'IPSAE',
+        'interface_metric_source': 'none',
+        'interface_metric_kind': 'none',
         'ptm': 0.0,
         'complex_plddt': 0.0,
         'binder_avg_plddt': 0.0,
@@ -869,6 +934,12 @@ def parse_confidence_metrics(
                 iptm = summary_data.get("iptm")
                 if isinstance(iptm, (int, float)):
                     metrics['iptm'] = float(iptm)
+                ipsae_dom = _normalize_probability_metric(summary_data.get("ipsae_dom"))
+                if ipsae_dom is not None:
+                    metrics['ipsae_dom'] = ipsae_dom
+                ligand_ipsae_max = _normalize_probability_metric(summary_data.get("ligand_ipsae_max"))
+                if ligand_ipsae_max is not None:
+                    metrics['ligand_ipsae_max'] = ligand_ipsae_max
                 chain_pair_iptm = summary_data.get("chain_pair_iptm")
                 if isinstance(chain_pair_iptm, list):
                     chain_ids = _extract_chain_ids_from_summary(summary_data)
@@ -976,6 +1047,16 @@ def parse_confidence_metrics(
                 iptm = _find_numeric_value(payload, ["iptm", "iptm_score", "ip_tm"])
                 if iptm is not None:
                     metrics['iptm'] = iptm
+            if metrics.get('ipsae_dom') is None:
+                ipsae_dom = _normalize_probability_metric(_find_numeric_value(payload, ["ipsae_dom", "ipsaeDom"]))
+                if ipsae_dom is not None:
+                    metrics['ipsae_dom'] = ipsae_dom
+            if metrics.get('ligand_ipsae_max') is None:
+                ligand_ipsae_max = _normalize_probability_metric(
+                    _find_numeric_value(payload, ["ligand_ipsae_max", "ligandIpsaeMax"])
+                )
+                if ligand_ipsae_max is not None:
+                    metrics['ligand_ipsae_max'] = ligand_ipsae_max
             if 'ranking_score' not in metrics:
                 ranking_score = _find_numeric_value(payload, ["ranking_score", "score"])
                 if ranking_score is not None:
@@ -1017,6 +1098,12 @@ def parse_confidence_metrics(
             iptm_raw = data.get('iptm', 0.0)
             if isinstance(iptm_raw, (int, float)):
                 metrics['iptm'] = float(iptm_raw)
+            ipsae_dom = _normalize_probability_metric(data.get('ipsae_dom'))
+            if ipsae_dom is not None:
+                metrics['ipsae_dom'] = ipsae_dom
+            ligand_ipsae_max = _normalize_probability_metric(data.get('ligand_ipsae_max'))
+            if ligand_ipsae_max is not None:
+                metrics['ligand_ipsae_max'] = ligand_ipsae_max
             pair_iptm = data.get('pair_chains_iptm', {})
             pair_values_by_chain: Dict[str, float] = {}
             if target_chain_id:
@@ -1050,6 +1137,12 @@ def parse_confidence_metrics(
                 metrics['binder_avg_plddt'] = float(np.mean(binder_plddts))
     except Exception as exc:
         logger.warning(f"Error parsing pLDDTs from CIF file in {results_path}. Error: {exc}")
+
+    preferred_interface_metric = resolve_preferred_interface_metric(metrics)
+    metrics['interface_metric'] = preferred_interface_metric.get('value')
+    metrics['interface_metric_label'] = preferred_interface_metric.get('label') or 'IPSAE'
+    metrics['interface_metric_source'] = preferred_interface_metric.get('source') or 'none'
+    metrics['interface_metric_kind'] = preferred_interface_metric.get('kind') or 'none'
 
     return metrics
 
@@ -1430,10 +1523,12 @@ class ParetoOptimizer:
     
     def dominates(self, solution1: Dict, solution2: Dict) -> bool:
         """检查solution1是否支配solution2"""
-        iptm1, plddt1 = solution1.get('iptm', 0), solution1.get('binder_avg_plddt', 0)
-        iptm2, plddt2 = solution2.get('iptm', 0), solution2.get('binder_avg_plddt', 0)
-        
-        return (iptm1 >= iptm2 and plddt1 >= plddt2) and (iptm1 > iptm2 or plddt1 > plddt2)
+        interface1 = resolve_preferred_interface_metric(solution1).get('value') or 0.0
+        interface2 = resolve_preferred_interface_metric(solution2).get('value') or 0.0
+        plddt1 = solution1.get('binder_avg_plddt', 0)
+        plddt2 = solution2.get('binder_avg_plddt', 0)
+
+        return (interface1 >= interface2 and plddt1 >= plddt2) and (interface1 > interface2 or plddt1 > plddt2)
     
     def update_pareto_front(self, new_solutions: List[Dict]):
         """更新Pareto前沿"""
@@ -1466,17 +1561,32 @@ class ParetoOptimizer:
         for solution in solutions:
             solution['crowding_distance'] = 0
         
-        for obj_func in ['iptm', 'binder_avg_plddt']:
-            solutions.sort(key=lambda x: x.get(obj_func, 0))
+        for obj_func in ['interface_metric', 'binder_avg_plddt']:
+            if obj_func == 'interface_metric':
+                solutions.sort(key=lambda x: resolve_preferred_interface_metric(x).get('value') or 0.0)
+            else:
+                solutions.sort(key=lambda x: x.get(obj_func, 0))
             
             if len(solutions) > 2:
                 solutions[0]['crowding_distance'] = float('inf')
                 solutions[-1]['crowding_distance'] = float('inf')
                 
-                obj_range = solutions[-1].get(obj_func, 0) - solutions[0].get(obj_func, 0)
+                if obj_func == 'interface_metric':
+                    min_value = resolve_preferred_interface_metric(solutions[0]).get('value') or 0.0
+                    max_value = resolve_preferred_interface_metric(solutions[-1]).get('value') or 0.0
+                else:
+                    min_value = solutions[0].get(obj_func, 0)
+                    max_value = solutions[-1].get(obj_func, 0)
+                obj_range = max_value - min_value
                 if obj_range > 0:
                     for i in range(1, len(solutions) - 1):
-                        distance = (solutions[i+1].get(obj_func, 0) - solutions[i-1].get(obj_func, 0)) / obj_range
+                        if obj_func == 'interface_metric':
+                            next_value = resolve_preferred_interface_metric(solutions[i + 1]).get('value') or 0.0
+                            prev_value = resolve_preferred_interface_metric(solutions[i - 1]).get('value') or 0.0
+                        else:
+                            next_value = solutions[i + 1].get(obj_func, 0)
+                            prev_value = solutions[i - 1].get(obj_func, 0)
+                        distance = (next_value - prev_value) / obj_range
                         solutions[i]['crowding_distance'] += distance
         
         solutions.sort(key=lambda x: x.get('crowding_distance', 0), reverse=True)

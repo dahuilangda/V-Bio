@@ -1216,6 +1216,7 @@ def _index_fragments_to_postgres_sharded(
         with psycopg.connect(postgres_url, autocommit=False) as conn:
             with conn.cursor() as cursor:
                 _pg_set_search_path(cursor, normalized_schema)
+                _create_postgres_merge_support_indexes(cursor)
                 for merge_seq, spec in enumerate(sorted(shard_specs, key=lambda item: item[0])):
                     shard_seq, shard_constants, _, _, shard_temp_schema = spec
                     shard_active_rows = _load_used_compounds_from_schema(
@@ -1893,6 +1894,25 @@ def _create_postgres_core_indexes(
             [("idx_constant_smiles_smiles_mol", "CREATE INDEX IF NOT EXISTS idx_constant_smiles_smiles_mol ON constant_smiles USING gist(smiles_mol)")],
             existing_indexes=existing,
         )
+
+
+def _create_postgres_merge_support_indexes(cursor) -> None:
+    """Build the narrow indexes needed while sharded merges are still in-flight."""
+    index_statements: List[Tuple[str, str]] = [
+        ("idx_compound_clean_smiles", "CREATE INDEX IF NOT EXISTS idx_compound_clean_smiles ON compound(clean_smiles)"),
+        ("idx_constant_smiles_smiles", "CREATE INDEX IF NOT EXISTS idx_constant_smiles_smiles ON constant_smiles(smiles)"),
+        ("idx_rule_from_to", "CREATE INDEX IF NOT EXISTS idx_rule_from_to ON rule(from_smiles_id, to_smiles_id)"),
+        ("idx_rule_to_smiles", "CREATE INDEX IF NOT EXISTS idx_rule_to_smiles ON rule(to_smiles_id)"),
+        ("idx_env_fp_lookup", "CREATE INDEX IF NOT EXISTS idx_env_fp_lookup ON environment_fingerprint(smarts, pseudosmiles, parent_smarts)"),
+        ("idx_rule_environment_lookup", "CREATE INDEX IF NOT EXISTS idx_rule_environment_lookup ON rule_environment(rule_id, environment_fingerprint_id, radius)"),
+        ("idx_rule_environment_env_fp", "CREATE INDEX IF NOT EXISTS idx_rule_environment_env_fp ON rule_environment(environment_fingerprint_id)"),
+        ("idx_pair_rule_env", "CREATE INDEX IF NOT EXISTS idx_pair_rule_env ON pair(rule_environment_id)"),
+        ("idx_pair_constant", "CREATE INDEX IF NOT EXISTS idx_pair_constant ON pair(constant_id)"),
+        ("idx_prop_name_name", "CREATE INDEX IF NOT EXISTS idx_prop_name_name ON property_name(name)"),
+        ("idx_rule_env_stats_prop", "CREATE INDEX IF NOT EXISTS idx_rule_env_stats_prop ON rule_environment_statistics(rule_environment_id, property_name_id)"),
+        ("idx_rule_env_stats_property_name", "CREATE INDEX IF NOT EXISTS idx_rule_env_stats_property_name ON rule_environment_statistics(property_name_id)"),
+    ]
+    _ensure_named_indexes(cursor, index_statements)
 
 
 def _apply_postgres_build_tuning(

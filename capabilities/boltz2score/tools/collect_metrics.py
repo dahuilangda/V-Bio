@@ -9,14 +9,7 @@ import json
 from pathlib import Path
 from typing import Dict, List
 
-
-def _select_confidence_file(conf_files: List[Path]) -> Path | None:
-    if not conf_files:
-        return None
-    for path in conf_files:
-        if "_model_0" in path.name or "_model_1" in path.name:
-            return path
-    return conf_files[0]
+from utils.result_utils import discover_record_dirs, select_confidence_file_from_dir
 
 
 def main() -> None:
@@ -31,17 +24,14 @@ def main() -> None:
     rows: List[Dict[str, str]] = []
     all_keys = set()
 
-    for subdir in sorted(pred_dir.iterdir()):
-        if not subdir.is_dir():
-            continue
-        conf_files = sorted(subdir.glob("confidence_*.json"))
-        conf_file = _select_confidence_file(conf_files)
+    for record_id, subdir in sorted(discover_record_dirs(pred_dir).items()):
+        conf_file = select_confidence_file_from_dir(subdir, required=False)
         if not conf_file:
             continue
         with conf_file.open("r") as f:
             data = json.load(f)
 
-        row: Dict[str, str] = {"id": subdir.name}
+        row: Dict[str, str] = {"id": record_id}
         for key, value in data.items():
             if isinstance(value, (dict, list)):
                 row[key] = json.dumps(value)

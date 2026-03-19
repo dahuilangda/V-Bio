@@ -9,6 +9,7 @@ import type {
   StructureSearchMode,
   SubmittedWithinDaysOption,
   TaskListRow,
+  TaskMetricColumnKey,
   TaskWorkflowFilter,
 } from './taskListTypes';
 import {
@@ -49,6 +50,7 @@ interface UseTaskListFilteringResult {
   structureSearchMatches: Record<string, boolean>;
   structureSearchLoading: boolean;
   structureSearchError: string | null;
+  visibleMetricColumns: TaskMetricColumnKey[];
   pageSize: number;
   page: number;
   advancedFilterCount: number;
@@ -71,6 +73,7 @@ interface UseTaskListFilteringResult {
   setMaxPae: Dispatch<SetStateAction<string>>;
   setStructureSearchMode: Dispatch<SetStateAction<StructureSearchMode>>;
   setStructureSearchQuery: Dispatch<SetStateAction<string>>;
+  setVisibleMetricColumns: Dispatch<SetStateAction<TaskMetricColumnKey[]>>;
   setPageSize: Dispatch<SetStateAction<number>>;
   setPage: Dispatch<SetStateAction<number>>;
   clearAdvancedFilters: () => void;
@@ -90,6 +93,18 @@ function normalizeTaskListPage(value: unknown): number {
   const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value.trim()) : Number.NaN;
   if (!Number.isFinite(parsed)) return 1;
   return Math.max(1, Math.floor(parsed));
+}
+
+const DEFAULT_VISIBLE_METRIC_COLUMNS: TaskMetricColumnKey[] = ['plddt', 'ipsae', 'iptm', 'pae'];
+
+function normalizeVisibleMetricColumns(value: unknown): TaskMetricColumnKey[] {
+  if (!Array.isArray(value)) return DEFAULT_VISIBLE_METRIC_COLUMNS;
+  const allowed = new Set<TaskMetricColumnKey>(DEFAULT_VISIBLE_METRIC_COLUMNS);
+  const normalized = value
+    .map((item) => String(item || '').trim().toLowerCase())
+    .filter((item): item is TaskMetricColumnKey => allowed.has(item as TaskMetricColumnKey));
+  if (normalized.length === 0) return DEFAULT_VISIBLE_METRIC_COLUMNS;
+  return DEFAULT_VISIBLE_METRIC_COLUMNS.filter((item) => normalized.includes(item));
 }
 
 export function useTaskListFiltering(
@@ -121,6 +136,7 @@ export function useTaskListFiltering(
   const [structureSearchMatches, setStructureSearchMatches] = useState<Record<string, boolean>>({});
   const [structureSearchLoading, setStructureSearchLoading] = useState(false);
   const [structureSearchError, setStructureSearchError] = useState<string | null>(null);
+  const [visibleMetricColumns, setVisibleMetricColumns] = useState<TaskMetricColumnKey[]>(DEFAULT_VISIBLE_METRIC_COLUMNS);
   const [pageSize, setPageSize] = useState<number>(12);
   const [page, setPage] = useState<number>(initialPage);
   const [filtersHydrated, setFiltersHydrated] = useState(false);
@@ -178,6 +194,7 @@ export function useTaskListFiltering(
     setStructureSearchMatches({});
     setStructureSearchLoading(false);
     setStructureSearchError(null);
+    setVisibleMetricColumns(DEFAULT_VISIBLE_METRIC_COLUMNS);
     setPageSize(12);
     setPage(initialPage);
     if (typeof window === 'undefined') {
@@ -239,6 +256,7 @@ export function useTaskListFiltering(
       if (typeof saved.structureSearchQuery === 'string') {
         setStructureSearchQuery(saved.structureSearchQuery);
       }
+      setVisibleMetricColumns(normalizeVisibleMetricColumns(saved.visibleMetricColumns));
       if (typeof saved.pageSize === 'number' && TASK_PAGE_SIZE_OPTIONS.includes(saved.pageSize)) {
         setPageSize(saved.pageSize);
       }
@@ -323,6 +341,14 @@ export function useTaskListFiltering(
     setStructureSearchQuery(value);
   }, []);
 
+  const setVisibleMetricColumnsWithPageReset = useCallback<Dispatch<SetStateAction<TaskMetricColumnKey[]>>>((value) => {
+    setPage(1);
+    setVisibleMetricColumns((prev) => {
+      const nextValue = typeof value === 'function' ? value(prev) : value;
+      return normalizeVisibleMetricColumns(nextValue);
+    });
+  }, []);
+
   const setPageSizeWithPageReset = useCallback<Dispatch<SetStateAction<number>>>((value) => {
     setPage(1);
     setPageSize(value);
@@ -346,6 +372,7 @@ export function useTaskListFiltering(
       maxPae,
       structureSearchMode,
       structureSearchQuery,
+      visibleMetricColumns,
       pageSize
     };
     try {
@@ -371,6 +398,7 @@ export function useTaskListFiltering(
     maxPae,
     structureSearchMode,
     structureSearchQuery,
+    visibleMetricColumns,
     pageSize
   ]);
 
@@ -505,6 +533,7 @@ export function useTaskListFiltering(
         task.structure_name,
         task.seed ?? '',
         metrics.plddt ?? '',
+        metrics.ipsae ?? '',
         metrics.iptm ?? '',
         metrics.pae ?? '',
         row.leadOptMmpSummary,
@@ -525,6 +554,9 @@ export function useTaskListFiltering(
       }
       if (sortKey === 'plddt') {
         return compareNullableNumber(a.metrics.plddt, b.metrics.plddt, sortDirection === 'asc');
+      }
+      if (sortKey === 'ipsae') {
+        return compareNullableNumber(a.metrics.ipsae, b.metrics.ipsae, sortDirection === 'asc');
       }
       if (sortKey === 'iptm') {
         return compareNullableNumber(a.metrics.iptm, b.metrics.iptm, sortDirection === 'asc');
@@ -628,6 +660,7 @@ export function useTaskListFiltering(
     structureSearchMatches,
     structureSearchLoading,
     structureSearchError,
+    visibleMetricColumns,
     pageSize,
     page,
     advancedFilterCount,
@@ -650,6 +683,7 @@ export function useTaskListFiltering(
     setMaxPae: setMaxPaeWithPageReset,
     setStructureSearchMode: setStructureSearchModeWithPageReset,
     setStructureSearchQuery: setStructureSearchQueryWithPageReset,
+    setVisibleMetricColumns: setVisibleMetricColumnsWithPageReset,
     setPageSize: setPageSizeWithPageReset,
     setPage,
     clearAdvancedFilters,

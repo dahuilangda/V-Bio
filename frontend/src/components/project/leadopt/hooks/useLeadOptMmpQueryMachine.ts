@@ -11,7 +11,14 @@ import {
   predictLeadOptimizationCandidate,
   queryLeadOptimizationMmp
 } from '../../../../api/backendApi';
-import { readFirstFiniteMetric, readObjectPath, readPairIptmForChains } from '../../../../pages/projectDetail/projectMetrics';
+import {
+  readFirstFiniteMetric,
+  readIpsaeDomMetric,
+  readLigandIpsaeMaxMetric,
+  readObjectPath,
+  readPairIptmForChains,
+  resolvePreferredInterfaceMetricFromValues
+} from '../../../../pages/projectDetail/projectMetrics';
 import type { ParsedResultBundle } from '../../../../types/models';
 import type {
   LeadOptDirection as Direction,
@@ -148,6 +155,9 @@ export interface LeadOptPredictionRecord {
   state: PredictionState;
   backend: string;
   pairIptm: number | null;
+  interfaceMetricValue: number | null;
+  interfaceMetricLabel: 'IPSAE' | 'ipTM';
+  interfaceMetricSource: 'ipsae' | 'iptm' | 'none';
   pairPae: number | null;
   pairIptmResolved?: boolean;
   ligandPlddt: number | null;
@@ -159,6 +169,40 @@ export interface LeadOptPredictionRecord {
   structureName?: string;
   error: string;
   updatedAt: number;
+}
+
+function resolveLeadOptPreferredInterfaceMetric(params: {
+  confidence?: Record<string, unknown>;
+  affinity?: Record<string, unknown>;
+  compact?: Record<string, unknown>;
+  pairIptm: number | null;
+}): {
+  interfaceMetricValue: number | null;
+  interfaceMetricLabel: 'IPSAE' | 'ipTM';
+  interfaceMetricSource: 'ipsae' | 'iptm' | 'none';
+} {
+  const confidence = params.confidence || {};
+  const affinity = params.affinity || {};
+  const compact = params.compact || {};
+  const ligandIpsaeMax =
+    readLigandIpsaeMaxMetric(confidence) ??
+    readLigandIpsaeMaxMetric(affinity) ??
+    normalizeIptm(compact.ligand_ipsae_max ?? compact.ligandIpsaeMax);
+  const ipsaeDom =
+    readIpsaeDomMetric(confidence) ??
+    readIpsaeDomMetric(affinity) ??
+    normalizeIptm(compact.ipsae_dom ?? compact.ipsaeDom);
+  const preferred = resolvePreferredInterfaceMetricFromValues({
+    pairIptm: params.pairIptm,
+    iptm: params.pairIptm ?? normalizeIptm(compact.pair_iptm ?? compact.pairIptm ?? compact.iptm),
+    ipsaeDom,
+    ligandIpsaeMax
+  });
+  return {
+    interfaceMetricValue: preferred.value,
+    interfaceMetricLabel: preferred.label,
+    interfaceMetricSource: preferred.source
+  };
 }
 
 export function buildLeadOptPredictionRecordKey(backendInput: unknown, candidateSmilesInput: unknown): string {
@@ -206,6 +250,10 @@ function normalizePredictionRecord(value: unknown): LeadOptPredictionRecord | nu
   const structureFormat = readText(raw.structureFormat ?? raw.structure_format).toLowerCase() === 'pdb' ? 'pdb' : 'cif';
   const structureName = readText(raw.structureName ?? raw.structure_name);
   const pairIptm = normalizeIptm(raw.pairIptm ?? raw.pair_iptm);
+  const normalizedPreferredInterfaceMetric = resolveLeadOptPreferredInterfaceMetric({
+    compact: raw,
+    pairIptm
+  });
   const pairPae = normalizePae(
     raw.pairPae ?? raw.pair_pae ?? raw.pair_pde ?? raw.pair_gpde ?? raw.complex_pde ?? raw.complex_pae ?? raw.gpde ?? raw.pae
   );
@@ -224,6 +272,18 @@ function normalizePredictionRecord(value: unknown): LeadOptPredictionRecord | nu
     state: normalizedState,
     backend: readText(raw.backend).trim().toLowerCase(),
     pairIptm,
+    interfaceMetricValue:
+      normalizeIptm(raw.interfaceMetricValue ?? raw.interface_metric_value) ?? normalizedPreferredInterfaceMetric.interfaceMetricValue,
+    interfaceMetricLabel:
+      readText(raw.interfaceMetricLabel ?? raw.interface_metric_label).trim() === 'ipTM'
+        ? 'ipTM'
+        : normalizedPreferredInterfaceMetric.interfaceMetricLabel,
+    interfaceMetricSource:
+      readText(raw.interfaceMetricSource ?? raw.interface_metric_source).trim().toLowerCase() === 'ipsae'
+        ? 'ipsae'
+        : readText(raw.interfaceMetricSource ?? raw.interface_metric_source).trim().toLowerCase() === 'iptm'
+          ? 'iptm'
+          : normalizedPreferredInterfaceMetric.interfaceMetricSource,
     pairPae,
     pairIptmResolved: pairIptmResolvedRaw === true && hasResolvedMetrics ? true : hasResolvedMetrics,
     ligandPlddt,
@@ -428,6 +488,23 @@ function mergePredictionRecordNonRegressive(
     state: mergedState,
     backend: readText(incoming.backend).trim().toLowerCase() || readText(current.backend).trim().toLowerCase(),
     pairIptm: incoming.pairIptm ?? current.pairIptm,
+    interfaceMetricValue:
+      (current.interfaceMetricSource !== 'ipsae' && incoming.interfaceMetricSource === 'ipsae') ||
+      current.interfaceMetricSource === 'none'
+        ? incoming.interfaceMetricValue
+        : incoming.interfaceMetricValue ?? current.interfaceMetricValue,
+    interfaceMetricLabel:
+      (current.interfaceMetricSource !== 'ipsae' && incoming.interfaceMetricSource === 'ipsae') ||
+      current.interfaceMetricSource === 'none'
+        ? incoming.interfaceMetricLabel
+        : incoming.interfaceMetricLabel ?? current.interfaceMetricLabel,
+    interfaceMetricSource:
+      (current.interfaceMetricSource !== 'ipsae' && incoming.interfaceMetricSource === 'ipsae') ||
+      current.interfaceMetricSource === 'none'
+        ? incoming.interfaceMetricSource
+        : incoming.interfaceMetricSource === 'none'
+          ? current.interfaceMetricSource
+          : incoming.interfaceMetricSource ?? current.interfaceMetricSource,
     pairPae: incoming.pairPae ?? current.pairPae,
     ligandPlddt: incoming.ligandPlddt ?? current.ligandPlddt,
     ligandAtomPlddts:
@@ -513,6 +590,9 @@ function buildQueuedPredictionRecord(taskId: string, backend: string): LeadOptPr
     state: 'QUEUED',
     backend: normalizedBackend,
     pairIptm: null,
+    interfaceMetricValue: null,
+    interfaceMetricLabel: 'IPSAE',
+    interfaceMetricSource: 'none',
     pairPae: null,
     pairIptmResolved: false,
     ligandPlddt: null,
@@ -525,6 +605,7 @@ function buildQueuedPredictionRecord(taskId: string, backend: string): LeadOptPr
 function hasResolvedPredictionMetrics(record: LeadOptPredictionRecord | null | undefined): boolean {
   if (!record) return false;
   const pairIptm = typeof record.pairIptm === 'number' && Number.isFinite(record.pairIptm);
+  const interfaceMetric = typeof record.interfaceMetricValue === 'number' && Number.isFinite(record.interfaceMetricValue);
   const pairPae = typeof record.pairPae === 'number' && Number.isFinite(record.pairPae);
   const ligandPlddt = typeof record.ligandPlddt === 'number' && Number.isFinite(record.ligandPlddt);
   const ligandAtomPlddts = Array.isArray(record.ligandAtomPlddts) && record.ligandAtomPlddts.length > 0;
@@ -532,7 +613,7 @@ function hasResolvedPredictionMetrics(record: LeadOptPredictionRecord | null | u
   if (backend === 'alphafold3' && !ligandAtomPlddts) {
     return false;
   }
-  return record.pairIptmResolved === true && (pairIptm || pairPae || ligandPlddt || ligandAtomPlddts);
+  return record.pairIptmResolved === true && (pairIptm || interfaceMetric || pairPae || ligandPlddt || ligandAtomPlddts);
 }
 
 function hasHydratedPredictionVisualization(record: LeadOptPredictionRecord | null | undefined): boolean {
@@ -631,6 +712,9 @@ function extractPredictionMetricsFromStatusInfo(
   ligandChain: string
 ): {
   pairIptm: number | null;
+  interfaceMetricValue: number | null;
+  interfaceMetricLabel: 'IPSAE' | 'ipTM';
+  interfaceMetricSource: 'ipsae' | 'iptm' | 'none';
   pairPae: number | null;
   ligandPlddt: number | null;
   ligandAtomPlddts: number[];
@@ -648,6 +732,12 @@ function extractPredictionMetricsFromStatusInfo(
     findPairIptm(confidence, targetChain, ligandChain) ??
     findPairIptm(affinity, targetChain, ligandChain) ??
     normalizeIptm(compact.pair_iptm ?? compact.pairIptm ?? compact.iptm);
+  const preferredInterfaceMetric = resolveLeadOptPreferredInterfaceMetric({
+    confidence,
+    affinity,
+    compact,
+    pairIptm
+  });
   const pairPae =
     findPairPae(confidence, targetChain, ligandChain) ??
     findPairPae(affinity, targetChain, ligandChain) ??
@@ -671,6 +761,9 @@ function extractPredictionMetricsFromStatusInfo(
   const hasMetrics = pairIptm !== null || pairPae !== null || ligandPlddt !== null || ligandAtomPlddts.length > 0;
   return {
     pairIptm,
+    interfaceMetricValue: preferredInterfaceMetric.interfaceMetricValue,
+    interfaceMetricLabel: preferredInterfaceMetric.interfaceMetricLabel,
+    interfaceMetricSource: preferredInterfaceMetric.interfaceMetricSource,
     pairPae,
     ligandPlddt,
     ligandAtomPlddts,
@@ -1193,6 +1286,9 @@ function extractPredictionResultPayload(
   candidateSmilesInput?: unknown
 ): {
   pairIptm: number | null;
+  interfaceMetricValue: number | null;
+  interfaceMetricLabel: 'IPSAE' | 'ipTM';
+  interfaceMetricSource: 'ipsae' | 'iptm' | 'none';
   pairPae: number | null;
   ligandPlddt: number | null;
   ligandAtomPlddts: number[];
@@ -1207,11 +1303,19 @@ function extractPredictionResultPayload(
   const candidateSmiles = readText(candidateSmilesInput).trim();
   const renderPayload = extractPredictionRenderPayload(confidence, asRecord({}), ligandChain, candidateSmiles);
   const pairIptm = findPairIptm(confidence, targetChain, ligandChain) ?? findPairIptm(affinity, targetChain, ligandChain);
+  const preferredInterfaceMetric = resolveLeadOptPreferredInterfaceMetric({
+    confidence,
+    affinity,
+    pairIptm
+  });
   const pairPae = findPairPae(confidence, targetChain, ligandChain) ?? findPairPae(affinity, targetChain, ligandChain);
   const ligandAtomPlddts = findLigandAtomPlddts(confidence, ligandChain);
   const structureText = readText(parsed?.structureText);
   return {
     pairIptm,
+    interfaceMetricValue: preferredInterfaceMetric.interfaceMetricValue,
+    interfaceMetricLabel: preferredInterfaceMetric.interfaceMetricLabel,
+    interfaceMetricSource: preferredInterfaceMetric.interfaceMetricSource,
     pairPae,
     ligandPlddt: mean(ligandAtomPlddts),
     ligandAtomPlddts,
@@ -1393,6 +1497,9 @@ export function useLeadOptMmpQueryMachine({
                     ...current,
                     state: 'SUCCESS',
                     pairIptm: nextPairIptm,
+                    interfaceMetricValue: metrics.hasMetrics ? metrics.interfaceMetricValue : current.interfaceMetricValue,
+                    interfaceMetricLabel: metrics.hasMetrics ? metrics.interfaceMetricLabel : current.interfaceMetricLabel,
+                    interfaceMetricSource: metrics.hasMetrics ? metrics.interfaceMetricSource : current.interfaceMetricSource,
                     pairPae: nextPairPae,
                     pairIptmResolved:
                       metrics.hasMetrics ||
@@ -1539,6 +1646,9 @@ export function useLeadOptMmpQueryMachine({
                     ...current,
                     state: 'SUCCESS',
                     pairIptm: nextPairIptm,
+                    interfaceMetricValue: metrics.hasMetrics ? metrics.interfaceMetricValue : current.interfaceMetricValue,
+                    interfaceMetricLabel: metrics.hasMetrics ? metrics.interfaceMetricLabel : current.interfaceMetricLabel,
+                    interfaceMetricSource: metrics.hasMetrics ? metrics.interfaceMetricSource : current.interfaceMetricSource,
                     pairPae: nextPairPae,
                     pairIptmResolved:
                       metrics.hasMetrics ||
@@ -1663,6 +1773,9 @@ export function useLeadOptMmpQueryMachine({
                   ...current,
                   state: 'SUCCESS',
                   pairIptm: resultPayload.pairIptm,
+                  interfaceMetricValue: resultPayload.interfaceMetricValue,
+                  interfaceMetricLabel: resultPayload.interfaceMetricLabel,
+                  interfaceMetricSource: resultPayload.interfaceMetricSource,
                   pairPae: resultPayload.pairPae,
                   pairIptmResolved: true,
                   ligandPlddt: resultPayload.ligandPlddt,
@@ -1790,6 +1903,9 @@ export function useLeadOptMmpQueryMachine({
                   ...current,
                   state: 'SUCCESS',
                   pairIptm: resultPayload.pairIptm,
+                  interfaceMetricValue: resultPayload.interfaceMetricValue,
+                  interfaceMetricLabel: resultPayload.interfaceMetricLabel,
+                  interfaceMetricSource: resultPayload.interfaceMetricSource,
                   pairPae: resultPayload.pairPae,
                   pairIptmResolved: true,
                   ligandPlddt: resultPayload.ligandPlddt,
@@ -2819,6 +2935,9 @@ export function useLeadOptMmpQueryMachine({
           ...existing,
           state: 'SUCCESS',
           pairIptm: resultPayload.pairIptm,
+          interfaceMetricValue: resultPayload.interfaceMetricValue,
+          interfaceMetricLabel: resultPayload.interfaceMetricLabel,
+          interfaceMetricSource: resultPayload.interfaceMetricSource,
           pairPae: resultPayload.pairPae,
           pairIptmResolved: true,
           ligandPlddt: resultPayload.ligandPlddt,
@@ -2963,6 +3082,9 @@ export function useLeadOptMmpQueryMachine({
           ...existing,
           state: 'SUCCESS',
           pairIptm: resultPayload.pairIptm,
+          interfaceMetricValue: resultPayload.interfaceMetricValue,
+          interfaceMetricLabel: resultPayload.interfaceMetricLabel,
+          interfaceMetricSource: resultPayload.interfaceMetricSource,
           pairPae: resultPayload.pairPae,
           pairIptmResolved: true,
           ligandPlddt: resultPayload.ligandPlddt,

@@ -10,6 +10,7 @@ from management_api.runtime_proxy import read_upload_text
 
 AFFINITY_TARGET_UPLOAD_COMPONENT_ID = "__affinity_target_upload__"
 AFFINITY_LIGAND_UPLOAD_COMPONENT_ID = "__affinity_ligand_upload__"
+TASK_INPUT_OPTIONS_KEY = "__vbio_input_options_v1"
 
 
 def _normalize_chain_id_list(value: Any) -> List[str]:
@@ -295,12 +296,18 @@ def build_affinity_task_snapshot(request_obj: Any, upstream_path: str) -> Dict[s
         ligand_smiles = next(iter(ligand_smiles_map.values()))
 
     enable_affinity = parse_bool_form(request_obj, "enable_affinity", False)
+    mode = (request_obj.form.get("mode") or "score").strip().lower()
+    if mode not in {"score", "pose", "refine", "interface"}:
+        mode = "score"
     activity_enabled = bool(enable_affinity and target_chain and ligand_chain and ligand_smiles)
     properties: Dict[str, Any] = {
         "affinity": activity_enabled,
         "target": target_chain or None,
         "ligand": ligand_chain or None,
         "binder": ligand_chain or None,
+        TASK_INPUT_OPTIONS_KEY: {
+            "affinityMode": mode
+        },
     }
 
     components: List[Dict[str, Any]] = []

@@ -7,6 +7,7 @@ import type {
   StructureSearchMode,
   SubmittedWithinDaysOption,
   TaskTableMode,
+  TaskMetricColumnKey,
   TaskWorkflowFilter
 } from './taskListTypes';
 import { backendLabel } from './taskPresentation';
@@ -47,6 +48,8 @@ interface ProjectTasksFiltersProps {
   structureSearchLoading: boolean;
   structureSearchError: string | null;
   structureSearchMatches: Record<string, boolean>;
+  visibleMetricColumns: TaskMetricColumnKey[];
+  onVisibleMetricColumnsChange: (value: TaskMetricColumnKey[]) => void;
   onClearAdvancedFilters: () => void;
 }
 
@@ -86,6 +89,8 @@ export function ProjectTasksFilters({
   structureSearchLoading,
   structureSearchError,
   structureSearchMatches,
+  visibleMetricColumns,
+  onVisibleMetricColumnsChange,
   onClearAdvancedFilters
 }: ProjectTasksFiltersProps) {
   const searchPlaceholder =
@@ -225,7 +230,7 @@ export function ProjectTasksFilters({
                   />
                 </label>
                 <label className="advanced-filter-field">
-                  <span>Min iPTM</span>
+                  <span>Min ipTM</span>
                   <input
                     type="number"
                     min={0}
@@ -234,7 +239,7 @@ export function ProjectTasksFilters({
                     value={minIptm}
                     onChange={(e) => onMinIptmChange(e.target.value)}
                     placeholder="e.g. 0.70"
-                    aria-label="Minimum iPTM"
+                    aria-label="Minimum ipTM"
                   />
                 </label>
                 <label className="advanced-filter-field">
@@ -262,43 +267,115 @@ export function ProjectTasksFilters({
                 <span>Failures / errors only</span>
               </label>
             </div>
-            <div className="advanced-filter-field advanced-filter-field-wide task-structure-query-row">
-              <div className="task-structure-query-head">
-                <span>Structure Query</span>
-                <div className="task-structure-mode-switch" role="tablist" aria-label="Structure search mode">
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={structureSearchMode === 'exact'}
-                    className={`task-structure-mode-btn ${structureSearchMode === 'exact' ? 'active' : ''}`}
-                    onClick={() => onStructureSearchModeChange('exact')}
-                  >
-                    Exact
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={structureSearchMode === 'substructure'}
-                    className={`task-structure-mode-btn ${structureSearchMode === 'substructure' ? 'active' : ''}`}
-                    onClick={() => onStructureSearchModeChange('substructure')}
-                  >
-                    Substructure
-                  </button>
+            {!compactMetricsView ? (
+              <div className="advanced-filter-field-wide task-advanced-metrics-query-row">
+                <div className="advanced-filter-field advanced-filter-check task-metric-columns-panel">
+                  <span>Metric Columns</span>
+                  <div className="advanced-filter-checkbox-stack">
+                    {([
+                      ['plddt', 'pLDDT'],
+                      ['ipsae', 'IPSAE'],
+                      ['iptm', 'ipTM'],
+                      ['pae', 'PAE']
+                    ] as const).map(([key, label]) => (
+                      <label key={key} className="advanced-filter-checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={visibleMetricColumns.includes(key)}
+                          onChange={(event) => {
+                            const checked = event.target.checked;
+                            const next = checked
+                              ? [...visibleMetricColumns, key]
+                              : visibleMetricColumns.filter((value) => value !== key);
+                            onVisibleMetricColumnsChange(next);
+                          }}
+                        />
+                        <span>{label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div className="advanced-filter-field task-structure-query-row">
+                  <div className="task-structure-query-head">
+                    <span>Structure Query</span>
+                    <div className="task-structure-mode-switch" role="tablist" aria-label="Structure search mode">
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={structureSearchMode === 'exact'}
+                        className={`task-structure-mode-btn ${structureSearchMode === 'exact' ? 'active' : ''}`}
+                        onClick={() => onStructureSearchModeChange('exact')}
+                      >
+                        Exact
+                      </button>
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={structureSearchMode === 'substructure'}
+                        className={`task-structure-mode-btn ${structureSearchMode === 'substructure' ? 'active' : ''}`}
+                        onClick={() => onStructureSearchModeChange('substructure')}
+                      >
+                        Substructure
+                      </button>
+                    </div>
+                  </div>
+                  <div className="jsme-editor-container task-structure-jsme-shell">
+                    <JSMEEditor
+                      smiles={structureSearchQuery}
+                      height={300}
+                      onSmilesChange={onStructureSearchQueryChange}
+                    />
+                  </div>
+                  <div className={`task-structure-query-status ${structureSearchError ? 'is-error' : ''}`}>
+                    {structureSearchLoading
+                      ? 'Searching...'
+                      : structureSearchError
+                        ? 'Invalid query'
+                        : structureSearchQuery.trim()
+                          ? `Matched ${Object.values(structureSearchMatches).filter(Boolean).length}`
+                          : 'Draw query'}
+                  </div>
                 </div>
               </div>
-              <div className="jsme-editor-container task-structure-jsme-shell">
-                <JSMEEditor smiles={structureSearchQuery} height={300} onSmilesChange={onStructureSearchQueryChange} />
+            ) : (
+              <div className="advanced-filter-field advanced-filter-field-wide task-structure-query-row">
+                <div className="task-structure-query-head">
+                  <span>Structure Query</span>
+                  <div className="task-structure-mode-switch" role="tablist" aria-label="Structure search mode">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={structureSearchMode === 'exact'}
+                      className={`task-structure-mode-btn ${structureSearchMode === 'exact' ? 'active' : ''}`}
+                      onClick={() => onStructureSearchModeChange('exact')}
+                    >
+                      Exact
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={structureSearchMode === 'substructure'}
+                      className={`task-structure-mode-btn ${structureSearchMode === 'substructure' ? 'active' : ''}`}
+                      onClick={() => onStructureSearchModeChange('substructure')}
+                    >
+                      Substructure
+                    </button>
+                  </div>
+                </div>
+                <div className="jsme-editor-container task-structure-jsme-shell">
+                  <JSMEEditor smiles={structureSearchQuery} height={300} onSmilesChange={onStructureSearchQueryChange} />
+                </div>
+                <div className={`task-structure-query-status ${structureSearchError ? 'is-error' : ''}`}>
+                  {structureSearchLoading
+                    ? 'Searching...'
+                    : structureSearchError
+                      ? 'Invalid query'
+                      : structureSearchQuery.trim()
+                        ? `Matched ${Object.values(structureSearchMatches).filter(Boolean).length}`
+                        : 'Draw query'}
+                </div>
               </div>
-              <div className={`task-structure-query-status ${structureSearchError ? 'is-error' : ''}`}>
-                {structureSearchLoading
-                  ? 'Searching...'
-                  : structureSearchError
-                    ? 'Invalid query'
-                    : structureSearchQuery.trim()
-                      ? `Matched ${Object.values(structureSearchMatches).filter(Boolean).length}`
-                      : 'Draw query'}
-              </div>
-            </div>
+            )}
           </div>
           <div className="advanced-filter-actions">
             <button

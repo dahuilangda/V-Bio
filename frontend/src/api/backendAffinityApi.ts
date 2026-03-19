@@ -1,15 +1,6 @@
 import type { AffinityPreviewPayload, AffinitySubmitInput } from '../types/models';
 import { API_HEADERS, requestBackend } from './backendClient';
 
-const BOLTZ2SCORE_AFFINITY_PROFILE = Object.freeze({
-  // Affinity scoring should keep input complex geometry by default (score-only mode).
-  structureRefine: false,
-  recyclingSteps: 20,
-  samplingSteps: 1,
-  diffusionSamples: 1,
-  maxParallelSamples: 1
-});
-
 export async function previewAffinityComplex(input: {
   targetFile: File;
   ligandFile?: File | null;
@@ -130,12 +121,17 @@ export async function submitAffinityScoring(input: AffinitySubmitInput): Promise
   }
 
   const enableAffinity = Boolean(input.enableAffinity);
+  const normalizedMode = input.mode === 'pose' || input.mode === 'refine' || input.mode === 'interface' ? input.mode : 'score';
+  const computeIpsae = input.computeIpsae !== false;
+  form.append('mode', normalizedMode);
+  if (computeIpsae) {
+    form.append('compute_ipsae', 'true');
+  }
   if (enableAffinity) {
     if (!targetChainIds.length || !ligandChainId || !ligandSmiles) {
       throw new Error('Affinity mode needs target chain(s), ligand chain, and ligand SMILES.');
     }
     form.append('enable_affinity', 'true');
-    form.append('auto_enable_affinity', 'true');
   }
   if (input.affinityRefine) {
     form.append('affinity_refine', 'true');
@@ -145,11 +141,6 @@ export async function submitAffinityScoring(input: AffinitySubmitInput): Promise
   }
   const useMsaServer = input.useMsa === true;
   form.append('use_msa_server', String(useMsaServer).toLowerCase());
-  form.append('structure_refine', String(BOLTZ2SCORE_AFFINITY_PROFILE.structureRefine).toLowerCase());
-  form.append('recycling_steps', String(BOLTZ2SCORE_AFFINITY_PROFILE.recyclingSteps));
-  form.append('sampling_steps', String(BOLTZ2SCORE_AFFINITY_PROFILE.samplingSteps));
-  form.append('diffusion_samples', String(BOLTZ2SCORE_AFFINITY_PROFILE.diffusionSamples));
-  form.append('max_parallel_samples', String(BOLTZ2SCORE_AFFINITY_PROFILE.maxParallelSamples));
   form.append('priority', 'high');
   const endpoint = '/api/boltz2score';
 

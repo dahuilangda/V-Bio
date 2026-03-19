@@ -1,11 +1,14 @@
 import type { CSSProperties, KeyboardEvent, PointerEvent, RefObject } from 'react';
 import { AffinityBasicsWorkspace } from '../../components/project/AffinityWorkspace';
+import type { AffinityScoringMode } from '../../types/models';
 
 export interface AffinityWorkflowSectionProps {
   visible: boolean;
   canEdit: boolean;
   submitting: boolean;
   backend: string;
+  mode: AffinityScoringMode;
+  seed: number | null;
   targetFileName: string;
   ligandFileName: string;
   ligandSmiles: string;
@@ -13,7 +16,6 @@ export interface AffinityWorkflowSectionProps {
   useMsa: boolean;
   confidenceOnly: boolean;
   confidenceOnlyLocked: boolean;
-  confidenceOnlyHint: string;
   previewTargetStructureText: string;
   previewTargetStructureFormat: 'cif' | 'pdb';
   previewLigandStructureText: string;
@@ -27,6 +29,8 @@ export interface AffinityWorkflowSectionProps {
   onUseMsaChange: (value: boolean) => void;
   onConfidenceOnlyChange: (value: boolean) => void;
   onBackendChange: (backend: string) => void;
+  onModeChange: (mode: AffinityScoringMode) => void;
+  onSeedChange: (seed: number | null) => void;
   onLigandSmilesChange: (value: string) => void;
   onResizerPointerDown: (event: PointerEvent<HTMLDivElement>) => void;
   onResizerKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
@@ -37,6 +41,8 @@ export function AffinityWorkflowSection({
   canEdit,
   submitting,
   backend,
+  mode,
+  seed,
   targetFileName,
   ligandFileName,
   ligandSmiles,
@@ -44,7 +50,6 @@ export function AffinityWorkflowSection({
   useMsa,
   confidenceOnly,
   confidenceOnlyLocked,
-  confidenceOnlyHint,
   previewTargetStructureText,
   previewTargetStructureFormat,
   previewLigandStructureText,
@@ -58,6 +63,8 @@ export function AffinityWorkflowSection({
   onUseMsaChange,
   onConfidenceOnlyChange,
   onBackendChange,
+  onModeChange,
+  onSeedChange,
   onLigandSmilesChange,
   onResizerPointerDown,
   onResizerKeyDown
@@ -69,6 +76,8 @@ export function AffinityWorkflowSection({
       canEdit={canEdit}
       submitting={submitting}
       backend={backend}
+      mode={mode}
+      seed={seed}
       targetFileName={targetFileName}
       ligandFileName={ligandFileName}
       ligandSmiles={ligandSmiles}
@@ -76,7 +85,6 @@ export function AffinityWorkflowSection({
       useMsa={useMsa}
       confidenceOnly={confidenceOnly}
       confidenceOnlyLocked={confidenceOnlyLocked}
-      confidenceOnlyHint={confidenceOnlyHint}
       previewTargetStructureText={previewTargetStructureText}
       previewTargetStructureFormat={previewTargetStructureFormat}
       previewLigandStructureText={previewLigandStructureText}
@@ -90,6 +98,8 @@ export function AffinityWorkflowSection({
       onUseMsaChange={onUseMsaChange}
       onConfidenceOnlyChange={onConfidenceOnlyChange}
       onBackendChange={onBackendChange}
+      onModeChange={onModeChange}
+      onSeedChange={onSeedChange}
       onLigandSmilesChange={onLigandSmilesChange}
       onResizerPointerDown={onResizerPointerDown}
       onResizerKeyDown={onResizerKeyDown}

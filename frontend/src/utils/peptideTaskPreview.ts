@@ -65,6 +65,26 @@ function normalizeIptmValue(value: number | null): number | null {
   return value;
 }
 
+function readPreferredInterfaceMetric(row: Record<string, unknown>): {
+  value: number | null;
+  label: 'IPSAE' | 'ipTM';
+  source: 'ipsae' | 'iptm' | 'none';
+} {
+  const ligandIpsaeMax = normalizeIptmValue(firstFiniteMetric([row], ['ligand_ipsae_max', 'ligandIpsaeMax']));
+  if (ligandIpsaeMax !== null) {
+    return { value: ligandIpsaeMax, label: 'IPSAE', source: 'ipsae' };
+  }
+  const ipsaeDom = normalizeIptmValue(firstFiniteMetric([row], ['ipsae_dom', 'ipsaeDom']));
+  if (ipsaeDom !== null) {
+    return { value: ipsaeDom, label: 'IPSAE', source: 'ipsae' };
+  }
+  const iptm = normalizeIptmValue(firstFiniteMetric([row], ['pair_iptm_target_binder', 'pair_iptm', 'iptm']));
+  if (iptm !== null) {
+    return { value: iptm, label: 'ipTM', source: 'iptm' };
+  }
+  return { value: null, label: 'IPSAE', source: 'none' };
+}
+
 function normalizeInt(value: number | null): number | null {
   if (value === null || !Number.isFinite(value)) return null;
   return Math.max(0, Math.floor(value));
@@ -227,6 +247,14 @@ function compareCandidateRows(a: Record<string, unknown>, b: Record<string, unkn
   if (aPlddt !== null && bPlddt !== null && aPlddt !== bPlddt) return bPlddt - aPlddt;
   if (aPlddt !== null && bPlddt === null) return -1;
   if (aPlddt === null && bPlddt !== null) return 1;
+
+  const aInterfaceMetric = readPreferredInterfaceMetric(a).value;
+  const bInterfaceMetric = readPreferredInterfaceMetric(b).value;
+  if (aInterfaceMetric !== null && bInterfaceMetric !== null && aInterfaceMetric !== bInterfaceMetric) {
+    return bInterfaceMetric - aInterfaceMetric;
+  }
+  if (aInterfaceMetric !== null && bInterfaceMetric === null) return -1;
+  if (aInterfaceMetric === null && bInterfaceMetric !== null) return 1;
 
   return aIndex - bIndex;
 }
@@ -435,6 +463,7 @@ function buildPeptidePreview(payload: Record<string, unknown>): Record<string, u
     const best = sorted.find((row) => Boolean(readCandidateSequence(row))) || sorted[0];
     const sequence = readCandidateSequence(best);
     if (sequence) {
+      const preferredInterfaceMetric = readPreferredInterfaceMetric(best);
       const binderChainId = firstTextMetric([best, payload, peptideDesign, peptideProgress, topProgress], [
         'binder_chain_id',
         'model_ligand_chain_id',
@@ -445,6 +474,9 @@ function buildPeptidePreview(payload: Record<string, unknown>): Record<string, u
       bestCandidate = {
         sequence,
         plddt: normalizePlddtValue(firstFiniteMetric([best], ['binder_avg_plddt', 'plddt', 'ligand_mean_plddt', 'mean_plddt'])),
+        interface_metric: preferredInterfaceMetric.value,
+        interface_metric_label: preferredInterfaceMetric.label,
+        interface_metric_source: preferredInterfaceMetric.source,
         iptm: normalizeIptmValue(firstFiniteMetric([best], ['pair_iptm_target_binder', 'pair_iptm', 'iptm'])),
         score: firstFiniteMetric([best], ['composite_score', 'score', 'fitness', 'objective']),
         rank: normalizeInt(firstFiniteMetric([best], ['rank', 'ranking', 'order'])),

@@ -1511,7 +1511,6 @@ export function ApiAccessPage() {
         JSON.stringify({ [affinityLigandChain]: affinityLigandSmiles })
       );
       return ` \\\n  -F "enable_affinity=true" \\
-  -F "auto_enable_affinity=true" \\
   -F "target_chain=${escapeForDoubleQuotedShell(affinityTargetChain)}" \\
   -F "ligand_chain=${escapeForDoubleQuotedShell(affinityLigandChain)}" \\
   -F "ligand_smiles_map=${affinitySmilesMap}"`;
@@ -1557,12 +1556,9 @@ ${submitTaskIdCapture}`;
   -F "protein_file=@${escapedTargetPath}" \\
   -F "ligand_file=@${escapedLigandPath}" \\
   -F "backend=boltz" \\
+  -F "mode=score" \\
+  -F "compute_ipsae=true" \\
   -F "use_msa_server=${builderUseMsaAffinity ? 'true' : 'false'}" \\
-  -F "structure_refine=false" \\
-  -F "recycling_steps=20" \\
-  -F "sampling_steps=1" \\
-  -F "diffusion_samples=1" \\
-  -F "max_parallel_samples=1" \\
   -F "priority=high"${affinityActivityFlags})
 ${submitTaskIdCapture}`;
   const commandSubmit = !isSupportedSubmitWorkflow

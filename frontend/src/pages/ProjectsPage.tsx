@@ -577,7 +577,7 @@ export function ProjectsPage() {
 
         {(error || renameError) && <div className="alert error">{error || renameError}</div>}
 
-        {loading ? (
+        {loading && projects.length === 0 ? (
           <div className="muted">Loading projects...</div>
         ) : filteredProjects.length === 0 ? (
           <div className="empty-state">

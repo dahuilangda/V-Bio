@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { useAffinityWorkflow } from '../../hooks/useAffinityWorkflow';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
-import type { InputComponent, ProjectTask } from '../../types/models';
+import type { AffinityScoringMode, InputComponent, ProjectTask } from '../../types/models';
 import { applyAffinityChainsToDraftState, applyUseMsaToProteinComponents } from './projectAffinityDraft';
 import { readTaskAffinityUploads, resolveAffinityUploadStorageTaskRowId } from './projectTaskSnapshot';
 
@@ -11,6 +11,7 @@ interface UseProjectAffinityWorkspaceInput {
   workspaceTab: 'results' | 'basics' | 'components' | 'constraints';
   projectId: string | null;
   draft: any;
+  affinityMode: AffinityScoringMode;
   setDraft: Dispatch<SetStateAction<any>>;
   affinityUploadScopeTaskRowId: string | null;
   taskAffinityUploads: Record<string, AffinityPersistedUploads>;
@@ -26,6 +27,7 @@ export function useProjectAffinityWorkspace({
   workspaceTab,
   projectId,
   draft,
+  affinityMode,
   setDraft,
   affinityUploadScopeTaskRowId,
   taskAffinityUploads,
@@ -35,6 +37,26 @@ export function useProjectAffinityWorkspace({
   computeUseMsaFlag,
   rememberAffinityUploadsForTaskRow
 }: UseProjectAffinityWorkspaceInput) {
+  const onAffinityModeChange = useCallback(
+    (mode: AffinityScoringMode) => {
+      setDraft((prev: any) => {
+        if (!prev) return prev;
+        if (prev.inputConfig?.options?.affinityMode === mode) return prev;
+        return {
+          ...prev,
+          inputConfig: {
+            ...prev.inputConfig,
+            options: {
+              ...(prev.inputConfig?.options || {}),
+              affinityMode: mode
+            }
+          }
+        };
+      });
+    },
+    [setDraft]
+  );
+
   const applyAffinityChainsToDraft = useCallback(
     (targetChainId: string, ligandChainId: string, forceEnable = false) => {
       setDraft((prev: any) => applyAffinityChainsToDraftState(prev, targetChainId, ligandChainId, forceEnable));
@@ -109,6 +131,8 @@ export function useProjectAffinityWorkspace({
 
   return {
     ...affinityWorkflow,
+    affinityMode,
+    onAffinityModeChange,
     onAffinityUseMsaChange
   };
 }

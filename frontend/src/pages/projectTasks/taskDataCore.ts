@@ -438,7 +438,7 @@ function normalizeProbability(value: number | null): number | null {
 }
 
 const TASKS_PAGE_FILTERS_STORAGE_KEY = 'vbio:tasks-page-filters:v1';
-const TASK_SORT_KEYS: SortKey[] = ['plddt', 'iptm', 'pae', 'submitted', 'backend', 'seed', 'duration'];
+const TASK_SORT_KEYS: SortKey[] = ['plddt', 'ipsae', 'iptm', 'pae', 'submitted', 'backend', 'seed', 'duration'];
 const TASK_SORT_DIRECTIONS: SortDirection[] = ['asc', 'desc'];
 const TASK_SUBMITTED_WINDOW_OPTIONS: SubmittedWithinDaysOption[] = ['all', '1', '7', '30', '90'];
 const TASK_SEED_FILTER_OPTIONS: SeedFilterOption[] = ['all', 'with_seed', 'without_seed'];
@@ -673,6 +673,37 @@ function readChainMeanPlddtForChain(confidence: Record<string, unknown>, chainId
   const value = toFiniteNumber((map as Record<string, unknown>)[chainId]);
   if (value === null) return null;
   return value >= 0 && value <= 1 ? value * 100 : value;
+}
+
+function readIpsaeDomMetric(confidence: Record<string, unknown>): number | null {
+  return normalizeProbability(readFirstFiniteMetric(confidence, ['ipsae_dom', 'ipsaeDom']));
+}
+
+function readLigandIpsaeMaxMetric(confidence: Record<string, unknown>): number | null {
+  return normalizeProbability(readFirstFiniteMetric(confidence, ['ligand_ipsae_max', 'ligandIpsaeMax']));
+}
+
+function resolvePreferredInterfaceMetric(
+  confidence: Record<string, unknown>,
+  context?: TaskMetricContext
+): { value: number | null; label: 'IPSAE' | 'ipTM'; source: 'ipsae' | 'iptm' | 'none'; pairIptm: number | null } {
+  const pairIptm = context
+    ? readPairIptmForChains(confidence, context.targetChainId, context.ligandChainId, context.chainIds)
+    : null;
+  const ligandIpsaeMax = readLigandIpsaeMaxMetric(confidence);
+  if (ligandIpsaeMax !== null) {
+    return { value: ligandIpsaeMax, label: 'IPSAE', source: 'ipsae', pairIptm };
+  }
+  const ipsaeDom = readIpsaeDomMetric(confidence);
+  if (ipsaeDom !== null) {
+    return { value: ipsaeDom, label: 'IPSAE', source: 'ipsae', pairIptm };
+  }
+  const scalarIptm = normalizeProbability(readFirstFiniteMetric(confidence, ['iptm', 'ligand_iptm', 'protein_iptm']));
+  const preferredIptm = pairIptm ?? scalarIptm;
+  if (preferredIptm !== null) {
+    return { value: preferredIptm, label: 'ipTM', source: 'iptm', pairIptm };
+  }
+  return { value: null, label: 'IPSAE', source: 'none', pairIptm };
 }
 
 function resolveTaskSelectionContext(
@@ -951,9 +982,10 @@ function readTaskConfidenceMetrics(task: ProjectTask, context?: TaskMetricContex
   const selectedLigandPlddt = context
     ? readChainMeanPlddtForChain(confidence, context.ligandChainId)
     : null;
-  const selectedPairIptm = context
-    ? readPairIptmForChains(confidence, context.targetChainId, context.ligandChainId, context.chainIds)
-    : null;
+  const ligandIpsaeMax = readLigandIpsaeMaxMetric(confidence);
+  const ipsaeDom = readIpsaeDomMetric(confidence);
+  const preferredInterfaceMetric = resolvePreferredInterfaceMetric(confidence, context);
+  const selectedPairIptm = preferredInterfaceMetric.pairIptm;
   const plddtRaw = readFirstFiniteMetric(confidence, [
     'ligand_plddt',
     'ligand_mean_plddt',
@@ -969,7 +1001,11 @@ function readTaskConfidenceMetrics(task: ProjectTask, context?: TaskMetricContex
   const mergedPlddt = selectedLigandPlddt ?? plddtRaw;
   return {
     plddt: mergedPlddt === null ? null : mergedPlddt <= 1 ? mergedPlddt * 100 : mergedPlddt,
+    ipsae: ligandIpsaeMax ?? ipsaeDom,
     iptm: normalizeProbability(iptmRaw),
+    interfaceMetricValue: preferredInterfaceMetric.value,
+    interfaceMetricLabel: preferredInterfaceMetric.label,
+    interfaceMetricSource: preferredInterfaceMetric.source,
     pae: paeRaw
   };
 }
@@ -2244,7 +2280,7 @@ function hasTaskLigandAtomPlddts(
 function hasTaskSummaryMetrics(task: ProjectTask): boolean {
   const context = resolveTaskSelectionContext(task);
   const metrics = readTaskConfidenceMetrics(task, context);
-  return metrics.plddt !== null || metrics.iptm !== null || metrics.pae !== null;
+  return metrics.plddt !== null || metrics.ipsae !== null || metrics.iptm !== null || metrics.pae !== null;
 }
 
 export {

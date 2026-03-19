@@ -15,7 +15,7 @@ import {
   sortProjectTasks,
   type LoadTaskDataOptions,
 } from './taskDataUtils';
-import { hydrateTaskMetricsFromResultRows, syncInitialRuntimeTaskRows, syncRuntimeTaskRows } from './taskRowSync';
+import { syncInitialRuntimeTaskRows, syncRuntimeTaskRows } from './taskRowSync';
 
 interface UseProjectTasksDataLoaderOptions {
   projectId: string;
@@ -50,6 +50,7 @@ const TASK_STATE_PRIORITY: Record<string, number> = {
   FAILURE: 3,
   REVOKED: 3,
 };
+const TASK_LIST_RUNTIME_CACHE_TTL_MS = 15000;
 
 function taskStatePriority(value: unknown): number {
   return TASK_STATE_PRIORITY[String(value || '').trim().toUpperCase()] ?? 0;
@@ -240,9 +241,13 @@ export function useProjectTasksDataLoader({
   const tasksRef = useRef<ProjectTask[]>([]);
   const taskListAccessContextRef = useRef<TaskListAccessContext | null>(null);
   const detailHydrationInFlightRef = useRef<Set<string>>(new Set());
-  const resultHydrationInFlightRef = useRef<Set<string>>(new Set());
-  const resultHydrationDoneRef = useRef<Set<string>>(new Set());
-  const resultHydrationAttemptsRef = useRef<Map<string, number>>(new Map());
+
+  const taskListRuntimeCacheKey = useMemo(() => {
+    const sessionIdentity = String(sessionUserId || '').trim().toLowerCase() || '__anonymous__';
+    const normalizedProjectId = String(projectId || '').trim();
+    if (!normalizedProjectId) return '';
+    return `vbio:project-tasks-runtime:v1:${sessionIdentity}:${normalizedProjectId}`;
+  }, [projectId, sessionUserId]);
 
   useEffect(() => {
     projectRef.current = project;
@@ -257,6 +262,54 @@ export function useProjectTasksDataLoader({
     taskListAccessContextRef.current = null;
   }, [projectId]);
 
+  const persistRuntimeCache = useCallback(
+    (projectRow: Project | null, taskRows: ProjectTask[]) => {
+      if (typeof window === 'undefined' || !taskListRuntimeCacheKey || !projectRow) return;
+      try {
+        window.localStorage.setItem(
+          taskListRuntimeCacheKey,
+          JSON.stringify({
+            saved_at: Date.now(),
+            project: projectRow,
+            tasks: sanitizeTaskRows(taskRows)
+          })
+        );
+      } catch {
+        // Ignore storage quota or serialization failures.
+      }
+    },
+    [taskListRuntimeCacheKey]
+  );
+
+  const hydrateRuntimeCache = useCallback(() => {
+    if (typeof window === 'undefined' || !taskListRuntimeCacheKey) return false;
+    if (projectRef.current || tasksRef.current.length > 0) return false;
+    try {
+      const raw = window.localStorage.getItem(taskListRuntimeCacheKey);
+      if (!raw) return false;
+      const parsed = JSON.parse(raw) as {
+        saved_at?: number;
+        project?: Project | null;
+        tasks?: ProjectTask[] | null;
+      };
+      const savedAt = Number(parsed?.saved_at || 0);
+      if (!Number.isFinite(savedAt) || Date.now() - savedAt > TASK_LIST_RUNTIME_CACHE_TTL_MS) {
+        window.localStorage.removeItem(taskListRuntimeCacheKey);
+        return false;
+      }
+      const cachedProject = parsed?.project || null;
+      const cachedTasks = sanitizeTaskRows(Array.isArray(parsed?.tasks) ? parsed.tasks : []);
+      if (!cachedProject || cachedTasks.length === 0) return false;
+      projectRef.current = cachedProject;
+      tasksRef.current = cachedTasks;
+      setProject(cachedProject);
+      setTasks(cachedTasks);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [taskListRuntimeCacheKey]);
+
   const syncRuntimeTasks = useCallback(
     async (projectRow: Project, taskRows: ProjectTask[]) =>
       syncRuntimeTaskRows(projectRow, taskRows, {
@@ -270,18 +323,8 @@ export function useProjectTasksDataLoader({
     []
   );
 
-  const hydrateTaskMetricsFromResults = useCallback(
-    async (projectRow: Project, taskRows: ProjectTask[]) =>
-      hydrateTaskMetricsFromResultRows(projectRow, taskRows, {
-        resultHydrationInFlightRef,
-        resultHydrationDoneRef,
-        resultHydrationAttemptsRef
-      }),
-    []
-  );
-
   const syncCachedRuntimeState = useCallback(
-    async (options?: { hydrateResults?: boolean }) => {
+    async () => {
       const cachedProject = projectRef.current;
       const cachedTasks = sanitizeTaskRows(tasksRef.current);
       if (!cachedProject || cachedTasks.length === 0) return;
@@ -289,20 +332,9 @@ export function useProjectTasksDataLoader({
       const synced = await syncRuntimeTasks(cachedProject, cachedTasks);
       setProject(synced.project);
       setTasks(sanitizeTaskRows(synced.taskRows));
-
-      if (options?.hydrateResults === false) return;
-
-      void (async () => {
-        try {
-          const hydrated = await hydrateTaskMetricsFromResults(synced.project, synced.taskRows);
-          setProject(hydrated.project);
-          setTasks(sanitizeTaskRows(hydrated.taskRows));
-        } catch {
-          // Keep runtime-synced state if result hydration fails.
-        }
-      })();
+      persistRuntimeCache(synced.project, synced.taskRows);
     },
-    [hydrateTaskMetricsFromResults, syncRuntimeTasks]
+    [persistRuntimeCache, syncRuntimeTasks]
   );
 
   const loadData = useCallback(
@@ -314,6 +346,9 @@ export function useProjectTasksDataLoader({
       const showRefreshing = silent && options?.showRefreshing !== false;
       const preferBackendStatus = options?.preferBackendStatus !== false;
       const forceRefetch = Boolean(options?.forceRefetch);
+      if (!forceRefetch) {
+        hydrateRuntimeCache();
+      }
       if (showRefreshing) {
         setRefreshing(true);
       } else if (!silent) {
@@ -340,16 +375,7 @@ export function useProjectTasksDataLoader({
           if (loadSeqRef.current !== loadSeq) return;
           setProject(synced.project);
           setTasks(sanitizeTaskRows(synced.taskRows));
-          void (async () => {
-            try {
-              const hydrated = await hydrateTaskMetricsFromResults(synced.project, synced.taskRows);
-              if (loadSeqRef.current !== loadSeq) return;
-              setProject(hydrated.project);
-              setTasks(sanitizeTaskRows(hydrated.taskRows));
-            } catch {
-              // Keep cached sync state if result hydration fails.
-            }
-          })();
+          persistRuntimeCache(synced.project, synced.taskRows);
           return;
         }
 
@@ -371,24 +397,12 @@ export function useProjectTasksDataLoader({
           editableTaskIds: accessInfo.editableTaskIds
         };
         const workflowKey = normalizeWorkflowKey(projectRow.task_type);
-        const useLightweightPredictionRows = workflowKey === 'prediction';
+        const useLightweightTaskRows = workflowKey !== 'lead_optimization';
         const includeComponentsForList = false;
-        const includeConfidenceForList =
-          workflowKey === 'lead_optimization'
-            ? false
-            : workflowKey === 'peptide_design'
-            ? !silent || cachedTasks.length === 0
-            : useLightweightPredictionRows
-              ? false
-              : !(silent && cachedTasks.length > 0);
-        const includeConfidenceSummaryForList = useLightweightPredictionRows && !includeConfidenceForList;
-        const includePropertiesForList =
-          workflowKey === 'lead_optimization'
-            ? false
-            : useLightweightPredictionRows
-              ? false
-              : true;
-        const includePropertiesSummaryForList = useLightweightPredictionRows && !includePropertiesForList;
+        const includeConfidenceForList = false;
+        const includeConfidenceSummaryForList = useLightweightTaskRows;
+        const includePropertiesForList = false;
+        const includePropertiesSummaryForList = useLightweightTaskRows;
         const taskRows = await listProjectTasksForList(projectId, {
           includeComponents: includeComponentsForList,
           includeConfidence: includeConfidenceForList,
@@ -429,6 +443,7 @@ export function useProjectTasksDataLoader({
         if (loadSeqRef.current !== loadSeq) return;
         setProject(nextProject);
         setTasks(sanitizeTaskRows(nextRows));
+        persistRuntimeCache(nextProject, nextRows);
 
         if (!preferBackendStatus) {
           return;
@@ -445,6 +460,7 @@ export function useProjectTasksDataLoader({
               runtimeSettledRows = sanitizeTaskRows(initialSynced.taskRows);
               setProject(runtimeSettledProject);
               setTasks(runtimeSettledRows);
+              persistRuntimeCache(runtimeSettledProject, runtimeSettledRows);
 
               const fullySynced = await syncRuntimeTasks(runtimeSettledProject, runtimeSettledRows);
               if (loadSeqRef.current !== loadSeq) return;
@@ -452,14 +468,10 @@ export function useProjectTasksDataLoader({
               runtimeSettledRows = sanitizeTaskRows(fullySynced.taskRows);
               setProject(runtimeSettledProject);
               setTasks(runtimeSettledRows);
+              persistRuntimeCache(runtimeSettledProject, runtimeSettledRows);
             }
-
-            const hydrated = await hydrateTaskMetricsFromResults(runtimeSettledProject, runtimeSettledRows);
-            if (loadSeqRef.current !== loadSeq) return;
-            setProject(hydrated.project);
-            setTasks(sanitizeTaskRows(hydrated.taskRows));
           } catch {
-            // Keep runtime-synced rows if result hydration fails.
+            // Keep runtime-synced rows if backend status sync fails.
           }
         })();
       } catch (err) {
@@ -473,7 +485,7 @@ export function useProjectTasksDataLoader({
         loadInFlightRef.current = false;
       }
     },
-    [projectId, sessionUserId, syncInitialRuntimeTasks, syncRuntimeTasks, hydrateTaskMetricsFromResults]
+    [hydrateRuntimeCache, persistRuntimeCache, projectId, sessionUserId, syncInitialRuntimeTasks, syncRuntimeTasks]
   );
 
   useEffect(() => {
@@ -546,7 +558,7 @@ export function useProjectTasksDataLoader({
       if (cancelled || inFlight) return;
       inFlight = true;
       try {
-        await syncCachedRuntimeState({ hydrateResults: true });
+        await syncCachedRuntimeState();
       } finally {
         inFlight = false;
         scheduleNext();

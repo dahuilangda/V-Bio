@@ -29,6 +29,7 @@ from design_utils import (
     generate_random_sequence,
     mutate_sequence,
     parse_confidence_metrics,
+    resolve_preferred_interface_metric,
     MONOSACCHARIDES,
     GLYCOSYLATION_SITES,
     get_valid_residues_for_glycan,
@@ -169,14 +170,16 @@ class Designer:
         )
         metrics['backend'] = self.backend
         metrics['mutation_strategy'] = strategy_used  # 添加策略信息
-        iptm_score = metrics.get('iptm', 0.0)
+        preferred_interface_metric = resolve_preferred_interface_metric(metrics)
+        interface_score = preferred_interface_metric.get('value') or 0.0
         plddt_score = metrics.get('binder_avg_plddt', 0.0)
-        iptm_label = "ipTM"
-        if target_chain_id:
-            iptm_label = f"ipTM({binder_chain_id}-{target_chain_id})"
+        interface_label = str(preferred_interface_metric.get('label') or 'IPSAE')
+        interface_kind = str(preferred_interface_metric.get('kind') or 'none')
+        if interface_kind == 'pair_iptm' and target_chain_id:
+            interface_label = f"ipTM({binder_chain_id}-{target_chain_id})"
         logger.info(
             f"Candidate '{sequence[:20]}...' evaluated. "
-            f"{iptm_label}: {iptm_score:.4f}, pLDDT: {plddt_score:.2f}"
+            f"{interface_label}: {interface_score:.4f}, pLDDT: {plddt_score:.2f}"
         )
         return (sequence, metrics, results_path)
     
@@ -190,7 +193,18 @@ class Designer:
         results_to_write = copy.deepcopy(all_results)
         results_to_write.sort(key=lambda x: x.get('composite_score', 0.0), reverse=True)
         
-        header = ['rank', 'generation', 'sequence', 'composite_score', 'iptm', 'binder_avg_plddt', 'ptm', 'complex_plddt']
+        header = [
+            'rank',
+            'generation',
+            'sequence',
+            'composite_score',
+            'interface_metric',
+            'interface_metric_label',
+            'iptm',
+            'binder_avg_plddt',
+            'ptm',
+            'complex_plddt',
+        ]
         if keep_temp_files:
             header.append('results_path')
         logger.info(f"Writing {len(results_to_write)} total results to {os.path.abspath(output_csv_path)}...")
@@ -200,7 +214,7 @@ class Designer:
                 writer.writeheader()
                 for i, result_data in enumerate(results_to_write):
                     result_data['rank'] = i + 1
-                    for key in ['composite_score', 'iptm', 'ptm', 'complex_plddt', 'binder_avg_plddt']:
+                    for key in ['composite_score', 'interface_metric', 'iptm', 'ptm', 'complex_plddt', 'binder_avg_plddt']:
                         if key in result_data and isinstance(result_data[key], float):
                             result_data[key] = f"{result_data[key]:.4f}"
                     row_to_write = {key: result_data.get(key, 'N/A') for key in header}
@@ -219,7 +233,18 @@ class Designer:
         results_to_write.sort(key=lambda x: x.get('composite_score', 0.0), reverse=True)
         top_results = results_to_write[:10]
         
-        header = ['rank', 'generation', 'sequence', 'composite_score', 'iptm', 'binder_avg_plddt', 'ptm', 'complex_plddt']
+        header = [
+            'rank',
+            'generation',
+            'sequence',
+            'composite_score',
+            'interface_metric',
+            'interface_metric_label',
+            'iptm',
+            'binder_avg_plddt',
+            'ptm',
+            'complex_plddt',
+        ]
         if keep_temp_files:
             header.append('results_path')
             
@@ -229,7 +254,7 @@ class Designer:
                 writer.writeheader()
                 for i, result_data in enumerate(top_results):
                     result_data['rank'] = i + 1
-                    for key in ['composite_score', 'iptm', 'ptm', 'complex_plddt', 'binder_avg_plddt']:
+                    for key in ['composite_score', 'interface_metric', 'iptm', 'ptm', 'complex_plddt', 'binder_avg_plddt']:
                         if key in result_data and isinstance(result_data[key], float):
                             result_data[key] = f"{result_data[key]:.4f}"
                     row_to_write = {key: result_data.get(key, 'N/A') for key in header}
@@ -311,7 +336,7 @@ class Designer:
         self.backend = kwargs.get('backend', self.backend) or self.backend
 
         logger.info(f"--- Starting Design Run (Type: {design_type.capitalize()}) with Adaptive Hyperparameters ---")
-        logger.info(f"Scoring weights -> ipTM: {weight_iptm}, pLDDT: {weight_plddt}")
+        logger.info(f"Scoring weights -> Interface: {weight_iptm}, pLDDT: {weight_plddt}")
         logger.info(f"Mutation rate: {mutation_rate}")
         logger.info(f"Cysteine control: {'enabled' if include_cysteine else 'disabled'}")
         logger.info(f"Cyclic design: {'enabled' if cyclic_binder else 'disabled'}")
@@ -365,9 +390,14 @@ class Designer:
             })
 
         def calculate_composite_score(metrics: dict) -> float:
-            iptm = metrics.get('iptm', 0.0)
+            preferred_interface_metric = resolve_preferred_interface_metric(metrics)
+            interface_value = preferred_interface_metric.get('value') or 0.0
+            metrics['interface_metric'] = preferred_interface_metric.get('value')
+            metrics['interface_metric_label'] = preferred_interface_metric.get('label') or 'IPSAE'
+            metrics['interface_metric_source'] = preferred_interface_metric.get('source') or 'none'
+            metrics['interface_metric_kind'] = preferred_interface_metric.get('kind') or 'none'
             avg_plddt_normalized = metrics.get('binder_avg_plddt', 0.0) / 100.0
-            return (weight_iptm * iptm) + (weight_plddt * avg_plddt_normalized)
+            return (weight_iptm * interface_value) + (weight_plddt * avg_plddt_normalized)
 
         elite_population = []
         all_results_data = []
@@ -579,9 +609,11 @@ class Designer:
                 # 日志记录
                 if elite_population:
                     best_elite = elite_population[0]
+                    best_interface_label = best_elite['metrics'].get('interface_metric_label', 'IPSAE')
+                    best_interface_value = best_elite['metrics'].get('interface_metric', 0.0) or 0.0
                     logger.info(
                         f"Generation {i+1} complete. Best score so far: {best_elite['metrics'].get('composite_score', 0.0):.4f} "
-                        f"(ipTM: {best_elite['metrics'].get('iptm', 0.0):.4f}, pLDDT: {best_elite['metrics'].get('binder_avg_plddt', 0.0):.2f})"
+                        f"({best_interface_label}: {best_interface_value:.4f}, pLDDT: {best_elite['metrics'].get('binder_avg_plddt', 0.0):.2f})"
                     )
                 
                 end_time = time.time()
@@ -592,8 +624,10 @@ class Designer:
         if all_results_data:
             final_best_entry = max(all_results_data, key=lambda r: r['composite_score'])
             logger.info(f"Final best sequence: {final_best_entry['sequence']}")
+            final_interface_label = final_best_entry.get('interface_metric_label', 'IPSAE')
+            final_interface_value = final_best_entry.get('interface_metric', 0.0) or 0.0
             logger.info(f"Final best composite score: {final_best_entry['composite_score']:.4f} "
-                        f"(ipTM: {final_best_entry.get('iptm', 0.0):.4f}, "
+                        f"({final_interface_label}: {final_interface_value:.4f}, "
                         f"pLDDT: {final_best_entry.get('binder_avg_plddt', 0.0):.2f})")
             
             # 应用阈值过滤和Top10选择

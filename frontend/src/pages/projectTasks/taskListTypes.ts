@@ -2,9 +2,10 @@ import type { InputComponent, ProjectTask } from '../../types/models';
 import type { WorkflowKey } from '../../utils/workflows';
 
 export type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
-export type SortKey = 'plddt' | 'iptm' | 'pae' | 'submitted' | 'backend' | 'seed' | 'duration';
+export type SortKey = 'plddt' | 'ipsae' | 'iptm' | 'pae' | 'submitted' | 'backend' | 'seed' | 'duration';
 export type SortDirection = 'asc' | 'desc';
 export type TaskTableMode = 'default' | 'lead_opt' | 'peptide';
+export type TaskMetricColumnKey = 'plddt' | 'ipsae' | 'iptm' | 'pae';
 export type SubmittedWithinDaysOption = 'all' | '1' | '7' | '30' | '90';
 export type SeedFilterOption = 'all' | 'with_seed' | 'without_seed';
 export type StructureSearchMode = 'exact' | 'substructure';
@@ -13,7 +14,11 @@ export type TaskWorkflowFilter = 'all' | WorkflowKey;
 
 export interface TaskConfidenceMetrics {
   plddt: number | null;
+  ipsae: number | null;
   iptm: number | null;
+  interfaceMetricValue: number | null;
+  interfaceMetricLabel: 'IPSAE' | 'ipTM';
+  interfaceMetricSource: 'ipsae' | 'iptm' | 'none';
   pae: number | null;
 }
 

@@ -1,5 +1,5 @@
 import type { CSSProperties, Dispatch, KeyboardEvent, PointerEvent, ReactNode, RefObject, SetStateAction } from 'react';
-import type { InputComponent, ProteinTemplateUpload } from '../../types/models';
+import type { AffinityScoringMode, InputComponent, ProteinTemplateUpload } from '../../types/models';
 import type { MolstarResiduePick } from '../../components/project/MolstarViewer';
 import type { AffinitySignalCard } from '../../components/project/AffinityWorkspace';
 import type { LeadOptCandidatesUiState } from '../../components/project/leadopt/LeadOptCandidatesPanel';
@@ -67,10 +67,10 @@ interface UseProjectWorkflowSectionPropsInput {
   affinityLigandFileName: string;
   affinityLigandSmiles: string;
   affinityPreviewLigandSmiles: string;
+  affinityMode: AffinityScoringMode;
   affinityUseMsa: boolean;
   affinityConfidenceOnlyUiValue: boolean;
   affinityConfidenceOnlyUiLocked: boolean;
-  affinityHasLigand: boolean;
   affinityPreviewStructureText: string;
   affinityPreviewStructureFormat: 'pdb' | 'cif';
   affinityPreviewLigandOverlayText: string;
@@ -79,6 +79,7 @@ interface UseProjectWorkflowSectionPropsInput {
   onAffinityLigandFileChange: (file: File | null) => void;
   onAffinityUseMsaChange: (checked: boolean) => void;
   onAffinityConfidenceOnlyChange: (checked: boolean) => void;
+  onAffinityModeChange: (mode: AffinityScoringMode) => void;
   setAffinityLigandSmiles: (value: string) => void;
   leadOptProteinSequence: string;
   leadOptLigandSmiles: string;
@@ -238,10 +239,10 @@ export function useProjectWorkflowSectionProps({
   affinityLigandFileName,
   affinityLigandSmiles,
   affinityPreviewLigandSmiles,
+  affinityMode,
   affinityUseMsa,
   affinityConfidenceOnlyUiValue,
   affinityConfidenceOnlyUiLocked,
-  affinityHasLigand,
   affinityPreviewStructureText,
   affinityPreviewStructureFormat,
   affinityPreviewLigandOverlayText,
@@ -250,6 +251,7 @@ export function useProjectWorkflowSectionProps({
   onAffinityLigandFileChange,
   onAffinityUseMsaChange,
   onAffinityConfidenceOnlyChange,
+  onAffinityModeChange,
   setAffinityLigandSmiles,
   leadOptProteinSequence,
   leadOptLigandSmiles,
@@ -391,14 +393,11 @@ export function useProjectWorkflowSectionProps({
         ligandFileName: affinityLigandFileName,
         ligandSmiles: affinityEffectiveLigandSmiles,
         ligandEditorInput: affinityEffectiveLigandSmiles,
+        mode: affinityMode,
+        seed: seed ?? null,
         useMsa: affinityUseMsa,
         confidenceOnly: affinityConfidenceOnlyUiValue,
         confidenceOnlyLocked: affinityConfidenceOnlyUiLocked,
-        confidenceOnlyHint: affinityConfidenceOnlyUiLocked
-          ? affinityHasLigand
-            ? 'Only small-molecule ligand supports activity.'
-            : 'No ligand uploaded: confidence only.'
-          : '',
         previewTargetStructureText: affinityPreviewStructureText,
         previewTargetStructureFormat: affinityPreviewStructureFormat,
         previewLigandStructureText: affinityPreviewLigandOverlayText,
@@ -412,6 +411,8 @@ export function useProjectWorkflowSectionProps({
         onUseMsaChange: onAffinityUseMsaChange,
         onConfidenceOnlyChange: onAffinityConfidenceOnlyChange,
         onBackendChange,
+        onModeChange: onAffinityModeChange,
+        onSeedChange,
         onLigandSmilesChange: setAffinityLigandSmiles,
         onResizerPointerDown: onResultsResizerPointerDown,
         onResizerKeyDown: onResultsResizerKeyDown

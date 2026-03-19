@@ -16,6 +16,37 @@ function readText(value: unknown): string {
   return String(value);
 }
 
+function normalizeProbability(value: number | null): number | null {
+  if (value === null || !Number.isFinite(value)) return null;
+  if (value > 1 && value <= 100) return value / 100;
+  return value;
+}
+
+function readPreferredInterfaceMetric(payload: Record<string, unknown> | null): {
+  value: number | null;
+  label: 'IPSAE' | 'ipTM';
+  source: 'ipsae' | 'iptm' | 'none';
+} {
+  if (!payload) {
+    return { value: null, label: 'IPSAE', source: 'none' };
+  }
+  const ligandIpsaeMax = normalizeProbability(typeof payload.ligand_ipsae_max === 'number' ? payload.ligand_ipsae_max : null);
+  if (ligandIpsaeMax !== null) {
+    return { value: ligandIpsaeMax, label: 'IPSAE', source: 'ipsae' };
+  }
+  const ipsaeDom = normalizeProbability(
+    typeof payload.ipsae_dom === 'number' ? payload.ipsae_dom : typeof payload.ipsaeDom === 'number' ? payload.ipsaeDom : null
+  );
+  if (ipsaeDom !== null) {
+    return { value: ipsaeDom, label: 'IPSAE', source: 'ipsae' };
+  }
+  const iptm = normalizeProbability(typeof payload.iptm === 'number' ? payload.iptm : null);
+  if (iptm !== null) {
+    return { value: iptm, label: 'ipTM', source: 'iptm' };
+  }
+  return { value: null, label: 'IPSAE', source: 'none' };
+}
+
 function parseJsonObject(text: string | null | undefined): Record<string, unknown> | null {
   if (!text) return null;
   try {
@@ -120,6 +151,7 @@ async function chooseBestBoltzStructureAndConfidence(
         ligandMeanFromPayload !== null
           ? normalizePlddt(ligandMeanFromPayload)
           : await readLigandMeanForStructure(matchedStructure);
+      const preferredInterfaceMetric = readPreferredInterfaceMetric(payload);
       return {
         file,
         matchedStructure,
@@ -127,6 +159,8 @@ async function chooseBestBoltzStructureAndConfidence(
         confidenceScore: payload ? toFiniteNumber(payload.confidence_score) : null,
         complexPlddt: payload ? toFiniteNumber(payload.complex_plddt) : null,
         iptm: payload ? toFiniteNumber(payload.iptm) : null,
+        interfaceMetric: preferredInterfaceMetric.value,
+        interfaceMetricSource: preferredInterfaceMetric.source,
         heuristicScore: boltzConfidenceHeuristicScore(file)
       };
     })
@@ -154,11 +188,11 @@ async function chooseBestBoltzStructureAndConfidence(
       return b.complexPlddt - a.complexPlddt;
     }
 
-    const aHasIptm = a.iptm !== null ? 1 : 0;
-    const bHasIptm = b.iptm !== null ? 1 : 0;
-    if (aHasIptm !== bHasIptm) return bHasIptm - aHasIptm;
-    if (a.iptm !== null && b.iptm !== null && a.iptm !== b.iptm) {
-      return b.iptm - a.iptm;
+    const aHasInterfaceMetric = a.interfaceMetric !== null ? 1 : 0;
+    const bHasInterfaceMetric = b.interfaceMetric !== null ? 1 : 0;
+    if (aHasInterfaceMetric !== bHasInterfaceMetric) return bHasInterfaceMetric - aHasInterfaceMetric;
+    if (a.interfaceMetric !== null && b.interfaceMetric !== null && a.interfaceMetric !== b.interfaceMetric) {
+      return b.interfaceMetric - a.interfaceMetric;
     }
 
     if (a.heuristicScore !== b.heuristicScore) return a.heuristicScore - b.heuristicScore;
@@ -1800,6 +1834,14 @@ async function parsePeptideDesignCandidatesFromBundle(
         readFiniteNumberLoose(row.score) ??
         readFiniteNumberLoose(row.fitness) ??
         readFiniteNumberLoose(row.objective),
+      interface_metric:
+        readFiniteNumberLoose(row.ligand_ipsae_max) ??
+        readFiniteNumberLoose(row.ipsae_dom) ??
+        readFiniteNumberLoose(row.pair_iptm_target_binder) ??
+        readFiniteNumberLoose(row.pair_iptm) ??
+        readFiniteNumberLoose(row.iptm),
+      interface_metric_label:
+        readFiniteNumberLoose(row.ligand_ipsae_max) !== null || readFiniteNumberLoose(row.ipsae_dom) !== null ? 'IPSAE' : 'ipTM',
       iptm: readFiniteNumberLoose(row.pair_iptm_target_binder) ?? readFiniteNumberLoose(row.pair_iptm) ?? readFiniteNumberLoose(row.iptm),
       pair_iptm: readFiniteNumberLoose(row.pair_iptm),
       pair_iptm_target_binder: readFiniteNumberLoose(row.pair_iptm_target_binder),
@@ -2149,6 +2191,16 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
         candidate_count: peptideDesignCandidates.length
       },
       best_sequences: peptideDesignCandidates
+    };
+  }
+  const ipsaeFile = names
+    .filter((name) => name.toLowerCase().endsWith('.json') && name.toLowerCase().endsWith('best_ipsae.json'))
+    .sort((a, b) => a.length - b.length)[0];
+  const parsedIpsae = await readZipJson(zip, ipsaeFile || null);
+  if (parsedIpsae && typeof parsedIpsae === 'object' && !Array.isArray(parsedIpsae)) {
+    confidence = {
+      ...confidence,
+      ...(parsedIpsae as Record<string, unknown>)
     };
   }
   confidence = compactConfidenceForStorage(confidence, { preservePeptideCandidateStructureText });

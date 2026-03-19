@@ -43,7 +43,6 @@ def _resolve_capability_dir(name: str) -> Path:
 
 LEAD_OPTIMIZATION_DIR = _resolve_capability_dir("lead_optimization")
 DESIGNER_DIR = _resolve_capability_dir("designer")
-BOLTZ2SCORE_DIR = _resolve_capability_dir("boltz2score")
 
 def _ensure_repo_root_on_path() -> Path | None:
     """Ensure the repo root (containing capabilities/) is on sys.path."""
@@ -51,13 +50,7 @@ def _ensure_repo_root_on_path() -> Path | None:
         sys.path.insert(0, str(BASE_DIR))
     if CAPABILITIES_DIR.is_dir() and str(CAPABILITIES_DIR) not in sys.path:
         sys.path.insert(0, str(CAPABILITIES_DIR))
-    candidates = [BASE_DIR]
-    for candidate in candidates:
-        if (candidate / "capabilities" / "affinity").is_dir():
-            if str(candidate) not in sys.path:
-                sys.path.insert(0, str(candidate))
-            return candidate
-    return None
+    return BASE_DIR
 
 _ensure_repo_root_on_path()
 
@@ -1495,319 +1488,6 @@ def cleanup_stuck_task(self, task_id):
     
 
 @celery_app.task(bind=True)
-def affinity_task(self, affinity_args: dict):
-    """
-    Celery task for running affinity prediction.
-    """
-    gpu_id = -1
-    reported_gpu_id = -1
-    task_id = self.request.id
-    task_temp_dir = None
-    tracker = None
-
-    try:
-        redis_client = get_redis_client()
-        tracker = TaskProgressTracker(task_id, redis_client)
-        tracker.start_heartbeat()
-        tracker.update_status("starting", "Initializing affinity task")
-
-        logger.info(f"Task {task_id}: Attempting to acquire GPU for affinity prediction.")
-        tracker.update_status("acquiring_gpu", "Waiting for GPU allocation")
-
-        gpu_id = _acquire_gpu_with_non_peptide_wait_registration(task_id=task_id, timeout=3600)
-        reported_gpu_id = gpu_id
-        self.update_state(state='PROGRESS', meta={'status': f'Acquired GPU {gpu_id}. Starting affinity prediction.'})
-        logger.info(f"Task {task_id}: Acquired GPU {gpu_id}. Creating temporary directory.")
-        tracker.update_status("gpu_acquired", f"Using GPU {gpu_id}")
-
-        task_temp_dir = _mk_task_temp_dir(prefix=f"boltz_affinity_task_{task_id}_")
-        
-        # Handle different input modes: complex file vs separate files
-        input_file_path = None  # Initialize to avoid UnboundLocalError
-        
-        if 'protein_file_content' in affinity_args and 'ligand_file_content' in affinity_args:
-            # Separate protein and ligand files mode
-            protein_content = affinity_args['protein_file_content']
-            ligand_content = affinity_args['ligand_file_content']
-            protein_filename = affinity_args['protein_filename']
-            ligand_filename = affinity_args['ligand_filename']
-            
-            # Write protein file
-            protein_file_path = os.path.join(task_temp_dir, protein_filename)
-            with open(protein_file_path, 'w') as f:
-                f.write(protein_content)
-            
-            # Write ligand file
-            ligand_file_path = os.path.join(task_temp_dir, ligand_filename)
-            with open(ligand_file_path, 'wb' if ligand_filename.lower().endswith('.sdf') else 'w') as f:
-                if ligand_filename.lower().endswith('.sdf'):
-                    f.write(ligand_content.encode('utf-8'))
-                else:
-                    f.write(ligand_content)
-            
-            output_csv_path = os.path.join(task_temp_dir, f"{task_id}_affinity_results.csv")
-            
-            # For separate inputs, we'll update input_file_path after prediction to use generated complex
-            input_file_path = protein_file_path  # Temporary, will be updated after prediction
-            input_filename = protein_filename    # Temporary, will be updated after prediction
-            
-            args_for_script = {
-                'task_temp_dir': task_temp_dir,
-                'protein_file_path': protein_file_path,
-                'ligand_file_path': ligand_file_path,
-                'ligand_resname': 'LIG',  # Fixed ligand name for separate inputs
-                'output_prefix': affinity_args.get('output_prefix', 'complex'),
-                'output_csv_path': output_csv_path
-            }
-            
-        else:
-            # Original complex file mode
-            input_file_content = affinity_args['input_file_content']
-            input_filename = affinity_args['input_filename']
-            input_file_path = os.path.join(task_temp_dir, input_filename)
-            with open(input_file_path, 'w') as f:
-                f.write(input_file_content)
-
-            if input_filename.lower().endswith('.pdb'):
-                cif_filename = f"{os.path.splitext(input_filename)[0]}.cif"
-                cif_path = os.path.join(task_temp_dir, cif_filename)
-                
-                # Check if maxit is available
-                try:
-                    # subprocess.run(["maxit", "--help"], capture_output=True, check=True)
-                    #上面的不行, 换一种
-                    subprocess.run(["which", "maxit"], capture_output=True, check=True)
-                except (subprocess.CalledProcessError, FileNotFoundError):
-                    error_message = (
-                        "maxit tool is not installed or not accessible. "
-                        "Please install maxit to convert PDB files to mmCIF format. "
-                        "You can install it from: https://sw-tools.rcsb.org/apps/MAXIT/index.html"
-                    )
-                    logger.error(error_message)
-                    tracker.update_status("failed", "maxit tool not available")
-                    raise RuntimeError(error_message)
-                
-                try:
-                    result = subprocess.run(["maxit", "-input", input_file_path, "-output", cif_path, "-o", "1"], 
-                                          check=True, capture_output=True, text=True)
-                    
-                    # Verify the generated CIF file has proper format and content
-                    if os.path.exists(cif_path):
-                        with open(cif_path, 'r') as f:
-                            cif_content = f.read().strip()
-                        
-                        # Check if the CIF file is empty or has content
-                        if not cif_content:
-                            error_message = f"maxit generated empty CIF file for {input_filename}"
-                            logger.error(error_message)
-                            tracker.update_status("failed", "Empty CIF file generated")
-                            raise RuntimeError(error_message)
-                        
-                        # Check if the CIF file starts with data_ directive
-                        if not cif_content.startswith('data_'):
-                            # Fix the CIF file by adding proper header
-                            fixed_content = f"data_protein\n#\n{cif_content}"
-                            with open(cif_path, 'w') as f:
-                                f.write(fixed_content)
-                            logger.info(f"Fixed CIF format for {cif_filename} - added data_ header")
-                        
-                        # Verify the fixed file can be read
-                        with open(cif_path, 'r') as f:
-                            final_content = f.read()
-                        
-                        if len(final_content) < 50:  # Suspiciously short file
-                            logger.warning(f"Generated CIF file seems unusually short: {len(final_content)} characters")
-                    
-                    input_file_path = cif_path
-                    input_filename = cif_filename
-                    logger.info(f"Successfully converted {input_filename} to CIF format using maxit")
-                except subprocess.CalledProcessError as e:
-                    error_message = f"maxit failed for {input_filename}: {e.stderr}"
-                    logger.error(error_message)
-                    tracker.update_status("failed", "PDB to CIF conversion failed")
-                    raise RuntimeError(error_message) from e
-
-            output_csv_path = os.path.join(task_temp_dir, f"{task_id}_affinity_results.csv")
-
-            args_for_script = {
-                'task_temp_dir': task_temp_dir,
-                'input_file_path': input_file_path,
-                'ligand_resname': affinity_args['ligand_resname'],
-                'output_csv_path': output_csv_path
-            }
-
-        args_file_path = os.path.join(task_temp_dir, 'args.json')
-        with open(args_file_path, 'w') as f:
-            json.dump(args_for_script, f)
-        
-        logger.info(f"Task {task_id}: Arguments saved to '{args_file_path}'.")
-        tracker.update_status("preparing", "Setting up temporary workspace for affinity prediction")
-
-        command, task_container_name = _build_gpu_docker_python_command(
-            task_id=task_id,
-            gpu_id=gpu_id,
-            task_temp_dir=task_temp_dir,
-            runtime_label="affinity",
-            python_entry=[
-                "python",
-                "-m",
-                "backend.runtime.run_affinity_prediction",
-                args_file_path,
-            ],
-        )
-
-        _terminate_task_container(task_container_name)
-        logger.info(
-            "Task %s: Running affinity prediction on GPU %s. Docker command: %s",
-            task_id,
-            gpu_id,
-            " ".join(shlex.quote(part) for part in command),
-        )
-        self.update_state(state='PROGRESS', meta={'status': f'Running affinity prediction on GPU {gpu_id}'})
-        tracker.update_status("running", f"Executing affinity prediction with GPU {gpu_id}")
-
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True
-        )
-
-        tracker.register_process(process.pid)
-
-        try:
-            stdout, stderr = process.communicate(timeout=SUBPROCESS_TIMEOUT)
-        except subprocess.TimeoutExpired as e:
-            process.kill()
-            stdout, stderr = process.communicate()
-            _terminate_task_container(task_container_name)
-            error_message = (
-                f"Subprocess for affinity task {task_id} timed out after {SUBPROCESS_TIMEOUT} seconds.\n"
-                f"Stderr (tail):\n{_truncate_text(stderr, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}\n"
-                f"Stdout (tail):\n{_truncate_text(stdout, MAX_STDIO_TAIL_CHARS, prefer_tail=True)}"
-            )
-            logger.error(error_message)
-            tracker.update_status("timeout", f"Process timeout after {SUBPROCESS_TIMEOUT}s")
-            raise TimeoutError(error_message) from e
-
-        if process.returncode != 0:
-            error_message = _format_subprocess_failure("affinity task", task_id, process.returncode, stderr, stdout)
-            logger.error(error_message)
-            tracker.update_status("failed", f"Process failed with exit code {process.returncode}")
-            raise RuntimeError(error_message)
-
-        logger.info(f"Task {task_id}: Affinity subprocess completed successfully. Checking for results CSV.")
-        tracker.update_status("processing_output", "Processing affinity results")
-
-        if not os.path.exists(output_csv_path):
-            error_message = f"Subprocess completed, but no results CSV found at expected path: {output_csv_path}. Stderr: {stderr}"
-            logger.error(error_message)
-            tracker.update_status("failed", "No results CSV found")
-            raise FileNotFoundError(error_message)
-        
-        import zipfile
-        output_archive_path = os.path.join(task_temp_dir, f"{task_id}_affinity_results.zip")
-        with zipfile.ZipFile(output_archive_path, 'w') as zipf:
-            zipf.write(output_csv_path, os.path.basename(output_csv_path))
-            
-            # For separate inputs, include the generated complex file if it exists
-            if 'protein_file_path' in args_for_script and 'ligand_file_path' in args_for_script:
-                # Look for generated complex files
-                combined_dir = os.path.join(task_temp_dir, 'boltzina_output', 'combined_complexes')
-                if os.path.exists(combined_dir):
-                    for file in os.listdir(combined_dir):
-                        if file.endswith('.pdb'):
-                            complex_file_path = os.path.join(combined_dir, file)
-                            zipf.write(complex_file_path, f"generated_complex_{file}")
-                            
-                            # Convert the generated complex to CIF for 3D visualization
-                            cif_filename = f"{os.path.splitext(file)[0]}.cif"
-                            cif_path = os.path.join(task_temp_dir, cif_filename)
-                            
-                            try:
-                                # Check if maxit is available
-                                subprocess.run(["which", "maxit"], capture_output=True, check=True)
-                                
-                                # Convert to CIF
-                                result = subprocess.run(["maxit", "-input", complex_file_path, "-output", cif_path, "-o", "1"], 
-                                                      check=True, capture_output=True, text=True)
-                                
-                                # Verify and fix CIF format
-                                if os.path.exists(cif_path):
-                                    with open(cif_path, 'r') as f:
-                                        cif_content = f.read().strip()
-                                    
-                                    if cif_content and '_atom_site' in cif_content:
-                                        if not cif_content.startswith('data_'):
-                                            fixed_content = f"data_complex\n#\n{cif_content}"
-                                            with open(cif_path, 'w') as f:
-                                                f.write(fixed_content)
-                                            logger.info(f"Fixed CIF format for {cif_filename}")
-                                        
-                                        # Add CIF file to archive
-                                        zipf.write(cif_path, f"complex_{cif_filename}")
-                                        logger.info(f"Generated and included CIF file: {cif_filename}")
-                                    else:
-                                        logger.warning(f"Generated CIF file is incomplete or missing _atom_site section")
-                                        
-                            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                                logger.warning(f"Could not convert complex to CIF format: {e}")
-                                # CIF conversion failure is not critical, continue without it
-                            
-                            input_file_path = complex_file_path  # Update for logging
-                            break
-            
-            # Include original input file if it exists
-            if input_file_path and os.path.exists(input_file_path):
-                zipf.write(input_file_path, os.path.basename(input_file_path))
-
-        logger.info(f"Task {task_id}: Results archived to '{output_archive_path}'.")
-        self.update_state(state='PROGRESS', meta={'status': f'Uploading results for task {task_id}'})
-        tracker.update_status("uploading", "Uploading results to central API")
-
-        if gpu_id != -1:
-            release_gpu(gpu_id=gpu_id, task_id=task_id)
-            logger.info(f"Task {task_id}: Released GPU {gpu_id} before result upload.")
-            gpu_id = -1
-
-        upload_response = upload_result_to_central_api(task_id, output_archive_path, os.path.basename(output_archive_path))
-
-        final_meta = {
-            'status': 'Complete',
-            'gpu_id': reported_gpu_id,
-            'upload_info': upload_response,
-            'result_file': os.path.basename(output_archive_path)
-        }
-        self.update_state(state='SUCCESS', meta=final_meta)
-        logger.info(f"Task {task_id}: Affinity prediction completed and results uploaded successfully. Final status: SUCCESS.")
-        tracker.update_status("completed", "Task completed successfully")
-        return final_meta
-
-    except Exception as e:
-        logger.error(f"Task {task_id} failed: {e}", exc_info=True)
-        if tracker:
-            tracker.update_status("failed", _truncate_text(e, MAX_STATUS_DETAILS_CHARS))
-        self.update_state(state='FAILURE', meta=_build_failure_meta(e))
-        raise e
-
-    finally:
-        _terminate_task_containers_by_task_id(task_id)
-
-        if gpu_id != -1:
-            release_gpu(gpu_id=gpu_id, task_id=task_id)
-            logger.info(f"Task {task_id}: Released GPU {gpu_id}.")
-
-        if task_temp_dir and os.path.exists(task_temp_dir):
-            shutil.rmtree(task_temp_dir)
-            logger.info(f"Task {task_id}: Cleaned up temporary directory '{task_temp_dir}'.")
-
-        if tracker:
-            tracker.stop_heartbeat()
-            logger.info(f"Task {task_id}: Cleanup completed")
-
-
-@celery_app.task(bind=True)
 def boltz2score_task(self, score_args: dict):
     """
     Celery task for running Boltz2Score (confidence; optional affinity).
@@ -1900,6 +1580,11 @@ def boltz2score_task(self, score_args: dict):
             score_args.get('structure_refine'),
             BOLTZ2SCORE_DEFAULT_STRUCTURE_REFINE,
         )
+        requested_mode = str(score_args.get('mode') or 'score').strip().lower()
+        if requested_mode not in {'score', 'pose', 'refine', 'interface'}:
+            logger.info("Task %s: unsupported mode %r, defaulting to 'score'.", task_id, requested_mode)
+            requested_mode = 'score'
+        compute_ipsae = _coerce_bool(score_args.get('compute_ipsae'), False)
         use_msa_server = _coerce_bool(
             score_args.get('use_msa_server'),
             True,
@@ -1967,6 +1652,7 @@ def boltz2score_task(self, score_args: dict):
             "--accelerator", "gpu",
             "--devices", "1",
             "--num_workers", "0",
+            "--mode", requested_mode,
             "--recycling_steps", str(recycling_steps),
             "--sampling_steps", str(sampling_steps),
             "--diffusion_samples", str(diffusion_samples),
@@ -1984,6 +1670,8 @@ def boltz2score_task(self, score_args: dict):
         else:
             boltz2score_entry.extend(["--input", input_file_path])
         boltz2score_entry.extend(["--seed", str(seed)])
+        if compute_ipsae:
+            boltz2score_entry.append("--compute_ipsae")
 
         target_chain = score_args.get('target_chain') or (detected_target_chain if using_separate_inputs else None)
         ligand_chain = score_args.get('ligand_chain')
@@ -1998,8 +1686,6 @@ def boltz2score_task(self, score_args: dict):
             boltz2score_entry.append("--affinity_refine")
         if score_args.get('enable_affinity'):
             boltz2score_entry.append("--enable_affinity")
-        if score_args.get('auto_enable_affinity'):
-            boltz2score_entry.append("--auto_enable_affinity")
         ligand_smiles_map = score_args.get('ligand_smiles_map')
         if isinstance(ligand_smiles_map, dict) and ligand_smiles_map:
             boltz2score_entry.extend(["--ligand_smiles_map", json.dumps(ligand_smiles_map, ensure_ascii=False)])
@@ -2011,9 +1697,11 @@ def boltz2score_task(self, score_args: dict):
 
         tracker.update_status("running", "Executing Boltz2Score subprocess")
         logger.info(
-            "Task %s: Boltz2Score settings: structure_refine=%s, use_msa_server=%s, recycling_steps=%d, "
-            "sampling_steps=%d, diffusion_samples=%d, max_parallel_samples=%d, seed=%s, msa_server_url=%s",
+            "Task %s: Boltz2Score settings: mode=%s, compute_ipsae=%s, structure_refine=%s, use_msa_server=%s, "
+            "recycling_steps=%d, sampling_steps=%d, diffusion_samples=%d, max_parallel_samples=%d, seed=%s, msa_server_url=%s",
             task_id,
+            requested_mode,
+            compute_ipsae,
             structure_refine,
             use_msa_server,
             recycling_steps,

@@ -93,7 +93,7 @@ export async function exportTaskRowsToExcel({
     { header: 'Submitted', key: 'submitted', width: 22 },
     { header: 'Duration', key: 'duration', width: 12 },
     { header: 'pLDDT', key: 'plddt', width: 10 },
-    { header: 'iPTM', key: 'iptm', width: 10 },
+    { header: 'Interface', key: 'interfaceMetric', width: 12 },
     { header: 'PAE', key: 'pae', width: 10 },
     { header: 'SMILES', key: 'smiles', width: 42 },
     { header: 'Ligand 2D (Confidence Color)', key: 'ligand2d', width: 36 }
@@ -148,7 +148,7 @@ export async function exportTaskRowsToExcel({
       submitted: submittedText,
       duration: formatDuration(task.duration_seconds),
       plddt: formatMetric(metrics.plddt, 1),
-      iptm: formatMetric(metrics.iptm, 3),
+      interfaceMetric: formatMetric(metrics.interfaceMetricValue, 3),
       pae: formatMetric(metrics.pae, 2),
       smiles: ligandSmiles || '',
       ligand2d: imageBytes ? '' : '-'

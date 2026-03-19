@@ -1,5 +1,10 @@
 import { CircleAlert } from 'lucide-react';
 import { useMemo } from 'react';
+import {
+  readIpsaeDomMetric,
+  readLigandIpsaeMaxMetric,
+  resolvePreferredInterfaceMetricFromValues
+} from '../../pages/projectDetail/projectMetrics';
 
 interface MetricsPanelProps {
   title: string;
@@ -491,9 +496,18 @@ function ConfidencePanel({
       pickNumber(data, ['ligand_mean_plddt', 'ligand_plddt', 'complex_iplddt', 'complex_plddt_protein', 'complex_plddt'])
     );
   const selectedPairIptm = readPairIptmForChains(data, selectedTargetChainId, selectedLigandChainId, chainIds);
-  const iptm = selectedPairIptm ?? normalizeProbability(pickNumber(data, ['iptm', 'ligand_iptm', 'protein_iptm']));
   const ptm = pickNumber(data, ['ptm']);
   const pae = pickNumber(data, ['complex_pde', 'complex_pae', 'gpde', 'pae']);
+  const ipsaeDom = readIpsaeDomMetric(data);
+  const ligandIpsaeMax = readLigandIpsaeMaxMetric(data);
+  const preferredInterfaceMetric = resolvePreferredInterfaceMetricFromValues({
+    pairIptm: selectedPairIptm,
+    iptm: selectedPairIptm ?? normalizeProbability(pickNumber(data, ['iptm', 'ligand_iptm', 'protein_iptm'])),
+    ipsaeDom,
+    ligandIpsaeMax
+  });
+  const preferredInterfaceMetricScale: 'probability' | 'iptm' =
+    preferredInterfaceMetric.source === 'ipsae' ? 'probability' : 'iptm';
   const rankingScore = pickNumber(data, ['ranking_score']);
   const fractionDisordered = pickNumber(data, ['fraction_disordered']);
 
@@ -513,14 +527,18 @@ function ConfidencePanel({
       scale: 'plddt' as const
     },
     {
-      label: 'ipTM',
+      label: preferredInterfaceMetric.label,
       help:
-        selectedPairIptm !== null
-          ? 'Selected target-ligand component pair interface confidence (0 to 1). Higher is better.'
-          : 'Interface confidence between chains (0 to 1). Higher is better.',
-      value: iptm,
-      display: formatMetricValue(iptm, 4),
-      scale: 'iptm' as const
+        preferredInterfaceMetric.kind === 'ligand_ipsae'
+          ? 'Strongest ligand-contact IPSAE signal. Higher values indicate more confident local ligand contacts.'
+          : preferredInterfaceMetric.kind === 'ipsae_dom'
+            ? 'Interface predicted structural alignment error score for the selected complex. Higher is better.'
+            : selectedPairIptm !== null
+              ? 'Selected target-ligand component pair interface confidence (0 to 1). Higher is better.'
+              : 'Interface confidence between chains (0 to 1). Higher is better.',
+      value: preferredInterfaceMetric.value,
+      display: formatMetricValue(preferredInterfaceMetric.value, 4),
+      scale: preferredInterfaceMetricScale
     },
     {
       label: 'pTM',
@@ -536,6 +554,20 @@ function ConfidencePanel({
       display: formatMetricValue(pae, 2),
       scale: 'pae' as const
     },
+    ...(preferredInterfaceMetric.source === 'ipsae' && ipsaeDom !== null && ligandIpsaeMax !== null && ipsaeDom !== ligandIpsaeMax
+      ? [
+          {
+            label: preferredInterfaceMetric.kind === 'ligand_ipsae' ? 'Interface IPSAE' : 'Ligand IPSAE',
+            help:
+              preferredInterfaceMetric.kind === 'ligand_ipsae'
+                ? 'Domain-level IPSAE for the selected complex. Higher is better.'
+                : 'Strongest ligand-contact IPSAE signal. Higher values indicate more confident local ligand contacts.',
+            value: preferredInterfaceMetric.kind === 'ligand_ipsae' ? ipsaeDom : ligandIpsaeMax,
+            display: formatMetricValue(preferredInterfaceMetric.kind === 'ligand_ipsae' ? ipsaeDom : ligandIpsaeMax, 4),
+            scale: 'probability' as const
+          }
+        ]
+      : []),
     {
       label: 'Ranking Score',
       help: 'AlphaFold3 ranking score. Higher values generally rank better.',
@@ -550,7 +582,7 @@ function ConfidencePanel({
       display: formatMetricValue(fractionDisordered, 3),
       scale: 'fraction' as const
     }
-  ].filter((item) => item.value !== null || ['Mean pLDDT', 'ipTM', 'pTM', 'PAE (A)'].includes(item.label));
+  ].filter((item) => item.value !== null || ['Mean pLDDT', preferredInterfaceMetric.label, 'pTM', 'PAE (A)'].includes(item.label));
 
   return (
     <>

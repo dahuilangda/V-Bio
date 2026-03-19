@@ -26,6 +26,7 @@ export const TASK_INPUT_OPTIONS_KEY = '__vbio_input_options_v1';
 
 const TASK_INPUT_OPTION_KEYS: Array<keyof PredictionOptions> = [
   'seed',
+  'affinityMode',
   'peptideDesignMode',
   'peptideBinderLength',
   'peptideUseInitialSequence',

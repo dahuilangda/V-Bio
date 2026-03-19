@@ -516,6 +516,15 @@ class ResultArchiveService:
                 if affinity_candidates:
                     include.append(sorted(affinity_candidates, key=lambda item: len(item))[0])
 
+            ipsae_candidates = [
+                name
+                for name in names
+                if name.lower().endswith('.json') and os.path.basename(name).lower() == 'best_ipsae.json'
+            ]
+            ipsae = self._choose_preferred_path(ipsae_candidates)
+            if ipsae:
+                include.append(ipsae)
+
             if not include:
                 raise RuntimeError('Unable to build view archive: no renderable files found.')
 
@@ -819,6 +828,7 @@ class ResultArchiveService:
                     if name.lower().endswith('.json')
                     and (
                         'confidence' in name.lower()
+                        or os.path.basename(name).lower() == 'best_ipsae.json'
                         or os.path.basename(name).lower() in {'confidences.json', 'affinity_data.json'}
                     )
                 ]
@@ -841,7 +851,15 @@ class ResultArchiveService:
                     ligand_display_smiles = self._extract_ligand_display_smiles(payload)
                     ligand_display_atom_plddts = self._extract_ligand_display_atom_plddts(payload)
                     ligand_plddt = self._extract_ligand_plddt(payload, ligand_atom_plddts=ligand_atom_plddts)
-                    coverage = int(pair_iptm is not None) + int(pair_pae is not None) + int(ligand_plddt is not None)
+                    ipsae_dom = self._to_finite_float(payload.get('ipsae_dom'))
+                    ligand_ipsae_max = self._to_finite_float(payload.get('ligand_ipsae_max'))
+                    coverage = (
+                        int(pair_iptm is not None)
+                        + int(pair_pae is not None)
+                        + int(ligand_plddt is not None)
+                        + int(ipsae_dom is not None)
+                        + int(ligand_ipsae_max is not None)
+                    )
                     if coverage <= 0:
                         continue
                     score = coverage * 100 - len(name)
@@ -852,6 +870,8 @@ class ResultArchiveService:
                                 'pair_iptm': pair_iptm,
                                 'pair_pae': pair_pae,
                                 'ligand_plddt': ligand_plddt,
+                                'ipsae_dom': ipsae_dom,
+                                'ligand_ipsae_max': ligand_ipsae_max,
                                 'ligand_atom_plddts': ligand_atom_plddts,
                                 'ligand_smiles': ligand_smiles,
                                 'ligand_display_smiles': ligand_display_smiles,
@@ -864,6 +884,8 @@ class ResultArchiveService:
                         'pair_iptm': pair_iptm,
                         'pair_pae': pair_pae,
                         'ligand_plddt': ligand_plddt,
+                        'ipsae_dom': ipsae_dom,
+                        'ligand_ipsae_max': ligand_ipsae_max,
                         'ligand_atom_plddts': ligand_atom_plddts,
                         'ligand_smiles': ligand_smiles,
                         'ligand_display_smiles': ligand_display_smiles,
@@ -877,6 +899,8 @@ class ResultArchiveService:
                     'pair_iptm',
                     'pair_pae',
                     'ligand_plddt',
+                    'ipsae_dom',
+                    'ligand_ipsae_max',
                     'ligand_atom_plddts',
                     'ligand_smiles',
                     'ligand_display_smiles',

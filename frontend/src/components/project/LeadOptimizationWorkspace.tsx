@@ -151,6 +151,8 @@ function buildLeadOptPredictionHydrationSignature(value: unknown): string {
         readText(record.taskId || record.task_id).trim(),
         readText(record.state).trim().toUpperCase(),
         Number.isFinite(Number(record.updatedAt ?? record.updated_at)) ? String(Number(record.updatedAt ?? record.updated_at)) : '',
+        Number.isFinite(Number(record.interfaceMetricValue ?? record.interface_metric_value)) ? 'interface' : '',
+        readText(record.interfaceMetricSource ?? record.interface_metric_source).trim().toLowerCase(),
         Number.isFinite(Number(record.pairIptm ?? record.pair_iptm)) ? 'iptm' : '',
         Number.isFinite(Number(record.pairPae ?? record.pair_pae ?? record.pae)) ? 'pae' : '',
         Number.isFinite(Number(record.ligandPlddt ?? record.ligand_plddt)) ? 'plddt' : '',

@@ -1,0 +1,10 @@
+# Core runtime
+boltz[cuda]
+pytorch-lightning
+gemmi
+rdkit
+numpy
+
+# Analysis
+matplotlib
+seaborn

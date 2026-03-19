@@ -16,6 +16,7 @@ import { MemoLigand2DPreview } from '../Ligand2DPreview';
 import { JSMEEditor } from '../JSMEEditor';
 import { loadRDKitModule } from '../../../utils/rdkit';
 import { buildLeadOptPredictionRecordKey, type LeadOptPredictionRecord } from './hooks/useLeadOptMmpQueryMachine';
+import '../../../styles/project-tasks-query.css';
 
 function readText(value: unknown): string {
   if (value === null || value === undefined) return '';
@@ -109,6 +110,85 @@ function resolvePredictionConfidencePreview(
     smiles: candidateSmiles,
     atomConfidences: null
   };
+}
+
+function readPredictionInterfaceMetricValue(prediction: LeadOptPredictionRecord | null | undefined): number | null {
+  return readNumberOrNull(prediction?.interfaceMetricValue ?? prediction?.pairIptm);
+}
+
+type LeadOptModelMetricKey = 'plddt' | 'ipsae' | 'iptm' | 'pae';
+
+const LEAD_OPT_MODEL_METRIC_OPTIONS: Array<{ key: LeadOptModelMetricKey; label: string }> = [
+  { key: 'plddt', label: 'pLDDT' },
+  { key: 'ipsae', label: 'IPSAE' },
+  { key: 'iptm', label: 'ipTM' },
+  { key: 'pae', label: 'PAE' }
+];
+
+const DEFAULT_LEAD_OPT_MODEL_METRIC_COLUMNS: LeadOptModelMetricKey[] = ['plddt', 'ipsae', 'iptm'];
+
+function normalizeLeadOptModelMetricKey(value: unknown): LeadOptModelMetricKey {
+  const token = String(value || '').trim().toLowerCase();
+  if (token === 'ipsae' || token === 'iptm' || token === 'pae') return token;
+  return 'plddt';
+}
+
+function normalizeLeadOptModelMetricColumns(value: unknown): LeadOptModelMetricKey[] {
+  const normalized = Array.isArray(value) ? value.map((item) => normalizeLeadOptModelMetricKey(item)) : [];
+  const unique: LeadOptModelMetricKey[] = [];
+  for (const key of normalized) {
+    if (!unique.includes(key)) unique.push(key);
+  }
+  for (const key of DEFAULT_LEAD_OPT_MODEL_METRIC_COLUMNS) {
+    if (unique.length >= 3) break;
+    if (!unique.includes(key)) unique.push(key);
+  }
+  return unique.slice(0, 3);
+}
+
+function readPredictionIpsaeValue(prediction: LeadOptPredictionRecord | null | undefined): number | null {
+  if (readText(prediction?.interfaceMetricSource).trim().toLowerCase() !== 'ipsae') return null;
+  return readNumberOrNull(prediction?.interfaceMetricValue);
+}
+
+function readPredictionIptmValue(prediction: LeadOptPredictionRecord | null | undefined): number | null {
+  const pairIptm = readNumberOrNull(prediction?.pairIptm);
+  if (pairIptm !== null) return pairIptm;
+  if (readText(prediction?.interfaceMetricSource).trim().toLowerCase() !== 'iptm') return null;
+  return readNumberOrNull(prediction?.interfaceMetricValue);
+}
+
+function readPredictionModelMetricValue(
+  prediction: LeadOptPredictionRecord | null | undefined,
+  key: LeadOptModelMetricKey
+): number | null {
+  if (key === 'plddt') return readNumberOrNull(prediction?.ligandPlddt);
+  if (key === 'ipsae') return readPredictionIpsaeValue(prediction);
+  if (key === 'iptm') return readPredictionIptmValue(prediction);
+  return readNumberOrNull(prediction?.pairPae);
+}
+
+function resolveLeadOptModelMetricTone(key: LeadOptModelMetricKey, value: number | null): ConfidenceTone {
+  if (key === 'pae') return resolvePaeTone(value);
+  if (key === 'plddt') return resolveConfidenceTone(value);
+  return resolveConfidenceTone(value !== null && Number.isFinite(value) ? value * 100 : null);
+}
+
+function resolveLeadOptModelMetricLabel(key: LeadOptModelMetricKey): string {
+  return LEAD_OPT_MODEL_METRIC_OPTIONS.find((item) => item.key === key)?.label || 'Metric';
+}
+
+function resolveLeadOptModelMetricDigits(key: LeadOptModelMetricKey): number {
+  if (key === 'plddt') return 1;
+  if (key === 'pae') return 2;
+  return 3;
+}
+
+function resolveLeadOptModelMetricDeltaTone(key: LeadOptModelMetricKey, delta: number | null): 'up' | 'down' | 'flat' | 'na' {
+  if (key === 'pae') {
+    return resolveDeltaTone(delta === null ? null : -delta);
+  }
+  return resolveDeltaTone(delta);
 }
 
 function deriveReferenceProperty(row: Record<string, unknown>, key: 'mw' | 'logp' | 'tpsa'): number | null {
@@ -228,6 +308,7 @@ export interface LeadOptCandidatesUiState {
   selectedBackend: string;
   stateFilter: CandidateStateFilter;
   showAdvanced: boolean;
+  modelMetricColumns: LeadOptModelMetricKey[];
   mwMin: string;
   mwMax: string;
   logpMin: string;
@@ -278,10 +359,14 @@ export function normalizeLeadOptCandidatesUiState(
       ? (value as Record<string, unknown>)
       : {};
   const preferredDefaultBackend = normalizeBackend(readText(defaultPredictionBackend) || 'pocketxmol');
+  const modelMetricColumns = normalizeLeadOptModelMetricColumns(
+    payload.modelMetricColumns ?? payload.model_metric_columns
+  );
   return {
     selectedBackend: normalizeBackend(readText(payload.selectedBackend ?? payload.selected_backend) || preferredDefaultBackend),
     stateFilter: normalizeStateFilter(payload.stateFilter ?? payload.state_filter),
     showAdvanced: normalizeBoolean(payload.showAdvanced ?? payload.show_advanced, false),
+    modelMetricColumns,
     mwMin: readText(payload.mwMin ?? payload.mw_min).trim(),
     mwMax: readText(payload.mwMax ?? payload.mw_max).trim(),
     logpMin: readText(payload.logpMin ?? payload.logp_min).trim(),
@@ -305,6 +390,7 @@ export function buildLeadOptCandidatesUiStateSignature(value: LeadOptCandidatesU
     normalizeBackend(value.selectedBackend),
     normalizeStateFilter(value.stateFilter),
     value.showAdvanced ? '1' : '0',
+    normalizeLeadOptModelMetricColumns(value.modelMetricColumns).join(','),
     readText(value.mwMin).trim(),
     readText(value.mwMax).trim(),
     readText(value.logpMin).trim(),
@@ -380,6 +466,9 @@ export function LeadOptCandidatesPanel({
   const [selectedBackend, setSelectedBackend] = useState<string>(normalizedInitialUiState.selectedBackend);
   const [stateFilter, setStateFilter] = useState<CandidateStateFilter>(normalizedInitialUiState.stateFilter);
   const [showAdvanced, setShowAdvanced] = useState(normalizedInitialUiState.showAdvanced);
+  const [modelMetricColumns, setModelMetricColumns] = useState<LeadOptModelMetricKey[]>(
+    normalizedInitialUiState.modelMetricColumns
+  );
   const [mwMin, setMwMin] = useState(normalizedInitialUiState.mwMin);
   const [mwMax, setMwMax] = useState(normalizedInitialUiState.mwMax);
   const [logpMin, setLogpMin] = useState(normalizedInitialUiState.logpMin);
@@ -415,6 +504,7 @@ export function LeadOptCandidatesPanel({
     selectedBackend: normalizeBackend(overrides?.selectedBackend ?? selectedBackend),
     stateFilter: normalizeStateFilter(overrides?.stateFilter ?? stateFilter),
     showAdvanced: overrides?.showAdvanced ?? showAdvanced,
+    modelMetricColumns: normalizeLeadOptModelMetricColumns(overrides?.modelMetricColumns ?? modelMetricColumns),
     mwMin: readText(overrides?.mwMin ?? mwMin).trim(),
     mwMax: readText(overrides?.mwMax ?? mwMax).trim(),
     logpMin: readText(overrides?.logpMin ?? logpMin).trim(),
@@ -460,6 +550,7 @@ export function LeadOptCandidatesPanel({
     setSelectedBackend(normalizedInitialUiState.selectedBackend);
     setStateFilter(normalizedInitialUiState.stateFilter);
     setShowAdvanced(normalizedInitialUiState.showAdvanced);
+    setModelMetricColumns(normalizedInitialUiState.modelMetricColumns);
     setMwMin(normalizedInitialUiState.mwMin);
     setMwMax(normalizedInitialUiState.mwMax);
     setLogpMin(normalizedInitialUiState.logpMin);
@@ -504,6 +595,7 @@ export function LeadOptCandidatesPanel({
     plddtMin,
     iptmMax,
     iptmMin,
+    modelMetricColumns,
     selectedBackend,
     showAdvanced,
     stateFilter,
@@ -674,7 +766,7 @@ export function LeadOptCandidatesPanel({
         const prediction = predictionForBackend(smiles);
         const predictionState = normalizeState(prediction?.state);
         const plddt = predictionState === 'SUCCESS' ? readNumberOrNull(prediction?.ligandPlddt) : null;
-        const iptm = predictionState === 'SUCCESS' ? readNumberOrNull(prediction?.pairIptm) : null;
+        const interfaceMetric = predictionState === 'SUCCESS' ? readPredictionInterfaceMetricValue(prediction) : null;
         const pae = predictionState === 'SUCCESS' ? readNumberOrNull(prediction?.pairPae) : null;
         if (mwMinValue !== null && (mw === null || mw < mwMinValue)) return false;
         if (mwMaxValue !== null && (mw === null || mw > mwMaxValue)) return false;
@@ -684,8 +776,8 @@ export function LeadOptCandidatesPanel({
         if (tpsaMaxValue !== null && (tpsa === null || tpsa > tpsaMaxValue)) return false;
         if (plddtMinValue !== null && (plddt === null || plddt < plddtMinValue)) return false;
         if (plddtMaxValue !== null && (plddt === null || plddt > plddtMaxValue)) return false;
-        if (iptmMinValue !== null && (iptm === null || iptm < iptmMinValue)) return false;
-        if (iptmMaxValue !== null && (iptm === null || iptm > iptmMaxValue)) return false;
+        if (iptmMinValue !== null && (interfaceMetric === null || interfaceMetric < iptmMinValue)) return false;
+        if (iptmMaxValue !== null && (interfaceMetric === null || interfaceMetric > iptmMaxValue)) return false;
         if (paeMinValue !== null && (pae === null || pae < paeMinValue)) return false;
         if (paeMaxValue !== null && (pae === null || pae > paeMaxValue)) return false;
         return true;
@@ -740,8 +832,17 @@ export function LeadOptCandidatesPanel({
   })();
   const referencePredictionState = normalizeState(referencePrediction?.state);
   const referencePlddt = referencePredictionState === 'SUCCESS' ? referencePrediction?.ligandPlddt ?? null : null;
-  const referenceIptm = referencePredictionState === 'SUCCESS' ? referencePrediction?.pairIptm ?? null : null;
+  const referenceIpsae = referencePredictionState === 'SUCCESS' ? readPredictionIpsaeValue(referencePrediction) : null;
+  const referenceIptm = referencePredictionState === 'SUCCESS' ? readPredictionIptmValue(referencePrediction) : null;
   const referencePae = referencePredictionState === 'SUCCESS' ? referencePrediction?.pairPae ?? null : null;
+
+  const updateModelMetricColumn = (slotIndex: number, value: string) => {
+    const nextColumns = [...modelMetricColumns];
+    nextColumns[slotIndex] = normalizeLeadOptModelMetricKey(value);
+    const normalizedColumns = normalizeLeadOptModelMetricColumns(nextColumns);
+    setModelMetricColumns(normalizedColumns);
+    emitUiStateNow({ modelMetricColumns: normalizedColumns });
+  };
 
   useEffect(() => {
     setPageInput(String(clampedPage));
@@ -795,7 +896,7 @@ export function LeadOptCandidatesPanel({
 
   const confidenceFilterFields = [
     { label: 'pLDDT', min: plddtMin, max: plddtMax, setMin: setPlddtMin, setMax: setPlddtMax, minPlaceholder: '70', maxPlaceholder: '100' },
-    { label: 'ipTM', min: iptmMin, max: iptmMax, setMin: setIptmMin, setMax: setIptmMax, minPlaceholder: '0.55', maxPlaceholder: '1.00' },
+    { label: 'Interface', min: iptmMin, max: iptmMax, setMin: setIptmMin, setMax: setIptmMax, minPlaceholder: '0.55', maxPlaceholder: '1.00' },
     { label: 'PAE', min: paeMin, max: paeMax, setMin: setPaeMin, setMax: setPaeMax, minPlaceholder: '0', maxPlaceholder: '15' }
   ];
 
@@ -976,6 +1077,8 @@ export function LeadOptCandidatesPanel({
                   setDebouncedStructureSearchQuery('');
                   setStructureSearchMatches({});
                   setStructureSearchError(null);
+                  const nextModelMetricColumns = [...DEFAULT_LEAD_OPT_MODEL_METRIC_COLUMNS];
+                  setModelMetricColumns(nextModelMetricColumns);
                   setMwMin('');
                   setMwMax('');
                   setLogpMin('');
@@ -993,6 +1096,7 @@ export function LeadOptCandidatesPanel({
                   emitUiStateNow({
                     structureSearchMode: 'exact',
                     structureSearchQuery: '',
+                    modelMetricColumns: nextModelMetricColumns,
                     mwMin: '',
                     mwMax: '',
                     logpMin: '',
@@ -1083,6 +1187,33 @@ export function LeadOptCandidatesPanel({
                   ))}
                 </div>
               </div>
+              <div className="lead-opt-advanced-group">
+                <div className="lead-opt-advanced-group-title">Model Profile</div>
+                <div className="lead-opt-advanced-field-grid">
+                  {modelMetricColumns.map((metricKey, index) => (
+                    <div key={`model-metric-column-${index}`} className="lead-opt-advanced-field-row">
+                      <span className="lead-opt-advanced-field-label">Column {index + 1}</span>
+                      <select
+                        className="lead-opt-advanced-input"
+                        value={metricKey}
+                        onChange={(event) => updateModelMetricColumn(index, event.target.value)}
+                        aria-label={`Model profile column ${index + 1}`}
+                      >
+                        {LEAD_OPT_MODEL_METRIC_OPTIONS.map((option) => {
+                          const selectedElsewhere = modelMetricColumns.some(
+                            (selectedKey, selectedIndex) => selectedIndex !== index && selectedKey === option.key
+                          );
+                          return (
+                            <option key={option.key} value={option.key} disabled={selectedElsewhere}>
+                              {option.label}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -1105,8 +1236,6 @@ export function LeadOptCandidatesPanel({
               const logp = readNumberOrNull(properties.logp);
               const tpsa = readNumberOrNull(properties.tpsa);
               const plddtValue = prediction?.ligandPlddt ?? null;
-              const iptmValue = prediction?.pairIptm ?? null;
-              const paeValue = prediction?.pairPae ?? null;
               const plddtTone = resolveConfidenceTone(plddtValue);
               const useConfidenceRender = previewRenderMode === 'confidence';
               const confidencePreview = resolvePredictionConfidencePreview(prediction, smiles, previewRenderMode);
@@ -1171,22 +1300,20 @@ export function LeadOptCandidatesPanel({
                       <span className="lead-opt-card-pill-key">TPSA</span>
                       <strong>{formatMetric(tpsa, 1)}</strong>
                     </span>
-                    <span className={`lead-opt-card-pill conf-tone-${plddtTone}`}>
-                      <span className="lead-opt-card-pill-key">pLDDT</span>
-                      <strong>{plddtValue !== null ? formatMetric(plddtValue, 1) : '-'}</strong>
-                    </span>
-                    <span
-                      className={`lead-opt-card-pill conf-tone-${resolveConfidenceTone(
-                        iptmValue !== null && Number.isFinite(iptmValue) ? iptmValue * 100 : null
-                      )}`}
-                    >
-                      <span className="lead-opt-card-pill-key">iPTM</span>
-                      <strong>{iptmValue !== null ? formatMetric(iptmValue, 3) : '-'}</strong>
-                    </span>
-                    <span className={`lead-opt-card-pill conf-tone-${resolvePaeTone(paeValue)}`}>
-                      <span className="lead-opt-card-pill-key">PAE</span>
-                      <strong>{paeValue !== null ? formatMetric(paeValue, 2) : '-'}</strong>
-                    </span>
+                    {modelMetricColumns.map((metricKey) => {
+                      const metricValue = readPredictionModelMetricValue(prediction, metricKey);
+                      return (
+                        <span
+                          key={`${smiles || index}-${metricKey}`}
+                          className={`lead-opt-card-pill conf-tone-${resolveLeadOptModelMetricTone(metricKey, metricValue)}`}
+                        >
+                          <span className="lead-opt-card-pill-key">{resolveLeadOptModelMetricLabel(metricKey)}</span>
+                          <strong>
+                            {metricValue !== null ? formatMetric(metricValue, resolveLeadOptModelMetricDigits(metricKey)) : '-'}
+                          </strong>
+                        </span>
+                      );
+                    })}
                   </div>
                 </article>
               );
@@ -1224,19 +1351,7 @@ export function LeadOptCandidatesPanel({
                   const refLogp = deriveReferenceProperty(row, 'logp');
                   const refTpsa = deriveReferenceProperty(row, 'tpsa');
                   const plddtValue = prediction?.ligandPlddt ?? null;
-                  const iptmValue = prediction?.pairIptm ?? null;
-                  const paeValue = prediction?.pairPae ?? null;
-                  const plddtDelta = plddtValue !== null && referencePlddt !== null ? plddtValue - referencePlddt : null;
-                  const iptmDelta = iptmValue !== null && referenceIptm !== null ? iptmValue - referenceIptm : null;
-                  const paeDelta = paeValue !== null && referencePae !== null ? paeValue - referencePae : null;
                   const plddtTone = resolveConfidenceTone(plddtValue);
-                  const iptmTone = resolveConfidenceTone(
-                    iptmValue !== null && Number.isFinite(iptmValue) ? iptmValue * 100 : null
-                  );
-                  const paeTone = resolvePaeTone(paeValue);
-                  const plddtDeltaTone = resolveDeltaTone(plddtDelta);
-                  const iptmDeltaTone = resolveDeltaTone(iptmDelta);
-                  const paeDeltaTone = resolveDeltaTone(paeDelta === null ? null : -paeDelta);
                   const isActive = activeSmiles === smiles;
                   const useConfidenceRender = previewRenderMode === 'confidence';
                   const confidencePreview = resolvePredictionConfidencePreview(prediction, smiles, previewRenderMode);
@@ -1317,30 +1432,36 @@ export function LeadOptCandidatesPanel({
                       </td>
                       <td className="col-insights col-insights-model">
                         <div className="lead-opt-info-col lead-opt-info-col--profile">
-                          <div className={`lead-opt-confidence-row conf-tone-${plddtTone}`}>
-                            <span className="lead-opt-confidence-label">pLDDT</span>
-                            <strong className="lead-opt-confidence-value">{plddtValue !== null ? formatMetric(plddtValue, 1) : '-'}</strong>
-                            <span className={`lead-opt-delta-indicator ${plddtDeltaTone}`}>
-                              <DeltaSpark tone={plddtDeltaTone} />
-                              <span className="lead-opt-delta-value">{plddtDelta !== null ? formatDelta(plddtDelta, 2) : '-'}</span>
-                            </span>
-                          </div>
-                          <div className={`lead-opt-confidence-row conf-tone-${iptmTone}`}>
-                            <span className="lead-opt-confidence-label">iPTM</span>
-                            <strong className="lead-opt-confidence-value">{iptmValue !== null ? formatMetric(iptmValue, 3) : '-'}</strong>
-                            <span className={`lead-opt-delta-indicator ${iptmDeltaTone}`}>
-                              <DeltaSpark tone={iptmDeltaTone} />
-                              <span className="lead-opt-delta-value">{iptmDelta !== null ? formatDelta(iptmDelta, 3) : '-'}</span>
-                            </span>
-                          </div>
-                          <div className={`lead-opt-confidence-row conf-tone-${paeTone}`}>
-                            <span className="lead-opt-confidence-label">PAE</span>
-                            <strong className="lead-opt-confidence-value">{paeValue !== null ? formatMetric(paeValue, 2) : '-'}</strong>
-                            <span className={`lead-opt-delta-indicator ${paeDeltaTone}`}>
-                              <DeltaSpark tone={paeDeltaTone} />
-                              <span className="lead-opt-delta-value">{paeDelta !== null ? formatDelta(paeDelta, 2) : '-'}</span>
-                            </span>
-                          </div>
+                          {modelMetricColumns.map((metricKey) => {
+                            const metricValue = readPredictionModelMetricValue(prediction, metricKey);
+                            const referenceMetricValue =
+                              metricKey === 'plddt'
+                                ? referencePlddt
+                                : metricKey === 'ipsae'
+                                  ? referenceIpsae
+                                  : metricKey === 'iptm'
+                                    ? referenceIptm
+                                    : referencePae;
+                            const metricDelta =
+                              metricValue !== null && referenceMetricValue !== null ? metricValue - referenceMetricValue : null;
+                            const metricTone = resolveLeadOptModelMetricTone(metricKey, metricValue);
+                            const metricDeltaTone = resolveLeadOptModelMetricDeltaTone(metricKey, metricDelta);
+                            const digits = resolveLeadOptModelMetricDigits(metricKey);
+                            return (
+                              <div key={`${smiles || index}-${metricKey}`} className={`lead-opt-confidence-row conf-tone-${metricTone}`}>
+                                <span className="lead-opt-confidence-label">{resolveLeadOptModelMetricLabel(metricKey)}</span>
+                                <strong className="lead-opt-confidence-value">
+                                  {metricValue !== null ? formatMetric(metricValue, digits) : '-'}
+                                </strong>
+                                <span className={`lead-opt-delta-indicator ${metricDeltaTone}`}>
+                                  <DeltaSpark tone={metricDeltaTone} />
+                                  <span className="lead-opt-delta-value">
+                                    {metricDelta !== null ? formatDelta(metricDelta, digits) : '-'}
+                                  </span>
+                                </span>
+                              </div>
+                            );
+                          })}
                         </div>
                       </td>
                       <td className="col-state">

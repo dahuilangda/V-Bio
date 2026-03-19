@@ -96,3 +96,5 @@ capabilities/affinity/tests/
 capabilities/boltz2score/tests/
 capabilities/lead_optimization/tests/
 capabilities/boltz2score_v2
+capabilities/boltz2score/.venv/
+capabilities/boltz2score/data/

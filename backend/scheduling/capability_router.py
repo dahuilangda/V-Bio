@@ -13,7 +13,6 @@ KNOWN_CAPABILITIES: tuple[str, ...] = (
     "alphafold3",
     "protenix",
     "pocketxmol",
-    "affinity",
     "boltz2score",
     "lead_opt",
     "peptide_design",
@@ -24,7 +23,6 @@ GPU_CAPABILITIES = {
     "alphafold3",
     "protenix",
     "pocketxmol",
-    "affinity",
     "boltz2score",
 }
 CPU_CAPABILITIES = {"lead_opt", "peptide_design"}
@@ -37,7 +35,7 @@ _CAPABILITY_ALIASES = {
     "af3": "alphafold3",
     "protenix": "protenix",
     "pocketxmol": "pocketxmol",
-    "affinity": "affinity",
+    "affinity": "boltz2score",
     "boltz2score": "boltz2score",
     "score": "boltz2score",
     "lead_opt": "lead_opt",
@@ -60,7 +58,6 @@ _GROUP_ALIASES = {
 
 _PREDICT_BACKEND_RE = re.compile(r"""["']backend["']\s*:\s*["']([a-zA-Z0-9_\-]+)["']""")
 _TASK_NAME_CAPABILITY_FALLBACK = {
-    "affinity_task": "affinity",
     "boltz2score_task": "boltz2score",
     "lead_optimization_mmp_query_task": "lead_opt",
     "lead_optimization_task": "lead_opt",

@@ -52,7 +52,8 @@ export function ProjectWorkspaceContent({
     isPredictionWorkflow && (workspaceTab === 'components' || workspaceTab === 'constraints');
   const showFlatAffinityWorkspace = isAffinityWorkflow && workspaceTab === 'components';
   const showFlatWorkspace = showFlatPredictionWorkspace || showFlatAffinityWorkspace;
-  const showRuntimeSettingsInComponents = workspaceTab === 'components' && !isLeadOptimizationWorkflow;
+  const showRuntimeSettingsInComponents =
+    workspaceTab === 'components' && !isLeadOptimizationWorkflow && !isAffinityWorkflow;
   const showPredictionSection = isPredictionWorkflow && (workspaceTab === 'components' || workspaceTab === 'constraints');
   const showAffinitySection = workspaceTab === 'components' && isAffinityWorkflow;
 

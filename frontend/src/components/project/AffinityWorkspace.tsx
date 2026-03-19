@@ -6,6 +6,7 @@ import { Ligand2DPreview } from './Ligand2DPreview';
 import { LigandPropertyGrid } from './LigandPropertyGrid';
 import { MetricsPanel } from './MetricsPanel';
 import { resolveExactLigandAtomLinks } from './affinityAtomLinking';
+import type { AffinityScoringMode } from '../../types/models';
 
 export type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
 export type ResultsGridStyle = CSSProperties & { '--results-main-width'?: string };
@@ -26,6 +27,8 @@ interface AffinityBasicsWorkspaceProps {
   canEdit: boolean;
   submitting: boolean;
   backend: string;
+  mode: AffinityScoringMode;
+  seed: number | null;
   targetFileName: string;
   ligandFileName: string;
   ligandSmiles: string;
@@ -33,7 +36,6 @@ interface AffinityBasicsWorkspaceProps {
   useMsa: boolean;
   confidenceOnly: boolean;
   confidenceOnlyLocked: boolean;
-  confidenceOnlyHint: string;
   previewTargetStructureText: string;
   previewTargetStructureFormat: 'cif' | 'pdb';
   previewLigandStructureText: string;
@@ -47,6 +49,8 @@ interface AffinityBasicsWorkspaceProps {
   onUseMsaChange: (checked: boolean) => void;
   onConfidenceOnlyChange: (checked: boolean) => void;
   onBackendChange: (backend: string) => void;
+  onModeChange: (mode: AffinityScoringMode) => void;
+  onSeedChange: (seed: number | null) => void;
   onLigandSmilesChange: (smiles: string) => void;
   onResizerPointerDown: (event: PointerEvent<HTMLDivElement>) => void;
   onResizerKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
@@ -56,6 +60,8 @@ export function AffinityBasicsWorkspace({
   canEdit,
   submitting,
   backend,
+  mode,
+  seed,
   targetFileName,
   ligandFileName,
   ligandSmiles,
@@ -63,7 +69,6 @@ export function AffinityBasicsWorkspace({
   useMsa,
   confidenceOnly,
   confidenceOnlyLocked,
-  confidenceOnlyHint,
   previewTargetStructureText,
   previewTargetStructureFormat,
   previewLigandStructureText,
@@ -77,6 +82,8 @@ export function AffinityBasicsWorkspace({
   onUseMsaChange,
   onConfidenceOnlyChange,
   onBackendChange,
+  onModeChange,
+  onSeedChange,
   onLigandSmilesChange,
   onResizerPointerDown,
   onResizerKeyDown
@@ -84,50 +91,54 @@ export function AffinityBasicsWorkspace({
   return (
     <section className="affinity-basics-panel">
       <div className="affinity-basics-controls">
-        <label className="field affinity-upload-field">
-          <span className="affinity-field-title">
-            <Dna size={13} />
-            Target <span className="required-mark">*</span>
-            {targetFileName ? <CircleCheck size={13} className="affinity-upload-ok" /> : null}
-          </span>
-          <input
-            type="file"
-            className="file-input-unified"
-            accept=".pdb,.ent,.cif,.mmcif"
-            disabled={!canEdit || submitting}
-            onClick={(event) => {
-              (event.currentTarget as HTMLInputElement).value = '';
-            }}
-            onChange={(event) => onTargetFileChange(event.target.files?.[0] || null)}
-          />
-        </label>
-
-        <label className="field affinity-upload-field">
-          <span className="affinity-field-title">
-            <FlaskConical size={13} />
-            Ligand
-            {ligandFileName ? <CircleCheck size={13} className="affinity-upload-ok" /> : null}
-          </span>
-          <input
-            type="file"
-            className="file-input-unified"
-            accept=".sdf,.sd,.mol2,.mol,.pdb,.ent,.cif,.mmcif"
-            disabled={!canEdit || submitting}
-            onClick={(event) => {
-              (event.currentTarget as HTMLInputElement).value = '';
-            }}
-            onChange={(event) => onLigandFileChange(event.target.files?.[0] || null)}
-          />
-        </label>
-        <div className="affinity-basics-inline-options">
-          <label className="field affinity-inline-field">
-            <span className="affinity-field-title">Backend</span>
-            <select
-              value={backend}
+        <div className="affinity-basics-upload-row">
+          <label className="field affinity-upload-field">
+            <span className="affinity-field-title">
+              <Dna size={13} />
+              Target <span className="required-mark">*</span>
+              {targetFileName ? <CircleCheck size={13} className="affinity-upload-ok" /> : null}
+            </span>
+            <input
+              type="file"
+              className="file-input-unified"
+              accept=".pdb,.ent,.cif,.mmcif"
               disabled={!canEdit || submitting}
-              onChange={(event) => onBackendChange(event.target.value)}
+              onClick={(event) => {
+                (event.currentTarget as HTMLInputElement).value = '';
+              }}
+              onChange={(event) => onTargetFileChange(event.target.files?.[0] || null)}
+            />
+          </label>
+
+          <label className="field affinity-upload-field">
+            <span className="affinity-field-title">
+              <FlaskConical size={13} />
+              Ligand
+              {ligandFileName ? <CircleCheck size={13} className="affinity-upload-ok" /> : null}
+            </span>
+            <input
+              type="file"
+              className="file-input-unified"
+              accept=".sdf,.sd,.mol2,.mol,.pdb,.ent,.cif,.mmcif"
+              disabled={!canEdit || submitting}
+              onClick={(event) => {
+                (event.currentTarget as HTMLInputElement).value = '';
+              }}
+              onChange={(event) => onLigandFileChange(event.target.files?.[0] || null)}
+            />
+          </label>
+
+          <label className="field affinity-inline-field">
+            <span className="affinity-field-title">Mode</span>
+            <select
+              value={mode}
+              disabled={!canEdit || submitting}
+              onChange={(event) => onModeChange(event.target.value as AffinityScoringMode)}
             >
-              <option value="boltz">Boltz-2</option>
+              <option value="score">Score</option>
+              <option value="pose">Pose</option>
+              <option value="refine">Refine</option>
+              <option value="interface">Interface</option>
             </select>
           </label>
 
@@ -158,7 +169,6 @@ export function AffinityBasicsWorkspace({
           </label>
         </div>
       </div>
-      {confidenceOnlyHint.trim() ? <div className="muted small affinity-toggles-hint">{confidenceOnlyHint}</div> : null}
 
       <div ref={resultsGridRef} className={`results-grid ${isResultsResizing ? 'is-resizing' : ''}`} style={resultsGridStyle}>
         <section className="structure-panel">
@@ -202,6 +212,37 @@ export function AffinityBasicsWorkspace({
           </section>
         </aside>
       </div>
+
+      <section className="panel subtle affinity-runtime-card">
+        <div className="affinity-basics-settings-row">
+          <label className="field affinity-inline-field">
+            <span className="affinity-field-title">Backend</span>
+            <select
+              value={backend}
+              disabled={!canEdit || submitting}
+              onChange={(event) => onBackendChange(event.target.value)}
+            >
+              <option value="boltz">Boltz-2</option>
+            </select>
+          </label>
+
+          <label className="field affinity-inline-field">
+            <span>Seed (optional)</span>
+            <input
+              type="number"
+              min={0}
+              value={seed ?? ''}
+              onChange={(event) => {
+                const value = event.target.value;
+                const nextSeed = value === '' ? null : Math.max(0, Math.floor(Number(value) || 0));
+                onSeedChange(nextSeed);
+              }}
+              disabled={!canEdit || submitting}
+              placeholder="Default: 42"
+            />
+          </label>
+        </div>
+      </section>
     </section>
   );
 }

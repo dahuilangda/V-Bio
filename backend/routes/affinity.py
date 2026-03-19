@@ -6,6 +6,8 @@ from typing import Any, Callable, Dict, Optional
 from flask import jsonify, request
 from werkzeug.utils import secure_filename
 
+VALID_BOLTZ2SCORE_MODES = {"score", "pose", "refine", "interface"}
+
 
 def _parse_ligand_smiles_map(raw: Optional[str]) -> Dict[str, str]:
     mapping: Dict[str, str] = {}
@@ -30,7 +32,6 @@ def register_affinity_routes(
     require_api_token,
     logger,
     config_module,
-    affinity_task,
     boltz2score_task,
     build_affinity_preview,
     affinity_preview_error_cls,
@@ -110,147 +111,6 @@ def register_affinity_routes(
             }
         )
 
-    @app.route('/api/affinity', methods=['POST'])
-    @require_api_token
-    def handle_affinity():
-        logger.info('Received affinity prediction request.')
-
-        if 'input_file' not in request.files:
-            logger.error("Missing 'input_file' in affinity prediction request. Client IP: %s", request.remote_addr)
-            return jsonify({'error': "Request form must contain a 'input_file' part"}), 400
-
-        input_file = request.files['input_file']
-        if input_file.filename == '':
-            logger.error("No selected file for 'input_file' in affinity prediction request.")
-            return jsonify({'error': 'No selected file for input_file'}), 400
-
-        try:
-            input_file_content = input_file.read().decode('utf-8')
-            logger.debug('Input file successfully read and decoded.')
-        except UnicodeDecodeError:
-            logger.error('Failed to decode input_file as UTF-8. Client IP: %s', request.remote_addr)
-            return jsonify({'error': "Failed to decode input_file. Ensure it's a valid UTF-8 text file."}), 400
-        except IOError as exc:
-            logger.exception('Failed to read input_file from request: %s. Client IP: %s', exc, request.remote_addr)
-            return jsonify({'error': f'Failed to read input_file: {exc}'}), 400
-
-        ligand_resname = request.form.get('ligand_resname', 'LIG')
-        logger.info('ligand_resname parameter received: %s for client %s.', ligand_resname, request.remote_addr)
-
-        priority = request.form.get('priority', 'default').lower()
-        if priority not in ['high', 'default']:
-            logger.warning("Invalid priority '%s' provided by client %s. Defaulting to 'default'.", priority, request.remote_addr)
-            priority = 'default'
-
-        queue_selection = select_queue_for_capability('affinity', priority)
-        if not bool(queue_selection.get('online', False)):
-            return jsonify({
-                'error': 'No online workers available for requested capability.',
-                'capability': 'affinity',
-                'queue_selection': queue_selection,
-            }), 503
-        target_queue = str(queue_selection.get('queue') or '').strip()
-        if not target_queue:
-            return jsonify({'error': 'Resolved queue is empty for requested capability.', 'queue_selection': queue_selection}), 500
-        logger.info('Affinity prediction priority: %s, targeting queue: %s for client %s.', priority, target_queue, request.remote_addr)
-
-        affinity_args: Dict[str, Any] = {
-            'input_file_content': input_file_content,
-            'input_filename': secure_filename(input_file.filename),
-            'ligand_resname': ligand_resname,
-        }
-
-        try:
-            task = affinity_task.apply_async(args=[affinity_args], queue=target_queue)
-            logger.info('Affinity task %s dispatched to queue: %s.', task.id, target_queue)
-        except Exception as exc:
-            logger.exception('Failed to dispatch Celery task for affinity prediction request from %s: %s', request.remote_addr, exc)
-            return jsonify({'error': 'Failed to dispatch affinity prediction task.', 'details': str(exc)}), 500
-
-        response_payload = {
-            'task_id': task.id,
-            'queue': target_queue,
-            'capability': 'affinity',
-            'queue_selection': queue_selection,
-        }
-        return jsonify(response_payload), 202
-
-    @app.route('/api/affinity_separate', methods=['POST'])
-    @require_api_token
-    def handle_affinity_separate():
-        logger.info('Received separate affinity prediction request.')
-
-        if 'protein_file' not in request.files or 'ligand_file' not in request.files:
-            logger.error('Missing required files in separate affinity prediction request. Client IP: %s', request.remote_addr)
-            return jsonify({'error': "Request form must contain both 'protein_file' and 'ligand_file' parts"}), 400
-
-        protein_file = request.files['protein_file']
-        ligand_file = request.files['ligand_file']
-
-        if protein_file.filename == '' or ligand_file.filename == '':
-            logger.error('No selected files for separate affinity prediction request.')
-            return jsonify({'error': 'Both protein_file and ligand_file must be selected'}), 400
-
-        try:
-            protein_file_content = protein_file.read().decode('utf-8')
-            ligand_file.seek(0)
-            try:
-                ligand_file_content = ligand_file.read().decode('utf-8')
-            except UnicodeDecodeError:
-                ligand_file.seek(0)
-                ligand_file_content = ligand_file.read().decode('utf-8', errors='replace')
-            logger.debug('Protein and ligand files successfully read.')
-        except UnicodeDecodeError:
-            logger.error('Failed to decode files as UTF-8. Client IP: %s', request.remote_addr)
-            return jsonify({'error': 'Failed to decode files. Ensure they are valid text files.'}), 400
-        except IOError as exc:
-            logger.exception('Failed to read files from request: %s. Client IP: %s', exc, request.remote_addr)
-            return jsonify({'error': f'Failed to read files: {exc}'}), 400
-
-        ligand_resname = request.form.get('ligand_resname', 'LIG')
-        output_prefix = request.form.get('output_prefix', 'complex')
-
-        priority = request.form.get('priority', 'default').lower()
-        if priority not in ['high', 'default']:
-            logger.warning("Invalid priority '%s' provided by client %s. Defaulting to 'default'.", priority, request.remote_addr)
-            priority = 'default'
-
-        queue_selection = select_queue_for_capability('affinity', priority)
-        if not bool(queue_selection.get('online', False)):
-            return jsonify({
-                'error': 'No online workers available for requested capability.',
-                'capability': 'affinity',
-                'queue_selection': queue_selection,
-            }), 503
-        target_queue = str(queue_selection.get('queue') or '').strip()
-        if not target_queue:
-            return jsonify({'error': 'Resolved queue is empty for requested capability.', 'queue_selection': queue_selection}), 500
-        logger.info('Separate affinity prediction priority: %s, targeting queue: %s for client %s.', priority, target_queue, request.remote_addr)
-
-        affinity_args = {
-            'protein_file_content': protein_file_content,
-            'ligand_file_content': ligand_file_content,
-            'protein_filename': secure_filename(protein_file.filename),
-            'ligand_filename': secure_filename(ligand_file.filename),
-            'ligand_resname': ligand_resname,
-            'output_prefix': output_prefix,
-        }
-
-        try:
-            task = affinity_task.apply_async(args=[affinity_args], queue=target_queue)
-            logger.info('Separate affinity task %s dispatched to queue: %s.', task.id, target_queue)
-        except Exception as exc:
-            logger.exception('Failed to dispatch Celery task for separate affinity prediction request from %s: %s', request.remote_addr, exc)
-            return jsonify({'error': 'Failed to dispatch separate affinity prediction task.', 'details': str(exc)}), 500
-
-        response_payload = {
-            'task_id': task.id,
-            'queue': target_queue,
-            'capability': 'affinity',
-            'queue_selection': queue_selection,
-        }
-        return jsonify(response_payload), 202
-
     @app.route('/api/boltz2score', methods=['POST'])
     @require_api_token
     def handle_boltz2score():
@@ -264,7 +124,12 @@ def register_affinity_routes(
         requested_max_parallel_samples = parse_int(request.form.get('max_parallel_samples'), None)
         requested_seed = parse_int(request.form.get('seed'), None)
         requested_structure_refine = parse_bool(request.form.get('structure_refine'), False)
+        requested_compute_ipsae = parse_bool(request.form.get('compute_ipsae'), False)
         requested_use_msa_server = parse_bool(request.form.get('use_msa_server'), True)
+        requested_mode = str(request.form.get('mode') or 'score').strip().lower()
+        if requested_mode not in VALID_BOLTZ2SCORE_MODES:
+            return jsonify({'error': f"Unsupported mode '{requested_mode}'."}), 400
+
         msa_server_url = str(getattr(config_module, 'MSA_SERVER_URL', '') or '').strip()
         if not msa_server_url:
             return jsonify({
@@ -281,7 +146,7 @@ def register_affinity_routes(
             logger.error('Invalid ligand_smiles_map JSON from %s: %s', request.remote_addr, exc)
             return jsonify({'error': "Invalid 'ligand_smiles_map' JSON format."}), 400
 
-        score_args: Dict[str, Any] = {}
+        score_args: Dict[str, Any]
 
         if 'input_file' in request.files:
             input_file = request.files['input_file']
@@ -298,17 +163,24 @@ def register_affinity_routes(
                 logger.exception('Failed to read input_file from request: %s. Client IP: %s', exc, request.remote_addr)
                 return jsonify({'error': f'Failed to read input_file: {exc}'}), 400
 
+            if requested_mode != 'score':
+                return jsonify({
+                    'error': f"Mode '{requested_mode}' requires 'protein_file' and 'ligand_file'."
+                }), 400
+
             score_args = {
                 'input_file_content': input_file_content,
                 'input_filename': secure_filename(input_file.filename),
+                'mode': requested_mode,
+                'compute_ipsae': requested_compute_ipsae,
                 'target_chain': target_chain,
                 'ligand_chain': ligand_chain,
+                'affinity_refine': parse_bool(request.form.get('affinity_refine'), False),
+                'enable_affinity': parse_bool(request.form.get('enable_affinity'), False),
             }
             if ligand_smiles_map:
                 score_args['ligand_smiles_map'] = ligand_smiles_map
-            score_args['affinity_refine'] = parse_bool(request.form.get('affinity_refine'), False)
-            score_args['enable_affinity'] = parse_bool(request.form.get('enable_affinity'), False)
-            score_args['auto_enable_affinity'] = parse_bool(request.form.get('auto_enable_affinity'), False)
+
         elif (
             'protein_file' in request.files
             or 'ligand_file' in request.files
@@ -330,6 +202,8 @@ def register_affinity_routes(
             if not has_ligand_file and not has_ligand_smiles:
                 logger.error('Missing ligand input in Boltz2Score separate-input request.')
                 return jsonify({'error': "Provide either 'ligand_file' or non-empty 'ligand_smiles'."}), 400
+            if requested_mode != 'score' and not has_ligand_file:
+                return jsonify({'error': f"Mode '{requested_mode}' requires an uploaded 'ligand_file'."}), 400
 
             try:
                 protein_file_content = protein_file.read().decode('utf-8')
@@ -340,14 +214,18 @@ def register_affinity_routes(
                 logger.exception('Failed to read protein_file from request: %s. Client IP: %s', exc, request.remote_addr)
                 return jsonify({'error': f'Failed to read protein_file: {exc}'}), 400
 
-            output_prefix = request.form.get('output_prefix', 'complex')
             score_args = {
                 'protein_file_content': protein_file_content,
                 'protein_filename': secure_filename(protein_file.filename),
-                'output_prefix': output_prefix,
+                'mode': requested_mode,
+                'compute_ipsae': requested_compute_ipsae,
+                'target_chain': target_chain,
+                'ligand_chain': ligand_chain,
+                'affinity_refine': parse_bool(request.form.get('affinity_refine'), False),
+                'enable_affinity': parse_bool(request.form.get('enable_affinity'), False),
             }
 
-            if has_ligand_file:
+            if has_ligand_file and ligand_file is not None:
                 try:
                     ligand_file.seek(0)
                     try:
@@ -368,16 +246,9 @@ def register_affinity_routes(
                     'ligand_smiles': ligand_smiles,
                     'ligand_filename': secure_filename(request.form.get('ligand_filename', 'ligand_from_smiles.sdf')),
                 })
+
             if ligand_smiles_map:
                 score_args['ligand_smiles_map'] = ligand_smiles_map
-
-            score_args['affinity_refine'] = parse_bool(request.form.get('affinity_refine'), False)
-            score_args['enable_affinity'] = parse_bool(request.form.get('enable_affinity'), False)
-            score_args['auto_enable_affinity'] = parse_bool(request.form.get('auto_enable_affinity'), False)
-            if target_chain:
-                score_args['target_chain'] = target_chain
-            if ligand_chain:
-                score_args['ligand_chain'] = ligand_chain
         else:
             logger.error('Missing input for Boltz2Score request. Client IP: %s', request.remote_addr)
             return jsonify({
@@ -412,7 +283,7 @@ def register_affinity_routes(
         target_queue = str(queue_selection.get('queue') or '').strip()
         if not target_queue:
             return jsonify({'error': 'Resolved queue is empty for requested capability.', 'queue_selection': queue_selection}), 500
-        logger.info('Boltz2Score priority: %s, targeting queue: %s for client %s.', priority, target_queue, request.remote_addr)
+        logger.info('Boltz2Score priority: %s, mode=%s, targeting queue: %s for client %s.', priority, requested_mode, target_queue, request.remote_addr)
 
         try:
             task = boltz2score_task.apply_async(args=[score_args], queue=target_queue)

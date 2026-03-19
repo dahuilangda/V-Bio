@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import type { InputComponent, ProjectTask } from '../../types/models';
+import type { AffinityScoringMode, InputComponent, ProjectTask } from '../../types/models';
 import { enumerateLeadOptimizationMmp, getTaskStatuses } from '../../api/backendApi';
 import { useAuth } from '../../hooks/useAuth';
 import {
@@ -38,6 +38,14 @@ import {
   sortProjectTasks
 } from './projectDraftUtils';
 import { inferTaskStateFromStatusPayload, readStatusText } from './projectMetrics';
+
+function normalizeAffinityMode(value: unknown): AffinityScoringMode {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'pose' || normalized === 'refine' || normalized === 'interface') {
+    return normalized;
+  }
+  return 'score';
+}
 import { useResultSnapshot } from './useResultSnapshot';
 import { useProjectRunUiEffects } from './useProjectRunUiEffects';
 import { useProjectRuntimeEffects } from './useProjectRuntimeEffects';
@@ -1023,7 +1031,9 @@ export function useProjectDetailRuntimeContext() {
         const rowsRaw = await listProjectTasksForList(projectIdValue, {
           includeComponents: false,
           includeConfidence: false,
+          includeConfidenceSummary: workflowKey !== 'lead_optimization',
           includeProperties: false,
+          includePropertiesSummary: workflowKey !== 'lead_optimization',
           includeLeadOptSummary: workflowKey === 'lead_optimization',
           includeLeadOptCandidates: false,
           taskRowIds:
@@ -1498,6 +1508,8 @@ export function useProjectDetailRuntimeContext() {
     rememberTemplatesForTaskRow(templateContextTask.id, proteinTemplates);
   }, [requestedStatusTaskRow, activeStatusTaskRow, proteinTemplates, rememberTemplatesForTaskRow]);
 
+  const affinityMode = normalizeAffinityMode(draft?.inputConfig?.options?.affinityMode);
+
   const {
     normalizedDraftComponents,
     leadOptPrimary,
@@ -1817,12 +1829,14 @@ export function useProjectDetailRuntimeContext() {
     onLigandFileChange: onAffinityLigandFileChange,
     onConfidenceOnlyChange: onAffinityConfidenceOnlyChange,
     setLigandSmiles: setAffinityLigandSmiles,
+    onAffinityModeChange,
     onAffinityUseMsaChange
   } = useProjectAffinityWorkspace({
     isAffinityWorkflow,
     workspaceTab,
     projectId: project?.id || null,
     draft,
+    affinityMode,
     setDraft,
     affinityUploadScopeTaskRowId,
     taskAffinityUploads,
@@ -2150,10 +2164,12 @@ export function useProjectDetailRuntimeContext() {
     affinityConfidenceOnly,
     affinityConfidenceOnlyLocked,
     affinityCurrentUploads,
+    affinityMode,
     onAffinityTargetFileChange,
     onAffinityLigandFileChange,
     onAffinityConfidenceOnlyChange,
     setAffinityLigandSmiles,
+    onAffinityModeChange,
     onAffinityUseMsaChange,
     metadataOnlyDraftDirty,
     hasUnsavedChanges,

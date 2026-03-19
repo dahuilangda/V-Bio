@@ -21,6 +21,7 @@ import re
 import base64
 import random
 import copy
+import numpy as np
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any, Iterable, Callable
 import subprocess
@@ -38,7 +39,7 @@ if CAPABILITIES_DIR.is_dir() and str(CAPABILITIES_DIR) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-BOLTZ2SCORE_DIR = _resolve_capability_dir("boltz2score")
+BOLTZ2SCORE_SCRIPT = "/workspace/vbio/capabilities/boltz2score/boltz2score.py"
 
 sys.path.append(str(PROJECT_ROOT))
 from backend.core.config import (
@@ -107,6 +108,10 @@ MSA_CACHE_CONFIG = {
 }
 
 MANDATORY_COLABFOLD_MSA_BACKENDS = {"boltz", "alphafold3", "protenix"}
+IPSAE_PAE_CUTOFF = 12.0
+IPSAE_DIST_CUTOFF = 5.0
+_BOLTZ_RESULT_CONF_RE = re.compile(r"^confidence_(.+)_model_(\d+)\.json$", re.IGNORECASE)
+_PROTENIX_SUMMARY_CONF_RE = re.compile(r"_summary_confidence_sample_(\d+)\.json$", re.IGNORECASE)
 
 
 def _normalized_msa_server_url() -> str:
@@ -1569,6 +1574,947 @@ def prepare_structure_for_affinity(source_path: Path, work_dir: Path) -> Path:
     return sanitized_path
 
 
+def _is_protein_like_residue_name(resname: str) -> bool:
+    normalized = str(resname or "").strip().upper()
+    return normalized in AMINO_ACID_MAPPING
+
+
+def _infer_affinity_chain_plan(
+    structure_path: Path,
+    requested_ligand_chain: str,
+) -> Optional[Dict[str, Any]]:
+    solvent_names = {"HOH", "WAT"}
+    ligand_chain_requested = str(requested_ligand_chain or "").strip()
+    if not ligand_chain_requested:
+        return None
+
+    try:
+        structure = gemmi.read_structure(str(structure_path))
+    except Exception as err:
+        print(f"⚠️ 无法解析结构以推断 affinity 链信息: {err}", file=sys.stderr)
+        return None
+
+    resolved_ligand_chain: Optional[str] = None
+    target_chain_ids: List[str] = []
+
+    for model in structure:
+        for chain in model:
+            chain_name = str(chain.name or "").strip()
+            if not chain_name:
+                continue
+            residue_names = [
+                str(residue.name or "").strip().upper()
+                for residue in chain
+                if str(residue.name or "").strip()
+            ]
+            if not residue_names:
+                continue
+
+            has_protein = any(_is_protein_like_residue_name(name) for name in residue_names)
+            has_non_solvent_nonpolymer = any(
+                name not in solvent_names and not _is_protein_like_residue_name(name)
+                for name in residue_names
+            )
+
+            if chain_name == ligand_chain_requested:
+                if has_non_solvent_nonpolymer:
+                    resolved_ligand_chain = chain_name
+                continue
+
+            if has_protein:
+                target_chain_ids.append(chain_name)
+
+    if not resolved_ligand_chain:
+        return None
+    if not target_chain_ids:
+        return None
+
+    return {
+        "ligand_chain": resolved_ligand_chain,
+        "target_chain_ids": target_chain_ids,
+    }
+
+
+def _load_json_object(path: Path) -> Dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _ensure_boltz2score_ipsae_tools() -> Tuple[Callable[..., None], Callable[..., Any]]:
+    boltz2score_dir = CAPABILITIES_DIR / "boltz2score"
+    if boltz2score_dir.is_dir() and str(boltz2score_dir) not in sys.path:
+        sys.path.insert(0, str(boltz2score_dir))
+    from core.results import compute_and_write_ipsae, rerank_diffusion_samples
+
+    return compute_and_write_ipsae, rerank_diffusion_samples
+
+
+def _to_finite_float(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _choose_preferred_existing_path(paths: Iterable[Path]) -> Optional[Path]:
+    candidates = [Path(path) for path in paths if Path(path).exists()]
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda path: (
+            1 if "seed-" in str(path).lower() else 0,
+            len(str(path)),
+            str(path),
+        )
+    )
+    return candidates[0]
+
+
+def _collect_structure_chain_ids(structure_path: Path) -> List[str]:
+    try:
+        structure = gemmi.read_structure(str(structure_path))
+    except Exception:
+        return []
+
+    chain_ids: List[str] = []
+    seen: set[str] = set()
+    for model in structure:
+        for chain in model:
+            chain_id = str(chain.name or "").strip()
+            if not chain_id or chain_id in seen:
+                continue
+            seen.add(chain_id)
+            chain_ids.append(chain_id)
+        if chain_ids:
+            break
+    return chain_ids
+
+
+def _build_structure_chain_map(structure_path: Path) -> Dict[str, str]:
+    return {
+        str(index): chain_id
+        for index, chain_id in enumerate(_collect_structure_chain_ids(structure_path))
+    }
+
+
+def _structure_chain_has_nonpolymer_ligand(structure_path: Path, chain_id: str) -> bool:
+    chain_id = str(chain_id or "").strip()
+    if not chain_id:
+        return False
+
+    solvent_names = {"HOH", "WAT"}
+    polymer_like_names = set(AMINO_ACID_MAPPING.keys()) | {
+        "A", "C", "G", "U", "I",
+        "DA", "DC", "DG", "DT", "DI", "DU",
+    }
+
+    try:
+        structure = gemmi.read_structure(str(structure_path))
+    except Exception:
+        return False
+
+    for model in structure:
+        for chain in model:
+            current_chain_id = str(chain.name or "").strip()
+            if current_chain_id != chain_id:
+                continue
+            residue_names = [
+                str(residue.name or "").strip().upper()
+                for residue in chain
+                if str(residue.name or "").strip()
+            ]
+            return any(
+                residue_name not in solvent_names and residue_name not in polymer_like_names
+                for residue_name in residue_names
+            )
+    return False
+
+
+def _extract_ligand_chain_ids_from_yaml_data(
+    yaml_data: Dict[str, Any],
+    alias_map: Optional[Dict[str, str]] = None,
+) -> List[str]:
+    if not isinstance(yaml_data, dict):
+        return []
+
+    resolved: List[str] = []
+    seen: set[str] = set()
+    for entry in yaml_data.get("sequences", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        ligand = entry.get("ligand")
+        if not isinstance(ligand, dict):
+            continue
+        raw_ids = ligand.get("id")
+        if isinstance(raw_ids, list):
+            values = raw_ids
+        elif raw_ids is None:
+            values = []
+        else:
+            values = [raw_ids]
+        for value in values:
+            chain_id = str(value or "").strip()
+            if not chain_id:
+                continue
+            if alias_map:
+                chain_id = (
+                    alias_map.get(chain_id)
+                    or alias_map.get(chain_id.upper())
+                    or alias_map.get(chain_id.lower())
+                    or chain_id
+                )
+            if chain_id in seen:
+                continue
+            seen.add(chain_id)
+            resolved.append(chain_id)
+    return resolved
+
+
+def _resolve_ligand_chain_annotations(
+    requested_chain_ids: Iterable[str],
+    structure_path: Path,
+) -> Optional[Dict[str, str]]:
+    requested = [str(chain_id or "").strip() for chain_id in requested_chain_ids if str(chain_id or "").strip()]
+    valid_requested = [
+        chain_id
+        for chain_id in requested
+        if _structure_chain_has_nonpolymer_ligand(structure_path, chain_id)
+    ]
+    if len(valid_requested) == 1:
+        requested_ligand_chain = requested[0] if len(requested) == 1 else valid_requested[0]
+        return {
+            "requested_ligand_chain_id": requested_ligand_chain,
+            "model_ligand_chain_id": valid_requested[0],
+        }
+
+    inferred = _find_ligand_chain_and_resname_in_structure(structure_path)
+    if not inferred:
+        return None
+
+    inferred_chain = str(inferred[0] or "").strip()
+    if not inferred_chain:
+        return None
+
+    if not requested:
+        requested_ligand_chain = inferred_chain
+    elif len(requested) == 1:
+        requested_ligand_chain = requested[0]
+    elif inferred_chain in requested:
+        requested_ligand_chain = inferred_chain
+    else:
+        return None
+
+    return {
+        "requested_ligand_chain_id": requested_ligand_chain,
+        "model_ligand_chain_id": inferred_chain,
+    }
+
+
+def _convert_pair_iptm_matrix_to_map(matrix: Any, chain_map: Dict[str, str]) -> Dict[str, Dict[str, float]]:
+    if not isinstance(matrix, list):
+        return {}
+
+    pair_map: Dict[str, Dict[str, float]] = {}
+    chain_count = len(chain_map)
+    for row_index, row in enumerate(matrix[:chain_count]):
+        if not isinstance(row, list):
+            continue
+        row_map: Dict[str, float] = {}
+        for col_index, value in enumerate(row[:chain_count]):
+            parsed = _to_finite_float(value)
+            if parsed is None:
+                continue
+            row_map[str(col_index)] = parsed
+        if row_map:
+            pair_map[str(row_index)] = row_map
+    return pair_map
+
+
+def _write_ipsae_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_pae_matrix(path: Path, pae_matrix: Any) -> None:
+    matrix = np.asarray(pae_matrix, dtype=float)
+    np.savez_compressed(path, pae=matrix)
+
+
+def _copy_structure_with_ipsae_ligand_layout(
+    source_path: Path,
+    dest_path: Path,
+    ligand_chain_id: str,
+) -> None:
+    ligand_chain_id = str(ligand_chain_id or "").strip()
+    if source_path.suffix.lower() not in {".cif", ".mmcif"} or not ligand_chain_id:
+        shutil.copy2(source_path, dest_path)
+        return
+
+    try:
+        lines = source_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        shutil.copy2(source_path, dest_path)
+        return
+
+    output_lines: List[str] = []
+    atom_fields: List[str] = []
+    atom_field_index: Dict[str, int] = {}
+    inside_atom_loop = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "loop_":
+            atom_fields = []
+            atom_field_index = {}
+            inside_atom_loop = False
+            output_lines.append(line)
+            continue
+
+        if line.startswith("_atom_site."):
+            inside_atom_loop = True
+            atom_fields.append(line.strip().split(".", 1)[1])
+            atom_field_index = {name: index for index, name in enumerate(atom_fields)}
+            output_lines.append(line)
+            continue
+
+        if inside_atom_loop and (line.startswith("ATOM") or line.startswith("HETATM")):
+            parts = line.split()
+            required_fields = {"label_seq_id", "auth_asym_id"}
+            if required_fields.issubset(atom_field_index) and len(parts) >= len(atom_fields):
+                chain_value = parts[atom_field_index.get("auth_asym_id", -1)]
+                if chain_value == ligand_chain_id:
+                    parts[atom_field_index["label_seq_id"]] = "."
+                    line = " ".join(parts)
+            output_lines.append(line)
+            continue
+
+        if inside_atom_loop and atom_fields and stripped and not stripped.startswith("_atom_site."):
+            output_lines.append(line)
+            if not (line.startswith("ATOM") or line.startswith("HETATM")):
+                inside_atom_loop = False
+                atom_fields = []
+                atom_field_index = {}
+            continue
+
+        output_lines.append(line)
+
+    dest_path.write_text("\n".join(output_lines) + "\n", encoding="utf-8")
+
+
+def _finalize_ipsae_archive_entries(record_dir: Path) -> List[Tuple[Path, str]]:
+    best_confidence_path = record_dir / "best_confidence.json"
+    best_structure_path = _find_first_existing(
+        [record_dir / "best_model.cif", record_dir / "best_model.mmcif"]
+    )
+    if best_confidence_path.exists():
+        confidence_best_model_path = record_dir / "confidence_best_model.json"
+        shutil.copy2(best_confidence_path, confidence_best_model_path)
+
+    entries: List[Tuple[Path, str]] = []
+    for candidate_name in (
+        "best_ipsae.json",
+        "best_confidence.json",
+        "confidence_best_model.json",
+        "best_model.cif",
+        "best_model.mmcif",
+    ):
+        candidate_path = record_dir / candidate_name
+        if candidate_path.exists():
+            entries.append((candidate_path, candidate_name))
+    if best_structure_path and best_structure_path.exists():
+        best_structure_alias = record_dir / best_structure_path.name
+        if best_structure_alias.exists():
+            entries.append((best_structure_alias, best_structure_alias.name))
+
+    seen_arcnames: set[str] = set()
+    deduped: List[Tuple[Path, str]] = []
+    for file_path, arcname in entries:
+        if arcname in seen_arcnames:
+            continue
+        seen_arcnames.add(arcname)
+        deduped.append((file_path, arcname))
+    return deduped
+
+
+def _run_standalone_ipsae_postprocess(
+    *,
+    postprocess_base: Path,
+    source: str,
+    record_id: str,
+    model_entries: List[Dict[str, Any]],
+) -> List[Tuple[Path, str]]:
+    if not model_entries:
+        print(f"ℹ️ {source} 未收集到可用于 IPSAE 的模型结果，跳过后处理。", file=sys.stderr)
+        return []
+
+    compute_and_write_ipsae, rerank_diffusion_samples = _ensure_boltz2score_ipsae_tools()
+
+    postprocess_base.mkdir(parents=True, exist_ok=True)
+    stage_root = postprocess_base / "staged_output"
+    record_dir = stage_root / record_id
+    if record_dir.exists():
+        shutil.rmtree(record_dir)
+    record_dir.mkdir(parents=True, exist_ok=True)
+
+    first_structure = Path(model_entries[0]["structure_path"])
+    chain_map = _build_structure_chain_map(first_structure)
+    if chain_map:
+        _write_ipsae_json(record_dir / "chain_map.json", chain_map)
+
+    for entry in model_entries:
+        model_index = int(entry["model_index"])
+        structure_path = Path(entry["structure_path"])
+        structure_suffix = structure_path.suffix.lower() or ".cif"
+        staged_structure_path = record_dir / f"{record_id}_model_{model_index}{structure_suffix}"
+        _copy_structure_with_ipsae_ligand_layout(
+            structure_path,
+            staged_structure_path,
+            str(entry["confidence_payload"].get("model_ligand_chain_id") or ""),
+        )
+        _write_ipsae_json(
+            record_dir / f"confidence_{record_id}_model_{model_index}.json",
+            dict(entry["confidence_payload"]),
+        )
+        _write_pae_matrix(
+            record_dir / f"pae_{record_id}_model_{model_index}.npz",
+            entry["pae_matrix"],
+        )
+
+    compute_and_write_ipsae(
+        output_dir=stage_root,
+        record_id=record_id,
+        pae_cutoff=IPSAE_PAE_CUTOFF,
+        dist_cutoff=IPSAE_DIST_CUTOFF,
+    )
+    rerank_diffusion_samples(stage_root, record_id)
+
+    entries = _finalize_ipsae_archive_entries(record_dir)
+    if not entries:
+        print(f"⚠️ {source} IPSAE 后处理未生成可归档文件。", file=sys.stderr)
+        return []
+
+    print(f"✅ {source} IPSAE 后处理完成，生成 {len(entries)} 个归档文件。", file=sys.stderr)
+    return entries
+
+
+def _run_boltz_ipsae_postprocess(
+    *,
+    postprocess_base: Path,
+    results_dir: Path,
+    yaml_data: Dict[str, Any],
+) -> List[Tuple[Path, str]]:
+    requested_chain_ids = _extract_ligand_chain_ids_from_yaml_data(yaml_data)
+    model_entries: List[Dict[str, Any]] = []
+    record_id: Optional[str] = None
+
+    for confidence_path in sorted(results_dir.glob("confidence_*_model_*.json")):
+        match = _BOLTZ_RESULT_CONF_RE.match(confidence_path.name)
+        if not match:
+            continue
+        current_record_id = str(match.group(1))
+        model_index = int(match.group(2))
+        structure_path = _find_first_existing(
+            [
+                results_dir / f"{current_record_id}_model_{model_index}.cif",
+                results_dir / f"{current_record_id}_model_{model_index}.mmcif",
+            ]
+        )
+        pae_path = results_dir / f"pae_{current_record_id}_model_{model_index}.npz"
+        if not structure_path or not structure_path.exists() or not pae_path.exists():
+            continue
+
+        annotations = _resolve_ligand_chain_annotations(requested_chain_ids, structure_path)
+        if not annotations:
+            continue
+
+        confidence_payload = _load_json_object(confidence_path)
+        if not confidence_payload:
+            continue
+        confidence_payload.update(annotations)
+        pae_matrix = np.load(pae_path)["pae"]
+        model_entries.append(
+            {
+                "model_index": model_index,
+                "structure_path": structure_path,
+                "confidence_payload": confidence_payload,
+                "pae_matrix": pae_matrix,
+            }
+        )
+        if record_id is None:
+            record_id = current_record_id
+
+    if not record_id:
+        return []
+
+    return _run_standalone_ipsae_postprocess(
+        postprocess_base=postprocess_base,
+        source="boltz",
+        record_id=record_id,
+        model_entries=model_entries,
+    )
+
+
+def _build_af3_ipsae_confidence_payload(
+    *,
+    summary_payload: Dict[str, Any],
+    confidences_payload: Dict[str, Any],
+    chain_map: Dict[str, str],
+    annotations: Dict[str, str],
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = dict(annotations)
+
+    for metric_key in ("ptm", "iptm", "ranking_score", "fraction_disordered"):
+        parsed = _to_finite_float(summary_payload.get(metric_key))
+        if parsed is not None:
+            payload[metric_key] = parsed
+    if "ranking_score" in payload and "confidence_score" not in payload:
+        payload["confidence_score"] = payload["ranking_score"]
+
+    pair_chains_iptm = _convert_pair_iptm_matrix_to_map(summary_payload.get("chain_pair_iptm"), chain_map)
+    if pair_chains_iptm:
+        payload["pair_chains_iptm"] = pair_chains_iptm
+
+    atom_plddts = [
+        float(value)
+        for value in confidences_payload.get("atom_plddts", []) or []
+        if isinstance(value, (int, float)) and math.isfinite(float(value))
+    ]
+    atom_chain_ids = [str(value) for value in confidences_payload.get("atom_chain_ids", []) or []]
+    if atom_plddts:
+        payload["complex_plddt"] = float(sum(atom_plddts) / len(atom_plddts))
+    if atom_plddts and len(atom_plddts) == len(atom_chain_ids):
+        chain_values: Dict[str, List[float]] = {}
+        for chain_id, atom_plddt in zip(atom_chain_ids, atom_plddts):
+            chain_values.setdefault(chain_id, []).append(atom_plddt)
+        if chain_values:
+            payload["chain_mean_plddt"] = {
+                chain_id: float(sum(values) / len(values))
+                for chain_id, values in chain_values.items()
+                if values
+            }
+        ligand_chain_id = str(annotations.get("model_ligand_chain_id") or "").strip()
+        ligand_values = chain_values.get(ligand_chain_id) or []
+        if ligand_values:
+            payload["ligand_atom_plddts"] = ligand_values
+            payload["ligand_atom_plddts_by_chain"] = {ligand_chain_id: ligand_values}
+
+    return payload
+
+
+def _run_af3_ipsae_postprocess(
+    *,
+    postprocess_base: Path,
+    yaml_data: Dict[str, Any],
+    prep: AF3Preparation,
+    af3_output_dir: Path,
+) -> List[Tuple[Path, str]]:
+    structure_path = locate_af3_structure_file(af3_output_dir, prep.jobname)
+    if not structure_path or not structure_path.exists():
+        return []
+
+    job_dir = structure_path.parent
+    summary_path = _choose_preferred_existing_path(job_dir.rglob("*summary_confidences.json"))
+    confidences_path = _choose_preferred_existing_path(
+        path
+        for path in job_dir.rglob("*confidences.json")
+        if "summary_confidences" not in path.name.lower()
+    )
+    if not summary_path or not confidences_path:
+        return []
+
+    summary_payload = _load_json_object(summary_path)
+    confidences_payload = _load_json_object(confidences_path)
+    pae_matrix = confidences_payload.get("pae")
+    if not isinstance(pae_matrix, list):
+        return []
+
+    requested_chain_ids = _extract_ligand_chain_ids_from_yaml_data(
+        yaml_data,
+        alias_map=prep.chain_id_label_map,
+    )
+    annotations = _resolve_ligand_chain_annotations(requested_chain_ids, structure_path)
+    if not annotations:
+        return []
+
+    chain_map = _build_structure_chain_map(structure_path)
+    confidence_payload = _build_af3_ipsae_confidence_payload(
+        summary_payload=summary_payload,
+        confidences_payload=confidences_payload,
+        chain_map=chain_map,
+        annotations=annotations,
+    )
+
+    return _run_standalone_ipsae_postprocess(
+        postprocess_base=postprocess_base,
+        source="alphafold3",
+        record_id=prep.jobname,
+        model_entries=[
+            {
+                "model_index": 0,
+                "structure_path": structure_path,
+                "confidence_payload": confidence_payload,
+                "pae_matrix": pae_matrix,
+            }
+        ],
+    )
+
+
+def _build_protenix_ipsae_confidence_payload(
+    *,
+    summary_payload: Dict[str, Any],
+    full_data_payload: Dict[str, Any],
+    chain_map: Dict[str, str],
+    annotations: Dict[str, str],
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = dict(annotations)
+
+    for metric_key in ("ptm", "iptm", "ranking_score", "plddt"):
+        parsed = _to_finite_float(summary_payload.get(metric_key))
+        if parsed is not None:
+            payload[metric_key] = parsed
+    if "ranking_score" in payload and "confidence_score" not in payload:
+        payload["confidence_score"] = payload["ranking_score"]
+
+    pair_chains_iptm = _convert_pair_iptm_matrix_to_map(summary_payload.get("chain_pair_iptm"), chain_map)
+    if pair_chains_iptm:
+        payload["pair_chains_iptm"] = pair_chains_iptm
+
+    atom_plddts = [
+        float(value)
+        for value in full_data_payload.get("atom_plddt", []) or []
+        if isinstance(value, (int, float)) and math.isfinite(float(value))
+    ]
+    if atom_plddts:
+        payload["complex_plddt"] = float(sum(atom_plddts) / len(atom_plddts))
+
+    atom_to_token_idx = full_data_payload.get("atom_to_token_idx", []) or []
+    token_asym_id = full_data_payload.get("token_asym_id", []) or []
+    ligand_chain_id = str(annotations.get("model_ligand_chain_id") or "").strip()
+    if atom_plddts and isinstance(atom_to_token_idx, list) and isinstance(token_asym_id, list):
+        ligand_values: List[float] = []
+        for atom_index, atom_plddt in enumerate(atom_plddts):
+            if atom_index >= len(atom_to_token_idx):
+                break
+            token_index = atom_to_token_idx[atom_index]
+            if not isinstance(token_index, int) or token_index < 0 or token_index >= len(token_asym_id):
+                continue
+            chain_pos = token_asym_id[token_index]
+            chain_id = chain_map.get(str(chain_pos))
+            if chain_id != ligand_chain_id:
+                continue
+            ligand_values.append(atom_plddt)
+        if ligand_values:
+            payload["ligand_atom_plddts"] = ligand_values
+            payload["ligand_atom_plddts_by_chain"] = {ligand_chain_id: ligand_values}
+
+    return payload
+
+
+def _run_protenix_ipsae_postprocess(
+    *,
+    postprocess_base: Path,
+    yaml_data: Dict[str, Any],
+    prep: ProtenixPreparation,
+    protenix_output_dir: Path,
+) -> List[Tuple[Path, str]]:
+    summary_candidates = list(protenix_output_dir.rglob("*_summary_confidence_sample_*.json"))
+    if not summary_candidates:
+        return []
+
+    scored_candidates: List[Tuple[float, Path]] = []
+    for summary_path in summary_candidates:
+        payload = _load_json_object(summary_path)
+        ranking_score = _to_finite_float(payload.get("ranking_score"))
+        if ranking_score is None:
+            continue
+        scored_candidates.append((ranking_score, summary_path))
+    if not scored_candidates:
+        return []
+
+    scored_candidates.sort(key=lambda item: (-item[0], len(str(item[1]))))
+    summary_path = scored_candidates[0][1]
+    sample_match = _PROTENIX_SUMMARY_CONF_RE.search(summary_path.name)
+    if not sample_match:
+        return []
+
+    sample_index = sample_match.group(1)
+    summary_payload = _load_json_object(summary_path)
+    structure_stem = summary_path.name[: summary_path.name.rfind(f"_summary_confidence_sample_{sample_index}.json")]
+    structure_path = _find_first_existing(
+        [
+            summary_path.parent / f"{structure_stem}_sample_{sample_index}.cif",
+            summary_path.parent / f"{structure_stem}_sample_{sample_index}.mmcif",
+        ]
+    )
+    full_data_path = summary_path.parent / f"{structure_stem}_full_data_sample_{sample_index}.json"
+    if not structure_path or not structure_path.exists() or not full_data_path.exists():
+        return []
+
+    full_data_payload = _load_json_object(full_data_path)
+    pae_matrix = full_data_payload.get("token_pair_pae")
+    if not isinstance(pae_matrix, list):
+        return []
+
+    requested_chain_ids = _extract_ligand_chain_ids_from_yaml_data(
+        yaml_data,
+        alias_map=prep.chain_alias_map,
+    )
+    annotations = _resolve_ligand_chain_annotations(requested_chain_ids, structure_path)
+    if not annotations:
+        return []
+
+    chain_map = _build_structure_chain_map(structure_path)
+    confidence_payload = _build_protenix_ipsae_confidence_payload(
+        summary_payload=summary_payload,
+        full_data_payload=full_data_payload,
+        chain_map=chain_map,
+        annotations=annotations,
+    )
+
+    return _run_standalone_ipsae_postprocess(
+        postprocess_base=postprocess_base,
+        source="protenix",
+        record_id=prep.input_name,
+        model_entries=[
+            {
+                "model_index": 0,
+                "structure_path": structure_path,
+                "confidence_payload": confidence_payload,
+                "pae_matrix": pae_matrix,
+            }
+        ],
+    )
+
+
+def _run_boltz2score_affinity_postprocess(
+    *,
+    affinity_base: Path,
+    model_path: Path,
+    requested_ligand_chain: str,
+    ligand_resname: Optional[str],
+    source: str,
+    archive_prefix: str,
+) -> List[Tuple[Path, str]]:
+    output_dir = affinity_base / "boltz2score_output"
+    work_dir = affinity_base / "boltz2score_work"
+    sanitized_struct_dir = affinity_base / "sanitized_structures"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    sanitized_struct_dir.mkdir(parents=True, exist_ok=True)
+
+    model_for_affinity = prepare_structure_for_affinity(model_path, sanitized_struct_dir)
+    chain_plan = _infer_affinity_chain_plan(model_for_affinity, requested_ligand_chain)
+    if not chain_plan:
+        print(
+            f"⚠️ 无法从结构中解析 affinity 所需的 target/ligand 链，跳过亲和力预测: {model_for_affinity}",
+            file=sys.stderr,
+        )
+        return []
+
+    resolved_ligand_chain = str(chain_plan["ligand_chain"])
+    target_chain_ids = [
+        str(chain_id).strip()
+        for chain_id in chain_plan["target_chain_ids"]
+        if str(chain_id).strip()
+    ]
+    if not target_chain_ids:
+        print("⚠️ 未识别到蛋白 target 链，跳过亲和力预测。", file=sys.stderr)
+        return []
+
+    print(
+        "⚙️ 开始运行 Boltz2Score 亲和力后处理，"
+        f"target链: {','.join(target_chain_ids)}, 配体链: {resolved_ligand_chain}",
+        file=sys.stderr,
+    )
+
+    score_cmd = [
+        "python",
+        BOLTZ2SCORE_SCRIPT,
+        "--output_dir",
+        str(output_dir),
+        "--work_dir",
+        str(work_dir),
+        "--accelerator",
+        "gpu",
+        "--devices",
+        "1",
+        "--num_workers",
+        "0",
+        "--mode",
+        "score",
+        "--compute_ipsae",
+        "--input",
+        str(model_for_affinity),
+        "--enable_affinity",
+        "--target_chain",
+        ",".join(target_chain_ids),
+        "--ligand_chain",
+        resolved_ligand_chain,
+    ]
+
+    try:
+        gpu_arg = determine_docker_gpu_arg(os.environ.get("CUDA_VISIBLE_DEVICES"))
+    except RuntimeError as err:
+        print(f"⚠️ 无法准备 Boltz2Score GPU 环境，跳过亲和力预测: {err}", file=sys.stderr)
+        return []
+
+    image = str(BOLTZ2_DOCKER_IMAGE or "").strip()
+    if not image:
+        raise RuntimeError("BOLTZ2_DOCKER_IMAGE 未配置，无法运行 affinity 后处理 Boltz2Score。")
+
+    raw_extra_args = shlex.split(BOLTZ2_DOCKER_EXTRA_ARGS) if BOLTZ2_DOCKER_EXTRA_ARGS else []
+    extra_args = sanitize_docker_extra_args(raw_extra_args)
+    if raw_extra_args and len(extra_args) != len(raw_extra_args):
+        print(
+            f"⚠️ 已忽略部分 BOLTZ2_DOCKER_EXTRA_ARGS 参数，原始值: {raw_extra_args}",
+            file=sys.stderr,
+        )
+    shm_size = str(BOLTZ2_DOCKER_SHM_SIZE or "").strip()
+
+    runtime_task_id = str(os.environ.get("BOLTZ_TASK_ID") or affinity_base.name).strip()
+    task_container_name = make_task_scoped_container_name(f"{runtime_task_id}-{archive_prefix}-boltz2score")
+    runtime_overridden = any(token == "--runtime" for token in extra_args)
+
+    docker_command = ["docker", "run", "--rm"]
+    if task_container_name:
+        docker_command.extend(["--name", task_container_name])
+        docker_command.extend(["--label", f"boltz.task_id={runtime_task_id}"])
+        docker_command.extend(["--label", "boltz.runtime=boltz2score"])
+    if not runtime_overridden:
+        docker_command.extend(["--runtime", "nvidia"])
+    if shm_size and not docker_args_has_flag(extra_args, "--shm-size") and not docker_args_has_flag(extra_args, "--ipc"):
+        docker_command.extend(["--shm-size", shm_size])
+
+    docker_command.extend(
+        [
+            "--gpus",
+            gpu_arg,
+            "--volume",
+            f"{affinity_base}:{affinity_base}",
+            "--volume",
+            f"{PROJECT_ROOT}:/workspace/vbio:ro",
+            "--workdir",
+            "/workspace/vbio",
+            "--env",
+            "PYTHONPATH=/workspace/vbio",
+        ]
+    )
+
+    passthrough_env_keys = [
+        "BOLTZ_DOWNLOAD_RETRIES",
+        "BOLTZ_CCD_URL",
+        "BOLTZ1_MODEL_URL",
+        "BOLTZ2_MOLS_URL",
+        "BOLTZ2_MODEL_URL",
+        "BOLTZ2_AFFINITY_MODEL_URL",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    ]
+    for env_key in passthrough_env_keys:
+        env_val = str(os.environ.get(env_key, "") or "").strip()
+        if env_val:
+            docker_command.extend(["--env", f"{env_key}={env_val}"])
+
+    if runtime_task_id:
+        docker_command.extend(["--env", f"BOLTZ_TASK_ID={runtime_task_id}"])
+
+    host_cache_dir = str(BOLTZ2_HOST_CACHE_DIR or "").strip()
+    container_cache_dir = str(BOLTZ2_CONTAINER_CACHE_DIR or "/root/.boltz").strip() or "/root/.boltz"
+    if host_cache_dir:
+        os.makedirs(host_cache_dir, exist_ok=True)
+        docker_command.extend(["--volume", f"{host_cache_dir}:{container_cache_dir}"])
+        docker_command.extend(["--env", f"BOLTZ_CACHE={container_cache_dir}"])
+
+    docker_command.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
+    for gid in collect_gpu_device_group_ids():
+        docker_command.extend(["--group-add", str(gid)])
+
+    docker_command.extend(extra_args)
+    docker_command.append(image)
+    docker_command.extend(score_cmd)
+
+    if task_container_name:
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", task_container_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except Exception:
+            pass
+
+    score_log = affinity_base / "boltz2score.log"
+    print(
+        f"🧮 运行 affinity 后处理 Boltz2Score: {' '.join(shlex.quote(part) for part in docker_command)}",
+        file=sys.stderr,
+    )
+    with score_log.open("w", encoding="utf-8") as logf:
+        score_proc = subprocess.Popen(
+            docker_command,
+            cwd=str(PROJECT_ROOT),
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        score_return = score_proc.wait()
+    if score_return != 0:
+        print(
+            "⚠️ Boltz2Score affinity 后处理失败，跳过 affinity_data.json。"
+            f" Tail:\n{_tail_lines(score_log, 120)}",
+            file=sys.stderr,
+        )
+        return []
+
+    affinity_result_path = _find_first_existing(sorted(output_dir.rglob("affinity_*.json")))
+    if affinity_result_path is None or not affinity_result_path.exists():
+        print("⚠️ Boltz2Score affinity 未产生 affinity JSON，跳过 affinity_data.json。", file=sys.stderr)
+        return []
+
+    affinity_result = _load_json_object(affinity_result_path)
+    if not affinity_result:
+        print("⚠️ 读取 Boltz2Score affinity JSON 失败，跳过 affinity_data.json。", file=sys.stderr)
+        return []
+
+    affinity_result["source"] = source
+    affinity_result["binder_chain"] = resolved_ligand_chain
+    affinity_result["requested_ligand_chain"] = resolved_ligand_chain
+    affinity_result["requested_target_chain"] = ",".join(target_chain_ids)
+    affinity_result["target_chain"] = target_chain_ids[0]
+    affinity_result["target_chain_ids"] = target_chain_ids
+    if ligand_resname:
+        affinity_result["ligand_resname"] = ligand_resname
+
+    affinity_json_path = affinity_base / "affinity_data.json"
+    affinity_json_path.write_text(
+        json.dumps(affinity_result, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    affinity_entries: List[Tuple[Path, str]] = [(affinity_json_path, "affinity_data.json")]
+    best_confidence_path = _find_first_existing(sorted(output_dir.rglob("best_confidence.json")))
+    best_ipsae_path = _find_first_existing(sorted(output_dir.rglob("best_ipsae.json")))
+    if best_confidence_path and best_confidence_path.exists():
+        affinity_entries.append((best_confidence_path, f"{archive_prefix}/best_confidence.json"))
+    if best_ipsae_path and best_ipsae_path.exists():
+        affinity_entries.append((best_ipsae_path, f"{archive_prefix}/best_ipsae.json"))
+    if score_log.exists():
+        affinity_entries.append((score_log, f"{archive_prefix}/boltz2score.log"))
+
+    print("✅ 亲和力预测完成，结果已写入 affinity_data.json。", file=sys.stderr)
+    return affinity_entries
+
+
 def _structure_candidate_priority(name: str, base_priority: int, jobname: str) -> int:
     priority = base_priority
     suffix = Path(name).suffix.lower()
@@ -1790,56 +2736,19 @@ def run_af3_affinity_pipeline(
         )
         return []
 
-    try:
-        from capabilities.affinity.main import Boltzina
-    except ImportError as err:
-        print(f"⚠️ 无法导入 Boltz-2 亲和力模块：{err}，跳过亲和力预测。", file=sys.stderr)
-        return []
-
     affinity_base = (results_root / "affinity") if results_root else (Path(temp_dir) / "af3_affinity")
-    output_dir = affinity_base / "boltzina_output"
-    work_dir = affinity_base / "boltzina_work"
-    sanitized_struct_dir = affinity_base / "sanitized_structures"
-
-    model_for_affinity = prepare_structure_for_affinity(model_path, sanitized_struct_dir)
-
-    affinity_entries: List[Tuple[Path, str]] = []
     try:
-        print(
-            f"⚙️ 开始运行 Boltz-2 亲和力评估，配体链: {binder_chain}, 残基名: {ligand_resname}",
-            file=sys.stderr,
-        )
-        boltzina = Boltzina(
-            output_dir=str(output_dir),
-            work_dir=str(work_dir),
+        return _run_boltz2score_affinity_postprocess(
+            affinity_base=affinity_base,
+            model_path=model_path,
+            requested_ligand_chain=binder_chain,
             ligand_resname=ligand_resname,
+            source="alphafold3",
+            archive_prefix="af3",
         )
-        boltzina.predict([str(model_for_affinity)])
-
-        if not boltzina.results:
-            print("⚠️ 亲和力预测未产生结果，跳过生成 affinity_data.json。", file=sys.stderr)
-            return []
-
-        affinity_result = dict(boltzina.results[0])
-        affinity_result["ligand_resname"] = ligand_resname
-        affinity_result["binder_chain"] = binder_chain
-        affinity_result["source"] = "alphafold3"
-
-        affinity_base.mkdir(parents=True, exist_ok=True)
-        affinity_json_path = affinity_base / "affinity_data.json"
-        with affinity_json_path.open("w") as json_file:
-            json.dump(affinity_result, json_file, indent=2)
-        affinity_entries.append((affinity_json_path, "affinity_data.json"))
-
-        affinity_csv_path = output_dir / "affinity_results.csv"
-        if affinity_csv_path.exists():
-            affinity_entries.append((affinity_csv_path, "af3/affinity_results.csv"))
-
-        print("✅ 亲和力预测完成，结果已写入 affinity_data.json。", file=sys.stderr)
     except Exception as err:
-        print(f"⚠️ 运行 Boltz-2 亲和力预测失败: {err}", file=sys.stderr)
-
-    return affinity_entries
+        print(f"⚠️ 运行 Boltz2Score 亲和力后处理失败: {err}", file=sys.stderr)
+        return []
 
 
 def locate_protenix_structure_file(protenix_output_dir: Path, input_name: str) -> Optional[Path]:
@@ -1986,55 +2895,19 @@ def run_protenix_affinity_pipeline(
         )
         return []
 
-    try:
-        from capabilities.affinity.main import Boltzina
-    except ImportError as err:
-        print(f"⚠️ 无法导入 Boltz-2 亲和力模块：{err}，跳过亲和力预测。", file=sys.stderr)
-        return []
-
     affinity_base = (results_root / "affinity") if results_root else (Path(temp_dir) / "protenix_affinity")
-    output_dir = affinity_base / "boltzina_output"
-    work_dir = affinity_base / "boltzina_work"
-    sanitized_struct_dir = affinity_base / "sanitized_structures"
-    model_for_affinity = prepare_structure_for_affinity(model_path, sanitized_struct_dir)
-
-    affinity_entries: List[Tuple[Path, str]] = []
     try:
-        print(
-            f"⚙️ 开始运行 Boltz-2 亲和力评估，配体链: {binder_chain}, 残基名: {ligand_resname}",
-            file=sys.stderr,
-        )
-        boltzina = Boltzina(
-            output_dir=str(output_dir),
-            work_dir=str(work_dir),
+        return _run_boltz2score_affinity_postprocess(
+            affinity_base=affinity_base,
+            model_path=model_path,
+            requested_ligand_chain=binder_chain,
             ligand_resname=ligand_resname,
+            source="protenix",
+            archive_prefix="protenix",
         )
-        boltzina.predict([str(model_for_affinity)])
-
-        if not boltzina.results:
-            print("⚠️ 亲和力预测未产生结果，跳过生成 affinity_data.json。", file=sys.stderr)
-            return []
-
-        affinity_result = dict(boltzina.results[0])
-        affinity_result["ligand_resname"] = ligand_resname
-        affinity_result["binder_chain"] = binder_chain
-        affinity_result["source"] = "protenix"
-
-        affinity_base.mkdir(parents=True, exist_ok=True)
-        affinity_json_path = affinity_base / "affinity_data.json"
-        with affinity_json_path.open("w") as json_file:
-            json.dump(affinity_result, json_file, indent=2)
-        affinity_entries.append((affinity_json_path, "affinity_data.json"))
-
-        affinity_csv_path = output_dir / "affinity_results.csv"
-        if affinity_csv_path.exists():
-            affinity_entries.append((affinity_csv_path, "protenix/affinity_results.csv"))
-
-        print("✅ 亲和力预测完成，结果已写入 affinity_data.json。", file=sys.stderr)
     except Exception as err:
-        print(f"⚠️ 运行 Boltz-2 亲和力预测失败: {err}", file=sys.stderr)
-
-    return affinity_entries
+        print(f"⚠️ 运行 Boltz2Score 亲和力后处理失败: {err}", file=sys.stderr)
+        return []
 
 
 def get_sequence_hash(sequence: str) -> str:
@@ -2806,7 +3679,12 @@ def get_cached_a3m_files(yaml_content: str) -> list:
     
     return cached_a3m_files
 
-def create_archive_with_a3m(output_archive_path: str, output_directory_path: str, yaml_content: str):
+def create_archive_with_a3m(
+    output_archive_path: str,
+    output_directory_path: str,
+    yaml_content: str,
+    extra_files: Optional[List[Tuple[Path, str]]] = None,
+):
     """
     创建包含预测结果和a3m缓存文件的zip归档
     """
@@ -2839,6 +3717,14 @@ def create_archive_with_a3m(output_archive_path: str, output_directory_path: str
                 print(f"✅ 成功添加 {len(cached_a3m_files)} 个a3m缓存文件到zip归档", file=sys.stderr)
             else:
                 print("⚠️ 未找到相关的a3m缓存文件", file=sys.stderr)
+
+            if extra_files:
+                for file_path, arcname in extra_files:
+                    if not file_path or not Path(file_path).exists():
+                        print(f"⚠️ 额外文件不存在，跳过添加: {file_path}", file=sys.stderr)
+                        continue
+                    zipf.write(str(file_path), arcname)
+                    print(f"添加额外文件: {arcname}", file=sys.stderr)
         
         print(f"✅ 归档创建完成: {output_archive_path}", file=sys.stderr)
         
@@ -3703,6 +4589,17 @@ def run_protenix_backend(
         print(f"⚠️ Protenix 亲和力流程解析 YAML 失败，将跳过亲和力预测: {yaml_err}", file=sys.stderr)
 
     extra_files: List[Tuple[Path, str]] = [(Path(protenix_log_path), "protenix/protenix_docker.log")]
+    try:
+        extra_files.extend(
+            _run_protenix_ipsae_postprocess(
+                postprocess_base=protenix_results_root / "ipsae",
+                yaml_data=yaml_data,
+                prep=prep,
+                protenix_output_dir=Path(protenix_output_dir),
+            )
+        )
+    except Exception as err:
+        print(f"⚠️ 运行 Protenix IPSAE 后处理失败: {err}", file=sys.stderr)
     extra_files.extend(
         run_protenix_affinity_pipeline(
             temp_dir=temp_dir,
@@ -4617,6 +5514,9 @@ def run_pocketxmol_backend(
         "1",
         "--num_workers",
         "0",
+        "--mode",
+        "score",
+        "--compute_ipsae",
         "--recycling_steps",
         "20",
         "--sampling_steps",
@@ -5389,7 +6289,12 @@ def run_peptide_design_backend(
     if designer_dir not in sys.path:
         sys.path.append(designer_dir)
 
-    from design_utils import generate_random_sequence, mutate_sequence, parse_confidence_metrics  # type: ignore
+    from design_utils import (  # type: ignore
+        generate_random_sequence,
+        mutate_sequence,
+        parse_confidence_metrics,
+        resolve_preferred_interface_metric,
+    )
 
     try:
         base_yaml_data = yaml.safe_load(yaml_content) or {}
@@ -5689,9 +6594,22 @@ def run_peptide_design_backend(
             global_iptm = float(global_iptm_raw) if isinstance(global_iptm_raw, (int, float)) else None
             pair_iptm = pair_iptm_target_binder if pair_iptm_target_binder is not None else global_iptm
             pair_iptm_formula = "target_vs_peptide_chain" if pair_iptm_target_binder is not None else "global_iptm"
+            preferred_interface_metric = resolve_preferred_interface_metric(metrics)
+            interface_metric_value = (
+                float(preferred_interface_metric.get("value"))
+                if isinstance(preferred_interface_metric.get("value"), (int, float))
+                else None
+            )
+            interface_metric_label = (
+                "ipTM"
+                if str(preferred_interface_metric.get("label") or "").strip() == "ipTM"
+                else "IPSAE"
+            )
+            interface_metric_source = str(preferred_interface_metric.get("source") or "none").strip().lower() or "none"
+            interface_metric_kind = str(preferred_interface_metric.get("kind") or "none").strip().lower() or "none"
             binder_avg_plddt = float(metrics.get("binder_avg_plddt") or 0.0)
-            if pair_iptm is not None:
-                composite_score = (0.7 * pair_iptm) + (0.3 * (binder_avg_plddt / 100.0))
+            if interface_metric_value is not None:
+                composite_score = (0.7 * interface_metric_value) + (0.3 * (binder_avg_plddt / 100.0))
             elif binder_avg_plddt > 0:
                 composite_score = binder_avg_plddt / 100.0
                 pair_iptm_formula = "binder_avg_plddt_only"
@@ -5707,6 +6625,12 @@ def run_peptide_design_backend(
                 "pair_iptm_target_linker": pair_iptm_target_linker,
                 "pair_iptm_formula": pair_iptm_formula,
                 "pair_iptm_resolved": pair_iptm is not None,
+                "ipsae_dom": metrics.get("ipsae_dom"),
+                "ligand_ipsae_max": metrics.get("ligand_ipsae_max"),
+                "interface_metric": interface_metric_value,
+                "interface_metric_label": interface_metric_label,
+                "interface_metric_source": interface_metric_source,
+                "interface_metric_kind": interface_metric_kind,
                 "binder_avg_plddt": binder_avg_plddt,
                 "composite_score": composite_score,
                 "score": composite_score,
@@ -5756,6 +6680,12 @@ def run_peptide_design_backend(
                         "pair_iptm_target_binder": row.get("pair_iptm_target_binder"),
                         "pair_iptm_target_linker": row.get("pair_iptm_target_linker"),
                         "pair_iptm_formula": row.get("pair_iptm_formula"),
+                        "ipsae_dom": row.get("ipsae_dom"),
+                        "ligand_ipsae_max": row.get("ligand_ipsae_max"),
+                        "interface_metric": row.get("interface_metric"),
+                        "interface_metric_label": row.get("interface_metric_label"),
+                        "interface_metric_source": row.get("interface_metric_source"),
+                        "interface_metric_kind": row.get("interface_metric_kind"),
                         "binder_avg_plddt": row.get("binder_avg_plddt"),
                         "target_chain_id": row.get("target_chain_id"),
                         "binder_chain_id": row.get("binder_chain_id"),
@@ -6103,7 +7033,30 @@ def run_boltz_backend(
             f"Prediction result directory was found but is empty: {output_directory_path}"
         )
 
-    create_archive_with_a3m(output_archive_path, output_directory_path, normalized_yaml)
+    extra_archive_files: List[Tuple[Path, str]] = []
+    try:
+        parsed_yaml = yaml.safe_load(normalized_yaml)
+        boltz_yaml_data = parsed_yaml if isinstance(parsed_yaml, dict) else {}
+    except Exception as yaml_err:
+        print(f"⚠️ Boltz IPSAE 后处理解析 YAML 失败，将跳过 IPSAE: {yaml_err}", file=sys.stderr)
+        boltz_yaml_data = {}
+    try:
+        extra_archive_files.extend(
+            _run_boltz_ipsae_postprocess(
+                postprocess_base=results_root / "ipsae",
+                results_dir=Path(output_directory_path),
+                yaml_data=boltz_yaml_data,
+            )
+        )
+    except Exception as err:
+        print(f"⚠️ 运行 Boltz IPSAE 后处理失败: {err}", file=sys.stderr)
+
+    create_archive_with_a3m(
+        output_archive_path,
+        output_directory_path,
+        normalized_yaml,
+        extra_files=extra_archive_files,
+    )
 
 
 def run_alphafold3_backend(
@@ -6527,12 +7480,26 @@ except Exception:
     if not any(p.is_file() for p in af3_output_contents):
         print("⚠️ AlphaFold3 输出目录为空，可能推理未产生结果。", file=sys.stderr)
 
-    extra_archive_files = run_af3_affinity_pipeline(
-        temp_dir=temp_dir,
-        yaml_data=yaml_data,
-        prep=prep,
-        af3_output_dir=af3_output_dir,
-        results_root=af3_results_root,
+    extra_archive_files: List[Tuple[Path, str]] = []
+    try:
+        extra_archive_files.extend(
+            _run_af3_ipsae_postprocess(
+                postprocess_base=af3_results_root / "ipsae",
+                yaml_data=yaml_data,
+                prep=prep,
+                af3_output_dir=Path(af3_output_dir),
+            )
+        )
+    except Exception as err:
+        print(f"⚠️ 运行 AlphaFold3 IPSAE 后处理失败: {err}", file=sys.stderr)
+    extra_archive_files.extend(
+        run_af3_affinity_pipeline(
+            temp_dir=temp_dir,
+            yaml_data=yaml_data,
+            prep=prep,
+            af3_output_dir=af3_output_dir,
+            results_root=af3_results_root,
+        )
     )
 
     create_af3_archive(

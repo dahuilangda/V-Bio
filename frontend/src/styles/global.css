@@ -572,6 +572,11 @@ h3 {
   font-size: var(--text-sm);
 }
 
+.advanced-filter-checkbox-stack {
+  display: grid;
+  gap: 8px;
+}
+
 .advanced-filter-checkbox-row input {
   width: 16px;
   height: 16px;
@@ -1897,13 +1902,12 @@ select:focus {
   }
 
   .affinity-basics-controls {
-    grid-template-columns: 1fr;
+    gap: 12px;
   }
 
-  .affinity-basics-inline-options {
-    flex-wrap: wrap;
-    justify-content: flex-start;
-    min-height: 0;
+  .affinity-basics-upload-row,
+  .affinity-basics-settings-row {
+    grid-template-columns: 1fr;
   }
 
   .affinity-toggles-hint {

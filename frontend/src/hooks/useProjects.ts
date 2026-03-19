@@ -5,17 +5,20 @@ import {
   deleteProjectTaskSharesByProjectId,
   deleteProjectTasksByProjectId,
   insertProject,
-  listAccessibleProjects,
+  listProjectShareLinksForUser,
+  listProjectTaskCountsByProjects,
+  listProjectTaskShareLinksForUser,
+  listProjects,
+  listProjectsByIds,
+  listProjectTaskStatesByTaskIds,
   listProjectTaskStatesByProjects,
   listProjectTaskStatesByTaskRowIds,
   updateProject,
-  updateProjectTask,
   type ProjectTaskRuntimeRow
 } from '../api/supabaseLite';
-import { getTaskStatuses, terminateTask } from '../api/backendApi';
+import { getTaskRuntimeIndex, getTaskStatuses, terminateTask } from '../api/backendApi';
 import { removeProjectInputConfig, removeProjectUiState } from '../utils/projectInputs';
-import { canEditProject } from '../utils/accessControl';
-import { inferTaskStateFromStatusPayload, readTaskRuntimeStatusText } from '../utils/taskRuntime';
+import { inferTaskStateFromStatusPayload } from '../utils/taskRuntime';
 import { normalizeWorkflowKey } from '../utils/workflows';
 
 const DEFAULT_TASK_TYPE = 'prediction';
@@ -28,10 +31,10 @@ const TASK_STATE_PRIORITY: Record<string, number> = {
   FAILURE: 3,
   REVOKED: 3
 };
-const TASK_STATUS_POLL_CHUNK_SIZE = 3;
 const PROJECT_DELETE_TERMINATE_CONCURRENCY = 6;
 const PROJECT_DELETE_STOP_POLL_INTERVAL_MS = 700;
 const PROJECT_DELETE_STOP_POLL_TIMEOUT_MS = 12000;
+const PROJECT_RUNTIME_COUNTS_CACHE_TTL_MS = 15000;
 
 export interface CreateProjectInput {
   name: string;
@@ -47,6 +50,27 @@ interface LoadProjectsOptions {
   silent?: boolean;
   statusOnly?: boolean;
   preferBackendStatus?: boolean;
+}
+
+function buildProjectListSignature(rows: Project[]): string {
+  return rows
+    .map((row) => {
+      const accessibleTaskIds = Array.isArray(row.accessible_task_ids)
+        ? row.accessible_task_ids.map((item) => String(item || '').trim()).filter(Boolean).join(',')
+        : '';
+      return [
+        row.id,
+        row.updated_at,
+        row.task_id,
+        row.task_state,
+        row.access_scope,
+        row.access_level,
+        accessibleTaskIds
+      ]
+        .map((item) => String(item || '').trim())
+        .join('|');
+    })
+    .join('\n');
 }
 
 function taskStatePriority(value: unknown): number {
@@ -80,8 +104,71 @@ function mergeProjectRuntimeFields(next: Project, prev: Project | null): Project
   };
 }
 
-function canPersistProjectWrites(project: Project | null | undefined): boolean {
-  return canEditProject(project);
+function applyOwnerProjectAccess(project: Project): Project {
+  return {
+    ...project,
+    access_scope: 'owner',
+    access_level: 'owner',
+    accessible_task_ids: [],
+    editable_task_ids: []
+  };
+}
+
+function buildAccessibleProjects(
+  ownedProjects: Project[],
+  projectShareLinks: Array<{ project_id: string; access_level: 'viewer' | 'editor' }>,
+  taskShareLinks: Array<{ project_id: string; project_task_id: string; access_level: 'viewer' | 'editor' }>,
+  sharedProjects: Project[]
+): Project[] {
+  const ownedIds = new Set(ownedProjects.map((project) => String(project.id || '').trim()).filter(Boolean));
+  const projectShareByProjectId = new Map(
+    projectShareLinks
+      .map((row) => [String(row.project_id || '').trim(), row.access_level] as const)
+      .filter(([projectId]) => Boolean(projectId))
+  );
+  const taskShareIdsByProject = new Map<string, string[]>();
+  const editableTaskIdsByProject = new Map<string, string[]>();
+
+  for (const row of taskShareLinks) {
+    const projectId = String(row.project_id || '').trim();
+    const taskId = String(row.project_task_id || '').trim();
+    if (!projectId || !taskId) continue;
+    const currentTaskIds = taskShareIdsByProject.get(projectId) || [];
+    currentTaskIds.push(taskId);
+    taskShareIdsByProject.set(projectId, currentTaskIds);
+    if (row.access_level === 'editor') {
+      const editableTaskIds = editableTaskIdsByProject.get(projectId) || [];
+      editableTaskIds.push(taskId);
+      editableTaskIdsByProject.set(projectId, editableTaskIds);
+    }
+  }
+
+  const sharedById = new Map(sharedProjects.map((project) => [project.id, project] as const));
+  const sharedProjectIds = Array.from(
+    new Set([
+      ...Array.from(projectShareByProjectId.keys()),
+      ...Array.from(taskShareIdsByProject.keys())
+    ])
+  ).filter((id) => !ownedIds.has(id));
+
+  const rows = ownedProjects.map((project) => applyOwnerProjectAccess(project));
+  for (const projectId of sharedProjectIds) {
+    const project = sharedById.get(projectId);
+    if (!project) continue;
+    const taskIds = Array.from(new Set(taskShareIdsByProject.get(projectId) || []));
+    const editableTaskIds = Array.from(new Set(editableTaskIdsByProject.get(projectId) || []));
+    const projectShareLevel = projectShareByProjectId.get(projectId) || null;
+    rows.push({
+      ...project,
+      access_scope: projectShareLevel ? 'project_share' : 'task_share',
+      access_level: projectShareLevel ? (projectShareLevel === 'editor' ? 'editor' : 'viewer') : editableTaskIds.length > 0 ? 'editor' : 'viewer',
+      accessible_task_ids: taskIds,
+      editable_task_ids: editableTaskIds
+    });
+  }
+
+  rows.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+  return rows;
 }
 
 async function fetchRuntimeStatusesByTaskId(taskIds: string[]): Promise<Record<string, TaskStatusResponse>> {
@@ -93,18 +180,11 @@ async function fetchRuntimeStatusesByTaskId(taskIds: string[]): Promise<Record<s
     )
   );
   if (normalizedTaskIds.length === 0) return {};
-
-  const byTaskId: Record<string, TaskStatusResponse> = {};
-  for (let i = 0; i < normalizedTaskIds.length; i += Math.max(TASK_STATUS_POLL_CHUNK_SIZE, 64)) {
-    const chunk = normalizedTaskIds.slice(i, i + Math.max(TASK_STATUS_POLL_CHUNK_SIZE, 64));
-    try {
-      Object.assign(byTaskId, await getTaskStatuses(chunk));
-    } catch {
-      // Keep partial successes from other chunks.
-    }
+  try {
+    return await getTaskStatuses(normalizedTaskIds);
+  } catch {
+    return {};
   }
-
-  return byTaskId;
 }
 
 function emptyProjectTaskCounts(): ProjectTaskCounts {
@@ -214,28 +294,14 @@ function countProjectTaskStates(
   return map;
 }
 
-function applyRuntimeStatusToTaskRow(
-  row: ProjectTaskRuntimeRow,
-  statusPayload: TaskStatusResponse | null | undefined
-): ProjectTaskRuntimeRow {
-  if (!statusPayload) return row;
-  const taskState = inferTaskStateFromStatusPayload(statusPayload, row.task_state);
-  const statusText = readTaskRuntimeStatusText(statusPayload);
-  const errorText = taskState === 'FAILURE' ? statusText : '';
-  const terminal = taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED';
-  const completedAt = terminal ? row.completed_at || new Date().toISOString() : null;
-  const durationSeconds =
-    terminal && row.submitted_at
-      ? Math.max(0, (new Date(completedAt || Date.now()).getTime() - new Date(row.submitted_at).getTime()) / 1000)
-      : null;
-
+function cloneProjectTaskCounts(counts: ProjectTaskCounts | null | undefined): ProjectTaskCounts {
   return {
-    ...row,
-    task_state: taskState,
-    status_text: statusText,
-    error_text: errorText,
-    completed_at: completedAt,
-    duration_seconds: Number.isFinite(durationSeconds as number) ? durationSeconds : null
+    total: counts?.total || 0,
+    running: counts?.running || 0,
+    success: counts?.success || 0,
+    failure: counts?.failure || 0,
+    queued: counts?.queued || 0,
+    other: counts?.other || 0
   };
 }
 
@@ -245,46 +311,77 @@ function applyRuntimeStatusToProjectRow(
 ): Project {
   if (!statusPayload) return row;
   const taskState = inferTaskStateFromStatusPayload(statusPayload, row.task_state);
-  const statusText = readTaskRuntimeStatusText(statusPayload);
-  const errorText = taskState === 'FAILURE' ? statusText : '';
-  const terminal = taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED';
-  const completedAt = terminal ? row.completed_at || new Date().toISOString() : null;
-  const durationSeconds =
-    terminal && row.submitted_at
-      ? Math.max(0, (new Date(completedAt || Date.now()).getTime() - new Date(row.submitted_at).getTime()) / 1000)
-      : null;
 
   return {
     ...row,
     task_state: taskState,
-    status_text: statusText,
-    error_text: errorText,
-    completed_at: completedAt,
-    duration_seconds: Number.isFinite(durationSeconds as number) ? durationSeconds : null
+    status_text: String(row.status_text || '').trim(),
+    error_text: String(row.error_text || '').trim(),
+    completed_at: row.completed_at,
+    duration_seconds: row.duration_seconds
   };
 }
 
-function sameProjectRuntime(a: Project, b: Project): boolean {
-  return (
-    a.task_id === b.task_id &&
-    a.task_state === b.task_state &&
-    a.status_text === b.status_text &&
-    a.error_text === b.error_text &&
-    a.submitted_at === b.submitted_at &&
-    a.completed_at === b.completed_at &&
-    a.duration_seconds === b.duration_seconds
+function buildTaskIdSet(values: unknown): Set<string> {
+  return new Set(
+    (Array.isArray(values) ? values : [])
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
   );
 }
 
-function sameTaskRuntimeRow(a: ProjectTaskRuntimeRow, b: ProjectTaskRuntimeRow): boolean {
-  return (
-    a.task_state === b.task_state &&
-    a.status_text === b.status_text &&
-    a.error_text === b.error_text &&
-    a.submitted_at === b.submitted_at &&
-    a.completed_at === b.completed_at &&
-    a.duration_seconds === b.duration_seconds
+function overlayProjectCountsWithRuntimeSnapshot(params: {
+  projects: Project[];
+  baseCountsByProject: Map<string, ProjectTaskCounts>;
+  runtimeRows: ProjectTaskRuntimeRow[];
+  activeTaskIds: Set<string>;
+  queuedTaskIds: Set<string>;
+}): Map<string, ProjectTaskCounts> {
+  const { projects, baseCountsByProject, runtimeRows, activeTaskIds, queuedTaskIds } = params;
+  const nextCountsByProject = new Map<string, ProjectTaskCounts>();
+  const projectById = new Map(projects.map((project) => [project.id, project] as const));
+  const accessibleTaskRowIdSetByProject = new Map(
+    projects
+      .filter((project) => String(project.access_scope || 'owner') === 'task_share')
+      .map((project) => [
+        project.id,
+        new Set((project.accessible_task_ids || []).map((item) => String(item || '').trim()).filter(Boolean))
+      ] as const)
   );
+
+  projects.forEach((project) => {
+    const baseCounts = cloneProjectTaskCounts(baseCountsByProject.get(project.id) || emptyProjectTaskCounts());
+    baseCounts.running = 0;
+    nextCountsByProject.set(project.id, baseCounts);
+  });
+
+  runtimeRows.forEach((row) => {
+    const project = projectById.get(row.project_id);
+    if (!project) return;
+    if (String(project.access_scope || 'owner') === 'task_share') {
+      const accessibleTaskRowIds = accessibleTaskRowIdSetByProject.get(project.id);
+      if (accessibleTaskRowIds && !accessibleTaskRowIds.has(String(row.id || '').trim())) {
+        return;
+      }
+    }
+    const taskId = String(row.task_id || '').trim();
+    if (!taskId) return;
+    const counts = nextCountsByProject.get(project.id) || emptyProjectTaskCounts();
+    if (activeTaskIds.has(taskId)) {
+      counts.running += 1;
+      if (String(row.task_state || '').trim().toUpperCase() === 'QUEUED' && counts.queued > 0) {
+        counts.queued -= 1;
+      }
+      nextCountsByProject.set(project.id, counts);
+      return;
+    }
+    if (queuedTaskIds.has(taskId) && String(row.task_state || '').trim().toUpperCase() !== 'QUEUED') {
+      counts.queued += 1;
+      nextCountsByProject.set(project.id, counts);
+    }
+  });
+
+  return nextCountsByProject;
 }
 
 export function useProjects(session: Session | null) {
@@ -294,33 +391,239 @@ export function useProjects(session: Session | null) {
   const [search, setSearch] = useState('');
   const loadSeqRef = useRef(0);
   const loadInFlightRef = useRef(false);
+  const projectsRef = useRef<Project[]>([]);
+  const projectCountsRef = useRef<Map<string, ProjectTaskCounts>>(new Map());
+  const taskRowsRef = useRef<ProjectTaskRuntimeRow[]>([]);
+  const projectListSignatureRef = useRef('');
+
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
+
+  const readProjectCounts = useCallback(
+    (projectId: string, fallback?: ProjectTaskCounts | null): ProjectTaskCounts =>
+      cloneProjectTaskCounts(projectCountsRef.current.get(projectId) || fallback || emptyProjectTaskCounts()),
+    []
+  );
+
+  const persistProjectCountsCache = useCallback((nextProjects: Project[]) => {
+    if (typeof window === 'undefined' || !session) return;
+    const sessionIdentity = String(session.userId || '').trim() || String(session.username || '').trim().toLowerCase();
+    if (!sessionIdentity) return;
+    try {
+      const countsByProject = Object.fromEntries(
+        nextProjects.map((row) => [row.id, cloneProjectTaskCounts(row.task_counts || emptyProjectTaskCounts())] as const)
+      );
+      window.localStorage.setItem(
+        `vbio:projects-runtime-counts:v1:${sessionIdentity}`,
+        JSON.stringify({
+          saved_at: Date.now(),
+          counts_by_project: countsByProject
+        })
+      );
+    } catch {
+      // Ignore storage failures and continue with in-memory cache only.
+    }
+  }, [session]);
+
+  const hydrateProjectCountsCache = useCallback(() => {
+    if (typeof window === 'undefined' || !session) return;
+    if (projectCountsRef.current.size > 0) return;
+    const sessionIdentity = String(session.userId || '').trim() || String(session.username || '').trim().toLowerCase();
+    if (!sessionIdentity) return;
+    const storageKey = `vbio:projects-runtime-counts:v1:${sessionIdentity}`;
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as {
+        saved_at?: number;
+        counts_by_project?: Record<string, ProjectTaskCounts | null | undefined>;
+      };
+      const savedAt = Number(parsed?.saved_at || 0);
+      if (!Number.isFinite(savedAt) || Date.now() - savedAt > PROJECT_RUNTIME_COUNTS_CACHE_TTL_MS) {
+        window.localStorage.removeItem(storageKey);
+        return;
+      }
+      const countsByProject = parsed?.counts_by_project && typeof parsed.counts_by_project === 'object'
+        ? parsed.counts_by_project
+        : {};
+      projectCountsRef.current = new Map(
+        Object.entries(countsByProject)
+          .map(([projectId, counts]) => [String(projectId || '').trim(), cloneProjectTaskCounts(counts)] as const)
+          .filter(([projectId]) => Boolean(projectId))
+      );
+    } catch {
+      // Ignore malformed cache and continue with fresh data.
+    }
+  }, [session]);
+
+  const publishProjectsState = useCallback((nextProjects: Project[], nextTaskRows: ProjectTaskRuntimeRow[]) => {
+    taskRowsRef.current = nextTaskRows;
+    projectsRef.current = nextProjects;
+    projectCountsRef.current = new Map(nextProjects.map((row) => [row.id, cloneProjectTaskCounts(row.task_counts)] as const));
+    persistProjectCountsCache(nextProjects);
+    setProjects((prev) => {
+      const prevById = new Map(prev.map((item) => [item.id, item] as const));
+      return nextProjects.map((row) => ({
+        ...mergeProjectRuntimeFields(row, prevById.get(row.id) || null),
+        task_counts: row.task_counts
+      }));
+    });
+  }, [persistProjectCountsCache]);
+
+  const fetchProjectRuntimeOverlay = useCallback(async () => {
+    try {
+      const runtimeIndex = await getTaskRuntimeIndex();
+      const activeTaskIdsRaw = Array.from(buildTaskIdSet(runtimeIndex.active_task_ids));
+      const activeStatusByTaskId = activeTaskIdsRaw.length > 0 ? await fetchRuntimeStatusesByTaskId(activeTaskIdsRaw) : {};
+      const activeTaskIds = new Set(
+        activeTaskIdsRaw.filter((taskId) => {
+          const statusPayload = activeStatusByTaskId[taskId];
+          if (!statusPayload) return true;
+          const state = inferTaskStateFromStatusPayload(statusPayload, 'RUNNING');
+          return state === 'RUNNING' || state === 'QUEUED';
+        })
+      );
+      const queuedTaskIds = new Set([
+        ...buildTaskIdSet(runtimeIndex.reserved_task_ids),
+        ...buildTaskIdSet(runtimeIndex.scheduled_task_ids)
+      ]);
+      const runtimeTaskIds = Array.from(new Set([...Array.from(activeTaskIds), ...Array.from(queuedTaskIds)]));
+      const runtimeRows = runtimeTaskIds.length > 0 ? await listProjectTaskStatesByTaskIds(runtimeTaskIds) : [];
+      return {
+        runtimeRows,
+        activeTaskIds,
+        queuedTaskIds,
+        activeStatusByTaskId
+      };
+    } catch {
+      return {
+        runtimeRows: [] as ProjectTaskRuntimeRow[],
+        activeTaskIds: new Set<string>(),
+        queuedTaskIds: new Set<string>(),
+        activeStatusByTaskId: {} as Record<string, TaskStatusResponse>
+      };
+    }
+  }, []);
+
+  const syncCachedProjectRuntimeState = useCallback(
+    async (baseProjects?: Project[]): Promise<boolean> => {
+      const cachedProjects = (Array.isArray(baseProjects) && baseProjects.length > 0 ? baseProjects : projectsRef.current).filter(Boolean);
+      if (cachedProjects.length === 0) return false;
+      const cachedCountsByProject = new Map(
+        cachedProjects.map((row) => [row.id, readProjectCounts(row.id, row.task_counts)] as const)
+      );
+      const runtimeOverlay = await fetchProjectRuntimeOverlay();
+      const countsByProject = overlayProjectCountsWithRuntimeSnapshot({
+        projects: cachedProjects,
+        baseCountsByProject: cachedCountsByProject,
+        runtimeRows: runtimeOverlay.runtimeRows,
+        activeTaskIds: runtimeOverlay.activeTaskIds,
+        queuedTaskIds: runtimeOverlay.queuedTaskIds
+      });
+      const liveProjects = cachedProjects.map((row) => {
+        const activeTaskId = String(row.task_id || '').trim();
+        const runtimeProject = applyRuntimeStatusToProjectRow(row, runtimeOverlay.activeStatusByTaskId[activeTaskId] || null);
+        return {
+          ...runtimeProject,
+          task_counts: countsByProject.get(row.id) || row.task_counts || emptyProjectTaskCounts()
+        };
+      });
+
+      publishProjectsState(liveProjects, runtimeOverlay.runtimeRows);
+      return true;
+    },
+    [fetchProjectRuntimeOverlay, publishProjectsState, readProjectCounts]
+  );
 
   const load = useCallback(async (options?: LoadProjectsOptions) => {
     if (!session) {
       setProjects([]);
+      projectsRef.current = [];
+      projectCountsRef.current = new Map();
+      taskRowsRef.current = [];
+      projectListSignatureRef.current = '';
       return;
     }
     if (loadInFlightRef.current) return;
     loadInFlightRef.current = true;
+    hydrateProjectCountsCache();
     const loadSeq = ++loadSeqRef.current;
     const silent = Boolean(options?.silent);
-    const preferBackendStatus = Boolean(options?.preferBackendStatus);
+    const statusOnly = Boolean(options?.statusOnly);
+    const preferBackendStatus = options?.preferBackendStatus !== false;
     if (!silent) {
       setLoading(true);
       setError(null);
     }
     try {
-      const rows = await listAccessibleProjects(session.userId, {
+      if (statusOnly) {
+        const reusedCachedRuntime = await syncCachedProjectRuntimeState();
+        if (reusedCachedRuntime) return;
+      }
+
+      const previousProjects = projectsRef.current;
+      const shouldPublishProjectsEarly = silent || previousProjects.length > 0;
+      const shareLinksPromise = Promise.all([
+        listProjectShareLinksForUser(session.userId),
+        listProjectTaskShareLinksForUser(session.userId)
+      ]);
+      const ownedProjects = await listProjects({
+        userId: session.userId,
         lightweight: true
       });
       if (loadSeqRef.current !== loadSeq) return;
+      const ownedBaseProjects = ownedProjects.map((row) => applyOwnerProjectAccess(row));
+      const previousProjectsById = new Map(previousProjects.map((row) => [row.id, row] as const));
+      const optimisticOwnedProjects = ownedBaseProjects.map((row) => ({
+        ...mergeProjectRuntimeFields(row, previousProjectsById.get(row.id) || null),
+        task_counts: readProjectCounts(row.id, previousProjectsById.get(row.id)?.task_counts)
+      }));
+      if (shouldPublishProjectsEarly) {
+        setProjects(optimisticOwnedProjects);
+        projectsRef.current = optimisticOwnedProjects;
+      }
+
+      const [projectShareLinks, taskShareLinks] = await shareLinksPromise;
+      if (loadSeqRef.current !== loadSeq) return;
+      const ownedIds = new Set(ownedProjects.map((project) => String(project.id || '').trim()).filter(Boolean));
+      const sharedProjectIds = Array.from(
+        new Set(
+          [
+            ...projectShareLinks.map((row) => String(row.project_id || '').trim()),
+            ...taskShareLinks.map((row) => String(row.project_id || '').trim())
+          ].filter((id) => Boolean(id) && !ownedIds.has(id))
+        )
+      );
+      const sharedProjects = sharedProjectIds.length > 0 ? await listProjectsByIds(sharedProjectIds, { lightweight: true }) : [];
+      if (loadSeqRef.current !== loadSeq) return;
+
+      const rows = buildAccessibleProjects(ownedProjects, projectShareLinks, taskShareLinks, sharedProjects);
+      const nextProjectSignature = buildProjectListSignature(rows);
+      const baseProjects = rows.map((row) => ({
+        ...mergeProjectRuntimeFields(row, previousProjectsById.get(row.id) || null),
+        task_counts: readProjectCounts(row.id, previousProjectsById.get(row.id)?.task_counts)
+      }));
+      if (shouldPublishProjectsEarly) {
+        setProjects(baseProjects);
+        projectsRef.current = baseProjects;
+      }
+
+      const canReuseCachedTaskRows = silent && nextProjectSignature === projectListSignatureRef.current;
+      projectListSignatureRef.current = nextProjectSignature;
+      if (canReuseCachedTaskRows) {
+        if (preferBackendStatus) {
+          await syncCachedProjectRuntimeState(baseProjects);
+        }
+        return;
+      }
 
       const fullAccessProjectIds = rows
         .filter((row) => String(row.access_scope || 'owner') !== 'task_share')
         .map((row) => row.id);
       const taskSharedProjects = rows.filter((row) => String(row.access_scope || 'owner') === 'task_share');
-      const [fullAccessTaskRows, taskShareTaskRows] = await Promise.all([
-        listProjectTaskStatesByProjects(fullAccessProjectIds),
+      const [fullAccessTaskCounts, taskShareTaskRows] = await Promise.all([
+        listProjectTaskCountsByProjects(fullAccessProjectIds),
         listProjectTaskStatesByTaskRowIds(taskSharedProjects.flatMap((row) => row.accessible_task_ids || []))
       ]);
       if (loadSeqRef.current !== loadSeq) return;
@@ -332,86 +635,61 @@ export function useProjects(session: Session | null) {
         ] as const)
       );
 
-      const scopedTaskRows = [
-        ...fullAccessTaskRows,
-        ...taskShareTaskRows.filter((row) => {
-          const scopedIds = accessibleTaskRowIdSetByProject.get(row.project_id);
-          return scopedIds ? scopedIds.has(String(row.id || '').trim()) : true;
-        })
-      ];
+      const scopedTaskRows = taskShareTaskRows.filter((row) => {
+        const scopedIds = accessibleTaskRowIdSetByProject.get(row.project_id);
+        return scopedIds ? scopedIds.has(String(row.id || '').trim()) : true;
+      });
 
-      const runtimeTaskIds = preferBackendStatus
-        ? scopedTaskRows
-            .filter((row) => {
-              const taskId = String(row.task_id || '').trim();
-              const taskState = String(row.task_state || '').trim().toUpperCase();
-              return Boolean(taskId) && (taskState === 'QUEUED' || taskState === 'RUNNING');
-            })
-            .map((row) => String(row.task_id || '').trim())
-        : [];
-      const statusByTaskId = preferBackendStatus ? await fetchRuntimeStatusesByTaskId(runtimeTaskIds) : {};
+      const countsByProject = new Map<string, ProjectTaskCounts>();
+      rows.forEach((row) => {
+        countsByProject.set(row.id, cloneProjectTaskCounts(fullAccessTaskCounts.get(row.id) || emptyProjectTaskCounts()));
+      });
+      const taskShareCounts = countProjectTaskStates(
+        taskSharedProjects.map((row) => row.id),
+        scopedTaskRows.filter((row) => String(rows.find((project) => project.id === row.project_id)?.access_scope || 'owner') === 'task_share')
+      );
+      taskShareCounts.forEach((counts, projectId) => {
+        countsByProject.set(projectId, counts);
+      });
+      const baseProjectsWithCounts = rows.map((row) => ({
+        ...row,
+        task_counts: countsByProject.get(row.id) || emptyProjectTaskCounts()
+      }));
+
+      const deferRuntimeOverlay = !silent && previousProjects.length === 0;
+      if (deferRuntimeOverlay) {
+        publishProjectsState(baseProjectsWithCounts, scopedTaskRows);
+        setLoading(false);
+      }
+
+      const runtimeOverlay = preferBackendStatus
+        ? await fetchProjectRuntimeOverlay()
+        : {
+            runtimeRows: [] as ProjectTaskRuntimeRow[],
+            activeTaskIds: new Set<string>(),
+            queuedTaskIds: new Set<string>(),
+            activeStatusByTaskId: {} as Record<string, TaskStatusResponse>
+          };
       if (loadSeqRef.current !== loadSeq) return;
-
-      const liveTaskRows = scopedTaskRows.map((row) =>
-        applyRuntimeStatusToTaskRow(row, statusByTaskId[String(row.task_id || '').trim()] || null)
-      );
-      const countsByProject = countProjectTaskStates(
-        rows.map((row) => row.id).filter(Boolean),
-        liveTaskRows
-      );
+      const liveCountsByProject = overlayProjectCountsWithRuntimeSnapshot({
+        projects: rows,
+        baseCountsByProject: countsByProject,
+        runtimeRows: runtimeOverlay.runtimeRows,
+        activeTaskIds: runtimeOverlay.activeTaskIds,
+        queuedTaskIds: runtimeOverlay.queuedTaskIds
+      });
       const liveProjects = rows.map((row) => {
         const activeTaskId = String(row.task_id || '').trim();
         const runtimeProject = preferBackendStatus
-          ? applyRuntimeStatusToProjectRow(row, statusByTaskId[activeTaskId] || null)
+          ? applyRuntimeStatusToProjectRow(row, runtimeOverlay.activeStatusByTaskId[activeTaskId] || null)
           : row;
         return {
           ...runtimeProject,
-          task_counts: countsByProject.get(row.id) || emptyProjectTaskCounts()
+          task_counts: liveCountsByProject.get(row.id) || emptyProjectTaskCounts()
         };
       });
 
-      if (preferBackendStatus) {
-        const originalProjectById = new Map(rows.map((row) => [row.id, row] as const));
-        const originalTaskRowById = new Map(scopedTaskRows.map((row) => [row.id, row] as const));
-
-        for (const liveTaskRow of liveTaskRows) {
-          const sourceTaskRow = originalTaskRowById.get(liveTaskRow.id);
-          if (!sourceTaskRow || sameTaskRuntimeRow(sourceTaskRow, liveTaskRow)) continue;
-          const parentProject = originalProjectById.get(liveTaskRow.project_id) || null;
-          if (!canPersistProjectWrites(parentProject)) continue;
-          const taskPatch = {
-            task_state: liveTaskRow.task_state,
-            status_text: liveTaskRow.status_text,
-            error_text: liveTaskRow.error_text,
-            completed_at: liveTaskRow.completed_at,
-            duration_seconds: liveTaskRow.duration_seconds
-          };
-          void updateProjectTask(liveTaskRow.id, taskPatch, { minimalReturn: true }).catch(() => undefined);
-        }
-
-        for (const liveProject of liveProjects) {
-          const sourceProject = originalProjectById.get(liveProject.id);
-          if (!sourceProject || sameProjectRuntime(sourceProject, liveProject)) continue;
-          if (!canPersistProjectWrites(sourceProject)) continue;
-          const projectPatch = {
-            task_state: liveProject.task_state,
-            status_text: liveProject.status_text,
-            error_text: liveProject.error_text,
-            completed_at: liveProject.completed_at,
-            duration_seconds: liveProject.duration_seconds
-          };
-          void updateProject(liveProject.id, projectPatch).catch(() => undefined);
-        }
-      }
-
-      if (loadSeqRef.current !== loadSeq) return;
-      setProjects((prev) => {
-        const prevById = new Map(prev.map((item) => [item.id, item] as const));
-        return liveProjects.map((row) => ({
-          ...mergeProjectRuntimeFields(row, prevById.get(row.id) || null),
-          task_counts: row.task_counts
-        }));
-      });
+      publishProjectsState(liveProjects, runtimeOverlay.runtimeRows);
     } catch (e) {
       if (!silent) {
         setError(e instanceof Error ? e.message : 'Failed to load projects.');
@@ -422,10 +700,10 @@ export function useProjects(session: Session | null) {
         setLoading(false);
       }
     }
-  }, [session]);
+  }, [session, fetchProjectRuntimeOverlay, publishProjectsState, readProjectCounts, syncCachedProjectRuntimeState]);
 
   useEffect(() => {
-    void load();
+    void load({ preferBackendStatus: true });
   }, [load]);
 
   const createProject = useCallback(
@@ -461,6 +739,7 @@ export function useProjects(session: Session | null) {
         },
         ...prev
       ]);
+      projectCountsRef.current.set(created.id, emptyProjectTaskCounts());
       return created;
     },
     [session]
@@ -497,6 +776,7 @@ export function useProjects(session: Session | null) {
         removeProjectInputConfig(id);
         removeProjectUiState(id);
         setProjects((prev) => prev.filter((p) => p.id !== id));
+        projectCountsRef.current.delete(id);
       } catch (error) {
         setError(error instanceof Error ? error.message : 'Failed to delete project.');
       }

@@ -663,6 +663,7 @@ create index if not exists idx_projects_user_id on public.projects (user_id);
 create index if not exists idx_projects_updated_at on public.projects (updated_at desc);
 create index if not exists idx_projects_deleted_at on public.projects (deleted_at);
 create index if not exists idx_project_tasks_project_id on public.project_tasks (project_id, created_at desc);
+create index if not exists idx_project_tasks_project_state on public.project_tasks (project_id, task_state);
 create index if not exists idx_project_tasks_task_id on public.project_tasks (task_id);
 
 create or replace function public.strip_task_components_for_storage(input jsonb)
@@ -768,6 +769,21 @@ select
   created_at,
   updated_at
 from public.project_tasks;
+
+drop view if exists public.project_task_counts;
+create or replace view public.project_task_counts as
+select
+  project_id,
+  count(*)::bigint as total_count,
+  count(*) filter (where upper(coalesce(task_state, '')) = 'RUNNING')::bigint as running_count,
+  count(*) filter (where upper(coalesce(task_state, '')) = 'SUCCESS')::bigint as success_count,
+  count(*) filter (where upper(coalesce(task_state, '')) = 'FAILURE')::bigint as failure_count,
+  count(*) filter (where upper(coalesce(task_state, '')) = 'QUEUED')::bigint as queued_count,
+  count(*) filter (
+    where upper(coalesce(task_state, '')) not in ('RUNNING', 'SUCCESS', 'FAILURE', 'QUEUED')
+  )::bigint as other_count
+from public.project_tasks
+group by project_id;
 
 create or replace function public.set_updated_at()
 returns trigger as $$
@@ -1052,4 +1068,5 @@ grant select, insert, update, delete on public.project_task_shares to anon, auth
 grant select, insert, update, delete on public.api_tokens to anon, authenticated, service_role;
 grant select, insert, update, delete on public.api_token_usage to anon, authenticated, service_role;
 grant select on public.project_tasks_list to anon, authenticated, service_role;
+grant select on public.project_task_counts to anon, authenticated, service_role;
 grant select on public.api_token_usage_daily to anon, authenticated, service_role;

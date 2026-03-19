@@ -4,6 +4,21 @@
   gap: 8px;
 }
 
+.task-advanced-metrics-query-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.task-advanced-metrics-query-row > .advanced-filter-field {
+  min-width: 0;
+}
+
+.task-metric-columns-panel {
+  align-self: start;
+}
+
 .task-structure-query-row > .jsme-editor-container.task-structure-jsme-shell {
   border: 1px solid #dbe6df;
   border-radius: 8px;
@@ -77,3 +92,8 @@
   color: #8a2626;
 }
 
+@media (max-width: 960px) {
+  .task-advanced-metrics-query-row {
+    grid-template-columns: 1fr;
+  }
+}

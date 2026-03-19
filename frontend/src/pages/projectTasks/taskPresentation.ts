@@ -31,6 +31,23 @@ export function toneForIptm(value: number | null): MetricTone {
   return 'low';
 }
 
+export function toneForProbability(value: number | null): MetricTone {
+  if (value === null) return 'neutral';
+  const normalized = value <= 1 ? value * 100 : value;
+  if (normalized >= 90) return 'excellent';
+  if (normalized >= 70) return 'good';
+  if (normalized >= 50) return 'medium';
+  return 'low';
+}
+
+export function toneForInterfaceMetric(
+  value: number | null,
+  source: 'ipsae' | 'iptm' | 'none'
+): MetricTone {
+  if (source === 'ipsae') return toneForProbability(value);
+  return toneForIptm(value);
+}
+
 export function toneForPae(value: number | null): MetricTone {
   if (value === null) return 'neutral';
   if (value <= 5) return 'excellent';

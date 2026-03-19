@@ -6,6 +6,20 @@ import {
 } from '../../utils/taskRuntime';
 
 export type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
+export type InterfaceMetricSource = 'ipsae' | 'iptm' | 'none';
+export type InterfaceMetricKind = 'ligand_ipsae' | 'ipsae_dom' | 'pair_iptm' | 'iptm' | 'none';
+
+export interface PreferredInterfaceMetric {
+  label: 'IPSAE' | 'ipTM';
+  source: InterfaceMetricSource;
+  kind: InterfaceMetricKind;
+  value: number | null;
+  tone: MetricTone;
+  pairIptm: number | null;
+  iptm: number | null;
+  ipsaeDom: number | null;
+  ligandIpsaeMax: number | null;
+}
 
 export function mapTaskState(raw: string): TaskState {
   return mapBackendTaskState(raw);
@@ -155,6 +169,11 @@ function normalizeProbability(value: number | null): number | null {
   if (value === null) return null;
   if (value > 1 && value <= 100) return value / 100;
   return value;
+}
+
+export function readProbabilityMetric(data: Record<string, unknown> | null, paths: string[]): number | null {
+  if (!data) return null;
+  return normalizeProbability(readFirstFiniteMetric(data, paths));
 }
 
 function normalizeChainToken(value: string): string {
@@ -333,6 +352,14 @@ export function readPairIptmForChains(
   return null;
 }
 
+export function readIpsaeDomMetric(confidence: Record<string, unknown> | null): number | null {
+  return readProbabilityMetric(confidence, ['ipsae_dom', 'ipsaeDom']);
+}
+
+export function readLigandIpsaeMaxMetric(confidence: Record<string, unknown> | null): number | null {
+  return readProbabilityMetric(confidence, ['ligand_ipsae_max', 'ligandIpsaeMax']);
+}
+
 export function readChainMeanPlddtForChain(confidence: Record<string, unknown> | null, chainId: string | null): number | null {
   if (!confidence || !chainId) return null;
   const map = readObjectPath(confidence, 'chain_mean_plddt');
@@ -384,6 +411,90 @@ export function toneForIc50(value: number | null): MetricTone {
   if (value <= 1) return 'good';
   if (value <= 10) return 'medium';
   return 'low';
+}
+
+export function resolvePreferredInterfaceMetricFromValues(params: {
+  pairIptm: number | null;
+  iptm: number | null;
+  ipsaeDom: number | null;
+  ligandIpsaeMax: number | null;
+}): PreferredInterfaceMetric {
+  const { pairIptm, iptm, ipsaeDom, ligandIpsaeMax } = params;
+
+  if (ligandIpsaeMax !== null) {
+    return {
+      label: 'IPSAE',
+      source: 'ipsae',
+      kind: 'ligand_ipsae',
+      value: ligandIpsaeMax,
+      tone: toneForProbability(ligandIpsaeMax),
+      pairIptm,
+      iptm,
+      ipsaeDom,
+      ligandIpsaeMax
+    };
+  }
+
+  if (ipsaeDom !== null) {
+    return {
+      label: 'IPSAE',
+      source: 'ipsae',
+      kind: 'ipsae_dom',
+      value: ipsaeDom,
+      tone: toneForProbability(ipsaeDom),
+      pairIptm,
+      iptm,
+      ipsaeDom,
+      ligandIpsaeMax
+    };
+  }
+
+  const preferredIptm = pairIptm ?? iptm;
+  if (preferredIptm !== null) {
+    return {
+      label: 'ipTM',
+      source: 'iptm',
+      kind: pairIptm !== null ? 'pair_iptm' : 'iptm',
+      value: preferredIptm,
+      tone: toneForIptm(preferredIptm),
+      pairIptm,
+      iptm,
+      ipsaeDom,
+      ligandIpsaeMax
+    };
+  }
+
+  return {
+    label: 'IPSAE',
+    source: 'none',
+    kind: 'none',
+    value: null,
+    tone: 'neutral',
+    pairIptm,
+    iptm,
+    ipsaeDom,
+    ligandIpsaeMax
+  };
+}
+
+export function resolvePreferredInterfaceMetric(
+  confidence: Record<string, unknown> | null,
+  chainA: string | null,
+  chainB: string | null,
+  fallbackChainIds: string[]
+): PreferredInterfaceMetric {
+  const pairIptm = readPairIptmForChains(confidence, chainA, chainB, fallbackChainIds);
+  const iptm = confidence
+    ? readProbabilityMetric(confidence, ['iptm', 'ligand_iptm', 'protein_iptm'])
+    : null;
+  const ipsaeDom = readIpsaeDomMetric(confidence);
+  const ligandIpsaeMax = readLigandIpsaeMaxMetric(confidence);
+  return resolvePreferredInterfaceMetricFromValues({
+    pairIptm,
+    iptm,
+    ipsaeDom,
+    ligandIpsaeMax
+  });
 }
 
 export function mean(values: number[]): number {

@@ -24,9 +24,8 @@ from boltz.data import const
 from boltz.data.msa.mmseqs2 import run_mmseqs2
 from boltz.data.parse.a3m import parse_a3m
 from boltz.data.parse.csv import parse_csv
-from boltz.data.parse.mmcif import parse_mmcif
-from boltz.data.types import ChainInfo, Manifest, Record
-from capabilities.boltz2score.mapping_utils import resolve_chain_smiles
+from boltz.data.parse.mmcif_with_constraints import parse_mmcif
+from boltz.data.types import ChainInfo, Manifest, Record, TemplateInfo
 
 
 STRUCT_EXTS = {".pdb", ".ent", ".cif", ".mmcif"}
@@ -219,102 +218,74 @@ def _attach_msa_to_record(
         chain.msa_id = entity_to_processed.get(chain.entity_id, -1)
 
 
-def _heavy_atom_names_from_residue(residue: gemmi.Residue) -> list[str]:
-    names: list[str] = []
-    for atom in residue:
-        element = str(atom.element.name or atom.name[:1]).strip().upper()
-        if element in {"H", "D", "T"}:
-            continue
-        atom_name = atom.name.strip()
-        if atom_name:
-            names.append(atom_name)
-    return names
-
-
-def _heavy_atom_names_from_mol(mol: Chem.Mol | None) -> list[str]:
-    if mol is None:
-        return []
-    try:
-        ref_heavy = Chem.RemoveHs(Chem.Mol(mol), sanitize=False)
-    except Exception:
-        ref_heavy = mol
-
-    names: list[str] = []
-    for atom in ref_heavy.GetAtoms():
-        if atom.HasProp("name"):
-            atom_name = atom.GetProp("name").strip()
-        elif atom.HasProp("atomName"):
-            atom_name = atom.GetProp("atomName").strip()
-        else:
-            atom_name = ""
-        if atom_name:
-            names.append(atom_name)
-    return names
-
-
-def _canonical_heavy_smiles(mol: Chem.Mol | None) -> str:
-    if mol is None:
-        return ""
-    try:
-        base = Chem.RemoveHs(Chem.Mol(mol), sanitize=False)
-        return Chem.MolToSmiles(base, canonical=True, isomericSmiles=True)
-    except Exception:
-        return ""
-
-
-def _ligand_mapping_stats_from_names(
-    residue_names: list[str],
-    mol_names: list[str],
-) -> dict[str, object]:
-    residue_counter = Counter(residue_names)
-    mol_counter = Counter(mol_names)
-    matched = sum(min(count, mol_counter.get(name, 0)) for name, count in residue_counter.items())
-    residue_duplicates = sorted(name for name, count in residue_counter.items() if count > 1)
-    mol_duplicates = sorted(name for name, count in mol_counter.items() if count > 1)
-
-    missing_in_mol = []
-    for name, count in residue_counter.items():
-        deficit = count - mol_counter.get(name, 0)
-        if deficit > 0:
-            missing_in_mol.extend([name] * deficit)
-
-    missing_in_residue = []
-    for name, count in mol_counter.items():
-        deficit = count - residue_counter.get(name, 0)
-        if deficit > 0:
-            missing_in_residue.extend([name] * deficit)
-
-    return {
-        "residue_total": len(residue_names),
-        "mol_total": len(mol_names),
-        "matched": matched,
-        "residue_duplicates": residue_duplicates[:10],
-        "mol_duplicates": mol_duplicates[:10],
-        "missing_in_mol": sorted(set(missing_in_mol))[:10],
-        "missing_in_residue": sorted(set(missing_in_residue))[:10],
-    }
-
-
 def _ccd_matches_residue(residue: gemmi.Residue, ccd_mol: Chem.Mol) -> bool:
     """Return True if CCD atom names can map to residue atom names.
 
-    Boltz2 parses ligand coordinates by exact atom *name* lookup. If names do
-    not match, coordinates are dropped (atoms marked not present), which
-    degrades confidence on small molecules. CCD reuse therefore requires exact
-    heavy-atom name equality after stripping outer whitespace only.
+    Boltz2 maps ligand coordinates by atom *name*. If names do not match,
+    coordinates will be dropped (atoms marked not present), which degrades
+    confidence on small molecules. We therefore require name-level agreement
+    (with light normalization) rather than element-only matching.
     """
     if ccd_mol is None:
         return False
 
-    res_names = _heavy_atom_names_from_residue(residue)
+    res_names = [atom.name.strip() for atom in residue if atom.name.strip()]
     if not res_names:
         return False
 
-    ccd_names = _heavy_atom_names_from_mol(ccd_mol)
-    if not ccd_names or len(res_names) != len(ccd_names):
-        return False
+    # Compare against heavy-atom CCD names (Boltz removes H during parsing).
+    try:
+        ref_mol = Chem.RemoveHs(ccd_mol, sanitize=False)
+    except Exception:
+        ref_mol = ccd_mol
 
-    return Counter(res_names) == Counter(ccd_names)
+    ccd_names = []
+    ccd_elements = []
+    for atom in ref_mol.GetAtoms():
+        if atom.HasProp("name"):
+            name = atom.GetProp("name")
+            ccd_names.append(name)
+            ccd_elements.append(atom.GetSymbol())
+        elif atom.HasProp("atomName"):
+            name = atom.GetProp("atomName")
+            ccd_names.append(name)
+            ccd_elements.append(atom.GetSymbol())
+        else:
+            ccd_names.append(atom.GetSymbol())
+            ccd_elements.append(atom.GetSymbol())
+
+    from collections import Counter
+    import re
+
+    def _norm(name: str) -> str:
+        # Normalize common PDB/CCD naming differences without losing identity.
+        norm = re.sub(r"[^A-Za-z0-9]", "", name.strip().upper())
+        norm = norm.lstrip("0123456789")
+        return norm
+
+    res_counter = Counter(res_names)
+    ccd_counter = Counter(ccd_names)
+    res_norm_counter = Counter(_norm(n) for n in res_names)
+    ccd_norm_counter = Counter(_norm(n) for n in ccd_names)
+
+    # Try exact atom name matching first
+    exact_match = True
+    for name, count in res_counter.items():
+        if ccd_counter.get(name, 0) < count:
+            exact_match = False
+            break
+
+    if exact_match:
+        return True
+
+    # Try normalized name matching (handles simple formatting differences).
+    norm_match = True
+    for name, count in res_norm_counter.items():
+        if ccd_norm_counter.get(name, 0) < count:
+            norm_match = False
+            break
+
+    return norm_match
 
 
 def _has_non_single_bonds(mol: Chem.Mol) -> bool:
@@ -399,39 +370,6 @@ def _assign_bond_orders(mol: Chem.Mol) -> Chem.Mol:
         return base
 
 
-def _assign_stereochemistry_from_3d_if_possible(mol: Chem.Mol) -> Chem.Mol:
-    """Recover atom chirality and E/Z stereo from the current conformer when available."""
-    if mol.GetNumAtoms() == 0 or mol.GetNumConformers() == 0:
-        return mol
-    try:
-        Chem.AssignStereochemistryFrom3D(mol)
-    except Exception:
-        return mol
-    try:
-        Chem.AssignStereochemistry(mol, force=True, cleanIt=False)
-    except Exception:
-        pass
-    return mol
-
-
-def _remove_hydrogens_preserve_atom_names(mol: Chem.Mol) -> Chem.Mol:
-    atom_names = [
-        atom.GetProp("name")
-        for atom in mol.GetAtoms()
-        if atom.GetAtomicNum() > 1 and atom.HasProp("name")
-    ]
-    try:
-        without_h = Chem.RemoveHs(Chem.Mol(mol), sanitize=False)
-    except Exception:
-        return mol
-    if without_h.GetNumAtoms() == mol.GetNumAtoms():
-        return mol
-    if len(atom_names) == without_h.GetNumAtoms():
-        for idx, atom in enumerate(without_h.GetAtoms()):
-            atom.SetProp("name", atom_names[idx])
-    return without_h
-
-
 def _build_custom_ligand_mol(residue: gemmi.Residue) -> Chem.Mol:
     """Create a minimal RDKit molecule from a gemmi residue."""
     rw_mol = Chem.RWMol()
@@ -456,10 +394,28 @@ def _build_custom_ligand_mol(residue: gemmi.Residue) -> Chem.Mol:
 
     # Try to infer bonds from coordinates; fall back to no bonds on failure.
     mol = _assign_bond_orders(mol)
-    mol = _assign_stereochemistry_from_3d_if_possible(mol)
-    mol = _remove_hydrogens_preserve_atom_names(mol)
+    _finalize_custom_mol(mol)
 
     return mol
+
+
+def _finalize_custom_mol(mol: Chem.Mol) -> None:
+    """Ensure RDKit caches are populated for downstream geometry constraint generation."""
+    try:
+        mol.UpdatePropertyCache(strict=False)
+    except Exception:
+        pass
+    try:
+        Chem.SanitizeMol(mol)
+    except Exception:
+        try:
+            Chem.GetSymmSSSR(mol)
+        except Exception:
+            pass
+        try:
+            mol.UpdatePropertyCache(strict=False)
+        except Exception:
+            pass
 
 
 def _build_custom_ligand_mol_from_smiles(
@@ -512,7 +468,6 @@ def _build_custom_ligand_mol_from_smiles(
         assigned = AllChem.AssignBondOrdersFromTemplate(template, candidate)
     except Exception:
         return None
-    assigned = _assign_stereochemistry_from_3d_if_possible(assigned)
 
     # Ensure atom name props are preserved for downstream coordinate mapping.
     for idx, atom in enumerate(assigned.GetAtoms()):
@@ -522,6 +477,7 @@ def _build_custom_ligand_mol_from_smiles(
     assigned.SetProp("_Name", resname)
     assigned.SetProp("name", resname)
     assigned.SetProp("id", resname)
+    _finalize_custom_mol(assigned)
     return assigned
 
 
@@ -555,7 +511,6 @@ def _build_custom_ligand_mol_from_smiles_with_reference(
         assigned = AllChem.AssignBondOrdersFromTemplate(template, candidate)
     except Exception:
         return None
-    assigned = _assign_stereochemistry_from_3d_if_possible(assigned)
 
     for idx, atom in enumerate(assigned.GetAtoms()):
         if idx < len(atom_names) and atom_names[idx]:
@@ -564,14 +519,59 @@ def _build_custom_ligand_mol_from_smiles_with_reference(
     assigned.SetProp("_Name", resname)
     assigned.SetProp("name", resname)
     assigned.SetProp("id", resname)
+    _finalize_custom_mol(assigned)
     return assigned
 
 
 def _atom_name_mapping_stats(residue: gemmi.Residue, mol: Chem.Mol) -> dict[str, object]:
     """Compute heavy-atom name matching statistics between residue and reference mol."""
-    residue_names = _heavy_atom_names_from_residue(residue)
-    mol_names = _heavy_atom_names_from_mol(mol)
-    return _ligand_mapping_stats_from_names(residue_names, mol_names)
+    residue_names: list[str] = []
+    for atom in residue:
+        element = str(atom.element.name or atom.name[:1]).strip().upper()
+        if element in {"H", "D", "T"}:
+            continue
+        name = atom.name.strip()
+        if name:
+            residue_names.append(name)
+
+    try:
+        ref_heavy = Chem.RemoveHs(Chem.Mol(mol), sanitize=False)
+    except Exception:
+        ref_heavy = mol
+
+    mol_names: list[str] = []
+    for atom in ref_heavy.GetAtoms():
+        name = atom.GetProp("name").strip() if atom.HasProp("name") else ""
+        if name:
+            mol_names.append(name)
+
+    residue_counter = Counter(residue_names)
+    mol_counter = Counter(mol_names)
+    matched = sum(min(count, mol_counter.get(name, 0)) for name, count in residue_counter.items())
+    residue_duplicates = sorted(name for name, count in residue_counter.items() if count > 1)
+    mol_duplicates = sorted(name for name, count in mol_counter.items() if count > 1)
+
+    missing_in_mol = []
+    for name, count in residue_counter.items():
+        deficit = count - mol_counter.get(name, 0)
+        if deficit > 0:
+            missing_in_mol.extend([name] * deficit)
+
+    missing_in_residue = []
+    for name, count in mol_counter.items():
+        deficit = count - residue_counter.get(name, 0)
+        if deficit > 0:
+            missing_in_residue.extend([name] * deficit)
+
+    return {
+        "residue_total": len(residue_names),
+        "mol_total": len(mol_names),
+        "matched": matched,
+        "residue_duplicates": residue_duplicates[:10],
+        "mol_duplicates": mol_duplicates[:10],
+        "missing_in_mol": sorted(set(missing_in_mol))[:10],
+        "missing_in_residue": sorted(set(missing_in_residue))[:10],
+    }
 
 
 def _extract_pdb_ligand_block(
@@ -649,8 +649,6 @@ def _build_custom_ligand_mol_from_pdb(
         return None
 
     mol = _assign_bond_orders(mol)
-    mol = _assign_stereochemistry_from_3d_if_possible(mol)
-    mol = _remove_hydrogens_preserve_atom_names(mol)
     try:
         Chem.SanitizeMol(mol)
     except Exception:
@@ -665,6 +663,7 @@ def _build_custom_ligand_mol_from_pdb(
     mol.SetProp("_Name", resname)
     mol.SetProp("name", resname)
     mol.SetProp("id", resname)
+    _finalize_custom_mol(mol)
     return mol
 
 
@@ -699,80 +698,13 @@ def _get_cached_mol(mols: dict, mol_dir: Path, code: str) -> Chem.Mol | None:
     return None
 
 
-def _normalized_ligand_map(source: dict[str, str] | None) -> dict[str, str]:
-    if not source:
-        return {}
-    normalized: dict[str, str] = {}
-    for raw_key, raw_value in source.items():
-        key = str(raw_key or "").strip()
-        value = str(raw_value or "").strip()
-        if key and value:
-            normalized[key] = value
-    return normalized
-
-
-def _ligand_occurrence_signature(
-    residue: gemmi.Residue,
-    custom_mol: Chem.Mol,
-    chain_smiles: str | None,
-) -> tuple[tuple[tuple[str, int], ...], tuple[tuple[str, int], ...], str]:
-    residue_counter = Counter(_heavy_atom_names_from_residue(residue))
-    mol_counter = Counter(_heavy_atom_names_from_mol(custom_mol))
-    smiles = str(chain_smiles or "").strip() or _canonical_heavy_smiles(custom_mol)
-    return (
-        tuple(sorted(residue_counter.items())),
-        tuple(sorted(mol_counter.items())),
-        smiles,
-    )
-
-
-def _to_base36(value: int) -> str:
-    digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    if value <= 0:
-        return "0"
-    out = []
-    num = value
-    while num:
-        num, rem = divmod(num, 36)
-        out.append(digits[rem])
-    return "".join(reversed(out))
-
-
-def _allocate_unique_ligand_resname(seed: str, used: set[str]) -> str:
-    token = re.sub(r"[^A-Za-z0-9]", "", str(seed or "").strip().upper()) or "LIG"
-    prefixes = [token[:2], token[:1], "L"]
-    for prefix in prefixes:
-        width = 3 - len(prefix)
-        if width <= 0:
-            prefix = prefix[:2]
-            width = 1
-        limit = 36 ** width
-        for idx in range(limit):
-            suffix = _to_base36(idx).rjust(width, "0")[-width:]
-            candidate = f"{prefix}{suffix}"[:3]
-            if candidate not in used:
-                used.add(candidate)
-                return candidate
-    raise RuntimeError(f"Unable to allocate unique ligand residue name for {seed!r}.")
-
-
-def _write_structure_with_updated_ligand_names(
-    structure: gemmi.Structure,
-    path: Path,
-) -> Path:
-    rewritten = path.with_name(f"{path.stem}_ligand_mapped.cif")
-    doc = structure.make_mmcif_document()
-    doc.write_file(str(rewritten))
-    return rewritten
-
-
 def _collect_custom_ligands(
     path: Path,
     mols: dict,
     mol_dir: Path,
     preloaded_custom_mols: dict[str, Chem.Mol] | None = None,
     ligand_smiles_map: dict[str, str] | None = None,
-) -> tuple[dict, Path]:
+) -> dict:
     """Collect custom ligand definitions that should override CCD entries."""
     structure = gemmi.read_structure(str(path))
     structure.setup_entities()
@@ -790,18 +722,66 @@ def _collect_custom_ligands(
         except Exception:
             pdb_lines = None
 
-    normalized_ligand_smiles_map = _normalized_ligand_map(ligand_smiles_map)
-    used_resnames = {
-        str(residue.name or "").strip()
-        for chain in structure[0]
-        for residue in chain
-        if str(residue.name or "").strip()
-    }
-    used_resnames.update(str(key or "").strip() for key in mols.keys() if str(key or "").strip())
+    custom_mols: dict = {}
 
-    custom_entries: list[dict[str, object]] = []
-    custom_mols: dict[str, Chem.Mol] = {}
-    parse_path = path
+    def _normalized_ligand_map(source: dict[str, str] | None) -> dict[str, str]:
+        if not source:
+            return {}
+        normalized: dict[str, str] = {}
+        for raw_key, raw_value in source.items():
+            key = str(raw_key or "").strip()
+            value = str(raw_value or "").strip()
+            if not key or not value:
+                continue
+            normalized[key] = value
+        return normalized
+
+    def _chain_aliases(chain_name: str) -> list[str]:
+        raw = str(chain_name or "").strip()
+        if not raw:
+            return []
+        aliases: list[str] = []
+        seen: set[str] = set()
+
+        def _push(value: str) -> None:
+            key = value.strip()
+            if not key:
+                return
+            for variant in (key, key.upper(), key.lower()):
+                if variant not in seen:
+                    seen.add(variant)
+                    aliases.append(variant)
+
+        _push(raw)
+        m = re.match(r"^(.+?)x(?:p|\d+)$", raw, flags=re.IGNORECASE)
+        if m:
+            _push(m.group(1))
+        if "x" in raw:
+            _push(raw.split("x", 1)[0])
+        return aliases
+
+    def _resolve_chain_smiles(
+        map_data: dict[str, str],
+        chain_name: str,
+        resname: str,
+    ) -> str | None:
+        if not map_data:
+            return None
+        residue = str(resname or "").strip()
+        for chain_key in _chain_aliases(chain_name):
+            for candidate in (
+                f"{chain_key}:{residue}",
+                f"{chain_key}:{residue.upper()}",
+                f"{chain_key}:{residue.lower()}",
+                chain_key,
+            ):
+                if candidate in map_data:
+                    return map_data[candidate]
+        if len(map_data) == 1:
+            return next(iter(map_data.values()))
+        return None
+
+    normalized_ligand_smiles_map = _normalized_ligand_map(ligand_smiles_map)
 
     for chain in structure[0]:
         for residue in chain:
@@ -814,55 +794,146 @@ def _collect_custom_ligands(
 
             ccd_mol = _get_cached_mol(mols, mol_dir, resname)
             ccd_matches = _ccd_matches_residue(residue, ccd_mol) if ccd_mol else False
-            chain_smiles = resolve_chain_smiles(
-                normalized_ligand_smiles_map,
-                str(chain.name or "").strip(),
-                resname,
-            )
+
             if (
-                not chain_smiles
-                and resname not in GENERIC_LIGAND_NAMES
-                and resname in mols
-                and ccd_matches
+                resname in GENERIC_LIGAND_NAMES
+                or resname not in mols
+                or not ccd_matches
             ):
+                if resname not in custom_mols:
+                    custom_mol = None
+                    if preloaded_custom_mols and resname in preloaded_custom_mols:
+                        # Separate-input mode: uploaded ligand file is the highest-fidelity
+                        # topology source; start from it to preserve atom naming/order.
+                        custom_mol = Chem.Mol(preloaded_custom_mols[resname])
+                    chain_smiles = _resolve_chain_smiles(
+                        normalized_ligand_smiles_map,
+                        chain.name,
+                        resname,
+                    )
+                    if chain_smiles:
+                        smiles_mol = None
+                        if custom_mol is not None:
+                            smiles_mol = _build_custom_ligand_mol_from_smiles_with_reference(
+                                reference_mol=custom_mol,
+                                smiles=chain_smiles,
+                                resname=resname,
+                            )
+                        else:
+                            smiles_mol = _build_custom_ligand_mol_from_smiles(
+                                residue=residue,
+                                smiles=chain_smiles,
+                                resname=resname,
+                            )
+                        if smiles_mol is None:
+                            raise RuntimeError(
+                                "Failed to apply SMILES topology override for "
+                                f"chain {chain.name} ({resname})."
+                            )
+                        custom_mol = smiles_mol
+                        print(
+                            f"[Info] Applied SMILES topology override for chain {chain.name} "
+                            f"({resname})."
+                        )
+                    if pdb_lines:
+                        extracted = _extract_pdb_ligand_block(
+                            pdb_lines=pdb_lines,
+                            resname=resname,
+                            chain_id=chain.name,
+                            resseq=residue.seqid.num,
+                            icode=residue.seqid.icode,
+                        )
+                        if extracted:
+                            pdb_block, het_lines = extracted
+                            if custom_mol is None:
+                                custom_mol = _build_custom_ligand_mol_from_pdb(
+                                    pdb_block=pdb_block,
+                                    het_lines=het_lines,
+                                    resname=resname,
+                                )
+                    if custom_mol is None:
+                        custom_mol = _build_custom_ligand_mol(residue)
+                    mapping_stats = _atom_name_mapping_stats(residue, custom_mol)
+                    residue_total = int(mapping_stats["residue_total"])
+                    mol_total = int(mapping_stats["mol_total"])
+                    matched = int(mapping_stats["matched"])
+                    if chain_smiles and (
+                        residue_total == 0
+                        or mol_total == 0
+                        or matched != residue_total
+                        or matched != mol_total
+                        or bool(mapping_stats["residue_duplicates"])
+                        or bool(mapping_stats["mol_duplicates"])
+                    ):
+                        raise RuntimeError(
+                            "SMILES override produced incomplete heavy-atom name mapping for "
+                            f"chain {chain.name} ({resname}): matched={matched}, "
+                            f"residue_total={residue_total}, mol_total={mol_total}, "
+                            f"residue_duplicates={mapping_stats['residue_duplicates']}, "
+                            f"mol_duplicates={mapping_stats['mol_duplicates']}, "
+                            f"missing_in_mol={mapping_stats['missing_in_mol']}, "
+                            f"missing_in_residue={mapping_stats['missing_in_residue']}."
+                        )
+                    bond_count = custom_mol.GetNumBonds()
+                    non_single = sum(
+                        1
+                        for bond in custom_mol.GetBonds()
+                        if bond.GetBondType() not in (Chem.rdchem.BondType.SINGLE,)
+                    )
+                    print(
+                        f"[Info] Built custom ligand {resname} "
+                        f"(atoms={custom_mol.GetNumAtoms()}, bonds={bond_count}, "
+                        f"non_single_bonds={non_single}, "
+                        f"mapped_heavy_atoms={matched}/{max(residue_total, mol_total)})."
+                    )
+                    custom_mols[resname] = custom_mol
+
+    return custom_mols
+
+
+def _collect_custom_polymer_residues(
+    path: Path,
+    mols: dict,
+    mol_dir: Path,
+) -> dict[str, Chem.Mol]:
+    """Collect custom polymer residue definitions when CCD entries do not match input atoms."""
+    structure = gemmi.read_structure(str(path))
+    structure.setup_entities()
+
+    entity_types = {
+        sub: ent.entity_type.name
+        for ent in structure.entities
+        for sub in ent.subchains
+    }
+
+    pdb_lines = None
+    if path.suffix.lower() in {".pdb", ".ent"}:
+        try:
+            pdb_lines = path.read_text().splitlines()
+        except Exception:
+            pdb_lines = None
+
+    custom_mols: dict[str, Chem.Mol] = {}
+
+    for chain in structure[0]:
+        for residue in chain:
+            sub = residue.subchain
+            if entity_types.get(sub) != "Polymer":
+                continue
+            resname = residue.name.strip()
+            if not resname or resname in const.tokens:
+                continue
+
+            ccd_mol = _get_cached_mol(mols, mol_dir, resname)
+            ccd_matches = _ccd_matches_residue(residue, ccd_mol) if ccd_mol else False
+            if ccd_matches:
+                continue
+
+            if resname in custom_mols:
                 continue
 
             custom_mol = None
-            if preloaded_custom_mols and resname in preloaded_custom_mols:
-                # Separate-input mode: uploaded ligand file is the highest-fidelity
-                # topology source; start from it to preserve atom naming/order.
-                custom_mol = Chem.Mol(preloaded_custom_mols[resname])
-            elif ccd_matches and ccd_mol is not None:
-                # When a SMILES override is provided, start from the CCD/reference
-                # molecule so we keep the exact atom-name mapping but replace bond
-                # orders/stereo with the user-supplied topology.
-                custom_mol = Chem.Mol(ccd_mol)
-
-            if chain_smiles:
-                smiles_mol = None
-                if custom_mol is not None:
-                    smiles_mol = _build_custom_ligand_mol_from_smiles_with_reference(
-                        reference_mol=custom_mol,
-                        smiles=chain_smiles,
-                        resname=resname,
-                    )
-                else:
-                    smiles_mol = _build_custom_ligand_mol_from_smiles(
-                        residue=residue,
-                        smiles=chain_smiles,
-                        resname=resname,
-                    )
-                if smiles_mol is None:
-                    raise RuntimeError(
-                        "Failed to apply SMILES topology override for "
-                        f"chain {chain.name} ({resname})."
-                    )
-                custom_mol = smiles_mol
-                print(
-                    f"[Info] Applied SMILES topology override for chain {chain.name} "
-                    f"({resname})."
-                )
-            if pdb_lines and custom_mol is None:
+            if pdb_lines:
                 extracted = _extract_pdb_ligand_block(
                     pdb_lines=pdb_lines,
                     resname=resname,
@@ -871,107 +942,27 @@ def _collect_custom_ligands(
                     icode=residue.seqid.icode,
                 )
                 if extracted:
-                    pdb_block, het_lines = extracted
+                    pdb_block, atom_lines = extracted
                     custom_mol = _build_custom_ligand_mol_from_pdb(
                         pdb_block=pdb_block,
-                        het_lines=het_lines,
+                        het_lines=atom_lines,
                         resname=resname,
                     )
             if custom_mol is None:
                 custom_mol = _build_custom_ligand_mol(residue)
 
             mapping_stats = _atom_name_mapping_stats(residue, custom_mol)
+            matched = int(mapping_stats["matched"])
             residue_total = int(mapping_stats["residue_total"])
             mol_total = int(mapping_stats["mol_total"])
-            matched = int(mapping_stats["matched"])
-            if (
-                residue_total == 0
-                or mol_total == 0
-                or matched != residue_total
-                or matched != mol_total
-                or bool(mapping_stats["residue_duplicates"])
-                or bool(mapping_stats["mol_duplicates"])
-            ):
-                raise RuntimeError(
-                    "Custom ligand produced incomplete heavy-atom name mapping for "
-                    f"chain {chain.name} ({resname}): matched={matched}, "
-                    f"residue_total={residue_total}, mol_total={mol_total}, "
-                    f"residue_duplicates={mapping_stats['residue_duplicates']}, "
-                    f"mol_duplicates={mapping_stats['mol_duplicates']}, "
-                    f"missing_in_mol={mapping_stats['missing_in_mol']}, "
-                    f"missing_in_residue={mapping_stats['missing_in_residue']}."
-                )
-
-            custom_entries.append(
-                {
-                    "chain_name": str(chain.name or "").strip(),
-                    "residue": residue,
-                    "original_resname": resname,
-                    "custom_mol": custom_mol,
-                    "signature": _ligand_occurrence_signature(residue, custom_mol, chain_smiles),
-                    "mapping_stats": mapping_stats,
-                }
-            )
-
-    grouped_entries: dict[str, list[dict[str, object]]] = {}
-    for entry in custom_entries:
-        grouped_entries.setdefault(str(entry["original_resname"]), []).append(entry)
-
-    renamed_any = False
-    for original_resname, entries in grouped_entries.items():
-        signature_to_entries: dict[tuple[tuple[tuple[str, int], ...], tuple[tuple[str, int], ...], str], list[dict[str, object]]] = {}
-        for entry in entries:
-            signature = entry["signature"]
-            signature_to_entries.setdefault(signature, []).append(entry)
-
-        effective_names: dict[
-            tuple[tuple[tuple[str, int], ...], tuple[tuple[str, int], ...], str],
-            str,
-        ] = {}
-        if len(signature_to_entries) == 1:
-            effective_names[next(iter(signature_to_entries.keys()))] = original_resname
-        else:
-            renamed_any = True
-            for signature in signature_to_entries:
-                effective_names[signature] = _allocate_unique_ligand_resname(
-                    original_resname,
-                    used_resnames,
-                )
-
-        for entry in entries:
-            signature = entry["signature"]
-            effective_name = effective_names[signature]
-            residue = entry["residue"]
-            assert isinstance(residue, gemmi.Residue)
-            residue.name = effective_name
-            custom_mol = Chem.Mol(entry["custom_mol"])
-            custom_mol.SetProp("_Name", effective_name)
-            custom_mol.SetProp("name", effective_name)
-            custom_mol.SetProp("id", effective_name)
-            custom_mols[effective_name] = custom_mol
-
-            mapping_stats = entry["mapping_stats"]
-            residue_total = int(mapping_stats["residue_total"])
-            mol_total = int(mapping_stats["mol_total"])
-            matched = int(mapping_stats["matched"])
-            bond_count = custom_mol.GetNumBonds()
-            non_single = sum(
-                1
-                for bond in custom_mol.GetBonds()
-                if bond.GetBondType() not in (Chem.rdchem.BondType.SINGLE,)
-            )
             print(
-                f"[Info] Built custom ligand {effective_name} "
-                f"(source={original_resname}, chain={entry['chain_name']}, "
-                f"atoms={custom_mol.GetNumAtoms()}, bonds={bond_count}, "
-                f"non_single_bonds={non_single}, "
+                f"[Info] Built custom polymer residue {resname} "
+                f"(atoms={custom_mol.GetNumAtoms()}, bonds={custom_mol.GetNumBonds()}, "
                 f"mapped_heavy_atoms={matched}/{max(residue_total, mol_total)})."
             )
+            custom_mols[resname] = custom_mol
 
-    if renamed_any:
-        parse_path = _write_structure_with_updated_ligand_names(structure, path)
-
-    return custom_mols, parse_path
+    return custom_mols
 
 
 def _iter_struct_files(input_dir: Path, recursive: bool) -> List[Path]:
@@ -1005,7 +996,7 @@ def _parse_structure(path: Path, mols: dict, mol_dir: Path):
             mols=mols,
             moldir=str(mol_dir),
             use_assembly=False,
-            compute_interfaces=False,
+            call_compute_interfaces=False,
         )
     raise ValueError(f"Unsupported structure format: {path}")
 
@@ -1053,11 +1044,16 @@ def _parse_pdb_with_sequence(path: Path, mols: dict, mol_dir: Path):
             mols=mols,
             moldir=str(mol_dir),
             use_assembly=False,
-            compute_interfaces=False,
+            call_compute_interfaces=False,
         )
 
 
-def _build_record(target_id: str, parsed) -> Record:
+def _build_record(
+    target_id: str,
+    parsed,
+    self_template: bool = False,
+    self_template_threshold: float = 2.0,
+) -> Record:
     chains = parsed.data.chains
     chain_infos = []
     for chain in chains:
@@ -1078,13 +1074,38 @@ def _build_record(target_id: str, parsed) -> Record:
     if struct_info.num_chains is None:
         struct_info = replace(struct_info, num_chains=len(chains))
 
+    template_records = None
+    if self_template:
+        template_rows: list[TemplateInfo] = []
+        for chain in chains:
+            if int(chain["mol_type"]) != PROTEIN_CHAIN_TYPE:
+                continue
+            chain_name = str(chain["name"])
+            num_residues = int(chain["res_num"])
+            if num_residues <= 0:
+                continue
+            template_rows.append(
+                TemplateInfo(
+                    name="self",
+                    query_chain=chain_name,
+                    query_st=1,
+                    query_en=num_residues,
+                    template_chain=chain_name,
+                    template_st=1,
+                    template_en=num_residues,
+                    force=True,
+                    threshold=float(self_template_threshold),
+                )
+            )
+        template_records = template_rows or None
+
     return Record(
         id=target_id,
         structure=struct_info,
         chains=chain_infos,
         interfaces=[],
         inference_options=None,
-        templates=None,
+        templates=template_records,
         md=None,
         affinity=None,
     )
@@ -1102,16 +1123,23 @@ def prepare_inputs(
     msa_pairing_strategy: str = "greedy",
     max_msa_seqs: int = 8192,
     msa_cache_dir: Path | None = DEFAULT_MSA_CACHE_DIR,
+    self_template: bool = False,
+    self_template_threshold: float = 2.0,
 ) -> Tuple[Manifest, List[Path]]:
     struct_dir = out_dir / "processed" / "structures"
     records_dir = out_dir / "processed" / "records"
+    constraints_dir = out_dir / "processed" / "constraints"
     msa_dir = out_dir / "processed" / "msa"
     mols_dir = out_dir / "processed" / "mols"
+    template_dir = out_dir / "processed" / "templates"
 
     struct_dir.mkdir(parents=True, exist_ok=True)
     records_dir.mkdir(parents=True, exist_ok=True)
+    constraints_dir.mkdir(parents=True, exist_ok=True)
     msa_dir.mkdir(parents=True, exist_ok=True)
     mols_dir.mkdir(parents=True, exist_ok=True)
+    if self_template:
+        template_dir.mkdir(parents=True, exist_ok=True)
 
     mol_dir = cache_dir / "mols"
     if not mol_dir.exists():
@@ -1135,23 +1163,34 @@ def prepare_inputs(
         target_id = path.stem
         custom_mols = {}
         overridden = {}
-        parse_path = path
         try:
-            custom_mols, parse_path = _collect_custom_ligands(
+            custom_mols = _collect_custom_ligands(
                 path,
                 mols,
                 mol_dir,
                 preloaded_custom_mols=preloaded_custom_mols,
                 ligand_smiles_map=ligand_smiles_map,
             )
+            polymer_custom_mols = _collect_custom_polymer_residues(
+                path,
+                mols,
+                mol_dir,
+            )
+            if polymer_custom_mols:
+                custom_mols.update(polymer_custom_mols)
             if custom_mols:
                 for name, mol in custom_mols.items():
                     if name in mols:
                         overridden[name] = mols[name]
                     mols[name] = mol
 
-            parsed = _parse_structure(parse_path, mols=mols, mol_dir=mol_dir)
-            record = _build_record(target_id, parsed)
+            parsed = _parse_structure(path, mols=mols, mol_dir=mol_dir)
+            record = _build_record(
+                target_id,
+                parsed,
+                self_template=self_template,
+                self_template_threshold=self_template_threshold,
+            )
             _attach_msa_to_record(
                 parsed=parsed,
                 record=record,
@@ -1165,6 +1204,10 @@ def prepare_inputs(
             )
             # Dump structure and record
             parsed.data.dump(struct_dir / f"{target_id}.npz")
+            if record.templates:
+                parsed.data.dump(template_dir / f"{target_id}_self.npz")
+            if getattr(parsed, "residue_constraints", None) is not None:
+                parsed.residue_constraints.dump(constraints_dir / f"{target_id}.npz")
             record.dump(records_dir / f"{target_id}.json")
 
             # Collect extra molecules (ligands) not guaranteed in mol cache
@@ -1244,6 +1287,17 @@ def main() -> None:
         default=str(DEFAULT_MSA_CACHE_DIR),
         help="Cache directory for sequence-keyed .a3m files.",
     )
+    parser.add_argument(
+        "--self_template",
+        action="store_true",
+        help="Inject the input protein structure as a forced Boltz2 template.",
+    )
+    parser.add_argument(
+        "--self_template_threshold",
+        type=float,
+        default=2.0,
+        help="Flat-bottom threshold in angstroms used by the forced self-template.",
+    )
 
     args = parser.parse_args()
 
@@ -1263,6 +1317,8 @@ def main() -> None:
         msa_pairing_strategy=args.msa_pairing_strategy,
         max_msa_seqs=max(1, int(args.max_msa_seqs)),
         msa_cache_dir=Path(args.msa_cache_dir).expanduser().resolve() if args.msa_cache_dir else None,
+        self_template=bool(args.self_template),
+        self_template_threshold=float(args.self_template_threshold),
     )
 
     print(f"Prepared {len(manifest.records)} inputs in {out_dir / 'processed'}")

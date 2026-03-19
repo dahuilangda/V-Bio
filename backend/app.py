@@ -7,7 +7,6 @@ from backend.core import config
 from backend.core.celery_app import celery_app
 from backend.worker.tasks import (
     predict_task,
-    affinity_task,
     boltz2score_task,
     lead_optimization_mmp_query_task,
 )
@@ -254,7 +253,6 @@ register_affinity_routes(
     require_api_token=require_api_token,
     logger=logger,
     config_module=config,
-    affinity_task=affinity_task,
     boltz2score_task=boltz2score_task,
     build_affinity_preview=build_affinity_preview,
     affinity_preview_error_cls=AffinityPreviewError,

@@ -12,10 +12,12 @@ import {
   shouldShowRunNote,
   taskStateLabel,
   taskStateTone,
-  toneForIptm,
   toneForPae,
-  toneForPlddt
+  toneForPlddt,
+  toneForIptm,
+  toneForProbability
 } from './taskPresentation';
+import type { TaskMetricColumnKey } from './taskListTypes';
 
 function isSequenceLigandType(type: InputComponent['type'] | null): boolean {
   return type === 'protein' || type === 'dna' || type === 'rna';
@@ -24,6 +26,7 @@ function isSequenceLigandType(type: InputComponent['type'] | null): boolean {
 interface ProjectTaskRowProps {
   row: TaskListRow;
   mode: 'default' | 'lead_opt' | 'peptide';
+  visibleMetricColumns: TaskMetricColumnKey[];
   canManageShares: boolean;
   editingTaskNameId: string | null;
   editingTaskNameValue: string;
@@ -55,6 +58,7 @@ function formatPeptideMutationRate(value: number | null): string {
 export function ProjectTaskRow({
   row,
   mode,
+  visibleMetricColumns,
   canManageShares,
   editingTaskNameId,
   editingTaskNameValue,
@@ -100,9 +104,6 @@ export function ProjectTaskRow({
   const terminatingThisTask = terminatingTaskId === task.id;
   const actionTitle = hasRuntimeTaskId ? 'Open this task result' : 'Open this draft snapshot for editing';
   const stateTone = taskStateTone(task.task_state);
-  const plddtTone = toneForPlddt(metrics.plddt);
-  const iptmTone = toneForIptm(metrics.iptm);
-  const paeTone = toneForPae(metrics.pae);
   const workflowClass = row.workflowKey.replace(/_/g, '-');
   const isLeadOptMode = mode === 'lead_opt';
   const isPeptideMode = mode === 'peptide';
@@ -254,15 +255,24 @@ export function ProjectTaskRow({
         </>
       ) : (
         <>
-          <td className="task-col-metric">
-            <span className={`task-metric-value metric-value-${plddtTone}`}>{formatMetric(metrics.plddt, 1)}</span>
-          </td>
-          <td className="task-col-metric">
-            <span className={`task-metric-value metric-value-${iptmTone}`}>{formatMetric(metrics.iptm, 3)}</span>
-          </td>
-          <td className="task-col-metric">
-            <span className={`task-metric-value metric-value-${paeTone}`}>{formatMetric(metrics.pae, 2)}</span>
-          </td>
+          {visibleMetricColumns.map((metricKey) => {
+            const metricValue =
+              metricKey === 'plddt' ? metrics.plddt : metricKey === 'ipsae' ? metrics.ipsae : metricKey === 'iptm' ? metrics.iptm : metrics.pae;
+            const metricTone =
+              metricKey === 'plddt'
+                ? toneForPlddt(metrics.plddt)
+                : metricKey === 'ipsae'
+                  ? toneForProbability(metrics.ipsae)
+                  : metricKey === 'iptm'
+                    ? toneForIptm(metrics.iptm)
+                    : toneForPae(metrics.pae);
+            const fractionDigits = metricKey === 'plddt' ? 1 : metricKey === 'pae' ? 2 : 3;
+            return (
+              <td key={metricKey} className={`task-col-metric task-col-metric-${metricKey}`}>
+                <span className={`task-metric-value metric-value-${metricTone}`}>{formatMetric(metricValue, fractionDigits)}</span>
+              </td>
+            );
+          })}
         </>
       )}
       <td className="project-col-time task-col-submitted">

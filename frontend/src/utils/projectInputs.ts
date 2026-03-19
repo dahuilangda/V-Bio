@@ -60,6 +60,8 @@ const DEFAULT_PEPTIDE_BICYCLIC_INCLUDE_EXTRA_CYS = false;
 const DEFAULT_PEPTIDE_BICYCLIC_CYS1_POS = 3;
 const DEFAULT_PEPTIDE_BICYCLIC_CYS2_POS = 8;
 const DEFAULT_PEPTIDE_BICYCLIC_CYS3_POS = 15;
+const DEFAULT_AFFINITY_MODE = 'score';
+const VALID_AFFINITY_MODES = new Set(['score', 'pose', 'refine', 'interface']);
 
 export const PEPTIDE_DESIGNED_LIGAND_TOKEN = '__designed_peptide__';
 
@@ -207,6 +209,16 @@ function normalizePeptideBicyclicCysPositionMode(value: unknown): 'auto' | 'manu
   return DEFAULT_PEPTIDE_BICYCLIC_CYS_POSITION_MODE as 'auto' | 'manual';
 }
 
+function normalizeAffinityMode(value: unknown): 'score' | 'pose' | 'refine' | 'interface' {
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (VALID_AFFINITY_MODES.has(normalized)) {
+      return normalized as 'score' | 'pose' | 'refine' | 'interface';
+    }
+  }
+  return DEFAULT_AFFINITY_MODE as 'score' | 'pose' | 'refine' | 'interface';
+}
+
 function readFiniteNumber(value: unknown): number | null {
   const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
   if (!Number.isFinite(parsed)) return null;
@@ -279,6 +291,7 @@ export function buildDefaultInputConfig(workflowKey: string | null | undefined =
     },
     options: {
       seed: 42,
+      affinityMode: DEFAULT_AFFINITY_MODE as 'score' | 'pose' | 'refine' | 'interface',
       peptideDesignMode: DEFAULT_PEPTIDE_DESIGN_MODE,
       peptideBinderLength: DEFAULT_PEPTIDE_BINDER_LENGTH,
       peptideUseInitialSequence: DEFAULT_PEPTIDE_USE_INITIAL_SEQUENCE,
@@ -316,6 +329,7 @@ function normalizeOptions(value: unknown): PredictionOptions {
   const rawObj = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
   const raw = rawObj as Partial<PredictionOptions>;
   const seed = raw.seed;
+  const affinityMode = normalizeAffinityMode(raw.affinityMode ?? rawObj.affinity_mode ?? rawObj.mode);
   const peptideDesignMode = normalizePeptideDesignMode(raw.peptideDesignMode ?? rawObj.peptide_design_mode);
   const minPeptideLength = peptideDesignMode === 'bicyclic' ? 8 : 5;
   const peptideBinderLength = normalizeIntegerOption(
@@ -406,6 +420,7 @@ function normalizeOptions(value: unknown): PredictionOptions {
   if (seed === null) {
     return {
       seed: null,
+      affinityMode,
       peptideDesignMode,
       peptideBinderLength,
       peptideUseInitialSequence,
@@ -426,6 +441,7 @@ function normalizeOptions(value: unknown): PredictionOptions {
   }
   return {
     seed: typeof seed === 'number' && Number.isFinite(seed) ? Math.max(0, Math.floor(seed)) : 42,
+    affinityMode,
     peptideDesignMode,
     peptideBinderLength,
     peptideUseInitialSequence,

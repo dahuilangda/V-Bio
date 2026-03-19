@@ -9,6 +9,7 @@ import type {
   SubmittedWithinDaysOption,
   TaskTableMode,
   TaskListRow,
+  TaskMetricColumnKey,
   TaskWorkflowFilter
 } from './taskListTypes';
 
@@ -48,6 +49,8 @@ interface ProjectTasksWorkspaceProps {
   structureSearchLoading: boolean;
   structureSearchError: string | null;
   structureSearchMatches: Record<string, boolean>;
+  visibleMetricColumns: TaskMetricColumnKey[];
+  onVisibleMetricColumnsChange: (value: TaskMetricColumnKey[]) => void;
   onClearAdvancedFilters: () => void;
   sortKey: SortKey;
   sortMark: (key: SortKey) => string;
@@ -113,6 +116,8 @@ export function ProjectTasksWorkspace({
   structureSearchLoading,
   structureSearchError,
   structureSearchMatches,
+  visibleMetricColumns,
+  onVisibleMetricColumnsChange,
   onClearAdvancedFilters,
   sortKey,
   sortMark,
@@ -159,6 +164,13 @@ export function ProjectTasksWorkspace({
     onNormalizeSortKey('submitted');
   }, [compactMetricsView, onNormalizeSortKey, sortKey]);
 
+  useEffect(() => {
+    if (compactMetricsView) return;
+    if (sortKey === 'submitted' || sortKey === 'backend' || sortKey === 'seed' || sortKey === 'duration') return;
+    if (visibleMetricColumns.includes(sortKey as TaskMetricColumnKey)) return;
+    onNormalizeSortKey('submitted');
+  }, [compactMetricsView, onNormalizeSortKey, sortKey, visibleMetricColumns]);
+
   return (
     <section className="panel">
       <ProjectTasksFilters
@@ -197,6 +209,8 @@ export function ProjectTasksWorkspace({
         structureSearchLoading={structureSearchLoading}
         structureSearchError={structureSearchError}
         structureSearchMatches={structureSearchMatches}
+        visibleMetricColumns={visibleMetricColumns}
+        onVisibleMetricColumnsChange={onVisibleMetricColumnsChange}
         onClearAdvancedFilters={onClearAdvancedFilters}
       />
 
@@ -205,6 +219,7 @@ export function ProjectTasksWorkspace({
         canManageShares={canManageShares}
         filteredCount={filteredCount}
         tableMode={tableMode}
+        visibleMetricColumns={visibleMetricColumns}
         sortKey={sortKey}
         sortMark={sortMark}
         onSort={onSort}

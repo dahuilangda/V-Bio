@@ -153,16 +153,27 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
   const activeAffinityBackend = 'boltz';
   const backendSupportsActivity = true;
   const effectiveConfidenceOnly = backendSupportsActivity ? affinityConfidenceOnly : true;
+  const affinityMode =
+    draft.inputConfig.options.affinityMode === 'pose' ||
+    draft.inputConfig.options.affinityMode === 'refine' ||
+    draft.inputConfig.options.affinityMode === 'interface'
+      ? draft.inputConfig.options.affinityMode
+      : 'score';
   const targetChains = affinityTargetChainIds.filter((item) => item.trim());
   const ligandChain = affinityLigandChainId.trim();
   const previewLigandSmiles = String(affinityPreview?.ligandSmiles || '').trim();
   const ligandSmilesInput = affinityLigandSmiles.trim();
   const ligandSmiles = ligandSmilesInput || previewLigandSmiles;
+  const usingSeparateInputs = Boolean(affinityTargetFile && affinityLigandFile);
   const runAffinityActivity =
     backendSupportsActivity &&
     !effectiveConfidenceOnly &&
     affinityHasLigand &&
     (affinitySupportsActivity || Boolean(ligandSmiles.trim()));
+  if (affinityMode !== 'score' && !usingSeparateInputs) {
+    setError('Pose/refine/interface modes require uploaded target and ligand files.');
+    return;
+  }
   if (runAffinityActivity && !targetChains.length) {
     setError('No target chain could be inferred from uploaded target structure.');
     return;
@@ -263,6 +274,8 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
       ligandFile: affinityLigandFile,
       backend: activeAffinityBackend,
       seed: configWithAffinity.options.seed ?? null,
+      mode: affinityMode,
+      computeIpsae: affinityHasLigand,
       enableAffinity: runAffinityActivity,
       ligandSmiles,
       targetChainIds: ligandChain ? targetChains : [],

@@ -4,6 +4,7 @@ import type {
   ApiTokenUsageDaily,
   AppUser,
   Project,
+  ProjectTaskCounts,
   ProjectAccessScope,
   EffectiveAccessLevel,
   ProjectShareRecord,
@@ -13,6 +14,7 @@ import type {
   TaskState
 } from '../types/models';
 import { ENV } from '../utils/env';
+import { PEPTIDE_TASK_PREVIEW_KEY } from '../utils/peptideTaskPreview';
 
 const configuredBaseUrl = ENV.supabaseRestUrl.replace(/\/$/, '');
 const SUPABASE_TIMEOUT_MS = 15000;
@@ -35,10 +37,6 @@ async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs =
   } finally {
     clearTimeout(timer);
   }
-}
-
-function unique<T>(items: T[]): T[] {
-  return Array.from(new Set(items));
 }
 
 function asObjectRecord(value: unknown): Record<string, unknown> {
@@ -95,16 +93,7 @@ function buildSupabaseUrlCandidates(path: string, query?: Record<string, string 
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
   const queryString = buildQueryString(query);
   const suffix = `${normalizedPath}${queryString ? `?${queryString}` : ''}`;
-  const candidates = [`${configuredBaseUrl}${suffix}`];
-
-  if (typeof window !== 'undefined') {
-    // Vite proxy path
-    candidates.push(`${window.location.origin}/supabase${suffix}`);
-    // Remote-access fallback: hit PostgREST directly on the current host.
-    candidates.push(`${window.location.protocol}//${window.location.hostname}:54321${suffix}`);
-  }
-
-  return unique(candidates.filter(Boolean));
+  return [`${configuredBaseUrl}${suffix}`].filter(Boolean);
 }
 
 async function request<T>(
@@ -493,7 +482,7 @@ export async function getProjectById(projectId: string, options: GetProjectByIdO
   return normalizeProjectRow(row as Partial<Project>);
 }
 
-async function listProjectsByIds(projectIds: string[], options: GetProjectByIdOptions = {}): Promise<Project[]> {
+export async function listProjectsByIds(projectIds: string[], options: GetProjectByIdOptions = {}): Promise<Project[]> {
   const idFilter = buildInFilter(projectIds);
   if (!idFilter) return [];
   const selectFields = options.lightweight
@@ -528,7 +517,7 @@ async function listProjectsByIds(projectIds: string[], options: GetProjectByIdOp
   return rows.map((row) => normalizeProjectRow(row));
 }
 
-async function listProjectShareLinksForUser(userId: string): Promise<Array<{ project_id: string; access_level: ShareAccessLevel }>> {
+export async function listProjectShareLinksForUser(userId: string): Promise<Array<{ project_id: string; access_level: ShareAccessLevel }>> {
   const normalizedUserId = String(userId || '').trim();
   if (!normalizedUserId) return [];
   const rows = await request<Array<{ project_id: string; access_level?: string }>>('/project_shares', undefined, {
@@ -541,7 +530,7 @@ async function listProjectShareLinksForUser(userId: string): Promise<Array<{ pro
   }));
 }
 
-async function listProjectTaskShareLinksForUser(
+export async function listProjectTaskShareLinksForUser(
   userId: string
 ): Promise<Array<{ project_id: string; project_task_id: string; access_level: ShareAccessLevel }>> {
   const normalizedUserId = String(userId || '').trim();
@@ -836,7 +825,23 @@ export async function listProjectTasksForList(
       ? [
           'properties_target:properties->>target',
           'properties_ligand:properties->>ligand',
-          'properties_binder:properties->>binder'
+          'properties_binder:properties->>binder',
+          'properties_peptide_preview_design_mode:properties->peptide_preview->>design_mode',
+          'properties_peptide_preview_binder_length:properties->peptide_preview->>binder_length',
+          'properties_peptide_preview_iterations:properties->peptide_preview->>iterations',
+          'properties_peptide_preview_population_size:properties->peptide_preview->>population_size',
+          'properties_peptide_preview_elite_size:properties->peptide_preview->>elite_size',
+          'properties_peptide_preview_mutation_rate:properties->peptide_preview->>mutation_rate',
+          'properties_peptide_preview_current_generation:properties->peptide_preview->>current_generation',
+          'properties_peptide_preview_total_generations:properties->peptide_preview->>total_generations',
+          'properties_peptide_preview_best_score:properties->peptide_preview->>best_score',
+          'properties_peptide_preview_candidate_count:properties->peptide_preview->>candidate_count',
+          'properties_peptide_preview_completed_tasks:properties->peptide_preview->>completed_tasks',
+          'properties_peptide_preview_pending_tasks:properties->peptide_preview->>pending_tasks',
+          'properties_peptide_preview_total_tasks:properties->peptide_preview->>total_tasks',
+          'properties_peptide_preview_current_status:properties->peptide_preview->>current_status',
+          'properties_peptide_preview_status_message:properties->peptide_preview->>status_message',
+          'properties_peptide_preview_best_candidate:properties->peptide_preview->best_candidate'
         ]
       : []),
     ...(includeProperties ? ['properties'] : []),
@@ -855,6 +860,8 @@ export async function listProjectTasksForList(
           'confidence_chain_ids:confidence->chain_ids',
           'confidence_chain_mean_plddt:confidence->chain_mean_plddt',
           'confidence_pair_chains_iptm:confidence->pair_chains_iptm',
+          'confidence_chain_pair_iptm:confidence->chain_pair_iptm',
+          'confidence_chain_pair_iptm_global:confidence->chain_pair_iptm_global',
           'confidence_ligand_display_atom_plddts_by_chain:confidence->ligand_display_atom_plddts_by_chain',
           'confidence_ligand_atom_plddts_by_chain:confidence->ligand_atom_plddts_by_chain',
           'confidence_ligand_display_atom_plddts:confidence->ligand_display_atom_plddts',
@@ -865,6 +872,8 @@ export async function listProjectTasksForList(
           'confidence_complex_plddt_protein:confidence->>complex_plddt_protein',
           'confidence_complex_plddt:confidence->>complex_plddt',
           'confidence_plddt:confidence->>plddt',
+          'confidence_ipsae_dom:confidence->>ipsae_dom',
+          'confidence_ligand_ipsae_max:confidence->>ligand_ipsae_max',
           'confidence_iptm:confidence->>iptm',
           'confidence_ligand_iptm:confidence->>ligand_iptm',
           'confidence_protein_iptm:confidence->>protein_iptm',
@@ -1145,11 +1154,37 @@ export async function listProjectTasksForList(
     const rowRecord = row as unknown as Record<string, unknown>;
     const leadOptSummaryProperties = includeLeadOptSummary ? buildLeadOptSummaryProperties(rowRecord) : null;
     const summaryProperties = includePropertiesSummary
-      ? compactObjectRecord({
-          target: readText(rowRecord.properties_target),
-          ligand: readText(rowRecord.properties_ligand),
-          binder: readText(rowRecord.properties_binder)
-        })
+      ? (() => {
+          const peptidePreview = compactObjectRecord({
+            design_mode: readText(rowRecord.properties_peptide_preview_design_mode),
+            binder_length: readFiniteNumber(rowRecord.properties_peptide_preview_binder_length),
+            iterations: readFiniteNumber(rowRecord.properties_peptide_preview_iterations),
+            population_size: readFiniteNumber(rowRecord.properties_peptide_preview_population_size),
+            elite_size: readFiniteNumber(rowRecord.properties_peptide_preview_elite_size),
+            mutation_rate: readFiniteNumber(rowRecord.properties_peptide_preview_mutation_rate),
+            current_generation: readFiniteNumber(rowRecord.properties_peptide_preview_current_generation),
+            total_generations: readFiniteNumber(rowRecord.properties_peptide_preview_total_generations),
+            best_score: readFiniteNumber(rowRecord.properties_peptide_preview_best_score),
+            candidate_count: readFiniteNumber(rowRecord.properties_peptide_preview_candidate_count),
+            completed_tasks: readFiniteNumber(rowRecord.properties_peptide_preview_completed_tasks),
+            pending_tasks: readFiniteNumber(rowRecord.properties_peptide_preview_pending_tasks),
+            total_tasks: readFiniteNumber(rowRecord.properties_peptide_preview_total_tasks),
+            current_status: readText(rowRecord.properties_peptide_preview_current_status),
+            status_message: readText(rowRecord.properties_peptide_preview_status_message),
+            best_candidate:
+              rowRecord.properties_peptide_preview_best_candidate &&
+              typeof rowRecord.properties_peptide_preview_best_candidate === 'object' &&
+              !Array.isArray(rowRecord.properties_peptide_preview_best_candidate)
+                ? (rowRecord.properties_peptide_preview_best_candidate as Record<string, unknown>)
+                : undefined
+          });
+          return compactObjectRecord({
+            target: readText(rowRecord.properties_target),
+            ligand: readText(rowRecord.properties_ligand),
+            binder: readText(rowRecord.properties_binder),
+            ...(Object.keys(peptidePreview).length > 0 ? { [PEPTIDE_TASK_PREVIEW_KEY]: peptidePreview } : {})
+          });
+        })()
       : {};
     const summaryConfidence = (() => {
       if (!includeConfidenceSummary) return {};
@@ -1220,6 +1255,8 @@ export async function listProjectTasksForList(
       assignArray('chain_ids', chainIdsFromSummary);
       assignObject('chain_mean_plddt', chainMeanPlddt);
       assignObject('pair_chains_iptm', pairChainsIptm);
+      assignArray('chain_pair_iptm', rowRecord.confidence_chain_pair_iptm);
+      assignArray('chain_pair_iptm_global', rowRecord.confidence_chain_pair_iptm_global);
       assignObject('ligand_display_atom_plddts_by_chain', ligandDisplayAtomPlddtsByChain);
       assignObject('ligand_atom_plddts_by_chain', ligandAtomPlddtsByChain);
       assignNumber('ligand_plddt', rowRecord.confidence_ligand_plddt);
@@ -1228,6 +1265,8 @@ export async function listProjectTasksForList(
       assignNumber('complex_plddt_protein', rowRecord.confidence_complex_plddt_protein);
       assignNumber('complex_plddt', rowRecord.confidence_complex_plddt);
       assignNumber('plddt', rowRecord.confidence_plddt);
+      assignNumber('ipsae_dom', rowRecord.confidence_ipsae_dom);
+      assignNumber('ligand_ipsae_max', rowRecord.confidence_ligand_ipsae_max);
       assignNumber('iptm', rowRecord.confidence_iptm);
       assignNumber('ligand_iptm', rowRecord.confidence_ligand_iptm);
       assignNumber('protein_iptm', rowRecord.confidence_protein_iptm);
@@ -1736,12 +1775,97 @@ export async function listProjectTaskStatesByProjects(projectIds: string[]): Pro
   return results.flat();
 }
 
+export async function listRuntimeCandidateProjectTaskStatesByProjects(projectIds: string[]): Promise<ProjectTaskRuntimeRow[]> {
+  const normalizedIds = Array.from(new Set(projectIds.map((id) => id.trim()).filter(Boolean)));
+  if (normalizedIds.length === 0) return [];
+
+  const chunkSize = 150;
+  const chunks: string[][] = [];
+  for (let i = 0; i < normalizedIds.length; i += chunkSize) {
+    chunks.push(normalizedIds.slice(i, i + chunkSize));
+  }
+
+  const results = await Promise.all(
+    chunks.map((chunk) =>
+      request<ProjectTaskRuntimeRow[]>('/project_tasks', undefined, {
+        select: 'id,project_id,task_id,task_state,status_text,error_text,submitted_at,completed_at,duration_seconds',
+        project_id: `in.(${chunk.join(',')})`,
+        task_id: 'neq.',
+        completed_at: 'is.null'
+      })
+    )
+  );
+  return results.flat();
+}
+
+export async function listProjectTaskCountsByProjects(projectIds: string[]): Promise<Map<string, ProjectTaskCounts>> {
+  const normalizedIds = Array.from(new Set(projectIds.map((id) => id.trim()).filter(Boolean)));
+  if (normalizedIds.length === 0) return new Map();
+
+  const chunkSize = 150;
+  const chunks: string[][] = [];
+  for (let i = 0; i < normalizedIds.length; i += chunkSize) {
+    chunks.push(normalizedIds.slice(i, i + chunkSize));
+  }
+
+  const rows = (
+    await Promise.all(
+      chunks.map((chunk) =>
+        request<
+          Array<{
+            project_id: string;
+            total_count?: number | string | null;
+            running_count?: number | string | null;
+            success_count?: number | string | null;
+            failure_count?: number | string | null;
+            queued_count?: number | string | null;
+            other_count?: number | string | null;
+          }>
+        >('/project_task_counts', undefined, {
+          select: 'project_id,total_count,running_count,success_count,failure_count,queued_count,other_count',
+          project_id: `in.(${chunk.join(',')})`
+        })
+      )
+    )
+  ).flat();
+
+  const readCount = (value: unknown): number => {
+    const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
+    return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+  };
+
+  return new Map(
+    rows
+      .map((row) => [
+        String(row.project_id || '').trim(),
+        {
+          total: readCount(row.total_count),
+          running: readCount(row.running_count),
+          success: readCount(row.success_count),
+          failure: readCount(row.failure_count),
+          queued: readCount(row.queued_count),
+          other: readCount(row.other_count)
+        }
+      ] as const)
+      .filter(([projectId]) => Boolean(projectId))
+  );
+}
+
 export async function listProjectTaskStatesByTaskRowIds(taskRowIds: string[]): Promise<ProjectTaskRuntimeRow[]> {
   const idFilter = buildInFilter(taskRowIds);
   if (!idFilter) return [];
   return request<ProjectTaskRuntimeRow[]>('/project_tasks', undefined, {
     select: 'id,project_id,task_id,task_state,status_text,error_text,submitted_at,completed_at,duration_seconds',
     id: idFilter
+  });
+}
+
+export async function listProjectTaskStatesByTaskIds(taskIds: string[]): Promise<ProjectTaskRuntimeRow[]> {
+  const taskIdFilter = buildInFilter(taskIds);
+  if (!taskIdFilter) return [];
+  return request<ProjectTaskRuntimeRow[]>('/project_tasks', undefined, {
+    select: 'id,project_id,task_id,task_state,status_text,error_text,submitted_at,completed_at,duration_seconds',
+    task_id: taskIdFilter
   });
 }
 

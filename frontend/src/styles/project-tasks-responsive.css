@@ -3,8 +3,8 @@
     min-width: 1120px;
   }
 
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) th:nth-child(7),
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) td:nth-child(7) {
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-duration,
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-duration {
     display: none;
   }
 }
@@ -14,8 +14,8 @@
     min-width: 1000px;
   }
 
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) th:nth-child(8),
-  .task-table:not(.task-table--leadopt):not(.task-table--peptide) td:nth-child(8) {
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-seed,
+  .task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-seed {
     display: none;
   }
 }

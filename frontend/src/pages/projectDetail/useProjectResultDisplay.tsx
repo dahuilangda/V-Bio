@@ -2,7 +2,12 @@ import { useMemo, type ReactNode } from 'react';
 import { Ligand2DPreview } from '../../components/project/Ligand2DPreview';
 import { ensureStructureConfidenceColoringData } from '../../api/backendApi';
 import type { InputComponent } from '../../types/models';
-import type { MetricTone } from './projectMetrics';
+import {
+  readIpsaeDomMetric,
+  readLigandIpsaeMaxMetric,
+  resolvePreferredInterfaceMetricFromValues,
+  type MetricTone
+} from './projectMetrics';
 import {
   buildSnapshotCards,
   resolveAffinityResultLigandSmiles,
@@ -37,7 +42,6 @@ interface UseProjectResultDisplayOptions {
   snapshotPlddtTone: MetricTone;
   snapshotIptm: number | null;
   snapshotSelectedPairIptm: number | null;
-  snapshotIptmTone: MetricTone;
   snapshotIc50Um: number | null;
   snapshotIc50Error: { plus: number; minus: number } | null;
   snapshotIc50Tone: MetricTone;
@@ -112,7 +116,6 @@ export function useProjectResultDisplay({
   snapshotPlddtTone,
   snapshotIptm,
   snapshotSelectedPairIptm,
-  snapshotIptmTone,
   snapshotIc50Um,
   snapshotIc50Error,
   snapshotIc50Tone,
@@ -166,6 +169,18 @@ export function useProjectResultDisplay({
     ? resultChainShortLabelById.get(selectedResultLigandChainId) || selectedResultLigandChainId
     : 'Comp 1';
   const selectedResultPairLabel = `${selectedResultTargetLabel} ↔ ${selectedResultLigandLabel}`;
+  const snapshotIpsaeDom = useMemo(() => readIpsaeDomMetric(snapshotConfidence), [snapshotConfidence]);
+  const snapshotLigandIpsaeMax = useMemo(() => readLigandIpsaeMaxMetric(snapshotConfidence), [snapshotConfidence]);
+  const preferredInterfaceMetric = useMemo(
+    () =>
+      resolvePreferredInterfaceMetricFromValues({
+        pairIptm: snapshotSelectedPairIptm,
+        iptm: snapshotIptm,
+        ipsaeDom: snapshotIpsaeDom,
+        ligandIpsaeMax: snapshotLigandIpsaeMax
+      }),
+    [snapshotIptm, snapshotIpsaeDom, snapshotLigandIpsaeMax, snapshotSelectedPairIptm]
+  );
 
   const snapshotCards: Array<{ key: string; label: string; value: string; detail: string; tone: MetricTone }> = useMemo(
     () =>
@@ -175,9 +190,7 @@ export function useProjectResultDisplay({
             snapshotSelectedLigandChainPlddt,
             snapshotLigandMeanPlddt,
             snapshotPlddtTone,
-            snapshotIptm,
-            snapshotSelectedPairIptm,
-            snapshotIptmTone,
+            preferredInterfaceMetric,
             snapshotIc50Um,
             snapshotIc50Error,
             snapshotIc50Tone,
@@ -195,9 +208,7 @@ export function useProjectResultDisplay({
       snapshotSelectedLigandChainPlddt,
       snapshotLigandMeanPlddt,
       snapshotPlddtTone,
-      snapshotIptm,
-      snapshotSelectedPairIptm,
-      snapshotIptmTone,
+      preferredInterfaceMetric,
       snapshotIc50Um,
       snapshotIc50Error,
       snapshotIc50Tone,

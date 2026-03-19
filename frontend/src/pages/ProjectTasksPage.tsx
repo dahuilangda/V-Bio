@@ -97,6 +97,7 @@ export function ProjectTasksPage() {
     structureSearchMatches,
     structureSearchLoading,
     structureSearchError,
+    visibleMetricColumns,
     pageSize,
     page,
     advancedFilterCount,
@@ -117,6 +118,7 @@ export function ProjectTasksPage() {
     setMaxPae,
     setStructureSearchMode,
     setStructureSearchQuery,
+    setVisibleMetricColumns,
     setPageSize,
     setPage,
     clearAdvancedFilters,
@@ -309,6 +311,8 @@ export function ProjectTasksPage() {
           structureSearchLoading={structureSearchLoading}
           structureSearchError={structureSearchError}
           structureSearchMatches={structureSearchMatches}
+          visibleMetricColumns={visibleMetricColumns}
+          onVisibleMetricColumnsChange={setVisibleMetricColumns}
           onClearAdvancedFilters={clearAdvancedFilters}
           sortKey={sortKey}
           sortMark={sortMark}

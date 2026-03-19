@@ -1,4 +1,4 @@
-import type { MetricTone } from './projectMetrics';
+import type { MetricTone, PreferredInterfaceMetric } from './projectMetrics';
 import { readFirstNonEmptyStringMetric, readLigandSmilesFromMap } from './projectMetrics';
 import {
   readAlignedLigandAtomPlddtsFromConfidence,
@@ -20,9 +20,7 @@ export function buildSnapshotCards(params: {
   snapshotSelectedLigandChainPlddt: number | null;
   snapshotLigandMeanPlddt: number | null;
   snapshotPlddtTone: MetricTone;
-  snapshotIptm: number | null;
-  snapshotSelectedPairIptm: number | null;
-  snapshotIptmTone: MetricTone;
+  preferredInterfaceMetric: PreferredInterfaceMetric;
   snapshotIc50Um: number | null;
   snapshotIc50Error: { plus: number; minus: number } | null;
   snapshotIc50Tone: MetricTone;
@@ -38,9 +36,7 @@ export function buildSnapshotCards(params: {
     snapshotSelectedLigandChainPlddt,
     snapshotLigandMeanPlddt,
     snapshotPlddtTone,
-    snapshotIptm,
-    snapshotSelectedPairIptm,
-    snapshotIptmTone,
+    preferredInterfaceMetric,
     snapshotIc50Um,
     snapshotIc50Error,
     snapshotIc50Tone,
@@ -66,14 +62,18 @@ export function buildSnapshotCards(params: {
       tone: snapshotPlddtTone
     },
     {
-      key: 'iptm',
-      label: 'ipTM',
-      value: snapshotIptm === null ? '-' : snapshotIptm.toFixed(4),
+      key: preferredInterfaceMetric.source === 'ipsae' ? 'ipsae' : 'iptm',
+      label: preferredInterfaceMetric.label,
+      value: preferredInterfaceMetric.value === null ? '-' : preferredInterfaceMetric.value.toFixed(4),
       detail:
-        snapshotSelectedPairIptm !== null && selectedResultTargetLabel !== selectedResultLigandLabel
+        preferredInterfaceMetric.kind === 'ligand_ipsae'
+          ? 'Best ligand contact IPSAE'
+          : preferredInterfaceMetric.kind === 'ipsae_dom'
+            ? 'Interface IPSAE'
+            : preferredInterfaceMetric.pairIptm !== null && selectedResultTargetLabel !== selectedResultLigandLabel
           ? selectedResultPairLabel
-          : 'Interface conf',
-      tone: snapshotIptmTone
+            : 'Interface conf',
+      tone: preferredInterfaceMetric.tone
     },
     {
       key: 'ic50',

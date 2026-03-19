@@ -1,243 +1,197 @@
 # Boltz2Score
 
-Score existing structures with the Boltz-2 confidence head **without running diffusion structure prediction**. This mirrors the AF3Score idea of “prediction stripped, scoring only” by setting `skip_run_structure=True` and feeding your input coordinates directly into the confidence module.
+Boltz2Score scores an existing protein-ligand complex with the Boltz-2 confidence head and optionally performs pose-conditioned local optimization.
 
-## What it does
+The main entrypoint is `boltz2score.py` with four modes:
 
-- Parses input PDB/mmCIF structures into Boltz2 `StructureV2` records.
-- Runs the Boltz2 trunk + confidence head **only** (no diffusion sampling).
-- Writes confidence summaries (`confidence_*.json`) and a copy of the structure with pLDDT in B‑factors (optional output format).
+- `score`: confidence scoring only
+- `pose`: minimal-drift local optimization around the input pose
+- `refine`: stronger local optimization with a balance between pose retention and interface quality
+- `interface`: the loosest optimization mode, biased toward interface improvement
 
-## Requirements
-
-You need the Boltz2 cache assets:
-
-- `ccd.pkl`
-- `mols/` directory
-- `boltz2_conf.ckpt`
-
-By default the scripts use `BOLTZ_CACHE` or `~/.boltz` (same as Boltz CLI).
-
-## Installation
-
-### Standalone install
+## Install
 
 ```bash
-cd /path/to/Boltz2Score
-
-# 1) Create isolated env
+cd /data/Boltz2Score
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-
-# 2) Install runtime deps
-pip install "boltz[cuda]"
+pip install -r requirements.txt
 ```
 
-If your machine has no CUDA GPU, replace the last line with:
+Optional CUDA build:
 
 ```bash
-pip install boltz
+pip install --upgrade "boltz[cuda]"
 ```
 
-Then prepare Boltz cache assets (required):
+Required Boltz cache assets under `BOLTZ_CACHE` or `~/.boltz`:
+
+- `ccd.pkl`
+- `mols/`
+- `boltz2_conf.ckpt`
+
+Optional affinity assets:
+
+- `boltz2_aff.ckpt`
+
+## Quick Start
+
+### Score only
 
 ```bash
-export BOLTZ_CACHE=/path/to/boltz_cache
-mkdir -p "$BOLTZ_CACHE"
-# Put these files under $BOLTZ_CACHE:
-#   ccd.pkl
-#   mols/
-#   boltz2_conf.ckpt
+python boltz2score.py \
+  --protein_file data/cdk8/5hnb-chainA-prepared.pdb \
+  --ligand_file data/cdk8/ligands.sdf \
+  --output_dir results/cdk8_score \
+  --compute_ipsae
 ```
 
-After that, run scripts directly from the standalone directory, e.g.:
+### Pose optimization
 
 ```bash
-python boltz2score.py --input /path/to/structure.pdb --output_dir /path/to/out
+python boltz2score.py \
+  --mode pose \
+  --protein_file data/cdk8/5hnb-chainA-prepared.pdb \
+  --ligand_file data/cdk8/ligands.sdf \
+  --output_dir results/cdk8_pose \
+  --compute_ipsae
 ```
 
-### Optional: enable affinity scoring
-
-Affinity requires an additional external module and checkpoint. No extra service setup is required for single-process lightweight usage.
-
-1) Add `affinity/` module beside this project (or on `PYTHONPATH`):
-
-- Source: https://github.com/dahuilangda/V-Bio/tree/main/affinity
-- Expected layout example:
-
-```text
-<workspace>/
-  Boltz2Score/
-    boltz2score.py
-    prepare_boltz2score_inputs.py
-    run_boltz2score.py
-  affinity/
-    __init__.py
-    main.py
-    boltzina/
-```
-
-2) Put affinity checkpoint into cache:
+### Refine optimization
 
 ```bash
-export BOLTZ_CACHE=/path/to/boltz_cache
-# Required for affinity:
-#   $BOLTZ_CACHE/boltz2_aff.ckpt
+python boltz2score.py \
+  --mode refine \
+  --protein_file data/cdk8/5hnb-chainA-prepared.pdb \
+  --ligand_file data/cdk8/ligands.sdf \
+  --output_dir results/cdk8_refine \
+  --compute_ipsae
 ```
 
-3) Run one-step scoring with chain flags to trigger affinity:
+### Interface optimization
+
+```bash
+python boltz2score.py \
+  --mode interface \
+  --protein_file data/cdk8/5hnb-chainA-prepared.pdb \
+  --ligand_file data/cdk8/ligands.sdf \
+  --output_dir results/cdk8_interface \
+  --compute_ipsae
+```
+
+### Affinity prediction
+
+```bash
+python boltz2score.py \
+  --protein_file data/cdk8/5hnb-chainA-prepared.pdb \
+  --ligand_file data/cdk8/ligands.sdf \
+  --output_dir results/cdk8_affinity \
+  --enable_affinity \
+  --target_chain A \
+  --ligand_chain L
+```
+
+Use `--affinity_refine` if you want the official Boltz2 affinity head to run on a refined pre-affinity structure instead of the default fast path.
+Affinity runs only when you explicitly pass `--enable_affinity` together with `--target_chain` and `--ligand_chain`, and is currently supported only for protein-small-molecule complexes. Other input types still run normal Boltz2Score scoring/refinement, but skip affinity.
+
+## Inputs
+
+- Use either `--input <complex.pdb/mmcif>` or `--protein_file + --ligand_file`.
+- Optimization modes currently require separate-input mode with an SDF ligand file.
+- Multi-molecule SDF is supported. Each valid ligand becomes one record directory.
+- Use `--ligand_indices 1,3-5` to run only selected 1-based ligand entries from a multi-molecule SDF.
+- If ligand SMILES are not provided, RDKit derives canonical SMILES from the ligand structure.
+- With `--compute_ipsae`, output is forced to mmCIF.
+
+Optional ligand SMILES override:
 
 ```bash
 python boltz2score.py \
   --input /path/to/complex.pdb \
   --output_dir /path/to/out \
-  --target_chain A \
-  --ligand_chain B
+  --ligand_smiles_map '{"L:LIG":"CC1=CC=CC=C1"}'
 ```
 
-If `affinity/` or `boltz2_aff.ckpt` is missing, the script keeps confidence scoring and skips affinity with a warning.
+Accepted `ligand_smiles_map` keys:
 
-## Usage
+- `chain`
+- `chain:resname`
 
-### One-step (single PDB/mmCIF)
+## Output Layout
 
-```bash
-python boltz2score.py \
-  --input /path/to/structure.pdb \
-  --output_dir /path/to/boltz2score_out
-```
+Each record directory contains:
 
-Optional flags:
+- `best_model.cif`
+- `best_confidence.json`
+- `affinity_<record>.json` when affinity is enabled
+- `best_ipsae.json` when `--compute_ipsae` is enabled
+- per-sample `confidence_<record>_model_*.json`
+- per-sample structure files
+- per-sample `ipsae_<record>_model_*.json` when IPSAE is enabled
 
-- `--cache /path/to/boltz_cache`
-- `--checkpoint /path/to/boltz2_conf.ckpt`
-- `--output_format mmcif|pdb`
-- `--num_workers 0` (default)
-- `--keep_work` (keep intermediates)
-- `--target_chain A --ligand_chain B` (enable affinity prediction)
+Ligand atom confidence is exposed in three explicit orders inside `confidence_*.json`:
 
-### 1) Prepare processed inputs
+- input heavy-atom order: `ligand_atom_plddts`, `ligand_atom_names`
+- RDKit traversal order: `ligand_atom_smiles_order_plddts`, `ligand_atom_smiles_order_names`
+- Boltz writer/model order: `ligand_atom_model_order_plddts`, `ligand_atom_model_order_names`
 
-```bash
-python prepare_boltz2score_inputs.py \
-  --input_dir /path/to/pdbs \
-  --output_dir /path/to/boltz2score_job
-```
+## Mode Summary
 
-This creates:
+### `score`
 
-```
-/path/to/boltz2score_job/processed/
-  structures/*.npz
-  records/*.json
-  manifest.json
-  msa/
-```
+- No diffusion resampling
+- Best baseline for pure confidence scoring
 
-### 1.1) Prepare processed inputs with MSA (ColabFold server)
+### `pose`
 
-If you want Boltz2Score to use MSA, enable MSA generation during the prepare step:
+- Most conservative optimization mode
+- Best when the input ligand orientation is already plausible
+- Default choice for docking-pose cleanup
 
-```bash
-python prepare_boltz2score_inputs.py \
-  --input_dir /path/to/pdbs \
-  --output_dir /path/to/boltz2score_job \
-  --use_msa_server \
-  --msa_server_url https://api.colabfold.com \
-  --msa_pairing_strategy greedy \
-  --max_msa_seqs 8192 \
-  --msa_cache_dir /tmp/boltz_msa_cache
-```
+### `refine`
 
-You can also point to a local ColabFold server, for example:
+- Middle ground between structure retention and interface adjustment
+- Useful when pose quality is uncertain
 
-```bash
-python prepare_boltz2score_inputs.py \
-  --input_dir /path/to/pdbs \
-  --output_dir /path/to/boltz2score_job \
-  --use_msa_server \
-  --msa_server_url http://localhost:8080
-```
+### `interface`
 
-For local deployment, run any ColabFold-compatible API service and pass its URL via `--msa_server_url`.
+- Most permissive optimization mode
+- Favors interface-focused confidence more than strict pose retention
 
-Quick API health check for local server:
+## IPSAE
 
-```bash
-curl -X POST \
-  -d $'q=>query\nMKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQANL' \
-  -d 'mode=colabfold' \
-  http://localhost:8080/ticket/msa
-```
+Reported IPSAE-related fields include:
 
-Equivalent env-style setup:
+- `ipsae_dom`: raw interface-wide IPSAE
+- `ligand_ipsae_max`: strongest local ligand-contact IPSAE
 
-```bash
-export MSA_SERVER_URL=http://localhost:8080
-python prepare_boltz2score_inputs.py \
-  --input_dir /path/to/pdbs \
-  --output_dir /path/to/boltz2score_job \
-  --use_msa_server
-```
+## Advanced Flags
 
-When `--use_msa_server` is on:
+Most users should stay with `--mode` and `--compute_ipsae`.
 
-- Protein chains get MSA ids in `processed/records/*.json` (`msa_id` is no longer `-1`).
-- Processed MSA files are written to `processed/msa/*.npz` and consumed directly by `run_boltz2score.py`.
-- Raw server-returned CSV files are kept under `processed/msa/<target>_raw/`.
-- Sequence-level `.a3m` cache is stored in `--msa_cache_dir` (default `/tmp/boltz_msa_cache`) as `msa_<md5>.a3m`.
+Lower-level refinement flags are still available for method work:
 
+- `--structure_refine`
+- `--anchored_refine`
+- `--reference_from_input`
+- `--sampling_init_from_input`
+- `--sigma_max`
+- `--noise_scale`
+- `--gamma_0`
+- `--gamma_min`
 
-### 2) Run score‑only inference
+## Repository Layout
 
-```bash
-python run_boltz2score.py \
-  --processed_dir /path/to/boltz2score_job/processed \
-  --output_dir /path/to/boltz2score_job/predictions
-```
-
-Optional flags:
-
-- `--checkpoint /path/to/boltz2_conf.ckpt`
-- `--cache /path/to/boltz_cache`
-- `--output_format mmcif|pdb`
-- `--recycling_steps` (default: `7` in score-only mode, `3` with `--structure_refine`)
-
-### 3) Collect metrics into CSV
-
-```bash
-python collect_boltz2score_metrics.py \
-  --pred_dir /path/to/boltz2score_job/predictions \
-  --output_csv /path/to/boltz2score_job/boltz2score_metrics.csv
-```
+- `core/`: orchestration, CLI, input prep, inference, and result handling
+- `utils/`: ligand handling, diagnostics, writer compatibility, and refinement helpers
+- `metrics/`: metric calculation modules
+- `tools/`: helper scripts
+- `data/`: benchmark and plotting scripts
 
 ## Notes
 
-- The output structure is written from the **featurized coordinates**, which are centered by the featurizer. The geometry is preserved, but absolute position is not. If you need the original coordinates, keep the input PDB/mmCIF alongside the confidence JSON.
-- If `prepare_boltz2score_inputs.py` is run without `--use_msa_server`, Boltz2Score falls back to single-sequence dummy MSA behavior.
-- Affinity is optional and only available in `boltz2score.py` one-step mode with `--target_chain` + `--ligand_chain`. In standalone `Boltz2Score` copies, affinity may be unavailable unless the external `affinity` module and `boltz2_aff.ckpt` are also provided.
-
-## Outputs
-
-For each input ID, the output directory contains:
-
-```
-<ID>/
-  <ID>_model_0.cif (or .pdb)
-  confidence_<ID>_model_0.json
-  chain_map.json
-  affinity_<ID>.json (only if --target_chain and --ligand_chain are set)
-```
-
-The confidence JSON includes:
-
-- `ptm`, `iptm`, `complex_plddt`, `complex_pde`, `confidence_score`, etc.
-- `pair_chains_iptm` for chain‑pair scores
-
-## Acknowledgements
-
-Thanks to the following works for their inspiration and guidance:
-
-- https://pubs.acs.org/doi/10.1021/acs.jcim.5c00653
-- https://openreview.net/forum?id=OwtEQsd2hN
+- Boltz2 confidence scores are not experimental affinity predictions.
+- Affinity prediction uses the official Boltz2 affinity checkpoint and requires `boltz2_aff.ckpt` in the Boltz cache.
+- Flexible optimization is an engineering layer on top of Boltz2, not the original Boltz2 inference workflow.
+- If Numba cache permissions are problematic, set `NUMBA_CACHE_DIR=/tmp/numba_cache`.

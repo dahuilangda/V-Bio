@@ -168,13 +168,16 @@ fi
 
 if [[ "${GPU_MODE}" == "caps" ]]; then
   echo "==> GPU capability workers"
-  compose_force_recreate "${GPU_CAPS_COMPOSE}" "${GPU_CAPS_ENV}" \
+  docker compose \
+    -f "${GPU_CAPS_COMPOSE}" \
+    --env-file "${GPU_CAPS_ENV}" \
     --profile boltz2 \
     --profile boltz2score \
     --profile affinity \
     --profile alphafold3 \
     --profile protenix \
-    --profile pocketxmol
+    --profile pocketxmol \
+    up -d --build --force-recreate
 else
   echo "==> Unified GPU worker"
   compose_force_recreate "${GPU_COMPOSE}" "${GPU_ENV}"

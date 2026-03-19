@@ -3,6 +3,7 @@ export type MoleculeType = 'protein' | 'dna' | 'rna' | 'ligand';
 export type LigandInputMethod = 'smiles' | 'ccd' | 'jsme';
 export type PredictionConstraintType = 'contact' | 'bond' | 'pocket';
 export type PeptideDesignMode = 'linear' | 'cyclic' | 'bicyclic';
+export type AffinityScoringMode = 'score' | 'pose' | 'refine' | 'interface';
 
 export interface InputComponent {
   id: string;
@@ -72,6 +73,7 @@ export interface PredictionProperties {
 
 export interface PredictionOptions {
   seed: number | null;
+  affinityMode?: AffinityScoringMode;
   peptideDesignMode?: PeptideDesignMode;
   peptideBinderLength?: number;
   peptideUseInitialSequence?: boolean;
@@ -327,6 +329,8 @@ export interface AffinitySubmitInput {
   ligandFile?: File | null;
   backend?: string;
   seed?: number | null;
+  mode?: AffinityScoringMode;
+  computeIpsae?: boolean;
   enableAffinity: boolean;
   ligandSmiles?: string;
   targetChainIds?: string[];
