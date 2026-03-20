@@ -19,6 +19,7 @@ import {
   readPairIptmForChains,
   resolvePreferredInterfaceMetricFromValues
 } from '../../../../pages/projectDetail/projectMetrics';
+import { buildTaskRuntimeFailureMessage } from '../../../../utils/taskRuntime';
 import type { ParsedResultBundle } from '../../../../types/models';
 import type {
   LeadOptDirection as Direction,
@@ -167,6 +168,7 @@ export interface LeadOptPredictionRecord {
   structureText?: string;
   structureFormat?: 'cif' | 'pdb';
   structureName?: string;
+  resultBundleHydrated?: boolean;
   error: string;
   updatedAt: number;
 }
@@ -267,6 +269,7 @@ function normalizePredictionRecord(value: unknown): LeadOptPredictionRecord | nu
   const hasExactRenderContract = ligandRenderSmiles.length > 0 && ligandRenderAtomPlddts.length > 0;
   const hasResolvedMetrics = pairIptm !== null || pairPae !== null || ligandPlddt !== null || ligandAtomPlddts.length > 0;
   const pairIptmResolvedRaw = raw.pairIptmResolved ?? raw.pair_iptm_resolved;
+  const resultBundleHydratedRaw = raw.resultBundleHydrated ?? raw.result_bundle_hydrated;
   return {
     taskId,
     state: normalizedState,
@@ -296,6 +299,7 @@ function normalizePredictionRecord(value: unknown): LeadOptPredictionRecord | nu
           structureName
         }
       : {}),
+    resultBundleHydrated: resultBundleHydratedRaw === true || structureText.trim().length > 0,
     error: readText(raw.error),
     updatedAt: Number.isFinite(Number(raw.updatedAt ?? raw.updated_at))
       ? Number(raw.updatedAt ?? raw.updated_at)
@@ -374,7 +378,6 @@ function mapPredictionRuntimeState(raw: unknown): PredictionState | null {
 function inferPredictionRuntimeStateFromStatusPayload(status: { state?: unknown; info?: unknown }): PredictionState | null {
   const direct = mapPredictionRuntimeState(status?.state);
   if (direct === 'SUCCESS' || direct === 'FAILURE') return direct;
-  const pendingLike = direct === 'QUEUED' || direct === 'RUNNING';
   const info = asRecord(status?.info);
   const resultFile = readText(info.result_file || info.resultFile).trim();
   if (resultFile) return 'SUCCESS';
@@ -389,7 +392,6 @@ function inferPredictionRuntimeStateFromStatusPayload(status: { state?: unknown;
       statusText.includes('does not exist') ||
       statusText.includes('not found')
     ) {
-      if (pendingLike) return direct;
       return 'FAILURE';
     }
     if (statusText.includes('failed') || statusText.includes('error') || statusText.includes('timeout')) {
@@ -435,7 +437,7 @@ function resolveNonRegressiveRuntimeState(
   const currentState = normalizePredictionStateToken(currentStateInput);
   if (!currentState) return incomingState;
   if (currentState === 'RUNNING' && incomingState === 'QUEUED') return 'RUNNING';
-  if ((currentState === 'SUCCESS' || currentState === 'FAILURE') && (incomingState === 'QUEUED' || incomingState === 'RUNNING')) {
+  if (currentState === 'SUCCESS' && (incomingState === 'QUEUED' || incomingState === 'RUNNING')) {
     return currentState;
   }
   return incomingState;
@@ -516,6 +518,7 @@ function mergePredictionRecordNonRegressive(
     structureText: readText(incoming.structureText).trim() ? incoming.structureText : current.structureText,
     structureFormat: readText(incoming.structureText).trim() ? incoming.structureFormat : current.structureFormat,
     structureName: readText(incoming.structureText).trim() ? incoming.structureName : current.structureName,
+    resultBundleHydrated: incoming.resultBundleHydrated === true || current.resultBundleHydrated === true,
     error: readText(incoming.error).trim() || current.error,
     pairIptmResolved:
       incoming.pairIptmResolved === true ||
@@ -597,6 +600,7 @@ function buildQueuedPredictionRecord(taskId: string, backend: string): LeadOptPr
     pairIptmResolved: false,
     ligandPlddt: null,
     ligandAtomPlddts: [],
+    resultBundleHydrated: false,
     error: '',
     updatedAt: Date.now()
   };
@@ -623,9 +627,20 @@ function hasHydratedPredictionVisualization(record: LeadOptPredictionRecord | nu
   return hasExactPredictionRenderContract(record);
 }
 
+function hasHydratedPredictionIpsae(record: LeadOptPredictionRecord | null | undefined): boolean {
+  if (!record) return false;
+  if (readText(record.interfaceMetricSource).trim().toLowerCase() !== 'ipsae') return false;
+  return typeof record.interfaceMetricValue === 'number' && Number.isFinite(record.interfaceMetricValue);
+}
+
 function hasHydratedPredictionResult(record: LeadOptPredictionRecord | null | undefined): boolean {
   if (!record) return false;
-  return hasResolvedPredictionMetrics(record) && hasHydratedPredictionVisualization(record);
+  return (
+    record.resultBundleHydrated === true &&
+    hasResolvedPredictionMetrics(record) &&
+    hasHydratedPredictionVisualization(record) &&
+    hasHydratedPredictionIpsae(record)
+  );
 }
 
 function shouldProbeTaskStatus(
@@ -704,6 +719,11 @@ function inferPendingRuntimeStateFromError(error: unknown): PredictionState {
     return 'QUEUED';
   }
   return 'RUNNING';
+}
+
+function isSyntheticStaleFailureMessage(error: unknown): boolean {
+  const message = readText(error).trim().toLowerCase();
+  return message.includes('runtime status became stale') || message.includes('stale after');
 }
 
 function extractPredictionMetricsFromStatusInfo(
@@ -797,7 +817,10 @@ function buildPendingPredictionEntries(
   return Object.entries(records)
     .filter(([, record]) => {
       const state = String(record.state || '').toUpperCase();
-      const shouldPoll = state === 'QUEUED' || state === 'RUNNING';
+      const shouldPoll =
+        state === 'QUEUED' ||
+        state === 'RUNNING' ||
+        (state === 'FAILURE' && isSyntheticStaleFailureMessage(record.error));
       if (!shouldPoll) return false;
       const taskId = readText(record.taskId).trim();
       return taskId.length > 0 && !taskId.startsWith('local:');
@@ -1524,7 +1547,10 @@ export function useLeadOptMmpQueryMachine({
                 delete predictionHydrationRetryTimerRef.current[predictionKey];
               }
               delete predictionHydrationRetryCountRef.current[predictionKey];
-              const errorText = readText(asRecord(status.info).error || asRecord(status.info).message || status.state);
+              const errorText = buildTaskRuntimeFailureMessage(
+                status as { state: string; info?: Record<string, unknown> },
+                'Prediction failed.'
+              );
               setPredictionBySmiles((prev) => ({
                 ...prev,
                 [predictionKey]: {
@@ -1673,7 +1699,10 @@ export function useLeadOptMmpQueryMachine({
                 delete referenceHydrationRetryTimerRef.current[backendKey];
               }
               delete referenceHydrationRetryCountRef.current[backendKey];
-              const errorText = readText(asRecord(status.info).error || asRecord(status.info).message || status.state);
+              const errorText = buildTaskRuntimeFailureMessage(
+                status as { state: string; info?: Record<string, unknown> },
+                'Prediction failed.'
+              );
               setReferencePredictionByBackend((prev) => ({
                 ...prev,
                 [backendKey]: {
@@ -1789,6 +1818,7 @@ export function useLeadOptMmpQueryMachine({
                         structureName: resultPayload.structureName
                       }
                     : {}),
+                  resultBundleHydrated: true,
                   error: '',
                   updatedAt: Date.now()
                 }
@@ -1919,6 +1949,7 @@ export function useLeadOptMmpQueryMachine({
                         structureName: resultPayload.structureName
                       }
                     : {}),
+                  resultBundleHydrated: true,
                   error: '',
                   updatedAt: Date.now()
                 }
@@ -2910,7 +2941,10 @@ export function useLeadOptMmpQueryMachine({
           return nextRecord;
         }
         if (runtimeState === 'FAILURE') {
-          const errorText = readText(asRecord(status.info).error || asRecord(status.info).message || status.state);
+          const errorText = buildTaskRuntimeFailureMessage(
+            status as { state: string; info?: Record<string, unknown> },
+            'Prediction failed.'
+          );
           const nextRecord: LeadOptPredictionRecord = {
             ...existing,
             state: 'FAILURE',
@@ -2951,6 +2985,7 @@ export function useLeadOptMmpQueryMachine({
                 structureName: resultPayload.structureName
               }
             : {}),
+          resultBundleHydrated: true,
           error: '',
           updatedAt: Date.now()
         };
@@ -3057,7 +3092,10 @@ export function useLeadOptMmpQueryMachine({
           return nextRecord;
         }
         if (runtimeState === 'FAILURE') {
-          const errorText = readText(asRecord(status.info).error || asRecord(status.info).message || status.state);
+          const errorText = buildTaskRuntimeFailureMessage(
+            status as { state: string; info?: Record<string, unknown> },
+            'Prediction failed.'
+          );
           const nextRecord: LeadOptPredictionRecord = {
             ...existing,
             state: 'FAILURE',
@@ -3098,6 +3136,7 @@ export function useLeadOptMmpQueryMachine({
                 structureName: resultPayload.structureName
               }
             : {}),
+          resultBundleHydrated: true,
           error: '',
           updatedAt: Date.now()
         };

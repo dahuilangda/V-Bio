@@ -166,7 +166,7 @@ export function ProjectTasksWorkspace({
 
   useEffect(() => {
     if (compactMetricsView) return;
-    if (sortKey === 'submitted' || sortKey === 'backend' || sortKey === 'seed' || sortKey === 'duration') return;
+    if (sortKey === 'submitted' || sortKey === 'backend' || sortKey === 'seed' || sortKey === 'mode') return;
     if (visibleMetricColumns.includes(sortKey as TaskMetricColumnKey)) return;
     onNormalizeSortKey('submitted');
   }, [compactMetricsView, onNormalizeSortKey, sortKey, visibleMetricColumns]);

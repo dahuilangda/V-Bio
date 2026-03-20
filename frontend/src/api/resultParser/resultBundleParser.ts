@@ -54,8 +54,75 @@ function parseJsonObject(text: string | null | undefined): Record<string, unknow
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
     return parsed as Record<string, unknown>;
   } catch {
-    return null;
+    const normalized = normalizeNonFiniteJsonLiterals(text);
+    if (normalized === text) return null;
+    try {
+      const parsed = JSON.parse(normalized) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      return parsed as Record<string, unknown>;
+    } catch {
+      return null;
+    }
   }
+}
+
+function isJsonLiteralBoundary(value: string | undefined): boolean {
+  return !value || /\s|[,:{}\[\]]/.test(value);
+}
+
+function normalizeNonFiniteJsonLiterals(text: string): string {
+  let out = '';
+  let inString = false;
+  let escaping = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      out += char;
+      if (escaping) {
+        escaping = false;
+      } else if (char === '\\') {
+        escaping = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      out += char;
+      continue;
+    }
+    const previous = index > 0 ? text[index - 1] : undefined;
+    if (
+      text.startsWith('-Infinity', index) &&
+      isJsonLiteralBoundary(previous) &&
+      isJsonLiteralBoundary(text[index + '-Infinity'.length])
+    ) {
+      out += 'null';
+      index += '-Infinity'.length - 1;
+      continue;
+    }
+    if (
+      text.startsWith('Infinity', index) &&
+      isJsonLiteralBoundary(previous) &&
+      isJsonLiteralBoundary(text[index + 'Infinity'.length])
+    ) {
+      out += 'null';
+      index += 'Infinity'.length - 1;
+      continue;
+    }
+    if (
+      text.startsWith('NaN', index) &&
+      isJsonLiteralBoundary(previous) &&
+      isJsonLiteralBoundary(text[index + 'NaN'.length])
+    ) {
+      out += 'null';
+      index += 'NaN'.length - 1;
+      continue;
+    }
+    out += char;
+  }
+  return out;
 }
 
 function choosePreferredPath(candidates: string[]): string | null {

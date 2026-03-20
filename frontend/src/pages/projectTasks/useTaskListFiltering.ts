@@ -528,6 +528,7 @@ export function useTaskListFiltering(
         row.backendValue,
         row.workflowLabel,
         backendLabel(row.backendValue),
+        row.modeValue,
         task.status_text,
         task.error_text,
         task.structure_name,
@@ -564,11 +565,12 @@ export function useTaskListFiltering(
       if (sortKey === 'pae') {
         return compareNullableNumber(a.metrics.pae, b.metrics.pae, sortDirection === 'asc');
       }
-      if (sortKey === 'duration') {
-        return compareNullableNumber(a.durationValue, b.durationValue, sortDirection === 'asc');
-      }
       if (sortKey === 'seed') {
         return compareNullableNumber(a.task.seed, b.task.seed, sortDirection === 'asc');
+      }
+      if (sortKey === 'mode') {
+        const result = a.modeValue.localeCompare(b.modeValue);
+        return sortDirection === 'asc' ? result : -result;
       }
       const result = a.backendValue.localeCompare(b.backendValue);
       return sortDirection === 'asc' ? result : -result;

@@ -27,6 +27,28 @@ _PROTENIX_SUMMARY_SAMPLE_RE = re.compile(r'_summary_confidence_sample_(\d+)\.jso
 _PEPTIDE_DESIGN_RANK_RE = re.compile(r'(?:^|/)rank_(\d+)(?:_|\.|$)', re.IGNORECASE)
 
 
+def _normalize_json_value_for_output(value: Any) -> Any:
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): _normalize_json_value_for_output(nested) for key, nested in value.items()}
+    if isinstance(value, list):
+        return [_normalize_json_value_for_output(item) for item in value]
+    return value
+
+
+def _sanitize_json_bytes(payload: bytes) -> bytes:
+    try:
+        parsed = json.loads(payload)
+    except Exception:
+        return payload
+    try:
+        normalized = _normalize_json_value_for_output(parsed)
+        return (json.dumps(normalized, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    except Exception:
+        return payload
+
+
 class ResultArchiveService:
     def __init__(self, *, app, celery_app, logger, get_redis_client_fn: Callable[[], Any]):
         self.app = app
@@ -543,13 +565,15 @@ class ResultArchiveService:
                         payload = src_zip.read(member_name)
                     except KeyError:
                         continue
+                    if member_name.lower().endswith('.json'):
+                        payload = _sanitize_json_bytes(payload)
                     out_zip.writestr(member_name, payload)
             out_buffer.seek(0)
             return out_buffer.getvalue()
 
     def build_or_get_view_archive(self, source_zip_path: str) -> str:
         src_stat = os.stat(source_zip_path)
-        cache_schema_version = 'view-v8-peptide-design-results'
+        cache_schema_version = 'view-v9-json-sanitized'
         cache_seed = f'{cache_schema_version}|{source_zip_path}|{int(src_stat.st_mtime_ns)}|{src_stat.st_size}'
         cache_key = hashlib.sha256(cache_seed.encode('utf-8')).hexdigest()[:24]
         cache_dir = Path('/tmp/boltz_result_view_cache')

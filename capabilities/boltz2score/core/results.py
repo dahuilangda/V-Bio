@@ -1,17 +1,32 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 from pathlib import Path
-
-from boltz.data.types import StructureV2
 
 from metrics.ligand_ipsae import compute_ligand_ipsae_from_files
 from utils.result_utils import BEST_CONFIDENCE_NAME, BEST_IPSAE_NAME, BEST_STRUCTURE_NAMES, confidence_model_stem
 
 
+def _normalize_json_value(value):
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): _normalize_json_value(nested) for key, nested in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_json_value(item) for item in value]
+    return value
+
+
+def _write_json(path: Path, payload) -> None:
+    path.write_text(json.dumps(_normalize_json_value(payload), indent=2, allow_nan=False) + "\n")
+
+
 def write_chain_map(processed_dir: Path, output_dir: Path, record_id: str) -> None:
     try:
+        from boltz.data.types import StructureV2
+
         structure = StructureV2.load(
             processed_dir / "structures" / f"{record_id}.npz"
         )
@@ -22,7 +37,7 @@ def write_chain_map(processed_dir: Path, output_dir: Path, record_id: str) -> No
         }
         chain_map_path = output_dir / record_id / "chain_map.json"
         chain_map_path.parent.mkdir(parents=True, exist_ok=True)
-        chain_map_path.write_text(json.dumps(chain_map, indent=2))
+        _write_json(chain_map_path, chain_map)
     except Exception as exc:  # noqa: BLE001
         print(f"[Warning] Failed to write chain map: {exc}")
 
@@ -62,11 +77,11 @@ def compute_and_write_ipsae(
         )
 
         ipsae_path = result_dir / f"ipsae_{model_stem}.json"
-        ipsae_path.write_text(json.dumps(result, indent=2) + "\n")
+        _write_json(ipsae_path, result)
 
         payload = json.loads(conf_path.read_text())
         payload.update(result)
-        conf_path.write_text(json.dumps(payload, indent=2))
+        _write_json(conf_path, payload)
 
 
 def rerank_diffusion_samples(
@@ -198,7 +213,7 @@ def rerank_diffusion_samples(
         "models": scored_rows,
     }
     summary_path = result_dir / f"best_sample_{record_id}.json"
-    summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+    _write_json(summary_path, summary)
 
     _write_best_aliases(
         structure_path=Path(best_row["structure_path"]),

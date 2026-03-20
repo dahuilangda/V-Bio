@@ -772,18 +772,123 @@ from public.project_tasks;
 
 drop view if exists public.project_task_counts;
 create or replace view public.project_task_counts as
+with normalized as (
+  select
+    project_id,
+    upper(coalesce(task_state, '')) as normalized_task_state,
+    greatest(
+      0,
+      coalesce(
+        nullif(properties->'lead_opt_state'->'prediction_summary'->>'total', '')::bigint,
+        nullif(properties->'lead_opt_list'->'prediction_summary'->>'total', '')::bigint,
+        0
+      )
+    ) as lead_opt_total,
+    greatest(
+      0,
+      coalesce(
+        nullif(properties->'lead_opt_state'->'prediction_summary'->>'running', '')::bigint,
+        nullif(properties->'lead_opt_list'->'prediction_summary'->>'running', '')::bigint,
+        0
+      )
+    ) as lead_opt_running,
+    greatest(
+      0,
+      coalesce(
+        nullif(properties->'lead_opt_state'->'prediction_summary'->>'queued', '')::bigint,
+        nullif(properties->'lead_opt_list'->'prediction_summary'->>'queued', '')::bigint,
+        0
+      )
+    ) as lead_opt_queued,
+    greatest(
+      0,
+      coalesce(
+        nullif(properties->'lead_opt_state'->'prediction_summary'->>'success', '')::bigint,
+        nullif(properties->'lead_opt_list'->'prediction_summary'->>'success', '')::bigint,
+        0
+      )
+    ) as lead_opt_success,
+    greatest(
+      0,
+      coalesce(
+        nullif(properties->'lead_opt_state'->'prediction_summary'->>'failure', '')::bigint,
+        nullif(properties->'lead_opt_list'->'prediction_summary'->>'failure', '')::bigint,
+        0
+      )
+    ) as lead_opt_failure
+  from public.project_tasks
+)
 select
   project_id,
-  count(*)::bigint as total_count,
-  count(*) filter (where upper(coalesce(task_state, '')) = 'RUNNING')::bigint as running_count,
-  count(*) filter (where upper(coalesce(task_state, '')) = 'SUCCESS')::bigint as success_count,
-  count(*) filter (where upper(coalesce(task_state, '')) = 'FAILURE')::bigint as failure_count,
-  count(*) filter (where upper(coalesce(task_state, '')) = 'QUEUED')::bigint as queued_count,
-  count(*) filter (
-    where upper(coalesce(task_state, '')) not in ('RUNNING', 'SUCCESS', 'FAILURE', 'QUEUED')
+  sum(
+    case
+      when lead_opt_total > 0 then lead_opt_total
+      else 1
+    end
+  )::bigint as total_count,
+  sum(
+    case
+      when lead_opt_total > 0 then 0
+      else 0
+    end
+  )::bigint as running_count,
+  sum(
+    case
+      when lead_opt_total > 0 then lead_opt_success
+      when normalized_task_state = 'SUCCESS' then 1
+      else 0
+    end
+  )::bigint as success_count,
+  sum(
+    case
+      when lead_opt_total > 0 then lead_opt_failure
+      when normalized_task_state = 'FAILURE' then 1
+      else 0
+    end
+  )::bigint as failure_count,
+  sum(
+    case
+      when lead_opt_total > 0 then greatest(lead_opt_total - lead_opt_success - lead_opt_failure, 0)
+      when normalized_task_state in ('QUEUED', 'RUNNING') then 1
+      else 0
+    end
+  )::bigint as queued_count,
+  sum(
+    case
+      when lead_opt_total > 0 then greatest(
+        lead_opt_total - lead_opt_success - lead_opt_failure - greatest(lead_opt_total - lead_opt_success - lead_opt_failure, 0),
+        0
+      )
+      when normalized_task_state not in ('SUCCESS', 'FAILURE', 'QUEUED', 'RUNNING') then 1
+      else 0
+    end
   )::bigint as other_count
-from public.project_tasks
+from normalized
 group by project_id;
+
+drop view if exists public.project_lead_opt_child_tasks;
+create or replace view public.project_lead_opt_child_tasks as
+with lead_opt_sources as (
+  select
+    id as project_task_id,
+    project_id,
+    coalesce(
+      nullif(properties->'lead_opt_state'->'prediction_by_smiles', '{}'::jsonb),
+      nullif(properties->'lead_opt_list'->'prediction_by_smiles', '{}'::jsonb),
+      nullif(confidence->'lead_opt_mmp'->'prediction_by_smiles', '{}'::jsonb),
+      '{}'::jsonb
+    ) as prediction_by_smiles
+  from public.project_tasks
+)
+select
+  source.project_task_id,
+  source.project_id,
+  entry.key as prediction_key,
+  coalesce(entry.value->>'taskId', entry.value->>'task_id') as child_task_id,
+  upper(coalesce(entry.value->>'state', '')) as child_task_state
+from lead_opt_sources as source
+cross join lateral jsonb_each(source.prediction_by_smiles) as entry(key, value)
+where coalesce(entry.value->>'taskId', entry.value->>'task_id', '') <> '';
 
 create or replace function public.set_updated_at()
 returns trigger as $$
@@ -1069,4 +1174,5 @@ grant select, insert, update, delete on public.api_tokens to anon, authenticated
 grant select, insert, update, delete on public.api_token_usage to anon, authenticated, service_role;
 grant select on public.project_tasks_list to anon, authenticated, service_role;
 grant select on public.project_task_counts to anon, authenticated, service_role;
+grant select on public.project_lead_opt_child_tasks to anon, authenticated, service_role;
 grant select on public.api_token_usage_daily to anon, authenticated, service_role;

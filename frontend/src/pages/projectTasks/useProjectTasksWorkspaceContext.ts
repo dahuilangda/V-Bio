@@ -39,6 +39,23 @@ interface UseProjectTasksWorkspaceContextResult {
   backendOptions: string[];
 }
 
+function readAffinityModeValue(task: ProjectTask, workflowKey: string): string {
+  if (workflowKey !== 'affinity') return '';
+  const properties =
+    task.properties && typeof task.properties === 'object' && !Array.isArray(task.properties)
+      ? (task.properties as Record<string, unknown>)
+      : {};
+  const options =
+    properties.__vbio_input_options_v1 &&
+    typeof properties.__vbio_input_options_v1 === 'object' &&
+    !Array.isArray(properties.__vbio_input_options_v1)
+      ? (properties.__vbio_input_options_v1 as Record<string, unknown>)
+      : {};
+  const raw = String(options.affinityMode || '').trim().toLowerCase();
+  if (raw === 'pose' || raw === 'refine' || raw === 'interface') return raw;
+  return raw === 'score' ? 'score' : '';
+}
+
 export function useProjectTasksWorkspaceContext({
   project,
   tasks
@@ -156,10 +173,6 @@ export function useProjectTasksWorkspaceContext({
       }
 
       const submittedTs = new Date(task.submitted_at || task.created_at).getTime();
-      const durationValue =
-        typeof task.duration_seconds === 'number' && Number.isFinite(task.duration_seconds)
-          ? task.duration_seconds
-          : null;
       const resolvedWorkflow = resolveTaskWorkflowKey(task, project?.task_type || '');
       const workflowKey =
         resolvedWorkflow === 'affinity' ||
@@ -225,7 +238,7 @@ export function useProjectTasksWorkspaceContext({
         },
         submittedTs,
         backendValue: resolveTaskBackendValue(task, project?.backend || ''),
-        durationValue,
+        modeValue: readAffinityModeValue(task, workflowKey),
         ligandSmiles: workflowKey === 'peptide_design' ? '' : selection.ligandSmiles,
         ligandRenderSmiles,
         ligandIsSmiles: workflowKey === 'peptide_design' ? false : selection.ligandIsSmiles,

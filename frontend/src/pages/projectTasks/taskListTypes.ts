@@ -2,7 +2,7 @@ import type { InputComponent, ProjectTask } from '../../types/models';
 import type { WorkflowKey } from '../../utils/workflows';
 
 export type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
-export type SortKey = 'plddt' | 'ipsae' | 'iptm' | 'pae' | 'submitted' | 'backend' | 'seed' | 'duration';
+export type SortKey = 'plddt' | 'ipsae' | 'iptm' | 'pae' | 'submitted' | 'backend' | 'seed' | 'mode';
 export type SortDirection = 'asc' | 'desc';
 export type TaskTableMode = 'default' | 'lead_opt' | 'peptide';
 export type TaskMetricColumnKey = 'plddt' | 'ipsae' | 'iptm' | 'pae';
@@ -47,7 +47,7 @@ export interface TaskListRow {
   metrics: TaskConfidenceMetrics;
   submittedTs: number;
   backendValue: string;
-  durationValue: number | null;
+  modeValue: string;
   ligandSmiles: string;
   ligandRenderSmiles: string;
   ligandIsSmiles: boolean;

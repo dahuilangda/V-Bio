@@ -438,7 +438,7 @@ function normalizeProbability(value: number | null): number | null {
 }
 
 const TASKS_PAGE_FILTERS_STORAGE_KEY = 'vbio:tasks-page-filters:v1';
-const TASK_SORT_KEYS: SortKey[] = ['plddt', 'ipsae', 'iptm', 'pae', 'submitted', 'backend', 'seed', 'duration'];
+const TASK_SORT_KEYS: SortKey[] = ['plddt', 'ipsae', 'iptm', 'pae', 'submitted', 'backend', 'seed', 'mode'];
 const TASK_SORT_DIRECTIONS: SortDirection[] = ['asc', 'desc'];
 const TASK_SUBMITTED_WINDOW_OPTIONS: SubmittedWithinDaysOption[] = ['all', '1', '7', '30', '90'];
 const TASK_SEED_FILTER_OPTIONS: SeedFilterOption[] = ['all', 'with_seed', 'without_seed'];
@@ -2280,7 +2280,14 @@ function hasTaskLigandAtomPlddts(
 function hasTaskSummaryMetrics(task: ProjectTask): boolean {
   const context = resolveTaskSelectionContext(task);
   const metrics = readTaskConfidenceMetrics(task, context);
-  return metrics.plddt !== null || metrics.ipsae !== null || metrics.iptm !== null || metrics.pae !== null;
+  const hasAnyMetric = metrics.plddt !== null || metrics.ipsae !== null || metrics.iptm !== null || metrics.pae !== null;
+  if (!hasAnyMetric) return false;
+  // Prediction/affinity result bundles now provide IPSAE across supported backends.
+  // If other summary metrics exist but IPSAE is still missing, keep this row eligible for the shared result hydration path.
+  if (metrics.ipsae === null && (metrics.plddt !== null || metrics.iptm !== null || metrics.pae !== null)) {
+    return false;
+  }
+  return true;
 }
 
 export {

@@ -1753,6 +1753,14 @@ export interface ProjectTaskRuntimeRow {
   duration_seconds: number | null;
 }
 
+export interface ProjectLeadOptChildTaskRow {
+  project_task_id: string;
+  project_id: string;
+  prediction_key: string;
+  child_task_id: string;
+  child_task_state: string;
+}
+
 export async function listProjectTaskStatesByProjects(projectIds: string[]): Promise<ProjectTaskRuntimeRow[]> {
   const normalizedIds = Array.from(new Set(projectIds.map((id) => id.trim()).filter(Boolean)));
   if (normalizedIds.length === 0) return [];
@@ -1866,6 +1874,15 @@ export async function listProjectTaskStatesByTaskIds(taskIds: string[]): Promise
   return request<ProjectTaskRuntimeRow[]>('/project_tasks', undefined, {
     select: 'id,project_id,task_id,task_state,status_text,error_text,submitted_at,completed_at,duration_seconds',
     task_id: taskIdFilter
+  });
+}
+
+export async function listLeadOptChildTaskRowsByTaskIds(taskIds: string[]): Promise<ProjectLeadOptChildTaskRow[]> {
+  const taskIdFilter = buildInFilter(taskIds);
+  if (!taskIdFilter) return [];
+  return request<ProjectLeadOptChildTaskRow[]>('/project_lead_opt_child_tasks', undefined, {
+    select: 'project_task_id,project_id,prediction_key,child_task_id,child_task_state',
+    child_task_id: taskIdFilter
   });
 }
 

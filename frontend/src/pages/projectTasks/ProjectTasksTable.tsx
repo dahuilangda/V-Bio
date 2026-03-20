@@ -146,9 +146,9 @@ export function ProjectTasksTable({
                   </th>
                 )}
                 {!isLeadOptMode && !isPeptideMode && (
-                  <th className="task-th-duration">
-                    <button type="button" className={`task-th-sort ${sortKey === 'duration' ? 'active' : ''}`} onClick={() => onSort('duration')}>
-                      <span className="project-th">Duration <span className="task-th-arrow">{sortMark('duration')}</span></span>
+                  <th className="task-th-mode">
+                    <button type="button" className={`task-th-sort ${sortKey === 'mode' ? 'active' : ''}`} onClick={() => onSort('mode')}>
+                      <span className="project-th">Mode <span className="task-th-arrow">{sortMark('mode')}</span></span>
                     </button>
                   </th>
                 )}

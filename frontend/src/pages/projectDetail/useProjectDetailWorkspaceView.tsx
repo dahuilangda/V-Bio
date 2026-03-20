@@ -52,6 +52,14 @@ function asPredictionRecordMap(value: unknown): Record<string, LeadOptPrediction
   return value as Record<string, LeadOptPredictionRecord>;
 }
 
+function hasPersistedIpsaeMetric(value: unknown): boolean {
+  const row = asRecord(value);
+  return (
+    toFiniteNumber(row.ligand_ipsae_max ?? row.ligandIpsaeMax) !== null ||
+    toFiniteNumber(row.ipsae_dom ?? row.ipsaeDom) !== null
+  );
+}
+
 function normalizePredictionState(value: unknown): 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE' {
   const token = readText(value).trim().toUpperCase();
   if (token === 'RUNNING' || token === 'SUCCESS' || token === 'FAILURE') return token;
@@ -67,10 +75,38 @@ function predictionStatePriority(state: unknown): number {
 
 function hasPredictionRecordMetrics(record: LeadOptPredictionRecord | null | undefined): boolean {
   if (!record) return false;
+  if (toFiniteNumber(record.interfaceMetricValue) !== null) return true;
   if (toFiniteNumber(record.pairIptm) !== null) return true;
   if (toFiniteNumber(record.pairPae) !== null) return true;
   if (toFiniteNumber(record.ligandPlddt) !== null) return true;
   return Array.isArray(record.ligandAtomPlddts) && record.ligandAtomPlddts.length > 0;
+}
+
+function normalizePredictionInterfaceSource(value: unknown): 'ipsae' | 'iptm' | 'none' {
+  const token = readText(value).trim().toLowerCase();
+  if (token === 'ipsae' || token === 'iptm') return token;
+  return 'none';
+}
+
+function mergePredictionInterfaceMetric(
+  primary: LeadOptPredictionRecord,
+  secondary: LeadOptPredictionRecord
+): Pick<LeadOptPredictionRecord, 'interfaceMetricValue' | 'interfaceMetricLabel' | 'interfaceMetricSource'> {
+  const primarySource = normalizePredictionInterfaceSource(primary.interfaceMetricSource);
+  const secondarySource = normalizePredictionInterfaceSource(secondary.interfaceMetricSource);
+  const preferred = primarySource === 'ipsae' || secondarySource !== 'ipsae' ? primary : secondary;
+  const fallback = preferred === primary ? secondary : primary;
+  const preferredValue = toFiniteNumber(preferred.interfaceMetricValue);
+  const fallbackValue = toFiniteNumber(fallback.interfaceMetricValue);
+  const preferredSource = normalizePredictionInterfaceSource(preferred.interfaceMetricSource);
+  const fallbackSource = normalizePredictionInterfaceSource(fallback.interfaceMetricSource);
+  const mergedSource = preferredSource !== 'none' ? preferredSource : fallbackSource;
+  const mergedLabel = mergedSource === 'iptm' ? 'ipTM' : 'IPSAE';
+  return {
+    interfaceMetricValue: preferredValue ?? fallbackValue,
+    interfaceMetricLabel: mergedLabel,
+    interfaceMetricSource: mergedSource
+  };
 }
 
 function hasPredictionRecordStructure(record: LeadOptPredictionRecord | null | undefined): boolean {
@@ -143,6 +179,7 @@ function mergePredictionRecordPair(
   const primary = choosePreferredPredictionRecord(fromConfidence, fromProperties);
   const secondary = primary === fromConfidence ? fromProperties : fromConfidence;
   const renderContract = pickPredictionRenderContract(primary, secondary);
+  const mergedInterfaceMetric = mergePredictionInterfaceMetric(primary, secondary);
   return {
     ...secondary,
     ...primary,
@@ -150,6 +187,9 @@ function mergePredictionRecordPair(
     state: normalizePredictionState(primary.state),
     backend: readText(primary.backend || secondary.backend).trim().toLowerCase(),
     pairIptm: toFiniteNumber(primary.pairIptm) ?? toFiniteNumber(secondary.pairIptm),
+    interfaceMetricValue: mergedInterfaceMetric.interfaceMetricValue,
+    interfaceMetricLabel: mergedInterfaceMetric.interfaceMetricLabel,
+    interfaceMetricSource: mergedInterfaceMetric.interfaceMetricSource,
     pairPae: toFiniteNumber(primary.pairPae) ?? toFiniteNumber(secondary.pairPae),
     pairIptmResolved:
       primary.pairIptmResolved === true ||
@@ -164,6 +204,7 @@ function mergePredictionRecordPair(
         : [],
     ligandRenderSmiles: renderContract.ligandRenderSmiles,
     ligandRenderAtomPlddts: renderContract.ligandRenderAtomPlddts,
+    resultBundleHydrated: primary.resultBundleHydrated === true || secondary.resultBundleHydrated === true,
     updatedAt: Math.max(
       Number.isFinite(Number(primary.updatedAt)) ? Number(primary.updatedAt) : 0,
       Number.isFinite(Number(secondary.updatedAt)) ? Number(secondary.updatedAt) : 0
@@ -250,9 +291,13 @@ function hydratePredictionRecordMetricsFromHistory(
   if (!current) return historical || null;
   if (!historical) return current;
   const renderContract = pickPredictionRenderContract(current, historical);
+  const mergedInterfaceMetric = mergePredictionInterfaceMetric(current, historical);
   return {
     ...current,
     pairIptm: toFiniteNumber(current.pairIptm) ?? toFiniteNumber(historical.pairIptm),
+    interfaceMetricValue: mergedInterfaceMetric.interfaceMetricValue,
+    interfaceMetricLabel: mergedInterfaceMetric.interfaceMetricLabel,
+    interfaceMetricSource: mergedInterfaceMetric.interfaceMetricSource,
     pairPae: toFiniteNumber(current.pairPae) ?? toFiniteNumber(historical.pairPae),
     pairIptmResolved:
       current.pairIptmResolved === true ||
@@ -280,6 +325,7 @@ function hydratePredictionRecordMetricsFromHistory(
             ? 'pdb'
             : 'cif',
     structureName: readText(current.structureName).trim() || readText(historical.structureName).trim(),
+    resultBundleHydrated: current.resultBundleHydrated === true || historical.resultBundleHydrated === true,
     updatedAt: Math.max(
       Number.isFinite(Number(current.updatedAt)) ? Number(current.updatedAt) : 0,
       Number.isFinite(Number(historical.updatedAt)) ? Number(historical.updatedAt) : 0
@@ -410,6 +456,7 @@ function compactLeadOptPredictionRecord(value: LeadOptPredictionRecord): LeadOpt
     structureText: '',
     structureFormat: readText(value.structureFormat).toLowerCase() === 'pdb' ? 'pdb' : 'cif',
     structureName: readText(value.structureName).trim(),
+    resultBundleHydrated: value.resultBundleHydrated === true,
     error: readText(value.error),
     updatedAt: Number.isFinite(Number(value.updatedAt)) ? Number(value.updatedAt) : 0
   };
@@ -1702,6 +1749,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   const leadOptPredictionPersistKeyRef = useRef('');
   const leadOptPredictionPersistQueueRef = useRef<Promise<void>>(Promise.resolve());
   const leadOptPredictionPersistTimerRef = useRef<number | null>(null);
+  const resultViewHydrationAttemptedRef = useRef<Set<string>>(new Set());
   const leadOptPredictionPersistPendingByTaskRowRef = useRef<Record<string, {
     taskRowId: string;
     patchPayload: Record<string, unknown>;
@@ -1796,6 +1844,36 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       window.removeEventListener('pagehide', handlePageHide);
     };
   }, [flushLeadOptPredictionPersistQueueNow]);
+
+  useEffect(() => {
+    if (workspaceTab !== 'results') return;
+    if (!isPredictionWorkflow && !isAffinityWorkflow) return;
+    const contextTask = activeResultTask || statusContextTaskRow;
+    const taskId = readText(contextTask?.task_id || project.task_id).trim();
+    const taskRowId = readText(contextTask?.id).trim();
+    const taskState = readText(contextTask?.task_state || project.task_state).trim().toUpperCase();
+    if (!taskId || taskState !== 'SUCCESS') return;
+    const snapshotConfidenceSource = contextTask?.confidence ?? project.confidence;
+    if (hasPersistedIpsaeMetric(snapshotConfidenceSource)) return;
+    const hydrationKey = `${taskRowId || '__project__'}:${taskId}`;
+    if (resultViewHydrationAttemptedRef.current.has(hydrationKey)) return;
+    resultViewHydrationAttemptedRef.current.add(hydrationKey);
+    void pullResultForViewer(taskId, {
+      taskRowId: taskRowId || undefined,
+      persistProject: readText(project.task_id).trim() === taskId,
+      resultMode: 'view'
+    });
+  }, [
+    activeResultTask,
+    isAffinityWorkflow,
+    isPredictionWorkflow,
+    project.confidence,
+    project.task_id,
+    project.task_state,
+    pullResultForViewer,
+    statusContextTaskRow,
+    workspaceTab
+  ]);
 
   const preferredLeadOptSnapshotTask = useMemo(
     () => pickPreferredLeadOptTask(projectTasks),

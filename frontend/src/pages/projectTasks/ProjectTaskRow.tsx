@@ -2,7 +2,7 @@ import { ExternalLink, LoaderCircle, Share2, Square, Trash2 } from 'lucide-react
 import { Ligand2DPreview } from '../../components/project/Ligand2DPreview';
 import type { InputComponent, ProjectTask } from '../../types/models';
 import { canEditTask } from '../../utils/accessControl';
-import { formatDateTime, formatDuration } from '../../utils/date';
+import { formatDateTime } from '../../utils/date';
 import { TaskLigandSequencePreview } from './TaskLigandSequencePreview';
 import type { TaskListRow } from './taskListTypes';
 import { inferTaskStateFromStatusPayload } from './taskRuntimeUiUtils';
@@ -325,7 +325,7 @@ export function ProjectTaskRow({
         </td>
       ) : null}
       {mode === 'default' ? <td className="task-col-seed">{task.seed ?? '-'}</td> : null}
-      {mode === 'default' ? <td className="project-col-time task-col-duration">{formatDuration(task.duration_seconds)}</td> : null}
+      {mode === 'default' ? <td className="task-col-mode">{row.modeValue || '-'}</td> : null}
       <td className="project-col-actions">
         <div className="row gap-6 project-action-row">
           <button

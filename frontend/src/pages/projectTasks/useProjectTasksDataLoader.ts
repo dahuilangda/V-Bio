@@ -15,7 +15,7 @@ import {
   sortProjectTasks,
   type LoadTaskDataOptions,
 } from './taskDataUtils';
-import { syncInitialRuntimeTaskRows, syncRuntimeTaskRows } from './taskRowSync';
+import { hydrateTaskMetricsFromResultRows, syncInitialRuntimeTaskRows, syncRuntimeTaskRows } from './taskRowSync';
 
 interface UseProjectTasksDataLoaderOptions {
   projectId: string;
@@ -50,7 +50,8 @@ const TASK_STATE_PRIORITY: Record<string, number> = {
   FAILURE: 3,
   REVOKED: 3,
 };
-const TASK_LIST_RUNTIME_CACHE_TTL_MS = 15000;
+const TASK_LIST_RUNTIME_CACHE_TTL_MS = 5000;
+const TASK_LIST_RUNTIME_CACHE_KEY_VERSION = 'v2';
 
 function taskStatePriority(value: unknown): number {
   return TASK_STATE_PRIORITY[String(value || '').trim().toUpperCase()] ?? 0;
@@ -222,6 +223,19 @@ function mergeProjectRuntimeFields(next: Project, prev: Project): Project {
   };
 }
 
+function collectPendingRuntimeTaskIds(taskRows: ProjectTask[]): Set<string> {
+  return new Set(
+    sanitizeTaskRows(taskRows)
+      .filter((row) => {
+        const taskId = String(row.task_id || '').trim();
+        const taskState = String(row.task_state || '').trim().toUpperCase();
+        return Boolean(taskId) && (taskState === 'QUEUED' || taskState === 'RUNNING');
+      })
+      .map((row) => String(row.task_id || '').trim())
+      .filter(Boolean)
+  );
+}
+
 export function useProjectTasksDataLoader({
   projectId,
   sessionUserId,
@@ -241,12 +255,18 @@ export function useProjectTasksDataLoader({
   const tasksRef = useRef<ProjectTask[]>([]);
   const taskListAccessContextRef = useRef<TaskListAccessContext | null>(null);
   const detailHydrationInFlightRef = useRef<Set<string>>(new Set());
+  const resultHydrationInFlightRef = useRef<Set<string>>(new Set());
+  const resultHydrationDoneRef = useRef<Set<string>>(new Set());
+  const resultHydrationAttemptsRef = useRef<Map<string, number>>(new Map());
+  const runtimeSnapshotTaskIdsRef = useRef<Set<string>>(new Set());
+  const pendingForceRefetchRef = useRef(false);
+  const loadDataRef = useRef<((options?: LoadTaskDataOptions) => Promise<void>) | null>(null);
 
   const taskListRuntimeCacheKey = useMemo(() => {
     const sessionIdentity = String(sessionUserId || '').trim().toLowerCase() || '__anonymous__';
     const normalizedProjectId = String(projectId || '').trim();
     if (!normalizedProjectId) return '';
-    return `vbio:project-tasks-runtime:v1:${sessionIdentity}:${normalizedProjectId}`;
+    return `vbio:project-tasks-runtime:${TASK_LIST_RUNTIME_CACHE_KEY_VERSION}:${sessionIdentity}:${normalizedProjectId}`;
   }, [projectId, sessionUserId]);
 
   useEffect(() => {
@@ -258,8 +278,16 @@ export function useProjectTasksDataLoader({
   }, [tasks]);
 
   useEffect(() => {
+    resultHydrationInFlightRef.current.clear();
+    resultHydrationDoneRef.current.clear();
+    resultHydrationAttemptsRef.current.clear();
+  }, [projectId]);
+
+  useEffect(() => {
     detailHydrationInFlightRef.current.clear();
     taskListAccessContextRef.current = null;
+    runtimeSnapshotTaskIdsRef.current = new Set();
+    pendingForceRefetchRef.current = false;
   }, [projectId]);
 
   const persistRuntimeCache = useCallback(
@@ -328,11 +356,29 @@ export function useProjectTasksDataLoader({
       const cachedProject = projectRef.current;
       const cachedTasks = sanitizeTaskRows(tasksRef.current);
       if (!cachedProject || cachedTasks.length === 0) return;
+      const previousPendingTaskIds =
+        runtimeSnapshotTaskIdsRef.current.size > 0
+          ? new Set(runtimeSnapshotTaskIdsRef.current)
+          : collectPendingRuntimeTaskIds(cachedTasks);
 
       const synced = await syncRuntimeTasks(cachedProject, cachedTasks);
+      const nextPendingTaskIds = collectPendingRuntimeTaskIds(synced.taskRows);
+      runtimeSnapshotTaskIdsRef.current = nextPendingTaskIds;
+      if (
+        previousPendingTaskIds.size > 0 &&
+        Array.from(previousPendingTaskIds).some((taskId) => !nextPendingTaskIds.has(taskId))
+      ) {
+        pendingForceRefetchRef.current = true;
+      }
       setProject(synced.project);
       setTasks(sanitizeTaskRows(synced.taskRows));
       persistRuntimeCache(synced.project, synced.taskRows);
+      if (pendingForceRefetchRef.current) {
+        pendingForceRefetchRef.current = false;
+        window.setTimeout(() => {
+          void loadDataRef.current?.({ silent: true, showRefreshing: false, forceRefetch: true });
+        }, 0);
+      }
     },
     [persistRuntimeCache, syncRuntimeTasks]
   );
@@ -439,6 +485,7 @@ export function useProjectTasksDataLoader({
               };
         let nextProject = cachedProject ? mergeProjectRuntimeFields(accessibleProjectBase, cachedProject) : accessibleProjectBase;
         let nextRows = mergeTaskRowsWithLocal(sortedTaskRows, cachedTasks);
+        runtimeSnapshotTaskIdsRef.current = collectPendingRuntimeTaskIds(nextRows);
 
         if (loadSeqRef.current !== loadSeq) return;
         setProject(nextProject);
@@ -458,6 +505,7 @@ export function useProjectTasksDataLoader({
               if (loadSeqRef.current !== loadSeq) return;
               runtimeSettledProject = initialSynced.project;
               runtimeSettledRows = sanitizeTaskRows(initialSynced.taskRows);
+              runtimeSnapshotTaskIdsRef.current = collectPendingRuntimeTaskIds(runtimeSettledRows);
               setProject(runtimeSettledProject);
               setTasks(runtimeSettledRows);
               persistRuntimeCache(runtimeSettledProject, runtimeSettledRows);
@@ -466,6 +514,7 @@ export function useProjectTasksDataLoader({
               if (loadSeqRef.current !== loadSeq) return;
               runtimeSettledProject = fullySynced.project;
               runtimeSettledRows = sanitizeTaskRows(fullySynced.taskRows);
+              runtimeSnapshotTaskIdsRef.current = collectPendingRuntimeTaskIds(runtimeSettledRows);
               setProject(runtimeSettledProject);
               setTasks(runtimeSettledRows);
               persistRuntimeCache(runtimeSettledProject, runtimeSettledRows);
@@ -489,6 +538,13 @@ export function useProjectTasksDataLoader({
   );
 
   useEffect(() => {
+    loadDataRef.current = loadData;
+    return () => {
+      loadDataRef.current = null;
+    };
+  }, [loadData]);
+
+  useEffect(() => {
     void loadData();
   }, [loadData]);
 
@@ -509,6 +565,41 @@ export function useProjectTasksDataLoader({
       document.removeEventListener('visibilitychange', onVisible);
     };
   }, [loadData, workspaceView]);
+
+  useEffect(() => {
+    if (workspaceView !== 'tasks') return;
+    const projectRow = projectRef.current;
+    if (!projectRow) return;
+    if (normalizeWorkflowKey(projectRow.task_type) !== 'prediction') return;
+    const currentRows = sanitizeTaskRows(tasksRef.current);
+    if (currentRows.length === 0) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const hydrated = await hydrateTaskMetricsFromResultRows(projectRow, currentRows, {
+          resultHydrationInFlightRef,
+          resultHydrationDoneRef,
+          resultHydrationAttemptsRef
+        });
+        if (cancelled) return;
+        const nextRows = sanitizeTaskRows(hydrated.taskRows);
+        const nextProject = hydrated.project;
+        const projectChanged = JSON.stringify(nextProject) !== JSON.stringify(projectRef.current);
+        const rowsChanged = JSON.stringify(nextRows) !== JSON.stringify(currentRows);
+        if (!projectChanged && !rowsChanged) return;
+        setProject(nextProject);
+        setTasks(nextRows);
+        persistRuntimeCache(nextProject, nextRows);
+      } catch {
+        // Keep lightweight rows if background result hydration fails.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [persistRuntimeCache, tasks, workspaceView]);
 
   const runtimePollState = useMemo(() => {
     let hasActiveRuntime = false;

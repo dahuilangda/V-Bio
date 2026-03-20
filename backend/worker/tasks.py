@@ -886,6 +886,42 @@ def _write_smiles_to_sdf(smiles: str, out_path: str) -> None:
     finally:
         writer.close()
 
+
+def _trim_sdf_to_first_valid_molecule(path: str) -> bool:
+    """Keep only the first valid molecule in an SDF file.
+
+    Returns True when the file was rewritten because multiple valid molecules
+    were present; otherwise returns False.
+    """
+    normalized_path = str(path or "").strip()
+    if not normalized_path or not normalized_path.lower().endswith(".sdf"):
+        return False
+
+    from rdkit import Chem
+
+    supplier = Chem.SDMolSupplier(normalized_path, removeHs=False)
+    first_valid = None
+    valid_count = 0
+    for mol in supplier:
+        if mol is None:
+            continue
+        valid_count += 1
+        if first_valid is None:
+            first_valid = Chem.Mol(mol)
+        if valid_count >= 2:
+            break
+
+    if first_valid is None or valid_count < 2:
+        return False
+
+    writer = Chem.SDWriter(normalized_path)
+    try:
+        writer.write(first_valid)
+    finally:
+        writer.close()
+    return True
+
+
 def _read_lead_optimization_progress(output_dir: str,
                                      elapsed: float,
                                      expected_candidates: Optional[int] = None,
@@ -1537,6 +1573,11 @@ def boltz2score_task(self, score_args: dict):
             if has_ligand_file_input:
                 with open(ligand_file_path, 'w', encoding='utf-8') as f:
                     f.write(score_args['ligand_file_content'])
+                if _trim_sdf_to_first_valid_molecule(ligand_file_path):
+                    logger.info(
+                        "Task %s: detected multi-molecule ligand SDF; keeping only the first valid ligand entry.",
+                        task_id,
+                    )
             else:
                 if not ligand_filename.lower().endswith('.sdf'):
                     ligand_filename = f"{Path(ligand_filename).stem or 'ligand'}.sdf"

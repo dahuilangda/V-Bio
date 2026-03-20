@@ -1643,13 +1643,96 @@ def _load_json_object(path: Path) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _ensure_boltz2score_ipsae_tools() -> Tuple[Callable[..., None], Callable[..., Any]]:
-    boltz2score_dir = CAPABILITIES_DIR / "boltz2score"
-    if boltz2score_dir.is_dir() and str(boltz2score_dir) not in sys.path:
-        sys.path.insert(0, str(boltz2score_dir))
-    from core.results import compute_and_write_ipsae, rerank_diffusion_samples
+def _run_boltz2score_ipsae_postprocess_in_docker(
+    *,
+    stage_root: Path,
+    record_id: str,
+    log_path: Path,
+) -> None:
+    image = str(BOLTZ2_DOCKER_IMAGE or "").strip()
+    if not image:
+        raise RuntimeError("BOLTZ2_DOCKER_IMAGE 未配置，无法运行 IPSAE 后处理。")
 
-    return compute_and_write_ipsae, rerank_diffusion_samples
+    raw_extra_args = shlex.split(BOLTZ2_DOCKER_EXTRA_ARGS) if BOLTZ2_DOCKER_EXTRA_ARGS else []
+    extra_args = sanitize_docker_extra_args(raw_extra_args)
+    runtime_task_id = str(os.environ.get("BOLTZ_TASK_ID") or record_id).strip()
+    task_container_name = make_task_scoped_container_name(f"{runtime_task_id}-{record_id}-ipsae")
+
+    docker_command = ["docker", "run", "--rm"]
+    if task_container_name:
+        docker_command.extend(["--name", task_container_name])
+        docker_command.extend(["--label", f"boltz.task_id={runtime_task_id}"])
+        docker_command.extend(["--label", "boltz.runtime=boltz2score-ipsae"])
+
+    docker_command.extend(
+        [
+            "--volume",
+            f"{stage_root}:{stage_root}",
+            "--volume",
+            f"{PROJECT_ROOT}:/workspace/vbio:ro",
+            "--workdir",
+            "/workspace/vbio",
+            "--env",
+            "PYTHONPATH=/workspace/vbio",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+        ]
+    )
+    for gid in collect_gpu_device_group_ids():
+        docker_command.extend(["--group-add", str(gid)])
+
+    docker_command.extend(extra_args)
+    docker_command.append(image)
+    docker_command.extend(
+        [
+            "python",
+            "-c",
+            (
+                "import sys; "
+                "sys.path.insert(0, '/workspace/vbio/capabilities/boltz2score'); "
+                "from core.results import compute_and_write_ipsae, rerank_diffusion_samples; "
+                "from pathlib import Path; "
+                "output_dir = Path(sys.argv[1]); "
+                "record_id = sys.argv[2]; "
+                "pae_cutoff = float(sys.argv[3]); "
+                "dist_cutoff = float(sys.argv[4]); "
+                "compute_and_write_ipsae(output_dir=output_dir, record_id=record_id, pae_cutoff=pae_cutoff, dist_cutoff=dist_cutoff); "
+                "rerank_diffusion_samples(output_dir, record_id)"
+            ),
+            str(stage_root),
+            record_id,
+            str(IPSAE_PAE_CUTOFF),
+            str(IPSAE_DIST_CUTOFF),
+        ]
+    )
+
+    if task_container_name:
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", task_container_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except Exception:
+            pass
+
+    with log_path.open("w", encoding="utf-8") as logf:
+        proc = subprocess.Popen(
+            docker_command,
+            cwd=str(PROJECT_ROOT),
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        return_code = proc.wait()
+
+    if return_code != 0:
+        raise RuntimeError(
+            "Boltz Docker IPSAE 后处理失败。"
+            f" Tail:\n{_tail_lines(log_path, 120)}\n"
+            f"Full log: {log_path}"
+        )
 
 
 def _to_finite_float(value: Any) -> Optional[float]:
@@ -1835,8 +1918,17 @@ def _convert_pair_iptm_matrix_to_map(matrix: Any, chain_map: Dict[str, str]) -> 
 
 
 def _write_ipsae_json(path: Path, payload: Dict[str, Any]) -> None:
+    def _normalize_json_value(value: Any) -> Any:
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        if isinstance(value, dict):
+            return {str(key): _normalize_json_value(nested) for key, nested in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_normalize_json_value(item) for item in value]
+        return value
+
     path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(_normalize_json_value(payload), ensure_ascii=False, indent=2, allow_nan=False) + "\n",
         encoding="utf-8",
     )
 
@@ -1953,8 +2045,6 @@ def _run_standalone_ipsae_postprocess(
         print(f"ℹ️ {source} 未收集到可用于 IPSAE 的模型结果，跳过后处理。", file=sys.stderr)
         return []
 
-    compute_and_write_ipsae, rerank_diffusion_samples = _ensure_boltz2score_ipsae_tools()
-
     postprocess_base.mkdir(parents=True, exist_ok=True)
     stage_root = postprocess_base / "staged_output"
     record_dir = stage_root / record_id
@@ -1986,15 +2076,16 @@ def _run_standalone_ipsae_postprocess(
             entry["pae_matrix"],
         )
 
-    compute_and_write_ipsae(
-        output_dir=stage_root,
+    ipsae_log_path = record_dir / "boltz2score_ipsae.log"
+    _run_boltz2score_ipsae_postprocess_in_docker(
+        stage_root=stage_root,
         record_id=record_id,
-        pae_cutoff=IPSAE_PAE_CUTOFF,
-        dist_cutoff=IPSAE_DIST_CUTOFF,
+        log_path=ipsae_log_path,
     )
-    rerank_diffusion_samples(stage_root, record_id)
 
     entries = _finalize_ipsae_archive_entries(record_dir)
+    if ipsae_log_path.exists():
+        entries.append((ipsae_log_path, ipsae_log_path.name))
     if not entries:
         print(f"⚠️ {source} IPSAE 后处理未生成可归档文件。", file=sys.stderr)
         return []

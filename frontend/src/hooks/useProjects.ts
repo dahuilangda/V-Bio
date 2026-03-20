@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Project, ProjectTaskCounts, Session, TaskStatusResponse } from '../types/models';
+import type { Project, ProjectTaskCounts, Session, TaskState, TaskStatusResponse } from '../types/models';
 import {
   deleteProjectSharesByProjectId,
   deleteProjectTaskSharesByProjectId,
   deleteProjectTasksByProjectId,
   insertProject,
+  listLeadOptChildTaskRowsByTaskIds,
   listProjectShareLinksForUser,
   listProjectTaskCountsByProjects,
   listProjectTaskShareLinksForUser,
@@ -13,12 +14,18 @@ import {
   listProjectTaskStatesByTaskIds,
   listProjectTaskStatesByProjects,
   listProjectTaskStatesByTaskRowIds,
+  updateProjectTask,
   updateProject,
+  type ProjectLeadOptChildTaskRow,
   type ProjectTaskRuntimeRow
 } from '../api/supabaseLite';
 import { getTaskRuntimeIndex, getTaskStatuses, terminateTask } from '../api/backendApi';
 import { removeProjectInputConfig, removeProjectUiState } from '../utils/projectInputs';
-import { inferTaskStateFromStatusPayload } from '../utils/taskRuntime';
+import {
+  buildTaskRuntimeFailureMessage,
+  inferTaskStateFromStatusPayload,
+  readTaskRuntimeStatusText
+} from '../utils/taskRuntime';
 import { normalizeWorkflowKey } from '../utils/workflows';
 
 const DEFAULT_TASK_TYPE = 'prediction';
@@ -34,7 +41,8 @@ const TASK_STATE_PRIORITY: Record<string, number> = {
 const PROJECT_DELETE_TERMINATE_CONCURRENCY = 6;
 const PROJECT_DELETE_STOP_POLL_INTERVAL_MS = 700;
 const PROJECT_DELETE_STOP_POLL_TIMEOUT_MS = 12000;
-const PROJECT_RUNTIME_COUNTS_CACHE_TTL_MS = 15000;
+const PROJECT_RUNTIME_COUNTS_CACHE_TTL_MS = 5000;
+const PROJECT_RUNTIME_COUNTS_CACHE_KEY_VERSION = 'v2';
 
 export interface CreateProjectInput {
   name: string;
@@ -50,6 +58,7 @@ interface LoadProjectsOptions {
   silent?: boolean;
   statusOnly?: boolean;
   preferBackendStatus?: boolean;
+  forceRefetch?: boolean;
 }
 
 function buildProjectListSignature(rows: Project[]): string {
@@ -187,6 +196,82 @@ async function fetchRuntimeStatusesByTaskId(taskIds: string[]): Promise<Record<s
   }
 }
 
+async function persistTerminalRuntimeTaskStatuses(
+  taskIds: string[],
+  statusByTaskId: Record<string, TaskStatusResponse>,
+  projects: Project[]
+): Promise<void> {
+  const normalizedTaskIds = Array.from(
+    new Set(
+      (Array.isArray(taskIds) ? taskIds : [])
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+    )
+  );
+  if (normalizedTaskIds.length === 0) return;
+  const runtimeRows = await listProjectTaskStatesByTaskIds(normalizedTaskIds);
+  if (runtimeRows.length === 0) return;
+  const projectByTaskId = new Map(
+    projects
+      .map((project) => [String(project.task_id || '').trim(), project] as const)
+      .filter(([taskId]) => Boolean(taskId))
+  );
+
+  await Promise.all(
+    runtimeRows.map(async (row) => {
+      const taskId = String(row.task_id || '').trim();
+      const statusPayload = statusByTaskId[taskId];
+      if (!statusPayload) return;
+      const taskState = inferTaskStateFromStatusPayload(statusPayload, row.task_state);
+      if (!isTerminalTaskState(taskState)) return;
+
+      const statusText = readTaskRuntimeStatusText(statusPayload);
+      const errorText = taskState === 'FAILURE' ? buildTaskRuntimeFailureMessage(statusPayload) : '';
+      const completedAt = row.completed_at || new Date().toISOString();
+      const submittedAt = row.submitted_at;
+      const durationSeconds =
+        submittedAt
+          ? (() => {
+              const duration = (new Date(completedAt).getTime() - new Date(submittedAt).getTime()) / 1000;
+              return Number.isFinite(duration) && duration >= 0 ? duration : null;
+            })()
+          : row.duration_seconds;
+
+      if (
+        String(row.task_state || '').trim().toUpperCase() === taskState &&
+        String(row.status_text || '').trim() === statusText &&
+        String(row.error_text || '').trim() === errorText &&
+        String(row.completed_at || '').trim() === String(completedAt || '').trim() &&
+        (row.duration_seconds ?? null) === (durationSeconds ?? null)
+      ) {
+        return;
+      }
+
+      await updateProjectTask(
+        row.id,
+        {
+          task_state: taskState,
+          status_text: statusText,
+          error_text: errorText,
+          completed_at: completedAt,
+          duration_seconds: durationSeconds
+        },
+        { minimalReturn: true }
+      );
+
+      const project = projectByTaskId.get(taskId);
+      if (!project) return;
+      await updateProject(project.id, {
+        task_state: taskState,
+        status_text: statusText,
+        error_text: errorText,
+        completed_at: completedAt,
+        duration_seconds: durationSeconds
+      });
+    })
+  );
+}
+
 function emptyProjectTaskCounts(): ProjectTaskCounts {
   return {
     total: 0,
@@ -201,6 +286,11 @@ function emptyProjectTaskCounts(): ProjectTaskCounts {
 function isRuntimePendingState(value: unknown): boolean {
   const token = String(value || '').trim().toUpperCase();
   return token === 'QUEUED' || token === 'RUNNING';
+}
+
+function isTerminalTaskState(value: unknown): boolean {
+  const token = String(value || '').trim().toUpperCase();
+  return token === 'SUCCESS' || token === 'FAILURE' || token === 'REVOKED';
 }
 
 function sleep(ms: number): Promise<void> {
@@ -305,6 +395,23 @@ function cloneProjectTaskCounts(counts: ProjectTaskCounts | null | undefined): P
   };
 }
 
+function decrementProjectTaskCount(counts: ProjectTaskCounts, state: unknown): void {
+  const token = String(state || '').trim().toUpperCase();
+  if (token === 'RUNNING' && counts.running > 0) counts.running -= 1;
+  else if (token === 'SUCCESS' && counts.success > 0) counts.success -= 1;
+  else if (token === 'FAILURE' && counts.failure > 0) counts.failure -= 1;
+  else if (token === 'QUEUED' && counts.queued > 0) counts.queued -= 1;
+  else if (counts.other > 0) counts.other -= 1;
+}
+
+function incrementProjectTaskCount(counts: ProjectTaskCounts, state: TaskState): void {
+  if (state === 'RUNNING') counts.running += 1;
+  else if (state === 'SUCCESS') counts.success += 1;
+  else if (state === 'FAILURE') counts.failure += 1;
+  else if (state === 'QUEUED') counts.queued += 1;
+  else counts.other += 1;
+}
+
 function applyRuntimeStatusToProjectRow(
   row: Project,
   statusPayload: TaskStatusResponse | null | undefined
@@ -334,10 +441,11 @@ function overlayProjectCountsWithRuntimeSnapshot(params: {
   projects: Project[];
   baseCountsByProject: Map<string, ProjectTaskCounts>;
   runtimeRows: ProjectTaskRuntimeRow[];
+  leadOptChildRows: ProjectLeadOptChildTaskRow[];
   activeTaskIds: Set<string>;
   queuedTaskIds: Set<string>;
 }): Map<string, ProjectTaskCounts> {
-  const { projects, baseCountsByProject, runtimeRows, activeTaskIds, queuedTaskIds } = params;
+  const { projects, baseCountsByProject, runtimeRows, leadOptChildRows, activeTaskIds, queuedTaskIds } = params;
   const nextCountsByProject = new Map<string, ProjectTaskCounts>();
   const projectById = new Map(projects.map((project) => [project.id, project] as const));
   const accessibleTaskRowIdSetByProject = new Map(
@@ -351,7 +459,6 @@ function overlayProjectCountsWithRuntimeSnapshot(params: {
 
   projects.forEach((project) => {
     const baseCounts = cloneProjectTaskCounts(baseCountsByProject.get(project.id) || emptyProjectTaskCounts());
-    baseCounts.running = 0;
     nextCountsByProject.set(project.id, baseCounts);
   });
 
@@ -368,16 +475,41 @@ function overlayProjectCountsWithRuntimeSnapshot(params: {
     if (!taskId) return;
     const counts = nextCountsByProject.get(project.id) || emptyProjectTaskCounts();
     if (activeTaskIds.has(taskId)) {
-      counts.running += 1;
-      if (String(row.task_state || '').trim().toUpperCase() === 'QUEUED' && counts.queued > 0) {
-        counts.queued -= 1;
-      }
+      const currentState = String(row.task_state || '').trim().toUpperCase();
+      if (counts.queued > 0) decrementProjectTaskCount(counts, 'QUEUED');
+      else if (currentState !== 'RUNNING') decrementProjectTaskCount(counts, currentState);
+      incrementProjectTaskCount(counts, 'RUNNING');
       nextCountsByProject.set(project.id, counts);
       return;
     }
-    if (queuedTaskIds.has(taskId) && String(row.task_state || '').trim().toUpperCase() !== 'QUEUED') {
-      counts.queued += 1;
+    if (queuedTaskIds.has(taskId) && String(row.task_state || '').trim().toUpperCase() === 'RUNNING' && counts.running > 0) {
+      decrementProjectTaskCount(counts, 'RUNNING');
+      incrementProjectTaskCount(counts, 'QUEUED');
       nextCountsByProject.set(project.id, counts);
+    }
+  });
+
+  leadOptChildRows.forEach((row) => {
+    const project = projectById.get(row.project_id);
+    if (!project) return;
+    const counts = nextCountsByProject.get(project.id) || emptyProjectTaskCounts();
+    const childTaskId = String(row.child_task_id || '').trim();
+    if (!childTaskId) return;
+    if (activeTaskIds.has(childTaskId)) {
+      const currentState = String(row.child_task_state || '').trim().toUpperCase();
+      if (counts.queued > 0) decrementProjectTaskCount(counts, 'QUEUED');
+      else if (currentState !== 'RUNNING') decrementProjectTaskCount(counts, currentState);
+      incrementProjectTaskCount(counts, 'RUNNING');
+      nextCountsByProject.set(project.id, counts);
+      return;
+    }
+    if (queuedTaskIds.has(childTaskId)) {
+      const currentState = String(row.child_task_state || '').trim().toUpperCase();
+      if (currentState === 'RUNNING' && counts.running > 0) {
+        decrementProjectTaskCount(counts, 'RUNNING');
+        incrementProjectTaskCount(counts, 'QUEUED');
+        nextCountsByProject.set(project.id, counts);
+      }
     }
   });
 
@@ -393,8 +525,11 @@ export function useProjects(session: Session | null) {
   const loadInFlightRef = useRef(false);
   const projectsRef = useRef<Project[]>([]);
   const projectCountsRef = useRef<Map<string, ProjectTaskCounts>>(new Map());
+  const projectBaseCountsRef = useRef<Map<string, ProjectTaskCounts>>(new Map());
   const taskRowsRef = useRef<ProjectTaskRuntimeRow[]>([]);
   const projectListSignatureRef = useRef('');
+  const runtimeSnapshotTaskIdsRef = useRef<Set<string>>(new Set());
+  const pendingBaseRefreshRef = useRef(false);
 
   useEffect(() => {
     projectsRef.current = projects;
@@ -415,7 +550,7 @@ export function useProjects(session: Session | null) {
         nextProjects.map((row) => [row.id, cloneProjectTaskCounts(row.task_counts || emptyProjectTaskCounts())] as const)
       );
       window.localStorage.setItem(
-        `vbio:projects-runtime-counts:v1:${sessionIdentity}`,
+        `vbio:projects-runtime-counts:${PROJECT_RUNTIME_COUNTS_CACHE_KEY_VERSION}:${sessionIdentity}`,
         JSON.stringify({
           saved_at: Date.now(),
           counts_by_project: countsByProject
@@ -431,7 +566,7 @@ export function useProjects(session: Session | null) {
     if (projectCountsRef.current.size > 0) return;
     const sessionIdentity = String(session.userId || '').trim() || String(session.username || '').trim().toLowerCase();
     if (!sessionIdentity) return;
-    const storageKey = `vbio:projects-runtime-counts:v1:${sessionIdentity}`;
+    const storageKey = `vbio:projects-runtime-counts:${PROJECT_RUNTIME_COUNTS_CACHE_KEY_VERSION}:${sessionIdentity}`;
     try {
       const raw = window.localStorage.getItem(storageKey);
       if (!raw) return;
@@ -489,9 +624,13 @@ export function useProjects(session: Session | null) {
         ...buildTaskIdSet(runtimeIndex.scheduled_task_ids)
       ]);
       const runtimeTaskIds = Array.from(new Set([...Array.from(activeTaskIds), ...Array.from(queuedTaskIds)]));
-      const runtimeRows = runtimeTaskIds.length > 0 ? await listProjectTaskStatesByTaskIds(runtimeTaskIds) : [];
+      const [runtimeRows, leadOptChildRows] = await Promise.all([
+        runtimeTaskIds.length > 0 ? listProjectTaskStatesByTaskIds(runtimeTaskIds) : Promise.resolve([] as ProjectTaskRuntimeRow[]),
+        runtimeTaskIds.length > 0 ? listLeadOptChildTaskRowsByTaskIds(runtimeTaskIds) : Promise.resolve([] as ProjectLeadOptChildTaskRow[])
+      ]);
       return {
         runtimeRows,
+        leadOptChildRows,
         activeTaskIds,
         queuedTaskIds,
         activeStatusByTaskId
@@ -499,6 +638,7 @@ export function useProjects(session: Session | null) {
     } catch {
       return {
         runtimeRows: [] as ProjectTaskRuntimeRow[],
+        leadOptChildRows: [] as ProjectLeadOptChildTaskRow[],
         activeTaskIds: new Set<string>(),
         queuedTaskIds: new Set<string>(),
         activeStatusByTaskId: {} as Record<string, TaskStatusResponse>
@@ -511,13 +651,45 @@ export function useProjects(session: Session | null) {
       const cachedProjects = (Array.isArray(baseProjects) && baseProjects.length > 0 ? baseProjects : projectsRef.current).filter(Boolean);
       if (cachedProjects.length === 0) return false;
       const cachedCountsByProject = new Map(
-        cachedProjects.map((row) => [row.id, readProjectCounts(row.id, row.task_counts)] as const)
+        cachedProjects.map((row) => [
+          row.id,
+          cloneProjectTaskCounts(projectBaseCountsRef.current.get(row.id) || row.task_counts || emptyProjectTaskCounts())
+        ] as const)
       );
       const runtimeOverlay = await fetchProjectRuntimeOverlay();
+      const nextRuntimeTaskIds = new Set([
+        ...Array.from(runtimeOverlay.activeTaskIds),
+        ...Array.from(runtimeOverlay.queuedTaskIds)
+      ]);
+      const hadPreviousRuntimeSnapshot = runtimeSnapshotTaskIdsRef.current.size > 0;
+      const removedRuntimeTaskIds = hadPreviousRuntimeSnapshot
+        ? Array.from(runtimeSnapshotTaskIdsRef.current).filter((taskId) => !nextRuntimeTaskIds.has(taskId))
+        : [];
+      const removedStatusByTaskId =
+        removedRuntimeTaskIds.length > 0 ? await fetchRuntimeStatusesByTaskId(removedRuntimeTaskIds) : {};
+      const terminalStatusTaskIds = Object.entries(runtimeOverlay.activeStatusByTaskId)
+        .filter(([, statusPayload]) => isTerminalTaskState(inferTaskStateFromStatusPayload(statusPayload, 'RUNNING')))
+        .map(([taskId]) => taskId);
+      const terminalRemovedTaskIds = Object.entries(removedStatusByTaskId)
+        .filter(([, statusPayload]) => isTerminalTaskState(inferTaskStateFromStatusPayload(statusPayload, 'RUNNING')))
+        .map(([taskId]) => taskId);
+      const terminalTaskIdsToPersist = Array.from(new Set([...terminalStatusTaskIds, ...terminalRemovedTaskIds]));
+      const terminalStatusByTaskId = {
+        ...runtimeOverlay.activeStatusByTaskId,
+        ...removedStatusByTaskId
+      };
+      if (terminalTaskIdsToPersist.length > 0) {
+        await persistTerminalRuntimeTaskStatuses(terminalTaskIdsToPersist, terminalStatusByTaskId, cachedProjects);
+      }
+      runtimeSnapshotTaskIdsRef.current = nextRuntimeTaskIds;
+      if (removedRuntimeTaskIds.length > 0 || terminalTaskIdsToPersist.length > 0) {
+        pendingBaseRefreshRef.current = true;
+      }
       const countsByProject = overlayProjectCountsWithRuntimeSnapshot({
         projects: cachedProjects,
         baseCountsByProject: cachedCountsByProject,
         runtimeRows: runtimeOverlay.runtimeRows,
+        leadOptChildRows: runtimeOverlay.leadOptChildRows,
         activeTaskIds: runtimeOverlay.activeTaskIds,
         queuedTaskIds: runtimeOverlay.queuedTaskIds
       });
@@ -541,8 +713,11 @@ export function useProjects(session: Session | null) {
       setProjects([]);
       projectsRef.current = [];
       projectCountsRef.current = new Map();
+      projectBaseCountsRef.current = new Map();
       taskRowsRef.current = [];
       projectListSignatureRef.current = '';
+      runtimeSnapshotTaskIdsRef.current = new Set();
+      pendingBaseRefreshRef.current = false;
       return;
     }
     if (loadInFlightRef.current) return;
@@ -552,6 +727,7 @@ export function useProjects(session: Session | null) {
     const silent = Boolean(options?.silent);
     const statusOnly = Boolean(options?.statusOnly);
     const preferBackendStatus = options?.preferBackendStatus !== false;
+    const forceRefetch = Boolean(options?.forceRefetch);
     if (!silent) {
       setLoading(true);
       setError(null);
@@ -609,7 +785,7 @@ export function useProjects(session: Session | null) {
         projectsRef.current = baseProjects;
       }
 
-      const canReuseCachedTaskRows = silent && nextProjectSignature === projectListSignatureRef.current;
+      const canReuseCachedTaskRows = silent && !forceRefetch && nextProjectSignature === projectListSignatureRef.current;
       projectListSignatureRef.current = nextProjectSignature;
       if (canReuseCachedTaskRows) {
         if (preferBackendStatus) {
@@ -651,6 +827,9 @@ export function useProjects(session: Session | null) {
       taskShareCounts.forEach((counts, projectId) => {
         countsByProject.set(projectId, counts);
       });
+      projectBaseCountsRef.current = new Map(
+        Array.from(countsByProject.entries()).map(([projectId, counts]) => [projectId, cloneProjectTaskCounts(counts)] as const)
+      );
       const baseProjectsWithCounts = rows.map((row) => ({
         ...row,
         task_counts: countsByProject.get(row.id) || emptyProjectTaskCounts()
@@ -666,15 +845,21 @@ export function useProjects(session: Session | null) {
         ? await fetchProjectRuntimeOverlay()
         : {
             runtimeRows: [] as ProjectTaskRuntimeRow[],
+            leadOptChildRows: [] as ProjectLeadOptChildTaskRow[],
             activeTaskIds: new Set<string>(),
             queuedTaskIds: new Set<string>(),
             activeStatusByTaskId: {} as Record<string, TaskStatusResponse>
           };
+      runtimeSnapshotTaskIdsRef.current = new Set([
+        ...Array.from(runtimeOverlay.activeTaskIds),
+        ...Array.from(runtimeOverlay.queuedTaskIds)
+      ]);
       if (loadSeqRef.current !== loadSeq) return;
       const liveCountsByProject = overlayProjectCountsWithRuntimeSnapshot({
         projects: rows,
         baseCountsByProject: countsByProject,
         runtimeRows: runtimeOverlay.runtimeRows,
+        leadOptChildRows: runtimeOverlay.leadOptChildRows,
         activeTaskIds: runtimeOverlay.activeTaskIds,
         queuedTaskIds: runtimeOverlay.queuedTaskIds
       });
@@ -696,6 +881,12 @@ export function useProjects(session: Session | null) {
       }
     } finally {
       loadInFlightRef.current = false;
+      if (statusOnly && pendingBaseRefreshRef.current) {
+        pendingBaseRefreshRef.current = false;
+        window.setTimeout(() => {
+          void load({ silent: true, preferBackendStatus: true, forceRefetch: true });
+        }, 0);
+      }
       if (!silent) {
         setLoading(false);
       }
@@ -740,6 +931,7 @@ export function useProjects(session: Session | null) {
         ...prev
       ]);
       projectCountsRef.current.set(created.id, emptyProjectTaskCounts());
+      projectBaseCountsRef.current.set(created.id, emptyProjectTaskCounts());
       return created;
     },
     [session]
@@ -777,6 +969,7 @@ export function useProjects(session: Session | null) {
         removeProjectUiState(id);
         setProjects((prev) => prev.filter((p) => p.id !== id));
         projectCountsRef.current.delete(id);
+        projectBaseCountsRef.current.delete(id);
       } catch (error) {
         setError(error instanceof Error ? error.message : 'Failed to delete project.');
       }

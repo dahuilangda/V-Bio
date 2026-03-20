@@ -11,6 +11,7 @@ import type { Project, ProjectTask } from '../../types/models';
 import { canEditProject, canEditTask } from '../../utils/accessControl';
 import { mergePeptidePreviewIntoProperties } from '../../utils/peptideTaskPreview';
 import { derivePersistedResultConfidences } from '../../utils/resultConfidenceStorage';
+import { buildTaskRuntimeFailureMessage } from '../../utils/taskRuntime';
 import {
   readLeadOptTaskSummary,
   readTaskConfidenceMetrics,
@@ -519,13 +520,17 @@ function resolveLeadOptNonRegressiveState(current: string, incoming: string): st
   const incomingState = String(incoming || '').trim().toUpperCase();
   if (!incomingState) return currentState || 'QUEUED';
   if (currentState === 'RUNNING' && incomingState === 'QUEUED') return 'RUNNING';
-  if (
-    (currentState === 'SUCCESS' || currentState === 'FAILURE') &&
-    (incomingState === 'QUEUED' || incomingState === 'RUNNING')
-  ) {
+  if (currentState === 'SUCCESS' && (incomingState === 'QUEUED' || incomingState === 'RUNNING')) {
     return currentState;
   }
   return incomingState;
+}
+
+function isSyntheticLeadOptStaleFailure(record: Record<string, unknown>): boolean {
+  const state = String(record.state || '').trim().toUpperCase();
+  if (state !== 'FAILURE') return false;
+  const error = String(record.error || '').trim().toLowerCase();
+  return error.includes('runtime status became stale') || error.includes('stale after');
 }
 
 async function reconcileLeadOptPredictionMapStates(
@@ -538,7 +543,7 @@ async function reconcileLeadOptPredictionMapStates(
     .filter(({ record }) => {
       const state = String(record.state || '').trim().toUpperCase();
       const taskId = String(record.taskId || record.task_id || '').trim();
-      return Boolean(taskId) && (state === 'QUEUED' || state === 'RUNNING');
+      return Boolean(taskId) && (state === 'QUEUED' || state === 'RUNNING' || isSyntheticLeadOptStaleFailure(record));
     })
     .slice(0, 4);
 
@@ -563,11 +568,10 @@ async function reconcileLeadOptPredictionMapStates(
       const state = resolveLeadOptNonRegressiveState(currentState, nextState);
       const errorText =
         state === 'FAILURE'
-          ? String(
-              (status.info && typeof status.info === 'object'
-                ? (status.info as Record<string, unknown>).error || (status.info as Record<string, unknown>).message
-                : '') || status.state || 'Prediction failed.'
-            ).trim()
+          ? buildTaskRuntimeFailureMessage(
+              status as { state: string; info?: Record<string, unknown> },
+              'Prediction failed.'
+            )
           : '';
       const currentError = String(entry.record.error || '').trim();
       if (currentState === state && currentError === errorText) continue;
@@ -854,13 +858,12 @@ export async function syncRuntimeTaskRows(
                 : runtimeState === 'RUNNING'
                   ? 'RUNNING'
                   : 'QUEUED';
-          const statusInfo =
-            status.info && typeof status.info === 'object' && !Array.isArray(status.info)
-              ? (status.info as Record<string, unknown>)
-              : {};
           const errorText =
             mappedState === 'FAILURE'
-              ? String(statusInfo.error || statusInfo.message || status.state || 'Prediction failed.').trim()
+              ? buildTaskRuntimeFailureMessage(
+                  status as { state: string; info?: Record<string, unknown> },
+                  'Prediction failed.'
+                )
               : '';
           const baselineTotal = Math.max(1, totalHint || queuedHint + runningHint + successHint + failureHint || 1);
           let nextQueued = queuedHint;
