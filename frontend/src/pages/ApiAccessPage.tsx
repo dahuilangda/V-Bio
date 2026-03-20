@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import type {
+  AffinityScoringMode,
   ApiToken,
   ApiTokenUsage,
   ApiTokenUsageDaily,
@@ -179,6 +180,14 @@ function normalizePredictionBackend(value: string | null | undefined): Predictio
 
 function normalizeAffinityBackend(_value: string | null | undefined): AffinityBackend {
   return 'boltz';
+}
+
+function normalizeAffinityBuilderMode(value: unknown): AffinityScoringMode {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'pose' || normalized === 'refine' || normalized === 'interface') {
+    return normalized;
+  }
+  return 'score';
 }
 
 function randomAlphaNum(length: number): string {
@@ -453,6 +462,8 @@ export function ApiAccessPage() {
   const [builderResultPath, setBuilderResultPath] = useState('./result.zip');
   const [builderPredictionBackend, setBuilderPredictionBackend] = useState<PredictionBackend>('boltz');
   const [builderUseMsaAffinity, setBuilderUseMsaAffinity] = useState(true);
+  const [builderAffinityMode, setBuilderAffinityMode] = useState<AffinityScoringMode>('score');
+  const [builderAffinitySeed, setBuilderAffinitySeed] = useState<number | null>(null);
   const [builderAffinityConfidenceOnly, setBuilderAffinityConfidenceOnly] = useState(true);
   const [builderAffinityTargetChain, setBuilderAffinityTargetChain] = useState('A');
   const [builderAffinityLigandChain, setBuilderAffinityLigandChain] = useState('L');
@@ -1027,6 +1038,8 @@ export function ApiAccessPage() {
     if (!isAffinityWorkflow) return;
     const useMsa = Boolean(selectedProject?.use_msa);
     setBuilderUseMsaAffinity(useMsa);
+    setBuilderAffinityMode('score');
+    setBuilderAffinitySeed(null);
     setBuilderAffinityConfidenceOnly(true);
     setBuilderAffinityTargetChain('A');
     setBuilderAffinityLigandChain('L');
@@ -1096,6 +1109,9 @@ export function ApiAccessPage() {
           setBuilderPredictionBackend(normalizePredictionBackend(taskBackend));
           setBuilderAffinityBackend(normalizeAffinityBackend(taskBackend));
         }
+        setBuilderAffinitySeed(
+          typeof task.seed === 'number' && Number.isFinite(task.seed) ? Math.max(0, Math.floor(task.seed)) : null
+        );
 
         const taskComponents = Array.isArray(task.components)
           ? normalizeInputComponents(task.components.filter((component) => !isAffinityUploadComponent(component)) as InputComponent[])
@@ -1107,14 +1123,21 @@ export function ApiAccessPage() {
           setBuilderYamlConstraints(task.constraints);
           setBuilderYamlConstraintsOpen(task.constraints.length > 0);
         }
-        const taskProperties =
+        const taskPropertiesRaw =
           task.properties && typeof task.properties === 'object'
-            ? (task.properties as PredictionProperties)
+            ? (task.properties as unknown as Record<string, unknown>)
             : null;
-        if (taskProperties) {
+        if (taskPropertiesRaw) {
+          const taskInputOptions =
+            taskPropertiesRaw.__vbio_input_options_v1 && typeof taskPropertiesRaw.__vbio_input_options_v1 === 'object'
+              ? (taskPropertiesRaw.__vbio_input_options_v1 as Record<string, unknown>)
+              : {};
+          setBuilderAffinityMode(
+            normalizeAffinityBuilderMode(taskInputOptions.affinityMode ?? taskPropertiesRaw.affinityMode ?? taskPropertiesRaw.mode)
+          );
           setBuilderYamlProperties({
             ...EMPTY_PREDICTION_PROPERTIES,
-            ...taskProperties
+            ...(taskPropertiesRaw as unknown as PredictionProperties)
           });
         }
       } catch {
@@ -1499,6 +1522,11 @@ export function ApiAccessPage() {
     : '';
   const escapedTargetPath = escapeForDoubleQuotedShell(builderTargetPath.trim() || './protein.pdb');
   const escapedLigandPath = escapeForDoubleQuotedShell(builderLigandPath.trim() || './ligand.sdf');
+  const normalizedAffinityMode = normalizeAffinityBuilderMode(builderAffinityMode);
+  const normalizedAffinitySeed =
+    typeof builderAffinitySeed === 'number' && Number.isFinite(builderAffinitySeed)
+      ? Math.max(0, Math.floor(builderAffinitySeed))
+      : null;
   const affinityTargetChain = String(builderAffinityTargetChain || '').trim();
   const affinityLigandChain = String(builderAffinityLigandChain || '').trim();
   const affinityLigandSmiles = String(builderAffinityLigandSmiles || '').trim();
@@ -1516,6 +1544,7 @@ export function ApiAccessPage() {
   -F "ligand_smiles_map=${affinitySmilesMap}"`;
     })()
     : '';
+  const affinitySeedFlag = normalizedAffinitySeed !== null ? ` \\\n  -F "seed=${normalizedAffinitySeed}"` : '';
   const affinityModeHint =
     !builderAffinityConfidenceOnly && !affinityCanEnableActivity
       ? '\n# Affinity mode requires target chain, ligand chain, and ligand SMILES.'
@@ -1556,10 +1585,10 @@ ${submitTaskIdCapture}`;
   -F "protein_file=@${escapedTargetPath}" \\
   -F "ligand_file=@${escapedLigandPath}" \\
   -F "backend=boltz" \\
-  -F "mode=score" \\
+  -F "mode=${normalizedAffinityMode}" \\
   -F "compute_ipsae=true" \\
   -F "use_msa_server=${builderUseMsaAffinity ? 'true' : 'false'}" \\
-  -F "priority=high"${affinityActivityFlags})
+  -F "priority=high"${affinitySeedFlag}${affinityActivityFlags})
 ${submitTaskIdCapture}`;
   const commandSubmit = !isSupportedSubmitWorkflow
     ? `# Workflow "${selectedWorkflow.title}" is not supported in Command Builder.\n# Use project workflows: Prediction or Affinity.`
@@ -2276,6 +2305,31 @@ ${submitTaskIdCapture}`;
                     <span>Confidence Only</span>
                   </label>
                 </div>
+                <label className="field">
+                  <span>Mode</span>
+                  <select
+                    value={builderAffinityMode}
+                    onChange={(e) => setBuilderAffinityMode(normalizeAffinityBuilderMode(e.target.value))}
+                  >
+                    <option value="score">score</option>
+                    <option value="pose">pose</option>
+                    <option value="refine">refine</option>
+                    <option value="interface">interface</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Seed (optional)</span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={builderAffinitySeed ?? ''}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setBuilderAffinitySeed(value === '' ? null : Math.max(0, Math.floor(Number(value) || 0)));
+                    }}
+                    placeholder="Default: 42"
+                  />
+                </label>
                 <label className="field">
                   <span>Target file path</span>
                   <input value={builderTargetPath} onChange={(e) => setBuilderTargetPath(e.target.value)} placeholder="./protein.pdb" />

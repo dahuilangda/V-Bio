@@ -43,7 +43,7 @@ function readAffinityModeValue(task: ProjectTask, workflowKey: string): string {
   if (workflowKey !== 'affinity') return '';
   const properties =
     task.properties && typeof task.properties === 'object' && !Array.isArray(task.properties)
-      ? (task.properties as Record<string, unknown>)
+      ? (task.properties as unknown as Record<string, unknown>)
       : {};
   const options =
     properties.__vbio_input_options_v1 &&
