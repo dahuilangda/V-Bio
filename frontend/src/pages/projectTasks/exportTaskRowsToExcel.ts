@@ -19,6 +19,42 @@ interface ExportTaskRowsToExcelInput {
   workspacePairPreference: WorkspacePairPreference;
 }
 
+const EXPORT_TASK_FETCH_CHUNK_SIZE = 80;
+
+async function loadAuthoritativeTasksForExport(
+  project: Project,
+  filteredRows: TaskListRow[]
+) {
+  const taskRowIds = Array.from(
+    new Set(
+      filteredRows
+        .map((row) => String(row.task.id || '').trim())
+        .filter(Boolean)
+    )
+  );
+  if (taskRowIds.length === 0) return [];
+
+  const sharedAccess = {
+    accessScope: project.access_scope || 'owner',
+    accessLevel: project.access_level || 'owner',
+    editableTaskIds: project.editable_task_ids || []
+  } as const;
+
+  const taskIdChunks = Array.from(
+    { length: Math.ceil(taskRowIds.length / EXPORT_TASK_FETCH_CHUNK_SIZE) },
+    (_, index) => taskRowIds.slice(index * EXPORT_TASK_FETCH_CHUNK_SIZE, (index + 1) * EXPORT_TASK_FETCH_CHUNK_SIZE)
+  );
+  const taskChunks = await Promise.all(
+    taskIdChunks.map((taskRowIdsChunk) =>
+      listProjectTasks(project.id, {
+        taskRowIds: taskRowIdsChunk,
+        ...sharedAccess
+      })
+    )
+  );
+  return taskChunks.flat();
+}
+
 export async function exportTaskRowsToExcel({
   project,
   filteredRows,
@@ -27,12 +63,7 @@ export async function exportTaskRowsToExcel({
   if (filteredRows.length === 0) return;
 
   const [{ default: ExcelJS }, rdkit] = await Promise.all([import('exceljs'), loadRDKitModule()]);
-  const authoritativeTasks = await listProjectTasks(project.id, {
-    taskRowIds: filteredRows.map((row) => row.task.id),
-    accessScope: project.access_scope || 'owner',
-    accessLevel: project.access_level || 'owner',
-    editableTaskIds: project.editable_task_ids || []
-  });
+  const authoritativeTasks = await loadAuthoritativeTasksForExport(project, filteredRows);
   const authoritativeTaskMap = new Map(authoritativeTasks.map((task) => [task.id, task] as const));
   const imageWidthPx = 220;
   const imageHeightPx = 132;

@@ -23,7 +23,7 @@ import time
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
     from rdkit import Chem
@@ -1042,7 +1042,7 @@ def _index_fragments_to_postgres_sharded(
 
     output_dir = os.path.dirname(os.path.abspath(fragments_file)) or "."
     try:
-        _prepare_full_sharded_build_state(
+        meta_path = _prepare_full_sharded_build_state(
             output_dir=output_dir,
             fragments_file=fragments_file,
             schema=normalized_schema,
@@ -1193,8 +1193,34 @@ def _index_fragments_to_postgres_sharded(
         logger.error("Full shard preparation failed: %s", "; ".join(shard_prepare_errors))
         return False
 
+    build_state = _read_full_sharded_build_state(
+        output_dir=output_dir,
+        schema=normalized_schema,
+        shard_count=shard_total,
+    )
+    merged_shards_completed: set[int] = {
+        int(item)
+        for item in (build_state.get("merged_shards") if isinstance(build_state.get("merged_shards"), list) else [])
+        if int(item or 0) > 0
+    }
     existing_target_tables = _find_mmpdb_core_tables_in_schema(postgres_url, normalized_schema)
-    if existing_target_tables and not force_rebuild_schema:
+    can_resume_target_merge = bool(merged_shards_completed)
+    if can_resume_target_merge and not existing_target_tables:
+        logger.warning(
+            "Sharded full-build state recorded merged shards but target schema '%s' is empty; restarting target merge from scratch.",
+            normalized_schema,
+        )
+        build_state = _write_full_sharded_build_state(
+            output_dir=output_dir,
+            schema=normalized_schema,
+            fragments_file=fragments_file,
+            shard_count=shard_total,
+            merged_shards=[],
+            merge_completed=False,
+        )
+        merged_shards_completed.clear()
+        can_resume_target_merge = False
+    if existing_target_tables and (not force_rebuild_schema) and not can_resume_target_merge:
         logger.error(
             "Target schema '%s' already contains mmpdb core tables: %s. Use --force to rebuild.",
             normalized_schema,
@@ -1202,15 +1228,31 @@ def _index_fragments_to_postgres_sharded(
         )
         return False
 
-    try:
-        _create_postgres_bigint_core_schema(
-            postgres_url,
-            schema=normalized_schema,
-            drop_existing_core_tables=True,
+    if not can_resume_target_merge:
+        try:
+            _create_postgres_bigint_core_schema(
+                postgres_url,
+                schema=normalized_schema,
+                drop_existing_core_tables=True,
+            )
+            build_state = _write_full_sharded_build_state(
+                output_dir=output_dir,
+                schema=normalized_schema,
+                fragments_file=fragments_file,
+                shard_count=shard_total,
+                merged_shards=[],
+                merge_completed=False,
+            )
+        except Exception as exc:
+            logger.error("Failed initializing target schema for sharded full index: %s", exc)
+            return False
+    else:
+        logger.info(
+            "Resuming sharded full-index target merge: schema=%s completed_shards=%s/%s",
+            normalized_schema,
+            len(merged_shards_completed),
+            len(shard_specs),
         )
-    except Exception as exc:
-        logger.error("Failed initializing target schema for sharded full index: %s", exc)
-        return False
 
     try:
         with psycopg.connect(postgres_url, autocommit=False) as conn:
@@ -1218,7 +1260,15 @@ def _index_fragments_to_postgres_sharded(
                 _pg_set_search_path(cursor, normalized_schema)
                 _create_postgres_merge_support_indexes(cursor)
                 for merge_seq, spec in enumerate(sorted(shard_specs, key=lambda item: item[0])):
+                    _pg_set_search_path(cursor, normalized_schema)
                     shard_seq, shard_constants, _, _, shard_temp_schema = spec
+                    if shard_seq in merged_shards_completed:
+                        logger.info(
+                            "Skipping already-merged full-index shard: shard=%s schema=%s",
+                            shard_seq,
+                            shard_temp_schema,
+                        )
+                        continue
                     shard_active_rows = _load_used_compounds_from_schema(
                         cursor,
                         schema=shard_temp_schema,
@@ -1241,8 +1291,32 @@ def _index_fragments_to_postgres_sharded(
                         skip_finalize=True,
                         align_sequences=(merge_seq == 0),
                     )
+                    conn.commit()
+                    merged_shards_completed.add(shard_seq)
+                    build_state = _write_full_sharded_build_state(
+                        output_dir=output_dir,
+                        schema=normalized_schema,
+                        fragments_file=fragments_file,
+                        shard_count=shard_total,
+                        merged_shards=sorted(merged_shards_completed),
+                        merge_completed=(len(merged_shards_completed) >= len(shard_specs)),
+                    )
+                    logger.info(
+                        "Committed full-index shard merge transaction: shard=%s schema=%s",
+                        shard_seq,
+                        shard_temp_schema,
+                    )
+                _pg_set_search_path(cursor, normalized_schema)
                 _update_dataset_counts(cursor)
                 conn.commit()
+        _write_full_sharded_build_state(
+            output_dir=output_dir,
+            schema=normalized_schema,
+            fragments_file=fragments_file,
+            shard_count=shard_total,
+            merged_shards=sorted(merged_shards_completed),
+            merge_completed=True,
+        )
     except Exception as exc:
         logger.error("Failed merging sharded full-index schemas into target '%s': %s", normalized_schema, exc, exc_info=True)
         return False
@@ -3267,6 +3341,227 @@ def _normalize_compound_batch_id(value: str) -> str:
     return f"compound_batch_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
 
 
+def _manifest_bool(value: object, *, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    token = str(value).strip().lower()
+    if not token:
+        return bool(default)
+    if token in {"1", "true", "yes", "y", "on"}:
+        return True
+    if token in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean value in manifest: {value}")
+
+
+def _resolve_manifest_path(manifest_dir: str, raw_path: object, *, field_name: str) -> str:
+    token = str(raw_path or "").strip()
+    if not token:
+        raise ValueError(f"Compound batch manifest field '{field_name}' is required.")
+    if os.path.isabs(token):
+        return token
+    return os.path.abspath(os.path.join(manifest_dir, token))
+
+
+def _load_compound_batch_manifest(
+    manifest_file: str,
+    *,
+    default_smiles_column: str = "",
+    default_id_column: str = "",
+    default_canonicalize_smiles: bool = True,
+    default_overwrite_existing_batch: bool = False,
+) -> tuple[list[dict[str, Any]], bool]:
+    path_token = str(manifest_file or "").strip()
+    if not path_token:
+        raise ValueError("Compound batch manifest file is required.")
+    if not os.path.exists(path_token):
+        raise FileNotFoundError(f"Compound batch manifest file not found: {path_token}")
+
+    manifest_dir = os.path.dirname(os.path.abspath(path_token)) or "."
+    try:
+        with open(path_token, "r", encoding="utf-8") as handle:
+            raw_payload = json.load(handle)
+    except Exception as exc:
+        raise ValueError(f"Failed to parse compound batch manifest JSON: {exc}") from exc
+    if not isinstance(raw_payload, dict):
+        raise ValueError("Compound batch manifest must be a JSON object.")
+
+    defaults = dict(raw_payload.get("defaults") or {}) if isinstance(raw_payload.get("defaults"), dict) else {}
+    continue_on_error = _manifest_bool(raw_payload.get("continue_on_error"), default=False)
+    rows = raw_payload.get("batches")
+    if not isinstance(rows, list):
+        raise ValueError("Compound batch manifest must contain a 'batches' array.")
+
+    if not rows:
+        raise ValueError("Compound batch manifest contains no batches.")
+
+    normalized_entries: list[dict[str, Any]] = []
+    for index, raw_item in enumerate(rows, start=1):
+        if not isinstance(raw_item, dict):
+            raise ValueError(f"Compound batch manifest entry #{index} must be an object.")
+        item = dict(raw_item)
+        source_file = _resolve_manifest_path(
+            manifest_dir,
+            item.get("file"),
+            field_name="file",
+        )
+        if not os.path.exists(source_file):
+            raise FileNotFoundError(f"Compound batch manifest entry #{index} file not found: {source_file}")
+        property_metadata_file = str(item.get("property_metadata_file") or defaults.get("property_metadata_file") or "").strip()
+        resolved_property_metadata = ""
+        if property_metadata_file:
+            resolved_property_metadata = _resolve_manifest_path(
+                manifest_dir,
+                property_metadata_file,
+                field_name="property_metadata_file",
+            )
+            if not os.path.exists(resolved_property_metadata):
+                raise FileNotFoundError(
+                    f"Compound batch manifest entry #{index} property_metadata_file not found: {resolved_property_metadata}"
+                )
+        batch_id = str(item.get("batch_id") or "").strip()
+        if not batch_id:
+            batch_id = f"compound_batch_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}_{index:03d}"
+        normalized_entries.append(
+            {
+                "structures_file": source_file,
+                "batch_id": batch_id,
+                "batch_label": str(item.get("batch_label") or defaults.get("batch_label") or "").strip(),
+                "batch_notes": str(item.get("batch_notes") or defaults.get("batch_notes") or "").strip(),
+                "smiles_column": str(item.get("smiles_column") or defaults.get("smiles_column") or default_smiles_column or "").strip(),
+                "id_column": str(item.get("id_column") or defaults.get("id_column") or default_id_column or "").strip(),
+                "canonicalize_smiles": _manifest_bool(
+                    item.get("canonicalize_smiles", defaults.get("canonicalize_smiles")),
+                    default=default_canonicalize_smiles,
+                ),
+                "overwrite_existing_batch": _manifest_bool(
+                    item.get("overwrite_existing_batch", defaults.get("overwrite_existing_batch")),
+                    default=default_overwrite_existing_batch,
+                ),
+                "property_metadata_file": resolved_property_metadata,
+            }
+        )
+    return normalized_entries, continue_on_error
+
+
+def import_compound_batch_manifest_postgres(
+    postgres_url: str,
+    *,
+    schema: str,
+    manifest_file: str,
+    output_dir: str = "data",
+    max_heavy_atoms: int = 50,
+    skip_attachment_enrichment: bool = False,
+    attachment_force_recompute: bool = False,
+    fragment_jobs: int = 8,
+    index_maintenance_work_mem_mb: int = 1024,
+    index_work_mem_mb: int = 128,
+    index_parallel_workers: int = 4,
+    index_commit_every_flushes: int = 0,
+    incremental_index_shards: int = 1,
+    incremental_index_jobs: int = 1,
+    build_construct_tables: bool = True,
+    build_constant_smiles_mol_index: bool = True,
+    skip_incremental_analyze: bool = True,
+    refresh_dataset_counts: bool = False,
+    smiles_column: str = "",
+    id_column: str = "",
+    canonicalize_smiles: bool = True,
+    overwrite_existing_batch: bool = False,
+    property_metadata_file: str = "",
+) -> bool:
+    logger = logging.getLogger(__name__)
+    normalized_schema = _validate_pg_schema(schema)
+    entries, continue_on_error = _load_compound_batch_manifest(
+        manifest_file,
+        default_smiles_column=smiles_column,
+        default_id_column=id_column,
+        default_canonicalize_smiles=canonicalize_smiles,
+        default_overwrite_existing_batch=overwrite_existing_batch,
+    )
+    logger.info(
+        "Compound batch manifest loaded: schema=%s file=%s batches=%s continue_on_error=%s",
+        normalized_schema,
+        manifest_file,
+        len(entries),
+        continue_on_error,
+    )
+    succeeded = 0
+    failed: list[str] = []
+    for index, entry in enumerate(entries, start=1):
+        batch_id = str(entry.get("batch_id") or "").strip()
+        source_file = str(entry.get("structures_file") or "").strip()
+        logger.info(
+            "Manifest compound import %s/%s: schema=%s batch_id=%s file=%s",
+            index,
+            len(entries),
+            normalized_schema,
+            batch_id,
+            source_file,
+        )
+        ok = import_compound_batch_postgres(
+            postgres_url,
+            schema=normalized_schema,
+            structures_file=source_file,
+            batch_id=batch_id,
+            batch_label=str(entry.get("batch_label") or "").strip(),
+            batch_notes=str(entry.get("batch_notes") or "").strip(),
+            smiles_column=str(entry.get("smiles_column") or "").strip(),
+            id_column=str(entry.get("id_column") or "").strip(),
+            canonicalize_smiles=bool(entry.get("canonicalize_smiles")),
+            output_dir=output_dir,
+            max_heavy_atoms=max_heavy_atoms,
+            skip_attachment_enrichment=skip_attachment_enrichment,
+            attachment_force_recompute=attachment_force_recompute,
+            fragment_jobs=fragment_jobs,
+            index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+            index_work_mem_mb=index_work_mem_mb,
+            index_parallel_workers=index_parallel_workers,
+            index_commit_every_flushes=index_commit_every_flushes,
+            incremental_index_shards=incremental_index_shards,
+            incremental_index_jobs=incremental_index_jobs,
+            build_construct_tables=build_construct_tables,
+            build_constant_smiles_mol_index=build_constant_smiles_mol_index,
+            skip_incremental_analyze=skip_incremental_analyze,
+            refresh_dataset_counts=refresh_dataset_counts,
+            overwrite_existing_batch=bool(entry.get("overwrite_existing_batch")),
+        )
+        if ok:
+            entry_property_metadata_file = str(entry.get("property_metadata_file") or "").strip()
+            if entry_property_metadata_file:
+                ok = apply_property_metadata_postgres(
+                    postgres_url,
+                    normalized_schema,
+                    entry_property_metadata_file,
+                )
+        if ok:
+            succeeded += 1
+            continue
+        failed.append(batch_id or source_file or f"entry_{index}")
+        if not continue_on_error:
+            logger.error(
+                "Stopping compound batch manifest import after failure: schema=%s failed_batch=%s",
+                normalized_schema,
+                failed[-1],
+            )
+            break
+    global_property_metadata = str(property_metadata_file or "").strip()
+    if global_property_metadata and succeeded > 0 and not failed:
+        if not apply_property_metadata_postgres(postgres_url, normalized_schema, global_property_metadata):
+            failed.append(f"property_metadata:{global_property_metadata}")
+    logger.info(
+        "Compound batch manifest import finished: schema=%s succeeded=%s failed=%s",
+        normalized_schema,
+        succeeded,
+        len(failed),
+    )
+    if failed:
+        logger.error("Compound batch manifest failures: %s", "; ".join(failed))
+    return not failed
+
+
 def _ensure_compound_batch_tables(cursor, *, seed_base_from_compound: bool = False) -> None:
     logger = logging.getLogger(__name__)
     cursor.execute(
@@ -4267,6 +4562,80 @@ def _full_sharded_build_meta(
     }
 
 
+def _normalize_full_sharded_build_state_payload(
+    payload: Dict[str, object],
+    *,
+    shard_count: int,
+) -> Dict[str, object]:
+    normalized = dict(payload if isinstance(payload, dict) else {})
+    normalized_shards = max(1, int(shard_count or 1))
+    merged_raw = normalized.get("merged_shards")
+    merged_shards: List[int] = []
+    if isinstance(merged_raw, list):
+        seen: set[int] = set()
+        for item in merged_raw:
+            try:
+                shard_seq = int(item)
+            except Exception:
+                continue
+            if shard_seq < 1 or shard_seq > normalized_shards or shard_seq in seen:
+                continue
+            seen.add(shard_seq)
+            merged_shards.append(shard_seq)
+    merged_shards.sort()
+    normalized["merged_shards"] = merged_shards
+    normalized["merge_completed"] = bool(normalized.get("merge_completed")) and len(merged_shards) >= normalized_shards
+    return normalized
+
+
+def _full_sharded_build_meta_matches(existing: Dict[str, object], expected: Dict[str, object]) -> bool:
+    if not isinstance(existing, dict):
+        return False
+    for key in ("mode", "schema", "shard_count", "fragment_file"):
+        if existing.get(key) != expected.get(key):
+            return False
+    return True
+
+
+def _read_full_sharded_build_state(
+    *,
+    output_dir: str,
+    schema: str,
+    shard_count: int,
+) -> Dict[str, object]:
+    meta_path = _full_sharded_build_meta_path(output_dir, schema)
+    payload = _read_json_payload(meta_path)
+    return _normalize_full_sharded_build_state_payload(payload, shard_count=shard_count)
+
+
+def _write_full_sharded_build_state(
+    *,
+    output_dir: str,
+    schema: str,
+    fragments_file: str,
+    shard_count: int,
+    merged_shards: Optional[Sequence[int]] = None,
+    merge_completed: Optional[bool] = None,
+) -> Dict[str, object]:
+    normalized_shards = max(1, int(shard_count or 1))
+    meta_path = _full_sharded_build_meta_path(output_dir, schema)
+    payload = _full_sharded_build_meta(
+        fragments_file=fragments_file,
+        schema=schema,
+        shard_count=normalized_shards,
+    )
+    if merged_shards is not None:
+        payload["merged_shards"] = list(merged_shards)
+    if merge_completed is not None:
+        payload["merge_completed"] = bool(merge_completed)
+    normalized = _normalize_full_sharded_build_state_payload(
+        payload,
+        shard_count=normalized_shards,
+    )
+    _write_json_payload(meta_path, normalized)
+    return normalized
+
+
 def _assert_full_sharded_build_meta(
     *,
     output_dir: str,
@@ -4281,13 +4650,19 @@ def _assert_full_sharded_build_meta(
         shard_count=shard_count,
     )
     existing = _read_json_payload(meta_path)
-    if existing and existing != expected:
+    if existing and not _full_sharded_build_meta_matches(existing, expected):
         raise RuntimeError(
             "Existing sharded full-build state does not match the current fragments file or shard settings. "
             f"State file: {meta_path}"
         )
-    if not existing:
-        _write_json_payload(meta_path, expected)
+    normalized = _normalize_full_sharded_build_state_payload(
+        existing if existing else expected,
+        shard_count=shard_count,
+    )
+    normalized.update(expected)
+    normalized = _normalize_full_sharded_build_state_payload(normalized, shard_count=shard_count)
+    if normalized != existing:
+        _write_json_payload(meta_path, normalized)
     return meta_path
 
 
@@ -4365,7 +4740,7 @@ def _prepare_full_sharded_build_state(
         shard_count=shard_count,
     )
     existing = _read_json_payload(meta_path)
-    if existing and existing != expected:
+    if existing and not _full_sharded_build_meta_matches(existing, expected):
         if not force_rebuild:
             raise RuntimeError(
                 "Existing sharded full-build state does not match the current fragments file or shard settings. "
@@ -7717,6 +8092,13 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
     )
 
     parser.add_argument(
+        '--import_compounds_manifest',
+        type=str,
+        default='',
+        help='批量导入化合物批次的JSON manifest（顺序复用现有单批次导入逻辑）'
+    )
+
+    parser.add_argument(
         '--delete_compounds_batch',
         type=str,
         default='',
@@ -7955,10 +8337,12 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
         + int(property_batch_list_mode)
     )
     compound_batch_import_file = str(args.import_compounds_batch or "").strip()
+    compound_batch_manifest_file = str(args.import_compounds_manifest or "").strip()
     compound_batch_delete_id = str(args.delete_compounds_batch or "").strip()
     compound_batch_list_mode = bool(args.list_compounds_batches)
     compound_batch_mode_count = (
         int(bool(compound_batch_import_file))
+        + int(bool(compound_batch_manifest_file))
         + int(bool(compound_batch_delete_id))
         + int(compound_batch_list_mode)
     )
@@ -7970,7 +8354,8 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
     if compound_batch_mode_count > 1:
         parser.error(
             "Only one compound batch operation can be selected: "
-            "--import_compounds_batch or --delete_compounds_batch or --list_compounds_batches."
+            "--import_compounds_batch or --import_compounds_manifest or "
+            "--delete_compounds_batch or --list_compounds_batches."
         )
     if property_batch_mode_count > 0 and compound_batch_mode_count > 0:
         parser.error("Property-batch operation and compound-batch operation cannot be combined in one run.")
@@ -8143,6 +8528,51 @@ COc1cc2c(cc1OC)CCN(C2)C    CHEMBL456    193.2
                 print(f"PostgreSQL: {postgres_url}")
                 print(f"schema: {args.postgres_schema}")
                 print(f"deleted compound batch_id: {compound_batch_delete_id}")
+                sys.exit(0)
+
+            if compound_batch_manifest_file:
+                property_metadata_file = str(args.property_metadata_file or "").strip()
+
+                def _do_compound_batch_manifest_import() -> bool:
+                    return import_compound_batch_manifest_postgres(
+                        postgres_url,
+                        schema=args.postgres_schema,
+                        manifest_file=compound_batch_manifest_file,
+                        smiles_column=args.compound_batch_smiles_column,
+                        id_column=args.compound_batch_id_column,
+                        canonicalize_smiles=not args.compound_batch_no_canonicalize_smiles,
+                        output_dir=args.output_dir,
+                        max_heavy_atoms=args.max_heavy_atoms,
+                        skip_attachment_enrichment=args.skip_attachment_enrichment,
+                        attachment_force_recompute=args.attachment_force_recompute,
+                        fragment_jobs=args.fragment_jobs,
+                        index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
+                        index_work_mem_mb=args.pg_index_work_mem_mb,
+                        index_parallel_workers=args.pg_index_parallel_workers,
+                        index_commit_every_flushes=args.pg_index_commit_every_flushes,
+                        incremental_index_shards=args.pg_incremental_index_shards,
+                        incremental_index_jobs=args.pg_incremental_index_jobs,
+                        skip_incremental_analyze=(not args.pg_incremental_force_analyze),
+                        refresh_dataset_counts=bool(args.pg_incremental_refresh_dataset_counts),
+                        build_construct_tables=not args.pg_skip_construct_tables,
+                        build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
+                        property_metadata_file=property_metadata_file,
+                    )
+
+                import_ok = _run_with_registry_status(
+                    postgres_url,
+                    args.postgres_schema,
+                    "import_compound_batch_manifest",
+                    _do_compound_batch_manifest_import,
+                )
+                if not import_ok:
+                    sys.exit(1)
+                print("\n" + "=" * 60)
+                print("化合物批量批次导入完成!")
+                print("=" * 60)
+                print(f"PostgreSQL: {postgres_url}")
+                print(f"schema: {args.postgres_schema}")
+                print(f"manifest: {compound_batch_manifest_file}")
                 sys.exit(0)
 
             normalized_compound_batch_id = _normalize_compound_batch_id(args.compound_batch_id)

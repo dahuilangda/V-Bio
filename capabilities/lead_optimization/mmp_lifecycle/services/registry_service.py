@@ -28,5 +28,32 @@ def set_database_flags(
     )
 
 
+def upsert_database(
+    *,
+    database_id: str = "",
+    database_url: str = "",
+    schema: str = "",
+    label: str | None = None,
+    description: str | None = None,
+    visible: bool | None = None,
+    is_default: bool | None = None,
+    status: str | None = None,
+    status_message: str | None = None,
+    include_stats: bool = True,
+) -> Dict[str, Any]:
+    return registry.upsert_mmp_database(
+        database_id=database_id,
+        database_url=database_url,
+        schema=schema,
+        label=label,
+        description=description,
+        visible=visible,
+        is_default=is_default,
+        status=status,
+        status_message=status_message,
+        include_stats=include_stats,
+    )
+
+
 def delete_database(database_id: str, *, drop_data: bool = False, include_stats: bool = True) -> Dict[str, Any]:
     return registry.delete_mmp_database(database_id, drop_data=drop_data, include_stats=include_stats)

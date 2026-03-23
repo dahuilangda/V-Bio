@@ -204,12 +204,39 @@ function buildCheckOverview(compoundSummary: Record<string, unknown>, experiment
   };
 }
 
-function getDatabaseBuildState(item: MmpLifecycleDatabaseItem): 'ready' | 'building' {
+type DatabaseBuildState = 'ready' | 'building' | 'failed';
+
+function getDatabaseBuildState(item: MmpLifecycleDatabaseItem): DatabaseBuildState {
+  const status = readText(item.status).toLowerCase();
+  if (status === 'ready') return 'ready';
+  if (status === 'failed') return 'failed';
+  if (status === 'building') return 'building';
   const stats = asRecord(item.stats);
   const compounds = readNumber(stats.compounds);
   const rules = readNumber(stats.rules);
   const pairs = readNumber(stats.pairs);
   return compounds !== null && rules !== null && pairs !== null ? 'ready' : 'building';
+}
+
+function getDatabaseBuildStateLabel(item: MmpLifecycleDatabaseItem): string {
+  const state = getDatabaseBuildState(item);
+  if (state === 'ready') return 'Ready';
+  if (state === 'failed') return 'Failed';
+  return 'Building';
+}
+
+function getDatabaseBuildProgressLabel(item: MmpLifecycleDatabaseItem): string {
+  const progress = asRecord(item.build_progress);
+  const shardCount = readNumber(progress.shard_count);
+  const mergedShardCount = readNumber(progress.merged_shard_count);
+  if (shardCount !== null && shardCount > 0 && mergedShardCount !== null) {
+    return `Merge ${Math.min(shardCount, Math.max(0, Math.trunc(mergedShardCount)))}/${Math.trunc(shardCount)} shards`;
+  }
+  const state = getDatabaseBuildState(item);
+  if (state === 'failed') {
+    return readText(item.status_message) || 'Build failed';
+  }
+  return '';
 }
 
 function splitDelimitedLine(line: string, delimiter: string): string[] {
@@ -2803,7 +2830,15 @@ export function MmpLifecycleAdminPage() {
     if (!dbId) return '-';
     const db = databaseById.get(dbId);
     if (!db) return '-';
-    return getDatabaseBuildState(db) === 'ready' ? 'Ready' : 'Building';
+    return getDatabaseBuildStateLabel(db);
+  }, [assayMethodDatabaseId, databaseById]);
+
+  const selectedAssayDatabaseProgressLabel = useMemo(() => {
+    const dbId = readText(assayMethodDatabaseId);
+    if (!dbId) return '';
+    const db = databaseById.get(dbId);
+    if (!db) return '';
+    return getDatabaseBuildProgressLabel(db);
   }, [assayMethodDatabaseId, databaseById]);
 
   const selectedAssayDatabasePendingProperties = useMemo(() => {
@@ -3311,7 +3346,8 @@ export function MmpLifecycleAdminPage() {
                     const dbId = readText(item.selected_database_id);
                     const dbMeta = databaseById.get(dbId);
                     const dbLabel = readText(dbMeta?.label || dbMeta?.schema || dbMeta?.id || dbId) || '-';
-                    const dbState = dbMeta ? getDatabaseBuildState(dbMeta) : 'building';
+                    const dbStateLabel = dbMeta ? getDatabaseBuildStateLabel(dbMeta) : 'Building';
+                    const dbProgressLabel = dbMeta ? getDatabaseBuildProgressLabel(dbMeta) : '';
                     const dbPendingSync = Number(pendingSyncByDatabase[dbId] || 0);
                     const lastCheck = asRecord(item.last_check);
                     const compoundSummary = asRecord(lastCheck.compound_summary);
@@ -3353,7 +3389,8 @@ export function MmpLifecycleAdminPage() {
                           <div className="mmp-life-db-primary">{dbLabel}</div>
                           <div className="mmp-life-db-meta">
                             <span>{readText(dbMeta?.schema) || dbId || '-'}</span>
-                            <span>{dbState === 'ready' ? 'Ready' : 'Building'}</span>
+                            <span>{dbStateLabel}</span>
+                            {dbProgressLabel ? <span>{dbProgressLabel}</span> : null}
                             {dbPendingSync > 0 ? <span>{`Pending Sync ${summarizeCount(dbPendingSync)}`}</span> : null}
                           </div>
                         </td>
@@ -3451,10 +3488,10 @@ export function MmpLifecycleAdminPage() {
                         {databases.map((item) => {
                           const id = readText(item.id);
                           const label = readText(item.label || item.schema || item.id);
-                          const state = getDatabaseBuildState(item);
-                          const stateLabel = state === 'ready' ? 'Ready' : 'Building';
+                          const stateLabel = getDatabaseBuildStateLabel(item);
+                          const progressLabel = getDatabaseBuildProgressLabel(item);
                           return (
-                            <option key={id} value={id}>{label} · {stateLabel}</option>
+                            <option key={id} value={id}>{[label, stateLabel, progressLabel].filter(Boolean).join(' · ')}</option>
                           );
                         })}
                       </select>
@@ -4057,17 +4094,18 @@ export function MmpLifecycleAdminPage() {
                   {databases.map((item) => {
                     const id = readText(item.id);
                     const label = readText(item.label || item.schema || item.id) || id;
-                    const state = getDatabaseBuildState(item);
+                    const stateLabel = getDatabaseBuildStateLabel(item);
+                    const progressLabel = getDatabaseBuildProgressLabel(item);
                     return (
                       <option key={`assay-db-${id}`} value={id}>
-                        {`${label} · ${state === 'ready' ? 'Ready' : 'Building'}`}
+                        {[label, stateLabel, progressLabel].filter(Boolean).join(' · ')}
                       </option>
                     );
                   })}
                 </select>
               </label>
               <div className="mmp-life-method-scope-meta muted small">
-                {`State ${selectedAssayDatabaseStateLabel} · Props ${summarizeCount(assayDatabasePropertyNames.length)} · Pending ${summarizeCount(selectedAssayDatabasePendingSyncCount)} · ${assayPropertySummaryText}`}
+                {`State ${selectedAssayDatabaseStateLabel}${selectedAssayDatabaseProgressLabel ? ` · ${selectedAssayDatabaseProgressLabel}` : ''} · Props ${summarizeCount(assayDatabasePropertyNames.length)} · Pending ${summarizeCount(selectedAssayDatabasePendingSyncCount)} · ${assayPropertySummaryText}`}
               </div>
             </div>
             <div className="toolbar project-toolbar mmp-life-list-toolbar mmp-life-assay-toolbar">

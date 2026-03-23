@@ -10,7 +10,7 @@ import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -67,6 +67,7 @@ def _read_text(value: Any) -> str:
     return str(value).strip()
 
 
+_DEFAULT_LIFECYCLE_OUTPUT_DIR = "capabilities/lead_optimization/data"
 _LIFECYCLE_TRANSIENT_SCHEMA_RE = re.compile(r"_incs_[0-9]{8,}_[0-9]{2}$", re.IGNORECASE)
 
 
@@ -91,6 +92,73 @@ def _filter_lifecycle_catalog_databases(catalog: Dict[str, Any]) -> Dict[str, An
     if default_id and not any(_read_text(item.get("id")) == default_id for item in databases):
         payload["default_database_id"] = _read_text(databases[0].get("id")) if databases else ""
     return payload
+
+
+def _default_lifecycle_output_dir() -> str:
+    return _DEFAULT_LIFECYCLE_OUTPUT_DIR
+
+
+def _read_database_build_progress(item: Dict[str, Any], *, output_dir: str) -> Dict[str, Any]:
+    schema = _read_text(item.get("schema"))
+    if not schema:
+        return {}
+    try:
+        meta_path = legacy_engine._full_sharded_build_meta_path(output_dir, schema)
+        raw_state = legacy_engine._read_json_payload(meta_path)
+    except Exception:
+        return {}
+    if _read_text(raw_state.get("mode")) != "full_sharded_index":
+        return {}
+    try:
+        shard_count = int(raw_state.get("shard_count") or 0)
+    except Exception:
+        return {}
+    if shard_count <= 0:
+        return {}
+    try:
+        state = legacy_engine._read_full_sharded_build_state(
+            output_dir=output_dir,
+            schema=schema,
+            shard_count=shard_count,
+        )
+    except Exception:
+        return {}
+    merged_raw = state.get("merged_shards")
+    merged_shards = [int(item) for item in merged_raw] if isinstance(merged_raw, list) else []
+    fragment_file = _safe_json_object(state.get("fragment_file"))
+    fragment_path = _read_text(fragment_file.get("path"))
+    progress = {
+        "mode": "full_sharded_index",
+        "schema": schema,
+        "shard_count": shard_count,
+        "merged_shards": merged_shards,
+        "merged_shard_count": len(merged_shards),
+        "merge_completed": bool(state.get("merge_completed")),
+    }
+    if fragment_path:
+        progress["fragment_file"] = {
+            "path": os.path.basename(fragment_path),
+            "size": fragment_file.get("size"),
+            "mtime_ns": fragment_file.get("mtime_ns"),
+        }
+    return progress
+
+
+def _enrich_lifecycle_catalog_databases(
+    databases: List[Dict[str, Any]],
+    *,
+    output_dir: str,
+) -> List[Dict[str, Any]]:
+    enriched: List[Dict[str, Any]] = []
+    for item in databases:
+        row = dict(_safe_json_object(item))
+        if not row:
+            continue
+        build_progress = _read_database_build_progress(row, output_dir=output_dir)
+        if build_progress:
+            row["build_progress"] = build_progress
+        enriched.append(row)
+    return enriched
 
 
 def _normalize_property_token(raw: Any) -> str:
@@ -760,7 +828,7 @@ def _extract_compound_import_options(payload: Dict[str, Any]) -> CompoundImportO
         incremental_jobs = incremental_shards
 
     return CompoundImportOptions(
-        output_dir=str(payload.get("output_dir") or "capabilities/lead_optimization/data").strip() or "capabilities/lead_optimization/data",
+        output_dir=str(payload.get("output_dir") or _default_lifecycle_output_dir()).strip() or _default_lifecycle_output_dir(),
         max_heavy_atoms=_to_int("max_heavy_atoms", 50),
         skip_attachment_enrichment=_to_bool("skip_attachment_enrichment", False),
         attachment_force_recompute=_to_bool("attachment_force_recompute", False),
@@ -775,6 +843,76 @@ def _extract_compound_import_options(payload: Dict[str, Any]) -> CompoundImportO
         build_construct_tables=not _to_bool("pg_skip_construct_tables", False),
         build_constant_smiles_mol_index=not _to_bool("pg_skip_constant_smiles_mol_index", False),
     )
+
+
+def _autotune_compound_import_options(
+    options: CompoundImportOptions,
+    *,
+    payload: Dict[str, Any],
+    compound_summary: Dict[str, Any],
+) -> CompoundImportOptions:
+    reindex_rows = _to_nonneg_int(compound_summary.get("reindex_rows"), 0)
+    if reindex_rows <= 0:
+        return options
+
+    cpu_count = max(1, int(os.cpu_count() or 1))
+    tuned_fragment_jobs = options.fragment_jobs
+    tuned_parallel_workers = options.index_parallel_workers
+    tuned_shards = options.incremental_index_shards
+    tuned_jobs = options.incremental_index_jobs
+
+    if reindex_rows >= 100_000:
+        tuned_fragment_jobs = min(32, cpu_count)
+        tuned_parallel_workers = min(8, max(2, cpu_count // 4))
+        tuned_shards = min(16, max(4, cpu_count // 2))
+        tuned_jobs = min(tuned_shards, max(2, cpu_count // 4))
+    elif reindex_rows >= 25_000:
+        tuned_fragment_jobs = min(24, cpu_count)
+        tuned_parallel_workers = min(6, max(2, cpu_count // 5))
+        tuned_shards = min(8, max(4, cpu_count // 3))
+        tuned_jobs = min(tuned_shards, max(2, cpu_count // 6))
+    elif reindex_rows >= 5_000:
+        tuned_fragment_jobs = min(16, cpu_count)
+        tuned_parallel_workers = min(4, max(2, cpu_count // 6))
+        tuned_shards = min(4, max(2, cpu_count // 4))
+        tuned_jobs = min(tuned_shards, max(1, cpu_count // 8))
+
+    explicit_int_keys = {
+        key
+        for key in (
+            "fragment_jobs",
+            "pg_index_parallel_workers",
+            "pg_incremental_index_shards",
+            "pg_incremental_index_jobs",
+        )
+        if key in payload
+    }
+
+    next_options = replace(
+        options,
+        fragment_jobs=options.fragment_jobs if "fragment_jobs" in explicit_int_keys else max(options.fragment_jobs, tuned_fragment_jobs),
+        index_parallel_workers=(
+            options.index_parallel_workers
+            if "pg_index_parallel_workers" in explicit_int_keys
+            else max(options.index_parallel_workers, tuned_parallel_workers)
+        ),
+        incremental_index_shards=(
+            options.incremental_index_shards
+            if "pg_incremental_index_shards" in explicit_int_keys
+            else max(options.incremental_index_shards, tuned_shards)
+        ),
+        incremental_index_jobs=(
+            options.incremental_index_jobs
+            if "pg_incremental_index_jobs" in explicit_int_keys
+            else max(options.incremental_index_jobs, tuned_jobs)
+        ),
+    )
+    if next_options.incremental_index_jobs > next_options.incremental_index_shards:
+        next_options = replace(
+            next_options,
+            incremental_index_jobs=next_options.incremental_index_shards,
+        )
+    return next_options
 
 
 def _canonicalize_smiles(raw: str) -> str:
@@ -1743,8 +1881,12 @@ def register_mmp_lifecycle_admin_routes(
         generated_property_meta: Dict[str, Any] = {}
         compounds_skipped_reason = ""
 
-        compound_options = _extract_compound_import_options(payload_obj)
         compound_summary = _safe_json_object(last_check.get("compound_summary"))
+        compound_options = _autotune_compound_import_options(
+            _extract_compound_import_options(payload_obj),
+            payload=payload_obj,
+            compound_summary=compound_summary,
+        )
         checked_database_id = _read_text(last_check.get("database_id"))
         checked_at = _read_text(last_check.get("checked_at"))
         checked_at_dt = _parse_utc_iso(checked_at)
@@ -1768,6 +1910,17 @@ def register_mmp_lifecycle_admin_routes(
                 )
                 import_compounds = False
                 _mark_progress("preflight", "No structural compound delta; skipped compound import")
+            else:
+                logger.info(
+                    "Lifecycle compound import autotune: batch=%s db=%s reindex_rows=%s fragment_jobs=%s shards=%s jobs=%s parallel_workers=%s",
+                    batch_id,
+                    database_id,
+                    reindex_rows,
+                    compound_options.fragment_jobs,
+                    compound_options.incremental_index_shards,
+                    compound_options.incremental_index_jobs,
+                    compound_options.index_parallel_workers,
+                )
 
         if import_compounds:
             _start_stage("import_compounds", "Importing compounds")
@@ -1954,6 +2107,14 @@ def register_mmp_lifecycle_admin_routes(
                     include_stats=True,
                     include_properties=False,
                 )
+            )
+            catalog["databases"] = _enrich_lifecycle_catalog_databases(
+                [
+                    _safe_json_object(item)
+                    for item in catalog.get("databases", [])
+                    if isinstance(item, dict)
+                ],
+                output_dir=_default_lifecycle_output_dir(),
             )
             pending_rows = store.list_pending_database_sync(pending_only=True)
             allowed_database_ids = {

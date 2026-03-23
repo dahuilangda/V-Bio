@@ -11,6 +11,11 @@ export interface MmpLifecycleDatabaseItem {
   backend?: string;
   visible?: boolean;
   is_default?: boolean;
+  status?: string;
+  status_message?: string;
+  status_updated_at?: string;
+  status_token?: string;
+  build_progress?: Record<string, unknown>;
   properties?: Array<Record<string, unknown>>;
   stats?: Record<string, unknown>;
 }

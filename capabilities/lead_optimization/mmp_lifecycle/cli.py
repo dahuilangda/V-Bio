@@ -149,6 +149,40 @@ def _cmd_compound_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_compound_import_manifest(args: argparse.Namespace) -> int:
+    target = _build_target(args)
+    before = verify_service.fetch_dataset_stats(target)
+    ok = setup_service.import_compound_batch_manifest(
+        target,
+        manifest_file=args.file,
+        smiles_column=args.smiles_column,
+        id_column=args.id_column,
+        canonicalize_smiles=not args.no_canonicalize,
+        output_dir=args.output_dir,
+        max_heavy_atoms=args.max_heavy_atoms,
+        skip_attachment_enrichment=args.skip_attachment_enrichment,
+        attachment_force_recompute=args.attachment_force_recompute,
+        fragment_jobs=args.fragment_jobs,
+        index_maintenance_work_mem_mb=args.pg_index_maintenance_work_mem_mb,
+        index_work_mem_mb=args.pg_index_work_mem_mb,
+        index_parallel_workers=args.pg_index_parallel_workers,
+        index_commit_every_flushes=args.pg_index_commit_every_flushes,
+        incremental_index_shards=args.pg_incremental_index_shards,
+        incremental_index_jobs=args.pg_incremental_index_jobs,
+        build_construct_tables=not args.pg_skip_construct_tables,
+        build_constant_smiles_mol_index=not args.pg_skip_constant_smiles_mol_index,
+        skip_incremental_analyze=False,
+        property_metadata_file=args.property_metadata_file,
+    )
+    if not ok:
+        return 1
+    after = verify_service.fetch_dataset_stats(target)
+    _print_dataset_stats("compound_manifest_before", before)
+    _print_dataset_stats("compound_manifest_after", after)
+    print(f"pair_delta={after.pairs - before.pairs}")
+    return 0
+
+
 def _cmd_compound_delete(args: argparse.Namespace) -> int:
     target = _build_target(args)
     before = verify_service.fetch_dataset_stats(target)
@@ -205,6 +239,100 @@ def _cmd_registry_set(args: argparse.Namespace) -> int:
         is_default=args.is_default,
         include_stats=not args.no_stats,
     )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_registry_upsert(args: argparse.Namespace) -> int:
+    payload = registry_service.upsert_database(
+        database_id=args.database_id,
+        database_url=args.postgres_url,
+        schema=args.postgres_schema,
+        label=args.label,
+        description=args.description,
+        visible=args.visible,
+        is_default=args.is_default,
+        status=args.status,
+        status_message=args.status_message,
+        include_stats=not args.no_stats,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _load_registry_batch_entries(path: str) -> list[dict[str, object]]:
+    with open(path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, list):
+        raise ValueError("Registry batch file must be a JSON array.")
+    entries: list[dict[str, object]] = []
+    for index, item in enumerate(payload, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"Registry batch entry #{index} must be a JSON object.")
+        entries.append(dict(item))
+    return entries
+
+
+def _coerce_optional_bool(value: object) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    token = str(value).strip().lower()
+    if token in {"1", "true", "yes", "y", "on"}:
+        return True
+    if token in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean value: {value}")
+
+
+def _normalize_registry_batch_entry(item: dict[str, object], *, index: int) -> dict[str, object]:
+    database_id = str(item.get("database_id") or "").strip()
+    postgres_url = str(item.get("postgres_url") or "").strip()
+    postgres_schema = str(item.get("postgres_schema") or "").strip()
+    if not database_id and not (postgres_url and postgres_schema):
+        raise ValueError(
+            f"Registry batch entry #{index} must provide either 'database_id' or both 'postgres_url' and 'postgres_schema'."
+        )
+    return {
+        "database_id": database_id,
+        "postgres_url": postgres_url,
+        "postgres_schema": postgres_schema,
+        "label": (None if "label" not in item else str(item.get("label") or "")),
+        "description": (None if "description" not in item else str(item.get("description") or "")),
+        "visible": (None if "visible" not in item else _coerce_optional_bool(item.get("visible"))),
+        "is_default": (None if "is_default" not in item else _coerce_optional_bool(item.get("is_default"))),
+        "status": (None if "status" not in item else str(item.get("status") or "")),
+        "status_message": (None if "status_message" not in item else str(item.get("status_message") or "")),
+    }
+
+
+def _cmd_registry_batch_upsert(args: argparse.Namespace) -> int:
+    payload = {}
+    for index, raw_item in enumerate(_load_registry_batch_entries(args.file), start=1):
+        item = _normalize_registry_batch_entry(raw_item, index=index)
+        payload = registry_service.upsert_database(
+            database_id=str(item.get("database_id") or ""),
+            database_url=str(item.get("postgres_url") or ""),
+            schema=str(item.get("postgres_schema") or ""),
+            label=item.get("label") if isinstance(item.get("label"), str) or item.get("label") is None else None,
+            description=(
+                item.get("description") if isinstance(item.get("description"), str) or item.get("description") is None else None
+            ),
+            visible=item.get("visible") if isinstance(item.get("visible"), bool) or item.get("visible") is None else None,
+            is_default=item.get("is_default") if isinstance(item.get("is_default"), bool) or item.get("is_default") is None else None,
+            status=item.get("status") if isinstance(item.get("status"), str) or item.get("status") is None else None,
+            status_message=(
+                item.get("status_message")
+                if isinstance(item.get("status_message"), str) or item.get("status_message") is None
+                else None
+            ),
+            include_stats=False,
+        )
+    if not payload:
+        payload = registry_service.list_catalog(include_hidden=True, include_stats=not args.no_stats)
+    elif not args.no_stats:
+        payload = registry_service.list_catalog(include_hidden=True, include_stats=True)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
@@ -477,6 +605,33 @@ def build_parser() -> argparse.ArgumentParser:
     p_cmp_import.add_argument("--report_batch_pairs", action="store_true")
     p_cmp_import.set_defaults(func=_cmd_compound_import)
 
+    p_cmp_manifest = sub.add_parser("compound-import-manifest", help="Import multiple compound batches from JSON manifest")
+    _add_target_args(p_cmp_manifest)
+    p_cmp_manifest.add_argument("--file", required=True, type=str)
+    p_cmp_manifest.add_argument("--property_metadata_file", default="", type=str)
+    p_cmp_manifest.add_argument("--smiles_column", default="", type=str)
+    p_cmp_manifest.add_argument("--id_column", default="", type=str)
+    p_cmp_manifest.add_argument("--no_canonicalize", action="store_true")
+    p_cmp_manifest.add_argument("--output_dir", default="lead_optimization/data", type=str)
+    p_cmp_manifest.add_argument("--max_heavy_atoms", default=50, type=int)
+    p_cmp_manifest.add_argument("--skip_attachment_enrichment", action="store_true")
+    p_cmp_manifest.add_argument("--attachment_force_recompute", action="store_true")
+    p_cmp_manifest.add_argument("--fragment_jobs", default=8, type=int)
+    p_cmp_manifest.add_argument("--pg_index_maintenance_work_mem_mb", default=2048, type=int)
+    p_cmp_manifest.add_argument("--pg_index_work_mem_mb", default=64, type=int)
+    p_cmp_manifest.add_argument("--pg_index_parallel_workers", default=2, type=int)
+    p_cmp_manifest.add_argument(
+        "--pg_index_commit_every_flushes",
+        default=1,
+        type=int,
+        help="Commit cadence for mmpdb index flushes (<=0: auto-adaptive).",
+    )
+    p_cmp_manifest.add_argument("--pg_incremental_index_shards", default=1, type=int)
+    p_cmp_manifest.add_argument("--pg_incremental_index_jobs", default=1, type=int)
+    p_cmp_manifest.add_argument("--pg_skip_construct_tables", action="store_true")
+    p_cmp_manifest.add_argument("--pg_skip_constant_smiles_mol_index", action="store_true")
+    p_cmp_manifest.set_defaults(func=_cmd_compound_import_manifest)
+
     p_cmp_delete = sub.add_parser("compound-delete", help="Delete incremental compound batch")
     _add_target_args(p_cmp_delete)
     p_cmp_delete.add_argument("--batch_id", required=True, type=str)
@@ -522,6 +677,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_reg_set.add_argument("--is_default", type=lambda x: str(x).lower() in {"1", "true", "yes", "y"}, default=None)
     p_reg_set.add_argument("--no_stats", action="store_true")
     p_reg_set.set_defaults(func=_cmd_registry_set)
+
+    p_reg_upsert = sub.add_parser("registry-upsert", help="Create or update one DB registry entry")
+    p_reg_upsert.add_argument("--database_id", default="", type=str)
+    p_reg_upsert.add_argument("--postgres_url", default="", type=str)
+    p_reg_upsert.add_argument("--postgres_schema", default="", type=str)
+    p_reg_upsert.add_argument("--label", type=str, default=None)
+    p_reg_upsert.add_argument("--description", type=str, default=None)
+    p_reg_upsert.add_argument("--visible", type=lambda x: str(x).lower() in {"1", "true", "yes", "y"}, default=None)
+    p_reg_upsert.add_argument("--is_default", type=lambda x: str(x).lower() in {"1", "true", "yes", "y"}, default=None)
+    p_reg_upsert.add_argument("--status", type=str, default=None)
+    p_reg_upsert.add_argument("--status_message", type=str, default=None)
+    p_reg_upsert.add_argument("--no_stats", action="store_true")
+    p_reg_upsert.set_defaults(func=_cmd_registry_upsert)
+
+    p_reg_batch = sub.add_parser("registry-batch-upsert", help="Create or update registry entries from JSON manifest")
+    p_reg_batch.add_argument("--file", required=True, type=str)
+    p_reg_batch.add_argument("--no_stats", action="store_true")
+    p_reg_batch.set_defaults(func=_cmd_registry_batch_upsert)
 
     p_reg_del = sub.add_parser("registry-delete", help="Delete registry entry and optional schema")
     p_reg_del.add_argument("--database_id", required=True, type=str)

@@ -938,6 +938,84 @@ def patch_mmp_database(
     return get_mmp_database_catalog(include_hidden=True, include_stats=include_stats)
 
 
+def upsert_mmp_database(
+    *,
+    database_id: str = "",
+    database_url: str = "",
+    schema: str = "",
+    label: Optional[str] = None,
+    description: Optional[str] = None,
+    visible: Optional[bool] = None,
+    is_default: Optional[bool] = None,
+    status: Optional[str] = None,
+    status_message: Optional[str] = None,
+    include_stats: bool = False,
+) -> Dict[str, Any]:
+    resolved = _resolve_entry_for_status_update(
+        database_id=database_id,
+        database_url=database_url,
+        schema=schema,
+    )
+    target_id = resolved["id"]
+    target_url = resolved["database_url"]
+    target_schema = resolved["schema"]
+
+    catalog = get_mmp_database_catalog(include_hidden=True, include_stats=False, include_properties=False)
+    databases = catalog.get("databases") if isinstance(catalog, dict) else []
+    source = None
+    for item in databases if isinstance(databases, list) else []:
+        row = item if isinstance(item, dict) else {}
+        if str(row.get("id") or "").strip() == target_id:
+            source = row
+            break
+
+    manual_entries = _read_manual_entries()
+    by_id = {str(item.get("id") or ""): dict(item) for item in manual_entries}
+    target = by_id.get(target_id) or {
+        "id": target_id,
+        "label": str((source or {}).get("label") or target_schema or target_id).strip() or target_id,
+        "description": str((source or {}).get("description") or "").strip(),
+        "visible": bool((source or {}).get("visible", True)),
+        "is_default": bool((source or {}).get("is_default", False)),
+        "database_url": target_url,
+        "schema": target_schema,
+        "status": _normalize_status((source or {}).get("status")) or "building",
+        "status_message": str((source or {}).get("status_message") or "").strip(),
+        "status_updated_at": str((source or {}).get("status_updated_at") or "").strip(),
+        "status_token": str((source or {}).get("status_token") or "").strip(),
+    }
+
+    target["database_url"] = target_url
+    target["schema"] = target_schema
+    if label is not None:
+        target["label"] = str(label).strip() or target_id
+    if description is not None:
+        target["description"] = str(description).strip()
+    if visible is not None:
+        target["visible"] = bool(visible)
+    if is_default is not None:
+        target["is_default"] = bool(is_default)
+    if status is not None:
+        normalized_status = _normalize_status(status)
+        if not normalized_status:
+            raise ValueError(f"Unsupported status: {status}")
+        target["status"] = normalized_status
+        if normalized_status != "building":
+            target["status_token"] = ""
+        target["status_updated_at"] = _utc_now_iso()
+    if status_message is not None:
+        target["status_message"] = str(status_message).strip()
+        target["status_updated_at"] = _utc_now_iso()
+
+    by_id[target_id] = target
+    entries = list(by_id.values())
+    if is_default:
+        for item in entries:
+            item["is_default"] = str(item.get("id") or "") == target_id
+    _write_manual_entries(entries)
+    return get_mmp_database_catalog(include_hidden=True, include_stats=include_stats)
+
+
 def delete_mmp_database(database_id: str, *, drop_data: bool = True, include_stats: bool = False) -> Dict[str, Any]:
     token = str(database_id or "").strip()
     if not token:

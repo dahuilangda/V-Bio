@@ -278,6 +278,62 @@ def import_compound_batch(
     return ok
 
 
+def import_compound_batch_manifest(
+    target: PostgresTarget,
+    *,
+    manifest_file: str,
+    smiles_column: str = "",
+    id_column: str = "",
+    canonicalize_smiles: bool = True,
+    output_dir: str = "data",
+    max_heavy_atoms: int = 50,
+    skip_attachment_enrichment: bool = False,
+    attachment_force_recompute: bool = False,
+    fragment_jobs: int = 8,
+    index_maintenance_work_mem_mb: int = 1024,
+    index_work_mem_mb: int = 128,
+    index_parallel_workers: int = 4,
+    index_commit_every_flushes: int = 0,
+    incremental_index_shards: int = 1,
+    incremental_index_jobs: int = 1,
+    build_construct_tables: bool = True,
+    build_constant_smiles_mol_index: bool = True,
+    skip_incremental_analyze: bool = False,
+    refresh_dataset_counts: bool = False,
+    overwrite_existing_batch: bool = False,
+    property_metadata_file: str = "",
+) -> bool:
+    return _run_with_database_status(
+        target,
+        operation="import_compound_batch_manifest",
+        fn=lambda: legacy.import_compound_batch_manifest_postgres(
+            target.url,
+            schema=target.schema,
+            manifest_file=manifest_file,
+            smiles_column=smiles_column,
+            id_column=id_column,
+            canonicalize_smiles=canonicalize_smiles,
+            output_dir=output_dir,
+            max_heavy_atoms=max_heavy_atoms,
+            skip_attachment_enrichment=skip_attachment_enrichment,
+            attachment_force_recompute=attachment_force_recompute,
+            fragment_jobs=fragment_jobs,
+            index_maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+            index_work_mem_mb=index_work_mem_mb,
+            index_parallel_workers=index_parallel_workers,
+            index_commit_every_flushes=index_commit_every_flushes,
+            incremental_index_shards=incremental_index_shards,
+            incremental_index_jobs=incremental_index_jobs,
+            build_construct_tables=build_construct_tables,
+            build_constant_smiles_mol_index=build_constant_smiles_mol_index,
+            skip_incremental_analyze=skip_incremental_analyze,
+            refresh_dataset_counts=refresh_dataset_counts,
+            overwrite_existing_batch=overwrite_existing_batch,
+            property_metadata_file=property_metadata_file,
+        ),
+    )
+
+
 def import_compound_batch_with_diagnostics(
     target: PostgresTarget,
     *,
