@@ -111,6 +111,7 @@ interface CheckOverview {
 
 type BatchSortKey = 'updated_at' | 'name' | 'status' | 'selected_database_id';
 type SortDirection = 'asc' | 'desc';
+type BatchRunScope = 'auto' | 'compounds' | 'properties' | 'both';
 
 type FlowStep = 'batch' | 'upload' | 'mapping' | 'qa';
 
@@ -119,6 +120,13 @@ const FLOW_STEPS: Array<{ key: FlowStep; label: string }> = [
   { key: 'upload', label: 'Upload' },
   { key: 'mapping', label: 'Mapping' },
   { key: 'qa', label: 'Check' },
+];
+
+const BATCH_RUN_SCOPE_OPTIONS: Array<{ value: BatchRunScope; label: string }> = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'compounds', label: 'Compounds' },
+  { value: 'properties', label: 'Props' },
+  { value: 'both', label: 'Both' },
 ];
 
 const BULK_APPLY_RELAXED_POLICY: Record<string, unknown> = {
@@ -237,6 +245,78 @@ function getDatabaseBuildProgressLabel(item: MmpLifecycleDatabaseItem): string {
     return readText(item.status_message) || 'Build failed';
   }
   return '';
+}
+
+function hasBatchFileMeta(fileMeta: unknown): boolean {
+  const meta = asRecord(fileMeta);
+  return Boolean(
+    readText(meta.path)
+    || readText(meta.path_rel)
+    || readText(meta.stored_name)
+    || readText(meta.original_name)
+    || readText(meta.uploaded_at)
+  );
+}
+
+function summarizeBatchImportMode(importCompounds: boolean, importExperiments: boolean): string {
+  if (importCompounds && importExperiments) return 'Compounds + Props';
+  if (importCompounds) return 'Compounds';
+  if (importExperiments) return 'Props';
+  return 'Nothing';
+}
+
+function isBatchRuntimeActiveToken(value: unknown): boolean {
+  const token = readText(value).toLowerCase();
+  return token === 'queued' || token === 'queue' || token === 'running' || token === 'deleting';
+}
+
+function resolveBatchRunPlan(
+  batch: MmpLifecycleBatch | null,
+  scope: BatchRunScope,
+): {
+  importCompounds: boolean;
+  importExperiments: boolean;
+  availableCompounds: boolean;
+  availableExperiments: boolean;
+  label: string;
+  issue: string;
+} {
+  const files = asRecord(batch?.files);
+  const availableCompounds = hasBatchFileMeta(files.compounds);
+  const availableExperiments = hasBatchFileMeta(files.experiments);
+  let importCompounds = false;
+  let importExperiments = false;
+  let issue = '';
+
+  if (scope === 'auto') {
+    importCompounds = availableCompounds;
+    importExperiments = availableExperiments;
+  } else if (scope === 'compounds') {
+    importCompounds = availableCompounds;
+    if (!availableCompounds) issue = 'Compounds-only run requires an uploaded compounds file.';
+  } else if (scope === 'properties') {
+    importExperiments = availableExperiments;
+    if (!availableExperiments) issue = 'Props-only run requires an uploaded experiments/property file.';
+  } else {
+    importCompounds = availableCompounds;
+    importExperiments = availableExperiments;
+    if (!availableCompounds || !availableExperiments) {
+      issue = 'Both run requires both compounds and props files.';
+    }
+  }
+
+  if (!issue && !importCompounds && !importExperiments) {
+    issue = 'Nothing to run. Upload compounds and/or props first.';
+  }
+
+  return {
+    importCompounds,
+    importExperiments,
+    availableCompounds,
+    availableExperiments,
+    label: summarizeBatchImportMode(importCompounds, importExperiments),
+    issue,
+  };
 }
 
 function splitDelimitedLine(line: string, delimiter: string): string[] {
@@ -641,6 +721,7 @@ export function MmpLifecycleAdminPage() {
 
   const [checkResult, setCheckResult] = useState<Record<string, unknown> | null>(null);
   const [qaAction, setQaAction] = useState<'none' | 'check' | 'apply'>('none');
+  const [runScope, setRunScope] = useState<BatchRunScope>('auto');
   const [selectedBatchIds, setSelectedBatchIds] = useState<string[]>([]);
   const [bulkApplyRunning, setBulkApplyRunning] = useState(false);
   const [flowStep, setFlowStep] = useState<FlowStep>('batch');
@@ -825,13 +906,8 @@ export function MmpLifecycleAdminPage() {
         const phase = readText(runtime.phase).toLowerCase();
         const status = readText(item.status).toLowerCase();
         return (
-          phase === 'queued'
-          || phase === 'queue'
-          || phase === 'running'
-          || phase === 'deleting'
-          || status === 'queued'
-          || status === 'running'
-          || status === 'deleting'
+          isBatchRuntimeActiveToken(phase)
+          || isBatchRuntimeActiveToken(status)
         );
       }),
     [batches]
@@ -843,14 +919,7 @@ export function MmpLifecycleAdminPage() {
       const runtime = asRecord(item.apply_runtime);
       const phase = readText(runtime.phase).toLowerCase();
       const status = readText(item.status).toLowerCase();
-      const active =
-        phase === 'queued'
-        || phase === 'queue'
-        || phase === 'running'
-        || phase === 'deleting'
-        || status === 'queued'
-        || status === 'running'
-        || status === 'deleting';
+      const active = isBatchRuntimeActiveToken(phase) || isBatchRuntimeActiveToken(status);
       if (!active) continue;
       const dbId = readText(runtime.database_id || item.selected_database_id);
       if (!dbId) continue;
@@ -885,13 +954,23 @@ export function MmpLifecycleAdminPage() {
     [applyingByDatabase, lockedByDatabase]
   );
 
+  const hasActiveLifecycleWork = useMemo(() => {
+    if (hasApplyingBatch) return true;
+    if (pendingDatabaseSyncRows.some((row) => readText(row.status).toLowerCase() === 'pending')) return true;
+    if (databaseOperationLocks.some((row) => {
+      const status = readText(row.status).toLowerCase();
+      return !status || status === 'active';
+    })) return true;
+    return Object.values(busyOperationsByDatabase).some((value) => Number(value || 0) > 0);
+  }, [hasApplyingBatch, pendingDatabaseSyncRows, databaseOperationLocks, busyOperationsByDatabase]);
+
   useEffect(() => {
-    if (!hasApplyingBatch) return;
+    if (!hasActiveLifecycleWork) return;
     const timer = window.setInterval(() => {
       void loadOverview({ silent: true });
     }, 3000);
     return () => window.clearInterval(timer);
-  }, [hasApplyingBatch, loadOverview]);
+  }, [hasActiveLifecycleWork, loadOverview]);
 
   const selectedBatch = useMemo(
     () => batches.find((item) => readText(item.id) === selectedBatchId) || null,
@@ -918,6 +997,7 @@ export function MmpLifecycleAdminPage() {
     setBatchDescription(readText(selectedBatch.description));
     setBatchNotes(readText(selectedBatch.notes));
     setBatchDatabaseId(readText(selectedBatch.selected_database_id));
+    setRunScope('auto');
     const batchConfig = readBatchActivityConfig(selectedBatch);
     setStructureColumn(batchConfig.structureColumn);
     setActivityColumns(batchConfig.activityColumns);
@@ -2020,7 +2100,10 @@ export function MmpLifecycleAdminPage() {
     }
   };
 
-  const prepareBatchForCheckApply = useCallback(async (dbId: string): Promise<MmpLifecycleBatch | null> => {
+  const prepareBatchForCheckApply = useCallback(async (
+    dbId: string,
+    options?: { importExperiments?: boolean }
+  ): Promise<MmpLifecycleBatch | null> => {
     if (!selectedBatch) return null;
     let workingBatch = selectedBatch;
     const methodOutputById = new Map<string, string>();
@@ -2086,8 +2169,12 @@ export function MmpLifecycleAdminPage() {
     const desiredMethodMapNormalized = normalizeConfigMap(desiredMethodMap, desiredCols);
     const desiredTransformMapNormalized = normalizeConfigMap(desiredTransformMap, desiredCols);
     const desiredOutputMapNormalized = normalizeConfigMap(desiredOutputMap, desiredCols);
+    const shouldPrepareExperiments = options?.importExperiments !== false;
     const needsMaterialize = (
-      desiredCols.length > 0
+      shouldPrepareExperiments
+      && hasBatchFileMeta(asRecord(workingBatch.files).compounds)
+      && hasBatchFileMeta(asRecord(workingBatch.files).experiments)
+      && desiredCols.length > 0
       && (
         readText(experimentsCfg.smiles_column) !== desiredSmilesColumn
         || JSON.stringify(existingCols) !== JSON.stringify(desiredCols)
@@ -2154,6 +2241,15 @@ export function MmpLifecycleAdminPage() {
       setError('Target database is still building. Please wait before check.');
       return;
     }
+    if (isDatabaseBusy(dbId)) {
+      setError('Target database is busy with another update. Try again after current task finishes.');
+      return;
+    }
+    const runPlan = resolveBatchRunPlan(selectedBatch, runScope);
+    if (runPlan.issue) {
+      setError(runPlan.issue);
+      return;
+    }
     const keepQaStep = flowStep === 'qa';
     if (keepQaStep) {
       keepQaStepOnBatchSwitchRef.current = true;
@@ -2162,10 +2258,14 @@ export function MmpLifecycleAdminPage() {
     setQaAction('check');
     setError(null);
     try {
-      const workingBatch = await prepareBatchForCheckApply(dbId);
+      const workingBatch = await prepareBatchForCheckApply(dbId, {
+        importExperiments: runPlan.importExperiments,
+      });
       if (!workingBatch) return;
       const checkPayload = await checkMmpLifecycleBatch(readText(workingBatch.id), {
         database_id: dbId,
+        import_compounds: runPlan.importCompounds,
+        import_experiments: runPlan.importExperiments,
         row_limit: 400,
         check_policy: { ...BULK_APPLY_RELAXED_POLICY } as Record<string, unknown>,
       });
@@ -2202,6 +2302,11 @@ export function MmpLifecycleAdminPage() {
       setError('Target database is busy with another update. Try again after current task finishes.');
       return;
     }
+    const runPlan = resolveBatchRunPlan(selectedBatch, runScope);
+    if (runPlan.issue) {
+      setError(runPlan.issue);
+      return;
+    }
     const keepQaStep = flowStep === 'qa';
     if (keepQaStep) {
       keepQaStepOnBatchSwitchRef.current = true;
@@ -2210,10 +2315,14 @@ export function MmpLifecycleAdminPage() {
     setQaAction('apply');
     setError(null);
     try {
-      const workingBatch = await prepareBatchForCheckApply(dbId);
+      const workingBatch = await prepareBatchForCheckApply(dbId, {
+        importExperiments: runPlan.importExperiments,
+      });
       if (!workingBatch) return;
       const checkPayload = await checkMmpLifecycleBatch(readText(workingBatch.id), {
         database_id: dbId,
+        import_compounds: runPlan.importCompounds,
+        import_experiments: runPlan.importExperiments,
         row_limit: 400,
         check_policy: { ...BULK_APPLY_RELAXED_POLICY } as Record<string, unknown>,
       });
@@ -2232,8 +2341,8 @@ export function MmpLifecycleAdminPage() {
       const applyPayload = await applyMmpLifecycleBatch(readText(workingBatch.id), {
         async: true,
         database_id: dbId,
-        import_compounds: true,
-        import_experiments: true,
+        import_compounds: runPlan.importCompounds,
+        import_experiments: runPlan.importExperiments,
         check_policy: { ...BULK_APPLY_RELAXED_POLICY } as Record<string, unknown>,
       });
       const appliedBatch = asRecord(applyPayload.batch);
@@ -2305,14 +2414,19 @@ export function MmpLifecycleAdminPage() {
           pushFailure(batch, batchId, 'Target database is busy with another update.');
           return;
         }
+        const runPlan = resolveBatchRunPlan(batch, 'auto');
+        if (runPlan.issue) {
+          pushFailure(batch, batchId, runPlan.issue);
+          return;
+        }
         reservedDatabaseIds.add(databaseId);
 
         try {
           const applyPayload = await applyMmpLifecycleBatch(batchId, {
             async: true,
             database_id: databaseId,
-            import_compounds: true,
-            import_experiments: true,
+            import_compounds: runPlan.importCompounds,
+            import_experiments: runPlan.importExperiments,
             check_policy: { ...BULK_APPLY_RELAXED_POLICY } as Record<string, unknown>,
           });
           const appliedBatch = asRecord(applyPayload.batch);
@@ -2408,6 +2522,34 @@ export function MmpLifecycleAdminPage() {
     return asRecord(batchLastCheck.experiment_summary);
   })();
   const runtimeCheckOverview = buildCheckOverview(runtimeCompoundSummary, runtimeExperimentSummary);
+  const selectedBatchRuntime = asRecord(selectedBatch?.apply_runtime);
+  const selectedBatchRuntimePhase = readText(selectedBatchRuntime.phase || selectedBatch?.status).toLowerCase();
+  const selectedBatchRuntimeStage = readText(selectedBatchRuntime.stage);
+  const selectedBatchRuntimeMessage = readText(selectedBatchRuntime.message);
+  const selectedBatchRuntimeError = readText(selectedBatchRuntime.error || selectedBatch?.last_error);
+  const selectedBatchRuntimeScope = summarizeBatchImportMode(
+    Boolean(selectedBatchRuntime.import_compounds),
+    Boolean(selectedBatchRuntime.import_experiments),
+  );
+  const selectedBatchRunPlan = useMemo(
+    () => resolveBatchRunPlan(selectedBatch, runScope),
+    [selectedBatch, runScope]
+  );
+  const selectedBatchTimingEntries = useMemo(
+    () =>
+      Object.entries(asRecord(selectedBatchRuntime.timings_s))
+        .map(([key, value]) => {
+          const num = Number(value);
+          return [readText(key), num] as const;
+        })
+        .filter(([key, value]) => key && Number.isFinite(value) && value >= 0)
+        .sort((left, right) => right[1] - left[1]),
+    [selectedBatchRuntime.timings_s]
+  );
+  const selectedBatchDatabasePendingSync = useMemo(() => {
+    const dbId = readText(selectedBatch?.selected_database_id || selectedBatchRuntime.database_id);
+    return dbId ? Number(pendingSyncByDatabase[dbId] || 0) : 0;
+  }, [selectedBatch, selectedBatchRuntime.database_id, pendingSyncByDatabase]);
   const flowStepIndex = Math.max(0, FLOW_STEPS.findIndex((item) => item.key === flowStep));
   const uploadColumnOptions = useMemo(() => {
     const collected = new Set<string>(uploadHeaderOptions);
@@ -2968,8 +3110,9 @@ export function MmpLifecycleAdminPage() {
     if (isDatabaseBusy(dbId)) {
       return 'Target database is busy with another update';
     }
+    if (selectedBatchRunPlan.issue) return selectedBatchRunPlan.issue;
     return '';
-  }, [viewMode, selectedBatch, batchDatabaseId, databaseById, isDatabaseBusy]);
+  }, [viewMode, selectedBatch, batchDatabaseId, databaseById, isDatabaseBusy, selectedBatchRunPlan.issue]);
   const runActionBlocked = Boolean(runActionBlockReason);
   const checkActionBlockReason = useMemo(() => {
     const dbId = readText(batchDatabaseId);
@@ -2980,8 +3123,12 @@ export function MmpLifecycleAdminPage() {
     if (!dbMeta || getDatabaseBuildState(dbMeta) !== 'ready') {
       return 'Target database is still building';
     }
+    if (isDatabaseBusy(dbId)) {
+      return 'Target database is busy with another update';
+    }
+    if (selectedBatchRunPlan.issue) return selectedBatchRunPlan.issue;
     return '';
-  }, [viewMode, selectedBatch, batchDatabaseId, databaseById]);
+  }, [viewMode, selectedBatch, batchDatabaseId, databaseById, isDatabaseBusy, selectedBatchRunPlan.issue]);
   const checkActionBlocked = Boolean(checkActionBlockReason);
   const uploadSaveBlockReason = useMemo(() => {
     if (!selectedBatch) return 'Select one lifecycle batch first';
@@ -3342,6 +3489,8 @@ export function MmpLifecycleAdminPage() {
                       ? normalizeBatchStatusToken(runtime.phase)
                       : normalizeBatchStatusToken(item.status);
                     const statusLabel = statusToken;
+                    const runtimeMessage = readText(runtime.message || runtime.error || item.last_error);
+                    const runtimeMode = summarizeBatchImportMode(Boolean(runtime.import_compounds), Boolean(runtime.import_experiments));
                     const fileSummary = `${asRecord(files.compounds).path ? 'compounds ' : ''}${asRecord(files.experiments).path ? 'experiments' : ''}`.trim() || '-';
                     const dbId = readText(item.selected_database_id);
                     const dbMeta = databaseById.get(dbId);
@@ -3383,6 +3532,12 @@ export function MmpLifecycleAdminPage() {
                             <span className={`task-state-chip ${statusToken || 'draft'}`}>
                               {statusLabel}
                             </span>
+                            {runtimeMode !== 'Nothing' ? (
+                              <div className="task-submitted-summary">{runtimeMode}</div>
+                            ) : null}
+                            {runtimeMessage ? (
+                              <div className="task-submitted-summary" title={runtimeMessage}>{runtimeMessage}</div>
+                            ) : null}
                           </div>
                         </td>
                         <td className="mmp-life-db-cell">
@@ -3969,6 +4124,48 @@ export function MmpLifecycleAdminPage() {
                 {selectedBatchApplyHistoryCount <= 0 ? (
                   <div className="muted small">
                     Check is dry-run only. Use Apply to persist assays into database.
+                  </div>
+                ) : null}
+                <div className="toolbar mmp-life-run-row">
+                  <div className="project-compact-meta">
+                    <span className="meta-chip">Run Scope {selectedBatchRunPlan.label}</span>
+                    <span className="meta-chip">
+                      Files {summarizeBatchImportMode(selectedBatchRunPlan.availableCompounds, selectedBatchRunPlan.availableExperiments)}
+                    </span>
+                    {selectedBatchDatabasePendingSync > 0 ? (
+                      <span className="meta-chip">Pending Sync {summarizeCount(selectedBatchDatabasePendingSync)}</span>
+                    ) : null}
+                  </div>
+                  <div className="mmp-life-run-row">
+                    {BATCH_RUN_SCOPE_OPTIONS.map((option) => (
+                      <button
+                        key={option.value}
+                        className={`btn btn-compact ${runScope === option.value ? 'btn-primary' : 'btn-ghost'}`}
+                        type="button"
+                        onClick={() => setRunScope(option.value)}
+                        disabled={saving}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {selectedBatchRuntimeMessage || selectedBatchRuntimeError ? (
+                  <div className={`alert ${selectedBatchRuntimeError && !isBatchRuntimeActiveToken(selectedBatchRuntimePhase) ? 'error' : 'warning'}`}>
+                    <strong>{selectedBatchRuntimeScope !== 'Nothing' ? `${selectedBatchRuntimeScope} · ` : ''}</strong>
+                    {selectedBatchRuntimeStage ? `${selectedBatchRuntimeStage}: ` : ''}
+                    {selectedBatchRuntimeError || selectedBatchRuntimeMessage}
+                    <div className="muted small">
+                      Queued {formatDateTime(readText(selectedBatchRuntime.queued_at))} · Started {formatDateTime(readText(selectedBatchRuntime.started_at))} · Finished {formatDateTime(readText(selectedBatchRuntime.finished_at))}
+                    </div>
+                    {selectedBatchTimingEntries.length > 0 ? (
+                      <div className="muted small">
+                        {selectedBatchTimingEntries
+                          .slice(0, 6)
+                          .map(([key, value]) => `${key} ${value.toFixed(1)}s`)
+                          .join(' · ')}
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
                 {gateReasons.length > 0 ? (

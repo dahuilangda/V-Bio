@@ -3408,9 +3408,13 @@ def register_mmp_lifecycle_admin_routes(
             files = _safe_json_object(batch.get("files"))
             compounds_file = _safe_json_object(files.get("compounds"))
             experiments_file = _safe_json_object(files.get("experiments"))
+            import_compounds = bool(payload.get("import_compounds", True)) and bool(compounds_file)
+            import_experiments = bool(payload.get("import_experiments", True)) and bool(experiments_file)
+            if not import_compounds and not import_experiments:
+                return jsonify({"error": "Nothing to check. Upload compounds and/or experiments first."}), 400
 
             compound_check = None
-            if compounds_file:
+            if import_compounds:
                 structures_path = _resolve_batch_file_path(store=store, batch_id=batch_id, file_meta=compounds_file)
                 if structures_path and os.path.exists(structures_path):
                     compound_cfg = _safe_json_object(compounds_file.get("column_config"))
@@ -3430,7 +3434,7 @@ def register_mmp_lifecycle_admin_routes(
                     }
 
             experiment_check = None
-            if experiments_file:
+            if import_experiments:
                 mappings = store.list_property_mappings(database_id=database_id)
                 compound_summary = _safe_json_object(_safe_json_object(compound_check).get("summary"))
                 # Keep check behavior aligned with apply preflight:
@@ -3467,6 +3471,8 @@ def register_mmp_lifecycle_admin_routes(
                 },
                 "has_compound_file": bool(compounds_file),
                 "has_experiment_file": bool(experiments_file),
+                "import_compounds": bool(import_compounds),
+                "import_experiments": bool(import_experiments),
                 "compound_rows": int((_safe_json_object(compound_check).get("summary") or {}).get("annotated_rows") or 0),
                 "experiment_rows": int((_safe_json_object(experiment_check).get("summary") or {}).get("rows_total") or 0),
             }
@@ -3484,8 +3490,8 @@ def register_mmp_lifecycle_admin_routes(
             check_gate = _build_check_gate(
                 batch=staged_batch,
                 database_id=database_id,
-                import_compounds=bool(compounds_file),
-                import_experiments=bool(experiments_file),
+                import_compounds=bool(import_compounds),
+                import_experiments=bool(import_experiments),
                 policy=check_policy,
             )
 

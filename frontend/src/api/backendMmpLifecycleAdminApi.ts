@@ -573,6 +573,8 @@ export async function checkMmpLifecycleBatch(
   batchId: string,
   payload: {
     database_id: string;
+    import_compounds?: boolean;
+    import_experiments?: boolean;
     row_limit?: number;
     check_policy?: Record<string, unknown>;
   }

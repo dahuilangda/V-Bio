@@ -1114,11 +1114,21 @@ def _index_fragments_to_postgres_sharded(
         spec: Tuple[int, List[str], str, str, str]
     ) -> Tuple[int, bool, str]:
         shard_seq, shard_constants, shard_constants_file, shard_fragdb_file, shard_temp_schema = spec
+        t_shard_start = time.time()
         if _schema_has_ready_mmpdb_core_tables(postgres_url, shard_temp_schema):
+            if not _ensure_postgres_schema_merge_source_indexes(
+                postgres_url,
+                schema=shard_temp_schema,
+                maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+                work_mem_mb=index_work_mem_mb,
+                parallel_maintenance_workers=index_parallel_workers,
+            ):
+                return shard_seq, False, "ensure merge-source indexes failed"
             logger.info(
-                "Reusing completed full-index shard schema: shard=%s schema=%s",
+                "Reusing completed full-index shard schema: shard=%s schema=%s elapsed=%.2fs",
                 shard_seq,
                 shard_temp_schema,
+                max(0.0, time.time() - t_shard_start),
             )
             return shard_seq, True, ""
         shard_constant_count = _write_constants_file(
@@ -1159,6 +1169,21 @@ def _index_fragments_to_postgres_sharded(
         )
         if not ok:
             return shard_seq, False, "index_fragments_to_postgres failed"
+        if not _ensure_postgres_schema_merge_source_indexes(
+            postgres_url,
+            schema=shard_temp_schema,
+            maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+            work_mem_mb=index_work_mem_mb,
+            parallel_maintenance_workers=index_parallel_workers,
+        ):
+            return shard_seq, False, "ensure merge-source indexes failed"
+        logger.info(
+            "Prepared full-index shard: shard=%s schema=%s constants=%s elapsed=%.2fs",
+            shard_seq,
+            shard_temp_schema,
+            len(shard_constants),
+            max(0.0, time.time() - t_shard_start),
+        )
         return shard_seq, True, ""
 
     shard_prepare_errors: List[str] = []
@@ -1269,11 +1294,19 @@ def _index_fragments_to_postgres_sharded(
                             shard_temp_schema,
                         )
                         continue
+                    t_load = time.time()
                     shard_active_rows = _load_used_compounds_from_schema(
                         cursor,
                         schema=shard_temp_schema,
                     )
                     shard_candidate_smiles = [row[0] for row in shard_active_rows]
+                    logger.info(
+                        "Loaded active compounds for full-index shard: shard=%s schema=%s compounds=%s elapsed=%.2fs",
+                        shard_seq,
+                        shard_temp_schema,
+                        len(shard_candidate_smiles),
+                        max(0.0, time.time() - t_load),
+                    )
                     logger.info(
                         "Merging full-index shard into target: shard=%s schema=%s compounds=%s constants=%s",
                         shard_seq,
@@ -1281,6 +1314,7 @@ def _index_fragments_to_postgres_sharded(
                         len(shard_candidate_smiles),
                         len(shard_constants),
                     )
+                    t_merge = time.time()
                     _merge_incremental_temp_schema_into_target(
                         cursor,
                         temp_schema=shard_temp_schema,
@@ -1290,6 +1324,13 @@ def _index_fragments_to_postgres_sharded(
                         replace_existing_pairs_for_constants=False,
                         skip_finalize=True,
                         align_sequences=(merge_seq == 0),
+                        defer_rule_environment_num_pairs_update=True,
+                    )
+                    logger.info(
+                        "Merged full-index shard into target: shard=%s schema=%s elapsed=%.2fs",
+                        shard_seq,
+                        shard_temp_schema,
+                        max(0.0, time.time() - t_merge),
                     )
                     conn.commit()
                     merged_shards_completed.add(shard_seq)
@@ -1307,6 +1348,13 @@ def _index_fragments_to_postgres_sharded(
                         shard_temp_schema,
                     )
                 _pg_set_search_path(cursor, normalized_schema)
+                t_recount = time.time()
+                _recompute_all_rule_environment_pair_counts(cursor)
+                logger.info(
+                    "Recomputed full-index rule_environment.num_pairs: schema=%s elapsed=%.2fs",
+                    normalized_schema,
+                    max(0.0, time.time() - t_recount),
+                )
                 _update_dataset_counts(cursor)
                 conn.commit()
         _write_full_sharded_build_state(
@@ -1968,6 +2016,69 @@ def _create_postgres_core_indexes(
             [("idx_constant_smiles_smiles_mol", "CREATE INDEX IF NOT EXISTS idx_constant_smiles_smiles_mol ON constant_smiles USING gist(smiles_mol)")],
             existing_indexes=existing,
         )
+
+
+def _create_postgres_merge_source_indexes(
+    cursor,
+    schema: str,
+) -> None:
+    """Build only the shard-side indexes required by the merge path."""
+    index_statements: List[Tuple[str, str]] = [
+        ("idx_compound_clean_smiles", "CREATE INDEX IF NOT EXISTS idx_compound_clean_smiles ON compound(clean_smiles)"),
+        ("idx_constant_smiles_smiles", "CREATE INDEX IF NOT EXISTS idx_constant_smiles_smiles ON constant_smiles(smiles)"),
+        ("idx_rule_from_to", "CREATE INDEX IF NOT EXISTS idx_rule_from_to ON rule(from_smiles_id, to_smiles_id)"),
+        ("idx_rule_environment_lookup", "CREATE INDEX IF NOT EXISTS idx_rule_environment_lookup ON rule_environment(rule_id, environment_fingerprint_id, radius)"),
+        ("idx_pair_rule_env", "CREATE INDEX IF NOT EXISTS idx_pair_rule_env ON pair(rule_environment_id)"),
+        ("idx_pair_constant", "CREATE INDEX IF NOT EXISTS idx_pair_constant ON pair(constant_id)"),
+        ("idx_pair_compound1", "CREATE INDEX IF NOT EXISTS idx_pair_compound1 ON pair(compound1_id)"),
+        ("idx_pair_compound2", "CREATE INDEX IF NOT EXISTS idx_pair_compound2 ON pair(compound2_id)"),
+        ("idx_prop_name_name", "CREATE INDEX IF NOT EXISTS idx_prop_name_name ON property_name(name)"),
+        ("idx_rule_env_stats_prop", "CREATE INDEX IF NOT EXISTS idx_rule_env_stats_prop ON rule_environment_statistics(rule_environment_id, property_name_id)"),
+    ]
+    _ensure_named_indexes(cursor, index_statements)
+
+
+def _ensure_postgres_schema_merge_source_indexes(
+    postgres_url: str,
+    *,
+    schema: str,
+    maintenance_work_mem_mb: int = 0,
+    work_mem_mb: int = 0,
+    parallel_maintenance_workers: int = 0,
+) -> bool:
+    logger = logging.getLogger(__name__)
+    normalized_schema = _validate_pg_schema(schema)
+    try:
+        with psycopg.connect(postgres_url, autocommit=False) as conn:
+            with conn.cursor() as cursor:
+                _pg_set_search_path(cursor, normalized_schema)
+                _apply_postgres_build_tuning(
+                    cursor,
+                    maintenance_work_mem_mb=maintenance_work_mem_mb,
+                    work_mem_mb=work_mem_mb,
+                    parallel_maintenance_workers=parallel_maintenance_workers,
+                )
+                _create_postgres_merge_source_indexes(cursor, normalized_schema)
+                for table_name in (
+                    "pair",
+                    "compound",
+                    "constant_smiles",
+                    "rule",
+                    "rule_environment",
+                    "property_name",
+                    "rule_environment_statistics",
+                ):
+                    cursor.execute(f"ANALYZE {table_name}")
+            conn.commit()
+        return True
+    except Exception as exc:
+        logger.error(
+            "Failed ensuring merge-source indexes for schema '%s': %s",
+            normalized_schema,
+            exc,
+            exc_info=True,
+        )
+        return False
 
 
 def _create_postgres_merge_support_indexes(cursor) -> None:
@@ -5423,6 +5534,47 @@ def _update_rule_environment_counts_for_constants(cursor, *, affected_constants:
     )
 
 
+def _recompute_all_rule_environment_pair_counts(cursor) -> None:
+    cursor.execute("DROP TABLE IF EXISTS tmp_rule_env_pair_counts")
+    cursor.execute(
+        """
+        CREATE TEMP TABLE tmp_rule_env_pair_counts (
+            id INTEGER PRIMARY KEY,
+            num_pairs INTEGER NOT NULL
+        ) ON COMMIT DROP
+        """
+    )
+    cursor.execute(
+        """
+        INSERT INTO tmp_rule_env_pair_counts (id, num_pairs)
+        SELECT p.rule_environment_id AS id, COUNT(*)::INTEGER AS num_pairs
+        FROM pair p
+        GROUP BY p.rule_environment_id
+        """
+    )
+    cursor.execute(
+        """
+        UPDATE rule_environment re
+           SET num_pairs = stats.num_pairs
+          FROM tmp_rule_env_pair_counts stats
+         WHERE re.id = stats.id
+           AND re.num_pairs IS DISTINCT FROM stats.num_pairs
+        """
+    )
+    cursor.execute(
+        """
+        UPDATE rule_environment re
+           SET num_pairs = 0
+         WHERE COALESCE(re.num_pairs, 0) <> 0
+           AND NOT EXISTS (
+                SELECT 1
+                FROM tmp_rule_env_pair_counts stats
+                WHERE stats.id = re.id
+            )
+        """
+    )
+
+
 def _update_dataset_counts(cursor) -> None:
     cursor.execute(
         """
@@ -5590,6 +5742,7 @@ def _merge_incremental_temp_schema_into_target(
     replace_existing_pairs_for_constants: bool = True,
     skip_finalize: bool = False,
     align_sequences: bool = True,
+    defer_rule_environment_num_pairs_update: bool = False,
 ) -> None:
     merge_debug_stats = _env_bool("MMP_LIFECYCLE_INCREMENTAL_DEBUG_STATS", default=False)
     _logger = logging.getLogger(__name__)
@@ -5602,6 +5755,7 @@ def _merge_incremental_temp_schema_into_target(
             if str((row[0] if len(row) > 0 else "") or "").strip()
         }
     )
+    track_inserted_pair_ids = not skip_finalize
     if not constants:
         return
     if align_sequences:
@@ -6008,15 +6162,55 @@ def _merge_incremental_temp_schema_into_target(
         )
         cursor.execute(
             """
-            INSERT INTO rule_environment (rule_id, environment_fingerprint_id, radius, num_pairs)
-            SELECT k.rule_id, k.env_fp_id, k.radius, 0
-            FROM tmp_inc_rule_env_keys k
-            LEFT JOIN rule_environment re
-                   ON re.rule_id = k.rule_id
-                  AND re.environment_fingerprint_id = k.env_fp_id
-                  AND re.radius = k.radius
-            WHERE re.id IS NULL
+            CREATE INDEX tmp_inc_rule_env_lookup_idx
+            ON tmp_inc_rule_env_keys(rule_id, env_fp_id, radius)
             """
+        )
+        cursor.execute("ANALYZE tmp_inc_rule_env_keys")
+        if defer_rule_environment_num_pairs_update:
+            cursor.execute("DROP TABLE IF EXISTS tmp_inc_rule_env_distinct_keys")
+            cursor.execute(
+                """
+                CREATE TEMP TABLE tmp_inc_rule_env_distinct_keys AS
+                SELECT DISTINCT
+                    rule_id,
+                    env_fp_id,
+                    radius
+                FROM tmp_inc_rule_env_keys
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX tmp_inc_rule_env_distinct_lookup_idx
+                ON tmp_inc_rule_env_distinct_keys(rule_id, env_fp_id, radius)
+                """
+            )
+            cursor.execute("ANALYZE tmp_inc_rule_env_distinct_keys")
+        cursor.execute(
+            (
+                """
+                INSERT INTO rule_environment (rule_id, environment_fingerprint_id, radius, num_pairs)
+                SELECT k.rule_id, k.env_fp_id, k.radius, 0
+                FROM tmp_inc_rule_env_distinct_keys k
+                LEFT JOIN rule_environment re
+                       ON re.rule_id = k.rule_id
+                      AND re.environment_fingerprint_id = k.env_fp_id
+                      AND re.radius = k.radius
+                WHERE re.id IS NULL
+                """
+                if defer_rule_environment_num_pairs_update
+                else
+                """
+                INSERT INTO rule_environment (rule_id, environment_fingerprint_id, radius, num_pairs)
+                SELECT k.rule_id, k.env_fp_id, k.radius, 0
+                FROM tmp_inc_rule_env_keys k
+                LEFT JOIN rule_environment re
+                       ON re.rule_id = k.rule_id
+                      AND re.environment_fingerprint_id = k.env_fp_id
+                      AND re.radius = k.radius
+                WHERE re.id IS NULL
+                """
+            )
         )
         cursor.execute("DROP TABLE IF EXISTS tmp_map_rule_env")
         cursor.execute(
@@ -6119,13 +6313,14 @@ def _merge_incremental_temp_schema_into_target(
                 """
             )
         else:
-            cursor.execute(
-                """
-                CREATE TEMP TABLE IF NOT EXISTS tmp_inc_inserted_pair_ids_all (
-                    pair_id INTEGER PRIMARY KEY
-                ) ON COMMIT DROP
-                """
-            )
+            if track_inserted_pair_ids:
+                cursor.execute(
+                    """
+                    CREATE TEMP TABLE IF NOT EXISTS tmp_inc_inserted_pair_ids_all (
+                        pair_id INTEGER PRIMARY KEY
+                    ) ON COMMIT DROP
+                    """
+                )
             cursor.execute("DROP TABLE IF EXISTS tmp_inc_candidate_pair_keys")
             cursor.execute(
                 """
@@ -6137,35 +6332,61 @@ def _merge_incremental_temp_schema_into_target(
                 ) ON COMMIT DROP
                 """
             )
-            cursor.execute(
-                f"""
-                INSERT INTO tmp_inc_candidate_pair_keys (
-                    rule_environment_id,
-                    compound1_id,
-                    compound2_id,
-                    constant_id
+            if defer_rule_environment_num_pairs_update:
+                cursor.execute(
+                    f"""
+                    INSERT INTO tmp_inc_candidate_pair_keys (
+                        rule_environment_id,
+                        compound1_id,
+                        compound2_id,
+                        constant_id
+                    )
+                    SELECT DISTINCT
+                        mre.main_id AS rule_environment_id,
+                        mc1.main_id AS compound1_id,
+                        mc2.main_id AS compound2_id,
+                        mcs.main_id AS constant_id
+                    FROM {ts}.pair p
+                    INNER JOIN tmp_map_rule_env mre
+                            ON mre.temp_id = p.rule_environment_id
+                    INNER JOIN tmp_map_compound mc1
+                            ON mc1.temp_id = p.compound1_id
+                    INNER JOIN tmp_map_compound mc2
+                            ON mc2.temp_id = p.compound2_id
+                    INNER JOIN tmp_map_constant mcs
+                            ON mcs.temp_id = p.constant_id
+                    """
                 )
-                SELECT DISTINCT
-                    mre.main_id AS rule_environment_id,
-                    mc1.main_id AS compound1_id,
-                    mc2.main_id AS compound2_id,
-                    mcs.main_id AS constant_id
-                FROM {ts}.pair p
-                INNER JOIN tmp_map_rule_env mre
-                        ON mre.temp_id = p.rule_environment_id
-                INNER JOIN tmp_map_compound mc1
-                        ON mc1.temp_id = p.compound1_id
-                INNER JOIN tmp_map_compound mc2
-                        ON mc2.temp_id = p.compound2_id
-                INNER JOIN tmp_map_constant mcs
-                        ON mcs.temp_id = p.constant_id
-                LEFT JOIN tmp_inc_candidate_compound_ids cc1
-                       ON cc1.id = mc1.main_id
-                LEFT JOIN tmp_inc_candidate_compound_ids cc2
-                       ON cc2.id = mc2.main_id
-                WHERE cc1.id IS NOT NULL OR cc2.id IS NOT NULL
-                """
-            )
+            else:
+                cursor.execute(
+                    f"""
+                    INSERT INTO tmp_inc_candidate_pair_keys (
+                        rule_environment_id,
+                        compound1_id,
+                        compound2_id,
+                        constant_id
+                    )
+                    SELECT DISTINCT
+                        mre.main_id AS rule_environment_id,
+                        mc1.main_id AS compound1_id,
+                        mc2.main_id AS compound2_id,
+                        mcs.main_id AS constant_id
+                    FROM {ts}.pair p
+                    INNER JOIN tmp_map_rule_env mre
+                            ON mre.temp_id = p.rule_environment_id
+                    INNER JOIN tmp_map_compound mc1
+                            ON mc1.temp_id = p.compound1_id
+                    INNER JOIN tmp_map_compound mc2
+                            ON mc2.temp_id = p.compound2_id
+                    INNER JOIN tmp_map_constant mcs
+                            ON mcs.temp_id = p.constant_id
+                    LEFT JOIN tmp_inc_candidate_compound_ids cc1
+                           ON cc1.id = mc1.main_id
+                    LEFT JOIN tmp_inc_candidate_compound_ids cc2
+                           ON cc2.id = mc2.main_id
+                    WHERE cc1.id IS NOT NULL OR cc2.id IS NOT NULL
+                    """
+                )
             cursor.execute(
                 """
                 CREATE INDEX tmp_inc_candidate_pair_lookup_idx
@@ -6173,24 +6394,39 @@ def _merge_incremental_temp_schema_into_target(
                 """
             )
             cursor.execute("DROP TABLE IF EXISTS tmp_inc_existing_pair_keys")
-            cursor.execute(
-                """
-                CREATE TEMP TABLE tmp_inc_existing_pair_keys AS
-                SELECT DISTINCT
-                    existing.rule_environment_id,
-                    existing.compound1_id,
-                    existing.compound2_id,
-                    existing.constant_id
-                FROM pair existing
-                INNER JOIN tmp_map_constant mcs
-                        ON mcs.main_id = existing.constant_id
-                LEFT JOIN tmp_inc_candidate_compound_ids cc1
-                       ON cc1.id = existing.compound1_id
-                LEFT JOIN tmp_inc_candidate_compound_ids cc2
-                       ON cc2.id = existing.compound2_id
-                WHERE cc1.id IS NOT NULL OR cc2.id IS NOT NULL
-                """
-            )
+            if defer_rule_environment_num_pairs_update:
+                cursor.execute(
+                    """
+                    CREATE TEMP TABLE tmp_inc_existing_pair_keys AS
+                    SELECT DISTINCT
+                        existing.rule_environment_id,
+                        existing.compound1_id,
+                        existing.compound2_id,
+                        existing.constant_id
+                    FROM pair existing
+                    INNER JOIN tmp_map_constant mcs
+                            ON mcs.main_id = existing.constant_id
+                    """
+                )
+            else:
+                cursor.execute(
+                    """
+                    CREATE TEMP TABLE tmp_inc_existing_pair_keys AS
+                    SELECT DISTINCT
+                        existing.rule_environment_id,
+                        existing.compound1_id,
+                        existing.compound2_id,
+                        existing.constant_id
+                    FROM pair existing
+                    INNER JOIN tmp_map_constant mcs
+                            ON mcs.main_id = existing.constant_id
+                    LEFT JOIN tmp_inc_candidate_compound_ids cc1
+                           ON cc1.id = existing.compound1_id
+                    LEFT JOIN tmp_inc_candidate_compound_ids cc2
+                           ON cc2.id = existing.compound2_id
+                    WHERE cc1.id IS NOT NULL OR cc2.id IS NOT NULL
+                    """
+                )
             cursor.execute(
                 """
                 CREATE INDEX tmp_inc_existing_pair_lookup_idx
@@ -6215,47 +6451,124 @@ def _merge_incremental_temp_schema_into_target(
                     _append_candidate_pairs,
                     _append_existing_pairs,
                 )
-            cursor.execute(
-                f"""
-                WITH inserted_pairs AS (
-                    INSERT INTO pair (rule_environment_id, compound1_id, compound2_id, constant_id)
-                    SELECT
-                        cpk.rule_environment_id,
-                        cpk.compound1_id,
-                        cpk.compound2_id,
-                        cpk.constant_id
-                    FROM tmp_inc_candidate_pair_keys cpk
-                    LEFT JOIN tmp_inc_existing_pair_keys existing
-                           ON existing.rule_environment_id = cpk.rule_environment_id
-                          AND existing.compound1_id = cpk.compound1_id
-                          AND existing.compound2_id = cpk.compound2_id
-                          AND existing.constant_id IS NOT DISTINCT FROM cpk.constant_id
-                    WHERE existing.rule_environment_id IS NULL
-                    RETURNING id AS pair_id, rule_environment_id
-                ),
-                _inserted_pair_ids AS (
-                    INSERT INTO tmp_inc_inserted_pair_ids_all (pair_id)
-                    SELECT pair_id
-                    FROM inserted_pairs
-                    ON CONFLICT DO NOTHING
-                ),
-                counts AS (
-                    SELECT rule_environment_id, COUNT(*)::INTEGER AS n
-                    FROM inserted_pairs
-                    GROUP BY rule_environment_id
-                )
-                UPDATE rule_environment re
-                   SET num_pairs = COALESCE(re.num_pairs, 0) + counts.n
-                  FROM counts
-                 WHERE re.id = counts.rule_environment_id
-                """
-            )
+            if defer_rule_environment_num_pairs_update:
+                if track_inserted_pair_ids:
+                    cursor.execute(
+                        f"""
+                        WITH inserted_pairs AS (
+                            INSERT INTO pair (rule_environment_id, compound1_id, compound2_id, constant_id)
+                            SELECT
+                                cpk.rule_environment_id,
+                                cpk.compound1_id,
+                                cpk.compound2_id,
+                                cpk.constant_id
+                            FROM tmp_inc_candidate_pair_keys cpk
+                            LEFT JOIN tmp_inc_existing_pair_keys existing
+                                   ON existing.rule_environment_id = cpk.rule_environment_id
+                                  AND existing.compound1_id = cpk.compound1_id
+                                  AND existing.compound2_id = cpk.compound2_id
+                                  AND existing.constant_id IS NOT DISTINCT FROM cpk.constant_id
+                            WHERE existing.rule_environment_id IS NULL
+                            RETURNING id AS pair_id
+                        )
+                        INSERT INTO tmp_inc_inserted_pair_ids_all (pair_id)
+                        SELECT pair_id
+                        FROM inserted_pairs
+                        ON CONFLICT DO NOTHING
+                        """
+                    )
+                else:
+                    cursor.execute(
+                        f"""
+                        INSERT INTO pair (rule_environment_id, compound1_id, compound2_id, constant_id)
+                        SELECT
+                            cpk.rule_environment_id,
+                            cpk.compound1_id,
+                            cpk.compound2_id,
+                            cpk.constant_id
+                        FROM tmp_inc_candidate_pair_keys cpk
+                        LEFT JOIN tmp_inc_existing_pair_keys existing
+                               ON existing.rule_environment_id = cpk.rule_environment_id
+                              AND existing.compound1_id = cpk.compound1_id
+                              AND existing.compound2_id = cpk.compound2_id
+                              AND existing.constant_id IS NOT DISTINCT FROM cpk.constant_id
+                        WHERE existing.rule_environment_id IS NULL
+                        """
+                    )
+            else:
+                if track_inserted_pair_ids:
+                    cursor.execute(
+                        f"""
+                        WITH inserted_pairs AS (
+                            INSERT INTO pair (rule_environment_id, compound1_id, compound2_id, constant_id)
+                            SELECT
+                                cpk.rule_environment_id,
+                                cpk.compound1_id,
+                                cpk.compound2_id,
+                                cpk.constant_id
+                            FROM tmp_inc_candidate_pair_keys cpk
+                            LEFT JOIN tmp_inc_existing_pair_keys existing
+                                   ON existing.rule_environment_id = cpk.rule_environment_id
+                                  AND existing.compound1_id = cpk.compound1_id
+                                  AND existing.compound2_id = cpk.compound2_id
+                                  AND existing.constant_id IS NOT DISTINCT FROM cpk.constant_id
+                            WHERE existing.rule_environment_id IS NULL
+                            RETURNING id AS pair_id, rule_environment_id
+                        ),
+                        _inserted_pair_ids AS (
+                            INSERT INTO tmp_inc_inserted_pair_ids_all (pair_id)
+                            SELECT pair_id
+                            FROM inserted_pairs
+                            ON CONFLICT DO NOTHING
+                        ),
+                        counts AS (
+                            SELECT rule_environment_id, COUNT(*)::INTEGER AS n
+                            FROM inserted_pairs
+                            GROUP BY rule_environment_id
+                        )
+                        UPDATE rule_environment re
+                           SET num_pairs = COALESCE(re.num_pairs, 0) + counts.n
+                          FROM counts
+                         WHERE re.id = counts.rule_environment_id
+                        """
+                    )
+                else:
+                    cursor.execute(
+                        f"""
+                        WITH inserted_pairs AS (
+                            INSERT INTO pair (rule_environment_id, compound1_id, compound2_id, constant_id)
+                            SELECT
+                                cpk.rule_environment_id,
+                                cpk.compound1_id,
+                                cpk.compound2_id,
+                                cpk.constant_id
+                            FROM tmp_inc_candidate_pair_keys cpk
+                            LEFT JOIN tmp_inc_existing_pair_keys existing
+                                   ON existing.rule_environment_id = cpk.rule_environment_id
+                                  AND existing.compound1_id = cpk.compound1_id
+                                  AND existing.compound2_id = cpk.compound2_id
+                                  AND existing.constant_id IS NOT DISTINCT FROM cpk.constant_id
+                            WHERE existing.rule_environment_id IS NULL
+                            RETURNING rule_environment_id
+                        ),
+                        counts AS (
+                            SELECT rule_environment_id, COUNT(*)::INTEGER AS n
+                            FROM inserted_pairs
+                            GROUP BY rule_environment_id
+                        )
+                        UPDATE rule_environment re
+                           SET num_pairs = COALESCE(re.num_pairs, 0) + counts.n
+                          FROM counts
+                         WHERE re.id = counts.rule_environment_id
+                        """
+                    )
             if merge_debug_stats:
-                cursor.execute("SELECT COUNT(*) FROM tmp_inc_inserted_pair_ids_all")
-                _logger.info(
-                    "Incremental merge append-mode inserted pair IDs (cumulative in tx): %s",
-                    int(cursor.fetchone()[0] or 0),
-                )
+                if track_inserted_pair_ids:
+                    cursor.execute("SELECT COUNT(*) FROM tmp_inc_inserted_pair_ids_all")
+                    _logger.info(
+                        "Incremental merge append-mode inserted pair IDs (cumulative in tx): %s",
+                        int(cursor.fetchone()[0] or 0),
+                    )
 
         cursor.execute(
             f"""
@@ -7002,6 +7315,7 @@ def _incremental_reindex_compound_delta(
             spec: Tuple[int, List[str], str, str, str]
         ) -> Tuple[int, bool, str]:
             shard_seq, shard_constants, shard_constants_file, shard_candidate_fragdb_file, shard_temp_schema = spec
+            t_shard_start = time.time()
             shard_constant_count = _write_constants_file(
                 shard_constants_file,
                 shard_constants,
@@ -7036,6 +7350,21 @@ def _incremental_reindex_compound_delta(
             )
             if not ok:
                 return shard_seq, False, "index_fragments_to_postgres failed"
+            if not _ensure_postgres_schema_merge_source_indexes(
+                postgres_url,
+                schema=shard_temp_schema,
+                maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+                work_mem_mb=index_work_mem_mb,
+                parallel_maintenance_workers=index_parallel_workers,
+            ):
+                return shard_seq, False, "ensure merge-source indexes failed"
+            logger.info(
+                "Prepared incremental shard: shard=%s schema=%s constants=%s elapsed=%.2fs",
+                shard_seq,
+                shard_temp_schema,
+                len(shard_constants),
+                max(0.0, time.time() - t_shard_start),
+            )
             return shard_seq, True, ""
 
         shard_prepare_errors: List[str] = []
