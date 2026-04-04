@@ -41,6 +41,25 @@ function hasLeadOptMmpOnlySnapshot(task: ProjectTask): boolean {
   return String(task.status_text || '').toUpperCase().includes('MMP');
 }
 
+function isTransientRuntimeStatusText(value: unknown): boolean {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized === 'running' ||
+    normalized === 'queued' ||
+    normalized === 'pending' ||
+    normalized === 'started' ||
+    normalized === 'starting' ||
+    normalized.includes(' running') ||
+    normalized.includes(' queued') ||
+    normalized.includes('pending') ||
+    normalized.includes('started') ||
+    normalized.includes('preparing') ||
+    normalized.includes('processing') ||
+    normalized.includes('uploading')
+  );
+}
+
 type LeadOptTaskSummary = NonNullable<ReturnType<typeof readLeadOptTaskSummary>>;
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -480,6 +499,38 @@ function deriveLeadOptRuntimeState(summary: LeadOptTaskSummary): {
   }
 
   return null;
+}
+
+function readLeadOptTerminalStatusText(task: ProjectTask, taskState: ProjectTask['task_state'], fallback: string): string {
+  const summary = readLeadOptTaskSummary(task);
+  if (!summary) {
+    return taskState === 'SUCCESS' ? 'Task completed.' : fallback;
+  }
+
+  const transformCount = Math.max(0, summary.transformCount || 0);
+  const candidateCount = Math.max(0, summary.candidateCount || 0);
+  if (transformCount > 0 || candidateCount > 0) {
+    if (taskState === 'SUCCESS') {
+      return `MMP complete (${transformCount} transforms, ${candidateCount} rows). Scoring not started.`;
+    }
+    return fallback;
+  }
+
+  const total = Math.max(0, summary.predictionTotal || 0);
+  const success = Math.max(0, summary.predictionSuccess || 0);
+  const failure = Math.max(0, summary.predictionFailure || 0);
+  if (total > 0 || success > 0 || failure > 0) {
+    if (taskState === 'SUCCESS') {
+      return `Scoring complete (${success}/${Math.max(1, total || success)})`;
+    }
+    if (taskState === 'FAILURE') {
+      return success === 0
+        ? `Scoring complete (0/${Math.max(1, total || failure)})`
+        : `Scoring complete (${success}/${Math.max(1, total || success + failure)})`;
+    }
+  }
+
+  return taskState === 'SUCCESS' ? 'Task completed.' : fallback;
 }
 
 function promoteLeadOptPredictionMetrics(task: ProjectTask): {
@@ -1291,7 +1342,7 @@ export async function syncRuntimeTaskRows(
             }
             return inferred;
           })();
-    const statusText = stalePendingRepair
+    const rawStatusText = stalePendingRepair
       ? 'Task not found in runtime backend; stale queued row repaired.'
       : statusPayload
         ? readStatusText(statusPayload)
@@ -1302,6 +1353,13 @@ export async function syncRuntimeTaskRows(
           : currentTaskState === 'QUEUED' && String(runtimeTask.status_text || '').trim()
             ? String(runtimeTask.status_text || '').trim()
             : 'Task is waiting in the queue.';
+    const runtimeWorkflow = resolveTaskWorkflowKey(runtimeTask, nextProject.task_type || '');
+    const statusText =
+      runtimeWorkflow === 'lead_optimization' &&
+      (taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED') &&
+      isTransientRuntimeStatusText(rawStatusText)
+        ? readLeadOptTerminalStatusText(runtimeTask, taskState, rawStatusText)
+        : rawStatusText;
     const errorText = taskState === 'FAILURE' ? statusText : '';
     const terminal = taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED';
     const completedAt = terminal ? runtimeTask.completed_at || new Date().toISOString() : null;
@@ -1314,7 +1372,6 @@ export async function syncRuntimeTaskRows(
           })()
         : null;
     const runtimeInfo = asRecord(statusPayload?.info);
-    const runtimeWorkflow = resolveTaskWorkflowKey(runtimeTask, nextProject.task_type || '');
     const runtimeConfidencePatch =
       runtimeWorkflow === 'peptide_design' ? mergePeptideRuntimeStatusIntoConfidence(runtimeTask, runtimeInfo) : null;
     const runtimePropertiesPatch =
@@ -1492,7 +1549,14 @@ export async function syncInitialRuntimeTaskRows(
           : currentTaskState === 'QUEUED' && String(runtimeTask.status_text || '').trim()
             ? String(runtimeTask.status_text || '').trim()
             : 'Task is waiting in the queue.';
-    const errorText = taskState === 'FAILURE' ? statusText : '';
+    const runtimeWorkflow = resolveTaskWorkflowKey(runtimeTask, nextProject.task_type || '');
+    const normalizedStatusText =
+      runtimeWorkflow === 'lead_optimization' &&
+      (taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED') &&
+      isTransientRuntimeStatusText(statusText)
+        ? readLeadOptTerminalStatusText(runtimeTask, taskState, statusText)
+        : statusText;
+    const errorText = taskState === 'FAILURE' ? normalizedStatusText : '';
     const terminal = taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED';
     const completedAt = terminal ? runtimeTask.completed_at || new Date().toISOString() : null;
     const submittedAt = runtimeTask.submitted_at || (nextProject.task_id === runtimeTask.task_id ? nextProject.submitted_at : null);
@@ -1506,7 +1570,7 @@ export async function syncInitialRuntimeTaskRows(
 
     const taskNeedsPatch =
       runtimeTask.task_state !== taskState ||
-      (runtimeTask.status_text || '') !== statusText ||
+      (runtimeTask.status_text || '') !== normalizedStatusText ||
       (runtimeTask.error_text || '') !== errorText ||
       runtimeTask.completed_at !== completedAt ||
       runtimeTask.duration_seconds !== durationSeconds;
@@ -1514,7 +1578,7 @@ export async function syncInitialRuntimeTaskRows(
     if (taskNeedsPatch) {
       const taskPatch: Partial<ProjectTask> = {
         task_state: taskState,
-        status_text: statusText,
+        status_text: normalizedStatusText,
         error_text: errorText,
         completed_at: completedAt,
         duration_seconds: durationSeconds

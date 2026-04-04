@@ -2,10 +2,13 @@ import type { MutableRefObject } from 'react';
 import {
   compactResultConfidenceForStorage,
   downloadResultBlob,
+  enumerateLeadOptimizationMmp,
+  fetchLeadOptimizationMmpQueryStatus,
   getTaskStatus,
   parseResultBundle,
 } from '../../api/backendApi';
 import type { DownloadResultMode } from '../../api/backendTaskApi';
+import type { LeadOptMmpQueryResponse } from '../../api/backendLeadOptimizationApi';
 import type { Project, ProjectTask, TaskState } from '../../types/models';
 import { mergePeptidePreviewIntoProperties } from '../../utils/peptideTaskPreview';
 import {
@@ -23,6 +26,25 @@ function hasLeadOptMmpOnlySnapshot(task: ProjectTask | null): boolean {
     if (leadOptMmp && typeof leadOptMmp === 'object') return true;
   }
   return String(task.status_text || '').toUpperCase().includes('MMP');
+}
+
+function isTransientRuntimeStatusText(value: unknown): boolean {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized === 'running' ||
+    normalized === 'queued' ||
+    normalized === 'pending' ||
+    normalized === 'started' ||
+    normalized === 'starting' ||
+    normalized.includes(' running') ||
+    normalized.includes(' queued') ||
+    normalized.includes('pending') ||
+    normalized.includes('started') ||
+    normalized.includes('preparing') ||
+    normalized.includes('processing') ||
+    normalized.includes('uploading')
+  );
 }
 
 const PEPTIDE_RUNTIME_SETUP_KEYS = [
@@ -62,6 +84,11 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+function readFiniteNumber(value: unknown): number | null {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value.trim()) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function normalizeTaskId(value: unknown): string {
   return String(value || '').trim();
 }
@@ -80,6 +107,265 @@ function readStatusScopeTaskId(value: unknown): string {
 function asRecordArray(value: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object' && !Array.isArray(item)));
+}
+
+function hasLeadOptMaterializedSnapshot(task: ProjectTask | null): boolean {
+  if (!task) return false;
+  const properties = asRecord(task.properties);
+  const listMeta = asRecord(properties.lead_opt_list);
+  const queryResult = asRecord(listMeta.query_result);
+  const confidence = asRecord(task.confidence);
+  const leadOptMmp = asRecord(confidence.lead_opt_mmp);
+  const confidenceQueryResult = asRecord(leadOptMmp.query_result);
+  const queryId = normalizeTaskId(
+    listMeta.query_id ||
+      queryResult.query_id ||
+      leadOptMmp.query_id ||
+      confidenceQueryResult.query_id
+  );
+  if (!queryId) return false;
+  if (Object.keys(queryResult).length > 0 || Object.keys(confidenceQueryResult).length > 0) return true;
+  if (Array.isArray(listMeta.enumerated_candidates) || Array.isArray(leadOptMmp.enumerated_candidates)) return true;
+  if (readFiniteNumber(listMeta.candidate_count) !== null || readFiniteNumber(listMeta.transform_count) !== null) return true;
+  if (readFiniteNumber(leadOptMmp.candidate_count) !== null || readFiniteNumber(leadOptMmp.transform_count) !== null) return true;
+  return false;
+}
+
+function compactLeadOptQueryResultForStorage(resultInput: unknown, taskId: string): Record<string, unknown> {
+  const result = asRecord(resultInput);
+  const transforms = asRecordArray(result.transforms);
+  const globalTransforms = asRecordArray(result.global_transforms);
+  const clusters = asRecordArray(result.clusters);
+  const count = readFiniteNumber(result.count) ?? transforms.length;
+  const globalCount = readFiniteNumber(result.global_count) ?? Math.max(count, globalTransforms.length);
+  const groupedByEnvironment = result.grouped_by_environment;
+  return {
+    query_id: normalizeTaskId(result.query_id),
+    task_id: normalizeTaskId(result.task_id) || taskId,
+    query_mode: String(result.query_mode || 'one-to-many').trim() || 'one-to-many',
+    aggregation_type: String(result.aggregation_type || '').trim(),
+    property_targets: asRecord(result.property_targets),
+    rule_env_radius: readFiniteNumber(result.rule_env_radius) ?? 1,
+    ...(typeof groupedByEnvironment === 'boolean' ? { grouped_by_environment: groupedByEnvironment } : {}),
+    mmp_database_id: normalizeTaskId(result.mmp_database_id),
+    mmp_database_label: String(result.mmp_database_label || '').trim(),
+    mmp_database_schema: String(result.mmp_database_schema || '').trim(),
+    cluster_group_by: String(result.cluster_group_by || '').trim(),
+    min_pairs: readFiniteNumber(result.min_pairs) ?? 1,
+    transforms,
+    global_transforms: globalTransforms,
+    clusters,
+    count,
+    global_count: globalCount,
+    stats: asRecord(result.stats)
+  };
+}
+
+function readLeadOptPredictionSummary(task: ProjectTask | null): Record<string, unknown> {
+  const properties = asRecord(task?.properties);
+  const listSummary = asRecord(asRecord(properties.lead_opt_list).prediction_summary);
+  const stateSummary = asRecord(asRecord(properties.lead_opt_state).prediction_summary);
+  const confidenceSummary = asRecord(asRecord(asRecord(task?.confidence).lead_opt_mmp).prediction_summary);
+  const source = Object.keys(stateSummary).length > 0
+    ? stateSummary
+    : Object.keys(listSummary).length > 0
+      ? listSummary
+      : confidenceSummary;
+  return {
+    total: readFiniteNumber(source.total) ?? 0,
+    queued: readFiniteNumber(source.queued) ?? 0,
+    running: readFiniteNumber(source.running) ?? 0,
+    success: readFiniteNumber(source.success) ?? 0,
+    failure: readFiniteNumber(source.failure) ?? 0,
+    ...(normalizeTaskId(source.latest_task_id) ? { latest_task_id: normalizeTaskId(source.latest_task_id) } : {})
+  };
+}
+
+function buildLeadOptCompletedTaskPatch(
+  task: ProjectTask,
+  taskId: string,
+  result: LeadOptMmpQueryResponse,
+  enumeratedCandidates: Array<Record<string, unknown>>
+): Partial<ProjectTask> {
+  const properties = asRecord(task.properties);
+  const listMeta = asRecord(properties.lead_opt_list);
+  const stateMeta = asRecord(properties.lead_opt_state);
+  const confidence = asRecord(task.confidence);
+  const leadOptMmp = asRecord(confidence.lead_opt_mmp);
+  const compactQueryResult = compactLeadOptQueryResultForStorage(result, taskId);
+  const queryId = normalizeTaskId(compactQueryResult.query_id);
+  const transformCount = Math.max(
+    asRecordArray(compactQueryResult.transforms).length,
+    readFiniteNumber(compactQueryResult.count) ?? 0
+  );
+  const candidateCount = enumeratedCandidates.length;
+  const predictionSummary = readLeadOptPredictionSummary(task);
+  const predictionStage = String(
+    stateMeta.prediction_stage || listMeta.prediction_stage || leadOptMmp.prediction_stage || 'idle'
+  ).trim() || 'idle';
+  const stage = String(stateMeta.stage || listMeta.stage || leadOptMmp.stage || 'completed').trim() || 'completed';
+  const nextProperties = {
+    ...properties,
+    lead_opt_list: {
+      ...listMeta,
+      stage,
+      prediction_stage: predictionStage,
+      query_id: queryId,
+      task_id: taskId,
+      transform_count: transformCount,
+      candidate_count: candidateCount,
+      mmp_database_id: normalizeTaskId(compactQueryResult.mmp_database_id),
+      mmp_database_label: String(compactQueryResult.mmp_database_label || '').trim(),
+      mmp_database_schema: String(compactQueryResult.mmp_database_schema || '').trim(),
+      prediction_summary: predictionSummary,
+      query_result: compactQueryResult,
+      enumerated_candidates: enumeratedCandidates,
+      ui_state: asRecord(listMeta.ui_state)
+    },
+    lead_opt_state: {
+      ...stateMeta,
+      stage,
+      prediction_stage: predictionStage,
+      query_id: queryId,
+      prediction_summary: predictionSummary,
+      prediction_by_smiles: asRecord(stateMeta.prediction_by_smiles),
+      reference_prediction_by_backend: asRecord(stateMeta.reference_prediction_by_backend)
+    }
+  };
+  const nextConfidence = {
+    ...confidence,
+    lead_opt_mmp: {
+      ...leadOptMmp,
+      stage,
+      prediction_stage: predictionStage,
+      query_id: queryId,
+      task_id: taskId,
+      transform_count: transformCount,
+      candidate_count: candidateCount,
+      mmp_database_id: normalizeTaskId(compactQueryResult.mmp_database_id),
+      mmp_database_label: String(compactQueryResult.mmp_database_label || '').trim(),
+      mmp_database_schema: String(compactQueryResult.mmp_database_schema || '').trim(),
+      prediction_summary: predictionSummary,
+      prediction_by_smiles: asRecord(leadOptMmp.prediction_by_smiles),
+      reference_prediction_by_backend: asRecord(leadOptMmp.reference_prediction_by_backend),
+      query_result: compactQueryResult,
+      enumerated_candidates: enumeratedCandidates
+    }
+  };
+  return {
+    task_state: 'SUCCESS',
+    status_text: `MMP complete (${transformCount} transforms, ${candidateCount} rows). Scoring not started.`,
+    error_text: '',
+    completed_at: task.completed_at || new Date().toISOString(),
+    properties: nextProperties as unknown as ProjectTask['properties'],
+    confidence: nextConfidence as unknown as ProjectTask['confidence']
+  };
+}
+
+function summarizeLeadOptTerminalPredictions(task: ProjectTask | null): { total: number; success: number; failure: number } {
+  const properties = asRecord(task?.properties);
+  const stateMeta = asRecord(properties.lead_opt_state);
+  const confidence = asRecord(task?.confidence);
+  const leadOptMmp = asRecord(confidence.lead_opt_mmp);
+  const merged = {
+    ...asRecord(leadOptMmp.reference_prediction_by_backend),
+    ...asRecord(stateMeta.reference_prediction_by_backend),
+    ...asRecord(leadOptMmp.prediction_by_smiles),
+    ...asRecord(stateMeta.prediction_by_smiles)
+  };
+  let total = 0;
+  let success = 0;
+  let failure = 0;
+  for (const value of Object.values(merged)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    total += 1;
+    const state = String((value as Record<string, unknown>).state || '').trim().toUpperCase();
+    if (state === 'SUCCESS') success += 1;
+    else if (state === 'FAILURE') failure += 1;
+  }
+  return { total, success, failure };
+}
+
+function readLeadOptTerminalStatusText(task: ProjectTask | null, taskState: TaskState, fallback: string): string {
+  const properties = asRecord(task?.properties);
+  const listMeta = asRecord(properties.lead_opt_list);
+  const queryResult = asRecord(listMeta.query_result);
+  const confidence = asRecord(task?.confidence);
+  const leadOptMmp = asRecord(confidence.lead_opt_mmp);
+  const transformCount = Math.max(
+    readFiniteNumber(listMeta.transform_count) ?? 0,
+    readFiniteNumber(leadOptMmp.transform_count) ?? 0,
+    readFiniteNumber(queryResult.count) ?? 0
+  );
+  const candidateCount = Math.max(
+    readFiniteNumber(listMeta.candidate_count) ?? 0,
+    readFiniteNumber(leadOptMmp.candidate_count) ?? 0,
+    Array.isArray(listMeta.enumerated_candidates) ? listMeta.enumerated_candidates.length : 0,
+    Array.isArray(leadOptMmp.enumerated_candidates) ? leadOptMmp.enumerated_candidates.length : 0
+  );
+  const queryId = normalizeTaskId(listMeta.query_id || queryResult.query_id || leadOptMmp.query_id);
+  if (queryId || transformCount > 0 || candidateCount > 0) {
+    if (taskState === 'SUCCESS') {
+      return `MMP complete (${transformCount} transforms, ${candidateCount} rows). Scoring not started.`;
+    }
+    return fallback;
+  }
+
+  const summary = summarizeLeadOptTerminalPredictions(task);
+  if (summary.total > 0) {
+    if (taskState === 'SUCCESS') {
+      return `Scoring complete (${summary.success}/${Math.max(1, summary.total)})`;
+    }
+    if (taskState === 'FAILURE') {
+      return summary.success === 0
+        ? `Scoring complete (0/${Math.max(1, summary.total)})`
+        : `Scoring complete (${summary.success}/${Math.max(1, summary.total)})`;
+    }
+  }
+
+  return taskState === 'SUCCESS' ? 'Task completed.' : fallback;
+}
+
+export async function materializeLeadOptCompletedTask(params: {
+  task: ProjectTask | null;
+  taskId: string;
+  persistTask: (taskRowId: string, patch: Partial<ProjectTask>) => Promise<ProjectTask | null>;
+}): Promise<ProjectTask | null> {
+  const { task, taskId, persistTask } = params;
+  if (!task) return null;
+  const normalizedTaskId = normalizeTaskId(taskId);
+  if (!normalizedTaskId) return null;
+  if (hasLeadOptMaterializedSnapshot(task)) return task;
+
+  const status = await fetchLeadOptimizationMmpQueryStatus(normalizedTaskId);
+  const state = String(status.state || '').trim().toUpperCase();
+  const result = status.result || null;
+  if (state !== 'SUCCESS' || !result) return null;
+
+  const compactQueryResult = compactLeadOptQueryResultForStorage(result, normalizedTaskId);
+  const queryId = normalizeTaskId(compactQueryResult.query_id);
+  const transformCount = Math.max(
+    asRecordArray(compactQueryResult.transforms).length,
+    readFiniteNumber(compactQueryResult.count) ?? 0
+  );
+  if (!queryId && transformCount > 0) {
+    throw new Error(`Lead opt task ${normalizedTaskId} finished without query_id.`);
+  }
+
+  let enumeratedCandidates: Array<Record<string, unknown>> = [];
+  if (queryId && transformCount > 0) {
+    const enumerate = await enumerateLeadOptimizationMmp({
+      query_id: queryId,
+      task_id: normalizedTaskId,
+      property_constraints: {},
+      max_candidates: Math.min(1000, Math.max(200, transformCount)),
+      compact: true
+    });
+    enumeratedCandidates = asRecordArray(enumerate.candidates);
+  }
+
+  const patch = buildLeadOptCompletedTaskPatch(task, normalizedTaskId, result, enumeratedCandidates);
+  return await persistTask(task.id, patch);
 }
 
 function readPeptideCandidateRowsFromPayload(value: unknown): Array<Record<string, unknown>> {
@@ -518,7 +804,15 @@ export async function refreshTaskStatus(params: {
       status,
       runtimeTask?.task_state || project.task_state
     );
-    const statusText = readStatusText(status);
+    const isPeptideDesignWorkflow = normalizeWorkflowKey(project.task_type) === 'peptide_design';
+    const isLeadOptimizationWorkflow = normalizeWorkflowKey(project.task_type) === 'lead_optimization';
+    const rawStatusText = readStatusText(status);
+    const statusText =
+      (taskState === 'SUCCESS' || taskState === 'FAILURE' || taskState === 'REVOKED') &&
+      isLeadOptimizationWorkflow &&
+      isTransientRuntimeStatusText(rawStatusText)
+        ? readLeadOptTerminalStatusText(runtimeTask, taskState, rawStatusText)
+        : rawStatusText;
     setStatusInfo((previous) => {
       const incoming = asRecord(status.info);
       const scopedIncoming = {
@@ -537,8 +831,7 @@ export async function refreshTaskStatus(params: {
       return Object.keys(incoming).length > 0 ? scopedIncoming : null;
     });
     const runtimeInfo = asRecord(status.info);
-    const isPeptideDesignWorkflow = normalizeWorkflowKey(project.task_type) === 'peptide_design';
-    const isLeadOptimizationWorkflow = normalizeWorkflowKey(project.task_type) === 'lead_optimization';
+    const isProjectActiveTask = String(project?.task_id || '').trim() === activeTaskId;
     const nextErrorText = taskState === 'FAILURE' ? statusText : '';
     const completedAt = taskState === 'SUCCESS' ? new Date().toISOString() : null;
     const submittedAt = runtimeTask?.submitted_at || project.submitted_at;
@@ -549,8 +842,49 @@ export async function refreshTaskStatus(params: {
             return Number.isFinite(duration) ? duration : null;
           })()
         : null;
+    if (
+      taskState === 'SUCCESS' &&
+      isLeadOptimizationWorkflow &&
+      runtimeTask &&
+      !hasLeadOptMaterializedSnapshot(runtimeTask)
+    ) {
+      const materializedLeadOptTask = await materializeLeadOptCompletedTask({
+        task: runtimeTask,
+        taskId: activeTaskId,
+        persistTask: patchTask
+      });
+      if (materializedLeadOptTask) {
+        if (isProjectActiveTask) {
+          const nextStatusText = String(materializedLeadOptTask.status_text || statusText).trim();
+          const nextCompletedAt = materializedLeadOptTask.completed_at || new Date().toISOString();
+          const nextDurationSeconds =
+            materializedLeadOptTask.duration_seconds ??
+            (submittedAt
+              ? (() => {
+                  const duration = (Date.now() - new Date(submittedAt).getTime()) / 1000;
+                  return Number.isFinite(duration) ? duration : null;
+                })()
+              : null);
+          const shouldPatchProject =
+            project.task_state !== 'SUCCESS' ||
+            (project.status_text || '') !== nextStatusText ||
+            (project.error_text || '') !== '' ||
+            (project.completed_at || null) !== (nextCompletedAt || null) ||
+            (project.duration_seconds ?? null) !== (nextDurationSeconds ?? null);
+          if (shouldPatchProject) {
+            await patch({
+              task_state: 'SUCCESS',
+              status_text: nextStatusText,
+              error_text: '',
+              completed_at: nextCompletedAt,
+              duration_seconds: nextDurationSeconds
+            });
+          }
+        }
+        return;
+      }
+    }
 
-    const isProjectActiveTask = String(project?.task_id || '').trim() === activeTaskId;
     const patchData: Partial<Project> = {
       task_state: taskState,
       status_text: statusText,

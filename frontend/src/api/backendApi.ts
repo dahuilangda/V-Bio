@@ -7,6 +7,7 @@ export {
   fetchLeadOptimizationBackendCapabilities,
   fetchLeadOptimizationMmpDatabases,
   fetchLeadOptimizationMmpEvidence,
+  fetchLeadOptimizationMmpQueryStatus,
   fetchLeadOptimizationMmpQueryResult,
   patchLeadOptimizationMmpDatabaseAdmin,
   predictLeadOptimizationCandidate,
@@ -24,6 +25,7 @@ export type {
   LeadOptMmpDatabaseProperty,
   LeadOptMmpEvidenceResponse,
   LeadOptMmpQueryResponse,
+  LeadOptMmpQueryStatusResponse,
   LeadOptPocketOverlayResponse,
   LeadOptReferencePreviewResponse
 } from './backendLeadOptimizationApi';

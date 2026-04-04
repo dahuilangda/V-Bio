@@ -559,6 +559,39 @@ function compactLeadOptEnumeratedCandidates(value: unknown): Array<Record<string
   return rows;
 }
 
+function compactLeadOptQueryResult(value: unknown): Record<string, unknown> {
+  const queryResult = asRecord(value);
+  if (Object.keys(queryResult).length === 0) return {};
+  const transforms = asRecordArray(queryResult.transforms);
+  const globalTransforms = asRecordArray(queryResult.global_transforms);
+  const clusters = asRecordArray(queryResult.clusters);
+  const count = Number.isFinite(Number(queryResult.count)) ? Number(queryResult.count) : transforms.length;
+  const globalCount = Number.isFinite(Number(queryResult.global_count))
+    ? Number(queryResult.global_count)
+    : Math.max(count, globalTransforms.length);
+  const groupedByEnvironment = readBooleanToken(queryResult.grouped_by_environment);
+  return {
+    query_id: readText(queryResult.query_id).trim(),
+    task_id: readText(queryResult.task_id).trim(),
+    query_mode: readText(queryResult.query_mode).trim() || 'one-to-many',
+    aggregation_type: readText(queryResult.aggregation_type).trim(),
+    property_targets: asRecord(queryResult.property_targets),
+    rule_env_radius: Number.isFinite(Number(queryResult.rule_env_radius)) ? Number(queryResult.rule_env_radius) : 1,
+    ...(groupedByEnvironment === null ? {} : { grouped_by_environment: groupedByEnvironment }),
+    mmp_database_id: readText(queryResult.mmp_database_id).trim(),
+    mmp_database_label: readText(queryResult.mmp_database_label).trim(),
+    mmp_database_schema: readText(queryResult.mmp_database_schema).trim(),
+    cluster_group_by: readText(queryResult.cluster_group_by).trim(),
+    transforms,
+    global_transforms: globalTransforms,
+    clusters,
+    stats: asRecord(queryResult.stats),
+    count,
+    global_count: globalCount,
+    min_pairs: Number.isFinite(Number(queryResult.min_pairs)) ? Number(queryResult.min_pairs) : 1
+  };
+}
+
 function readLeadOptStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return Array.from(
@@ -635,21 +668,14 @@ function buildLeadOptListMeta(leadOptMmpInput: unknown): Record<string, unknown>
   const compactCandidates = compactLeadOptEnumeratedCandidates(
     leadOptMmp.enumerated_candidates ?? asRecord(leadOptMmp.result_snapshot).enumerated_candidates
   );
-  const compactQueryResult = {
+  const compactQueryResult = compactLeadOptQueryResult({
+    ...queryResult,
     query_id: readText(leadOptMmp.query_id || queryResult.query_id).trim(),
     task_id: readText(leadOptMmp.task_id || queryResult.task_id).trim(),
-    query_mode: readText(queryResult.query_mode).trim() || 'one-to-many',
-    aggregation_type: readText(queryResult.aggregation_type).trim(),
-    property_targets: asRecord(queryResult.property_targets),
-    rule_env_radius: toFiniteNumber(queryResult.rule_env_radius),
-    grouped_by_environment: readBooleanToken(queryResult.grouped_by_environment),
     mmp_database_id: readText(leadOptMmp.mmp_database_id || queryResult.mmp_database_id).trim(),
     mmp_database_label: readText(leadOptMmp.mmp_database_label || queryResult.mmp_database_label).trim(),
-    mmp_database_schema: readText(leadOptMmp.mmp_database_schema || queryResult.mmp_database_schema).trim(),
-    cluster_group_by: readText(queryResult.cluster_group_by).trim(),
-    min_pairs: toFiniteNumber(queryResult.min_pairs),
-    stats: asRecord(queryResult.stats)
-  } as Record<string, unknown>;
+    mmp_database_schema: readText(leadOptMmp.mmp_database_schema || queryResult.mmp_database_schema).trim()
+  });
   const predictionTotal = toFiniteNumber(predictionSummary.total);
   const selectedFragmentIds = readLeadOptStringArray(
     selection.selected_fragment_ids ?? leadOptMmp.selected_fragment_ids
@@ -861,13 +887,39 @@ function mergeLeadOptSnapshotForPersist(nextValue: unknown, prevValue: unknown):
   const next = asRecord(nextValue);
   const prev = asRecord(prevValue);
   if (Object.keys(next).length === 0 && Object.keys(prev).length === 0) return {};
+  const nextQueryResult = compactLeadOptQueryResult(next.query_result);
+  const prevQueryResult = compactLeadOptQueryResult(prev.query_result);
+  const nextSnapshotIdentity = readText(nextQueryResult.query_id || nextQueryResult.task_id).trim();
+  const prevSnapshotIdentity = readText(prevQueryResult.query_id || prevQueryResult.task_id).trim();
+  const mergedQueryResult =
+    nextSnapshotIdentity && prevSnapshotIdentity && nextSnapshotIdentity !== prevSnapshotIdentity
+      ? nextQueryResult
+      : {
+          ...prevQueryResult,
+          ...nextQueryResult,
+          transforms:
+            Array.isArray(nextQueryResult.transforms) && nextQueryResult.transforms.length > 0
+              ? nextQueryResult.transforms
+              : Array.isArray(prevQueryResult.transforms)
+                ? prevQueryResult.transforms
+                : [],
+          global_transforms:
+            Array.isArray(nextQueryResult.global_transforms) && nextQueryResult.global_transforms.length > 0
+              ? nextQueryResult.global_transforms
+              : Array.isArray(prevQueryResult.global_transforms)
+                ? prevQueryResult.global_transforms
+                : [],
+          clusters:
+            Array.isArray(nextQueryResult.clusters) && nextQueryResult.clusters.length > 0
+              ? nextQueryResult.clusters
+              : Array.isArray(prevQueryResult.clusters)
+                ? prevQueryResult.clusters
+                : []
+        };
   return {
     ...prev,
     ...next,
-    query_result:
-      Object.keys(asRecord(next.query_result)).length > 0
-        ? asRecord(next.query_result)
-        : asRecord(prev.query_result),
+    query_result: mergedQueryResult,
     selection:
       Object.keys(asRecord(next.selection)).length > 0
         ? asRecord(next.selection)
@@ -2099,26 +2151,13 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     const snapshot = asRecord(payload.resultSnapshot);
     const queryResult = asRecord(snapshot.query_result);
     const enumeratedCandidates = compactLeadOptEnumeratedCandidates(snapshot.enumerated_candidates);
-    const compactQueryResult: Record<string, unknown> = {
+    const compactQueryResult = compactLeadOptQueryResult({
+      ...queryResult,
       query_id: readText(payload.queryId).trim(),
       task_id: readText(taskId).trim(),
-      query_mode: readText(queryResult.query_mode).trim() || 'one-to-many',
-      aggregation_type: readText(queryResult.aggregation_type).trim(),
-      mmp_database_id: readText(queryResult.mmp_database_id).trim(),
-      mmp_database_label: readText(queryResult.mmp_database_label).trim(),
-      mmp_database_schema: readText(queryResult.mmp_database_schema).trim(),
-      property_targets: asRecord(queryResult.property_targets),
-      rule_env_radius: Number.isFinite(Number(queryResult.rule_env_radius)) ? Number(queryResult.rule_env_radius) : 1,
-      grouped_by_environment:
-        readBooleanToken(queryResult.grouped_by_environment) === null
-          ? undefined
-          : readBooleanToken(queryResult.grouped_by_environment),
       count: Number.isFinite(Number(queryResult.count)) ? Number(queryResult.count) : payload.transformCount,
-      global_count: Number.isFinite(Number(queryResult.global_count)) ? Number(queryResult.global_count) : payload.transformCount,
-      min_pairs: Number.isFinite(Number(queryResult.min_pairs)) ? Number(queryResult.min_pairs) : 1,
-      cluster_group_by: readText(queryResult.cluster_group_by).trim(),
-      stats: asRecord(queryResult.stats)
-    };
+      global_count: Number.isFinite(Number(queryResult.global_count)) ? Number(queryResult.global_count) : payload.transformCount
+    });
     const inheritedReferenceRecords = hydratePredictionRecordMapFromHistory(
       asPredictionRecordMap(snapshot.reference_prediction_by_backend),
       leadOptHistoricalReferenceRecords

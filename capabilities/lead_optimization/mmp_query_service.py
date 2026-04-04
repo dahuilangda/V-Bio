@@ -2745,9 +2745,18 @@ def run_mmp_query(payload: Dict[str, Any]) -> Dict[str, Any]:
         has_num_frags = _table_has_column(conn, "rule_smiles", "num_frags")
         has_constant_num_frags = _table_has_column(conn, "constant_smiles", "num_frags")
         if not has_num_frags:
-            raise ValueError(
-                "MMP database schema is missing attachment metadata on rule_smiles (num_frags). "
-                "Please rebuild/enrich via lead_optimization.mmp_lifecycle before running lead optimization queries."
+            logger.warning(
+                "Lead-opt MMP query continuing without rule_smiles.num_frags attachment metadata: "
+                "schema=%s db=%s. Query will fall back to attachment-count inference and may be slower/less precise.",
+                selected_database_schema or "<default>",
+                db_log_label,
+            )
+        if not has_constant_num_frags:
+            logger.warning(
+                "Lead-opt MMP query continuing without constant_smiles.num_frags attachment metadata: "
+                "schema=%s db=%s.",
+                selected_database_schema or "<default>",
+                db_log_label,
             )
         max_rule_smiles = max(200, min(5000, int(payload.get("max_rule_smiles") or 2000)))
         rule_smiles_ids = _lookup_rule_smiles_ids(

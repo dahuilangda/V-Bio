@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import type { AffinityScoringMode, InputComponent, ProjectTask } from '../../types/models';
-import { enumerateLeadOptimizationMmp, getTaskStatuses } from '../../api/backendApi';
+import { getTaskStatuses } from '../../api/backendApi';
 import { useAuth } from '../../hooks/useAuth';
 import {
   getProjectTaskById,
@@ -38,6 +38,7 @@ import {
   sortProjectTasks
 } from './projectDraftUtils';
 import { inferTaskStateFromStatusPayload, readStatusText } from './projectMetrics';
+import { materializeLeadOptCompletedTask } from './projectTaskRuntime';
 
 function normalizeAffinityMode(value: unknown): AffinityScoringMode {
   const normalized = String(value || '').trim().toLowerCase();
@@ -158,7 +159,6 @@ const TASK_STATE_PRIORITY: Record<string, number> = {
 };
 const RUNTIME_STATUS_LIGHT_POLL_MAX_TASKS = 24;
 const LEADOPT_CANDIDATE_HYDRATION_RETRY_MS = 15000;
-const LEADOPT_CANDIDATE_REPAIR_RETRY_MS = 60000;
 
 type ProjectTaskDetailOptions = {
   includeComponents?: boolean;
@@ -591,29 +591,6 @@ function readLeadOptQueryIdFromRow(row: { properties?: unknown; confidence?: unk
   ).trim();
 }
 
-function readLeadOptRuntimeTaskIdFromRow(
-  row: { task_id?: string | null; properties?: unknown; confidence?: unknown } | null | undefined
-): string {
-  if (!row) return '';
-  const directTaskId = String(row.task_id || '').trim();
-  if (directTaskId) return directTaskId;
-  const properties = asObjectRecord(row.properties);
-  const listMeta = asObjectRecord(properties.lead_opt_list);
-  const stateMeta = asObjectRecord(properties.lead_opt_state);
-  const listQueryResult = asObjectRecord(listMeta.query_result);
-  const confidence = asObjectRecord(row.confidence);
-  const leadOptConfidence = asObjectRecord(confidence.lead_opt_mmp);
-  const confidenceQueryResult = asObjectRecord(leadOptConfidence.query_result);
-  return String(
-    listMeta.task_id ||
-      stateMeta.task_id ||
-      listQueryResult.task_id ||
-      leadOptConfidence.task_id ||
-      confidenceQueryResult.task_id ||
-      ''
-  ).trim();
-}
-
 function readLeadOptEnumeratedCandidateCount(row: { properties?: unknown; confidence?: unknown } | null | undefined): number {
   if (!row) return 0;
   const properties = asObjectRecord(row.properties);
@@ -623,6 +600,23 @@ function readLeadOptEnumeratedCandidateCount(row: { properties?: unknown; confid
   const leadOptConfidence = asObjectRecord(confidence.lead_opt_mmp);
   if (Array.isArray(leadOptConfidence.enumerated_candidates)) return leadOptConfidence.enumerated_candidates.length;
   return 0;
+}
+
+function hasTransientRuntimeStatusText(value: unknown): boolean {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized === 'running' ||
+    normalized === 'queued' ||
+    normalized === 'pending' ||
+    normalized === 'started' ||
+    normalized.includes(' running') ||
+    normalized.includes(' queued') ||
+    normalized.includes('pending') ||
+    normalized.includes('started') ||
+    normalized.includes('preparing') ||
+    normalized.includes('processing')
+  );
 }
 
 function countLeadOptUploadPayloads(task: { components?: unknown } | null | undefined): number {
@@ -884,7 +878,7 @@ export function useProjectDetailRuntimeContext() {
     };
   }, [runtimePollingSignature, projectTasks]);
   const leadOptCandidateHydrationAtRef = useRef<Record<string, number>>({});
-  const leadOptCandidateRepairAtRef = useRef<Record<string, number>>({});
+  const leadOptResultMaterializationRef = useRef<Record<string, string>>({});
   const runtimeTaskStatusCursorRef = useRef(0);
   const runtimeTerminalStatusByTaskIdRef = useRef<Record<string, { task_id: string; state: string; info?: Record<string, unknown> }>>({});
   const projectTaskDetailCacheRef = useRef<Record<string, CachedProjectTaskDetail>>({});
@@ -902,16 +896,24 @@ export function useProjectDetailRuntimeContext() {
         projectTasks.find((row) => String(row.id || '').trim() === normalizedTaskRowId) || null;
       const currentUpdatedAt = String(currentRow?.updated_at || '').trim();
       const cached = projectTaskDetailCacheRef.current[normalizedTaskRowId];
+      const shouldRefetchLeadOptCandidates =
+        requestedOptions.includeLeadOptCandidates &&
+        (hasLeadOptResultSummaryPayload(currentRow) || hasLeadOptResultSummaryPayload(cached?.task || null)) &&
+        Math.max(
+          readLeadOptEnumeratedCandidateCount(currentRow),
+          readLeadOptEnumeratedCandidateCount(cached?.task || null)
+        ) === 0;
       if (
         cached &&
         cached.updatedAt === currentUpdatedAt &&
-        projectTaskDetailOptionsCover(cached.options, requestedOptions)
+        projectTaskDetailOptionsCover(cached.options, requestedOptions) &&
+        !shouldRefetchLeadOptCandidates
       ) {
         return currentRow ? mergeTaskRuntimeFields(cached.task, currentRow) : cached.task;
       }
 
       const inFlight = projectTaskDetailInFlightRef.current[normalizedTaskRowId];
-      if (inFlight && projectTaskDetailOptionsCover(inFlight.options, requestedOptions)) {
+      if (inFlight && projectTaskDetailOptionsCover(inFlight.options, requestedOptions) && !shouldRefetchLeadOptCandidates) {
         return await inFlight.promise;
       }
 
@@ -1112,6 +1114,38 @@ export function useProjectDetailRuntimeContext() {
                   (runtimeRowState === 'QUEUED' || runtimeRowState === 'RUNNING');
                 if (shouldPersistRuntimeTerminal) {
                   const runtimeStatusText = String(readStatusText(status) || '').trim();
+                  if (workflowKey === 'lead_optimization' && inferred === 'SUCCESS' && runtimeRow) {
+                    try {
+                      const materializedRow = await materializeLeadOptCompletedTask({
+                        task: runtimeRow as ProjectTask,
+                        taskId,
+                        persistTask: async (taskRowId, patch) => {
+                          try {
+                            const updated = await updateProjectTask(taskRowId, patch, { minimalReturn: true });
+                            return updated
+                              ? ({ ...runtimeRow, ...patch, ...updated } as ProjectTask)
+                              : ({ ...runtimeRow, ...patch } as ProjectTask);
+                          } catch {
+                            return { ...runtimeRow, ...patch } as ProjectTask;
+                          }
+                        }
+                      });
+                      if (materializedRow) {
+                        const normalizedMaterializedRow = normalizeLeadOptRuntimeRow(materializedRow);
+                        const nextRowIndex = nextRows.findIndex((row) => String(row.id || '').trim() === runtimeRowId);
+                        if (nextRowIndex >= 0) {
+                          nextRows[nextRowIndex] = normalizedMaterializedRow;
+                        }
+                        runtimeEnhancedRows = runtimeEnhancedRows.map((row) =>
+                          String(row.id || '').trim() === runtimeRowId ? normalizedMaterializedRow : row
+                        );
+                        runtimeRowByTaskId.set(taskId, normalizedMaterializedRow);
+                        continue;
+                      }
+                    } catch {
+                      // Keep terminal status in memory; a later refresh can retry materialization.
+                    }
+                  }
                   try {
                     await updateProjectTask(
                       runtimeRowId,
@@ -1151,7 +1185,6 @@ export function useProjectDetailRuntimeContext() {
           const focusedQueryIdInRows = resolveFocusedQueryId(rowsForUi);
           const focusedRow = resolveFocusedRow(rowsForUi);
           const focusedRowId = String(focusedRow?.id || '').trim();
-          const focusedRuntimeTaskId = readLeadOptRuntimeTaskIdFromRow(focusedRow);
           hasLeadOptCandidates = focusedQueryIdInRows
             ? rowsForUi.some(
                 (row) => readLeadOptQueryIdFromRow(row) === focusedQueryIdInRows && readLeadOptEnumeratedCandidateCount(row) > 0
@@ -1192,77 +1225,6 @@ export function useProjectDetailRuntimeContext() {
                 }
               } catch {
                 // Keep lightweight summary rows and retry with cooldown.
-              }
-            }
-          }
-          if (
-            shouldRequestLeadOptCandidates &&
-            hasLeadOptSummaryRows &&
-            !hasLeadOptCandidates &&
-            focusedRowId &&
-            focusedQueryIdInRows
-          ) {
-            const repairKey = `${focusedRowId}|${focusedQueryIdInRows}`;
-            const lastRepairAt = Number(leadOptCandidateRepairAtRef.current[repairKey] || 0);
-            const nowTs = Date.now();
-            if (!Number.isFinite(lastRepairAt) || nowTs - lastRepairAt >= LEADOPT_CANDIDATE_REPAIR_RETRY_MS) {
-              leadOptCandidateRepairAtRef.current[repairKey] = nowTs;
-              try {
-                const enumerate = await enumerateLeadOptimizationMmp({
-                  query_id: focusedQueryIdInRows,
-                  task_id: focusedRuntimeTaskId,
-                  property_constraints: {},
-                  max_candidates: 360,
-                  compact: true
-                });
-                const repairedCandidates = Array.isArray(enumerate.candidates)
-                  ? enumerate.candidates.filter((item) => item && typeof item === 'object' && !Array.isArray(item))
-                  : [];
-                if (repairedCandidates.length > 0) {
-                  const targetRow = rowsForUi.find((row) => String(row.id || '').trim() === focusedRowId) || null;
-                  if (targetRow) {
-                    const rowProperties = asObjectRecord(targetRow.properties);
-                    const rowLeadOptList = asObjectRecord(rowProperties.lead_opt_list);
-                    const rowLeadOptState = asObjectRecord(rowProperties.lead_opt_state);
-                    const nextProperties = {
-                      ...rowProperties,
-                      lead_opt_list: {
-                        ...rowLeadOptList,
-                        query_id:
-                          String(rowLeadOptList.query_id || focusedQueryIdInRows).trim() || focusedQueryIdInRows,
-                        candidate_count: Math.max(
-                          Number(rowLeadOptList.candidate_count || 0) || 0,
-                          repairedCandidates.length
-                        ),
-                        enumerated_candidates: repairedCandidates
-                      },
-                      lead_opt_state: {
-                        ...rowLeadOptState,
-                        query_id:
-                          String(rowLeadOptState.query_id || focusedQueryIdInRows).trim() || focusedQueryIdInRows
-                      }
-                    } as Record<string, unknown>;
-                    try {
-                      await updateProjectTask(
-                        focusedRowId,
-                        {
-                          properties: nextProperties as any
-                        },
-                        { minimalReturn: true }
-                      );
-                    } catch {
-                      // Keep repaired candidates in-memory even if persistence fails.
-                    }
-                    rowsForUi = rowsForUi.map((row) =>
-                      String(row.id || '').trim() === focusedRowId
-                        ? ({ ...row, properties: nextProperties as any } as any)
-                        : row
-                    );
-                    hasLeadOptCandidates = true;
-                  }
-                }
-              } catch {
-                // Keep lightweight snapshot when backend query cache is unavailable/expired.
               }
             }
           }
@@ -1495,6 +1457,64 @@ export function useProjectDetailRuntimeContext() {
         }
       })();
     }, 240);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [getProjectTaskDetailCached, location.search, project?.task_id, projectTasks, setProjectTasks, workflowKey, workspaceTab]);
+
+  useEffect(() => {
+    if (workflowKey !== 'lead_optimization') return;
+    if (workspaceTab !== 'results') return;
+
+    const query = new URLSearchParams(location.search);
+    const explicitTaskRowId =
+      String(query.get('task_row_id') || '').trim() || String(query.get('source_task_row_id') || '').trim();
+    const activeTaskId = String(project?.task_id || '').trim();
+    const focusedRow =
+      (explicitTaskRowId
+        ? projectTasks.find((row) => String(row.id || '').trim() === explicitTaskRowId)
+        : undefined) ||
+      (activeTaskId ? projectTasks.find((row) => String(row.task_id || '').trim() === activeTaskId) : undefined) ||
+      null;
+    const focusedRowId = String(focusedRow?.id || '').trim();
+    if (!focusedRowId || focusedRowId.startsWith('local-')) return;
+
+    const enumeratedCount = readLeadOptEnumeratedCandidateCount(focusedRow);
+    if (!hasLeadOptResultSummaryPayload(focusedRow) || enumeratedCount > 0) return;
+
+    const lastAt = Number(leadOptCandidateHydrationAtRef.current[focusedRowId] || 0);
+    const nowTs = Date.now();
+    if (Number.isFinite(lastAt) && nowTs - lastAt < 3000) return;
+    leadOptCandidateHydrationAtRef.current[focusedRowId] = nowTs;
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const detailRow = await getProjectTaskDetailCached(focusedRowId, {
+            includeComponents: false,
+            includeConstraints: false,
+            includeProperties: false,
+            includeLeadOptSummary: true,
+            includeLeadOptCandidates: true,
+            includeConfidence: false,
+            includeAffinity: false,
+            includeProteinSequence: false
+          });
+          if (cancelled || !detailRow) return;
+          if (readLeadOptEnumeratedCandidateCount(detailRow) <= 0) return;
+          setProjectTasks((prev) =>
+            prev.map((row) =>
+              String(row.id || '').trim() === focusedRowId ? mergeTaskRuntimeFields(detailRow, row) : row
+            )
+          );
+        } catch {
+          // Keep the lightweight row; fast results polling will retry shortly.
+        }
+      })();
+    }, 120);
 
     return () => {
       cancelled = true;
@@ -1920,6 +1940,41 @@ export function useProjectDetailRuntimeContext() {
     setResultError,
     setStatusInfo
   });
+
+  useEffect(() => {
+    if (workflowKey !== 'lead_optimization') return;
+    if (workspaceTab !== 'results') return;
+
+    const sourceRow = requestedStatusTaskRow || activeResultTask || statusContextTaskRow || null;
+    const sourceRowId = String(sourceRow?.id || '').trim();
+    const sourceTaskId = String(sourceRow?.task_id || '').trim();
+    const sourceTaskState = String(sourceRow?.task_state || '').trim().toUpperCase();
+    if (!sourceRowId || !sourceTaskId || sourceTaskState !== 'SUCCESS') return;
+    if (hasLeadOptResultSummaryPayload(sourceRow) && readLeadOptQueryIdFromRow(sourceRow)) return;
+
+    const marker = [sourceRowId, sourceTaskId, String(sourceRow?.updated_at || '').trim()].join('|');
+    if (leadOptResultMaterializationRef.current[sourceRowId] === marker) return;
+    leadOptResultMaterializationRef.current[sourceRowId] = marker;
+
+    void refreshStatus({ silent: true, taskId: sourceTaskId });
+  }, [activeResultTask, refreshStatus, requestedStatusTaskRow, statusContextTaskRow, workflowKey, workspaceTab]);
+
+  useEffect(() => {
+    if (workflowKey !== 'lead_optimization') return;
+    const sourceRow = requestedStatusTaskRow || activeResultTask || statusContextTaskRow || null;
+    const sourceRowId = String(sourceRow?.id || '').trim();
+    const sourceTaskId = String(sourceRow?.task_id || '').trim();
+    const sourceTaskState = String(sourceRow?.task_state || '').trim().toUpperCase();
+    if (!sourceRowId || !sourceTaskId) return;
+    if (sourceTaskState !== 'SUCCESS' && sourceTaskState !== 'FAILURE' && sourceTaskState !== 'REVOKED') return;
+    if (!hasTransientRuntimeStatusText(sourceRow?.status_text)) return;
+
+    const marker = ['terminal-status', sourceRowId, sourceTaskId, String(sourceRow?.updated_at || '').trim()].join('|');
+    if (leadOptResultMaterializationRef.current[sourceRowId] === marker) return;
+    leadOptResultMaterializationRef.current[sourceRowId] = marker;
+
+    void refreshStatus({ silent: true, taskId: sourceTaskId });
+  }, [activeResultTask, refreshStatus, requestedStatusTaskRow, statusContextTaskRow, workflowKey]);
 
   const showRunQueuedNotice = (message: string) => {
     showRunQueuedNoticeControl({

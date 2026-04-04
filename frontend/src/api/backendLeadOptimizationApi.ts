@@ -116,6 +116,7 @@ export interface LeadOptMmpDatabaseItem {
   visible?: boolean;
   is_default?: boolean;
   status?: 'ready' | 'building' | string;
+  status_message?: string;
   source?: string;
   properties: LeadOptMmpDatabaseProperty[];
   stats?: LeadOptMmpDatabaseStats;
@@ -138,12 +139,25 @@ export interface LeadOptBackendCapabilityResponse {
   backends: Record<string, LeadOptBackendCapability>;
 }
 
-interface LeadOptMmpQueryStatusResponse {
+export interface LeadOptMmpQueryStatusResponse {
   task_id?: string;
   state?: string;
   progress?: Record<string, unknown>;
   result?: LeadOptMmpQueryResponse;
   error?: string;
+}
+
+function parseBackendErrorMessage(text: string, fallback: string): string {
+  const raw = String(text || '').trim();
+  if (!raw) return fallback;
+  try {
+    const parsed = JSON.parse(raw) as { error?: unknown };
+    const errorMessage = String(parsed?.error || '').trim();
+    if (errorMessage) return errorMessage;
+  } catch {
+    // Keep raw text fallback for non-JSON responses.
+  }
+  return raw;
 }
 
 export interface LeadOptMmpEvidenceResponse {
@@ -232,7 +246,7 @@ export async function queryLeadOptimizationMmp(
   });
   if (!enqueue.ok) {
     const text = await enqueue.text();
-    throw new Error(`Failed to query MMP (${enqueue.status}): ${text}`);
+    throw new Error(`Failed to query MMP (${enqueue.status}): ${parseBackendErrorMessage(text, 'Request failed.')}`);
   }
   const enqueueData = (await enqueue.json()) as { task_id?: string; state?: string } & LeadOptMmpQueryResponse;
   if (!enqueueData.task_id) {
@@ -257,7 +271,9 @@ export async function queryLeadOptimizationMmp(
     });
     if (!statusRes.ok) {
       const text = await statusRes.text();
-      throw new Error(`Failed to query MMP status (${statusRes.status}): ${text}`);
+      throw new Error(
+        `Failed to query MMP status (${statusRes.status}): ${parseBackendErrorMessage(text, 'Status check failed.')}`
+      );
     }
     const statusData = (await statusRes.json()) as LeadOptMmpQueryStatusResponse;
     const state = String(statusData.state || '').toUpperCase();
@@ -283,6 +299,27 @@ export async function queryLeadOptimizationMmp(
   }
 }
 
+export async function fetchLeadOptimizationMmpQueryStatus(taskId: string): Promise<LeadOptMmpQueryStatusResponse> {
+  const normalizedTaskId = String(taskId || '').trim();
+  if (!normalizedTaskId) {
+    throw new Error('Task ID is required.');
+  }
+  const statusRes = await requestBackend(`/api/lead_optimization/mmp_query_status/${encodeURIComponent(normalizedTaskId)}`, {
+    method: 'GET',
+    headers: {
+      ...API_HEADERS,
+      Accept: 'application/json'
+    }
+  });
+  if (!statusRes.ok) {
+    const text = await statusRes.text();
+    throw new Error(
+      `Failed to query MMP status (${statusRes.status}): ${parseBackendErrorMessage(text, 'Status check failed.')}`
+    );
+  }
+  return (await statusRes.json()) as LeadOptMmpQueryStatusResponse;
+}
+
 export async function fetchLeadOptimizationMmpDatabases(options?: {
   includeHidden?: boolean;
 }): Promise<LeadOptMmpDatabaseCatalogResponse> {
@@ -298,7 +335,9 @@ export async function fetchLeadOptimizationMmpDatabases(options?: {
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Failed to list MMP databases (${res.status}): ${text}`);
+    throw new Error(
+      `Failed to list MMP databases (${res.status}): ${parseBackendErrorMessage(text, 'Catalog request failed.')}`
+    );
   }
   return (await res.json()) as LeadOptMmpDatabaseCatalogResponse;
 }

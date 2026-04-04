@@ -687,6 +687,7 @@ export function LeadOptimizationWorkspace({
   });
 
   const hydratedSnapshotKeyRef = useRef('');
+  const hydratedQueryBackfillKeyRef = useRef('');
   const snapshotDatabaseIdRef = useRef('');
 
   useEffect(() => {
@@ -698,6 +699,28 @@ export function LeadOptimizationWorkspace({
     if (hydratedSnapshotKeyRef.current === hydrationKey) return;
     hydratedSnapshotKeyRef.current = hydrationKey;
     mmp.hydrateFromSnapshot(initialMmpSnapshot || null);
+  }, [initialMmpSnapshot, mmp]);
+
+  useEffect(() => {
+    const snapshot = (initialMmpSnapshot || null) as Record<string, unknown> | null;
+    const queryResult = snapshot && typeof snapshot.query_result === 'object' ? (snapshot.query_result as Record<string, unknown>) : null;
+    const queryId = readText(queryResult?.query_id || snapshot?.query_id).trim();
+    if (!queryId) return;
+    const hasTransforms = Array.isArray(queryResult?.transforms) && queryResult.transforms.length > 0;
+    const transformCountHint = Math.max(
+      Number.isFinite(Number(snapshot?.transform_count)) ? Number(snapshot?.transform_count) : 0,
+      Number.isFinite(Number(queryResult?.count)) ? Number(queryResult?.count) : 0
+    );
+    const needsTransformBackfill = !hasTransforms && transformCountHint > 0;
+    if (!needsTransformBackfill) return;
+    const taskId = readText(queryResult?.task_id || snapshot?.task_id).trim();
+    const backfillKey = [queryId, taskId, transformCountHint].join('|');
+    if (hydratedQueryBackfillKeyRef.current === backfillKey) return;
+    hydratedQueryBackfillKeyRef.current = backfillKey;
+    // Older task snapshots can omit transform summaries; hydrate the query summary only.
+    void mmp.loadQueryRun(queryId, {
+      taskId
+    });
   }, [initialMmpSnapshot, mmp]);
 
   useEffect(() => {
@@ -901,7 +924,10 @@ export function LeadOptimizationWorkspace({
     () =>
       databaseOptions.map((item) => ({
         id: readText(item.id).trim(),
-        label: readText(item.label).trim() || readText(item.id).trim()
+        label:
+          [readText(item.label).trim() || readText(item.id).trim(), readText(item.schema).trim()]
+            .filter(Boolean)
+            .join(' · ')
       })),
     [databaseOptions]
   );

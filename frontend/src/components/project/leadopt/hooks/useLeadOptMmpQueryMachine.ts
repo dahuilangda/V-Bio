@@ -2315,7 +2315,12 @@ export function useLeadOptMmpQueryMachine({
   );
 
   const loadQueryRun = useCallback(
-    async (nextQueryId: string) => {
+    async (
+      nextQueryId: string,
+      options?: {
+        taskId?: string;
+      }
+    ) => {
       const normalizedId = readText(nextQueryId).trim();
       if (!normalizedId) return;
       setLoading(true);
@@ -2338,7 +2343,7 @@ export function useLeadOptMmpQueryMachine({
         const responseAggregationType =
           readText(queryResultRecord.aggregation_type).trim() || (nextMode === 'many-to-many' ? 'group_by_fragment' : 'individual_transforms');
         const responseGroupedByEnvironment = readBoolean(queryResultRecord.grouped_by_environment, false);
-        const responseTaskId = readText(queryResultRecord.task_id);
+        const responseTaskId = readText(queryResultRecord.task_id || options?.taskId);
         if (responseTaskId) {
           setLastMmpTaskId(responseTaskId);
         }

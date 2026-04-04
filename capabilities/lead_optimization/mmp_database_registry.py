@@ -35,6 +35,10 @@ _CATALOG_LIVE_COUNTS = str(os.getenv("LEAD_OPT_MMP_CATALOG_LIVE_COUNTS", "") or 
 _CATALOG_CACHE_LOCK = threading.Lock()
 _CATALOG_CACHE: Dict[Tuple[bool, bool, bool], Tuple[float, Dict[str, Any]]] = {}
 _STATUS_VALUES = {"ready", "building", "failed"}
+_STALE_BUILDING_THRESHOLD_S = max(
+    60.0,
+    float(str(os.getenv("LEAD_OPT_MMP_STALE_BUILDING_S", "7200") or "7200")),
+)
 _LOCALHOST_DSN_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _DEFAULT_PG_PORT = 5432
 _INCREMENTAL_TRANSIENT_SCHEMA_RE = re.compile(r"_incs_[0-9]{8,}_[0-9]{2}$", re.IGNORECASE)

@@ -1990,6 +1990,7 @@ def _create_postgres_core_indexes(
         ("idx_compound_clean_smiles", "CREATE INDEX IF NOT EXISTS idx_compound_clean_smiles ON compound(clean_smiles)"),
         ("idx_constant_smiles_smiles", "CREATE INDEX IF NOT EXISTS idx_constant_smiles_smiles ON constant_smiles(smiles)"),
         ("idx_rule_from_to", "CREATE INDEX IF NOT EXISTS idx_rule_from_to ON rule(from_smiles_id, to_smiles_id)"),
+        ("idx_rule_to_smiles", "CREATE INDEX IF NOT EXISTS idx_rule_to_smiles ON rule(to_smiles_id)"),
         ("idx_rule_environment_rule_radius", "CREATE INDEX IF NOT EXISTS idx_rule_environment_rule_radius ON rule_environment(rule_id, radius)"),
         ("idx_rule_environment_lookup", "CREATE INDEX IF NOT EXISTS idx_rule_environment_lookup ON rule_environment(rule_id, environment_fingerprint_id, radius)"),
         ("idx_env_fp_lookup", "CREATE INDEX IF NOT EXISTS idx_env_fp_lookup ON environment_fingerprint(smarts, pseudosmiles, parent_smarts)"),
@@ -2122,6 +2123,23 @@ def _enrich_attachment_schema_postgres(
     *,
     enable_constant_smiles_mol_index: bool = True,
 ) -> None:
+    _enrich_attachment_num_frags_postgres(
+        cursor,
+        schema,
+        force_recompute=force_recompute,
+    )
+    _enrich_attachment_smiles_mol_postgres(
+        cursor,
+        schema,
+        enable_constant_smiles_mol_index=enable_constant_smiles_mol_index,
+    )
+
+
+def _enrich_attachment_num_frags_postgres(
+    cursor,
+    schema: str,
+    force_recompute: bool = False,
+) -> None:
     if not _pg_column_exists(cursor, schema, "rule_smiles", "num_frags"):
         cursor.execute("ALTER TABLE rule_smiles ADD COLUMN num_frags INTEGER")
     if not _pg_column_exists(cursor, schema, "constant_smiles", "num_frags"):
@@ -2169,7 +2187,7 @@ def _enrich_attachment_schema_postgres(
         """
     )
 
-    existing_indexes = _ensure_named_indexes(
+    _ensure_named_indexes(
         cursor,
         [
             ("idx_rule_smiles_num_frags", "CREATE INDEX IF NOT EXISTS idx_rule_smiles_num_frags ON rule_smiles(num_frags)"),
@@ -2179,6 +2197,14 @@ def _enrich_attachment_schema_postgres(
         ],
     )
 
+
+def _enrich_attachment_smiles_mol_postgres(
+    cursor,
+    schema: str,
+    *,
+    enable_constant_smiles_mol_index: bool = True,
+) -> None:
+    existing_indexes = None
     if _pg_column_exists(cursor, schema, "rule_smiles", "smiles_mol"):
         cursor.execute("UPDATE rule_smiles SET smiles_mol = mol_from_smiles(smiles) WHERE smiles_mol IS NULL")
     else:
@@ -5170,7 +5196,7 @@ def _sync_candidate_compounds_from_active_rows(
     cursor.execute(
         """
         CREATE TEMP TABLE tmp_inc_obsolete_compound_ids (
-            id INTEGER PRIMARY KEY
+            id BIGINT PRIMARY KEY
         ) ON COMMIT DROP
         """
     )
@@ -5312,7 +5338,7 @@ def _cleanup_orphan_mmp_rows_for_constants(cursor, *, affected_constants: Sequen
     cursor.execute(
         """
         CREATE TEMP TABLE tmp_inc_cleanup_rule_env_ids (
-            id INTEGER PRIMARY KEY
+            id BIGINT PRIMARY KEY
         ) ON COMMIT DROP
         """
     )
@@ -5455,7 +5481,7 @@ def _update_rule_environment_counts_for_constants(cursor, *, affected_constants:
     cursor.execute(
         """
         CREATE TEMP TABLE tmp_inc_touched_rule_env_ids (
-            id INTEGER PRIMARY KEY
+            id BIGINT PRIMARY KEY
         ) ON COMMIT DROP
         """
     )
@@ -5511,7 +5537,7 @@ def _update_rule_environment_counts_for_constants(cursor, *, affected_constants:
         UPDATE rule_environment re
            SET num_pairs = stats.num_pairs
           FROM (
-              SELECT p.rule_environment_id AS id, COUNT(*)::INTEGER AS num_pairs
+              SELECT p.rule_environment_id AS id, COUNT(*)::BIGINT AS num_pairs
               FROM pair p
               INNER JOIN tmp_inc_touched_rule_env_ids t
                       ON t.id = p.rule_environment_id
@@ -5539,15 +5565,15 @@ def _recompute_all_rule_environment_pair_counts(cursor) -> None:
     cursor.execute(
         """
         CREATE TEMP TABLE tmp_rule_env_pair_counts (
-            id INTEGER PRIMARY KEY,
-            num_pairs INTEGER NOT NULL
+            id BIGINT PRIMARY KEY,
+            num_pairs BIGINT NOT NULL
         ) ON COMMIT DROP
         """
     )
     cursor.execute(
         """
         INSERT INTO tmp_rule_env_pair_counts (id, num_pairs)
-        SELECT p.rule_environment_id AS id, COUNT(*)::INTEGER AS num_pairs
+        SELECT p.rule_environment_id AS id, COUNT(*)::BIGINT AS num_pairs
         FROM pair p
         GROUP BY p.rule_environment_id
         """
@@ -5834,7 +5860,7 @@ def _merge_incremental_temp_schema_into_target(
         cursor.execute(
             """
             CREATE TEMP TABLE IF NOT EXISTS tmp_inc_removed_rule_env_ids_all (
-                rule_environment_id INTEGER PRIMARY KEY
+                rule_environment_id BIGINT PRIMARY KEY
             ) ON COMMIT DROP
             """
         )
@@ -5986,7 +6012,7 @@ def _merge_incremental_temp_schema_into_target(
         cursor.execute(
             """
             CREATE TEMP TABLE tmp_inc_candidate_compound_ids (
-                id INTEGER PRIMARY KEY
+                id BIGINT PRIMARY KEY
             ) ON COMMIT DROP
             """
         )
@@ -6317,7 +6343,7 @@ def _merge_incremental_temp_schema_into_target(
                 cursor.execute(
                     """
                     CREATE TEMP TABLE IF NOT EXISTS tmp_inc_inserted_pair_ids_all (
-                        pair_id INTEGER PRIMARY KEY
+                        pair_id BIGINT PRIMARY KEY
                     ) ON COMMIT DROP
                     """
                 )
@@ -6325,10 +6351,10 @@ def _merge_incremental_temp_schema_into_target(
             cursor.execute(
                 """
                 CREATE TEMP TABLE tmp_inc_candidate_pair_keys (
-                    rule_environment_id INTEGER NOT NULL,
-                    compound1_id INTEGER NOT NULL,
-                    compound2_id INTEGER NOT NULL,
-                    constant_id INTEGER
+                    rule_environment_id BIGINT NOT NULL,
+                    compound1_id BIGINT NOT NULL,
+                    compound2_id BIGINT NOT NULL,
+                    constant_id BIGINT
                 ) ON COMMIT DROP
                 """
             )
@@ -6522,7 +6548,7 @@ def _merge_incremental_temp_schema_into_target(
                             ON CONFLICT DO NOTHING
                         ),
                         counts AS (
-                            SELECT rule_environment_id, COUNT(*)::INTEGER AS n
+                            SELECT rule_environment_id, COUNT(*)::BIGINT AS n
                             FROM inserted_pairs
                             GROUP BY rule_environment_id
                         )
@@ -6552,7 +6578,7 @@ def _merge_incremental_temp_schema_into_target(
                             RETURNING rule_environment_id
                         ),
                         counts AS (
-                            SELECT rule_environment_id, COUNT(*)::INTEGER AS n
+                            SELECT rule_environment_id, COUNT(*)::BIGINT AS n
                             FROM inserted_pairs
                             GROUP BY rule_environment_id
                         )
@@ -6968,7 +6994,7 @@ def _incremental_delete_compounds_without_reindex(
             cursor.execute(
                 """
                 CREATE TEMP TABLE tmp_inc_deleted_pair_ids (
-                    pair_id INTEGER PRIMARY KEY
+                    pair_id BIGINT PRIMARY KEY
                 ) ON COMMIT DROP
                 """
             )
@@ -8135,6 +8161,7 @@ def finalize_postgres_database(
     normalized_index_parallel_workers = max(0, int(index_parallel_workers or 0))
     enable_construct_tables = bool(build_construct_tables)
     enable_constant_smiles_mol_index = bool(build_constant_smiles_mol_index)
+    enhancement_warnings: List[str] = []
     try:
         with psycopg.connect(postgres_url, autocommit=False) as conn:
             with conn.cursor() as cursor:
@@ -8147,22 +8174,71 @@ def finalize_postgres_database(
                     work_mem_mb=normalized_index_work_mem_mb,
                     parallel_maintenance_workers=normalized_index_parallel_workers,
                 )
-                _enrich_attachment_schema_postgres(
+                _enrich_attachment_num_frags_postgres(
                     cursor,
                     normalized_schema,
                     force_recompute=force_recompute_num_frags,
-                    enable_constant_smiles_mol_index=enable_constant_smiles_mol_index,
                 )
-                if enable_construct_tables:
-                    _rebuild_construct_tables_postgres(cursor)
-                _create_postgres_core_indexes(
-                    cursor,
-                    normalized_schema,
-                    enable_constant_smiles_mol_index=enable_constant_smiles_mol_index,
-                )
-                cursor.execute("ANALYZE")
                 conn.commit()
+        try:
+            with psycopg.connect(postgres_url, autocommit=False) as conn:
+                with conn.cursor() as cursor:
+                    _pg_set_search_path(cursor, normalized_schema)
+                    _apply_postgres_build_tuning(
+                        cursor,
+                        maintenance_work_mem_mb=normalized_index_maintenance_mem_mb,
+                        work_mem_mb=normalized_index_work_mem_mb,
+                        parallel_maintenance_workers=normalized_index_parallel_workers,
+                    )
+                    _enrich_attachment_smiles_mol_postgres(
+                        cursor,
+                        normalized_schema,
+                        enable_constant_smiles_mol_index=enable_constant_smiles_mol_index,
+                    )
+                    _create_postgres_core_indexes(
+                        cursor,
+                        normalized_schema,
+                        enable_constant_smiles_mol_index=enable_constant_smiles_mol_index,
+                    )
+                    cursor.execute("ANALYZE")
+                    conn.commit()
+        except Exception as exc:
+            enhancement_warnings.append(f"core index/smiles_mol enhancement skipped: {exc}")
+            logger.warning(
+                "PostgreSQL finalize preserved attachment metadata for schema '%s' but skipped some optional index/cartridge enhancements: %s",
+                normalized_schema,
+                exc,
+                exc_info=True,
+            )
+        construct_tables_ready = False
+        if enable_construct_tables:
+            try:
+                with psycopg.connect(postgres_url, autocommit=False) as conn:
+                    with conn.cursor() as cursor:
+                        _pg_set_search_path(cursor, normalized_schema)
+                        _apply_postgres_build_tuning(
+                            cursor,
+                            maintenance_work_mem_mb=normalized_index_maintenance_mem_mb,
+                            work_mem_mb=normalized_index_work_mem_mb,
+                            parallel_maintenance_workers=normalized_index_parallel_workers,
+                        )
+                        _rebuild_construct_tables_postgres(cursor)
+                        cursor.execute("ANALYZE from_construct")
+                        cursor.execute("ANALYZE to_construct")
+                        conn.commit()
+                construct_tables_ready = True
+            except Exception as exc:
+                enhancement_warnings.append(f"construct table rebuild skipped: {exc}")
+                logger.warning(
+                    "PostgreSQL finalize preserved query-ready schema '%s' but skipped construct-table rebuild: %s",
+                    normalized_schema,
+                    exc,
+                    exc_info=True,
+                )
+        else:
+            construct_tables_ready = False
 
+        with psycopg.connect(postgres_url, autocommit=False) as conn:
             with conn.cursor() as cursor:
                 _pg_set_search_path(cursor, normalized_schema)
                 cursor.execute("SELECT COUNT(*) FROM compound")
@@ -8171,7 +8247,7 @@ def finalize_postgres_database(
                 rules = int(cursor.fetchone()[0])
                 cursor.execute("SELECT COUNT(*) FROM pair")
                 pairs = int(cursor.fetchone()[0])
-                if enable_construct_tables:
+                if construct_tables_ready:
                     cursor.execute("SELECT COUNT(*) FROM from_construct")
                     from_construct_rows = int(cursor.fetchone()[0])
                     cursor.execute("SELECT COUNT(*) FROM to_construct")
@@ -8188,6 +8264,12 @@ def finalize_postgres_database(
             from_construct_rows,
             to_construct_rows,
         )
+        if enhancement_warnings:
+            logger.warning(
+                "PostgreSQL finalize completed with warnings for schema '%s': %s",
+                normalized_schema,
+                " | ".join(enhancement_warnings),
+            )
         return True
     except Exception as exc:
         logger.error("Failed finalizing PostgreSQL mmpdb: %s", exc, exc_info=True)
