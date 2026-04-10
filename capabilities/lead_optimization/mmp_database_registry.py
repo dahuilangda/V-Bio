@@ -377,18 +377,16 @@ def _get_pg_dataset_counts(conn: Any, schema: str) -> Dict[str, Optional[int]]:
             row = cursor.fetchone()
     except Exception:
         return stats
-    if not row:
-        return stats
-
-    compounds = _to_int_or_none(row[0] if len(row) > 0 else None)
-    rules = _to_int_or_none(row[1] if len(row) > 1 else None)
-    pairs = _to_int_or_none(row[2] if len(row) > 2 else None)
-    if compounds is not None and compounds >= 0:
-        stats["compounds"] = compounds
-    if rules is not None and rules >= 0:
-        stats["rules"] = rules
-    if pairs is not None and pairs >= 0:
-        stats["pairs"] = pairs
+    if row:
+        compounds = _to_int_or_none(row[0] if len(row) > 0 else None)
+        rules = _to_int_or_none(row[1] if len(row) > 1 else None)
+        pairs = _to_int_or_none(row[2] if len(row) > 2 else None)
+        if compounds is not None and compounds >= 0:
+            stats["compounds"] = compounds
+        if rules is not None and rules >= 0:
+            stats["rules"] = rules
+        if pairs is not None and pairs >= 0:
+            stats["pairs"] = pairs
 
     # Fast adaptive path: use pg_class row estimates to recover from stale/null
     # dataset counters without paying full COUNT(*) cost on every request.

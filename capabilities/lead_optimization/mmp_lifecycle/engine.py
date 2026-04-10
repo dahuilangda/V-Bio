@@ -1283,6 +1283,24 @@ def _index_fragments_to_postgres_sharded(
         with psycopg.connect(postgres_url, autocommit=False) as conn:
             with conn.cursor() as cursor:
                 _pg_set_search_path(cursor, normalized_schema)
+                _apply_postgres_build_tuning(
+                    cursor,
+                    maintenance_work_mem_mb=index_maintenance_work_mem_mb,
+                    work_mem_mb=index_work_mem_mb,
+                    parallel_maintenance_workers=index_parallel_workers,
+                    parallel_query_workers=index_parallel_workers,
+                )
+                template_schema = (
+                    _validate_pg_schema(shard_specs[0][4])
+                    if shard_specs and len(shard_specs[0]) >= 5
+                    else None
+                )
+                _ensure_postgres_dataset_row(
+                    cursor,
+                    schema=normalized_schema,
+                    source_schema=template_schema,
+                    title=normalized_schema,
+                )
                 _create_postgres_merge_support_indexes(cursor)
                 for merge_seq, spec in enumerate(sorted(shard_specs, key=lambda item: item[0])):
                     _pg_set_search_path(cursor, normalized_schema)
@@ -1395,6 +1413,7 @@ def _index_fragments_to_postgres_sharded(
                         maintenance_work_mem_mb=index_maintenance_work_mem_mb,
                         work_mem_mb=index_work_mem_mb,
                         parallel_maintenance_workers=index_parallel_workers,
+                        parallel_query_workers=index_parallel_workers,
                     )
                     _create_postgres_core_indexes(
                         cursor,
@@ -1908,6 +1927,78 @@ def _pg_set_search_path(cursor, schema: str) -> None:
         cursor.execute(SQL("SET search_path TO {}, public").format(Identifier(schema)))
 
 
+def _current_pg_schema(cursor) -> str:
+    cursor.execute("SELECT current_schema()")
+    row = cursor.fetchone()
+    token = str(row[0] or "").strip() if row else ""
+    return _validate_pg_schema(token or "public")
+
+
+def _ensure_postgres_dataset_row(
+    cursor,
+    *,
+    schema: Optional[str] = None,
+    source_schema: Optional[str] = None,
+    title: str = "",
+) -> None:
+    target_schema = _validate_pg_schema(schema or _current_pg_schema(cursor))
+    cursor.execute(SQL("SELECT 1 FROM {}.dataset WHERE id = 1").format(Identifier(target_schema)))
+    if cursor.fetchone():
+        return
+
+    if source_schema:
+        source_token = _validate_pg_schema(source_schema)
+        cursor.execute(
+            SQL(
+                """
+                INSERT INTO {}.dataset (
+                    id,
+                    mmpdb_version,
+                    title,
+                    creation_date,
+                    fragment_options,
+                    index_options,
+                    is_symmetric
+                )
+                SELECT
+                    1,
+                    mmpdb_version,
+                    title,
+                    creation_date,
+                    fragment_options,
+                    index_options,
+                    is_symmetric
+                FROM {}.dataset
+                ORDER BY id
+                LIMIT 1
+                ON CONFLICT (id) DO NOTHING
+                """
+            ).format(Identifier(target_schema), Identifier(source_token))
+        )
+        cursor.execute(SQL("SELECT 1 FROM {}.dataset WHERE id = 1").format(Identifier(target_schema)))
+        if cursor.fetchone():
+            return
+
+    cursor.execute(
+        SQL(
+            """
+            INSERT INTO {}.dataset (
+                id,
+                mmpdb_version,
+                title,
+                creation_date,
+                fragment_options,
+                index_options,
+                is_symmetric
+            )
+            VALUES (1, 4, %s, CURRENT_TIMESTAMP, %s, %s, %s)
+            ON CONFLICT (id) DO NOTHING
+            """
+        ).format(Identifier(target_schema)),
+        (str(title or target_schema).strip() or target_schema, "{}", "{}", 0),
+    )
+
+
 def _pg_column_exists(cursor, schema: str, table_name: str, column_name: str) -> bool:
     cursor.execute(
         """
@@ -2107,6 +2198,7 @@ def _apply_postgres_build_tuning(
     maintenance_work_mem_mb: int = 0,
     work_mem_mb: int = 0,
     parallel_maintenance_workers: int = 0,
+    parallel_query_workers: int = 0,
 ) -> None:
     if maintenance_work_mem_mb and maintenance_work_mem_mb > 0:
         cursor.execute(f"SET maintenance_work_mem TO '{int(maintenance_work_mem_mb)}MB'")
@@ -2114,6 +2206,8 @@ def _apply_postgres_build_tuning(
         cursor.execute(f"SET work_mem TO '{int(work_mem_mb)}MB'")
     if parallel_maintenance_workers and parallel_maintenance_workers > 0:
         cursor.execute(f"SET max_parallel_maintenance_workers TO {int(parallel_maintenance_workers)}")
+    if parallel_query_workers and parallel_query_workers > 0:
+        cursor.execute(f"SET max_parallel_workers_per_gather TO {int(parallel_query_workers)}")
 
 
 def _enrich_attachment_schema_postgres(
@@ -5602,6 +5696,7 @@ def _recompute_all_rule_environment_pair_counts(cursor) -> None:
 
 
 def _update_dataset_counts(cursor) -> None:
+    _ensure_postgres_dataset_row(cursor)
     cursor.execute(
         """
         UPDATE dataset
@@ -8166,6 +8261,11 @@ def finalize_postgres_database(
         with psycopg.connect(postgres_url, autocommit=False) as conn:
             with conn.cursor() as cursor:
                 _pg_set_search_path(cursor, normalized_schema)
+                _ensure_postgres_dataset_row(
+                    cursor,
+                    schema=normalized_schema,
+                    title=normalized_schema,
+                )
                 _ensure_postgres_attachment_columns(cursor, normalized_schema)
                 _assert_postgres_attachment_columns_ready(cursor, normalized_schema)
                 _apply_postgres_build_tuning(
@@ -8173,6 +8273,7 @@ def finalize_postgres_database(
                     maintenance_work_mem_mb=normalized_index_maintenance_mem_mb,
                     work_mem_mb=normalized_index_work_mem_mb,
                     parallel_maintenance_workers=normalized_index_parallel_workers,
+                    parallel_query_workers=normalized_index_parallel_workers,
                 )
                 _enrich_attachment_num_frags_postgres(
                     cursor,
@@ -8189,6 +8290,7 @@ def finalize_postgres_database(
                         maintenance_work_mem_mb=normalized_index_maintenance_mem_mb,
                         work_mem_mb=normalized_index_work_mem_mb,
                         parallel_maintenance_workers=normalized_index_parallel_workers,
+                        parallel_query_workers=normalized_index_parallel_workers,
                     )
                     _enrich_attachment_smiles_mol_postgres(
                         cursor,
@@ -8221,6 +8323,7 @@ def finalize_postgres_database(
                             maintenance_work_mem_mb=normalized_index_maintenance_mem_mb,
                             work_mem_mb=normalized_index_work_mem_mb,
                             parallel_maintenance_workers=normalized_index_parallel_workers,
+                            parallel_query_workers=normalized_index_parallel_workers,
                         )
                         _rebuild_construct_tables_postgres(cursor)
                         cursor.execute("ANALYZE from_construct")
