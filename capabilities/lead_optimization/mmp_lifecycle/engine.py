@@ -1288,7 +1288,6 @@ def _index_fragments_to_postgres_sharded(
                     maintenance_work_mem_mb=index_maintenance_work_mem_mb,
                     work_mem_mb=index_work_mem_mb,
                     parallel_maintenance_workers=index_parallel_workers,
-                    parallel_query_workers=index_parallel_workers,
                 )
                 template_schema = (
                     _validate_pg_schema(shard_specs[0][4])
@@ -1413,7 +1412,6 @@ def _index_fragments_to_postgres_sharded(
                         maintenance_work_mem_mb=index_maintenance_work_mem_mb,
                         work_mem_mb=index_work_mem_mb,
                         parallel_maintenance_workers=index_parallel_workers,
-                        parallel_query_workers=index_parallel_workers,
                     )
                     _create_postgres_core_indexes(
                         cursor,
@@ -8273,7 +8271,6 @@ def finalize_postgres_database(
                     maintenance_work_mem_mb=normalized_index_maintenance_mem_mb,
                     work_mem_mb=normalized_index_work_mem_mb,
                     parallel_maintenance_workers=normalized_index_parallel_workers,
-                    parallel_query_workers=normalized_index_parallel_workers,
                 )
                 _enrich_attachment_num_frags_postgres(
                     cursor,
@@ -8290,7 +8287,6 @@ def finalize_postgres_database(
                         maintenance_work_mem_mb=normalized_index_maintenance_mem_mb,
                         work_mem_mb=normalized_index_work_mem_mb,
                         parallel_maintenance_workers=normalized_index_parallel_workers,
-                        parallel_query_workers=normalized_index_parallel_workers,
                     )
                     _enrich_attachment_smiles_mol_postgres(
                         cursor,
@@ -8323,7 +8319,6 @@ def finalize_postgres_database(
                             maintenance_work_mem_mb=normalized_index_maintenance_mem_mb,
                             work_mem_mb=normalized_index_work_mem_mb,
                             parallel_maintenance_workers=normalized_index_parallel_workers,
-                            parallel_query_workers=normalized_index_parallel_workers,
                         )
                         _rebuild_construct_tables_postgres(cursor)
                         cursor.execute("ANALYZE from_construct")
