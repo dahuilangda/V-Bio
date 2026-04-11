@@ -911,6 +911,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   text-decoration: none;
   cursor: pointer;
   box-shadow: 0 1px 0 #edf4ef inset;

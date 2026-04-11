@@ -1288,6 +1288,7 @@ def _index_fragments_to_postgres_sharded(
                     maintenance_work_mem_mb=index_maintenance_work_mem_mb,
                     work_mem_mb=index_work_mem_mb,
                     parallel_maintenance_workers=index_parallel_workers,
+                    parallel_query_workers=0,
                 )
                 template_schema = (
                     _validate_pg_schema(shard_specs[0][4])
@@ -1412,6 +1413,7 @@ def _index_fragments_to_postgres_sharded(
                         maintenance_work_mem_mb=index_maintenance_work_mem_mb,
                         work_mem_mb=index_work_mem_mb,
                         parallel_maintenance_workers=index_parallel_workers,
+                        parallel_query_workers=0,
                     )
                     _create_postgres_core_indexes(
                         cursor,
@@ -2196,7 +2198,7 @@ def _apply_postgres_build_tuning(
     maintenance_work_mem_mb: int = 0,
     work_mem_mb: int = 0,
     parallel_maintenance_workers: int = 0,
-    parallel_query_workers: int = 0,
+    parallel_query_workers: Optional[int] = None,
 ) -> None:
     if maintenance_work_mem_mb and maintenance_work_mem_mb > 0:
         cursor.execute(f"SET maintenance_work_mem TO '{int(maintenance_work_mem_mb)}MB'")
@@ -2204,7 +2206,7 @@ def _apply_postgres_build_tuning(
         cursor.execute(f"SET work_mem TO '{int(work_mem_mb)}MB'")
     if parallel_maintenance_workers and parallel_maintenance_workers > 0:
         cursor.execute(f"SET max_parallel_maintenance_workers TO {int(parallel_maintenance_workers)}")
-    if parallel_query_workers and parallel_query_workers > 0:
+    if parallel_query_workers is not None and int(parallel_query_workers) >= 0:
         cursor.execute(f"SET max_parallel_workers_per_gather TO {int(parallel_query_workers)}")
 
 
@@ -8271,6 +8273,7 @@ def finalize_postgres_database(
                     maintenance_work_mem_mb=normalized_index_maintenance_mem_mb,
                     work_mem_mb=normalized_index_work_mem_mb,
                     parallel_maintenance_workers=normalized_index_parallel_workers,
+                    parallel_query_workers=0,
                 )
                 _enrich_attachment_num_frags_postgres(
                     cursor,
@@ -8287,6 +8290,7 @@ def finalize_postgres_database(
                         maintenance_work_mem_mb=normalized_index_maintenance_mem_mb,
                         work_mem_mb=normalized_index_work_mem_mb,
                         parallel_maintenance_workers=normalized_index_parallel_workers,
+                        parallel_query_workers=0,
                     )
                     _enrich_attachment_smiles_mol_postgres(
                         cursor,
@@ -8319,6 +8323,7 @@ def finalize_postgres_database(
                             maintenance_work_mem_mb=normalized_index_maintenance_mem_mb,
                             work_mem_mb=normalized_index_work_mem_mb,
                             parallel_maintenance_workers=normalized_index_parallel_workers,
+                            parallel_query_workers=0,
                         )
                         _rebuild_construct_tables_postgres(cursor)
                         cursor.execute("ANALYZE from_construct")

@@ -25,7 +25,7 @@ backend/scripts/         容器启动入口脚本（API/worker/monitor）
 
 Docker 部署入口统一在 `deploy/docker/`，文件名统一使用 `DOCKER_*`。
 
-## 部署原则（必须遵守）
+## 部署原则
 
 1. 计算节点只按各自 `DOCKER_STACK_WORKER_*.env` 声明的能力接任务。
 2. 任务按能力队列路由（`cap.*`），不使用旧通用队列。

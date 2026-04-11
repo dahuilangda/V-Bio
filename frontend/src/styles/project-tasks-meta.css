@@ -215,38 +215,37 @@
 }
 
 .task-table.task-table--peptide .task-col-peptide-setup {
-  width: 17%;
+  width: 15%;
 }
 
 .task-table.task-table--peptide thead th:nth-child(2) {
-  width: 17%;
+  width: 15%;
 }
 
 .task-table.task-table--peptide .task-col-peptide-progress {
-  width: 16%;
+  width: 14%;
 }
 
 .task-table.task-table--peptide thead th:nth-child(3) {
-  width: 16%;
+  width: 14%;
 }
 
 .task-table.task-table--peptide .task-col-submitted {
   min-width: 0;
-  width: 25%;
+  width: 20%;
   white-space: normal;
 }
 
 .task-table.task-table--peptide thead th:nth-child(4) {
-  width: 25%;
+  width: 20%;
 }
 
 .task-table.task-table--peptide .project-col-actions {
-  width: 8%;
-  min-width: 76px;
+  width: 12%;
 }
 
 .task-table.task-table--peptide thead th:nth-child(5) {
-  width: 8%;
+  width: 12%;
 }
 
 .task-leadopt-db-cell {
