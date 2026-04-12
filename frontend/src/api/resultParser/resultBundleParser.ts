@@ -2259,6 +2259,24 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
       },
       best_sequences: peptideDesignCandidates
     };
+    // Promote best candidate metrics to top-level confidence when absent.
+    const bestCandidate = peptideDesignCandidates[0];
+    const cl = confidence as Record<string, unknown>;
+    if (bestCandidate) {
+      const promoteIfAbsent = (key: string, value: unknown) => {
+        if (value !== null && value !== undefined && (cl[key] === null || cl[key] === undefined)) {
+          cl[key] = value;
+        }
+      };
+      promoteIfAbsent('iptm', bestCandidate.iptm);
+      promoteIfAbsent('pair_iptm', bestCandidate.pair_iptm);
+      promoteIfAbsent('pair_iptm_target_binder', bestCandidate.pair_iptm_target_binder);
+      promoteIfAbsent('interface_metric', bestCandidate.interface_metric);
+      promoteIfAbsent('interface_metric_label', bestCandidate.interface_metric_label);
+      promoteIfAbsent('plddt', bestCandidate.plddt);
+      promoteIfAbsent('binder_chain_id', bestCandidate.binder_chain_id);
+      promoteIfAbsent('target_chain_id', bestCandidate.target_chain_id);
+    }
   }
   const ipsaeFile = names
     .filter((name) => name.toLowerCase().endsWith('.json') && name.toLowerCase().endsWith('best_ipsae.json'))

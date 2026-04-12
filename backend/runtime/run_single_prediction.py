@@ -3668,6 +3668,12 @@ def _extract_peptide_candidate_archive_for_metrics(candidate_dir: str, archive_p
             f"Peptide candidate archive is not a valid zip: {archive_file}"
         ) from exc
 
+    # parse_confidence_metrics expects af3/ or protenix/ as a direct child of the result root.
+    # If the extracted archive contains af3/ or protenix/ at the top level, return extract_root
+    # so that parse_confidence_metrics can find them at root_path / "af3" (or "protenix").
+    if (extract_root / "af3").is_dir() or (extract_root / "protenix").is_dir():
+        return str(extract_root)
+
     return find_results_dir(str(extract_root))
 
 

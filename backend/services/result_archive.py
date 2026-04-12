@@ -856,8 +856,14 @@ class ResultArchiveService:
                         or os.path.basename(name).lower() in {'confidences.json', 'affinity_data.json'}
                     )
                 ]
+                # Fall back to peptide design results_summary.json when no confidence files exist.
                 if not json_candidates:
-                    return None
+                    summary_name = next(
+                        (n for n in names if os.path.basename(n).lower() == 'results_summary.json'),
+                        None
+                    )
+                    if summary_name:
+                        json_candidates = [summary_name]
                 parsed_entries: list[tuple[int, Dict[str, Any]]] = []
                 best: Optional[Dict[str, Any]] = None
                 best_score = -1
@@ -868,6 +874,21 @@ class ResultArchiveService:
                         continue
                     if not isinstance(payload, dict):
                         continue
+                    # Handle peptide design results_summary.json: extract from best candidate row.
+                    if os.path.basename(name).lower() == 'results_summary.json':
+                        top_results = payload.get('top_results') or payload.get('best_sequences')
+                        if isinstance(top_results, list) and top_results:
+                            best_row: Optional[Dict[str, Any]] = None
+                            for candidate in top_results:
+                                if not isinstance(candidate, dict):
+                                    continue
+                                cs = self._to_finite_float(candidate.get('composite_score'))
+                                if best_row is None or (cs is not None and (self._to_finite_float(best_row.get('composite_score')) is None or cs > self._to_finite_float(best_row.get('composite_score')))):
+                                    best_row = candidate
+                            if best_row:
+                                payload = best_row
+                        else:
+                            continue
                     pair_iptm = self._extract_pair_iptm(payload)
                     pair_pae = self._extract_pair_pae(payload)
                     ligand_atom_plddts = self._extract_ligand_atom_plddts(payload)

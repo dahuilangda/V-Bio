@@ -25,6 +25,7 @@ import {
   isDraftTaskSnapshot,
   mergeTaskSnapshotIntoConfig,
   readLeadOptUploadsFromComponents,
+  readTaskInputOptions,
 } from './projectTaskSnapshot';
 import {
   createAffinityUploadsFingerprint,
@@ -1311,6 +1312,59 @@ export function useProjectDetailRuntimeContext() {
     setProjectTasks,
     workspaceTab,
     workflowKey
+  ]);
+
+  // Peptide design: rehydrate draft options when switching between tasks.
+  // Without this, all peptide design tasks share the same draft.inputConfig.options
+  // because there is no per-task option loading on task switch.
+  // Only triggers on task selection change, NOT on draft edits.
+  const peptideTaskSwitchRef = useRef<string>('');
+  useEffect(() => {
+    if (!isPeptideDesignWorkflow) return;
+
+    const query = new URLSearchParams(location.search);
+    const requestedTaskRowId = String(query.get('task_row_id') || '').trim();
+    const activeTaskId = String(project?.task_id || '').trim();
+    const focusedRow =
+      (requestedTaskRowId
+        ? projectTasks.find((row) => String(row.id || '').trim() === requestedTaskRowId)
+        : undefined) ||
+      (activeTaskId ? projectTasks.find((row) => String(row.task_id || '').trim() === activeTaskId) : undefined) ||
+      null;
+    const focusedRowId = String(focusedRow?.id || '').trim();
+    // Skip if same task already loaded — avoids overwriting user edits.
+    if (!focusedRowId || peptideTaskSwitchRef.current === focusedRowId) return;
+    peptideTaskSwitchRef.current = focusedRowId;
+
+    const taskOptions = readTaskInputOptions(focusedRow);
+    if (Object.keys(taskOptions).length === 0) return;
+
+    setDraft((prev) => {
+      if (!prev) return prev;
+      const mergedConfig = normalizeConfigForBackend(
+        {
+          ...prev.inputConfig,
+          options: {
+            ...taskOptions,
+            seed: taskOptions.seed ?? prev.inputConfig.options.seed
+          }
+        },
+        prev.backend
+      );
+      return {
+        ...prev,
+        inputConfig: {
+          ...prev.inputConfig,
+          options: mergedConfig.options
+        }
+      };
+    });
+  }, [
+    isPeptideDesignWorkflow,
+    location.search,
+    project?.task_id,
+    projectTasks,
+    setDraft
   ]);
 
   useEffect(() => {

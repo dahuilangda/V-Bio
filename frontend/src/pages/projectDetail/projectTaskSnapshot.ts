@@ -518,15 +518,24 @@ export function mergeTaskSnapshotIntoConfig(baseConfig: ProjectInputConfig, task
   const taskOptions = readTaskInputOptions(task);
   const taskSeed = typeof task.seed === 'number' && Number.isFinite(task.seed) ? Math.max(0, Math.floor(task.seed)) : null;
 
+  // Use task-specific options as the primary source to prevent leakage between tasks.
+  // When a task has stored options, use them directly (not baseConfig.options which may
+  // contain values from a different task). Fall back to baseConfig only when the task
+  // has no stored options at all (e.g. a legacy task without per-task option storage).
+  const hasTaskOptions = Object.keys(taskOptions).length > 0;
+  const optionsBase = hasTaskOptions ? {} : baseConfig.options;
+
+  const resolvedSeed = taskSeed ?? taskOptions.seed ?? (hasTaskOptions ? null : baseConfig.options.seed);
+
   return {
     ...baseConfig,
     components: taskComponents.length > 0 ? taskComponents : baseConfig.components,
     constraints: taskConstraints ?? baseConfig.constraints,
     properties: taskProperties ?? baseConfig.properties,
     options: {
-      ...baseConfig.options,
+      ...optionsBase,
       ...taskOptions,
-      seed: taskSeed ?? taskOptions.seed ?? baseConfig.options.seed
+      seed: resolvedSeed
     }
   };
 }
