@@ -1366,8 +1366,11 @@ def _index_fragments_to_postgres_sharded(
                         shard_temp_schema,
                     )
                 _pg_set_search_path(cursor, normalized_schema)
+                _recount_batch = max(0, _env_int("MMP_LIFECYCLE_RECOUNT_BATCH_SIZE", 500000))
                 t_recount = time.time()
-                _recompute_all_rule_environment_pair_counts(cursor)
+                _recompute_all_rule_environment_pair_counts(
+                    cursor, conn, batch_size=_recount_batch,
+                )
                 logger.info(
                     "Recomputed full-index rule_environment.num_pairs: schema=%s elapsed=%.2fs",
                     normalized_schema,
@@ -5571,6 +5574,7 @@ def _update_rule_environment_counts_for_constants(cursor, *, affected_constants:
     constants = sorted({str(item or "").strip() for item in affected_constants if str(item or "").strip()})
     if not constants:
         return
+    _recount_logger = logging.getLogger(__name__)
     cursor.execute("DROP TABLE IF EXISTS tmp_inc_touched_rule_env_ids")
     cursor.execute(
         """
@@ -5626,73 +5630,199 @@ def _update_rule_environment_counts_for_constants(cursor, *, affected_constants:
                 """
             )
 
+    cursor.execute("SELECT count(*)::bigint FROM tmp_inc_touched_rule_env_ids")
+    _touched_count = cursor.fetchone()[0]
+    _recount_logger.info(
+        "Updating num_pairs for constants: constants=%s touched_rule_envs=%s",
+        len(constants), int(_touched_count or 0),
+    )
+
+    # Single-pass UPDATE: set num_pairs from pair counts, or 0 if no pairs remain.
+    # This avoids two separate UPDATE passes and reduces index maintenance overhead.
     cursor.execute(
         """
         UPDATE rule_environment re
-           SET num_pairs = stats.num_pairs
-          FROM (
+           SET num_pairs = COALESCE(pair_counts.num_pairs, 0)
+          FROM tmp_inc_touched_rule_env_ids t
+          LEFT JOIN (
               SELECT p.rule_environment_id AS id, COUNT(*)::BIGINT AS num_pairs
               FROM pair p
-              INNER JOIN tmp_inc_touched_rule_env_ids t
-                      ON t.id = p.rule_environment_id
+              INNER JOIN tmp_inc_touched_rule_env_ids t2
+                      ON t2.id = p.rule_environment_id
               GROUP BY p.rule_environment_id
-          ) stats
-         WHERE re.id = stats.id
-        """
-    )
-    cursor.execute(
-        """
-        UPDATE rule_environment re
-           SET num_pairs = 0
-         WHERE re.id IN (SELECT id FROM tmp_inc_touched_rule_env_ids)
-           AND NOT EXISTS (
-                SELECT 1
-                FROM pair p
-                WHERE p.rule_environment_id = re.id
-            )
+          ) pair_counts ON pair_counts.id = re.id
+         WHERE re.id = t.id
+           AND re.num_pairs IS DISTINCT FROM COALESCE(pair_counts.num_pairs, 0)
         """
     )
 
 
-def _recompute_all_rule_environment_pair_counts(cursor) -> None:
-    cursor.execute("DROP TABLE IF EXISTS tmp_rule_env_pair_counts")
+def _recompute_all_rule_environment_pair_counts(cursor, conn=None, *, batch_size=0) -> None:
+    _recount_logger = logging.getLogger(__name__)
+    effective_batch = max(0, int(batch_size))
+    if effective_batch <= 0:
+        effective_batch = max(0, _env_int("MMP_LIFECYCLE_RECOUNT_BATCH_SIZE", 0))
+
+    # Use UNLOGGED table: no WAL overhead, survives commits when batching.
+    cursor.execute("DROP TABLE IF EXISTS _leadopt_recount_pairs")
     cursor.execute(
         """
-        CREATE TEMP TABLE tmp_rule_env_pair_counts (
+        CREATE UNLOGGED TABLE _leadopt_recount_pairs (
             id BIGINT PRIMARY KEY,
             num_pairs BIGINT NOT NULL
-        ) ON COMMIT DROP
+        )
         """
     )
-    cursor.execute(
-        """
-        INSERT INTO tmp_rule_env_pair_counts (id, num_pairs)
-        SELECT p.rule_environment_id AS id, COUNT(*)::BIGINT AS num_pairs
-        FROM pair p
-        GROUP BY p.rule_environment_id
-        """
-    )
-    cursor.execute(
-        """
-        UPDATE rule_environment re
-           SET num_pairs = stats.num_pairs
-          FROM tmp_rule_env_pair_counts stats
-         WHERE re.id = stats.id
-           AND re.num_pairs IS DISTINCT FROM stats.num_pairs
-        """
-    )
-    cursor.execute(
-        """
-        UPDATE rule_environment re
-           SET num_pairs = 0
-         WHERE COALESCE(re.num_pairs, 0) <> 0
-           AND NOT EXISTS (
-                SELECT 1
-                FROM tmp_rule_env_pair_counts stats
-                WHERE stats.id = re.id
+
+    cursor.execute("SELECT COALESCE(MIN(id), 0), COALESCE(MAX(id), 0) FROM rule_environment")
+    _re_min, _re_max = cursor.fetchone()
+
+    t_agg = time.time()
+
+    if effective_batch > 0 and conn is not None:
+        # ---- Chunked aggregation: avoids single massive GROUP BY on billions of rows ----
+        _agg_chunk = max(effective_batch, _env_int("MMP_LIFECYCLE_RECOUNT_AGG_CHUNK", 10_000_000))
+        _agg_chunks = (_re_max - _re_min) // _agg_chunk + 1
+        _commit_every = max(1, _env_int("MMP_LIFECYCLE_RECOUNT_COMMIT_EVERY_N_BATCHES", 3))
+        _recount_logger.info(
+            "Chunked aggregation: id_range=[%s, %s] agg_chunk=%s total_chunks=%s",
+            _re_min, _re_max, _agg_chunk, _agg_chunks,
+        )
+        for _ci, _cstart in enumerate(range(_re_min, _re_max + 1, _agg_chunk)):
+            _cend = _cstart + _agg_chunk - 1
+            cursor.execute(
+                """
+                INSERT INTO _leadopt_recount_pairs (id, num_pairs)
+                SELECT p.rule_environment_id AS id, COUNT(*)::BIGINT AS num_pairs
+                FROM pair p
+                WHERE p.rule_environment_id BETWEEN %s AND %s
+                GROUP BY p.rule_environment_id
+                ON CONFLICT (id) DO UPDATE SET num_pairs = _leadopt_recount_pairs.num_pairs + EXCLUDED.num_pairs
+                """,
+                (_cstart, _cend),
             )
-        """
+            conn.commit()
+            if _ci % 20 == 0 or _ci == _agg_chunks - 1:
+                _recount_logger.info(
+                    "Agg chunk %d/%d (%.1f%%) elapsed=%.1fs",
+                    _ci + 1, _agg_chunks, 100.0 * (_ci + 1) / _agg_chunks,
+                    time.time() - t_agg,
+                )
+    else:
+        # Small dataset or no conn: single-pass aggregation
+        _recount_logger.info("Aggregating pair counts (single pass) ...")
+        cursor.execute(
+            """
+            INSERT INTO _leadopt_recount_pairs (id, num_pairs)
+            SELECT p.rule_environment_id AS id, COUNT(*)::BIGINT AS num_pairs
+            FROM pair p
+            GROUP BY p.rule_environment_id
+            """
+        )
+
+    cursor.execute("SELECT count(*)::bigint, sum(num_pairs)::bigint FROM _leadopt_recount_pairs")
+    _agg_row = cursor.fetchone()
+    if conn is not None:
+        conn.commit()
+    _recount_logger.info(
+        "Aggregation done: rule_envs_with_pairs=%s total_pairs=%s elapsed=%.2fs",
+        int(_agg_row[0] or 0) if _agg_row else 0,
+        int(_agg_row[1] or 0) if _agg_row else 0,
+        time.time() - t_agg,
     )
+
+    if effective_batch > 0 and conn is not None:
+        # ---- Batched UPDATE with periodic commits ----
+        _total_range = _re_max - _re_min + 1
+        _est_batches = (_total_range + effective_batch - 1) // effective_batch
+        _recount_logger.info(
+            "Batch-updating rule_environment.num_pairs: id_range=[%s, %s] batch_size=%s est_batches=%s",
+            _re_min, _re_max, effective_batch, _est_batches,
+        )
+
+        _updated_total = 0
+        _batch_seq = 0
+        _commit_every = max(1, _env_int("MMP_LIFECYCLE_RECOUNT_COMMIT_EVERY_N_BATCHES", 3))
+        for _bstart in range(_re_min, _re_max + 1, effective_batch):
+            _bend = _bstart + effective_batch - 1
+            cursor.execute(
+                """
+                UPDATE rule_environment re
+                   SET num_pairs = stats.num_pairs
+                  FROM _leadopt_recount_pairs stats
+                 WHERE re.id = stats.id
+                   AND re.id BETWEEN %s AND %s
+                   AND re.num_pairs IS DISTINCT FROM stats.num_pairs
+                """,
+                (_bstart, _bend),
+            )
+            _updated_total += cursor.rowcount
+            _batch_seq += 1
+            if _batch_seq % _commit_every == 0:
+                conn.commit()
+                _recount_logger.info(
+                    "Batch recount progress: batches=%s/%s rows_updated=%s elapsed=%.1fs",
+                    _batch_seq, _est_batches, _updated_total,
+                    time.time() - t_agg,
+                )
+        conn.commit()
+        _recount_logger.info(
+            "Batch recount main pass done: total_updated=%s elapsed=%.1fs",
+            _updated_total, time.time() - t_agg,
+        )
+
+        # Zero out rule_envs that have no pairs
+        _recount_logger.info("Zeroing num_pairs for empty rule environments ...")
+        _zero_total = 0
+        _batch_seq = 0
+        for _bstart in range(_re_min, _re_max + 1, effective_batch):
+            _bend = _bstart + effective_batch - 1
+            cursor.execute(
+                """
+                UPDATE rule_environment re
+                   SET num_pairs = 0
+                 WHERE COALESCE(re.num_pairs, 0) <> 0
+                   AND re.id BETWEEN %s AND %s
+                   AND NOT EXISTS (
+                        SELECT 1 FROM _leadopt_recount_pairs stats WHERE stats.id = re.id
+                    )
+                """,
+                (_bstart, _bend),
+            )
+            _zero_total += cursor.rowcount
+            _batch_seq += 1
+            if _batch_seq % _commit_every == 0:
+                conn.commit()
+        conn.commit()
+        _recount_logger.info(
+            "Batch recount complete: updated=%s zeroed=%s elapsed=%.1fs",
+            _updated_total, _zero_total, time.time() - t_agg,
+        )
+    else:
+        # Original single-transaction path (backward compatible)
+        cursor.execute(
+            """
+            UPDATE rule_environment re
+               SET num_pairs = stats.num_pairs
+              FROM _leadopt_recount_pairs stats
+             WHERE re.id = stats.id
+               AND re.num_pairs IS DISTINCT FROM stats.num_pairs
+            """
+        )
+        cursor.execute(
+            """
+            UPDATE rule_environment re
+               SET num_pairs = 0
+             WHERE COALESCE(re.num_pairs, 0) <> 0
+               AND NOT EXISTS (
+                    SELECT 1
+                    FROM _leadopt_recount_pairs stats
+                    WHERE stats.id = re.id
+                )
+            """
+        )
+
+    cursor.execute("DROP TABLE IF EXISTS _leadopt_recount_pairs")
 
 
 def _update_dataset_counts(cursor) -> None:

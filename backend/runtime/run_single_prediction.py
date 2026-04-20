@@ -6110,10 +6110,15 @@ def _select_primary_structure_file(results_dir: str) -> Optional[Path]:
     if not candidates:
         candidates = [p for p in path_obj.glob("*.pdb")]
     if not candidates:
+        candidates = [p for p in path_obj.rglob("*.cif")]
+    if not candidates:
+        candidates = [p for p in path_obj.rglob("*.pdb")]
+    if not candidates:
         return None
 
     def _score(path: Path) -> Tuple[int, str]:
         name = path.name.lower()
+        rel = str(path.relative_to(path_obj)).replace("\\", "/").lower()
         score = 100
         if "rank_1" in name:
             score = 1
@@ -6123,7 +6128,13 @@ def _select_primary_structure_file(results_dir: str) -> Optional[Path]:
             score = 20
         elif "model_" in name:
             score = 30
-        return (score, name)
+        if rel.startswith("af3/output/") or "/af3/output/" in rel:
+            score -= 10
+        elif rel.startswith("protenix/output/") or "/protenix/output/" in rel:
+            score -= 8
+        elif rel.startswith("structures/") or "/structures/" in rel:
+            score -= 6
+        return (score, rel)
 
     return sorted(candidates, key=_score)[0]
 
