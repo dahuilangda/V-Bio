@@ -51,6 +51,27 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
+    build: {
+      chunkSizeWarningLimit: 1000,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (!id.includes('/node_modules/')) return undefined;
+            if (id.includes('/node_modules/exceljs/')) return 'vendor-excel';
+            if (id.includes('/node_modules/jszip/')) return 'vendor-zip';
+            if (id.includes('/node_modules/js-yaml/')) return 'vendor-yaml';
+            if (
+              id.includes('/node_modules/react/') ||
+              id.includes('/node_modules/react-dom/') ||
+              id.includes('/node_modules/scheduler/')
+            ) {
+              return 'vendor-react';
+            }
+            return 'vendor';
+          }
+        }
+      }
+    },
     server: {
       port: 5173,
       host: true,

@@ -452,6 +452,93 @@ create unique index if not exists idx_project_task_shares_task_user on public.pr
 create index if not exists idx_project_task_shares_user_id on public.project_task_shares (user_id, created_at desc);
 create index if not exists idx_project_task_shares_project_id on public.project_task_shares (project_id, created_at desc);
 
+drop table if exists public.project_task_chat_messages cascade;
+
+create table if not exists public.project_copilot_messages (
+  id uuid primary key default gen_random_uuid(),
+  context_type text not null default 'task_list',
+  project_id uuid,
+  project_task_id uuid,
+  user_id uuid,
+  role text not null default 'user',
+  content text not null default '',
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.project_copilot_messages add column if not exists context_type text;
+alter table public.project_copilot_messages add column if not exists project_id uuid;
+alter table public.project_copilot_messages add column if not exists project_task_id uuid;
+alter table public.project_copilot_messages add column if not exists user_id uuid;
+alter table public.project_copilot_messages add column if not exists role text;
+alter table public.project_copilot_messages add column if not exists content text;
+alter table public.project_copilot_messages add column if not exists metadata jsonb;
+alter table public.project_copilot_messages add column if not exists created_at timestamptz;
+alter table public.project_copilot_messages add column if not exists updated_at timestamptz;
+update public.project_copilot_messages set context_type = 'task_list' where context_type is null or context_type not in ('project_list', 'task_list', 'task_detail');
+update public.project_copilot_messages set role = 'user' where role is null or role not in ('user', 'assistant', 'system');
+update public.project_copilot_messages set content = '' where content is null;
+update public.project_copilot_messages set metadata = '{}'::jsonb where metadata is null;
+update public.project_copilot_messages set created_at = now() where created_at is null;
+update public.project_copilot_messages set updated_at = now() where updated_at is null;
+alter table public.project_copilot_messages alter column context_type set not null;
+alter table public.project_copilot_messages alter column role set not null;
+alter table public.project_copilot_messages alter column content set not null;
+alter table public.project_copilot_messages alter column metadata set not null;
+alter table public.project_copilot_messages alter column created_at set not null;
+alter table public.project_copilot_messages alter column updated_at set not null;
+alter table public.project_copilot_messages alter column context_type set default 'task_list';
+alter table public.project_copilot_messages alter column role set default 'user';
+alter table public.project_copilot_messages alter column content set default '';
+alter table public.project_copilot_messages alter column metadata set default '{}'::jsonb;
+alter table public.project_copilot_messages alter column created_at set default now();
+alter table public.project_copilot_messages alter column updated_at set default now();
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'project_copilot_messages_project_id_fkey'
+      AND conrelid = 'public.project_copilot_messages'::regclass
+  ) THEN
+    ALTER TABLE public.project_copilot_messages
+      ADD CONSTRAINT project_copilot_messages_project_id_fkey
+      FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE CASCADE;
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'project_copilot_messages_project_task_id_fkey'
+      AND conrelid = 'public.project_copilot_messages'::regclass
+  ) THEN
+    ALTER TABLE public.project_copilot_messages
+      ADD CONSTRAINT project_copilot_messages_project_task_id_fkey
+      FOREIGN KEY (project_task_id) REFERENCES public.project_tasks(id) ON DELETE CASCADE;
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'project_copilot_messages_user_id_fkey'
+      AND conrelid = 'public.project_copilot_messages'::regclass
+  ) THEN
+    ALTER TABLE public.project_copilot_messages
+      ADD CONSTRAINT project_copilot_messages_user_id_fkey
+      FOREIGN KEY (user_id) REFERENCES public.app_users(id) ON DELETE SET NULL;
+  END IF;
+END
+$$;
+
+create index if not exists idx_project_copilot_messages_scope_time on public.project_copilot_messages (context_type, project_id, project_task_id, created_at asc);
+
 create table if not exists public.api_tokens (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null,
@@ -928,6 +1015,12 @@ before update on public.project_task_shares
 for each row
 execute procedure public.set_updated_at();
 
+drop trigger if exists trg_project_copilot_messages_updated_at on public.project_copilot_messages;
+create trigger trg_project_copilot_messages_updated_at
+before update on public.project_copilot_messages
+for each row
+execute procedure public.set_updated_at();
+
 drop trigger if exists trg_api_tokens_updated_at on public.api_tokens;
 create trigger trg_api_tokens_updated_at
 before update on public.api_tokens
@@ -945,6 +1038,7 @@ alter table public.projects enable row level security;
 alter table public.project_tasks enable row level security;
 alter table public.project_shares enable row level security;
 alter table public.project_task_shares enable row level security;
+alter table public.project_copilot_messages enable row level security;
 alter table public.api_tokens enable row level security;
 alter table public.api_token_usage enable row level security;
 
@@ -994,6 +1088,10 @@ drop policy if exists project_task_shares_anon_select on public.project_task_sha
 drop policy if exists project_task_shares_anon_insert on public.project_task_shares;
 drop policy if exists project_task_shares_anon_update on public.project_task_shares;
 drop policy if exists project_task_shares_anon_delete on public.project_task_shares;
+drop policy if exists project_copilot_messages_anon_select on public.project_copilot_messages;
+drop policy if exists project_copilot_messages_anon_insert on public.project_copilot_messages;
+drop policy if exists project_copilot_messages_anon_update on public.project_copilot_messages;
+drop policy if exists project_copilot_messages_anon_delete on public.project_copilot_messages;
 drop policy if exists api_tokens_anon_select on public.api_tokens;
 drop policy if exists api_tokens_anon_insert on public.api_tokens;
 drop policy if exists api_tokens_anon_update on public.api_tokens;
@@ -1103,6 +1201,31 @@ for delete
 to anon
 using (true);
 
+create policy project_copilot_messages_anon_select
+on public.project_copilot_messages
+for select
+to anon
+using (true);
+
+create policy project_copilot_messages_anon_insert
+on public.project_copilot_messages
+for insert
+to anon
+with check (true);
+
+create policy project_copilot_messages_anon_update
+on public.project_copilot_messages
+for update
+to anon
+using (true)
+with check (true);
+
+create policy project_copilot_messages_anon_delete
+on public.project_copilot_messages
+for delete
+to anon
+using (true);
+
 create policy api_tokens_anon_select
 on public.api_tokens
 for select
@@ -1170,6 +1293,7 @@ grant select, insert, update, delete on public.projects to anon, authenticated, 
 grant select, insert, update, delete on public.project_tasks to anon, authenticated, service_role;
 grant select, insert, update, delete on public.project_shares to anon, authenticated, service_role;
 grant select, insert, update, delete on public.project_task_shares to anon, authenticated, service_role;
+grant select, insert, update, delete on public.project_copilot_messages to anon, authenticated, service_role;
 grant select, insert, update, delete on public.api_tokens to anon, authenticated, service_role;
 grant select, insert, update, delete on public.api_token_usage to anon, authenticated, service_role;
 grant select on public.project_tasks_list to anon, authenticated, service_role;

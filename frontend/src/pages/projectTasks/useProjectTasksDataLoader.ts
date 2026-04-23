@@ -52,6 +52,10 @@ const TASK_STATE_PRIORITY: Record<string, number> = {
 };
 const TASK_LIST_RUNTIME_CACHE_TTL_MS = 5000;
 const TASK_LIST_RUNTIME_CACHE_KEY_VERSION = 'v2';
+const TASK_LIST_INITIAL_FETCH_LIMIT = 120;
+const TASK_LIST_BACKGROUND_FETCH_CHUNK_SIZE = 240;
+const TASK_LIST_BACKGROUND_FETCH_DELAY_MS = 80;
+const TASK_LIST_RUNTIME_CACHE_MAX_ROWS = 180;
 
 function taskStatePriority(value: unknown): number {
   return TASK_STATE_PRIORITY[String(value || '').trim().toUpperCase()] ?? 0;
@@ -187,14 +191,33 @@ function mergeTaskRuntimeFields(next: ProjectTask, prev: ProjectTask): ProjectTa
   };
 }
 
-function mergeTaskRowsWithLocal(nextRows: ProjectTask[], prevRows: ProjectTask[]): ProjectTask[] {
-  if (prevRows.length === 0 || nextRows.length === 0) return nextRows;
-  const prevById = new Map(prevRows.map((row) => [row.id, row] as const));
-  return nextRows.map((row) => {
-    const prev = prevById.get(row.id);
-    if (!prev) return row;
-    return mergeTaskRuntimeFields(row, prev);
-  });
+function mergeTaskRowPages(nextRows: ProjectTask[], prevRows: ProjectTask[]): ProjectTask[] {
+  const mergedById = new Map<string, ProjectTask>();
+  for (const row of sanitizeTaskRows(prevRows)) {
+    mergedById.set(row.id, row);
+  }
+  for (const row of sanitizeTaskRows(nextRows)) {
+    const prev = mergedById.get(row.id);
+    mergedById.set(row.id, prev ? mergeTaskRuntimeFields(row, prev) : row);
+  }
+  return sortProjectTasks(Array.from(mergedById.values()));
+}
+
+function pickRuntimeCacheTaskRows(taskRows: ProjectTask[]): ProjectTask[] {
+  const rows = sanitizeTaskRows(taskRows);
+  if (rows.length <= TASK_LIST_RUNTIME_CACHE_MAX_ROWS) return rows;
+  const selected = new Map<string, ProjectTask>();
+  for (const row of rows) {
+    const state = String(row.task_state || '').trim().toUpperCase();
+    if (state === 'QUEUED' || state === 'RUNNING' || hasLeadOptPredictionRuntime(row)) {
+      selected.set(row.id, row);
+    }
+  }
+  for (const row of sortProjectTasks(rows)) {
+    if (selected.size >= TASK_LIST_RUNTIME_CACHE_MAX_ROWS) break;
+    selected.set(row.id, row);
+  }
+  return sortProjectTasks(Array.from(selected.values()));
 }
 
 function mergeProjectRuntimeFields(next: Project, prev: Project): Project {
@@ -299,7 +322,7 @@ export function useProjectTasksDataLoader({
           JSON.stringify({
             saved_at: Date.now(),
             project: projectRow,
-            tasks: sanitizeTaskRows(taskRows)
+            tasks: pickRuntimeCacheTaskRows(taskRows)
           })
         );
       } catch {
@@ -449,7 +472,7 @@ export function useProjectTasksDataLoader({
         const includeConfidenceSummaryForList = useLightweightTaskRows;
         const includePropertiesForList = false;
         const includePropertiesSummaryForList = useLightweightTaskRows;
-        const taskRows = await listProjectTasksForList(projectId, {
+        const baseTaskListOptions = {
           includeComponents: includeComponentsForList,
           includeConfidence: includeConfidenceForList,
           includeConfidenceSummary: includeConfidenceSummaryForList,
@@ -460,6 +483,11 @@ export function useProjectTasksDataLoader({
           accessScope: projectAccessScope,
           accessLevel: accessInfo.accessLevel || 'owner',
           editableTaskIds: accessInfo.editableTaskIds
+        };
+        const taskRows = await listProjectTasksForList(projectId, {
+          ...baseTaskListOptions,
+          limit: TASK_LIST_INITIAL_FETCH_LIMIT,
+          offset: 0
         });
 
         lastFullFetchTsRef.current = Date.now();
@@ -484,13 +512,42 @@ export function useProjectTasksDataLoader({
                 editable_task_ids: accessInfo.editableTaskIds
               };
         let nextProject = cachedProject ? mergeProjectRuntimeFields(accessibleProjectBase, cachedProject) : accessibleProjectBase;
-        let nextRows = mergeTaskRowsWithLocal(sortedTaskRows, cachedTasks);
+        let nextRows = mergeTaskRowPages(sortedTaskRows, cachedTasks);
         runtimeSnapshotTaskIdsRef.current = collectPendingRuntimeTaskIds(nextRows);
 
         if (loadSeqRef.current !== loadSeq) return;
         setProject(nextProject);
         setTasks(sanitizeTaskRows(nextRows));
         persistRuntimeCache(nextProject, nextRows);
+
+        void (async () => {
+          let offset = TASK_LIST_INITIAL_FETCH_LIMIT;
+          let mergedRows = sanitizeTaskRows(nextRows);
+          while (loadSeqRef.current === loadSeq) {
+            if (TASK_LIST_BACKGROUND_FETCH_DELAY_MS > 0) {
+              await new Promise((resolve) => window.setTimeout(resolve, TASK_LIST_BACKGROUND_FETCH_DELAY_MS));
+            }
+            const chunkRows = await listProjectTasksForList(projectId, {
+              ...baseTaskListOptions,
+              limit: TASK_LIST_BACKGROUND_FETCH_CHUNK_SIZE,
+              offset
+            });
+            if (loadSeqRef.current !== loadSeq || chunkRows.length === 0) return;
+            const sortedChunkRows = sortProjectTasks(sanitizeTaskRows(chunkRows));
+            mergedRows = mergeTaskRowPages(sortedChunkRows, tasksRef.current);
+            const projectForChunk = projectRef.current || nextProject;
+            runtimeSnapshotTaskIdsRef.current = collectPendingRuntimeTaskIds(mergedRows);
+            setTasks(mergedRows);
+            persistRuntimeCache(projectForChunk, mergedRows);
+            if (chunkRows.length < TASK_LIST_BACKGROUND_FETCH_CHUNK_SIZE) {
+              lastFullFetchTsRef.current = Date.now();
+              return;
+            }
+            offset += TASK_LIST_BACKGROUND_FETCH_CHUNK_SIZE;
+          }
+        })().catch(() => {
+          // Keep the visible first page if background chunk loading fails.
+        });
 
         if (!preferBackendStatus) {
           return;

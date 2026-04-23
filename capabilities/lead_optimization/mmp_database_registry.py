@@ -388,8 +388,10 @@ def _get_pg_dataset_counts(conn: Any, schema: str) -> Dict[str, Optional[int]]:
         if pairs is not None and pairs >= 0:
             stats["pairs"] = pairs
 
-    # Fast adaptive path: use pg_class row estimates to recover from stale/null
-    # dataset counters without paying full COUNT(*) cost on every request.
+    # Fast fallback path: use pg_class row estimates only when dataset counters
+    # are missing. dataset.* is populated via exact COUNT(*) in the lifecycle
+    # engine, so replacing it with reltuples can surface stale estimates in the
+    # admin UI after large imports/builds.
     try:
         with conn.cursor() as cursor:
             cursor.execute(
@@ -417,10 +419,6 @@ def _get_pg_dataset_counts(conn: Any, schema: str) -> Dict[str, Optional[int]]:
         if estimate is None or estimate < 0:
             continue
         if current is None or current < 0:
-            stats[key] = estimate
-            continue
-        diff = abs(int(estimate) - int(current))
-        if diff >= 100 and (diff / max(int(current), 1)) >= 0.02:
             stats[key] = int(estimate)
 
     # Optional slower path: live counts from core tables.

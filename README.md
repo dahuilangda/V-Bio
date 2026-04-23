@@ -64,6 +64,10 @@ pip install -r requirements.txt
 bash frontend/run.sh start
 ```
 
+前端 Copilot（协作聊天、列表分析、确认式任务计划、Affinity 文件上传入口）依赖
+`frontend` 的 Node 依赖、`supabase-lite` 新增消息表，以及 management API 的
+`VBIO_TASK_CHAT_*` 环境变量。详细配置见 [`frontend/README.md`](frontend/README.md)。
+
 ## 一键模板位置
 
 - Docker 模板目录：[`deploy/docker/README.md`](deploy/docker/README.md)

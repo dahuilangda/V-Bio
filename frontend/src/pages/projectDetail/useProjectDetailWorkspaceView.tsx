@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { Link } from 'react-router-dom';
-import type { PredictionConstraint, ProjectTask } from '../../types/models';
+import type { InputComponent, PredictionConstraint, ProjectTask } from '../../types/models';
 import { downloadResultBlob, downloadResultFile, terminateTask as terminateBackendTask } from '../../api/backendApi';
 import { createInputComponent } from '../../utils/projectInputs';
 import { getWorkflowDefinition } from '../../utils/workflows';
@@ -37,6 +37,8 @@ import {
   type LeadOptPredictionRecord
 } from '../../components/project/leadopt/hooks/useLeadOptMmpQueryMachine';
 import { readLeadOptTaskSummary } from '../projectTasks/taskDataUtils';
+import { ProjectCopilotModal, readStoredCopilotOpen, writeStoredCopilotOpen } from '../../components/copilot/ProjectCopilotModal';
+import type { CopilotPlanAction } from '../../types/models';
 
 function readText(value: unknown): string {
   if (value === null || value === undefined) return '';
@@ -45,6 +47,11 @@ function readText(value: unknown): string {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+}
+
+function readFiniteNumber(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function asPredictionRecordMap(value: unknown): Record<string, LeadOptPredictionRecord> {
@@ -1619,6 +1626,11 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   const [leadOptHeaderRunAction, setLeadOptHeaderRunAction] = useState<(() => void | Promise<void>) | null>(null);
   const [leadOptHeaderRunPending, setLeadOptHeaderRunPending] = useState(false);
   const [headerStopRunPending, setHeaderStopRunPending] = useState(false);
+  const [copilotOpen, setCopilotOpen] = useState(() => readStoredCopilotOpen({ contextType: 'task_detail' }));
+  const [copilotSubmitAfterPatch, setCopilotSubmitAfterPatch] = useState(false);
+  useEffect(() => {
+    writeStoredCopilotOpen({ contextType: 'task_detail' }, copilotOpen);
+  }, [copilotOpen]);
   const explicitRequestedTaskRowId = useMemo(
     () => {
       const query = new URLSearchParams(runtime.locationSearch);
@@ -3145,6 +3157,96 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       });
   };
 
+  const applyTaskDetailCopilotAction = useCallback((action: CopilotPlanAction) => {
+    const patch = asRecord(action.payload?.parameterPatch);
+    const applyPatch = () => {
+      const seed = readFiniteNumber(patch.seed);
+      if (seed !== null) handleRuntimeSeedChange(Math.floor(seed));
+      const affinityModePatch = readText(patch.affinityMode).trim();
+      if (affinityModePatch === 'score' || affinityModePatch === 'pose' || affinityModePatch === 'refine' || affinityModePatch === 'interface') {
+        onAffinityModeChange(affinityModePatch);
+      }
+      const peptideDesignMode = readText(patch.peptideDesignMode).trim();
+      if (peptideDesignMode === 'linear' || peptideDesignMode === 'cyclic' || peptideDesignMode === 'bicyclic') {
+        handleRuntimePeptideDesignModeChange(peptideDesignMode);
+      }
+      const peptideBinderLength = readFiniteNumber(patch.peptideBinderLength);
+      if (peptideBinderLength !== null) handleRuntimePeptideBinderLengthChange(Math.max(1, Math.floor(peptideBinderLength)));
+      const peptideIterations = readFiniteNumber(patch.peptideIterations);
+      if (peptideIterations !== null) handleRuntimePeptideIterationsChange(Math.max(1, Math.floor(peptideIterations)));
+      const peptidePopulationSize = readFiniteNumber(patch.peptidePopulationSize);
+      if (peptidePopulationSize !== null) handleRuntimePeptidePopulationSizeChange(Math.max(1, Math.floor(peptidePopulationSize)));
+      const peptideEliteSize = readFiniteNumber(patch.peptideEliteSize);
+      if (peptideEliteSize !== null) handleRuntimePeptideEliteSizeChange(Math.max(1, Math.floor(peptideEliteSize)));
+      const peptideMutationRate = readFiniteNumber(patch.peptideMutationRate);
+      if (peptideMutationRate !== null) handleRuntimePeptideMutationRateChange(Math.min(1, Math.max(0, peptideMutationRate)));
+      const componentsReplacement = asRecord(patch.componentsReplacement);
+      const replacementComponentsRaw = componentsReplacement.components;
+      if (Array.isArray(replacementComponentsRaw)) {
+        const replacementComponents = replacementComponentsRaw
+          .map((component) => (component && typeof component === 'object' ? (component as InputComponent) : null))
+          .filter((component): component is InputComponent => Boolean(component?.type && readText(component.sequence).trim()));
+        if (replacementComponents.length > 0) {
+          setDraft((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  inputConfig: {
+                    ...prev.inputConfig,
+                    version: 1,
+                    components: replacementComponents,
+                    constraints: componentsReplacement.clearConstraints === false ? prev.inputConfig.constraints : []
+                  }
+                }
+              : prev
+          );
+        }
+      }
+    };
+    if (action.id === 'task_detail:apply_parameter_patch') {
+      applyPatch();
+      return;
+    }
+    if (action.id === 'task_detail:save_draft') {
+      void saveDraft();
+      return;
+    }
+    if (action.id === 'task_detail:apply_patch_and_submit') {
+      applyPatch();
+      setCopilotSubmitAfterPatch(true);
+      return;
+    }
+    if (action.id === 'task_detail:submit_current' || action.id === 'task_detail:apply_patch_and_submit') {
+      if (effectiveRunDisabled) {
+        throw new Error(effectiveRunBlockedReason || 'Current task cannot be submitted yet.');
+      }
+      handleHeaderRunAction();
+    }
+  }, [
+    effectiveRunBlockedReason,
+    effectiveRunDisabled,
+    handleHeaderRunAction,
+    handleRuntimePeptideBinderLengthChange,
+    handleRuntimePeptideDesignModeChange,
+    handleRuntimePeptideEliteSizeChange,
+    handleRuntimePeptideIterationsChange,
+    handleRuntimePeptideMutationRateChange,
+    handleRuntimePeptidePopulationSizeChange,
+    handleRuntimeSeedChange,
+    onAffinityModeChange,
+    saveDraft
+  ]);
+
+  useEffect(() => {
+    if (!copilotSubmitAfterPatch) return;
+    setCopilotSubmitAfterPatch(false);
+    if (effectiveRunDisabled) {
+      setError(effectiveRunBlockedReason || 'Current task cannot be submitted yet.');
+      return;
+    }
+    handleHeaderRunAction();
+  }, [copilotSubmitAfterPatch, effectiveRunBlockedReason, effectiveRunDisabled, handleHeaderRunAction, setError]);
+
   return (
     <>
     <ProjectDetailLayout
@@ -3234,6 +3336,69 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       onTaskSummaryChange={handleTaskSummaryChange}
       onWorkspaceFormSubmit={handleWorkspaceFormSubmit}
     />
+    {session?.userId ? (
+      <ProjectCopilotModal
+        open={copilotOpen}
+        title="Task Copilot"
+        subtitle={`${workflow.shortTitle} · ${project.name}`}
+        contextType="task_detail"
+        projectId={project.id}
+        projectTaskId={readText((activeResultTask || statusContextTaskRow)?.id).trim() || null}
+        currentUserId={session.userId}
+        currentUsername={session.username}
+        contextPayload={{
+          project: { id: project.id, name: project.name, task_type: project.task_type },
+          draft: {
+            taskName: draft.taskName,
+            taskSummary: draft.taskSummary,
+            backend: draft.inputConfig?.properties?.target ? undefined : project.backend,
+            options: draft.inputConfig?.options,
+            components: draft.inputConfig?.components,
+            constraints: draft.inputConfig?.constraints
+          },
+          runtime: {
+            displayTaskState,
+            runDisabled: effectiveRunDisabled,
+            runBlockedReason: effectiveRunBlockedReason,
+            activeTaskId: headerRuntimeTaskId
+          },
+          affinityUploads: isAffinityWorkflow
+            ? {
+                targetFileName: affinityTargetFile?.name || '',
+                ligandFileName: affinityLigandFile?.name || '',
+                targetUploaded: Boolean(affinityTargetFile),
+                ligandUploaded: Boolean(affinityLigandFile)
+              }
+            : undefined,
+          currentTask: activeResultTask || statusContextTaskRow || null
+        }}
+        onApplyPlanAction={applyTaskDetailCopilotAction}
+        attachmentActions={
+          isAffinityWorkflow
+            ? [
+                {
+                  id: 'affinity-target-upload',
+                  label: 'Target',
+                  accept: '.pdb,.ent,.cif,.mmcif',
+                  ready: Boolean(affinityTargetFile),
+                  disabled: !canEdit || submitting,
+                  onFile: (file) => onAffinityTargetFileChange(file)
+                },
+                {
+                  id: 'affinity-ligand-upload',
+                  label: 'Ligand',
+                  accept: '.sdf,.sd,.mol2,.mol,.pdb,.ent,.cif,.mmcif',
+                  ready: Boolean(affinityLigandFile),
+                  disabled: !canEdit || submitting,
+                  onFile: (file) => onAffinityLigandFileChange(file)
+                }
+              ]
+            : []
+        }
+        onOpen={() => setCopilotOpen(true)}
+        onClose={() => setCopilotOpen(false)}
+      />
+    ) : null}
     </>
   );
 }

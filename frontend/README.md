@@ -11,6 +11,7 @@ React + Vite V-Bio frontend with:
   - `GET /status/:task_id`
   - `GET /results/:task_id`
 - Persistence through `supabase-lite` (Postgres + PostgREST)
+- Project/task Copilot chat for collaboration, analysis, confirmed task actions, and Affinity file upload assistance
 
 ## 0) Prepare Python venv (required by management API)
 
@@ -42,6 +43,19 @@ Default PostgREST URL: `http://127.0.0.1:54321`
 For a clean install, the full schema is created directly from `frontend/supabase-lite/init/init.sql`
 when the Postgres volume is initialized.
 
+If you are upgrading an existing `supabase-lite` Postgres volume, re-run the idempotent init SQL once so Copilot
+message tables are available to PostgREST:
+
+```bash
+cd frontend/supabase-lite
+docker compose exec -T db psql -U postgres -d postgres -f /docker-entrypoint-initdb.d/01-init.sql
+docker compose exec -T db psql -U postgres -d postgres -c "notify pgrst, 'reload schema';"
+```
+
+The Copilot chat table added by this schema is:
+
+- `project_copilot_messages`: unified Copilot chat on project list, task list, and task detail pages.
+
 One-command startup for production-style frontend stack:
 
 ```bash
@@ -69,6 +83,10 @@ Important variables:
 - `VITE_API_BASE_URL`: backend API base URL. Leave empty to use Vite proxy (defaults to `http://127.0.0.1:5000`).
 - `VITE_API_TOKEN`: must match backend `BOLTZ_API_TOKEN`.
 - `VITE_SUPABASE_REST_URL`: PostgREST endpoint, default `http://127.0.0.1:54321`.
+- `VITE_VBIO_MANAGEMENT_API_BASE_URL`: optional browser-visible management API base URL. Leave empty to use the Vite `/vbio-api` proxy during local development.
+- `VBIO_COPILOT_API_URL`: server-side OpenAI-compatible chat completions endpoint for Copilot.
+- `VBIO_COPILOT_API_KEY`: server-side bearer token for the chat endpoint.
+- `VBIO_COPILOT_MODEL`: model name used by Copilot, for example `gemma4-31b`.
 
 ## 3) Run V-Bio frontend
 
@@ -79,6 +97,9 @@ npm run dev
 ```
 
 Default URL: `http://127.0.0.1:5173`
+
+The frontend uses `react-markdown` and `remark-gfm` for Copilot message rendering. They are included in
+`package.json`; `npm install` is enough on a fresh checkout.
 
 ## 4) Create/upgrade admin user (CLI)
 
@@ -134,11 +155,49 @@ source ./venv/bin/activate
 export VBIO_POSTGREST_URL="http://127.0.0.1:54321"
 export VBIO_RUNTIME_API_BASE_URL="http://127.0.0.1:5000"
 export VBIO_RUNTIME_API_TOKEN="<BOLTZ_BACKEND_TOKEN>"
+export VBIO_COPILOT_API_URL="http://219.146.211.42:29568/v1/chat/completions"
+export VBIO_COPILOT_API_KEY="<COPILOT_API_KEY>"
+export VBIO_COPILOT_MODEL="gemma4-31b"
 
 python ./frontend/server/vbio_management_api.py
 ```
 
 Default gateway URL: `http://127.0.0.1:5055/vbio-api`
+
+Task rows include a shared chat. Mention `@V-Bio Copilot` in a task chat message to route the question through the
+management API, which adds task context and persists the assistant reply.
+
+Project list, task list, and task detail pages also include a floating Copilot button in the lower-right corner.
+Copilot can answer read-only analysis questions immediately. Actions that change filters, patch parameters, save
+drafts, or submit work are planned first and require an explicit confirmation button in the UI.
+
+After changing Copilot backend code, restart the management API process. With `frontend/run.sh`:
+
+```bash
+bash frontend/run.sh stop
+bash frontend/run.sh start
+```
+
+Or restart only the gunicorn/process manager that serves `vbio_management_api:app`.
+
+### Copilot task-input behavior
+
+Copilot validates the current workflow before planning a submission:
+
+- Structure Prediction requires valid structural components.
+- Affinity Scoring requires an affinity-ready target/ligand setup. A single peptide/protein sequence is not enough for
+  an Affinity task.
+- Peptide Designer requires target/design intent and design options.
+- Lead Optimization uses dedicated candidate/MMP tools, not generic parameter patching.
+
+On Affinity task detail pages, Copilot exposes upload buttons next to the chat input:
+
+- Target structure upload: `.pdb`, `.ent`, `.cif`, `.mmcif`
+- Ligand upload: `.sdf`, `.sd`, `.mol2`, `.mol`, `.pdb`, `.ent`, `.cif`, `.mmcif`
+
+These buttons reuse the same upload handlers, validation, persisted task snapshot, preview, and submit path as the
+main Affinity workspace. Copilot should not bypass the existing upload flow or guess whether an arbitrary file is a
+target or ligand.
 
 ## 7) Local submit with cURL
 

@@ -265,6 +265,32 @@ export interface ProjectTaskShareRecord {
   granted_by_name?: string;
 }
 
+export type CopilotMessageRole = 'user' | 'assistant' | 'system';
+
+export type CopilotContextType = 'project_list' | 'task_list' | 'task_detail';
+
+export interface ProjectCopilotMessage {
+  id: string;
+  context_type: CopilotContextType;
+  project_id: string | null;
+  project_task_id: string | null;
+  user_id: string | null;
+  role: CopilotMessageRole;
+  content: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  username?: string;
+  user_name?: string;
+}
+
+export interface CopilotPlanAction {
+  id: string;
+  label: string;
+  description: string;
+  payload?: Record<string, unknown>;
+}
+
 export interface Session {
   userId: string;
   username: string;

@@ -8,6 +8,7 @@ import type {
   ProjectAccessScope,
   EffectiveAccessLevel,
   ProjectShareRecord,
+  ProjectCopilotMessage,
   ProjectTask,
   ProjectTaskShareRecord,
   ShareAccessLevel,
@@ -799,6 +800,8 @@ export async function listProjectTasksForList(
     accessScope?: ProjectAccessScope;
     accessLevel?: EffectiveAccessLevel;
     editableTaskIds?: string[];
+    limit?: number;
+    offset?: number;
   }
 ): Promise<ProjectTask[]> {
   const includeComponents = options?.includeComponents !== false;
@@ -809,6 +812,12 @@ export async function listProjectTasksForList(
   const includeLeadOptSummary = options?.includeLeadOptSummary === true;
   const includeLeadOptCandidates = options?.includeLeadOptCandidates === true;
   const taskIdFilter = buildInFilter(options?.taskRowIds || []);
+  const limit = Number(options?.limit);
+  const offset = Number(options?.offset);
+  const paginationQuery = {
+    ...(Number.isFinite(limit) && limit > 0 ? { limit: String(Math.floor(limit)) } : {}),
+    ...(Number.isFinite(offset) && offset > 0 ? { offset: String(Math.floor(offset)) } : {})
+  };
   const selectFields = [
     'id',
     'project_id',
@@ -947,14 +956,16 @@ export async function listProjectTasksForList(
     select: selectFields,
     project_id: `eq.${projectId}`,
     ...(taskIdFilter ? { id: taskIdFilter } : {}),
-    order: 'created_at.desc'
+    order: 'created_at.desc',
+    ...paginationQuery
   });
   const detailRows = includeComponents
     ? await request<Array<Partial<ProjectTask>>>('/project_tasks_list', undefined, {
         select: 'id,components',
         project_id: `eq.${projectId}`,
         ...(taskIdFilter ? { id: taskIdFilter } : {}),
-        order: 'created_at.desc'
+        order: 'created_at.desc',
+        ...paginationQuery
       })
     : [];
   const detailById = new Map(
@@ -2269,6 +2280,234 @@ export async function deleteProjectTaskSharesByProjectId(projectId: string): Pro
       project_id: `eq.${normalizedProjectId}`
     }
   );
+}
+
+function normalizeChatMessageRole(value: unknown): ProjectCopilotMessage['role'] {
+  const token = String(value || '').trim().toLowerCase();
+  if (token === 'assistant') return 'assistant';
+  if (token === 'system') return 'system';
+  return 'user';
+}
+
+function isMissingRelationError(error: unknown, relationName: string): boolean {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return message.includes('42P01') || message.includes(`relation "public.${relationName}" does not exist`);
+}
+
+function createLocalId(prefix: string): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `local:${crypto.randomUUID()}`;
+  }
+  return `local:${prefix}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+}
+
+function readLocalRows<T>(key: string): T[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(key) || '[]');
+    return Array.isArray(parsed) ? (parsed as T[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalRows<T>(key: string, rows: T[]) {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(key, JSON.stringify(rows.slice(-200)));
+}
+
+function copilotLocalStorageKey(input: {
+  contextType: ProjectCopilotMessage['context_type'];
+  projectId?: string | null;
+  projectTaskId?: string | null;
+}): string {
+  return [
+    'vbio:project-copilot:v1',
+    normalizeCopilotContextType(input.contextType),
+    String(input.projectId || 'project-null'),
+    String(input.projectTaskId || 'task-null')
+  ].join(':');
+}
+
+function normalizeCopilotContextType(value: unknown): ProjectCopilotMessage['context_type'] {
+  const token = String(value || '').trim().toLowerCase();
+  if (token === 'project_list') return 'project_list';
+  if (token === 'task_detail') return 'task_detail';
+  return 'task_list';
+}
+
+function normalizeProjectCopilotMessage(row: Partial<ProjectCopilotMessage>): ProjectCopilotMessage {
+  return {
+    id: String(row.id || ''),
+    context_type: normalizeCopilotContextType(row.context_type),
+    project_id: row.project_id ? String(row.project_id) : null,
+    project_task_id: row.project_task_id ? String(row.project_task_id) : null,
+    user_id: row.user_id ? String(row.user_id) : null,
+    role: normalizeChatMessageRole(row.role),
+    content: String(row.content || ''),
+    metadata: asObjectRecord(row.metadata),
+    created_at: String(row.created_at || ''),
+    updated_at: String(row.updated_at || ''),
+    username: String(row.username || '').trim(),
+    user_name: String(row.user_name || '').trim()
+  };
+}
+
+export async function listProjectCopilotMessages(input: {
+  contextType: ProjectCopilotMessage['context_type'];
+  projectId?: string | null;
+  projectTaskId?: string | null;
+  userId?: string | null;
+}): Promise<ProjectCopilotMessage[]> {
+  const contextType = normalizeCopilotContextType(input.contextType);
+  const query: Record<string, string> = {
+    select: '*',
+    context_type: `eq.${contextType}`,
+    order: 'created_at.asc',
+    limit: '200'
+  };
+  const projectId = String(input.projectId || '').trim();
+  const projectTaskId = String(input.projectTaskId || '').trim();
+  query.project_id = projectId ? `eq.${projectId}` : 'is.null';
+  query.project_task_id = projectTaskId ? `eq.${projectTaskId}` : 'is.null';
+  let rows: Array<Partial<ProjectCopilotMessage>>;
+  try {
+    rows = await request<Array<Partial<ProjectCopilotMessage>>>('/project_copilot_messages', undefined, query);
+  } catch (error) {
+    if (!isMissingRelationError(error, 'project_copilot_messages')) throw error;
+    const normalizedUserId = String(input.userId || '').trim();
+    return readLocalRows<Partial<ProjectCopilotMessage>>(copilotLocalStorageKey({ contextType, projectId, projectTaskId }))
+      .map(normalizeProjectCopilotMessage)
+      .filter((row) => {
+        if (!normalizedUserId) return false;
+        return row.user_id === normalizedUserId || String(row.metadata?.owner_user_id || '') === normalizedUserId;
+      });
+  }
+  const normalizedUserId = String(input.userId || '').trim();
+  rows = rows.filter((row) => {
+    if (!normalizedUserId) return false;
+    return String(row.user_id || '') === normalizedUserId || String(asObjectRecord(row.metadata).owner_user_id || '') === normalizedUserId;
+  });
+  const userIds = Array.from(new Set(rows.map((row) => String(row.user_id || '').trim()).filter(Boolean)));
+  const users = await listUsersByIds(userIds);
+  const userById = new Map(users.map((user) => [user.id, user] as const));
+  return rows.map((row) => {
+    const user = row.user_id ? userById.get(String(row.user_id)) : null;
+    return normalizeProjectCopilotMessage({
+      ...row,
+      username: user?.username || '',
+      user_name: user?.name || ''
+    });
+  });
+}
+
+export async function insertProjectCopilotMessage(input: {
+  contextType: ProjectCopilotMessage['context_type'];
+  projectId?: string | null;
+  projectTaskId?: string | null;
+  userId?: string | null;
+  role?: ProjectCopilotMessage['role'];
+  content: string;
+  metadata?: Record<string, unknown>;
+}): Promise<ProjectCopilotMessage> {
+  const content = String(input.content || '').trim();
+  if (!content) throw new Error('Message content is required.');
+  const contextType = normalizeCopilotContextType(input.contextType);
+  const ownerUserId = String(input.userId || input.metadata?.owner_user_id || '').trim();
+  const metadata = {
+    ...(input.metadata || {}),
+    ...(ownerUserId ? { owner_user_id: ownerUserId } : {})
+  };
+  try {
+    const rows = await request<ProjectCopilotMessage[]>(
+      '/project_copilot_messages',
+      {
+        method: 'POST',
+        headers: { Prefer: 'return=representation' },
+        body: JSON.stringify({
+          context_type: contextType,
+          project_id: input.projectId || null,
+          project_task_id: input.projectTaskId || null,
+          user_id: input.userId || null,
+          role: normalizeChatMessageRole(input.role),
+          content,
+          metadata
+        })
+      },
+      { select: '*' }
+    );
+    return normalizeProjectCopilotMessage(rows[0] || {});
+  } catch (error) {
+    if (!isMissingRelationError(error, 'project_copilot_messages')) throw error;
+    const now = new Date().toISOString();
+    const row = normalizeProjectCopilotMessage({
+      id: createLocalId('copilot'),
+      context_type: contextType,
+      project_id: input.projectId || null,
+      project_task_id: input.projectTaskId || null,
+      user_id: input.userId || null,
+      role: normalizeChatMessageRole(input.role),
+      content,
+      metadata,
+      created_at: now,
+      updated_at: now
+    });
+    const key = copilotLocalStorageKey({ contextType, projectId: input.projectId || null, projectTaskId: input.projectTaskId || null });
+    writeLocalRows(key, [...readLocalRows<ProjectCopilotMessage>(key), row]);
+    return row;
+  }
+}
+
+export async function deleteProjectCopilotMessagesBySession(input: {
+  contextType: ProjectCopilotMessage['context_type'];
+  projectId?: string | null;
+  projectTaskId?: string | null;
+  sessionId: string;
+  userId?: string | null;
+  messageIds?: string[];
+}): Promise<void> {
+  const sessionId = String(input.sessionId || '').trim();
+  if (!sessionId) return;
+  const contextType = normalizeCopilotContextType(input.contextType);
+  const projectId = String(input.projectId || '').trim();
+  const projectTaskId = String(input.projectTaskId || '').trim();
+  const userId = String(input.userId || '').trim();
+  const messageIds = Array.from(
+    new Set((input.messageIds || []).map((value) => String(value || '').trim()).filter((value) => value && !value.startsWith('local:')))
+  );
+  if (messageIds.length > 0) {
+    try {
+      await request<unknown>('/project_copilot_messages', { method: 'DELETE' }, { id: buildInFilter(messageIds) });
+    } catch (error) {
+      if (!isMissingRelationError(error, 'project_copilot_messages')) throw error;
+    }
+  }
+  const query: Record<string, string> = {
+    context_type: `eq.${contextType}`,
+    project_id: projectId ? `eq.${projectId}` : 'is.null',
+    project_task_id: projectTaskId ? `eq.${projectTaskId}` : 'is.null',
+    'metadata->>session_id': `eq.${sessionId}`,
+    'metadata->>owner_user_id': `eq.${userId}`
+  };
+  try {
+    await request<unknown>('/project_copilot_messages', { method: 'DELETE' }, query);
+    if (userId) {
+      await request<unknown>('/project_copilot_messages', { method: 'DELETE' }, {
+        context_type: `eq.${contextType}`,
+        project_id: projectId ? `eq.${projectId}` : 'is.null',
+        project_task_id: projectTaskId ? `eq.${projectTaskId}` : 'is.null',
+        'metadata->>session_id': `eq.${sessionId}`,
+        user_id: `eq.${userId}`
+      });
+    }
+  } catch (error) {
+    if (!isMissingRelationError(error, 'project_copilot_messages')) throw error;
+    const key = copilotLocalStorageKey({ contextType, projectId, projectTaskId });
+    const rows = readLocalRows<ProjectCopilotMessage>(key).filter(
+      (row) => String(row.metadata?.session_id || 'default') !== sessionId || String(row.metadata?.owner_user_id || '') !== userId
+    );
+    writeLocalRows(key, rows);
+  }
 }
 
 export async function listIncomingProjectShares(userId: string): Promise<ProjectShareRecord[]> {

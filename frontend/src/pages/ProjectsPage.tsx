@@ -19,13 +19,14 @@ import {
   SlidersHorizontal,
   Trash2
 } from 'lucide-react';
+import { ProjectCopilotModal, readStoredCopilotOpen, writeStoredCopilotOpen } from '../components/copilot/ProjectCopilotModal';
 import { SharingModal } from '../components/project/SharingModal';
 import { useAuth } from '../hooks/useAuth';
 import { useProjects } from '../hooks/useProjects';
 import { formatDateTime } from '../utils/date';
 import { canDeleteProject, canEditProject as canEditProjectAccess, canManageProjectShares } from '../utils/accessControl';
 import { getWorkflowDefinition, type WorkflowKey, WORKFLOWS } from '../utils/workflows';
-import type { Project, TaskState } from '../types/models';
+import type { CopilotPlanAction, Project, TaskState } from '../types/models';
 
 const workflowIconMap: Record<WorkflowKey, JSX.Element> = {
   prediction: <Dna size={16} />,
@@ -78,6 +79,10 @@ export function ProjectsPage() {
   const [page, setPage] = useState<number>(1);
   const [filtersHydrated, setFiltersHydrated] = useState(false);
   const [sharedProject, setSharedProject] = useState<Project | null>(null);
+  const [copilotOpen, setCopilotOpen] = useState(() => readStoredCopilotOpen({ contextType: 'project_list' }));
+  useEffect(() => {
+    writeStoredCopilotOpen({ contextType: 'project_list' }, copilotOpen);
+  }, [copilotOpen]);
   const projectsFiltersStorageKey = useMemo(() => {
     const sessionIdentity =
       String(session?.userId || '').trim() ||
@@ -281,6 +286,44 @@ export function ProjectsPage() {
     return filteredProjects.slice(start, start + pageSize);
   }, [filteredProjects, currentPage, pageSize]);
 
+  const buildProjectCopilotActions = (content: string): CopilotPlanAction[] => {
+    const text = content.toLowerCase();
+    const actions: CopilotPlanAction[] = [];
+    if (text.includes('fail') || text.includes('失败')) {
+      actions.push({ id: 'projects:failed', label: 'Show failed projects', description: 'Filter projects to those with failed tasks.' });
+    }
+    if (text.includes('active') || text.includes('running') || text.includes('queued') || text.includes('运行') || text.includes('排队')) {
+      actions.push({ id: 'projects:active', label: 'Show active projects', description: 'Filter projects with queued or running tasks.' });
+    }
+    if (text.includes('newest') || text.includes('latest') || text.includes('最近') || text.includes('最新')) {
+      actions.push({ id: 'projects:updated_desc', label: 'Sort by newest updated', description: 'Sort projects by most recently updated.' });
+    }
+    if (text.includes('oldest') || text.includes('最旧')) {
+      actions.push({ id: 'projects:updated_asc', label: 'Sort by oldest updated', description: 'Sort projects by least recently updated.' });
+    }
+    if (text.includes('boltz')) {
+      actions.push({ id: 'projects:backend_boltz', label: 'Filter Boltz projects', description: 'Show projects using the Boltz backend.' });
+    }
+    return actions;
+  };
+
+  const applyProjectCopilotAction = (action: CopilotPlanAction) => {
+    setShowAdvancedFilters(true);
+    if (action.id === 'projects:failed') {
+      setActivityFilter('failed');
+      setStateFilter('all');
+    } else if (action.id === 'projects:active') {
+      setActivityFilter('active');
+      setStateFilter('all');
+    } else if (action.id === 'projects:updated_desc') {
+      setSortBy('updated_desc');
+    } else if (action.id === 'projects:updated_asc') {
+      setSortBy('updated_asc');
+    } else if (action.id === 'projects:backend_boltz') {
+      setBackendFilter('boltz');
+    }
+  };
+
   useEffect(() => {
     setPage(1);
   }, [search, typeFilter, stateFilter, sortBy, pageSize, backendFilter, activityFilter, updatedWithinDays, minTaskCount]);
@@ -417,10 +460,12 @@ export function ProjectsPage() {
             {session?.name} · {countText}
           </p>
         </div>
-        <button className="btn btn-primary" onClick={openCreateModal}>
-          <Plus size={16} />
-          New Project
-        </button>
+        <div className="row gap-8">
+          <button className="btn btn-primary" onClick={openCreateModal}>
+            <Plus size={16} />
+            New Project
+          </button>
+        </div>
       </section>
 
       <section className="panel">
@@ -895,6 +940,34 @@ export function ProjectsPage() {
           projectName={sharedProject.name}
           currentUserId={session.userId}
           onClose={() => setSharedProject(null)}
+        />
+      ) : null}
+
+      {session?.userId ? (
+        <ProjectCopilotModal
+          open={copilotOpen}
+          title="Project Copilot"
+          subtitle={`${filteredProjects.length} matched / ${projects.length} total`}
+          contextType="project_list"
+          currentUserId={session.userId}
+          currentUsername={session.username}
+          contextPayload={{
+            total_projects: projects.length,
+            matched_projects: filteredProjects.length,
+            filters: { search, typeFilter, stateFilter, sortBy, backendFilter, activityFilter, updatedWithinDays, minTaskCount },
+            projects: filteredProjects.slice(0, 40).map((project) => ({
+              id: project.id,
+              name: project.name,
+              task_type: project.task_type,
+              backend: project.backend,
+              task_counts: project.task_counts,
+              updated_at: project.updated_at
+            }))
+          }}
+          buildPlanActions={buildProjectCopilotActions}
+          onApplyPlanAction={applyProjectCopilotAction}
+          onOpen={() => setCopilotOpen(true)}
+          onClose={() => setCopilotOpen(false)}
         />
       ) : null}
 

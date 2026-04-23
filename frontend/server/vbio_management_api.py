@@ -11,7 +11,7 @@ import logging
 import os
 from typing import Tuple
 
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, jsonify, request
 from management_api.auth_service import AuthService
 from management_api.gateway_handlers import GatewayHandlers
 from management_api.http_session import create_pooled_session
@@ -20,6 +20,7 @@ from management_api.lead_opt_routes import register_lead_opt_routes
 from management_api.postgrest_client import PostgrestClient
 from management_api.runtime_proxy import RuntimeProxy
 from management_api.task_store import ProjectTaskStore
+from management_api.copilot import CopilotAssistant
 from management_api.usage_tracker import UsageTracker
 
 LOG_LEVEL = os.environ.get("VBIO_MGMT_LOG_LEVEL", "INFO").upper()
@@ -50,6 +51,13 @@ LEAD_OPT_OVERLAY_MAX_PENDING = int(os.environ.get("VBIO_LEAD_OPT_OVERLAY_MAX_PEN
 LEAD_OPT_OVERLAY_CACHE_SIZE = int(os.environ.get("VBIO_LEAD_OPT_OVERLAY_CACHE_SIZE", "256"))
 LEAD_OPT_OVERLAY_CACHE_TTL_SECONDS = float(os.environ.get("VBIO_LEAD_OPT_OVERLAY_CACHE_TTL_SECONDS", "300"))
 LEAD_OPT_OVERLAY_TIMEOUT_SECONDS = float(os.environ.get("VBIO_LEAD_OPT_OVERLAY_TIMEOUT_SECONDS", "8"))
+COPILOT_API_URL = os.environ.get(
+    "VBIO_COPILOT_API_URL",
+    "http://219.146.211.42:29568/v1/chat/completions",
+).strip()
+COPILOT_API_KEY = os.environ.get("VBIO_COPILOT_API_KEY", "woaihuadong").strip()
+COPILOT_MODEL = os.environ.get("VBIO_COPILOT_MODEL", "gemma4-31b").strip()
+COPILOT_TIMEOUT_SECONDS = float(os.environ.get("VBIO_COPILOT_TIMEOUT_SECONDS", "90"))
 
 FORM_FIELDS_INTERNAL = {"project_id", "task_name", "task_summary", "operation_mode"}
 DEFAULT_PROTENIX_PREDICT_SEED = 42
@@ -92,6 +100,14 @@ lead_opt_overlay_service = LeadOptOverlayService(
     cache_ttl_seconds=LEAD_OPT_OVERLAY_CACHE_TTL_SECONDS,
     task_timeout_seconds=LEAD_OPT_OVERLAY_TIMEOUT_SECONDS,
 )
+copilot_assistant = CopilotAssistant(
+    chat_api_url=COPILOT_API_URL,
+    chat_api_key=COPILOT_API_KEY,
+    chat_model=COPILOT_MODEL,
+    timeout_seconds=COPILOT_TIMEOUT_SECONDS,
+    session=runtime_http,
+    logger=logger,
+)
 
 gateway = GatewayHandlers(
     auth_service=auth_service,
@@ -124,6 +140,44 @@ def runtime_status() -> Tuple[Response, int]:
             "overlay_service": lead_opt_overlay_service.get_status(),
         }
     ), 200
+
+
+@app.post("/vbio-api/copilot/assistant")
+def copilot_assistant_answer() -> Tuple[Response, int]:
+    payload = request.get_json(silent=True) or {}
+    try:
+        content = copilot_assistant.answer_context(
+            context_type=str(payload.get("context_type") or "").strip(),
+            context_payload=payload.get("context_payload") if isinstance(payload.get("context_payload"), dict) else {},
+            user_id=str(payload.get("user_id") or "").strip(),
+            username=str(payload.get("username") or "").strip(),
+            content=str(payload.get("content") or "").strip(),
+        )
+        return jsonify({"content": content}), 200
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        logger.exception("Copilot assistant failed")
+        return jsonify({"error": str(exc)}), 502
+
+
+@app.post("/vbio-api/copilot/plan_actions")
+def copilot_plan_actions() -> Tuple[Response, int]:
+    payload = request.get_json(silent=True) or {}
+    try:
+        actions = copilot_assistant.plan_actions(
+            context_type=str(payload.get("context_type") or "").strip(),
+            context_payload=payload.get("context_payload") if isinstance(payload.get("context_payload"), dict) else {},
+            user_id=str(payload.get("user_id") or "").strip(),
+            username=str(payload.get("username") or "").strip(),
+            content=str(payload.get("content") or "").strip(),
+        )
+        return jsonify({"actions": actions}), 200
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "actions": []}), 400
+    except Exception as exc:
+        logger.exception("Copilot action planning failed")
+        return jsonify({"error": str(exc), "actions": []}), 502
 
 
 @app.post("/vbio-api/predict")
