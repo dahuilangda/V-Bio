@@ -1063,6 +1063,15 @@ select:focus {
   font-size: var(--text-xs);
 }
 
+.project-cancel-btn {
+  background: #fff4e8;
+  color: #8a4b12;
+}
+
+.project-cancel-btn:hover:not(:disabled) {
+  background: #ffe4c2;
+}
+
 .project-state-overview {
   min-width: 240px;
 }

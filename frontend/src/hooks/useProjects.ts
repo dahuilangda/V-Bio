@@ -316,9 +316,18 @@ async function runWithConcurrency<T>(
   await Promise.all(runners);
 }
 
-async function stopProjectRuntimeTasks(taskRows: ProjectTaskRuntimeRow[]): Promise<void> {
-  const candidateRows = taskRows.filter((row) => Boolean(String(row.task_id || '').trim()) && isRuntimePendingState(row.task_state));
-  if (candidateRows.length === 0) return;
+async function stopProjectRuntimeTasks(taskRows: ProjectTaskRuntimeRow[]): Promise<ProjectTaskRuntimeRow[]> {
+  const runtimeIndex = await getTaskRuntimeIndex().catch(() => null);
+  const activeRuntimeTaskIds = new Set([
+    ...buildTaskIdSet(runtimeIndex?.active_task_ids),
+    ...buildTaskIdSet(runtimeIndex?.reserved_task_ids),
+    ...buildTaskIdSet(runtimeIndex?.scheduled_task_ids)
+  ]);
+  const candidateRows = taskRows.filter((row) => {
+    const taskId = String(row.task_id || '').trim();
+    return Boolean(taskId) && (isRuntimePendingState(row.task_state) || activeRuntimeTaskIds.has(taskId));
+  });
+  if (candidateRows.length === 0) return [];
 
   const candidateTaskIds = Array.from(new Set(candidateRows.map((row) => String(row.task_id || '').trim()).filter(Boolean)));
   const statusByTaskId = await fetchRuntimeStatusesByTaskId(candidateTaskIds);
@@ -328,7 +337,7 @@ async function stopProjectRuntimeTasks(taskRows: ProjectTaskRuntimeRow[]): Promi
     if (!statusPayload) return true;
     return isRuntimePendingState(inferTaskStateFromStatusPayload(statusPayload, row?.task_state || 'QUEUED'));
   });
-  if (activeTaskIds.length === 0) return;
+  if (activeTaskIds.length === 0) return [];
 
   await runWithConcurrency(activeTaskIds, PROJECT_DELETE_TERMINATE_CONCURRENCY, async (taskId) => {
     try {
@@ -363,6 +372,8 @@ async function stopProjectRuntimeTasks(taskRows: ProjectTaskRuntimeRow[]): Promi
   if (remainingTaskIds.length > 0) {
     throw new Error(`Failed to stop ${remainingTaskIds.length} active task(s) before deleting the project.`);
   }
+
+  return candidateRows.filter((row) => activeTaskIds.includes(String(row.task_id || '').trim()));
 }
 
 function countProjectTaskStates(
@@ -610,19 +621,30 @@ export function useProjects(session: Session | null) {
     try {
       const runtimeIndex = await getTaskRuntimeIndex();
       const activeTaskIdsRaw = Array.from(buildTaskIdSet(runtimeIndex.active_task_ids));
-      const activeStatusByTaskId = activeTaskIdsRaw.length > 0 ? await fetchRuntimeStatusesByTaskId(activeTaskIdsRaw) : {};
+      const queuedTaskIdsRaw = Array.from(
+        new Set([
+          ...buildTaskIdSet(runtimeIndex.reserved_task_ids),
+          ...buildTaskIdSet(runtimeIndex.scheduled_task_ids)
+        ])
+      );
+      const indexedTaskIds = Array.from(new Set([...activeTaskIdsRaw, ...queuedTaskIdsRaw]));
+      const activeStatusByTaskId = indexedTaskIds.length > 0 ? await fetchRuntimeStatusesByTaskId(indexedTaskIds) : {};
       const activeTaskIds = new Set(
         activeTaskIdsRaw.filter((taskId) => {
           const statusPayload = activeStatusByTaskId[taskId];
-          if (!statusPayload) return true;
+          if (!statusPayload) return false;
           const state = inferTaskStateFromStatusPayload(statusPayload, 'RUNNING');
           return state === 'RUNNING' || state === 'QUEUED';
         })
       );
-      const queuedTaskIds = new Set([
-        ...buildTaskIdSet(runtimeIndex.reserved_task_ids),
-        ...buildTaskIdSet(runtimeIndex.scheduled_task_ids)
-      ]);
+      const queuedTaskIds = new Set(
+        queuedTaskIdsRaw.filter((taskId) => {
+          const statusPayload = activeStatusByTaskId[taskId];
+          if (!statusPayload) return false;
+          const state = inferTaskStateFromStatusPayload(statusPayload, 'QUEUED');
+          return state === 'RUNNING' || state === 'QUEUED';
+        })
+      );
       const runtimeTaskIds = Array.from(new Set([...Array.from(activeTaskIds), ...Array.from(queuedTaskIds)]));
       const [runtimeRows, leadOptChildRows] = await Promise.all([
         runtimeTaskIds.length > 0 ? listProjectTaskStatesByTaskIds(runtimeTaskIds) : Promise.resolve([] as ProjectTaskRuntimeRow[]),
@@ -943,6 +965,43 @@ export function useProjects(session: Session | null) {
     return updated;
   }, []);
 
+  const cancelProjectRuntimeTasks = useCallback(
+    async (id: string) => {
+      setError(null);
+      try {
+        const projectTaskRows = (await listProjectTaskStatesByProjects([id])).filter((row) => row.project_id === id);
+        const stoppedRows = await stopProjectRuntimeTasks(projectTaskRows);
+        const now = new Date().toISOString();
+        await runWithConcurrency(stoppedRows, PROJECT_DELETE_TERMINATE_CONCURRENCY, async (row) => {
+          await updateProjectTask(
+            row.id,
+            {
+              task_state: 'REVOKED',
+              status_text: 'Cancelled via project list',
+              error_text: '',
+              completed_at: now
+            },
+            { minimalReturn: true }
+          );
+        });
+        if (stoppedRows.length > 0) {
+          await patchProject(id, {
+            task_state: 'REVOKED',
+            status_text: `Cancelled ${stoppedRows.length} runtime task(s).`,
+            error_text: '',
+            completed_at: now
+          });
+        }
+        await load({ silent: true, preferBackendStatus: true, forceRefetch: true });
+        return stoppedRows.length;
+      } catch (error) {
+        setError(error instanceof Error ? error.message : 'Failed to cancel project tasks.');
+        throw error;
+      }
+    },
+    [load, patchProject]
+  );
+
   const softDeleteProject = useCallback(
     async (id: string) => {
       setError(null);
@@ -986,6 +1045,7 @@ export function useProjects(session: Session | null) {
     load,
     createProject,
     patchProject,
+    cancelProjectRuntimeTasks,
     softDeleteProject
   };
 }

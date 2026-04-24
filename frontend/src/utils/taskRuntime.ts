@@ -6,6 +6,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 export function mapBackendTaskState(raw: string): TaskState {
   const normalized = String(raw || '').trim().toUpperCase();
+  if (normalized === 'DRAFT') return 'DRAFT';
   if (normalized === 'SUCCESS') return 'SUCCESS';
   if (normalized === 'FAILURE') return 'FAILURE';
   if (normalized === 'REVOKED') return 'REVOKED';

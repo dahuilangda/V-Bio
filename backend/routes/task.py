@@ -379,15 +379,41 @@ def register_task_routes(
                         task_ids.append(task_id)
             return list(dict.fromkeys(task_ids))
 
+        def normalize_runtime_bucket(raw_bucket: str, status_response: Dict[str, Any]) -> str | None:
+            state = str(status_response.get('state') or '').strip().upper()
+            if state in {'PROGRESS', 'RUNNING', 'STARTED'}:
+                return 'active'
+            if state in {'PENDING', 'RECEIVED', 'RETRY', 'QUEUED'}:
+                return 'reserved' if raw_bucket != 'scheduled' else 'scheduled'
+            return None
+
         try:
             active = inspector.active() or {}
             reserved = inspector.reserved() or {}
             scheduled = inspector.scheduled() or {}
-            payload = {
-                'active_task_ids': collect_task_ids(active),
-                'reserved_task_ids': collect_task_ids(reserved),
-                'scheduled_task_ids': collect_task_ids(scheduled),
+            raw_payload = {
+                'active': collect_task_ids(active),
+                'reserved': collect_task_ids(reserved),
+                'scheduled': collect_task_ids(scheduled),
             }
+            payload = {
+                'active_task_ids': [],
+                'reserved_task_ids': [],
+                'scheduled_task_ids': [],
+            }
+            seen_task_ids = set()
+            for raw_bucket, task_ids in raw_payload.items():
+                for task_id in task_ids:
+                    if task_id in seen_task_ids:
+                        continue
+                    seen_task_ids.add(task_id)
+                    bucket = normalize_runtime_bucket(raw_bucket, build_task_status_response(task_id))
+                    if bucket == 'active':
+                        payload['active_task_ids'].append(task_id)
+                    elif bucket == 'reserved':
+                        payload['reserved_task_ids'].append(task_id)
+                    elif bucket == 'scheduled':
+                        payload['scheduled_task_ids'].append(task_id)
             logger.debug(
                 'Runtime task index collected. Active: %s, Reserved: %s, Scheduled: %s',
                 len(payload['active_task_ids']),

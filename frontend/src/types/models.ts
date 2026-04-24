@@ -284,11 +284,22 @@ export interface ProjectCopilotMessage {
   user_name?: string;
 }
 
+export interface ProjectCopilotState {
+  id: string;
+  user_id: string;
+  state_key: string;
+  data: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface CopilotPlanAction {
   id: string;
   label: string;
   description: string;
   payload?: Record<string, unknown>;
+  needs_confirmation?: boolean;
+  execute_now?: boolean;
 }
 
 export interface Session {

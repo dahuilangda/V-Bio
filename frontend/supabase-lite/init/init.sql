@@ -538,6 +538,53 @@ END
 $$;
 
 create index if not exists idx_project_copilot_messages_scope_time on public.project_copilot_messages (context_type, project_id, project_task_id, created_at asc);
+create index if not exists idx_project_copilot_messages_conversation_scope_time
+on public.project_copilot_messages ((metadata->>'conversation_scope'), context_type, project_id, project_task_id, created_at desc);
+
+create table if not exists public.project_copilot_states (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null,
+  state_key text not null default '',
+  data jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.project_copilot_states add column if not exists user_id uuid;
+alter table public.project_copilot_states add column if not exists state_key text;
+alter table public.project_copilot_states add column if not exists data jsonb;
+alter table public.project_copilot_states add column if not exists created_at timestamptz;
+alter table public.project_copilot_states add column if not exists updated_at timestamptz;
+update public.project_copilot_states set state_key = '' where state_key is null;
+update public.project_copilot_states set data = '{}'::jsonb where data is null;
+update public.project_copilot_states set created_at = now() where created_at is null;
+update public.project_copilot_states set updated_at = now() where updated_at is null;
+alter table public.project_copilot_states alter column user_id set not null;
+alter table public.project_copilot_states alter column state_key set not null;
+alter table public.project_copilot_states alter column data set not null;
+alter table public.project_copilot_states alter column created_at set not null;
+alter table public.project_copilot_states alter column updated_at set not null;
+alter table public.project_copilot_states alter column state_key set default '';
+alter table public.project_copilot_states alter column data set default '{}'::jsonb;
+alter table public.project_copilot_states alter column created_at set default now();
+alter table public.project_copilot_states alter column updated_at set default now();
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'project_copilot_states_user_id_fkey'
+      AND conrelid = 'public.project_copilot_states'::regclass
+  ) THEN
+    ALTER TABLE public.project_copilot_states
+      ADD CONSTRAINT project_copilot_states_user_id_fkey
+      FOREIGN KEY (user_id) REFERENCES public.app_users(id) ON DELETE CASCADE;
+  END IF;
+END
+$$;
+
+create unique index if not exists idx_project_copilot_states_user_key_unique on public.project_copilot_states (user_id, state_key);
+create index if not exists idx_project_copilot_states_user_key on public.project_copilot_states (user_id, state_key);
 
 create table if not exists public.api_tokens (
   id uuid primary key default gen_random_uuid(),
@@ -915,7 +962,10 @@ select
   )::bigint as total_count,
   sum(
     case
-      when lead_opt_total > 0 then 0
+      when lead_opt_total > 0 then least(
+        lead_opt_running,
+        greatest(lead_opt_total - lead_opt_success - lead_opt_failure, 0)
+      )
       else 0
     end
   )::bigint as running_count,
@@ -935,7 +985,16 @@ select
   )::bigint as failure_count,
   sum(
     case
-      when lead_opt_total > 0 then greatest(lead_opt_total - lead_opt_success - lead_opt_failure, 0)
+      when lead_opt_total > 0 then least(
+        lead_opt_queued,
+        greatest(
+          lead_opt_total
+          - lead_opt_success
+          - lead_opt_failure
+          - least(lead_opt_running, greatest(lead_opt_total - lead_opt_success - lead_opt_failure, 0)),
+          0
+        )
+      )
       when normalized_task_state in ('QUEUED', 'RUNNING') then 1
       else 0
     end
@@ -943,7 +1002,20 @@ select
   sum(
     case
       when lead_opt_total > 0 then greatest(
-        lead_opt_total - lead_opt_success - lead_opt_failure - greatest(lead_opt_total - lead_opt_success - lead_opt_failure, 0),
+        lead_opt_total
+        - lead_opt_success
+        - lead_opt_failure
+        - least(lead_opt_running, greatest(lead_opt_total - lead_opt_success - lead_opt_failure, 0))
+        - least(
+          lead_opt_queued,
+          greatest(
+            lead_opt_total
+            - lead_opt_success
+            - lead_opt_failure
+            - least(lead_opt_running, greatest(lead_opt_total - lead_opt_success - lead_opt_failure, 0)),
+            0
+          )
+        ),
         0
       )
       when normalized_task_state not in ('SUCCESS', 'FAILURE', 'QUEUED', 'RUNNING') then 1
@@ -1033,12 +1105,19 @@ before insert or update of components on public.project_tasks
 for each row
 execute procedure public.project_tasks_compact_components_for_storage();
 
+drop trigger if exists trg_project_copilot_states_updated_at on public.project_copilot_states;
+create trigger trg_project_copilot_states_updated_at
+before update on public.project_copilot_states
+for each row
+execute procedure public.set_updated_at();
+
 alter table public.app_users enable row level security;
 alter table public.projects enable row level security;
 alter table public.project_tasks enable row level security;
 alter table public.project_shares enable row level security;
 alter table public.project_task_shares enable row level security;
 alter table public.project_copilot_messages enable row level security;
+alter table public.project_copilot_states enable row level security;
 alter table public.api_tokens enable row level security;
 alter table public.api_token_usage enable row level security;
 
@@ -1092,6 +1171,10 @@ drop policy if exists project_copilot_messages_anon_select on public.project_cop
 drop policy if exists project_copilot_messages_anon_insert on public.project_copilot_messages;
 drop policy if exists project_copilot_messages_anon_update on public.project_copilot_messages;
 drop policy if exists project_copilot_messages_anon_delete on public.project_copilot_messages;
+drop policy if exists project_copilot_states_anon_select on public.project_copilot_states;
+drop policy if exists project_copilot_states_anon_insert on public.project_copilot_states;
+drop policy if exists project_copilot_states_anon_update on public.project_copilot_states;
+drop policy if exists project_copilot_states_anon_delete on public.project_copilot_states;
 drop policy if exists api_tokens_anon_select on public.api_tokens;
 drop policy if exists api_tokens_anon_insert on public.api_tokens;
 drop policy if exists api_tokens_anon_update on public.api_tokens;
@@ -1226,6 +1309,31 @@ for delete
 to anon
 using (true);
 
+create policy project_copilot_states_anon_select
+on public.project_copilot_states
+for select
+to anon
+using (true);
+
+create policy project_copilot_states_anon_insert
+on public.project_copilot_states
+for insert
+to anon
+with check (true);
+
+create policy project_copilot_states_anon_update
+on public.project_copilot_states
+for update
+to anon
+using (true)
+with check (true);
+
+create policy project_copilot_states_anon_delete
+on public.project_copilot_states
+for delete
+to anon
+using (true);
+
 create policy api_tokens_anon_select
 on public.api_tokens
 for select
@@ -1294,6 +1402,7 @@ grant select, insert, update, delete on public.project_tasks to anon, authentica
 grant select, insert, update, delete on public.project_shares to anon, authenticated, service_role;
 grant select, insert, update, delete on public.project_task_shares to anon, authenticated, service_role;
 grant select, insert, update, delete on public.project_copilot_messages to anon, authenticated, service_role;
+grant select, insert, update, delete on public.project_copilot_states to anon, authenticated, service_role;
 grant select, insert, update, delete on public.api_tokens to anon, authenticated, service_role;
 grant select, insert, update, delete on public.api_token_usage to anon, authenticated, service_role;
 grant select on public.project_tasks_list to anon, authenticated, service_role;

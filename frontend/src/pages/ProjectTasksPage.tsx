@@ -20,24 +20,6 @@ import { getWorkflowDefinition } from '../utils/workflows';
 import type { CopilotPlanAction, ProjectTask } from '../types/models';
 import '../styles/project-tasks.css';
 
-function findTaskForCopilot(content: string, rows: ProjectTask[]): ProjectTask | null {
-  const normalized = content.toLowerCase();
-  const quoted = content.match(/["“”']([^"“”']+)["“”']/)?.[1]?.trim();
-  const tokens = [
-    quoted,
-    ...Array.from(content.matchAll(/\b(?:task[_\s-]?id|task|任务)\s*(?:是|为|=|:)?\s*([A-Za-z0-9_.:-]{4,})/gi)).map((match) => match[1])
-  ]
-    .map((item) => String(item || '').trim().toLowerCase())
-    .filter(Boolean);
-  for (const row of rows) {
-    const taskId = String(row.task_id || '').trim().toLowerCase();
-    const rowId = String(row.id || '').trim().toLowerCase();
-    const name = String(row.name || '').trim().toLowerCase();
-    if (tokens.some((token) => token === taskId || token === rowId || (name && name.includes(token)))) return row;
-  }
-  return rows.find((row) => normalized.includes(String(row.task_id || '').trim().toLowerCase()) && String(row.task_id || '').trim()) || null;
-}
-
 export function ProjectTasksPage() {
   const { projectId = '' } = useParams();
   const location = useLocation();
@@ -50,10 +32,10 @@ export function ProjectTasksPage() {
 
   const [exportingExcel, setExportingExcel] = useState(false);
   const [sharedTaskRow, setSharedTaskRow] = useState<ProjectTask | null>(null);
-  const [copilotOpen, setCopilotOpen] = useState(() => readStoredCopilotOpen({ contextType: 'task_list', projectId }));
+  const [copilotOpen, setCopilotOpen] = useState(() => readStoredCopilotOpen({ contextType: 'task_list', projectId, userId: session?.userId || null }));
   useEffect(() => {
-    writeStoredCopilotOpen({ contextType: 'task_list', projectId }, copilotOpen);
-  }, [copilotOpen, projectId]);
+    writeStoredCopilotOpen({ contextType: 'task_list', projectId, userId: session?.userId || null }, copilotOpen);
+  }, [copilotOpen, projectId, session?.userId]);
   const [priorityTaskRowIds, setPriorityTaskRowIds] = useState<string[]>([]);
   const initialPage = useMemo(() => {
     const parsed = Number(new URLSearchParams(location.search).get('page') || '');
@@ -201,6 +183,7 @@ export function ProjectTasksPage() {
     beginTaskNameEdit,
     cancelTaskNameEdit,
     saveTaskNameEdit,
+    updateTaskMetadata,
     terminateTask,
     removeTask,
   } = useProjectTaskRowActions({
@@ -245,76 +228,63 @@ export function ProjectTasksPage() {
     return 'API Access is only available for Prediction and Affinity Scoring.';
   }, [projectWorkflowKey]);
 
-  const buildTaskListCopilotActions = useCallback((content: string): CopilotPlanAction[] => {
-    const text = content.toLowerCase();
-    const actions: CopilotPlanAction[] = [];
-    const matchedTask = findTaskForCopilot(content, taskRows.map((row) => row.task));
-    if (text.includes('fail') || text.includes('失败')) {
-      actions.push({ id: 'tasks:failure', label: 'Show failed tasks', description: 'Filter the task list to FAILURE.' });
-    }
-    if (text.includes('running') || text.includes('运行')) {
-      actions.push({ id: 'tasks:running', label: 'Show running tasks', description: 'Filter the task list to RUNNING.' });
-    }
-    if (text.includes('queued') || text.includes('排队')) {
-      actions.push({ id: 'tasks:queued', label: 'Show queued tasks', description: 'Filter the task list to QUEUED.' });
-    }
-    if (text.includes('success') || text.includes('成功')) {
-      actions.push({ id: 'tasks:success', label: 'Show successful tasks', description: 'Filter the task list to SUCCESS.' });
-    }
-    if (text.includes('latest') || text.includes('newest') || text.includes('最近') || text.includes('最新')) {
-      actions.push({ id: 'tasks:submitted', label: 'Sort by submitted time', description: 'Sort tasks by submitted time.' });
-    }
-    if (text.includes('boltz')) {
-      actions.push({ id: 'tasks:backend_boltz', label: 'Filter Boltz tasks', description: 'Show tasks submitted to the Boltz backend.' });
-    }
-    if (text.includes('new task') || text.includes('add task') || text.includes('create task') || text.includes('新增任务') || text.includes('添加任务') || text.includes('新任务')) {
-      actions.push({
-        id: 'tasks:create',
-        label: 'Create new task',
-        description: canEdit ? 'Open the project task builder.' : 'This project is read-only for your account.'
-      });
-    }
-    if (matchedTask && (text.includes('open') || text.includes('view') || text.includes('查看') || text.includes('打开'))) {
-      actions.push({
-        id: 'tasks:open',
-        label: 'Open task',
-        description: matchedTask.name || matchedTask.task_id || matchedTask.id,
-        payload: { taskRowId: matchedTask.id }
-      });
-    }
-    if (matchedTask && (text.includes('cancel') || text.includes('stop') || text.includes('取消') || text.includes('停止'))) {
-      actions.push({
-        id: 'tasks:cancel',
-        label: 'Cancel task',
-        description: matchedTask.name || matchedTask.task_id || matchedTask.id,
-        payload: { taskRowId: matchedTask.id }
-      });
-    }
-    return actions;
-  }, [canEdit, taskRows]);
-
   const applyTaskListCopilotAction = useCallback(async (action: CopilotPlanAction) => {
     if (action.id === 'tasks:failure') setStateFilter('FAILURE');
     if (action.id === 'tasks:running') setStateFilter('RUNNING');
     if (action.id === 'tasks:queued') setStateFilter('QUEUED');
     if (action.id === 'tasks:success') setStateFilter('SUCCESS');
     if (action.id === 'tasks:submitted') handleSort('submitted');
+    if (action.id === 'tasks:sort_plddt') handleSort('plddt');
+    if (action.id === 'tasks:sort_iptm') handleSort('iptm');
+    if (action.id === 'tasks:sort_ipsae') handleSort('ipsae');
+    if (action.id === 'tasks:sort_pae') handleSort('pae');
     if (action.id === 'tasks:backend_boltz') setBackendFilter('boltz');
     if (action.id === 'tasks:create') {
       if (!canEdit) throw new Error('This project is read-only for your account.');
       navigate(createTaskHref);
     }
-    if (action.id === 'tasks:open' || action.id === 'tasks:cancel') {
+    if (action.id === 'tasks:create_with_sequence') {
+      if (!canEdit) throw new Error('This project is read-only for your account.');
+      const sequence = String(action.payload?.protein_sequence || '').trim();
+      const components = Array.isArray(action.payload?.components) ? action.payload.components : [];
+      const url = new URL(createTaskHref, window.location.origin);
+      if (components.length > 0) {
+        url.searchParams.set('copilot_components', JSON.stringify(components));
+      } else if (sequence) {
+        url.searchParams.set('copilot_sequence', sequence);
+      }
+      navigate(url.pathname + url.search);
+    }
+    if (action.id === 'tasks:delete') {
+      if (!canEdit) throw new Error('This project is read-only for your account.');
       const taskRowId = String(action.payload?.taskRowId || '').trim();
       const task = taskRows.find((row) => row.task.id === taskRowId)?.task;
       if (!task) throw new Error('Could not find the task referenced by Copilot.');
-      if (action.id === 'tasks:open') {
-        await openTask(task);
-      } else {
-        await terminateTask(task);
-      }
+      await removeTask(task);
     }
-  }, [canEdit, createTaskHref, handleSort, navigate, openTask, setBackendFilter, setStateFilter, taskRows, terminateTask]);
+    if (action.id === 'tasks:rename') {
+      if (!canEdit) throw new Error('This project is read-only for your account.');
+      const taskRowId = String(action.payload?.taskRowId || '').trim();
+      const task = taskRows.find((row) => row.task.id === taskRowId)?.task;
+      if (!task) throw new Error('Could not find the task referenced by Copilot.');
+      const nextName = typeof action.payload?.taskName === 'string' ? action.payload.taskName : undefined;
+      const nextSummary = typeof action.payload?.taskSummary === 'string' ? action.payload.taskSummary : undefined;
+      await updateTaskMetadata(task, { name: nextName, summary: nextSummary });
+    }
+    if (action.id === 'tasks:cancel') {
+      if (!canEdit) throw new Error('This project is read-only for your account.');
+      const taskRowId = String(action.payload?.taskRowId || '').trim();
+      const task = taskRows.find((row) => row.task.id === taskRowId)?.task;
+      if (!task) throw new Error('Could not find the task referenced by Copilot.');
+      await terminateTask(task);
+    }
+    if (action.id === 'tasks:open') {
+      const taskRowId = String(action.payload?.taskRowId || '').trim();
+      const task = taskRows.find((row) => row.task.id === taskRowId)?.task;
+      if (!task) throw new Error('Could not find the task referenced by Copilot.');
+      await openTask(task);
+    }
+  }, [canEdit, createTaskHref, handleSort, navigate, openTask, removeTask, setBackendFilter, setStateFilter, taskRows, terminateTask, updateTaskMetadata]);
 
   useEffect(() => {
     if (supportsApiAccess) return;
@@ -451,7 +421,7 @@ export function ProjectTasksPage() {
       {project && session?.userId ? (
         <ProjectCopilotModal
           open={copilotOpen}
-          title="Task List Copilot"
+          title="Copilot"
           subtitle={`${filteredRows.length} matched / ${taskRows.length} total`}
           contextType="task_list"
           projectId={project.id}
@@ -471,7 +441,6 @@ export function ProjectTasksPage() {
               submitted_at: row.task.submitted_at || row.task.created_at
             }))
           }}
-          buildPlanActions={buildTaskListCopilotActions}
           onApplyPlanAction={applyTaskListCopilotAction}
           onOpen={() => setCopilotOpen(true)}
           onClose={() => setCopilotOpen(false)}

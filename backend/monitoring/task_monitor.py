@@ -15,6 +15,9 @@ from backend.core import config
 from backend.core.celery_app import celery_app
 from gpu_manager import get_gpu_status, get_redis_client, release_gpu
 
+TASK_CANCELLED_KEY_PREFIX = 'task_cancelled:'
+TASK_CANCELLED_TTL_SECONDS = 14 * 24 * 3600
+
 
 class TaskMonitor:
     """任务监控和清理工具。"""
@@ -355,6 +358,15 @@ class TaskMonitor:
             'ok': False,
             'errors': [],
         }
+
+        try:
+            self.redis_client.setex(
+                f'{TASK_CANCELLED_KEY_PREFIX}{task_id}',
+                TASK_CANCELLED_TTL_SECONDS,
+                'cancelled',
+            )
+        except Exception as exc:
+            result['errors'].append(f'Failed to write cancellation marker: {exc}')
 
         task_processes = self._find_task_processes(task_id)
         result['processes_found'] = [proc['pid'] for proc in task_processes]

@@ -23,6 +23,7 @@ import importlib.util
 from werkzeug.utils import secure_filename
 
 import requests
+from celery.exceptions import Ignore
 from backend.core import config
 from backend.core.celery_app import celery_app
 from gpu_manager import (
@@ -105,6 +106,30 @@ MAX_STATUS_DETAILS_CHARS = 4_000
 MAX_EXCEPTION_MESSAGE_CHARS = 20_000
 MAX_TRACEBACK_CHARS = 40_000
 MAX_STDIO_TAIL_CHARS = 12_000
+TASK_CANCELLED_KEY_PREFIX = "task_cancelled:"
+TASK_CANCELLED_TTL_SECONDS = 14 * 24 * 3600
+
+
+def _task_cancelled_key(task_id: str) -> str:
+    return f"{TASK_CANCELLED_KEY_PREFIX}{str(task_id or '').strip()}"
+
+
+def _is_task_cancelled(redis_client: Any, task_id: str) -> bool:
+    normalized_task_id = str(task_id or "").strip()
+    if not normalized_task_id:
+        return False
+    try:
+        return bool(redis_client.exists(_task_cancelled_key(normalized_task_id)))
+    except Exception as exc:
+        logger.warning("Task %s: Failed to read cancellation marker: %s", normalized_task_id, exc)
+        return False
+
+
+def _raise_if_task_cancelled(self: Any, redis_client: Any, task_id: str) -> None:
+    if not _is_task_cancelled(redis_client, task_id):
+        return
+    logger.info("Task %s: Cancellation marker found before execution; acking without GPU work.", task_id)
+    raise Ignore()
 
 
 def _resolve_worker_temp_root() -> str:
@@ -1105,9 +1130,11 @@ def predict_task(self, predict_args: dict):
     try:
         # 初始化进度跟踪器
         redis_client = get_redis_client()
+        _raise_if_task_cancelled(self, redis_client, task_id)
         tracker = TaskProgressTracker(task_id, redis_client)
         tracker.start_heartbeat()
         tracker.update_status("starting", "Initializing task")
+        _raise_if_task_cancelled(self, redis_client, task_id)
         normalized_workflow = _normalize_prediction_workflow(predict_args.get('workflow'))
         is_peptide_design = normalized_workflow == 'peptide_design'
         if is_peptide_design:
@@ -1125,7 +1152,9 @@ def predict_task(self, predict_args: dict):
         else:
             logger.info(f"Task {task_id}: Attempting to acquire GPU.")
             tracker.update_status("acquiring_gpu", "Waiting for GPU allocation")
+            _raise_if_task_cancelled(self, redis_client, task_id)
             gpu_id = _acquire_gpu_with_non_peptide_wait_registration(task_id=task_id, timeout=3600)
+            _raise_if_task_cancelled(self, redis_client, task_id)
             allocated_gpu_ids = [gpu_id]
             reported_gpu_id = gpu_id
             reported_gpu_ids = [gpu_id]
@@ -1157,6 +1186,7 @@ def predict_task(self, predict_args: dict):
             # (e.g. PocketXMol shell wrapper) so they do not fall back to GPU 0.
             proc_env["BOLTZ_ASSIGNED_GPU_ID"] = str(gpu_id)
         proc_env["BOLTZ_TASK_ID"] = task_id
+        _raise_if_task_cancelled(self, redis_client, task_id)
         
         command = [
             sys.executable,
@@ -1313,6 +1343,8 @@ def predict_task(self, predict_args: dict):
         tracker.update_status("completed", "Task completed successfully")
         return final_meta
 
+    except Ignore:
+        raise
     except Exception as e:
         logger.error(f"Task {task_id} failed: {e}", exc_info=True)
         if tracker:

@@ -363,8 +363,7 @@
 .copilot-chat-window .copilot-plan-actions {
   display: grid;
   gap: 7px;
-  max-height: 150px;
-  overflow: auto;
+  flex-shrink: 0;
   padding: 8px;
   border: 1px solid #d6e2db;
   border-radius: 10px;

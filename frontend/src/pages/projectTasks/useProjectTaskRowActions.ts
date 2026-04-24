@@ -36,6 +36,7 @@ interface UseProjectTaskRowActionsResult {
   beginTaskNameEdit: (task: ProjectTask, displayName: string) => void;
   cancelTaskNameEdit: () => void;
   saveTaskNameEdit: (task: ProjectTask, displayName: string) => Promise<void>;
+  updateTaskMetadata: (task: ProjectTask, patch: { name?: string; summary?: string }) => Promise<void>;
   terminateTask: (task: ProjectTask) => Promise<void>;
   removeTask: (task: ProjectTask) => Promise<void>;
 }
@@ -206,6 +207,26 @@ export function useProjectTaskRowActions({
     }
   }, [editingTaskNameId, savingTaskNameId, editingTaskNameValue, setError, setTasks]);
 
+  const updateTaskMetadata = useCallback(async (task: ProjectTask, patch: { name?: string; summary?: string }) => {
+    if (!canEditTask(task)) return;
+    const nextPatch: Partial<ProjectTask> = {};
+    if (typeof patch.name === 'string') nextPatch.name = patch.name.trim();
+    if (typeof patch.summary === 'string') nextPatch.summary = patch.summary.trim();
+    if (!Object.keys(nextPatch).length) return;
+    setSavingTaskNameId(task.id);
+    setError(null);
+    try {
+      const updatedTask = await updateProjectTask(task.id, nextPatch);
+      const nextRow = isProjectTaskRow(updatedTask) ? { ...task, ...updatedTask } : { ...task, ...nextPatch };
+      setTasks((prev) => sanitizeTaskRows(prev).map((row) => (row.id === task.id ? nextRow : row)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update task metadata.');
+      throw err;
+    } finally {
+      setSavingTaskNameId(null);
+    }
+  }, [setError, setTasks]);
+
   const terminateTask = useCallback(async (task: ProjectTask) => {
     if (!canEditTask(task)) return;
     const runtimeTaskId = String(task.task_id || '').trim();
@@ -344,6 +365,7 @@ export function useProjectTaskRowActions({
     beginTaskNameEdit,
     cancelTaskNameEdit,
     saveTaskNameEdit,
+    updateTaskMetadata,
     terminateTask,
     removeTask,
   };

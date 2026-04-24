@@ -164,13 +164,15 @@ def copilot_assistant_answer() -> Tuple[Response, int]:
 @app.post("/vbio-api/copilot/plan_actions")
 def copilot_plan_actions() -> Tuple[Response, int]:
     payload = request.get_json(silent=True) or {}
+    ctx_type = str(payload.get("context_type") or "").strip()
+    content = str(payload.get("content") or "").strip()
     try:
         actions = copilot_assistant.plan_actions(
-            context_type=str(payload.get("context_type") or "").strip(),
+            context_type=ctx_type,
             context_payload=payload.get("context_payload") if isinstance(payload.get("context_payload"), dict) else {},
             user_id=str(payload.get("user_id") or "").strip(),
             username=str(payload.get("username") or "").strip(),
-            content=str(payload.get("content") or "").strip(),
+            content=content,
         )
         return jsonify({"actions": actions}), 200
     except ValueError as exc:

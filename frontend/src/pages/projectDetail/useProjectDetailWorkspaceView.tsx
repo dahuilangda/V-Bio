@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } fro
 import { Link } from 'react-router-dom';
 import type { InputComponent, PredictionConstraint, ProjectTask } from '../../types/models';
 import { downloadResultBlob, downloadResultFile, terminateTask as terminateBackendTask } from '../../api/backendApi';
+import { deleteProjectTask } from '../../api/supabaseLite';
 import { createInputComponent } from '../../utils/projectInputs';
 import { getWorkflowDefinition } from '../../utils/workflows';
 import { ProjectDetailLayout } from './ProjectDetailLayout';
@@ -37,7 +38,13 @@ import {
   type LeadOptPredictionRecord
 } from '../../components/project/leadopt/hooks/useLeadOptMmpQueryMachine';
 import { readLeadOptTaskSummary } from '../projectTasks/taskDataUtils';
-import { ProjectCopilotModal, readStoredCopilotOpen, writeStoredCopilotOpen } from '../../components/copilot/ProjectCopilotModal';
+import {
+  ProjectCopilotModal,
+  clearStoredCopilotTaskPrefill,
+  readStoredCopilotOpen,
+  readStoredCopilotTaskPrefill,
+  writeStoredCopilotOpen
+} from '../../components/copilot/ProjectCopilotModal';
 import type { CopilotPlanAction } from '../../types/models';
 
 function readText(value: unknown): string {
@@ -47,6 +54,52 @@ function readText(value: unknown): string {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+}
+
+function normalizeCopilotPrefillComponents(value: unknown): InputComponent[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item, index) => {
+      const row = asRecord(item);
+      let componentType = readText(row.type).trim().toLowerCase();
+      componentType = componentType.replace(/[-\s]+/g, '_');
+      if (componentType === 'peptide' || componentType === 'polypeptide') componentType = 'protein';
+      if (
+        componentType === 'small_molecule' ||
+        componentType === 'smallmolecule' ||
+        componentType === 'molecule' ||
+        componentType === 'compound' ||
+        componentType === 'drug' ||
+        componentType === 'smiles' ||
+        componentType === 'ccd'
+      ) {
+        componentType = 'ligand';
+      }
+      if (componentType !== 'protein' && componentType !== 'ligand' && componentType !== 'dna' && componentType !== 'rna') return null;
+      const rawSequence =
+        readText(row.sequence).trim() ||
+        readText(row.value).trim() ||
+        readText(row.input).trim() ||
+        (componentType === 'ligand'
+          ? readText(row.smiles).trim() || readText(row.ccd).trim() || readText(row.ligand).trim()
+          : '');
+      const sequence = componentType === 'ligand' ? rawSequence : rawSequence.replace(/\s+/g, '').toUpperCase();
+      if (!sequence) return null;
+      const component: InputComponent = {
+        id: `copilot-${componentType}-${index + 1}`,
+        type: componentType as InputComponent['type'],
+        sequence,
+        numCopies: Math.max(1, Math.floor(Number(row.numCopies) || 1)),
+      };
+      if (componentType === 'protein') {
+        component.useMsa = row.useMsa === false ? false : true;
+      }
+      if (componentType === 'ligand') {
+        component.inputMethod = readText(row.inputMethod).trim() === 'ccd' ? 'ccd' : 'smiles';
+      }
+      return component;
+    })
+    .filter((component): component is InputComponent => Boolean(component));
 }
 
 function readFiniteNumber(value: unknown): number | null {
@@ -1626,11 +1679,11 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   const [leadOptHeaderRunAction, setLeadOptHeaderRunAction] = useState<(() => void | Promise<void>) | null>(null);
   const [leadOptHeaderRunPending, setLeadOptHeaderRunPending] = useState(false);
   const [headerStopRunPending, setHeaderStopRunPending] = useState(false);
-  const [copilotOpen, setCopilotOpen] = useState(() => readStoredCopilotOpen({ contextType: 'task_detail' }));
-  const [copilotSubmitAfterPatch, setCopilotSubmitAfterPatch] = useState(false);
+  const [copilotOpen, setCopilotOpen] = useState(() => readStoredCopilotOpen({ contextType: 'task_detail', userId: session?.userId || null }));
   useEffect(() => {
-    writeStoredCopilotOpen({ contextType: 'task_detail' }, copilotOpen);
-  }, [copilotOpen]);
+    writeStoredCopilotOpen({ contextType: 'task_detail', userId: session?.userId || null }, copilotOpen);
+  }, [copilotOpen, session?.userId]);
+
   const explicitRequestedTaskRowId = useMemo(
     () => {
       const query = new URLSearchParams(runtime.locationSearch);
@@ -1802,6 +1855,85 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     navigate,
     affinityLigandFile
   } = runtime;
+
+  const copilotSequenceAppliedRef = useRef(false);
+  const [copilotPrefillSave, setCopilotPrefillSave] = useState<{ components: InputComponent[] } | null>(null);
+  useEffect(() => {
+    if (copilotSequenceAppliedRef.current) return;
+    const query = new URLSearchParams(runtime.locationSearch);
+    const copilotComponentsRaw = String(query.get('copilot_components') || '').trim();
+    const copilotSequence = String(query.get('copilot_sequence') || '').trim();
+    const storedCopilotPrefill =
+      session?.userId && project?.id
+        ? readStoredCopilotTaskPrefill(session.userId, project.id)
+        : null;
+    if ((!copilotComponentsRaw && !copilotSequence && !storedCopilotPrefill) || !draft || !project) return;
+    copilotSequenceAppliedRef.current = true;
+    const aminoAcidPattern = /^[ACDEFGHIKLMNPQRSTVWY]+$/i;
+    query.delete('copilot_components');
+    query.delete('copilot_sequence');
+    const nextSearch = query.toString();
+    navigate(
+      { pathname: window.location.pathname, search: nextSearch ? `?${nextSearch}` : '' },
+      { replace: true }
+    );
+    let nextComponents: InputComponent[] = [];
+    if (copilotComponentsRaw) {
+      try {
+        nextComponents = normalizeCopilotPrefillComponents(JSON.parse(copilotComponentsRaw));
+      } catch {
+        nextComponents = [];
+      }
+    }
+    if (storedCopilotPrefill) {
+      const storedComponents = normalizeCopilotPrefillComponents(storedCopilotPrefill.components);
+      if (storedComponents.length > nextComponents.length) {
+        nextComponents = storedComponents;
+      }
+    }
+    if (nextComponents.length === 0 && aminoAcidPattern.test(copilotSequence)) {
+      nextComponents = [{
+        id: `copilot-protein-1`,
+        type: 'protein',
+        sequence: copilotSequence.toUpperCase(),
+        numCopies: 1,
+        useMsa: true,
+      }];
+    }
+    if (nextComponents.length === 0) return;
+    setDraft((prev) =>
+      prev
+        ? {
+            ...prev,
+            inputConfig: {
+              ...prev.inputConfig,
+              version: 1,
+              components: nextComponents,
+              constraints: [],
+            },
+          }
+        : prev
+    );
+    if (storedCopilotPrefill && session?.userId && project.id) {
+      clearStoredCopilotTaskPrefill(session.userId, project.id);
+    }
+    setCopilotPrefillSave({ components: nextComponents });
+  }, [draft, navigate, project, runtime.locationSearch, session?.userId, setDraft]);
+
+  useEffect(() => {
+    if (!copilotPrefillSave || !draft) return;
+    const hasAllComponents = copilotPrefillSave.components.every((expected) =>
+      draft.inputConfig.components.some(
+        (component) =>
+          component.type === expected.type &&
+          readText(component.sequence).trim() === readText(expected.sequence).trim()
+      )
+    );
+    if (!hasAllComponents) return;
+    setCopilotPrefillSave(null);
+    void saveDraft();
+  }, [copilotPrefillSave, draft, saveDraft]);
+
   const sessionIdentity =
     readText(session?.userId).trim() ||
     readText(session?.username).trim().toLowerCase() ||
@@ -3109,6 +3241,16 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       ? 'Select at least one fragment to run.'
       : 'Run action is only available in Lead Optimization Components view.'
     : runBlockedReason;
+  const submitTaskRef = useRef(submitTask);
+  const runDisabledRef = useRef(effectiveRunDisabled);
+  const runBlockedReasonRef = useRef(effectiveRunBlockedReason);
+
+  useEffect(() => {
+    submitTaskRef.current = submitTask;
+    runDisabledRef.current = effectiveRunDisabled;
+    runBlockedReasonRef.current = effectiveRunBlockedReason;
+  }, [effectiveRunBlockedReason, effectiveRunDisabled, submitTask]);
+
   const headerRuntimeTaskId =
     readText(statusContextTaskRow?.task_id).trim() ||
     readText(activeResultTask?.task_id).trim() ||
@@ -3157,8 +3299,28 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       });
   };
 
-  const applyTaskDetailCopilotAction = useCallback((action: CopilotPlanAction) => {
+  const applyTaskDetailCopilotAction = useCallback(async (action: CopilotPlanAction) => {
     const patch = asRecord(action.payload?.parameterPatch);
+    const applyMetadataPatch = () => {
+      const metadataPatch = asRecord(action.payload?.metadataPatch);
+      const nextName = readText(metadataPatch.taskName).trim();
+      const nextSummary = readText(metadataPatch.taskSummary).trim();
+      if (!nextName && !nextSummary) throw new Error('No task name or description update was provided.');
+      if (!canEdit) throw new Error('This project is read-only for your account.');
+
+      const taskRow = activeResultTask || statusContextTaskRow;
+      if (!taskRow?.id) throw new Error('No current task to update.');
+
+      if (nextName) handleTaskNameChange(nextName);
+      if (nextSummary) handleTaskSummaryChange(nextSummary);
+
+      const payload: Partial<ProjectTask> = {};
+      if (nextName) payload.name = nextName;
+      if (nextSummary) payload.summary = nextSummary;
+      void patchTask(taskRow.id, payload).catch((err) => {
+        setError(err instanceof Error ? err.message : 'Failed to update task information.');
+      });
+    };
     const applyPatch = () => {
       const seed = readFiniteNumber(patch.seed);
       if (seed !== null) handleRuntimeSeedChange(Math.floor(seed));
@@ -3207,22 +3369,55 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       applyPatch();
       return;
     }
+    if (action.id === 'task_detail:apply_metadata_patch') {
+      applyMetadataPatch();
+      return;
+    }
     if (action.id === 'task_detail:save_draft') {
-      void saveDraft();
+      await saveDraft();
       return;
     }
     if (action.id === 'task_detail:apply_patch_and_submit') {
       applyPatch();
-      setCopilotSubmitAfterPatch(true);
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      if (runDisabledRef.current) {
+        throw new Error(runBlockedReasonRef.current || 'Current task cannot be submitted yet.');
+      }
+      await submitTaskRef.current();
       return;
     }
-    if (action.id === 'task_detail:submit_current' || action.id === 'task_detail:apply_patch_and_submit') {
-      if (effectiveRunDisabled) {
-        throw new Error(effectiveRunBlockedReason || 'Current task cannot be submitted yet.');
+    if (action.id === 'task_detail:submit_current') {
+      if (runDisabledRef.current) {
+        throw new Error(runBlockedReasonRef.current || 'Current task cannot be submitted yet.');
       }
-      handleHeaderRunAction();
+      await submitTaskRef.current();
+      return;
+    }
+    if (action.id === 'task_detail:delete_current') {
+      const taskRow = activeResultTask || statusContextTaskRow;
+      if (!taskRow) throw new Error('No current task to delete.');
+      if (!canEdit) throw new Error('This project is read-only for your account.');
+      const taskName = String(taskRow.name || taskRow.task_id || taskRow.id || '').trim();
+      if (!window.confirm(`Delete task "${taskName}"?`)) return;
+      const runtimeTaskId = String(taskRow.task_id || '').trim();
+      const runtimeState = String(taskRow.task_state || displayTaskState || '').trim().toUpperCase();
+      if ((runtimeState === 'QUEUED' || runtimeState === 'RUNNING') && !runtimeTaskId) {
+        throw new Error('Task is active but task_id is missing; deletion is blocked to avoid orphan runtime.');
+      }
+      if (runtimeState === 'QUEUED' || runtimeState === 'RUNNING') {
+        const response = await terminateBackendTask(runtimeTaskId);
+        if (response.terminated !== true) {
+          throw new Error(`Backend did not confirm cancellation for task "${runtimeTaskId}".`);
+        }
+      }
+      await deleteProjectTask(taskRow.id);
+      await loadProject();
+      navigate(`/projects/${project.id}/tasks`, { replace: true });
     }
   }, [
+    activeResultTask,
+    canEdit,
+    displayTaskState,
     effectiveRunBlockedReason,
     effectiveRunDisabled,
     handleHeaderRunAction,
@@ -3233,19 +3428,17 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     handleRuntimePeptideMutationRateChange,
     handleRuntimePeptidePopulationSizeChange,
     handleRuntimeSeedChange,
+    handleTaskNameChange,
+    handleTaskSummaryChange,
+    navigate,
     onAffinityModeChange,
-    saveDraft
+    patchTask,
+    project.id,
+    loadProject,
+    saveDraft,
+    setError,
+    statusContextTaskRow
   ]);
-
-  useEffect(() => {
-    if (!copilotSubmitAfterPatch) return;
-    setCopilotSubmitAfterPatch(false);
-    if (effectiveRunDisabled) {
-      setError(effectiveRunBlockedReason || 'Current task cannot be submitted yet.');
-      return;
-    }
-    handleHeaderRunAction();
-  }, [copilotSubmitAfterPatch, effectiveRunBlockedReason, effectiveRunDisabled, handleHeaderRunAction, setError]);
 
   return (
     <>
@@ -3339,7 +3532,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     {session?.userId ? (
       <ProjectCopilotModal
         open={copilotOpen}
-        title="Task Copilot"
+        title="Copilot"
         subtitle={`${workflow.shortTitle} · ${project.name}`}
         contextType="task_detail"
         projectId={project.id}

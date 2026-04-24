@@ -16,6 +16,9 @@ create table if not exists public.project_copilot_messages (
 create index if not exists idx_project_copilot_messages_scope_time
 on public.project_copilot_messages (context_type, project_id, project_task_id, created_at asc);
 
+create index if not exists idx_project_copilot_messages_conversation_scope_time
+on public.project_copilot_messages ((metadata->>'conversation_scope'), context_type, project_id, project_task_id, created_at desc);
+
 drop trigger if exists trg_project_copilot_messages_updated_at on public.project_copilot_messages;
 create trigger trg_project_copilot_messages_updated_at
 before update on public.project_copilot_messages

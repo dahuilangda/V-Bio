@@ -17,6 +17,7 @@ import {
   Search,
   Share2,
   SlidersHorizontal,
+  Square,
   Trash2
 } from 'lucide-react';
 import { ProjectCopilotModal, readStoredCopilotOpen, writeStoredCopilotOpen } from '../components/copilot/ProjectCopilotModal';
@@ -56,7 +57,7 @@ function backendLabel(value: string): string {
 export function ProjectsPage() {
   const navigate = useNavigate();
   const { session } = useAuth();
-  const { projects, loading, error, search, setSearch, createProject, patchProject, softDeleteProject, load } =
+  const { projects, loading, error, search, setSearch, createProject, patchProject, cancelProjectRuntimeTasks, softDeleteProject, load } =
     useProjects(session);
 
   const [showCreate, setShowCreate] = useState(false);
@@ -79,10 +80,11 @@ export function ProjectsPage() {
   const [page, setPage] = useState<number>(1);
   const [filtersHydrated, setFiltersHydrated] = useState(false);
   const [sharedProject, setSharedProject] = useState<Project | null>(null);
-  const [copilotOpen, setCopilotOpen] = useState(() => readStoredCopilotOpen({ contextType: 'project_list' }));
+  const [cancellingProjectId, setCancellingProjectId] = useState<string | null>(null);
+  const [copilotOpen, setCopilotOpen] = useState(() => readStoredCopilotOpen({ contextType: 'project_list', userId: session?.userId || null }));
   useEffect(() => {
-    writeStoredCopilotOpen({ contextType: 'project_list' }, copilotOpen);
-  }, [copilotOpen]);
+    writeStoredCopilotOpen({ contextType: 'project_list', userId: session?.userId || null }, copilotOpen);
+  }, [copilotOpen, session?.userId]);
   const projectsFiltersStorageKey = useMemo(() => {
     const sessionIdentity =
       String(session?.userId || '').trim() ||
@@ -286,28 +288,36 @@ export function ProjectsPage() {
     return filteredProjects.slice(start, start + pageSize);
   }, [filteredProjects, currentPage, pageSize]);
 
-  const buildProjectCopilotActions = (content: string): CopilotPlanAction[] => {
-    const text = content.toLowerCase();
-    const actions: CopilotPlanAction[] = [];
-    if (text.includes('fail') || text.includes('失败')) {
-      actions.push({ id: 'projects:failed', label: 'Show failed projects', description: 'Filter projects to those with failed tasks.' });
+  const applyProjectCopilotAction = async (action: CopilotPlanAction) => {
+    if (action.id === 'projects:create') {
+      openCreateModal();
+      return;
     }
-    if (text.includes('active') || text.includes('running') || text.includes('queued') || text.includes('运行') || text.includes('排队')) {
-      actions.push({ id: 'projects:active', label: 'Show active projects', description: 'Filter projects with queued or running tasks.' });
+    if (action.id === 'projects:open') {
+      const projectId = String(action.payload?.projectId || '').trim();
+      const target = projects.find((p) => p.id === projectId);
+      if (!target) throw new Error('Could not find the project referenced by Copilot.');
+      navigate(`/projects/${target.id}`);
+      return;
     }
-    if (text.includes('newest') || text.includes('latest') || text.includes('最近') || text.includes('最新')) {
-      actions.push({ id: 'projects:updated_desc', label: 'Sort by newest updated', description: 'Sort projects by most recently updated.' });
+    if (action.id === 'projects:cancel_active') {
+      const projectId = String(action.payload?.projectId || '').trim();
+      const target = projects.find((p) => p.id === projectId);
+      if (!target) throw new Error('Could not find the project referenced by Copilot.');
+      await cancelProjectRuntimeTasks(projectId);
+      return;
     }
-    if (text.includes('oldest') || text.includes('最旧')) {
-      actions.push({ id: 'projects:updated_asc', label: 'Sort by oldest updated', description: 'Sort projects by least recently updated.' });
+    if (action.id === 'projects:delete') {
+      const projectId = String(action.payload?.projectId || '').trim();
+      const projectName = String(action.payload?.projectName || '').trim();
+      const target = projects.find((p) => p.id === projectId);
+      if (!target) throw new Error('Could not find the project referenced by Copilot.');
+      const canRemove = canDeleteProject(target, session?.userId || null);
+      if (!canRemove) throw new Error('Only the project owner can delete this project.');
+      if (!window.confirm(`Delete project "${projectName || target.name}"?`)) return;
+      await softDeleteProject(projectId);
+      return;
     }
-    if (text.includes('boltz')) {
-      actions.push({ id: 'projects:backend_boltz', label: 'Filter Boltz projects', description: 'Show projects using the Boltz backend.' });
-    }
-    return actions;
-  };
-
-  const applyProjectCopilotAction = (action: CopilotPlanAction) => {
     setShowAdvancedFilters(true);
     if (action.id === 'projects:failed') {
       setActivityFilter('failed');
@@ -315,6 +325,14 @@ export function ProjectsPage() {
     } else if (action.id === 'projects:active') {
       setActivityFilter('active');
       setStateFilter('all');
+    } else if (action.id === 'projects:workflow_prediction') {
+      setTypeFilter('prediction');
+    } else if (action.id === 'projects:workflow_affinity') {
+      setTypeFilter('affinity');
+    } else if (action.id === 'projects:workflow_peptide_design') {
+      setTypeFilter('peptide_design');
+    } else if (action.id === 'projects:workflow_lead_optimization') {
+      setTypeFilter('lead_optimization');
     } else if (action.id === 'projects:updated_desc') {
       setSortBy('updated_desc');
     } else if (action.id === 'projects:updated_asc') {
@@ -448,6 +466,18 @@ export function ProjectsPage() {
       setRenameError(err instanceof Error ? err.message : 'Failed to update project name.');
     } finally {
       setSavingProjectNameId(null);
+    }
+  };
+
+  const cancelProjectRuns = async (project: Project) => {
+    if (cancellingProjectId) return;
+    const projectName = String(project.name || '').trim() || `Project ${String(project.id || '').slice(0, 8)}`;
+    if (!window.confirm(`Cancel active runtime tasks for "${projectName}"?`)) return;
+    setCancellingProjectId(project.id);
+    try {
+      await cancelProjectRuntimeTasks(project.id);
+    } finally {
+      setCancellingProjectId(null);
     }
   };
 
@@ -687,6 +717,7 @@ export function ProjectsPage() {
                   const canEditProject = canEditProjectAccess(project);
                   const canRemoveProject = canDeleteProject(project, session?.userId || null);
                   const canShareProject = canManageProjectShares(project, session?.userId || null);
+                  const hasProjectRuntime = counts.running > 0 || counts.queued > 0;
                   const accessLabel =
                     project.access_scope === 'project_share'
                       ? project.access_level === 'editor'
@@ -790,10 +821,26 @@ export function ProjectsPage() {
                       <td className="project-col-time">{formatDateTime(project.created_at)}</td>
                       <td className="project-col-actions">
                         <div className="row gap-6 project-action-row">
-                          <Link className="btn btn-ghost btn-compact" to={`/projects/${project.id}`}>
+                          <Link
+                            className="btn btn-ghost btn-compact"
+                            to={`/projects/${project.id}`}
+                            title="Open project"
+                            aria-label="Open project"
+                          >
                             <ExternalLink size={14} />
-                            Open
                           </Link>
+                          {hasProjectRuntime ? (
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-compact project-cancel-btn"
+                              onClick={() => void cancelProjectRuns(project)}
+                              disabled={Boolean(cancellingProjectId)}
+                              title={`Cancel ${counts.running + counts.queued} active task(s)`}
+                              aria-label={`Cancel ${counts.running + counts.queued} active task(s)`}
+                            >
+                              <Square size={13} />
+                            </button>
+                          ) : null}
                           {canShareProject ? (
                             <button
                               type="button"
@@ -946,7 +993,7 @@ export function ProjectsPage() {
       {session?.userId ? (
         <ProjectCopilotModal
           open={copilotOpen}
-          title="Project Copilot"
+          title="Copilot"
           subtitle={`${filteredProjects.length} matched / ${projects.length} total`}
           contextType="project_list"
           currentUserId={session.userId}
@@ -964,7 +1011,6 @@ export function ProjectsPage() {
               updated_at: project.updated_at
             }))
           }}
-          buildPlanActions={buildProjectCopilotActions}
           onApplyPlanAction={applyProjectCopilotAction}
           onOpen={() => setCopilotOpen(true)}
           onClose={() => setCopilotOpen(false)}

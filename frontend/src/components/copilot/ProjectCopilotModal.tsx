@@ -2,7 +2,15 @@ import { Bot, Check, Clock3, LoaderCircle, MessageSquarePlus, MessageSquareText,
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { deleteProjectCopilotMessagesBySession, insertProjectCopilotMessage, listProjectCopilotMessages } from '../../api/supabaseLite';
+import {
+  deleteProjectCopilotMessagesBySession,
+  deleteProjectCopilotState,
+  getProjectCopilotState,
+  insertProjectCopilotMessage,
+  readCachedProjectCopilotMessages,
+  listProjectCopilotMessages,
+  upsertProjectCopilotState
+} from '../../api/supabaseLite';
 import { requestCopilotAssistant, requestCopilotPlanActions } from '../../api/copilotApi';
 import type { CopilotContextType, CopilotPlanAction, ProjectCopilotMessage } from '../../types/models';
 import { formatDateTime } from '../../utils/date';
@@ -18,7 +26,6 @@ interface ProjectCopilotModalProps {
   currentUserId: string;
   currentUsername: string;
   contextPayload: Record<string, unknown>;
-  buildPlanActions?: (content: string) => CopilotPlanAction[];
   onApplyPlanAction?: (action: CopilotPlanAction) => void | Promise<void>;
   attachmentActions?: Array<{
     id: string;
@@ -52,48 +59,34 @@ function readSessionId(message: ProjectCopilotMessage): string {
 
 function readPlanActions(value: unknown): CopilotPlanAction[] {
   if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
   return value
     .map((item) => (item && typeof item === 'object' ? (item as CopilotPlanAction) : null))
-    .filter((item): item is CopilotPlanAction => Boolean(item?.id && item.label));
+    .filter((item): item is CopilotPlanAction => {
+      if (!item?.id || !item.label) return false;
+      const key = `${item.id}:${JSON.stringify(item.payload || {})}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
-function hasParameterPatch(actions: CopilotPlanAction[]): boolean {
-  return actions.some((action) => {
-    const patch = action.payload?.parameterPatch;
-    return Boolean(patch && typeof patch === 'object' && !Array.isArray(patch) && Object.keys(patch as Record<string, unknown>).length > 0);
-  });
+function readAppliedActionId(message: ProjectCopilotMessage): string {
+  const applied = message.metadata?.applied_action;
+  if (!applied || typeof applied !== 'object') return '';
+  return String((applied as CopilotPlanAction).id || '').trim();
 }
 
-function preferFallbackWhenItHasConcretePatch(
-  fallbackActions: CopilotPlanAction[],
-  structuredActions: CopilotPlanAction[]
-): CopilotPlanAction[] {
-  if (structuredActions.length === 0) return fallbackActions;
-  if (hasParameterPatch(fallbackActions) && !hasParameterPatch(structuredActions)) return fallbackActions;
-  const fallbackSubmitAction =
-    fallbackActions.find((action) => action.id === 'task_detail:apply_patch_and_submit') ||
-    fallbackActions.find((action) => action.id === 'task_detail:apply_parameter_patch');
-  const fallbackPatch = fallbackSubmitAction?.payload?.parameterPatch;
-  if (!fallbackPatch || typeof fallbackPatch !== 'object' || Array.isArray(fallbackPatch)) return structuredActions;
-  const fallbackPatchRecord = fallbackPatch as Record<string, unknown>;
-  if (Object.keys(fallbackPatchRecord).length === 0) return structuredActions;
-  return structuredActions.map((action) => {
-    if (action.id !== 'task_detail:apply_patch_and_submit' && action.id !== 'task_detail:apply_parameter_patch') return action;
-    const structuredPatch =
-      action.payload?.parameterPatch && typeof action.payload.parameterPatch === 'object' && !Array.isArray(action.payload.parameterPatch)
-        ? (action.payload.parameterPatch as Record<string, unknown>)
-        : {};
-    return {
-      ...action,
-      payload: {
-        ...(action.payload || {}),
-        parameterPatch: {
-          ...fallbackPatchRecord,
-          ...structuredPatch
-        }
-      }
-    };
-  });
+function filterAppliedPlanActions(messages: ProjectCopilotMessage[], sessionId: string, actions: CopilotPlanAction[]): CopilotPlanAction[] {
+  if (actions.length === 0) return [];
+  const appliedIds = new Set(
+    messages
+      .filter((message) => readSessionId(message) === sessionId)
+      .map(readAppliedActionId)
+      .filter(Boolean)
+  );
+  if (appliedIds.size === 0) return actions;
+  return actions.filter((action) => !appliedIds.has(action.id));
 }
 
 function getSessionTitle(messages: ProjectCopilotMessage[], sessionId: string): string {
@@ -105,6 +98,14 @@ function getSessionTitle(messages: ProjectCopilotMessage[], sessionId: string): 
 
 function copilotOpenStorageKey(): string {
   return 'vbio:copilot-open:v1';
+}
+
+function copilotStateLocalStorageKey(userId: string, stateKey: string): string {
+  return [
+    'vbio:project-copilot-state:v1',
+    String(userId || 'anonymous').trim().toLowerCase() || 'anonymous',
+    String(stateKey || 'default').trim() || 'default'
+  ].join(':');
 }
 
 interface CopilotPanelState {
@@ -119,47 +120,215 @@ function copilotPanelStateStorageKey(userId: string): string {
   return `vbio:copilot-panel:v1:${String(userId || 'anonymous').trim().toLowerCase() || 'anonymous'}`;
 }
 
+function copilotPanelStateDbKey(): string {
+  return 'panel';
+}
+
+function copilotOpenStateDbKey(): string {
+  return 'open';
+}
+
 function copilotContinuationStorageKey(userId: string, projectId?: string | null): string {
   return `vbio:copilot-continuation:v1:${String(userId || 'anonymous').trim().toLowerCase() || 'anonymous'}:${String(projectId || 'project-null')}`;
 }
 
-function readCopilotContinuation(userId: string, projectId?: string | null): {
+function copilotContinuationDbKey(projectId?: string | null): string {
+  return `continuation:${String(projectId || 'project-null')}`;
+}
+
+function copilotTaskPrefillStorageKey(userId: string, projectId?: string | null): string {
+  return `vbio:copilot-task-prefill:v1:${String(userId || 'anonymous').trim().toLowerCase() || 'anonymous'}:${String(projectId || 'project-null')}`;
+}
+
+function copilotDraftStorageKey(input: {
+  userId: string;
+}): string {
+  return [
+    'vbio:copilot-draft:v1',
+    String(input.userId || 'anonymous').trim().toLowerCase() || 'anonymous',
+    'global'
+  ].join(':');
+}
+
+function copilotDraftDbKey(): string {
+  return 'draft:global';
+}
+
+function readStoredCopilotDraftLocal(input: {
+  userId: string;
+}): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    return String(window.localStorage.getItem(copilotDraftStorageKey(input)) || '');
+  } catch {
+    return '';
+  }
+}
+
+function writeStoredCopilotDraftLocal(input: {
+  userId: string;
+}, draft: string): void {
+  if (typeof window === 'undefined') return;
+  const key = copilotDraftStorageKey(input);
+  if (draft) {
+    window.localStorage.setItem(key, draft);
+  } else {
+    window.localStorage.removeItem(key);
+  }
+}
+
+type CopilotContinuationState = {
   sessionId: string;
+  sourceContextType: CopilotContextType;
   sourceProjectTaskId: string;
   createdAt: number;
-} | null {
+  appliedAction: CopilotPlanAction | null;
+  followUpActions: CopilotPlanAction[];
+};
+
+type CopilotTaskPrefillState = {
+  sessionId: string;
+  projectId: string;
+  sourceActionId: string;
+  components: unknown[];
+  createdAt: number;
+};
+
+function parseCopilotContinuation(value: unknown): CopilotContinuationState | null {
+  const parsed = value && typeof value === 'object' ? (value as {
+    sessionId?: string;
+    sourceContextType?: CopilotContextType;
+    sourceProjectTaskId?: string;
+    createdAt?: number;
+    appliedAction?: CopilotPlanAction;
+    followUpActions?: unknown;
+  }) : null;
+  const sessionId = String(parsed?.sessionId || '').trim();
+  const sourceProjectTaskId = String(parsed?.sourceProjectTaskId || '').trim();
+  const sourceContextType = parsed?.sourceContextType === 'task_list' || parsed?.sourceContextType === 'project_list'
+    ? parsed.sourceContextType
+    : 'task_detail';
+  const createdAt = Number(parsed?.createdAt || 0);
+  if (!sessionId || !sourceProjectTaskId || !Number.isFinite(createdAt)) return null;
+  if (Date.now() - createdAt > 10 * 60 * 1000) return null;
+  const appliedAction = parsed?.appliedAction && typeof parsed.appliedAction === 'object' ? parsed.appliedAction : null;
+  const followUpActions = readPlanActions(parsed?.followUpActions);
+  return { sessionId, sourceContextType, sourceProjectTaskId, createdAt, appliedAction, followUpActions };
+}
+
+function readCopilotContinuationLocal(userId: string, projectId?: string | null): CopilotContinuationState | null {
   if (typeof window === 'undefined') return null;
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(copilotContinuationStorageKey(userId, projectId)) || 'null') as {
-      sessionId?: string;
-      sourceProjectTaskId?: string;
-      createdAt?: number;
-    } | null;
-    const sessionId = String(parsed?.sessionId || '').trim();
-    const sourceProjectTaskId = String(parsed?.sourceProjectTaskId || '').trim();
-    const createdAt = Number(parsed?.createdAt || 0);
-    if (!sessionId || !sourceProjectTaskId || !Number.isFinite(createdAt)) return null;
-    if (Date.now() - createdAt > 10 * 60 * 1000) return null;
-    return { sessionId, sourceProjectTaskId, createdAt };
+    return parseCopilotContinuation(JSON.parse(window.localStorage.getItem(copilotContinuationStorageKey(userId, projectId)) || 'null'));
   } catch {
     return null;
   }
 }
 
+async function readCopilotContinuation(userId: string, projectId?: string | null): Promise<CopilotContinuationState | null> {
+  const local = readCopilotContinuationLocal(userId, projectId);
+  if (local) return local;
+  const persisted = await getProjectCopilotState(userId, copilotContinuationDbKey(projectId));
+  return parseCopilotContinuation(persisted);
+}
+
 function writeCopilotContinuation(userId: string, projectId: string | null | undefined, value: {
   sessionId: string;
+  sourceContextType: CopilotContextType;
   sourceProjectTaskId: string;
+  appliedAction?: CopilotPlanAction;
+  followUpActions?: CopilotPlanAction[];
 }): void {
   if (typeof window === 'undefined') return;
+  const payload = { ...value, createdAt: Date.now() };
   window.localStorage.setItem(
     copilotContinuationStorageKey(userId, projectId),
-    JSON.stringify({ ...value, createdAt: Date.now() })
+    JSON.stringify(payload)
   );
+  void upsertProjectCopilotState(userId, copilotContinuationDbKey(projectId), payload);
+}
+
+function buildSubmitCurrentFollowUpAction(params?: {
+  description?: string;
+  sourceActionId?: string;
+  sequence?: unknown;
+}): CopilotPlanAction {
+  const { description, sourceActionId = 'copilot:follow_up', sequence } = params || {};
+  const normalizedSequence = String(sequence || '').trim().toUpperCase();
+  return {
+    id: 'task_detail:submit_current',
+    label: '开始运行',
+    description: description || (normalizedSequence
+      ? `新任务已填写序列 ${normalizedSequence}，确认后开始结构预测。`
+      : '当前任务内容已填写完成，确认后开始运行。'),
+    payload: {
+      schemaVersion: 'vbio-copilot-action-v2',
+      contextType: 'task_detail',
+      workflowKey: 'prediction',
+      sourceActionId,
+      destructive: false
+    },
+    needs_confirmation: true,
+    execute_now: false
+  };
 }
 
 function clearCopilotContinuation(userId: string, projectId?: string | null): void {
   if (typeof window === 'undefined') return;
   window.localStorage.removeItem(copilotContinuationStorageKey(userId, projectId));
+  void deleteProjectCopilotState(userId, copilotContinuationDbKey(projectId));
+}
+
+function parseCopilotTaskPrefill(value: unknown, projectId?: string | null): CopilotTaskPrefillState | null {
+  const parsed = value && typeof value === 'object' ? (value as {
+    sessionId?: string;
+    projectId?: string;
+    sourceActionId?: string;
+    components?: unknown;
+    createdAt?: number;
+  }) : null;
+  const sessionId = String(parsed?.sessionId || '').trim();
+  const normalizedProjectId = String(parsed?.projectId || '').trim();
+  const expectedProjectId = String(projectId || '').trim();
+  const createdAt = Number(parsed?.createdAt || 0);
+  if (!sessionId || !normalizedProjectId || !Array.isArray(parsed?.components) || !Number.isFinite(createdAt)) return null;
+  if (expectedProjectId && normalizedProjectId !== expectedProjectId) return null;
+  if (Date.now() - createdAt > 10 * 60 * 1000) return null;
+  return {
+    sessionId,
+    projectId: normalizedProjectId,
+    sourceActionId: String(parsed?.sourceActionId || '').trim(),
+    components: parsed.components,
+    createdAt
+  };
+}
+
+export function readStoredCopilotTaskPrefill(userId: string, projectId?: string | null): CopilotTaskPrefillState | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return parseCopilotTaskPrefill(JSON.parse(window.localStorage.getItem(copilotTaskPrefillStorageKey(userId, projectId)) || 'null'), projectId);
+  } catch {
+    return null;
+  }
+}
+
+export function clearStoredCopilotTaskPrefill(userId: string, projectId?: string | null): void {
+  if (typeof window === 'undefined') return;
+  window.localStorage.removeItem(copilotTaskPrefillStorageKey(userId, projectId));
+}
+
+function writeStoredCopilotTaskPrefill(
+  userId: string,
+  projectId: string | null | undefined,
+  value: Omit<CopilotTaskPrefillState, 'createdAt' | 'projectId'>
+): void {
+  if (typeof window === 'undefined') return;
+  const normalizedProjectId = String(projectId || '').trim();
+  if (!normalizedProjectId || !Array.isArray(value.components) || value.components.length === 0) return;
+  window.localStorage.setItem(
+    copilotTaskPrefillStorageKey(userId, normalizedProjectId),
+    JSON.stringify({ ...value, projectId: normalizedProjectId, createdAt: Date.now() })
+  );
 }
 
 function readStoredCopilotPanelState(userId: string): CopilotPanelState {
@@ -175,20 +344,81 @@ function readStoredCopilotPanelState(userId: string): CopilotPanelState {
 function writeStoredCopilotPanelState(userId: string, patch: CopilotPanelState): void {
   if (typeof window === 'undefined') return;
   const prev = readStoredCopilotPanelState(userId);
-  window.localStorage.setItem(copilotPanelStateStorageKey(userId), JSON.stringify({ ...prev, ...patch }));
+  const next = { ...prev, ...patch };
+  window.localStorage.setItem(copilotPanelStateStorageKey(userId), JSON.stringify(next));
+  void upsertProjectCopilotState(userId, copilotPanelStateDbKey(), next as Record<string, unknown>);
 }
 
-export function readStoredCopilotOpen(_input: { contextType: CopilotContextType; projectId?: string | null; projectTaskId?: string | null }): boolean {
+export function readStoredCopilotOpen(input: {
+  contextType: CopilotContextType;
+  projectId?: string | null;
+  projectTaskId?: string | null;
+  userId?: string | null;
+}): boolean {
   if (typeof window === 'undefined') return false;
+  const userId = String(input.userId || '').trim();
+  if (userId) {
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(copilotStateLocalStorageKey(userId, copilotOpenStateDbKey())) || 'null');
+      if (parsed && typeof parsed === 'object' && typeof parsed.open === 'boolean') return parsed.open;
+    } catch {
+      // Fall back to the legacy open key below.
+    }
+  }
   return window.localStorage.getItem(copilotOpenStorageKey()) === 'true';
 }
 
 export function writeStoredCopilotOpen(
-  _input: { contextType: CopilotContextType; projectId?: string | null; projectTaskId?: string | null },
+  input: { contextType: CopilotContextType; projectId?: string | null; projectTaskId?: string | null; userId?: string | null },
   open: boolean
 ): void {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(copilotOpenStorageKey(), open ? 'true' : 'false');
+  const userId = String(input.userId || '').trim();
+  if (userId) {
+    window.localStorage.setItem(copilotStateLocalStorageKey(userId, copilotOpenStateDbKey()), JSON.stringify({ open }));
+    void upsertProjectCopilotState(userId, copilotOpenStateDbKey(), { open }).catch(() => {
+      // Non-blocking UI preference persistence.
+    });
+  }
+}
+
+function getInitialPanelPosition(stored: CopilotPanelState): { x: number; y: number } | null {
+  const x = Number(stored.x);
+  const y = Number(stored.y);
+  if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+  if (typeof window === 'undefined') return null;
+  return {
+    x: Math.max(12, window.innerWidth - 560 - 24),
+    y: Math.max(12, window.innerHeight - 680 - 24)
+  };
+}
+
+function globalCopilotMessageScope(userId: string | null | undefined) {
+  return {
+    contextType: 'project_list' as const,
+    projectId: null,
+    projectTaskId: null,
+    userId: userId || null,
+    conversationScope: 'global'
+  };
+}
+
+function currentContextMetadata(input: {
+  contextType: CopilotContextType;
+  projectId?: string | null;
+  projectTaskId?: string | null;
+}): Record<string, unknown> {
+  return {
+    source_context_type: input.contextType,
+    source_project_id: input.projectId || null,
+    source_project_task_id: input.projectTaskId || null
+  };
+}
+
+function actionMatchesContext(action: CopilotPlanAction, contextType: CopilotContextType): boolean {
+  const actionContext = String(action.payload?.contextType || '').trim();
+  return !actionContext || actionContext === contextType;
 }
 
 export function ProjectCopilotModal({
@@ -201,17 +431,23 @@ export function ProjectCopilotModal({
   currentUserId,
   currentUsername,
   contextPayload,
-  buildPlanActions,
   onApplyPlanAction,
   attachmentActions = [],
   onOpen,
   onClose
 }: ProjectCopilotModalProps) {
   const storedPanelState = useMemo(() => readStoredCopilotPanelState(currentUserId), [currentUserId]);
-  const [messages, setMessages] = useState<ProjectCopilotMessage[]>([]);
+  const draftScope = useMemo(
+    () => ({ userId: currentUserId }),
+    [currentUserId]
+  );
+  const messageScope = useMemo(() => globalCopilotMessageScope(currentUserId), [currentUserId]);
+  const [messages, setMessages] = useState<ProjectCopilotMessage[]>(() =>
+    readCachedProjectCopilotMessages(globalCopilotMessageScope(currentUserId))
+  );
   const [activeSessionId, setActiveSessionId] = useState(createSessionId);
   const [historyOpen, setHistoryOpen] = useState(Boolean(storedPanelState.historyOpen));
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useState(() => readStoredCopilotDraftLocal(draftScope));
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -220,6 +456,7 @@ export function ProjectCopilotModal({
   const panelRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const focusComposerFrameRef = useRef<number | null>(null);
   const dragRef = useRef<{
     pointerId: number;
     startX: number;
@@ -228,9 +465,7 @@ export function ProjectCopilotModal({
     originY: number;
   } | null>(null);
   const [position, setPosition] = useState<{ x: number; y: number } | null>(() => {
-    const x = Number(storedPanelState.x);
-    const y = Number(storedPanelState.y);
-    return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+    return getInitialPanelPosition(storedPanelState);
   });
   const latestPositionRef = useRef<{ x: number; y: number } | null>(position);
   const sizeReadyRef = useRef(false);
@@ -240,9 +475,9 @@ export function ProjectCopilotModal({
     return Number.isFinite(width) && Number.isFinite(height) ? { width, height } : null;
   });
 
-  const scope = useMemo(
-    () => ({ contextType, projectId: projectId || null, projectTaskId: projectTaskId || null, userId: currentUserId || null }),
-    [contextType, currentUserId, projectId, projectTaskId]
+  const sourceContext = useMemo(
+    () => currentContextMetadata({ contextType, projectId: projectId || null, projectTaskId: projectTaskId || null }),
+    [contextType, projectId, projectTaskId]
   );
 
   const sessionMessages = useMemo(
@@ -269,58 +504,88 @@ export function ProjectCopilotModal({
     const latestAssistant = [...nextMessages]
       .reverse()
       .find((message) => readSessionId(message) === sessionId && message.role === 'assistant');
-    setPendingActions(readPlanActions(latestAssistant?.metadata?.candidate_plan_actions));
+    setPendingActions(
+      filterAppliedPlanActions(nextMessages, sessionId, readPlanActions(latestAssistant?.metadata?.candidate_plan_actions))
+        .filter((action) => actionMatchesContext(action, contextType))
+    );
+  }, [contextType]);
+
+  const focusComposer = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    if (focusComposerFrameRef.current) {
+      window.cancelAnimationFrame(focusComposerFrameRef.current);
+    }
+    focusComposerFrameRef.current = window.requestAnimationFrame(() => {
+      focusComposerFrameRef.current = null;
+      if (!open || sending || applyingActionId) return;
+      textareaRef.current?.focus({ preventScroll: true });
+    });
+  }, [applyingActionId, open, sending]);
+
+  useEffect(() => {
+    return () => {
+      if (focusComposerFrameRef.current) {
+        window.cancelAnimationFrame(focusComposerFrameRef.current);
+      }
+    };
   }, []);
 
   const loadMessages = useCallback(async () => {
     if (!open) return;
-    setLoading(true);
+    const cached = readCachedProjectCopilotMessages(messageScope);
+    if (cached.length > 0) {
+      setMessages(cached);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     setError(null);
     try {
-      let loaded = await listProjectCopilotMessages(scope);
+      let loaded = await listProjectCopilotMessages(messageScope);
       const continuation = contextType === 'task_detail'
-        ? readCopilotContinuation(currentUserId, projectId)
+        ? await readCopilotContinuation(currentUserId, projectId)
         : null;
+      let preferredSessionId = '';
       if (
         continuation &&
         projectTaskId &&
         continuation.sourceProjectTaskId &&
-        continuation.sourceProjectTaskId !== projectTaskId
+        continuation.sourceProjectTaskId !== (projectTaskId || 'task-detail:null')
       ) {
-        const copiedOriginalIds = new Set(
-          loaded
-            .map((message) => String(message.metadata?.continued_from_message_id || '').trim())
-            .filter(Boolean)
+        preferredSessionId = continuation.sessionId;
+        const alreadyInserted = loaded.some(
+          (message) =>
+            readSessionId(message) === continuation.sessionId &&
+            String(message.metadata?.continued_into_project_task_id || '') === projectTaskId
         );
-        const sourceMessages = (await listProjectCopilotMessages({
-          contextType: 'task_detail',
-          projectId: projectId || null,
-          projectTaskId: continuation.sourceProjectTaskId,
-          userId: currentUserId || null
-        })).filter((message) => readSessionId(message) === continuation.sessionId);
-        for (const sourceMessage of sourceMessages) {
-          if (!sourceMessage.id || copiedOriginalIds.has(sourceMessage.id)) continue;
+        if (!alreadyInserted && continuation.followUpActions.length > 0) {
           await insertProjectCopilotMessage({
-            ...scope,
-            userId: sourceMessage.user_id,
-            role: sourceMessage.role,
-            content: sourceMessage.content,
+            ...messageScope,
+            userId: null,
+            role: 'assistant',
+            content: '新任务已经填写并保存为 draft。请检查当前 task 的组件和参数；如果没问题，可以点击下方按钮开始运行。',
             metadata: {
-              ...(sourceMessage.metadata || {}),
+              ...sourceContext,
               session_id: continuation.sessionId,
               owner_user_id: currentUserId,
+              candidate_plan_actions: continuation.followUpActions,
               continued_from_project_task_id: continuation.sourceProjectTaskId,
-              continued_from_message_id: sourceMessage.id
+              continued_into_project_task_id: projectTaskId
             }
           });
         }
-        loaded = await listProjectCopilotMessages(scope);
+        loaded = await listProjectCopilotMessages(messageScope);
         clearCopilotContinuation(currentUserId, projectId);
       }
       setMessages(loaded);
       setActiveSessionId((currentSessionId) => {
         const sessionIds = Array.from(new Set(loaded.map(readSessionId)));
-        const nextSessionId = sessionIds.includes(currentSessionId) ? currentSessionId : sessionIds[0] || currentSessionId || createSessionId();
+        const nextSessionId =
+          (preferredSessionId && sessionIds.includes(preferredSessionId) ? preferredSessionId : '') ||
+          (sessionIds.includes(currentSessionId) ? currentSessionId : '') ||
+          sessionIds[0] ||
+          currentSessionId ||
+          createSessionId();
         restoreSessionActions(loaded, nextSessionId);
         return nextSessionId;
       });
@@ -329,7 +594,7 @@ export function ProjectCopilotModal({
     } finally {
       setLoading(false);
     }
-  }, [contextType, currentUserId, open, projectId, projectTaskId, restoreSessionActions, scope]);
+  }, [contextType, currentUserId, messageScope, open, projectId, projectTaskId, restoreSessionActions, sourceContext]);
 
   useEffect(() => {
     if (!open) return;
@@ -337,8 +602,43 @@ export function ProjectCopilotModal({
   }, [loadMessages, open]);
 
   useEffect(() => {
+    if (!currentUserId) return;
+    void upsertProjectCopilotState(currentUserId, copilotOpenStateDbKey(), { open }).catch(() => {
+      // Non-blocking UI preference persistence.
+    });
+  }, [currentUserId, open]);
+
+  useEffect(() => {
+    if (!currentUserId) return;
+    let cancelled = false;
+    void getProjectCopilotState(currentUserId, copilotPanelStateDbKey())
+      .then((state) => {
+        if (cancelled || !state) return;
+        const nextX = Number(state.x);
+        const nextY = Number(state.y);
+        const nextWidth = Number(state.width);
+        const nextHeight = Number(state.height);
+        if (Number.isFinite(nextX) && Number.isFinite(nextY)) {
+          latestPositionRef.current = { x: nextX, y: nextY };
+          setPosition({ x: nextX, y: nextY });
+        }
+        if (Number.isFinite(nextWidth) && Number.isFinite(nextHeight) && nextWidth >= 300 && nextHeight >= 300) {
+          setPanelSize({ width: nextWidth, height: nextHeight });
+        }
+        if (typeof state.historyOpen === 'boolean') {
+          setHistoryOpen(state.historyOpen);
+        }
+      })
+      .catch(() => {
+        // Local cache is enough for smooth first paint.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUserId]);
+
+  useEffect(() => {
     if (!open) {
-      setDraft('');
       setError(null);
       return;
     }
@@ -346,6 +646,46 @@ export function ProjectCopilotModal({
       scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
     }, 0);
   }, [sessionMessages.length, open]);
+
+  useEffect(() => {
+    if (!open || sending || applyingActionId) return;
+    focusComposer();
+  }, [applyingActionId, focusComposer, open, sending]);
+
+  useEffect(() => {
+    const localDraft = readStoredCopilotDraftLocal(draftScope);
+    setDraft(localDraft);
+    if (!currentUserId) return;
+    let cancelled = false;
+    void getProjectCopilotState(currentUserId, copilotDraftDbKey())
+      .then((state) => {
+        if (cancelled) return;
+        const persistedDraft = typeof state?.draft === 'string' ? state.draft : '';
+        if (persistedDraft && persistedDraft !== localDraft) {
+          writeStoredCopilotDraftLocal(draftScope, persistedDraft);
+          setDraft(persistedDraft);
+        }
+      })
+      .catch(() => {
+        // Local draft cache is enough when database state is unavailable.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUserId, draftScope]);
+
+  useEffect(() => {
+    writeStoredCopilotDraftLocal(draftScope, draft);
+    if (!currentUserId) return;
+    const timer = window.setTimeout(() => {
+      void upsertProjectCopilotState(currentUserId, copilotDraftDbKey(), { draft }).catch(() => {
+        // Draft persistence should never block typing.
+      });
+    }, 350);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [currentUserId, draft, draftScope]);
 
   useEffect(() => {
     if (!open || position) return;
@@ -438,53 +778,55 @@ export function ProjectCopilotModal({
     setSending(true);
     setError(null);
     setDraft('');
+    writeStoredCopilotDraftLocal(draftScope, '');
+    void deleteProjectCopilotState(currentUserId, copilotDraftDbKey());
     setPendingActions([]);
     try {
       const userMessage = await insertProjectCopilotMessage({
-        ...scope,
+        ...messageScope,
         userId: currentUserId,
         role: 'user',
         content,
-        metadata: { session_id: activeSessionId }
+        metadata: { ...sourceContext, session_id: activeSessionId }
       });
       setMessages((prev) => [...prev, { ...userMessage, username: currentUsername }]);
 
-      const fallbackPlanActions = buildPlanActions ? buildPlanActions(content) : [];
-      let planActions = fallbackPlanActions;
+      let planActions: CopilotPlanAction[] = [];
       try {
-        const structuredPlanActions = await requestCopilotPlanActions({
+        planActions = await requestCopilotPlanActions({
           contextType,
           contextPayload,
           userId: currentUserId,
           username: currentUsername,
           content
         });
-        planActions = preferFallbackWhenItHasConcretePatch(fallbackPlanActions, structuredPlanActions);
       } catch {
-        planActions = fallbackPlanActions;
+        planActions = [];
       }
       const assistantContent = await requestCopilotAssistant({
         contextType,
         contextPayload: {
           ...contextPayload,
-          candidate_plan_actions: planActions
+          ...(planActions.length > 0 ? { candidate_plan_actions: planActions } : {})
         },
         userId: currentUserId,
         username: currentUsername,
         content
       });
       const assistantMessage = await insertProjectCopilotMessage({
-        ...scope,
+        ...messageScope,
         userId: null,
         role: 'assistant',
         content: assistantContent,
-        metadata: { session_id: activeSessionId, owner_user_id: currentUserId, candidate_plan_actions: planActions }
+        metadata: { ...sourceContext, session_id: activeSessionId, owner_user_id: currentUserId, candidate_plan_actions: planActions }
       });
       setMessages((prev) => [...prev, assistantMessage]);
-      setPendingActions(planActions);
+      setPendingActions(planActions.filter((action) => actionMatchesContext(action, contextType)));
+      focusComposer();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send Copilot message.');
       setDraft(content);
+      focusComposer();
     } finally {
       setSending(false);
     }
@@ -505,15 +847,21 @@ export function ProjectCopilotModal({
     const nextSessionId = createSessionId();
     setActiveSessionId(nextSessionId);
     setDraft('');
+    writeStoredCopilotDraftLocal(draftScope, '');
+    void deleteProjectCopilotState(currentUserId, copilotDraftDbKey());
     setPendingActions([]);
     setError(null);
+    focusComposer();
   };
 
   const selectSession = (sessionId: string) => {
     setActiveSessionId(sessionId);
     setDraft('');
+    writeStoredCopilotDraftLocal(draftScope, '');
+    void deleteProjectCopilotState(currentUserId, copilotDraftDbKey());
     setError(null);
     restoreSessionActions(messages, sessionId);
+    focusComposer();
   };
 
   const deleteSession = async (sessionId: string) => {
@@ -523,7 +871,7 @@ export function ProjectCopilotModal({
       const messageIds = messages
         .filter((message) => readSessionId(message) === sessionId)
         .map((message) => message.id);
-      await deleteProjectCopilotMessagesBySession({ ...scope, sessionId, userId: currentUserId, messageIds });
+      await deleteProjectCopilotMessagesBySession({ ...messageScope, sessionId, userId: currentUserId, messageIds });
       setMessages((prev) => prev.filter((message) => readSessionId(message) !== sessionId));
       if (sessionId === activeSessionId) {
         startNewChat();
@@ -539,25 +887,64 @@ export function ProjectCopilotModal({
     setError(null);
     try {
       if (
-        contextType === 'task_detail' &&
-        projectTaskId &&
-        (action.id === 'task_detail:submit_current' || action.id === 'task_detail:apply_patch_and_submit')
+        (contextType === 'task_detail' &&
+          projectTaskId &&
+          (action.id === 'task_detail:submit_current' || action.id === 'task_detail:apply_patch_and_submit')) ||
+        (contextType === 'task_list' && action.id === 'tasks:create_with_sequence')
       ) {
+        const actionComponents = Array.isArray(action.payload?.components) ? action.payload.components : [];
+        if (contextType === 'task_list' && action.id === 'tasks:create_with_sequence') {
+          writeStoredCopilotTaskPrefill(currentUserId, projectId, {
+            sessionId: activeSessionId,
+            sourceActionId: action.id,
+            components: actionComponents
+          });
+        }
+        const firstProteinComponent = actionComponents.find((component) => {
+          if (!component || typeof component !== 'object') return false;
+          return String((component as Record<string, unknown>).type || '').trim() === 'protein';
+        }) as Record<string, unknown> | undefined;
+        const followUpActions = contextType === 'task_list'
+          ? [buildSubmitCurrentFollowUpAction({
+              sourceActionId: action.id,
+              sequence: firstProteinComponent?.sequence ?? action.payload?.protein_sequence,
+              description: '新任务内容已填写完成，确认后开始结构预测。'
+            })]
+          : [];
         writeCopilotContinuation(currentUserId, projectId, {
           sessionId: activeSessionId,
-          sourceProjectTaskId: projectTaskId
+          sourceContextType: contextType,
+          sourceProjectTaskId: projectTaskId || `__${contextType}__`,
+          appliedAction: action,
+          followUpActions
         });
       }
       await onApplyPlanAction(action);
       setPendingActions((prev) => prev.filter((item) => item.id !== action.id));
       const receipt = await insertProjectCopilotMessage({
-        ...scope,
+        ...messageScope,
         userId: currentUserId,
         role: 'system',
         content: `Confirmed action: ${action.label}`,
-        metadata: { session_id: activeSessionId, owner_user_id: currentUserId, applied_action: action }
+        metadata: { ...sourceContext, session_id: activeSessionId, owner_user_id: currentUserId, applied_action: action }
       });
-      setMessages((prev) => [...prev, receipt]);
+      let nextMessages = [...messages, receipt];
+      if (contextType === 'task_detail' && action.id === 'task_detail:apply_parameter_patch') {
+        const followUpAction = buildSubmitCurrentFollowUpAction({
+          sourceActionId: action.id,
+          description: '组件或参数已更新完成。请检查当前 task；如果没问题，可以点击下方按钮开始运行。'
+        });
+        const followUp = await insertProjectCopilotMessage({
+          ...messageScope,
+          userId: null,
+          role: 'assistant',
+          content: '组件或参数已更新完成。请检查当前 task；如果没问题，可以点击下方按钮开始运行。',
+          metadata: { ...sourceContext, session_id: activeSessionId, owner_user_id: currentUserId, candidate_plan_actions: [followUpAction] }
+        });
+        nextMessages = [...nextMessages, followUp];
+        setPendingActions([followUpAction]);
+      }
+      setMessages(nextMessages);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to apply Copilot action.');
     } finally {
@@ -744,12 +1131,12 @@ export function ProjectCopilotModal({
               setDraft(event.target.value);
             }}
             onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) {
+              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                 event.preventDefault();
                 void sendMessage();
               }
             }}
-            placeholder="Ask Copilot to analyze, filter, sort, or plan a confirmed action"
+            placeholder="输入消息…"
             disabled={sending}
           />
           <button

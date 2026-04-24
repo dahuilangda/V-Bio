@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from management_api.copilot_skills.context_actions import (
+    ACTION_SCHEMA_VERSION,
+    CONTEXT_ACTION_SCHEMAS,
+    build_context_actions,
+    render_context_action_tool_schema,
+)
+from management_api.copilot_skills.workflows import infer_workflow_key, normalize_workflow_key
+
 
 COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     {
@@ -162,46 +170,94 @@ WORKFLOW_PARAMETER_KEYS: Dict[str, List[str]] = {
 }
 
 
-def normalize_workflow_key(value: Any) -> str:
-    token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if token in {"prediction", "boltz_2_prediction", "boltz_prediction"}:
-        return "prediction"
-    if token in {"affinity", "affinity_scoring", "boltz_2_affinity"}:
-        return "affinity"
-    if token in {"peptide", "peptide_design"}:
-        return "peptide_design"
-    if token in {"leadopt", "lead_opt", "lead_optimization"}:
-        return "lead_optimization"
-    if "peptide" in token:
-        return "peptide_design"
-    if "affinity" in token:
-        return "affinity"
-    if "lead" in token and "opt" in token:
-        return "lead_optimization"
-    return "prediction"
+def render_context_plan_schema_prompt(context_type: str, context_payload: Dict[str, Any]) -> str:
+    if context_type == "task_detail":
+        workflow_key = infer_workflow_key(context_payload)
+        return render_task_submission_schema_prompt(workflow_key)
+    if context_type == "task_list":
+        return _render_task_list_plan_schema()
+    if context_type == "project_list":
+        return _render_project_list_plan_schema()
+    return "No planning schema available for this context. Return {\"actions\":[]}."
 
 
-def infer_workflow_key(context_payload: Dict[str, Any]) -> str:
-    if not isinstance(context_payload, dict):
-        return "prediction"
-    direct = context_payload.get("workflow") or context_payload.get("workflow_key")
-    if direct:
-        return normalize_workflow_key(direct)
-    project = context_payload.get("project")
-    if isinstance(project, dict):
-        return normalize_workflow_key(project.get("task_type") or project.get("workflow") or project.get("workflow_key"))
-    return "prediction"
+def _render_task_list_plan_schema() -> str:
+    return (
+        "Current context: task_list (a project's task list page).\n"
+        "Use the page workflow to decide whether an operation is valid. The current project workflow is in context_payload.project.task_type.\n"
+        "Schema: return a JSON object with an \"actions\" array.\n"
+        "Each action must look like {\"id\":\"tasks:<verb>\",\"label\":\"<short label>\",\"description\":\"<detail>\",\"payload\":{...},\"needs_confirmation\":true,\"execute_now\":false}.\n"
+        "Treat the following as tool definitions. Choose only one or two smallest matching actions; copy IDs exactly from context when required:\n"
+        f"{render_context_action_tool_schema('task_list')}\n"
+        "Rules:\n"
+        "- A protein/peptide sequence is 2+ uppercase letters from the amino acid alphabet (ACDEFGHIKLMNPQRSTVWY).\n"
+        "- For new prediction tasks, payload.components is required. Never use a protein-only shortcut when the user provided ligand, DNA, RNA, or multiple components.\n"
+        "- Before returning JSON, internally extract all user-provided structural components and make payload.components match that set exactly; do not drop ligands, DNA, RNA, or copy old components.\n"
+        "- Component schema: {type:\"protein|ligand|dna|rna\", sequence:\"...\", numCopies:1, useMsa:true/false, inputMethod:\"smiles|ccd\" for ligand}. Use type ligand for small molecules, compounds, CCD IDs, and SMILES strings.\n"
+        "- If the user provides a sequence and wants to predict/submit, use tasks:create_with_sequence only when current workflow is prediction.\n"
+        "- If current workflow is affinity, peptide_design, or lead_optimization and the user asks to predict a lone sequence, return no actions; the assistant message should explain they are in the wrong project function.\n"
+        "- For delete or cancel, identify the target task from context_payload.rows by matching name or task_id.\n"
+        "- Use tasks:cancel for stop/terminate/cancel operations on running or queued tasks.\n"
+        "- Use tasks:delete for removing task records entirely.\n"
+        "- All actions require user confirmation (needs_confirmation=true, execute_now=false).\n"
+        "Examples:\n"
+        "- user asks to predict a sequence:\n"
+        "  {\"actions\":[{\"id\":\"tasks:create_with_sequence\",\"label\":\"新建预测任务\",\"description\":\"创建包含蛋白序列 AAADDD 的新预测任务\",\"payload\":{\"create\":true,\"components\":[{\"type\":\"protein\",\"sequence\":\"AAADDD\",\"numCopies\":1,\"useMsa\":true}]}}]}\n"
+        "- user asks to predict protein plus small molecule:\n"
+        "  {\"actions\":[{\"id\":\"tasks:create_with_sequence\",\"label\":\"新建预测任务\",\"description\":\"创建包含蛋白序列 AAAEEEDDD 和小分子 c1ccccc1 的新预测任务\",\"payload\":{\"create\":true,\"components\":[{\"type\":\"protein\",\"sequence\":\"AAAEEEDDD\",\"numCopies\":1,\"useMsa\":true},{\"type\":\"ligand\",\"sequence\":\"c1ccccc1\",\"numCopies\":1,\"inputMethod\":\"smiles\"}]}}]}\n"
+        "- user asks to show failed tasks:\n"
+        "  {\"actions\":[{\"id\":\"tasks:failure\",\"label\":\"显示失败任务\",\"description\":\"筛选 FAILURE 状态的任务\",\"payload\":{\"stateFilter\":\"FAILURE\"}}]}\n"
+        "- user asks to sort by pLDDT / 按 pLDDT 排序 / 按 置信度 排序:\n"
+        "  {\"actions\":[{\"id\":\"tasks:sort_plddt\",\"label\":\"按 pLDDT 排序\",\"description\":\"按置信度 pLDDT 从高到低排序\",\"payload\":{\"sortKey\":\"plddt\"}}]}\n"
+        "- user asks to sort by ipTM / 按 ipTM 排序:\n"
+        "  {\"actions\":[{\"id\":\"tasks:sort_iptm\",\"label\":\"按 ipTM 排序\",\"description\":\"按界面 ipTM 从高到低排序\",\"payload\":{\"sortKey\":\"iptm\"}}]}\n"
+        "- user asks to delete a task:\n"
+        "  {\"actions\":[{\"id\":\"tasks:delete\",\"label\":\"删除任务\",\"description\":\"删除任务 xxx\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\"}}]}\n"
+        "- user asks to cancel/stop/terminate a task / 取消/停止 任务:\n"
+        "  {\"actions\":[{\"id\":\"tasks:cancel\",\"label\":\"取消任务\",\"description\":\"取消正在运行的任务 xxx\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\"}}]}\n"
+        "Return JSON only. Do not explain."
+    )
+
+
+def _render_project_list_plan_schema() -> str:
+    return (
+        "Current context: project_list (all projects overview page).\n"
+        "The user can create new projects, delete projects, and analyze/project statistics. "
+        "The user CANNOT submit specific tasks from this page.\n"
+        "Schema: return a JSON object with an \"actions\" array.\n"
+        "Each action must look like {\"id\":\"projects:<verb>\",\"label\":\"<short label>\",\"description\":\"<detail>\",\"payload\":{...},\"needs_confirmation\":true,\"execute_now\":false}.\n"
+        "Treat the following as tool definitions. Choose only one or two smallest matching actions; copy IDs exactly from context when required:\n"
+        f"{render_context_action_tool_schema('project_list')}\n"
+        "Rules:\n"
+        "- For open/delete/cancel_active, identify the target project from context_payload.projects by matching name or id.\n"
+        "- If the user asks for affinity-related projects, use projects:workflow_affinity, not projects:backend_boltz.\n"
+        "- Use projects:backend_boltz only when the user explicitly asks for Boltz backend.\n"
+        "- If the user asks to submit/predict/run a task, return no actions from project_list; they must open the right project/task function first.\n"
+        "- All create and delete actions require user confirmation (needs_confirmation=true, execute_now=false).\n"
+        "- Filter/sort actions also require user confirmation.\n"
+        "Examples:\n"
+        "- user asks to create a project:\n"
+        "  {\"actions\":[{\"id\":\"projects:create\",\"label\":\"新建项目\",\"description\":\"创建一个新项目\",\"payload\":{\"create\":true}}]}\n"
+        "- user asks to delete a project:\n"
+        "  {\"actions\":[{\"id\":\"projects:delete\",\"label\":\"删除项目\",\"description\":\"删除项目 xxx\",\"payload\":{\"projectId\":\"<matched-id>\",\"projectName\":\"xxx\"}}]}\n"
+        "Return JSON only. Do not explain."
+    )
 
 
 def render_task_submission_schema_prompt(workflow_key: str = "prediction") -> str:
     normalized_workflow = normalize_workflow_key(workflow_key)
     allowed_keys = WORKFLOW_PARAMETER_KEYS.get(normalized_workflow, WORKFLOW_PARAMETER_KEYS["prediction"])
     lines = [
-        "Task submission planning must output strict JSON only.",
-        f"Current workflow: {normalized_workflow}",
-        "Schema:",
+        "Task detail context: the user is viewing/editing a specific task within a project.",
+        "They can create new tasks, delete the current task, or analyze the current task.",
+        "Schema: return a JSON object.",
+        "If the user wants to modify parameters or submit:",
         '{"capability":"task_submission_planning","intent":"...",'
         '"parameter_patch":{},"missing_questions":[],"risks":[],"needs_confirmation":true,"execute_now":false}',
+        "If the user wants to delete the current task:",
+        '{"capability":"task_deletion","intent":"delete","needs_confirmation":true,"execute_now":false}',
+        "If the user wants to rename or update description for the current task:",
+        '{"capability":"task_metadata_patch","intent":"rename","metadata_patch":{"taskName":"<NEW_NAME>","taskSummary":"<NEW_DESCRIPTION>"},"needs_confirmation":true,"execute_now":false}',
         "Interpret user-requested input changes into parameter_patch schema. Do not copy existing components when the user asks for only/single one component.",
         "For structure prediction, peptide and protein sequence inputs are both protein components.",
         "Examples:",
@@ -326,6 +382,58 @@ def sanitize_task_parameter_patch(candidate: Any, workflow_key: str = "predictio
 
 def build_task_submission_actions(candidate: Dict[str, Any], user_content: str, workflow_key: str = "prediction") -> List[Dict[str, Any]]:
     normalized_workflow = normalize_workflow_key(workflow_key)
+    capability = str(candidate.get("capability") or "").strip().lower()
+    if capability == "task_deletion":
+        return [
+            {
+                "id": "task_detail:delete_current",
+                "label": "删除当前任务",
+                "description": "确认删除当前正在查看的任务",
+                "payload": {
+                    "schemaVersion": ACTION_SCHEMA_VERSION,
+                    "contextType": "task_detail",
+                    "workflowKey": normalized_workflow,
+                    "destructive": True,
+                },
+                "needs_confirmation": True,
+                "execute_now": False,
+            }
+        ]
+    if capability == "task_metadata_patch":
+        raw_patch = candidate.get("metadata_patch") if isinstance(candidate.get("metadata_patch"), dict) else {}
+        task_name = str(raw_patch.get("taskName") or raw_patch.get("name") or "").strip()
+        task_summary = str(raw_patch.get("taskSummary") or raw_patch.get("summary") or "").strip()
+        metadata_patch = {
+            key: value
+            for key, value in {
+                "taskName": task_name,
+                "taskSummary": task_summary,
+            }.items()
+            if value
+        }
+        if not metadata_patch:
+            return []
+        parts = []
+        if task_name:
+            parts.append(f"name: {task_name}")
+        if task_summary:
+            parts.append(f"description: {task_summary}")
+        return [
+            {
+                "id": "task_detail:apply_metadata_patch",
+                "label": "更新任务信息",
+                "description": ", ".join(parts),
+                "payload": {
+                    "metadataPatch": metadata_patch,
+                    "workflowKey": normalized_workflow,
+                    "schemaVersion": ACTION_SCHEMA_VERSION,
+                    "contextType": "task_detail",
+                    "destructive": False,
+                },
+                "needs_confirmation": True,
+                "execute_now": False,
+            }
+        ]
     patch = sanitize_task_parameter_patch(candidate.get("parameter_patch"), normalized_workflow)
     if not patch:
         return []
@@ -341,25 +449,40 @@ def build_task_submission_actions(candidate: Dict[str, Any], user_content: str, 
         else:
             description_parts.append(f"{key}: {value}")
     description = ", ".join(description_parts)
-    actions = [
-        {
-            "id": "task_detail:apply_parameter_patch",
-            "label": "Confirm parameter changes",
-            "description": description,
-            "payload": {"parameterPatch": patch, "workflowKey": normalized_workflow},
-        }
-    ]
     content = str(user_content or "").lower()
     wants_submit = any(token in content for token in ["submit", "run", "rerun", "提交", "运行", "重跑"])
     intent = str(candidate.get("intent") or "").lower()
     wants_submit = wants_submit or any(token in intent for token in ["submit", "run", "rerun"])
     if wants_submit:
-        actions.append(
+        return [
             {
                 "id": "task_detail:apply_patch_and_submit",
                 "label": "Confirm changes and run",
                 "description": f"Apply {description}, then use the existing validated run action.",
-                "payload": {"parameterPatch": patch, "workflowKey": normalized_workflow},
+                "payload": {
+                    "parameterPatch": patch,
+                    "workflowKey": normalized_workflow,
+                    "schemaVersion": ACTION_SCHEMA_VERSION,
+                    "contextType": "task_detail",
+                    "destructive": False,
+                },
+                "needs_confirmation": True,
+                "execute_now": False,
             }
-        )
-    return actions
+        ]
+    return [
+        {
+            "id": "task_detail:apply_parameter_patch",
+            "label": "Confirm parameter changes",
+            "description": description,
+            "payload": {
+                "parameterPatch": patch,
+                "workflowKey": normalized_workflow,
+                "schemaVersion": ACTION_SCHEMA_VERSION,
+                "contextType": "task_detail",
+                "destructive": False,
+            },
+            "needs_confirmation": True,
+            "execute_now": False,
+        }
+    ]
