@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List
 
 from management_api.copilot_skills.project_list import PROJECT_LIST_ACTION_SCHEMAS
@@ -158,6 +159,44 @@ def _sanitize_prediction_components(value: Any) -> List[Dict[str, Any]]:
     return components
 
 
+def _declared_ligand_tokens(user_content: str) -> List[str]:
+    content = str(user_content or "")
+    if not content.strip():
+        return []
+    token_pattern = r"([A-Za-z0-9@+\-\[\]\(\)=#$\\/%.]+)"
+    patterns = [
+        rf"(?:小分子|配体|化合物)\s*(?:序列|SMILES|smiles|为|是|:|：|=)?\s*{token_pattern}",
+        rf"(?:small\s+molecule|ligand|compound|SMILES|smiles)\s*(?:sequence|is|as|:|=)?\s*{token_pattern}",
+    ]
+    tokens: List[str] = []
+    seen: set[str] = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, content, flags=re.IGNORECASE):
+            token = str(match.group(1) or "").strip().strip("，,。.;；")
+            if not token:
+                continue
+            key = token.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            tokens.append(token)
+    return tokens
+
+
+def _component_contains_sequence(components: List[Dict[str, Any]], component_type: str, sequence: str) -> bool:
+    expected = str(sequence or "").strip().lower()
+    if not expected:
+        return True
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        if str(component.get("type") or "").strip().lower() != component_type:
+            continue
+        if str(component.get("sequence") or "").strip().lower() == expected:
+            return True
+    return False
+
+
 def _context_action_is_allowed(
     *,
     context_type: str,
@@ -199,6 +238,9 @@ def _context_action_is_allowed(
         components = payload.get("components") if isinstance(payload.get("components"), list) else []
         if not components:
             return False
+        for ligand_token in _declared_ligand_tokens(user_content):
+            if not _component_contains_sequence(components, "ligand", ligand_token):
+                return False
         has_valid_component = False
         for component in components:
             if not isinstance(component, dict):
@@ -278,6 +320,9 @@ def build_context_actions(
     user_content: str = "",
 ) -> List[Dict[str, Any]]:
     normalized_context = str(context_type or "").strip()
+    missing_questions = candidate.get("missing_questions") if isinstance(candidate, dict) else []
+    if isinstance(missing_questions, list) and any(str(item or "").strip() for item in missing_questions):
+        return []
     workflow_key = infer_workflow_key(context_payload)
     planned = candidate.get("actions") or candidate.get("plan_actions") or []
     if not isinstance(planned, list):

@@ -190,21 +190,30 @@ def _render_task_list_plan_schema() -> str:
         "Treat the following as tool definitions. Choose only one or two smallest matching actions; copy IDs exactly from context when required:\n"
         f"{render_context_action_tool_schema('task_list')}\n"
         "Rules:\n"
-        "- A protein/peptide sequence is 2+ uppercase letters from the amino acid alphabet (ACDEFGHIKLMNPQRSTVWY).\n"
-        "- For new prediction tasks, payload.components is required. Never use a protein-only shortcut when the user provided ligand, DNA, RNA, or multiple components.\n"
-        "- Before returning JSON, internally extract all user-provided structural components and make payload.components match that set exactly; do not drop ligands, DNA, RNA, or copy old components.\n"
-        "- Component schema: {type:\"protein|ligand|dna|rna\", sequence:\"...\", numCopies:1, useMsa:true/false, inputMethod:\"smiles|ccd\" for ligand}. Use type ligand for small molecules, compounds, CCD IDs, and SMILES strings.\n"
+        "- Component extraction is semantic, not regex-only. First honor explicit labels in the user message, then infer from the value shape only when no label is present.\n"
+        "- Label mapping: 蛋白/protein/peptide/多肽/氨基酸 -> protein; 小分子/配体/化合物/compound/ligand/drug/SMILES/smiles -> ligand; DNA/dna/脱氧核糖核酸 -> dna; RNA/rna/核糖核酸 -> rna.\n"
+        "- A protein/peptide sequence is usually 2+ letters from the amino acid alphabet (ACDEFGHIKLMNPQRSTVWY), but an explicitly labeled ligand wins over this rule. Example: 小分子为 ATP is ligand, not protein.\n"
+        "- Ligands may be lowercase, uppercase, mixed-case, symbolic SMILES such as CN1C=NC2=C1C(=O)N(C)C(=O)N2C, or CCD IDs such as ATP/NAD/HEM. Preserve ligand text exactly except surrounding whitespace.\n"
+        "- Preserve every user-provided component in order. If the user provides multiple proteins/ligands/DNA/RNA items, payload.components must include all of them; do not merge, drop, or copy old components.\n"
+        "- Component schema: {type:\"protein|ligand|dna|rna\", sequence:\"...\", numCopies:1, useMsa:true/false, inputMethod:\"smiles|ccd\" for ligand}. For proteins default useMsa=true unless the user says no MSA or the component is clearly a peptide binder.\n"
         "- If the user provides a sequence and wants to predict/submit, use tasks:create_with_sequence only when current workflow is prediction.\n"
+        "- If the user asks only to create/fill a task, create the draft action. If they asks to run/submit/predict too, still return the same confirmed create action; the UI will ask for run confirmation after the draft is filled.\n"
+        "- If the user request is ambiguous or lacks necessary information, return {\"actions\":[],\"missing_questions\":[\"...\"]}. Ask for clarification instead of forcing a confirmation button.\n"
+        "- Ambiguous examples: unlabeled uppercase strings that could be peptide/protein/CCD/SMILES; 'new task' without any component; 'delete it' with multiple plausible target tasks; a workflow request that conflicts with current project type.\n"
         "- If current workflow is affinity, peptide_design, or lead_optimization and the user asks to predict a lone sequence, return no actions; the assistant message should explain they are in the wrong project function.\n"
         "- For delete or cancel, identify the target task from context_payload.rows by matching name or task_id.\n"
         "- Use tasks:cancel for stop/terminate/cancel operations on running or queued tasks.\n"
         "- Use tasks:delete for removing task records entirely.\n"
         "- All actions require user confirmation (needs_confirmation=true, execute_now=false).\n"
-        "Examples:\n"
-        "- user asks to predict a sequence:\n"
-        "  {\"actions\":[{\"id\":\"tasks:create_with_sequence\",\"label\":\"新建预测任务\",\"description\":\"创建包含蛋白序列 AAADDD 的新预测任务\",\"payload\":{\"create\":true,\"components\":[{\"type\":\"protein\",\"sequence\":\"AAADDD\",\"numCopies\":1,\"useMsa\":true}]}}]}\n"
-        "- user asks to predict protein plus small molecule:\n"
-        "  {\"actions\":[{\"id\":\"tasks:create_with_sequence\",\"label\":\"新建预测任务\",\"description\":\"创建包含蛋白序列 AAAEEEDDD 和小分子 c1ccccc1 的新预测任务\",\"payload\":{\"create\":true,\"components\":[{\"type\":\"protein\",\"sequence\":\"AAAEEEDDD\",\"numCopies\":1,\"useMsa\":true},{\"type\":\"ligand\",\"sequence\":\"c1ccccc1\",\"numCopies\":1,\"inputMethod\":\"smiles\"}]}}]}\n"
+        "Broad examples, adapt them to the user's exact labels and values:\n"
+        "- protein-only task / 只有一条蛋白 / predict this peptide:\n"
+        "  {\"actions\":[{\"id\":\"tasks:create_with_sequence\",\"label\":\"新建预测任务\",\"description\":\"创建包含蛋白序列 MEEPQSDPSV 的新预测任务\",\"payload\":{\"create\":true,\"components\":[{\"type\":\"protein\",\"sequence\":\"MEEPQSDPSV\",\"numCopies\":1,\"useMsa\":true}]}}]}\n"
+        "- protein plus explicitly labeled small molecule, including uppercase ligand-like text:\n"
+        "  {\"actions\":[{\"id\":\"tasks:create_with_sequence\",\"label\":\"新建预测任务\",\"description\":\"创建包含蛋白序列 GSHMKWVTFISLLFLFSSAYSRGV 和小分子 ATP 的新预测任务\",\"payload\":{\"create\":true,\"components\":[{\"type\":\"protein\",\"sequence\":\"GSHMKWVTFISLLFLFSSAYSRGV\",\"numCopies\":1,\"useMsa\":true},{\"type\":\"ligand\",\"sequence\":\"ATP\",\"numCopies\":1,\"inputMethod\":\"ccd\"}]}}]}\n"
+        "- protein plus drug-like SMILES / compound CN1C=NC2=C1C(=O)N(C)C(=O)N2C / ligand NAD:\n"
+        "  {\"actions\":[{\"id\":\"tasks:create_with_sequence\",\"label\":\"新建预测任务\",\"description\":\"创建包含蛋白和 ligand 的新预测任务\",\"payload\":{\"create\":true,\"components\":[{\"type\":\"protein\",\"sequence\":\"MEEPQSDPSV\",\"numCopies\":1,\"useMsa\":true},{\"type\":\"ligand\",\"sequence\":\"CN1C=NC2=C1C(=O)N(C)C(=O)N2C\",\"numCopies\":1,\"inputMethod\":\"smiles\"},{\"type\":\"ligand\",\"sequence\":\"NAD\",\"numCopies\":1,\"inputMethod\":\"ccd\"}]}}]}\n"
+        "- mixed biomolecules / DNA and RNA are not proteins:\n"
+        "  {\"actions\":[{\"id\":\"tasks:create_with_sequence\",\"label\":\"新建预测任务\",\"description\":\"创建包含蛋白、DNA 和 RNA 的新预测任务\",\"payload\":{\"create\":true,\"components\":[{\"type\":\"protein\",\"sequence\":\"MSTNPKPQR\",\"numCopies\":1,\"useMsa\":true},{\"type\":\"dna\",\"sequence\":\"ATCGATCG\",\"numCopies\":1},{\"type\":\"rna\",\"sequence\":\"AUGCUU\",\"numCopies\":1}]}}]}\n"
         "- user asks to show failed tasks:\n"
         "  {\"actions\":[{\"id\":\"tasks:failure\",\"label\":\"显示失败任务\",\"description\":\"筛选 FAILURE 状态的任务\",\"payload\":{\"stateFilter\":\"FAILURE\"}}]}\n"
         "- user asks to sort by pLDDT / 按 pLDDT 排序 / 按 置信度 排序:\n"
@@ -258,13 +267,23 @@ def render_task_submission_schema_prompt(workflow_key: str = "prediction") -> st
         '{"capability":"task_deletion","intent":"delete","needs_confirmation":true,"execute_now":false}',
         "If the user wants to rename or update description for the current task:",
         '{"capability":"task_metadata_patch","intent":"rename","metadata_patch":{"taskName":"<NEW_NAME>","taskSummary":"<NEW_DESCRIPTION>"},"needs_confirmation":true,"execute_now":false}',
-        "Interpret user-requested input changes into parameter_patch schema. Do not copy existing components when the user asks for only/single one component.",
-        "For structure prediction, peptide and protein sequence inputs are both protein components.",
-        "Examples:",
-        "- one protein sequence:",
+        "If the request is ambiguous or missing necessary information:",
+        '{"capability":"clarification_needed","intent":"ask_clarifying_question","missing_questions":["<QUESTION_TO_ASK_USER>"],"needs_confirmation":false,"execute_now":false}',
+        "Interpret user-requested input changes into parameter_patch schema. Component extraction is semantic: first honor explicit labels, then infer from value shape only when no label is present.",
+        "Label mapping: 蛋白/protein/peptide/多肽/氨基酸 -> protein; 小分子/配体/化合物/compound/ligand/drug/SMILES/smiles -> ligand; DNA/dna -> dna; RNA/rna -> rna.",
+        "For structure prediction, peptide and protein sequence inputs are both protein components, unless the user explicitly labels the value as ligand/small molecule/SMILES.",
+        "When the user asks for only/single/只有/rewrite/replace components, replace the component list and clear constraints unless they explicitly ask to keep constraints. Do not copy old components.",
+        "If the user gives multiple components, preserve all components in order. Uppercase ligand text such as ATP/NAD/HEM remains ligand when labeled 小分子/ligand/CCD/SMILES.",
+        "If the type or value of a component is unclear, or the user asks to run but required inputs are missing, set capability=clarification_needed with missing_questions instead of producing a confirmation action.",
+        "Broad examples, adapt them to the exact user labels and values:",
+        "- replace with one protein sequence:",
         '{"parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"<PROTEIN_SEQUENCE>","numCopies":1,"useMsa":true}],"clearConstraints":true}},"needs_confirmation":true,"execute_now":false}',
-        "- protein plus small molecule ligand:",
-        '{"parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"<PROTEIN_SEQUENCE>","numCopies":1,"useMsa":true},{"type":"ligand","sequence":"<SMILES_OR_CCD>","numCopies":1,"inputMethod":"smiles"}],"clearConstraints":true}},"needs_confirmation":true,"execute_now":false}',
+        "- replace with protein plus explicitly labeled small molecule ligand, preserving uppercase ligand text:",
+        '{"parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"GSHMKWVTFISLLFLFSSAYSRGV","numCopies":1,"useMsa":true},{"type":"ligand","sequence":"ATP","numCopies":1,"inputMethod":"ccd"}],"clearConstraints":true}},"needs_confirmation":true,"execute_now":false}',
+        "- replace with multiple ligands or SMILES strings:",
+        '{"parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"<PROTEIN_SEQUENCE>","numCopies":1,"useMsa":true},{"type":"ligand","sequence":"CN1C=NC2=C1C(=O)N(C)C(=O)N2C","numCopies":1,"inputMethod":"smiles"},{"type":"ligand","sequence":"NAD","numCopies":1,"inputMethod":"ccd"}],"clearConstraints":true}},"needs_confirmation":true,"execute_now":false}',
+        "- replace with protein plus DNA/RNA components:",
+        '{"parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"<PROTEIN_SEQUENCE>","numCopies":1,"useMsa":true},{"type":"dna","sequence":"ATCGATCG","numCopies":1},{"type":"rna","sequence":"AUGCUU","numCopies":1}],"clearConstraints":true}},"needs_confirmation":true,"execute_now":false}',
         "- protein plus peptide binder; peptide is represented as another protein component:",
         '{"parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"<TARGET_PROTEIN_SEQUENCE>","numCopies":1,"useMsa":true},{"type":"protein","sequence":"<PEPTIDE_SEQUENCE>","numCopies":1,"useMsa":false}],"clearConstraints":true}},"needs_confirmation":true,"execute_now":false}',
         "Allowed parameter_patch keys for this workflow:",
@@ -383,6 +402,11 @@ def sanitize_task_parameter_patch(candidate: Any, workflow_key: str = "predictio
 def build_task_submission_actions(candidate: Dict[str, Any], user_content: str, workflow_key: str = "prediction") -> List[Dict[str, Any]]:
     normalized_workflow = normalize_workflow_key(workflow_key)
     capability = str(candidate.get("capability") or "").strip().lower()
+    missing_questions = candidate.get("missing_questions") if isinstance(candidate, dict) else []
+    if capability == "clarification_needed" or (
+        isinstance(missing_questions, list) and any(str(item or "").strip() for item in missing_questions)
+    ):
+        return []
     if capability == "task_deletion":
         return [
             {

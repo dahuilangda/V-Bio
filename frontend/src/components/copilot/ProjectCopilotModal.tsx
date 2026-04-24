@@ -71,22 +71,23 @@ function readPlanActions(value: unknown): CopilotPlanAction[] {
     });
 }
 
-function readAppliedActionId(message: ProjectCopilotMessage): string {
+function readAppliedActionKey(message: ProjectCopilotMessage): string {
   const applied = message.metadata?.applied_action;
   if (!applied || typeof applied !== 'object') return '';
-  return String((applied as CopilotPlanAction).id || '').trim();
+  const action = applied as CopilotPlanAction;
+  return `${String(action.id || '').trim()}:${JSON.stringify(action.payload || {})}`;
 }
 
 function filterAppliedPlanActions(messages: ProjectCopilotMessage[], sessionId: string, actions: CopilotPlanAction[]): CopilotPlanAction[] {
   if (actions.length === 0) return [];
-  const appliedIds = new Set(
+  const appliedKeys = new Set(
     messages
       .filter((message) => readSessionId(message) === sessionId)
-      .map(readAppliedActionId)
+      .map(readAppliedActionKey)
       .filter(Boolean)
   );
-  if (appliedIds.size === 0) return actions;
-  return actions.filter((action) => !appliedIds.has(action.id));
+  if (appliedKeys.size === 0) return actions;
+  return actions.filter((action) => !appliedKeys.has(`${action.id}:${JSON.stringify(action.payload || {})}`));
 }
 
 function getSessionTitle(messages: ProjectCopilotMessage[], sessionId: string): string {
@@ -126,6 +127,14 @@ function copilotPanelStateDbKey(): string {
 
 function copilotOpenStateDbKey(): string {
   return 'open';
+}
+
+function copilotActiveSessionStateDbKey(): string {
+  return 'active_session:global';
+}
+
+function copilotActiveSessionStorageKey(userId: string): string {
+  return `vbio:copilot-active-session:v1:${String(userId || 'anonymous').trim().toLowerCase() || 'anonymous'}`;
 }
 
 function copilotContinuationStorageKey(userId: string, projectId?: string | null): string {
@@ -175,6 +184,38 @@ function writeStoredCopilotDraftLocal(input: {
   } else {
     window.localStorage.removeItem(key);
   }
+}
+
+function readStoredCopilotActiveSessionLocal(userId: string): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    return String(window.localStorage.getItem(copilotActiveSessionStorageKey(userId)) || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+async function readStoredCopilotActiveSession(userId: string): Promise<string> {
+  const local = readStoredCopilotActiveSessionLocal(userId);
+  if (local) return local;
+  const persisted = await getProjectCopilotState(userId, copilotActiveSessionStateDbKey());
+  return String(persisted?.session_id || '').trim();
+}
+
+function writeStoredCopilotActiveSession(userId: string, sessionId: string): void {
+  const normalizedSessionId = String(sessionId || '').trim();
+  if (!normalizedSessionId) return;
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(copilotActiveSessionStorageKey(userId), normalizedSessionId);
+  }
+  void upsertProjectCopilotState(userId, copilotActiveSessionStateDbKey(), { session_id: normalizedSessionId });
+}
+
+function clearStoredCopilotActiveSession(userId: string): void {
+  if (typeof window !== 'undefined') {
+    window.localStorage.removeItem(copilotActiveSessionStorageKey(userId));
+  }
+  void deleteProjectCopilotState(userId, copilotActiveSessionStateDbKey());
 }
 
 type CopilotContinuationState = {
@@ -445,7 +486,7 @@ export function ProjectCopilotModal({
   const [messages, setMessages] = useState<ProjectCopilotMessage[]>(() =>
     readCachedProjectCopilotMessages(globalCopilotMessageScope(currentUserId))
   );
-  const [activeSessionId, setActiveSessionId] = useState(createSessionId);
+  const [activeSessionId, setActiveSessionId] = useState(() => readStoredCopilotActiveSessionLocal(currentUserId) || createSessionId());
   const [historyOpen, setHistoryOpen] = useState(Boolean(storedPanelState.historyOpen));
   const [draft, setDraft] = useState(() => readStoredCopilotDraftLocal(draftScope));
   const [loading, setLoading] = useState(false);
@@ -510,6 +551,13 @@ export function ProjectCopilotModal({
     );
   }, [contextType]);
 
+  const activateSession = useCallback((sessionId: string) => {
+    const normalizedSessionId = String(sessionId || '').trim() || createSessionId();
+    writeStoredCopilotActiveSession(currentUserId, normalizedSessionId);
+    setActiveSessionId(normalizedSessionId);
+    return normalizedSessionId;
+  }, [currentUserId]);
+
   const focusComposer = useCallback(() => {
     if (typeof window === 'undefined') return;
     if (focusComposerFrameRef.current) {
@@ -542,6 +590,7 @@ export function ProjectCopilotModal({
     setError(null);
     try {
       let loaded = await listProjectCopilotMessages(messageScope);
+      const storedActiveSessionId = await readStoredCopilotActiveSession(currentUserId);
       const continuation = contextType === 'task_detail'
         ? await readCopilotContinuation(currentUserId, projectId)
         : null;
@@ -580,12 +629,16 @@ export function ProjectCopilotModal({
       setMessages(loaded);
       setActiveSessionId((currentSessionId) => {
         const sessionIds = Array.from(new Set(loaded.map(readSessionId)));
+        const latestLoadedSessionId = loaded.length > 0 ? readSessionId(loaded[loaded.length - 1]) : '';
         const nextSessionId =
           (preferredSessionId && sessionIds.includes(preferredSessionId) ? preferredSessionId : '') ||
+          (storedActiveSessionId && sessionIds.includes(storedActiveSessionId) ? storedActiveSessionId : '') ||
           (sessionIds.includes(currentSessionId) ? currentSessionId : '') ||
-          sessionIds[0] ||
+          latestLoadedSessionId ||
+          sessionIds[sessionIds.length - 1] ||
           currentSessionId ||
           createSessionId();
+        writeStoredCopilotActiveSession(currentUserId, nextSessionId);
         restoreSessionActions(loaded, nextSessionId);
         return nextSessionId;
       });
@@ -845,7 +898,7 @@ export function ProjectCopilotModal({
 
   const startNewChat = () => {
     const nextSessionId = createSessionId();
-    setActiveSessionId(nextSessionId);
+    activateSession(nextSessionId);
     setDraft('');
     writeStoredCopilotDraftLocal(draftScope, '');
     void deleteProjectCopilotState(currentUserId, copilotDraftDbKey());
@@ -855,7 +908,7 @@ export function ProjectCopilotModal({
   };
 
   const selectSession = (sessionId: string) => {
-    setActiveSessionId(sessionId);
+    activateSession(sessionId);
     setDraft('');
     writeStoredCopilotDraftLocal(draftScope, '');
     void deleteProjectCopilotState(currentUserId, copilotDraftDbKey());
@@ -874,6 +927,7 @@ export function ProjectCopilotModal({
       await deleteProjectCopilotMessagesBySession({ ...messageScope, sessionId, userId: currentUserId, messageIds });
       setMessages((prev) => prev.filter((message) => readSessionId(message) !== sessionId));
       if (sessionId === activeSessionId) {
+        clearStoredCopilotActiveSession(currentUserId);
         startNewChat();
       }
     } catch (err) {

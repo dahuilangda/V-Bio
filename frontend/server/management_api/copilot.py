@@ -178,6 +178,7 @@ class CopilotAssistant:
                     "The previous JSON did not satisfy the action schema. "
                     "For tasks:create_with_sequence, payload.components is required and must include every user-provided component. "
                     "Use type ligand for small molecules, compounds, CCD IDs, and SMILES strings. "
+                    "When the user labels a value with 小分子, 配体, small molecule, ligand, compound, or SMILES, that value must be a ligand component even if it is uppercase. "
                     f"Previous JSON: {compact_text(candidate, 2000)}"
                 ),
             },

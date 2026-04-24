@@ -196,6 +196,92 @@ class TaskChatTests(unittest.TestCase):
             ],
         )
 
+    def test_task_list_create_with_sequence_rejects_missing_declared_ligand(self):
+        actions = build_context_actions(
+            "task_list",
+            {
+                "actions": [
+                    {
+                        "id": "tasks:create_with_sequence",
+                        "payload": {
+                            "create": True,
+                            "components": [
+                                {"type": "protein", "sequence": "AAAEEE", "numCopies": 1, "useMsa": True},
+                            ],
+                        },
+                    }
+                ]
+            },
+            {"project": {"task_type": "Structure Prediction"}, "rows": []},
+            "帮我新建一个任务\n\n蛋白序列为AAAEEE 小分子为CCCCO",
+        )
+        self.assertEqual(actions, [])
+
+    def test_task_list_create_with_sequence_accepts_uppercase_declared_ligand(self):
+        actions = build_context_actions(
+            "task_list",
+            {
+                "actions": [
+                    {
+                        "id": "tasks:create_with_sequence",
+                        "payload": {
+                            "create": True,
+                            "components": [
+                                {"type": "protein", "sequence": "AAAEEE", "numCopies": 1, "useMsa": True},
+                                {"type": "ligand", "sequence": "CCCCO", "numCopies": 1, "inputMethod": "smiles"},
+                            ],
+                        },
+                    }
+                ]
+            },
+            {"project": {"task_type": "Structure Prediction"}, "rows": []},
+            "帮我新建一个任务\n\n蛋白序列为AAAEEE 小分子为CCCCO",
+        )
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(
+            actions[0]["payload"]["components"],
+            [
+                {"type": "protein", "sequence": "AAAEEE", "numCopies": 1, "useMsa": True},
+                {"type": "ligand", "sequence": "CCCCO", "numCopies": 1, "inputMethod": "smiles"},
+            ],
+        )
+
+    def test_context_actions_do_not_confirm_when_missing_questions_present(self):
+        actions = build_context_actions(
+            "task_list",
+            {
+                "missing_questions": ["这个未标注的 CCCC 是小分子、CCD ID 还是肽段？"],
+                "actions": [
+                    {
+                        "id": "tasks:create_with_sequence",
+                        "payload": {
+                            "create": True,
+                            "components": [
+                                {"type": "protein", "sequence": "CCCC", "numCopies": 1, "useMsa": True},
+                            ],
+                        },
+                    }
+                ],
+            },
+            {"project": {"task_type": "Structure Prediction"}, "rows": []},
+            "新建 CCCC",
+        )
+        self.assertEqual(actions, [])
+
+    def test_task_detail_missing_questions_do_not_create_confirmation_action(self):
+        actions = build_task_submission_actions(
+            {
+                "capability": "clarification_needed",
+                "intent": "ask_clarifying_question",
+                "missing_questions": ["请说明 CCCC 是小分子、CCD ID 还是蛋白/肽段序列。"],
+                "needs_confirmation": False,
+                "execute_now": False,
+            },
+            "把 CCCC 填进去并运行",
+            "prediction",
+        )
+        self.assertEqual(actions, [])
+
     def test_task_list_rename_and_cancel_are_schema_confirmed(self):
         actions = build_context_actions(
             "task_list",
