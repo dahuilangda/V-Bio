@@ -28,8 +28,12 @@ def infer_workflow_key(context_payload: Dict[str, Any]) -> str:
     direct = context_payload.get("workflow") or context_payload.get("workflow_key")
     if direct:
         return normalize_workflow_key(direct)
+    page = context_payload.get("page")
+    if isinstance(page, dict):
+        page_workflow = page.get("workflowKey") or page.get("workflow_key") or page.get("workflow") or page.get("workflowTitle")
+        if page_workflow:
+            return normalize_workflow_key(page_workflow)
     project = context_payload.get("project")
     if isinstance(project, dict):
         return normalize_workflow_key(project.get("task_type") or project.get("workflow") or project.get("workflow_key"))
     return "prediction"
-

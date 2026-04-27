@@ -215,6 +215,48 @@ def _error_mentions_field(text: Any, field: str) -> bool:
     return field.lower() in normalized and any(token in normalized for token in ("unsupported", "unknown", "extra", "unexpected", "not permitted", "unrecognized"))
 
 
+def _read_authoritative_workflow_key(context_payload: Any) -> str:
+    if not isinstance(context_payload, dict):
+        return ""
+    page = context_payload.get("page")
+    if isinstance(page, dict):
+        value = page.get("workflowKey") or page.get("workflow_key") or page.get("workflow")
+        if value:
+            return str(value or "").strip().lower()
+    project = context_payload.get("project")
+    if isinstance(project, dict):
+        value = project.get("workflow_key") or project.get("workflow") or project.get("task_type")
+        if value:
+            return str(value or "").strip().lower()
+    return ""
+
+
+def remove_page_workflow_conflicts(context_payload: Any) -> Any:
+    if not isinstance(context_payload, dict):
+        return context_payload
+    workflow_key = _read_authoritative_workflow_key(context_payload)
+    if not workflow_key or "affinity" in workflow_key:
+        return context_payload
+    current_task = context_payload.get("currentTask")
+    if not isinstance(current_task, dict):
+        return context_payload
+    cleaned_task = dict(current_task)
+    cleaned_task.pop("affinity", None)
+    properties = cleaned_task.get("properties")
+    if isinstance(properties, dict):
+        cleaned_properties = dict(properties)
+        cleaned_properties.pop("affinityMode", None)
+        cleaned_properties.pop("affinity_mode", None)
+        cleaned_task["properties"] = cleaned_properties
+    cleaned_task["_copilot_context_note"] = (
+        "Workflow-incompatible affinity result fields were omitted because the authoritative page workflow is "
+        f"{workflow_key}."
+    )
+    cleaned = dict(context_payload)
+    cleaned["currentTask"] = cleaned_task
+    return cleaned
+
+
 def strip_internal_capability_lines(content: str) -> str:
     cleaned_lines: List[str] = []
     internal_label_pattern = re.compile(
@@ -334,15 +376,20 @@ class CopilotAssistant:
         normalized_content = compact_text(content, 6000)
         if not normalized_content:
             raise ValueError("content is required.")
-        safe_context_payload = sanitize_context_payload(context_payload)
+        safe_context_payload = remove_page_workflow_conflicts(sanitize_context_payload(context_payload))
         system_prompt = (
             "你是 V-Bio Copilot，也是协作留言助手和任务操作规划助手。"
             "根据能力定义选择最小可用能力。"
             "不要向用户展示内部能力名、工具名、skill 名、action id，也不要写“能力使用”或“能力调用”。"
+            "页面模块必须以 context_payload.page.workflowKey / page.workflowTitle 为准；如果 currentTask、历史结果、properties 或 affinity 字段与 page 冲突，不能用它们覆盖当前页面模块。"
+            "回答当前所在功能时，优先引用 page.workflowTitle；不要因为结果记录里存在 affinity/score 字段就说用户在 Affinity 页面。"
             "任何提交、取消、删除、修改参数、筛选排序等动作都必须通过 candidate_plan_actions 的 schema 按钮执行，先给出计划并等待用户确认，不能声称已经执行。"
             "如果用户不在正确的 project 功能页或 task 功能页，明确指出当前功能不适合该操作，并告诉用户应进入哪个功能；不要编造可执行按钮。"
             "只有当 context_payload.candidate_plan_actions 是非空数组时，才允许说明界面会在消息下方显示确认按钮；否则不要提确认按钮。"
             "如果没有 candidate_plan_actions，但用户要求提交、运行、删除或修改，说明当前没有生成可执行确认操作，不要声称已经规划出按钮。"
+            "只能承诺本 Copilot schema 和页面已有功能能完成的事：分析当前上下文、规划需确认的参数/组件修改、提交/删除/重命名、应用已上传文件。"
+            "不要承诺生成、返回、导出、下载或计算化合物坐标、结构文件、后台结果文件；除非 context_payload 或 candidate_plan_actions 明确提供了对应能力。"
+            "不要泛泛建议“通过下载按钮/下载选项获取结果文件”；只有当 context_payload.page.availableActions 或 context_payload.resultDownloads 明确包含下载能力时才可以提下载。"
             "Affinity Scoring 不是仅凭一个多肽/蛋白序列做结构预测；如果用户只给序列并要求提交结构预测，不要把它解释为 affinity 提交。"
             "回答要明确区分：分析结论、计划、确认项。优先使用中文。\n\n"
             f"{render_capability_prompt()}"
@@ -413,7 +460,7 @@ class CopilotAssistant:
         if not normalized_content:
             raise ValueError("content is required.")
         normalized_ctx = str(context_type or "").strip()
-        safe_context_payload = sanitize_context_payload(context_payload)
+        safe_context_payload = remove_page_workflow_conflicts(sanitize_context_payload(context_payload))
 
         system_prompt = (
             "You are a deterministic planning adapter for V-Bio Copilot. "

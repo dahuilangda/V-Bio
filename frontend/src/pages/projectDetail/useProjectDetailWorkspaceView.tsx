@@ -3628,7 +3628,23 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         currentUserId={session.userId}
         currentUsername={session.username}
         contextPayload={{
-          project: { id: project.id, name: project.name, task_type: project.task_type },
+          page: {
+            contextType: 'task_detail',
+            workflowKey: workflow.key,
+            workflowTitle: workflow.title,
+            workflowShortTitle: workflow.shortTitle,
+            runLabel: workflow.runLabel,
+            supportsSequenceInputs: workflow.supportsSequenceInputs,
+            availableActions: [
+              'analyze_current_context',
+              'plan_confirmed_parameter_patch',
+              'plan_confirmed_submit',
+              'plan_confirmed_delete_current_task',
+              'plan_confirmed_metadata_update',
+              'apply_copilot_uploaded_files_when_supported'
+            ]
+          },
+          project: { id: project.id, name: project.name, task_type: project.task_type, workflow_key: workflow.key },
           draft: {
             taskName: draft.taskName,
             taskSummary: draft.taskSummary,
