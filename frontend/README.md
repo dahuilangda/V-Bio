@@ -88,6 +88,10 @@ Important variables:
 - `VBIO_COPILOT_API_KEY`: server-side bearer token for the chat endpoint.
 - `VBIO_COPILOT_MODEL`: model name used by Copilot, for example `gemma4-31b`.
 
+Copilot is enabled only when the management API process has `VBIO_COPILOT_API_URL` in its environment.
+The browser bundle does not read Copilot keys directly. If you start the app with `frontend/run.sh`, put the
+Copilot variables in `frontend/.env`; that script loads the file before starting `vbio_management_api:app`.
+
 ## 3) Run V-Bio frontend
 
 ```bash
@@ -164,6 +168,16 @@ python ./frontend/server/vbio_management_api.py
 
 Default gateway URL: `http://127.0.0.1:5055/vbio-api`
 
+To verify Copilot configuration after restarting the management API:
+
+```bash
+curl http://127.0.0.1:5055/vbio-api/copilot/config
+# expected: {"enabled":true}
+```
+
+Legacy `VBIO_TASK_CHAT_API_URL`, `VBIO_TASK_CHAT_API_KEY`, and `VBIO_TASK_CHAT_MODEL` are still accepted as a
+compatibility fallback, but new deployments should use the `VBIO_COPILOT_*` names.
+
 Task rows include a shared chat. Mention `@V-Bio Copilot` in a task chat message to route the question through the
 management API, which adds task context and persists the assistant reply.
 
@@ -190,14 +204,18 @@ Copilot validates the current workflow before planning a submission:
 - Peptide Designer requires target/design intent and design options.
 - Lead Optimization uses dedicated candidate/MMP tools, not generic parameter patching.
 
-On Affinity task detail pages, Copilot exposes upload buttons next to the chat input:
+Copilot file input uses a compact `+` button inside the chat composer. Uploaded files appear as `@filename` chips,
+and clicking a chip inserts the mention into the message. The model uses the surrounding text and `@filename`
+mentions to infer file roles:
 
-- Target structure upload: `.pdb`, `.ent`, `.cif`, `.mmcif`
-- Ligand upload: `.sdf`, `.sd`, `.mol2`, `.mol`, `.pdb`, `.ent`, `.cif`, `.mmcif`
+- Structure Prediction: PDB/CIF/MMCIF files are templates only when the user explicitly says template/模板.
+- Affinity Scoring: target/protein/receptor files map to the target, and ligand/small-molecule/compound files map to
+  the ligand.
+- Peptide Designer: target/protein/receptor files map to the peptide-design target structure.
+- Lead Optimization: target/protein/receptor files map to reference target context, and ligand/compound files map to
+  ligand context.
 
-These buttons reuse the same upload handlers, validation, persisted task snapshot, preview, and submit path as the
-main Affinity workspace. Copilot should not bypass the existing upload flow or guess whether an arbitrary file is a
-target or ligand.
+If file roles are unclear, Copilot should ask a follow-up question instead of guessing.
 
 ## 7) Local submit with cURL
 

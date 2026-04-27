@@ -6,6 +6,7 @@ import { ProjectCopilotModal, readStoredCopilotOpen, writeStoredCopilotOpen } fr
 import { SharingModal } from '../components/project/SharingModal';
 import { ApiAccessPage } from './ApiAccessPage';
 import { useAuth } from '../hooks/useAuth';
+import { useCopilotAvailability } from '../hooks/useCopilotAvailability';
 import { ProjectTasksHeader } from './projectTasks/ProjectTasksHeader';
 import { ProjectTasksWorkspace } from './projectTasks/ProjectTasksWorkspace';
 import { exportTaskRowsToExcel } from './projectTasks/exportTaskRowsToExcel';
@@ -25,6 +26,7 @@ export function ProjectTasksPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const { session } = useAuth();
+  const copilotAvailable = useCopilotAvailability();
   const { workspaceView, setWorkspaceViewWithUrl } = useProjectTasksWorkspaceView({
     location,
     navigate
@@ -418,7 +420,7 @@ export function ProjectTasksPage() {
           onClose={() => setSharedTaskRow(null)}
         />
       ) : null}
-      {project && session?.userId ? (
+      {project && copilotAvailable && session?.userId ? (
         <ProjectCopilotModal
           open={copilotOpen}
           title="Copilot"

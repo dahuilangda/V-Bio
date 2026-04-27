@@ -1,6 +1,8 @@
 import type { AffinityPreviewPayload, AffinitySubmitInput } from '../types/models';
 import { API_HEADERS, requestBackend } from './backendClient';
 
+const AFFINITY_PREVIEW_TIMEOUT_MS = 90000;
+
 export async function previewAffinityComplex(input: {
   targetFile: File;
   ligandFile?: File | null;
@@ -18,7 +20,7 @@ export async function previewAffinityComplex(input: {
       Accept: 'application/json'
     },
     body: form
-  });
+  }, AFFINITY_PREVIEW_TIMEOUT_MS);
 
   if (!res.ok) {
     const text = await res.text();

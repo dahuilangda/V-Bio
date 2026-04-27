@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { Link } from 'react-router-dom';
-import type { InputComponent, PredictionConstraint, ProjectTask } from '../../types/models';
+import type { InputComponent, PredictionConstraint, ProjectTask, ProteinTemplateUpload } from '../../types/models';
 import { downloadResultBlob, downloadResultFile, terminateTask as terminateBackendTask } from '../../api/backendApi';
 import { deleteProjectTask } from '../../api/supabaseLite';
 import { createInputComponent } from '../../utils/projectInputs';
@@ -40,12 +40,16 @@ import {
 import { readLeadOptTaskSummary } from '../projectTasks/taskDataUtils';
 import {
   ProjectCopilotModal,
+  type CopilotAttachmentApplication,
+  type CopilotUploadedAttachment,
   clearStoredCopilotTaskPrefill,
   readStoredCopilotOpen,
   readStoredCopilotTaskPrefill,
   writeStoredCopilotOpen
 } from '../../components/copilot/ProjectCopilotModal';
 import type { CopilotPlanAction } from '../../types/models';
+import { detectStructureFormat, extractProteinChainSequences } from '../../utils/structureParser';
+import { useCopilotAvailability } from '../../hooks/useCopilotAvailability';
 
 function readText(value: unknown): string {
   if (value === null || value === undefined) return '';
@@ -1676,6 +1680,7 @@ export function useProjectDetailWorkspaceView() {
 
 function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeReady }) {
   const { session } = useAuth();
+  const copilotAvailable = useCopilotAvailability();
   const [leadOptHeaderRunAction, setLeadOptHeaderRunAction] = useState<(() => void | Promise<void>) | null>(null);
   const [leadOptHeaderRunPending, setLeadOptHeaderRunPending] = useState(false);
   const [headerStopRunPending, setHeaderStopRunPending] = useState(false);
@@ -2727,6 +2732,89 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     ]
   );
 
+  const handleCopilotAttachments = useCallback(
+    async (attachments: CopilotUploadedAttachment[], _content: string, applications?: CopilotAttachmentApplication[]) => {
+      if (!canEdit || attachments.length === 0) return;
+      if (!applications || applications.length === 0) return;
+      const roleEntries = attachments.map((attachment) => {
+        const application = applications?.find((item) => item.attachmentId === attachment.id || item.fileName === attachment.name);
+        return {
+          attachment,
+          role: application?.role || null
+        };
+      });
+
+      if (isAffinityWorkflow || isPeptideDesignWorkflow) {
+        const target = roleEntries.find((entry) => entry.role === 'target')?.attachment || null;
+        const ligand = roleEntries.find((entry) => entry.role === 'ligand')?.attachment || null;
+        if (target) onAffinityTargetFileChange(target.file);
+        if (isAffinityWorkflow && ligand) onAffinityLigandFileChange(ligand.file);
+        return;
+      }
+
+      if (isLeadOptimizationWorkflow) {
+        const target = roleEntries.find((entry) => entry.role === 'target')?.attachment || null;
+        const ligand = roleEntries.find((entry) => entry.role === 'ligand')?.attachment || null;
+        if (!target && !ligand) return;
+        const readUpload = async (attachment: CopilotUploadedAttachment | null) =>
+          attachment ? { fileName: attachment.name, content: await attachment.file.text() } : null;
+        await handleLeadOptReferenceUploadsChange({
+          target: await readUpload(target),
+          ligand: await readUpload(ligand)
+        });
+        return;
+      }
+
+      if (isPredictionWorkflow) {
+        const template = roleEntries.find((entry) => entry.role === 'template')?.attachment || null;
+        if (!template) return;
+        const targetProteinComponent = draft.inputConfig.components.find((component) => component.type === 'protein') || null;
+        if (!targetProteinComponent) {
+          setError('Copilot could not attach the template because the current prediction task has no protein component.');
+          return;
+        }
+        const format = detectStructureFormat(template.name);
+        if (!format) {
+          setError('Copilot template upload supports .pdb, .cif, or .mmcif files.');
+          return;
+        }
+        try {
+          const contentText = await template.file.text();
+          const chainSequences = extractProteinChainSequences(contentText, format);
+          const chainIds = Object.keys(chainSequences).sort((a, b) => a.localeCompare(b));
+          if (chainIds.length === 0) {
+            setError('Copilot could not parse a protein chain from the uploaded template.');
+            return;
+          }
+          const upload: ProteinTemplateUpload = {
+            fileName: template.name,
+            format,
+            content: contentText,
+            chainId: chainIds[0],
+            chainSequences
+          };
+          setProteinTemplates((prev) => ({ ...prev, [targetProteinComponent.id]: upload }));
+          setError(null);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : 'Failed to read Copilot template upload.');
+        }
+      }
+    },
+    [
+      canEdit,
+      draft.inputConfig.components,
+      handleLeadOptReferenceUploadsChange,
+      isAffinityWorkflow,
+      isLeadOptimizationWorkflow,
+      isPeptideDesignWorkflow,
+      isPredictionWorkflow,
+      onAffinityLigandFileChange,
+      onAffinityTargetFileChange,
+      setError,
+      setProteinTemplates
+    ]
+  );
+
   const workflow = getWorkflowDefinition(project.task_type);
   const affinityUseMsa = computeUseMsaFlag(draft.inputConfig.components, draft.use_msa);
   const runSubmitting = submitting || (isLeadOptimizationWorkflow && leadOptHeaderRunPending);
@@ -3529,7 +3617,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       onTaskSummaryChange={handleTaskSummaryChange}
       onWorkspaceFormSubmit={handleWorkspaceFormSubmit}
     />
-    {session?.userId ? (
+    {copilotAvailable && session?.userId ? (
       <ProjectCopilotModal
         open={copilotOpen}
         title="Copilot"
@@ -3566,28 +3654,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
           currentTask: activeResultTask || statusContextTaskRow || null
         }}
         onApplyPlanAction={applyTaskDetailCopilotAction}
-        attachmentActions={
-          isAffinityWorkflow
-            ? [
-                {
-                  id: 'affinity-target-upload',
-                  label: 'Target',
-                  accept: '.pdb,.ent,.cif,.mmcif',
-                  ready: Boolean(affinityTargetFile),
-                  disabled: !canEdit || submitting,
-                  onFile: (file) => onAffinityTargetFileChange(file)
-                },
-                {
-                  id: 'affinity-ligand-upload',
-                  label: 'Ligand',
-                  accept: '.sdf,.sd,.mol2,.mol,.pdb,.ent,.cif,.mmcif',
-                  ready: Boolean(affinityLigandFile),
-                  disabled: !canEdit || submitting,
-                  onFile: (file) => onAffinityLigandFileChange(file)
-                }
-              ]
-            : []
-        }
+        onSendAttachments={handleCopilotAttachments}
         onOpen={() => setCopilotOpen(true)}
         onClose={() => setCopilotOpen(false)}
       />

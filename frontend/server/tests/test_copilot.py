@@ -14,7 +14,12 @@ from management_api.copilot_capabilities import (
     render_context_plan_schema_prompt,
     sanitize_task_parameter_patch,
 )
-from management_api.copilot import CopilotAssistant, strip_internal_capability_lines
+from management_api.copilot import (
+    CopilotAssistant,
+    normalize_chat_messages_for_template,
+    sanitize_context_payload,
+    strip_internal_capability_lines,
+)
 
 
 class TaskChatTests(unittest.TestCase):
@@ -32,12 +37,277 @@ class TaskChatTests(unittest.TestCase):
         sent_messages = session.last_request["json"]["messages"]
         self.assertTrue(any("V-Bio Copilot" in item["content"] for item in sent_messages))
         self.assertTrue(any("alice:" in item["content"] for item in sent_messages))
+        self.assertEqual([item["role"] for item in sent_messages].count("system"), 1)
+        self.assertEqual(sent_messages[0]["role"], "system")
+
+    def test_normalize_chat_messages_merges_system_messages_for_strict_templates(self):
+        messages = normalize_chat_messages_for_template(
+            [
+                {"role": "system", "content": "base"},
+                {"role": "system", "content": "context"},
+                {"role": "user", "content": "hello"},
+                {"role": "system", "content": "repair"},
+            ]
+        )
+        self.assertEqual([item["role"] for item in messages], ["system", "user"])
+        self.assertIn("base", messages[0]["content"])
+        self.assertIn("context", messages[0]["content"])
+        self.assertIn("repair", messages[0]["content"])
+
+    def test_call_model_retries_empty_message_once(self):
+        class EmptyThenContentSession:
+            def __init__(self):
+                self.responses = ["", "正常回复"]
+                self.requests = []
+
+            def post(self, url, headers, json, timeout):
+                self.requests.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+                return FakeResponse(self.responses.pop(0))
+
+        session = EmptyThenContentSession()
+        assistant = CopilotAssistant(
+            chat_api_url="http://example.test/v1/chat/completions",
+            chat_api_key="test-key",
+            chat_model="gemma4-31b",
+            timeout_seconds=3,
+            session=session,
+            logger=type("Logger", (), {"warning": lambda *args, **kwargs: None})(),
+        )
+        content = assistant.answer_context(
+            context_type="task_detail",
+            context_payload={"project": {"task_type": "Structure Prediction"}},
+            user_id="user-1",
+            username="alice",
+            content="解释这个结果",
+        )
+        self.assertEqual(content, "正常回复")
+        self.assertEqual(len(session.requests), 2)
+        self.assertIn("previous response was empty", session.requests[1]["json"]["messages"][0]["content"])
+        self.assertNotIn("chat_template_kwargs", session.requests[0]["json"])
+        self.assertNotIn("chat_template_kwargs", session.requests[1]["json"])
+
+    def test_json_planning_uses_thinking_off_only_after_reasoning_empty(self):
+        class JsonModeReasoningEmptySession:
+            def __init__(self):
+                self.requests = []
+                self.calls = 0
+
+            def post(self, url, headers, json, timeout):
+                self.requests.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+                self.calls += 1
+                if self.calls == 1:
+                    return type(
+                        "ReasoningResponse",
+                        (),
+                        {
+                            "ok": True,
+                            "status_code": 200,
+                            "text": "",
+                            "json": lambda self: {
+                                "choices": [
+                                    {
+                                        "message": {"content": "", "reasoning": "thinking but no final"},
+                                        "finish_reason": "length",
+                                    }
+                                ]
+                            },
+                        },
+                    )()
+                return FakeResponse(
+                    '{"parameter_patch":{"componentsReplacement":{"mode":"replace","components":['
+                    '{"type":"protein","sequence":"AAAEEEDD","numCopies":1,"useMsa":true},'
+                    '{"type":"ligand","sequence":"c1ccccc1","numCopies":1,"inputMethod":"smiles"}'
+                    '],"clearConstraints":true}},"needs_confirmation":true,"execute_now":false}'
+                )
+
+        session = JsonModeReasoningEmptySession()
+        assistant = CopilotAssistant(
+            chat_api_url="http://example.test/v1/chat/completions",
+            chat_api_key="test-key",
+            chat_model="gemma4-31b",
+            timeout_seconds=3,
+            session=session,
+            logger=type("Logger", (), {"warning": lambda *args, **kwargs: None})(),
+        )
+        actions = assistant.plan_actions(
+            context_type="task_detail",
+            context_payload={"project": {"task_type": "Structure Prediction"}},
+            user_id="user-1",
+            username="alice",
+            content="请帮我新建一个任务 蛋白为AAAEEEDD 小分子是c1ccccc1",
+        )
+        self.assertEqual(actions[0]["id"], "task_detail:apply_patch_and_submit")
+        self.assertEqual(session.requests[0]["json"].get("response_format"), {"type": "json_object"})
+        self.assertEqual(session.requests[1]["json"]["chat_template_kwargs"], {"enable_thinking": False})
+        self.assertEqual(session.requests[1]["json"].get("response_format"), {"type": "json_object"})
+
+    def test_call_model_ignores_reasoning_content_without_final_answer(self):
+        class ReasoningOnlySession:
+            def __init__(self):
+                self.requests = []
+
+            def post(self, url, headers, json, timeout):
+                self.requests.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+                return type(
+                    "ReasoningResponse",
+                    (),
+                    {
+                        "ok": True,
+                        "status_code": 200,
+                        "text": "",
+                        "json": lambda self: {
+                            "choices": [
+                                {
+                                    "message": {
+                                        "content": "",
+                                        "reasoning_content": '{"parameter_patch":{"seed":42}}',
+                                    },
+                                    "finish_reason": "stop",
+                                }
+                            ]
+                        },
+                    },
+                )()
+
+        session = ReasoningOnlySession()
+        assistant = CopilotAssistant(
+            chat_api_url="http://example.test/v1/chat/completions",
+            chat_api_key="test-key",
+            chat_model="gemma4-31b",
+            timeout_seconds=3,
+            session=session,
+            logger=type("Logger", (), {"warning": lambda *args, **kwargs: None})(),
+        )
+        with self.assertRaisesRegex(RuntimeError, "empty message"):
+            assistant.answer_context(
+                context_type="task_detail",
+                context_payload={"project": {"task_type": "Structure Prediction"}},
+                user_id="user-1",
+                username="alice",
+                content="解释这个结果",
+            )
+        self.assertEqual(len(session.requests), 3)
+        self.assertNotIn("chat_template_kwargs", session.requests[0]["json"])
+        self.assertEqual(session.requests[1]["json"]["chat_template_kwargs"], {"enable_thinking": False})
 
     def test_strip_internal_capability_lines_hides_tool_names(self):
         content = strip_internal_capability_lines("分析结论\n能力使用：task_result_analysis\n可以继续检查。")
         self.assertNotIn("能力使用", content)
         self.assertNotIn("task_result_analysis", content)
         self.assertIn("可以继续检查", content)
+
+    def test_sanitize_context_payload_omits_file_bodies(self):
+        large_file_body = "ATOM " * 2000
+        payload = {
+            "draft": {
+                "templateUploads": [
+                    {
+                        "fileName": "target.cif",
+                        "format": "cif",
+                        "content": large_file_body,
+                        "templateChainId": "A",
+                        "targetChainIds": ["A"],
+                    }
+                ],
+                "components": [
+                    {"type": "protein", "sequence": "AAACCCDDDEE"},
+                ],
+            }
+        }
+        sanitized = sanitize_context_payload(payload)
+        upload = sanitized["draft"]["templateUploads"][0]
+        self.assertEqual(upload["fileName"], "target.cif")
+        self.assertEqual(upload["format"], "cif")
+        self.assertIn("omitted file/text payload", upload["content"])
+        self.assertNotIn("ATOM ATOM ATOM", upload["content"])
+
+    def test_task_detail_labeled_components_schema_creates_submit_button(self):
+        assistant, session = make_assistant(
+            '{"parameter_patch":{"componentsReplacement":{"mode":"replace","components":['
+            '{"type":"protein","sequence":"AAAEEE","numCopies":1,"useMsa":true},'
+            '{"type":"ligand","sequence":"c1ccccc1","numCopies":1,"inputMethod":"smiles"}'
+            '],"clearConstraints":true}},"needs_confirmation":true,"execute_now":false}'
+        )
+        actions = assistant.plan_actions(
+            context_type="task_detail",
+            context_payload={"project": {"task_type": "Structure Prediction"}},
+            user_id="user-1",
+            username="alice",
+            content="帮我提交一下新的任务\n\n蛋白序列为AAAEEE\n小分子为c1ccccc1",
+        )
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["id"], "task_detail:apply_patch_and_submit")
+        components = actions[0]["payload"]["parameterPatch"]["componentsReplacement"]["components"]
+        self.assertEqual(
+            [(item["type"], item["sequence"]) for item in components],
+            [("protein", "AAAEEE"), ("ligand", "c1ccccc1")],
+        )
+        self.assertEqual(session.last_request["json"]["response_format"], {"type": "json_object"})
+
+    def test_task_detail_plan_repair_uses_model_schema_not_local_fallback(self):
+        class SequenceSession:
+            def __init__(self):
+                self.responses = [
+                    "我会帮你处理，但没有 JSON。",
+                    '{"parameter_patch":{"componentsReplacement":{"mode":"replace","components":['
+                    '{"type":"protein","sequence":"AAAEEE","numCopies":1,"useMsa":true},'
+                    '{"type":"ligand","sequence":"c1ccccc1","numCopies":1,"inputMethod":"smiles"}'
+                    '],"clearConstraints":true}},"needs_confirmation":true,"execute_now":false}',
+                ]
+                self.requests = []
+
+            def post(self, url, headers, json, timeout):
+                self.requests.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+                return FakeResponse(self.responses.pop(0))
+
+        session = SequenceSession()
+        assistant = CopilotAssistant(
+            chat_api_url="http://example.test/v1/chat/completions",
+            chat_api_key="test-key",
+            chat_model="gemma4-31b",
+            timeout_seconds=3,
+            session=session,
+            logger=type("Logger", (), {"warning": lambda *args, **kwargs: None})(),
+        )
+        actions = assistant.plan_actions(
+            context_type="task_detail",
+            context_payload={"project": {"task_type": "Structure Prediction"}},
+            user_id="user-1",
+            username="alice",
+            content="帮我提交一下新的任务\n\n蛋白序列为AAAEEE\n小分子为c1ccccc1",
+        )
+        self.assertEqual(len(session.requests), 2)
+        self.assertIn("previous planning output did not satisfy the schema", session.requests[1]["json"]["messages"][0]["content"])
+        self.assertEqual(actions[0]["id"], "task_detail:apply_patch_and_submit")
+
+    def test_task_detail_plan_schema_failure_is_visible_for_mutating_request(self):
+        class InvalidSchemaSession:
+            def __init__(self):
+                self.responses = [
+                    '{"actions":[]}',
+                    '{"capability":"task_submission_planning","parameter_patch":{},"needs_confirmation":true,"execute_now":false}',
+                ]
+
+            def post(self, url, headers, json, timeout):
+                return FakeResponse(self.responses.pop(0))
+
+        session = InvalidSchemaSession()
+        assistant = CopilotAssistant(
+            chat_api_url="http://example.test/v1/chat/completions",
+            chat_api_key="test-key",
+            chat_model="gemma4-31b",
+            timeout_seconds=3,
+            session=session,
+            logger=type("Logger", (), {"warning": lambda *args, **kwargs: None})(),
+        )
+        with self.assertRaisesRegex(ValueError, "valid confirmation action"):
+            assistant.plan_actions(
+                context_type="task_detail",
+                context_payload={"project": {"task_type": "Structure Prediction"}},
+                user_id="user-1",
+                username="alice",
+                content="帮我提交一下新的任务\n\n蛋白序列为AAAEEE\n小分子为c1ccccc1",
+            )
 
     def test_sanitize_task_parameter_patch_allows_only_prediction_schema_keys(self):
         patch = sanitize_task_parameter_patch(
@@ -142,6 +412,61 @@ class TaskChatTests(unittest.TestCase):
         self.assertFalse(actions[0]["execute_now"])
         self.assertEqual(actions[0]["payload"]["schemaVersion"], "vbio-copilot-action-v2")
         self.assertEqual(actions[0]["payload"]["metadataPatch"]["taskName"], "round 2")
+
+    def test_task_detail_attachment_application_requires_confirmation(self):
+        actions = build_task_submission_actions(
+            {
+                "capability": "attachment_application",
+                "intent": "apply_uploaded_files",
+                "attachment_applications": [
+                    {"attachmentId": "file-target", "fileName": "target.cif", "role": "target"},
+                    {"attachmentId": "file-ligand", "fileName": "ligand.sdf", "role": "ligand"},
+                ],
+                "needs_confirmation": True,
+                "execute_now": False,
+            },
+            "把 @target.cif 作为 target，把 @ligand.sdf 作为 ligand",
+            "affinity",
+        )
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["id"], "task_detail:apply_copilot_attachments")
+        self.assertTrue(actions[0]["needs_confirmation"])
+        self.assertFalse(actions[0]["execute_now"])
+        self.assertEqual(
+            actions[0]["payload"]["attachmentApplications"],
+            [
+                {"attachmentId": "file-target", "fileName": "target.cif", "role": "target"},
+                {"attachmentId": "file-ligand", "fileName": "ligand.sdf", "role": "ligand"},
+            ],
+        )
+
+    def test_task_detail_attachment_application_rejects_wrong_workflow_roles(self):
+        prediction_actions = build_task_submission_actions(
+            {
+                "capability": "attachment_application",
+                "attachment_applications": [
+                    {"attachmentId": "file-target", "fileName": "target.cif", "role": "target"},
+                ],
+                "needs_confirmation": True,
+                "execute_now": False,
+            },
+            "把 @target.cif 作为 target",
+            "prediction",
+        )
+        peptide_actions = build_task_submission_actions(
+            {
+                "capability": "attachment_application",
+                "attachment_applications": [
+                    {"attachmentId": "file-ligand", "fileName": "ligand.sdf", "role": "ligand"},
+                ],
+                "needs_confirmation": True,
+                "execute_now": False,
+            },
+            "把 @ligand.sdf 作为 ligand",
+            "peptide_design",
+        )
+        self.assertEqual(prediction_actions, [])
+        self.assertEqual(peptide_actions, [])
 
     def test_context_schema_includes_mutating_and_navigation_actions(self):
         project_schema = render_context_plan_schema_prompt("project_list", {})

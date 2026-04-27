@@ -1,4 +1,4 @@
-import { Bot, Check, Clock3, LoaderCircle, MessageSquarePlus, MessageSquareText, PanelLeft, Send, Trash2, Upload, X } from 'lucide-react';
+import { Bot, Check, Clock3, LoaderCircle, MessageSquarePlus, MessageSquareText, PanelLeft, Plus, Send, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -27,17 +27,33 @@ interface ProjectCopilotModalProps {
   currentUsername: string;
   contextPayload: Record<string, unknown>;
   onApplyPlanAction?: (action: CopilotPlanAction) => void | Promise<void>;
-  attachmentActions?: Array<{
-    id: string;
-    label: string;
-    accept: string;
-    ready?: boolean;
-    disabled?: boolean;
-    onFile: (file: File) => void | Promise<void>;
-  }>;
+  onSendAttachments?: (
+    attachments: CopilotUploadedAttachment[],
+    content: string,
+    applications?: CopilotAttachmentApplication[]
+  ) => void | Promise<void>;
   onOpen: () => void;
   onClose: () => void;
 }
+
+export interface CopilotUploadedAttachment {
+  id: string;
+  file: File;
+  name: string;
+  type: string;
+  size: number;
+}
+
+export interface CopilotAttachmentApplication {
+  attachmentId: string;
+  fileName: string;
+  role: 'target' | 'ligand' | 'template';
+}
+
+const COPILOT_RECENT_CONTEXT_MESSAGES = 6;
+const COPILOT_SUMMARY_SOURCE_MESSAGES = 12;
+const COPILOT_CONTEXT_MESSAGE_CHARS = 700;
+const COPILOT_CONTEXT_SUMMARY_CHARS = 1800;
 
 function author(message: ProjectCopilotMessage): string {
   if (message.role === 'assistant') return 'V-Bio Copilot';
@@ -462,6 +478,37 @@ function actionMatchesContext(action: CopilotPlanAction, contextType: CopilotCon
   return !actionContext || actionContext === contextType;
 }
 
+function compactCopilotText(value: unknown, limit: number): string {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit)}...`;
+}
+
+function buildCopilotConversationContext(messages: ProjectCopilotMessage[]): Record<string, unknown> {
+  const visibleMessages = messages.filter((message) => message.role === 'user' || message.role === 'assistant');
+  if (visibleMessages.length === 0) {
+    return { compression: 'empty', recent_messages: [] };
+  }
+  const recent = visibleMessages.slice(-COPILOT_RECENT_CONTEXT_MESSAGES).map((message) => ({
+    role: message.role,
+    at: message.created_at,
+    content: compactCopilotText(message.content, COPILOT_CONTEXT_MESSAGE_CHARS)
+  }));
+  const older = visibleMessages.slice(0, Math.max(0, visibleMessages.length - COPILOT_RECENT_CONTEXT_MESSAGES));
+  const summarySource = older.slice(-COPILOT_SUMMARY_SOURCE_MESSAGES);
+  const olderSummary = summarySource
+    .map((message, index) => `${index + 1}. ${message.role}: ${compactCopilotText(message.content, 180)}`)
+    .join('\n');
+  return {
+    compression: older.length > 0 ? 'summary_plus_recent' : 'recent_only',
+    total_messages: visibleMessages.length,
+    summarized_messages: older.length,
+    summary_source_messages: summarySource.length,
+    summary: older.length > 0 ? compactCopilotText(olderSummary, COPILOT_CONTEXT_SUMMARY_CHARS) : '',
+    recent_messages: recent
+  };
+}
+
 export function ProjectCopilotModal({
   open,
   title,
@@ -473,7 +520,7 @@ export function ProjectCopilotModal({
   currentUsername,
   contextPayload,
   onApplyPlanAction,
-  attachmentActions = [],
+  onSendAttachments,
   onOpen,
   onClose
 }: ProjectCopilotModalProps) {
@@ -497,6 +544,7 @@ export function ProjectCopilotModal({
   const panelRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const focusComposerFrameRef = useRef<number | null>(null);
   const dragRef = useRef<{
     pointerId: number;
@@ -515,6 +563,10 @@ export function ProjectCopilotModal({
     const height = Number(storedPanelState.height);
     return Number.isFinite(width) && Number.isFinite(height) ? { width, height } : null;
   });
+  const [uploadedAttachments, setUploadedAttachments] = useState<CopilotUploadedAttachment[]>([]);
+  const [mentionCaret, setMentionCaret] = useState(0);
+  const [mentionActiveIndex, setMentionActiveIndex] = useState(0);
+  const [mentionDismissedDraft, setMentionDismissedDraft] = useState<string | null>(null);
 
   const sourceContext = useMemo(
     () => currentContextMetadata({ contextType, projectId: projectId || null, projectTaskId: projectTaskId || null }),
@@ -825,9 +877,25 @@ export function ProjectCopilotModal({
     event.currentTarget.releasePointerCapture(event.pointerId);
   };
 
+  const syncMentionCaretFromTextarea = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    setMentionDismissedDraft(null);
+    setMentionCaret(textarea.selectionStart ?? textarea.value.length);
+  }, []);
+
   const sendMessage = async () => {
     const content = draft.trim();
     if (!content) return;
+    const attachmentMetadata = uploadedAttachments.map((attachment) => ({
+      id: attachment.id,
+      name: attachment.name,
+      type: attachment.type,
+      size: attachment.size,
+      mention: `@${attachment.name}`,
+      mentioned: content.includes(`@${attachment.name}`)
+    }));
+    const conversationContext = buildCopilotConversationContext(sessionMessages);
     setSending(true);
     setError(null);
     setDraft('');
@@ -840,32 +908,40 @@ export function ProjectCopilotModal({
         userId: currentUserId,
         role: 'user',
         content,
-        metadata: { ...sourceContext, session_id: activeSessionId }
+        metadata: { ...sourceContext, session_id: activeSessionId, attachments: attachmentMetadata }
       });
       setMessages((prev) => [...prev, { ...userMessage, username: currentUsername }]);
 
       let planActions: CopilotPlanAction[] = [];
-      try {
-        planActions = await requestCopilotPlanActions({
-          contextType,
-          contextPayload,
-          userId: currentUserId,
-          username: currentUsername,
-          content
-        });
-      } catch {
-        planActions = [];
-      }
-      const assistantContent = await requestCopilotAssistant({
+      planActions = await requestCopilotPlanActions({
         contextType,
         contextPayload: {
           ...contextPayload,
-          ...(planActions.length > 0 ? { candidate_plan_actions: planActions } : {})
+          copilot_conversation: conversationContext,
+          ...(attachmentMetadata.length > 0 ? { copilot_attachments: attachmentMetadata } : {})
         },
         userId: currentUserId,
         username: currentUsername,
         content
       });
+      let assistantContent = '';
+      try {
+        assistantContent = await requestCopilotAssistant({
+          contextType,
+          contextPayload: {
+              ...contextPayload,
+              copilot_conversation: conversationContext,
+              ...(attachmentMetadata.length > 0 ? { copilot_attachments: attachmentMetadata } : {}),
+              ...(planActions.length > 0 ? { candidate_plan_actions: planActions } : {})
+          },
+          userId: currentUserId,
+          username: currentUsername,
+          content
+        });
+      } catch (err) {
+        if (planActions.length === 0) throw err;
+        assistantContent = '已生成确认操作。请检查下方按钮，确认后执行。';
+      }
       const assistantMessage = await insertProjectCopilotMessage({
         ...messageScope,
         userId: null,
@@ -884,6 +960,103 @@ export function ProjectCopilotModal({
       setSending(false);
     }
   };
+
+  const addUploadedFiles = useCallback((files: FileList | File[]) => {
+    const rows = Array.from(files);
+    if (rows.length === 0) return;
+    setUploadedAttachments((prev) => {
+      const seen = new Set(prev.map((item) => `${item.name}:${item.size}:${item.type}`));
+      const next = [...prev];
+      for (const file of rows) {
+        const key = `${file.name}:${file.size}:${file.type}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        next.push({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          file,
+          name: file.name,
+          type: file.type || 'application/octet-stream',
+          size: file.size
+        });
+      }
+      return next.slice(-8);
+    });
+    if (typeof window !== 'undefined') {
+      window.requestAnimationFrame(() => {
+        syncMentionCaretFromTextarea();
+        textareaRef.current?.focus({ preventScroll: true });
+      });
+    }
+  }, [syncMentionCaretFromTextarea]);
+
+  const insertAttachmentMention = useCallback((attachment: CopilotUploadedAttachment) => {
+    setDraft((prev) => {
+      const mention = `@${attachment.name}`;
+      if (prev.includes(mention)) return prev;
+      const separator = prev.trim() ? ' ' : '';
+      return `${prev}${separator}${mention}`;
+    });
+    focusComposer();
+  }, [focusComposer]);
+
+  const attachmentMentionState = useMemo(() => {
+    if (uploadedAttachments.length === 0) return null;
+    if (mentionDismissedDraft === draft) return null;
+    const caret = Math.max(0, Math.min(mentionCaret, draft.length));
+    const beforeCaret = draft.slice(0, caret);
+    const asciiAtIndex = beforeCaret.lastIndexOf('@');
+    const fullwidthAtIndex = beforeCaret.lastIndexOf('＠');
+    const atIndex = Math.max(asciiAtIndex, fullwidthAtIndex);
+    if (atIndex < 0) return null;
+    const prefix = atIndex > 0 ? beforeCaret[atIndex - 1] : '';
+    if (prefix && !/\s|[(\[{,;:]/.test(prefix)) return null;
+    const query = beforeCaret.slice(atIndex + 1);
+    if (/[\r\n\t]/.test(query)) return null;
+    if (query.includes('  ')) return null;
+    const normalizedQuery = query.trim().toLowerCase();
+    const options = uploadedAttachments
+      .filter((attachment) => {
+        if (!normalizedQuery) return true;
+        return attachment.name.toLowerCase().includes(normalizedQuery);
+      })
+      .slice(0, 6);
+    if (options.length === 0) return null;
+    return { start: atIndex, end: caret, query, options };
+  }, [draft, mentionCaret, mentionDismissedDraft, uploadedAttachments]);
+
+  useEffect(() => {
+    if (!attachmentMentionState) {
+      setMentionActiveIndex(0);
+      return;
+    }
+    setMentionActiveIndex((index) => Math.min(index, attachmentMentionState.options.length - 1));
+  }, [attachmentMentionState]);
+
+  const insertAttachmentMentionAtCaret = useCallback((attachment: CopilotUploadedAttachment) => {
+    const state = attachmentMentionState;
+    const textarea = textareaRef.current;
+    const fallbackCaret = textarea?.selectionStart ?? draft.length;
+    const start = state?.start ?? fallbackCaret;
+    const end = state?.end ?? fallbackCaret;
+    const mention = `@${attachment.name}`;
+    const suffix = draft.slice(end);
+    const needsSpace = suffix.length === 0 || !/^\s/.test(suffix);
+    const nextDraft = `${draft.slice(0, start)}${mention}${needsSpace ? ' ' : ''}${suffix}`;
+    const nextCaret = start + mention.length + (needsSpace ? 1 : 0);
+    setDraft(nextDraft);
+    setMentionDismissedDraft(null);
+    setMentionCaret(nextCaret);
+    if (typeof window !== 'undefined') {
+      window.requestAnimationFrame(() => {
+        textareaRef.current?.focus({ preventScroll: true });
+        textareaRef.current?.setSelectionRange(nextCaret, nextCaret);
+      });
+    }
+  }, [attachmentMentionState, draft]);
+
+  const removeUploadedAttachment = useCallback((attachmentId: string) => {
+    setUploadedAttachments((prev) => prev.filter((item) => item.id !== attachmentId));
+  }, []);
 
   const resizeComposer = useCallback(() => {
     const textarea = textareaRef.current;
@@ -936,7 +1109,7 @@ export function ProjectCopilotModal({
   };
 
   const applyAction = async (action: CopilotPlanAction) => {
-    if (!onApplyPlanAction) return;
+    if (!onApplyPlanAction && !(action.id === 'task_detail:apply_copilot_attachments' && onSendAttachments)) return;
     setApplyingActionId(action.id);
     setError(null);
     try {
@@ -973,7 +1146,34 @@ export function ProjectCopilotModal({
           followUpActions
         });
       }
-      await onApplyPlanAction(action);
+      if (action.id === 'task_detail:apply_copilot_attachments') {
+        if (!onSendAttachments) throw new Error('This page cannot apply Copilot file attachments.');
+        const rawApplications = Array.isArray(action.payload?.attachmentApplications)
+          ? action.payload.attachmentApplications
+          : [];
+        const applications = rawApplications
+          .map((item) => {
+            if (!item || typeof item !== 'object') return null;
+            const row = item as Record<string, unknown>;
+            const role = String(row.role || '').trim();
+            if (role !== 'target' && role !== 'ligand' && role !== 'template') return null;
+            return {
+              attachmentId: String(row.attachmentId || '').trim(),
+              fileName: String(row.fileName || '').trim(),
+              role
+            } as CopilotAttachmentApplication;
+          })
+          .filter((item): item is CopilotAttachmentApplication => Boolean(item?.attachmentId || item?.fileName));
+        if (applications.length === 0) throw new Error('Copilot did not provide a file-role plan to apply.');
+        const selectedAttachments = uploadedAttachments.filter((attachment) =>
+          applications.some((item) => item.attachmentId === attachment.id || item.fileName === attachment.name)
+        );
+        if (selectedAttachments.length === 0) throw new Error('The referenced uploaded files are no longer available in this chat composer.');
+        await onSendAttachments(selectedAttachments, String(action.payload?.sourceContent || ''), applications);
+      } else {
+        if (!onApplyPlanAction) throw new Error('This Copilot action cannot be applied on the current page.');
+        await onApplyPlanAction(action);
+      }
       setPendingActions((prev) => prev.filter((item) => item.id !== action.id));
       const receipt = await insertProjectCopilotMessage({
         ...messageScope,
@@ -1136,73 +1336,175 @@ export function ProjectCopilotModal({
         </div>
 
         {pendingActions.length > 0 ? (
-          <div className="copilot-plan-actions">
-            {pendingActions.map((action) => (
-              <button key={action.id} type="button" onClick={() => void applyAction(action)} disabled={Boolean(applyingActionId)}>
-                {applyingActionId === action.id ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}
-                <span>
-                  <strong>{action.label}</strong>
-                  <small>{action.description}</small>
-                </span>
-              </button>
-            ))}
+          <div className="copilot-action-stack">
+            {pendingActions.length > 0 ? (
+              <div className="copilot-plan-actions">
+                {pendingActions.map((action) => (
+                  <button key={action.id} type="button" onClick={() => void applyAction(action)} disabled={Boolean(applyingActionId)}>
+                    {applyingActionId === action.id ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}
+                    <span>
+                      <strong>{action.label}</strong>
+                      <small>{action.description}</small>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
         ) : null}
 
-        <div className={`copilot-composer${attachmentActions.length > 0 ? ' has-attachments' : ''}`}>
-          {attachmentActions.length > 0 ? (
-            <div className="copilot-attachment-actions" aria-label="Upload files">
-              {attachmentActions.map((action) => (
-                <label
-                  className={`copilot-attachment-action${action.ready ? ' ready' : ''}${action.disabled ? ' disabled' : ''}`}
-                  key={action.id}
-                  title={action.label}
-                  aria-label={action.label}
-                >
-                  {action.ready ? <Check size={15} /> : <Upload size={15} />}
-                  <span className="copilot-attachment-action-label">{action.label}</span>
-                  <input
-                    type="file"
-                    accept={action.accept}
-                    disabled={action.disabled}
-                    onClick={(event) => {
-                      (event.currentTarget as HTMLInputElement).value = '';
+        <div className="copilot-composer">
+          <div className="copilot-input-shell">
+            {uploadedAttachments.length > 0 ? (
+              <div className="copilot-attachment-tray" aria-label="Attached files">
+                {uploadedAttachments.map((attachment) => (
+                  <button
+                    className="copilot-attachment-chip"
+                    type="button"
+                    key={attachment.id}
+                    onClick={() => insertAttachmentMention(attachment)}
+                    title={`Insert @${attachment.name}`}
+                  >
+                    <span className="copilot-attachment-name">{attachment.name}</span>
+                    <small>{Math.max(1, Math.round(attachment.size / 1024))} KB</small>
+                    <span
+                      className="copilot-attachment-remove"
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Remove ${attachment.name}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        removeUploadedAttachment(attachment.id);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          removeUploadedAttachment(attachment.id);
+                        }
+                      }}
+                    >
+                      <X size={11} />
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {attachmentMentionState ? (
+              <div className="copilot-mention-menu" role="listbox" aria-label="File mentions">
+                {attachmentMentionState.options.map((attachment, index) => (
+                  <button
+                    key={attachment.id}
+                    className={`copilot-mention-option${index === mentionActiveIndex ? ' active' : ''}`}
+                    type="button"
+                    role="option"
+                    aria-selected={index === mentionActiveIndex}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      insertAttachmentMentionAtCaret(attachment);
                     }}
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (file) void action.onFile(file);
-                    }}
-                  />
-                </label>
-              ))}
+                  >
+                    <span className="copilot-mention-file-icon">@</span>
+                    <span className="copilot-mention-file-text">
+                      <strong>{attachment.name}</strong>
+                      <small>{Math.max(1, Math.round(attachment.size / 1024))} KB</small>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <div className="copilot-input-row">
+              <button
+                className="copilot-attach-btn"
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={sending}
+                aria-label="Attach file"
+                title="Attach file"
+              >
+                <Plus size={16} />
+              </button>
+              <input
+                ref={fileInputRef}
+                className="copilot-file-input"
+                type="file"
+                multiple
+                accept=".pdb,.ent,.cif,.mmcif,.sdf,.sd,.mol2,.mol,.txt,.csv,.tsv"
+                onChange={(event) => {
+                  if (event.target.files) addUploadedFiles(event.target.files);
+                  event.currentTarget.value = '';
+                }}
+              />
+              <textarea
+                ref={textareaRef}
+                value={draft}
+                rows={1}
+                onChange={(event) => {
+                  setDraft(event.target.value);
+                  setMentionDismissedDraft(null);
+                  setMentionCaret(event.target.selectionStart ?? event.target.value.length);
+                  if (typeof window !== 'undefined') {
+                    window.requestAnimationFrame(syncMentionCaretFromTextarea);
+                  }
+                }}
+                onKeyDown={(event) => {
+                  if (attachmentMentionState) {
+                    if (event.key === 'ArrowDown') {
+                      event.preventDefault();
+                      setMentionActiveIndex((index) => (index + 1) % attachmentMentionState.options.length);
+                      return;
+                    }
+                    if (event.key === 'ArrowUp') {
+                      event.preventDefault();
+                      setMentionActiveIndex((index) =>
+                        (index - 1 + attachmentMentionState.options.length) % attachmentMentionState.options.length
+                      );
+                      return;
+                    }
+                    if (event.key === 'Enter' || event.key === 'Tab') {
+                      event.preventDefault();
+                      insertAttachmentMentionAtCaret(attachmentMentionState.options[mentionActiveIndex] || attachmentMentionState.options[0]);
+                      return;
+                    }
+                    if (event.key === 'Escape') {
+                      event.preventDefault();
+                      setMentionDismissedDraft(draft);
+                      setMentionCaret(-1);
+                      return;
+                    }
+                  }
+                  if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                    event.preventDefault();
+                    void sendMessage();
+                  }
+                }}
+                onInput={() => {
+                  if (typeof window !== 'undefined') {
+                    window.requestAnimationFrame(syncMentionCaretFromTextarea);
+                  }
+                }}
+                onFocus={syncMentionCaretFromTextarea}
+                onClick={syncMentionCaretFromTextarea}
+                onSelect={syncMentionCaretFromTextarea}
+                onKeyUp={(event) => {
+                  if (event.key === 'Escape') return;
+                  syncMentionCaretFromTextarea();
+                }}
+                placeholder="输入消息…"
+                disabled={sending}
+              />
+              <button
+                className="copilot-send-btn"
+                type="button"
+                onClick={() => void sendMessage()}
+                disabled={sending || !draft.trim()}
+                aria-label="Send"
+                title="Send"
+              >
+                {sending ? <LoaderCircle size={15} className="spin" /> : <Send size={15} />}
+              </button>
             </div>
-          ) : null}
-          <textarea
-            ref={textareaRef}
-            value={draft}
-            rows={1}
-            onChange={(event) => {
-              setDraft(event.target.value);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                event.preventDefault();
-                void sendMessage();
-              }
-            }}
-            placeholder="输入消息…"
-            disabled={sending}
-          />
-          <button
-            className="copilot-send-btn"
-            type="button"
-            onClick={() => void sendMessage()}
-            disabled={sending || !draft.trim()}
-            aria-label="Send"
-            title="Send"
-          >
-            {sending ? <LoaderCircle size={15} className="spin" /> : <Send size={15} />}
-          </button>
+          </div>
         </div>
       </div>
     </div>

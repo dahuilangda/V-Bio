@@ -316,7 +316,12 @@ export function useAffinityWorkflow(options: UseAffinityWorkflowOptions): Affini
         setPreviewVersion((prev) => prev + 1);
         setTargetChainIds([]);
         setLigandChainId('');
-        setPreviewError(error instanceof Error ? error.message : 'Failed to build affinity preview.');
+        const message = error instanceof Error ? error.message : 'Failed to build affinity preview.';
+        setPreviewError(
+          message.includes('Backend request timeout')
+            ? 'Affinity preview timed out while preparing the uploaded target and ligand. The files were selected, but preview preparation did not finish in time; try smaller files or run after the backend is less busy.'
+            : message
+        );
       } finally {
         if (requestSeqRef.current === requestSeq) {
           setPreviewLoading(false);

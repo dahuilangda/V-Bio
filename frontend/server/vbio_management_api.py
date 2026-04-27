@@ -51,13 +51,22 @@ LEAD_OPT_OVERLAY_MAX_PENDING = int(os.environ.get("VBIO_LEAD_OPT_OVERLAY_MAX_PEN
 LEAD_OPT_OVERLAY_CACHE_SIZE = int(os.environ.get("VBIO_LEAD_OPT_OVERLAY_CACHE_SIZE", "256"))
 LEAD_OPT_OVERLAY_CACHE_TTL_SECONDS = float(os.environ.get("VBIO_LEAD_OPT_OVERLAY_CACHE_TTL_SECONDS", "300"))
 LEAD_OPT_OVERLAY_TIMEOUT_SECONDS = float(os.environ.get("VBIO_LEAD_OPT_OVERLAY_TIMEOUT_SECONDS", "8"))
-COPILOT_API_URL = os.environ.get(
-    "VBIO_COPILOT_API_URL",
-    "http://219.146.211.42:29568/v1/chat/completions",
-).strip()
-COPILOT_API_KEY = os.environ.get("VBIO_COPILOT_API_KEY", "woaihuadong").strip()
-COPILOT_MODEL = os.environ.get("VBIO_COPILOT_MODEL", "gemma4-31b").strip()
+COPILOT_API_URL = (
+    os.environ.get("VBIO_COPILOT_API_URL", "").strip()
+    or os.environ.get("VBIO_TASK_CHAT_API_URL", "").strip()
+)
+COPILOT_API_KEY = (
+    os.environ.get("VBIO_COPILOT_API_KEY", "").strip()
+    or os.environ.get("VBIO_TASK_CHAT_API_KEY", "").strip()
+)
+COPILOT_MODEL = (
+    os.environ.get("VBIO_COPILOT_MODEL", "").strip()
+    or os.environ.get("VBIO_TASK_CHAT_MODEL", "").strip()
+)
+COPILOT_ENABLED = os.environ.get("VBIO_COPILOT_ENABLED", "").strip().lower()
+COPILOT_CONFIGURED = COPILOT_ENABLED not in {"0", "false", "no", "off"} and bool(COPILOT_API_URL)
 COPILOT_TIMEOUT_SECONDS = float(os.environ.get("VBIO_COPILOT_TIMEOUT_SECONDS", "90"))
+COPILOT_MAX_REQUEST_BYTES = int(os.environ.get("VBIO_COPILOT_MAX_REQUEST_BYTES", "524288"))
 
 FORM_FIELDS_INTERNAL = {"project_id", "task_name", "task_summary", "operation_mode"}
 DEFAULT_PROTENIX_PREDICT_SEED = 42
@@ -142,8 +151,22 @@ def runtime_status() -> Tuple[Response, int]:
     ), 200
 
 
+@app.get("/vbio-api/copilot/config")
+def copilot_config() -> Tuple[Response, int]:
+    return jsonify({"enabled": COPILOT_CONFIGURED}), 200
+
+
+def _copilot_request_too_large() -> bool:
+    content_length = request.content_length
+    return content_length is not None and content_length > COPILOT_MAX_REQUEST_BYTES
+
+
 @app.post("/vbio-api/copilot/assistant")
 def copilot_assistant_answer() -> Tuple[Response, int]:
+    if not COPILOT_CONFIGURED:
+        return jsonify({"error": "Copilot is not configured."}), 404
+    if _copilot_request_too_large():
+        return jsonify({"error": "Copilot request is too large. Attach files by reference instead of sending file content."}), 413
     payload = request.get_json(silent=True) or {}
     try:
         content = copilot_assistant.answer_context(
@@ -163,6 +186,10 @@ def copilot_assistant_answer() -> Tuple[Response, int]:
 
 @app.post("/vbio-api/copilot/plan_actions")
 def copilot_plan_actions() -> Tuple[Response, int]:
+    if not COPILOT_CONFIGURED:
+        return jsonify({"error": "Copilot is not configured.", "actions": []}), 404
+    if _copilot_request_too_large():
+        return jsonify({"error": "Copilot request is too large. Attach files by reference instead of sending file content.", "actions": []}), 413
     payload = request.get_json(silent=True) or {}
     ctx_type = str(payload.get("context_type") or "").strip()
     content = str(payload.get("content") or "").strip()

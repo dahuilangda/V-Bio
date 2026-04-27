@@ -23,6 +23,7 @@ import {
 import { ProjectCopilotModal, readStoredCopilotOpen, writeStoredCopilotOpen } from '../components/copilot/ProjectCopilotModal';
 import { SharingModal } from '../components/project/SharingModal';
 import { useAuth } from '../hooks/useAuth';
+import { useCopilotAvailability } from '../hooks/useCopilotAvailability';
 import { useProjects } from '../hooks/useProjects';
 import { formatDateTime } from '../utils/date';
 import { canDeleteProject, canEditProject as canEditProjectAccess, canManageProjectShares } from '../utils/accessControl';
@@ -57,6 +58,7 @@ function backendLabel(value: string): string {
 export function ProjectsPage() {
   const navigate = useNavigate();
   const { session } = useAuth();
+  const copilotAvailable = useCopilotAvailability();
   const { projects, loading, error, search, setSearch, createProject, patchProject, cancelProjectRuntimeTasks, softDeleteProject, load } =
     useProjects(session);
 
@@ -990,7 +992,7 @@ export function ProjectsPage() {
         />
       ) : null}
 
-      {session?.userId ? (
+      {copilotAvailable && session?.userId ? (
         <ProjectCopilotModal
           open={copilotOpen}
           title="Copilot"
