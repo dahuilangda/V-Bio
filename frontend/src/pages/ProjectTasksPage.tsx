@@ -43,6 +43,27 @@ function isOneOf<T extends readonly string[]>(value: string, options: T): value 
   return (options as readonly string[]).includes(value);
 }
 
+function normalizeCopilotTaskParameterPatch(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object') return {};
+  const row = value as Record<string, unknown>;
+  const patch: Record<string, unknown> = {};
+  const backend = readCopilotText(row.backend).toLowerCase();
+  if (backend === 'boltz' || backend === 'alphafold3' || backend === 'protenix') {
+    patch.backend = backend;
+  }
+  const seed = readCopilotNumber(row.seed);
+  if (seed !== null) {
+    patch.seed = Math.max(0, Math.floor(seed));
+  }
+  if (Array.isArray(row.componentsAdd)) {
+    patch.componentsAdd = row.componentsAdd;
+  }
+  if (row.componentsReplacement && typeof row.componentsReplacement === 'object') {
+    patch.componentsReplacement = row.componentsReplacement;
+  }
+  return patch;
+}
+
 function summarizeTaskStates(rows: ProjectTask[]): Record<string, number> {
   return rows.reduce<Record<string, number>>((acc, row) => {
     const state = String(row.task_state || 'UNKNOWN').trim().toUpperCase() || 'UNKNOWN';
@@ -377,6 +398,24 @@ export function ProjectTasksPage() {
       }
       navigate(url.pathname + url.search);
     }
+    if (action.id === 'tasks:copy_with_patch') {
+      if (!canEdit) throw new Error('This project is read-only for your account.');
+      if (!project) throw new Error('Project is not loaded.');
+      const taskRowId = String(action.payload?.taskRowId || '').trim();
+      const task = taskRows.find((row) => row.task.id === taskRowId)?.task;
+      if (!task) throw new Error('Could not find the task referenced by Copilot.');
+      const parameterPatch = normalizeCopilotTaskParameterPatch(action.payload?.parameterPatch);
+      if (Object.keys(parameterPatch).length === 0) throw new Error('Copilot did not provide any task changes to apply.');
+      const params = new URLSearchParams();
+      params.set('tab', 'components');
+      params.set('new_task', '1');
+      params.set('source_task_row_id', task.id);
+      params.set('copilot_parameter_patch', JSON.stringify(parameterPatch));
+      if (currentPage > 1) {
+        params.set('task_list_page', String(currentPage));
+      }
+      navigate(`/projects/${project.id}?${params.toString()}`);
+    }
     if (action.id === 'tasks:delete') {
       if (!canEdit) throw new Error('This project is read-only for your account.');
       const taskRowId = String(action.payload?.taskRowId || '').trim();
@@ -410,10 +449,12 @@ export function ProjectTasksPage() {
     canEdit,
     clearAdvancedFilters,
     createTaskHref,
+    currentPage,
     handleSort,
     navigate,
     normalizeSortKey,
     openTask,
+    project,
     removeTask,
     setBackendFilter,
     setMaxPae,

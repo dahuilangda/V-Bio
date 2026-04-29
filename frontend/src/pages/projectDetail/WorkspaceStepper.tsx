@@ -1,18 +1,25 @@
-import { Eye, SlidersHorizontal, Target } from 'lucide-react';
+import { Dna, Eye, SlidersHorizontal, Target } from 'lucide-react';
 import type { WorkspaceTab } from './workspaceTypes';
 
 interface WorkspaceStepperProps {
   workspaceTab: WorkspaceTab;
   onWorkspaceTabChange: (tab: WorkspaceTab) => void;
   isPredictionWorkflow: boolean;
+  isAffinityWorkflow: boolean;
+  isLeadOptimizationWorkflow: boolean;
+  componentStepLabel: string;
 }
 
 export function WorkspaceStepper({
   workspaceTab,
   onWorkspaceTabChange,
-  isPredictionWorkflow
+  isPredictionWorkflow,
+  isAffinityWorkflow,
+  isLeadOptimizationWorkflow,
+  componentStepLabel
 }: WorkspaceStepperProps) {
-  const constraintsLabel = 'Constraints';
+  const componentsLabel = isLeadOptimizationWorkflow ? 'Build' : componentStepLabel;
+  const constraintsLabel = isLeadOptimizationWorkflow ? 'Results' : 'Constraints';
   const showConstraintsStep = isPredictionWorkflow;
 
   return (
@@ -30,6 +37,20 @@ export function WorkspaceStepper({
           <SlidersHorizontal size={13} />
         </span>
       </button>
+      {(isPredictionWorkflow || isAffinityWorkflow || isLeadOptimizationWorkflow) && (
+        <button
+          type="button"
+          className={`workspace-step ${workspaceTab === 'components' ? 'active' : ''}`}
+          onClick={() => onWorkspaceTabChange('components')}
+          aria-label={`Edit ${componentsLabel.toLowerCase()}`}
+          data-label={componentsLabel}
+          title={componentsLabel}
+        >
+          <span className="workspace-step-dot">
+            <Dna size={13} />
+          </span>
+        </button>
+      )}
       {showConstraintsStep && (
         <button
           type="button"

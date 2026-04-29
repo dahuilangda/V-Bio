@@ -62,9 +62,9 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
     },
     {
         "name": "task_submission_planning",
-        "description": "Draft a parameter-change and submission plan for the current task/project using existing UI form state.",
-        "trigger": "Commands to rerun, change seed/backend/mode/parameters, submit variants, or batch submit candidates.",
-        "inputs": "Current draft/task parameters, workflow, editable status, run disabled reason, requested changes.",
+        "description": "Draft a parameter-change and submission plan for the current task/project using existing UI form state, or copy a visible task-list row into a new draft with a requested backend.",
+        "trigger": "Commands to rerun, change seed/backend/mode/parameters, submit variants, copy a best-scoring visible task, or batch submit candidates.",
+        "inputs": "Current draft/task parameters, visible task rows when in task_list, workflow, editable status, run disabled reason, requested changes.",
         "confirmation": "Always require a plan and explicit user confirmation before execution. If required parameters are missing, ask concise follow-up questions.",
         "execution_boundary": "Never submit directly from the model response. The host app must execute through the existing validated submit path after confirmation.",
     },
@@ -224,7 +224,9 @@ def _render_task_list_plan_schema() -> str:
         "- Component schema: {type:\"protein|ligand|dna|rna\", sequence:\"...\", numCopies:1, useMsa:true/false, inputMethod:\"smiles|ccd\" for ligand}. For proteins default useMsa=true unless the user says no MSA or the component is clearly a peptide binder.\n"
         "- If the user provides a sequence and wants to predict/submit, use tasks:create_with_sequence only when current workflow is prediction.\n"
         "- If the user asks only to create/fill a task, create the draft action. If they asks to run/submit/predict too, still return the same confirmed create action; the UI will ask for run confirmation after the draft is filled.\n"
-        "- If the user asks to change parameters, change backend/model, rerun, resubmit, or submit a variant of an existing task from the task list, identify the target row and use tasks:open. The list page cannot directly edit or rerun an existing task; parameter patching is available after opening task detail.\n"
+        "- If the user asks to create a new submitted variant from an existing visible task, use tasks:copy_with_patch. Select taskRowId from context_payload.rows using the user's criterion, such as highest ipTM, highest pLDDT, lowest PAE, or a named task. Put requested changes in payload.parameterPatch.\n"
+        "- Supported copy patches: backend, seed, componentsAdd for appending components, and componentsReplacement for replacing or rewriting the full component list. Use only fields the user requested.\n"
+        "- If the user asks to inspect or manually edit an existing task from the task list without requesting a new submitted variant, identify the target row and use tasks:open.\n"
         "- If the user request is ambiguous or lacks necessary information, return {\"actions\":[],\"missing_questions\":[\"...\"]}. Ask for clarification instead of forcing a confirmation button.\n"
         "- Ambiguous examples: unlabeled uppercase strings that could be peptide/protein/CCD/SMILES; 'new task' without any component; 'delete it' with multiple plausible target tasks; a workflow request that conflicts with current project type.\n"
         "- If context_payload.copilot_attachments exists, the user uploaded files through Copilot. Interpret @filename mentions and nearby words to infer role. For affinity and lead optimization, ask which uploaded file is target/protein/receptor and which is ligand/small molecule if roles are unclear. For peptide design, target/protein/receptor files are target structures; ask which file is the target if unclear. For prediction, a PDB/CIF/MMCIF attachment is a template only when the user labels it template/模板 or otherwise says to use it as a structure template.\n"
@@ -256,8 +258,14 @@ def _render_task_list_plan_schema() -> str:
         "  {\"actions\":[{\"id\":\"tasks:delete\",\"label\":\"删除任务\",\"description\":\"删除任务 xxx\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\"}}]}\n"
         "- user asks to cancel/stop/terminate a task / 取消/停止 任务:\n"
         "  {\"actions\":[{\"id\":\"tasks:cancel\",\"label\":\"取消任务\",\"description\":\"取消正在运行的任务 xxx\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\"}}]}\n"
-        "- user asks to change backend/seed/options and rerun an existing task from the list:\n"
-        "  {\"actions\":[{\"id\":\"tasks:open\",\"label\":\"打开任务\",\"description\":\"打开任务 xxx 后再修改参数并重新提交\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\"}}]}\n"
+        "- user asks to submit a new task by rerunning the visible task with highest ipTM using AlphaFold3 / 最高 ipTM 的任务换成 AlphaFold3 重新提交:\n"
+        "  {\"actions\":[{\"id\":\"tasks:copy_with_patch\",\"label\":\"复制并用 AlphaFold3 重新运行\",\"description\":\"复制当前可见列表中 ipTM 最高的任务，并将 backend 切换为 AlphaFold3 后继续提交\",\"payload\":{\"taskRowId\":\"<row-id-with-highest-iptm>\",\"taskName\":\"<matched-name>\",\"parameterPatch\":{\"backend\":\"alphafold3\"}}}]}\n"
+        "- user asks to add one ligand component to a named task and rerun:\n"
+        "  {\"actions\":[{\"id\":\"tasks:copy_with_patch\",\"label\":\"复制任务并追加组分\",\"description\":\"复制任务 xxx，追加 ligand 组分 ATP 后继续提交\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\",\"parameterPatch\":{\"componentsAdd\":[{\"type\":\"ligand\",\"sequence\":\"ATP\",\"numCopies\":1,\"inputMethod\":\"ccd\"}]}}}]}\n"
+        "- user asks to change seed on a copied task and rerun:\n"
+        "  {\"actions\":[{\"id\":\"tasks:copy_with_patch\",\"label\":\"复制任务并修改 seed\",\"description\":\"复制任务 xxx，将 seed 改为 123 后继续提交\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\",\"parameterPatch\":{\"seed\":123}}}]}\n"
+        "- user asks to open an existing task for manual edits:\n"
+        "  {\"actions\":[{\"id\":\"tasks:open\",\"label\":\"打开任务\",\"description\":\"打开任务 xxx 查看或手动编辑\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\"}}]}\n"
         "Return JSON only. Do not explain."
     )
 

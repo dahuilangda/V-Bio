@@ -65,6 +65,79 @@ TASK_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    "tasks:copy_with_patch": {
+        "label": "复制任务并修改参数",
+        "description": "从任务列表中选择一个已有任务，复制为新 draft，应用结构化参数/组件 patch，并在任务详情页继续确认运行。",
+        "payload_keys": ["taskRowId", "taskName", "parameterPatch"],
+        "requires_workflow": ["prediction"],
+        "requires_payload": ["taskRowId", "parameterPatch"],
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taskRowId": {
+                    "type": "string",
+                    "description": "ID copied exactly from context_payload.rows[].id for the task selected by the user's criterion, e.g. highest ipTM.",
+                },
+                "taskName": {"type": "string"},
+                "parameterPatch": {
+                    "type": "object",
+                    "description": "Patch to apply after copying the source task. Include only requested changes.",
+                    "properties": {
+                        "backend": {
+                            "type": "string",
+                            "enum": ["boltz", "alphafold3", "protenix"],
+                            "description": "Requested target backend. Map AlphaFold/AF3 to alphafold3.",
+                        },
+                        "seed": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+                        "componentsAdd": {
+                            "type": "array",
+                            "description": "Components to append to the copied source task.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"type": "string", "enum": ["protein", "ligand", "dna", "rna"]},
+                                    "sequence": {"type": "string"},
+                                    "numCopies": {"type": "integer", "minimum": 1},
+                                    "useMsa": {"type": "boolean"},
+                                    "inputMethod": {"type": "string", "enum": ["smiles", "ccd"]},
+                                },
+                                "required": ["type", "sequence"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "componentsReplacement": {
+                            "type": "object",
+                            "description": "Use when the user asks to replace or rewrite the whole component list. The components array must be the full desired list after copying.",
+                            "properties": {
+                                "mode": {"type": "string", "enum": ["replace"]},
+                                "components": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "type": {"type": "string", "enum": ["protein", "ligand", "dna", "rna"]},
+                                            "sequence": {"type": "string"},
+                                            "numCopies": {"type": "integer", "minimum": 1},
+                                            "useMsa": {"type": "boolean"},
+                                            "inputMethod": {"type": "string", "enum": ["smiles", "ccd"]},
+                                        },
+                                        "required": ["type", "sequence"],
+                                        "additionalProperties": False,
+                                    },
+                                },
+                                "clearConstraints": {"type": "boolean"},
+                            },
+                            "required": ["mode", "components"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["taskRowId", "parameterPatch"],
+            "additionalProperties": False,
+        },
+    },
     "tasks:delete": {
         "label": "删除任务",
         "description": "删除匹配的任务记录。",

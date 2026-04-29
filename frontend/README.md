@@ -159,7 +159,7 @@ source ./venv/bin/activate
 export VBIO_POSTGREST_URL="http://127.0.0.1:54321"
 export VBIO_RUNTIME_API_BASE_URL="http://127.0.0.1:5000"
 export VBIO_RUNTIME_API_TOKEN="<BOLTZ_BACKEND_TOKEN>"
-export VBIO_COPILOT_API_URL="http://219.146.211.42:29568/v1/chat/completions"
+export VBIO_COPILOT_API_URL="https://your-copilot-endpoint.example/v1/chat/completions"
 export VBIO_COPILOT_API_KEY="<COPILOT_API_KEY>"
 export VBIO_COPILOT_MODEL="gemma4-31b"
 

@@ -77,8 +77,12 @@ def _sanitize_context_payload(action_id: str, payload: Any, schema: Dict[str, An
     for key in ("projectId", "projectName", "taskRowId", "taskName", "taskSummary"):
         if key in sanitized:
             sanitized[key] = str(sanitized[key] or "").strip()
+    if "backend" in sanitized:
+        sanitized["backend"] = str(sanitized["backend"] or "").strip().lower()
     if "components" in sanitized:
         sanitized["components"] = _sanitize_prediction_components(sanitized["components"])
+    if "parameterPatch" in sanitized:
+        sanitized["parameterPatch"] = _sanitize_task_list_parameter_patch(sanitized["parameterPatch"])
     if "workflowFilter" in sanitized:
         sanitized["workflowFilter"] = str(sanitized["workflowFilter"] or "").strip()
     if action_id in {"projects:create", "tasks:create", "tasks:create_with_sequence"}:
@@ -203,12 +207,48 @@ def _context_action_is_allowed(
         str(payload.get("taskName") or "").strip() or str(payload.get("taskSummary") or "").strip()
     ):
         return False
+    if action_id == "tasks:copy_with_patch" and not _has_task_list_parameter_patch(payload.get("parameterPatch")):
+        return False
     if context_type == "project_list":
         if action_id.startswith("projects:workflow_"):
             return str(payload.get("workflowFilter") or "") in {"prediction", "affinity", "peptide_design", "lead_optimization"}
         if action_id == "projects:backend_boltz" and str(payload.get("backendFilter") or "").strip().lower() != "boltz":
             return False
     return True
+
+
+def _sanitize_task_list_parameter_patch(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    patch: Dict[str, Any] = {}
+    backend = str(value.get("backend") or "").strip().lower()
+    if backend in {"boltz", "alphafold3", "protenix"}:
+        patch["backend"] = backend
+    try:
+        seed = int(value.get("seed"))
+    except (TypeError, ValueError):
+        seed = -1
+    if 0 <= seed <= 2147483647:
+        patch["seed"] = seed
+    components_add = _sanitize_prediction_components(value.get("componentsAdd"))
+    if components_add:
+        patch["componentsAdd"] = components_add
+    replacement_raw = value.get("componentsReplacement")
+    if isinstance(replacement_raw, dict) and str(replacement_raw.get("mode") or "replace").strip().lower() == "replace":
+        replacement_components = _sanitize_prediction_components(replacement_raw.get("components"))
+        if replacement_components:
+            patch["componentsReplacement"] = {
+                "mode": "replace",
+                "components": replacement_components,
+                "clearConstraints": replacement_raw.get("clearConstraints", True) is not False,
+            }
+    return patch
+
+
+def _has_task_list_parameter_patch(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return any(key in value for key in ("backend", "seed", "componentsAdd", "componentsReplacement"))
 
 
 def render_context_action_tool_schema(context_type: str) -> str:

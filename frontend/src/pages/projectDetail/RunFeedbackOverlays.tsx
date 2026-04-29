@@ -1,11 +1,18 @@
 import type { MouseEvent } from 'react';
-import { CheckCircle2 } from 'lucide-react';
+import { CheckCircle2, LoaderCircle } from 'lucide-react';
+import { RunPlayIcon } from './RunPlayIcon';
 
 interface RunFeedbackOverlaysProps {
   runSuccessNotice: string | null;
   taskHistoryPath: string;
   onOpenTaskHistory: (event: MouseEvent<HTMLElement>) => void;
   isRunRedirecting: boolean;
+  showQuickRunFab: boolean;
+  onRunAction: () => void;
+  runDisabled: boolean;
+  runBlockedReason: string;
+  workflowRunLabel: string;
+  submitting: boolean;
   error: string | null;
   resultError: string | null;
   affinityPreviewError: string | null;
@@ -17,6 +24,12 @@ export function RunFeedbackOverlays({
   taskHistoryPath,
   onOpenTaskHistory,
   isRunRedirecting,
+  showQuickRunFab,
+  onRunAction,
+  runDisabled,
+  runBlockedReason,
+  workflowRunLabel,
+  submitting,
   error,
   resultError,
   affinityPreviewError,
@@ -47,6 +60,19 @@ export function RunFeedbackOverlays({
             <span className="run-submit-transition-title">Task queued. Opening Tasks...</span>
           </div>
         </div>
+      )}
+
+      {showQuickRunFab && (
+        <button
+          type="button"
+          className="run-fab"
+          onClick={onRunAction}
+          disabled={runDisabled}
+          title={runBlockedReason || workflowRunLabel}
+          aria-label={runBlockedReason || workflowRunLabel}
+        >
+          {submitting ? <LoaderCircle size={16} className="spin" /> : <RunPlayIcon size={16} />}
+        </button>
       )}
 
       {(error || resultError || affinityPreviewError) && (

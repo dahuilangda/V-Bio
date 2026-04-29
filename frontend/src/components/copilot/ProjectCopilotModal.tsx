@@ -1117,7 +1117,7 @@ export function ProjectCopilotModal({
         (contextType === 'task_detail' &&
           projectTaskId &&
           (action.id === 'task_detail:submit_current' || action.id === 'task_detail:apply_patch_and_submit')) ||
-        (contextType === 'task_list' && action.id === 'tasks:create_with_sequence')
+        (contextType === 'task_list' && (action.id === 'tasks:create_with_sequence' || action.id === 'tasks:copy_with_patch'))
       ) {
         const actionComponents = Array.isArray(action.payload?.components) ? action.payload.components : [];
         if (contextType === 'task_list' && action.id === 'tasks:create_with_sequence') {
@@ -1135,7 +1135,9 @@ export function ProjectCopilotModal({
           ? [buildSubmitCurrentFollowUpAction({
               sourceActionId: action.id,
               sequence: firstProteinComponent?.sequence ?? action.payload?.protein_sequence,
-              description: '新任务内容已填写完成，确认后开始结构预测。'
+              description: action.id === 'tasks:copy_with_patch'
+                ? '新任务已从源任务复制并应用参数修改。请检查当前 task；如果没问题，可以点击下方按钮开始运行。'
+                : '新任务内容已填写完成，确认后开始结构预测。'
             })]
           : [];
         writeCopilotContinuation(currentUserId, projectId, {

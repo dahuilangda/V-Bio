@@ -1868,15 +1868,17 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     const query = new URLSearchParams(runtime.locationSearch);
     const copilotComponentsRaw = String(query.get('copilot_components') || '').trim();
     const copilotSequence = String(query.get('copilot_sequence') || '').trim();
+    const copilotParameterPatchRaw = String(query.get('copilot_parameter_patch') || '').trim();
     const storedCopilotPrefill =
       session?.userId && project?.id
         ? readStoredCopilotTaskPrefill(session.userId, project.id)
         : null;
-    if ((!copilotComponentsRaw && !copilotSequence && !storedCopilotPrefill) || !draft || !project) return;
+    if ((!copilotComponentsRaw && !copilotSequence && !copilotParameterPatchRaw && !storedCopilotPrefill) || !draft || !project) return;
     copilotSequenceAppliedRef.current = true;
     const aminoAcidPattern = /^[ACDEFGHIKLMNPQRSTVWY]+$/i;
     query.delete('copilot_components');
     query.delete('copilot_sequence');
+    query.delete('copilot_parameter_patch');
     const nextSearch = query.toString();
     navigate(
       { pathname: window.location.pathname, search: nextSearch ? `?${nextSearch}` : '' },
@@ -1905,24 +1907,73 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         useMsa: true,
       }];
     }
-    if (nextComponents.length === 0) return;
+    const parameterPatch = (() => {
+      if (!copilotParameterPatchRaw) return {};
+      try {
+        return asRecord(JSON.parse(copilotParameterPatchRaw));
+      } catch {
+        return {};
+      }
+    })();
+    const replacement = asRecord(parameterPatch.componentsReplacement);
+    const replacementComponents = normalizeCopilotPrefillComponents(replacement.components);
+    const addedComponents = normalizeCopilotPrefillComponents(parameterPatch.componentsAdd);
+    const backendPatch = readText(parameterPatch.backend).trim().toLowerCase();
+    const seedPatch = readFiniteNumber(parameterPatch.seed);
+    const hasPatch =
+      replacementComponents.length > 0 ||
+      addedComponents.length > 0 ||
+      backendPatch === 'boltz' ||
+      backendPatch === 'alphafold3' ||
+      backendPatch === 'protenix' ||
+      seedPatch !== null;
+    if (nextComponents.length === 0 && !hasPatch) return;
     setDraft((prev) =>
-      prev
-        ? {
-            ...prev,
-            inputConfig: {
-              ...prev.inputConfig,
-              version: 1,
-              components: nextComponents,
-              constraints: [],
-            },
-          }
-        : prev
+      {
+        if (!prev) return prev;
+        const patchedComponents =
+          replacementComponents.length > 0
+            ? replacementComponents
+            : nextComponents.length > 0
+              ? nextComponents
+              : addedComponents.length > 0
+                ? [...prev.inputConfig.components, ...addedComponents]
+                : prev.inputConfig.components;
+        return {
+          ...prev,
+          backend:
+            backendPatch === 'boltz' || backendPatch === 'alphafold3' || backendPatch === 'protenix'
+              ? backendPatch
+              : prev.backend,
+          inputConfig: {
+            ...prev.inputConfig,
+            version: 1,
+            components: patchedComponents,
+            constraints:
+              nextComponents.length > 0 || (replacementComponents.length > 0 && replacement.clearConstraints !== false)
+                ? []
+                : prev.inputConfig.constraints,
+            options: {
+              ...prev.inputConfig.options,
+              ...(seedPatch !== null ? { seed: Math.max(0, Math.floor(seedPatch)) } : {})
+            }
+          },
+        };
+      }
     );
     if (storedCopilotPrefill && session?.userId && project.id) {
       clearStoredCopilotTaskPrefill(session.userId, project.id);
     }
-    setCopilotPrefillSave({ components: nextComponents });
+    setCopilotPrefillSave({
+      components:
+        replacementComponents.length > 0
+          ? replacementComponents
+          : nextComponents.length > 0
+            ? nextComponents
+            : addedComponents.length > 0
+              ? [...draft.inputConfig.components, ...addedComponents]
+              : draft.inputConfig.components
+    });
   }, [draft, navigate, project, runtime.locationSearch, session?.userId, setDraft]);
 
   useEffect(() => {
@@ -2883,6 +2934,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   const {
     componentStepLabel,
     isRunRedirecting,
+    showQuickRunFab,
     affinityConfidenceOnlyUiValue,
     affinityConfidenceOnlyUiLocked,
     runBlockedReason,
@@ -3626,6 +3678,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       stopSubmitting={headerStopRunPending}
       stopDisabled={headerStopRunDisabled}
       stopTitle={headerStopRunTitle}
+      showQuickRunFab={showQuickRunFab}
       taskHistoryPath={taskHistoryPath}
       runSuccessNotice={runSuccessNotice}
       error={error}
