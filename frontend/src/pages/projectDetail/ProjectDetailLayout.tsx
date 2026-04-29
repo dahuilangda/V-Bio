@@ -45,7 +45,6 @@ export interface ProjectDetailLayoutProps {
   isRunRedirecting: boolean;
   canOpenRunMenu: boolean;
   showHeaderRunAction: boolean;
-  showQuickRunFab: boolean;
   taskHistoryPath: string;
   runSuccessNotice: string | null;
   error: string | null;
@@ -105,7 +104,6 @@ export function ProjectDetailLayout({
   isRunRedirecting,
   canOpenRunMenu,
   showHeaderRunAction,
-  showQuickRunFab,
   taskHistoryPath,
   runSuccessNotice,
   error,
@@ -187,12 +185,6 @@ export function ProjectDetailLayout({
         taskHistoryPath={taskHistoryPath}
         onOpenTaskHistory={onOpenTaskHistory}
         isRunRedirecting={isRunRedirecting}
-        showQuickRunFab={showQuickRunFab}
-        onRunAction={onRunAction}
-        runDisabled={runDisabled}
-        runBlockedReason={runBlockedReason}
-        workflowRunLabel={workflow.runLabel}
-        submitting={runSubmitting}
         error={error}
         resultError={resultError}
         affinityPreviewError={affinityPreviewError}
@@ -204,9 +196,6 @@ export function ProjectDetailLayout({
           workspaceTab={workspaceTab}
           onWorkspaceTabChange={onWorkspaceTabChange}
           isPredictionWorkflow={isPredictionWorkflow}
-          isAffinityWorkflow={isAffinityWorkflow}
-          isLeadOptimizationWorkflow={isLeadOptimizationWorkflow}
-          componentStepLabel={componentStepLabel}
         />
 
         <ProjectWorkspaceContent

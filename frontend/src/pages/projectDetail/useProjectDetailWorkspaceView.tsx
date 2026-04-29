@@ -2883,7 +2883,6 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   const {
     componentStepLabel,
     isRunRedirecting,
-    showQuickRunFab,
     affinityConfidenceOnlyUiValue,
     affinityConfidenceOnlyUiLocked,
     runBlockedReason,
@@ -3627,7 +3626,6 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       stopSubmitting={headerStopRunPending}
       stopDisabled={headerStopRunDisabled}
       stopTitle={headerStopRunTitle}
-      showQuickRunFab={showQuickRunFab}
       taskHistoryPath={taskHistoryPath}
       runSuccessNotice={runSuccessNotice}
       error={error}
