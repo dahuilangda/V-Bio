@@ -819,8 +819,11 @@ export function ProjectCopilotModal({
       if (!entry) return;
       if (frame) window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
-        const width = Math.round(entry.contentRect.width);
-        const height = Math.round(entry.contentRect.height);
+        const panel = panelRef.current;
+        if (!panel) return;
+        const rect = panel.getBoundingClientRect();
+        const width = Math.round(rect.width);
+        const height = Math.round(rect.height);
         if (width < 300 || height < 300) return;
         if (!sizeReadyRef.current) {
           if (Math.abs(width - initialWidth) < 4 && Math.abs(height - initialHeight) < 4) {
