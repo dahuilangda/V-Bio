@@ -2321,10 +2321,12 @@ function copilotLocalStorageKey(input: {
   contextType: ProjectCopilotMessage['context_type'];
   projectId?: string | null;
   projectTaskId?: string | null;
+  userId?: string | null;
   conversationScope?: string | null;
 }): string {
   return [
-    'vbio:project-copilot:v1',
+    'vbio:project-copilot:v2',
+    String(input.userId || 'anonymous').trim().toLowerCase() || 'anonymous',
     String(input.conversationScope || 'scoped'),
     normalizeCopilotContextType(input.contextType),
     String(input.projectId || 'project-null'),
@@ -2459,9 +2461,12 @@ export async function listProjectCopilotMessages(input: {
 }): Promise<ProjectCopilotMessage[]> {
   const contextType = normalizeCopilotContextType(input.contextType);
   const conversationScope = String(input.conversationScope || '').trim();
+  const normalizedUserId = String(input.userId || '').trim();
+  if (!normalizedUserId) return [];
   const query: Record<string, string> = {
     select: '*',
     context_type: `eq.${contextType}`,
+    'metadata->>owner_user_id': `eq.${normalizedUserId}`,
     order: 'created_at.desc',
     limit: '200'
   };
@@ -2477,17 +2482,15 @@ export async function listProjectCopilotMessages(input: {
     rows = await request<Array<Partial<ProjectCopilotMessage>>>('/project_copilot_messages', undefined, query);
   } catch (error) {
     if (!isMissingRelationError(error, 'project_copilot_messages')) throw error;
-    const normalizedUserId = String(input.userId || '').trim();
-    return readLocalRows<Partial<ProjectCopilotMessage>>(copilotLocalStorageKey({ contextType, projectId, projectTaskId, conversationScope }))
+    return readLocalRows<Partial<ProjectCopilotMessage>>(
+      copilotLocalStorageKey({ contextType, projectId, projectTaskId, userId: normalizedUserId, conversationScope })
+    )
       .map(normalizeProjectCopilotMessage)
       .filter((row) => {
-        if (!normalizedUserId) return false;
         return row.user_id === normalizedUserId || String(row.metadata?.owner_user_id || '') === normalizedUserId;
       });
   }
-  const normalizedUserId = String(input.userId || '').trim();
   rows = rows.filter((row) => {
-    if (!normalizedUserId) return false;
     return String(row.user_id || '') === normalizedUserId || String(asObjectRecord(row.metadata).owner_user_id || '') === normalizedUserId;
   });
   const userIds = Array.from(new Set(rows.map((row) => String(row.user_id || '').trim()).filter(Boolean)));
@@ -2501,7 +2504,7 @@ export async function listProjectCopilotMessages(input: {
       user_name: user?.name || ''
     });
   }).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
-  writeLocalRows(copilotLocalStorageKey({ contextType, projectId, projectTaskId, conversationScope }), normalizedRows);
+  writeLocalRows(copilotLocalStorageKey({ contextType, projectId, projectTaskId, userId: normalizedUserId, conversationScope }), normalizedRows);
   return normalizedRows;
 }
 
@@ -2518,7 +2521,7 @@ export function readCachedProjectCopilotMessages(input: {
   const userId = String(input.userId || '').trim();
   const conversationScope = String(input.conversationScope || '').trim();
   if (!userId) return [];
-  return readLocalRows<Partial<ProjectCopilotMessage>>(copilotLocalStorageKey({ contextType, projectId, projectTaskId, conversationScope }))
+  return readLocalRows<Partial<ProjectCopilotMessage>>(copilotLocalStorageKey({ contextType, projectId, projectTaskId, userId, conversationScope }))
     .map(normalizeProjectCopilotMessage)
     .filter((row) => row.user_id === userId || String(row.metadata?.owner_user_id || '') === userId);
 }
@@ -2562,7 +2565,13 @@ export async function insertProjectCopilotMessage(input: {
       { select: '*' }
     );
     const row = normalizeProjectCopilotMessage(rows[0] || {});
-    const key = copilotLocalStorageKey({ contextType, projectId: input.projectId || null, projectTaskId: input.projectTaskId || null, conversationScope });
+    const key = copilotLocalStorageKey({
+      contextType,
+      projectId: input.projectId || null,
+      projectTaskId: input.projectTaskId || null,
+      userId: ownerUserId,
+      conversationScope
+    });
     writeLocalRows(key, [...readLocalRows<ProjectCopilotMessage>(key), row]);
     return row;
   } catch (error) {
@@ -2580,7 +2589,13 @@ export async function insertProjectCopilotMessage(input: {
       created_at: now,
       updated_at: now
     });
-    const key = copilotLocalStorageKey({ contextType, projectId: input.projectId || null, projectTaskId: input.projectTaskId || null, conversationScope });
+    const key = copilotLocalStorageKey({
+      contextType,
+      projectId: input.projectId || null,
+      projectTaskId: input.projectTaskId || null,
+      userId: ownerUserId,
+      conversationScope
+    });
     writeLocalRows(key, [...readLocalRows<ProjectCopilotMessage>(key), row]);
     return row;
   }
@@ -2634,14 +2649,14 @@ export async function deleteProjectCopilotMessagesBySession(input: {
         user_id: `eq.${userId}`
       });
     }
-    const key = copilotLocalStorageKey({ contextType, projectId, projectTaskId, conversationScope });
+    const key = copilotLocalStorageKey({ contextType, projectId, projectTaskId, userId, conversationScope });
     const rows = readLocalRows<ProjectCopilotMessage>(key).filter(
       (row) => String(row.metadata?.session_id || 'default') !== sessionId || String(row.metadata?.owner_user_id || row.user_id || '') !== userId
     );
     writeLocalRows(key, rows);
   } catch (error) {
     if (!isMissingRelationError(error, 'project_copilot_messages')) throw error;
-    const key = copilotLocalStorageKey({ contextType, projectId, projectTaskId, conversationScope });
+    const key = copilotLocalStorageKey({ contextType, projectId, projectTaskId, userId, conversationScope });
     const rows = readLocalRows<ProjectCopilotMessage>(key).filter(
       (row) => String(row.metadata?.session_id || 'default') !== sessionId || String(row.metadata?.owner_user_id || '') !== userId
     );

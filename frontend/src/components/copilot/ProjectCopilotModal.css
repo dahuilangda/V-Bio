@@ -62,7 +62,7 @@
 .copilot-modal.copilot-chat-window.history-open {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
-  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto auto minmax(180px, 1fr) auto auto;
   column-gap: 12px;
 }
 
@@ -244,7 +244,7 @@
 
 .copilot-chat-window .copilot-messages {
   flex: 1 1 auto;
-  min-height: 0;
+  min-height: 180px;
   overflow: auto;
   overscroll-behavior: contain;
   scroll-padding-bottom: 18px;
@@ -319,6 +319,9 @@
 
 .copilot-chat-window .copilot-message-body {
   margin-top: 4px;
+  max-height: min(320px, 45vh);
+  overflow-y: auto;
+  padding-right: 2px;
   line-height: 1.45;
   white-space: normal;
   overflow-wrap: anywhere;
@@ -642,12 +645,13 @@
 
   .copilot-modal.copilot-chat-window.history-open {
     grid-template-columns: 1fr;
-    grid-template-rows: auto auto auto minmax(0, 1fr) auto auto;
+    grid-template-rows: auto auto auto minmax(180px, 1fr) auto auto;
   }
 
   .copilot-history {
     grid-column: 1;
     grid-row: auto;
+    max-height: 180px;
     padding-right: 0;
     padding-bottom: 8px;
     border-right: 0;
