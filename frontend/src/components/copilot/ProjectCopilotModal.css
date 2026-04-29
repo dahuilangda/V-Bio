@@ -149,8 +149,11 @@
 .copilot-history-list {
   min-height: 0;
   overflow: auto;
+  scrollbar-gutter: stable;
   display: grid;
   gap: 6px;
+  margin-right: -10px;
+  padding-right: 14px;
 }
 
 .copilot-history-item {
@@ -160,6 +163,7 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: stretch;
+  min-height: 58px;
   overflow: hidden;
 }
 
@@ -171,14 +175,25 @@
 .copilot-history-item > button:first-child {
   border: 0;
   background: transparent;
-  padding: 8px 9px;
+  padding: 10px 9px;
   display: grid;
-  gap: 4px;
+  align-content: center;
+  gap: 5px;
   text-align: left;
   color: #243d32;
   font: inherit;
   cursor: pointer;
   min-width: 0;
+  min-height: 56px;
+  line-height: 1.25;
+}
+
+.copilot-history-item > button:first-child > span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .copilot-history-delete {
@@ -201,8 +216,13 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
   color: var(--muted);
   font-size: var(--text-2xs);
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .copilot-history-empty {
@@ -246,6 +266,7 @@
   flex: 1 1 auto;
   min-height: 180px;
   overflow: auto;
+  scrollbar-gutter: stable;
   overscroll-behavior: contain;
   scroll-padding-bottom: 18px;
   display: flex;
@@ -254,7 +275,8 @@
   background: #fff;
   border: 0;
   border-radius: 0;
-  padding: 6px 2px 18px;
+  margin-right: -10px;
+  padding: 6px 14px 18px 2px;
 }
 
 .copilot-chat-window .copilot-messages > :last-child {
