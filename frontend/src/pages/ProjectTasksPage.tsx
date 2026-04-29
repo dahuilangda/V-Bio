@@ -447,7 +447,14 @@ export function ProjectTasksPage() {
       if (currentPage > 1) {
         params.set('task_list_page', String(currentPage));
       }
-      navigate(`/projects/${project.id}?${params.toString()}`);
+      const targetPath = `/projects/${project.id}`;
+      const targetSearch = `?${params.toString()}`;
+      const targetUrl = `${targetPath}${targetSearch}`;
+      navigate(targetUrl);
+      window.setTimeout(() => {
+        if (window.location.pathname === targetPath && window.location.search === targetSearch) return;
+        window.location.assign(targetUrl);
+      }, 150);
       return;
     }
     if (action.id === 'tasks:delete') {
