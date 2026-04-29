@@ -18,7 +18,7 @@ from management_api.copilot_capabilities import (
 MAX_CONTEXT_STRING_CHARS = 1600
 MAX_CONTEXT_LIST_ITEMS = 40
 MAX_CONTEXT_DICT_KEYS = 80
-MAX_MODEL_MESSAGE_CHARS = 30000
+MAX_MODEL_MESSAGE_CHARS = 64000
 REDACTED_FILE_TEXT_KEYS = {
     "content",
     "structure_text",
