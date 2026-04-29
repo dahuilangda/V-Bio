@@ -153,6 +153,83 @@ def _sanitize_prediction_components(value: Any) -> List[Dict[str, Any]]:
     return components
 
 
+def _sanitize_component_selector(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    selector: Dict[str, Any] = {}
+    for key in ("id", "sequenceContains"):
+        text = str(value.get(key) or "").strip()
+        if text:
+            selector[key] = text
+    component_type = _normalize_component_type(value.get("type"))
+    if component_type in {"protein", "ligand", "dna", "rna"}:
+        selector["type"] = component_type
+    try:
+        index = int(value.get("index"))
+    except (TypeError, ValueError):
+        index = 0
+    if index >= 1:
+        selector["index"] = index
+    return selector
+
+
+def _sanitize_component_partial(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    patch: Dict[str, Any] = {}
+    component_type = _normalize_component_type(value.get("type"))
+    if component_type in {"protein", "ligand", "dna", "rna"}:
+        patch["type"] = component_type
+    sequence = _read_component_sequence(value, component_type if component_type in {"protein", "ligand", "dna", "rna"} else "")
+    if sequence:
+        patch["sequence"] = sequence if component_type == "ligand" else "".join(sequence.split()).upper()
+    copies = _safe_int(value.get("numCopies"))
+    if copies >= 1:
+        patch["numCopies"] = copies
+    if isinstance(value.get("useMsa"), bool):
+        patch["useMsa"] = bool(value.get("useMsa"))
+    input_method = str(value.get("inputMethod") or "").strip().lower()
+    if input_method in {"smiles", "ccd"}:
+        patch["inputMethod"] = input_method
+    return patch
+
+
+def _sanitize_component_patch_operations(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    operations: List[Dict[str, Any]] = []
+    for item in value[:16]:
+        if not isinstance(item, dict):
+            continue
+        op = str(item.get("op") or "").strip().lower()
+        if op == "add":
+            op = "append"
+        if op == "replace":
+            op = "update"
+        if op not in {"append", "update", "remove", "replace_all"}:
+            continue
+        if op == "append":
+            component = _sanitize_prediction_components([item.get("component")])
+            if component:
+                operations.append({"op": "append", "component": component[0]})
+            continue
+        if op == "replace_all":
+            components = _sanitize_prediction_components(item.get("components"))
+            if components:
+                operations.append({"op": "replace_all", "components": components})
+            continue
+        selector = _sanitize_component_selector(item.get("selector"))
+        if not selector:
+            continue
+        if op == "remove":
+            operations.append({"op": "remove", "selector": selector})
+            continue
+        component_patch = _sanitize_component_partial(item.get("component"))
+        if component_patch:
+            operations.append({"op": "update", "selector": selector, "component": component_patch})
+    return operations
+
+
 def _context_action_is_allowed(
     *,
     context_type: str,
@@ -233,6 +310,9 @@ def _sanitize_task_list_parameter_patch(value: Any) -> Dict[str, Any]:
     components_add = _sanitize_prediction_components(value.get("componentsAdd"))
     if components_add:
         patch["componentsAdd"] = components_add
+    component_ops = _sanitize_component_patch_operations(value.get("componentsPatch"))
+    if component_ops:
+        patch["componentsPatch"] = component_ops
     replacement_raw = value.get("componentsReplacement")
     if isinstance(replacement_raw, dict) and str(replacement_raw.get("mode") or "replace").strip().lower() == "replace":
         replacement_components = _sanitize_prediction_components(replacement_raw.get("components"))
@@ -248,7 +328,7 @@ def _sanitize_task_list_parameter_patch(value: Any) -> Dict[str, Any]:
 def _has_task_list_parameter_patch(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
-    return any(key in value for key in ("backend", "seed", "componentsAdd", "componentsReplacement"))
+    return any(key in value for key in ("backend", "seed", "componentsAdd", "componentsReplacement", "componentsPatch"))
 
 
 def render_context_action_tool_schema(context_type: str) -> str:

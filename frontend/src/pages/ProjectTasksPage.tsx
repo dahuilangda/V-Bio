@@ -58,6 +58,9 @@ function normalizeCopilotTaskParameterPatch(value: unknown): Record<string, unkn
   if (Array.isArray(row.componentsAdd)) {
     patch.componentsAdd = row.componentsAdd;
   }
+  if (Array.isArray(row.componentsPatch)) {
+    patch.componentsPatch = row.componentsPatch;
+  }
   if (row.componentsReplacement && typeof row.componentsReplacement === 'object') {
     patch.componentsReplacement = row.componentsReplacement;
   }
@@ -373,18 +376,47 @@ export function ProjectTasksPage() {
       return;
     }
     if (action.id === 'tasks:failure') setStateFilter('FAILURE');
-    if (action.id === 'tasks:running') setStateFilter('RUNNING');
-    if (action.id === 'tasks:queued') setStateFilter('QUEUED');
-    if (action.id === 'tasks:success') setStateFilter('SUCCESS');
-    if (action.id === 'tasks:submitted') handleSort('submitted');
-    if (action.id === 'tasks:sort_plddt') handleSort('plddt');
-    if (action.id === 'tasks:sort_iptm') handleSort('iptm');
-    if (action.id === 'tasks:sort_ipsae') handleSort('ipsae');
-    if (action.id === 'tasks:sort_pae') handleSort('pae');
-    if (action.id === 'tasks:backend_boltz') setBackendFilter('boltz');
+    if (action.id === 'tasks:failure') return;
+    if (action.id === 'tasks:running') {
+      setStateFilter('RUNNING');
+      return;
+    }
+    if (action.id === 'tasks:queued') {
+      setStateFilter('QUEUED');
+      return;
+    }
+    if (action.id === 'tasks:success') {
+      setStateFilter('SUCCESS');
+      return;
+    }
+    if (action.id === 'tasks:submitted') {
+      handleSort('submitted');
+      return;
+    }
+    if (action.id === 'tasks:sort_plddt') {
+      handleSort('plddt');
+      return;
+    }
+    if (action.id === 'tasks:sort_iptm') {
+      handleSort('iptm');
+      return;
+    }
+    if (action.id === 'tasks:sort_ipsae') {
+      handleSort('ipsae');
+      return;
+    }
+    if (action.id === 'tasks:sort_pae') {
+      handleSort('pae');
+      return;
+    }
+    if (action.id === 'tasks:backend_boltz') {
+      setBackendFilter('boltz');
+      return;
+    }
     if (action.id === 'tasks:create') {
       if (!canEdit) throw new Error('This project is read-only for your account.');
       navigate(createTaskHref);
+      return;
     }
     if (action.id === 'tasks:create_with_sequence') {
       if (!canEdit) throw new Error('This project is read-only for your account.');
@@ -397,6 +429,7 @@ export function ProjectTasksPage() {
         url.searchParams.set('copilot_sequence', sequence);
       }
       navigate(url.pathname + url.search);
+      return;
     }
     if (action.id === 'tasks:copy_with_patch') {
       if (!canEdit) throw new Error('This project is read-only for your account.');
@@ -415,6 +448,7 @@ export function ProjectTasksPage() {
         params.set('task_list_page', String(currentPage));
       }
       navigate(`/projects/${project.id}?${params.toString()}`);
+      return;
     }
     if (action.id === 'tasks:delete') {
       if (!canEdit) throw new Error('This project is read-only for your account.');
@@ -422,6 +456,7 @@ export function ProjectTasksPage() {
       const task = taskRows.find((row) => row.task.id === taskRowId)?.task;
       if (!task) throw new Error('Could not find the task referenced by Copilot.');
       await removeTask(task);
+      return;
     }
     if (action.id === 'tasks:rename') {
       if (!canEdit) throw new Error('This project is read-only for your account.');
@@ -431,6 +466,7 @@ export function ProjectTasksPage() {
       const nextName = typeof action.payload?.taskName === 'string' ? action.payload.taskName : undefined;
       const nextSummary = typeof action.payload?.taskSummary === 'string' ? action.payload.taskSummary : undefined;
       await updateTaskMetadata(task, { name: nextName, summary: nextSummary });
+      return;
     }
     if (action.id === 'tasks:cancel') {
       if (!canEdit) throw new Error('This project is read-only for your account.');
@@ -438,13 +474,16 @@ export function ProjectTasksPage() {
       const task = taskRows.find((row) => row.task.id === taskRowId)?.task;
       if (!task) throw new Error('Could not find the task referenced by Copilot.');
       await terminateTask(task);
+      return;
     }
     if (action.id === 'tasks:open') {
       const taskRowId = String(action.payload?.taskRowId || '').trim();
       const task = taskRows.find((row) => row.task.id === taskRowId)?.task;
       if (!task) throw new Error('Could not find the task referenced by Copilot.');
       await openTask(task);
+      return;
     }
+    throw new Error(`Unsupported Copilot task-list action: ${action.id}`);
   }, [
     canEdit,
     clearAdvancedFilters,

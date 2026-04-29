@@ -106,6 +106,101 @@ function normalizeCopilotPrefillComponents(value: unknown): InputComponent[] {
     .filter((component): component is InputComponent => Boolean(component));
 }
 
+function normalizeCopilotComponentPartial(value: unknown): Partial<InputComponent> {
+  const row = asRecord(value);
+  const patch: Partial<InputComponent> = {};
+  let componentType = readText(row.type).trim().toLowerCase().replace(/[-\s]+/g, '_');
+  if (componentType === 'peptide' || componentType === 'polypeptide') componentType = 'protein';
+  if (
+    componentType === 'small_molecule' ||
+    componentType === 'smallmolecule' ||
+    componentType === 'molecule' ||
+    componentType === 'compound' ||
+    componentType === 'drug' ||
+    componentType === 'smiles' ||
+    componentType === 'ccd'
+  ) {
+    componentType = 'ligand';
+  }
+  if (componentType === 'protein' || componentType === 'ligand' || componentType === 'dna' || componentType === 'rna') {
+    patch.type = componentType;
+  }
+  const rawSequence =
+    readText(row.sequence).trim() ||
+    readText(row.value).trim() ||
+    readText(row.input).trim() ||
+    readText(row.smiles).trim() ||
+    readText(row.ccd).trim() ||
+    readText(row.ligand).trim();
+  if (rawSequence) {
+    patch.sequence = patch.type === 'ligand' ? rawSequence : rawSequence.replace(/\s+/g, '').toUpperCase();
+  }
+  const copies = Math.floor(Number(row.numCopies));
+  if (Number.isFinite(copies) && copies >= 1) patch.numCopies = copies;
+  if (typeof row.useMsa === 'boolean') patch.useMsa = row.useMsa;
+  const inputMethod = readText(row.inputMethod).trim();
+  if (inputMethod === 'smiles' || inputMethod === 'ccd') patch.inputMethod = inputMethod;
+  return patch;
+}
+
+function findCopilotComponentIndex(components: InputComponent[], selectorValue: unknown): number {
+  const selector = asRecord(selectorValue);
+  const index = Math.floor(Number(selector.index));
+  if (Number.isFinite(index) && index >= 1 && index <= components.length) return index - 1;
+  const id = readText(selector.id).trim();
+  if (id) {
+    const byId = components.findIndex((component) => component.id === id);
+    if (byId >= 0) return byId;
+  }
+  const type = readText(selector.type).trim().toLowerCase();
+  const sequenceContains = readText(selector.sequenceContains).trim();
+  return components.findIndex((component) => {
+    if (type && component.type !== type) return false;
+    if (sequenceContains && !readText(component.sequence).includes(sequenceContains)) return false;
+    return Boolean(type || sequenceContains);
+  });
+}
+
+function applyCopilotComponentPatchOperations(components: InputComponent[], operationsValue: unknown): InputComponent[] {
+  if (!Array.isArray(operationsValue) || operationsValue.length === 0) return components;
+  let next = [...components];
+  let changed = false;
+  operationsValue.slice(0, 16).forEach((operationValue) => {
+    const operation = asRecord(operationValue);
+    const op = readText(operation.op).trim().toLowerCase();
+    if (op === 'append') {
+      const [component] = normalizeCopilotPrefillComponents([operation.component]);
+      if (component) {
+        next = [...next, { ...component, id: component.id || `copilot-${component.type}-${next.length + 1}` }];
+        changed = true;
+      }
+      return;
+    }
+    if (op === 'replace_all') {
+      const componentsReplacement = normalizeCopilotPrefillComponents(operation.components);
+      if (componentsReplacement.length > 0) {
+        next = componentsReplacement;
+        changed = true;
+      }
+      return;
+    }
+    const targetIndex = findCopilotComponentIndex(next, operation.selector);
+    if (targetIndex < 0) return;
+    if (op === 'remove') {
+      next = next.filter((_, index) => index !== targetIndex);
+      changed = true;
+      return;
+    }
+    if (op === 'update') {
+      const patch = normalizeCopilotComponentPartial(operation.component);
+      if (Object.keys(patch).length === 0) return;
+      next = next.map((component, index) => (index === targetIndex ? { ...component, ...patch } : component));
+      changed = true;
+    }
+  });
+  return changed && next.length > 0 ? next : components;
+}
+
 function readFiniteNumber(value: unknown): number | null {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
@@ -1918,11 +2013,14 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     const replacement = asRecord(parameterPatch.componentsReplacement);
     const replacementComponents = normalizeCopilotPrefillComponents(replacement.components);
     const addedComponents = normalizeCopilotPrefillComponents(parameterPatch.componentsAdd);
+    const patchedByOperations = applyCopilotComponentPatchOperations(draft.inputConfig.components, parameterPatch.componentsPatch);
+    const componentOperationsChanged = patchedByOperations !== draft.inputConfig.components;
     const backendPatch = readText(parameterPatch.backend).trim().toLowerCase();
     const seedPatch = readFiniteNumber(parameterPatch.seed);
     const hasPatch =
       replacementComponents.length > 0 ||
       addedComponents.length > 0 ||
+      componentOperationsChanged ||
       backendPatch === 'boltz' ||
       backendPatch === 'alphafold3' ||
       backendPatch === 'protenix' ||
@@ -1936,6 +2034,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
             ? replacementComponents
             : nextComponents.length > 0
               ? nextComponents
+              : componentOperationsChanged
+                ? applyCopilotComponentPatchOperations(prev.inputConfig.components, parameterPatch.componentsPatch)
               : addedComponents.length > 0
                 ? [...prev.inputConfig.components, ...addedComponents]
                 : prev.inputConfig.components;
@@ -1970,6 +2070,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
           ? replacementComponents
           : nextComponents.length > 0
             ? nextComponents
+            : componentOperationsChanged
+              ? patchedByOperations
             : addedComponents.length > 0
               ? [...draft.inputConfig.components, ...addedComponents]
               : draft.inputConfig.components

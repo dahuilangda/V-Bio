@@ -91,44 +91,38 @@ TASK_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
                         "seed": {"type": "integer", "minimum": 0, "maximum": 2147483647},
                         "componentsAdd": {
                             "type": "array",
-                            "description": "Components to append to the copied source task.",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "type": {"type": "string", "enum": ["protein", "ligand", "dna", "rna"]},
-                                    "sequence": {"type": "string"},
-                                    "numCopies": {"type": "integer", "minimum": 1},
-                                    "useMsa": {"type": "boolean"},
-                                    "inputMethod": {"type": "string", "enum": ["smiles", "ccd"]},
-                                },
-                                "required": ["type", "sequence"],
-                                "additionalProperties": False,
-                            },
+                            "description": "Legacy shortcut for componentsPatch append operations. Prefer componentsPatch for new plans.",
+                            "items": {"type": "object"},
                         },
                         "componentsReplacement": {
                             "type": "object",
-                            "description": "Use when the user asks to replace or rewrite the whole component list. The components array must be the full desired list after copying.",
-                            "properties": {
-                                "mode": {"type": "string", "enum": ["replace"]},
-                                "components": {
-                                    "type": "array",
-                                    "items": {
+                            "description": "Legacy shortcut for componentsPatch replace_all operations. Prefer componentsPatch for new plans.",
+                            "properties": {"mode": {"type": "string"}, "components": {"type": "array", "items": {"type": "object"}}, "clearConstraints": {"type": "boolean"}},
+                        },
+                        "componentsPatch": {
+                            "type": "array",
+                            "description": "Ordered component operations to apply to the copied source task.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "op": {"type": "string", "enum": ["append", "update", "remove", "replace_all"]},
+                                    "selector": {
                                         "type": "object",
-                                        "properties": {
-                                            "type": {"type": "string", "enum": ["protein", "ligand", "dna", "rna"]},
-                                            "sequence": {"type": "string"},
-                                            "numCopies": {"type": "integer", "minimum": 1},
-                                            "useMsa": {"type": "boolean"},
-                                            "inputMethod": {"type": "string", "enum": ["smiles", "ccd"]},
-                                        },
-                                        "required": ["type", "sequence"],
-                                        "additionalProperties": False,
+                                        "description": "Existing component selector for update/remove: id, 1-based index, type, or sequenceContains.",
+                                    },
+                                    "component": {
+                                        "type": "object",
+                                        "description": "Full component for append or partial fields for update: type, sequence, numCopies, useMsa, inputMethod.",
+                                    },
+                                    "components": {
+                                        "type": "array",
+                                        "description": "Full final component list for replace_all.",
+                                        "items": {"type": "object"},
                                     },
                                 },
-                                "clearConstraints": {"type": "boolean"},
+                                "required": ["op"],
+                                "additionalProperties": False,
                             },
-                            "required": ["mode", "components"],
-                            "additionalProperties": False,
                         },
                     },
                     "additionalProperties": False,
