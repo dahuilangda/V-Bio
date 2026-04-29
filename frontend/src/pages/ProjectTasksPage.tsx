@@ -21,6 +21,36 @@ import { getWorkflowDefinition } from '../utils/workflows';
 import type { CopilotPlanAction, ProjectTask } from '../types/models';
 import '../styles/project-tasks.css';
 
+const TASK_STATE_FILTER_OPTIONS = ['all', 'DRAFT', 'QUEUED', 'RUNNING', 'SUCCESS', 'FAILURE', 'REVOKED'] as const;
+const TASK_SORT_OPTIONS = ['submitted', 'plddt', 'ipsae', 'iptm', 'pae', 'backend', 'seed', 'mode'] as const;
+const TASK_SORT_DIRECTION_OPTIONS = ['asc', 'desc'] as const;
+const TASK_SUBMITTED_WITHIN_OPTIONS = ['all', '1', '7', '30', '90'] as const;
+const TASK_SEED_FILTER_OPTIONS = ['all', 'with_seed', 'without_seed'] as const;
+const TASK_PAGE_SIZE_OPTIONS = [8, 12, 20, 50] as const;
+const TASK_METRIC_COLUMN_OPTIONS = ['plddt', 'ipsae', 'iptm', 'pae'] as const;
+const WORKFLOW_FILTER_OPTIONS = ['all', 'prediction', 'affinity', 'peptide_design', 'lead_optimization'] as const;
+
+function readCopilotText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function readCopilotNumber(value: unknown): number | null {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value.trim()) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isOneOf<T extends readonly string[]>(value: string, options: T): value is T[number] {
+  return (options as readonly string[]).includes(value);
+}
+
+function summarizeTaskStates(rows: ProjectTask[]): Record<string, number> {
+  return rows.reduce<Record<string, number>>((acc, row) => {
+    const state = String(row.task_state || 'UNKNOWN').trim().toUpperCase() || 'UNKNOWN';
+    acc[state] = (acc[state] || 0) + 1;
+    return acc;
+  }, {});
+}
+
 export function ProjectTasksPage() {
   const { projectId = '' } = useParams();
   const location = useLocation();
@@ -116,6 +146,7 @@ export function ProjectTasksPage() {
     setStateFilter,
     setWorkflowFilter,
     setBackendFilter,
+    setSortDirection,
     setShowAdvancedFilters,
     setSubmittedWithinDays,
     setSeedFilter,
@@ -231,6 +262,95 @@ export function ProjectTasksPage() {
   }, [projectWorkflowKey]);
 
   const applyTaskListCopilotAction = useCallback(async (action: CopilotPlanAction) => {
+    if (action.id === 'tasks:update_view') {
+      const payload = action.payload || {};
+      const search = typeof payload.search === 'string' ? payload.search : null;
+      if (search !== null) setTaskSearch(search);
+
+      const state = readCopilotText(payload.stateFilter);
+      if (isOneOf(state, TASK_STATE_FILTER_OPTIONS)) setStateFilter(state);
+
+      const workflow = readCopilotText(payload.workflowFilter);
+      if (isOneOf(workflow, WORKFLOW_FILTER_OPTIONS) && (workflow === 'all' || workflowOptions.includes(workflow))) {
+        setWorkflowFilter(workflow);
+      }
+
+      const backend = readCopilotText(payload.backendFilter).toLowerCase();
+      if (backend === 'all') {
+        setBackendFilter('all');
+      } else if (backend && backendOptions.includes(backend)) {
+        setBackendFilter(backend);
+      }
+
+      const sortKeyPatch = readCopilotText(payload.sortKey);
+      if (isOneOf(sortKeyPatch, TASK_SORT_OPTIONS)) normalizeSortKey(sortKeyPatch);
+
+      const sortDirectionPatch = readCopilotText(payload.sortDirection);
+      if (isOneOf(sortDirectionPatch, TASK_SORT_DIRECTION_OPTIONS)) setSortDirection(sortDirectionPatch);
+
+      const pageSizePatch = readCopilotNumber(payload.pageSize);
+      if (pageSizePatch !== null && (TASK_PAGE_SIZE_OPTIONS as readonly number[]).includes(pageSizePatch)) {
+        setPageSize(pageSizePatch);
+      }
+
+      let advancedUpdated = false;
+      const submittedWithinDaysPatch = readCopilotText(payload.submittedWithinDays);
+      if (isOneOf(submittedWithinDaysPatch, TASK_SUBMITTED_WITHIN_OPTIONS)) {
+        setSubmittedWithinDays(submittedWithinDaysPatch);
+        advancedUpdated = true;
+      }
+
+      const seedFilterPatch = readCopilotText(payload.seedFilter);
+      if (isOneOf(seedFilterPatch, TASK_SEED_FILTER_OPTIONS)) {
+        setSeedFilter(seedFilterPatch);
+        advancedUpdated = true;
+      }
+
+      if (typeof payload.failureOnly === 'boolean') {
+        setFailureOnly(payload.failureOnly);
+        advancedUpdated = true;
+      }
+
+      const minPlddtPatch = readCopilotNumber(payload.minPlddt);
+      if (minPlddtPatch !== null) {
+        setMinPlddt(String(Math.min(100, Math.max(0, minPlddtPatch))));
+        advancedUpdated = true;
+      }
+
+      const minIptmPatch = readCopilotNumber(payload.minIptm);
+      if (minIptmPatch !== null) {
+        setMinIptm(String(Math.min(1, Math.max(0, minIptmPatch))));
+        advancedUpdated = true;
+      }
+
+      const maxPaePatch = readCopilotNumber(payload.maxPae);
+      if (maxPaePatch !== null) {
+        setMaxPae(String(Math.max(0, maxPaePatch)));
+        advancedUpdated = true;
+      }
+
+      if (Array.isArray(payload.visibleMetricColumns)) {
+        const requestedColumns = payload.visibleMetricColumns;
+        const nextColumns = TASK_METRIC_COLUMN_OPTIONS.filter((key) => requestedColumns.includes(key));
+        if (nextColumns.length > 0) {
+          setVisibleMetricColumns(nextColumns);
+          advancedUpdated = true;
+        }
+      }
+
+      if (advancedUpdated) setShowAdvancedFilters(true);
+      return;
+    }
+    if (action.id === 'tasks:clear_filters') {
+      setTaskSearch('');
+      setStateFilter('all');
+      setWorkflowFilter('all');
+      setBackendFilter('all');
+      normalizeSortKey('submitted');
+      clearAdvancedFilters();
+      setShowAdvancedFilters(false);
+      return;
+    }
     if (action.id === 'tasks:failure') setStateFilter('FAILURE');
     if (action.id === 'tasks:running') setStateFilter('RUNNING');
     if (action.id === 'tasks:queued') setStateFilter('QUEUED');
@@ -286,7 +406,34 @@ export function ProjectTasksPage() {
       if (!task) throw new Error('Could not find the task referenced by Copilot.');
       await openTask(task);
     }
-  }, [canEdit, createTaskHref, handleSort, navigate, openTask, removeTask, setBackendFilter, setStateFilter, taskRows, terminateTask, updateTaskMetadata]);
+  }, [
+    canEdit,
+    clearAdvancedFilters,
+    createTaskHref,
+    handleSort,
+    navigate,
+    normalizeSortKey,
+    openTask,
+    removeTask,
+    setBackendFilter,
+    setMaxPae,
+    setMinIptm,
+    setMinPlddt,
+    setPageSize,
+    setSeedFilter,
+    setShowAdvancedFilters,
+    setSortDirection,
+    setStateFilter,
+    setSubmittedWithinDays,
+    setTaskSearch,
+    setVisibleMetricColumns,
+    setWorkflowFilter,
+    taskRows,
+    terminateTask,
+    updateTaskMetadata,
+    workflowOptions,
+    backendOptions
+  ]);
 
   useEffect(() => {
     if (supportsApiAccess) return;
@@ -431,7 +578,38 @@ export function ProjectTasksPage() {
           currentUsername={session.username}
           contextPayload={{
             project: { id: project.id, name: project.name, task_type: project.task_type },
-            filters: { taskSearch, stateFilter, workflowFilter, backendFilter, sortKey, pageSize, page: currentPage },
+            options: { workflowOptions, backendOptions },
+            summary: {
+              totalTasks: taskRows.length,
+              matchedTasks: filteredRows.length,
+              allStateCounts: summarizeTaskStates(tasks),
+              matchedStateCounts: summarizeTaskStates(filteredRows.map((row) => row.task)),
+              currentTask: currentTaskRow
+                ? {
+                    id: currentTaskRow.id,
+                    name: currentTaskRow.name,
+                    task_id: currentTaskRow.task_id,
+                    state: currentTaskRow.task_state,
+                    backend: currentTaskRow.backend
+                  }
+                : null
+            },
+            filters: {
+              taskSearch,
+              stateFilter,
+              workflowFilter,
+              backendFilter,
+              sortKey,
+              pageSize,
+              page: currentPage,
+              submittedWithinDays,
+              seedFilter,
+              failureOnly,
+              minPlddt,
+              minIptm,
+              maxPae,
+              visibleMetricColumns
+            },
             rows: filteredRows.slice(0, 60).map((row) => ({
               id: row.task.id,
               name: row.task.name,

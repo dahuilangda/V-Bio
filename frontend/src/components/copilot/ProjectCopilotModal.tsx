@@ -932,7 +932,7 @@ export function ProjectCopilotModal({
               ...contextPayload,
               copilot_conversation: conversationContext,
               ...(attachmentMetadata.length > 0 ? { copilot_attachments: attachmentMetadata } : {}),
-              ...(planActions.length > 0 ? { candidate_plan_actions: planActions } : {})
+              candidate_plan_actions: planActions
           },
           userId: currentUserId,
           username: currentUsername,

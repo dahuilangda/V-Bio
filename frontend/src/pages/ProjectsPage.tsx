@@ -47,6 +47,34 @@ const PROJECT_SORT_OPTIONS: ProjectSortBy[] = ['updated_desc', 'updated_asc', 'c
 const UPDATED_WITHIN_DAYS_OPTIONS: UpdatedWithinDaysOption[] = ['all', '1', '7', '30', '90'];
 const MIN_TASK_COUNT_OPTIONS: MinTaskCountOption[] = ['all', '1', '3', '5', '10'];
 const PROJECTS_PAGE_SIZE_OPTIONS = [8, 12, 20, 50];
+const PROJECT_STATE_FILTER_OPTIONS = ['all', 'DRAFT', 'QUEUED', 'RUNNING', 'SUCCESS', 'FAILURE', 'REVOKED'] as const;
+const PROJECT_TYPE_FILTER_OPTIONS = ['all', 'prediction', 'affinity', 'peptide_design', 'lead_optimization'] as const;
+const PROJECT_ACTIVITY_FILTER_OPTIONS = ['all', 'active', 'completed', 'failed', 'no_tasks'] as const;
+
+function readCopilotText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function readCopilotNumber(value: unknown): number | null {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value.trim()) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isOneOf<T extends readonly string[]>(value: string, options: T): value is T[number] {
+  return (options as readonly string[]).includes(value);
+}
+
+function summarizeProjectTaskStates(rows: Project[]): Record<string, number> {
+  return rows.reduce<Record<string, number>>((acc, project) => {
+    const counts = project.task_counts || { queued: 0, running: 0, success: 0, failure: 0, other: 0 };
+    acc.QUEUED = (acc.QUEUED || 0) + counts.queued;
+    acc.RUNNING = (acc.RUNNING || 0) + counts.running;
+    acc.SUCCESS = (acc.SUCCESS || 0) + counts.success;
+    acc.FAILURE = (acc.FAILURE || 0) + counts.failure;
+    acc.OTHER = (acc.OTHER || 0) + counts.other;
+    return acc;
+  }, {});
+}
 
 function backendLabel(value: string): string {
   if (value === 'alphafold3') return 'AlphaFold3';
@@ -318,6 +346,61 @@ export function ProjectsPage() {
       if (!canRemove) throw new Error('Only the project owner can delete this project.');
       if (!window.confirm(`Delete project "${projectName || target.name}"?`)) return;
       await softDeleteProject(projectId);
+      return;
+    }
+    if (action.id === 'projects:clear_filters') {
+      setSearch('');
+      setTypeFilter('all');
+      setStateFilter('all');
+      setSortBy('updated_desc');
+      clearAdvancedFilters();
+      setShowAdvancedFilters(false);
+      return;
+    }
+    if (action.id === 'projects:update_view') {
+      const payload = action.payload || {};
+      const searchPatch = typeof payload.search === 'string' ? payload.search : null;
+      if (searchPatch !== null) setSearch(searchPatch);
+
+      const typePatch = readCopilotText(payload.typeFilter);
+      if (isOneOf(typePatch, PROJECT_TYPE_FILTER_OPTIONS)) setTypeFilter(typePatch);
+
+      const statePatch = readCopilotText(payload.stateFilter);
+      if (isOneOf(statePatch, PROJECT_STATE_FILTER_OPTIONS)) setStateFilter(statePatch);
+
+      const sortPatch = readCopilotText(payload.sortBy);
+      if (PROJECT_SORT_OPTIONS.includes(sortPatch as ProjectSortBy)) setSortBy(sortPatch as ProjectSortBy);
+
+      const backendPatch = readCopilotText(payload.backendFilter).toLowerCase();
+      if (backendPatch === 'all') {
+        setBackendFilter('all');
+      } else if (backendPatch && backendOptions.includes(backendPatch)) {
+        setBackendFilter(backendPatch);
+      }
+
+      let advancedUpdated = false;
+      const activityPatch = readCopilotText(payload.activityFilter);
+      if (isOneOf(activityPatch, PROJECT_ACTIVITY_FILTER_OPTIONS)) {
+        setActivityFilter(activityPatch);
+        advancedUpdated = true;
+      }
+
+      const updatedPatch = readCopilotText(payload.updatedWithinDays);
+      if (UPDATED_WITHIN_DAYS_OPTIONS.includes(updatedPatch as UpdatedWithinDaysOption)) {
+        setUpdatedWithinDays(updatedPatch as UpdatedWithinDaysOption);
+        advancedUpdated = true;
+      }
+
+      const minTaskPatch = readCopilotText(payload.minTaskCount);
+      if (MIN_TASK_COUNT_OPTIONS.includes(minTaskPatch as MinTaskCountOption)) {
+        setMinTaskCount(minTaskPatch as MinTaskCountOption);
+        advancedUpdated = true;
+      }
+
+      const pageSizePatch = readCopilotNumber(payload.pageSize);
+      if (pageSizePatch !== null && PROJECTS_PAGE_SIZE_OPTIONS.includes(pageSizePatch)) setPageSize(pageSizePatch);
+
+      if (advancedUpdated || (backendPatch && backendPatch !== 'all')) setShowAdvancedFilters(true);
       return;
     }
     setShowAdvancedFilters(true);
@@ -1003,6 +1086,17 @@ export function ProjectsPage() {
           contextPayload={{
             total_projects: projects.length,
             matched_projects: filteredProjects.length,
+            summary: {
+              allTaskStateCounts: summarizeProjectTaskStates(projects),
+              matchedTaskStateCounts: summarizeProjectTaskStates(filteredProjects),
+              activeProjects: projects.filter((project) => {
+                const counts = project.task_counts || { queued: 0, running: 0 };
+                return counts.queued > 0 || counts.running > 0 || project.task_state === 'QUEUED' || project.task_state === 'RUNNING';
+              }).length,
+              failedProjects: projects.filter((project) => (project.task_counts?.failure || 0) > 0).length,
+              emptyProjects: projects.filter((project) => (project.task_counts?.total || 0) === 0).length
+            },
+            options: { backendOptions, workflowOptions: WORKFLOWS.map((item) => item.key) },
             filters: { search, typeFilter, stateFilter, sortBy, backendFilter, activityFilter, updatedWithinDays, minTaskCount },
             projects: filteredProjects.slice(0, 40).map((project) => ({
               id: project.id,

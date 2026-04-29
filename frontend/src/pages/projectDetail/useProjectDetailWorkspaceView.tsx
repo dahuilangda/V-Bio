@@ -3412,6 +3412,10 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     const applyPatch = () => {
       const seed = readFiniteNumber(patch.seed);
       if (seed !== null) handleRuntimeSeedChange(Math.floor(seed));
+      const backendPatch = readText(patch.backend).trim().toLowerCase();
+      if (backendPatch === 'boltz' || backendPatch === 'alphafold3' || backendPatch === 'protenix') {
+        handleRuntimeBackendChange(backendPatch);
+      }
       const affinityModePatch = readText(patch.affinityMode).trim();
       if (affinityModePatch === 'score' || affinityModePatch === 'pose' || affinityModePatch === 'refine' || affinityModePatch === 'interface') {
         onAffinityModeChange(affinityModePatch);
@@ -3430,6 +3434,33 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       if (peptideEliteSize !== null) handleRuntimePeptideEliteSizeChange(Math.max(1, Math.floor(peptideEliteSize)));
       const peptideMutationRate = readFiniteNumber(patch.peptideMutationRate);
       if (peptideMutationRate !== null) handleRuntimePeptideMutationRateChange(Math.min(1, Math.max(0, peptideMutationRate)));
+      if (typeof patch.peptideUseInitialSequence === 'boolean') {
+        handleRuntimePeptideUseInitialSequenceChange(patch.peptideUseInitialSequence);
+      }
+      const peptideInitialSequence = readText(patch.peptideInitialSequence).trim();
+      if (peptideInitialSequence) handleRuntimePeptideInitialSequenceChange(peptideInitialSequence);
+      const peptideSequenceMask = readText(patch.peptideSequenceMask).trim();
+      if (peptideSequenceMask) handleRuntimePeptideSequenceMaskChange(peptideSequenceMask);
+      const peptideBicyclicLinkerCcd = readText(patch.peptideBicyclicLinkerCcd).trim();
+      if (peptideBicyclicLinkerCcd === 'SEZ' || peptideBicyclicLinkerCcd === '29N' || peptideBicyclicLinkerCcd === 'BS3') {
+        handleRuntimePeptideBicyclicLinkerCcdChange(peptideBicyclicLinkerCcd);
+      }
+      const peptideBicyclicCysPositionMode = readText(patch.peptideBicyclicCysPositionMode).trim();
+      if (peptideBicyclicCysPositionMode === 'auto' || peptideBicyclicCysPositionMode === 'manual') {
+        handleRuntimePeptideBicyclicCysPositionModeChange(peptideBicyclicCysPositionMode);
+      }
+      if (typeof patch.peptideBicyclicFixTerminalCys === 'boolean') {
+        handleRuntimePeptideBicyclicFixTerminalCysChange(patch.peptideBicyclicFixTerminalCys);
+      }
+      if (typeof patch.peptideBicyclicIncludeExtraCys === 'boolean') {
+        handleRuntimePeptideBicyclicIncludeExtraCysChange(patch.peptideBicyclicIncludeExtraCys);
+      }
+      const peptideBicyclicCys1Pos = readFiniteNumber(patch.peptideBicyclicCys1Pos);
+      if (peptideBicyclicCys1Pos !== null) handleRuntimePeptideBicyclicCys1PosChange(Math.max(1, Math.floor(peptideBicyclicCys1Pos)));
+      const peptideBicyclicCys2Pos = readFiniteNumber(patch.peptideBicyclicCys2Pos);
+      if (peptideBicyclicCys2Pos !== null) handleRuntimePeptideBicyclicCys2PosChange(Math.max(1, Math.floor(peptideBicyclicCys2Pos)));
+      const peptideBicyclicCys3Pos = readFiniteNumber(patch.peptideBicyclicCys3Pos);
+      if (peptideBicyclicCys3Pos !== null) handleRuntimePeptideBicyclicCys3PosChange(Math.max(1, Math.floor(peptideBicyclicCys3Pos)));
       const componentsReplacement = asRecord(patch.componentsReplacement);
       const replacementComponentsRaw = componentsReplacement.components;
       if (Array.isArray(replacementComponentsRaw)) {
@@ -3481,6 +3512,22 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       await submitTaskRef.current();
       return;
     }
+    if (action.id === 'task_detail:cancel_current') {
+      const taskRow = statusContextTaskRow || activeResultTask;
+      const runtimeTaskId = String(taskRow?.task_id || headerRuntimeTaskId || '').trim();
+      const runtimeState = String(taskRow?.task_state || displayTaskState || '').trim().toUpperCase();
+      if (!canEdit) throw new Error('This project is read-only for your account.');
+      if (!runtimeTaskId) throw new Error('No active runtime task_id is available to cancel.');
+      if (runtimeState !== 'QUEUED' && runtimeState !== 'RUNNING') {
+        throw new Error('Current task is not running or queued.');
+      }
+      const response = await terminateBackendTask(runtimeTaskId);
+      if (response.terminated !== true) {
+        throw new Error(`Backend did not confirm cancellation for task "${runtimeTaskId}".`);
+      }
+      await loadProject();
+      return;
+    }
     if (action.id === 'task_detail:delete_current') {
       const taskRow = activeResultTask || statusContextTaskRow;
       if (!taskRow) throw new Error('No current task to delete.');
@@ -3510,14 +3557,26 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     effectiveRunDisabled,
     handleHeaderRunAction,
     handleRuntimePeptideBinderLengthChange,
+    handleRuntimeBackendChange,
+    handleRuntimePeptideBicyclicCys1PosChange,
+    handleRuntimePeptideBicyclicCys2PosChange,
+    handleRuntimePeptideBicyclicCys3PosChange,
+    handleRuntimePeptideBicyclicCysPositionModeChange,
+    handleRuntimePeptideBicyclicFixTerminalCysChange,
+    handleRuntimePeptideBicyclicIncludeExtraCysChange,
+    handleRuntimePeptideBicyclicLinkerCcdChange,
     handleRuntimePeptideDesignModeChange,
     handleRuntimePeptideEliteSizeChange,
+    handleRuntimePeptideInitialSequenceChange,
     handleRuntimePeptideIterationsChange,
     handleRuntimePeptideMutationRateChange,
     handleRuntimePeptidePopulationSizeChange,
+    handleRuntimePeptideSequenceMaskChange,
+    handleRuntimePeptideUseInitialSequenceChange,
     handleRuntimeSeedChange,
     handleTaskNameChange,
     handleTaskSummaryChange,
+    headerRuntimeTaskId,
     navigate,
     onAffinityModeChange,
     patchTask,
@@ -3639,6 +3698,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
               'analyze_current_context',
               'plan_confirmed_parameter_patch',
               'plan_confirmed_submit',
+              'plan_confirmed_cancel_current_task',
               'plan_confirmed_delete_current_task',
               'plan_confirmed_metadata_update',
               'apply_copilot_uploaded_files_when_supported'
@@ -3648,7 +3708,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
           draft: {
             taskName: draft.taskName,
             taskSummary: draft.taskSummary,
-            backend: draft.inputConfig?.properties?.target ? undefined : project.backend,
+            backend: draft.backend,
             options: draft.inputConfig?.options,
             components: draft.inputConfig?.components,
             constraints: draft.inputConfig?.constraints
@@ -3657,7 +3717,18 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
             displayTaskState,
             runDisabled: effectiveRunDisabled,
             runBlockedReason: effectiveRunBlockedReason,
-            activeTaskId: headerRuntimeTaskId
+            activeTaskId: headerRuntimeTaskId,
+            statusTaskRowId: readText(statusContextTaskRow?.id).trim(),
+            statusTaskId: readText(statusContextTaskRow?.task_id).trim(),
+            statusTaskState: readText(statusContextTaskRow?.task_state).trim(),
+            activeResultTaskRowId: readText(activeResultTask?.id).trim(),
+            activeResultTaskId: readText(activeResultTask?.task_id).trim(),
+            activeResultTaskState: readText(activeResultTask?.task_state).trim(),
+            authoritativeTaskState:
+              readText(displayTaskState).trim() ||
+              readText(statusContextTaskRow?.task_state).trim() ||
+              readText(activeResultTask?.task_state).trim() ||
+              readText(project.task_state).trim()
           },
           affinityUploads: isAffinityWorkflow
             ? {
@@ -3667,7 +3738,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
                 ligandUploaded: Boolean(affinityLigandFile)
               }
             : undefined,
-          currentTask: activeResultTask || statusContextTaskRow || null
+          currentTask: statusContextTaskRow || activeResultTask || null
         }}
         onApplyPlanAction={applyTaskDetailCopilotAction}
         onSendAttachments={handleCopilotAttachments}

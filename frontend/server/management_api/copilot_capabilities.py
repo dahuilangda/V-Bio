@@ -146,6 +146,7 @@ def render_capability_prompt() -> str:
 
 
 TASK_PARAMETER_SCHEMA: Dict[str, Dict[str, Any]] = {
+    "backend": {"type": "enum", "values": ["boltz", "alphafold3", "protenix"]},
     "seed": {"type": "int", "min": 0, "max": 2147483647},
     "affinityMode": {"type": "enum", "values": ["score", "pose", "refine", "interface"]},
     "peptideDesignMode": {"type": "enum", "values": ["linear", "cyclic", "bicyclic"]},
@@ -154,13 +155,24 @@ TASK_PARAMETER_SCHEMA: Dict[str, Dict[str, Any]] = {
     "peptidePopulationSize": {"type": "int", "min": 1, "max": 10000},
     "peptideEliteSize": {"type": "int", "min": 1, "max": 10000},
     "peptideMutationRate": {"type": "float", "min": 0.0, "max": 1.0},
+    "peptideUseInitialSequence": {"type": "bool"},
+    "peptideInitialSequence": {"type": "string", "max_length": 200},
+    "peptideSequenceMask": {"type": "string", "max_length": 200},
+    "peptideBicyclicLinkerCcd": {"type": "enum", "values": ["SEZ", "29N", "BS3"]},
+    "peptideBicyclicCysPositionMode": {"type": "enum", "values": ["auto", "manual"]},
+    "peptideBicyclicFixTerminalCys": {"type": "bool"},
+    "peptideBicyclicIncludeExtraCys": {"type": "bool"},
+    "peptideBicyclicCys1Pos": {"type": "int", "min": 1, "max": 200},
+    "peptideBicyclicCys2Pos": {"type": "int", "min": 1, "max": 200},
+    "peptideBicyclicCys3Pos": {"type": "int", "min": 1, "max": 200},
     "componentsReplacement": {"type": "component_replacement"},
 }
 
 WORKFLOW_PARAMETER_KEYS: Dict[str, List[str]] = {
-    "prediction": ["seed", "componentsReplacement"],
+    "prediction": ["backend", "seed", "componentsReplacement"],
     "affinity": ["seed", "affinityMode"],
     "peptide_design": [
+        "backend",
         "seed",
         "peptideDesignMode",
         "peptideBinderLength",
@@ -168,6 +180,16 @@ WORKFLOW_PARAMETER_KEYS: Dict[str, List[str]] = {
         "peptidePopulationSize",
         "peptideEliteSize",
         "peptideMutationRate",
+        "peptideUseInitialSequence",
+        "peptideInitialSequence",
+        "peptideSequenceMask",
+        "peptideBicyclicLinkerCcd",
+        "peptideBicyclicCysPositionMode",
+        "peptideBicyclicFixTerminalCys",
+        "peptideBicyclicIncludeExtraCys",
+        "peptideBicyclicCys1Pos",
+        "peptideBicyclicCys2Pos",
+        "peptideBicyclicCys3Pos",
     ],
     "lead_optimization": [],
 }
@@ -193,6 +215,7 @@ def _render_task_list_plan_schema() -> str:
         "Treat the following as tool definitions. Choose only one or two smallest matching actions; copy IDs exactly from context when required:\n"
         f"{render_context_action_tool_schema('task_list')}\n"
         "Rules:\n"
+        "- If the user asks for current status, progress, summary, analysis, counts, explanation, or what is happening now, return {\"actions\":[]} unless they explicitly ask to change the view or mutate tasks.\n"
         "- Component extraction is semantic, not regex-only. First honor explicit labels in the user message, then infer from the value shape only when no label is present.\n"
         "- Label mapping: 蛋白/protein/peptide/多肽/氨基酸 -> protein; 小分子/配体/化合物/compound/ligand/drug/SMILES/smiles -> ligand; DNA/dna/脱氧核糖核酸 -> dna; RNA/rna/核糖核酸 -> rna.\n"
         "- A protein/peptide sequence is usually 2+ letters from the amino acid alphabet (ACDEFGHIKLMNPQRSTVWY), but an explicitly labeled ligand wins over this rule. Example: 小分子为 ATP is ligand, not protein.\n"
@@ -201,6 +224,7 @@ def _render_task_list_plan_schema() -> str:
         "- Component schema: {type:\"protein|ligand|dna|rna\", sequence:\"...\", numCopies:1, useMsa:true/false, inputMethod:\"smiles|ccd\" for ligand}. For proteins default useMsa=true unless the user says no MSA or the component is clearly a peptide binder.\n"
         "- If the user provides a sequence and wants to predict/submit, use tasks:create_with_sequence only when current workflow is prediction.\n"
         "- If the user asks only to create/fill a task, create the draft action. If they asks to run/submit/predict too, still return the same confirmed create action; the UI will ask for run confirmation after the draft is filled.\n"
+        "- If the user asks to change parameters, change backend/model, rerun, resubmit, or submit a variant of an existing task from the task list, identify the target row and use tasks:open. The list page cannot directly edit or rerun an existing task; parameter patching is available after opening task detail.\n"
         "- If the user request is ambiguous or lacks necessary information, return {\"actions\":[],\"missing_questions\":[\"...\"]}. Ask for clarification instead of forcing a confirmation button.\n"
         "- Ambiguous examples: unlabeled uppercase strings that could be peptide/protein/CCD/SMILES; 'new task' without any component; 'delete it' with multiple plausible target tasks; a workflow request that conflicts with current project type.\n"
         "- If context_payload.copilot_attachments exists, the user uploaded files through Copilot. Interpret @filename mentions and nearby words to infer role. For affinity and lead optimization, ask which uploaded file is target/protein/receptor and which is ligand/small molecule if roles are unclear. For peptide design, target/protein/receptor files are target structures; ask which file is the target if unclear. For prediction, a PDB/CIF/MMCIF attachment is a template only when the user labels it template/模板 or otherwise says to use it as a structure template.\n"
@@ -208,6 +232,8 @@ def _render_task_list_plan_schema() -> str:
         "- For delete or cancel, identify the target task from context_payload.rows by matching name or task_id.\n"
         "- Use tasks:cancel for stop/terminate/cancel operations on running or queued tasks.\n"
         "- Use tasks:delete for removing task records entirely.\n"
+        "- Use tasks:update_view for combined task list search, state/workflow/backend filters, page size, advanced filters, metric column visibility, and sort direction. Use the most specific payload fields only.\n"
+        "- If the user asks to restore the list, show all tasks, remove/clear/reset filters, or says 不要过滤/不过滤/不筛选/取消筛选, use tasks:clear_filters.\n"
         "- All actions require user confirmation (needs_confirmation=true, execute_now=false).\n"
         "Broad examples, adapt them to the user's exact labels and values:\n"
         "- protein-only task / 只有一条蛋白 / predict this peptide:\n"
@@ -220,6 +246,8 @@ def _render_task_list_plan_schema() -> str:
         "  {\"actions\":[{\"id\":\"tasks:create_with_sequence\",\"label\":\"新建预测任务\",\"description\":\"创建包含蛋白、DNA 和 RNA 的新预测任务\",\"payload\":{\"create\":true,\"components\":[{\"type\":\"protein\",\"sequence\":\"MSTNPKPQR\",\"numCopies\":1,\"useMsa\":true},{\"type\":\"dna\",\"sequence\":\"ATCGATCG\",\"numCopies\":1},{\"type\":\"rna\",\"sequence\":\"AUGCUU\",\"numCopies\":1}]}}]}\n"
         "- user asks to show failed tasks:\n"
         "  {\"actions\":[{\"id\":\"tasks:failure\",\"label\":\"显示失败任务\",\"description\":\"筛选 FAILURE 状态的任务\",\"payload\":{\"stateFilter\":\"FAILURE\"}}]}\n"
+        "- user asks to restore all tasks / 不要过滤 / 取消筛选 / show everything:\n"
+        "  {\"actions\":[{\"id\":\"tasks:clear_filters\",\"label\":\"显示全部任务\",\"description\":\"清除任务列表筛选并恢复默认排序\",\"payload\":{\"stateFilter\":\"all\",\"workflowFilter\":\"all\",\"backendFilter\":\"all\",\"sortKey\":\"submitted\",\"clearAdvancedFilters\":true,\"clearSearch\":true}}]}\n"
         "- user asks to sort by pLDDT / 按 pLDDT 排序 / 按 置信度 排序:\n"
         "  {\"actions\":[{\"id\":\"tasks:sort_plddt\",\"label\":\"按 pLDDT 排序\",\"description\":\"按置信度 pLDDT 从高到低排序\",\"payload\":{\"sortKey\":\"plddt\"}}]}\n"
         "- user asks to sort by ipTM / 按 ipTM 排序:\n"
@@ -228,6 +256,8 @@ def _render_task_list_plan_schema() -> str:
         "  {\"actions\":[{\"id\":\"tasks:delete\",\"label\":\"删除任务\",\"description\":\"删除任务 xxx\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\"}}]}\n"
         "- user asks to cancel/stop/terminate a task / 取消/停止 任务:\n"
         "  {\"actions\":[{\"id\":\"tasks:cancel\",\"label\":\"取消任务\",\"description\":\"取消正在运行的任务 xxx\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\"}}]}\n"
+        "- user asks to change backend/seed/options and rerun an existing task from the list:\n"
+        "  {\"actions\":[{\"id\":\"tasks:open\",\"label\":\"打开任务\",\"description\":\"打开任务 xxx 后再修改参数并重新提交\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\"}}]}\n"
         "Return JSON only. Do not explain."
     )
 
@@ -242,9 +272,12 @@ def _render_project_list_plan_schema() -> str:
         "Treat the following as tool definitions. Choose only one or two smallest matching actions; copy IDs exactly from context when required:\n"
         f"{render_context_action_tool_schema('project_list')}\n"
         "Rules:\n"
+        "- If the user asks for current status, progress, summary, analysis, counts, explanation, or what is happening now, return {\"actions\":[]} unless they explicitly ask to change the view or mutate projects.\n"
         "- For open/delete/cancel_active, identify the target project from context_payload.projects by matching name or id.\n"
         "- If the user asks for affinity-related projects, use projects:workflow_affinity, not projects:backend_boltz.\n"
         "- Use projects:backend_boltz only when the user explicitly asks for Boltz backend.\n"
+        "- Use projects:update_view for combined project list search, type/state/backend/activity/recency/min-task filters, page size, and non-default sort orders. Use the most specific payload fields only.\n"
+        "- If the user asks to restore the list, show all projects, remove/clear/reset filters, or says 不要过滤/不过滤/不筛选/取消筛选, use projects:clear_filters.\n"
         "- If the user asks to submit/predict/run a task, return no actions from project_list; they must open the right project/task function first.\n"
         "- All create and delete actions require user confirmation (needs_confirmation=true, execute_now=false).\n"
         "- Filter/sort actions also require user confirmation.\n"
@@ -266,18 +299,24 @@ def render_task_submission_schema_prompt(workflow_key: str = "prediction") -> st
         "Schema: return exactly one JSON object. In task_detail context, never return an actions array; use capability plus parameter_patch instead.",
         "If the user wants to modify parameters or submit:",
         '{"capability":"task_submission_planning","intent":"...",'
-        '"parameter_patch":{},"missing_questions":[],"risks":[],"needs_confirmation":true,"execute_now":false}',
+        '"parameter_patch":{},"submit_after_patch":false,"missing_questions":[],"risks":[],"needs_confirmation":true,"execute_now":false}',
         "If the user wants to delete the current task:",
         '{"capability":"task_deletion","intent":"delete","needs_confirmation":true,"execute_now":false}',
+        "If the user wants to cancel/stop/terminate the current running or queued task:",
+        '{"capability":"task_cancellation","intent":"cancel_current","needs_confirmation":true,"execute_now":false}',
         "If the user wants to rename or update description for the current task:",
         '{"capability":"task_metadata_patch","intent":"rename","metadata_patch":{"taskName":"<NEW_NAME>","taskSummary":"<NEW_DESCRIPTION>"},"needs_confirmation":true,"execute_now":false}',
         "If the user wants to apply uploaded Copilot files to the current task:",
         '{"capability":"attachment_application","intent":"apply_uploaded_files","attachment_applications":[{"attachmentId":"<ID_FROM_CONTEXT>","fileName":"<FILENAME>","role":"target|ligand|template"}],"missing_questions":[],"needs_confirmation":true,"execute_now":false}',
         "If the request is ambiguous or missing necessary information:",
         '{"capability":"clarification_needed","intent":"ask_clarifying_question","missing_questions":["<QUESTION_TO_ASK_USER>"],"needs_confirmation":false,"execute_now":false}',
+        "If the user asks for current status, progress, summary, analysis, counts, explanation, or what is happening now, return {\"capability\":\"analysis_only\",\"intent\":\"answer_status\",\"needs_confirmation\":false,\"execute_now\":false}.",
         "Interpret user-requested input changes into parameter_patch schema. Component extraction is semantic: first honor explicit labels, then infer from value shape only when no label is present.",
-        "For phrases like 新任务/new task with explicit components, do not use a create action. Return capability=task_submission_planning with intent=replace_components_and_submit and parameter_patch.componentsReplacement.",
-        "For phrases like 提交/run/submit/predict plus explicit components, include every component in componentsReplacement and set needs_confirmation=true, execute_now=false.",
+        "For phrases like 新任务/new task with explicit components, do not use a create action. Return capability=task_submission_planning with parameter_patch.componentsReplacement and submit_after_patch=true.",
+        "For phrases like 提交/run/submit/predict plus explicit components, include every component in componentsReplacement and set submit_after_patch=true, needs_confirmation=true, execute_now=false.",
+        "If the user only asks to edit/fill/change parameters without running, set submit_after_patch=false.",
+        "If the user asks to change backend/model engine/provider, set parameter_patch.backend to one of boltz, alphafold3, protenix. For backend aliases: Boltz/Boltz-2 -> boltz; AlphaFold/AF3 -> alphafold3; Protenix -> protenix.",
+        "For peptide design option changes, map natural-language controls into exact parameter_patch keys: binder length -> peptideBinderLength; design mode -> peptideDesignMode; iterations/rounds -> peptideIterations; population size -> peptidePopulationSize; elite/top candidates -> peptideEliteSize; mutation rate -> peptideMutationRate; initial sequence/start sequence -> peptideInitialSequence plus peptideUseInitialSequence=true; sequence mask/fixed positions -> peptideSequenceMask; bicyclic linker -> peptideBicyclicLinkerCcd; automatic/manual cysteine positions -> peptideBicyclicCysPositionMode; fixed terminal cysteine -> peptideBicyclicFixTerminalCys; include extra cysteine -> peptideBicyclicIncludeExtraCys; Cys1/Cys2/Cys3 positions -> peptideBicyclicCys1Pos/peptideBicyclicCys2Pos/peptideBicyclicCys3Pos.",
         "Label mapping: 蛋白/protein/peptide/多肽/氨基酸 -> protein; 小分子/配体/化合物/compound/ligand/drug/SMILES/smiles -> ligand; DNA/dna -> dna; RNA/rna -> rna.",
         "For structure prediction, peptide and protein sequence inputs are both protein components, unless the user explicitly labels the value as ligand/small molecule/SMILES.",
         "When the user asks for only/single/只有/rewrite/replace components, replace the component list and clear constraints unless they explicitly ask to keep constraints. Do not copy old components.",
@@ -286,15 +325,21 @@ def render_task_submission_schema_prompt(workflow_key: str = "prediction") -> st
         "If context_payload.copilot_attachments exists, use @filename mentions and nearby role words. Do not assume file roles from upload order. If roles are clear, return capability=attachment_application with attachment_applications using exact attachment IDs and filenames from context_payload.copilot_attachments. In affinity and lead optimization, target/protein/receptor files are target structures and ligand/small molecule/compound files are ligand structures. In peptide design, target/protein/receptor files are target structures for peptide binder design; ask which file is the target if unclear. In prediction, PDB/CIF/MMCIF files are templates only when explicitly described as template/模板. If uploaded file roles are unclear, ask a clarifying question.",
         "Broad examples, adapt them to the exact user labels and values:",
         "- replace with one protein sequence:",
-        '{"parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"<PROTEIN_SEQUENCE>","numCopies":1,"useMsa":true}],"clearConstraints":true}},"needs_confirmation":true,"execute_now":false}',
+        '{"capability":"task_submission_planning","parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"<PROTEIN_SEQUENCE>","numCopies":1,"useMsa":true}],"clearConstraints":true}},"submit_after_patch":true,"needs_confirmation":true,"execute_now":false}',
+        "- change backend to Protenix and rerun current draft:",
+        '{"capability":"task_submission_planning","parameter_patch":{"backend":"protenix"},"submit_after_patch":true,"needs_confirmation":true,"execute_now":false}',
         "- replace with protein plus explicitly labeled small molecule ligand, preserving uppercase ligand text:",
-        '{"parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"GSHMKWVTFISLLFLFSSAYSRGV","numCopies":1,"useMsa":true},{"type":"ligand","sequence":"ATP","numCopies":1,"inputMethod":"ccd"}],"clearConstraints":true}},"needs_confirmation":true,"execute_now":false}',
+        '{"capability":"task_submission_planning","parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"GSHMKWVTFISLLFLFSSAYSRGV","numCopies":1,"useMsa":true},{"type":"ligand","sequence":"ATP","numCopies":1,"inputMethod":"ccd"}],"clearConstraints":true}},"submit_after_patch":true,"needs_confirmation":true,"execute_now":false}',
         "- replace with multiple ligands or SMILES strings:",
-        '{"parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"<PROTEIN_SEQUENCE>","numCopies":1,"useMsa":true},{"type":"ligand","sequence":"CN1C=NC2=C1C(=O)N(C)C(=O)N2C","numCopies":1,"inputMethod":"smiles"},{"type":"ligand","sequence":"NAD","numCopies":1,"inputMethod":"ccd"}],"clearConstraints":true}},"needs_confirmation":true,"execute_now":false}',
+        '{"capability":"task_submission_planning","parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"<PROTEIN_SEQUENCE>","numCopies":1,"useMsa":true},{"type":"ligand","sequence":"CN1C=NC2=C1C(=O)N(C)C(=O)N2C","numCopies":1,"inputMethod":"smiles"},{"type":"ligand","sequence":"NAD","numCopies":1,"inputMethod":"ccd"}],"clearConstraints":true}},"submit_after_patch":true,"needs_confirmation":true,"execute_now":false}',
         "- replace with protein plus DNA/RNA components:",
-        '{"parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"<PROTEIN_SEQUENCE>","numCopies":1,"useMsa":true},{"type":"dna","sequence":"ATCGATCG","numCopies":1},{"type":"rna","sequence":"AUGCUU","numCopies":1}],"clearConstraints":true}},"needs_confirmation":true,"execute_now":false}',
+        '{"capability":"task_submission_planning","parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"<PROTEIN_SEQUENCE>","numCopies":1,"useMsa":true},{"type":"dna","sequence":"ATCGATCG","numCopies":1},{"type":"rna","sequence":"AUGCUU","numCopies":1}],"clearConstraints":true}},"submit_after_patch":true,"needs_confirmation":true,"execute_now":false}',
         "- protein plus peptide binder; peptide is represented as another protein component:",
-        '{"parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"<TARGET_PROTEIN_SEQUENCE>","numCopies":1,"useMsa":true},{"type":"protein","sequence":"<PEPTIDE_SEQUENCE>","numCopies":1,"useMsa":false}],"clearConstraints":true}},"needs_confirmation":true,"execute_now":false}',
+        '{"capability":"task_submission_planning","parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"<TARGET_PROTEIN_SEQUENCE>","numCopies":1,"useMsa":true},{"type":"protein","sequence":"<PEPTIDE_SEQUENCE>","numCopies":1,"useMsa":false}],"clearConstraints":true}},"submit_after_patch":true,"needs_confirmation":true,"execute_now":false}',
+        "- peptide design: use an initial sequence, mask, and rerun:",
+        '{"capability":"task_submission_planning","parameter_patch":{"peptideUseInitialSequence":true,"peptideInitialSequence":"ACDEFGHIK","peptideSequenceMask":"ACDXXXXXX"},"submit_after_patch":true,"needs_confirmation":true,"execute_now":false}',
+        "- peptide design: switch to bicyclic linker and manual cysteine positions:",
+        '{"capability":"task_submission_planning","parameter_patch":{"peptideDesignMode":"bicyclic","peptideBicyclicLinkerCcd":"BS3","peptideBicyclicCysPositionMode":"manual","peptideBicyclicCys1Pos":3,"peptideBicyclicCys2Pos":8,"peptideBicyclicCys3Pos":15},"submit_after_patch":true,"needs_confirmation":true,"execute_now":false}',
         "Allowed parameter_patch keys for this workflow:",
     ]
     for key in allowed_keys:
@@ -306,6 +351,10 @@ def render_task_submission_schema_prompt(workflow_key: str = "prediction") -> st
             )
         elif spec["type"] == "enum":
             detail = ", ".join(spec["values"])
+        elif spec["type"] == "bool":
+            detail = "boolean true or false"
+        elif spec["type"] == "string":
+            detail = f"string max length {spec['max_length']}"
         else:
             detail = f"{spec['type']} range {spec['min']}..{spec['max']}"
         lines.append(f"- {key}: {detail}")
@@ -394,6 +443,15 @@ def sanitize_task_parameter_patch(candidate: Any, workflow_key: str = "predictio
             if token in spec["values"]:
                 sanitized[normalized_key] = token
             continue
+        if spec["type"] == "bool":
+            if isinstance(value, bool):
+                sanitized[normalized_key] = value
+            continue
+        if spec["type"] == "string":
+            text = str(value or "").strip()
+            if text:
+                sanitized[normalized_key] = text[: int(spec["max_length"])]
+            continue
         number = _finite_number(value)
         if number is None:
             continue
@@ -459,6 +517,22 @@ def build_task_submission_actions(candidate: Dict[str, Any], user_content: str, 
                 "id": "task_detail:delete_current",
                 "label": "删除当前任务",
                 "description": "确认删除当前正在查看的任务",
+                "payload": {
+                    "schemaVersion": ACTION_SCHEMA_VERSION,
+                    "contextType": "task_detail",
+                    "workflowKey": normalized_workflow,
+                    "destructive": True,
+                },
+                "needs_confirmation": True,
+                "execute_now": False,
+            }
+        ]
+    if capability == "task_cancellation":
+        return [
+            {
+                "id": "task_detail:cancel_current",
+                "label": "取消当前任务",
+                "description": "确认取消当前正在运行或排队的任务",
                 "payload": {
                     "schemaVersion": ACTION_SCHEMA_VERSION,
                     "contextType": "task_detail",
@@ -549,10 +623,7 @@ def build_task_submission_actions(candidate: Dict[str, Any], user_content: str, 
         else:
             description_parts.append(f"{key}: {value}")
     description = ", ".join(description_parts)
-    content = str(user_content or "").lower()
-    wants_submit = any(token in content for token in ["submit", "run", "rerun", "predict", "new task", "提交", "运行", "重跑", "预测", "新建", "新的任务", "新任务"])
-    intent = str(candidate.get("intent") or "").lower()
-    wants_submit = wants_submit or any(token in intent for token in ["submit", "run", "rerun"])
+    wants_submit = candidate.get("submit_after_patch") is True
     if wants_submit:
         return [
             {

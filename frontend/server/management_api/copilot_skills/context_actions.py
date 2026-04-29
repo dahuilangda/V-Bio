@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Dict, List
 
 from management_api.copilot_skills.project_list import PROJECT_LIST_ACTION_SCHEMAS
@@ -67,15 +66,6 @@ def _safe_int(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
-
-
-def _contains_intent_keyword(user_content: str, keywords: Any) -> bool:
-    if not keywords:
-        return True
-    content = str(user_content or "").strip().lower()
-    if not content:
-        return True
-    return any(str(keyword or "").strip().lower() in content for keyword in keywords)
 
 
 def _sanitize_context_payload(action_id: str, payload: Any, schema: Dict[str, Any]) -> Dict[str, Any]:
@@ -159,44 +149,6 @@ def _sanitize_prediction_components(value: Any) -> List[Dict[str, Any]]:
     return components
 
 
-def _declared_ligand_tokens(user_content: str) -> List[str]:
-    content = str(user_content or "")
-    if not content.strip():
-        return []
-    token_pattern = r"([A-Za-z0-9@+\-\[\]\(\)=#$\\/%.]+)"
-    patterns = [
-        rf"(?:小分子|配体|化合物)\s*(?:序列|SMILES|smiles|为|是|:|：|=)?\s*{token_pattern}",
-        rf"(?:small\s+molecule|ligand|compound|SMILES|smiles)\s*(?:sequence|is|as|:|=)?\s*{token_pattern}",
-    ]
-    tokens: List[str] = []
-    seen: set[str] = set()
-    for pattern in patterns:
-        for match in re.finditer(pattern, content, flags=re.IGNORECASE):
-            token = str(match.group(1) or "").strip().strip("，,。.;；")
-            if not token:
-                continue
-            key = token.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            tokens.append(token)
-    return tokens
-
-
-def _component_contains_sequence(components: List[Dict[str, Any]], component_type: str, sequence: str) -> bool:
-    expected = str(sequence or "").strip().lower()
-    if not expected:
-        return True
-    for component in components:
-        if not isinstance(component, dict):
-            continue
-        if str(component.get("type") or "").strip().lower() != component_type:
-            continue
-        if str(component.get("sequence") or "").strip().lower() == expected:
-            return True
-    return False
-
-
 def _context_action_is_allowed(
     *,
     context_type: str,
@@ -204,12 +156,9 @@ def _context_action_is_allowed(
     action_id: str,
     payload: Dict[str, Any],
     workflow_key: str,
-    user_content: str = "",
 ) -> bool:
     schema = CONTEXT_ACTION_SCHEMAS.get(context_type, {}).get(action_id)
     if not schema:
-        return False
-    if not _contains_intent_keyword(user_content, schema.get("intent_keywords")):
         return False
     required_workflows = schema.get("requires_workflow")
     if isinstance(required_workflows, list) and workflow_key not in required_workflows:
@@ -218,7 +167,7 @@ def _context_action_is_allowed(
         if not str(payload.get(key) or "").strip():
             return False
     any_payload_keys = schema.get("requires_any_payload") or []
-    if any_payload_keys and not any(payload.get(key) for key in any_payload_keys):
+    if any_payload_keys and not any(key in payload and payload.get(key) not in (None, "") for key in any_payload_keys):
         return False
     known = _known_ids(context_payload, context_type)
     if known:
@@ -238,9 +187,6 @@ def _context_action_is_allowed(
         components = payload.get("components") if isinstance(payload.get("components"), list) else []
         if not components:
             return False
-        for ligand_token in _declared_ligand_tokens(user_content):
-            if not _component_contains_sequence(components, "ligand", ligand_token):
-                return False
         has_valid_component = False
         for component in components:
             if not isinstance(component, dict):
@@ -302,17 +248,6 @@ def render_context_action_tool_schema(context_type: str) -> str:
     return json.dumps(rendered, ensure_ascii=False, indent=2, sort_keys=True)
 
 
-def _project_list_action_matches_user_intent(action_id: str, payload: Dict[str, Any], user_content: str) -> bool:
-    content = str(user_content or "").strip().lower()
-    if not content:
-        return True
-    if "affinity" in content or "亲和" in content:
-        return action_id == "projects:workflow_affinity" or action_id in {"projects:open", "projects:delete", "projects:cancel_active"}
-    if "boltz" in content:
-        return action_id == "projects:backend_boltz" or action_id in {"projects:open", "projects:delete", "projects:cancel_active"}
-    return True
-
-
 def build_context_actions(
     context_type: str,
     candidate: Dict[str, Any],
@@ -346,10 +281,7 @@ def build_context_actions(
             action_id=action_id,
             payload=payload,
             workflow_key=workflow_key,
-            user_content=user_content,
         ):
-            continue
-        if normalized_context == "project_list" and not _project_list_action_matches_user_intent(action_id, payload, user_content):
             continue
         dedupe_key = f"{action_id}:{payload}"
         if dedupe_key in seen:

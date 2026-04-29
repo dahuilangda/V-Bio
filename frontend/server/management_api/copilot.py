@@ -19,22 +19,6 @@ MAX_CONTEXT_STRING_CHARS = 1600
 MAX_CONTEXT_LIST_ITEMS = 40
 MAX_CONTEXT_DICT_KEYS = 80
 MAX_MODEL_MESSAGE_CHARS = 30000
-MUTATING_TASK_TOKENS = (
-    "submit",
-    "run",
-    "rerun",
-    "predict",
-    "delete",
-    "rename",
-    "提交",
-    "运行",
-    "重跑",
-    "预测",
-    "删除",
-    "重命名",
-    "新的任务",
-    "新任务",
-)
 REDACTED_FILE_TEXT_KEYS = {
     "content",
     "structure_text",
@@ -166,11 +150,6 @@ def _candidate_requests_clarification(candidate: Dict[str, Any]) -> bool:
     )
 
 
-def _looks_like_mutating_task_request(content: str) -> bool:
-    normalized = str(content or "").strip().lower()
-    return any(token in normalized for token in MUTATING_TASK_TOKENS)
-
-
 def _extract_chat_message_content(message: Any) -> str:
     if not isinstance(message, dict):
         return ""
@@ -213,6 +192,26 @@ def _payload_has_reasoning_without_content(payload: Any) -> bool:
 def _error_mentions_field(text: Any, field: str) -> bool:
     normalized = str(text or "").lower()
     return field.lower() in normalized and any(token in normalized for token in ("unsupported", "unknown", "extra", "unexpected", "not permitted", "unrecognized"))
+
+
+def _candidate_declares_confirmable_task_action(candidate: Any) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    capability = str(candidate.get("capability") or "").strip().lower()
+    if capability in {"task_submission_planning", "task_deletion", "task_metadata_patch", "attachment_application"}:
+        return True
+    if candidate.get("needs_confirmation") is True:
+        return True
+    return isinstance(candidate.get("parameter_patch"), dict) or isinstance(candidate.get("metadata_patch"), dict)
+
+
+def _candidate_declares_context_actions(candidate: Any) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    planned = candidate.get("actions") or candidate.get("plan_actions")
+    if isinstance(planned, dict):
+        return True
+    return isinstance(planned, list) and any(isinstance(item, dict) for item in planned)
 
 
 def _read_authoritative_workflow_key(context_payload: Any) -> str:
@@ -380,13 +379,16 @@ class CopilotAssistant:
         system_prompt = (
             "你是 V-Bio Copilot，也是协作留言助手和任务操作规划助手。"
             "根据能力定义选择最小可用能力。"
-            "不要向用户展示内部能力名、工具名、skill 名、action id，也不要写“能力使用”或“能力调用”。"
+            "不要向用户展示内部能力名、工具名、skill 名、action id、schema 字段名或 context 字段名，也不要写“能力使用”或“能力调用”。"
             "页面模块必须以 context_payload.page.workflowKey / page.workflowTitle 为准；如果 currentTask、历史结果、properties 或 affinity 字段与 page 冲突，不能用它们覆盖当前页面模块。"
             "回答当前所在功能时，优先引用 page.workflowTitle；不要因为结果记录里存在 affinity/score 字段就说用户在 Affinity 页面。"
             "任何提交、取消、删除、修改参数、筛选排序等动作都必须通过 candidate_plan_actions 的 schema 按钮执行，先给出计划并等待用户确认，不能声称已经执行。"
             "如果用户不在正确的 project 功能页或 task 功能页，明确指出当前功能不适合该操作，并告诉用户应进入哪个功能；不要编造可执行按钮。"
             "只有当 context_payload.candidate_plan_actions 是非空数组时，才允许说明界面会在消息下方显示确认按钮；否则不要提确认按钮。"
+            "context_payload.page.availableActions 只是页面能力清单，不是已经生成的按钮；不能据此声称有确认按钮。"
+            "如果 context_payload.candidate_plan_actions 是空数组或不存在，明确当作没有可确认按钮；对用户只说“当前没有确认按钮/确认操作”，不要暴露字段名。"
             "如果没有 candidate_plan_actions，但用户要求提交、运行、删除或修改，说明当前没有生成可执行确认操作，不要声称已经规划出按钮。"
+            "回答 task_detail 状态时，以 context_payload.runtime.authoritativeTaskState / displayTaskState / statusTaskState 为准；draft.taskName 或 currentTask 为 DRAFT 不能覆盖运行态。"
             "只能承诺本 Copilot schema 和页面已有功能能完成的事：分析当前上下文、规划需确认的参数/组件修改、提交/删除/重命名、应用已上传文件。"
             "不要承诺生成、返回、导出、下载或计算化合物坐标、结构文件、后台结果文件；除非 context_payload 或 candidate_plan_actions 明确提供了对应能力。"
             "不要泛泛建议“通过下载按钮/下载选项获取结果文件”；只有当 context_payload.page.availableActions 或 context_payload.resultDownloads 明确包含下载能力时才可以提下载。"
@@ -420,14 +422,6 @@ class CopilotAssistant:
         if candidate.get("execute_now") is True:
             raise ValueError("Model attempted to execute without confirmation.")
         return candidate
-
-    def _candidate_includes_action(self, candidate: Dict[str, Any], action_id: str) -> bool:
-        planned = candidate.get("actions") or candidate.get("plan_actions") or []
-        if isinstance(planned, dict):
-            planned = [planned]
-        if not isinstance(planned, list):
-            return False
-        return any(isinstance(item, dict) and str(item.get("id") or "").strip() == action_id for item in planned)
 
     def _repair_plan_json(
         self,
@@ -496,21 +490,25 @@ class CopilotAssistant:
                 return actions
             if _candidate_requests_clarification(candidate):
                 return []
-            repaired_candidate = self._repair_plan_json(
-                system_prompt=system_prompt,
-                context_block=context_block,
-                username=username,
-                user_id=user_id,
-                content=normalized_content,
-                previous_output=candidate,
-                reason="The JSON parsed successfully but produced no valid task_detail action after schema validation.",
-            )
-            repaired_actions = build_task_submission_actions(repaired_candidate, normalized_content, workflow_key)
-            if repaired_actions:
-                return repaired_actions
-            if _candidate_requests_clarification(repaired_candidate):
-                return []
-            if _looks_like_mutating_task_request(normalized_content):
+            repaired_candidate = candidate
+            for repair_index in range(2):
+                if repair_index > 0 and not _candidate_declares_confirmable_task_action(repaired_candidate):
+                    break
+                repaired_candidate = self._repair_plan_json(
+                    system_prompt=system_prompt,
+                    context_block=context_block,
+                    username=username,
+                    user_id=user_id,
+                    content=normalized_content,
+                    previous_output=repaired_candidate,
+                    reason="The JSON parsed successfully but produced no valid task_detail action after schema validation.",
+                )
+                repaired_actions = build_task_submission_actions(repaired_candidate, normalized_content, workflow_key)
+                if repaired_actions:
+                    return repaired_actions
+                if _candidate_requests_clarification(repaired_candidate):
+                    return []
+            if _candidate_declares_confirmable_task_action(candidate) or _candidate_declares_confirmable_task_action(repaired_candidate):
                 self.logger.warning(
                     "Copilot plan_actions: model failed task_detail schema after repair. candidate=%s repaired=%s",
                     compact_text(candidate, 1000),
@@ -521,20 +519,23 @@ class CopilotAssistant:
 
         # task_list / project_list — generic action builder
         actions = build_context_actions(normalized_ctx, candidate, safe_context_payload, normalized_content)
-        if actions or normalized_ctx != "task_list" or not self._candidate_includes_action(candidate, "tasks:create_with_sequence"):
+        if actions or not _candidate_declares_context_actions(candidate):
             return actions
 
-        repair_hint = (
-            "The previous JSON did not satisfy the action schema. "
-            "For tasks:create_with_sequence, payload.components is required and must include every user-provided component. "
-            "Use type ligand for small molecules, compounds, CCD IDs, and SMILES strings. "
-            "When the user labels a value with 小分子, 配体, small molecule, ligand, compound, or SMILES, that value must be a ligand component even if it is uppercase. "
-            f"Previous JSON: {compact_text(candidate, 2000)}"
-        )
-        repair_messages = [
-            {"role": "system", "content": f"{system_prompt}\n\n{context_block}\n\n{repair_hint}"},
-            {"role": "user", "content": f"{username or user_id}: {normalized_content}"},
-        ]
-        repaired_raw_content = self._call_model(repair_messages, strip_internal=False, json_response=True)
-        repaired_candidate = self._parse_json_response(repaired_raw_content)
-        return build_context_actions(normalized_ctx, repaired_candidate, safe_context_payload, normalized_content)
+        repaired_candidate = candidate
+        for _ in range(2):
+            repaired_candidate = self._repair_plan_json(
+                system_prompt=system_prompt,
+                context_block=context_block,
+                username=username,
+                user_id=user_id,
+                content=normalized_content,
+                previous_output=repaired_candidate,
+                reason="The JSON parsed successfully but produced no valid context action after schema validation.",
+            )
+            repaired_actions = build_context_actions(normalized_ctx, repaired_candidate, safe_context_payload, normalized_content)
+            if repaired_actions:
+                return repaired_actions
+            if _candidate_requests_clarification(repaired_candidate) or not _candidate_declares_context_actions(repaired_candidate):
+                return []
+        return []
