@@ -341,8 +341,6 @@
 
 .copilot-chat-window .copilot-message-body {
   margin-top: 4px;
-  max-height: min(320px, 45vh);
-  overflow-y: auto;
   padding-right: 2px;
   line-height: 1.45;
   white-space: normal;
