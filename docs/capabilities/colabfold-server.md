@@ -1,6 +1,6 @@
-# 功能：ColabFold MSA Server
+# ColabFold MSA Server
 
-- 服务名称：`colabfold_server`（独立 MSA 服务，不是 worker capability）
+- 服务名称：`colabfold_server`（独立 MSA 服务，不进入任务队列）
 - 用途：为预测任务提供本地 MSA API（`/ticket/msa`、`/ticket/{id}`、`/result/download/{id}`）
 - 运行方式：Docker Compose（统一入口 `deploy/docker/DOCKER_CAP_COLABFOLD_SERVER.compose.yml`）
 

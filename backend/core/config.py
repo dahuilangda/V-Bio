@@ -234,7 +234,7 @@ BOLTZ2_CONTAINER_CACHE_DIR = os.environ.get("BOLTZ2_CONTAINER_CACHE_DIR", "/root
 # 6. AlphaFold3 Docker 集成
 # ==============================================================================
 
-ALPHAFOLD3_DOCKER_IMAGE = os.environ.get("ALPHAFOLD3_DOCKER_IMAGE", "cford38/alphafold3")
+ALPHAFOLD3_DOCKER_IMAGE = os.environ.get("ALPHAFOLD3_DOCKER_IMAGE", "jurgjn/alphafold3:v3.0.2")
 ALPHAFOLD3_MODEL_DIR = os.environ.get("ALPHAFOLD3_MODEL_DIR")
 ALPHAFOLD3_DATABASE_DIR = os.environ.get("ALPHAFOLD3_DATABASE_DIR")
 ALPHAFOLD3_DOCKER_EXTRA_ARGS = os.environ.get("ALPHAFOLD3_DOCKER_EXTRA_ARGS", "")
@@ -245,17 +245,17 @@ ALPHAFOLD3_DOCKER_EXTRA_ARGS = os.environ.get("ALPHAFOLD3_DOCKER_EXTRA_ARGS", ""
 
 PROTENIX_DOCKER_IMAGE = os.environ.get(
     "PROTENIX_DOCKER_IMAGE",
-    "ai4s-share-public-cn-beijing.cr.volces.com/release/protenix:1.0.0.4"
+    "vbio-protenix-v2-runtime:2.0.0"
 )
 PROTENIX_MODEL_DIR = os.environ.get("PROTENIX_MODEL_DIR")
-PROTENIX_MODEL_NAME = os.environ.get("PROTENIX_MODEL_NAME", "protenix_base_20250630_v1.0.0")
+PROTENIX_MODEL_NAME = os.environ.get("PROTENIX_MODEL_NAME", "protenix-v2")
 PROTENIX_SOURCE_DIR = os.environ.get(
     "PROTENIX_SOURCE_DIR",
-    "/data/protenix"
+    "/data/protenix/source-v2"
 )
-PROTENIX_DOCKER_EXTRA_ARGS = os.environ.get("PROTENIX_DOCKER_EXTRA_ARGS", "")
+PROTENIX_DOCKER_EXTRA_ARGS = os.environ.get("PROTENIX_DOCKER_EXTRA_ARGS", "--entrypoint=")
 PROTENIX_INFER_EXTRA_ARGS = os.environ.get("PROTENIX_INFER_EXTRA_ARGS", "")
-PROTENIX_PYTHON_BIN = os.environ.get("PROTENIX_PYTHON_BIN", "python3")
+PROTENIX_PYTHON_BIN = os.environ.get("PROTENIX_PYTHON_BIN", "/usr/local/micromamba/envs/protenix/bin/python")
 PROTENIX_USE_HOST_USER = os.environ.get("PROTENIX_USE_HOST_USER", "false")
 PROTENIX_CONTAINER_APP_DIR = os.environ.get("PROTENIX_CONTAINER_APP_DIR", "/app")
 PROTENIX_CONTAINER_MODEL_DIR = os.environ.get("PROTENIX_CONTAINER_MODEL_DIR", "/workspace/model")

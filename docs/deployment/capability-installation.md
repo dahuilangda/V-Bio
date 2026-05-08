@@ -1,15 +1,15 @@
-# 功能安装与 Docker 配置
+# 模型服务安装与 Docker 配置
 
-本文档给出功能最小安装，重点覆盖：`boltz2`、`alphafold3`、`protenix`、`pocketxmol`、`colabfold_server`、`lead_opt(MMP)`。
+本文档给出各计算任务的最小安装方法，覆盖：`boltz2`、`alphafold3`、`protenix`、`pocketxmol`、`colabfold_server`、`lead_opt(MMP)`。
 
 统一原则：
 - 配置写入对应 stack 的 env 文件（`deploy/docker/DOCKER_STACK_*.env`），不要使用临时 `export`。
-- Worker 只声明已安装功能。
-- 调度严格按功能匹配：缺功能直接 `503`。
+- 计算节点只声明本机已配置的任务类型。
+- 调度按任务类型匹配：没有可用计算节点时直接返回 `503`。
 - Docker 安装入口统一放在 `deploy/docker/DOCKER_*`。
 - `boltz2` / `boltz2score` / `alphafold3` / `protenix` 统一要求可访问 `MSA_SERVER_URL`。
 
-开始前先准备 worker env（示例用 GPU 全能力 worker）：
+开始前先准备 GPU 计算节点 env：
 
 ```bash
 cd /data/V-Bio
@@ -26,7 +26,7 @@ MSA_SERVER_TIMEOUT_SECONDS=1800
 COLABFOLD_JOBS_DIR=/data/colabfold/jobs
 ```
 
-能力配置模板（可拷贝字段）：
+单项配置模板：
 - `deploy/docker/DOCKER_CAP_ALPHAFOLD3.env.example`
 - `deploy/docker/DOCKER_CAP_PROTENIX.env.example`
 - `deploy/docker/DOCKER_CAP_POCKETXMOL.env.example`
@@ -92,11 +92,11 @@ BOLTZ2_CONTAINER_CACHE_DIR=/root/.boltz
 
 ## 2. AlphaFold3（Docker）
 
-`alphafold3` 通过 Docker 镜像运行。
+`alphafold3` 通过 Docker 镜像运行。当前使用 `jurgjn/alphafold3:v3.0.2`。
 
 ### 2.1 准备镜像与数据目录
 
-- 镜像：`ALPHAFOLD3_DOCKER_IMAGE` 指向可用 AF3 镜像。
+- 镜像：`ALPHAFOLD3_DOCKER_IMAGE=jurgjn/alphafold3:v3.0.2`
 - 模型目录：`ALPHAFOLD3_MODEL_DIR`（必须是你已下载完成的数据目录）
 - 数据库目录：`ALPHAFOLD3_DATABASE_DIR`（必须是你已下载完成的数据目录）
 - 宿主机挂载目录：`ALPHAFOLD3_ROOT_HOST`（compose 中用于把宿主机目录挂到 worker）
@@ -106,12 +106,12 @@ BOLTZ2_CONTAINER_CACHE_DIR=/root/.boltz
 
 ```bash
 cd /data/V-Bio
-docker pull cford38/alphafold3
-docker image inspect cford38/alphafold3 >/dev/null
+docker pull jurgjn/alphafold3:v3.0.2
+docker image inspect jurgjn/alphafold3:v3.0.2 >/dev/null
 
 mkdir -p /data/alphafold3/models /data/alphafold3/databases
 
-sed -i "s|^ALPHAFOLD3_DOCKER_IMAGE=.*|ALPHAFOLD3_DOCKER_IMAGE=cford38/alphafold3|" deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env
+sed -i "s|^ALPHAFOLD3_DOCKER_IMAGE=.*|ALPHAFOLD3_DOCKER_IMAGE=jurgjn/alphafold3:v3.0.2|" deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env
 sed -i "s|^ALPHAFOLD3_MODEL_DIR=.*|ALPHAFOLD3_MODEL_DIR=/data/alphafold3/models|" deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env
 sed -i "s|^ALPHAFOLD3_DATABASE_DIR=.*|ALPHAFOLD3_DATABASE_DIR=/data/alphafold3/databases|" deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env
 sed -i "s|^ALPHAFOLD3_ROOT_HOST=.*|ALPHAFOLD3_ROOT_HOST=/data/alphafold3|" deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env
@@ -127,48 +127,58 @@ ls -lh /data/alphafold3/databases/bfd-first_non_consensus_sequences.fasta
 
 ```env
 GPU_WORKER_CAPABILITIES=alphafold3
-ALPHAFOLD3_DOCKER_IMAGE=cford38/alphafold3
+ALPHAFOLD3_DOCKER_IMAGE=jurgjn/alphafold3:v3.0.2
 ALPHAFOLD3_MODEL_DIR=/data/alphafold3/models
 ALPHAFOLD3_DATABASE_DIR=/data/alphafold3/databases
 ALPHAFOLD3_DOCKER_EXTRA_ARGS=
 ALPHAFOLD3_ROOT_HOST=/data/alphafold3
 ```
 
-## 3. Protenix（Docker）
+## 3. Protenix v2（Docker）
 
-Protenix 官方镜像部署需要三类宿主机资源：
+Protenix v2 部署需要以下宿主机资源：
+- 本地运行镜像 `vbio-protenix-v2-runtime:2.0.0`
 - 源码目录（包含 `runner/inference.py`）
 - 权重目录（包含 `${PROTENIX_MODEL_NAME}.pt`）
 - common 数据目录（`PROTENIX_COMMON_CACHE_DIR`）
-- 宿主机挂载目录（worker compose）：`PROTENIX_SOURCE_DIR_HOST`
+- 宿主机挂载目录：`PROTENIX_SOURCE_DIR_HOST`
+
+说明：`drailab/protenix:2.0.0` 不包含 `protenix-v2.pt`，并且缺少首次编译 CUDA 扩展所需的 `ninja`。本仓库提供 `DOCKER_PROTENIX_V2_RUNTIME.Dockerfile`，基于该镜像补齐 `ninja-build`。
 
 ### 3.1 拉取镜像、准备资源并写入 stack env
 
 ```bash
 cd /data/V-Bio
-docker pull ai4s-share-public-cn-beijing.cr.volces.com/release/protenix:1.0.0.4
-docker image inspect ai4s-share-public-cn-beijing.cr.volces.com/release/protenix:1.0.0.4 >/dev/null
+docker pull drailab/protenix:2.0.0
+docker build -f deploy/docker/DOCKER_PROTENIX_V2_RUNTIME.Dockerfile \
+  -t vbio-protenix-v2-runtime:2.0.0 .
+docker image inspect vbio-protenix-v2-runtime:2.0.0 >/dev/null
 
 # 1) 准备源码
 mkdir -p /data/protenix
-git clone https://github.com/bytedance/Protenix.git /data/protenix/source
+git clone --branch v2.0.0 --depth 1 https://github.com/bytedance/Protenix.git /data/protenix/source-v2
 
-# 2) 下载权重与 common 数据（官方脚本）
-cd /data/protenix/source
-python3 -m protenix.data.download_protenix_data --data part_weights --download_dir /data/protenix
-python3 -m protenix.data.download_protenix_data --data part_data --download_dir /data/protenix
+# 2) 准备权重与 common 目录
+mkdir -p /data/protenix/model /data/protenix/common_cache
+curl -L \
+  https://huggingface.co/TMF001/pxdesign-weights/resolve/main/checkpoint/protenix-v2.pt \
+  -o /data/protenix/model/protenix-v2.pt
+sha256sum /data/protenix/model/protenix-v2.pt
 
 # 3) 写入 stack env
 cd /data/V-Bio
-sed -i "s|^PROTENIX_DOCKER_IMAGE=.*|PROTENIX_DOCKER_IMAGE=ai4s-share-public-cn-beijing.cr.volces.com/release/protenix:1.0.0.4|" deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env
+sed -i "s|^PROTENIX_DOCKER_IMAGE=.*|PROTENIX_DOCKER_IMAGE=vbio-protenix-v2-runtime:2.0.0|" deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env
 sed -i "s|^PROTENIX_SOURCE_DIR_HOST=.*|PROTENIX_SOURCE_DIR_HOST=/data/protenix|" deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env
-sed -i "s|^PROTENIX_SOURCE_DIR=.*|PROTENIX_SOURCE_DIR=/data/protenix/source|" deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env
+sed -i "s|^PROTENIX_SOURCE_DIR=.*|PROTENIX_SOURCE_DIR=/data/protenix/source-v2|" deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env
 sed -i "s|^PROTENIX_MODEL_DIR=.*|PROTENIX_MODEL_DIR=/data/protenix/model|" deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env
+sed -i "s|^PROTENIX_MODEL_NAME=.*|PROTENIX_MODEL_NAME=protenix-v2|" deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env
 sed -i "s|^PROTENIX_COMMON_CACHE_DIR=.*|PROTENIX_COMMON_CACHE_DIR=/data/protenix/common_cache|" deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env
+sed -i "s|^PROTENIX_DOCKER_EXTRA_ARGS=.*|PROTENIX_DOCKER_EXTRA_ARGS=--entrypoint=|" deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env
+sed -i "s|^PROTENIX_PYTHON_BIN=.*|PROTENIX_PYTHON_BIN=/usr/local/micromamba/envs/protenix/bin/python|" deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env
 
 # 4) 关键文件检查
-ls -lh /data/protenix/source/runner/inference.py
-ls -lh /data/protenix/model/protenix_base_20250630_v1.0.0.pt
+ls -lh /data/protenix/source-v2/runner/inference.py
+ls -lh /data/protenix/model/protenix-v2.pt
 ls -lah /data/protenix/common_cache
 
 # 可选：离线环境建议把 components.cif 预置到 common 目录
@@ -180,21 +190,22 @@ stack env 最小项：
 
 ```env
 GPU_WORKER_CAPABILITIES=protenix
-PROTENIX_DOCKER_IMAGE=ai4s-share-public-cn-beijing.cr.volces.com/release/protenix:1.0.0.4
+PROTENIX_DOCKER_IMAGE=vbio-protenix-v2-runtime:2.0.0
 PROTENIX_MODEL_DIR=/data/protenix/model
-PROTENIX_MODEL_NAME=protenix_base_20250630_v1.0.0
-PROTENIX_SOURCE_DIR=/data/protenix/source
+PROTENIX_MODEL_NAME=protenix-v2
+PROTENIX_SOURCE_DIR=/data/protenix/source-v2
 PROTENIX_SOURCE_DIR_HOST=/data/protenix
 PROTENIX_CONTAINER_APP_DIR=/app
 PROTENIX_CONTAINER_MODEL_DIR=/workspace/model
-# 可选：如果 checkpoint 不是默认路径
-PROTENIX_CONTAINER_CHECKPOINT_PATH=/workspace/model/protenix_base_20250630_v1.0.0.pt
+PROTENIX_CONTAINER_CHECKPOINT_PATH=
+PROTENIX_DOCKER_EXTRA_ARGS=--entrypoint=
+PROTENIX_PYTHON_BIN=/usr/local/micromamba/envs/protenix/bin/python
 PROTENIX_COMMON_CACHE_DIR=/data/protenix/common_cache
 ```
 
 要求：
 - `PROTENIX_SOURCE_DIR` 内必须包含 `runner/inference.py`
-- `PROTENIX_MODEL_DIR` 内必须包含 checkpoint 文件
+- `PROTENIX_MODEL_DIR` 内必须包含 `protenix-v2.pt`
 
 ## 4. PocketXMol（Docker）
 
@@ -247,7 +258,7 @@ docker compose -f DOCKER_CAP_COLABFOLD_SERVER.compose.yml \
   --env-file DOCKER_CAP_COLABFOLD_SERVER.env up -d --build
 ```
 
-### 5.2 中央/worker stack env 对接
+### 5.2 中心节点和计算节点 env 对接
 
 ```env
 MSA_SERVER_URL=http://<colabfold-host>:8080

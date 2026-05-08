@@ -4476,12 +4476,12 @@ def run_protenix_backend(
     source_dir = PROTENIX_SOURCE_DIR
     container_app_dir = str(PROTENIX_CONTAINER_APP_DIR or "/app").strip() or "/app"
     container_model_dir = str(PROTENIX_CONTAINER_MODEL_DIR or "/workspace/model").strip() or "/workspace/model"
-    model_name_raw = (PROTENIX_MODEL_NAME or "protenix_base_20250630_v1.0.0").strip()
+    model_name_raw = (PROTENIX_MODEL_NAME or "protenix-v2").strip()
     model_name = model_name_raw[:-3] if model_name_raw.endswith(".pt") else model_name_raw
     if not model_name:
         raise ValueError("PROTENIX_MODEL_NAME 不能为空。")
     checkpoint_filename = f"{model_name}.pt"
-    image = PROTENIX_DOCKER_IMAGE or "ai4s-share-public-cn-beijing.cr.volces.com/release/protenix:1.0.0.4"
+    image = PROTENIX_DOCKER_IMAGE or "vbio-protenix-v2-runtime:2.0.0"
     raw_extra_args = shlex.split(PROTENIX_DOCKER_EXTRA_ARGS) if PROTENIX_DOCKER_EXTRA_ARGS else []
     extra_args = sanitize_docker_extra_args(raw_extra_args)
     infer_extra_args = shlex.split(PROTENIX_INFER_EXTRA_ARGS) if PROTENIX_INFER_EXTRA_ARGS else []
@@ -4536,12 +4536,16 @@ def run_protenix_backend(
             gpu_arg,
             "--env",
             f"PYTHONPATH={container_app_dir}",
+            "--env",
+            "PROTENIX_ROOT_DIR=/cache",
             "--volume",
             f"{protenix_input_dir}:/workspace/protenix_input",
             "--volume",
             f"{protenix_output_dir}:/workspace/protenix_output",
             "--volume",
             f"{protenix_common_cache_dir}:/root/common",
+            "--volume",
+            f"{protenix_common_cache_dir}:/cache/common",
             "--volume",
             f"{model_dir}:{container_model_dir}",
             "--volume",
@@ -4564,7 +4568,7 @@ def run_protenix_backend(
     else:
         print("🔐 Protenix 容器使用默认 root 用户（官方镜像推荐）", file=sys.stderr)
     print("📦 Protenix 资源模式: host-mounted（源码 + 权重 + common）", file=sys.stderr)
-    print(f"🗂️ Protenix 缓存挂载: {protenix_common_cache_dir} -> /root/common", file=sys.stderr)
+    print(f"🗂️ Protenix 缓存挂载: {protenix_common_cache_dir} -> /cache/common", file=sys.stderr)
 
     docker_command.extend(extra_args)
 
@@ -7414,7 +7418,7 @@ except Exception:
 
     model_dir = ALPHAFOLD3_MODEL_DIR
     database_dir = ALPHAFOLD3_DATABASE_DIR
-    image = ALPHAFOLD3_DOCKER_IMAGE or "cford38/alphafold3"
+    image = ALPHAFOLD3_DOCKER_IMAGE or "jurgjn/alphafold3:v3.0.2"
     raw_extra_args = shlex.split(ALPHAFOLD3_DOCKER_EXTRA_ARGS) if ALPHAFOLD3_DOCKER_EXTRA_ARGS else []
     extra_args = sanitize_docker_extra_args(raw_extra_args)
     if raw_extra_args and len(extra_args) != len(raw_extra_args):

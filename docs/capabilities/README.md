@@ -1,6 +1,6 @@
-# Capabilities 文档目录
+# 模型服务文档
 
-本目录记录各能力的配置与运行约束，文件命名统一为 `kebab-case`。
+本目录记录各模型服务和计算任务的环境变量、路由规则和安装要求。文件名统一使用 `kebab-case`。
 
 - [boltz2.md](./boltz2.md)
 - [boltz2-score.md](./boltz2-score.md)

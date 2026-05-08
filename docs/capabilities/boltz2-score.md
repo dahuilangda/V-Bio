@@ -1,10 +1,10 @@
-# 功能：Boltz2Score
+# Boltz2Score
 
-- capability 名称：`boltz2score`
-- 典型任务：`/api/boltz2score`
-- worker 类型：GPU
+- 任务类型：`boltz2score`
+- 接口：`/api/boltz2score`
+- 运行节点：GPU 计算节点
 
-## `.env` 配置
+## 环境变量
 
 ```env
 GPU_WORKER_CAPABILITIES=boltz2score
@@ -13,4 +13,4 @@ GPU_WORKER_CAPABILITIES=boltz2score
 ## 路由规则
 
 调度到 `cap.boltz2score.high` 或 `cap.boltz2score.default`。
-无在线 worker时返回 `503`，不会进入默认队列。
+没有可用计算节点时返回 `503`，不会进入默认队列。

@@ -1,10 +1,10 @@
-# 功能：PocketXMol
+# PocketXMol
 
-- capability 名称：`pocketxmol`
-- 典型任务：lead-opt 候选提交（`backend=pocketxmol`）
-- worker 类型：GPU
+- 任务类型：`pocketxmol`
+- 接口：lead-opt 候选提交（`backend=pocketxmol`）
+- 运行节点：GPU 计算节点
 
-## `.env` 配置
+## 环境变量
 
 ```env
 GPU_WORKER_CAPABILITIES=pocketxmol
@@ -18,7 +18,7 @@ POCKETXMOL_BATCH_SIZE=50
 ## 路由规则
 
 调度到 `cap.pocketxmol.high` 或 `cap.pocketxmol.default`。
-无在线 worker 时返回 `503`，不会进入默认队列。
+没有可用计算节点时返回 `503`，不会进入默认队列。
 
 ## 最低文件要求
 
@@ -34,4 +34,4 @@ POCKETXMOL_BATCH_SIZE=50
 补充：
 - 先执行 `docker compose -f deploy/docker/DOCKER_CAP_POCKETXMOL.compose.yml build pocketxmol`。
 - 运行时镜像可通过 `POCKETXMOL_DOCKER_IMAGE` 指定（默认 `pocketxmol:cu128`）。
-- 权重需按 PocketXMol 官方说明下载到 `weights/` 目录（见该能力 README）。
+- 权重需按 PocketXMol 官方说明下载到 `weights/` 目录。

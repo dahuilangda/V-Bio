@@ -1,10 +1,10 @@
-# 功能：Affinity
+# Affinity
 
-- capability 名称：`affinity`
-- 典型任务：`/api/affinity`、`/api/affinity_separate`
-- worker 类型：GPU
+- 任务类型：`affinity`
+- 接口：`/api/affinity`、`/api/affinity_separate`
+- 运行节点：GPU 计算节点
 
-## `.env` 配置
+## 环境变量
 
 ```env
 GPU_WORKER_CAPABILITIES=affinity
@@ -13,4 +13,4 @@ GPU_WORKER_CAPABILITIES=affinity
 ## 路由规则
 
 调度到 `cap.affinity.high` 或 `cap.affinity.default`。
-无在线 worker 时返回 `503`，不会进入默认队列。
+没有可用计算节点时返回 `503`，不会进入默认队列。

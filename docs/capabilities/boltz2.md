@@ -1,10 +1,10 @@
-# 功能：Boltz2
+# Boltz2
 
-- capability 名称：`boltz2`
-- 典型任务：结构预测（`/predict`，`backend=boltz`）
-- worker 类型：GPU
+- 任务类型：`boltz2`
+- 接口：结构预测（`/predict`，`backend=boltz`）
+- 运行节点：GPU 计算节点
 
-## `.env` 配置
+## 环境变量
 
 ```env
 GPU_WORKER_CAPABILITIES=boltz2
@@ -14,7 +14,7 @@ BOLTZ2_HOST_CACHE_DIR=/data/boltz_cache
 BOLTZ2_CONTAINER_CACHE_DIR=/root/.boltz
 ```
 
-多功能机器可写成：
+同一台 GPU 机器也可以同时接收多个任务类型：
 ```env
 GPU_WORKER_CAPABILITIES=boltz2,alphafold3
 ```
@@ -22,7 +22,7 @@ GPU_WORKER_CAPABILITIES=boltz2,alphafold3
 ## 路由规则
 
 调度到 `cap.boltz2.high` 或 `cap.boltz2.default`。
-无在线 worker 时返回 `503`，不会进入默认队列。
+没有可用计算节点时返回 `503`，不会进入默认队列。
 
 ## 安装说明
 
