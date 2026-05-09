@@ -40,6 +40,20 @@ function readPreferredInterfaceMetric(payload: Record<string, unknown> | null): 
   if (ipsaeDom !== null) {
     return { value: ipsaeDom, label: 'IPSAE', source: 'ipsae' };
   }
+  const interfaceLabel = readText(payload.interface_metric_label || payload.interfaceMetricLabel).trim().toLowerCase();
+  const interfaceSource = readText(payload.interface_metric_source || payload.interfaceMetricSource).trim().toLowerCase();
+  const interfaceMetric = normalizeProbability(
+    typeof payload.interface_metric === 'number'
+      ? payload.interface_metric
+      : typeof payload.interface_metric_value === 'number'
+        ? payload.interface_metric_value
+        : typeof payload.interfaceMetricValue === 'number'
+          ? payload.interfaceMetricValue
+          : null
+  );
+  if (interfaceMetric !== null && (interfaceLabel === 'ipsae' || interfaceSource === 'ipsae')) {
+    return { value: interfaceMetric, label: 'IPSAE', source: 'ipsae' };
+  }
   const iptm = normalizeProbability(typeof payload.iptm === 'number' ? payload.iptm : null);
   if (iptm !== null) {
     return { value: iptm, label: 'ipTM', source: 'iptm' };

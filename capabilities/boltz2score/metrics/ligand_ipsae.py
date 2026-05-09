@@ -165,9 +165,8 @@ def _build_tokens(cif_path: Path, ligand_chain_id: str) -> tuple[list[Token], li
         )
 
     protein_tokens: list[Token] = []
+    ordered_polymer_tokens: list[Token] = []
     for chain_id, residue_seq_num, residue_name in residue_order:
-        if chain_id == ligand_chain_id:
-            continue
         atoms = residue_atoms[(chain_id, residue_seq_num, residue_name)]
         preferred_atom = None
         if residue_name not in {"ACE", "NMA"}:
@@ -177,20 +176,24 @@ def _build_tokens(cif_path: Path, ligand_chain_id: str) -> tuple[list[Token], li
                     break
         if preferred_atom is None:
             preferred_atom = atoms[0]
-        protein_tokens.append(
-            Token(
-                token_index=-1,
-                chain_id=chain_id,
-                residue_name=residue_name,
-                residue_seq_num=residue_seq_num,
-                atom_name=str(preferred_atom["atom_name"]),
-                coord=np.asarray(preferred_atom["coord"], dtype=float),
-                kind="protein_residue",
-                label=f"{chain_id}:{residue_name}:{residue_seq_num}:{preferred_atom['atom_name']}",
-            )
+        token = Token(
+            token_index=-1,
+            chain_id=chain_id,
+            residue_name=residue_name,
+            residue_seq_num=residue_seq_num,
+            atom_name=str(preferred_atom["atom_name"]),
+            coord=np.asarray(preferred_atom["coord"], dtype=float),
+            kind="ligand_residue" if chain_id == ligand_chain_id else "protein_residue",
+            label=f"{chain_id}:{residue_name}:{residue_seq_num}:{preferred_atom['atom_name']}",
         )
+        ordered_polymer_tokens.append(token)
+        if chain_id == ligand_chain_id:
+            ligand_tokens.append(token)
+        else:
+            protein_tokens.append(token)
 
-    all_tokens = protein_tokens + extra_protein_tokens + ligand_tokens
+    ligand_atom_tokens = [token for token in ligand_tokens if token.kind == "ligand_atom"]
+    all_tokens = ordered_polymer_tokens + extra_protein_tokens + ligand_atom_tokens
     for token_index, token in enumerate(all_tokens):
         token.token_index = token_index
 

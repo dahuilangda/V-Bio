@@ -4,7 +4,100 @@ import base64
 import json
 from typing import Any, Callable, Dict, Optional
 
+import yaml
 from flask import jsonify, request
+
+
+def _parse_prediction_properties(raw_value: Optional[str]) -> Optional[Dict[str, Any]]:
+    if raw_value is None or not str(raw_value).strip():
+        return None
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _normalize_prediction_property_entry(properties: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    ligand = str(properties.get('ligand') or properties.get('binder') or '').strip()
+    binder = str(properties.get('binder') or properties.get('ligand') or '').strip()
+    if not ligand and not binder:
+        return None
+
+    entry: Dict[str, Any] = {
+        'ligand': ligand or binder,
+        'binder': binder or ligand,
+        'affinity': bool(properties.get('affinity')),
+    }
+    target = str(properties.get('target') or '').strip()
+    if target:
+        entry['target'] = target
+    return entry
+
+
+def _merge_prediction_properties_into_yaml(
+    yaml_content: str,
+    properties: Optional[Dict[str, Any]],
+) -> tuple[str, bool]:
+    entry = _normalize_prediction_property_entry(properties or {})
+    if not entry:
+        return yaml_content, False
+
+    data = yaml.safe_load(yaml_content) or {}
+    if not isinstance(data, dict):
+        return yaml_content, False
+
+    raw_properties = data.get('properties')
+    if isinstance(raw_properties, list):
+        property_entries = [item for item in raw_properties if isinstance(item, dict)]
+    elif isinstance(raw_properties, dict):
+        property_entries = [raw_properties]
+    else:
+        property_entries = []
+
+    merged = False
+    for candidate in property_entries:
+        if any(str(candidate.get(key) or '').strip() for key in ('ligand', 'binder', 'target')) or 'affinity' in candidate:
+            candidate.update(entry)
+            merged = True
+            break
+    if not merged:
+        property_entries.insert(0, entry)
+
+    data['properties'] = property_entries
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True), True
+
+
+def _yaml_has_ligand_annotation(yaml_content: str) -> bool:
+    try:
+        data = yaml.safe_load(yaml_content) or {}
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+
+    sequences = data.get('sequences')
+    if isinstance(sequences, list):
+        for item in sequences:
+            if isinstance(item, dict) and isinstance(item.get('ligand'), dict):
+                ligand_id = item['ligand'].get('id')
+                if ligand_id:
+                    return True
+
+    raw_properties = data.get('properties')
+    if isinstance(raw_properties, dict):
+        property_entries = [raw_properties]
+    elif isinstance(raw_properties, list):
+        property_entries = [item for item in raw_properties if isinstance(item, dict)]
+    else:
+        property_entries = []
+    for entry in property_entries:
+        if str(entry.get('ligand') or entry.get('binder') or '').strip():
+            return True
+        affinity = entry.get('affinity')
+        if isinstance(affinity, dict) and str(affinity.get('binder') or affinity.get('chain') or '').strip():
+            return True
+    return False
 
 
 def register_prediction_routes(
@@ -44,6 +137,30 @@ def register_prediction_routes(
         except IOError as exc:
             logger.exception('Failed to read yaml_file from request: %s. Client IP: %s', exc, request.remote_addr)
             return jsonify({'error': f'Failed to read yaml_file: {exc}'}), 400
+
+        request_properties = _parse_prediction_properties(request.form.get('properties'))
+        if request.form.get('properties') and request_properties is None:
+            return jsonify({'error': "Invalid 'properties' form field. Expected a JSON object."}), 400
+        if request_properties:
+            try:
+                yaml_content, properties_merged = _merge_prediction_properties_into_yaml(
+                    yaml_content,
+                    request_properties,
+                )
+                if properties_merged:
+                    logger.info(
+                        'Merged explicit prediction properties into yaml_file for client %s.',
+                        request.remote_addr,
+                    )
+            except Exception as exc:
+                logger.exception('Failed to merge prediction properties into YAML for %s: %s', request.remote_addr, exc)
+                return jsonify({'error': f"Failed to merge 'properties' into yaml_file: {exc}"}), 400
+
+        require_ipsae = parse_bool(request.form.get('require_ipsae'), False)
+        if require_ipsae and not _yaml_has_ligand_annotation(yaml_content):
+            return jsonify({
+                'error': "IPSAE requested but yaml_file does not declare ligand/binder chain. Provide properties.target and properties.ligand/binder.",
+            }), 400
 
         use_msa_server_raw = request.form.get('use_msa_server')
         if use_msa_server_raw is None or not str(use_msa_server_raw).strip():

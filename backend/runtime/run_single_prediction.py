@@ -1817,6 +1817,13 @@ def _structure_chain_has_nonpolymer_ligand(structure_path: Path, chain_id: str) 
     return False
 
 
+def _structure_chain_exists(structure_path: Path, chain_id: str) -> bool:
+    chain_key = str(chain_id or "").strip()
+    if not chain_key:
+        return False
+    return chain_key in set(_collect_structure_chain_ids(structure_path))
+
+
 def _extract_ligand_chain_ids_from_yaml_data(
     yaml_data: Dict[str, Any],
     alias_map: Optional[Dict[str, str]] = None,
@@ -1826,6 +1833,23 @@ def _extract_ligand_chain_ids_from_yaml_data(
 
     resolved: List[str] = []
     seen: set[str] = set()
+
+    def add_chain_id(value: Any) -> None:
+        chain_id = str(value or "").strip()
+        if not chain_id:
+            return
+        if alias_map:
+            chain_id = (
+                alias_map.get(chain_id)
+                or alias_map.get(chain_id.upper())
+                or alias_map.get(chain_id.lower())
+                or chain_id
+            )
+        if chain_id in seen:
+            return
+        seen.add(chain_id)
+        resolved.append(chain_id)
+
     for entry in yaml_data.get("sequences", []) or []:
         if not isinstance(entry, dict):
             continue
@@ -1840,20 +1864,14 @@ def _extract_ligand_chain_ids_from_yaml_data(
         else:
             values = [raw_ids]
         for value in values:
-            chain_id = str(value or "").strip()
-            if not chain_id:
-                continue
-            if alias_map:
-                chain_id = (
-                    alias_map.get(chain_id)
-                    or alias_map.get(chain_id.upper())
-                    or alias_map.get(chain_id.lower())
-                    or chain_id
-                )
-            if chain_id in seen:
-                continue
-            seen.add(chain_id)
-            resolved.append(chain_id)
+            add_chain_id(value)
+
+    for entry in _iter_affinity_entries(yaml_data.get("properties")):
+        add_chain_id(entry.get("ligand"))
+        add_chain_id(entry.get("binder"))
+        affinity_info = entry.get("affinity")
+        if isinstance(affinity_info, dict):
+            add_chain_id(affinity_info.get("binder") or affinity_info.get("chain"))
     return resolved
 
 
@@ -1872,6 +1890,17 @@ def _resolve_ligand_chain_annotations(
         return {
             "requested_ligand_chain_id": requested_ligand_chain,
             "model_ligand_chain_id": valid_requested[0],
+        }
+
+    existing_requested = [
+        chain_id
+        for chain_id in requested
+        if _structure_chain_exists(structure_path, chain_id)
+    ]
+    if len(existing_requested) == 1:
+        return {
+            "requested_ligand_chain_id": existing_requested[0],
+            "model_ligand_chain_id": existing_requested[0],
         }
 
     inferred = _find_ligand_chain_and_resname_in_structure(structure_path)
@@ -1895,6 +1924,23 @@ def _resolve_ligand_chain_annotations(
         "requested_ligand_chain_id": requested_ligand_chain,
         "model_ligand_chain_id": inferred_chain,
     }
+
+
+def _log_ipsae_ligand_annotation_skip(
+    source: str,
+    requested_chain_ids: Iterable[str],
+    structure_path: Path,
+) -> None:
+    requested = [str(chain_id or "").strip() for chain_id in requested_chain_ids if str(chain_id or "").strip()]
+    structure_chain_ids = _collect_structure_chain_ids(structure_path)
+    requested_text = ",".join(requested) if requested else "未声明"
+    structure_text = ",".join(structure_chain_ids) if structure_chain_ids else "未解析到"
+    print(
+        f"⚠️ {source} IPSAE 后处理跳过：YAML 未声明可在结构中解析的 ligand/binder 链。"
+        f" requested={requested_text}; structure_chains={structure_text}。"
+        "请在 yaml_file properties 中明确写入 target、ligand、binder。",
+        file=sys.stderr,
+    )
 
 
 def _convert_pair_iptm_matrix_to_map(matrix: Any, chain_map: Dict[str, str]) -> Dict[str, Dict[str, float]]:
@@ -1945,6 +1991,9 @@ def _copy_structure_with_ipsae_ligand_layout(
 ) -> None:
     ligand_chain_id = str(ligand_chain_id or "").strip()
     if source_path.suffix.lower() not in {".cif", ".mmcif"} or not ligand_chain_id:
+        shutil.copy2(source_path, dest_path)
+        return
+    if not _structure_chain_has_nonpolymer_ligand(source_path, ligand_chain_id):
         shutil.copy2(source_path, dest_path)
         return
 
@@ -2122,6 +2171,7 @@ def _run_boltz_ipsae_postprocess(
 
         annotations = _resolve_ligand_chain_annotations(requested_chain_ids, structure_path)
         if not annotations:
+            _log_ipsae_ligand_annotation_skip("boltz", requested_chain_ids, structure_path)
             continue
 
         confidence_payload = _load_json_object(confidence_path)
@@ -2231,6 +2281,7 @@ def _run_af3_ipsae_postprocess(
     )
     annotations = _resolve_ligand_chain_annotations(requested_chain_ids, structure_path)
     if not annotations:
+        _log_ipsae_ligand_annotation_skip("alphafold3", requested_chain_ids, structure_path)
         return []
 
     chain_map = _build_structure_chain_map(structure_path)
@@ -2358,6 +2409,7 @@ def _run_protenix_ipsae_postprocess(
     )
     annotations = _resolve_ligand_chain_annotations(requested_chain_ids, structure_path)
     if not annotations:
+        _log_ipsae_ligand_annotation_skip("protenix", requested_chain_ids, structure_path)
         return []
 
     chain_map = _build_structure_chain_map(structure_path)
@@ -3986,6 +4038,10 @@ def _normalize_ligand_chain_collisions(yaml_content: str) -> str:
     for prop in yaml_data.get("properties", []) or []:
         if not isinstance(prop, dict):
             continue
+        for key in ("ligand", "binder"):
+            chain_id = str(prop.get(key) or "").strip()
+            if chain_id in ligand_id_mapping:
+                prop[key] = ligand_id_mapping[chain_id]
         affinity = prop.get("affinity")
         if isinstance(affinity, dict):
             binder = str(affinity.get("binder") or "").strip()

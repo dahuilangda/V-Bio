@@ -467,7 +467,7 @@ export function useProjectTasksDataLoader({
         };
         const workflowKey = normalizeWorkflowKey(projectRow.task_type);
         const useLightweightTaskRows = workflowKey !== 'lead_optimization';
-        const includeComponentsForList = false;
+        const includeComponentsForList = workflowKey === 'prediction' || workflowKey === 'peptide_design';
         const includeConfidenceForList = false;
         const includeConfidenceSummaryForList = useLightweightTaskRows;
         const includePropertiesForList = false;

@@ -187,18 +187,26 @@ function buildPropertyPayload(
   chainTypeById: Map<string, InputComponent['type']>,
   chainIds: string[]
 ): Array<Record<string, unknown>> {
-  if (!properties?.affinity) return [];
+  if (!properties) return [];
   const validChainIds = new Set(chainIds);
   const binderCandidate = String(properties.ligand || properties.binder || '').trim();
   if (!binderCandidate || !validChainIds.has(binderCandidate)) return [];
-  if (chainTypeById.get(binderCandidate) !== 'ligand') return [];
 
-  const affinity: Record<string, unknown> = { binder: binderCandidate };
+  const property: Record<string, unknown> = {
+    ligand: binderCandidate,
+    binder: binderCandidate,
+    affinity: Boolean(properties.affinity)
+  };
   const targetCandidate = String(properties.target || '').trim();
-  if (targetCandidate && validChainIds.has(targetCandidate) && chainTypeById.get(targetCandidate) !== 'ligand') {
-    affinity.target = targetCandidate;
+  if (
+    targetCandidate &&
+    validChainIds.has(targetCandidate) &&
+    targetCandidate !== binderCandidate &&
+    chainTypeById.get(targetCandidate) !== 'ligand'
+  ) {
+    property.target = targetCandidate;
   }
-  return [{ affinity }];
+  return [property];
 }
 
 interface BuildYamlOptions {

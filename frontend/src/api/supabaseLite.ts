@@ -808,6 +808,7 @@ export async function listProjectTasksForList(
   const includeComponents = options?.includeComponents !== false;
   const includeConfidence = options?.includeConfidence !== false;
   const includeConfidenceSummary = !includeConfidence && options?.includeConfidenceSummary === true;
+  const includeResidueConfidenceSummary = includeConfidenceSummary && includeComponents;
   const includeProperties = options?.includeProperties !== false;
   const includePropertiesSummary = !includeProperties && options?.includePropertiesSummary === true;
   const includeLeadOptSummary = options?.includeLeadOptSummary === true;
@@ -875,6 +876,15 @@ export async function listProjectTasksForList(
           'confidence_chain_pair_iptm_global:confidence->chain_pair_iptm_global',
           'confidence_ligand_display_atom_plddts_by_chain:confidence->ligand_display_atom_plddts_by_chain',
           'confidence_ligand_atom_plddts_by_chain:confidence->ligand_atom_plddts_by_chain',
+          ...(includeResidueConfidenceSummary
+            ? [
+                'confidence_residue_plddt_by_chain:confidence->residue_plddt_by_chain',
+                'confidence_residuePlddtByChain:confidence->residuePlddtByChain',
+                'confidence_residue_plddts_by_chain:confidence->residue_plddts_by_chain',
+                'confidence_chain_residue_plddt:confidence->chain_residue_plddt',
+                'confidence_plddt_by_chain:confidence->plddt_by_chain'
+              ]
+            : []),
           'confidence_ligand_display_atom_plddts:confidence->ligand_display_atom_plddts',
           'confidence_ligand_atom_plddts:confidence->ligand_atom_plddts',
           'confidence_ligand_plddt:confidence->>ligand_plddt',
@@ -885,6 +895,13 @@ export async function listProjectTasksForList(
           'confidence_plddt:confidence->>plddt',
           'confidence_ipsae_dom:confidence->>ipsae_dom',
           'confidence_ligand_ipsae_max:confidence->>ligand_ipsae_max',
+          'confidence_interface_metric:confidence->>interface_metric',
+          'confidence_interface_metric_value:confidence->>interface_metric_value',
+          'confidence_interface_metric_label:confidence->>interface_metric_label',
+          'confidence_interface_metric_source:confidence->>interface_metric_source',
+          'confidence_interfaceMetricValue:confidence->>interfaceMetricValue',
+          'confidence_interfaceMetricLabel:confidence->>interfaceMetricLabel',
+          'confidence_interfaceMetricSource:confidence->>interfaceMetricSource',
           'confidence_iptm:confidence->>iptm',
           'confidence_ligand_iptm:confidence->>ligand_iptm',
           'confidence_protein_iptm:confidence->>protein_iptm',
@@ -1209,6 +1226,20 @@ export async function listProjectTasksForList(
       const pairChainsIptm = asObjectRecord(rowRecord.confidence_pair_chains_iptm);
       const ligandDisplayAtomPlddtsByChain = asObjectRecord(rowRecord.confidence_ligand_display_atom_plddts_by_chain);
       const ligandAtomPlddtsByChain = asObjectRecord(rowRecord.confidence_ligand_atom_plddts_by_chain);
+      const firstObjectRecord = (...values: unknown[]): Record<string, unknown> => {
+        for (const value of values) {
+          const objectValue = asObjectRecord(value);
+          if (Object.keys(objectValue).length > 0) return objectValue;
+        }
+        return {};
+      };
+      const residuePlddtByChain = firstObjectRecord(
+        rowRecord.confidence_residue_plddt_by_chain,
+        rowRecord.confidence_residuePlddtByChain,
+        rowRecord.confidence_residue_plddts_by_chain,
+        rowRecord.confidence_chain_residue_plddt,
+        rowRecord.confidence_plddt_by_chain
+      );
       const chainIdsFromSummary = Array.from(
         new Set(
           [
@@ -1217,7 +1248,8 @@ export async function listProjectTasksForList(
               : []),
             ...Object.keys(chainMeanPlddt).map((value) => readText(value)).filter(Boolean),
             ...Object.keys(ligandDisplayAtomPlddtsByChain).map((value) => readText(value)).filter(Boolean),
-            ...Object.keys(ligandAtomPlddtsByChain).map((value) => readText(value)).filter(Boolean)
+            ...Object.keys(ligandAtomPlddtsByChain).map((value) => readText(value)).filter(Boolean),
+            ...Object.keys(residuePlddtByChain).map((value) => readText(value)).filter(Boolean)
           ]
         )
       );
@@ -1275,6 +1307,7 @@ export async function listProjectTasksForList(
       assignArray('chain_pair_iptm_global', rowRecord.confidence_chain_pair_iptm_global);
       assignObject('ligand_display_atom_plddts_by_chain', ligandDisplayAtomPlddtsByChain);
       assignObject('ligand_atom_plddts_by_chain', ligandAtomPlddtsByChain);
+      assignObject('residue_plddt_by_chain', residuePlddtByChain);
       assignNumber('ligand_plddt', rowRecord.confidence_ligand_plddt);
       assignNumber('ligand_mean_plddt', rowRecord.confidence_ligand_mean_plddt);
       assignNumber('complex_iplddt', rowRecord.confidence_complex_iplddt);
@@ -1283,6 +1316,13 @@ export async function listProjectTasksForList(
       assignNumber('plddt', rowRecord.confidence_plddt);
       assignNumber('ipsae_dom', rowRecord.confidence_ipsae_dom);
       assignNumber('ligand_ipsae_max', rowRecord.confidence_ligand_ipsae_max);
+      assignNumber('interface_metric', rowRecord.confidence_interface_metric);
+      assignNumber('interface_metric_value', rowRecord.confidence_interface_metric_value);
+      assignText('interface_metric_label', rowRecord.confidence_interface_metric_label);
+      assignText('interface_metric_source', rowRecord.confidence_interface_metric_source);
+      assignNumber('interfaceMetricValue', rowRecord.confidence_interfaceMetricValue);
+      assignText('interfaceMetricLabel', rowRecord.confidence_interfaceMetricLabel);
+      assignText('interfaceMetricSource', rowRecord.confidence_interfaceMetricSource);
       assignNumber('iptm', rowRecord.confidence_iptm);
       assignNumber('ligand_iptm', rowRecord.confidence_ligand_iptm);
       assignNumber('protein_iptm', rowRecord.confidence_protein_iptm);

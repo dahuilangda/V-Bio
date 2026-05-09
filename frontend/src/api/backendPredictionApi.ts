@@ -54,10 +54,12 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
   const useMsaServer = componentsForYaml.some((comp) => comp.type === 'protein' && comp.useMsa !== false);
   const hasConstraints = constraintsForBackend.length > 0;
   const hasAffinityProperty = Boolean(input.properties?.affinity && (input.properties?.ligand || input.properties?.binder));
+  const hasInterfaceProperty = Boolean(input.properties?.ligand || input.properties?.binder);
   const useSimpleYaml =
     !hasTemplateUploads &&
     !hasConstraints &&
     !hasAffinityProperty &&
+    !hasInterfaceProperty &&
     componentsForYaml.length === 2 &&
     componentsForYaml[0].type === 'protein' &&
     componentsForYaml[1].type === 'ligand' &&
@@ -78,6 +80,12 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
   form.append('backend', backend || 'boltz');
   form.append('workflow', workflow);
   form.append('use_msa_server', String(useMsaServer).toLowerCase());
+  if (input.properties) {
+    form.append('properties', JSON.stringify(input.properties));
+    if (input.properties.ligand || input.properties.binder) {
+      form.append('require_ipsae', 'true');
+    }
+  }
   if (workflow === 'peptide_design' && input.peptideDesignOptions) {
     form.append('peptide_design_options', JSON.stringify(input.peptideDesignOptions));
   }

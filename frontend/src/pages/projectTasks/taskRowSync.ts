@@ -17,11 +17,13 @@ import {
   readLeadOptTaskSummary,
   readTaskConfidenceMetrics,
   readTaskLigandAtomPlddts,
+  readTaskLigandResiduePlddts,
   hasTaskLigandAtomPlddts,
   hasTaskSummaryMetrics,
   isProjectRow,
   isProjectTaskRow,
   inferTaskStateFromStatusPayload,
+  isSequenceLigandType,
   mean,
   readStatusText,
   resolveTaskBackendValue,
@@ -1689,9 +1691,15 @@ export async function hydrateTaskMetricsFromResultRows(
             selection.ligandIsSmiles &&
             !hasTaskLigandAtomPlddts(row, selection.ligandChainId, selection.ligandComponentCount <= 1)
         );
+      const needsLigandResidueHydration =
+        Boolean(
+          selection.ligandSequence &&
+            isSequenceLigandType(selection.ligandSequenceType) &&
+            !readTaskLigandResiduePlddts(row, selection.ligandChainId)
+        );
       const needsProtenixDetailHydration =
         backendValue === 'protenix' && (!hasLigandByChain || !hasResidueByChain);
-      if (!needsSummaryHydration && !needsLigandAtomHydration && !needsProtenixDetailHydration) {
+      if (!needsSummaryHydration && !needsLigandAtomHydration && !needsLigandResidueHydration && !needsProtenixDetailHydration) {
         resultHydrationDoneRef.current.add(taskId);
         return false;
       }

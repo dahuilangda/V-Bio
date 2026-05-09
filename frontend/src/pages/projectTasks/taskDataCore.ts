@@ -683,6 +683,15 @@ function readLigandIpsaeMaxMetric(confidence: Record<string, unknown>): number |
   return normalizeProbability(readFirstFiniteMetric(confidence, ['ligand_ipsae_max', 'ligandIpsaeMax']));
 }
 
+function readInterfaceIpsaeMetric(confidence: Record<string, unknown>): number | null {
+  const source = readFirstNonEmptyStringMetric(confidence, ['interface_metric_source', 'interfaceMetricSource']).toLowerCase();
+  const label = readFirstNonEmptyStringMetric(confidence, ['interface_metric_label', 'interfaceMetricLabel']).toLowerCase();
+  if (source !== 'ipsae' && label !== 'ipsae') return null;
+  return normalizeProbability(
+    readFirstFiniteMetric(confidence, ['interface_metric', 'interface_metric_value', 'interfaceMetricValue'])
+  );
+}
+
 function resolvePreferredInterfaceMetric(
   confidence: Record<string, unknown>,
   context?: TaskMetricContext
@@ -697,6 +706,10 @@ function resolvePreferredInterfaceMetric(
   const ipsaeDom = readIpsaeDomMetric(confidence);
   if (ipsaeDom !== null) {
     return { value: ipsaeDom, label: 'IPSAE', source: 'ipsae', pairIptm };
+  }
+  const interfaceIpsae = readInterfaceIpsaeMetric(confidence);
+  if (interfaceIpsae !== null) {
+    return { value: interfaceIpsae, label: 'IPSAE', source: 'ipsae', pairIptm };
   }
   const scalarIptm = normalizeProbability(readFirstFiniteMetric(confidence, ['iptm', 'ligand_iptm', 'protein_iptm']));
   const preferredIptm = pairIptm ?? scalarIptm;
@@ -984,6 +997,7 @@ function readTaskConfidenceMetrics(task: ProjectTask, context?: TaskMetricContex
     : null;
   const ligandIpsaeMax = readLigandIpsaeMaxMetric(confidence);
   const ipsaeDom = readIpsaeDomMetric(confidence);
+  const interfaceIpsae = readInterfaceIpsaeMetric(confidence);
   const preferredInterfaceMetric = resolvePreferredInterfaceMetric(confidence, context);
   const selectedPairIptm = preferredInterfaceMetric.pairIptm;
   const plddtRaw = readFirstFiniteMetric(confidence, [
@@ -1001,7 +1015,7 @@ function readTaskConfidenceMetrics(task: ProjectTask, context?: TaskMetricContex
   const mergedPlddt = selectedLigandPlddt ?? plddtRaw;
   return {
     plddt: mergedPlddt === null ? null : mergedPlddt <= 1 ? mergedPlddt * 100 : mergedPlddt,
-    ipsae: ligandIpsaeMax ?? ipsaeDom,
+    ipsae: ligandIpsaeMax ?? ipsaeDom ?? interfaceIpsae,
     iptm: normalizeProbability(iptmRaw),
     interfaceMetricValue: preferredInterfaceMetric.value,
     interfaceMetricLabel: preferredInterfaceMetric.label,
