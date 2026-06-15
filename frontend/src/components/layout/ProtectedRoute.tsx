@@ -33,3 +33,22 @@ export function AdminRoute({ children }: { children: JSX.Element }) {
 
   return children;
 }
+
+
+export function SuperAdminRoute({ children }: { children: JSX.Element }) {
+  const { session, loading } = useAuth();
+
+  if (loading) {
+    return <div className="centered-page">Loading...</div>;
+  }
+
+  if (!session) {
+    return <Navigate to="/login" replace />;
+  }
+
+  if (!session.isSuperAdmin) {
+    return <Navigate to="/projects" replace />;
+  }
+
+  return children;
+}

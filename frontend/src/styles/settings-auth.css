@@ -283,10 +283,7 @@
   min-height: 100vh;
   display: grid;
   place-items: center;
-  background:
-    radial-gradient(circle at 14% 4%, #d8eadf 0, transparent 25%),
-    radial-gradient(circle at 90% 10%, #ecf6ef 0, transparent 24%),
-    #f2f7f3;
+  background: var(--bg);
   padding: 24px;
 }
 
@@ -294,11 +291,11 @@
   width: min(480px, 100%);
   background: #fff;
   border: 1px solid var(--line);
-  border-radius: 16px;
+  border-radius: 8px;
   padding: 24px;
   display: grid;
   gap: 14px;
-  box-shadow: 0 30px 80px rgba(20, 44, 33, 0.08);
+  box-shadow: 0 18px 48px rgba(20, 44, 33, 0.08);
 }
 
 .auth-brand {
@@ -313,6 +310,7 @@
   color: var(--muted);
   font-size: var(--text-md);
 }
+
 
 .auth-footer {
   color: var(--muted);
@@ -1828,4 +1826,34 @@
   .mmp-life-batch-table td:nth-child(9) {
     display: table-cell !important;
   }
+}
+
+.jwt-token-row {
+  grid-template-columns: minmax(280px, 420px) auto;
+  align-items: end;
+  justify-content: start;
+}
+
+
+.integration-create {
+  grid-template-columns: minmax(160px, 1fr) minmax(140px, 0.9fr) minmax(140px, 0.9fr) minmax(120px, 0.7fr) auto;
+  align-items: end;
+}
+
+.integration-create .btn {
+  align-self: end;
+  min-height: 42px;
+}
+
+.integration-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.integration-actions .icon-btn {
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
 }

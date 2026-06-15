@@ -103,6 +103,7 @@ export async function sha256Hex(input: string): Promise<string> {
   return sha256FallbackHex(input);
 }
 
+
 export async function hashPassword(username: string, password: string): Promise<string> {
   const normalized = username.trim().toLowerCase();
   return sha256Hex(`${normalized}::${password}`);

@@ -61,6 +61,8 @@ export const ENV = {
   apiBaseUrl: resolvedApiBaseUrl,
   managementApiBaseUrl: resolvedManagementApiBaseUrl,
   apiToken: import.meta.env.VITE_API_TOKEN?.trim() || 'development-api-token',
+  superAdminUsernames: import.meta.env.VITE_SUPER_ADMIN_USERNAMES?.trim() || '',
+  superAdminEmails: import.meta.env.VITE_SUPER_ADMIN_EMAILS?.trim() || '',
   supabaseRestUrl: resolvedSupabaseRestUrl,
   jsmeScriptUrl:
     import.meta.env.VITE_JSME_SCRIPT_URL?.trim() ||

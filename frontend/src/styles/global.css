@@ -20,7 +20,6 @@
   --draft: #6d6d6d;
   --radius: 12px;
 
-  /* Typography scale aligned to demo rhythm */
   --text-2xs: 11px;
   --text-xs: 12px;
   --text-sm: 13px;
@@ -48,10 +47,7 @@ body {
   font-size: var(--text-md);
   line-height: var(--lh-normal);
   color: var(--text);
-  background:
-    radial-gradient(circle at 8% 0%, #dceadd 0, transparent 26%),
-    radial-gradient(circle at 90% 8%, #edf3ec 0, transparent 24%),
-    var(--bg);
+  background: var(--bg);
 }
 
 a {

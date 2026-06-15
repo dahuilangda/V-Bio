@@ -1,8 +1,9 @@
 import { Suspense, lazy } from 'react';
 import { Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import { AppShell } from './components/layout/AppShell';
-import { AdminRoute, ProtectedRoute } from './components/layout/ProtectedRoute';
+import { AdminRoute, ProtectedRoute, SuperAdminRoute } from './components/layout/ProtectedRoute';
 import { LoginPage } from './pages/LoginPage';
+import { JwtCallbackPage } from './pages/JwtCallbackPage';
 import { RegisterPage } from './pages/RegisterPage';
 
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage').then((m) => ({ default: m.ProjectsPage })));
@@ -11,6 +12,7 @@ const ProjectDetailPage = lazy(() => import('./pages/ProjectDetailPage').then((m
 const ProjectTasksPage = lazy(() => import('./pages/ProjectTasksPage').then((m) => ({ default: m.ProjectTasksPage })));
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
 const UsersPage = lazy(() => import('./pages/UsersPage').then((m) => ({ default: m.UsersPage })));
+const JwtClientsPage = lazy(() => import('./pages/JwtClientsPage').then((m) => ({ default: m.JwtClientsPage })));
 const MmpLifecycleAdminPage = lazy(() => import('./pages/MmpLifecycleAdminPage').then((m) => ({ default: m.MmpLifecycleAdminPage })));
 
 function ShellPage({ children }: { children: JSX.Element }) {
@@ -34,6 +36,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/auth/jwt" element={<JwtCallbackPage />} />
       <Route path="/register" element={<RegisterPage />} />
 
       <Route
@@ -115,16 +118,28 @@ export default function App() {
       <Route
         path="/admin/users"
         element={
-          <AdminRoute>
+          <SuperAdminRoute>
             <ShellPage>
               <Suspense fallback={<PageLoading />}>
                 <UsersPage />
               </Suspense>
             </ShellPage>
-          </AdminRoute>
+          </SuperAdminRoute>
         }
       />
       <Route path="/users" element={<Navigate to="/admin/users" replace />} />
+      <Route
+        path="/admin/jwt-clients"
+        element={
+          <SuperAdminRoute>
+            <ShellPage>
+              <Suspense fallback={<PageLoading />}>
+                <JwtClientsPage />
+              </Suspense>
+            </ShellPage>
+          </SuperAdminRoute>
+        }
+      />
       <Route
         path="/admin/mmp-lifecycle"
         element={

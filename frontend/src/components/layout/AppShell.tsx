@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, useNavigate } from 'react-router-dom';
-import { ChevronDown, Database, FlaskConical, FolderKanban, LogOut, Settings, Share2, Users } from 'lucide-react';
+import { ChevronDown, Database, FlaskConical, FolderKanban, KeyRound, LogOut, Settings, Share2, Users } from 'lucide-react';
 import { useAuth } from '../../hooks/useAuth';
 import { getAvatarOverride } from '../../utils/profilePrefs';
 
@@ -50,11 +50,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <Share2 size={16} />
             <span>Shares</span>
           </NavLink>
-          {session?.isAdmin && (
-            <NavLink to="/admin/users" className="top-link">
-              <Users size={16} />
-              <span>Users</span>
-            </NavLink>
+          {session?.isSuperAdmin && (
+            <>
+              <NavLink to="/admin/users" className="top-link">
+                <Users size={16} />
+                <span>Users</span>
+              </NavLink>
+              <NavLink to="/admin/jwt-clients" className="top-link">
+                <KeyRound size={16} />
+                <span>Integrations</span>
+              </NavLink>
+            </>
           )}
           {session?.isAdmin && (
             <NavLink to="/admin/mmp-lifecycle" className="top-link">
@@ -81,7 +87,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               )}
               <div className="user-chip-text">
                 <div className="user-name">{session?.name || '-'}</div>
-                <div className="user-role">{session?.isAdmin ? 'Admin' : 'Member'}</div>
+                <div className="user-role">{session?.isSuperAdmin ? 'Super Admin' : session?.isAdmin ? 'Admin' : 'Member'}</div>
               </div>
               <ChevronDown size={14} className={`user-chip-caret ${menuOpen ? 'open' : ''}`} />
             </button>

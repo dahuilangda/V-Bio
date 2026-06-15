@@ -3,6 +3,7 @@ import { RefreshCcw, ShieldCheck, ShieldX, Trash2 } from 'lucide-react';
 import type { AppUser } from '../types/models';
 import { hashPassword } from '../utils/crypto';
 import { formatDateTime } from '../utils/date';
+import { isSuperAdminIdentity } from '../api/authApi';
 import { insertUser, listUsers, updateUser } from '../api/supabaseLite';
 
 export function UsersPage() {
@@ -37,7 +38,7 @@ export function UsersPage() {
     const name = String(form.get('name') || '').trim();
     const email = String(form.get('email') || '').trim().toLowerCase();
     const password = String(form.get('password') || '').trim();
-    const is_admin = String(form.get('is_admin') || '') === 'on';
+    const is_admin = String(form.get('is_admin') || '') === 'on' || isSuperAdminIdentity(username, email);
 
     if (!username || !name || !password) {
       setCreateError('Username, display name, and password are required.');
@@ -65,6 +66,7 @@ export function UsersPage() {
   };
 
   const toggleAdmin = async (user: AppUser) => {
+    if (isSuperAdminIdentity(user.username, user.email)) return;
     const next = await updateUser(user.id, { is_admin: !user.is_admin });
     setUsers((prev) => prev.map((u) => (u.id === user.id ? next : u)));
   };
@@ -78,6 +80,7 @@ export function UsersPage() {
   };
 
   const removeUser = async (user: AppUser) => {
+    if (isSuperAdminIdentity(user.username, user.email)) return;
     if (!window.confirm(`Delete user "${user.username}"?`)) return;
     const next = await updateUser(user.id, { deleted_at: new Date().toISOString() });
     setUsers((prev) => prev.filter((u) => u.id !== next.id));
@@ -156,18 +159,28 @@ export function UsersPage() {
                     <td>{user.username}</td>
                     <td>{user.name}</td>
                     <td>{user.email || '-'}</td>
-                    <td>{user.is_admin ? 'Admin' : 'Member'}</td>
+                    <td>{isSuperAdminIdentity(user.username, user.email) ? 'Super Admin' : user.is_admin ? 'Admin' : 'Member'}</td>
                     <td>{formatDateTime(user.last_login_at)}</td>
                     <td>{formatDateTime(user.created_at)}</td>
                     <td>
                       <div className="row gap-6">
-                        <button className="icon-btn" title="Toggle admin role" onClick={() => void toggleAdmin(user)}>
+                        <button
+                          className="icon-btn"
+                          title="Toggle admin role"
+                          disabled={isSuperAdminIdentity(user.username, user.email)}
+                          onClick={() => void toggleAdmin(user)}
+                        >
                           {user.is_admin ? <ShieldX size={14} /> : <ShieldCheck size={14} />}
                         </button>
                         <button className="icon-btn" title="Reset password" onClick={() => void resetPassword(user)}>
                           Reset
                         </button>
-                        <button className="icon-btn danger" title="Delete user" onClick={() => void removeUser(user)}>
+                        <button
+                          className="icon-btn danger"
+                          title="Delete user"
+                          disabled={isSuperAdminIdentity(user.username, user.email)}
+                          onClick={() => void removeUser(user)}
+                        >
                           <Trash2 size={14} />
                         </button>
                       </div>

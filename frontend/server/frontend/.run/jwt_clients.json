@@ -1,0 +1,13 @@
+[
+  {
+    "active": true,
+    "audience": "vbio",
+    "client_id": "jwt_SWUOqJGThG1KrSG",
+    "created_at": "2026-06-15T07:26:08Z",
+    "issuer": "navigation",
+    "max_ttl_seconds": 300,
+    "name": "GD",
+    "secret": "IG_xSROkKq9eaMPNyfSkhGomUF26UreWf6MVim6KyYnWaJ902Dm739HKLbOnEa3f",
+    "updated_at": "2026-06-15T07:26:08Z"
+  }
+]

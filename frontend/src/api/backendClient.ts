@@ -1,9 +1,24 @@
 import { apiUrl, ENV } from '../utils/env';
 
-export const API_HEADERS: Record<string, string> = {};
-if (ENV.apiToken) {
-  API_HEADERS['X-API-Token'] = ENV.apiToken;
+function getAuthHeaders(): Record<string, string> {
+  return ENV.apiToken ? { 'X-API-Token': ENV.apiToken } : {};
 }
+
+export const API_HEADERS: Record<string, string> = new Proxy(
+  {},
+  {
+    ownKeys: () => Reflect.ownKeys(getAuthHeaders()),
+    getOwnPropertyDescriptor: (_target, key) => {
+      const headers = getAuthHeaders();
+      if (!Object.prototype.hasOwnProperty.call(headers, key)) return undefined;
+      return { enumerable: true, configurable: true };
+    },
+    get: (_target, key) => {
+      if (typeof key !== 'string') return undefined;
+      return getAuthHeaders()[key];
+    }
+  }
+);
 
 export const BACKEND_TIMEOUT_MS = 20000;
 

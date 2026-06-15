@@ -1,83 +1,59 @@
-# `.env` 配置说明
+# 环境变量
 
-## 最小配置
+## 后端与 worker
 
-```env
-REDIS_URL=redis://localhost:6379/0
-CENTRAL_API_URL=http://localhost:5000
-BOLTZ_API_TOKEN=development-api-token
-```
+| 变量 | 用途 |
+| --- | --- |
+| `BOLTZ_API_TOKEN` | 后端 API 访问 token。前端的 `VITE_API_TOKEN` 必须与它一致。 |
+| `REDIS_URL` | Redis 地址，例如 `redis://<HOST_IP>:6379/0`。 |
+| `CENTRAL_API_URL` | 中央 API 地址，例如 `http://<HOST_IP>:5000`。 |
+| `GPU_WORKER_CAPABILITIES` | GPU worker 服务列表，例如 `boltz2,alphafold3,protenix`。 |
+| `CPU_WORKER_CAPABILITIES` | CPU worker 服务列表，例如 `lead_opt,peptide_design`。 |
 
-## Docker 栈配置边界
+## 前端与 management API
 
-- 微服务部署只使用 `deploy/docker/DOCKER_STACK_*.env`。
-- 容器配置请统一在对应 stack 的 `.env` 文件中维护，不再依赖仓库根目录 `.env`。
+配置文件：`frontend/.env`
 
-## 调度与并发（推荐默认）
+| 变量 | 用途 |
+| --- | --- |
+| `VITE_API_BASE_URL` | 后端 API 地址。 |
+| `VITE_API_TOKEN` | 与 `BOLTZ_API_TOKEN` 保持一致。 |
+| `VITE_SUPABASE_REST_URL` | PostgREST 地址，默认 `http://127.0.0.1:54321`。 |
+| `VITE_SUPER_ADMIN_USERNAMES` | 超级管理员用户名，逗号分隔。 |
+| `VITE_SUPER_ADMIN_EMAILS` | 超级管理员邮箱，逗号分隔。 |
+| `VBIO_JWT_CLIENTS_FILE` | 外部系统接入配置文件，默认 `frontend/.run/jwt_clients.json`。 |
+| `VBIO_SESSION_SECRET` | management API 会话签名密钥，只放服务端。 |
 
-```env
-MAX_CONCURRENT_TASKS=-1
-CPU_MAX_CONCURRENT_TASKS=0
-GPU_WORKER_CAPABILITIES=
-CPU_WORKER_CAPABILITIES=
-```
-
-含义：
-- `MAX_CONCURRENT_TASKS=-1`：GPU worker 默认使用本机全部可用 GPU。
-- `CPU_MAX_CONCURRENT_TASKS=0`：CPU worker 默认使用本机全部 CPU 核心。
-- `GPU_WORKER_CAPABILITIES=` 留空：GPU worker 默认具备全部 GPU 功能。
-- `CPU_WORKER_CAPABILITIES=` 留空：CPU worker 默认具备全部 CPU 功能。
-- `GPU_POOL_NAMESPACE=`：可选；为 GPU 池 Redis 键加命名空间（多 capability 微服务并行时建议设置）。
-
-多肽设计相关超时：
-- `PREDICTION_SUBPROCESS_TIMEOUT_SECONDS=10800`：常规单次预测/评分任务的默认子进程超时。
-- `PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT_SECONDS=0`：单个多肽候选子任务硬超时；`0` 表示禁用，避免大批量排队时误杀。
-- `PEPTIDE_PARENT_SUBPROCESS_TIMEOUT_SECONDS=0`：多肽父编排任务总硬超时；`0` 表示禁用。
-- `PEPTIDE_PARENT_TIMEOUT_PER_WAVE_SECONDS=1800`：多肽父任务估算超时时，每个并行 wave 预留秒数。
-- `PEPTIDE_PARENT_TIMEOUT_BUFFER_SECONDS=1800`：多肽父任务估算超时时附加的固定缓冲秒数。
-- `PEPTIDE_GPU_ACQUIRE_TIMEOUT_SECONDS=0`：多肽候选子任务等待 GPU 的超时；`0` 表示一直等待。
-
-功能代码目录默认在 `capabilities/`（例如 `lead_optimization`、`pocketxmol`）。
-ColabFold MSA 服务的 Docker 入口统一在 `deploy/docker/DOCKER_CAP_COLABFOLD_SERVER.*`。
-
-Protenix 官方镜像使用 host-mounted 资源：
-- `PROTENIX_DOCKER_IMAGE=ai4s-share-public-cn-beijing.cr.volces.com/release/protenix:1.0.0.4`
-- `PROTENIX_SOURCE_DIR_HOST=/data/protenix`
-- `PROTENIX_SOURCE_DIR=/data/protenix/source`
-- `PROTENIX_MODEL_DIR=/data/protenix/model`
-- `PROTENIX_COMMON_CACHE_DIR=/data/protenix/common_cache`
-
-AlphaFold3 常用 host-mounted 目录：
-- `ALPHAFOLD3_ROOT_HOST=/data/alphafold3`
-- `ALPHAFOLD3_MODEL_DIR=/data/alphafold3/models`
-- `ALPHAFOLD3_DATABASE_DIR=/data/alphafold3/databases`
-
-PocketXMol 建议使用独立 Docker 镜像：
-- `POCKETXMOL_DOCKER_IMAGE=pocketxmol:cu128`
-- `POCKETXMOL_ROOT_DIR=./capabilities/pocketxmol`
-- `POCKETXMOL_CONFIG_MODEL=configs/sample/pxm.yml`
-
-## 多功能声明示例
+当前超级管理员：
 
 ```env
-GPU_WORKER_CAPABILITIES=alphafold3,protenix,pocketxmol
-CPU_WORKER_CAPABILITIES=lead_opt,peptide_design
-BOLTZ2_DOCKER_IMAGE=vbio-boltz2-runtime
-BOLTZ2_HOST_CACHE_DIR=/data/boltz_cache
-PEPTIDE_PARENT_SUBPROCESS_TIMEOUT_SECONDS=0
-PEPTIDE_CANDIDATE_SUBPROCESS_TIMEOUT_SECONDS=0
-PEPTIDE_GPU_ACQUIRE_TIMEOUT_SECONDS=0
+VITE_SUPER_ADMIN_USERNAMES=dahuilangda
+VITE_SUPER_ADMIN_EMAILS=dahuilangda@hotmail.com
 ```
 
-一个 worker 可声明多个功能；系统会自动展开为多个 `cap.*` 队列监听。
-系统不会再监听任何旧通用队列；是否接任务仅取决于你在对应 stack env 声明的功能。
-`BOLTZ2_DOCKER_IMAGE` 会被 `boltz2`、`boltz2score`（以及依赖 Boltz runtime 的 affinity 执行链）共用。
-`BOLTZ2_HOST_CACHE_DIR` 建议预置 `boltz2_conf.ckpt`、`boltz2_aff.ckpt`、`ccd.pkl`、`mols.tar`。
+## 外部系统登录
 
-## 部署参考
+外部系统登录使用短期 JWT。接入步骤、JWT 字段和签名示例见：
 
-- 首次部署：`docs/deployment/quick-start.md`
-- 微服务解耦部署：`docs/deployment/microservice-decoupling.md`
-- 单机全量微服务部署：`docs/deployment/single-node-all-apps.md`
-- Docker Compose + systemd 模板：`docs/deployment/docker-compose-systemd.md`
-- Docker 文件统一入口：`deploy/docker/DOCKER_*`
+```text
+docs/apis/external-system-login.md
+```
+
+## 模型服务
+
+常用模型服务变量：
+
+| 服务 | 关键变量 |
+| --- | --- |
+| Boltz2 | `BOLTZ2_DOCKER_IMAGE`, `BOLTZ2_HOST_CACHE_DIR` |
+| AlphaFold3 | `ALPHAFOLD3_DOCKER_IMAGE`, `ALPHAFOLD3_MODEL_DIR`, `ALPHAFOLD3_DATABASE_DIR` |
+| Protenix | `PROTENIX_DOCKER_IMAGE`, `PROTENIX_SOURCE_DIR`, `PROTENIX_MODEL_DIR` |
+| PocketXMol | `POCKETXMOL_DOCKER_IMAGE`, `POCKETXMOL_ROOT_DIR` |
+| ColabFold MSA | `MSA_SERVER_URL`, `COLABFOLD_JOBS_DIR` |
+| Lead Opt | `LEAD_OPT_MMP_DB_URL`, `LEAD_OPT_MMP_DB_SCHEMA` |
+
+安装命令见：
+
+```text
+docs/deployment/model-services.md
+```

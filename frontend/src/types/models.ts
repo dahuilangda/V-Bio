@@ -302,6 +302,8 @@ export interface CopilotPlanAction {
   execute_now?: boolean;
 }
 
+export type AuthProviderType = 'local' | 'jwt';
+
 export interface Session {
   userId: string;
   username: string;
@@ -309,7 +311,10 @@ export interface Session {
   email?: string | null;
   avatarUrl?: string | null;
   isAdmin: boolean;
+  isSuperAdmin?: boolean;
   loginAt: string;
+  authProvider?: AuthProviderType;
+  managementToken?: string | null;
 }
 
 export interface AuthRegisterInput {

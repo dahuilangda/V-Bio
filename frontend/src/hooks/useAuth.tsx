@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import type { AuthLoginInput, AuthRegisterInput, Session } from '../types/models';
-import { clearSession, loadSession, login, register, saveSession } from '../api/authApi';
+import { clearSession, completeJwtLogin, isSuperAdminIdentity, loadSession, login, register, saveSession } from '../api/authApi';
 import { findUserByUsername } from '../api/supabaseLite';
 
 interface AuthContextValue {
@@ -10,6 +10,7 @@ interface AuthContextValue {
   registerAction: (input: AuthRegisterInput) => Promise<void>;
   logoutAction: () => void;
   refreshSession: () => Promise<void>;
+  completeJwtLoginAction: (token: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -32,14 +33,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setSession(null);
       return;
     }
+    const isSuperAdmin = isSuperAdminIdentity(user.username, user.email);
     const refreshed: Session = {
       userId: user.id,
       username: user.username,
       name: user.name,
       email: user.email || null,
       avatarUrl: user.avatar_url || session.avatarUrl || null,
-      isAdmin: user.is_admin,
-      loginAt: session.loginAt
+      isAdmin: user.is_admin || isSuperAdmin,
+      isSuperAdmin,
+      loginAt: session.loginAt,
+      authProvider: session.authProvider,
     };
     saveSession(refreshed);
     setSession(refreshed);
@@ -61,7 +65,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         clearSession();
         setSession(null);
       },
-      refreshSession
+      refreshSession,
+      completeJwtLoginAction: async (token) => {
+        const next = await completeJwtLogin(token);
+        setSession(next);
+      }
     }),
     [session, loading]
   );

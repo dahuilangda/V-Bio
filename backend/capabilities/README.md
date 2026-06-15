@@ -1,13 +1,6 @@
-# Backend Capabilities
+# Backend Model Services
 
-能力文档统一放在 `docs/capabilities/`：
+模型服务文档：
 
-- `boltz2`
-- `alphafold3`
-- `protenix`
-- `pocketxmol`
-- `affinity`
-- `boltz2score`
-- `lead_opt`
-
-请参见仓库根目录 `README.md` 的“功能与配置目录”。
+- `docs/model-services/README.md`
+- `docs/deployment/model-services.md`
