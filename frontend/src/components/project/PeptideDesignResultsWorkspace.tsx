@@ -1955,10 +1955,20 @@ export function PeptideDesignResultsWorkspace({
   };
 
   const renderRuntimeSummary = () => {
+    if (runtimeContext.state === 'SUCCESS') return null;
+    const hasRuntimeSignal = Boolean(
+      runtimeContext.statusMessage ||
+      runtimeContext.currentStatus ||
+      runtimeContext.progressPercent !== null ||
+      runtimeContext.currentGeneration !== null ||
+      runtimeContext.completedTasks !== null ||
+      runtimeContext.liveCandidateRows.length > 0
+    );
+    if (!hasRuntimeSignal) return null;
+
     const progress = runtimeContext.progressPercent;
     const clampedProgress = progress === null ? 0 : Math.max(0, Math.min(100, progress));
-    const stateTone = `peptide-tone-${runtimeContext.state.toLowerCase()}`;
-    const statusText = runtimeContext.statusMessage || runtimeContext.currentStatus || runtimeContext.state;
+    const statusText = runtimeContext.statusMessage || runtimeContext.currentStatus || 'Running peptide design';
     const generationText = runtimeContext.currentGeneration !== null && runtimeContext.totalGenerations !== null
       ? `${runtimeContext.currentGeneration}/${runtimeContext.totalGenerations}`
       : '-';
@@ -1968,67 +1978,71 @@ export function PeptideDesignResultsWorkspace({
     const generationCandidateText = runtimeContext.generationCompletedTasks !== null && runtimeContext.generationTotalTasks !== null
       ? `${runtimeContext.generationCompletedTasks}/${runtimeContext.generationTotalTasks}`
       : '-';
-    const runningQueueText = runtimeContext.generationRunningTasks !== null || runtimeContext.generationQueuedTasks !== null
-      ? `${runtimeContext.generationRunningTasks ?? 0} running / ${runtimeContext.generationQueuedTasks ?? 0} queued`
+    const queueText = runtimeContext.generationRunningTasks !== null || runtimeContext.generationQueuedTasks !== null
+      ? `${runtimeContext.generationRunningTasks ?? 0}/${runtimeContext.generationQueuedTasks ?? 0}`
       : '-';
-    const bestScoreText = formatScore(runtimeContext.bestScore);
-    const liveTopCount = runtimeContext.liveCandidateRows.length || sortedCandidates.filter((candidate) => candidate.source === 'live').length;
+    const liveTopCandidates = parseCandidateRows(
+      runtimeContext.liveCandidateRows,
+      'live',
+      runtimeContext.state === 'UNSCORED' ? 'RUNNING' : runtimeContext.state,
+      normalizeModelLabel(confidenceBackend) || normalizeModelLabel(projectBackend) || 'Boltz',
+      selectedResultLigandChainId || undefined,
+      selectedResultTargetChainId || undefined
+    );
+    const liveTopCount = liveTopCandidates.length;
+    const runtimeItems = [
+      { label: 'Generation', value: generationText },
+      { label: 'Candidates', value: totalCandidateText },
+      { label: 'Current gen', value: generationCandidateText },
+      { label: 'Run/Queue', value: queueText },
+      { label: 'Remaining', value: formatDuration(runtimeContext.estimatedRemainingSeconds) },
+      { label: 'ETA', value: formatEta(runtimeContext.estimatedCompletionTime) },
+      { label: 'Best', value: formatScore(runtimeContext.bestScore) },
+      { label: 'Top', value: liveTopCount ? String(liveTopCount) : '-' },
+      { label: 'Mutation', value: runtimeContext.adaptiveMutationRate === null ? '-' : runtimeContext.adaptiveMutationRate.toFixed(2) }
+    ];
 
     return (
-      <section className="result-aside-block peptide-runtime-status-card">
-        <div className="peptide-runtime-head">
-          <div>
-            <strong>Design progress</strong>
-            <div className="muted small peptide-runtime-message">{statusText}</div>
+      <div className="peptide-runtime-inline" aria-label="Peptide design runtime progress">
+        <div className="peptide-runtime-strip">
+          <div className="status-progress-track peptide-runtime-progress-track" aria-hidden="true">
+            <div className="status-progress-fill" style={{ width: `${clampedProgress}%` }} />
           </div>
-          <span className={`lead-opt-state-pill peptide-runtime-state ${stateTone}`}>{runtimeContext.state}</span>
-        </div>
-        <div className="status-progress-track peptide-runtime-progress-track" aria-label="Peptide design progress">
-          <div className="status-progress-fill" style={{ width: `${clampedProgress}%` }} />
-        </div>
-        <div className="peptide-runtime-stats">
-          <div className="peptide-runtime-stat">
-            <span>Progress</span>
-            <strong>{formatPercent(progress)}</strong>
-          </div>
-          <div className="peptide-runtime-stat">
-            <span>Generation</span>
-            <strong>{generationText}</strong>
-          </div>
-          <div className="peptide-runtime-stat">
-            <span>Candidates</span>
-            <strong>{totalCandidateText}</strong>
-          </div>
-          <div className="peptide-runtime-stat">
-            <span>This generation</span>
-            <strong>{generationCandidateText}</strong>
-          </div>
-          <div className="peptide-runtime-stat">
-            <span>Queue</span>
-            <strong>{runningQueueText}</strong>
-          </div>
-          <div className="peptide-runtime-stat">
-            <span>ETA</span>
-            <strong>{formatEta(runtimeContext.estimatedCompletionTime)}</strong>
-          </div>
-          <div className="peptide-runtime-stat">
-            <span>Remaining</span>
-            <strong>{formatDuration(runtimeContext.estimatedRemainingSeconds)}</strong>
-          </div>
-          <div className="peptide-runtime-stat">
-            <span>Best score</span>
-            <strong>{bestScoreText}</strong>
-          </div>
-          <div className="peptide-runtime-stat">
-            <span>Live top</span>
-            <strong>{liveTopCount || '-'}</strong>
-          </div>
-          <div className="peptide-runtime-stat">
-            <span>Mutation</span>
-            <strong>{runtimeContext.adaptiveMutationRate === null ? '-' : runtimeContext.adaptiveMutationRate.toFixed(2)}</strong>
+          <span className="peptide-runtime-strip-status">{statusText}</span>
+          <span className="peptide-runtime-strip-percent">{formatPercent(progress)}</span>
+          <div className="peptide-runtime-strip-items">
+            {runtimeItems
+              .filter((item) => item.value !== '-')
+              .map((item) => (
+                <span className="peptide-runtime-strip-item" key={item.label}>
+                  <span>{item.label}</span>
+                  <strong>{item.value}</strong>
+                </span>
+              ))}
           </div>
         </div>
-      </section>
+        {liveTopCandidates.length > 0 ? (
+          <div className="peptide-runtime-top-list" aria-label="Current best peptide candidates">
+            {liveTopCandidates.map((candidate) => {
+              const displaySequence = buildPeptideLigandViewTokens(candidate.sequence, candidate.modifications)
+                .map((token) => token.displayResidue)
+                .join('-') || candidate.sequence;
+              return (
+                <div className="peptide-runtime-top-row" key={`${candidate.sequence}-${candidate.rank}-${candidate.generation ?? 0}`}>
+                  <span className="peptide-runtime-top-rank">#{candidate.rank}</span>
+                  <span className="peptide-runtime-top-sequence" title={displaySequence}>{displaySequence}</span>
+                  <span className="peptide-runtime-top-metric">Score <strong>{formatScore(candidate.score)}</strong></span>
+                  <span className="peptide-runtime-top-metric">pLDDT <strong>{formatPlddt(candidate.plddt)}</strong></span>
+                  <span className="peptide-runtime-top-metric">
+                    {candidate.interfaceMetricSource === 'ipsae' ? 'IPSAE' : candidate.interfaceMetricLabel} <strong>{formatInterfaceMetric(candidate.interfaceMetric)}</strong>
+                  </span>
+                  <span className="peptide-runtime-top-metric">Gen <strong>{candidate.generation ?? '-'}</strong></span>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
     );
   };
 

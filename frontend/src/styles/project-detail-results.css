@@ -256,90 +256,119 @@
   min-height: 520px;
 }
 
-.peptide-runtime-status-card {
-  gap: 10px;
+.peptide-runtime-inline {
+  display: grid;
+  gap: 0;
   min-width: 0;
+  border-bottom: 1px solid #e2ece6;
 }
 
-.peptide-runtime-head {
+.peptide-runtime-strip {
+  position: relative;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.peptide-runtime-state {
-  margin-left: auto;
-}
-
-.lead-opt-state-pill.peptide-tone-success {
-  border-color: #b9dcc9;
-  background: #eaf8f0;
-  color: #206341;
-}
-
-.lead-opt-state-pill.peptide-tone-running {
-  border-color: #e8d6ae;
-  background: #fff7e8;
-  color: #8a5f1d;
-}
-
-.lead-opt-state-pill.peptide-tone-queued {
-  border-color: #ccdae8;
-  background: #f0f5fa;
-  color: #335978;
-}
-
-.lead-opt-state-pill.peptide-tone-failure {
-  border-color: #ebc5c5;
-  background: #fdf0f0;
-  color: #8f2f2f;
-}
-
-.lead-opt-state-pill.peptide-tone-unscored {
-  border-color: #ddd7cd;
-  background: #f7f4ee;
-  color: #666053;
-}
-
-.peptide-runtime-message {
-  margin-top: 3px;
-  max-width: 100%;
-  overflow-wrap: anywhere;
-}
-
-.peptide-runtime-progress-track {
-  margin-top: 1px;
-}
-
-.peptide-runtime-stats {
-  display: grid;
-  gap: 8px;
-  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
-}
-
-.peptide-runtime-stat {
-  border: 1px solid #dce8e2;
-  border-radius: 9px;
-  background: #fff;
-  padding: 7px 8px;
-  display: grid;
-  gap: 2px;
-}
-
-.peptide-runtime-stat > span {
-  font-size: var(--text-2xs);
-  color: #6b8175;
-  font-weight: 600;
-}
-
-.peptide-runtime-stat > strong {
-  font-size: var(--text-sm);
-  color: #2b493b;
-  line-height: 1.2;
-  font-variant-numeric: tabular-nums;
+  gap: 10px;
   min-width: 0;
-  overflow-wrap: anywhere;
+  padding: 6px 2px 7px;
+  color: #2f5143;
+}
+
+.peptide-runtime-strip .peptide-runtime-progress-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  margin: 0;
+  background: #edf4ef;
+}
+
+.peptide-runtime-strip-status {
+  min-width: 140px;
+  max-width: 34%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: #274839;
+}
+
+.peptide-runtime-strip-percent {
+  flex: 0 0 auto;
+  font-size: var(--text-xs);
+  font-weight: 800;
+  color: #1f5f47;
+  font-variant-numeric: tabular-nums;
+}
+
+.peptide-runtime-strip-items {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.peptide-runtime-strip-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  flex: 0 0 auto;
+  font-size: var(--text-2xs);
+  color: #6e8176;
+  white-space: nowrap;
+}
+
+.peptide-runtime-strip-item > strong {
+  color: #2e4f40;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.peptide-runtime-top-list {
+  display: grid;
+  min-width: 0;
+  padding: 3px 0 5px;
+}
+
+.peptide-runtime-top-row {
+  display: grid;
+  grid-template-columns: 34px minmax(170px, 1fr) repeat(4, max-content);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 3px 2px;
+  font-size: var(--text-2xs);
+  color: #5f7469;
+}
+
+.peptide-runtime-top-rank {
+  color: #60766b;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.peptide-runtime-top-sequence {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  color: #1f4134;
+  font-size: 11px;
+}
+
+.peptide-runtime-top-metric {
+  white-space: nowrap;
+  color: #6e8176;
+  font-variant-numeric: tabular-nums;
+}
+
+.peptide-runtime-top-metric > strong {
+  color: #304e41;
+  font-size: var(--text-xs);
 }
 
 .peptide-result-focus-card {
@@ -1101,8 +1130,26 @@
 }
 
 @media (max-width: 1024px) {
-  .peptide-runtime-stats {
-    grid-template-columns: 1fr;
+  .peptide-runtime-strip {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .peptide-runtime-strip-status {
+    max-width: 100%;
+    flex: 1 1 220px;
+  }
+
+  .peptide-runtime-strip-items {
+    flex-basis: 100%;
+  }
+
+  .peptide-runtime-top-row {
+    grid-template-columns: 30px minmax(150px, 1fr) repeat(2, max-content);
+  }
+
+  .peptide-runtime-top-row .peptide-runtime-top-metric:nth-last-child(-n + 2) {
+    display: none;
   }
 
   .peptide-result-focus-metrics {
