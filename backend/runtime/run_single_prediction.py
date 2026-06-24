@@ -7143,6 +7143,60 @@ def run_peptide_design_backend(
     all_results: List[Dict[str, Any]] = []
     best_score_seen = float("-inf")
     stagnant_generations = 0
+    peptide_started_at = time.time()
+
+    def _peptide_runtime_timing(done_count: int) -> Dict[str, Any]:
+        elapsed_seconds = max(0.0, time.time() - peptide_started_at)
+        done = max(0, int(done_count or 0))
+        remaining_seconds = None
+        completion_time = None
+        if done > 0 and total_tasks > done:
+            seconds_per_task = elapsed_seconds / done
+            remaining_seconds = max(0.0, seconds_per_task * (total_tasks - done))
+            completion_time = time.strftime(
+                "%Y-%m-%dT%H:%M:%S",
+                time.localtime(time.time() + remaining_seconds),
+            )
+        return {
+            "elapsed_seconds": elapsed_seconds,
+            "estimated_remaining_seconds": remaining_seconds,
+            "estimated_completion_time": completion_time,
+            "candidates_evaluated": done,
+        }
+
+    def _current_best_peptide_rows(limit: int = 10) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for rank, row in enumerate(all_results[: min(limit, len(all_results))], start=1):
+            rows.append(
+                {
+                    "rank": rank,
+                    "sequence": row.get("sequence"),
+                    "modifications": row.get("modifications"),
+                    "generation": row.get("generation"),
+                    "score": row.get("composite_score"),
+                    "iptm": row.get("iptm"),
+                    "pair_iptm": row.get("pair_iptm"),
+                    "pair_iptm_target_binder": row.get("pair_iptm_target_binder"),
+                    "pair_iptm_target_linker": row.get("pair_iptm_target_linker"),
+                    "pair_iptm_formula": row.get("pair_iptm_formula"),
+                    "ipsae_dom": row.get("ipsae_dom"),
+                    "ligand_ipsae_max": row.get("ligand_ipsae_max"),
+                    "interface_metric": row.get("interface_metric"),
+                    "interface_metric_label": row.get("interface_metric_label"),
+                    "interface_metric_source": row.get("interface_metric_source"),
+                    "interface_metric_kind": row.get("interface_metric_kind"),
+                    "binder_avg_plddt": row.get("binder_avg_plddt"),
+                    "interface_confidence": row.get("interface_confidence"),
+                    "binder_confidence": row.get("binder_confidence"),
+                    "pair_iptm_confidence": row.get("pair_iptm_confidence"),
+                    "developability_score": row.get("developability_score"),
+                    "liability_penalty": row.get("liability_penalty"),
+                    "target_chain_id": row.get("target_chain_id"),
+                    "binder_chain_id": row.get("binder_chain_id"),
+                    "linker_chain_id": row.get("linker_chain_id"),
+                }
+            )
+        return rows
 
     runtime_predict_args = dict(predict_args)
     if "seed" in runtime_predict_args:
@@ -7189,9 +7243,10 @@ def run_peptide_design_backend(
                     "progress_percent": (completed_tasks / total_tasks * 100.0) if total_tasks > 0 else 0.0,
                     "current_status": f"Generation {generation}/{iterations}",
                     "status_message": f"Running generation {generation} of {iterations}",
-                    "current_best_sequences": [],
+                    "current_best_sequences": _current_best_peptide_rows(),
                     "adaptive_mutation_rate": adaptive_mutation_rate,
                     "stagnant_generations": stagnant_generations,
+                    **_peptide_runtime_timing(completed_tasks),
                 }
             },
         )
@@ -7334,6 +7389,8 @@ def run_peptide_design_backend(
                         "generation_queued_tasks": queued_now,
                         "adaptive_mutation_rate": adaptive_mutation_rate,
                         "stagnant_generations": stagnant_generations,
+                        "current_best_sequences": _current_best_peptide_rows(),
+                        **_peptide_runtime_timing(global_done),
                     }
                 },
             )
@@ -7484,37 +7541,6 @@ def run_peptide_design_backend(
                 for row in _select_nsga2_peptide_elites(all_results, elite_size)
             ]
 
-            current_best_rows = []
-            for rank, row in enumerate(all_results[: min(8, len(all_results))], start=1):
-                current_best_rows.append(
-                    {
-                        "rank": rank,
-                        "sequence": row.get("sequence"),
-                        "modifications": row.get("modifications"),
-                        "generation": row.get("generation"),
-                        "score": row.get("composite_score"),
-                        "iptm": row.get("iptm"),
-                        "pair_iptm": row.get("pair_iptm"),
-                        "pair_iptm_target_binder": row.get("pair_iptm_target_binder"),
-                        "pair_iptm_target_linker": row.get("pair_iptm_target_linker"),
-                        "pair_iptm_formula": row.get("pair_iptm_formula"),
-                        "ipsae_dom": row.get("ipsae_dom"),
-                        "ligand_ipsae_max": row.get("ligand_ipsae_max"),
-                        "interface_metric": row.get("interface_metric"),
-                        "interface_metric_label": row.get("interface_metric_label"),
-                        "interface_metric_source": row.get("interface_metric_source"),
-                        "interface_metric_kind": row.get("interface_metric_kind"),
-                        "binder_avg_plddt": row.get("binder_avg_plddt"),
-                        "interface_confidence": row.get("interface_confidence"),
-                        "binder_confidence": row.get("binder_confidence"),
-                        "pair_iptm_confidence": row.get("pair_iptm_confidence"),
-                        "developability_score": row.get("developability_score"),
-                        "liability_penalty": row.get("liability_penalty"),
-                        "target_chain_id": row.get("target_chain_id"),
-                        "binder_chain_id": row.get("binder_chain_id"),
-                        "linker_chain_id": row.get("linker_chain_id"),
-                    }
-                )
             progress_payload = {
                 "peptide_design": {
                     "current_generation": generation,
@@ -7529,7 +7555,14 @@ def run_peptide_design_backend(
                         f"Generation {generation}/{iterations}: "
                         f"{generation_done}/{len(generation_jobs)} candidates completed"
                     ),
-                    "current_best_sequences": current_best_rows,
+                    "generation_total_tasks": len(generation_jobs),
+                    "generation_completed_tasks": generation_done,
+                    "generation_running_tasks": max(0, len(generation_jobs) - generation_done),
+                    "generation_queued_tasks": 0,
+                    "current_best_sequences": _current_best_peptide_rows(),
+                    "adaptive_mutation_rate": adaptive_mutation_rate,
+                    "stagnant_generations": stagnant_generations,
+                    **_peptide_runtime_timing(completed_tasks),
                 }
             }
             _write_peptide_progress(progress_path, progress_payload)
@@ -7633,7 +7666,12 @@ def run_peptide_design_backend(
                 "progress_percent": 100.0,
                 "current_status": "completed",
                 "status_message": "Peptide design completed",
-                "best_sequences": zip_rows[:8],
+                "best_sequences": zip_rows[:10],
+                "current_best_sequences": zip_rows[:10],
+                "elapsed_seconds": max(0.0, time.time() - peptide_started_at),
+                "estimated_remaining_seconds": 0.0,
+                "estimated_completion_time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
+                "candidates_evaluated": completed_tasks,
             }
         },
     )

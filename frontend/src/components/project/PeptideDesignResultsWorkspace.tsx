@@ -68,6 +68,16 @@ interface PeptideRuntimeContext {
   completedTasks: number | null;
   pendingTasks: number | null;
   totalTasks: number | null;
+  generationCompletedTasks: number | null;
+  generationRunningTasks: number | null;
+  generationQueuedTasks: number | null;
+  generationTotalTasks: number | null;
+  elapsedSeconds: number | null;
+  estimatedRemainingSeconds: number | null;
+  estimatedCompletionTime: string;
+  candidatesEvaluated: number | null;
+  adaptiveMutationRate: number | null;
+  stagnantGenerations: number | null;
   liveCandidateRows: Array<Record<string, unknown>>;
 }
 
@@ -1551,6 +1561,16 @@ function extractRuntimeContext(params: {
   const totalTasks =
     readFirstFiniteFromPaths(payloads, ['total_tasks', 'task_total']) ??
     (completedTasks !== null && pendingTasks !== null ? completedTasks + pendingTasks : null);
+  const generationCompletedTasks = readFirstFiniteFromPaths(payloads, ['generation_completed_tasks']);
+  const generationRunningTasks = readFirstFiniteFromPaths(payloads, ['generation_running_tasks']);
+  const generationQueuedTasks = readFirstFiniteFromPaths(payloads, ['generation_queued_tasks']);
+  const generationTotalTasks = readFirstFiniteFromPaths(payloads, ['generation_total_tasks']);
+  const elapsedSeconds = readFirstFiniteFromPaths(payloads, ['elapsed_seconds']);
+  const estimatedRemainingSeconds = readFirstFiniteFromPaths(payloads, ['estimated_remaining_seconds']);
+  const estimatedCompletionTime = readFirstTextFromPaths(payloads, ['estimated_completion_time']);
+  const candidatesEvaluated = readFirstFiniteFromPaths(payloads, ['candidates_evaluated']);
+  const adaptiveMutationRate = readFirstFiniteFromPaths(payloads, ['adaptive_mutation_rate']);
+  const stagnantGenerations = readFirstFiniteFromPaths(payloads, ['stagnant_generations']);
 
   let progress = parseProgressPercent(
     readFirstFiniteFromPaths(payloads, [
@@ -1595,8 +1615,43 @@ function extractRuntimeContext(params: {
     completedTasks: completedTasks === null ? null : Math.max(0, Math.floor(completedTasks)),
     pendingTasks: pendingTasks === null ? null : Math.max(0, Math.floor(pendingTasks)),
     totalTasks: totalTasks === null ? null : Math.max(0, Math.floor(totalTasks)),
+    generationCompletedTasks: generationCompletedTasks === null ? null : Math.max(0, Math.floor(generationCompletedTasks)),
+    generationRunningTasks: generationRunningTasks === null ? null : Math.max(0, Math.floor(generationRunningTasks)),
+    generationQueuedTasks: generationQueuedTasks === null ? null : Math.max(0, Math.floor(generationQueuedTasks)),
+    generationTotalTasks: generationTotalTasks === null ? null : Math.max(0, Math.floor(generationTotalTasks)),
+    elapsedSeconds,
+    estimatedRemainingSeconds,
+    estimatedCompletionTime,
+    candidatesEvaluated: candidatesEvaluated === null ? null : Math.max(0, Math.floor(candidatesEvaluated)),
+    adaptiveMutationRate,
+    stagnantGenerations: stagnantGenerations === null ? null : Math.max(0, Math.floor(stagnantGenerations)),
     liveCandidateRows
   };
+}
+
+function formatDuration(value: number | null): string {
+  if (value === null || !Number.isFinite(value) || value < 0) return '-';
+  const seconds = Math.round(value);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remSeconds = seconds % 60;
+  if (minutes < 60) return remSeconds ? `${minutes}m ${remSeconds}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remMinutes = minutes % 60;
+  return remMinutes ? `${hours}h ${remMinutes}m` : `${hours}h`;
+}
+
+function formatEta(value: string): string {
+  const text = value.trim();
+  if (!text) return '-';
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) return text;
+  return parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function formatPercent(value: number | null, digits = 0): string {
+  if (value === null || !Number.isFinite(value)) return '-';
+  return `${value.toFixed(digits)}%`;
 }
 
 function formatScore(value: number | null): string {
@@ -1899,6 +1954,84 @@ export function PeptideDesignResultsWorkspace({
     return sortDirection === 'asc' ? ' \u2191' : ' \u2193';
   };
 
+  const renderRuntimeSummary = () => {
+    const progress = runtimeContext.progressPercent;
+    const clampedProgress = progress === null ? 0 : Math.max(0, Math.min(100, progress));
+    const stateTone = `peptide-tone-${runtimeContext.state.toLowerCase()}`;
+    const statusText = runtimeContext.statusMessage || runtimeContext.currentStatus || runtimeContext.state;
+    const generationText = runtimeContext.currentGeneration !== null && runtimeContext.totalGenerations !== null
+      ? `${runtimeContext.currentGeneration}/${runtimeContext.totalGenerations}`
+      : '-';
+    const totalCandidateText = runtimeContext.completedTasks !== null && runtimeContext.totalTasks !== null
+      ? `${runtimeContext.completedTasks}/${runtimeContext.totalTasks}`
+      : '-';
+    const generationCandidateText = runtimeContext.generationCompletedTasks !== null && runtimeContext.generationTotalTasks !== null
+      ? `${runtimeContext.generationCompletedTasks}/${runtimeContext.generationTotalTasks}`
+      : '-';
+    const runningQueueText = runtimeContext.generationRunningTasks !== null || runtimeContext.generationQueuedTasks !== null
+      ? `${runtimeContext.generationRunningTasks ?? 0} running / ${runtimeContext.generationQueuedTasks ?? 0} queued`
+      : '-';
+    const bestScoreText = formatScore(runtimeContext.bestScore);
+    const liveTopCount = runtimeContext.liveCandidateRows.length || sortedCandidates.filter((candidate) => candidate.source === 'live').length;
+
+    return (
+      <section className="result-aside-block peptide-runtime-status-card">
+        <div className="peptide-runtime-head">
+          <div>
+            <strong>Design progress</strong>
+            <div className="muted small peptide-runtime-message">{statusText}</div>
+          </div>
+          <span className={`lead-opt-state-pill peptide-runtime-state ${stateTone}`}>{runtimeContext.state}</span>
+        </div>
+        <div className="status-progress-track peptide-runtime-progress-track" aria-label="Peptide design progress">
+          <div className="status-progress-fill" style={{ width: `${clampedProgress}%` }} />
+        </div>
+        <div className="peptide-runtime-stats">
+          <div className="peptide-runtime-stat">
+            <span>Progress</span>
+            <strong>{formatPercent(progress)}</strong>
+          </div>
+          <div className="peptide-runtime-stat">
+            <span>Generation</span>
+            <strong>{generationText}</strong>
+          </div>
+          <div className="peptide-runtime-stat">
+            <span>Candidates</span>
+            <strong>{totalCandidateText}</strong>
+          </div>
+          <div className="peptide-runtime-stat">
+            <span>This generation</span>
+            <strong>{generationCandidateText}</strong>
+          </div>
+          <div className="peptide-runtime-stat">
+            <span>Queue</span>
+            <strong>{runningQueueText}</strong>
+          </div>
+          <div className="peptide-runtime-stat">
+            <span>ETA</span>
+            <strong>{formatEta(runtimeContext.estimatedCompletionTime)}</strong>
+          </div>
+          <div className="peptide-runtime-stat">
+            <span>Remaining</span>
+            <strong>{formatDuration(runtimeContext.estimatedRemainingSeconds)}</strong>
+          </div>
+          <div className="peptide-runtime-stat">
+            <span>Best score</span>
+            <strong>{bestScoreText}</strong>
+          </div>
+          <div className="peptide-runtime-stat">
+            <span>Live top</span>
+            <strong>{liveTopCount || '-'}</strong>
+          </div>
+          <div className="peptide-runtime-stat">
+            <span>Mutation</span>
+            <strong>{runtimeContext.adaptiveMutationRate === null ? '-' : runtimeContext.adaptiveMutationRate.toFixed(2)}</strong>
+          </div>
+        </div>
+      </section>
+    );
+  };
+
   const renderViewerModeSwitch = () => (
     <div className="prediction-render-mode-switch" role="tablist" aria-label="3D color mode">
       <button
@@ -1926,6 +2059,7 @@ export function PeptideDesignResultsWorkspace({
 
   const renderCandidateTable = (standalone = false) => (
     <section className={`peptide-result-list-panel${standalone ? ' peptide-result-list-panel--standalone' : ''}`}>
+      {renderRuntimeSummary()}
       <div className="lead-opt-result-table-wrap peptide-result-table-wrap">
         <table className="lead-opt-candidate-table lead-opt-result-table peptide-result-table">
           <thead>
@@ -2155,6 +2289,7 @@ export function PeptideDesignResultsWorkspace({
           {renderViewerModeSwitch()}
         </div>
       </div>
+      {renderRuntimeSummary()}
       {sortedCandidates.length === 0 ? (
         <section className="result-aside-block peptide-selected-card">
           <div className="ligand-preview-empty">No designed peptide cards yet.</div>
