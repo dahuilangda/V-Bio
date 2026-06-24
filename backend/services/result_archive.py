@@ -979,6 +979,11 @@ class ResultArchiveService:
                         best_metric_value = value
                     if best_metric_value is not None:
                         merged[metric_key] = best_metric_value
+                pair_pae = self._to_finite_float(merged.get('pair_pae'))
+                if pair_pae is not None:
+                    for alias in ('complex_pde', 'complex_pae', 'pae'):
+                        if self._to_finite_float(merged.get(alias)) is None:
+                            merged[alias] = pair_pae
                 return merged or None
         except Exception as exc:
             self.logger.debug('Failed to extract compact prediction metrics from %s: %s', source_zip_path, exc)

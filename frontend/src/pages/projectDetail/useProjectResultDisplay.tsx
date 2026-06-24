@@ -65,6 +65,7 @@ interface UseProjectResultDisplayOptions {
   };
   selectedResultLigandSequence: string;
   selectedResultLigandComponentType: InputComponent['type'] | null;
+  selectedResultLigandModifications?: InputComponent['modifications'];
   snapshotLigandResiduePlddts: number[] | null;
 }
 
@@ -136,6 +137,7 @@ export function useProjectResultDisplay({
   overviewPrimaryLigand,
   selectedResultLigandSequence,
   selectedResultLigandComponentType,
+  selectedResultLigandModifications,
   snapshotLigandResiduePlddts,
 }: UseProjectResultDisplayOptions): UseProjectResultDisplayResult {
   const shouldPrepareAnyResultStructure = shouldPrepareResultStructure || shouldPrepareAffinityResultDisplay;
@@ -304,7 +306,11 @@ export function useProjectResultDisplay({
           confidenceHint={snapshotPlddt}
         />
       ) : selectedResultLigandSequence && isSequenceLigandType(selectedResultLigandComponentType || null) ? (
-        <OverviewLigandSequencePreview sequence={selectedResultLigandSequence} residuePlddts={snapshotLigandResiduePlddts} />
+        <OverviewLigandSequencePreview
+          sequence={selectedResultLigandSequence}
+          residuePlddts={snapshotLigandResiduePlddts}
+          modifications={selectedResultLigandModifications}
+        />
       ) : (
         <div className="ligand-preview-empty">
           {overviewPrimaryLigand.selectedComponentType && overviewPrimaryLigand.selectedComponentType !== 'ligand'

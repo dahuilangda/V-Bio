@@ -1786,10 +1786,78 @@ def _build_structure_chain_map(structure_path: Path) -> Dict[str, str]:
     }
 
 
+def _cif_chain_has_nonpolymer_atom_site(structure_path: Path, chain_id: str) -> Optional[bool]:
+    if structure_path.suffix.lower() not in {".cif", ".mmcif"}:
+        return None
+
+    chain_id = str(chain_id or "").strip()
+    if not chain_id:
+        return False
+
+    try:
+        lines = structure_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return None
+
+    solvent_names = {"HOH", "WAT"}
+    atom_fields: List[str] = []
+    atom_field_index: Dict[str, int] = {}
+    inside_atom_loop = False
+    saw_chain = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "loop_":
+            atom_fields = []
+            atom_field_index = {}
+            inside_atom_loop = False
+            continue
+
+        if line.startswith("_atom_site."):
+            inside_atom_loop = True
+            atom_fields.append(line.strip().split(".", 1)[1])
+            atom_field_index = {name: index for index, name in enumerate(atom_fields)}
+            continue
+
+        if inside_atom_loop and atom_fields and (line.startswith("ATOM") or line.startswith("HETATM")):
+            parts = line.split()
+            if len(parts) < len(atom_fields):
+                continue
+            chain_values = []
+            for field_name in ("auth_asym_id", "label_asym_id"):
+                field_index = atom_field_index.get(field_name)
+                if field_index is not None and field_index < len(parts):
+                    chain_values.append(parts[field_index])
+            if chain_id not in chain_values:
+                continue
+            saw_chain = True
+            residue_name = ""
+            comp_index = atom_field_index.get("label_comp_id")
+            if comp_index is not None and comp_index < len(parts):
+                residue_name = str(parts[comp_index]).strip().upper()
+            seq_index = atom_field_index.get("label_seq_id")
+            seq_id = parts[seq_index] if seq_index is not None and seq_index < len(parts) else ""
+            if seq_id == "." and residue_name not in solvent_names:
+                return True
+            continue
+
+        if inside_atom_loop and atom_fields and stripped and not stripped.startswith("_atom_site."):
+            if not (line.startswith("ATOM") or line.startswith("HETATM")):
+                inside_atom_loop = False
+                atom_fields = []
+                atom_field_index = {}
+
+    return False if saw_chain else None
+
+
 def _structure_chain_has_nonpolymer_ligand(structure_path: Path, chain_id: str) -> bool:
     chain_id = str(chain_id or "").strip()
     if not chain_id:
         return False
+
+    cif_result = _cif_chain_has_nonpolymer_atom_site(structure_path, chain_id)
+    if cif_result is not None:
+        return cif_result
 
     solvent_names = {"HOH", "WAT"}
     polymer_like_names = set(AMINO_ACID_MAPPING.keys()) | {
@@ -2894,6 +2962,38 @@ def run_af3_affinity_pipeline(
     except Exception as err:
         print(f"⚠️ 运行 Boltz2Score 亲和力后处理失败: {err}", file=sys.stderr)
         return []
+
+
+def _read_protenix_error_report(protenix_output_dir: Path, max_chars: int = 6000) -> str:
+    base_dir = Path(protenix_output_dir)
+    if not base_dir.exists():
+        return ""
+    error_files = sorted(base_dir.rglob("ERR/*.txt"), key=lambda item: (len(str(item)), str(item)))
+    if not error_files:
+        error_files = sorted(base_dir.rglob("*.err"), key=lambda item: (len(str(item)), str(item)))
+    chunks: List[str] = []
+    for path in error_files[:3]:
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception:
+            continue
+        if not content:
+            continue
+        try:
+            rel = path.relative_to(base_dir)
+        except ValueError:
+            rel = path
+        chunks.append(f"{rel}:\n{content[-max_chars:]}")
+    return "\n\n".join(chunks)[:max_chars]
+
+
+def _raise_if_protenix_reported_error_without_structure(protenix_output_dir: Path, input_name: str) -> None:
+    if locate_protenix_structure_file(protenix_output_dir, input_name) is not None:
+        return
+    report = _read_protenix_error_report(protenix_output_dir)
+    if not report:
+        return
+    raise RuntimeError(f"Protenix finished without a renderable structure. Error report:\n{report}")
 
 
 def locate_protenix_structure_file(protenix_output_dir: Path, input_name: str) -> Optional[Path]:
@@ -4738,6 +4838,8 @@ def run_protenix_backend(
             f"{traceback_suffix}"
             f"{hint}\nFull log: {protenix_log_path}"
         )
+
+    _raise_if_protenix_reported_error_without_structure(Path(protenix_output_dir), prep.input_name)
 
     yaml_data: Dict[str, Any] = {}
     try:

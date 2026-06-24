@@ -418,9 +418,12 @@
 .protein-mod-jsme {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: minmax(560px, 1.8fr) minmax(260px, 0.55fr);
+  grid-template-columns: minmax(360px, 1.8fr) minmax(220px, 0.65fr);
   gap: 8px 10px;
   align-items: start;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .protein-mod-jsme.is-collapsed {
@@ -457,7 +460,25 @@
   display: grid;
   gap: 6px;
   min-width: 0;
+  max-width: 100%;
   align-content: start;
+}
+
+.protein-mod-custom-side {
+  overflow: hidden;
+}
+
+.protein-mod-custom-side .field,
+.protein-mod-custom-side input,
+.protein-mod-custom-side select {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.protein-mod-custom-side input {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .protein-mod-jsme-main {
@@ -473,6 +494,7 @@
 .protein-mod-library {
   display: grid;
   gap: 6px;
+  min-width: 0;
 }
 
 .protein-mod-library-actions,
@@ -670,6 +692,8 @@
 
 .custom-residue-preview-status {
   color: var(--muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .custom-residue-preview.valid .custom-residue-preview-status {
@@ -687,10 +711,13 @@
 .protein-mod-rules {
   display: grid;
   gap: 5px;
+  min-width: 0;
+  max-width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.68);
+  overflow: hidden;
 }
 
 .protein-mod-rules > span {
@@ -700,9 +727,16 @@
 }
 
 .protein-mod-rules ul {
+  min-width: 0;
   margin: 0;
   padding-left: 17px;
   color: var(--muted);
   font-size: var(--text-xs);
   line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.protein-mod-rules li {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }

@@ -3194,6 +3194,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     overviewPrimaryLigand,
     selectedResultLigandSequence,
     selectedResultLigandComponentType: selectedResultLigandComponent?.type || null,
+    selectedResultLigandModifications: selectedResultLigandComponent?.modifications,
     snapshotLigandResiduePlddts,
   });
   const {

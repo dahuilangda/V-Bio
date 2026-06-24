@@ -299,6 +299,58 @@ def _normalize_protein_modifications(raw_modifications: object, sequence_length:
     return normalized
 
 
+_AF3_STANDARD_ONE_LETTER = {
+    "ALA": "A",
+    "ARG": "R",
+    "ASN": "N",
+    "ASP": "D",
+    "CYS": "C",
+    "GLN": "Q",
+    "GLU": "E",
+    "GLY": "G",
+    "HIS": "H",
+    "ILE": "I",
+    "LEU": "L",
+    "LYS": "K",
+    "MET": "M",
+    "PHE": "F",
+    "PRO": "P",
+    "SER": "S",
+    "THR": "T",
+    "TRP": "W",
+    "TYR": "Y",
+    "VAL": "V",
+}
+
+_AF3_COMMON_MODIFICATION_ONE_LETTER = {
+    "AIB": "A",
+    "HY3": "P",
+    "MSE": "M",
+    "PTR": "Y",
+    "SEP": "S",
+    "TPO": "T",
+}
+
+
+def _af3_ccd_to_one_letter(ccd: object) -> str:
+    code = str(ccd or "").strip().upper()
+    if code.startswith("CCD_"):
+        code = code[4:]
+    if len(code) == 1 and code.isalpha():
+        return code
+    return _AF3_STANDARD_ONE_LETTER.get(code) or _AF3_COMMON_MODIFICATION_ONE_LETTER.get(code) or "X"
+
+
+def _af3_effective_query_sequence(sequence: str, modifications: List[Dict[str, object]]) -> str:
+    chars = list(str(sequence or "").strip().upper())
+    for mod in modifications or []:
+        position = _coerce_int(mod.get("ptmPosition", mod.get("position")), "AF3 modification position")
+        if position < 1 or position > len(chars):
+            continue
+        chars[position - 1] = _af3_ccd_to_one_letter(mod.get("ptmType", mod.get("ccd")))
+    return "".join(chars)
+
+
 def _protein_group_key(sequence: str, modifications: List[Dict[str, object]]) -> str:
     if not modifications:
         return sequence
@@ -587,18 +639,60 @@ def _normalize_a3m_content(a3m_text: str) -> str:
     return ("\n".join(fixed) + "\n") if changed else a3m_text
 
 
+def _replace_a3m_first_query_sequence(a3m_text: str, query_sequence: str) -> str:
+    """Make the first A3M row match AF3's effective query sequence after PTMs."""
+    query = str(query_sequence or "").strip().upper()
+    if not query:
+        return a3m_text
+
+    lines = (a3m_text or "").splitlines()
+    first_header_index: Optional[int] = None
+    first_sequence_start: Optional[int] = None
+    first_sequence_end: Optional[int] = None
+    for idx, line in enumerate(lines):
+        if line.startswith(">"):
+            if first_header_index is None:
+                first_header_index = idx
+                first_sequence_start = idx + 1
+                continue
+            first_sequence_end = idx
+            break
+    if first_header_index is None or first_sequence_start is None:
+        return a3m_text
+    if first_sequence_end is None:
+        first_sequence_end = len(lines)
+
+    original_seq = "".join(line.strip() for line in lines[first_sequence_start:first_sequence_end] if line.strip())
+    if not original_seq or original_seq == query:
+        return a3m_text
+
+    if _count_non_lowercase(original_seq) == len(query):
+        query_iter = iter(query)
+        rewritten_seq = "".join(ch if ch.islower() else next(query_iter) for ch in original_seq)
+    else:
+        rewritten_seq = query
+
+    next_lines = lines[:first_sequence_start] + [rewritten_seq] + lines[first_sequence_end:]
+    return "\n".join(next_lines).rstrip("\n") + "\n"
+
+
 def load_unpaired_msa(
     prep: AF3Preparation, chain_msa_paths: Dict[str, Path]
 ) -> List[str]:
     unpaired: List[str] = []
     for index, sequence in enumerate(prep.query_sequences_unique):
         msa_content: Optional[str] = None
+        modifications = prep.query_modifications[index] if index < len(prep.query_modifications) else []
+        effective_sequence = _af3_effective_query_sequence(sequence, modifications)
         group_key = prep.query_sequence_keys[index] if index < len(prep.query_sequence_keys) else sequence
         chain_ids = prep.query_group_to_chain_ids.get(group_key) or prep.sequence_to_chain_ids.get(sequence, [])
         for chain_id in chain_ids:
             path = chain_msa_paths.get(chain_id)
             if path and path.exists():
-                msa_content = _normalize_a3m_content(path.read_text())
+                msa_content = _replace_a3m_first_query_sequence(
+                    _normalize_a3m_content(path.read_text()),
+                    effective_sequence,
+                )
                 break
         unpaired.append(msa_content or "")
     return unpaired

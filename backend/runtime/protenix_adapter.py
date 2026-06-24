@@ -84,6 +84,17 @@ def _normalize_ion_symbol(smiles_value: str) -> Optional[str]:
     return symbol[0].upper() + symbol[1].lower()
 
 
+def _normalize_protenix_ccd_code(value: Any, context: str) -> str:
+    code = str(value or "").strip().upper()
+    if not code:
+        raise ValueError(f"{context} requires a non-empty CCD code.")
+    if code.startswith("CCD_"):
+        code = code[4:]
+    if not re.fullmatch(r"[A-Z0-9]{1,12}", code):
+        raise ValueError(f"Invalid CCD code for {context}: {value}")
+    return f"CCD_{code}"
+
+
 def _normalize_protein_modifications(raw_mods: Any) -> List[Dict[str, Any]]:
     if not isinstance(raw_mods, list):
         return []
@@ -105,12 +116,9 @@ def _normalize_protein_modifications(raw_mods: Any) -> List[Dict[str, Any]]:
             ptm_pos = item.get("residuePosition")
         if ptm_type is None or ptm_pos is None:
             continue
-        ptm_type_text = str(ptm_type).strip()
-        if not ptm_type_text:
-            continue
         mods.append(
             {
-                "ptmType": ptm_type_text,
+                "ptmType": _normalize_protenix_ccd_code(ptm_type, "protein modification"),
                 "ptmPosition": _coerce_positive_int(ptm_pos, "protein modification position"),
             }
         )
@@ -132,12 +140,9 @@ def _normalize_nucleic_modifications(raw_mods: Any) -> List[Dict[str, Any]]:
             base_pos = item.get("residuePosition")
         if mod_type is None or base_pos is None:
             continue
-        mod_type_text = str(mod_type).strip()
-        if not mod_type_text:
-            continue
         mods.append(
             {
-                "modificationType": mod_type_text,
+                "modificationType": _normalize_protenix_ccd_code(mod_type, "nucleic acid modification"),
                 "basePosition": _coerce_positive_int(base_pos, "nucleic acid modification position"),
             }
         )

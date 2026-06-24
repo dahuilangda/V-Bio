@@ -497,7 +497,7 @@ function ConfidencePanel({
     );
   const selectedPairIptm = readPairIptmForChains(data, selectedTargetChainId, selectedLigandChainId, chainIds);
   const ptm = pickNumber(data, ['ptm']);
-  const pae = pickNumber(data, ['complex_pde', 'complex_pae', 'gpde', 'pae']);
+  const pae = pickNumber(data, ['complex_pde', 'complex_pae', 'pair_pae', 'pairPae', 'pair_pde', 'pair_gpde', 'gpde', 'pae']);
   const ipsaeDom = readIpsaeDomMetric(data);
   const ligandIpsaeMax = readLigandIpsaeMaxMetric(data);
   const preferredInterfaceMetric = resolvePreferredInterfaceMetricFromValues({

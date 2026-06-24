@@ -66,13 +66,13 @@ export const ENV = {
   supabaseRestUrl: resolvedSupabaseRestUrl,
   jsmeScriptUrl:
     import.meta.env.VITE_JSME_SCRIPT_URL?.trim() ||
-    'https://jsme-editor.github.io/dist/jsme/jsme.nocache.js',
+    '/vendor/jsme/jsme.nocache.js',
   molstarScriptUrl:
     import.meta.env.VITE_MOLSTAR_SCRIPT_URL?.trim() ||
-    'https://unpkg.com/molstar/build/viewer/molstar.js',
+    '/vendor/molstar/molstar.js',
   molstarCssUrl:
     import.meta.env.VITE_MOLSTAR_CSS_URL?.trim() ||
-    'https://unpkg.com/molstar/build/viewer/molstar.css',
+    '/vendor/molstar/molstar.css',
   rdkitScriptUrl:
     import.meta.env.VITE_RDKIT_SCRIPT_URL?.trim() ||
     'https://cdn.jsdelivr.net/npm/@rdkit/rdkit/dist/RDKit_minimal.js',

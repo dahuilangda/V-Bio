@@ -1011,7 +1011,16 @@ function readTaskConfidenceMetrics(task: ProjectTask, context?: TaskMetricContex
   const iptmRaw = strictPairIptm
     ? selectedPairIptm
     : selectedPairIptm ?? readFirstFiniteMetric(confidence, ['iptm', 'ligand_iptm', 'protein_iptm']);
-  const paeRaw = readFirstFiniteMetric(confidence, ['complex_pde', 'complex_pae', 'gpde', 'pae']);
+  const paeRaw = readFirstFiniteMetric(confidence, [
+    'complex_pde',
+    'complex_pae',
+    'pair_pae',
+    'pairPae',
+    'pair_pde',
+    'pair_gpde',
+    'gpde',
+    'pae'
+  ]);
   const mergedPlddt = selectedLigandPlddt ?? plddtRaw;
   return {
     plddt: mergedPlddt === null ? null : mergedPlddt <= 1 ? mergedPlddt * 100 : mergedPlddt,
