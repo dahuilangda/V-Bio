@@ -6357,19 +6357,114 @@ def _peptide_rank_score(row: Dict[str, Any]) -> float:
     return float("-inf")
 
 
-def _select_diverse_peptide_elites(results: List[Dict[str, Any]], elite_size: int) -> List[Dict[str, Any]]:
-    ranked = sorted(results, key=_peptide_rank_score, reverse=True)
-    selected: List[Dict[str, Any]] = []
-    for row in ranked:
-        seq = str(row.get("sequence") or "")
-        if not seq:
+def _peptide_float(row: Dict[str, Any], key: str, default: float = 0.0) -> float:
+    value = row.get(key)
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return float(value)
+    return default
+
+
+def _peptide_objectives(row: Dict[str, Any]) -> Tuple[float, float, float, float]:
+    return (
+        _peptide_float(row, "interface_confidence"),
+        _peptide_float(row, "binder_confidence"),
+        _peptide_float(row, "pair_iptm_confidence"),
+        _peptide_float(row, "developability_score", 1.0),
+    )
+
+
+def _peptide_dominates(row_a: Dict[str, Any], row_b: Dict[str, Any]) -> bool:
+    obj_a = _peptide_objectives(row_a)
+    obj_b = _peptide_objectives(row_b)
+    return all(a >= b for a, b in zip(obj_a, obj_b)) and any(a > b for a, b in zip(obj_a, obj_b))
+
+
+def _peptide_non_dominated_fronts(results: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    candidates = [row for row in results if str(row.get("sequence") or "")]
+    domination_counts: Dict[int, int] = {}
+    dominated_by_index: Dict[int, List[int]] = {}
+    first_front: List[int] = []
+    for idx, row in enumerate(candidates):
+        dominated: List[int] = []
+        domination_count = 0
+        for other_idx, other in enumerate(candidates):
+            if idx == other_idx:
+                continue
+            if _peptide_dominates(row, other):
+                dominated.append(other_idx)
+            elif _peptide_dominates(other, row):
+                domination_count += 1
+        dominated_by_index[idx] = dominated
+        domination_counts[idx] = domination_count
+        if domination_count == 0:
+            first_front.append(idx)
+
+    fronts: List[List[Dict[str, Any]]] = []
+    current = first_front
+    while current:
+        fronts.append([candidates[idx] for idx in current])
+        next_front: List[int] = []
+        for idx in current:
+            for dominated_idx in dominated_by_index.get(idx, []):
+                domination_counts[dominated_idx] = domination_counts.get(dominated_idx, 0) - 1
+                if domination_counts[dominated_idx] == 0:
+                    next_front.append(dominated_idx)
+        current = next_front
+    return fronts
+
+
+def _peptide_crowding_distance(front: List[Dict[str, Any]]) -> Dict[int, float]:
+    distances = {idx: 0.0 for idx in range(len(front))}
+    if len(front) <= 2:
+        return {idx: float("inf") for idx in range(len(front))}
+    objective_count = len(_peptide_objectives(front[0])) if front else 0
+    for objective_idx in range(objective_count):
+        values = [_peptide_objectives(row)[objective_idx] for row in front]
+        order = sorted(range(len(front)), key=lambda idx: values[idx])
+        distances[order[0]] = float("inf")
+        distances[order[-1]] = float("inf")
+        min_value = values[order[0]]
+        max_value = values[order[-1]]
+        span = max_value - min_value
+        if span <= 1e-12:
             continue
-        if len(selected) < 2 or all(_peptide_sequence_similarity(seq, str(prev.get("sequence") or "")) < 0.85 for prev in selected):
-            selected.append(row)
-        if len(selected) >= elite_size:
-            break
+        for rank_idx in range(1, len(order) - 1):
+            prev_value = values[order[rank_idx - 1]]
+            next_value = values[order[rank_idx + 1]]
+            distances[order[rank_idx]] += (next_value - prev_value) / span
+    return distances
+
+
+def _select_nsga2_peptide_elites(results: List[Dict[str, Any]], elite_size: int) -> List[Dict[str, Any]]:
+    fronts = _peptide_non_dominated_fronts(results)
+    selected: List[Dict[str, Any]] = []
+    for front in fronts:
+        if len(selected) + len(front) <= elite_size:
+            selected.extend(sorted(front, key=_peptide_rank_score, reverse=True))
+            continue
+        distances = _peptide_crowding_distance(front)
+        ranked_front = sorted(
+            enumerate(front),
+            key=lambda item: (distances.get(item[0], 0.0), _peptide_rank_score(item[1])),
+            reverse=True,
+        )
+        for _, row in ranked_front:
+            seq = str(row.get("sequence") or "")
+            if not seq:
+                continue
+            if all(_peptide_sequence_similarity(seq, str(prev.get("sequence") or "")) < 0.92 for prev in selected):
+                selected.append(row)
+            if len(selected) >= elite_size:
+                break
+        if len(selected) < elite_size:
+            for _, row in ranked_front:
+                if row not in selected:
+                    selected.append(row)
+                if len(selected) >= elite_size:
+                    break
+        break
     if len(selected) < elite_size:
-        for row in ranked:
+        for row in sorted(results, key=_peptide_rank_score, reverse=True):
             if row not in selected:
                 selected.append(row)
             if len(selected) >= elite_size:
@@ -7046,6 +7141,8 @@ def run_peptide_design_backend(
     evaluated_sequences: set[str] = set()
     elite_population: List[Dict[str, Any]] = []
     all_results: List[Dict[str, Any]] = []
+    best_score_seen = float("-inf")
+    stagnant_generations = 0
 
     runtime_predict_args = dict(predict_args)
     if "seed" in runtime_predict_args:
@@ -7077,6 +7174,8 @@ def run_peptide_design_backend(
     print(f"🧵 Peptide design subtask celery queue: {resolved_subtask_queue}", file=sys.stderr)
 
     for generation in range(1, iterations + 1):
+        generation_best_before = best_score_seen
+        adaptive_mutation_rate = min(0.85, mutation_rate * (1.0 + 0.35 * stagnant_generations))
         _write_peptide_progress(
             progress_path,
             {
@@ -7091,6 +7190,8 @@ def run_peptide_design_backend(
                     "current_status": f"Generation {generation}/{iterations}",
                     "status_message": f"Running generation {generation} of {iterations}",
                     "current_best_sequences": [],
+                    "adaptive_mutation_rate": adaptive_mutation_rate,
+                    "stagnant_generations": stagnant_generations,
                 }
             },
         )
@@ -7123,7 +7224,7 @@ def run_peptide_design_backend(
                 candidate_sequence = _mutate_peptide_sequence_from_pool(
                     parent_seq,
                     natural_pool=natural_pool,
-                    mutation_rate=mutation_rate,
+                    mutation_rate=adaptive_mutation_rate,
                     plddt_scores=parent_plddts,
                     design_mode=design_mode,
                     sequence_mask=sequence_mask,
@@ -7231,6 +7332,8 @@ def run_peptide_design_backend(
                         "generation_completed_tasks": done_now,
                         "generation_running_tasks": running_now,
                         "generation_queued_tasks": queued_now,
+                        "adaptive_mutation_rate": adaptive_mutation_rate,
+                        "stagnant_generations": stagnant_generations,
                     }
                 },
             )
@@ -7294,11 +7397,31 @@ def run_peptide_design_backend(
             interface_metric_source = str(preferred_interface_metric.get("source") or "none").strip().lower() or "none"
             interface_metric_kind = str(preferred_interface_metric.get("kind") or "none").strip().lower() or "none"
             binder_avg_plddt = float(metrics.get("binder_avg_plddt") or 0.0)
+            binder_confidence = max(0.0, min(1.0, binder_avg_plddt / 100.0)) if binder_avg_plddt > 0 else 0.0
+            pair_iptm_confidence = max(0.0, min(1.0, float(pair_iptm))) if isinstance(pair_iptm, (int, float)) else 0.0
+            interface_confidence = (
+                max(0.0, min(1.0, float(interface_metric_value)))
+                if interface_metric_value is not None
+                else pair_iptm_confidence
+            )
+            liability = _peptide_sequence_liability_penalty(candidate_sequence, candidate_modifications)
+            liability_penalty = float(liability.get("penalty") or 0.0)
+            developability_score = max(0.0, 1.0 - liability_penalty)
             if interface_metric_value is not None:
-                composite_score = (0.7 * interface_metric_value) + (0.3 * (binder_avg_plddt / 100.0))
+                composite_score = (
+                    0.58 * interface_confidence
+                    + 0.22 * binder_confidence
+                    + 0.12 * pair_iptm_confidence
+                    + 0.08 * developability_score
+                )
             elif binder_avg_plddt > 0:
-                composite_score = binder_avg_plddt / 100.0
-                pair_iptm_formula = "binder_avg_plddt_only"
+                composite_score = (
+                    0.58 * pair_iptm_confidence
+                    + 0.30 * binder_confidence
+                    + 0.12 * developability_score
+                )
+                if pair_iptm is None:
+                    pair_iptm_formula = "binder_avg_plddt_developability_only"
             else:
                 composite_score = None
             structure_file = _select_primary_structure_file(result_dir)
@@ -7319,6 +7442,12 @@ def run_peptide_design_backend(
                 "interface_metric_source": interface_metric_source,
                 "interface_metric_kind": interface_metric_kind,
                 "binder_avg_plddt": binder_avg_plddt,
+                "interface_confidence": interface_confidence,
+                "binder_confidence": binder_confidence,
+                "pair_iptm_confidence": pair_iptm_confidence,
+                "developability_score": developability_score,
+                "liability_penalty": liability_penalty,
+                "sequence_liabilities": liability,
                 "composite_score": composite_score,
                 "score": composite_score,
                 "plddt": binder_avg_plddt,
@@ -7352,7 +7481,7 @@ def run_peptide_design_backend(
                     "modifications": row.get("modifications") if isinstance(row.get("modifications"), list) else [],
                     "plddts": row.get("plddts") if isinstance(row.get("plddts"), list) else [],
                 }
-                for row in _select_diverse_peptide_elites(all_results, elite_size)
+                for row in _select_nsga2_peptide_elites(all_results, elite_size)
             ]
 
             current_best_rows = []
@@ -7376,6 +7505,11 @@ def run_peptide_design_backend(
                         "interface_metric_source": row.get("interface_metric_source"),
                         "interface_metric_kind": row.get("interface_metric_kind"),
                         "binder_avg_plddt": row.get("binder_avg_plddt"),
+                        "interface_confidence": row.get("interface_confidence"),
+                        "binder_confidence": row.get("binder_confidence"),
+                        "pair_iptm_confidence": row.get("pair_iptm_confidence"),
+                        "developability_score": row.get("developability_score"),
+                        "liability_penalty": row.get("liability_penalty"),
                         "target_chain_id": row.get("target_chain_id"),
                         "binder_chain_id": row.get("binder_chain_id"),
                         "linker_chain_id": row.get("linker_chain_id"),
@@ -7400,6 +7534,13 @@ def run_peptide_design_backend(
             }
             _write_peptide_progress(progress_path, progress_payload)
 
+        current_generation_best = _peptide_rank_score(all_results[0]) if all_results else float("-inf")
+        if current_generation_best > generation_best_before + 1e-6:
+            best_score_seen = current_generation_best
+            stagnant_generations = 0
+        else:
+            stagnant_generations += 1
+
     all_results.sort(
         key=lambda item: (
             1 if isinstance(item.get("composite_score"), (int, float)) else 0,
@@ -7407,7 +7548,8 @@ def run_peptide_design_backend(
         ),
         reverse=True,
     )
-    top_results = all_results[:24]
+    top_results = _select_nsga2_peptide_elites(all_results, min(24, len(all_results)))
+    top_results.sort(key=_peptide_rank_score, reverse=True)
     if not top_results:
         raise RuntimeError("Peptide design produced no valid candidates.")
 
