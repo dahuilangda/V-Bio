@@ -7,7 +7,7 @@ import {
   sanitizeProjectForTaskShare
 } from '../../api/supabaseLite';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
-import type { Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
+import type { CustomCcdMoleculeInput, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
 import { loadProjectInputConfig, loadProjectUiState } from '../../utils/projectInputs';
 import { getWorkflowDefinition, isPredictionLikeWorkflowKey } from '../../utils/workflows';
 import { resolveRestoredEditorState, resolveTaskSnapshotContext } from './projectLoadHelpers';
@@ -100,6 +100,7 @@ export interface ProjectLoadFlowResult {
   savedTemplateFingerprint: string;
   savedAffinityUploadsFingerprint: string;
   proteinTemplates: Record<string, ProteinTemplateUpload>;
+  customResidueLibrary: CustomCcdMoleculeInput[];
   taskProteinTemplates: Record<string, Record<string, ProteinTemplateUpload>>;
   taskAffinityUploads: Record<string, AffinityPersistedUploads>;
   activeConstraintId: string | null;
@@ -290,6 +291,7 @@ export async function loadProjectFlow(params: {
     savedTemplateFingerprint: createProteinTemplatesFingerprint(restoredTemplates),
     savedAffinityUploadsFingerprint: createAffinityUploadsFingerprint(restoredAffinityUploads),
     proteinTemplates: restoredTemplates,
+    customResidueLibrary: savedUiState?.customResidueLibrary || [],
     taskProteinTemplates: savedTaskTemplates,
     taskAffinityUploads: hydratedTaskAffinityUploads,
     activeConstraintId: savedUiState?.activeConstraintId || null,

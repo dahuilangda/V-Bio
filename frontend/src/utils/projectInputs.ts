@@ -1,6 +1,8 @@
 import type {
   InputComponent,
   MoleculeType,
+  ProteinModification,
+  CustomCcdMoleculeInput,
   PredictionConstraint,
   PredictionOptions,
   PredictionProperties,
@@ -17,6 +19,8 @@ const TEMPLATE_CONTENT_REF_PREFIX = '@pool:';
 const QUOTA_ERROR_NAMES = new Set(['QuotaExceededError', 'NS_ERROR_DOM_QUOTA_REACHED']);
 const VALID_MOLECULE_TYPES: MoleculeType[] = ['protein', 'ligand', 'dna', 'rna'];
 const VALID_LIGAND_INPUT_METHODS = new Set(['smiles', 'ccd', 'jsme']);
+const VALID_PROTEIN_MODIFICATION_INPUT_METHODS = new Set(['ccd', 'jsme']);
+const VALID_PROTEIN_RESIDUES = new Set(['A', 'R', 'N', 'D', 'C', 'Q', 'E', 'G', 'H', 'I', 'L', 'K', 'M', 'F', 'P', 'S', 'T', 'W', 'Y', 'V']);
 const INVALID_COMPONENT_ID_TOKENS = new Set(['undefined', 'null', 'nan']);
 const DEFAULT_PEPTIDE_DESIGN_MODE = 'cyclic';
 const VALID_PEPTIDE_DESIGN_MODES = new Set(['linear', 'cyclic', 'bicyclic']);
@@ -67,6 +71,7 @@ export const PEPTIDE_DESIGNED_LIGAND_TOKEN = '__designed_peptide__';
 
 export interface ProjectUiState {
   proteinTemplates: Record<string, ProteinTemplateUpload>;
+  customResidueLibrary?: CustomCcdMoleculeInput[];
   taskProteinTemplates?: Record<string, Record<string, ProteinTemplateUpload>>;
   templateContentPool?: Record<string, string>;
   taskAffinityUploads?: Record<
@@ -142,6 +147,56 @@ function normalizeLigandInputMethod(value: unknown): 'smiles' | 'ccd' | 'jsme' {
   return 'jsme';
 }
 
+function normalizeProteinModificationInputMethod(value: unknown): 'ccd' | 'jsme' {
+  if (typeof value === 'string' && VALID_PROTEIN_MODIFICATION_INPUT_METHODS.has(value)) {
+    return value as 'ccd' | 'jsme';
+  }
+  return 'ccd';
+}
+
+function normalizeProteinModificationCcd(value: unknown): string {
+  return typeof value === 'string' ? value.replace(/[^A-Za-z0-9_-]/g, '').toUpperCase().slice(0, 12) : '';
+}
+
+function normalizeProteinModifications(value: unknown, sequence: string): ProteinModification[] {
+  if (!Array.isArray(value)) return [];
+  const sequenceLength = sequence.length;
+  const usedPositions = new Set<number>();
+  const normalized: ProteinModification[] = [];
+  value.forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    const raw = item as Record<string, unknown>;
+    const rawTerminal = typeof raw.terminal === 'string' ? raw.terminal : '';
+    const terminal = rawTerminal === 'n_term' || rawTerminal === 'c_term' ? rawTerminal : 'internal';
+    const requestedPosition = terminal === 'n_term' ? 1 : terminal === 'c_term' ? sequenceLength || 1 : Math.max(1, Math.floor(Number(raw.position || 1)));
+    const position = Math.max(1, Math.floor(Number(requestedPosition || 1)));
+    if (!Number.isFinite(position) || position < 1 || (sequenceLength > 0 && position > sequenceLength)) return;
+    if (usedPositions.has(position)) return;
+    const inputMethod = normalizeProteinModificationInputMethod(raw.inputMethod ?? raw.input_method);
+    const ccd = normalizeProteinModificationCcd(raw.ccd ?? raw.ccdCode ?? raw.modification);
+    if (!ccd) return;
+    const sequenceResidue = sequence[position - 1]?.toUpperCase() || '';
+    const rawBaseResidue = typeof raw.baseResidue === 'string' ? raw.baseResidue : typeof raw.base_residue === 'string' ? raw.base_residue : '';
+    const baseResidue = rawBaseResidue.trim().toUpperCase().slice(0, 1) || sequenceResidue || 'A';
+    if (!VALID_PROTEIN_RESIDUES.has(baseResidue)) return;
+    const smiles = typeof raw.smiles === 'string' ? raw.smiles.trim() : '';
+    if (inputMethod === 'jsme' && !smiles) return;
+    usedPositions.add(position);
+    normalized.push({
+      id: typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : randomId(),
+      position,
+      terminal,
+      customEditorCollapsed: Boolean(raw.customEditorCollapsed ?? raw.custom_editor_collapsed),
+      baseResidue,
+      ccd,
+      inputMethod,
+      smiles: inputMethod === 'jsme' ? smiles : undefined,
+      label: typeof raw.label === 'string' && raw.label.trim() ? raw.label.trim() : undefined
+    });
+  });
+  return normalized.sort((a, b) => a.position - b.position || a.ccd.localeCompare(b.ccd));
+}
+
 export function normalizeInputComponents(components: InputComponent[]): InputComponent[] {
   return components.map((component, index) => {
     const type = normalizeComponentType(component?.type);
@@ -156,7 +211,8 @@ export function normalizeInputComponents(components: InputComponent[]): InputCom
         numCopies,
         sequence,
         useMsa: component?.useMsa !== false,
-        cyclic: Boolean(component?.cyclic)
+        cyclic: Boolean(component?.cyclic),
+        modifications: normalizeProteinModifications((component as unknown as Record<string, unknown>)?.modifications, sequence)
       };
     }
 
@@ -519,6 +575,28 @@ function normalizeConstraints(value: unknown): PredictionConstraint[] {
       return null;
     })
     .filter(Boolean) as PredictionConstraint[];
+}
+
+
+function normalizeCustomResidueLibrary(value: unknown): CustomCcdMoleculeInput[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const normalized: CustomCcdMoleculeInput[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const raw = item as Record<string, unknown>;
+    const ccd = normalizeProteinModificationCcd(raw.ccd ?? raw.ccdCode);
+    const smiles = typeof raw.smiles === 'string' ? raw.smiles.trim() : '';
+    if (!ccd || !smiles || seen.has(ccd)) continue;
+    seen.add(ccd);
+    normalized.push({
+      ccd,
+      smiles,
+      baseResidue: typeof raw.baseResidue === 'string' ? raw.baseResidue.trim().toUpperCase().slice(0, 1) : undefined,
+      label: typeof raw.label === 'string' && raw.label.trim() ? raw.label.trim().slice(0, 80) : undefined
+    });
+  }
+  return normalized;
 }
 
 function normalizeConfig(value: ProjectInputConfig): ProjectInputConfig {
@@ -900,6 +978,7 @@ export function loadProjectUiState(projectId: string): ProjectUiState | null {
 
   return {
     proteinTemplates,
+    customResidueLibrary: normalizeCustomResidueLibrary((found as any).customResidueLibrary),
     taskProteinTemplates,
     templateContentPool,
     taskAffinityUploads,
@@ -952,8 +1031,11 @@ export function saveProjectUiState(projectId: string, uiState: ProjectUiState): 
     }
   }
 
+  const customResidueLibrary = normalizeCustomResidueLibrary(uiState.customResidueLibrary);
+
   const serializedState: ProjectUiState = {
     proteinTemplates,
+    customResidueLibrary,
     taskProteinTemplates,
     taskAffinityUploads,
     templateContentPool: compactTemplateContentPool(contentPool, usedPoolKeys),
@@ -963,6 +1045,7 @@ export function saveProjectUiState(projectId: string, uiState: ProjectUiState): 
   };
   const fallbackState: ProjectUiState = {
     proteinTemplates: {},
+    customResidueLibrary,
     taskProteinTemplates: {},
     taskAffinityUploads: {},
     affinityUploads: {

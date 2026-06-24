@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
-import type { Project, ProteinTemplateUpload, TaskState } from '../../types/models';
+import type { CustomCcdMoleculeInput, Project, ProteinTemplateUpload, TaskState } from '../../types/models';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import { saveProjectUiState } from '../../utils/projectInputs';
 import { getWorkflowDefinition, isPredictionLikeWorkflowKey } from '../../utils/workflows';
@@ -12,6 +12,7 @@ interface UseProjectWorkspaceRuntimeUiOptions {
   setWorkspaceTab: Dispatch<SetStateAction<WorkspaceTab>>;
   setNowTs: Dispatch<SetStateAction<number>>;
   proteinTemplates: Record<string, ProteinTemplateUpload>;
+  customResidueLibrary: CustomCcdMoleculeInput[];
   taskProteinTemplates: Record<string, Record<string, ProteinTemplateUpload>>;
   taskAffinityUploads: Record<string, AffinityPersistedUploads>;
   activeConstraintId: string | null;
@@ -24,6 +25,7 @@ export function useProjectWorkspaceRuntimeUi({
   setWorkspaceTab,
   setNowTs,
   proteinTemplates,
+  customResidueLibrary,
   taskProteinTemplates,
   taskAffinityUploads,
   activeConstraintId,
@@ -71,6 +73,7 @@ export function useProjectWorkspaceRuntimeUi({
     if (!project) return;
     saveProjectUiState(project.id, {
       proteinTemplates,
+      customResidueLibrary,
       taskProteinTemplates,
       taskAffinityUploads,
       activeConstraintId,
@@ -79,6 +82,7 @@ export function useProjectWorkspaceRuntimeUi({
   }, [
     project,
     proteinTemplates,
+    customResidueLibrary,
     taskProteinTemplates,
     taskAffinityUploads,
     activeConstraintId,

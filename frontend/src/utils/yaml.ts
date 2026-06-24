@@ -1,5 +1,5 @@
 import yaml from 'js-yaml';
-import type { InputComponent, PredictionConstraint, PredictionProperties } from '../types/models';
+import type { CustomCcdMoleculeInput, InputComponent, PredictionConstraint, PredictionProperties, ProteinModification } from '../types/models';
 import { assignChainIdsForComponents } from './chainAssignments';
 
 const YAML_NO_WRAP = -1;
@@ -262,6 +262,42 @@ function buildTemplatePayload(templates: YamlTemplateInput[] | undefined): Array
   }, []);
 }
 
+function buildProteinModificationPayload(modifications: ProteinModification[] | undefined, sequence: string): Array<Record<string, unknown>> {
+  if (!Array.isArray(modifications) || modifications.length === 0) return [];
+  const sequenceLength = sequence.replace(/\s+/g, '').length;
+  const seen = new Set<number>();
+  return modifications.reduce<Array<Record<string, unknown>>>((acc, mod) => {
+    const position = Math.max(1, Math.floor(Number(mod.position || 1)));
+    if (!Number.isFinite(position) || position < 1 || (sequenceLength > 0 && position > sequenceLength)) return acc;
+    if (seen.has(position)) return acc;
+    const ccd = String(mod.ccd || '').trim().toUpperCase();
+    if (!ccd) return acc;
+    seen.add(position);
+    acc.push({ position, ccd });
+    return acc;
+  }, []);
+}
+
+export function collectCustomCcdMoleculesFromComponents(components: InputComponent[]): CustomCcdMoleculeInput[] {
+  const byCode = new Map<string, CustomCcdMoleculeInput>();
+  for (const component of components) {
+    if (component.type !== 'protein' || !Array.isArray(component.modifications)) continue;
+    for (const mod of component.modifications) {
+      if (mod.inputMethod !== 'jsme') continue;
+      const ccd = String(mod.ccd || '').trim().toUpperCase();
+      const smiles = String(mod.smiles || '').trim();
+      if (!ccd || !smiles || byCode.has(ccd)) continue;
+      byCode.set(ccd, {
+        ccd,
+        smiles,
+        baseResidue: String(mod.baseResidue || '').trim().toUpperCase().slice(0, 1) || undefined,
+        label: mod.label
+      });
+    }
+  }
+  return Array.from(byCode.values());
+}
+
 export function buildPredictionYamlFromComponents(components: InputComponent[], options: BuildYamlOptions = {}): string {
   const assignments = assignChainIdsForComponents(components);
   const chainIds = assignments.flat();
@@ -300,6 +336,8 @@ export function buildPredictionYamlFromComponents(components: InputComponent[], 
     if (comp.type === 'protein') {
       if (comp.cyclic) core.cyclic = true;
       if (comp.useMsa === false) core.msa = 'empty';
+      const modifications = buildProteinModificationPayload(comp.modifications, comp.sequence);
+      if (modifications.length > 0) core.modifications = modifications;
     }
 
     return {

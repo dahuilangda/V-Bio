@@ -1,9 +1,23 @@
 export type TaskState = 'DRAFT' | 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE' | 'REVOKED';
 export type MoleculeType = 'protein' | 'dna' | 'rna' | 'ligand';
 export type LigandInputMethod = 'smiles' | 'ccd' | 'jsme';
+export type ProteinModificationInputMethod = 'ccd' | 'jsme';
+export type ProteinModificationTerminal = 'internal' | 'n_term' | 'c_term';
 export type PredictionConstraintType = 'contact' | 'bond' | 'pocket';
 export type PeptideDesignMode = 'linear' | 'cyclic' | 'bicyclic';
 export type AffinityScoringMode = 'score' | 'pose' | 'refine' | 'interface';
+
+export interface ProteinModification {
+  id: string;
+  position: number;
+  terminal?: ProteinModificationTerminal;
+  customEditorCollapsed?: boolean;
+  baseResidue: string;
+  ccd: string;
+  inputMethod: ProteinModificationInputMethod;
+  smiles?: string;
+  label?: string;
+}
 
 export interface InputComponent {
   id: string;
@@ -13,6 +27,7 @@ export interface InputComponent {
   useMsa?: boolean;
   cyclic?: boolean;
   inputMethod?: LigandInputMethod;
+  modifications?: ProteinModification[];
 }
 
 export interface ProteinTemplateUpload {
@@ -344,6 +359,14 @@ export interface PredictionSubmitInput {
   backend: string;
   useMsa: boolean;
   templateUploads?: PredictionTemplateUpload[];
+  customCcdMolecules?: CustomCcdMoleculeInput[];
+}
+
+export interface CustomCcdMoleculeInput {
+  ccd: string;
+  smiles: string;
+  baseResidue?: string;
+  label?: string;
 }
 
 export interface AffinityPreviewPayload {

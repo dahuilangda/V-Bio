@@ -1,5 +1,5 @@
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
-import type { ProteinTemplateUpload, Project, ProjectTask } from '../../types/models';
+import type { CustomCcdMoleculeInput, ProteinTemplateUpload, Project, ProjectTask } from '../../types/models';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import { loadProjectFlow } from './projectLoadFlow';
 
@@ -30,6 +30,7 @@ export async function loadProjectIntoWorkspace<TDraft extends DraftLike>(params:
   setSavedAffinityUploadsFingerprint: Dispatch<SetStateAction<string>>;
   setRunMenuOpen: Dispatch<SetStateAction<boolean>>;
   setProteinTemplates: Dispatch<SetStateAction<Record<string, ProteinTemplateUpload>>>;
+  setCustomResidueLibrary: Dispatch<SetStateAction<CustomCcdMoleculeInput[]>>;
   setTaskProteinTemplates: Dispatch<SetStateAction<Record<string, Record<string, ProteinTemplateUpload>>>>;
   setTaskAffinityUploads: Dispatch<SetStateAction<Record<string, AffinityPersistedUploads>>>;
   setActiveConstraintId: Dispatch<SetStateAction<string | null>>;
@@ -57,6 +58,7 @@ export async function loadProjectIntoWorkspace<TDraft extends DraftLike>(params:
     setSavedAffinityUploadsFingerprint,
     setRunMenuOpen,
     setProteinTemplates,
+    setCustomResidueLibrary,
     setTaskProteinTemplates,
     setTaskAffinityUploads,
     setActiveConstraintId,
@@ -92,6 +94,7 @@ export async function loadProjectIntoWorkspace<TDraft extends DraftLike>(params:
     setSavedAffinityUploadsFingerprint(loaded.savedAffinityUploadsFingerprint);
     setRunMenuOpen(false);
     setProteinTemplates(loaded.proteinTemplates);
+    setCustomResidueLibrary(loaded.customResidueLibrary);
     setTaskProteinTemplates(loaded.taskProteinTemplates);
     setTaskAffinityUploads(loaded.taskAffinityUploads);
     setActiveConstraintId(loaded.activeConstraintId);

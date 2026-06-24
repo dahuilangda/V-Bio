@@ -1,5 +1,5 @@
 import type { CSSProperties, Dispatch, KeyboardEvent, PointerEvent, ReactNode, RefObject, SetStateAction } from 'react';
-import type { AffinityScoringMode, InputComponent, ProteinTemplateUpload } from '../../types/models';
+import type { AffinityScoringMode, CustomCcdMoleculeInput, InputComponent, ProteinTemplateUpload } from '../../types/models';
 import type { MolstarResiduePick } from '../../components/project/MolstarViewer';
 import type { AffinitySignalCard } from '../../components/project/AffinityWorkspace';
 import type { LeadOptCandidatesUiState } from '../../components/project/leadopt/LeadOptCandidatesPanel';
@@ -131,6 +131,8 @@ interface UseProjectWorkflowSectionPropsInput {
   components: InputComponent[];
   onComponentsChange: (components: InputComponent[]) => void;
   proteinTemplates: Record<string, ProteinTemplateUpload>;
+  customResidueLibrary: CustomCcdMoleculeInput[];
+  onCustomResidueLibraryChange: (library: CustomCcdMoleculeInput[]) => void;
   onProteinTemplateChange: (componentId: string, upload: ProteinTemplateUpload | null) => void;
   activeComponentId: string | null;
   setActiveComponentId: Dispatch<SetStateAction<string | null>>;
@@ -280,6 +282,8 @@ export function useProjectWorkflowSectionProps({
   components,
   onComponentsChange,
   proteinTemplates,
+  customResidueLibrary,
+  onCustomResidueLibraryChange,
   onProteinTemplateChange,
   activeComponentId,
   setActiveComponentId,
@@ -455,6 +459,8 @@ export function useProjectWorkflowSectionProps({
         components,
         onComponentsChange,
         proteinTemplates,
+        customResidueLibrary,
+        onCustomResidueLibraryChange,
         onProteinTemplateChange,
         activeComponentId,
         onActiveComponentIdChange: (id: string | null) => setActiveComponentId(id),

@@ -1,15 +1,20 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight, Dna, FlaskConical, Plus, Trash2 } from 'lucide-react';
-import type { InputComponent, LigandInputMethod, MoleculeType, ProteinTemplateUpload } from '../../types/models';
-import { componentTypeLabel, createInputComponent, normalizeComponentSequence } from '../../utils/projectInputs';
+import type { CustomCcdMoleculeInput, InputComponent, LigandInputMethod, MoleculeType, ProteinModification, ProteinModificationInputMethod, ProteinModificationTerminal, ProteinTemplateUpload } from '../../types/models';
+import { componentTypeLabel, createInputComponent, normalizeComponentSequence, randomId } from '../../utils/projectInputs';
 import { detectStructureFormat, extractProteinChainSequences } from '../../utils/structureParser';
 import { JSMEEditor } from './JSMEEditor';
 import { LigandPropertyGrid } from './LigandPropertyGrid';
+import { loadRDKitModule } from '../../utils/rdkit';
+import { renderLigand2DSvg } from '../../utils/ligand2d';
+import { AMINO_ACID_BACKBONE_SMARTS, rdkitMolHasAminoAcidBackbone } from '../../utils/inputValidation';
 
 interface ComponentInputEditorProps {
   components: InputComponent[];
   onChange: (components: InputComponent[]) => void;
   proteinTemplates?: Record<string, ProteinTemplateUpload>;
+  customResidueLibrary?: CustomCcdMoleculeInput[];
+  onCustomResidueLibraryChange?: (library: CustomCcdMoleculeInput[]) => void;
   onProteinTemplateChange?: (componentId: string, upload: ProteinTemplateUpload | null) => void;
   renderProteinTemplateViewer?: (args: { component: InputComponent; upload: ProteinTemplateUpload }) => ReactNode;
   selectedComponentId?: string | null;
@@ -22,6 +27,94 @@ interface ComponentInputEditorProps {
 const TYPE_OPTIONS: MoleculeType[] = ['protein', 'ligand', 'dna', 'rna'];
 const LIGAND_INPUT_OPTIONS: LigandInputMethod[] = ['smiles', 'ccd', 'jsme'];
 const QUICK_ADD_TYPES: MoleculeType[] = ['protein', 'ligand', 'dna', 'rna'];
+const CUSTOM_RESIDUE_SCAFFOLD_SMILES = 'N[C@@H](C)C(=O)O';
+
+const BUILT_IN_PROTEIN_MODIFICATIONS = [
+  { ccd: 'AIB', label: 'alpha-aminoisobutyric acid', baseResidue: 'A', group: 'Common non-natural' },
+  { ccd: 'NLE', label: 'norleucine', baseResidue: 'L', group: 'Common non-natural' },
+  { ccd: 'NVA', label: 'norvaline', baseResidue: 'V', group: 'Common non-natural' },
+  { ccd: 'ORN', label: 'ornithine', baseResidue: 'K', group: 'Common non-natural' },
+  { ccd: 'CIT', label: 'citrulline', baseResidue: 'R', group: 'Common non-natural' },
+  { ccd: 'HSE', label: 'homoserine', baseResidue: 'S', group: 'Common non-natural' },
+  { ccd: 'HCY', label: 'homocysteine', baseResidue: 'C', group: 'Common non-natural' },
+  { ccd: 'MSE', label: 'selenomethionine', baseResidue: 'M', group: 'Common non-natural' },
+  { ccd: 'SEC', label: 'selenocysteine', baseResidue: 'C', group: 'Common non-natural' },
+  { ccd: 'HYP', label: 'hydroxyproline', baseResidue: 'P', group: 'Common non-natural' },
+  { ccd: 'PCA', label: 'pyroglutamic acid', baseResidue: 'E', group: 'Common non-natural' },
+  { ccd: 'SEP', label: 'phosphoserine', baseResidue: 'S', group: 'PTM' },
+  { ccd: 'TPO', label: 'phosphothreonine', baseResidue: 'T', group: 'PTM' },
+  { ccd: 'PTR', label: 'phosphotyrosine', baseResidue: 'Y', group: 'PTM' },
+  { ccd: 'CSO', label: 'S-hydroxycysteine', baseResidue: 'C', group: 'PTM' },
+  { ccd: 'MLY', label: 'N6-methyllysine', baseResidue: 'K', group: 'PTM' },
+  { ccd: 'DAL', label: 'D-alanine', baseResidue: 'A', group: 'D-amino acid' },
+  { ccd: 'BALA', label: 'beta-alanine', baseResidue: 'A', group: 'Backbone variant' },
+  { ccd: 'MANS', label: 'O-Man-Ser', baseResidue: 'S', group: 'Glycosylation' },
+  { ccd: 'MANT', label: 'O-Man-Thr', baseResidue: 'T', group: 'Glycosylation' },
+  { ccd: 'MANN', label: 'N-Man-Asn', baseResidue: 'N', group: 'Glycosylation' },
+  { ccd: 'NAGS', label: 'O-GlcNAc-Ser', baseResidue: 'S', group: 'Glycosylation' },
+  { ccd: 'NAGT', label: 'O-GlcNAc-Thr', baseResidue: 'T', group: 'Glycosylation' },
+  { ccd: 'NAGN', label: 'N-GlcNAc-Asn', baseResidue: 'N', group: 'Glycosylation' },
+  { ccd: 'GALS', label: 'O-Gal-Ser', baseResidue: 'S', group: 'Glycosylation' },
+  { ccd: 'GALT', label: 'O-Gal-Thr', baseResidue: 'T', group: 'Glycosylation' },
+  { ccd: 'FUCS', label: 'O-Fuc-Ser', baseResidue: 'S', group: 'Glycosylation' },
+  { ccd: 'GLCS', label: 'O-Glc-Ser', baseResidue: 'S', group: 'Glycosylation' },
+  { ccd: 'XYLS', label: 'O-Xyl-Ser', baseResidue: 'S', group: 'Glycosylation' }
+];
+
+function hashTextForCode(value: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  }
+  return (hash >>> 0).toString(36).toUpperCase().slice(0, 5);
+}
+
+function buildCustomModificationCode(componentId: string, position: number, smiles = ''): string {
+  return `U${Math.max(1, Math.floor(position)).toString(36).toUpperCase()}${hashTextForCode(`${componentId}:${position}:${smiles}`)}`.slice(0, 5);
+}
+
+function normalizeModificationCcd(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]/g, '').toUpperCase().slice(0, 12);
+}
+
+function clampModificationPosition(value: number, sequence: string): number {
+  const max = Math.max(1, sequence.replace(/\s+/g, '').length || 1);
+  if (!Number.isFinite(value) || value < 1) return 1;
+  return Math.min(max, Math.floor(value));
+}
+
+function readResidueAt(sequence: string, position: number): string {
+  const cleaned = sequence.replace(/\s+/g, '').toUpperCase();
+  return cleaned[Math.max(0, position - 1)] || '';
+}
+
+function sequenceLength(sequence: string): number {
+  return sequence.replace(/\s+/g, '').length;
+}
+
+function terminalForPosition(position: number, sequence: string, requested?: ProteinModificationTerminal): ProteinModificationTerminal {
+  if (requested === 'n_term') return 'n_term';
+  if (requested === 'c_term') return 'c_term';
+  const length = sequenceLength(sequence);
+  if (Math.floor(Number(position)) === 1) return 'n_term';
+  if (length > 0 && Math.floor(Number(position)) === length) return 'c_term';
+  return 'internal';
+}
+
+function positionForTerminal(terminal: ProteinModificationTerminal, currentPosition: number, sequence: string): number {
+  if (terminal === 'n_term') return 1;
+  if (terminal === 'c_term') return Math.max(1, sequenceLength(sequence) || 1);
+  return clampModificationPosition(currentPosition, sequence);
+}
+
+function terminalLabel(terminal: ProteinModificationTerminal | undefined, position: number, sequence: string): string {
+  const resolved = terminalForPosition(position, sequence, terminal);
+  if (resolved === 'n_term') return 'N-term';
+  if (resolved === 'c_term') return 'C-term';
+  return 'Internal';
+}
+
 
 function clampCopies(value: number): number {
   if (!Number.isFinite(value) || value < 1) return 1;
@@ -36,10 +129,151 @@ function summarizeText(value: string, limit = 42): string {
   return `${text.slice(0, limit)}...`;
 }
 
+
+
+function modificationTone(index: number): string {
+  return `tone-${(index % 6) + 1}`;
+}
+
+function ProteinSequenceModificationPreview({
+  sequence,
+  modifications,
+  activeModificationId,
+  disabled = false,
+  onSelectModification,
+  onPlaceActiveModification
+}: {
+  sequence: string;
+  modifications: ProteinModification[];
+  activeModificationId: string | null;
+  disabled?: boolean;
+  onSelectModification: (id: string, scrollToRow?: boolean) => void;
+  onPlaceActiveModification: (position: number) => void;
+}) {
+  const clean = sequence.replace(/\s+/g, '').toUpperCase();
+  if (!clean || modifications.length === 0) return null;
+  const hasActiveModification = modifications.some((item) => item.id === activeModificationId);
+  const byPosition = new Map<number, Array<{ mod: ProteinModification; index: number }>>();
+  modifications.forEach((mod, index) => {
+    const position = Math.max(1, Math.floor(Number(mod.position || 1)));
+    const current = byPosition.get(position) || [];
+    current.push({ mod, index });
+    byPosition.set(position, current);
+  });
+
+  return (
+    <div className="protein-sequence-mod-preview" aria-label="Protein sequence modification map">
+      {clean.split('').map((residue, idx) => {
+        const position = idx + 1;
+        const mods = byPosition.get(position) || [];
+        const primary = mods[0];
+        const isActive = mods.some((item) => item.mod.id === activeModificationId);
+        const activeIndexAtPosition = mods.findIndex((item) => item.mod.id === activeModificationId);
+        const target = primary
+          ? activeIndexAtPosition >= 0
+            ? mods[(activeIndexAtPosition + 1) % mods.length]
+            : primary
+          : null;
+        const canClick = Boolean(target || hasActiveModification);
+        return (
+          <button
+            key={`seq-mod-${position}`}
+            type="button"
+            className={`protein-sequence-residue ${primary ? 'modified' : ''} ${primary ? modificationTone(primary.index) : ''} ${isActive ? 'active' : ''} ${
+              canClick ? 'selectable' : ''
+            }`}
+            onClick={() => {
+              if (disabled || !canClick) return;
+              if (target) {
+                onSelectModification(target.mod.id, true);
+              } else {
+                onPlaceActiveModification(position);
+              }
+            }}
+            title={
+              primary
+                ? `#${primary.index + 1} ${primary.mod.ccd} at ${position}${mods.length > 1 ? ` · ${mods.length} modifications, click to cycle` : ''}`
+                : hasActiveModification
+                  ? `Move selected modification to residue ${position}`
+                  : `Residue ${position}`
+            }
+            disabled={disabled || !canClick}
+          >
+            <span className="protein-sequence-residue-index">{position}</span>
+            <span className="protein-sequence-residue-letter">{residue}</span>
+            {primary ? <em>{primary.index + 1}</em> : null}
+            {mods.length > 1 ? <b>+{mods.length - 1}</b> : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function CustomResiduePreview({ smiles, onValidityChange }: { smiles: string; onValidityChange: (valid: boolean) => void }) {
+  const [svg, setSvg] = useState('');
+  const [message, setMessage] = useState('Draw a complete amino-acid residue.');
+  const [valid, setValid] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      const text = smiles.trim();
+      if (!text) {
+        setSvg('');
+        setMessage('Draw a complete amino-acid residue.');
+        setValid(false);
+        onValidityChange(false);
+        return;
+      }
+      try {
+        const rdkit = await loadRDKitModule();
+        if (cancelled) return;
+        const mol = rdkit.get_mol(text);
+        if (!mol) throw new Error('Invalid SMILES.');
+        mol.delete();
+        const hasBackbone = rdkitMolHasAminoAcidBackbone(rdkit, text, true);
+        const rendered = renderLigand2DSvg(rdkit, {
+          smiles: text,
+          width: 360,
+          height: 220,
+          highlightQuery: AMINO_ACID_BACKBONE_SMARTS
+        });
+        if (cancelled) return;
+        setSvg(rendered);
+        setValid(hasBackbone);
+        setMessage(hasBackbone ? 'Amino-acid backbone detected.' : 'Missing amino-acid backbone: N-CA-C(=O).');
+        onValidityChange(hasBackbone);
+      } catch (error) {
+        if (cancelled) return;
+        setSvg('');
+        setValid(false);
+        setMessage(error instanceof Error ? error.message : 'Unable to validate residue.');
+        onValidityChange(false);
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [smiles, onValidityChange]);
+
+  return (
+    <div className={`custom-residue-preview ${valid ? 'valid' : 'invalid'}`}>
+      <div className="custom-residue-preview-canvas" dangerouslySetInnerHTML={svg ? { __html: svg } : undefined}>
+        {!svg ? <span className="muted small">No valid preview.</span> : null}
+      </div>
+      <span className="small custom-residue-preview-status">{message}</span>
+    </div>
+  );
+}
+
 export function ComponentInputEditor({
   components,
   onChange,
   proteinTemplates = {},
+  customResidueLibrary = [],
+  onCustomResidueLibraryChange,
   onProteinTemplateChange,
   renderProteinTemplateViewer,
   selectedComponentId = null,
@@ -50,6 +284,10 @@ export function ComponentInputEditor({
 }: ComponentInputEditorProps) {
   const [templateErrors, setTemplateErrors] = useState<Record<string, string>>({});
   const [collapsedById, setCollapsedById] = useState<Record<string, boolean>>({});
+  const [modificationsCollapsedById, setModificationsCollapsedById] = useState<Record<string, boolean>>({});
+  const [customResidueValidity, setCustomResidueValidity] = useState<Record<string, boolean>>({});
+  const [activeModificationId, setActiveModificationId] = useState<string | null>(null);
+  const [numberDrafts, setNumberDrafts] = useState<Record<string, string>>({});
   const hasMountedSelectionEffectRef = useRef(false);
 
   useEffect(() => {
@@ -111,8 +349,141 @@ export function ComponentInputEditor({
 
   const addComponent = (type: MoleculeType) => onChange([...components, createInputComponent(type)]);
 
+  const patchProteinModification = (componentId: string, modificationId: string, patch: Partial<ProteinModification>) => {
+    const component = components.find((item) => item.id === componentId);
+    if (!component || component.type !== 'protein') return;
+    const modifications = (component.modifications || []).map((mod) => {
+      if (mod.id !== modificationId) return mod;
+      const next = { ...mod, ...patch };
+      const terminal = terminalForPosition(Number(next.position), component.sequence, next.terminal);
+      const position = positionForTerminal(terminal, Number(next.position), component.sequence);
+      const residueAtPosition = readResidueAt(component.sequence, position);
+      return {
+        ...next,
+        position,
+        terminal,
+        baseResidue: String(next.baseResidue || residueAtPosition || 'S').toUpperCase().slice(0, 1),
+        ccd:
+          next.inputMethod === 'jsme'
+            ? buildCustomModificationCode(componentId, position, String(next.smiles || ''))
+            : normalizeModificationCcd(String(next.ccd || '')),
+        inputMethod: (next.inputMethod === 'jsme' ? 'jsme' : 'ccd') as ProteinModificationInputMethod
+      };
+    });
+    patchOne(componentId, { modifications });
+  };
+
+  const addProteinModification = (componentId: string) => {
+    const component = components.find((item) => item.id === componentId);
+    if (!component || component.type !== 'protein') return;
+    const defaultPosition = clampModificationPosition(1, component.sequence);
+    const residueAtPosition = readResidueAt(component.sequence, defaultPosition);
+    const builtin = BUILT_IN_PROTEIN_MODIFICATIONS.find((item) => item.baseResidue === residueAtPosition) || BUILT_IN_PROTEIN_MODIFICATIONS[0];
+    const modification: ProteinModification = {
+      id: randomId(),
+      position: defaultPosition,
+      terminal: terminalForPosition(defaultPosition, component.sequence),
+      customEditorCollapsed: true,
+      baseResidue: residueAtPosition || builtin.baseResidue,
+      ccd: builtin.ccd,
+      inputMethod: 'ccd',
+      label: builtin.label
+    };
+    patchOne(componentId, { modifications: [...(component.modifications || []), modification] });
+    setActiveModificationId(modification.id);
+    setModificationsCollapsedById((prev) => ({ ...prev, [componentId]: false }));
+  };
+
+  const removeProteinModification = (componentId: string, modificationId: string) => {
+    const component = components.find((item) => item.id === componentId);
+    if (!component || component.type !== 'protein') return;
+    patchOne(componentId, { modifications: (component.modifications || []).filter((mod) => mod.id !== modificationId) });
+  };
+
+
+  const saveModificationToLibrary = (mod: ProteinModification) => {
+    if (!onCustomResidueLibraryChange || mod.inputMethod !== 'jsme') return;
+    const ccd = normalizeModificationCcd(mod.ccd || '');
+    const smiles = String(mod.smiles || '').trim();
+    if (!ccd || !smiles || !customResidueValidity[mod.id]) return;
+    const nextEntry: CustomCcdMoleculeInput = {
+      ccd,
+      smiles,
+      baseResidue: String(mod.baseResidue || '').toUpperCase().slice(0, 1) || undefined,
+      label: mod.label || 'Custom residue'
+    };
+    const nextLibrary = [nextEntry, ...customResidueLibrary.filter((item) => item.ccd !== ccd)].slice(0, 80);
+    onCustomResidueLibraryChange(nextLibrary);
+  };
+
+  const applyLibraryResidueToModification = (componentId: string, modificationId: string, ccd: string) => {
+    const entry = customResidueLibrary.find((item) => item.ccd === ccd);
+    if (!entry) return;
+    patchProteinModification(componentId, modificationId, {
+      inputMethod: 'jsme',
+      ccd: entry.ccd,
+      smiles: entry.smiles,
+      baseResidue: entry.baseResidue || undefined,
+      label: entry.label || 'Custom residue'
+    });
+  };
+
+  const removeLibraryResidue = (ccd: string) => {
+    if (!onCustomResidueLibraryChange) return;
+    onCustomResidueLibraryChange(customResidueLibrary.filter((item) => item.ccd !== ccd));
+  };
+
+  const selectProteinModification = (modificationId: string, scrollToRow = false) => {
+    setActiveModificationId(modificationId);
+    if (!scrollToRow) return;
+    window.requestAnimationFrame(() => {
+      document.getElementById(`protein-modification-row-${modificationId}`)?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'nearest'
+      });
+    });
+  };
+
+  const setNumberDraft = (key: string, value: string) => {
+    setNumberDrafts((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const clearNumberDraft = (key: string) => {
+    setNumberDrafts((prev) => {
+      if (!Object.prototype.hasOwnProperty.call(prev, key)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
+  const commitCopiesDraft = (component: InputComponent) => {
+    const key = `copies:${component.id}`;
+    const draft = numberDrafts[key];
+    if (draft === undefined) return;
+    patchOne(component.id, { numCopies: clampCopies(Number(draft)) });
+    clearNumberDraft(key);
+  };
+
+  const commitModificationPositionDraft = (component: InputComponent, mod: ProteinModification) => {
+    const key = `mod-position:${mod.id}`;
+    const draft = numberDrafts[key];
+    if (draft === undefined) return;
+    const position = clampModificationPosition(Number(draft), component.sequence);
+    patchProteinModification(component.id, mod.id, {
+      position,
+      terminal: terminalForPosition(position, component.sequence),
+      baseResidue: readResidueAt(component.sequence, position) || mod.baseResidue
+    });
+    clearNumberDraft(key);
+  };
+
   const toggleCollapsed = (id: string) => {
     setCollapsedById((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const toggleModificationsCollapsed = (id: string) => {
+    setModificationsCollapsedById((prev) => ({ ...prev, [id]: !prev[id] }));
   };
 
   const typeBadge = (type: MoleculeType) => {
@@ -223,6 +594,9 @@ export function ComponentInputEditor({
           const selectedTemplateSequence =
             templateUpload && templateUpload.chainId ? templateUpload.chainSequences[templateUpload.chainId] || '' : '';
           const hasLigandJsmeViewer = isLigand && method === 'jsme';
+          const proteinModifications = comp.modifications || [];
+          const hasProteinModifications = comp.type === 'protein' && proteinModifications.length > 0;
+          const areModificationsCollapsed = Boolean(modificationsCollapsedById[comp.id]);
           const collapsedSummary =
             comp.type === 'ligand'
               ? `${method.toUpperCase()} · ${summarizeText(comp.sequence)}`
@@ -304,9 +678,17 @@ export function ComponentInputEditor({
                     type="number"
                     min={1}
                     max={20}
-                    value={comp.numCopies}
+                    value={numberDrafts[`copies:${comp.id}`] ?? String(comp.numCopies)}
                     disabled={disabled}
-                    onChange={(e) => patchOne(comp.id, { numCopies: clampCopies(Number(e.target.value)) })}
+                    onChange={(e) => setNumberDraft(`copies:${comp.id}`, e.target.value)}
+                    onBlur={() => commitCopiesDraft(comp)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') e.currentTarget.blur();
+                      if (e.key === 'Escape') {
+                        clearNumberDraft(`copies:${comp.id}`);
+                        e.currentTarget.blur();
+                      }
+                    }}
                   />
                 </label>
 
@@ -387,16 +769,318 @@ export function ComponentInputEditor({
                       </label>
                     )}
 
-                    <label className="field">
-                      <span>Protein Sequence</span>
-                      <textarea
-                        rows={compact ? 4 : 6}
-                        placeholder="Example: MKTIIALSYIFCLVFA..."
-                        value={comp.sequence}
-                        disabled={disabled}
-                        onChange={(e) => patchOne(comp.id, { sequence: e.target.value })}
-                      />
-                    </label>
+                    {!hasProteinModifications ? (
+                      <label className="field">
+                        <span>Protein Sequence</span>
+                        <textarea
+                          rows={compact ? 4 : 6}
+                          placeholder="Example: MKTIIALSYIFCLVFA..."
+                          value={comp.sequence}
+                          disabled={disabled}
+                          onChange={(e) => patchOne(comp.id, { sequence: e.target.value })}
+                        />
+                      </label>
+                    ) : null}
+
+                    <ProteinSequenceModificationPreview
+                      sequence={comp.sequence}
+                      modifications={proteinModifications}
+                      activeModificationId={activeModificationId}
+                      disabled={disabled}
+                      onSelectModification={selectProteinModification}
+                      onPlaceActiveModification={(position) => {
+                        const active = (comp.modifications || []).find((item) => item.id === activeModificationId);
+                        if (!active) return;
+                        patchProteinModification(comp.id, active.id, {
+                          position,
+                          terminal: terminalForPosition(position, comp.sequence),
+                          baseResidue: readResidueAt(comp.sequence, position) || active.baseResidue
+                        });
+                      }}
+                    />
+
+                    <div className={`protein-modifications ${areModificationsCollapsed ? 'collapsed' : ''}`}>
+                      <div className="protein-modifications-head">
+                        <button
+                          type="button"
+                          className="protein-modifications-title"
+                          onClick={() => toggleModificationsCollapsed(comp.id)}
+                          disabled={!hasProteinModifications}
+                          aria-expanded={!areModificationsCollapsed}
+                        >
+                          {areModificationsCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                          <span>Residue Modifications</span>
+                          {hasProteinModifications ? <em>{proteinModifications.length}</em> : null}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-compact"
+                          disabled={disabled || !comp.sequence.trim()}
+                          onClick={() => addProteinModification(comp.id)}
+                        >
+                          <Plus size={12} />
+                          Add
+                        </button>
+                      </div>
+                      {!hasProteinModifications ? (
+                        <div className="protein-modifications-empty muted small">No residue modifications.</div>
+                      ) : areModificationsCollapsed ? (
+                        <div className="protein-modifications-summary muted small">
+                          {proteinModifications.map((mod, modIndex) => `#${modIndex + 1} ${mod.ccd}@${mod.position}`).join(' · ')}
+                        </div>
+                      ) : (
+                        <div className="protein-modification-list">
+                          {proteinModifications.map((mod, modIndex) => {
+                            const residueAtPosition = readResidueAt(comp.sequence, mod.position);
+                            const builtinValue = BUILT_IN_PROTEIN_MODIFICATIONS.some((item) => item.ccd === mod.ccd)
+                              ? mod.ccd
+                              : '__custom_ccd__';
+                            const terminal = terminalForPosition(mod.position, comp.sequence, mod.terminal);
+                            const customCollapsed = mod.customEditorCollapsed !== false;
+                            return (
+                              <div
+                                id={`protein-modification-row-${mod.id}`}
+                                key={mod.id}
+                                className={`protein-modification-row ${mod.inputMethod === 'jsme' ? 'is-custom' : ''} ${modificationTone(modIndex)} ${activeModificationId === mod.id ? 'active' : ''}`}
+                                onFocusCapture={() => selectProteinModification(mod.id)}
+                                onClick={() => selectProteinModification(mod.id)}
+                              >
+                                <div className={`protein-mod-number ${modificationTone(modIndex)}`}>#{modIndex + 1}</div>
+                                <label className="field protein-mod-position">
+                                  <span>Position</span>
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    max={Math.max(1, comp.sequence.replace(/\s+/g, '').length || 1)}
+                                    value={numberDrafts[`mod-position:${mod.id}`] ?? String(mod.position)}
+                                    disabled={disabled}
+                                    onChange={(e) => setNumberDraft(`mod-position:${mod.id}`, e.target.value)}
+                                    onBlur={() => commitModificationPositionDraft(comp, mod)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') e.currentTarget.blur();
+                                      if (e.key === 'Escape') {
+                                        clearNumberDraft(`mod-position:${mod.id}`);
+                                        e.currentTarget.blur();
+                                      }
+                                    }}
+                                  />
+                                </label>
+                                <label className="field protein-mod-terminal">
+                                  <span>Site</span>
+                                  <select
+                                    value={terminal}
+                                    disabled={disabled}
+                                    onChange={(e) => {
+                                      const nextTerminal = e.target.value as ProteinModificationTerminal;
+                                      const position = positionForTerminal(nextTerminal, mod.position, comp.sequence);
+                                      patchProteinModification(comp.id, mod.id, {
+                                        terminal: nextTerminal,
+                                        position,
+                                        baseResidue: readResidueAt(comp.sequence, position) || mod.baseResidue
+                                      });
+                                    }}
+                                  >
+                                    <option value="internal">Internal</option>
+                                    <option value="n_term">N-term</option>
+                                    <option value="c_term">C-term</option>
+                                  </select>
+                                </label>
+                                <label className="field protein-mod-residue">
+                                  <span>Residue</span>
+                                  <input value={residueAtPosition || mod.baseResidue || '-'} disabled readOnly />
+                                </label>
+                                <label className="field protein-mod-source">
+                                  <span>Source</span>
+                                  <select
+                                    value={mod.inputMethod}
+                                    disabled={disabled}
+                                    onChange={(e) => {
+                                      const nextMethod = e.target.value as ProteinModificationInputMethod;
+                                      const builtin = BUILT_IN_PROTEIN_MODIFICATIONS.find((item) => item.baseResidue === (residueAtPosition || mod.baseResidue)) || BUILT_IN_PROTEIN_MODIFICATIONS[0];
+                                      patchProteinModification(comp.id, mod.id, {
+                                        inputMethod: nextMethod,
+                                        ccd: nextMethod === 'jsme' ? buildCustomModificationCode(comp.id, mod.position, mod.smiles || '') : builtin.ccd,
+                                        smiles: nextMethod === 'jsme' ? mod.smiles || CUSTOM_RESIDUE_SCAFFOLD_SMILES : undefined,
+                                        label: nextMethod === 'jsme' ? 'Custom residue' : builtin.label,
+                                        customEditorCollapsed: nextMethod === 'jsme' ? true : undefined
+                                      });
+                                    }}
+                                  >
+                                    <option value="ccd">Built-in CCD</option>
+                                    <option value="jsme">Draw custom</option>
+                                  </select>
+                                </label>
+                                {mod.inputMethod === 'ccd' ? (
+                                  <label className="field protein-mod-ccd">
+                                    <span>Modification</span>
+                                    <select
+                                      value={builtinValue}
+                                      disabled={disabled}
+                                      onChange={(e) => {
+                                        const selected = BUILT_IN_PROTEIN_MODIFICATIONS.find((item) => item.ccd === e.target.value);
+                                        if (selected) {
+                                          patchProteinModification(comp.id, mod.id, {
+                                            ccd: selected.ccd,
+                                            baseResidue: residueAtPosition || selected.baseResidue,
+                                            label: selected.label
+                                          });
+                                        } else {
+                                          patchProteinModification(comp.id, mod.id, { ccd: mod.ccd });
+                                        }
+                                      }}
+                                    >
+                                      {Array.from(new Set(BUILT_IN_PROTEIN_MODIFICATIONS.map((item) => item.group))).map((group) => (
+                                        <optgroup key={group} label={group}>
+                                          {BUILT_IN_PROTEIN_MODIFICATIONS.filter((item) => item.group === group).map((item) => (
+                                            <option key={item.ccd} value={item.ccd}>
+                                              {item.label} ({item.ccd})
+                                            </option>
+                                          ))}
+                                        </optgroup>
+                                      ))}
+                                      {builtinValue === '__custom_ccd__' && <option value="__custom_ccd__">{mod.ccd}</option>}
+                                    </select>
+                                  </label>
+                                ) : (
+                                  <label className="field protein-mod-ccd">
+                                    <span>Code</span>
+                                    <input value={mod.ccd || buildCustomModificationCode(comp.id, mod.position, mod.smiles || '')} disabled readOnly />
+                                  </label>
+                                )}
+                                <button
+                                  type="button"
+                                  className="icon-btn protein-mod-remove"
+                                  disabled={disabled}
+                                  title="Remove modification"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    removeProteinModification(comp.id, mod.id);
+                                  }}
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                                {mod.inputMethod === 'jsme' && (
+                                  <div className={`protein-mod-jsme ${customCollapsed ? 'is-collapsed' : ''}`}>
+                                    <div className="protein-mod-jsme-head">
+                                      <button
+                                        type="button"
+                                        className="btn btn-ghost btn-compact protein-mod-jsme-toggle"
+                                        disabled={disabled}
+                                        aria-expanded={!customCollapsed}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          patchProteinModification(comp.id, mod.id, { customEditorCollapsed: !customCollapsed });
+                                        }}
+                                      >
+                                        {customCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                                        {customCollapsed ? 'Show custom editor' : 'Hide custom editor'}
+                                      </button>
+                                      <span className="muted small">{terminalLabel(terminal, mod.position, comp.sequence)} · {mod.ccd}</span>
+                                    </div>
+                                    {!customCollapsed && (
+                                      <>
+                                        <div className="protein-mod-jsme-main">
+                                          <span className="protein-mod-jsme-title">JSME Molecule Editor</span>
+                                          <div className="jsme-editor-container component-jsme-shell protein-mod-jsme-shell">
+                                            <JSMEEditor
+                                              smiles={mod.smiles || CUSTOM_RESIDUE_SCAFFOLD_SMILES}
+                                              height={compact ? 420 : 500}
+                                              onSmilesChange={(value) => patchProteinModification(comp.id, mod.id, { smiles: value })}
+                                            />
+                                          </div>
+                                        </div>
+                                        <div className="protein-mod-custom-side">
+                                          {customResidueLibrary.length > 0 && (
+                                            <div className="protein-mod-library">
+                                              <label className="field">
+                                                <span>Library</span>
+                                                <select
+                                                  value=""
+                                                  disabled={disabled}
+                                                  onChange={(e) => {
+                                                    if (e.target.value) applyLibraryResidueToModification(comp.id, mod.id, e.target.value);
+                                                  }}
+                                                >
+                                                  <option value="">Reuse saved residue</option>
+                                                  {customResidueLibrary.map((item) => (
+                                                    <option key={item.ccd} value={item.ccd}>
+                                                      {item.label || 'Custom residue'} ({item.ccd})
+                                                    </option>
+                                                  ))}
+                                                </select>
+                                              </label>
+                                              <div className="protein-mod-library-actions">
+                                                {customResidueLibrary.slice(0, 4).map((item) => (
+                                                  <button
+                                                    key={`library-remove-${item.ccd}`}
+                                                    type="button"
+                                                    className="btn btn-ghost btn-compact"
+                                                    disabled={disabled}
+                                                    title={`Delete ${item.ccd} from project library`}
+                                                    onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      removeLibraryResidue(item.ccd);
+                                                    }}
+                                                  >
+                                                    Delete {item.ccd}
+                                                  </button>
+                                                ))}
+                                              </div>
+                                            </div>
+                                          )}
+                                          <label className="field">
+                                            <span>Name</span>
+                                            <input
+                                              value={mod.label || ''}
+                                              disabled={disabled}
+                                              placeholder="Custom residue"
+                                              onChange={(e) => patchProteinModification(comp.id, mod.id, { label: e.target.value })}
+                                            />
+                                          </label>
+                                          <label className="field">
+                                            <span>Custom Residue SMILES</span>
+                                            <input
+                                              value={mod.smiles || CUSTOM_RESIDUE_SCAFFOLD_SMILES}
+                                              disabled={disabled}
+                                              placeholder="Draw or paste the complete modified residue SMILES"
+                                              onChange={(e) => patchProteinModification(comp.id, mod.id, { smiles: e.target.value })}
+                                            />
+                                          </label>
+                                          <CustomResiduePreview
+                                            smiles={mod.smiles || CUSTOM_RESIDUE_SCAFFOLD_SMILES}
+                                            onValidityChange={(isValid) =>
+                                              setCustomResidueValidity((prev) => (prev[mod.id] === isValid ? prev : { ...prev, [mod.id]: isValid }))
+                                            }
+                                          />
+                                          <div className="protein-mod-rules">
+                                            <span>Rules</span>
+                                            <ul>
+                                              <li>Complete residue, not a standalone ligand</li>
+                                              <li>Backbone N-CA-C(=O) must remain present</li>
+                                              <li>Modify the side chain or terminal chemistry as needed</li>
+                                            </ul>
+                                          </div>
+                                          <div className="protein-mod-jsme-actions">
+                                            <button
+                                              type="button"
+                                              className="btn btn-ghost btn-compact"
+                                              disabled={disabled || !String(mod.smiles || '').trim() || !customResidueValidity[mod.id]}
+                                              onClick={() => saveModificationToLibrary(mod)}
+                                            >
+                                              Save to library
+                                            </button>
+                                          </div>
+                                        </div>
+                                      </>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
                 {templateUpload && renderProteinTemplateViewer && (

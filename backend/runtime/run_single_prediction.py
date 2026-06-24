@@ -21,6 +21,7 @@ import re
 import base64
 import random
 import copy
+import pickle
 import numpy as np
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any, Iterable, Callable
@@ -112,6 +113,7 @@ IPSAE_PAE_CUTOFF = 12.0
 IPSAE_DIST_CUTOFF = 5.0
 _BOLTZ_RESULT_CONF_RE = re.compile(r"^confidence_(.+)_model_(\d+)\.json$", re.IGNORECASE)
 _PROTENIX_SUMMARY_CONF_RE = re.compile(r"_summary_confidence_sample_(\d+)\.json$", re.IGNORECASE)
+CUSTOM_RESIDUE_BACKBONE_SMARTS = "[NX3;!$(NC=O)]-[C;X4]-C(=O)[O,N]"
 
 
 def _normalized_msa_server_url() -> str:
@@ -6976,6 +6978,145 @@ def run_peptide_design_backend(
     )
 
 
+
+def _normalize_custom_ccd_molecules(raw_value: Any) -> List[Dict[str, str]]:
+    if not isinstance(raw_value, list):
+        return []
+    molecules: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw_value:
+        if not isinstance(item, dict):
+            continue
+        ccd = re.sub(r"[^A-Za-z0-9_-]", "", str(item.get("ccd") or "")).upper()[:12]
+        smiles = str(item.get("smiles") or "").strip()
+        if not ccd or not smiles or ccd in seen:
+            continue
+        seen.add(ccd)
+        molecules.append({
+            "ccd": ccd,
+            "smiles": smiles,
+            "base_residue": str(item.get("base_residue") or item.get("baseResidue") or "").strip().upper()[:1],
+            "label": str(item.get("label") or "").strip()[:80],
+        })
+    return molecules
+
+
+
+def _boltz_custom_ccd_aliases(ccd: str) -> List[str]:
+    code = re.sub(r"[^A-Za-z0-9_-]", "", str(ccd or "")).upper()
+    aliases: List[str] = []
+    for candidate in (code, code[:5]):
+        if candidate and candidate not in aliases:
+            aliases.append(candidate)
+    return aliases
+
+
+def _custom_ccd_has_amino_acid_backbone(mol: Chem.Mol) -> bool:
+    query = Chem.MolFromSmarts(CUSTOM_RESIDUE_BACKBONE_SMARTS)
+    return bool(query is not None and mol.HasSubstructMatch(query))
+
+
+def _set_custom_ccd_atom_properties(mol: Chem.Mol) -> None:
+    for idx, atom in enumerate(mol.GetAtoms()):
+        name = f"{atom.GetSymbol().upper()}{idx + 1}"
+        if len(name) > 4:
+            name = f"{atom.GetSymbol().upper()}{idx % 1000}"
+        atom.SetProp("name", name)
+        atom.SetProp("alt_name", name)
+        atom.SetProp("leaving_atom", "0")
+
+    backbone_patterns = {
+        "N": Chem.MolFromSmarts("[NX3;!$(NC=O)]"),
+        "CA": Chem.MolFromSmarts("[C;X4;H1]([N])C(=O)"),
+        "C": Chem.MolFromSmarts("C(=O)[O,N]"),
+    }
+    for atom_name, pattern in backbone_patterns.items():
+        if pattern is None:
+            continue
+        matches = mol.GetSubstructMatches(pattern)
+        if not matches:
+            continue
+        atom_idx = matches[0][0]
+        atom = mol.GetAtomWithIdx(atom_idx)
+        atom.SetProp("name", atom_name)
+        atom.SetProp("alt_name", atom_name)
+
+    carboxyl_pattern = Chem.MolFromSmarts("[CX3](=O)[OX1H0-,OX2H1]")
+    if carboxyl_pattern is not None:
+        for match in mol.GetSubstructMatches(carboxyl_pattern):
+            if len(match) < 3:
+                continue
+            carbon_idx, carbonyl_oxygen_idx, terminal_oxygen_idx = match[:3]
+            mol.GetAtomWithIdx(carbon_idx).SetProp("name", "C")
+            mol.GetAtomWithIdx(carbon_idx).SetProp("alt_name", "C")
+            mol.GetAtomWithIdx(carbonyl_oxygen_idx).SetProp("name", "O")
+            mol.GetAtomWithIdx(carbonyl_oxygen_idx).SetProp("alt_name", "O")
+            terminal = mol.GetAtomWithIdx(terminal_oxygen_idx)
+            terminal.SetProp("name", "OXT")
+            terminal.SetProp("alt_name", "OXT")
+            terminal.SetProp("leaving_atom", "1")
+            break
+
+
+def _build_custom_ccd_mol(smiles: str) -> Chem.Mol:
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError("RDKit failed to parse custom residue SMILES.")
+    Chem.SanitizeMol(mol)
+    if not _custom_ccd_has_amino_acid_backbone(mol):
+        raise ValueError("Custom residue must contain an amino-acid backbone (N-CA-C(=O)).")
+    _set_custom_ccd_atom_properties(mol)
+    try:
+        if AllChem.EmbedMolecule(mol) != -1:
+            try:
+                AllChem.UFFOptimizeMolecule(mol)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    for conformer in mol.GetConformers():
+        conformer.SetProp("name", "Ideal")
+    return mol
+
+
+def _prepare_task_boltz_custom_mols_dir(
+    temp_dir: str,
+    molecules: List[Dict[str, str]],
+    source_mols_dir: Path,
+    container_base_mols_dir: str,
+) -> Optional[Path]:
+    custom_molecules = _normalize_custom_ccd_molecules(molecules)
+    if not custom_molecules:
+        return None
+    if not source_mols_dir.is_dir():
+        raise RuntimeError(f"Boltz2 molecule cache directory is missing: {source_mols_dir}")
+
+    task_mols = Path(temp_dir) / "boltz_custom_mols"
+    task_mols.mkdir(parents=True, exist_ok=True)
+    for source in source_mols_dir.glob("*.pkl"):
+        link_path = task_mols / source.name
+        if link_path.exists() or link_path.is_symlink():
+            continue
+        link_path.symlink_to(f"{container_base_mols_dir.rstrip('/')}/{source.name}")
+
+    Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
+    for item in custom_molecules:
+        custom_mol = _build_custom_ccd_mol(item["smiles"])
+        aliases = _boltz_custom_ccd_aliases(item["ccd"])
+        for alias in aliases:
+            mol_path = task_mols / f"{alias}.pkl"
+            if mol_path.exists() or mol_path.is_symlink():
+                mol_path.unlink()
+            with mol_path.open("wb") as handle:
+                pickle.dump(custom_mol, handle)
+        alias_note = f" aliases={','.join(aliases)}" if len(aliases) > 1 else ""
+        print(
+            f"Registered custom residue CCD {item['ccd']} from drawn SMILES{alias_note}"
+            + (f" at base residue {item['base_residue']}" if item.get("base_residue") else ""),
+            file=sys.stderr,
+        )
+    return task_mols
+
 def run_boltz_backend(
     temp_dir: str,
     yaml_content: str,
@@ -6984,6 +7125,7 @@ def run_boltz_backend(
     model_name: Optional[str],
     task_id: Optional[str] = None,
     strict_ligand_confidence_contract: bool = False,
+    custom_ccd_molecules: Optional[List[Dict[str, str]]] = None,
 ) -> None:
     msa_server_url = _assert_msa_server_configured("boltz")
     normalized_yaml = _normalize_ligand_chain_collisions(yaml_content)
@@ -7123,12 +7265,28 @@ def run_boltz_backend(
     if runtime_task_id:
         docker_command.extend(["--env", f"BOLTZ_TASK_ID={runtime_task_id}"])
 
+    custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
     host_cache_dir = str(BOLTZ2_HOST_CACHE_DIR or "").strip()
     container_cache_dir = str(BOLTZ2_CONTAINER_CACHE_DIR or "/root/.boltz").strip() or "/root/.boltz"
+    container_base_mols_dir = "/root/.boltz_base_mols"
+    custom_mols_dir: Optional[Path] = None
+    if custom_molecules and not host_cache_dir:
+        raise RuntimeError("BOLTZ2_HOST_CACHE_DIR is required when using custom drawn residue CCD molecules.")
+    if custom_molecules:
+        custom_mols_dir = _prepare_task_boltz_custom_mols_dir(
+            temp_dir,
+            custom_molecules,
+            Path(host_cache_dir) / "mols",
+            container_base_mols_dir,
+        )
+
     if host_cache_dir:
         os.makedirs(host_cache_dir, exist_ok=True)
         docker_command.extend(["--volume", f"{host_cache_dir}:{container_cache_dir}"])
         docker_command.extend(["--env", f"BOLTZ_CACHE={container_cache_dir}"])
+        if custom_mols_dir:
+            docker_command.extend(["--volume", f"{Path(host_cache_dir) / 'mols'}:{container_base_mols_dir}:ro"])
+            docker_command.extend(["--volume", f"{custom_mols_dir}:{container_cache_dir}/mols:ro"])
 
     host_uid = os.getuid()
     host_gid = os.getgid()
@@ -7800,6 +7958,7 @@ def main():
         seed = predict_args.pop("seed", None)
         template_inputs = predict_args.pop("template_inputs", None)
         pocketxmol_inputs = predict_args.pop("pocketxmol_inputs", {})
+        custom_ccd_molecules = predict_args.pop("custom_ccd_molecules", [])
         strict_ligand_confidence_contract = _read_bool_option(
             predict_args,
             "strict_ligand_confidence_contract",
@@ -7910,6 +8069,7 @@ def main():
                     model_name,
                     task_id=runtime_task_id,
                     strict_ligand_confidence_contract=strict_ligand_confidence_contract,
+                    custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
                 )
 
             if not os.path.exists(output_archive_path):

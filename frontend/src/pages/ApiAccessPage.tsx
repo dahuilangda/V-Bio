@@ -36,7 +36,10 @@ import type {
   InputComponent,
   PredictionConstraint,
   PredictionProperties,
-  Project
+  Project,
+  ProteinModification,
+  ProteinModificationInputMethod,
+  ProteinModificationTerminal
 } from '../types/models';
 import { useAuth } from '../hooks/useAuth';
 import { ConstraintEditor } from '../components/project/ConstraintEditor';
@@ -56,10 +59,12 @@ import {
 } from '../api/supabaseLite';
 import { sha256Hex } from '../utils/crypto';
 import { ENV } from '../utils/env';
-import { componentTypeLabel, createInputComponent, normalizeInputComponents } from '../utils/projectInputs';
+import { componentTypeLabel, createInputComponent, normalizeInputComponents, randomId } from '../utils/projectInputs';
 import { getWorkflowDefinition } from '../utils/workflows';
-import { buildPredictionYamlFromComponents } from '../utils/yaml';
+import { buildPredictionYamlFromComponents, collectCustomCcdMoleculesFromComponents } from '../utils/yaml';
 import { assignChainIdsForComponents } from '../utils/chainAssignments';
+import { loadRDKitModule } from '../utils/rdkit';
+import { rdkitMolHasAminoAcidBackbone, looksLikeAminoAcidBackboneSmiles } from '../utils/inputValidation';
 
 type UsageWindow = '7d' | '30d' | '90d' | 'all';
 type ProjectStatsWorkflowFilter = 'all' | 'prediction' | 'affinity' | 'lead_optimization';
@@ -282,6 +287,86 @@ function createYamlBuilderComponent(type: InputComponent['type'] = 'protein'): I
   return component;
 }
 
+const BUILDER_CUSTOM_RESIDUE_SCAFFOLD = 'N[C@@H](C)C(=O)O';
+const BUILDER_BUILT_IN_MODIFICATIONS = [
+  { ccd: 'AIB', label: 'AIB', baseResidue: 'A' },
+  { ccd: 'NLE', label: 'NLE', baseResidue: 'L' },
+  { ccd: 'NVA', label: 'NVA', baseResidue: 'V' },
+  { ccd: 'ORN', label: 'ORN', baseResidue: 'K' },
+  { ccd: 'CIT', label: 'CIT', baseResidue: 'R' },
+  { ccd: 'MSE', label: 'MSE', baseResidue: 'M' },
+  { ccd: 'SEC', label: 'SEC', baseResidue: 'C' },
+  { ccd: 'SEP', label: 'SEP', baseResidue: 'S' },
+  { ccd: 'TPO', label: 'TPO', baseResidue: 'T' },
+  { ccd: 'PTR', label: 'PTR', baseResidue: 'Y' },
+  { ccd: 'MLY', label: 'MLY', baseResidue: 'K' },
+  { ccd: 'DAL', label: 'DAL', baseResidue: 'A' }
+];
+
+function normalizeBuilderCcd(value: string): string {
+  return String(value || '').replace(/[^A-Za-z0-9_-]/g, '').toUpperCase().slice(0, 12);
+}
+
+function hashBuilderText(value: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  }
+  return (hash >>> 0).toString(36).toUpperCase().slice(0, 5);
+}
+
+function buildBuilderCustomCcd(componentId: string, position: number, smiles = ''): string {
+  return `U${Math.max(1, Math.floor(position)).toString(36).toUpperCase()}${hashBuilderText(`${componentId}:${position}:${smiles}`)}`.slice(0, 5);
+}
+
+function cleanProteinSequence(sequence: string): string {
+  return String(sequence || '').replace(/\s+/g, '').toUpperCase();
+}
+
+function builderSequenceLength(sequence: string): number {
+  return cleanProteinSequence(sequence).length;
+}
+
+function clampBuilderModPosition(value: number, sequence: string): number {
+  const max = Math.max(1, builderSequenceLength(sequence) || 1);
+  if (!Number.isFinite(value) || value < 1) return 1;
+  return Math.min(max, Math.floor(value));
+}
+
+function builderResidueAt(sequence: string, position: number): string {
+  return cleanProteinSequence(sequence)[Math.max(0, position - 1)] || '';
+}
+
+function builderPositionForTerminal(terminal: ProteinModificationTerminal, position: number, sequence: string): number {
+  if (terminal === 'n_term') return 1;
+  if (terminal === 'c_term') return Math.max(1, builderSequenceLength(sequence) || 1);
+  return clampBuilderModPosition(position, sequence);
+}
+
+function builderTerminalForPosition(position: number, sequence: string, terminal?: ProteinModificationTerminal): ProteinModificationTerminal {
+  if (terminal === 'n_term' || terminal === 'c_term') return terminal;
+  if (Math.floor(Number(position)) === 1) return 'n_term';
+  if (builderSequenceLength(sequence) > 0 && Math.floor(Number(position)) === builderSequenceLength(sequence)) return 'c_term';
+  return 'internal';
+}
+
+function createBuilderModification(component: InputComponent): ProteinModification {
+  const position = clampBuilderModPosition(1, component.sequence);
+  const residue = builderResidueAt(component.sequence, position);
+  const builtin = BUILDER_BUILT_IN_MODIFICATIONS.find((item) => item.baseResidue === residue) || BUILDER_BUILT_IN_MODIFICATIONS[0];
+  return {
+    id: randomId(),
+    position,
+    terminal: builderTerminalForPosition(position, component.sequence),
+    baseResidue: residue || builtin.baseResidue,
+    ccd: builtin.ccd,
+    inputMethod: 'ccd',
+    label: builtin.label,
+    customEditorCollapsed: true
+  };
+}
+
 function isAffinityUploadComponent(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const component = value as Record<string, unknown>;
@@ -457,6 +542,7 @@ export function ApiAccessPage() {
   const [builderYamlConstraintsOpen, setBuilderYamlConstraintsOpen] = useState(false);
   const [builderYamlConstraints, setBuilderYamlConstraints] = useState<PredictionConstraint[]>([]);
   const [builderYamlProperties, setBuilderYamlProperties] = useState<PredictionProperties>({ ...EMPTY_PREDICTION_PROPERTIES });
+  const [builderCustomResidueValidity, setBuilderCustomResidueValidity] = useState<Record<string, boolean>>({});
   const [builderTargetPath, setBuilderTargetPath] = useState('./protein.pdb');
   const [builderLigandPath, setBuilderLigandPath] = useState('./ligand.sdf');
   const [builderResultPath, setBuilderResultPath] = useState('./result.zip');
@@ -1520,6 +1606,14 @@ export function ApiAccessPage() {
   const predictionTemplateFlags = predictionTemplateEnabled
     ? predictionTemplateEntries.map((entry) => ` \\\n  -F "template_files=@${entry.escapedPath}"`).join('')
     : '';
+  const allCustomCcdMolecules = collectCustomCcdMoleculesFromComponents(normalizedYamlBuilderComponents);
+  const customCcdMolecules = allCustomCcdMolecules.filter((item) =>
+    looksLikeAminoAcidBackboneSmiles(item.smiles)
+  );
+  const customCcdFlags = customCcdMolecules.length > 0
+    ? ` \\
+  -F "custom_ccd_molecules=${escapeForDoubleQuotedShell(JSON.stringify(customCcdMolecules))}"`
+    : '';
   const escapedTargetPath = escapeForDoubleQuotedShell(builderTargetPath.trim() || './protein.pdb');
   const escapedLigandPath = escapeForDoubleQuotedShell(builderLigandPath.trim() || './ligand.sdf');
   const normalizedAffinityMode = normalizeAffinityBuilderMode(builderAffinityMode);
@@ -1564,6 +1658,10 @@ export function ApiAccessPage() {
     LEAD_OPT_API_ACCESS_ENABLED && isLeadOptimizationWorkflow && !leadOptInputCompound
       ? '\n# Lead Optimization requires input_compound (SMILES).'
       : '';
+  const customResidueHint =
+    isPredictionWorkflow && allCustomCcdMolecules.length > customCcdMolecules.length
+      ? '\n# Some custom residue SMILES were omitted because no amino-acid backbone was detected.'
+      : '';
   const commandEnv = `export VBIO_API_BASE="${managementApiBaseUrl}"\nexport VBIO_API_TOKEN="${curlToken}"\nexport VBIO_PROJECT_ID="${selectedTokenProjectId}"`;
   const submitTaskIdCapture = `echo "$RESPONSE"
 TASK_ID=$(printf '%s' "$RESPONSE" | tr -d '\\n\\r' | sed -n 's/.*"task_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
@@ -1577,7 +1675,7 @@ fi
   -H "X-API-Token: ${curlToken}" \\
   -F "project_id=${selectedTokenProjectId}"${submitTaskMetaFlags} \\
   -F "yaml_file=@${escapedYamlPath}" \\
-  -F "backend=${effectivePredictionBackend}"${predictionTemplateFlags})
+  -F "backend=${effectivePredictionBackend}"${predictionTemplateFlags}${customCcdFlags})
 ${submitTaskIdCapture}`;
   const commandSubmitAffinityBoltz = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/api/boltz2score" \\
   -H "X-API-Token: ${curlToken}" \\
@@ -1595,7 +1693,7 @@ ${submitTaskIdCapture}`;
     : (builderWorkflowKey === 'affinity'
       ? commandSubmitAffinityBoltz
       : commandSubmitPrediction);
-  const commandSubmitWithHints = `${commandSubmit}${affinityModeHint}${predictionPairHint}${predictionAffinityHint}${leadOptHint}`;
+  const commandSubmitWithHints = `${commandSubmit}${affinityModeHint}${predictionPairHint}${predictionAffinityHint}${leadOptHint}${customResidueHint}`;
   const submitBackendLabel = builderWorkflowKey === 'affinity' ? effectiveAffinityBackend : effectivePredictionBackend;
   const statusEndpoint = `/status/${taskIdForCommand}`;
   const resultsEndpoint = `/results/${taskIdForCommand}`;
@@ -1744,6 +1842,66 @@ ${submitTaskIdCapture}`;
 
   const updateYamlBuilderComponent = (componentId: string, updater: (component: InputComponent) => InputComponent) => {
     setBuilderYamlComponents((prev) => prev.map((component) => (component.id === componentId ? updater(component) : component)));
+  };
+
+  const validateBuilderCustomSmiles = useCallback((modificationId: string, smiles: string) => {
+    const text = String(smiles || '').trim();
+    if (!text) {
+      setBuilderCustomResidueValidity((prev) => ({ ...prev, [modificationId]: false }));
+      return;
+    }
+    setBuilderCustomResidueValidity((prev) => ({ ...prev, [modificationId]: looksLikeAminoAcidBackboneSmiles(text) }));
+    void loadRDKitModule()
+      .then((rdkit) => {
+        const valid = rdkitMolHasAminoAcidBackbone(rdkit, text, true);
+        setBuilderCustomResidueValidity((prev) => ({ ...prev, [modificationId]: valid }));
+      })
+      .catch(() => {
+        setBuilderCustomResidueValidity((prev) => ({ ...prev, [modificationId]: looksLikeAminoAcidBackboneSmiles(text) }));
+      });
+  }, []);
+
+  const patchYamlBuilderModification = (componentId: string, modificationId: string, patch: Partial<ProteinModification>) => {
+    updateYamlBuilderComponent(componentId, (component) => {
+      if (component.type !== 'protein') return component;
+      const modifications = (component.modifications || []).map((mod) => {
+        if (mod.id !== modificationId) return mod;
+        const next = { ...mod, ...patch };
+        const terminal = builderTerminalForPosition(Number(next.position), component.sequence, next.terminal);
+        const position = builderPositionForTerminal(terminal, Number(next.position), component.sequence);
+        const smiles = String(next.smiles || '').trim();
+        const inputMethod = (next.inputMethod === 'jsme' ? 'jsme' : 'ccd') as ProteinModificationInputMethod;
+        return {
+          ...next,
+          terminal,
+          position,
+          inputMethod,
+          baseResidue: String(next.baseResidue || builderResidueAt(component.sequence, position) || 'S').toUpperCase().slice(0, 1),
+          ccd: inputMethod === 'jsme' ? buildBuilderCustomCcd(component.id, position, smiles) : normalizeBuilderCcd(String(next.ccd || '')),
+          smiles: inputMethod === 'jsme' ? smiles || BUILDER_CUSTOM_RESIDUE_SCAFFOLD : undefined
+        };
+      });
+      return { ...component, modifications };
+    });
+  };
+
+  const addYamlBuilderModification = (componentId: string) => {
+    updateYamlBuilderComponent(componentId, (component) => {
+      if (component.type !== 'protein') return component;
+      return { ...component, modifications: [...(component.modifications || []), createBuilderModification(component)] };
+    });
+  };
+
+  const removeYamlBuilderModification = (componentId: string, modificationId: string) => {
+    updateYamlBuilderComponent(componentId, (component) => {
+      if (component.type !== 'protein') return component;
+      return { ...component, modifications: (component.modifications || []).filter((mod) => mod.id !== modificationId) };
+    });
+    setBuilderCustomResidueValidity((prev) => {
+      const next = { ...prev };
+      delete next[modificationId];
+      return next;
+    });
   };
 
   const removeYamlBuilderComponent = (componentId: string) => {
@@ -2878,6 +3036,124 @@ ${submitTaskIdCapture}`;
                                   />
                                   <span>Cyclic</span>
                                 </label>
+                              </div>
+
+                              <div className="api-yaml-builder api-yaml-modifications">
+                                <div className="api-builder-meta">
+                                  <span className="badge">Residue Modifications {(component.modifications || []).length}</span>
+                                  <button type="button" className="btn btn-secondary btn-compact" onClick={() => addYamlBuilderModification(component.id)}>
+                                    <Plus size={12} />
+                                    Add
+                                  </button>
+                                </div>
+                                {(component.modifications || []).map((mod, modIndex) => {
+                                  const terminal = builderTerminalForPosition(mod.position, component.sequence, mod.terminal);
+                                  const residue = builderResidueAt(component.sequence, mod.position) || mod.baseResidue || '-';
+                                  const customValid = mod.inputMethod !== 'jsme' || Boolean(builderCustomResidueValidity[mod.id] ?? looksLikeAminoAcidBackboneSmiles(mod.smiles || ''));
+                                  return (
+                                    <div key={mod.id} className="api-yaml-mod-row">
+                                      <strong>#{modIndex + 1}</strong>
+                                      <label className="field">
+                                        <span>Position</span>
+                                        <input
+                                          type="number"
+                                          min={1}
+                                          max={Math.max(1, builderSequenceLength(component.sequence) || 1)}
+                                          value={mod.position}
+                                          onChange={(e) => {
+                                            const position = clampBuilderModPosition(Number(e.target.value), component.sequence);
+                                            patchYamlBuilderModification(component.id, mod.id, {
+                                              position,
+                                              terminal: builderTerminalForPosition(position, component.sequence),
+                                              baseResidue: builderResidueAt(component.sequence, position) || mod.baseResidue
+                                            });
+                                          }}
+                                        />
+                                      </label>
+                                      <label className="field">
+                                        <span>Site</span>
+                                        <select
+                                          value={terminal}
+                                          onChange={(e) => {
+                                            const nextTerminal = e.target.value as ProteinModificationTerminal;
+                                            const position = builderPositionForTerminal(nextTerminal, mod.position, component.sequence);
+                                            patchYamlBuilderModification(component.id, mod.id, {
+                                              terminal: nextTerminal,
+                                              position,
+                                              baseResidue: builderResidueAt(component.sequence, position) || mod.baseResidue
+                                            });
+                                          }}
+                                        >
+                                          <option value="internal">Internal</option>
+                                          <option value="n_term">N-term</option>
+                                          <option value="c_term">C-term</option>
+                                        </select>
+                                      </label>
+                                      <label className="field">
+                                        <span>Residue</span>
+                                        <input value={residue} readOnly />
+                                      </label>
+                                      <label className="field">
+                                        <span>Source</span>
+                                        <select
+                                          value={mod.inputMethod}
+                                          onChange={(e) => {
+                                            const inputMethod = (e.target.value === 'jsme' ? 'jsme' : 'ccd') as ProteinModificationInputMethod;
+                                            const fallback = BUILDER_BUILT_IN_MODIFICATIONS.find((item) => item.baseResidue === residue) || BUILDER_BUILT_IN_MODIFICATIONS[0];
+                                            const smiles = mod.smiles || BUILDER_CUSTOM_RESIDUE_SCAFFOLD;
+                                            patchYamlBuilderModification(component.id, mod.id, {
+                                              inputMethod,
+                                              ccd: inputMethod === 'jsme' ? buildBuilderCustomCcd(component.id, mod.position, smiles) : fallback.ccd,
+                                              smiles: inputMethod === 'jsme' ? smiles : undefined,
+                                              label: inputMethod === 'jsme' ? 'Custom residue' : fallback.label,
+                                              customEditorCollapsed: true
+                                            });
+                                            if (inputMethod === 'jsme') validateBuilderCustomSmiles(mod.id, smiles);
+                                          }}
+                                        >
+                                          <option value="ccd">Built-in CCD</option>
+                                          <option value="jsme">Custom SMILES</option>
+                                        </select>
+                                      </label>
+                                      {mod.inputMethod === 'ccd' ? (
+                                        <label className="field">
+                                          <span>CCD</span>
+                                          <select
+                                            value={BUILDER_BUILT_IN_MODIFICATIONS.some((item) => item.ccd === mod.ccd) ? mod.ccd : BUILDER_BUILT_IN_MODIFICATIONS[0].ccd}
+                                            onChange={(e) => {
+                                              const selected = BUILDER_BUILT_IN_MODIFICATIONS.find((item) => item.ccd === e.target.value) || BUILDER_BUILT_IN_MODIFICATIONS[0];
+                                              patchYamlBuilderModification(component.id, mod.id, { ccd: selected.ccd, label: selected.label, baseResidue: residue });
+                                            }}
+                                          >
+                                            {BUILDER_BUILT_IN_MODIFICATIONS.map((item) => (
+                                              <option key={item.ccd} value={item.ccd}>{item.label} ({item.ccd})</option>
+                                            ))}
+                                          </select>
+                                        </label>
+                                      ) : (
+                                        <>
+                                          <label className="field api-yaml-mod-smiles">
+                                            <span>Residue SMILES</span>
+                                            <input
+                                              value={mod.smiles || BUILDER_CUSTOM_RESIDUE_SCAFFOLD}
+                                              onChange={(e) => {
+                                                const smiles = e.target.value;
+                                                patchYamlBuilderModification(component.id, mod.id, { smiles, ccd: buildBuilderCustomCcd(component.id, mod.position, smiles) });
+                                                validateBuilderCustomSmiles(mod.id, smiles);
+                                              }}
+                                            />
+                                          </label>
+                                          <span className={`api-yaml-mod-status ${customValid ? 'valid' : 'invalid'}`}>
+                                            {customValid ? 'Backbone OK' : 'Needs N-CA-C(=O) backbone'}
+                                          </span>
+                                        </>
+                                      )}
+                                      <button type="button" className="icon-btn danger" aria-label="Remove residue modification" onClick={() => removeYamlBuilderModification(component.id, mod.id)}>
+                                        <Trash2 size={13} />
+                                      </button>
+                                    </div>
+                                  );
+                                })}
                               </div>
 
                               <div className="api-yaml-builder">

@@ -1792,3 +1792,79 @@
     align-self: flex-end;
   }
 }
+
+
+.api-yaml-modifications {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.api-yaml-mod-row {
+  display: grid;
+  grid-template-columns: 34px minmax(72px, 0.55fr) minmax(92px, 0.7fr) minmax(58px, 0.45fr) minmax(118px, 0.8fr) minmax(150px, 1fr) minmax(120px, 0.8fr) 30px;
+  gap: 6px;
+  align-items: end;
+  padding: 7px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.api-yaml-mod-row > strong {
+  align-self: center;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.api-yaml-mod-row .field {
+  gap: 4px;
+}
+
+.api-yaml-mod-row .field > span {
+  min-height: 14px;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+.api-yaml-mod-row input,
+.api-yaml-mod-row select {
+  width: 100%;
+  height: 34px;
+  min-height: 34px;
+}
+
+.api-yaml-mod-smiles {
+  min-width: 0;
+}
+
+.api-yaml-mod-status {
+  align-self: center;
+  min-width: 0;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.api-yaml-mod-status.valid {
+  color: var(--success);
+}
+
+.api-yaml-mod-status.invalid {
+  color: var(--danger);
+}
+
+@media (max-width: 980px) {
+  .api-yaml-mod-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) 30px;
+  }
+
+  .api-yaml-mod-row > strong,
+  .api-yaml-mod-smiles,
+  .api-yaml-mod-status {
+    grid-column: span 1;
+  }
+}

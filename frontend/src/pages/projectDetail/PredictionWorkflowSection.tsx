@@ -2,7 +2,7 @@ import type { CSSProperties, KeyboardEvent, PointerEvent, RefObject } from 'reac
 import { ComponentInputEditor } from '../../components/project/ComponentInputEditor';
 import type { MolstarResiduePick } from '../../components/project/MolstarViewer';
 import { MolstarViewer } from '../../components/project/MolstarViewer';
-import type { InputComponent, ProteinTemplateUpload } from '../../types/models';
+import type { CustomCcdMoleculeInput, InputComponent, ProteinTemplateUpload } from '../../types/models';
 import { PredictionComponentsSidebar, type PredictionComponentsSidebarProps } from './PredictionComponentsSidebar';
 import { PredictionConstraintsWorkspace, type PredictionConstraintsWorkspaceProps } from './PredictionConstraintsWorkspace';
 
@@ -20,6 +20,8 @@ export interface PredictionWorkflowSectionProps {
   components: InputComponent[];
   onComponentsChange: (components: InputComponent[]) => void;
   proteinTemplates: Record<string, ProteinTemplateUpload>;
+  customResidueLibrary: CustomCcdMoleculeInput[];
+  onCustomResidueLibraryChange: (library: CustomCcdMoleculeInput[]) => void;
   onProteinTemplateChange: (componentId: string, upload: ProteinTemplateUpload | null) => void;
   activeComponentId: string | null;
   onActiveComponentIdChange: (id: string | null) => void;
@@ -40,6 +42,8 @@ export function PredictionWorkflowSection({
   components,
   onComponentsChange,
   proteinTemplates,
+  customResidueLibrary,
+  onCustomResidueLibraryChange,
   onProteinTemplateChange,
   activeComponentId,
   onActiveComponentIdChange,
@@ -63,6 +67,8 @@ export function PredictionWorkflowSection({
             components={components}
             onChange={onComponentsChange}
             proteinTemplates={proteinTemplates}
+            customResidueLibrary={customResidueLibrary}
+            onCustomResidueLibraryChange={onCustomResidueLibraryChange}
             onProteinTemplateChange={onProteinTemplateChange}
             selectedComponentId={activeComponentId}
             onSelectedComponentIdChange={(id) => onActiveComponentIdChange(id)}

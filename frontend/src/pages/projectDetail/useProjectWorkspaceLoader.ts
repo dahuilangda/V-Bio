@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import type {
+  CustomCcdMoleculeInput,
   Project,
   ProjectTask,
   ProteinTemplateUpload,
@@ -29,6 +30,7 @@ interface UseProjectWorkspaceLoaderOptions<TDraft extends ProjectWorkspaceDraft>
   setSavedAffinityUploadsFingerprint: Dispatch<SetStateAction<string>>;
   setRunMenuOpen: Dispatch<SetStateAction<boolean>>;
   setProteinTemplates: Dispatch<SetStateAction<Record<string, ProteinTemplateUpload>>>;
+  setCustomResidueLibrary: Dispatch<SetStateAction<CustomCcdMoleculeInput[]>>;
   setTaskProteinTemplates: Dispatch<SetStateAction<Record<string, Record<string, ProteinTemplateUpload>>>>;
   setTaskAffinityUploads: Dispatch<SetStateAction<Record<string, AffinityPersistedUploads>>>;
   setActiveConstraintId: Dispatch<SetStateAction<string | null>>;
@@ -58,6 +60,7 @@ export function useProjectWorkspaceLoader<TDraft extends ProjectWorkspaceDraft>(
   setSavedAffinityUploadsFingerprint,
   setRunMenuOpen,
   setProteinTemplates,
+  setCustomResidueLibrary,
   setTaskProteinTemplates,
   setTaskAffinityUploads,
   setActiveConstraintId,
@@ -98,6 +101,7 @@ export function useProjectWorkspaceLoader<TDraft extends ProjectWorkspaceDraft>(
       setSavedAffinityUploadsFingerprint,
       setRunMenuOpen,
       setProteinTemplates,
+      setCustomResidueLibrary,
       setTaskProteinTemplates,
       setTaskAffinityUploads,
       setActiveConstraintId,
@@ -125,6 +129,7 @@ export function useProjectWorkspaceLoader<TDraft extends ProjectWorkspaceDraft>(
     setSavedAffinityUploadsFingerprint,
     setRunMenuOpen,
     setProteinTemplates,
+    setCustomResidueLibrary,
     setTaskProteinTemplates,
     setTaskAffinityUploads,
     setActiveConstraintId,

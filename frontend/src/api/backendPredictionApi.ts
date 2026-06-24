@@ -1,6 +1,6 @@
 import type { InputComponent, PredictionSubmitInput } from '../types/models';
 import { normalizeComponentSequence } from '../utils/projectInputs';
-import { buildPredictionYaml, buildPredictionYamlFromComponents } from '../utils/yaml';
+import { buildPredictionYaml, buildPredictionYamlFromComponents, collectCustomCcdMoleculesFromComponents } from '../utils/yaml';
 import { API_HEADERS, requestBackend } from './backendClient';
 
 export async function submitPrediction(input: PredictionSubmitInput): Promise<string> {
@@ -95,6 +95,10 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
   }
   if (typeof input.seed === 'number' && Number.isFinite(input.seed)) {
     form.append('seed', String(Math.max(0, Math.floor(input.seed))));
+  }
+  const customCcdMolecules = input.customCcdMolecules || collectCustomCcdMoleculesFromComponents(componentsForYaml);
+  if (customCcdMolecules.length > 0) {
+    form.append('custom_ccd_molecules', JSON.stringify(customCcdMolecules));
   }
   if (hasTemplateUploads) {
     for (const item of templateUploads) {

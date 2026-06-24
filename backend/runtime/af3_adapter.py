@@ -83,6 +83,8 @@ class AF3Utils:
         extra_molecules: Optional[List[MoleculeComponent]] = None,
         skip_msa_fields: bool = False,
         model_seeds: Optional[List[int]] = None,
+        query_sequence_keys: Optional[List[str]] = None,
+        query_modifications: Optional[List[List[Dict[str, object]]]] = None,
     ) -> None:
         self._id_counter = 1
         sequence_id_map = sequence_id_map or {}
@@ -95,6 +97,8 @@ class AF3Utils:
             sequence_id_map,
             skip_msa_fields,
             model_seeds,
+            query_sequence_keys,
+            query_modifications,
         )
         if extra_molecules:
             content = self.add_extra_molecules(content, extra_molecules)
@@ -120,12 +124,15 @@ class AF3Utils:
         sequence_id_map: Dict[str, List[str]],
         skip_msa_fields: bool,
         model_seeds: Optional[List[int]] = None,
+        query_sequence_keys: Optional[List[str]] = None,
+        query_modifications: Optional[List[List[Dict[str, object]]]] = None,
     ) -> Dict[str, object]:
         sequences: List[Dict[str, object]] = []
         used_ids: Set[str] = set()
         for i, query_seq in enumerate(query_seqs_unique):
             expected_copies = query_seqs_cardinality[i]
-            provided_ids = list(sequence_id_map.get(query_seq, []))
+            group_key = query_sequence_keys[i] if query_sequence_keys and i < len(query_sequence_keys) else query_seq
+            provided_ids = list(sequence_id_map.get(group_key, sequence_id_map.get(query_seq, [])))
             chain_ids: List[str] = []
             for cid in provided_ids[:expected_copies]:
                 normalized = str(cid).strip()
@@ -142,7 +149,7 @@ class AF3Utils:
                 "protein": {
                     "id": chain_ids,
                     "sequence": query_seq,
-                    "modifications": [],
+                    "modifications": list(query_modifications[i]) if query_modifications and i < len(query_modifications) else [],
                     "templates": [],
                 }
             }
@@ -228,6 +235,7 @@ class AF3Utils:
 class ProteinComponent:
     ids: List[str]
     sequence: str
+    modifications: List[Dict[str, object]]
 
 
 @dataclass
@@ -241,6 +249,9 @@ class AF3Preparation:
     other_molecules: List[MoleculeComponent]
     query_sequences_unique: List[str]
     query_sequences_cardinality: List[int]
+    query_sequence_keys: List[str]
+    query_group_to_chain_ids: Dict[str, List[str]]
+    query_modifications: List[List[Dict[str, object]]]
     chain_id_label_map: Dict[str, str]
     bond_constraints: List[Tuple[Tuple[str, int, str], Tuple[str, int, str]]]
     ignored_constraints: List[Dict[str, Any]]
@@ -258,6 +269,40 @@ def _sanitize_label(label: Optional[str], fallback: str) -> str:
             safe.append("_")
     sanitized = "".join(safe)
     return sanitized or fallback
+
+
+def _normalize_protein_modifications(raw_modifications: object, sequence_length: int) -> List[Dict[str, object]]:
+    if raw_modifications in (None, ""):
+        return []
+    if not isinstance(raw_modifications, list):
+        raise ValueError("Protein modifications must be a list of {position, ccd} entries.")
+
+    normalized: List[Dict[str, object]] = []
+    seen_positions: Set[int] = set()
+    for raw in raw_modifications:
+        if not isinstance(raw, dict):
+            raise ValueError("Each protein modification must be an object.")
+        ccd = str(raw.get("ccd") or raw.get("ptmType") or "").strip().upper()
+        if not ccd:
+            raise ValueError("Protein modification requires a CCD code.")
+        if ccd.startswith("CCD_"):
+            raise ValueError("AlphaFold3 protein ptmType must be a CCD code without the CCD_ prefix.")
+        position = _coerce_int(raw.get("position", raw.get("ptmPosition")), f"protein modification {ccd} position")
+        if position < 1 or position > sequence_length:
+            raise ValueError(
+                f"Protein modification {ccd} position {position} is outside sequence length {sequence_length}."
+            )
+        if position in seen_positions:
+            raise ValueError(f"Multiple protein modifications target residue position {position}.")
+        seen_positions.add(position)
+        normalized.append({"ptmType": ccd, "ptmPosition": position})
+    return normalized
+
+
+def _protein_group_key(sequence: str, modifications: List[Dict[str, object]]) -> str:
+    if not modifications:
+        return sequence
+    return f"{sequence}|mods={json.dumps(modifications, sort_keys=True, separators=(',', ':'))}"
 
 
 def parse_yaml_for_af3(
@@ -279,6 +324,9 @@ def parse_yaml_for_af3(
     other_molecules: List[MoleculeComponent] = []
     query_sequences_unique: List[str] = []
     query_sequences_cardinality: List[int] = []
+    query_sequence_keys: List[str] = []
+    query_group_to_chain_ids: Dict[str, List[str]] = {}
+    query_modifications: List[List[Dict[str, object]]] = []
     sequence_index_lookup: Dict[str, int] = {}
     chain_id_label_map: Dict[str, str] = {}
     bond_constraints: List[Tuple[Tuple[str, int, str], Tuple[str, int, str]]] = []
@@ -327,17 +375,22 @@ def parse_yaml_for_af3(
             if not sequence:
                 raise ValueError("Protein entries must include a non-empty sequence.")
 
+            modifications = _normalize_protein_modifications(info.get("modifications"), len(sequence))
             count = len(raw_ids_list) if raw_ids_list else 1
             sanitized_ids = prepare_chain_ids(raw_ids_list, "CHAIN", count)
-            proteins.append(ProteinComponent(ids=sanitized_ids, sequence=sequence))
+            proteins.append(ProteinComponent(ids=sanitized_ids, sequence=sequence, modifications=modifications))
 
-            index = sequence_index_lookup.get(sequence)
+            group_key = _protein_group_key(sequence, modifications)
+            index = sequence_index_lookup.get(group_key)
             if index is None:
-                sequence_index_lookup[sequence] = len(query_sequences_unique)
+                sequence_index_lookup[group_key] = len(query_sequences_unique)
                 query_sequences_unique.append(sequence)
                 query_sequences_cardinality.append(len(sanitized_ids))
+                query_sequence_keys.append(group_key)
+                query_modifications.append(modifications)
             else:
                 query_sequences_cardinality[index] += len(sanitized_ids)
+            query_group_to_chain_ids.setdefault(group_key, []).extend(sanitized_ids)
 
             for chain_id in sanitized_ids:
                 header_labels.append(chain_id)
@@ -458,6 +511,9 @@ def parse_yaml_for_af3(
         other_molecules=other_molecules,
         query_sequences_unique=query_sequences_unique,
         query_sequences_cardinality=query_sequences_cardinality,
+        query_sequence_keys=query_sequence_keys,
+        query_group_to_chain_ids=query_group_to_chain_ids,
+        query_modifications=query_modifications,
         chain_id_label_map=chain_id_label_map,
         bond_constraints=bond_constraints,
         ignored_constraints=ignored_constraints,
@@ -535,9 +591,11 @@ def load_unpaired_msa(
     prep: AF3Preparation, chain_msa_paths: Dict[str, Path]
 ) -> List[str]:
     unpaired: List[str] = []
-    for sequence in prep.query_sequences_unique:
+    for index, sequence in enumerate(prep.query_sequences_unique):
         msa_content: Optional[str] = None
-        for chain_id in prep.sequence_to_chain_ids.get(sequence, []):
+        group_key = prep.query_sequence_keys[index] if index < len(prep.query_sequence_keys) else sequence
+        chain_ids = prep.query_group_to_chain_ids.get(group_key) or prep.sequence_to_chain_ids.get(sequence, [])
+        for chain_id in chain_ids:
             path = chain_msa_paths.get(chain_id)
             if path and path.exists():
                 msa_content = _normalize_a3m_content(path.read_text())
@@ -558,10 +616,12 @@ def build_af3_json(
         prep.query_sequences_cardinality,
         unpaired_msa if use_external_msa else None,
         None,
-        prep.sequence_to_chain_ids,
+        prep.query_group_to_chain_ids or prep.sequence_to_chain_ids,
         prep.other_molecules,
         skip_msa_fields=not use_external_msa,
         model_seeds=model_seeds,
+        query_sequence_keys=prep.query_sequence_keys,
+        query_modifications=prep.query_modifications,
     )
     content = af3.content
     if prep.bond_constraints:

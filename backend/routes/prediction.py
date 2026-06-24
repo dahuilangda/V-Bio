@@ -100,6 +100,35 @@ def _yaml_has_ligand_annotation(yaml_content: str) -> bool:
     return False
 
 
+
+
+def _parse_custom_ccd_molecules(raw_value: Optional[str]) -> list[Dict[str, Any]]:
+    if raw_value is None or not str(raw_value).strip():
+        return []
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    molecules: list[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        ccd = str(item.get('ccd') or item.get('ccdCode') or '').strip().upper()
+        smiles = str(item.get('smiles') or '').strip()
+        if not ccd or not smiles or ccd in seen:
+            continue
+        seen.add(ccd)
+        molecules.append({
+            'ccd': ccd[:12],
+            'smiles': smiles,
+            'base_residue': str(item.get('baseResidue') or item.get('base_residue') or '').strip().upper()[:1],
+            'label': str(item.get('label') or '').strip()[:80],
+        })
+    return molecules
+
 def register_prediction_routes(
     app,
     *,
@@ -278,6 +307,8 @@ def register_prediction_routes(
             seed_value = 42
             logger.info('seed parameter missing for backend=protenix; defaulting to %s for client %s.', seed_value, request.remote_addr)
 
+        custom_ccd_molecules = _parse_custom_ccd_molecules(request.form.get('custom_ccd_molecules'))
+
         template_inputs = []
         template_meta_raw = request.form.get('template_meta')
         template_meta = []
@@ -331,6 +362,10 @@ def register_prediction_routes(
             predict_args['peptide_subtask_queue'] = str(queue_selection.get('queue') or '').strip()
         if template_inputs:
             predict_args['template_inputs'] = template_inputs
+        if custom_ccd_molecules:
+            if backend != 'boltz':
+                return jsonify({'error': 'Custom drawn residue CCD molecules are currently supported for backend=boltz only.'}), 400
+            predict_args['custom_ccd_molecules'] = custom_ccd_molecules
 
         try:
             task = predict_task.apply_async(args=[predict_args], queue=target_queue)

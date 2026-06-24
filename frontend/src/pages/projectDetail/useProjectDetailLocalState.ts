@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import type { InputComponent, Project, ProjectTask, ProteinTemplateUpload } from '../../types/models';
+import type { CustomCcdMoleculeInput, InputComponent, Project, ProjectTask, ProteinTemplateUpload } from '../../types/models';
 import type { ConstraintResiduePick } from '../../components/project/ConstraintEditor';
 import { useTaskAttachmentCache } from './useTaskAttachmentCache';
 import { useProjectPaneLayouts } from './useProjectPaneLayouts';
@@ -29,6 +29,7 @@ export function useProjectDetailLocalState() {
   const [savedAffinityUploadsFingerprint, setSavedAffinityUploadsFingerprint] = useState('');
   const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [proteinTemplates, setProteinTemplates] = useState<Record<string, ProteinTemplateUpload>>({});
+  const [customResidueLibrary, setCustomResidueLibrary] = useState<CustomCcdMoleculeInput[]>([]);
   const {
     taskProteinTemplates,
     setTaskProteinTemplates,
@@ -107,6 +108,8 @@ export function useProjectDetailLocalState() {
     setRunMenuOpen,
     proteinTemplates,
     setProteinTemplates,
+    customResidueLibrary,
+    setCustomResidueLibrary,
     taskProteinTemplates,
     setTaskProteinTemplates,
     taskAffinityUploads,
