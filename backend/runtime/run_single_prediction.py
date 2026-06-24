@@ -24,6 +24,7 @@ import copy
 import pickle
 import numpy as np
 from pathlib import Path
+from collections import Counter
 from typing import Optional, List, Tuple, Dict, Any, Iterable, Callable
 import subprocess
 
@@ -6006,7 +6007,7 @@ def _normalize_peptide_design_mode(raw: Any) -> str:
         return "cyclic"
     if token in {"bicyclic", "bicycle", "bi-cyclic"}:
         return "bicyclic"
-    return "cyclic"
+    return "linear"
 
 
 def _normalize_peptide_backend(raw: Any) -> str:
@@ -6106,6 +6107,17 @@ PEPTIDE_PRESET_BASE_RESIDUE = {
     "GALT": "T", "FUCS": "S", "GLCS": "S", "XYLS": "S",
 }
 
+PEPTIDE_PRESET_PLACEMENT_RULES = {
+    "PCA": "n_term",
+}
+
+PEPTIDE_CONSERVATIVE_SUBSTITUTIONS = {
+    "A": "GSV", "R": "KHQ", "N": "DQST", "D": "EN", "C": "ST", "Q": "ENKR",
+    "E": "DQK", "G": "AS", "H": "NQKR", "I": "LVMA", "L": "IVMF", "K": "RQE",
+    "M": "ILV", "F": "YWL", "P": "AGS", "S": "ATGN", "T": "SAV", "W": "FY",
+    "Y": "FW", "V": "ILMA",
+}
+
 def _normalize_peptide_residue_pool(raw_pool: Any, custom_molecules: List[Dict[str, str]]) -> Tuple[List[str], List[Dict[str, str]]]:
     natural: List[str] = []
     unnatural: List[Dict[str, str]] = []
@@ -6134,7 +6146,12 @@ def _normalize_peptide_residue_pool(raw_pool: Any, custom_molecules: List[Dict[s
                 if base not in "ARNDCQEGHILKMFPSTWYV":
                     base = "A"
                 if not any(row.get("ccd") == code and row.get("kind") == kind for row in unnatural):
-                    unnatural.append({"ccd": code, "base": base, "kind": kind})
+                    unnatural.append({
+                        "ccd": code,
+                        "base": base,
+                        "kind": kind,
+                        "placement": PEPTIDE_PRESET_PLACEMENT_RULES.get(code, "any") if kind == "preset" else "any",
+                    })
     if isinstance(raw_pool, list) and not natural and not unnatural:
         raise ValueError("Peptide residue candidate pool is empty; select at least one natural or non-natural residue.")
     if not natural and not unnatural:
@@ -6145,20 +6162,281 @@ def _normalize_peptide_residue_pool(raw_pool: Any, custom_molecules: List[Dict[s
         raise ValueError("Peptide residue candidate pool has no usable base residues.")
     return natural, unnatural
 
-def _sample_peptide_modifications(sequence: str, unnatural_pool: List[Dict[str, str]], min_count: int, max_count: int) -> Tuple[str, List[Dict[str, Any]]]:
+
+def _peptide_allowed_residues(natural_pool: List[str], design_mode: str) -> List[str]:
+    residues: List[str] = []
+    for aa in natural_pool:
+        token = str(aa or "").strip().upper()[:1]
+        if token and token in "ARNDCQEGHILKMFPSTWYV" and token not in residues:
+            residues.append(token)
+    if design_mode == "bicyclic":
+        residues = [aa for aa in residues if aa != "C"]
+    if not residues:
+        raise ValueError(
+            "Peptide natural residue candidate pool has no residues usable in "
+            f"{design_mode} mode. Select at least one compatible natural residue."
+        )
+    return residues
+
+
+def _random_peptide_sequence_from_pool(
+    binder_length: int,
+    natural_pool: List[str],
+    *,
+    design_mode: str,
+    sequence_mask: str,
+    design_params: Dict[str, Any],
+) -> str:
+    allowed = _peptide_allowed_residues(natural_pool, design_mode)
+    seq = [random.choice(allowed) for _ in range(max(1, binder_length))]
+    candidate = _apply_sequence_mask("".join(seq), sequence_mask)
+    if design_mode == "bicyclic":
+        candidate = _enforce_bicyclic_cys_layout(
+            candidate,
+            binder_length=binder_length,
+            cys_positions=design_params.get("cys_positions"),
+        )
+    return candidate
+
+
+def _peptide_protected_indices(sequence: str, sequence_mask: str, design_mode: str) -> set[int]:
+    protected: set[int] = set()
+    if sequence_mask:
+        for idx, mask_char in enumerate(sequence_mask[: len(sequence)]):
+            if mask_char != "X":
+                protected.add(idx)
+    if design_mode == "bicyclic":
+        protected.update(idx for idx, aa in enumerate(sequence) if aa == "C")
+    return protected
+
+
+def _weighted_choice(items: List[Any], weights: List[float]) -> Any:
+    if not items:
+        raise ValueError("Cannot choose from an empty list.")
+    total = sum(max(0.0, float(weight)) for weight in weights)
+    if total <= 0:
+        return random.choice(items)
+    threshold = random.random() * total
+    running = 0.0
+    for item, weight in zip(items, weights):
+        running += max(0.0, float(weight))
+        if threshold <= running:
+            return item
+    return items[-1]
+
+
+def _mutate_peptide_sequence_from_pool(
+    sequence: str,
+    *,
+    natural_pool: List[str],
+    mutation_rate: float,
+    plddt_scores: Optional[List[float]],
+    design_mode: str,
+    sequence_mask: str,
+    design_params: Dict[str, Any],
+    strategy: str,
+    elite_sequences: Optional[List[str]] = None,
+) -> str:
+    seq = list(str(sequence or "").upper())
+    if not seq:
+        return _random_peptide_sequence_from_pool(1, natural_pool, design_mode=design_mode, sequence_mask=sequence_mask, design_params=design_params)
+    allowed = _peptide_allowed_residues(natural_pool, design_mode)
+    protected = _peptide_protected_indices("".join(seq), sequence_mask, design_mode)
+    available = [idx for idx in range(len(seq)) if idx not in protected]
+    if not available:
+        return "".join(seq)
+
+    base_mutations = max(1, int(round(len(available) * max(0.01, min(1.0, float(mutation_rate))))))
+    if strategy == "explore":
+        num_mutations = max(base_mutations, min(len(available), max(2, len(available) // 3)))
+    elif strategy == "diversify":
+        num_mutations = max(base_mutations, min(len(available), max(2, len(available) // 4)))
+    elif strategy == "crossover":
+        num_mutations = max(1, min(len(available), base_mutations // 2 or 1))
+    else:
+        num_mutations = min(len(available), base_mutations)
+
+    if strategy == "crossover" and elite_sequences:
+        mate = random.choice([item for item in elite_sequences if len(item) == len(seq)] or elite_sequences)
+        if len(mate) == len(seq):
+            cut = random.randint(1, len(seq) - 1) if len(seq) > 1 else 1
+            seq = seq[:cut] + list(mate[cut:])
+
+    if strategy == "diversify" and elite_sequences:
+        similarity_counts: List[Tuple[int, int]] = []
+        for idx in available:
+            count = sum(1 for elite_seq in elite_sequences if len(elite_seq) > idx and elite_seq[idx] == seq[idx])
+            similarity_counts.append((idx, count))
+        similarity_counts.sort(key=lambda item: item[1], reverse=True)
+        positions = [idx for idx, _ in similarity_counts[:num_mutations]]
+    elif plddt_scores and len(plddt_scores) == len(seq) and strategy != "explore":
+        weights = [max(1.0, 100.0 - float(plddt_scores[idx])) for idx in available]
+        positions = []
+        remaining = list(available)
+        remaining_weights = list(weights)
+        for _ in range(min(num_mutations, len(remaining))):
+            chosen = _weighted_choice(remaining, remaining_weights)
+            chosen_idx = remaining.index(chosen)
+            positions.append(chosen)
+            remaining.pop(chosen_idx)
+            remaining_weights.pop(chosen_idx)
+    else:
+        positions = random.sample(available, k=min(num_mutations, len(available)))
+
+    for pos in positions:
+        current = seq[pos]
+        candidates = [aa for aa in allowed if aa != current]
+        if not candidates:
+            continue
+        if strategy == "explore":
+            seq[pos] = random.choice(candidates)
+            continue
+        conservative = set(PEPTIDE_CONSERVATIVE_SUBSTITUTIONS.get(current, ""))
+        weights = [2.5 if aa in conservative else 1.0 for aa in candidates]
+        seq[pos] = _weighted_choice(candidates, weights)
+
+    candidate = _apply_sequence_mask("".join(seq), sequence_mask)
+    if design_mode == "bicyclic":
+        candidate = _enforce_bicyclic_cys_layout(
+            candidate,
+            binder_length=len(seq),
+            cys_positions=design_params.get("cys_positions"),
+        )
+    return candidate
+
+
+def _peptide_sequence_liability_penalty(sequence: str, modifications: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    seq = str(sequence or "").upper()
+    length = max(1, len(seq))
+    counts = Counter(seq)
+    hydrophobic_ratio = sum(counts.get(aa, 0) for aa in "AILMFWYV") / length
+    charged_ratio = sum(counts.get(aa, 0) for aa in "DEKRH") / length
+    pro_gly_ratio = sum(counts.get(aa, 0) for aa in "PG") / length
+    max_run = 1
+    run = 1
+    for idx in range(1, len(seq)):
+        if seq[idx] == seq[idx - 1]:
+            run += 1
+            max_run = max(max_run, run)
+        else:
+            run = 1
+    repeated_triples = sum(1 for idx in range(0, max(0, len(seq) - 2)) if seq[idx] == seq[idx + 1] == seq[idx + 2])
+    penalty = 0.0
+    if hydrophobic_ratio > 0.58:
+        penalty += (hydrophobic_ratio - 0.58) * 0.35
+    if charged_ratio > 0.45:
+        penalty += (charged_ratio - 0.45) * 0.20
+    if pro_gly_ratio > 0.35:
+        penalty += (pro_gly_ratio - 0.35) * 0.20
+    if max_run >= 4:
+        penalty += min(0.12, (max_run - 3) * 0.03)
+    if repeated_triples:
+        penalty += min(0.08, repeated_triples * 0.015)
+    mod_count = len(modifications) if isinstance(modifications, list) else 0
+    return {
+        "penalty": min(0.25, penalty),
+        "hydrophobic_ratio": hydrophobic_ratio,
+        "charged_ratio": charged_ratio,
+        "pro_gly_ratio": pro_gly_ratio,
+        "max_homopolymer_run": max_run,
+        "repeated_triples": repeated_triples,
+        "modification_count": mod_count,
+    }
+
+
+def _peptide_sequence_similarity(seq_a: str, seq_b: str) -> float:
+    if not seq_a or not seq_b or len(seq_a) != len(seq_b):
+        return 0.0
+    return sum(1 for aa, bb in zip(seq_a, seq_b) if aa == bb) / max(1, len(seq_a))
+
+
+def _peptide_rank_score(row: Dict[str, Any]) -> float:
+    value = row.get("composite_score")
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return float(value)
+    return float("-inf")
+
+
+def _select_diverse_peptide_elites(results: List[Dict[str, Any]], elite_size: int) -> List[Dict[str, Any]]:
+    ranked = sorted(results, key=_peptide_rank_score, reverse=True)
+    selected: List[Dict[str, Any]] = []
+    for row in ranked:
+        seq = str(row.get("sequence") or "")
+        if not seq:
+            continue
+        if len(selected) < 2 or all(_peptide_sequence_similarity(seq, str(prev.get("sequence") or "")) < 0.85 for prev in selected):
+            selected.append(row)
+        if len(selected) >= elite_size:
+            break
+    if len(selected) < elite_size:
+        for row in ranked:
+            if row not in selected:
+                selected.append(row)
+            if len(selected) >= elite_size:
+                break
+    return selected[:elite_size]
+
+def _sample_peptide_modifications(
+    sequence: str,
+    unnatural_pool: List[Dict[str, str]],
+    min_count: int,
+    max_count: int,
+    *,
+    protected_positions: Optional[Iterable[int]] = None,
+) -> Tuple[str, List[Dict[str, Any]]]:
     if not unnatural_pool or max_count <= 0 or not sequence:
         return sequence, []
     length = len(sequence)
-    min_count = max(0, min(length, int(min_count)))
-    max_count = max(min_count, min(length, int(max_count)))
-    count = random.randint(min_count, max_count) if max_count > min_count else min_count
+    protected = {
+        int(pos)
+        for pos in (protected_positions or [])
+        if isinstance(pos, int) and 0 <= int(pos) < length
+    }
+
+    def _mods_allowed_at_position(idx: int) -> List[Dict[str, str]]:
+        allowed: List[Dict[str, str]] = []
+        for mod in unnatural_pool:
+            ccd = str(mod.get("ccd") or "").strip().upper()
+            if not ccd:
+                continue
+            placement = str(mod.get("placement") or PEPTIDE_PRESET_PLACEMENT_RULES.get(ccd, "any")).strip().lower()
+            if placement == "n_term" and idx != 0:
+                continue
+            if placement == "c_term" and idx != length - 1:
+                continue
+            if placement == "terminal" and idx not in {0, length - 1}:
+                continue
+            allowed.append(mod)
+        return allowed
+
+    eligible_positions = [
+        idx
+        for idx in range(length)
+        if idx not in protected and _mods_allowed_at_position(idx)
+    ]
+    requested_min = max(0, min(length, int(min_count)))
+    requested_max = max(requested_min, min(length, int(max_count)))
+    if requested_min > len(eligible_positions):
+        placement_limited = sorted(
+            f"{str(item.get('ccd') or '').strip().upper()}:{str(item.get('placement') or PEPTIDE_PRESET_PLACEMENT_RULES.get(str(item.get('ccd') or '').strip().upper(), 'any')).strip().lower()}"
+            for item in unnatural_pool
+            if str(item.get("placement") or PEPTIDE_PRESET_PLACEMENT_RULES.get(str(item.get("ccd") or "").strip().upper(), "any")).strip().lower() != "any"
+        )
+        special_note = f" Placement-limited residues selected: {', '.join(placement_limited)}." if placement_limited else ""
+        raise ValueError(
+            "Peptide non-natural residue constraints cannot be satisfied with the selected candidate pool "
+            f"and protected positions: requested at least {requested_min}, but only {len(eligible_positions)} positions are eligible."
+            f"{special_note}"
+        )
+    effective_max = min(requested_max, len(eligible_positions))
+    count = random.randint(requested_min, effective_max) if effective_max > requested_min else requested_min
     if count <= 0:
         return sequence, []
-    positions = random.sample(range(length), k=count)
+    positions = random.sample(eligible_positions, k=count)
     seq = list(sequence)
     modifications: List[Dict[str, Any]] = []
     for idx in positions:
-        mod = random.choice(unnatural_pool)
+        mod = random.choice(_mods_allowed_at_position(idx))
         base = str(mod.get("base") or seq[idx] or "A").upper()[:1]
         if base not in "ARNDCQEGHILKMFPSTWYV":
             base = "A"
@@ -6650,8 +6928,6 @@ def run_peptide_design_backend(
         sys.path.append(designer_dir)
 
     from design_utils import (  # type: ignore
-        generate_random_sequence,
-        mutate_sequence,
         parse_confidence_metrics,
         resolve_preferred_interface_metric,
     )
@@ -6735,6 +7011,7 @@ def run_peptide_design_backend(
 
     custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
     natural_pool, unnatural_pool = _normalize_peptide_residue_pool(options.get("peptideResiduePool") or options.get("peptide_residue_pool"), custom_molecules)
+    _peptide_allowed_residues(natural_pool, design_mode)
     nonnatural_min = _read_int_option(options, "peptideNonNaturalMin", 0, min_value=0, max_value=binder_length)
     nonnatural_max = _read_int_option(options, "peptideNonNaturalMax", nonnatural_min, min_value=nonnatural_min, max_value=binder_length)
     if peptide_backend in {"alphafold3", "protenix"} and any(item.get("kind") == "custom" for item in unnatural_pool):
@@ -6742,7 +7019,13 @@ def run_peptide_design_backend(
             f"Peptide design backend '{peptide_backend}' supports preset CCD residue modifications only; custom drawn peptide residues require Boltz-2."
         )
 
-    baseline_sequence = "".join(random.choice(natural_pool) for _ in range(binder_length))
+    baseline_sequence = _random_peptide_sequence_from_pool(
+        binder_length,
+        natural_pool,
+        design_mode=design_mode,
+        sequence_mask=sequence_mask,
+        design_params=design_params,
+    )
     initial_sequence = ""
     if use_initial_sequence:
         initial_sequence = _normalize_initial_sequence(
@@ -6821,16 +7104,32 @@ def run_peptide_design_backend(
             if generation == 1 and initial_sequence and initial_sequence not in evaluated_sequences:
                 candidate_sequence = initial_sequence
             elif not elite_population:
-                candidate_sequence = "".join(random.choice(natural_pool) for _ in range(binder_length))
+                candidate_sequence = _random_peptide_sequence_from_pool(
+                    binder_length,
+                    natural_pool,
+                    design_mode=design_mode,
+                    sequence_mask=sequence_mask,
+                    design_params=design_params,
+                )
             else:
                 parent = random.choice(elite_population)
                 parent_seq = str(parent.get("sequence") or "")
                 parent_plddts = parent.get("plddts") if isinstance(parent.get("plddts"), list) else None
-                candidate_sequence = mutate_sequence(
+                elite_sequences = [str(row.get("sequence") or "") for row in elite_population if str(row.get("sequence") or "")]
+                strategy = _weighted_choice(
+                    ["exploit", "diversify", "explore", "crossover"],
+                    [0.48, 0.24, 0.18, 0.10],
+                )
+                candidate_sequence = _mutate_peptide_sequence_from_pool(
                     parent_seq,
+                    natural_pool=natural_pool,
                     mutation_rate=mutation_rate,
                     plddt_scores=parent_plddts,
+                    design_mode=design_mode,
+                    sequence_mask=sequence_mask,
                     design_params=design_params,
+                    strategy=strategy,
+                    elite_sequences=elite_sequences,
                 )
 
             candidate_sequence = _apply_sequence_mask(candidate_sequence, sequence_mask)
@@ -6846,6 +7145,7 @@ def run_peptide_design_backend(
                 unnatural_pool,
                 nonnatural_min,
                 nonnatural_max,
+                protected_positions=_peptide_protected_indices(candidate_sequence, sequence_mask, design_mode),
             )
             candidate_key = _peptide_candidate_key(candidate_sequence, candidate_modifications)
             if candidate_key in evaluated_sequences:
@@ -7052,7 +7352,7 @@ def run_peptide_design_backend(
                     "modifications": row.get("modifications") if isinstance(row.get("modifications"), list) else [],
                     "plddts": row.get("plddts") if isinstance(row.get("plddts"), list) else [],
                 }
-                for row in all_results[:elite_size]
+                for row in _select_diverse_peptide_elites(all_results, elite_size)
             ]
 
             current_best_rows = []

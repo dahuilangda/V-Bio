@@ -19,6 +19,23 @@ const BICYCLIC_LINKERS: Array<{ type: BicyclicLinkerType; name: string; smiles: 
 
 const CUSTOM_RESIDUE_SCAFFOLD_SMILES = 'N[C@H](C(=O)O)c1ccccc1';
 
+type ResiduePlacementRule = 'any' | 'n_term' | 'c_term' | 'terminal';
+
+function residuePlacementRule(entry: ResidueCatalogEntry): ResiduePlacementRule {
+  return entry.placement || 'any';
+}
+
+function normalizePoolEntryKind(entry: ResidueCatalogEntry): PeptideResiduePoolSelection['kind'] {
+  return entry.group === 'Natural' ? 'natural' : entry.custom ? 'custom' : 'preset';
+}
+
+function placementLabel(rule: ResiduePlacementRule): string {
+  if (rule === 'n_term') return 'N-terminal only';
+  if (rule === 'c_term') return 'C-terminal only';
+  if (rule === 'terminal') return 'Terminal positions only';
+  return 'Any editable position';
+}
+
 function normalizeCustomResidueCode(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]/g, '').toUpperCase().slice(0, 12);
 }
@@ -193,7 +210,7 @@ export function WorkflowRuntimeSettingsSection({
     return normalized.padEnd(Math.max(1, peptideBinderLength), 'X');
   }, [peptideSequenceMask, peptideBinderLength]);
   const maskChars = useMemo(() => normalizedSequenceMask.split(''), [normalizedSequenceMask]);
-  const canToggleMask = canEdit && peptideUseInitialSequence;
+  const canToggleMask = canEdit;
 
   useEffect(() => {
     let cancelled = false;
@@ -267,20 +284,73 @@ export function WorkflowRuntimeSettingsSection({
     () => NATURAL_AMINO_ACID_RESIDUES.filter((entry) => selectedResidueKeySet.has(`natural:${entry.ccd}`)).length,
     [selectedResidueKeySet]
   );
+  const protectedResiduePositions = useMemo(() => {
+    const protectedSet = new Set<number>();
+    maskChars.forEach((maskChar, idx) => {
+      if (maskChar && maskChar !== 'X') protectedSet.add(idx + 1);
+    });
+    if (isBicyclicMode) {
+      Object.values(cysSlotValueMap).forEach((pos) => {
+        const normalized = Math.max(1, Math.min(peptideBinderLength, Math.floor(Number(pos) || 1)));
+        protectedSet.add(normalized);
+      });
+    }
+    return protectedSet;
+  }, [maskChars, isBicyclicMode, cysSlotValueMap, peptideBinderLength]);
+  const residuePlacementStatusByKey = useMemo(() => {
+    const status = new Map<string, { selectable: boolean; allowedPositions: number[]; reason: string; placement: string }>();
+    residueCatalogSections.forEach((section) => {
+      section.entries.forEach((entry) => {
+        const key = `${section.kind}:${entry.ccd}`;
+        const rule = residuePlacementRule(entry);
+        let candidatePositions = positions;
+        if (rule === 'n_term') candidatePositions = positions.filter((position) => position === 1);
+        if (rule === 'c_term') candidatePositions = positions.filter((position) => position === peptideBinderLength);
+        if (rule === 'terminal') candidatePositions = positions.filter((position) => position === 1 || position === peptideBinderLength);
+        if (isBicyclicMode && section.kind === 'natural' && entry.ccd === 'CYS') {
+          status.set(key, {
+            selectable: false,
+            allowedPositions: [],
+            reason: 'Cys positions are controlled by bicyclic linker settings in this mode.',
+            placement: 'Bicyclic linker controlled'
+          });
+          return;
+        }
+        const allowedPositions = candidatePositions.filter((position) => !protectedResiduePositions.has(position));
+        const placement = entry.placementLabel || placementLabel(rule);
+        let reason = allowedPositions.length > 0 ? `${placement}; ${allowedPositions.length} editable position${allowedPositions.length === 1 ? '' : 's'} available.` : '';
+        if (allowedPositions.length === 0) {
+          reason = `${placement}; no editable position is available with the current mask and design mode.`;
+          if (rule === 'n_term' && protectedResiduePositions.has(1)) reason = `${placement}; position 1 is fixed by the sequence mask.`;
+          if (rule === 'c_term' && protectedResiduePositions.has(peptideBinderLength)) reason = `${placement}; the C-terminal position is fixed by the sequence mask.`;
+          if (rule === 'terminal') reason = `${placement}; both terminal positions are fixed or protected.`;
+        }
+        status.set(key, {
+          selectable: allowedPositions.length > 0,
+          allowedPositions,
+          reason,
+          placement
+        });
+      });
+    });
+    return status;
+  }, [residueCatalogSections, positions, peptideBinderLength, protectedResiduePositions, isBicyclicMode]);
   const clampNonNaturalLimit = (value: number) => Math.max(0, Math.min(peptideBinderLength, Math.floor(Number(value) || 0)));
   const toggleResiduePoolEntry = (entry: ResidueCatalogEntry) => {
     if (!canEdit) return;
-    const kind: PeptideResiduePoolSelection['kind'] = entry.group === 'Natural' ? 'natural' : entry.custom ? 'custom' : 'preset';
+    const kind = normalizePoolEntryKind(entry);
     const key = `${kind}:${entry.ccd}`;
     const next = new Set(selectedResidueKeySet);
     if (next.has(key)) {
       next.delete(key);
-    } else {
+    } else if (residuePlacementStatusByKey.get(key)?.selectable !== false) {
       next.add(key);
+    } else {
+      return;
     }
     const ordered = residueCatalog
       .map((item) => {
-        const itemKind: PeptideResiduePoolSelection['kind'] = item.group === 'Natural' ? 'natural' : item.custom ? 'custom' : 'preset';
+        const itemKind = normalizePoolEntryKind(item);
         return { code: item.ccd, kind: itemKind };
       })
       .filter((item) => next.has(`${item.kind}:${item.code}`));
@@ -293,7 +363,7 @@ export function WorkflowRuntimeSettingsSection({
     entries.forEach((entry) => {
       const key = `${sectionKind}:${entry.ccd}`;
       if (selected) {
-        next.add(key);
+        if (residuePlacementStatusByKey.get(key)?.selectable !== false) next.add(key);
       } else {
         next.delete(key);
       }
@@ -364,7 +434,7 @@ export function WorkflowRuntimeSettingsSection({
     if (!canToggleMask) return;
     const index = position - 1;
     if (index < 0 || index >= maskChars.length) return;
-    const sequenceChar = normalizedInitialSequence[index] || 'X';
+    const sequenceChar = normalizedInitialSequence[index] || '';
     if (!sequenceChar || sequenceChar === 'X') return;
     const nextMask = [...maskChars];
     nextMask[index] = nextMask[index] === 'X' ? sequenceChar : 'X';
@@ -467,21 +537,8 @@ export function WorkflowRuntimeSettingsSection({
                     onChange={(e) => onPeptideUseInitialSequenceChange(e.target.checked)}
                     disabled={!canEdit}
                   />
-                  <span>Use Initial Sequence</span>
+                  <span>Seed first generation from reference sequence</span>
                 </label>
-                {peptideUseInitialSequence && (
-                  <label className="field peptide-initial-seq-field">
-                    <span>Initial Sequence</span>
-                    <input
-                      type="text"
-                      value={normalizedInitialSequence}
-                      onChange={(e) => onPeptideInitialSequenceChange(e.target.value)}
-                      disabled={!canEdit}
-                      placeholder={`Length ${peptideBinderLength}, e.g. ACDEFG...`}
-                      spellCheck={false}
-                    />
-                  </label>
-                )}
                 <div className="peptide-residue-config">
                   <div className="peptide-residue-config-head">
                     <div className="peptide-residue-config-title">
@@ -576,20 +633,30 @@ export function WorkflowRuntimeSettingsSection({
                             {section.entries.map((entry) => {
                               const kind: PeptideResiduePoolSelection['kind'] = section.kind;
                               const active = selectedResidueKeySet.has(`${kind}:${entry.ccd}`);
+                              const placementStatus = residuePlacementStatusByKey.get(`${kind}:${entry.ccd}`);
+                              const unavailable = placementStatus?.selectable === false;
+                              const cardDisabled = !canEdit;
+                              const helpText = [entry.backboneLabel, placementStatus?.reason].filter(Boolean).join(' · ');
                               return (
                                 <button
                                   key={`${kind}-${entry.ccd}`}
                                   type="button"
                                   role="listitem"
-                                  className={`peptide-residue-card ${active ? 'active' : ''} ${kind === 'natural' ? 'natural' : ''}`}
+                                  className={`peptide-residue-card ${active ? 'active' : ''} ${kind === 'natural' ? 'natural' : ''} ${unavailable ? 'unavailable' : ''}`}
                                   onClick={() => toggleResiduePoolEntry(entry)}
-                                  disabled={!canEdit}
+                                  disabled={cardDisabled}
                                   aria-pressed={active}
-                                  title={`${entry.label} · ${entry.ccd}`}
+                                  title={[entry.label, entry.ccd, entry.backboneLabel, placementStatus?.placement].filter(Boolean).join(' · ')}
                                 >
+                                  {helpText ? (
+                                    <span className="peptide-residue-help" aria-label={helpText} onClick={(event) => event.stopPropagation()}>
+                                      ?
+                                      <span className="peptide-residue-tooltip">{helpText}</span>
+                                    </span>
+                                  ) : null}
                                   <div className="peptide-residue-preview" aria-hidden="true">
                                     {entry.smiles ? (
-                                      <MemoLigand2DPreview smiles={entry.smiles} width={132} height={94} highlightQuery={AMINO_ACID_BACKBONE_SMARTS} />
+                                      <MemoLigand2DPreview smiles={entry.smiles} width={132} height={94} highlightQuery={entry.backboneHighlightQuery || AMINO_ACID_BACKBONE_SMARTS} />
                                     ) : (
                                       <div className="peptide-residue-preview-fallback">{entry.baseResidue}</div>
                                     )}
@@ -761,35 +828,50 @@ export function WorkflowRuntimeSettingsSection({
                     disabled={!canEdit}
                   />
                 </label>
-                {peptideUseInitialSequence && (
-                  <label className="field peptide-mask-field">
-                    <span>Mask Positions (click to toggle)</span>
-                    <div className="peptide-mask-rail" role="list" aria-label="Sequence mask positions">
-                      {positions.map((position) => {
-                        const residue = maskChars[position - 1] || 'X';
-                        const fixed = residue !== 'X';
-                        return (
-                          <button
-                            key={`peptide-mask-${position}`}
-                            type="button"
-                            role="listitem"
-                            className={`peptide-mask-dot ${fixed ? 'fixed' : ''}`}
-                            onClick={() => toggleMaskPosition(position)}
-                            disabled={!canToggleMask}
-                            title={fixed ? `Fixed at ${residue}` : `Position ${position} is mutable`}
-                          >
-                            <span>{position}</span>
-                            <strong>{fixed ? residue : '·'}</strong>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </label>
-                )}
+                <label className="field peptide-mask-field">
+                  <span>Fixed positions</span>
+                  <input
+                    className="peptide-fixed-reference-input"
+                    type="text"
+                    value={normalizedInitialSequence}
+                    onChange={(e) => onPeptideInitialSequenceChange(e.target.value)}
+                    disabled={!canEdit}
+                    placeholder={`Reference sequence, length ${peptideBinderLength}`}
+                    spellCheck={false}
+                  />
+                  <div className="peptide-mask-rail" role="list" aria-label="Sequence mask positions">
+                    {positions.map((position) => {
+                      const residue = maskChars[position - 1] || 'X';
+                      const fixed = residue !== 'X';
+                      const referenceResidue = normalizedInitialSequence[position - 1] || '';
+                      const canFixPosition = Boolean(referenceResidue && referenceResidue !== 'X');
+                      return (
+                        <button
+                          key={`peptide-mask-${position}`}
+                          type="button"
+                          role="listitem"
+                          className={`peptide-mask-dot ${fixed ? 'fixed' : ''} ${!canFixPosition ? 'empty' : ''}`}
+                          onClick={() => toggleMaskPosition(position)}
+                          disabled={!canToggleMask || !canFixPosition}
+                          title={
+                            fixed
+                              ? `Position ${position} fixed at ${residue}`
+                              : canFixPosition
+                                ? `Click to fix position ${position} at ${referenceResidue}`
+                                : `Add residue ${position} in the reference sequence before fixing it`
+                          }
+                        >
+                          <span>{position}</span>
+                          <strong>{fixed ? residue : canFixPosition ? referenceResidue : '·'}</strong>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </label>
               </div>
-              {peptideUseInitialSequence && normalizedInitialSequence.length !== peptideBinderLength && (
+              {normalizedInitialSequence.length !== peptideBinderLength && (
                 <p className="muted small">
-                  Initial sequence length is {normalizedInitialSequence.length}. Expected {peptideBinderLength}.
+                  Reference sequence length is {normalizedInitialSequence.length}. Expected {peptideBinderLength} to fix every desired position.
                 </p>
               )}
             </section>

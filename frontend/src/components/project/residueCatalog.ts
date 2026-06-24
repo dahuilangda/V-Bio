@@ -6,6 +6,10 @@ export interface ResidueCatalogEntry {
   baseResidue: string;
   group: string;
   smiles?: string;
+  backboneHighlightQuery?: string;
+  backboneLabel?: string;
+  placement?: 'any' | 'n_term' | 'c_term' | 'terminal';
+  placementLabel?: string;
   custom?: boolean;
 }
 
@@ -43,14 +47,14 @@ export const BUILT_IN_PROTEIN_MODIFICATIONS: ResidueCatalogEntry[] = [
   { ccd: 'MSE', label: 'selenomethionine', baseResidue: 'M', group: 'Common non-natural', smiles: 'N[C@@H](CC[Se]C)C(=O)O' },
   { ccd: 'SEC', label: 'selenocysteine', baseResidue: 'C', group: 'Common non-natural', smiles: 'N[C@@H](C[SeH])C(=O)O' },
   { ccd: 'HYP', label: 'hydroxyproline', baseResidue: 'P', group: 'Common non-natural', smiles: 'O=C(O)[C@@H]1CC(O)CN1' },
-  { ccd: 'PCA', label: 'pyroglutamic acid', baseResidue: 'E', group: 'Common non-natural', smiles: 'O=C(O)[C@@H]1CCC(=O)N1' },
+  { ccd: 'PCA', label: 'pyroglutamic acid', baseResidue: 'E', group: 'Common non-natural', smiles: 'O=C(O)[C@@H]1CCC(=O)N1', backboneHighlightQuery: '[NX3]1[C;X4](C(=O)[O,N])[C;X4][C;X4]C(=O)1', backboneLabel: 'Cyclized N-terminal backbone', placement: 'n_term', placementLabel: 'N-terminal only' },
   { ccd: 'SEP', label: 'phosphoserine', baseResidue: 'S', group: 'PTM', smiles: 'N[C@@H](COP(=O)(O)O)C(=O)O' },
   { ccd: 'TPO', label: 'phosphothreonine', baseResidue: 'T', group: 'PTM', smiles: 'N[C@@H]([C@H](C)OP(=O)(O)O)C(=O)O' },
   { ccd: 'PTR', label: 'phosphotyrosine', baseResidue: 'Y', group: 'PTM', smiles: 'N[C@@H](Cc1ccc(OP(=O)(O)O)cc1)C(=O)O' },
   { ccd: 'CSO', label: 'S-hydroxycysteine', baseResidue: 'C', group: 'PTM', smiles: 'N[C@@H](CSO)C(=O)O' },
   { ccd: 'MLY', label: 'N6-methyllysine', baseResidue: 'K', group: 'PTM', smiles: 'N[C@@H](CCCCNC)C(=O)O' },
   { ccd: 'DAL', label: 'D-alanine', baseResidue: 'A', group: 'D-amino acid', smiles: 'N[C@H](C)C(=O)O' },
-  { ccd: 'BALA', label: 'beta-alanine', baseResidue: 'A', group: 'Backbone variant', smiles: 'NCCC(=O)O' },
+  { ccd: 'BALA', label: 'beta-alanine', baseResidue: 'A', group: 'Backbone variant', smiles: 'NCCC(=O)O', backboneHighlightQuery: '[NX3,NX4,NX2]-[C;X4]-[C;X4]-C(=O)[O,N]', backboneLabel: 'Beta-amino-acid backbone' },
   { ccd: 'MANS', label: 'O-Man-Ser', baseResidue: 'S', group: 'Glycosylation', smiles: 'N[C@@H](CO[C@H]1O[C@@H](CO)[C@H](O)[C@@H](O)[C@@H]1O)C(=O)O' },
   { ccd: 'MANT', label: 'O-Man-Thr', baseResidue: 'T', group: 'Glycosylation', smiles: 'N[C@@H]([C@H](C)O[C@H]1O[C@@H](CO)[C@H](O)[C@@H](O)[C@@H]1O)C(=O)O' },
   { ccd: 'MANN', label: 'N-Man-Asn', baseResidue: 'N', group: 'Glycosylation', smiles: 'N[C@@H](CC(=O)N[C@H]1O[C@@H](CO)[C@H](O)[C@@H](O)[C@@H]1O)C(=O)O' },

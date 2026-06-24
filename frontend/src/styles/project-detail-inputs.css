@@ -270,6 +270,10 @@
   grid-column: 1 / -1;
 }
 
+.peptide-fixed-reference-input {
+  margin-top: 6px;
+}
+
 .peptide-mask-rail {
   margin-top: 6px;
   display: grid;
@@ -304,6 +308,17 @@
   border-color: #6a9c81;
   background: #ecf7f1;
   color: #2d5d45;
+}
+
+.peptide-mask-dot.empty {
+  border-color: #d9e1dd;
+  background: #f6f8f7;
+  color: #9aa8a1;
+}
+
+.peptide-mask-dot:disabled {
+  cursor: default;
+  opacity: 0.62;
 }
 
 .peptide-runtime-grid-cys {
@@ -782,6 +797,7 @@
 }
 
 .peptide-residue-card {
+  position: relative;
   display: grid;
   grid-template-rows: 104px minmax(38px, auto) auto;
   gap: 7px;
@@ -806,6 +822,65 @@
 .peptide-residue-card:disabled {
   cursor: default;
   opacity: 0.68;
+}
+
+.peptide-residue-card.unavailable {
+  background: #f4f7f5;
+  border-color: #d3ddd7;
+  color: #6f7f77;
+}
+
+.peptide-residue-card.unavailable:not(.active) .peptide-residue-preview,
+.peptide-residue-card.unavailable:not(.active) .peptide-residue-meta {
+  filter: grayscale(0.55);
+  opacity: 0.58;
+}
+
+.peptide-residue-help {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #c7d5ce;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #53675d;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+}
+
+.peptide-residue-tooltip {
+  position: absolute;
+  right: -4px;
+  top: 24px;
+  width: min(230px, 70vw);
+  padding: 7px 8px;
+  border: 1px solid #cbd8d1;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #25372f;
+  box-shadow: 0 8px 22px rgba(21, 45, 34, 0.14);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  text-align: left;
+  white-space: normal;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.peptide-residue-help:hover .peptide-residue-tooltip,
+.peptide-residue-help:focus .peptide-residue-tooltip {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .peptide-residue-preview {

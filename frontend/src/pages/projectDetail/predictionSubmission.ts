@@ -1,7 +1,7 @@
 import type { MutableRefObject } from 'react';
 import { submitPrediction } from '../../api/backendApi';
 import { assignChainIdsForComponents } from '../../utils/chainAssignments';
-import { extractPrimaryProteinAndLigand, PEPTIDE_DESIGNED_LIGAND_TOKEN } from '../../utils/projectInputs';
+import { extractPrimaryProteinAndLigand, normalizeProjectInputConfig, PEPTIDE_DESIGNED_LIGAND_TOKEN } from '../../utils/projectInputs';
 import { buildQueuedPeptidePreviewFromOptions, PEPTIDE_TASK_PREVIEW_KEY } from '../../utils/peptideTaskPreview';
 import type { CustomCcdMoleculeInput, InputComponent, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
 import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
@@ -204,7 +204,10 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
   } = deps;
 
   const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, draft.backend);
-  const submissionConfig = buildPredictionSubmissionConfig(normalizedConfig, isPeptideDesignWorkflow);
+  const submissionBaseConfig = isPeptideDesignWorkflow
+    ? normalizeProjectInputConfig({ ...normalizedConfig, options: normalizedConfig.options })
+    : normalizedConfig;
+  const submissionConfig = buildPredictionSubmissionConfig(submissionBaseConfig, isPeptideDesignWorkflow);
   const missingOrders = listIncompleteComponentOrders(normalizedConfig.components);
   if (missingOrders.length > 0) {
     const maxShown = 3;
@@ -253,14 +256,14 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
       ? customResidueLibrary.filter((item) => selectedCustomResidueCodes.has(String(item.ccd || '').trim().toUpperCase()))
       : [];
 
-    saveProjectInputConfig(project.id, normalizedConfig);
+    saveProjectInputConfig(project.id, submissionBaseConfig);
     const nextDraft: PredictionDraftFields = {
       taskName: draft.taskName.trim(),
       taskSummary: draft.taskSummary.trim(),
       backend: draft.backend,
       use_msa: hasMsa,
       color_mode: draft.color_mode === 'alphafold' ? 'alphafold' : 'default',
-      inputConfig: normalizedConfig
+      inputConfig: submissionBaseConfig
     };
     setDraft(nextDraft);
     setSavedDraftFingerprint(createDraftFingerprint(nextDraft));

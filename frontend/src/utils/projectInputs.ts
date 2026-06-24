@@ -677,6 +677,10 @@ function normalizeConfig(value: ProjectInputConfig): ProjectInputConfig {
   };
 }
 
+export function normalizeProjectInputConfig(value: ProjectInputConfig): ProjectInputConfig {
+  return normalizeConfig(value);
+}
+
 function readStore(): Record<string, ProjectInputConfig> {
   try {
     const raw = localStorage.getItem(COMPONENT_KEY);
