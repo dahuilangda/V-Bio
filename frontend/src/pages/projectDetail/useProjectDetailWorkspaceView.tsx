@@ -3130,6 +3130,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   });
   const {
     displayStructureText,
+    displayStructureConfidenceText,
     displayStructureFormat,
     displayStructureName,
     displayStructureColorMode,
@@ -3328,6 +3329,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     selectedResultTargetChainId,
     selectedResultLigandChainId,
     displayStructureText,
+    displayStructureConfidenceText,
     displayStructureFormat,
     displayStructureColorMode,
     displayStructureName,

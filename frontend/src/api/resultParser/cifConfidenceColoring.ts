@@ -333,3 +333,50 @@ export function ensureStructureConfidenceColoringData(
   const pruned = pruneCifMaQaMetricLocalToPolymer(structureText);
   return ensureCifHasMaQaMetricLocal(pruned);
 }
+
+export function stripStructureConfidenceColoringData(
+  structureText: string,
+  structureFormat: 'cif' | 'pdb'
+): string {
+  if (!structureText || structureFormat !== 'cif') return structureText;
+  const lines = structureText.split(/\r?\n/);
+  const output: string[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (trimmed !== 'loop_') {
+      output.push(line);
+      continue;
+    }
+
+    const headers: string[] = [];
+    let headerIndex = i + 1;
+    while (headerIndex < lines.length && lines[headerIndex].trim().startsWith('_')) {
+      headers.push(lines[headerIndex].trim().toLowerCase());
+      headerIndex += 1;
+    }
+
+    const isConfidenceLoop = headers.some((header) =>
+      header.startsWith('_ma_qa_metric.') ||
+      header.startsWith('_ma_qa_metric_local.') ||
+      header.startsWith('_ma_qa_metric_global.') ||
+      header.startsWith('_ma_qa_metric_local_pairwise.')
+    );
+    if (!isConfidenceLoop) {
+      output.push(line);
+      continue;
+    }
+
+    i = headerIndex;
+    while (i < lines.length) {
+      const row = lines[i].trim();
+      if (row === 'loop_' || row.startsWith('_') || row.startsWith('data_')) {
+        i -= 1;
+        break;
+      }
+      if (row === '#') break;
+      i += 1;
+    }
+  }
+  return output.join('\n');
+}

@@ -1,5 +1,6 @@
 export {
   ensureStructureConfidenceColoringData,
+  stripStructureConfidenceColoringData,
   compactResultConfidenceForStorage,
   parseResultBundle,
   downloadResultFile,

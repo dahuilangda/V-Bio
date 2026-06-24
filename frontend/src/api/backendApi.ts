@@ -77,5 +77,6 @@ export {
   compactResultConfidenceForStorage,
   downloadResultFile,
   ensureStructureConfidenceColoringData,
+  stripStructureConfidenceColoringData,
   parseResultBundle
 } from './backendResultParserApi';

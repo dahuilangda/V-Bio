@@ -25,6 +25,7 @@ export interface ProjectResultsSectionProps {
   selectedResultTargetChainId: string | null;
   selectedResultLigandChainId: string | null;
   displayStructureText: string;
+  displayStructureConfidenceText?: string;
   displayStructureFormat: 'cif' | 'pdb';
   displayStructureColorMode: 'default' | 'alphafold';
   displayStructureName: string;
@@ -66,6 +67,7 @@ export function ProjectResultsSection({
   selectedResultTargetChainId,
   selectedResultLigandChainId,
   displayStructureText,
+  displayStructureConfidenceText,
   displayStructureFormat,
   displayStructureColorMode,
   confidenceBackend,
@@ -132,7 +134,7 @@ export function ProjectResultsSection({
           <section className="structure-panel structure-panel--prediction">
             <MolstarViewer
               key={`prediction-results-viewer:${projectTaskId || '-'}:${predictionViewerColorMode}:${selectedResultLigandChainId || '-'}`}
-              structureText={displayStructureText}
+              structureText={predictionViewerColorMode === 'alphafold' ? displayStructureConfidenceText || displayStructureText : displayStructureText}
               format={displayStructureFormat}
               colorMode={predictionViewerColorMode}
               confidenceBackend={confidenceBackend || projectBackend}

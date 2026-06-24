@@ -418,6 +418,45 @@ export async function tryApplyLeadOptResultsInteractionTheme(viewer: any): Promi
   await updateThemeTargetsWithVariants(manager, components, structures, buildBaseElementSymbolThemeVariants());
 }
 
+export async function tryApplyStandardElementSymbolRepresentations(
+  viewer: any,
+  structures?: any[]
+): Promise<void> {
+  const plugin = viewer?.plugin;
+  const manager = plugin?.managers?.structure?.component;
+  const hasManagerTheme = typeof manager?.updateRepresentationsTheme === 'function';
+  const entries = Array.isArray(structures) ? structures : await waitForStructureEntries(viewer);
+
+  if (typeof viewer?.setStyle === 'function') {
+    try {
+      viewer.setStyle({ theme: 'element-symbol' });
+    } catch {
+      // no-op
+    }
+  }
+
+  if (entries.length > 0) {
+    await clearStructureComponents(viewer);
+    await tryBuildRepresentationsFromStructures(
+      viewer,
+      'element-symbol',
+      entries,
+      [
+        { kind: 'polymer', type: 'cartoon' },
+        { kind: 'ligand', type: 'ball-and-stick' },
+        { kind: 'branched', type: 'ball-and-stick' },
+        { kind: 'ion', type: 'ball-and-stick' }
+      ]
+    );
+  }
+
+  if (!hasManagerTheme) return;
+
+  const components = await waitForThemeComponents(viewer, 2200, 80);
+  if (components.length === 0 && entries.length === 0) return;
+  await updateThemeTargetsWithVariants(manager, components, entries, buildBaseElementSymbolThemeVariants());
+}
+
 export async function tryApplyElementSymbolThemeToCurrentScene(viewer: any): Promise<void> {
   const plugin = viewer?.plugin;
   const manager = plugin?.managers?.structure?.component;

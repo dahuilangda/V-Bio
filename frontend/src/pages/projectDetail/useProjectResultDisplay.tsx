@@ -1,6 +1,6 @@
 import { useMemo, type ReactNode } from 'react';
 import { Ligand2DPreview } from '../../components/project/Ligand2DPreview';
-import { ensureStructureConfidenceColoringData } from '../../api/backendApi';
+import { ensureStructureConfidenceColoringData, stripStructureConfidenceColoringData } from '../../api/backendApi';
 import type { InputComponent } from '../../types/models';
 import {
   readIpsaeDomMetric,
@@ -70,6 +70,7 @@ interface UseProjectResultDisplayOptions {
 
 interface UseProjectResultDisplayResult {
   displayStructureText: string;
+  displayStructureConfidenceText: string;
   displayStructureFormat: 'cif' | 'pdb';
   displayStructureName: string;
   displayStructureColorMode: 'default' | 'alphafold';
@@ -140,6 +141,10 @@ export function useProjectResultDisplay({
   const shouldPrepareAnyResultStructure = shouldPrepareResultStructure || shouldPrepareAffinityResultDisplay;
   const shouldPrepareAnyResultLigand = shouldPreparePredictionLigandPreview || shouldPrepareAffinityResultDisplay;
   const displayStructureText = useMemo(
+    () => (shouldPrepareAnyResultStructure ? stripStructureConfidenceColoringData(structureText, structureFormat) : ''),
+    [shouldPrepareAnyResultStructure, structureText, structureFormat]
+  );
+  const displayStructureConfidenceText = useMemo(
     () =>
       shouldPrepareAnyResultStructure
         ? ensureStructureConfidenceColoringData(structureText, structureFormat, confidenceBackend || projectBackend)
@@ -315,6 +320,7 @@ export function useProjectResultDisplay({
 
   return {
     displayStructureText,
+    displayStructureConfidenceText,
     displayStructureFormat,
     displayStructureName,
     displayStructureColorMode,

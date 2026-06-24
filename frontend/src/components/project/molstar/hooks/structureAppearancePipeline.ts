@@ -5,6 +5,7 @@ import {
   tryApplyLeadOptResultsInteractionTheme,
   tryApplyAlphaFoldTheme,
   tryApplyCartoonPreset,
+  tryApplyStandardElementSymbolRepresentations,
   tryBuildRepresentationsFromStructures,
   waitForStructureEntries
 } from '../theme';
@@ -165,21 +166,33 @@ export async function applyStructureAppearancePipeline({
     return;
   }
 
-  const presetApplied = await tryApplyCartoonPreset(viewer, structureEntries);
-  if (!isRequestCurrent()) return;
-  if (!presetApplied && resolvedColorMode === 'alphafold' && hasStaticRepresentationBuilder(viewer)) {
-    await clearStructureComponents(viewer);
-    await tryBuildRepresentationsFromStructures(viewer, 'plddt-confidence', structureEntries);
-    if (!isRequestCurrent()) return;
-  }
   if (resolvedColorMode === 'alphafold') {
+    const presetApplied = await tryApplyCartoonPreset(viewer, structureEntries);
+    if (!isRequestCurrent()) return;
+    if (!presetApplied && hasStaticRepresentationBuilder(viewer)) {
+      await clearStructureComponents(viewer);
+      await tryBuildRepresentationsFromStructures(viewer, 'plddt-confidence', structureEntries);
+      if (!isRequestCurrent()) return;
+    }
     await tryApplyAlphaFoldTheme(viewer, confidenceBackend);
     if (!isRequestCurrent()) return;
+  } else if (hasStaticRepresentationBuilder(viewer)) {
+    await tryApplyStandardElementSymbolRepresentations(viewer, structureEntries);
+    if (!isRequestCurrent()) return;
   } else {
+    const presetApplied = await tryApplyCartoonPreset(viewer, structureEntries);
+    if (!isRequestCurrent()) return;
+    if (!presetApplied) {
+      await tryApplyElementSymbolThemeToCurrentScene(viewer);
+      if (!isRequestCurrent()) return;
+    }
     await tryApplyElementSymbolThemeToCurrentScene(viewer);
     if (!isRequestCurrent()) return;
   }
   if (autoFocusLigand && !suppressAutoFocus) {
     focusLigandAnchor(viewer);
+    if (resolvedColorMode !== 'alphafold') {
+      await tryApplyElementSymbolThemeToCurrentScene(viewer);
+    }
   }
 }

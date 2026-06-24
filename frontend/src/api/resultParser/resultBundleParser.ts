@@ -3,7 +3,8 @@ import type { ParsedResultBundle } from '../../types/models';
 import { downloadResultBlob } from '../backendTaskApi';
 import {
   ensureCifHasMaQaMetricLocal,
-  ensureStructureConfidenceColoringData
+  ensureStructureConfidenceColoringData,
+  stripStructureConfidenceColoringData
 } from './cifConfidenceColoring';
 
 function getBaseName(path: string): string {
@@ -2330,4 +2331,4 @@ export async function downloadResultFile(taskId: string): Promise<void> {
   URL.revokeObjectURL(href);
 }
 
-export { ensureStructureConfidenceColoringData };
+export { ensureStructureConfidenceColoringData, stripStructureConfidenceColoringData };

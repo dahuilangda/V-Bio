@@ -42,6 +42,7 @@ interface UseProjectWorkflowSectionPropsInput {
   selectedResultTargetChainId: string | null;
   selectedResultLigandChainId: string | null;
   displayStructureText: string;
+  displayStructureConfidenceText: string;
   displayStructureFormat: 'pdb' | 'cif';
   displayStructureColorMode: 'default' | 'alphafold';
   displayStructureName: string;
@@ -216,6 +217,7 @@ export function useProjectWorkflowSectionProps({
   selectedResultTargetChainId,
   selectedResultLigandChainId,
   displayStructureText,
+  displayStructureConfidenceText,
   displayStructureFormat,
   displayStructureColorMode,
   displayStructureName,
@@ -366,6 +368,7 @@ export function useProjectWorkflowSectionProps({
         selectedResultTargetChainId,
         selectedResultLigandChainId,
         displayStructureText,
+        displayStructureConfidenceText,
         displayStructureFormat,
         displayStructureColorMode,
         displayStructureName,
