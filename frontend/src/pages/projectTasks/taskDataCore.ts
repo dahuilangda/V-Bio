@@ -1,4 +1,4 @@
-import type { InputComponent, Project, ProjectTask } from '../../types/models';
+import type { InputComponent, Project, ProjectTask, ProteinModification } from '../../types/models';
 import { assignChainIdsForComponents } from '../../utils/chainAssignments';
 import { readPeptidePreviewFromProperties } from '../../utils/peptideTaskPreview';
 import { normalizeComponentSequence, normalizeInputComponents } from '../../utils/projectInputs';
@@ -802,7 +802,8 @@ function resolveTaskSelectionContext(
       ligandIsSmiles: Boolean(fallbackLigandSmiles),
       ligandComponentCount,
       ligandSequence: '',
-      ligandSequenceType: null
+      ligandSequenceType: null,
+      ligandSequenceModifications: []
     };
   }
 
@@ -976,6 +977,10 @@ function resolveTaskSelectionContext(
       ? normalizeComponentSequence(selectedLigandComponent.type, selectedLigandComponent.sequence || '')
       : '';
   const ligandSequenceType = preferTaskSmilesLigand ? null : selectedLigandComponent?.type || null;
+  const ligandSequenceModifications =
+    !preferTaskSmilesLigand && selectedLigandComponent && isSequenceLigandType(selectedLigandComponent.type)
+      ? selectedLigandComponent.modifications || []
+      : [];
 
   return {
     chainIds,
@@ -985,7 +990,8 @@ function resolveTaskSelectionContext(
     ligandIsSmiles: ligand.isSmiles,
     ligandComponentCount,
     ligandSequence,
-    ligandSequenceType
+    ligandSequenceType,
+    ligandSequenceModifications
   };
 }
 
@@ -1072,6 +1078,7 @@ interface LeadOptTaskSummary {
 
 interface PeptideBestCandidatePreview {
   sequence: string;
+  modifications: ProteinModification[];
   plddt: number | null;
   iptm: number | null;
   residuePlddts: number[] | null;
@@ -1440,6 +1447,35 @@ function readPeptideCandidateSequence(row: Record<string, unknown>): string {
   return normalizePeptideCandidateSequence(sequence);
 }
 
+function readPeptideCandidateModifications(row: Record<string, unknown>, sequenceLength: number): ProteinModification[] {
+  const raw =
+    readObjectPath(row, 'modifications') ??
+    readObjectPath(row, 'protein_modifications') ??
+    readObjectPath(row, 'residue_modifications');
+  if (!Array.isArray(raw)) return [];
+  const rows: ProteinModification[] = [];
+  const seen = new Set<number>();
+  raw.forEach((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return;
+    const record = item as Record<string, unknown>;
+    const position = Math.floor(Number(record.position ?? record.residue_index ?? record.residue ?? record.pos));
+    const ccd = String(record.ccd ?? record.code ?? record.residue_name ?? '').trim().toUpperCase();
+    if (!Number.isFinite(position) || position < 1 || position > sequenceLength || !ccd || seen.has(position)) return;
+    seen.add(position);
+    rows.push({
+      id: String(record.id || `peptide-mod-${position}-${ccd}-${index}`),
+      position,
+      baseResidue: String(record.baseResidue ?? record.base_residue ?? '').trim().toUpperCase().slice(0, 1),
+      ccd,
+      inputMethod: String(record.inputMethod ?? record.input_method ?? '').trim().toLowerCase() === 'jsme' ? 'jsme' : 'ccd',
+      smiles: typeof record.smiles === 'string' ? record.smiles : undefined,
+      label: typeof record.label === 'string' ? record.label : undefined
+    });
+  });
+  return rows.sort((a, b) => a.position - b.position);
+}
+
+
 function comparePeptideCandidateRows(a: Record<string, unknown>, b: Record<string, unknown>, aIndex: number, bIndex: number): number {
   const aRank = readFirstFiniteFromPayloadPaths([a], ['rank', 'ranking', 'order']);
   const bRank = readFirstFiniteFromPayloadPaths([b], ['rank', 'ranking', 'order']);
@@ -1576,8 +1612,10 @@ function readPeptideBestCandidatePreview(task: ProjectTask): PeptideBestCandidat
         ['binder_chain_id', 'model_ligand_chain_id', 'requested_ligand_chain_id', 'ligand_chain_id']
       );
       const residuePlddts = readCandidateResiduePlddts(previewBest, sequence.length, binderChainId);
+      const modifications = readPeptideCandidateModifications(previewBest, sequence.length);
       return {
         sequence,
+        modifications,
         plddt,
         iptm,
         residuePlddts,
@@ -1640,9 +1678,11 @@ function readPeptideBestCandidatePreview(task: ProjectTask): PeptideBestCandidat
     ['binder_chain_id', 'model_ligand_chain_id', 'requested_ligand_chain_id', 'ligand_chain_id']
   );
   const residuePlddts = readCandidateResiduePlddts(best, sequence.length, binderChainId);
+  const modifications = readPeptideCandidateModifications(best, sequence.length);
 
   return {
     sequence,
+    modifications,
     plddt,
     iptm,
     residuePlddts,

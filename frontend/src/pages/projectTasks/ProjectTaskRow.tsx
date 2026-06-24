@@ -183,7 +183,11 @@ export function ProjectTaskRow({
               />
             </div>
           ) : row.ligandSequence && isSequenceLigandType(row.ligandSequenceType) ? (
-            <TaskLigandSequencePreview sequence={row.ligandSequence} residuePlddts={row.ligandResiduePlddts} />
+            <TaskLigandSequencePreview
+              sequence={row.ligandSequence}
+              residuePlddts={row.ligandResiduePlddts}
+              modifications={row.ligandSequenceModifications}
+            />
           ) : (
             <div className="task-ligand-thumb task-ligand-thumb-empty">
               <span className="muted small">No ligand</span>

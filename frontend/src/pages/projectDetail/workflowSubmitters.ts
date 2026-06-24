@@ -70,6 +70,7 @@ export function createWorkflowSubmitters(c: WorkflowSubmitterContext) {
       isPeptideDesignWorkflow: Boolean(c.isPeptideDesignWorkflow),
       workspaceTab: c.workspaceTab,
       proteinTemplates: c.proteinTemplates,
+      customResidueLibrary: c.customResidueLibrary,
       submitInFlightRef: c.submitInFlightRef,
       runRedirectTimerRef: c.runRedirectTimerRef,
       runSuccessNoticeTimerRef: c.runSuccessNoticeTimerRef,

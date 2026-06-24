@@ -22,7 +22,7 @@ const VALID_LIGAND_INPUT_METHODS = new Set(['smiles', 'ccd', 'jsme']);
 const VALID_PROTEIN_MODIFICATION_INPUT_METHODS = new Set(['ccd', 'jsme']);
 const VALID_PROTEIN_RESIDUES = new Set(['A', 'R', 'N', 'D', 'C', 'Q', 'E', 'G', 'H', 'I', 'L', 'K', 'M', 'F', 'P', 'S', 'T', 'W', 'Y', 'V']);
 const INVALID_COMPONENT_ID_TOKENS = new Set(['undefined', 'null', 'nan']);
-const DEFAULT_PEPTIDE_DESIGN_MODE = 'cyclic';
+const DEFAULT_PEPTIDE_DESIGN_MODE = 'linear';
 const VALID_PEPTIDE_DESIGN_MODES = new Set(['linear', 'cyclic', 'bicyclic']);
 const VALID_PEPTIDE_MASK_CHARS = new Set(['A', 'R', 'N', 'D', 'C', 'Q', 'E', 'G', 'H', 'I', 'L', 'K', 'M', 'F', 'P', 'S', 'T', 'W', 'Y', 'V', 'X']);
 const VALID_PEPTIDE_INITIAL_SEQUENCE_CHARS = new Set([
@@ -66,6 +66,29 @@ const DEFAULT_PEPTIDE_BICYCLIC_CYS2_POS = 8;
 const DEFAULT_PEPTIDE_BICYCLIC_CYS3_POS = 15;
 const DEFAULT_AFFINITY_MODE = 'score';
 const VALID_AFFINITY_MODES = new Set(['score', 'pose', 'refine', 'interface']);
+const VALID_PEPTIDE_POOL_KINDS = new Set(['natural', 'preset', 'custom']);
+const DEFAULT_PEPTIDE_RESIDUE_POOL: NonNullable<PredictionOptions['peptideResiduePool']> = [
+  'ALA',
+  'ARG',
+  'ASN',
+  'ASP',
+  'CYS',
+  'GLN',
+  'GLU',
+  'GLY',
+  'HIS',
+  'ILE',
+  'LEU',
+  'LYS',
+  'MET',
+  'PHE',
+  'PRO',
+  'SER',
+  'THR',
+  'TRP',
+  'TYR',
+  'VAL'
+].map((code) => ({ code, kind: 'natural' as const }));
 
 export const PEPTIDE_DESIGNED_LIGAND_TOKEN = '__designed_peptide__';
 
@@ -333,6 +356,23 @@ function normalizePeptideSequenceMask(value: unknown, binderLength: number): str
   return normalized.padEnd(binderLength, 'X');
 }
 
+function normalizePeptideResiduePool(value: unknown): NonNullable<PredictionOptions['peptideResiduePool']> {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const pool: NonNullable<PredictionOptions['peptideResiduePool']> = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const raw = item as Record<string, unknown>;
+    const code = normalizeProteinModificationCcd(raw.code ?? raw.ccd);
+    const kind = String(raw.kind || '').trim().toLowerCase();
+    const key = `${kind}:${code}`;
+    if (!code || !VALID_PEPTIDE_POOL_KINDS.has(kind) || seen.has(key)) continue;
+    seen.add(key);
+    pool.push({ code, kind: kind as 'natural' | 'preset' | 'custom' });
+  }
+  return pool.slice(0, 160);
+}
+
 export function buildDefaultInputConfig(workflowKey: string | null | undefined = 'prediction'): ProjectInputConfig {
   const isPeptideDesignWorkflow = String(workflowKey || '').trim().toLowerCase() === 'peptide_design';
   return {
@@ -357,6 +397,9 @@ export function buildDefaultInputConfig(workflowKey: string | null | undefined =
       peptidePopulationSize: DEFAULT_PEPTIDE_POPULATION_SIZE,
       peptideEliteSize: DEFAULT_PEPTIDE_ELITE_SIZE,
       peptideMutationRate: DEFAULT_PEPTIDE_MUTATION_RATE,
+      peptideResiduePool: DEFAULT_PEPTIDE_RESIDUE_POOL,
+      peptideNonNaturalMin: 0,
+      peptideNonNaturalMax: 0,
       peptideBicyclicLinkerCcd: DEFAULT_PEPTIDE_BICYCLIC_LINKER_CCD as 'SEZ' | '29N' | 'BS3',
       peptideBicyclicCysPositionMode: DEFAULT_PEPTIDE_BICYCLIC_CYS_POSITION_MODE as 'auto' | 'manual',
       peptideBicyclicFixTerminalCys: DEFAULT_PEPTIDE_BICYCLIC_FIX_TERMINAL_CYS,
@@ -436,6 +479,22 @@ function normalizeOptions(value: unknown): PredictionOptions {
     0.01,
     1
   );
+  const rawPeptideResiduePool = raw.peptideResiduePool ?? rawObj.peptide_residue_pool;
+  const peptideResiduePool = Array.isArray(rawPeptideResiduePool)
+    ? normalizePeptideResiduePool(rawPeptideResiduePool)
+    : DEFAULT_PEPTIDE_RESIDUE_POOL;
+  const peptideNonNaturalMin = normalizeIntegerOption(
+    raw.peptideNonNaturalMin ?? rawObj.peptide_non_natural_min ?? rawObj.non_natural_min,
+    0,
+    0,
+    peptideBinderLength
+  );
+  const peptideNonNaturalMax = normalizeIntegerOption(
+    raw.peptideNonNaturalMax ?? rawObj.peptide_non_natural_max ?? rawObj.non_natural_max,
+    peptideNonNaturalMin,
+    peptideNonNaturalMin,
+    peptideBinderLength
+  );
   const peptideBicyclicLinkerCcd = normalizePeptideBicyclicLinkerCcd(
     raw.peptideBicyclicLinkerCcd ?? rawObj.peptide_bicyclic_linker_ccd ?? rawObj.linker_ccd
   );
@@ -486,6 +545,9 @@ function normalizeOptions(value: unknown): PredictionOptions {
       peptidePopulationSize,
       peptideEliteSize,
       peptideMutationRate,
+      peptideResiduePool,
+      peptideNonNaturalMin,
+      peptideNonNaturalMax,
       peptideBicyclicLinkerCcd,
       peptideBicyclicCysPositionMode,
       peptideBicyclicFixTerminalCys,
@@ -507,6 +569,9 @@ function normalizeOptions(value: unknown): PredictionOptions {
     peptidePopulationSize,
     peptideEliteSize,
     peptideMutationRate,
+    peptideResiduePool,
+    peptideNonNaturalMin,
+    peptideNonNaturalMax,
     peptideBicyclicLinkerCcd,
     peptideBicyclicCysPositionMode,
     peptideBicyclicFixTerminalCys,

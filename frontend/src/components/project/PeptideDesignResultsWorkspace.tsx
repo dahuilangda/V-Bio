@@ -31,10 +31,17 @@ interface PeptideDesignResultsWorkspaceProps {
   onRequestStructure?: () => Promise<void> | void;
 }
 
+interface PeptideDesignCandidateModification {
+  position: number;
+  ccd: string;
+  baseResidue: string;
+}
+
 interface PeptideDesignCandidate {
   id: string;
   rank: number;
   sequence: string;
+  modifications: PeptideDesignCandidateModification[];
   score: number | null;
   plddt: number | null;
   residuePlddts: number[];
@@ -1331,6 +1338,7 @@ function mergeCandidateRows(rows: PeptideDesignCandidate[]): PeptideDesignCandid
       id: prev.id,
       rank: Math.min(prev.rank, row.rank),
       sequence: prev.sequence || row.sequence,
+      modifications: row.modifications.length > 0 ? row.modifications : prev.modifications,
       score:
         prev.score === null
           ? row.score
@@ -1378,6 +1386,30 @@ function mergeCandidateRows(rows: PeptideDesignCandidate[]): PeptideDesignCandid
   return [...merged.values()];
 }
 
+function parsePeptideCandidateModifications(row: Record<string, unknown>, sequenceLength: number): PeptideDesignCandidateModification[] {
+  const raw =
+    readObjectPath(row, 'modifications') ??
+    readObjectPath(row, 'protein_modifications') ??
+    readObjectPath(row, 'residue_modifications');
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<number>();
+  const rows: PeptideDesignCandidateModification[] = [];
+  raw.forEach((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return;
+    const record = item as Record<string, unknown>;
+    const position = Math.floor(Number(record.position ?? record.residue_index ?? record.residue ?? record.pos));
+    const ccd = readText(record.ccd ?? record.code ?? record.residue_name).trim().toUpperCase();
+    if (!Number.isFinite(position) || position < 1 || position > sequenceLength || !ccd || seen.has(position)) return;
+    seen.add(position);
+    rows.push({
+      position,
+      ccd,
+      baseResidue: readText(record.baseResidue ?? record.base_residue).trim().toUpperCase().slice(0, 1)
+    });
+  });
+  return rows.sort((a, b) => a.position - b.position);
+}
+
 function parseCandidateRows(
   rows: Array<Record<string, unknown>>,
   source: 'result' | 'live',
@@ -1398,6 +1430,7 @@ function parseCandidateRows(
         .replace(/\s+/g, '')
         .trim()
         .toUpperCase();
+      const modifications = parsePeptideCandidateModifications(row, sequence.length);
       const plddt = normalizePlddt(
         firstFiniteMetric(row, ['plddt', 'binder_avg_plddt', 'ligand_mean_plddt', 'mean_plddt'])
       );
@@ -1434,6 +1467,7 @@ function parseCandidateRows(
         id: `peptide-design-${source}-${idBase}-${index + 1}`,
         rank: rankRaw === null ? index + 1 : Math.max(1, Math.floor(rankRaw)),
         sequence,
+        modifications,
         score,
         plddt,
         residuePlddts,
@@ -1605,10 +1639,27 @@ function scoreConfidencePercent(value: number | null, minScore: number | null, m
   return Math.max(0, Math.min(100, normalized));
 }
 
-function buildPeptideLigandViewTokens(sequence: string): string[] {
+function buildPeptideLigandViewTokens(
+  sequence: string,
+  modifications: PeptideDesignCandidateModification[] = []
+): Array<{ residue: string; displayResidue: string; modifiedLabel: string }> {
   const normalized = sequence.trim().toUpperCase().replace(/[^A-Z]/g, '');
   if (!normalized) return [];
-  return normalized.split('');
+  const modificationByPosition = new Map<number, string>();
+  for (const mod of modifications) {
+    const position = Math.floor(Number(mod.position));
+    const ccd = readText(mod.ccd).trim().toUpperCase();
+    if (!Number.isFinite(position) || position < 1 || !ccd) continue;
+    modificationByPosition.set(position, ccd);
+  }
+  return normalized.split('').map((residue, index) => {
+    const modifiedLabel = modificationByPosition.get(index + 1) || '';
+    return {
+      residue,
+      displayResidue: modifiedLabel || residue,
+      modifiedLabel
+    };
+  });
 }
 
 export function PeptideDesignResultsWorkspace({
@@ -1915,7 +1966,7 @@ export function PeptideDesignResultsWorkspace({
               const interfaceTone = confidenceTone(
                 candidate.interfaceMetric === null ? null : candidate.interfaceMetric * 100
               );
-              const sequenceTokens = buildPeptideLigandViewTokens(candidate.sequence);
+              const sequenceTokens = buildPeptideLigandViewTokens(candidate.sequence, candidate.modifications);
               const sequenceRows = Array.from(
                 { length: Math.ceil(sequenceTokens.length / 10) },
                 (_, rowIdx) => sequenceTokens.slice(rowIdx * 10, rowIdx * 10 + 10)
@@ -1944,20 +1995,24 @@ export function PeptideDesignResultsWorkspace({
                         {sequenceRows.length > 0 ? (
                           sequenceRows.map((rowTokens, rowIdx) => (
                             <span className="peptide-ligand-preview-row" key={`${candidate.id}-ligand-view-row-${rowIdx}`}>
-                              {rowTokens.map((residue, idx) => {
+                              {rowTokens.map((token, idx) => {
                                 const residueIdx = rowIdx * 10 + idx;
                                 const residuePlddt = candidate.residuePlddts[residueIdx] ?? null;
                                 const residueTone = toneForPlddtValue(residuePlddt);
+                                const isModified = Boolean(token.modifiedLabel);
+                                const title = isModified
+                                  ? `#${residueIdx + 1} ${token.residue} -> ${token.modifiedLabel} | pLDDT ${residuePlddt === null ? '-' : residuePlddt.toFixed(1)}`
+                                  : `#${residueIdx + 1} ${token.residue} | pLDDT ${residuePlddt === null ? '-' : residuePlddt.toFixed(1)}`;
                                 return (
                                   <span className="peptide-ligand-preview-node-wrap" key={`${candidate.id}-ligand-view-${residueIdx}`}>
                                     {idx > 0 ? (
                                       <span className={`peptide-ligand-preview-link tone-${residueTone}`} aria-hidden="true" />
                                     ) : null}
                                     <span
-                                      className={`peptide-ligand-preview-node tone-${residueTone}`}
-                                      title={`#${residueIdx + 1} ${residue} | pLDDT ${residuePlddt === null ? '-' : residuePlddt.toFixed(1)}`}
+                                      className={`peptide-ligand-preview-node tone-${residueTone}${isModified ? ' is-modified' : ''}`}
+                                      title={title}
                                     >
-                                      {residue}
+                                      {token.displayResidue}
                                     </span>
                                   </span>
                                 );
@@ -2113,7 +2168,7 @@ export function PeptideDesignResultsWorkspace({
               const interfaceTone = confidenceTone(
                 candidate.interfaceMetric === null ? null : candidate.interfaceMetric * 100
               );
-              const sequenceTokens = buildPeptideLigandViewTokens(candidate.sequence);
+              const sequenceTokens = buildPeptideLigandViewTokens(candidate.sequence, candidate.modifications);
               const sequenceRows = Array.from(
                 { length: Math.ceil(sequenceTokens.length / 5) },
                 (_, rowIdx) => sequenceTokens.slice(rowIdx * 5, rowIdx * 5 + 5)
@@ -2142,20 +2197,24 @@ export function PeptideDesignResultsWorkspace({
                       {sequenceRows.length > 0 ? (
                         sequenceRows.map((rowTokens, rowIdx) => (
                           <span className="peptide-ligand-preview-row peptide-ligand-preview-row--card" key={`${candidate.id}-card-row-${rowIdx}`}>
-                            {rowTokens.map((residue, idx) => {
+                            {rowTokens.map((token, idx) => {
                               const residueIdx = rowIdx * 5 + idx;
                               const residuePlddt = candidate.residuePlddts[residueIdx] ?? null;
                               const residueTone = toneForPlddtValue(residuePlddt);
+                              const isModified = Boolean(token.modifiedLabel);
+                              const title = isModified
+                                ? `#${residueIdx + 1} ${token.residue} -> ${token.modifiedLabel} | pLDDT ${residuePlddt === null ? '-' : residuePlddt.toFixed(1)}`
+                                : `#${residueIdx + 1} ${token.residue} | pLDDT ${residuePlddt === null ? '-' : residuePlddt.toFixed(1)}`;
                               return (
                                 <span className="peptide-ligand-preview-node-wrap" key={`${candidate.id}-card-${residueIdx}`}>
                                   {idx > 0 ? (
                                     <span className={`peptide-ligand-preview-link tone-${residueTone}`} aria-hidden="true" />
                                   ) : null}
                                   <span
-                                    className={`peptide-ligand-preview-node peptide-ligand-preview-node--card tone-${residueTone}`}
-                                    title={`#${residueIdx + 1} ${residue} | pLDDT ${residuePlddt === null ? '-' : residuePlddt.toFixed(1)}`}
+                                    className={`peptide-ligand-preview-node peptide-ligand-preview-node--card tone-${residueTone}${isModified ? ' is-modified' : ''}`}
+                                    title={title}
                                   >
-                                    {residue}
+                                    {token.displayResidue}
                                   </span>
                                 </span>
                               );

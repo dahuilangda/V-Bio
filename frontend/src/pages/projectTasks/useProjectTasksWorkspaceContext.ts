@@ -197,6 +197,10 @@ export function useProjectTasksWorkspaceContext({
         workflowKey === 'peptide_design' && peptideBest?.sequence
           ? 'protein'
           : selection.ligandSequenceType;
+      const resolvedLigandSequenceModifications =
+        workflowKey === 'peptide_design' && peptideBest?.sequence
+          ? peptideBest.modifications
+          : selection.ligandSequenceModifications;
       const ligandResiduePlddtsRaw =
         workflowKey === 'peptide_design' && peptideBest?.sequence
           ? peptideBest.residuePlddts ?? readTaskLigandResiduePlddts(task, peptideBest.binderChainId || selection.ligandChainId)
@@ -246,6 +250,7 @@ export function useProjectTasksWorkspaceContext({
         ligandRenderAtomPlddts: ligandAtomPlddts,
         ligandSequence: resolvedLigandSequence,
         ligandSequenceType: resolvedLigandSequenceType,
+        ligandSequenceModifications: resolvedLigandSequenceModifications,
         ligandResiduePlddts,
         workflowKey,
         workflowLabel: getWorkflowDefinition(workflowKey).shortTitle,

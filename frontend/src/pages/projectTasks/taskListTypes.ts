@@ -1,4 +1,4 @@
-import type { InputComponent, ProjectTask } from '../../types/models';
+import type { InputComponent, ProjectTask, ProteinModification } from '../../types/models';
 import type { WorkflowKey } from '../../utils/workflows';
 
 export type MetricTone = 'excellent' | 'good' | 'medium' | 'low' | 'neutral';
@@ -40,6 +40,7 @@ export interface TaskSelectionContext extends TaskMetricContext {
   ligandComponentCount: number;
   ligandSequence: string;
   ligandSequenceType: InputComponent['type'] | null;
+  ligandSequenceModifications: ProteinModification[];
 }
 
 export interface TaskListRow {
@@ -55,6 +56,7 @@ export interface TaskListRow {
   ligandRenderAtomPlddts: number[] | null;
   ligandSequence: string;
   ligandSequenceType: InputComponent['type'] | null;
+  ligandSequenceModifications: ProteinModification[];
   ligandResiduePlddts: number[] | null;
   workflowKey: WorkflowKey;
   workflowLabel: string;

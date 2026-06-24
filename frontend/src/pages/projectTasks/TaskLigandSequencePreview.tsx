@@ -1,9 +1,11 @@
 import { useMemo } from 'react';
+import type { ProteinModification } from '../../types/models';
 import { toneForPlddt } from './taskPresentation';
 
 interface TaskLigandSequencePreviewProps {
   sequence: string;
   residuePlddts: number[] | null;
+  modifications?: ProteinModification[];
 }
 
 function ligandSequenceDensityClass(length: number): 'is-short' | 'is-medium' | 'is-long' | 'is-xlong' {
@@ -32,22 +34,36 @@ function ligandSequenceHeightClass(lineCount: number): 'is-height-normal' | 'is-
   return 'is-height-xtall';
 }
 
-export function TaskLigandSequencePreview({ sequence, residuePlddts }: TaskLigandSequencePreviewProps) {
+export function TaskLigandSequencePreview({ sequence, residuePlddts, modifications }: TaskLigandSequencePreviewProps) {
   const residues = sequence.trim().toUpperCase().split('');
   const densityClass = ligandSequenceDensityClass(residues.length);
+  const modificationByPosition = useMemo(() => {
+    const byPosition = new Map<number, ProteinModification>();
+    for (const mod of modifications || []) {
+      const position = Math.floor(Number(mod.position));
+      const ccd = String(mod.ccd || '').trim().toUpperCase();
+      if (!Number.isFinite(position) || position < 1 || !ccd) continue;
+      byPosition.set(position, { ...mod, ccd });
+    }
+    return byPosition;
+  }, [modifications]);
   const nodes = useMemo(() => {
     return residues.map((rawResidue, index) => {
       const residue = /^[A-Z]$/.test(rawResidue) ? rawResidue : '?';
       const confidence = residuePlddts?.[index] ?? null;
       const tone = toneForPlddt(confidence);
+      const modification = modificationByPosition.get(index + 1) || null;
+      const modifiedLabel = String(modification?.ccd || '').trim().toUpperCase();
       return {
         index,
         residue,
+        displayResidue: modifiedLabel || residue,
+        modifiedLabel,
         confidence,
         tone
       };
     });
-  }, [residues, residuePlddts]);
+  }, [residues, residuePlddts, modificationByPosition]);
   const lines = useMemo(() => splitSequenceNodesIntoBalancedLines(nodes), [nodes]);
   const heightClass = ligandSequenceHeightClass(lines.length);
 
@@ -74,14 +90,18 @@ export function TaskLigandSequencePreview({ sequence, residuePlddts }: TaskLigan
                 const confidenceText = item.confidence === null ? '-' : item.confidence.toFixed(1);
                 const linkTone = colIndex > 0 ? line[colIndex - 1].tone : item.tone;
                 const position = item.index + 1;
+                const isModified = Boolean(item.modifiedLabel);
+                const title = isModified
+                  ? `#${position} ${item.residue} -> ${item.modifiedLabel} | pLDDT ${confidenceText}`
+                  : `#${position} ${item.residue} | pLDDT ${confidenceText}`;
                 return (
                   <span className="task-ligand-sequence-node" key={`ligand-seq-residue-${item.index}`}>
                     {colIndex > 0 && <span className={`task-ligand-sequence-link tone-${linkTone}`} aria-hidden="true" />}
                     <span
-                      className={`task-ligand-sequence-residue tone-${item.tone}`}
-                      title={`#${position} ${item.residue} | pLDDT ${confidenceText}`}
+                      className={`task-ligand-sequence-residue tone-${item.tone}${isModified ? ' is-modified' : ''}`}
+                      title={title}
                     >
-                      {item.residue}
+                      {item.displayResidue}
                     </span>
                   </span>
                 );

@@ -1,6 +1,6 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type { MolstarResiduePick } from '../../components/project/MolstarViewer';
-import type { InputComponent, PredictionConstraint } from '../../types/models';
+import type { InputComponent, PeptideResiduePoolSelection, PredictionConstraint } from '../../types/models';
 import type { ProteinTemplateUpload } from '../../types/models';
 import { PEPTIDE_DESIGNED_LIGAND_TOKEN } from '../../utils/projectInputs';
 import { normalizePredictionBackend } from './projectDraftUtils';
@@ -28,6 +28,9 @@ interface DraftLike {
       peptidePopulationSize?: number;
       peptideEliteSize?: number;
       peptideMutationRate?: number;
+      peptideResiduePool?: PeptideResiduePoolSelection[];
+      peptideNonNaturalMin?: number;
+      peptideNonNaturalMax?: number;
       peptideBicyclicLinkerCcd?: 'SEZ' | '29N' | 'BS3';
       peptideBicyclicCysPositionMode?: 'auto' | 'manual';
       peptideBicyclicFixTerminalCys?: boolean;
@@ -149,7 +152,7 @@ function normalizePeptideBackendValue(value: unknown): 'boltz' | 'alphafold3' | 
 function normalizePeptideModeValue(value: unknown): 'linear' | 'cyclic' | 'bicyclic' {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'linear' || normalized === 'cyclic' || normalized === 'bicyclic') return normalized;
-  return 'cyclic';
+  return 'linear';
 }
 
 function peptideBackendSupportsMode(backend: string, mode: 'linear' | 'cyclic' | 'bicyclic'): boolean {
@@ -165,6 +168,9 @@ function hasPeptideDesignOptions(options: NonNullable<DraftLike['inputConfig']['
     options.peptidePopulationSize !== undefined ||
     options.peptideEliteSize !== undefined ||
     options.peptideMutationRate !== undefined ||
+    options.peptideResiduePool !== undefined ||
+    options.peptideNonNaturalMin !== undefined ||
+    options.peptideNonNaturalMax !== undefined ||
     options.peptideUseInitialSequence !== undefined ||
     options.peptideInitialSequence !== undefined ||
     options.peptideSequenceMask !== undefined ||
@@ -552,6 +558,35 @@ export function handleRuntimePeptideMutationRateChangeAction<TDraft extends Draf
     ...options,
     peptideMutationRate: Math.max(0.01, Math.min(1, Math.round((Number(peptideMutationRate) || 0.25) * 100) / 100))
   }));
+}
+
+export function handleRuntimePeptideResiduePoolChangeAction<TDraft extends DraftLike>(params: {
+  peptideResiduePool: NonNullable<NonNullable<DraftLike['inputConfig']['options']>['peptideResiduePool']>;
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { peptideResiduePool, setDraft } = params;
+  patchDraftOptions(setDraft, (options) => ({
+    ...options,
+    peptideResiduePool
+  }));
+}
+
+export function handleRuntimePeptideNonNaturalRangeChangeAction<TDraft extends DraftLike>(params: {
+  min: number;
+  max: number;
+  setDraft: Dispatch<SetStateAction<TDraft | null>>;
+}): void {
+  const { min, max, setDraft } = params;
+  patchDraftOptions(setDraft, (options) => {
+    const binderLength = Math.max(1, Math.floor(Number(options.peptideBinderLength) || 20));
+    const nextMin = Math.max(0, Math.min(binderLength, Math.floor(Number(min) || 0)));
+    const nextMax = Math.max(nextMin, Math.min(binderLength, Math.floor(Number(max) || 0)));
+    return {
+      ...options,
+      peptideNonNaturalMin: nextMin,
+      peptideNonNaturalMax: nextMax
+    };
+  });
 }
 
 export function handleRuntimePeptideBicyclicLinkerCcdChangeAction<TDraft extends DraftLike>(params: {

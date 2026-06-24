@@ -1,5 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { MemoLigand2DPreview } from '../../components/project/Ligand2DPreview';
+import { JSMEEditor } from '../../components/project/JSMEEditor';
+import { buildCustomResidueCatalog, BUILT_IN_PROTEIN_MODIFICATIONS, NATURAL_AMINO_ACID_RESIDUES, type ResidueCatalogEntry } from '../../components/project/residueCatalog';
+import { AMINO_ACID_BACKBONE_SMARTS, rdkitMolHasAminoAcidBackbone } from '../../utils/inputValidation';
+import { loadRDKitModule } from '../../utils/rdkit';
+import type { CustomCcdMoleculeInput, PeptideResiduePoolSelection } from '../../types/models';
 import { normalizePredictionBackend } from './projectDraftUtils';
 
 type CysSlot = 'cys1' | 'cys2' | 'cys3';
@@ -11,6 +16,13 @@ const BICYCLIC_LINKERS: Array<{ type: BicyclicLinkerType; name: string; smiles: 
   { type: '29N', name: 'Triazinane linker', smiles: 'CC(=O)CCN1CN(CC(=O)CC)CN(CC(=O)CC)C1' },
   { type: 'BS3', name: 'Bi(III) center', smiles: '[Bi+3]' }
 ];
+
+const CUSTOM_RESIDUE_SCAFFOLD_SMILES = 'N[C@H](C(=O)O)c1ccccc1';
+
+function normalizeCustomResidueCode(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]/g, '').toUpperCase().slice(0, 12);
+}
+
 
 export interface WorkflowRuntimeSettingsSectionProps {
   visible: boolean;
@@ -30,6 +42,11 @@ export interface WorkflowRuntimeSettingsSectionProps {
   peptidePopulationSize: number;
   peptideEliteSize: number;
   peptideMutationRate: number;
+  peptideResiduePool: PeptideResiduePoolSelection[];
+  peptideNonNaturalMin: number;
+  peptideNonNaturalMax: number;
+  peptideCustomResidueLibrary: CustomCcdMoleculeInput[];
+  onCustomResidueLibraryChange: (library: CustomCcdMoleculeInput[]) => void;
   peptideBicyclicLinkerCcd: BicyclicLinkerType;
   peptideBicyclicCysPositionMode: 'auto' | 'manual';
   peptideBicyclicFixTerminalCys: boolean;
@@ -48,6 +65,8 @@ export interface WorkflowRuntimeSettingsSectionProps {
   onPeptidePopulationSizeChange: (value: number) => void;
   onPeptideEliteSizeChange: (value: number) => void;
   onPeptideMutationRateChange: (value: number) => void;
+  onPeptideResiduePoolChange: (value: PeptideResiduePoolSelection[]) => void;
+  onPeptideNonNaturalRangeChange: (min: number, max: number) => void;
   onPeptideBicyclicLinkerCcdChange: (value: BicyclicLinkerType) => void;
   onPeptideBicyclicCysPositionModeChange: (value: 'auto' | 'manual') => void;
   onPeptideBicyclicFixTerminalCysChange: (value: boolean) => void;
@@ -75,6 +94,11 @@ export function WorkflowRuntimeSettingsSection({
   peptidePopulationSize,
   peptideEliteSize,
   peptideMutationRate,
+  peptideResiduePool,
+  peptideNonNaturalMin,
+  peptideNonNaturalMax,
+  peptideCustomResidueLibrary,
+  onCustomResidueLibraryChange,
   peptideBicyclicLinkerCcd,
   peptideBicyclicCysPositionMode,
   peptideBicyclicFixTerminalCys,
@@ -93,6 +117,8 @@ export function WorkflowRuntimeSettingsSection({
   onPeptidePopulationSizeChange,
   onPeptideEliteSizeChange,
   onPeptideMutationRateChange,
+  onPeptideResiduePoolChange,
+  onPeptideNonNaturalRangeChange,
   onPeptideBicyclicLinkerCcdChange,
   onPeptideBicyclicCysPositionModeChange,
   onPeptideBicyclicFixTerminalCysChange,
@@ -102,6 +128,13 @@ export function WorkflowRuntimeSettingsSection({
   onPeptideBicyclicCys3PosChange
 }: WorkflowRuntimeSettingsSectionProps) {
   const [activeCysSlot, setActiveCysSlot] = useState<CysSlot>('cys1');
+  const [customEditorOpen, setCustomEditorOpen] = useState(false);
+  const [customEditingCcd, setCustomEditingCcd] = useState('');
+  const [customDraftCcd, setCustomDraftCcd] = useState('');
+  const [customDraftName, setCustomDraftName] = useState('Custom residue');
+  const [customDraftBaseResidue, setCustomDraftBaseResidue] = useState('A');
+  const [customDraftSmiles, setCustomDraftSmiles] = useState(CUSTOM_RESIDUE_SCAFFOLD_SMILES);
+  const [customDraftValid, setCustomDraftValid] = useState(false);
   const showFullFields = displayMode === 'full';
   const normalizedBackend = isAffinityWorkflow ? 'boltz' : normalizePredictionBackend(backend);
   const canEditRuntimeIdentity = canEdit || isPredictionWorkflow || isPeptideDesignWorkflow || isAffinityWorkflow;
@@ -161,6 +194,157 @@ export function WorkflowRuntimeSettingsSection({
   }, [peptideSequenceMask, peptideBinderLength]);
   const maskChars = useMemo(() => normalizedSequenceMask.split(''), [normalizedSequenceMask]);
   const canToggleMask = canEdit && peptideUseInitialSequence;
+
+  useEffect(() => {
+    let cancelled = false;
+    const validate = async () => {
+      const smiles = customDraftSmiles.trim();
+      if (!smiles) {
+        setCustomDraftValid(false);
+        return;
+      }
+      try {
+        const rdkit = await loadRDKitModule();
+        if (cancelled) return;
+        setCustomDraftValid(rdkitMolHasAminoAcidBackbone(rdkit, smiles, true));
+      } catch {
+        if (!cancelled) setCustomDraftValid(false);
+      }
+    };
+    void validate();
+    return () => {
+      cancelled = true;
+    };
+  }, [customDraftSmiles]);
+
+  const openCustomResidueEditor = (entry?: CustomCcdMoleculeInput) => {
+    const ccd = normalizeCustomResidueCode(entry?.ccd || '');
+    setCustomEditingCcd(ccd);
+    setCustomDraftCcd(ccd || `UAA${Math.max(1, peptideCustomResidueLibrary.length + 1)}`.slice(0, 12));
+    setCustomDraftName(entry?.label || 'Custom residue');
+    setCustomDraftBaseResidue(String(entry?.baseResidue || 'A').trim().toUpperCase().slice(0, 1) || 'A');
+    setCustomDraftSmiles(entry?.smiles || CUSTOM_RESIDUE_SCAFFOLD_SMILES);
+    setCustomEditorOpen(true);
+  };
+
+  const closeCustomResidueEditor = () => {
+    setCustomEditorOpen(false);
+    setCustomEditingCcd('');
+  };
+
+  const customResidues = useMemo(() => buildCustomResidueCatalog(peptideCustomResidueLibrary), [peptideCustomResidueLibrary]);
+  const residueCatalogSections = useMemo(
+    () => [
+      { key: 'natural', title: 'Natural amino acids', kind: 'natural' as const, entries: NATURAL_AMINO_ACID_RESIDUES },
+      { key: 'preset', title: 'Preset non-natural residues', kind: 'preset' as const, entries: BUILT_IN_PROTEIN_MODIFICATIONS },
+      { key: 'custom', title: 'Custom library', kind: 'custom' as const, entries: customResidues }
+    ],
+    [customResidues]
+  );
+  const residueCatalog = useMemo(
+    () => residueCatalogSections.flatMap((section) => section.entries),
+    [residueCatalogSections]
+  );
+  const selectedResidueKeySet = useMemo(() => {
+    const selected = new Set<string>();
+    if (Array.isArray(peptideResiduePool)) {
+      peptideResiduePool.forEach((item) => selected.add(`${item.kind}:${item.code}`));
+    }
+    if (selected.size === 0) {
+      NATURAL_AMINO_ACID_RESIDUES.forEach((item) => selected.add(`natural:${item.ccd}`));
+    }
+    return selected;
+  }, [peptideResiduePool]);
+  const selectedNonNaturalCount = useMemo(
+    () =>
+      residueCatalogSections
+        .filter((section) => section.kind !== 'natural')
+        .flatMap((section) => section.entries.map((entry) => `${section.kind}:${entry.ccd}`))
+        .filter((key) => selectedResidueKeySet.has(key)).length,
+    [residueCatalogSections, selectedResidueKeySet]
+  );
+  const selectedNaturalCount = useMemo(
+    () => NATURAL_AMINO_ACID_RESIDUES.filter((entry) => selectedResidueKeySet.has(`natural:${entry.ccd}`)).length,
+    [selectedResidueKeySet]
+  );
+  const clampNonNaturalLimit = (value: number) => Math.max(0, Math.min(peptideBinderLength, Math.floor(Number(value) || 0)));
+  const toggleResiduePoolEntry = (entry: ResidueCatalogEntry) => {
+    if (!canEdit) return;
+    const kind: PeptideResiduePoolSelection['kind'] = entry.group === 'Natural' ? 'natural' : entry.custom ? 'custom' : 'preset';
+    const key = `${kind}:${entry.ccd}`;
+    const next = new Set(selectedResidueKeySet);
+    if (next.has(key)) {
+      next.delete(key);
+    } else {
+      next.add(key);
+    }
+    const ordered = residueCatalog
+      .map((item) => {
+        const itemKind: PeptideResiduePoolSelection['kind'] = item.group === 'Natural' ? 'natural' : item.custom ? 'custom' : 'preset';
+        return { code: item.ccd, kind: itemKind };
+      })
+      .filter((item) => next.has(`${item.kind}:${item.code}`));
+    onPeptideResiduePoolChange(ordered);
+  };
+
+  const setResidueSectionSelection = (sectionKind: PeptideResiduePoolSelection['kind'], entries: ResidueCatalogEntry[], selected: boolean) => {
+    if (!canEdit) return;
+    const next = new Set(selectedResidueKeySet);
+    entries.forEach((entry) => {
+      const key = `${sectionKind}:${entry.ccd}`;
+      if (selected) {
+        next.add(key);
+      } else {
+        next.delete(key);
+      }
+    });
+    const ordered = residueCatalogSections
+      .flatMap((section) =>
+        section.entries.map((entry) => ({ code: entry.ccd, kind: section.kind }))
+      )
+      .filter((item) => next.has(`${item.kind}:${item.code}`));
+    onPeptideResiduePoolChange(ordered);
+  };
+
+
+  const saveCustomResidueDraft = () => {
+    if (!canEdit || !customDraftValid) return;
+    const ccd = normalizeCustomResidueCode(customDraftCcd);
+    const smiles = customDraftSmiles.trim();
+    if (!ccd || !smiles) return;
+    const nextEntry: CustomCcdMoleculeInput = {
+      ccd,
+      smiles,
+      baseResidue: customDraftBaseResidue.trim().toUpperCase().slice(0, 1) || undefined,
+      label: customDraftName.trim() || 'Custom residue'
+    };
+    const nextLibrary = [
+      nextEntry,
+      ...peptideCustomResidueLibrary.filter((item) => {
+        const itemCcd = normalizeCustomResidueCode(item.ccd);
+        return itemCcd !== ccd && itemCcd !== customEditingCcd;
+      })
+    ].slice(0, 80);
+    onCustomResidueLibraryChange(nextLibrary);
+    const selectedKeys = new Set(selectedResidueKeySet);
+    selectedKeys.add(`custom:${ccd}`);
+    const ordered = residueCatalogSections
+      .flatMap((section) => section.entries.map((entry) => ({ code: entry.ccd, kind: section.kind })))
+      .filter((item) => selectedKeys.has(`${item.kind}:${item.code}`));
+    if (!ordered.some((item) => item.kind === 'custom' && item.code === ccd)) {
+      ordered.push({ code: ccd, kind: 'custom' });
+    }
+    onPeptideResiduePoolChange(ordered);
+    closeCustomResidueEditor();
+  };
+
+  const deleteCustomResidue = (ccdRaw: string) => {
+    if (!canEdit) return;
+    const ccd = normalizeCustomResidueCode(ccdRaw);
+    onCustomResidueLibraryChange(peptideCustomResidueLibrary.filter((item) => normalizeCustomResidueCode(item.ccd) !== ccd));
+    onPeptideResiduePoolChange(peptideResiduePool.filter((item) => !(item.kind === 'custom' && item.code === ccd)));
+    if (customEditingCcd === ccd) closeCustomResidueEditor();
+  };
 
   const assignCysPosition = (slot: CysSlot, position: number) => {
     if (!canEdit || cysPositionAuto) return;
@@ -249,7 +433,7 @@ export function WorkflowRuntimeSettingsSection({
                   <select
                     value={peptideDesignMode}
                     onChange={(e) =>
-                      onPeptideDesignModeChange((e.target.value as 'linear' | 'cyclic' | 'bicyclic') || 'cyclic')
+                      onPeptideDesignModeChange((e.target.value as 'linear' | 'cyclic' | 'bicyclic') || 'linear')
                     }
                     disabled={!canEdit}
                   >
@@ -297,6 +481,238 @@ export function WorkflowRuntimeSettingsSection({
                       spellCheck={false}
                     />
                   </label>
+                )}
+                <div className="peptide-residue-config">
+                  <div className="peptide-residue-config-head">
+                    <div className="peptide-residue-config-title">
+                      <strong>Residues used for design</strong>
+                      <span>Select the residues available during peptide generation.</span>
+                    </div>
+                    <span className="peptide-residue-selection-summary">
+                      {selectedNaturalCount} natural / {selectedNonNaturalCount} non-natural selected
+                    </span>
+                  </div>
+                  <div className="peptide-residue-usage">
+                    <div className="peptide-residue-usage-copy">
+                      <strong>Non-natural residue count</strong>
+                      <span>
+                        {selectedNonNaturalCount === 0
+                          ? 'Select non-natural residues to enable this constraint.'
+                          : 'Set how many selected non-natural residues each designed peptide may contain.'}
+                      </span>
+                    </div>
+                    <div className="peptide-residue-usage-controls">
+                      <label className="field peptide-residue-usage-field">
+                        <span>At least</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={peptideBinderLength}
+                          value={peptideNonNaturalMin}
+                          onChange={(e) => {
+                            const nextMin = clampNonNaturalLimit(Number(e.target.value));
+                            onPeptideNonNaturalRangeChange(nextMin, Math.max(nextMin, peptideNonNaturalMax));
+                          }}
+                          disabled={!canEdit || selectedNonNaturalCount === 0}
+                        />
+                      </label>
+                      <label className="field peptide-residue-usage-field">
+                        <span>At most</span>
+                        <input
+                          type="number"
+                          min={peptideNonNaturalMin}
+                          max={peptideBinderLength}
+                          value={peptideNonNaturalMax}
+                          onChange={(e) => {
+                            const nextMax = clampNonNaturalLimit(Number(e.target.value));
+                            onPeptideNonNaturalRangeChange(Math.min(peptideNonNaturalMin, nextMax), nextMax);
+                          }}
+                          disabled={!canEdit || selectedNonNaturalCount === 0}
+                        />
+                      </label>
+                    </div>
+                  </div>
+                  <div className="peptide-residue-pool" aria-label="Design residues">
+                    {residueCatalogSections.map((section) => {
+                      const sectionSelectedCount = section.entries.filter((entry) =>
+                        selectedResidueKeySet.has(`${section.kind}:${entry.ccd}`)
+                      ).length;
+                      return (
+                        <section className="peptide-residue-section" key={section.key}>
+                          <div className="peptide-residue-section-head">
+                            <strong>{section.title}</strong>
+                            <span>{sectionSelectedCount}/{section.entries.length} selected</span>
+                            <div className="peptide-residue-section-actions">
+                            {section.kind === 'custom' ? (
+                              <button
+                                type="button"
+                                className="btn btn-primary btn-compact"
+                                onClick={() => openCustomResidueEditor()}
+                                disabled={!canEdit}
+                              >
+                                Add
+                              </button>
+                            ) : null}
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-compact"
+                              onClick={() => setResidueSectionSelection(section.kind, section.entries, true)}
+                              disabled={!canEdit || section.entries.length === 0}
+                            >
+                              Select all
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-compact"
+                              onClick={() => setResidueSectionSelection(section.kind, section.entries, false)}
+                              disabled={!canEdit || section.entries.length === 0}
+                            >
+                              Select none
+                            </button>
+                          </div>
+                        </div>
+                        {section.entries.length > 0 ? (
+                          <div className="peptide-residue-section-grid" role="list">
+                            {section.entries.map((entry) => {
+                              const kind: PeptideResiduePoolSelection['kind'] = section.kind;
+                              const active = selectedResidueKeySet.has(`${kind}:${entry.ccd}`);
+                              return (
+                                <button
+                                  key={`${kind}-${entry.ccd}`}
+                                  type="button"
+                                  role="listitem"
+                                  className={`peptide-residue-card ${active ? 'active' : ''} ${kind === 'natural' ? 'natural' : ''}`}
+                                  onClick={() => toggleResiduePoolEntry(entry)}
+                                  disabled={!canEdit}
+                                  aria-pressed={active}
+                                  title={`${entry.label} · ${entry.ccd}`}
+                                >
+                                  <div className="peptide-residue-preview" aria-hidden="true">
+                                    {entry.smiles ? (
+                                      <MemoLigand2DPreview smiles={entry.smiles} width={132} height={94} highlightQuery={AMINO_ACID_BACKBONE_SMARTS} />
+                                    ) : (
+                                      <div className="peptide-residue-preview-fallback">{entry.baseResidue}</div>
+                                    )}
+                                  </div>
+                                  <div className="peptide-residue-meta">
+                                    <span className="peptide-residue-code">{entry.baseResidue}</span>
+                                    <span className="peptide-residue-name">{entry.label}</span>
+                                    <span className="peptide-residue-ccd">{entry.ccd}</span>
+                                  </div>
+                                  {kind === 'custom' ? (
+                                    <span className="peptide-residue-card-actions" onClick={(event) => event.stopPropagation()}>
+                                      <button
+                                        type="button"
+                                        className="btn btn-ghost btn-compact"
+                                        disabled={!canEdit}
+                                        onClick={() => {
+                                          const libraryEntry = peptideCustomResidueLibrary.find((item) => normalizeCustomResidueCode(item.ccd) === entry.ccd);
+                                          openCustomResidueEditor(libraryEntry);
+                                        }}
+                                      >
+                                        Edit
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="btn btn-ghost btn-compact danger"
+                                        disabled={!canEdit}
+                                        onClick={() => deleteCustomResidue(entry.ccd)}
+                                      >
+                                        Delete
+                                      </button>
+                                    </span>
+                                  ) : null}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="peptide-residue-section-empty">
+                            {section.kind === 'custom' ? 'Add a custom residue to show it here.' : 'No saved residues.'}
+                          </div>
+                        )}
+                        </section>
+                      );
+                    })}
+                  </div>
+                </div>
+                {customEditorOpen && (
+                  <div className="peptide-custom-editor">
+                    <div className="peptide-custom-editor-head">
+                      <strong>{customEditingCcd ? 'Edit custom residue' : 'Add custom residue'}</strong>
+                      <button type="button" className="btn btn-ghost btn-compact" onClick={closeCustomResidueEditor}>
+                        Close
+                      </button>
+                    </div>
+                    <div className="peptide-custom-editor-grid">
+                      <label className="field">
+                        <span>CCD</span>
+                        <input
+                          value={customDraftCcd}
+                          disabled={!canEdit}
+                          onChange={(event) => setCustomDraftCcd(normalizeCustomResidueCode(event.target.value))}
+                          placeholder="UAA1"
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Name</span>
+                        <input
+                          value={customDraftName}
+                          disabled={!canEdit}
+                          onChange={(event) => setCustomDraftName(event.target.value)}
+                          placeholder="Custom residue"
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Base residue</span>
+                        <select
+                          value={customDraftBaseResidue}
+                          disabled={!canEdit}
+                          onChange={(event) => setCustomDraftBaseResidue(event.target.value)}
+                        >
+                          {'ARNDCQEGHILKMFPSTWYV'.split('').map((aa) => (
+                            <option key={aa} value={aa}>
+                              {aa}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                    <div className="peptide-custom-editor-main">
+                      <div className="jsme-editor-container component-jsme-shell peptide-custom-jsme">
+                        <JSMEEditor smiles={customDraftSmiles} height={360} onSmilesChange={setCustomDraftSmiles} />
+                      </div>
+                      <div className="peptide-custom-preview">
+                        <MemoLigand2DPreview
+                          smiles={customDraftSmiles}
+                          width={240}
+                          height={160}
+                          highlightQuery={AMINO_ACID_BACKBONE_SMARTS}
+                        />
+                        <span className={customDraftValid ? 'peptide-custom-valid' : 'peptide-custom-invalid'}>
+                          {customDraftValid ? 'Amino-acid backbone detected.' : 'Backbone N-CA-C(=O) is required.'}
+                        </span>
+                      </div>
+                    </div>
+                    <label className="field peptide-custom-smiles">
+                      <span>Custom Residue SMILES</span>
+                      <input
+                        value={customDraftSmiles}
+                        disabled={!canEdit}
+                        onChange={(event) => setCustomDraftSmiles(event.target.value)}
+                      />
+                    </label>
+                    <div className="peptide-custom-editor-actions">
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-compact"
+                        disabled={!canEdit || !normalizeCustomResidueCode(customDraftCcd) || !customDraftSmiles.trim() || !customDraftValid}
+                        onClick={saveCustomResidueDraft}
+                      >
+                        Save residue
+                      </button>
+                    </div>
+                  </div>
                 )}
                 <label className="field">
                   <span>Iterations</span>

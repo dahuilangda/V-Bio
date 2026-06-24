@@ -6091,6 +6091,86 @@ def _apply_sequence_mask(sequence: str, sequence_mask: str) -> str:
     return "".join(seq_chars)
 
 
+PEPTIDE_NATURAL_THREE_TO_ONE = {
+    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
+    "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
+    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
+    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
+}
+PEPTIDE_PRESET_BASE_RESIDUE = {
+    "AIB": "A", "NLE": "L", "NVA": "V", "ORN": "K", "CIT": "R",
+    "HSE": "S", "HCY": "C", "MSE": "M", "SEC": "C", "HYP": "P",
+    "PCA": "E", "SEP": "S", "TPO": "T", "PTR": "Y", "CSO": "C",
+    "MLY": "K", "DAL": "A", "BALA": "A", "MANS": "S", "MANT": "T",
+    "MANN": "N", "NAGS": "S", "NAGT": "T", "NAGN": "N", "GALS": "S",
+    "GALT": "T", "FUCS": "S", "GLCS": "S", "XYLS": "S",
+}
+
+def _normalize_peptide_residue_pool(raw_pool: Any, custom_molecules: List[Dict[str, str]]) -> Tuple[List[str], List[Dict[str, str]]]:
+    natural: List[str] = []
+    unnatural: List[Dict[str, str]] = []
+    custom_by_code = {str(item.get("ccd") or "").upper(): item for item in custom_molecules if isinstance(item, dict)}
+    if isinstance(raw_pool, list):
+        for item in raw_pool:
+            if not isinstance(item, dict):
+                continue
+            code = re.sub(r"[^A-Za-z0-9_-]", "", str(item.get("code") or item.get("ccd") or "")).upper()[:12]
+            kind = str(item.get("kind") or "").strip().lower()
+            if not code:
+                continue
+            if kind == "natural":
+                aa = PEPTIDE_NATURAL_THREE_TO_ONE.get(code, code if len(code) == 1 else "")
+                if aa and aa in "ARNDCQEGHILKMFPSTWYV" and aa not in natural:
+                    natural.append(aa)
+                continue
+            if kind in {"preset", "custom"}:
+                base = ""
+                if kind == "custom":
+                    if code not in custom_by_code:
+                        raise ValueError(f"Custom peptide residue '{code}' is selected but no user-scoped custom CCD molecule was submitted.")
+                    base = str(custom_by_code[code].get("base_residue") or "A").upper()[:1] or "A"
+                else:
+                    base = PEPTIDE_PRESET_BASE_RESIDUE.get(code, "A")
+                if base not in "ARNDCQEGHILKMFPSTWYV":
+                    base = "A"
+                if not any(row.get("ccd") == code and row.get("kind") == kind for row in unnatural):
+                    unnatural.append({"ccd": code, "base": base, "kind": kind})
+    if isinstance(raw_pool, list) and not natural and not unnatural:
+        raise ValueError("Peptide residue candidate pool is empty; select at least one natural or non-natural residue.")
+    if not natural and not unnatural:
+        natural = list("ARNDCQEGHILKMFPSTWYV")
+    if not natural:
+        natural = sorted({row["base"] for row in unnatural if row.get("base")})
+    if not natural:
+        raise ValueError("Peptide residue candidate pool has no usable base residues.")
+    return natural, unnatural
+
+def _sample_peptide_modifications(sequence: str, unnatural_pool: List[Dict[str, str]], min_count: int, max_count: int) -> Tuple[str, List[Dict[str, Any]]]:
+    if not unnatural_pool or max_count <= 0 or not sequence:
+        return sequence, []
+    length = len(sequence)
+    min_count = max(0, min(length, int(min_count)))
+    max_count = max(min_count, min(length, int(max_count)))
+    count = random.randint(min_count, max_count) if max_count > min_count else min_count
+    if count <= 0:
+        return sequence, []
+    positions = random.sample(range(length), k=count)
+    seq = list(sequence)
+    modifications: List[Dict[str, Any]] = []
+    for idx in positions:
+        mod = random.choice(unnatural_pool)
+        base = str(mod.get("base") or seq[idx] or "A").upper()[:1]
+        if base not in "ARNDCQEGHILKMFPSTWYV":
+            base = "A"
+        seq[idx] = base
+        modifications.append({"position": idx + 1, "ccd": mod["ccd"], "baseResidue": base})
+    modifications.sort(key=lambda item: int(item.get("position") or 0))
+    return "".join(seq), modifications
+
+def _peptide_candidate_key(sequence: str, modifications: List[Dict[str, Any]]) -> str:
+    return f"{sequence}|{json.dumps(modifications, sort_keys=True, separators=(',', ':'))}"
+
+
 def _enforce_bicyclic_cys_layout(
     sequence: str,
     *,
@@ -6153,6 +6233,7 @@ def _build_peptide_candidate_yaml(
     linker_ccd: str,
     linker_chain_id: str,
     linker_atom_map: Dict[str, List[str]],
+    modifications: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     yaml_data = copy.deepcopy(base_yaml_data)
     if not isinstance(yaml_data.get("sequences"), list):
@@ -6165,6 +6246,12 @@ def _build_peptide_candidate_yaml(
             "msa": "empty",
         }
     }
+    if modifications:
+        binder_entry["protein"]["modifications"] = [
+            {"position": int(item.get("position") or 1), "ccd": str(item.get("ccd") or "").upper()}
+            for item in modifications
+            if str(item.get("ccd") or "").strip()
+        ]
     if design_mode == "cyclic":
         binder_entry["protein"]["cyclic"] = True
 
@@ -6556,6 +6643,7 @@ def run_peptide_design_backend(
     progress_path: Optional[str],
     gpu_ids: Optional[List[int]] = None,
     subtask_queue: Optional[str] = None,
+    custom_ccd_molecules: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     designer_dir = str(_resolve_capability_dir("designer"))
     if designer_dir not in sys.path:
@@ -6645,7 +6733,16 @@ def run_peptide_design_backend(
     if design_mode == "bicyclic" and linker_ccd not in linker_atom_map:
         linker_ccd = "SEZ"
 
-    baseline_sequence = generate_random_sequence(binder_length, design_params)
+    custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
+    natural_pool, unnatural_pool = _normalize_peptide_residue_pool(options.get("peptideResiduePool") or options.get("peptide_residue_pool"), custom_molecules)
+    nonnatural_min = _read_int_option(options, "peptideNonNaturalMin", 0, min_value=0, max_value=binder_length)
+    nonnatural_max = _read_int_option(options, "peptideNonNaturalMax", nonnatural_min, min_value=nonnatural_min, max_value=binder_length)
+    if peptide_backend in {"alphafold3", "protenix"} and any(item.get("kind") == "custom" for item in unnatural_pool):
+        raise ValueError(
+            f"Peptide design backend '{peptide_backend}' supports preset CCD residue modifications only; custom drawn peptide residues require Boltz-2."
+        )
+
+    baseline_sequence = "".join(random.choice(natural_pool) for _ in range(binder_length))
     initial_sequence = ""
     if use_initial_sequence:
         initial_sequence = _normalize_initial_sequence(
@@ -6673,6 +6770,8 @@ def run_peptide_design_backend(
     runtime_predict_args.pop("peptide_gpu_ids", None)
     runtime_predict_args.pop("peptide_parallel_gpus", None)
     runtime_predict_args.pop("peptideParallelGpus", None)
+    if custom_molecules:
+        runtime_predict_args["custom_ccd_molecules"] = custom_molecules
 
     worker_entry_path = str(Path(__file__).resolve())
     resolved_subtask_queue = str(subtask_queue or "").strip() or build_capability_queue(
@@ -6713,7 +6812,7 @@ def run_peptide_design_backend(
             },
         )
 
-        generation_candidates: List[str] = []
+        generation_candidates: List[Dict[str, Any]] = []
         attempts = 0
         max_attempts = max(population_size * 30, 60)
 
@@ -6722,7 +6821,7 @@ def run_peptide_design_backend(
             if generation == 1 and initial_sequence and initial_sequence not in evaluated_sequences:
                 candidate_sequence = initial_sequence
             elif not elite_population:
-                candidate_sequence = generate_random_sequence(binder_length, design_params)
+                candidate_sequence = "".join(random.choice(natural_pool) for _ in range(binder_length))
             else:
                 parent = random.choice(elite_population)
                 parent_seq = str(parent.get("sequence") or "")
@@ -6742,17 +6841,29 @@ def run_peptide_design_backend(
                     cys_positions=design_params.get("cys_positions"),
                 )
 
-            if candidate_sequence in evaluated_sequences:
+            candidate_sequence, candidate_modifications = _sample_peptide_modifications(
+                candidate_sequence,
+                unnatural_pool,
+                nonnatural_min,
+                nonnatural_max,
+            )
+            candidate_key = _peptide_candidate_key(candidate_sequence, candidate_modifications)
+            if candidate_key in evaluated_sequences:
                 continue
-            evaluated_sequences.add(candidate_sequence)
-            generation_candidates.append(candidate_sequence)
+            evaluated_sequences.add(candidate_key)
+            generation_candidates.append({
+                "sequence": candidate_sequence,
+                "modifications": candidate_modifications,
+            })
 
         if not generation_candidates:
             break
 
         generation_jobs: List[Dict[str, Any]] = []
         generation_completed_base = completed_tasks
-        for idx, candidate_sequence in enumerate(generation_candidates, start=1):
+        for idx, candidate in enumerate(generation_candidates, start=1):
+            candidate_sequence = str(candidate.get("sequence") or "")
+            candidate_modifications = candidate.get("modifications") if isinstance(candidate.get("modifications"), list) else []
             candidate_dir = os.path.join(temp_dir, "peptide_design", f"gen_{generation:03d}", f"cand_{idx:03d}")
             os.makedirs(candidate_dir, exist_ok=True)
             candidate_base_yaml_data = _materialize_candidate_template_paths(
@@ -6768,6 +6879,7 @@ def run_peptide_design_backend(
                 linker_ccd=linker_ccd,
                 linker_chain_id=linker_chain_id,
                 linker_atom_map=linker_atom_map,
+                modifications=candidate_modifications,
             )
             archive_path = os.path.join(candidate_dir, "result.zip")
 
@@ -6780,6 +6892,7 @@ def run_peptide_design_backend(
                     "generation": generation,
                     "candidate_index": idx,
                     "sequence": candidate_sequence,
+                    "modifications": candidate_modifications,
                     "candidate_yaml": candidate_yaml,
                     "candidate_dir": candidate_dir,
                     "archive_path": archive_path,
@@ -6837,6 +6950,7 @@ def run_peptide_design_backend(
         for job in completed_generation_jobs:
             idx = int(job.get("candidate_index") or 0)
             candidate_sequence = str(job.get("sequence") or "")
+            candidate_modifications = job.get("modifications") if isinstance(job.get("modifications"), list) else []
             candidate_dir = str(job.get("candidate_dir") or "")
             archive_path = str(job.get("archive_path") or "")
             result_dir = _extract_peptide_candidate_archive_for_metrics(candidate_dir, archive_path)
@@ -6890,6 +7004,7 @@ def run_peptide_design_backend(
             structure_file = _select_primary_structure_file(result_dir)
             result_row = {
                 "sequence": candidate_sequence,
+                "modifications": candidate_modifications,
                 "generation": generation,
                 "iptm": pair_iptm,
                 "pair_iptm": pair_iptm,
@@ -6934,6 +7049,7 @@ def run_peptide_design_backend(
             elite_population = [
                 {
                     "sequence": str(row.get("sequence") or ""),
+                    "modifications": row.get("modifications") if isinstance(row.get("modifications"), list) else [],
                     "plddts": row.get("plddts") if isinstance(row.get("plddts"), list) else [],
                 }
                 for row in all_results[:elite_size]
@@ -6945,6 +7061,7 @@ def run_peptide_design_backend(
                     {
                         "rank": rank,
                         "sequence": row.get("sequence"),
+                        "modifications": row.get("modifications"),
                         "generation": row.get("generation"),
                         "score": row.get("composite_score"),
                         "iptm": row.get("iptm"),
@@ -7987,6 +8104,7 @@ def main():
                     os.environ["CUDA_VISIBLE_DEVICES"] = str(worker_gpu_id)
 
                 worker_seed = worker_predict_args.pop("seed", None)
+                worker_custom_ccd_molecules = worker_predict_args.pop("custom_ccd_molecules", [])
                 use_msa_raw = worker_predict_args.get("use_msa_server", True)
                 if isinstance(use_msa_raw, bool):
                     worker_use_msa_server = use_msa_raw
@@ -8023,6 +8141,7 @@ def main():
                         worker_predict_args,
                         worker_model_name,
                         task_id=worker_task_id,
+                        custom_ccd_molecules=worker_custom_ccd_molecules if isinstance(worker_custom_ccd_molecules, list) else [],
                     )
                 else:
                     raise ValueError(f"Unsupported peptide candidate backend: '{worker_backend}'.")
@@ -8121,6 +8240,7 @@ def main():
                         progress_path=peptide_progress_path,
                         gpu_ids=peptide_gpu_ids,
                         subtask_queue=peptide_subtask_queue,
+                        custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
                     )
                 finally:
                     if peptide_parent_task_id:

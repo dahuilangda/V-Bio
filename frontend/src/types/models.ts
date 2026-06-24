@@ -5,7 +5,13 @@ export type ProteinModificationInputMethod = 'ccd' | 'jsme';
 export type ProteinModificationTerminal = 'internal' | 'n_term' | 'c_term';
 export type PredictionConstraintType = 'contact' | 'bond' | 'pocket';
 export type PeptideDesignMode = 'linear' | 'cyclic' | 'bicyclic';
+export type PeptideResiduePoolKind = 'natural' | 'preset' | 'custom';
 export type AffinityScoringMode = 'score' | 'pose' | 'refine' | 'interface';
+
+export interface PeptideResiduePoolSelection {
+  code: string;
+  kind: PeptideResiduePoolKind;
+}
 
 export interface ProteinModification {
   id: string;
@@ -98,6 +104,9 @@ export interface PredictionOptions {
   peptidePopulationSize?: number;
   peptideEliteSize?: number;
   peptideMutationRate?: number;
+  peptideResiduePool?: PeptideResiduePoolSelection[];
+  peptideNonNaturalMin?: number;
+  peptideNonNaturalMax?: number;
   peptideBicyclicLinkerCcd?: 'SEZ' | '29N' | 'BS3';
   peptideBicyclicCysPositionMode?: 'auto' | 'manual';
   peptideBicyclicFixTerminalCys?: boolean;

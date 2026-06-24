@@ -1,6 +1,7 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type {
   InputComponent,
+  PeptideResiduePoolSelection,
   PredictionConstraint,
   ProteinTemplateUpload
 } from '../../types/models';
@@ -25,7 +26,9 @@ import {
   handleRuntimePeptideIterationsChangeAction,
   handleRuntimePeptideSequenceMaskChangeAction,
   handleRuntimePeptideMutationRateChangeAction,
+  handleRuntimePeptideNonNaturalRangeChangeAction,
   handleRuntimePeptidePopulationSizeChangeAction,
+  handleRuntimePeptideResiduePoolChangeAction,
   handleRuntimePeptideUseInitialSequenceChangeAction,
   handleRuntimeSeedChangeAction,
   handleTaskNameChangeAction,
@@ -59,6 +62,8 @@ export interface UseProjectEditorHandlersResult {
   handleRuntimePeptidePopulationSizeChange: (value: number) => void;
   handleRuntimePeptideEliteSizeChange: (value: number) => void;
   handleRuntimePeptideMutationRateChange: (value: number) => void;
+  handleRuntimePeptideResiduePoolChange: (value: PeptideResiduePoolSelection[]) => void;
+  handleRuntimePeptideNonNaturalRangeChange: (min: number, max: number) => void;
   handleRuntimePeptideBicyclicLinkerCcdChange: (value: 'SEZ' | '29N' | 'BS3') => void;
   handleRuntimePeptideBicyclicCysPositionModeChange: (value: 'auto' | 'manual') => void;
   handleRuntimePeptideBicyclicFixTerminalCysChange: (value: boolean) => void;
@@ -179,6 +184,21 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
     });
   };
 
+  const handleRuntimePeptideResiduePoolChange = (value: PeptideResiduePoolSelection[]) => {
+    handleRuntimePeptideResiduePoolChangeAction({
+      peptideResiduePool: value,
+      setDraft
+    });
+  };
+
+  const handleRuntimePeptideNonNaturalRangeChange = (min: number, max: number) => {
+    handleRuntimePeptideNonNaturalRangeChangeAction({
+      min,
+      max,
+      setDraft
+    });
+  };
+
   const handleRuntimePeptideBicyclicLinkerCcdChange = (value: 'SEZ' | '29N' | 'BS3') => {
     handleRuntimePeptideBicyclicLinkerCcdChangeAction({
       peptideBicyclicLinkerCcd: value,
@@ -257,6 +277,8 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
     handleRuntimePeptidePopulationSizeChange,
     handleRuntimePeptideEliteSizeChange,
     handleRuntimePeptideMutationRateChange,
+    handleRuntimePeptideResiduePoolChange,
+    handleRuntimePeptideNonNaturalRangeChange,
     handleRuntimePeptideBicyclicLinkerCcdChange,
     handleRuntimePeptideBicyclicCysPositionModeChange,
     handleRuntimePeptideBicyclicFixTerminalCysChange,

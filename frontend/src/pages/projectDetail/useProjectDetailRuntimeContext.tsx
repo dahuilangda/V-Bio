@@ -1347,6 +1347,7 @@ export function useProjectDetailRuntimeContext() {
         {
           ...prev.inputConfig,
           options: {
+            ...prev.inputConfig.options,
             ...taskOptions,
             seed: taskOptions.seed ?? prev.inputConfig.options.seed
           }

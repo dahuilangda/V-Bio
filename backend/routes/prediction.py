@@ -250,7 +250,7 @@ def register_prediction_routes(
             design_mode_raw = (
                 peptide_design_options.get('peptideDesignMode')
                 or peptide_design_options.get('peptide_design_mode')
-                or 'cyclic'
+                or 'linear'
             )
             design_mode = str(design_mode_raw).strip().lower()
             if design_mode in {'cycle', 'ring'}:
@@ -258,7 +258,7 @@ def register_prediction_routes(
             elif design_mode in {'bicycle', 'bi-cyclic'}:
                 design_mode = 'bicyclic'
             elif design_mode != 'linear':
-                design_mode = 'cyclic'
+                design_mode = 'linear'
             if backend in {'alphafold3', 'protenix'} and design_mode != 'linear':
                 return jsonify({
                     'error': f"Backend '{backend}' supports linear peptide design only.",

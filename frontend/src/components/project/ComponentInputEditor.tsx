@@ -8,6 +8,7 @@ import { LigandPropertyGrid } from './LigandPropertyGrid';
 import { loadRDKitModule } from '../../utils/rdkit';
 import { renderLigand2DSvg } from '../../utils/ligand2d';
 import { AMINO_ACID_BACKBONE_SMARTS, rdkitMolHasAminoAcidBackbone } from '../../utils/inputValidation';
+import { BUILT_IN_PROTEIN_MODIFICATIONS } from './residueCatalog';
 
 interface ComponentInputEditorProps {
   components: InputComponent[];
@@ -28,38 +29,6 @@ const TYPE_OPTIONS: MoleculeType[] = ['protein', 'ligand', 'dna', 'rna'];
 const LIGAND_INPUT_OPTIONS: LigandInputMethod[] = ['smiles', 'ccd', 'jsme'];
 const QUICK_ADD_TYPES: MoleculeType[] = ['protein', 'ligand', 'dna', 'rna'];
 const CUSTOM_RESIDUE_SCAFFOLD_SMILES = 'N[C@@H](C)C(=O)O';
-
-const BUILT_IN_PROTEIN_MODIFICATIONS = [
-  { ccd: 'AIB', label: 'alpha-aminoisobutyric acid', baseResidue: 'A', group: 'Common non-natural' },
-  { ccd: 'NLE', label: 'norleucine', baseResidue: 'L', group: 'Common non-natural' },
-  { ccd: 'NVA', label: 'norvaline', baseResidue: 'V', group: 'Common non-natural' },
-  { ccd: 'ORN', label: 'ornithine', baseResidue: 'K', group: 'Common non-natural' },
-  { ccd: 'CIT', label: 'citrulline', baseResidue: 'R', group: 'Common non-natural' },
-  { ccd: 'HSE', label: 'homoserine', baseResidue: 'S', group: 'Common non-natural' },
-  { ccd: 'HCY', label: 'homocysteine', baseResidue: 'C', group: 'Common non-natural' },
-  { ccd: 'MSE', label: 'selenomethionine', baseResidue: 'M', group: 'Common non-natural' },
-  { ccd: 'SEC', label: 'selenocysteine', baseResidue: 'C', group: 'Common non-natural' },
-  { ccd: 'HYP', label: 'hydroxyproline', baseResidue: 'P', group: 'Common non-natural' },
-  { ccd: 'PCA', label: 'pyroglutamic acid', baseResidue: 'E', group: 'Common non-natural' },
-  { ccd: 'SEP', label: 'phosphoserine', baseResidue: 'S', group: 'PTM' },
-  { ccd: 'TPO', label: 'phosphothreonine', baseResidue: 'T', group: 'PTM' },
-  { ccd: 'PTR', label: 'phosphotyrosine', baseResidue: 'Y', group: 'PTM' },
-  { ccd: 'CSO', label: 'S-hydroxycysteine', baseResidue: 'C', group: 'PTM' },
-  { ccd: 'MLY', label: 'N6-methyllysine', baseResidue: 'K', group: 'PTM' },
-  { ccd: 'DAL', label: 'D-alanine', baseResidue: 'A', group: 'D-amino acid' },
-  { ccd: 'BALA', label: 'beta-alanine', baseResidue: 'A', group: 'Backbone variant' },
-  { ccd: 'MANS', label: 'O-Man-Ser', baseResidue: 'S', group: 'Glycosylation' },
-  { ccd: 'MANT', label: 'O-Man-Thr', baseResidue: 'T', group: 'Glycosylation' },
-  { ccd: 'MANN', label: 'N-Man-Asn', baseResidue: 'N', group: 'Glycosylation' },
-  { ccd: 'NAGS', label: 'O-GlcNAc-Ser', baseResidue: 'S', group: 'Glycosylation' },
-  { ccd: 'NAGT', label: 'O-GlcNAc-Thr', baseResidue: 'T', group: 'Glycosylation' },
-  { ccd: 'NAGN', label: 'N-GlcNAc-Asn', baseResidue: 'N', group: 'Glycosylation' },
-  { ccd: 'GALS', label: 'O-Gal-Ser', baseResidue: 'S', group: 'Glycosylation' },
-  { ccd: 'GALT', label: 'O-Gal-Thr', baseResidue: 'T', group: 'Glycosylation' },
-  { ccd: 'FUCS', label: 'O-Fuc-Ser', baseResidue: 'S', group: 'Glycosylation' },
-  { ccd: 'GLCS', label: 'O-Glc-Ser', baseResidue: 'S', group: 'Glycosylation' },
-  { ccd: 'XYLS', label: 'O-Xyl-Ser', baseResidue: 'S', group: 'Glycosylation' }
-];
 
 function hashTextForCode(value: string): string {
   let hash = 2166136261;

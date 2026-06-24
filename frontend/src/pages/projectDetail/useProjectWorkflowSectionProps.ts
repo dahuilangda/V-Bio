@@ -1,5 +1,5 @@
 import type { CSSProperties, Dispatch, KeyboardEvent, PointerEvent, ReactNode, RefObject, SetStateAction } from 'react';
-import type { AffinityScoringMode, CustomCcdMoleculeInput, InputComponent, ProteinTemplateUpload } from '../../types/models';
+import type { AffinityScoringMode, CustomCcdMoleculeInput, InputComponent, PeptideResiduePoolSelection, ProteinTemplateUpload } from '../../types/models';
 import type { MolstarResiduePick } from '../../components/project/MolstarViewer';
 import type { AffinitySignalCard } from '../../components/project/AffinityWorkspace';
 import type { LeadOptCandidatesUiState } from '../../components/project/leadopt/LeadOptCandidatesPanel';
@@ -151,6 +151,9 @@ interface UseProjectWorkflowSectionPropsInput {
   peptidePopulationSize: number;
   peptideEliteSize: number;
   peptideMutationRate: number;
+  peptideResiduePool: PeptideResiduePoolSelection[];
+  peptideNonNaturalMin: number;
+  peptideNonNaturalMax: number;
   peptideBicyclicLinkerCcd: 'SEZ' | '29N' | 'BS3';
   peptideBicyclicCysPositionMode: 'auto' | 'manual';
   peptideBicyclicFixTerminalCys: boolean;
@@ -169,6 +172,8 @@ interface UseProjectWorkflowSectionPropsInput {
   onPeptidePopulationSizeChange: (value: number) => void;
   onPeptideEliteSizeChange: (value: number) => void;
   onPeptideMutationRateChange: (value: number) => void;
+  onPeptideResiduePoolChange: (value: PeptideResiduePoolSelection[]) => void;
+  onPeptideNonNaturalRangeChange: (min: number, max: number) => void;
   onPeptideBicyclicLinkerCcdChange: (value: 'SEZ' | '29N' | 'BS3') => void;
   onPeptideBicyclicCysPositionModeChange: (value: 'auto' | 'manual') => void;
   onPeptideBicyclicFixTerminalCysChange: (value: boolean) => void;
@@ -305,6 +310,9 @@ export function useProjectWorkflowSectionProps({
   peptidePopulationSize,
   peptideEliteSize,
   peptideMutationRate,
+  peptideResiduePool,
+  peptideNonNaturalMin,
+  peptideNonNaturalMax,
   peptideBicyclicLinkerCcd,
   peptideBicyclicCysPositionMode,
   peptideBicyclicFixTerminalCys,
@@ -321,6 +329,8 @@ export function useProjectWorkflowSectionProps({
   onPeptidePopulationSizeChange,
   onPeptideEliteSizeChange,
   onPeptideMutationRateChange,
+  onPeptideResiduePoolChange,
+  onPeptideNonNaturalRangeChange,
   onPeptideBicyclicLinkerCcdChange,
   onPeptideBicyclicCysPositionModeChange,
   onPeptideBicyclicFixTerminalCysChange,
@@ -489,6 +499,11 @@ export function useProjectWorkflowSectionProps({
         peptidePopulationSize,
         peptideEliteSize,
         peptideMutationRate,
+        peptideResiduePool,
+        peptideNonNaturalMin,
+        peptideNonNaturalMax,
+        peptideCustomResidueLibrary: customResidueLibrary,
+        onCustomResidueLibraryChange,
         peptideBicyclicLinkerCcd,
         peptideBicyclicCysPositionMode,
         peptideBicyclicFixTerminalCys,
@@ -507,6 +522,8 @@ export function useProjectWorkflowSectionProps({
         onPeptidePopulationSizeChange,
         onPeptideEliteSizeChange,
         onPeptideMutationRateChange,
+        onPeptideResiduePoolChange,
+        onPeptideNonNaturalRangeChange,
         onPeptideBicyclicLinkerCcdChange,
         onPeptideBicyclicCysPositionModeChange,
         onPeptideBicyclicFixTerminalCysChange,
