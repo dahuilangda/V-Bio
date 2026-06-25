@@ -126,14 +126,29 @@ def _reconcile_in_use_allocations(client: redis.Redis, valid: set[int]) -> dict[
     - Keep leases with active heartbeat.
     - Reclaim leases for terminal tasks.
     - Reclaim PENDING leases that are not live and have no heartbeat (typical worker-crash orphan).
+
+    Reclaims mirror release_gpu: a stale lease is only dropped (returning the GPU to the
+    available pool) once GPU memory is confirmed reclaimed, so a stale lease is never handed
+    out dirty to the next task. If memory is still in use the lease is retained and reported
+    as held_dirty.
     """
     in_use_raw = client.hgetall(config.GPU_IN_USE_HASH_KEY) or {}
     if not in_use_raw:
-        return {"released": [], "kept": {}, "live_tasks": 0}
+        return {"released": [], "kept": {}, "held_dirty": [], "live_tasks": 0}
 
     live_task_ids = _collect_live_celery_task_ids()
     released: list[tuple[int, str, str]] = []
+    held_dirty: list[tuple[int, str, str]] = []
     kept: dict[str, str] = {}
+
+    def _reclaim_if_memory_reclaimed(gpu_id: int, task_id: str, reason: str) -> None:
+        # 与 release_gpu 一致：只有确认显存已回收才解除 lease，避免脏卡被重新分配。
+        if _wait_gpu_memory_reclaimed(gpu_id, task_id):
+            client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_id)
+            released.append((gpu_id, task_id, reason))
+        else:
+            held_dirty.append((gpu_id, task_id, reason))
+            kept[str(gpu_id)] = task_id
 
     for gpu_key, owner_task_id in in_use_raw.items():
         gpu_id = _to_int(gpu_key)
@@ -147,8 +162,7 @@ def _reconcile_in_use_allocations(client: redis.Redis, valid: set[int]) -> dict[
             client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_key)
             continue
         if not task_id:
-            client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_key)
-            released.append((gpu_id, "", "empty_owner"))
+            _reclaim_if_memory_reclaimed(gpu_id, "", "empty_owner")
             continue
         if task_id in live_task_ids:
             kept[str(gpu_id)] = task_id
@@ -161,21 +175,18 @@ def _reconcile_in_use_allocations(client: redis.Redis, valid: set[int]) -> dict[
 
         state = _read_task_state(task_id)
         if state in {"SUCCESS", "FAILURE", "REVOKED"}:
-            client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_key)
-            released.append((gpu_id, task_id, f"terminal_{state.lower()}"))
+            _reclaim_if_memory_reclaimed(gpu_id, task_id, f"terminal_{state.lower()}")
             continue
         if state in {"PROGRESS", "STARTED", "RECEIVED", "RETRY"}:
-            client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_key)
-            released.append((gpu_id, task_id, f"{state.lower()}_without_live_or_heartbeat"))
+            _reclaim_if_memory_reclaimed(gpu_id, task_id, f"{state.lower()}_without_live_or_heartbeat")
             continue
         if state == "PENDING":
-            client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_key)
-            released.append((gpu_id, task_id, "pending_without_live_or_heartbeat"))
+            _reclaim_if_memory_reclaimed(gpu_id, task_id, "pending_without_live_or_heartbeat")
             continue
 
         kept[str(gpu_id)] = task_id
 
-    return {"released": released, "kept": kept, "live_tasks": len(live_task_ids)}
+    return {"released": released, "kept": kept, "held_dirty": held_dirty, "live_tasks": len(live_task_ids)}
 
 def initialize_gpu_pool(devices_to_use: list[int]):
     """
@@ -249,6 +260,15 @@ def ensure_gpu_pool(devices_to_use: list[int]):
             for gpu_id, task_id, reason in reconcile["released"]
         ]
         logger.warning("检测到并回收陈旧 GPU 占用: %s", "; ".join(released_msgs))
+    if reconcile.get("held_dirty"):
+        dirty_msgs = [
+            f"gpu={gpu_id},task={task_id or '-'},reason={reason}"
+            for gpu_id, task_id, reason in reconcile["held_dirty"]
+        ]
+        logger.warning(
+            "陈旧 GPU 占用显存未回收，暂保留 lease 避免脏卡被重新分配: %s",
+            "; ".join(dirty_msgs),
+        )
     current_valid, current_available, current_in_use = _read_gpu_pool_state(client)
     old_available, expected_available = _rebuild_available_gpu_queue(client, current_valid, current_in_use)
     if old_available != expected_available:
