@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import json
 import hashlib
+import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import yaml
+
+_AF3_SRC_DIR = Path(__file__).resolve().parents[2] / "AF3Score" / "src"
+if _AF3_SRC_DIR.exists():
+    af3_src = str(_AF3_SRC_DIR)
+    if af3_src not in sys.path:
+        sys.path.insert(0, af3_src)
+
+from alphafold3.constants import residue_names as af3_residue_names
 
 
 class MolType(Enum):
@@ -299,46 +308,13 @@ def _normalize_protein_modifications(raw_modifications: object, sequence_length:
     return normalized
 
 
-_AF3_STANDARD_ONE_LETTER = {
-    "ALA": "A",
-    "ARG": "R",
-    "ASN": "N",
-    "ASP": "D",
-    "CYS": "C",
-    "GLN": "Q",
-    "GLU": "E",
-    "GLY": "G",
-    "HIS": "H",
-    "ILE": "I",
-    "LEU": "L",
-    "LYS": "K",
-    "MET": "M",
-    "PHE": "F",
-    "PRO": "P",
-    "SER": "S",
-    "THR": "T",
-    "TRP": "W",
-    "TYR": "Y",
-    "VAL": "V",
-}
-
-_AF3_COMMON_MODIFICATION_ONE_LETTER = {
-    "AIB": "A",
-    "HY3": "P",
-    "MSE": "M",
-    "PTR": "Y",
-    "SEP": "S",
-    "TPO": "T",
-}
-
-
 def _af3_ccd_to_one_letter(ccd: object) -> str:
     code = str(ccd or "").strip().upper()
     if code.startswith("CCD_"):
         code = code[4:]
     if len(code) == 1 and code.isalpha():
         return code
-    return _AF3_STANDARD_ONE_LETTER.get(code) or _AF3_COMMON_MODIFICATION_ONE_LETTER.get(code) or "X"
+    return af3_residue_names.CCD_NAME_TO_ONE_LETTER.get(code, "X")
 
 
 def _af3_effective_query_sequence(sequence: str, modifications: List[Dict[str, object]]) -> str:
@@ -690,7 +666,7 @@ def load_unpaired_msa(
             if path and path.exists():
                 msa_content = _replace_a3m_first_query_sequence(
                     _normalize_a3m_content(path.read_text()),
-                    sequence,
+                    _af3_effective_query_sequence(sequence, modifications),
                 )
                 break
         unpaired.append(msa_content or "")
