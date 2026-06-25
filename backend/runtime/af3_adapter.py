@@ -683,7 +683,6 @@ def load_unpaired_msa(
     for index, sequence in enumerate(prep.query_sequences_unique):
         msa_content: Optional[str] = None
         modifications = prep.query_modifications[index] if index < len(prep.query_modifications) else []
-        effective_sequence = _af3_effective_query_sequence(sequence, modifications)
         group_key = prep.query_sequence_keys[index] if index < len(prep.query_sequence_keys) else sequence
         chain_ids = prep.query_group_to_chain_ids.get(group_key) or prep.sequence_to_chain_ids.get(sequence, [])
         for chain_id in chain_ids:
@@ -691,7 +690,7 @@ def load_unpaired_msa(
             if path and path.exists():
                 msa_content = _replace_a3m_first_query_sequence(
                     _normalize_a3m_content(path.read_text()),
-                    effective_sequence,
+                    sequence,
                 )
                 break
         unpaired.append(msa_content or "")

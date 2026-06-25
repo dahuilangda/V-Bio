@@ -122,9 +122,42 @@ export function mergeTaskInputOptionsIntoProperties(
 export function readTaskInputOptions(task: ProjectTask | null): Partial<PredictionOptions> {
   if (!task) return {};
   const taskProperties = asRecord(task.properties);
+  const fromConfidence = readTaskOptionsFromConfidence(task);
   const fromProperties = normalizeTaskInputOptions(taskProperties[TASK_INPUT_OPTIONS_KEY]);
-  if (Object.keys(fromProperties).length > 0) return fromProperties;
-  return readTaskOptionsFromConfidence(task);
+  return {
+    ...fromConfidence,
+    ...fromProperties
+  };
+}
+
+export function hasStoredTaskInputOptions(task: { properties?: unknown } | null | undefined): boolean {
+  if (!task) return false;
+  const properties = asRecord(task.properties);
+  const options = asRecord(properties[TASK_INPUT_OPTIONS_KEY]);
+  return Object.keys(options).length > 0;
+}
+
+export function mergeTaskPropertiesPreservingInputOptions(
+  nextProperties: unknown,
+  prevProperties: unknown
+): ProjectTask["properties"] {
+  const next = asRecord(nextProperties);
+  const prev = asRecord(prevProperties);
+  if (Object.keys(next).length === 0) {
+    return prev as unknown as ProjectTask["properties"];
+  }
+  const merged: Record<string, unknown> = {
+    ...prev,
+    ...next
+  };
+  const nextOptions = asRecord(next[TASK_INPUT_OPTIONS_KEY]);
+  const prevOptions = asRecord(prev[TASK_INPUT_OPTIONS_KEY]);
+  if (Object.keys(nextOptions).length > 0) {
+    merged[TASK_INPUT_OPTIONS_KEY] = nextOptions;
+  } else if (Object.keys(prevOptions).length > 0) {
+    merged[TASK_INPUT_OPTIONS_KEY] = prevOptions;
+  }
+  return merged as unknown as ProjectTask["properties"];
 }
 
 function stripTaskStorageFieldsFromProperties(

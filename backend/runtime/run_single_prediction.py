@@ -3370,7 +3370,6 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
         
         # 解析 YAML 获取蛋白质序列
         yaml_data = yaml.safe_load(yaml_content)
-        protein_sequences = {}
         
         for entity in yaml_data.get('sequences', []):
             if entity.get('protein', {}).get('id'):
@@ -7121,10 +7120,6 @@ def run_peptide_design_backend(
     _peptide_allowed_residues(natural_pool, design_mode)
     nonnatural_min = _read_int_option(options, "peptideNonNaturalMin", 0, min_value=0, max_value=binder_length)
     nonnatural_max = _read_int_option(options, "peptideNonNaturalMax", nonnatural_min, min_value=nonnatural_min, max_value=binder_length)
-    if peptide_backend in {"alphafold3", "protenix"} and any(item.get("kind") == "custom" for item in unnatural_pool):
-        raise ValueError(
-            f"Peptide design backend '{peptide_backend}' supports preset CCD residue modifications only; custom drawn peptide residues require Boltz-2."
-        )
 
     baseline_sequence = _random_peptide_sequence_from_pool(
         binder_length,

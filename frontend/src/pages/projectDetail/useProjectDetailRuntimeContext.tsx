@@ -25,8 +25,9 @@ import {
   isDraftTaskSnapshot,
   mergeTaskSnapshotIntoConfig,
   readLeadOptUploadsFromComponents,
+  hasStoredTaskInputOptions,
+  mergeTaskPropertiesPreservingInputOptions,
   readTaskInputOptions,
-  TASK_INPUT_OPTIONS_KEY,
 } from './projectTaskSnapshot';
 import {
   createAffinityUploadsFingerprint,
@@ -348,12 +349,6 @@ function hasObjectContent(value: unknown): boolean {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length > 0);
 }
 
-function hasStoredTaskInputOptions(task: ProjectTask | null | undefined): boolean {
-  if (!task || !hasObjectContent(task.properties)) return false;
-  const properties = task.properties as unknown as Record<string, unknown>;
-  return hasObjectContent(properties[TASK_INPUT_OPTIONS_KEY]);
-}
-
 function normalizeCustomResidueDefinition(value: unknown): { ccd: string; smiles: string; baseResidue?: string; label?: string } | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
@@ -490,7 +485,7 @@ function mergePayloadFields<T extends object, U extends object>(next: T, prev: U
   if (Object.prototype.hasOwnProperty.call(nextAny, 'properties') || Object.prototype.hasOwnProperty.call(prevAny, 'properties')) {
     merged.properties =
       mergeLeadOptProperties(nextAny.properties, prevAny.properties) ||
-      (hasObjectContent(nextAny.properties) ? nextAny.properties : prevAny.properties);
+      mergeTaskPropertiesPreservingInputOptions(nextAny.properties, prevAny.properties);
   }
   if (Object.prototype.hasOwnProperty.call(nextAny, 'components') || Object.prototype.hasOwnProperty.call(prevAny, 'components')) {
     const nextComponents = Array.isArray(nextAny.components) ? nextAny.components : [];

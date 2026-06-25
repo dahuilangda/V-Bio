@@ -8,6 +8,7 @@ import {
   sanitizeProjectForTaskShare
 } from '../../api/supabaseLite';
 import { normalizeWorkflowKey } from '../../utils/workflows';
+import { mergeTaskPropertiesPreservingInputOptions } from '../projectDetail/projectTaskSnapshot';
 import {
   hasLeadOptPredictionRuntime,
   isProjectTaskRow,
@@ -153,7 +154,7 @@ function mergeTaskRuntimeFields(next: ProjectTask, prev: ProjectTask): ProjectTa
       confidence: hasObjectContent(next.confidence) ? next.confidence : prev.confidence,
       affinity: hasObjectContent(next.affinity) ? next.affinity : prev.affinity,
       components: Array.isArray(next.components) && next.components.length > 0 ? next.components : prev.components,
-      properties: mergedLeadOptProperties || (hasObjectContent(next.properties) ? next.properties : prev.properties),
+      properties: mergedLeadOptProperties || mergeTaskPropertiesPreservingInputOptions(next.properties, prev.properties),
       completed_at: isRuntimeState ? null : next.completed_at || prev.completed_at,
       duration_seconds: isRuntimeState ? null : next.duration_seconds ?? prev.duration_seconds,
       status_text: String(next.status_text || '').trim() || prev.status_text,
@@ -169,7 +170,7 @@ function mergeTaskRuntimeFields(next: ProjectTask, prev: ProjectTask): ProjectTa
       confidence: hasObjectContent(next.confidence) ? next.confidence : prev.confidence,
       affinity: hasObjectContent(next.affinity) ? next.affinity : prev.affinity,
       components: Array.isArray(next.components) && next.components.length > 0 ? next.components : prev.components,
-      properties: mergedLeadOptProperties || (hasObjectContent(next.properties) ? next.properties : prev.properties),
+      properties: mergedLeadOptProperties || mergeTaskPropertiesPreservingInputOptions(next.properties, prev.properties),
       task_state: prev.task_state,
       status_text: prev.status_text,
       error_text: prev.error_text,
@@ -183,7 +184,7 @@ function mergeTaskRuntimeFields(next: ProjectTask, prev: ProjectTask): ProjectTa
     confidence: hasObjectContent(next.confidence) ? next.confidence : prev.confidence,
     affinity: hasObjectContent(next.affinity) ? next.affinity : prev.affinity,
     components: Array.isArray(next.components) && next.components.length > 0 ? next.components : prev.components,
-    properties: mergedLeadOptProperties || (hasObjectContent(next.properties) ? next.properties : prev.properties),
+    properties: mergedLeadOptProperties || mergeTaskPropertiesPreservingInputOptions(next.properties, prev.properties),
     completed_at: next.completed_at || prev.completed_at,
     duration_seconds: next.duration_seconds ?? prev.duration_seconds,
     status_text: String(next.status_text || '').trim() || prev.status_text,

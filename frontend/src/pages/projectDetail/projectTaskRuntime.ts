@@ -11,6 +11,7 @@ import type { DownloadResultMode } from '../../api/backendTaskApi';
 import type { LeadOptMmpQueryResponse } from '../../api/backendLeadOptimizationApi';
 import type { Project, ProjectTask, TaskState } from '../../types/models';
 import { mergePeptidePreviewIntoProperties } from '../../utils/peptideTaskPreview';
+import { hasStoredTaskInputOptions } from './projectTaskSnapshot';
 import {
   hasMeaningfulValue,
   hasPeptideSummaryFields,
@@ -739,7 +740,9 @@ export async function pullResultForViewerTask(params: {
       });
     }
     if (options?.taskRowId) {
-      const propertiesPatch = mergePeptidePreviewIntoProperties(baseTaskProperties || {}, persistedTaskConfidence);
+      const propertiesPatch = baseTaskProperties && hasStoredTaskInputOptions({ properties: baseTaskProperties })
+        ? mergePeptidePreviewIntoProperties(baseTaskProperties, persistedTaskConfidence)
+        : null;
       await patchTask(options.taskRowId, {
         confidence: persistedTaskConfidence,
         affinity: parsed.affinity,
@@ -940,7 +943,7 @@ export async function refreshTaskStatus(params: {
       const taskConfidencePatch = isPeptideDesignWorkflow
         ? mergePeptideRuntimeStatusIntoConfidence(runtimeTask.confidence, runtimeInfo)
         : null;
-      const taskPropertiesPatch = isPeptideDesignWorkflow
+      const taskPropertiesPatch = isPeptideDesignWorkflow && hasStoredTaskInputOptions(runtimeTask)
         ? mergePeptidePreviewIntoProperties(runtimeTask.properties, taskConfidencePatch || runtimeTask.confidence)
         : null;
       if (taskConfidencePatch) {
