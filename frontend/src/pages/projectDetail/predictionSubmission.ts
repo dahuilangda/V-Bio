@@ -8,6 +8,54 @@ import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
 
 export type PredictionWorkspaceTab = 'results' | 'basics' | 'components' | 'constraints';
 
+function normalizeCustomResidueCode(value: unknown): string {
+  return String(value || '').replace(/[^A-Za-z0-9_-]/g, '').toUpperCase().slice(0, 12);
+}
+
+function selectedCustomResidueDefinitions(
+  options: ProjectInputConfig['options'],
+  library: CustomCcdMoleculeInput[]
+): CustomCcdMoleculeInput[] {
+  const selectedCodes = new Set(
+    (options.peptideResiduePool || [])
+      .filter((item) => item.kind === 'custom')
+      .map((item) => normalizeCustomResidueCode(item.code))
+      .filter(Boolean)
+  );
+  if (selectedCodes.size === 0) return [];
+  const seen = new Set<string>();
+  const rows: CustomCcdMoleculeInput[] = [];
+  for (const item of library) {
+    const ccd = normalizeCustomResidueCode(item.ccd);
+    const smiles = String(item.smiles || '').trim();
+    if (!ccd || !smiles || !selectedCodes.has(ccd) || seen.has(ccd)) continue;
+    seen.add(ccd);
+    rows.push({
+      ccd,
+      smiles,
+      baseResidue: String(item.baseResidue || '').trim().toUpperCase().slice(0, 1) || undefined,
+      label: String(item.label || '').trim().slice(0, 80) || undefined
+    });
+  }
+  return rows;
+}
+
+function withPeptideCustomResidueDefinitions(
+  config: ProjectInputConfig,
+  library: CustomCcdMoleculeInput[],
+  enabled: boolean
+): ProjectInputConfig {
+  if (!enabled) return config;
+  const definitions = selectedCustomResidueDefinitions(config.options, library);
+  return {
+    ...config,
+    options: {
+      ...config.options,
+      peptideCustomResidueDefinitions: definitions
+    }
+  };
+}
+
 export interface PredictionDraftFields {
   taskName: string;
   taskSummary: string;
@@ -204,9 +252,14 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
   } = deps;
 
   const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, draft.backend);
-  const submissionBaseConfig = isPeptideDesignWorkflow
+  const submissionBaseConfigRaw = isPeptideDesignWorkflow
     ? normalizeProjectInputConfig({ ...normalizedConfig, options: normalizedConfig.options })
     : normalizedConfig;
+  const submissionBaseConfig = withPeptideCustomResidueDefinitions(
+    submissionBaseConfigRaw,
+    customResidueLibrary,
+    isPeptideDesignWorkflow
+  );
   const submissionConfig = buildPredictionSubmissionConfig(submissionBaseConfig, isPeptideDesignWorkflow);
   const missingOrders = listIncompleteComponentOrders(normalizedConfig.components);
   if (missingOrders.length > 0) {
@@ -246,14 +299,8 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
     const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(submissionConfig);
     const hasMsa = computeUseMsaFlag(activeComponents, draft.use_msa);
     const persistenceWarnings: string[] = [];
-    const selectedCustomResidueCodes = new Set(
-      (submissionConfig.options.peptideResiduePool || [])
-        .filter((item) => item.kind === 'custom')
-        .map((item) => String(item.code || '').trim().toUpperCase())
-        .filter(Boolean)
-    );
     const peptideCustomCcdMolecules = isPeptideDesignWorkflow
-      ? customResidueLibrary.filter((item) => selectedCustomResidueCodes.has(String(item.ccd || '').trim().toUpperCase()))
+      ? (submissionConfig.options.peptideCustomResidueDefinitions || [])
       : [];
 
     saveProjectInputConfig(project.id, submissionBaseConfig);

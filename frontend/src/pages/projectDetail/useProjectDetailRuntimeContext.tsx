@@ -26,6 +26,7 @@ import {
   mergeTaskSnapshotIntoConfig,
   readLeadOptUploadsFromComponents,
   readTaskInputOptions,
+  TASK_INPUT_OPTIONS_KEY,
 } from './projectTaskSnapshot';
 import {
   createAffinityUploadsFingerprint,
@@ -345,6 +346,26 @@ function normalizeLeadOptRuntimeRow<
 
 function hasObjectContent(value: unknown): boolean {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length > 0);
+}
+
+function hasStoredTaskInputOptions(task: ProjectTask | null | undefined): boolean {
+  if (!task || !hasObjectContent(task.properties)) return false;
+  const properties = task.properties as unknown as Record<string, unknown>;
+  return hasObjectContent(properties[TASK_INPUT_OPTIONS_KEY]);
+}
+
+function normalizeCustomResidueDefinition(value: unknown): { ccd: string; smiles: string; baseResidue?: string; label?: string } | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const ccd = String(raw.ccd || '').replace(/[^A-Za-z0-9_-]/g, '').toUpperCase().slice(0, 12);
+  const smiles = String(raw.smiles || '').trim();
+  if (!ccd || !smiles) return null;
+  return {
+    ccd,
+    smiles,
+    baseResidue: String(raw.baseResidue || '').trim().toUpperCase().slice(0, 1) || undefined,
+    label: String(raw.label || '').trim().slice(0, 80) || undefined
+  };
 }
 
 function hasTaskInputSnapshotPayload(
@@ -1316,10 +1337,11 @@ export function useProjectDetailRuntimeContext() {
     workflowKey
   ]);
 
-  // Peptide design: rehydrate draft options when switching between tasks.
-  // Without this, all peptide design tasks share the same draft.inputConfig.options
-  // because there is no per-task option loading on task switch.
-  // Only triggers on task selection change, NOT on draft edits.
+  // Peptide design: rehydrate the full task snapshot when switching tasks.
+  // The residue pool, non-natural limits, partial masks, mode-specific cyclic settings,
+  // and related runtime options are stored per task under properties.__vbio_input_options_v1.
+  // List rows can be intentionally lightweight, so fetch the selected task detail once
+  // through the existing cache when the option snapshot is absent.
   const peptideTaskSwitchRef = useRef<string>('');
   useEffect(() => {
     if (!isPeptideDesignWorkflow) return;
@@ -1334,40 +1356,91 @@ export function useProjectDetailRuntimeContext() {
       (activeTaskId ? projectTasks.find((row) => String(row.task_id || '').trim() === activeTaskId) : undefined) ||
       null;
     const focusedRowId = String(focusedRow?.id || '').trim();
-    // Skip if same task already loaded — avoids overwriting user edits.
-    if (!focusedRowId || peptideTaskSwitchRef.current === focusedRowId) return;
-    peptideTaskSwitchRef.current = focusedRowId;
+    if (!focusedRowId) return;
 
-    const taskOptions = readTaskInputOptions(focusedRow);
-    if (Object.keys(taskOptions).length === 0) return;
+    let cancelled = false;
+    const applyTaskSnapshot = (taskRow: ProjectTask) => {
+      if (!hasStoredTaskInputOptions(taskRow)) return;
+      const taskOptions = readTaskInputOptions(taskRow);
+      if (Object.keys(taskOptions).length === 0) return;
+      const marker = `${focusedRowId}|${String(taskRow.updated_at || '').trim()}|${JSON.stringify(taskOptions)}`;
+      if (peptideTaskSwitchRef.current === marker) return;
+      peptideTaskSwitchRef.current = marker;
 
-    setDraft((prev) => {
-      if (!prev) return prev;
-      const mergedConfig = normalizeConfigForBackend(
-        {
-          ...prev.inputConfig,
-          options: {
-            ...prev.inputConfig.options,
-            ...taskOptions,
-            seed: taskOptions.seed ?? prev.inputConfig.options.seed
-          }
-        },
-        prev.backend
-      );
-      return {
-        ...prev,
-        inputConfig: {
-          ...prev.inputConfig,
-          options: mergedConfig.options
-        }
-      };
-    });
+      const taskCustomDefinitions = Array.isArray(taskOptions.peptideCustomResidueDefinitions)
+        ? taskOptions.peptideCustomResidueDefinitions.map(normalizeCustomResidueDefinition).filter(Boolean)
+        : [];
+      if (taskCustomDefinitions.length > 0) {
+        setCustomResidueLibrary((prev) => {
+          const byCode = new Map<string, typeof taskCustomDefinitions[number]>();
+          prev.forEach((item) => {
+            const normalized = normalizeCustomResidueDefinition(item);
+            if (normalized) byCode.set(normalized.ccd, normalized);
+          });
+          taskCustomDefinitions.forEach((item) => {
+            if (item) byCode.set(item.ccd, item);
+          });
+          return Array.from(byCode.values()).filter(Boolean) as NonNullable<typeof taskCustomDefinitions[number]>[];
+        });
+      }
+
+      setDraft((prev) => {
+        if (!prev) return prev;
+        const mergedConfig = normalizeConfigForBackend(
+          mergeTaskSnapshotIntoConfig(prev.inputConfig, taskRow),
+          prev.backend
+        );
+        return {
+          ...prev,
+          taskName: String(taskRow.name || prev.taskName || '').trim(),
+          taskSummary: String(taskRow.summary || prev.taskSummary || '').trim(),
+          inputConfig: mergedConfig
+        };
+      });
+    };
+
+    if (hasStoredTaskInputOptions(focusedRow)) {
+      applyTaskSnapshot(focusedRow as ProjectTask);
+      return;
+    }
+
+    void (async () => {
+      try {
+        const detailRow = await getProjectTaskDetailCached(focusedRowId, {
+          includeComponents: true,
+          includeConstraints: true,
+          includeProperties: true,
+          includeLeadOptSummary: false,
+          includeLeadOptCandidates: false,
+          includeConfidence: true,
+          includeAffinity: false,
+          includeProteinSequence: true
+        });
+        if (cancelled || !detailRow) return;
+        setProjectTasks((prev) =>
+          prev.map((row) =>
+            String(row.id || '').trim() === focusedRowId ? mergeTaskRuntimeFields(detailRow, row) : row
+          )
+        );
+        applyTaskSnapshot(detailRow);
+      } catch {
+        // Keep the current editor state if task detail hydration fails.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [
+    getProjectTaskDetailCached,
     isPeptideDesignWorkflow,
     location.search,
     project?.task_id,
     projectTasks,
-    setDraft
+    setDraft,
+    setProjectTasks,
+    setCustomResidueLibrary,
+    normalizeConfigForBackend
   ]);
 
   useEffect(() => {
@@ -1963,6 +2036,7 @@ export function useProjectDetailRuntimeContext() {
     affinityLigandFile,
     affinityCurrentUploads,
     proteinTemplates,
+    customResidueLibrary,
     requestedStatusTaskRowId: requestedStatusTaskRow?.id || null,
     activeStatusTaskRowId: activeStatusTaskRow?.id || null,
     statusRefreshInFlightRef,

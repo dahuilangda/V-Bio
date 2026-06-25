@@ -1,8 +1,56 @@
-import type { InputComponent, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
+import type { CustomCcdMoleculeInput, InputComponent, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import { extractPrimaryProteinAndLigand, saveProjectInputConfig } from '../../utils/projectInputs';
 import { getWorkflowDefinition, isPredictionLikeWorkflowKey } from '../../utils/workflows';
 import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
+
+function normalizeCustomResidueCode(value: unknown): string {
+  return String(value || '').replace(/[^A-Za-z0-9_-]/g, '').toUpperCase().slice(0, 12);
+}
+
+function selectedCustomResidueDefinitions(
+  options: ProjectInputConfig['options'],
+  library: CustomCcdMoleculeInput[]
+): CustomCcdMoleculeInput[] {
+  const selectedCodes = new Set(
+    (options.peptideResiduePool || [])
+      .filter((item) => item.kind === 'custom')
+      .map((item) => normalizeCustomResidueCode(item.code))
+      .filter(Boolean)
+  );
+  if (selectedCodes.size === 0) return [];
+  const seen = new Set<string>();
+  const rows: CustomCcdMoleculeInput[] = [];
+  for (const item of library) {
+    const ccd = normalizeCustomResidueCode(item.ccd);
+    const smiles = String(item.smiles || '').trim();
+    if (!ccd || !smiles || !selectedCodes.has(ccd) || seen.has(ccd)) continue;
+    seen.add(ccd);
+    rows.push({
+      ccd,
+      smiles,
+      baseResidue: String(item.baseResidue || '').trim().toUpperCase().slice(0, 1) || undefined,
+      label: String(item.label || '').trim().slice(0, 80) || undefined
+    });
+  }
+  return rows;
+}
+
+function withPeptideCustomResidueDefinitions(
+  config: ProjectInputConfig,
+  library: CustomCcdMoleculeInput[],
+  enabled: boolean
+): ProjectInputConfig {
+  if (!enabled) return config;
+  const definitions = selectedCustomResidueDefinitions(config.options, library);
+  return {
+    ...config,
+    options: {
+      ...config.options,
+      peptideCustomResidueDefinitions: definitions
+    }
+  };
+}
 
 export interface SaveDraftFields {
   taskName: string;
@@ -25,6 +73,7 @@ export interface SaveDraftDeps {
   affinityLigandFile: File | null;
   affinityCurrentUploads: AffinityPersistedUploads;
   proteinTemplates: Record<string, ProteinTemplateUpload>;
+  customResidueLibrary: CustomCcdMoleculeInput[];
   requestedStatusTaskRowId: string | null;
   activeStatusTaskRowId: string | null;
   normalizeConfigForBackend: (inputConfig: ProjectInputConfig, backend: string) => ProjectInputConfig;
@@ -82,6 +131,7 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
     affinityLigandFile,
     affinityCurrentUploads,
     proteinTemplates,
+    customResidueLibrary,
     requestedStatusTaskRowId,
     activeStatusTaskRowId,
     normalizeConfigForBackend,
@@ -111,7 +161,12 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
 
   const workflowDef = getWorkflowDefinition(project.task_type);
   const persistedBackend = workflowDef.key === 'affinity' ? 'boltz' : draft.backend;
-  const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, persistedBackend);
+  const normalizedConfigBase = normalizeConfigForBackend(draft.inputConfig, persistedBackend);
+  const normalizedConfig = withPeptideCustomResidueDefinitions(
+    normalizedConfigBase,
+    customResidueLibrary,
+    workflowDef.key === 'peptide_design'
+  );
   const activeComponents = nonEmptyComponents(normalizedConfig.components);
   const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(normalizedConfig);
   const msaComponents = workflowDef.key === 'affinity' ? normalizedConfig.components : activeComponents;

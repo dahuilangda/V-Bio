@@ -37,6 +37,7 @@ const TASK_INPUT_OPTION_KEYS: Array<keyof PredictionOptions> = [
   'peptideEliteSize',
   'peptideMutationRate',
   'peptideResiduePool',
+  'peptideCustomResidueDefinitions',
   'peptideNonNaturalMin',
   'peptideNonNaturalMax',
   'peptideBicyclicLinkerCcd',

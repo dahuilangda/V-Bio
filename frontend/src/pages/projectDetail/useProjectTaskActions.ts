@@ -3,6 +3,7 @@ import { useCallback } from 'react';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import type { DownloadResultMode } from '../../api/backendTaskApi';
 import type {
+  CustomCcdMoleculeInput,
   InputComponent,
   Project,
   ProjectInputConfig,
@@ -34,6 +35,7 @@ interface UseProjectTaskActionsInput {
   affinityLigandFile: File | null;
   affinityCurrentUploads: AffinityPersistedUploads;
   proteinTemplates: Record<string, ProteinTemplateUpload>;
+  customResidueLibrary: CustomCcdMoleculeInput[];
   requestedStatusTaskRowId: string | null;
   activeStatusTaskRowId: string | null;
   statusRefreshInFlightRef: MutableRefObject<Set<string>>;
@@ -122,6 +124,7 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
     affinityLigandFile,
     affinityCurrentUploads,
     proteinTemplates,
+    customResidueLibrary,
     requestedStatusTaskRowId,
     activeStatusTaskRowId,
     statusRefreshInFlightRef,
@@ -247,6 +250,7 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
           affinityLigandFile,
           affinityCurrentUploads,
           proteinTemplates,
+          customResidueLibrary,
           requestedStatusTaskRowId,
           activeStatusTaskRowId,
           normalizeConfigForBackend,

@@ -2298,11 +2298,11 @@ export function PeptideDesignResultsWorkspace({
       <section className="structure-panel structure-panel--results-compact peptide-results-structure-panel">
         {viewerStructureText.trim() ? (
           <MolstarViewer
-            key={`peptide-results-viewer:${selectedCandidate?.id || 'none'}:${viewerStructureFormat}:${viewerLigandFocusChainId || '-'}`}
+            key={`peptide-results-viewer:${selectedCandidate?.id || 'none'}:${viewerStructureFormat}:${viewerColorMode}:${viewerLigandFocusChainId || '-'}`}
             structureText={viewerStructureText}
             format={viewerStructureFormat}
             colorMode={viewerColorMode}
-            confidenceBackend={confidenceBackend || projectBackend}
+            confidenceBackend={viewerColorMode === 'alphafold' ? confidenceBackend || projectBackend : ''}
             scenePreset="lead_opt"
             leadOptStyleVariant="results"
             ligandFocusChainId={viewerLigandFocusChainId || ''}

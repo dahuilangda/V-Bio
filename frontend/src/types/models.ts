@@ -105,6 +105,7 @@ export interface PredictionOptions {
   peptideEliteSize?: number;
   peptideMutationRate?: number;
   peptideResiduePool?: PeptideResiduePoolSelection[];
+  peptideCustomResidueDefinitions?: CustomCcdMoleculeInput[];
   peptideNonNaturalMin?: number;
   peptideNonNaturalMax?: number;
   peptideBicyclicLinkerCcd?: 'SEZ' | '29N' | 'BS3';
