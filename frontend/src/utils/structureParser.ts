@@ -424,3 +424,145 @@ export function extractProteinChainResidueIndexMap(
 export function extractStructureChainIds(structureText: string, format: 'pdb' | 'cif'): string[] {
   return format === 'pdb' ? parsePdbChainIds(structureText) : parseCifChainIds(structureText);
 }
+
+
+export interface StructureResidueAtomOption {
+  chainId: string;
+  residue: number;
+  residueName: string;
+  atoms: string[];
+}
+
+export type StructureAtomOptionsByChain = Record<string, StructureResidueAtomOption[]>;
+
+function normalizeAtomName(value: string): string {
+  return value.replace(/\s+/g, '').trim().toUpperCase();
+}
+
+function appendStructureAtomOption(
+  buckets: Map<string, Map<number, { chainId: string; residue: number; residueName: string; atoms: Set<string> }>>,
+  chainId: string,
+  residueRaw: string,
+  residueName: string,
+  atomName: string
+) {
+  const residue = parseSeqNumber(residueRaw);
+  const atom = normalizeAtomName(atomName);
+  if (residue === null || residue <= 0 || !atom) return;
+  const chainBucket = buckets.get(chainId) || new Map<number, { chainId: string; residue: number; residueName: string; atoms: Set<string> }>();
+  const residueBucket = chainBucket.get(residue) || { chainId, residue, residueName: residueName.trim().toUpperCase(), atoms: new Set<string>() };
+  residueBucket.atoms.add(atom);
+  chainBucket.set(residue, residueBucket);
+  buckets.set(chainId, chainBucket);
+}
+
+function parsePdbStructureResidueAtomOptions(text: string): StructureAtomOptionsByChain {
+  const buckets = new Map<string, Map<number, { chainId: string; residue: number; residueName: string; atoms: Set<string> }>>();
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.startsWith('ATOM') && !line.startsWith('HETATM')) continue;
+    appendStructureAtomOption(
+      buckets,
+      normalizeChainId(line.slice(21, 22)),
+      line.slice(22, 26).trim(),
+      line.slice(17, 20).trim(),
+      line.slice(12, 16).trim()
+    );
+  }
+  return serializeStructureAtomOptions(buckets);
+}
+
+function parseCifStructureResidueAtomOptions(text: string): StructureAtomOptionsByChain {
+  const lines = text.split(/\r?\n/);
+  const buckets = new Map<string, Map<number, { chainId: string; residue: number; residueName: string; atoms: Set<string> }>>();
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i].trim();
+    if (line !== 'loop_') continue;
+
+    let j = i + 1;
+    const headers: string[] = [];
+    while (j < lines.length) {
+      const header = lines[j].trim();
+      if (!header.startsWith('_')) break;
+      headers.push(header);
+      j += 1;
+    }
+    if (!headers.some((h) => h.startsWith('_atom_site.'))) {
+      i = j - 1;
+      continue;
+    }
+
+    const col = (names: string[]) => {
+      for (const name of names) {
+        const idx = headers.indexOf(name);
+        if (idx >= 0) return idx;
+      }
+      return -1;
+    };
+
+    const chainIdx = col(['_atom_site.auth_asym_id', '_atom_site.label_asym_id']);
+    const residueNameIdx = col(['_atom_site.auth_comp_id', '_atom_site.label_comp_id']);
+    const authSeqIdx = col(['_atom_site.auth_seq_id']);
+    const labelSeqIdx = col(['_atom_site.label_seq_id']);
+    const atomIdx = col(['_atom_site.auth_atom_id', '_atom_site.label_atom_id']);
+
+    if (chainIdx < 0 || residueNameIdx < 0 || atomIdx < 0 || (authSeqIdx < 0 && labelSeqIdx < 0)) {
+      i = j - 1;
+      continue;
+    }
+
+    while (j < lines.length) {
+      const rowRaw = lines[j];
+      const row = rowRaw.trim();
+      if (!row || row === '#') {
+        j += 1;
+        continue;
+      }
+      if (row === 'loop_' || row.startsWith('_')) break;
+
+      const tokens = tokenizeCifRow(rowRaw);
+      if (tokens.length < headers.length) {
+        j += 1;
+        continue;
+      }
+
+      appendStructureAtomOption(
+        buckets,
+        normalizeChainId(tokens[chainIdx] || ''),
+        (authSeqIdx >= 0 ? tokens[authSeqIdx] : tokens[labelSeqIdx]) || '',
+        tokens[residueNameIdx] || '',
+        tokens[atomIdx] || ''
+      );
+      j += 1;
+    }
+
+    i = j - 1;
+  }
+
+  return serializeStructureAtomOptions(buckets);
+}
+
+function serializeStructureAtomOptions(
+  buckets: Map<string, Map<number, { chainId: string; residue: number; residueName: string; atoms: Set<string> }>>
+): StructureAtomOptionsByChain {
+  const result: StructureAtomOptionsByChain = {};
+  for (const [chainId, residueMap] of buckets.entries()) {
+    const rows = Array.from(residueMap.values())
+      .sort((a, b) => a.residue - b.residue)
+      .map((item) => ({
+        chainId: item.chainId,
+        residue: item.residue,
+        residueName: item.residueName,
+        atoms: Array.from(item.atoms).sort((a, b) => a.localeCompare(b))
+      }));
+    if (rows.length > 0) result[chainId] = rows;
+  }
+  return result;
+}
+
+export function extractStructureResidueAtomOptions(
+  structureText: string,
+  format: 'pdb' | 'cif'
+): StructureAtomOptionsByChain {
+  return format === 'pdb' ? parsePdbStructureResidueAtomOptions(structureText) : parseCifStructureResidueAtomOptions(structureText);
+}

@@ -3125,6 +3125,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     selectedTemplateResidueIndexMap,
     setPickedResidue,
     canEdit,
+    constraintPickModeEnabled,
     ligandChainOptions,
     isBondOnlyBackend
   });

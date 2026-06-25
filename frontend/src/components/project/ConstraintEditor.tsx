@@ -12,12 +12,14 @@ import type {
 } from '../../types/models';
 import { randomId } from '../../utils/projectInputs';
 import { buildChainInfos } from '../../utils/chainAssignments';
+import type { StructureAtomOptionsByChain, StructureResidueAtomOption } from '../../utils/structureParser';
 
 interface ConstraintEditorProps {
   components: InputComponent[];
   constraints: PredictionConstraint[];
   properties: PredictionProperties;
   pickedResidue?: ConstraintResiduePick | null;
+  structureAtomOptionsByChain?: StructureAtomOptionsByChain;
   selectedConstraintId?: string | null;
   selectedConstraintIds?: string[];
   onSelectedConstraintIdChange?: (id: string | null) => void;
@@ -125,6 +127,7 @@ export function ConstraintEditor({
   constraints,
   properties,
   pickedResidue = null,
+  structureAtomOptionsByChain = {},
   selectedConstraintId = null,
   selectedConstraintIds = [],
   onSelectedConstraintIdChange,
@@ -386,6 +389,7 @@ export function ConstraintEditor({
                       value={item}
                       chainInfos={chainInfos}
                       pickedResidue={pickedResidue}
+                      structureAtomOptionsByChain={structureAtomOptionsByChain}
                       disabled={disabled}
                       onChange={(next) => replaceAt(item.id, next)}
                     />
@@ -396,6 +400,7 @@ export function ConstraintEditor({
                       value={item}
                       chainInfos={chainInfos}
                       pickedResidue={pickedResidue}
+                      structureAtomOptionsByChain={structureAtomOptionsByChain}
                       disabled={disabled}
                       onChange={(next) => replaceAt(item.id, next)}
                     />
@@ -406,6 +411,7 @@ export function ConstraintEditor({
                       value={item}
                       chainInfos={chainInfos}
                       pickedResidue={pickedResidue}
+                      structureAtomOptionsByChain={structureAtomOptionsByChain}
                       disabled={disabled}
                       onChange={(next) => replaceAt(item.id, next)}
                     />
@@ -445,6 +451,7 @@ interface SharedFieldsProps<T> {
   value: T;
   chainInfos: ReturnType<typeof buildChainInfos>;
   pickedResidue?: ConstraintResiduePick | null;
+  structureAtomOptionsByChain?: StructureAtomOptionsByChain;
   disabled: boolean;
   onChange: (next: T) => void;
 }
@@ -559,52 +566,134 @@ function ContactConstraintFields({ value, chainInfos, pickedResidue, disabled, o
   );
 }
 
-function BondConstraintFields({ value, chainInfos, pickedResidue, disabled, onChange }: SharedFieldsProps<BondConstraint>) {
+function residueOptionsForChain(
+  structureAtomOptionsByChain: StructureAtomOptionsByChain | undefined,
+  chainId: string,
+  currentResidue: number
+): StructureResidueAtomOption[] {
+  const rows = structureAtomOptionsByChain?.[chainId] || [];
+  const current = clampPositiveInt(Number(currentResidue));
+  if (rows.some((item) => item.residue === current)) return rows;
+  return [{ chainId, residue: current, residueName: '', atoms: [] }, ...rows].sort((a, b) => a.residue - b.residue);
+}
+
+function atomOptionsForResidue(
+  structureAtomOptionsByChain: StructureAtomOptionsByChain | undefined,
+  chainId: string,
+  residue: number,
+  currentAtom: string
+): string[] {
+  const normalizedCurrent = String(currentAtom || '').trim().toUpperCase();
+  const row = (structureAtomOptionsByChain?.[chainId] || []).find((item) => item.residue === clampPositiveInt(Number(residue)));
+  const atoms = row?.atoms || [];
+  return normalizedCurrent && atoms.includes(normalizedCurrent) ? [normalizedCurrent, ...atoms.filter((atom) => atom !== normalizedCurrent)] : atoms;
+}
+
+function BondResidueSelect({
+  chainId,
+  value,
+  structureAtomOptionsByChain,
+  disabled,
+  onChange
+}: {
+  chainId: string;
+  value: number;
+  structureAtomOptionsByChain?: StructureAtomOptionsByChain;
+  disabled: boolean;
+  onChange: (value: number) => void;
+}) {
+  const options = residueOptionsForChain(structureAtomOptionsByChain, chainId, value);
+  if (options.length === 0) {
+    return <input type="number" min={1} value={value} disabled={disabled} onChange={(e) => onChange(clampPositiveInt(Number(e.target.value)))} />;
+  }
+  return (
+    <select value={value} disabled={disabled} onChange={(e) => onChange(clampPositiveInt(Number(e.target.value)))}>
+      {options.map((item) => (
+        <option key={`${chainId}:${item.residue}`} value={item.residue}>
+          {item.residueName ? `${item.residue} · ${item.residueName}` : item.residue}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function BondAtomSelect({
+  chainId,
+  residue,
+  value,
+  structureAtomOptionsByChain,
+  disabled,
+  onChange
+}: {
+  chainId: string;
+  residue: number;
+  value: string;
+  structureAtomOptionsByChain?: StructureAtomOptionsByChain;
+  disabled: boolean;
+  onChange: (value: string) => void;
+}) {
+  const options = atomOptionsForResidue(structureAtomOptionsByChain, chainId, residue, value);
+  if (options.length === 0) {
+    return <select value="" disabled title="No atom names are available for this residue/component."><option value="">No atoms</option></select>;
+  }
+  return (
+    <select value={options.includes(String(value || '').trim().toUpperCase()) ? String(value || '').trim().toUpperCase() : options[0]} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
+      {options.map((atom) => (
+        <option key={`${chainId}:${residue}:${atom}`} value={atom}>
+          {atom}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function BondConstraintFields({ value, chainInfos, pickedResidue, structureAtomOptionsByChain, disabled, onChange }: SharedFieldsProps<BondConstraint>) {
+  const updateAtom1Chain = (chainId: string) => {
+    const residues = residueOptionsForChain(structureAtomOptionsByChain, chainId, value.atom1_residue);
+    const residue = residues[0]?.residue || value.atom1_residue;
+    const atom = atomOptionsForResidue(structureAtomOptionsByChain, chainId, residue, value.atom1_atom)[0] || value.atom1_atom;
+    onChange({ ...value, atom1_chain: chainId, atom1_residue: residue, atom1_atom: atom });
+  };
+  const updateAtom2Chain = (chainId: string) => {
+    const residues = residueOptionsForChain(structureAtomOptionsByChain, chainId, value.atom2_residue);
+    const residue = residues[0]?.residue || value.atom2_residue;
+    const atom = atomOptionsForResidue(structureAtomOptionsByChain, chainId, residue, value.atom2_atom)[0] || value.atom2_atom;
+    onChange({ ...value, atom2_chain: chainId, atom2_residue: residue, atom2_atom: atom });
+  };
+  const updateAtom1Residue = (residue: number) => {
+    const atom = atomOptionsForResidue(structureAtomOptionsByChain, value.atom1_chain, residue, value.atom1_atom)[0] || value.atom1_atom;
+    onChange({ ...value, atom1_residue: residue, atom1_atom: atom });
+  };
+  const updateAtom2Residue = (residue: number) => {
+    const atom = atomOptionsForResidue(structureAtomOptionsByChain, value.atom2_chain, residue, value.atom2_atom)[0] || value.atom2_atom;
+    onChange({ ...value, atom2_residue: residue, atom2_atom: atom });
+  };
+
   return (
     <div className="constraint-grid">
       <label className="field">
         <span>Atom 1 Chain</span>
-        <ChainSelect value={value.atom1_chain} chainInfos={chainInfos} disabled={disabled} onChange={(next) => onChange({ ...value, atom1_chain: next })} />
+        <ChainSelect value={value.atom1_chain} chainInfos={chainInfos} disabled={disabled} onChange={updateAtom1Chain} />
       </label>
       <label className="field">
         <span>Atom 1 Residue</span>
-        <input
-          type="number"
-          min={1}
-          value={value.atom1_residue}
-          disabled={disabled}
-          onChange={(e) => onChange({ ...value, atom1_residue: clampPositiveInt(Number(e.target.value)) })}
-        />
+        <BondResidueSelect chainId={value.atom1_chain} value={value.atom1_residue} structureAtomOptionsByChain={structureAtomOptionsByChain} disabled={disabled} onChange={updateAtom1Residue} />
       </label>
       <label className="field">
         <span>Atom 1 Name</span>
-        <input
-          value={value.atom1_atom}
-          disabled={disabled}
-          onChange={(e) => onChange({ ...value, atom1_atom: e.target.value.toUpperCase() })}
-        />
+        <BondAtomSelect chainId={value.atom1_chain} residue={value.atom1_residue} value={value.atom1_atom} structureAtomOptionsByChain={structureAtomOptionsByChain} disabled={disabled} onChange={(atom) => onChange({ ...value, atom1_atom: atom })} />
       </label>
       <label className="field">
         <span>Atom 2 Chain</span>
-        <ChainSelect value={value.atom2_chain} chainInfos={chainInfos} disabled={disabled} onChange={(next) => onChange({ ...value, atom2_chain: next })} />
+        <ChainSelect value={value.atom2_chain} chainInfos={chainInfos} disabled={disabled} onChange={updateAtom2Chain} />
       </label>
       <label className="field">
         <span>Atom 2 Residue</span>
-        <input
-          type="number"
-          min={1}
-          value={value.atom2_residue}
-          disabled={disabled}
-          onChange={(e) => onChange({ ...value, atom2_residue: clampPositiveInt(Number(e.target.value)) })}
-        />
+        <BondResidueSelect chainId={value.atom2_chain} value={value.atom2_residue} structureAtomOptionsByChain={structureAtomOptionsByChain} disabled={disabled} onChange={updateAtom2Residue} />
       </label>
       <label className="field">
         <span>Atom 2 Name</span>
-        <input
-          value={value.atom2_atom}
-          disabled={disabled}
-          onChange={(e) => onChange({ ...value, atom2_atom: e.target.value.toUpperCase() })}
-        />
+        <BondAtomSelect chainId={value.atom2_chain} residue={value.atom2_residue} value={value.atom2_atom} structureAtomOptionsByChain={structureAtomOptionsByChain} disabled={disabled} onChange={(atom) => onChange({ ...value, atom2_atom: atom })} />
       </label>
       {pickedResidue && (
         <>

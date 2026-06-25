@@ -101,7 +101,7 @@ from Bio.PDB import PDBParser, MMCIFParser, Select
 from Bio.PDB.Polypeptide import is_aa
 import gemmi
 from rdkit import Chem
-from rdkit.Chem import AllChem, rdFMCS, rdMolAlign
+from rdkit.Chem import AllChem, Descriptors, rdFMCS, rdMolAlign, rdMolDescriptors
 
 # MSA 缓存配置
 MSA_CACHE_CONFIG = {
@@ -4568,6 +4568,7 @@ def run_protenix_backend(
     use_msa_server: bool,
     seed: Optional[int] = None,
     task_id: Optional[str] = None,
+    custom_ccd_molecules: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     print("🚀 Using Protenix backend", file=sys.stderr)
     msa_server_url = _assert_msa_server_configured("protenix")
@@ -4583,6 +4584,14 @@ def run_protenix_backend(
 
     protenix_results_root = _resolve_backend_results_root("protenix", task_id, temp_dir)
     protenix_work_root = _resolve_backend_work_root(protenix_results_root)
+    custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
+    protenix_common_overlay_root: Optional[Path] = None
+    if custom_molecules:
+        protenix_common_overlay_root = _merge_custom_ccd_with_existing_cache(
+            Path(str(PROTENIX_COMMON_CACHE_DIR).strip()),
+            protenix_work_root / "protenix_common_overlay",
+            custom_molecules,
+        )
 
     print(f"🧬 开始使用 MSA 服务器生成多序列比对: {msa_server_url}", file=sys.stderr)
     _require_complete_external_msa(yaml_content, str(protenix_work_root), "Protenix")
@@ -4667,6 +4676,9 @@ def run_protenix_backend(
         str(PROTENIX_COMMON_CACHE_DIR).strip()
     )
     os.makedirs(protenix_common_cache_dir, exist_ok=True)
+    protenix_common_cache_mount = protenix_common_cache_dir
+    if protenix_common_overlay_root is not None:
+        protenix_common_cache_mount = str(protenix_common_overlay_root / "common")
 
     visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
     try:
@@ -4702,9 +4714,9 @@ def run_protenix_backend(
             "--volume",
             f"{protenix_output_dir}:/workspace/protenix_output",
             "--volume",
-            f"{protenix_common_cache_dir}:/root/common",
+            f"{protenix_common_cache_mount}:/root/common",
             "--volume",
-            f"{protenix_common_cache_dir}:/cache/common",
+            f"{protenix_common_cache_mount}:/cache/common",
             "--volume",
             f"{model_dir}:{container_model_dir}",
             "--volume",
@@ -7678,6 +7690,7 @@ def run_peptide_design_backend(
 
 
 
+
 def _normalize_custom_ccd_molecules(raw_value: Any) -> List[Dict[str, str]]:
     if not isinstance(raw_value, list):
         return []
@@ -7690,15 +7703,18 @@ def _normalize_custom_ccd_molecules(raw_value: Any) -> List[Dict[str, str]]:
         smiles = str(item.get("smiles") or "").strip()
         if not ccd or not smiles or ccd in seen:
             continue
+        kind = str(item.get("kind") or "residue").strip().lower()
+        if kind not in {"residue", "ligand"}:
+            kind = "residue"
         seen.add(ccd)
         molecules.append({
             "ccd": ccd,
             "smiles": smiles,
             "base_residue": str(item.get("base_residue") or item.get("baseResidue") or "").strip().upper()[:1],
             "label": str(item.get("label") or "").strip()[:80],
+            "kind": kind,
         })
     return molecules
-
 
 
 def _boltz_custom_ccd_aliases(ccd: str) -> List[str]:
@@ -7715,14 +7731,21 @@ def _custom_ccd_has_amino_acid_backbone(mol: Chem.Mol) -> bool:
     return bool(query is not None and mol.HasSubstructMatch(query))
 
 
-def _set_custom_ccd_atom_properties(mol: Chem.Mol) -> None:
-    for idx, atom in enumerate(mol.GetAtoms()):
-        name = f"{atom.GetSymbol().upper()}{idx + 1}"
+def _set_custom_ccd_atom_properties(mol: Chem.Mol, *, kind: str) -> None:
+    element_count: Dict[str, int] = {}
+    for atom in mol.GetAtoms():
+        symbol = atom.GetSymbol().upper()
+        element_count[symbol] = element_count.get(symbol, 0) + 1
+        name = f"{symbol}{element_count[symbol]}"
         if len(name) > 4:
-            name = f"{atom.GetSymbol().upper()}{idx % 1000}"
+            raise ValueError(f"Custom CCD atom name exceeds 4 characters: {name}")
         atom.SetProp("name", name)
+        atom.SetProp("atom_name", name)
         atom.SetProp("alt_name", name)
         atom.SetProp("leaving_atom", "0")
+
+    if kind != "residue":
+        return
 
     backbone_patterns = {
         "N": Chem.MolFromSmarts("[NX3;!$(NC=O)]"),
@@ -7738,6 +7761,7 @@ def _set_custom_ccd_atom_properties(mol: Chem.Mol) -> None:
         atom_idx = matches[0][0]
         atom = mol.GetAtomWithIdx(atom_idx)
         atom.SetProp("name", atom_name)
+        atom.SetProp("atom_name", atom_name)
         atom.SetProp("alt_name", atom_name)
 
     carboxyl_pattern = Chem.MolFromSmarts("[CX3](=O)[OX1H0-,OX2H1]")
@@ -7746,37 +7770,201 @@ def _set_custom_ccd_atom_properties(mol: Chem.Mol) -> None:
             if len(match) < 3:
                 continue
             carbon_idx, carbonyl_oxygen_idx, terminal_oxygen_idx = match[:3]
-            mol.GetAtomWithIdx(carbon_idx).SetProp("name", "C")
-            mol.GetAtomWithIdx(carbon_idx).SetProp("alt_name", "C")
-            mol.GetAtomWithIdx(carbonyl_oxygen_idx).SetProp("name", "O")
-            mol.GetAtomWithIdx(carbonyl_oxygen_idx).SetProp("alt_name", "O")
+            carbon = mol.GetAtomWithIdx(carbon_idx)
+            oxygen = mol.GetAtomWithIdx(carbonyl_oxygen_idx)
             terminal = mol.GetAtomWithIdx(terminal_oxygen_idx)
-            terminal.SetProp("name", "OXT")
-            terminal.SetProp("alt_name", "OXT")
+            for atom, name in ((carbon, "C"), (oxygen, "O"), (terminal, "OXT")):
+                atom.SetProp("name", name)
+                atom.SetProp("atom_name", name)
+                atom.SetProp("alt_name", name)
             terminal.SetProp("leaving_atom", "1")
             break
 
 
-def _build_custom_ccd_mol(smiles: str) -> Chem.Mol:
+def _build_custom_ccd_mol(smiles: str, *, kind: str = "residue") -> Chem.Mol:
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
-        raise ValueError("RDKit failed to parse custom residue SMILES.")
+        raise ValueError("RDKit failed to parse custom CCD SMILES.")
     Chem.SanitizeMol(mol)
-    if not _custom_ccd_has_amino_acid_backbone(mol):
+    if kind == "residue" and not _custom_ccd_has_amino_acid_backbone(mol):
         raise ValueError("Custom residue must contain an amino-acid backbone (N-CA-C(=O)).")
-    _set_custom_ccd_atom_properties(mol)
+    mol = Chem.AddHs(mol)
+    _set_custom_ccd_atom_properties(mol, kind=kind)
     try:
-        if AllChem.EmbedMolecule(mol) != -1:
+        embed_status = AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+        if embed_status == -1:
+            embed_status = AllChem.EmbedMolecule(mol, useRandomCoords=True)
+        if embed_status != -1:
             try:
                 AllChem.UFFOptimizeMolecule(mol)
             except Exception:
                 pass
     except Exception:
         pass
+    if mol.GetNumConformers() == 0:
+        conf = Chem.Conformer(mol.GetNumAtoms())
+        for idx in range(mol.GetNumAtoms()):
+            conf.SetAtomPosition(idx, (float(idx), 0.0, 0.0))
+        mol.AddConformer(conf, assignId=True)
     for conformer in mol.GetConformers():
         conformer.SetProp("name", "Ideal")
+    mol.atom_map = {atom.GetProp("name"): atom.GetIdx() for atom in mol.GetAtoms() if atom.GetSymbol().upper() not in {"H", "D"}}
+    mol.name = "custom"
+    mol.sanitized = True
+    mol.ref_conf_id = 0
+    mol.ref_conf_type = "rdkit"
+    mol.ref_mask = np.ones(mol.GetNumAtoms(), dtype=bool)
     return mol
 
+
+def _custom_ccd_mol_atom_names(mol: Chem.Mol, *, include_hydrogens: bool = False) -> List[str]:
+    names: List[str] = []
+    for atom in mol.GetAtoms():
+        if not include_hydrogens and atom.GetSymbol().upper() in {"H", "D"}:
+            continue
+        names.append(atom.GetProp("name") if atom.HasProp("name") else f"{atom.GetSymbol().upper()}{atom.GetIdx() + 1}")
+    return names
+
+
+def _custom_ccd_mol_to_cif_block(ccd: str, mol: Chem.Mol, *, kind: str, label: str = "") -> str:
+    formula = rdMolDescriptors.CalcMolFormula(mol)
+    weight = Descriptors.MolWt(mol)
+    comp_type = "L-PEPTIDE LINKING" if kind == "residue" else "NON-POLYMER"
+    name = label or ccd
+    lines: List[str] = [
+        f"data_{ccd}",
+        "#",
+        f"_chem_comp.id {ccd}",
+        f"_chem_comp.name '{name.replace(chr(39), '')}'",
+        f"_chem_comp.type '{comp_type}'",
+        f"_chem_comp.formula '{formula}'",
+        "_chem_comp.mon_nstd_parent_comp_id ?",
+        "_chem_comp.pdbx_synonyms ?",
+        f"_chem_comp.formula_weight {weight:.3f}",
+        "#",
+        "loop_",
+        "_chem_comp_atom.comp_id",
+        "_chem_comp_atom.atom_id",
+        "_chem_comp_atom.type_symbol",
+        "_chem_comp_atom.charge",
+        "_chem_comp_atom.pdbx_model_Cartn_x_ideal",
+        "_chem_comp_atom.pdbx_model_Cartn_y_ideal",
+        "_chem_comp_atom.pdbx_model_Cartn_z_ideal",
+        "_chem_comp_atom.pdbx_leaving_atom_flag",
+        "_chem_comp_atom.alt_atom_id",
+        "_chem_comp_atom.pdbx_component_atom_id",
+    ]
+    conf = mol.GetConformer(mol.ref_conf_id if hasattr(mol, "ref_conf_id") else 0)
+    for atom in mol.GetAtoms():
+        if atom.GetSymbol().upper() in {"H", "D"}:
+            continue
+        atom_name = atom.GetProp("name")
+        pos = conf.GetAtomPosition(atom.GetIdx())
+        leaving = "Y" if atom.HasProp("leaving_atom") and atom.GetProp("leaving_atom") == "1" else "N"
+        lines.append(
+            f"{ccd} {atom_name} {atom.GetSymbol().upper()} {atom.GetFormalCharge()} {pos.x:.4f} {pos.y:.4f} {pos.z:.4f} {leaving} {atom_name} {atom_name}"
+        )
+    lines.extend([
+        "#",
+        "loop_",
+        "_chem_comp_bond.comp_id",
+        "_chem_comp_bond.atom_id_1",
+        "_chem_comp_bond.atom_id_2",
+        "_chem_comp_bond.value_order",
+        "_chem_comp_bond.pdbx_aromatic_flag",
+    ])
+    bond_order_map = {
+        Chem.BondType.SINGLE: "SING",
+        Chem.BondType.DOUBLE: "DOUB",
+        Chem.BondType.TRIPLE: "TRIP",
+        Chem.BondType.AROMATIC: "SING",
+    }
+    for bond in mol.GetBonds():
+        atom1 = bond.GetBeginAtom()
+        atom2 = bond.GetEndAtom()
+        if atom1.GetSymbol().upper() in {"H", "D"} or atom2.GetSymbol().upper() in {"H", "D"}:
+            continue
+        order = bond_order_map.get(bond.GetBondType(), "SING")
+        aromatic = "Y" if bond.GetIsAromatic() else "N"
+        lines.append(f"{ccd} {atom1.GetProp('name')} {atom2.GetProp('name')} {order} {aromatic}")
+    lines.append("#")
+    return "\n".join(lines) + "\n"
+
+
+def _build_custom_ccd_bundle(molecules: List[Dict[str, str]]) -> Tuple[str, Dict[str, Chem.Mol]]:
+    blocks: List[str] = []
+    mols: Dict[str, Chem.Mol] = {}
+    for item in _normalize_custom_ccd_molecules(molecules):
+        kind = item.get("kind") or "residue"
+        ccd = item["ccd"]
+        mol = _build_custom_ccd_mol(item["smiles"], kind=kind)
+        mol.name = ccd
+        mols[ccd] = mol
+        blocks.append(_custom_ccd_mol_to_cif_block(ccd, mol, kind=kind, label=item.get("label") or ccd))
+    return "\n".join(blocks), mols
+
+
+def _merge_custom_ccd_with_existing_cache(
+    source_common_dir: Path,
+    overlay_root: Path,
+    custom_molecules: List[Dict[str, str]],
+) -> Optional[Path]:
+    if not custom_molecules:
+        return None
+    if not source_common_dir.is_dir():
+        raise RuntimeError(f"Protenix common cache directory is missing: {source_common_dir}")
+
+    source_components = source_common_dir / "components.cif"
+    source_rdkit = source_common_dir / "components.cif.rdkit_mol.pkl"
+    if not source_components.is_file():
+        raise FileNotFoundError(f"Missing Protenix CCD components file: {source_components}")
+    if not source_rdkit.is_file():
+        raise FileNotFoundError(f"Missing Protenix CCD RDKit cache file: {source_rdkit}")
+
+    overlay_common = overlay_root / "common"
+    overlay_common.mkdir(parents=True, exist_ok=True)
+
+    custom_cif_text, custom_mols = _build_custom_ccd_bundle(custom_molecules)
+    merged_cif_text = source_components.read_text(encoding="utf-8", errors="replace")
+    if custom_cif_text.strip():
+        merged_cif_text = merged_cif_text.rstrip() + "\n" + custom_cif_text.strip() + "\n"
+    (overlay_common / "components.cif").write_text(merged_cif_text, encoding="utf-8")
+
+    merged_rdkit_mols: Dict[str, Chem.Mol] = {}
+    try:
+        with source_rdkit.open("rb") as handle:
+            loaded = pickle.load(handle)
+        if isinstance(loaded, dict):
+            merged_rdkit_mols.update(loaded)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load Protenix CCD RDKit cache: {source_rdkit}") from exc
+
+    merged_rdkit_mols.update(custom_mols)
+    Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
+    with (overlay_common / "components.cif.rdkit_mol.pkl").open("wb") as handle:
+        pickle.dump(merged_rdkit_mols, handle)
+
+    for source_item in source_common_dir.iterdir():
+        if source_item.name in {"components.cif", "components.cif.rdkit_mol.pkl"}:
+            continue
+        target_item = overlay_common / source_item.name
+        if target_item.exists() or target_item.is_symlink():
+            continue
+        try:
+            if source_item.is_dir():
+                shutil.copytree(source_item, target_item, dirs_exist_ok=True)
+            else:
+                target_item.symlink_to(source_item.resolve())
+        except Exception:
+            try:
+                if source_item.is_dir():
+                    shutil.copytree(source_item, target_item, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(source_item, target_item)
+            except Exception:
+                pass
+
+    return overlay_root
 
 def _prepare_task_boltz_custom_mols_dir(
     temp_dir: str,
@@ -8092,6 +8280,7 @@ def run_alphafold3_backend(
     seed: Optional[int] = None,
     template_payloads: Optional[List[dict]] = None,
     task_id: Optional[str] = None,
+    custom_ccd_molecules: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     print("🚀 Using AlphaFold3 backend (AF3 input preparation)", file=sys.stderr)
     msa_server_url = _assert_msa_server_configured("alphafold3")
@@ -8107,6 +8296,10 @@ def run_alphafold3_backend(
 
     af3_results_root = _resolve_backend_results_root("alphafold3", task_id, temp_dir)
     af3_work_root = _resolve_backend_work_root(af3_results_root)
+    custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
+    user_ccd_text = None
+    if custom_molecules:
+        user_ccd_text, _ = _build_custom_ccd_bundle(custom_molecules)
 
     print(f"🧬 开始使用 MSA 服务器生成多序列比对: {msa_server_url}", file=sys.stderr)
     _require_complete_external_msa(yaml_content, str(af3_work_root), "AlphaFold3")
@@ -8133,6 +8326,7 @@ def run_alphafold3_backend(
         unpaired_msa,
         use_external_msa=True,
         model_seeds=model_seeds,
+        user_ccd=user_ccd_text,
     )
 
     if template_payloads:
@@ -8601,6 +8795,7 @@ def main():
                         worker_use_msa_server,
                         seed=worker_seed,
                         task_id=worker_task_id,
+                        custom_ccd_molecules=worker_custom_ccd_molecules if isinstance(worker_custom_ccd_molecules, list) else [],
                     )
                 elif worker_backend == "protenix":
                     run_protenix_backend(
@@ -8610,6 +8805,7 @@ def main():
                         use_msa_server=worker_use_msa_server,
                         seed=worker_seed,
                         task_id=worker_task_id,
+                        custom_ccd_molecules=worker_custom_ccd_molecules if isinstance(worker_custom_ccd_molecules, list) else [],
                     )
                 elif worker_backend == "boltz":
                     if worker_seed is not None:
@@ -8739,6 +8935,7 @@ def main():
                     seed=seed,
                     template_payloads=af3_template_payloads,
                     task_id=runtime_task_id,
+                    custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
                 )
             elif backend == "protenix":
                 if template_inputs:
@@ -8750,6 +8947,7 @@ def main():
                     use_msa_server=use_msa_server,
                     seed=seed,
                     task_id=runtime_task_id,
+                    custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
                 )
             elif backend == "pocketxmol":
                 run_pocketxmol_backend(

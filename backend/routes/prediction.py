@@ -121,11 +121,15 @@ def _parse_custom_ccd_molecules(raw_value: Optional[str]) -> list[Dict[str, Any]
         if not ccd or not smiles or ccd in seen:
             continue
         seen.add(ccd)
+        kind = str(item.get('kind') or 'residue').strip().lower()
+        if kind not in {'residue', 'ligand'}:
+            kind = 'residue'
         molecules.append({
             'ccd': ccd[:12],
             'smiles': smiles,
             'base_residue': str(item.get('baseResidue') or item.get('base_residue') or '').strip().upper()[:1],
             'label': str(item.get('label') or '').strip()[:80],
+            'kind': kind,
         })
     return molecules
 
@@ -363,8 +367,6 @@ def register_prediction_routes(
         if template_inputs:
             predict_args['template_inputs'] = template_inputs
         if custom_ccd_molecules:
-            if backend != 'boltz':
-                return jsonify({'error': 'Custom drawn residue CCD molecules are currently supported for backend=boltz only.'}), 400
             predict_args['custom_ccd_molecules'] = custom_ccd_molecules
 
         try:

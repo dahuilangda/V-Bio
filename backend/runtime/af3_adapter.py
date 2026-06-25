@@ -551,7 +551,7 @@ def parse_yaml_for_af3(
                     raise ValueError(f"Invalid bond constraint: {exc}") from exc
                 bond_constraints.append((atom1, atom2))
             else:
-                ignored_constraints.append(constraint)
+                raise ValueError("This backend supports bond constraints only; remove contact/pocket constraints.")
 
     return AF3Preparation(
         jobname=jobname,
@@ -703,6 +703,7 @@ def build_af3_json(
     unpaired_msa: Optional[List[str]],
     use_external_msa: bool = True,
     model_seeds: Optional[List[int]] = None,
+    user_ccd: Optional[str] = None,
 ) -> Dict[str, object]:
     af3 = AF3Utils(
         prep.jobname,
@@ -718,6 +719,7 @@ def build_af3_json(
         query_modifications=prep.query_modifications,
     )
     content = af3.content
+    content["userCCD"] = user_ccd if user_ccd else None
     if prep.bond_constraints:
         content["bondedAtomPairs"] = [
             [

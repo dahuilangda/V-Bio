@@ -184,6 +184,7 @@ export function usePredictionWorkspaceProps({
         handleConstraintsResizerKeyDown,
         clearConstraintSelection,
         components: draft.inputConfig.components,
+        backend: draft.backend,
         constraints: draft.inputConfig.constraints,
         properties: draft.inputConfig.properties,
         activeConstraintId,

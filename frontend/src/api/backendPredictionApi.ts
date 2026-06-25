@@ -1,6 +1,6 @@
 import type { InputComponent, PredictionSubmitInput } from '../types/models';
 import { normalizeComponentSequence } from '../utils/projectInputs';
-import { buildPredictionYaml, buildPredictionYamlFromComponents, collectCustomCcdMoleculesFromComponents } from '../utils/yaml';
+import { buildPredictionYamlFromComponents, collectCustomCcdMoleculesFromComponents } from '../utils/yaml';
 import { API_HEADERS, requestBackend } from './backendClient';
 
 export async function submitPrediction(input: PredictionSubmitInput): Promise<string> {
@@ -52,27 +52,11 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
   }));
   const hasTemplateUploads = yamlTemplates.length > 0;
   const useMsaServer = componentsForYaml.some((comp) => comp.type === 'protein' && comp.useMsa !== false);
-  const hasConstraints = constraintsForBackend.length > 0;
-  const hasAffinityProperty = Boolean(input.properties?.affinity && (input.properties?.ligand || input.properties?.binder));
-  const hasInterfaceProperty = Boolean(input.properties?.ligand || input.properties?.binder);
-  const useSimpleYaml =
-    !hasTemplateUploads &&
-    !hasConstraints &&
-    !hasAffinityProperty &&
-    !hasInterfaceProperty &&
-    componentsForYaml.length === 2 &&
-    componentsForYaml[0].type === 'protein' &&
-    componentsForYaml[1].type === 'ligand' &&
-    componentsForYaml[0].numCopies === 1 &&
-    componentsForYaml[1].numCopies === 1;
-
-  const yaml = useSimpleYaml
-    ? buildPredictionYaml(componentsForYaml[0].sequence, componentsForYaml[1].sequence)
-    : buildPredictionYamlFromComponents(componentsForYaml, {
-        constraints: constraintsForBackend,
-        properties: input.properties,
-        templates: yamlTemplates
-      });
+  const yaml = buildPredictionYamlFromComponents(componentsForYaml, {
+    constraints: constraintsForBackend,
+    properties: input.properties,
+    templates: yamlTemplates
+  });
 
   const form = new FormData();
   const yamlFile = new File([yaml], 'config.yaml', { type: 'application/x-yaml' });

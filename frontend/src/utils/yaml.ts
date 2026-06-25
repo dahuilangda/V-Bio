@@ -4,6 +4,19 @@ import { assignChainIdsForComponents } from './chainAssignments';
 
 const YAML_NO_WRAP = -1;
 
+function hashTextForCode(value: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36).toUpperCase().padStart(6, '0');
+}
+
+function customLigandCcdForComponent(componentId: string, smiles: string): string {
+  return `L${hashTextForCode(`${componentId}:${smiles}`).slice(0, 4)}`;
+}
+
 export function buildPredictionYaml(proteinSequence: string, ligandSmiles: string): string {
   const payload = {
     version: 1,
@@ -281,21 +294,58 @@ function buildProteinModificationPayload(modifications: ProteinModification[] | 
 export function collectCustomCcdMoleculesFromComponents(components: InputComponent[]): CustomCcdMoleculeInput[] {
   const byCode = new Map<string, CustomCcdMoleculeInput>();
   for (const component of components) {
-    if (component.type !== 'protein' || !Array.isArray(component.modifications)) continue;
-    for (const mod of component.modifications) {
-      if (mod.inputMethod !== 'jsme') continue;
-      const ccd = String(mod.ccd || '').trim().toUpperCase();
-      const smiles = String(mod.smiles || '').trim();
-      if (!ccd || !smiles || byCode.has(ccd)) continue;
+    if (component.type === 'protein' && Array.isArray(component.modifications)) {
+      for (const mod of component.modifications) {
+        if (mod.inputMethod !== 'jsme') continue;
+        const ccd = String(mod.ccd || '').trim().toUpperCase();
+        const smiles = String(mod.smiles || '').trim();
+        if (!ccd || !smiles || byCode.has(ccd)) continue;
+        byCode.set(ccd, {
+          ccd,
+          smiles,
+          baseResidue: String(mod.baseResidue || '').trim().toUpperCase().slice(0, 1) || undefined,
+          label: mod.label,
+          kind: 'residue'
+        });
+      }
+      continue;
+    }
+
+    if (component.type === 'ligand' && component.inputMethod !== 'ccd') {
+      const smiles = String(component.sequence || '').trim();
+      if (!smiles) continue;
+      const ccd = customLigandCcdForComponent(component.id, smiles);
+      if (byCode.has(ccd)) continue;
       byCode.set(ccd, {
         ccd,
         smiles,
-        baseResidue: String(mod.baseResidue || '').trim().toUpperCase().slice(0, 1) || undefined,
-        label: mod.label
+        label: 'Custom ligand',
+        kind: 'ligand'
       });
     }
   }
   return Array.from(byCode.values());
+}
+
+
+function ligandFirstAtomNameForYaml(component: InputComponent): string {
+  const value = String(component.sequence || '').trim();
+  const first = value.match(/\[([^\]]+)\]|Br|Cl|Si|Se|Na|Li|Mg|Ca|Zn|Fe|[BCNOFPSIKbcnops]/);
+  if (!first) return '';
+  const bracket = first[1];
+  let symbol = first[0];
+  if (bracket) {
+    const bracketMatch = bracket.match(/^[0-9]*([A-Z][a-z]?|[cnops])/);
+    if (!bracketMatch) return '';
+    symbol = bracketMatch[1];
+  }
+  const normalized = symbol.length === 1 ? symbol.toUpperCase() : `${symbol[0].toUpperCase()}${symbol.slice(1).toLowerCase()}`;
+  return `${normalized.toUpperCase()}1`;
+}
+
+function ligandCcdForYaml(component: InputComponent): string {
+  if (component.inputMethod === 'ccd') return component.sequence.trim().toUpperCase();
+  return customLigandCcdForComponent(component.id, component.sequence.trim());
 }
 
 export function buildPredictionYamlFromComponents(components: InputComponent[], options: BuildYamlOptions = {}): string {
@@ -309,7 +359,7 @@ export function buildPredictionYamlFromComponents(components: InputComponent[], 
     for (const id of ids) {
       chainTypeById.set(id, comp.type);
       if (comp.type === 'ligand') {
-        ligandTokenById.set(id, inferLigandToken(comp.sequence));
+        ligandTokenById.set(id, ligandFirstAtomNameForYaml(comp) || inferLigandToken(comp.sequence));
       }
     }
   });
@@ -319,11 +369,10 @@ export function buildPredictionYamlFromComponents(components: InputComponent[], 
     const idValue = normalizeId(chainIds);
 
     if (comp.type === 'ligand') {
-      const inputMethod = comp.inputMethod === 'ccd' ? 'ccd' : 'smiles';
       return {
         ligand: {
           id: idValue,
-          [inputMethod]: comp.sequence.trim()
+          ccd: ligandCcdForYaml(comp)
         }
       };
     }

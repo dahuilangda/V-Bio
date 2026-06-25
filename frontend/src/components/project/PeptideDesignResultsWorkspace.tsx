@@ -1,5 +1,6 @@
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
+import { ensureStructureConfidenceColoringData, stripStructureConfidenceColoringData } from '../../api/backendApi';
 import { MolstarViewer } from './MolstarViewer';
 
 type ResultsGridStyle = CSSProperties & { '--results-main-width'?: string };
@@ -1880,8 +1881,17 @@ export function PeptideDesignResultsWorkspace({
   }, [projectTaskId]);
 
   const hasCandidateRows = sortedCandidates.length > 0;
-  const viewerStructureText = hasCandidateRows ? selectedCandidate?.structureText || '' : displayStructureText;
+  const viewerRawStructureText = hasCandidateRows ? selectedCandidate?.structureText || '' : displayStructureText;
   const viewerStructureFormat = selectedCandidate?.structureText ? selectedCandidate.structureFormat : displayStructureFormat;
+  const viewerStandardStructureText = useMemo(
+    () => stripStructureConfidenceColoringData(viewerRawStructureText, viewerStructureFormat),
+    [viewerRawStructureText, viewerStructureFormat]
+  );
+  const viewerConfidenceStructureText = useMemo(
+    () => ensureStructureConfidenceColoringData(viewerRawStructureText, viewerStructureFormat, confidenceBackend || projectBackend),
+    [viewerRawStructureText, viewerStructureFormat, confidenceBackend, projectBackend]
+  );
+  const viewerStructureText = viewerColorMode === 'alphafold' ? viewerConfidenceStructureText : viewerStandardStructureText;
   const viewerLigandFocusChainId = useMemo(() => {
     const preferredChain = selectedResultLigandChainId || undefined;
     const candidateSequence = readText(selectedCandidate?.sequence || '').trim().toUpperCase();

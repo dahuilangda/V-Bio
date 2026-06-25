@@ -30,6 +30,7 @@ export function useConstraintWorkspaceActions<TDraft extends DraftLike>(params: 
   selectedTemplateResidueIndexMap: Record<string, Record<number, number>>;
   setPickedResidue: Dispatch<SetStateAction<any>>;
   canEdit: boolean;
+  constraintPickModeEnabled: boolean;
   ligandChainOptions: Array<{ id: string }>;
   isBondOnlyBackend: boolean;
 }) {
@@ -53,6 +54,7 @@ export function useConstraintWorkspaceActions<TDraft extends DraftLike>(params: 
     selectedTemplateResidueIndexMap,
     setPickedResidue,
     canEdit,
+    constraintPickModeEnabled,
     ligandChainOptions,
     isBondOnlyBackend,
   } = params;
@@ -116,7 +118,7 @@ export function useConstraintWorkspaceActions<TDraft extends DraftLike>(params: 
       selectedTemplatePreview,
       selectedTemplateResidueIndexMap,
       setPickedResidue,
-      canEdit,
+      canEdit: canEdit && constraintPickModeEnabled,
       draft,
       ligandChainOptions,
       isBondOnlyBackend,

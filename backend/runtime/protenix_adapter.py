@@ -394,7 +394,7 @@ def parse_yaml_for_protenix(
                     )
                 )
             else:
-                ignored_constraints.append(constraint)
+                raise ValueError("This backend supports bond constraints only; remove contact/pocket constraints.")
 
     payload: List[Dict[str, Any]] = [{
         "name": input_name,

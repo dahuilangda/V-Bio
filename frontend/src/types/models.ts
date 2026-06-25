@@ -377,6 +377,7 @@ export interface CustomCcdMoleculeInput {
   smiles: string;
   baseResidue?: string;
   label?: string;
+  kind?: 'residue' | 'ligand';
 }
 
 export interface AffinityPreviewPayload {

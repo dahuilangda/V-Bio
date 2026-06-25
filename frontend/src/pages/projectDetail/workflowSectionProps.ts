@@ -35,6 +35,7 @@ export interface BuildPredictionConstraintsWorkspaceParams {
   handleConstraintsResizerKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
   clearConstraintSelection: () => void;
   components: InputComponent[];
+  backend: string;
   constraints: PredictionConstraint[];
   properties: PredictionProperties;
   activeConstraintId: string | null;
@@ -74,6 +75,7 @@ export function buildPredictionConstraintsWorkspaceProps(
     handleConstraintsResizerKeyDown,
     clearConstraintSelection,
     components,
+    backend,
     constraints,
     properties,
     activeConstraintId,
@@ -110,6 +112,7 @@ export function buildPredictionConstraintsWorkspaceProps(
     onConstraintsResizerKeyDown: handleConstraintsResizerKeyDown,
     onClearConstraintSelection: clearConstraintSelection,
     components,
+    backend,
     constraints,
     properties,
     activeConstraintId,
