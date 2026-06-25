@@ -335,6 +335,16 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
           : null) ||
         projectTasks.find((row) => String(row.task_id || '').trim() === normalizedTaskId) ||
         null;
+      const scopedProjectTaskId = String(project?.task_id || '').trim();
+      const runtimeState = String(
+        taskRow?.task_state || (scopedProjectTaskId === normalizedTaskId ? project?.task_state : '') || ''
+      )
+        .trim()
+        .toUpperCase();
+      if (runtimeState && runtimeState !== 'SUCCESS') {
+        setResultError(null);
+        return;
+      }
       const baseTaskConfidence =
         taskRow?.confidence && typeof taskRow.confidence === 'object' ? (taskRow.confidence as Record<string, unknown>) : null;
       const baseTaskProperties =

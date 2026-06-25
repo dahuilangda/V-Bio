@@ -1892,6 +1892,7 @@ export function PeptideDesignResultsWorkspace({
     [viewerRawStructureText, viewerStructureFormat, confidenceBackend, projectBackend]
   );
   const viewerStructureText = viewerColorMode === 'alphafold' ? viewerConfidenceStructureText : viewerStandardStructureText;
+  const canRequestStructure = runtimeContext.state === 'SUCCESS' && Boolean(onRequestStructure);
   const viewerLigandFocusChainId = useMemo(() => {
     const preferredChain = selectedResultLigandChainId || undefined;
     const candidateSequence = readText(selectedCandidate?.sequence || '').trim().toUpperCase();
@@ -1908,17 +1909,17 @@ export function PeptideDesignResultsWorkspace({
 
   useEffect(() => {
     if (!cardMode) return;
-    if (!onRequestStructure) return;
+    if (!canRequestStructure) return;
     if (!hasCandidateRows) return;
     if (readText(viewerStructureText).trim()) return;
     const requestKey = `${projectTaskId}:${selectedCandidate?.id || 'none'}`;
     if (requestedStructureKeyRef.current === requestKey) return;
     requestedStructureKeyRef.current = requestKey;
     setRequestingStructure(true);
-    Promise.resolve(onRequestStructure())
+    Promise.resolve(onRequestStructure?.())
       .catch(() => {})
       .finally(() => setRequestingStructure(false));
-  }, [cardMode, hasCandidateRows, onRequestStructure, projectTaskId, selectedCandidate?.id, viewerStructureText]);
+  }, [canRequestStructure, cardMode, hasCandidateRows, onRequestStructure, projectTaskId, selectedCandidate?.id, viewerStructureText]);
 
   const openCandidateCard = (candidateId: string) => {
     setSelectedCandidateId(candidateId);
@@ -2323,7 +2324,7 @@ export function PeptideDesignResultsWorkspace({
         ) : (
           <div className="ligand-preview-empty">
             <span>{requestingStructure ? 'Loading structure...' : 'Selected peptide has no precomputed structure yet.'}</span>
-            {onRequestStructure ? (
+            {canRequestStructure ? (
               <button
                 type="button"
                 className="lead-opt-row-action-btn"
@@ -2331,7 +2332,7 @@ export function PeptideDesignResultsWorkspace({
                 onClick={() => {
                   requestedStructureKeyRef.current = '';
                   setRequestingStructure(true);
-                  Promise.resolve(onRequestStructure())
+                  Promise.resolve(onRequestStructure?.())
                     .catch(() => {})
                     .finally(() => setRequestingStructure(false));
                 }}
