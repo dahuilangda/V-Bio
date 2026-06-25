@@ -129,7 +129,16 @@ export function ProjectTaskRow({
     return items;
   })();
   const peptideDesignItems = [
-    { key: 'iter', label: 'Iter', value: row.peptideIterations !== null ? String(row.peptideIterations) : '-' },
+    {
+      key: 'iter',
+      label: 'Iter',
+      value:
+        row.peptideIterations !== null
+          ? String(row.peptideIterations)
+          : row.peptideTotalGenerations !== null
+            ? String(row.peptideTotalGenerations)
+            : '-'
+    },
     { key: 'pop', label: 'Pop', value: row.peptidePopulationSize !== null ? String(row.peptidePopulationSize) : '-' },
     { key: 'elite', label: 'Elite', value: row.peptideEliteSize !== null ? String(row.peptideEliteSize) : '-' },
     { key: 'mut', label: 'Mut', value: formatPeptideMutationRate(row.peptideMutationRate) }

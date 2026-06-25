@@ -1,6 +1,7 @@
 import { useMemo, useRef } from 'react';
 import type { Project, ProjectTask } from '../../types/models';
 import { loadProjectInputConfig } from '../../utils/projectInputs';
+import { readPeptidePreviewFromProperties } from '../../utils/peptideTaskPreview';
 import { canEditTask } from '../../utils/accessControl';
 import { getWorkflowDefinition } from '../../utils/workflows';
 import { isDraftTaskSnapshot } from '../projectDetail/projectTaskSnapshot';
@@ -37,6 +38,42 @@ interface UseProjectTasksWorkspaceContextResult {
   taskRows: TaskListRow[];
   workflowOptions: TaskWorkflowFilter[];
   backendOptions: string[];
+}
+
+function readTaskRowRuntimeCacheSignature(task: ProjectTask): string {
+  const confidence =
+    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
+      ? (task.confidence as Record<string, unknown>)
+      : {};
+  const peptideDesign =
+    confidence.peptide_design && typeof confidence.peptide_design === 'object' && !Array.isArray(confidence.peptide_design)
+      ? (confidence.peptide_design as Record<string, unknown>)
+      : {};
+  const peptideProgress =
+    peptideDesign.progress && typeof peptideDesign.progress === 'object' && !Array.isArray(peptideDesign.progress)
+      ? (peptideDesign.progress as Record<string, unknown>)
+      : {};
+  const topProgress =
+    confidence.progress && typeof confidence.progress === 'object' && !Array.isArray(confidence.progress)
+      ? (confidence.progress as Record<string, unknown>)
+      : {};
+  const peptidePreview = readPeptidePreviewFromProperties(task.properties) || {};
+
+  return JSON.stringify({
+    taskState: task.task_state,
+    statusText: task.status_text,
+    errorText: task.error_text,
+    completedAt: task.completed_at,
+    durationSeconds: task.duration_seconds,
+    structureName: task.structure_name,
+    confidencePlddt: confidence.plddt,
+    confidenceIptm: confidence.iptm,
+    confidencePae: confidence.pae,
+    peptideDesign,
+    peptideProgress,
+    topProgress,
+    peptidePreview
+  });
 }
 
 function readAffinityModeValue(task: ProjectTask, workflowKey: string): string {
@@ -150,7 +187,7 @@ export function useProjectTasksWorkspaceContext({
   }, [project, currentTaskRow]);
 
   const taskRows = useMemo<TaskListRow[]>(() => {
-    const cacheKey = [
+    const baseCacheKey = [
       String(project?.backend || '').trim(),
       String(project?.task_type || '').trim(),
       String(workspacePairPreference.targetChainId || '').trim(),
@@ -166,6 +203,7 @@ export function useProjectTasksWorkspaceContext({
     >();
     const rows = sanitizeTaskRows(tasks).map((task) => {
       const taskRowId = String(task.id || '').trim();
+      const cacheKey = baseCacheKey + '|' + readTaskRowRuntimeCacheSignature(task);
       const cached = taskRowCacheRef.current.get(taskRowId);
       if (cached && cached.taskRef === task && cached.cacheKey === cacheKey) {
         nextCache.set(taskRowId, cached);

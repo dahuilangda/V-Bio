@@ -106,7 +106,7 @@ export function ProjectTasksTable({
                       <span className="project-th">Design Setup</span>
                     </th>
                     <th>
-                      <span className="project-th">Iteration</span>
+                      <span className="project-th">Gen</span>
                     </th>
                   </>
                 ) : (

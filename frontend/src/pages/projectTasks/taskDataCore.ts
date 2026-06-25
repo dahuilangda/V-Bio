@@ -1215,7 +1215,6 @@ function readPeptideTaskSummary(task: ProjectTask): PeptideTaskSummary | null {
       ? (taskRecord.options as Record<string, unknown>)
       : {};
   const payloads = [
-    peptidePreview || {},
     confidence || {},
     topProgress,
     peptideDesign,
@@ -1224,7 +1223,8 @@ function readPeptideTaskSummary(task: ProjectTask): PeptideTaskSummary | null {
     requestOptions,
     inputPayload,
     inputOptions,
-    taskOptions
+    taskOptions,
+    peptidePreview || {}
   ];
 
   const designMode = normalizePeptideDesignMode(
