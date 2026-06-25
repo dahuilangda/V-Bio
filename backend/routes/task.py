@@ -26,6 +26,21 @@ def register_task_routes(
     list_known_queues: Callable[[], list[str]],
     get_worker_capability_snapshot: Callable[[], Dict[str, Any]],
 ) -> None:
+    def _as_record(value: Any) -> Dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    def _merge_tracker_payload(response: Dict[str, Any], tracker_status: Dict[str, Any] | None) -> None:
+        tracker_payload = _as_record(_as_record(tracker_status).get('payload'))
+        if not tracker_payload:
+            return
+        info = _as_record(response.get('info'))
+        info.update(tracker_payload)
+        status_text = str(tracker_payload.get('status') or '').strip()
+        if status_text:
+            info['status'] = status_text
+            info['message'] = status_text
+        response['info'] = info
+
     def build_task_status_response(task_id: str) -> Dict[str, Any]:
         task_result = AsyncResult(task_id, app=celery_app)
 
@@ -65,9 +80,7 @@ def register_task_routes(
                         'tracker': tracker_status or {},
                         'heartbeat': heartbeat,
                     }
-                    tracker_payload = (tracker_status or {}).get('payload')
-                    if isinstance(tracker_payload, dict) and tracker_payload:
-                        response['info'].update(tracker_payload)
+                    _merge_tracker_payload(response, tracker_status)
                     if response['state'] == 'SUCCESS':
                         archive_name_from_tracker = find_result_archive(task_id)
                         if archive_name_from_tracker:
@@ -190,7 +203,8 @@ def register_task_routes(
                         response['info']['tracker'] = tracker_status
                     if heartbeat:
                         response['info']['heartbeat'] = heartbeat
-                    if tracker_message:
+                    _merge_tracker_payload(response, tracker_status)
+                    if tracker_message and not str(_as_record(response.get('info')).get('status') or '').strip():
                         response['info']['status'] = tracker_message
                         response['info']['message'] = tracker_message
                     logger.debug('Task %s is in state: %s.', task_id, task_result.state)

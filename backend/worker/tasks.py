@@ -1246,13 +1246,24 @@ def predict_task(self, predict_args: dict):
                         runtime_meta = _build_peptide_runtime_meta(predict_args, allocated_gpu_ids)
                         if runtime_meta == last_meta:
                             continue
-                        self.update_state(state='PROGRESS', meta=runtime_meta)
                         status_text = str(runtime_meta.get('status') or '').strip()
                         if status_text:
                             tracker.update_status("running", status_text, payload=runtime_meta)
+                        try:
+                            self.update_state(state='PROGRESS', meta=runtime_meta)
+                        except Exception as state_exc:
+                            logger.warning(
+                                "Task %s: Failed to update Celery peptide progress state: %s",
+                                task_id,
+                                state_exc,
+                            )
                         last_meta = runtime_meta
                     except Exception as progress_exc:
-                        logger.debug(f"Task {task_id}: Failed to emit peptide progress update: {progress_exc}")
+                        logger.warning(
+                            "Task %s: Failed to emit peptide progress update: %s",
+                            task_id,
+                            progress_exc,
+                        )
 
             progress_thread = threading.Thread(
                 target=_emit_peptide_progress,
