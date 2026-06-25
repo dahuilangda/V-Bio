@@ -1385,6 +1385,7 @@ def _ensure_nonempty_a3m_file(path: str, sequence: str, context: str = "", heade
                 existing_content = f.read()
         except OSError as exc:
             print(f"⚠️ 无法读取 A3M 文件 {path}: {exc}", file=sys.stderr)
+            return False
 
     sanitized = sanitize_a3m_content(existing_content, context=context or path)
     if sanitized and _a3m_has_sequence_content(sanitized):
@@ -1397,20 +1398,9 @@ def _ensure_nonempty_a3m_file(path: str, sequence: str, context: str = "", heade
                 return False
         return True
 
-    dummy_a3m = _build_query_only_a3m(sequence, header=header)
-    if not dummy_a3m:
-        return False
-
-    try:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(dummy_a3m)
-        msg_context = f" ({context})" if context else ""
-        print(f"⚠️ 检测到空 MSA，已回退为 query-only A3M: {path}{msg_context}", file=sys.stderr)
-        return True
-    except OSError as exc:
-        print(f"⚠️ 无法写入 query-only A3M 文件 {path}: {exc}", file=sys.stderr)
-        return False
+    msg_context = f" ({context})" if context else ""
+    print(f"❌ A3M 文件无有效序列内容: {path}{msg_context}", file=sys.stderr)
+    return False
 
 
 def _iter_affinity_entries(properties: Any) -> Iterable[Dict[str, Any]]:
@@ -3357,40 +3347,41 @@ def parse_a3m_content(a3m_content: str) -> list:
 def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
     """
     为 YAML 中的蛋白质序列生成 MSA
-    
+
     Args:
         yaml_content: YAML 配置内容
         temp_dir: 临时目录
-    
+
     Returns:
         是否成功生成 MSA
     """
     try:
         print(f"🧬 开始为蛋白质序列生成 MSA", file=sys.stderr)
-        
+
         # 解析 YAML 获取蛋白质序列
-        yaml_data = yaml.safe_load(yaml_content)
-        
+        yaml_data = yaml.safe_load(yaml_content) or {}
+        protein_sequences = {}
+
         for entity in yaml_data.get('sequences', []):
             if entity.get('protein', {}).get('id'):
                 protein_id = entity['protein']['id']
                 sequence = entity['protein'].get('sequence', '')
                 if sequence:
                     protein_sequences[protein_id] = sequence
-        
+
         if not protein_sequences:
             print("❌ 未找到蛋白质序列，跳过 MSA 生成", file=sys.stderr)
             return False
-        
+
         msa_timeout = MSA_SERVER_TIMEOUT_SECONDS if MSA_SERVER_TIMEOUT_SECONDS > 0 else 600
         print(f"🔍 找到 {len(protein_sequences)} 个蛋白质序列需要生成 MSA", file=sys.stderr)
         print(f"⏱️ 当前 MSA 超时配置: {msa_timeout} 秒", file=sys.stderr)
-        
+
         # 为每个蛋白质序列生成 MSA
         success_count = 0
         for protein_id, sequence in protein_sequences.items():
             print(f"🧬 正在为蛋白质 {protein_id} 生成 MSA...", file=sys.stderr)
-            
+
             # 检查临时目录中是否已经存在
             output_path = os.path.join(temp_dir, f"{protein_id}_msa.a3m")
             if os.path.exists(output_path):
@@ -3404,16 +3395,15 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
                     success_count += 1
                     continue
                 print(f"⚠️ 临时目录中的 MSA 文件不可用，准备重新生成: {output_path}", file=sys.stderr)
-            
+
             # 检查缓存（统一使用 msa_ 前缀）
             sequence_hash = get_sequence_hash(sequence)
             cache_dir = MSA_CACHE_CONFIG['cache_dir']
             cached_msa_path = os.path.join(cache_dir, f"msa_{sequence_hash}.a3m")
-            
+
             if MSA_CACHE_CONFIG['enable_cache'] and os.path.exists(cached_msa_path):
                 print(f"✅ 找到缓存的 MSA 文件: {cached_msa_path}", file=sys.stderr)
                 sanitize_a3m_file(cached_msa_path, context=f"{protein_id} 缓存原文件")
-                # 复制到临时目录
                 shutil.copy2(cached_msa_path, output_path)
                 if _ensure_nonempty_a3m_file(
                     output_path,
@@ -3424,11 +3414,10 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
                     success_count += 1
                     continue
                 print(f"⚠️ 缓存中的 MSA 文件为空，准备重新生成: {cached_msa_path}", file=sys.stderr)
-            
+
             # 从服务器请求 MSA
             msa_result = request_msa_from_server(sequence, timeout=msa_timeout)
             if msa_result:
-                # 保存到临时目录
                 if save_msa_result_to_file(msa_result, output_path):
                     if _ensure_nonempty_a3m_file(
                         output_path,
@@ -3437,8 +3426,7 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
                         header=protein_id,
                     ):
                         success_count += 1
-                    
-                        # 缓存结果（统一使用 msa_ 前缀）
+
                         if MSA_CACHE_CONFIG['enable_cache']:
                             os.makedirs(cache_dir, exist_ok=True)
                             shutil.copy2(output_path, cached_msa_path)
@@ -3454,33 +3442,15 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
                 else:
                     print(f"❌ 保存 MSA 文件失败: {protein_id}", file=sys.stderr)
             else:
-                print(f"⚠️ 获取 MSA 失败，回退到 query-only A3M: {protein_id}", file=sys.stderr)
-                if _ensure_nonempty_a3m_file(
-                    output_path,
-                    sequence,
-                    context=f"{protein_id} 回退写入",
-                    header=protein_id,
-                ):
-                    success_count += 1
-                    if MSA_CACHE_CONFIG['enable_cache']:
-                        os.makedirs(cache_dir, exist_ok=True)
-                        shutil.copy2(output_path, cached_msa_path)
-                        _ensure_nonempty_a3m_file(
-                            cached_msa_path,
-                            sequence,
-                            context=f"{protein_id} 回退缓存",
-                            header=protein_id,
-                        )
-                else:
-                    print(f"❌ query-only A3M 回退失败: {protein_id}", file=sys.stderr)
-        
+                print(f"❌ 获取 MSA 失败: {protein_id}", file=sys.stderr)
+
         total_sequences = len(protein_sequences)
         print(f"✅ MSA 生成完成: {success_count}/{total_sequences} 个成功", file=sys.stderr)
         if success_count != total_sequences:
             print("❌ MSA 生成不完整：必须为所有蛋白序列生成 MSA。", file=sys.stderr)
             return False
         return True
-        
+
     except Exception as e:
         print(f"❌ 生成 MSA 时出现错误: {e}", file=sys.stderr)
         return False
