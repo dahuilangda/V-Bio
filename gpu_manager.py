@@ -382,6 +382,81 @@ def acquire_gpu_for_peptide_worker(task_id: str, timeout: int = 0, poll_interval
         logger.info(f"✅ 任务 {task_id}: 多肽子任务已获取 GPU {gpu_id}。")
         return gpu_id
 
+def _query_gpu_used_memory_mib(gpu_id: int) -> int | None:
+    if not shutil.which("nvidia-smi"):
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                "nvidia-smi",
+                f"--id={int(gpu_id)}",
+                "--query-gpu=memory.used",
+                "--format=csv,noheader,nounits",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception as exc:
+        logger.warning("查询 GPU %s 显存失败: %s", gpu_id, exc)
+        return None
+    if proc.returncode != 0:
+        logger.warning("查询 GPU %s 显存失败: %s", gpu_id, (proc.stderr or "").strip())
+        return None
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            return int(float(line))
+        except ValueError:
+            continue
+    return None
+
+
+def _wait_gpu_memory_reclaimed(
+    gpu_id: int,
+    task_id: str,
+    *,
+    threshold_mib: int = 200,
+    timeout_seconds: float = 90.0,
+    poll_seconds: float = 1.0,
+) -> bool:
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    last_used: int | None = None
+    while True:
+        used = _query_gpu_used_memory_mib(gpu_id)
+        if used is None:
+            logger.critical(
+                "严重: 任务 %s 释放 GPU %s 时无法确认显存状态，保留 in-use lease。",
+                task_id,
+                gpu_id,
+            )
+            return False
+        last_used = used
+        if used <= int(threshold_mib):
+            logger.info(
+                "✅ 任务 %s: GPU %s 显存已确认回收 (used=%sMiB)。",
+                task_id,
+                gpu_id,
+                used,
+            )
+            return True
+        if time.monotonic() >= deadline:
+            logger.critical(
+                "严重: 任务 %s 释放 GPU %s 时显存在超时内未回收 "
+                "(used=%sMiB > threshold=%sMiB)，保留 in-use lease，避免脏 GPU 被重新分配。",
+                task_id,
+                gpu_id,
+                last_used,
+                threshold_mib,
+            )
+            return False
+        time.sleep(max(0.2, float(poll_seconds)))
+
+
 def release_gpu(gpu_id: int, task_id: str):
     """
     原子化且安全地将一个 GPU ID 返回到池中。
@@ -398,6 +473,9 @@ def release_gpu(gpu_id: int, task_id: str):
             f"错误: 任务 {task_id} 尝试释放 GPU {gpu_id}，但其当前所有者是 "
             f"'{current_owner}'。已忽略以防重复释放或错误释放。"
         )
+        return
+
+    if not _wait_gpu_memory_reclaimed(gpu_id, task_id):
         return
         
     pipe = client.pipeline()

@@ -4553,7 +4553,10 @@ def run_protenix_backend(
 
     protenix_results_root = _resolve_backend_results_root("protenix", task_id, temp_dir)
     protenix_work_root = _resolve_backend_work_root(protenix_results_root)
-    custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
+    custom_molecules = _merge_referenced_preset_modification_molecules(
+        _normalize_custom_ccd_molecules(custom_ccd_molecules or []),
+        yaml_content,
+    )
     protenix_common_overlay_root: Optional[Path] = None
     if custom_molecules:
         protenix_common_overlay_root = _merge_custom_ccd_with_existing_cache(
@@ -6088,6 +6091,38 @@ PEPTIDE_PRESET_BASE_RESIDUE = {
     "GALT": "T", "FUCS": "S", "GLCS": "S", "XYLS": "S",
 }
 
+PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES = {
+    "AIB": {"smiles": "NC(C)(C)C(=O)O", "label": "alpha-aminoisobutyric acid"},
+    "NLE": {"smiles": "N[C@@H](CCCCC)C(=O)O", "label": "norleucine"},
+    "NVA": {"smiles": "N[C@@H](CCC)C(=O)O", "label": "norvaline"},
+    "ORN": {"smiles": "N[C@@H](CCCN)C(=O)O", "label": "ornithine"},
+    "CIT": {"smiles": "N[C@@H](CCCNC(N)=O)C(=O)O", "label": "citrulline"},
+    "HSE": {"smiles": "N[C@@H](CCO)C(=O)O", "label": "homoserine"},
+    "HCY": {"smiles": "N[C@@H](CCS)C(=O)O", "label": "homocysteine"},
+    "MSE": {"smiles": "N[C@@H](CC[Se]C)C(=O)O", "label": "selenomethionine"},
+    "SEC": {"smiles": "N[C@@H](C[SeH])C(=O)O", "label": "selenocysteine"},
+    "HYP": {"smiles": "O=C(O)[C@@H]1CC(O)CN1", "label": "hydroxyproline"},
+    "PCA": {"smiles": "O=C(O)[C@@H]1CCC(=O)N1", "label": "pyroglutamic acid"},
+    "SEP": {"smiles": "N[C@@H](COP(=O)(O)O)C(=O)O", "label": "phosphoserine"},
+    "TPO": {"smiles": "N[C@@H]([C@H](C)OP(=O)(O)O)C(=O)O", "label": "phosphothreonine"},
+    "PTR": {"smiles": "N[C@@H](Cc1ccc(OP(=O)(O)O)cc1)C(=O)O", "label": "phosphotyrosine"},
+    "CSO": {"smiles": "N[C@@H](CSO)C(=O)O", "label": "S-hydroxycysteine"},
+    "MLY": {"smiles": "N[C@@H](CCCCNC)C(=O)O", "label": "N6-methyllysine"},
+    "DAL": {"smiles": "N[C@H](C)C(=O)O", "label": "D-alanine"},
+    "BALA": {"smiles": "NCCC(=O)O", "label": "beta-alanine"},
+    "MANS": {"smiles": "N[C@@H](CO[C@H]1O[C@@H](CO)[C@H](O)[C@@H](O)[C@@H]1O)C(=O)O", "label": "O-Man-Ser"},
+    "MANT": {"smiles": "N[C@@H]([C@H](C)O[C@H]1O[C@@H](CO)[C@H](O)[C@@H](O)[C@@H]1O)C(=O)O", "label": "O-Man-Thr"},
+    "MANN": {"smiles": "N[C@@H](CC(=O)N[C@H]1O[C@@H](CO)[C@H](O)[C@@H](O)[C@@H]1O)C(=O)O", "label": "N-Man-Asn"},
+    "NAGS": {"smiles": "N[C@@H](CO[C@H]1O[C@H](CO)[C@@H](O)[C@H](O)[C@@H]1NC(C)=O)C(=O)O", "label": "O-GlcNAc-Ser"},
+    "NAGT": {"smiles": "N[C@@H]([C@H](C)O[C@H]1O[C@H](CO)[C@@H](O)[C@H](O)[C@@H]1NC(C)=O)C(=O)O", "label": "O-GlcNAc-Thr"},
+    "NAGN": {"smiles": "N[C@@H](CC(=O)N[C@H]1O[C@H](CO)[C@@H](O)[C@H](O)[C@@H]1NC(C)=O)C(=O)O", "label": "N-GlcNAc-Asn"},
+    "GALS": {"smiles": "N[C@@H](CO[C@H]1O[C@H](CO)[C@@H](O)[C@@H](O)[C@H]1O)C(=O)O", "label": "O-Gal-Ser"},
+    "GALT": {"smiles": "N[C@@H]([C@H](C)O[C@H]1O[C@H](CO)[C@@H](O)[C@@H](O)[C@H]1O)C(=O)O", "label": "O-Gal-Thr"},
+    "FUCS": {"smiles": "N[C@@H](CO[C@H]1O[C@@H](C)[C@H](O)[C@@H](O)[C@@H]1O)C(=O)O", "label": "O-Fuc-Ser"},
+    "GLCS": {"smiles": "N[C@@H](CO[C@H]1O[C@H](CO)[C@@H](O)[C@H](O)[C@@H]1O)C(=O)O", "label": "O-Glc-Ser"},
+    "XYLS": {"smiles": "N[C@@H](CO[C@H]1O[C@@H](O)[C@H](O)[C@@H](O)[C@@H]1O)C(=O)O", "label": "O-Xyl-Ser"},
+}
+
 PEPTIDE_PRESET_PLACEMENT_RULES = {
     "PCA": "n_term",
 }
@@ -6098,6 +6133,79 @@ PEPTIDE_CONSERVATIVE_SUBSTITUTIONS = {
     "M": "ILV", "F": "YWL", "P": "AGS", "S": "ATGN", "T": "SAV", "W": "FY",
     "Y": "FW", "V": "ILMA",
 }
+
+def _merge_peptide_preset_molecules_by_code(
+    custom_molecules: List[Dict[str, str]],
+    ccd_codes: Iterable[str],
+) -> List[Dict[str, str]]:
+    merged = list(custom_molecules)
+    seen = {str(item.get("ccd") or "").upper() for item in merged if isinstance(item, dict)}
+    for raw_code in ccd_codes or []:
+        ccd = str(raw_code or "").strip().upper()
+        preset = PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES.get(ccd)
+        if not ccd or not preset or ccd in seen:
+            continue
+        seen.add(ccd)
+        merged.append({
+            "ccd": ccd,
+            "smiles": str(preset.get("smiles") or ""),
+            "base_residue": PEPTIDE_PRESET_BASE_RESIDUE.get(ccd, "A"),
+            "label": str(preset.get("label") or ccd),
+            "kind": "residue",
+        })
+    return merged
+
+
+def _merge_selected_peptide_preset_molecules(
+    custom_molecules: List[Dict[str, str]],
+    unnatural_pool: List[Dict[str, str]],
+) -> List[Dict[str, str]]:
+    return _merge_peptide_preset_molecules_by_code(
+        custom_molecules,
+        [
+            str(row.get("ccd") or "").strip().upper()
+            for row in unnatural_pool or []
+            if isinstance(row, dict) and str(row.get("kind") or "").lower() == "preset"
+        ],
+    )
+
+
+def _collect_preset_modification_ccds_from_yaml(yaml_content: str) -> List[str]:
+    try:
+        data = yaml.safe_load(yaml_content) or {}
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    codes: List[str] = []
+    seen: set[str] = set()
+    for entry in data.get("sequences") or []:
+        if not isinstance(entry, dict):
+            continue
+        protein = entry.get("protein")
+        if not isinstance(protein, dict):
+            continue
+        for mod in protein.get("modifications") or []:
+            if not isinstance(mod, dict):
+                continue
+            raw = mod.get("ccd") or mod.get("ptmType") or mod.get("modification")
+            code = re.sub(r"[^A-Za-z0-9_-]", "", str(raw or "")).upper()[:12]
+            if not code or code in seen or code not in PEPTIDE_PRESET_CUSTOM_CCD_MOLECULES:
+                continue
+            seen.add(code)
+            codes.append(code)
+    return codes
+
+
+def _merge_referenced_preset_modification_molecules(
+    custom_molecules: List[Dict[str, str]],
+    yaml_content: str,
+) -> List[Dict[str, str]]:
+    return _merge_peptide_preset_molecules_by_code(
+        custom_molecules,
+        _collect_preset_modification_ccds_from_yaml(yaml_content),
+    )
+
 
 def _normalize_peptide_residue_pool(raw_pool: Any, custom_molecules: List[Dict[str, str]]) -> Tuple[List[str], List[Dict[str, str]]]:
     natural: List[str] = []
@@ -7087,6 +7195,7 @@ def run_peptide_design_backend(
 
     custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
     natural_pool, unnatural_pool = _normalize_peptide_residue_pool(options.get("peptideResiduePool") or options.get("peptide_residue_pool"), custom_molecules)
+    custom_molecules = _merge_selected_peptide_preset_molecules(custom_molecules, unnatural_pool)
     _peptide_allowed_residues(natural_pool, design_mode)
     nonnatural_min = _read_int_option(options, "peptideNonNaturalMin", 0, min_value=0, max_value=binder_length)
     nonnatural_max = _read_int_option(options, "peptideNonNaturalMax", nonnatural_min, min_value=nonnatural_min, max_value=binder_length)
@@ -7696,7 +7805,96 @@ def _custom_ccd_has_amino_acid_backbone(mol: Chem.Mol) -> bool:
     return bool(query is not None and mol.HasSubstructMatch(query))
 
 
-def _set_custom_ccd_atom_properties(mol: Chem.Mol, *, kind: str) -> None:
+def _is_carbonyl_carbon(mol: Chem.Mol, atom_idx: int) -> bool:
+    atom = mol.GetAtomWithIdx(atom_idx)
+    if atom.GetAtomicNum() != 6:
+        return False
+    for bond in atom.GetBonds():
+        other = bond.GetOtherAtom(atom)
+        if other.GetAtomicNum() == 8 and bond.GetBondType() == Chem.BondType.DOUBLE:
+            return True
+    return False
+
+
+def _is_amide_like_nitrogen(mol: Chem.Mol, atom_idx: int) -> bool:
+    atom = mol.GetAtomWithIdx(atom_idx)
+    if atom.GetAtomicNum() != 7:
+        return False
+    for neighbor in atom.GetNeighbors():
+        if _is_carbonyl_carbon(mol, neighbor.GetIdx()):
+            return True
+    return False
+
+
+def _find_residue_backbone_topology(mol: Chem.Mol) -> Dict[str, Any]:
+    carboxyl_pattern = Chem.MolFromSmarts("[CX3](=O)[OX1H0-,OX2H1]")
+    if carboxyl_pattern is None:
+        raise RuntimeError("Failed to build residue carboxyl SMARTS.")
+    carboxyl_matches = list(mol.GetSubstructMatches(carboxyl_pattern))
+    if not carboxyl_matches:
+        raise ValueError("Custom residue must contain a terminal carboxyl group C(=O)O.")
+
+    n_candidates = [
+        atom.GetIdx()
+        for atom in mol.GetAtoms()
+        if atom.GetAtomicNum() == 7 and atom.GetDegree() > 0
+    ]
+    if not n_candidates:
+        raise ValueError("Custom residue must contain a peptide-linkable nitrogen atom.")
+
+    best: Dict[str, Any] | None = None
+    excluded_by_carboxyl = {idx for match in carboxyl_matches for idx in match[1:]}
+    for carboxyl in carboxyl_matches:
+        if len(carboxyl) < 3:
+            continue
+        carbon_idx, carbonyl_oxygen_idx, terminal_oxygen_idx = carboxyl[:3]
+        for n_idx in n_candidates:
+            if n_idx == carbon_idx or n_idx in excluded_by_carboxyl:
+                continue
+            try:
+                path = list(Chem.rdmolops.GetShortestPath(mol, n_idx, carbon_idx))
+            except Exception:
+                continue
+            if len(path) < 3:
+                continue
+            if any(idx in excluded_by_carboxyl for idx in path[1:-1]):
+                continue
+            interior = path[1:-1]
+            if not interior:
+                continue
+            if len(interior) > 8:
+                continue
+            first = mol.GetAtomWithIdx(interior[0])
+            if first.GetAtomicNum() not in {6, 7}:
+                continue
+            hetero_penalty = sum(1 for idx in interior if mol.GetAtomWithIdx(idx).GetAtomicNum() not in {6, 7})
+            amide_penalty = 4 if _is_amide_like_nitrogen(mol, n_idx) else 0
+            score = (amide_penalty, hetero_penalty, len(path))
+            candidate = {
+                "n_idx": n_idx,
+                "c_idx": carbon_idx,
+                "o_idx": carbonyl_oxygen_idx,
+                "oxt_idx": terminal_oxygen_idx,
+                "path": path,
+                "score": score,
+            }
+            if best is None or score < best["score"]:
+                best = candidate
+
+    if best is None:
+        raise ValueError(
+            "Custom residue must contain a peptide-linkable nitrogen connected to a terminal carboxyl group by a reasonable heavy-atom backbone path."
+        )
+    return best
+
+
+def _set_atom_name(atom: Chem.Atom, name: str) -> None:
+    atom.SetProp("name", name)
+    atom.SetProp("atom_name", name)
+    atom.SetProp("alt_name", name)
+
+
+def _set_custom_ccd_atom_properties(mol: Chem.Mol, *, kind: str, residue_topology: Optional[Dict[str, Any]] = None) -> None:
     element_count: Dict[str, int] = {}
     for atom in mol.GetAtoms():
         symbol = atom.GetSymbol().upper()
@@ -7704,46 +7902,32 @@ def _set_custom_ccd_atom_properties(mol: Chem.Mol, *, kind: str) -> None:
         name = f"{symbol}{element_count[symbol]}"
         if len(name) > 4:
             raise ValueError(f"Custom CCD atom name exceeds 4 characters: {name}")
-        atom.SetProp("name", name)
-        atom.SetProp("atom_name", name)
-        atom.SetProp("alt_name", name)
+        _set_atom_name(atom, name)
         atom.SetProp("leaving_atom", "0")
 
     if kind != "residue":
         return
+    if not residue_topology:
+        raise ValueError("Custom residue topology was not resolved.")
 
-    backbone_patterns = {
-        "N": Chem.MolFromSmarts("[NX3;!$(NC=O)]"),
-        "CA": Chem.MolFromSmarts("[C;X4;H1]([N])C(=O)"),
-        "C": Chem.MolFromSmarts("C(=O)[O,N]"),
-    }
-    for atom_name, pattern in backbone_patterns.items():
-        if pattern is None:
-            continue
-        matches = mol.GetSubstructMatches(pattern)
-        if not matches:
-            continue
-        atom_idx = matches[0][0]
-        atom = mol.GetAtomWithIdx(atom_idx)
-        atom.SetProp("name", atom_name)
-        atom.SetProp("atom_name", atom_name)
-        atom.SetProp("alt_name", atom_name)
+    path = [int(idx) for idx in residue_topology.get("path") or []]
+    n_idx = int(residue_topology["n_idx"])
+    c_idx = int(residue_topology["c_idx"])
+    o_idx = int(residue_topology["o_idx"])
+    oxt_idx = int(residue_topology["oxt_idx"])
 
-    carboxyl_pattern = Chem.MolFromSmarts("[CX3](=O)[OX1H0-,OX2H1]")
-    if carboxyl_pattern is not None:
-        for match in mol.GetSubstructMatches(carboxyl_pattern):
-            if len(match) < 3:
-                continue
-            carbon_idx, carbonyl_oxygen_idx, terminal_oxygen_idx = match[:3]
-            carbon = mol.GetAtomWithIdx(carbon_idx)
-            oxygen = mol.GetAtomWithIdx(carbonyl_oxygen_idx)
-            terminal = mol.GetAtomWithIdx(terminal_oxygen_idx)
-            for atom, name in ((carbon, "C"), (oxygen, "O"), (terminal, "OXT")):
-                atom.SetProp("name", name)
-                atom.SetProp("atom_name", name)
-                atom.SetProp("alt_name", name)
-            terminal.SetProp("leaving_atom", "1")
+    _set_atom_name(mol.GetAtomWithIdx(n_idx), "N")
+    _set_atom_name(mol.GetAtomWithIdx(c_idx), "C")
+    _set_atom_name(mol.GetAtomWithIdx(o_idx), "O")
+    terminal = mol.GetAtomWithIdx(oxt_idx)
+    _set_atom_name(terminal, "OXT")
+    terminal.SetProp("leaving_atom", "1")
+
+    backbone_names = ["CA", "CB", "CG", "CD", "CE", "CZ", "CH", "CI"]
+    for offset, atom_idx in enumerate(path[1:-1]):
+        if offset >= len(backbone_names):
             break
+        _set_atom_name(mol.GetAtomWithIdx(atom_idx), backbone_names[offset])
 
 
 def _build_custom_ccd_mol(smiles: str, *, kind: str = "residue") -> Chem.Mol:
@@ -7751,10 +7935,9 @@ def _build_custom_ccd_mol(smiles: str, *, kind: str = "residue") -> Chem.Mol:
     if mol is None:
         raise ValueError("RDKit failed to parse custom CCD SMILES.")
     Chem.SanitizeMol(mol)
-    if kind == "residue" and not _custom_ccd_has_amino_acid_backbone(mol):
-        raise ValueError("Custom residue must contain an amino-acid backbone (N-CA-C(=O)).")
+    residue_topology = _find_residue_backbone_topology(mol) if kind == "residue" else None
     mol = Chem.AddHs(mol)
-    _set_custom_ccd_atom_properties(mol, kind=kind)
+    _set_custom_ccd_atom_properties(mol, kind=kind, residue_topology=residue_topology)
     try:
         embed_status = AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
         if embed_status == -1:
@@ -7780,7 +7963,6 @@ def _build_custom_ccd_mol(smiles: str, *, kind: str = "residue") -> Chem.Mol:
     mol.ref_conf_type = "rdkit"
     mol.ref_mask = np.ones(mol.GetNumAtoms(), dtype=bool)
     return mol
-
 
 def _custom_ccd_mol_atom_names(mol: Chem.Mol, *, include_hydrogens: bool = False) -> List[str]:
     names: List[str] = []
@@ -8117,7 +8299,10 @@ def run_boltz_backend(
     if runtime_task_id:
         docker_command.extend(["--env", f"BOLTZ_TASK_ID={runtime_task_id}"])
 
-    custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
+    custom_molecules = _merge_referenced_preset_modification_molecules(
+        _normalize_custom_ccd_molecules(custom_ccd_molecules or []),
+        normalized_yaml,
+    )
     host_cache_dir = str(BOLTZ2_HOST_CACHE_DIR or "").strip()
     container_cache_dir = str(BOLTZ2_CONTAINER_CACHE_DIR or "/root/.boltz").strip() or "/root/.boltz"
     container_base_mols_dir = "/root/.boltz_base_mols"
@@ -8261,7 +8446,10 @@ def run_alphafold3_backend(
 
     af3_results_root = _resolve_backend_results_root("alphafold3", task_id, temp_dir)
     af3_work_root = _resolve_backend_work_root(af3_results_root)
-    custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
+    custom_molecules = _merge_referenced_preset_modification_molecules(
+        _normalize_custom_ccd_molecules(custom_ccd_molecules or []),
+        yaml_content,
+    )
     user_ccd_text = None
     if custom_molecules:
         user_ccd_text, _ = _build_custom_ccd_bundle(custom_molecules)
