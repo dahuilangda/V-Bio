@@ -6209,6 +6209,49 @@ def _merge_referenced_preset_modification_molecules(
     )
 
 
+def _extract_user_ccd_one_letter_overrides(user_ccd_text: Optional[str]) -> Dict[str, str]:
+    overrides: Dict[str, str] = {}
+    current_id = ""
+    current_parent = ""
+    current_one = ""
+
+    def _clean_token(value: str) -> str:
+        return str(value or "").strip().strip(chr(39) + chr(34)).upper()
+
+    def _flush() -> None:
+        nonlocal current_id, current_parent, current_one
+        if current_id:
+            one = _clean_token(current_one)
+            parent = _clean_token(current_parent)
+            resolved = one if len(one) == 1 and one != "?" else parent
+            if len(resolved) == 1 and resolved in "ARNDCQEGHILKMFPSTWYV":
+                overrides[current_id] = resolved
+        current_id = ""
+        current_parent = ""
+        current_one = ""
+
+    for raw_line in str(user_ccd_text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("data_"):
+            _flush()
+            current_id = _clean_token(line[5:])
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        key, value = parts[0], parts[1]
+        if key == "_chem_comp.id":
+            current_id = _clean_token(value)
+        elif key == "_chem_comp.one_letter_code":
+            current_one = value
+        elif key == "_chem_comp.mon_nstd_parent_comp_id":
+            current_parent = value
+    _flush()
+    return overrides
+
+
 def _normalize_peptide_residue_pool(raw_pool: Any, custom_molecules: List[Dict[str, str]]) -> Tuple[List[str], List[Dict[str, str]]]:
     natural: List[str] = []
     unnatural: List[Dict[str, str]] = []
@@ -6711,11 +6754,20 @@ def _build_peptide_candidate_yaml(
         }
     }
     if modifications:
-        binder_entry["protein"]["modifications"] = [
-            {"position": int(item.get("position") or 1), "ccd": str(item.get("ccd") or "").upper()}
-            for item in modifications
-            if str(item.get("ccd") or "").strip()
-        ]
+        binder_modifications: List[Dict[str, Any]] = []
+        for item in modifications:
+            if not isinstance(item, dict):
+                continue
+            ccd = str(item.get("ccd") or item.get("ptmType") or "").strip().upper()
+            if not ccd:
+                continue
+            base_residue = str(item.get("baseResidue") or item.get("base_residue") or "").strip().upper()[:1]
+            mod_entry: Dict[str, Any] = {"position": int(item.get("position") or item.get("ptmPosition") or 1), "ccd": ccd}
+            if base_residue:
+                mod_entry["baseResidue"] = base_residue
+            binder_modifications.append(mod_entry)
+        if binder_modifications:
+            binder_entry["protein"]["modifications"] = binder_modifications
     if design_mode == "cyclic":
         binder_entry["protein"]["cyclic"] = True
 
@@ -8528,6 +8580,8 @@ def run_alphafold3_backend(
         user_ccd=user_ccd_text,
     )
 
+    af3_ccd_one_letter_overrides = _extract_user_ccd_one_letter_overrides(user_ccd_text)
+
     if template_payloads:
         for tpl in template_payloads:
             mmcif_text = tpl.get("mmcif")
@@ -8622,6 +8676,23 @@ def _normalize_a3m(a3m_text: str):
             changed = True
         fixed.append(f"{hdr}\n{seq}")
     return "\n".join(fixed) + "\n", changed
+
+# Align AlphaFold3 runtime CCD-to-one-letter mapping with userCCD parent codes.
+# AF3 uses this table to derive the effective protein query sequence for PTMs
+# before validating the first MSA row.
+try:
+    import os as _os
+    import json as _json
+    from alphafold3.constants import residue_names as _af3_residue_names
+    _ccd_overrides = _json.loads(_os.environ.get("VBIO_AF3_CCD_ONE_LETTER_OVERRIDES", "{}"))
+    if isinstance(_ccd_overrides, dict):
+        for _ccd, _one in _ccd_overrides.items():
+            _ccd = str(_ccd or "").strip().upper()
+            _one = str(_one or "").strip().upper()[:1]
+            if _ccd and _one in "ARNDCQEGHILKMFPSTWYV":
+                _af3_residue_names.CCD_NAME_TO_ONE_LETTER[_ccd] = _one
+except Exception as _exc:
+    logging.warning("Failed to apply userCCD residue one-letter overrides: %s", _exc)
 
 if _af3_parsers is not None:
     _orig_convert = getattr(_af3_parsers, "convert_stockholm_to_a3m", None)
@@ -8789,6 +8860,11 @@ except Exception:
             f"{database_dir}:{container_database_dir}",
         ]
     )
+    if af3_ccd_one_letter_overrides:
+        docker_command.extend([
+            "--env",
+            "VBIO_AF3_CCD_ONE_LETTER_OVERRIDES=" + json.dumps(af3_ccd_one_letter_overrides, sort_keys=True),
+        ])
 
     # Enable persistent JAX compilation cache to avoid repeated long compiles.
     jax_cache_host_dir = os.environ.get("ALPHAFOLD3_JAX_CACHE_DIR")

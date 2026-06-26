@@ -316,7 +316,7 @@ def _normalize_protein_modifications(raw_modifications: object, sequence_length:
 
 def _af3_ccd_to_one_letter(ccd: object, base_residue: object = "") -> str:
     base = str(base_residue or "").strip().upper()[:1]
-    if base in "ARNDCQEGHILKMFPSTWYV":
+    if base and base in "ARNDCQEGHILKMFPSTWYV":
         return base
     code = str(ccd or "").strip().upper()
     if code.startswith("CCD_"):
