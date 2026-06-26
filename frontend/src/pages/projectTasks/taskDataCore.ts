@@ -1591,6 +1591,71 @@ function readCandidateResiduePlddts(
 }
 
 function readPeptideBestCandidatePreview(task: ProjectTask): PeptideBestCandidatePreview | null {
+  const confidence =
+    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
+      ? (task.confidence as Record<string, unknown>)
+      : null;
+
+  if (confidence) {
+    const peptideDesign =
+      confidence.peptide_design && typeof confidence.peptide_design === 'object' && !Array.isArray(confidence.peptide_design)
+        ? (confidence.peptide_design as Record<string, unknown>)
+        : {};
+    const peptideProgress =
+      peptideDesign.progress && typeof peptideDesign.progress === 'object' && !Array.isArray(peptideDesign.progress)
+        ? (peptideDesign.progress as Record<string, unknown>)
+        : {};
+    const topProgress =
+      confidence.progress && typeof confidence.progress === 'object' && !Array.isArray(confidence.progress)
+        ? (confidence.progress as Record<string, unknown>)
+        : {};
+
+    const candidateRows = readFirstRecordArrayFromPayloadPaths(
+      [confidence, peptideDesign, peptideProgress, topProgress],
+      [
+        'peptide_design.best_sequences',
+        'peptide_design.current_best_sequences',
+        'peptide_design.candidates',
+        'best_sequences',
+        'current_best_sequences',
+        'candidates',
+        'progress.best_sequences',
+        'progress.current_best_sequences'
+      ]
+    );
+    if (candidateRows.length > 0) {
+      const rowOrder = new Map(candidateRows.map((row, index) => [row, index] as const));
+      const sorted = [...candidateRows].sort((a, b) =>
+        comparePeptideCandidateRows(a, b, rowOrder.get(a) ?? 0, rowOrder.get(b) ?? 0)
+      );
+      const best = sorted.find((row) => Boolean(readPeptideCandidateSequence(row))) || sorted[0];
+      const sequence = best ? readPeptideCandidateSequence(best) : '';
+      if (sequence) {
+        const plddt = normalizePlddtScalar(
+          readFirstFiniteFromPayloadPaths([best], ['binder_avg_plddt', 'plddt', 'ligand_mean_plddt', 'mean_plddt'])
+        );
+        const iptm = normalizeProbability(
+          readFirstFiniteFromPayloadPaths([best], ['pair_iptm_target_binder', 'pair_iptm', 'iptm'])
+        );
+        const binderChainId = readFirstTextFromPayloadPaths(
+          [best, confidence, peptideDesign, peptideProgress, topProgress],
+          ['binder_chain_id', 'model_ligand_chain_id', 'requested_ligand_chain_id', 'ligand_chain_id']
+        );
+        const residuePlddts = readCandidateResiduePlddts(best, sequence.length, binderChainId);
+        const modifications = readPeptideCandidateModifications(best, sequence.length);
+
+        return {
+          sequence,
+          modifications,
+          plddt,
+          iptm,
+          residuePlddts,
+          binderChainId: binderChainId || null
+        };
+      }
+    }
+  }
+
   const peptidePreview = readPeptidePreviewFromProperties(task.properties);
   const previewBest = peptidePreview
     ? (() => {
@@ -1598,88 +1663,22 @@ function readPeptideBestCandidatePreview(task: ProjectTask): PeptideBestCandidat
         return best && typeof best === 'object' && !Array.isArray(best) ? (best as Record<string, unknown>) : null;
       })()
     : null;
-  if (previewBest) {
-    const sequence = readPeptideCandidateSequence(previewBest);
-    if (sequence) {
-      const plddt = normalizePlddtScalar(
-        readFirstFiniteFromPayloadPaths([previewBest], ['plddt', 'binder_avg_plddt', 'ligand_mean_plddt', 'mean_plddt'])
-      );
-      const iptm = normalizeProbability(
-        readFirstFiniteFromPayloadPaths([previewBest], ['pair_iptm_target_binder', 'pair_iptm', 'iptm'])
-      );
-      const binderChainId = readFirstTextFromPayloadPaths(
-        [previewBest, peptidePreview || {}],
-        ['binder_chain_id', 'model_ligand_chain_id', 'requested_ligand_chain_id', 'ligand_chain_id']
-      );
-      const residuePlddts = readCandidateResiduePlddts(previewBest, sequence.length, binderChainId);
-      const modifications = readPeptideCandidateModifications(previewBest, sequence.length);
-      return {
-        sequence,
-        modifications,
-        plddt,
-        iptm,
-        residuePlddts,
-        binderChainId: binderChainId || null
-      };
-    }
-  }
+  if (!previewBest) return null;
 
-  const confidence =
-    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
-      ? (task.confidence as Record<string, unknown>)
-      : null;
-  if (!confidence) return null;
-  const peptideDesign =
-    confidence.peptide_design && typeof confidence.peptide_design === 'object' && !Array.isArray(confidence.peptide_design)
-      ? (confidence.peptide_design as Record<string, unknown>)
-      : {};
-  const peptideProgress =
-    peptideDesign.progress && typeof peptideDesign.progress === 'object' && !Array.isArray(peptideDesign.progress)
-      ? (peptideDesign.progress as Record<string, unknown>)
-      : {};
-  const topProgress =
-    confidence.progress && typeof confidence.progress === 'object' && !Array.isArray(confidence.progress)
-      ? (confidence.progress as Record<string, unknown>)
-      : {};
-
-  const candidateRows = readFirstRecordArrayFromPayloadPaths(
-    [confidence, peptideDesign, peptideProgress, topProgress],
-    [
-      'peptide_design.best_sequences',
-      'peptide_design.current_best_sequences',
-      'peptide_design.candidates',
-      'best_sequences',
-      'current_best_sequences',
-      'candidates',
-      'progress.best_sequences',
-      'progress.current_best_sequences'
-    ]
-  );
-  if (candidateRows.length === 0) return null;
-
-  const rowOrder = new Map(candidateRows.map((row, index) => [row, index] as const));
-  const sorted = [...candidateRows].sort((a, b) =>
-    comparePeptideCandidateRows(a, b, rowOrder.get(a) ?? 0, rowOrder.get(b) ?? 0)
-  );
-  const best = sorted.find((row) => Boolean(readPeptideCandidateSequence(row))) || sorted[0];
-  if (!best) return null;
-
-  const sequence = readPeptideCandidateSequence(best);
+  const sequence = readPeptideCandidateSequence(previewBest);
   if (!sequence) return null;
-
   const plddt = normalizePlddtScalar(
-    readFirstFiniteFromPayloadPaths([best], ['binder_avg_plddt', 'plddt', 'ligand_mean_plddt', 'mean_plddt'])
+    readFirstFiniteFromPayloadPaths([previewBest], ['plddt', 'binder_avg_plddt', 'ligand_mean_plddt', 'mean_plddt'])
   );
   const iptm = normalizeProbability(
-    readFirstFiniteFromPayloadPaths([best], ['pair_iptm_target_binder', 'pair_iptm', 'iptm'])
+    readFirstFiniteFromPayloadPaths([previewBest], ['pair_iptm_target_binder', 'pair_iptm', 'iptm'])
   );
   const binderChainId = readFirstTextFromPayloadPaths(
-    [best, confidence, peptideDesign, peptideProgress, topProgress],
+    [previewBest, peptidePreview || {}],
     ['binder_chain_id', 'model_ligand_chain_id', 'requested_ligand_chain_id', 'ligand_chain_id']
   );
-  const residuePlddts = readCandidateResiduePlddts(best, sequence.length, binderChainId);
-  const modifications = readPeptideCandidateModifications(best, sequence.length);
-
+  const residuePlddts = readCandidateResiduePlddts(previewBest, sequence.length, binderChainId);
+  const modifications = readPeptideCandidateModifications(previewBest, sequence.length);
   return {
     sequence,
     modifications,

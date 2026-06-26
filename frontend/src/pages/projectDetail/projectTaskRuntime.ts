@@ -1,6 +1,5 @@
 import type { MutableRefObject } from 'react';
 import {
-  compactResultConfidenceForStorage,
   downloadResultBlob,
   enumerateLeadOptimizationMmp,
   fetchLeadOptimizationMmpQueryStatus,
@@ -11,11 +10,10 @@ import type { DownloadResultMode } from '../../api/backendTaskApi';
 import type { LeadOptMmpQueryResponse } from '../../api/backendLeadOptimizationApi';
 import type { Project, ProjectTask, TaskState } from '../../types/models';
 import { mergePeptidePreviewIntoProperties } from '../../utils/peptideTaskPreview';
-import { hasStoredTaskInputOptions } from './projectTaskSnapshot';
+import { hasStoredTaskInputOptions, readTaskInputOptions } from './projectTaskSnapshot';
 import {
-  hasMeaningfulValue,
-  hasPeptideSummaryFields,
-  mergePeptideSummaryIntoParsedConfidence
+  derivePersistedResultConfidences,
+  hasMeaningfulValue
 } from '../../utils/resultConfidenceStorage';
 import { normalizeWorkflowKey } from '../../utils/workflows';
 import { inferTaskStateFromStatusPayload, readStatusText } from './projectMetrics';
@@ -669,25 +667,17 @@ export async function pullResultForViewerTask(params: {
       throw new Error('No structure file was found in the result archive.');
     }
     const parsedConfidence = asRecord(parsed.confidence);
-    const persistedConfidenceFull = compactResultConfidenceForStorage(parsedConfidence, {
-      preservePeptideCandidateStructureText: true
+    const baseTaskInputOptions = baseTaskProperties && hasStoredTaskInputOptions({ properties: baseTaskProperties })
+      ? readTaskInputOptions({ properties: baseTaskProperties } as unknown as ProjectTask)
+      : {};
+    const persistedConfidence = derivePersistedResultConfidences({
+      parsedConfidenceValue: parsedConfidence,
+      baseProjectConfidenceValue: baseProjectConfidence,
+      baseTaskConfidenceValue: baseTaskConfidence,
+      baseTaskInputOptions
     });
-    const persistedConfidenceCompact = compactResultConfidenceForStorage(parsedConfidence, {
-      preservePeptideCandidateStructureText: false
-    });
-    const hasPeptidePayload = hasPeptideSummaryFields(persistedConfidenceFull);
-    const persistedProjectConfidenceSource = hasPeptidePayload ? persistedConfidenceCompact : persistedConfidenceFull;
-    const persistedProjectConfidence = hasPeptidePayload
-      ? persistedProjectConfidenceSource
-      : mergePeptideSummaryIntoParsedConfidence(
-          persistedProjectConfidenceSource,
-          baseProjectConfidence
-        );
-    const taskConfidenceBase = baseTaskConfidence ?? (hasPeptidePayload ? null : baseProjectConfidence);
-    const persistedTaskConfidence = mergePeptideSummaryIntoParsedConfidence(
-      hasPeptidePayload ? persistedConfidenceCompact : persistedConfidenceFull,
-      taskConfidenceBase
-    );
+    const persistedProjectConfidence = persistedConfidence.projectConfidence;
+    const persistedTaskConfidence = persistedConfidence.taskConfidence;
 
     setStructureText(parsed.structureText);
     setStructureFormat(parsed.structureFormat);

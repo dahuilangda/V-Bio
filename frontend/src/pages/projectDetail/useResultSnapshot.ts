@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import type { InputComponent, Project, ProjectInputConfig, ProjectTask } from '../../types/models';
+import type { InputComponent, Project, ProjectInputConfig, ProjectTask, ProteinModification } from '../../types/models';
 import { componentTypeLabel, normalizeComponentSequence } from '../../utils/projectInputs';
 import { buildChainInfos } from '../../utils/chainAssignments';
 import { isSequenceLigandType } from './OverviewLigandSequencePreview';
@@ -124,6 +124,166 @@ function hasLeadOptSnapshotPayload(task: ProjectTask | null | undefined): boolea
 function isRuntimeActiveTask(task: ProjectTask | null | undefined): boolean {
   const state = String(task?.task_state || '').trim().toUpperCase();
   return state === 'QUEUED' || state === 'RUNNING';
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function readObjectPath(data: Record<string, unknown>, path: string): unknown {
+  let current: unknown = data;
+  for (const key of path.split('.')) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return undefined;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current;
+}
+
+function readRecordArray(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object' && !Array.isArray(item)));
+}
+
+function readFirstRecordArray(payloads: Record<string, unknown>[], paths: string[]): Array<Record<string, unknown>> {
+  for (const payload of payloads) {
+    for (const path of paths) {
+      const rows = readRecordArray(readObjectPath(payload, path));
+      if (rows.length > 0) return rows;
+    }
+  }
+  return [];
+}
+
+function readText(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+function readFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function readFirstFinite(payloads: Record<string, unknown>[], paths: string[]): number | null {
+  for (const payload of payloads) {
+    for (const path of paths) {
+      const value = readFiniteNumber(readObjectPath(payload, path));
+      if (value !== null) return value;
+    }
+  }
+  return null;
+}
+
+function readFirstText(payloads: Record<string, unknown>[], paths: string[]): string {
+  for (const payload of payloads) {
+    for (const path of paths) {
+      const value = readText(readObjectPath(payload, path));
+      if (value) return value;
+    }
+  }
+  return '';
+}
+
+function readPeptideCandidateSequence(row: Record<string, unknown>): string {
+  return readFirstText(row ? [row] : [], ['peptide_sequence', 'binder_sequence', 'candidate_sequence', 'designed_sequence', 'sequence'])
+    .replace(/\s+/g, '')
+    .trim()
+    .toUpperCase();
+}
+
+function readPeptideCandidateModifications(row: Record<string, unknown>, sequenceLength: number): ProteinModification[] {
+  const raw =
+    readObjectPath(row, 'modifications') ??
+    readObjectPath(row, 'protein_modifications') ??
+    readObjectPath(row, 'residue_modifications');
+  if (!Array.isArray(raw)) return [];
+  const rows: ProteinModification[] = [];
+  const seen = new Set<number>();
+  raw.forEach((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return;
+    const record = item as Record<string, unknown>;
+    const position = Math.floor(Number(record.position ?? record.residue_index ?? record.residue ?? record.pos));
+    const ccd = readText(record.ccd ?? record.code ?? record.residue_name).toUpperCase();
+    if (!Number.isFinite(position) || position < 1 || position > sequenceLength || !ccd || seen.has(position)) return;
+    seen.add(position);
+    rows.push({
+      id: readText(record.id) || `peptide-mod-${position}-${ccd}-${index}`,
+      position,
+      baseResidue: readText(record.baseResidue ?? record.base_residue).toUpperCase().slice(0, 1),
+      ccd,
+      inputMethod: readText(record.inputMethod ?? record.input_method).toLowerCase() === 'jsme' ? 'jsme' : 'ccd',
+      smiles: typeof record.smiles === 'string' ? record.smiles : undefined,
+      label: typeof record.label === 'string' ? record.label : undefined
+    });
+  });
+  return rows.sort((a, b) => a.position - b.position);
+}
+
+function comparePeptideCandidateRows(a: Record<string, unknown>, b: Record<string, unknown>, aIndex: number, bIndex: number): number {
+  const aRank = readFirstFinite([a], ['rank', 'ranking', 'order']);
+  const bRank = readFirstFinite([b], ['rank', 'ranking', 'order']);
+  const aRankValue = aRank === null ? null : Math.max(1, Math.floor(aRank));
+  const bRankValue = bRank === null ? null : Math.max(1, Math.floor(bRank));
+  if (aRankValue !== null && bRankValue !== null && aRankValue !== bRankValue) return aRankValue - bRankValue;
+  if (aRankValue !== null && bRankValue === null) return -1;
+  if (aRankValue === null && bRankValue !== null) return 1;
+
+  const aScore = readFirstFinite([a], ['composite_score', 'score', 'fitness', 'objective']);
+  const bScore = readFirstFinite([b], ['composite_score', 'score', 'fitness', 'objective']);
+  if (aScore !== null && bScore !== null && aScore !== bScore) return bScore - aScore;
+  if (aScore !== null && bScore === null) return -1;
+  if (aScore === null && bScore !== null) return 1;
+
+  const aIptm = readFirstFinite([a], ['pair_iptm_target_binder', 'pair_iptm', 'iptm']);
+  const bIptm = readFirstFinite([b], ['pair_iptm_target_binder', 'pair_iptm', 'iptm']);
+  if (aIptm !== null && bIptm !== null && aIptm !== bIptm) return bIptm - aIptm;
+  if (aIptm !== null && bIptm === null) return -1;
+  if (aIptm === null && bIptm !== null) return 1;
+  return aIndex - bIndex;
+}
+
+function readPeptideBestCandidateFromTask(task: ProjectTask | null | undefined): {
+  sequence: string;
+  modifications: ProteinModification[];
+  binderChainId: string | null;
+} | null {
+  const confidence = asRecord(task?.confidence);
+  if (Object.keys(confidence).length === 0) return null;
+  const peptideDesign = asRecord(confidence.peptide_design);
+  const peptideProgress = asRecord(peptideDesign.progress);
+  const topProgress = asRecord(confidence.progress);
+  const candidateRows = readFirstRecordArray(
+    [confidence, peptideDesign, peptideProgress, topProgress],
+    [
+      'peptide_design.best_sequences',
+      'peptide_design.current_best_sequences',
+      'peptide_design.candidates',
+      'best_sequences',
+      'current_best_sequences',
+      'candidates',
+      'progress.best_sequences',
+      'progress.current_best_sequences'
+    ]
+  );
+  if (candidateRows.length === 0) return null;
+  const order = new Map(candidateRows.map((row, index) => [row, index] as const));
+  const sorted = [...candidateRows].sort((a, b) => comparePeptideCandidateRows(a, b, order.get(a) ?? 0, order.get(b) ?? 0));
+  const best = sorted.find((row) => Boolean(readPeptideCandidateSequence(row))) || sorted[0];
+  const sequence = best ? readPeptideCandidateSequence(best) : '';
+  if (!sequence) return null;
+  const binderChainId = readFirstText(
+    [best, confidence, peptideDesign, peptideProgress, topProgress],
+    ['binder_chain_id', 'model_ligand_chain_id', 'requested_ligand_chain_id', 'ligand_chain_id']
+  );
+  return {
+    sequence,
+    modifications: readPeptideCandidateModifications(best, sequence.length),
+    binderChainId: binderChainId || null
+  };
 }
 
 function readLeadOptTaskRowTimestamp(task: ProjectTask | null | undefined): number {
@@ -276,11 +436,27 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     return '__new__';
   }, [requestedStatusTaskRow, statusContextTaskRow, runtimeResultTask, isDraftTaskSnapshot]);
 
+  const peptideBestCandidate = useMemo(() => {
+    if (workflowKey !== 'peptide_design') return null;
+    return readPeptideBestCandidateFromTask(activeResultTask);
+  }, [activeResultTask, workflowKey]);
+
   const resultOverviewComponents = useMemo(() => {
     const taskComponents = readTaskComponents(activeResultTask);
-    if (taskComponents.length > 0) return taskComponents;
-    return normalizedDraftComponents;
-  }, [activeResultTask, normalizedDraftComponents]);
+    const baseComponents = taskComponents.length > 0 ? taskComponents : normalizedDraftComponents;
+    if (workflowKey !== 'peptide_design' || !peptideBestCandidate?.sequence) return baseComponents;
+    const withoutSyntheticPeptide = baseComponents.filter((component) => component.id !== '__peptide_design_best_candidate__');
+    return [
+      ...withoutSyntheticPeptide,
+      {
+        id: '__peptide_design_best_candidate__',
+        type: 'protein',
+        sequence: peptideBestCandidate.sequence,
+        modifications: peptideBestCandidate.modifications,
+        useMsa: false
+      } as InputComponent
+    ];
+  }, [activeResultTask, normalizedDraftComponents, peptideBestCandidate, workflowKey]);
 
   const resultOverviewActiveComponents = useMemo(() => {
     return nonEmptyComponents(resultOverviewComponents);
@@ -291,14 +467,26 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
   }, [resultOverviewActiveComponents]);
 
   const resultChainIds = useMemo(() => {
+    if (workflowKey === 'peptide_design' && peptideBestCandidate?.binderChainId) {
+      const syntheticInfo = resultChainInfos.find((item) => item.componentId === '__peptide_design_best_candidate__') || null;
+      return resultChainInfos.map((item) =>
+        syntheticInfo && item.id === syntheticInfo.id ? peptideBestCandidate.binderChainId || item.id : item.id
+      );
+    }
     return resultChainInfos.map((item) => item.id);
-  }, [resultChainInfos]);
+  }, [peptideBestCandidate, resultChainInfos, workflowKey]);
 
   const resultComponentOptions = useMemo(() => {
     const chainByComponentId = new Map<string, string>();
     for (const info of resultChainInfos) {
       if (!chainByComponentId.has(info.componentId)) {
-        chainByComponentId.set(info.componentId, info.id);
+        const chainId =
+          workflowKey === 'peptide_design' &&
+          info.componentId === '__peptide_design_best_candidate__' &&
+          peptideBestCandidate?.binderChainId
+            ? peptideBestCandidate.binderChainId
+            : info.id;
+        chainByComponentId.set(info.componentId, chainId);
       }
     }
     return resultOverviewActiveComponents.map((component, index) => ({
@@ -307,17 +495,26 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
       sequence: component.sequence,
       chainId: chainByComponentId.get(component.id) || null,
       isSmiles: component.type === 'ligand' && component.inputMethod !== 'ccd',
-      label: `Component ${index + 1} · ${componentTypeLabel(component.type)}`
+      label:
+        component.id === '__peptide_design_best_candidate__'
+          ? 'Designed peptide'
+          : `Component ${index + 1} · ${componentTypeLabel(component.type)}`
     }));
-  }, [resultOverviewActiveComponents, resultChainInfos]);
+  }, [peptideBestCandidate, resultOverviewActiveComponents, resultChainInfos, workflowKey]);
 
   const resultChainInfoById = useMemo(() => {
     const byId = new Map<string, ChainInfo>();
     for (const info of resultChainInfos) {
-      byId.set(info.id, info);
+      const chainId =
+        workflowKey === 'peptide_design' &&
+        info.componentId === '__peptide_design_best_candidate__' &&
+        peptideBestCandidate?.binderChainId
+          ? peptideBestCandidate.binderChainId
+          : info.id;
+      byId.set(chainId, info);
     }
     return byId;
-  }, [resultChainInfos]);
+  }, [peptideBestCandidate, resultChainInfos, workflowKey]);
 
   const resultComponentById = useMemo(() => {
     const byId = new Map<string, InputComponent>();
@@ -336,12 +533,22 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
       return 'RNA';
     };
     for (const info of resultChainInfos) {
+      const chainId =
+        workflowKey === 'peptide_design' &&
+        info.componentId === '__peptide_design_best_candidate__' &&
+        peptideBestCandidate?.binderChainId
+          ? peptideBestCandidate.binderChainId
+          : info.id;
+      if (info.componentId === '__peptide_design_best_candidate__') {
+        byId.set(chainId, 'Designed peptide');
+        continue;
+      }
       const compToken = `Comp ${info.componentIndex + 1}`;
       const copySuffix = info.copyIndex > 0 ? `.${info.copyIndex + 1}` : '';
-      byId.set(info.id, `${compToken}${copySuffix} ${typeShort(info.type)}`);
+      byId.set(chainId, `${compToken}${copySuffix} ${typeShort(info.type)}`);
     }
     return byId;
-  }, [resultChainInfos]);
+  }, [peptideBestCandidate, resultChainInfos, workflowKey]);
 
   const resultPairPreference = useMemo(() => {
     if (draftProperties && typeof draftProperties === 'object') {
@@ -386,6 +593,9 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
   ]);
 
   const selectedResultLigandChainId = useMemo(() => {
+    if (workflowKey === 'peptide_design' && peptideBestCandidate?.binderChainId) {
+      return peptideBestCandidate.binderChainId;
+    }
     const shouldUseProjectFallback = workflowKey !== 'peptide_design';
     const affinityData =
       activeResultTask?.affinity && typeof activeResultTask.affinity === 'object' && !Array.isArray(activeResultTask.affinity)
@@ -419,7 +629,8 @@ export function useResultSnapshot(params: UseResultSnapshotParams): UseResultSna
     project?.affinity,
     activeResultTask?.confidence,
     project?.confidence,
-    workflowKey
+    workflowKey,
+    peptideBestCandidate
   ]);
 
   const selectedResultLigandComponent = useMemo(() => {

@@ -13,6 +13,7 @@ import { canEditProject, canEditTask } from '../../utils/accessControl';
 import { mergePeptidePreviewIntoProperties } from '../../utils/peptideTaskPreview';
 import { derivePersistedResultConfidences } from '../../utils/resultConfidenceStorage';
 import { buildTaskRuntimeFailureMessage } from '../../utils/taskRuntime';
+import { hasStoredTaskInputOptions, mergeTaskPropertiesPreservingInputOptions } from '../projectDetail/projectTaskSnapshot';
 import {
   readLeadOptTaskSummary,
   readTaskConfidenceMetrics,
@@ -425,19 +426,26 @@ function canonicalizeLeadOptPredictionMap(
 }
 
 async function persistProjectTaskPatch(task: ProjectTask, patch: Partial<ProjectTask>): Promise<ProjectTask> {
+  const writePatch =
+    patch.properties !== undefined
+      ? {
+          ...patch,
+          properties: mergeTaskPropertiesPreservingInputOptions(patch.properties, task.properties)
+        }
+      : patch;
   if (!canEditTask(task)) {
     return {
       ...task,
-      ...patch
+      ...writePatch
     } as ProjectTask;
   }
-  const patchedTask = await updateProjectTask(task.id, patch);
+  const patchedTask = await updateProjectTask(task.id, writePatch);
   if (!isProjectTaskRow(patchedTask)) {
     throw new Error(`updateProjectTask returned invalid row for task row ${task.id}`);
   }
   return {
     ...task,
-    ...patch,
+    ...writePatch,
     ...patchedTask
   } as ProjectTask;
 }
@@ -1745,9 +1753,14 @@ export async function hydrateTaskMetricsFromResultRows(
       const persistedConfidence = derivePersistedResultConfidences({
         parsedConfidenceValue: parsed.confidence,
         baseProjectConfidenceValue: nextProject.task_id === taskId ? nextProject.confidence : null,
-        baseTaskConfidenceValue: task.confidence
+        baseTaskConfidenceValue: task.confidence,
+        baseTaskInputOptions: hasStoredTaskInputOptions(task)
+          ? (task.properties as unknown as Record<string, unknown>).__vbio_input_options_v1
+          : null
       });
-      const propertiesPatch = mergePeptidePreviewIntoProperties(task.properties || {}, persistedConfidence.taskConfidence);
+      const propertiesPatch = hasStoredTaskInputOptions(task)
+        ? mergePeptidePreviewIntoProperties(task.properties || {}, persistedConfidence.taskConfidence)
+        : null;
 
       const taskPatch: Partial<ProjectTask> = {
         confidence: persistedConfidence.taskConfidence,

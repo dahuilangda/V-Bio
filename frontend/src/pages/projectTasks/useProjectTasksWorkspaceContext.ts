@@ -88,7 +88,7 @@ function readAffinityModeValue(task: ProjectTask, workflowKey: string): string {
     !Array.isArray(properties.__vbio_input_options_v1)
       ? (properties.__vbio_input_options_v1 as Record<string, unknown>)
       : {};
-  const raw = String(options.affinityMode || '').trim().toLowerCase();
+  const raw = String(options.affinityMode || properties.affinity_mode_summary || '').trim().toLowerCase();
   if (raw === 'pose' || raw === 'refine' || raw === 'interface') return raw;
   return raw === 'score' ? 'score' : '';
 }

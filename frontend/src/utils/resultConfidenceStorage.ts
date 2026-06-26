@@ -42,10 +42,18 @@ const PEPTIDE_RUNTIME_PROGRESS_KEYS = [
 ] as const;
 
 const PEPTIDE_REQUEST_OPTION_KEYS = [
+  'seed',
+  'affinityMode',
   'peptideDesignMode',
   'peptide_design_mode',
   'peptideBinderLength',
   'peptide_binder_length',
+  'peptideUseInitialSequence',
+  'peptide_use_initial_sequence',
+  'peptideInitialSequence',
+  'peptide_initial_sequence',
+  'peptideSequenceMask',
+  'peptide_sequence_mask',
   'peptideIterations',
   'peptide_iterations',
   'peptidePopulationSize',
@@ -53,7 +61,29 @@ const PEPTIDE_REQUEST_OPTION_KEYS = [
   'peptideEliteSize',
   'peptide_elite_size',
   'peptideMutationRate',
-  'peptide_mutation_rate'
+  'peptide_mutation_rate',
+  'peptideResiduePool',
+  'peptide_residue_pool',
+  'peptideCustomResidueDefinitions',
+  'peptide_custom_residue_definitions',
+  'peptideNonNaturalMin',
+  'peptide_non_natural_min',
+  'peptideNonNaturalMax',
+  'peptide_non_natural_max',
+  'peptideBicyclicLinkerCcd',
+  'peptide_bicyclic_linker_ccd',
+  'peptideBicyclicCysPositionMode',
+  'peptide_bicyclic_cys_position_mode',
+  'peptideBicyclicFixTerminalCys',
+  'peptide_bicyclic_fix_terminal_cys',
+  'peptideBicyclicIncludeExtraCys',
+  'peptide_bicyclic_include_extra_cys',
+  'peptideBicyclicCys1Pos',
+  'peptide_bicyclic_cys1_pos',
+  'peptideBicyclicCys2Pos',
+  'peptide_bicyclic_cys2_pos',
+  'peptideBicyclicCys3Pos',
+  'peptide_bicyclic_cys3_pos'
 ] as const;
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -159,6 +189,7 @@ export function derivePersistedResultConfidences(params: {
   parsedConfidenceValue: unknown;
   baseProjectConfidenceValue?: unknown;
   baseTaskConfidenceValue?: unknown;
+  baseTaskInputOptions?: unknown;
 }): {
   projectConfidence: Record<string, unknown>;
   taskConfidence: Record<string, unknown>;
@@ -172,20 +203,41 @@ export function derivePersistedResultConfidences(params: {
     preservePeptideCandidateStructureText: false
   });
   const hasPeptidePayload = hasPeptideSummaryFields(persistedConfidenceFull);
+  const baseTaskInputOptions = asRecord(params.baseTaskInputOptions);
+  const inputOptionsConfidence = Object.keys(baseTaskInputOptions).length > 0
+    ? { request: { options: baseTaskInputOptions } }
+    : {};
   const persistedProjectConfidenceSource = hasPeptidePayload ? persistedConfidenceCompact : persistedConfidenceFull;
-  const projectConfidence = hasPeptidePayload
-    ? persistedProjectConfidenceSource
-    : mergePeptideSummaryIntoParsedConfidence(
-        persistedProjectConfidenceSource,
-        asRecord(params.baseProjectConfidenceValue)
-      );
+  const projectConfidence = mergePeptideSummaryIntoParsedConfidence(
+    persistedProjectConfidenceSource,
+    {
+      ...inputOptionsConfidence,
+      ...asRecord(params.baseProjectConfidenceValue),
+      request: {
+        ...asRecord(asRecord(params.baseProjectConfidenceValue).request),
+        options: {
+          ...asRecord(asRecord(asRecord(params.baseProjectConfidenceValue).request).options),
+          ...baseTaskInputOptions
+        }
+      }
+    }
+  );
   const taskConfidenceBase = asRecord(params.baseTaskConfidenceValue);
-  const effectiveTaskBase =
+  const effectiveTaskBaseSource =
     Object.keys(taskConfidenceBase).length > 0
       ? taskConfidenceBase
-      : hasPeptidePayload
-        ? null
-        : asRecord(params.baseProjectConfidenceValue);
+      : asRecord(params.baseProjectConfidenceValue);
+  const effectiveTaskBase = {
+    ...inputOptionsConfidence,
+    ...effectiveTaskBaseSource,
+    request: {
+      ...asRecord(effectiveTaskBaseSource.request),
+      options: {
+        ...asRecord(asRecord(effectiveTaskBaseSource.request).options),
+        ...baseTaskInputOptions
+      }
+    }
+  };
   const taskConfidence = mergePeptideSummaryIntoParsedConfidence(
     hasPeptidePayload ? persistedConfidenceCompact : persistedConfidenceFull,
     effectiveTaskBase

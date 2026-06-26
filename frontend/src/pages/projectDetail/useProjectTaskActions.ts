@@ -180,9 +180,10 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
         payload,
         updateProjectTask,
         setProjectTasks,
-        sortProjectTasks
+        sortProjectTasks,
+        currentTask: projectTasks.find((row) => String(row.id || '').trim() === taskRowId) || null
       }),
-    [updateProjectTask, setProjectTasks, sortProjectTasks]
+    [projectTasks, updateProjectTask, setProjectTasks, sortProjectTasks]
   );
 
   const resolveEditableDraftTaskRowId = useCallback(

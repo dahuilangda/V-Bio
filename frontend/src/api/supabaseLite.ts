@@ -1212,9 +1212,7 @@ export async function listProjectTasksForList(
             target: readText(rowRecord.properties_target),
             ligand: readText(rowRecord.properties_ligand),
             binder: readText(rowRecord.properties_binder),
-            __vbio_input_options_v1: compactObjectRecord({
-              affinityMode: readText(rowRecord.properties_affinity_mode)
-            }),
+            affinity_mode_summary: readText(rowRecord.properties_affinity_mode),
             ...(Object.keys(peptidePreview).length > 0 ? { [PEPTIDE_TASK_PREVIEW_KEY]: peptidePreview } : {})
           });
         })()

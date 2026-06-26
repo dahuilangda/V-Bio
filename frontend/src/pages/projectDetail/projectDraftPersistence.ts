@@ -2,7 +2,7 @@ import type { Dispatch, SetStateAction } from 'react';
 import type { InputComponent, Project, ProjectInputConfig, ProjectTask } from '../../types/models';
 import { extractPrimaryProteinAndLigand } from '../../utils/projectInputs';
 import { getWorkflowDefinition } from '../../utils/workflows';
-import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
+import { mergeTaskInputOptionsIntoProperties, mergeTaskPropertiesPreservingInputOptions } from './projectTaskSnapshot';
 
 export interface DraftSnapshotSource {
   taskName: string;
@@ -41,34 +41,56 @@ export async function patchTaskRecord(params: {
   ) => Promise<ProjectTask>;
   setProjectTasks: Dispatch<SetStateAction<ProjectTask[]>>;
   sortProjectTasks: (rows: ProjectTask[]) => ProjectTask[];
+  currentTask?: ProjectTask | null;
 }): Promise<ProjectTask | null> {
-  const { taskRowId, payload, updateProjectTask, setProjectTasks, sortProjectTasks } = params;
+  const { taskRowId, payload, updateProjectTask, setProjectTasks, sortProjectTasks, currentTask } = params;
+  const writePayload = payload.properties !== undefined && currentTask
+    ? {
+        ...payload,
+        properties: mergeTaskPropertiesPreservingInputOptions(payload.properties, currentTask.properties)
+      }
+    : payload;
   if (taskRowId.startsWith('local-')) {
     setProjectTasks((prev) =>
       sortProjectTasks(
-        prev.map((row) =>
-          row.id === taskRowId
+        prev.map((row) => {
+          if (row.id !== taskRowId) return row;
+          const rowPayload = payload.properties !== undefined
             ? {
-                ...row,
                 ...payload,
-                updated_at: new Date().toISOString(),
+                properties: mergeTaskPropertiesPreservingInputOptions(payload.properties, row.properties)
               }
-            : row
-        )
+            : payload;
+          return {
+            ...row,
+            ...rowPayload,
+            updated_at: new Date().toISOString(),
+          };
+        })
       )
     );
     return null;
   }
-  const next = await updateProjectTask(taskRowId, payload, { minimalReturn: true });
+  const next = await updateProjectTask(taskRowId, writePayload, { minimalReturn: true });
   let mergedRow: ProjectTask | null = null;
   setProjectTasks((prev) =>
     sortProjectTasks(
       prev.map((row) => {
         if (row.id !== taskRowId) return row;
+        const rowPayload = payload.properties !== undefined
+          ? {
+              ...payload,
+              properties: mergeTaskPropertiesPreservingInputOptions(payload.properties, row.properties)
+            }
+          : payload;
         mergedRow = {
           ...row,
-          ...payload,
+          ...rowPayload,
           ...next,
+          properties: mergeTaskPropertiesPreservingInputOptions(
+            (next as ProjectTask).properties ?? rowPayload.properties,
+            row.properties
+          ),
           updated_at: String(next.updated_at || new Date().toISOString())
         } as ProjectTask;
         return mergedRow;

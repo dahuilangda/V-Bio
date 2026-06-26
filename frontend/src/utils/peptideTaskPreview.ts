@@ -227,6 +227,34 @@ function readCandidateSequence(row: Record<string, unknown>): string {
   );
 }
 
+function readCandidateModifications(row: Record<string, unknown>, sequenceLength: number): Array<Record<string, unknown>> {
+  const raw =
+    readObjectPath(row, 'modifications') ??
+    readObjectPath(row, 'protein_modifications') ??
+    readObjectPath(row, 'residue_modifications');
+  if (!Array.isArray(raw)) return [];
+  const rows: Array<Record<string, unknown>> = [];
+  const seen = new Set<number>();
+  raw.forEach((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return;
+    const record = item as Record<string, unknown>;
+    const position = Math.floor(Number(record.position ?? record.residue_index ?? record.residue ?? record.pos));
+    const ccd = readText(record.ccd ?? record.code ?? record.residue_name).toUpperCase();
+    if (!Number.isFinite(position) || position < 1 || position > sequenceLength || !ccd || seen.has(position)) return;
+    seen.add(position);
+    rows.push({
+      id: readText(record.id) || `peptide-mod-${position}-${ccd}-${index}`,
+      position,
+      baseResidue: readText(record.baseResidue ?? record.base_residue).toUpperCase().slice(0, 1),
+      ccd,
+      inputMethod: readText(record.inputMethod ?? record.input_method).toLowerCase() === 'jsme' ? 'jsme' : 'ccd',
+      ...(typeof record.smiles === 'string' && record.smiles.trim() ? { smiles: record.smiles.trim() } : {}),
+      ...(typeof record.label === 'string' && record.label.trim() ? { label: record.label.trim() } : {})
+    });
+  });
+  return rows.sort((a, b) => Number(a.position || 0) - Number(b.position || 0));
+}
+
 function compareCandidateRows(a: Record<string, unknown>, b: Record<string, unknown>, aIndex: number, bIndex: number): number {
   const aRank = firstFiniteMetric([a], ['rank', 'ranking', 'order']);
   const bRank = firstFiniteMetric([b], ['rank', 'ranking', 'order']);
@@ -471,6 +499,7 @@ function buildPeptidePreview(payload: Record<string, unknown>): Record<string, u
         'ligand_chain_id'
       ]);
       const residuePlddts = readCandidateResiduePlddts(best, sequence.length, binderChainId);
+      const modifications = readCandidateModifications(best, sequence.length);
       bestCandidate = {
         sequence,
         plddt: normalizePlddtValue(firstFiniteMetric([best], ['binder_avg_plddt', 'plddt', 'ligand_mean_plddt', 'mean_plddt'])),
@@ -482,7 +511,8 @@ function buildPeptidePreview(payload: Record<string, unknown>): Record<string, u
         rank: normalizeInt(firstFiniteMetric([best], ['rank', 'ranking', 'order'])),
         generation: normalizeInt(firstFiniteMetric([best], ['generation', 'iteration', 'iter'])),
         binder_chain_id: binderChainId,
-        residue_plddts: residuePlddts.length >= Math.min(sequence.length, 4) ? residuePlddts : []
+        residue_plddts: residuePlddts.length >= Math.min(sequence.length, 4) ? residuePlddts : [],
+        modifications
       };
     }
   }
