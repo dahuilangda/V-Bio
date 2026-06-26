@@ -1613,14 +1613,16 @@ function readPeptideBestCandidatePreview(task: ProjectTask): PeptideBestCandidat
     const candidateRows = readFirstRecordArrayFromPayloadPaths(
       [confidence, peptideDesign, peptideProgress, topProgress],
       [
-        'peptide_design.best_sequences',
-        'peptide_design.current_best_sequences',
-        'peptide_design.candidates',
-        'best_sequences',
-        'current_best_sequences',
-        'candidates',
+        'progress.current_best_sequences',
         'progress.best_sequences',
-        'progress.current_best_sequences'
+        'peptide_design.progress.current_best_sequences',
+        'peptide_design.progress.best_sequences',
+        'peptide_design.current_best_sequences',
+        'current_best_sequences',
+        'peptide_design.best_sequences',
+        'best_sequences',
+        'peptide_design.candidates',
+        'candidates'
       ]
     );
     if (candidateRows.length > 0) {

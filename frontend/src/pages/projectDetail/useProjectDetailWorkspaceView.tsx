@@ -60,6 +60,12 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
 }
 
+function hasExplicitPeptideResiduePool(task: ProjectTask | null | undefined): boolean {
+  const properties = asRecord(task?.properties);
+  const options = asRecord(properties.__vbio_input_options_v1);
+  return Array.isArray(options.peptideResiduePool) || Array.isArray(options.peptide_residue_pool);
+}
+
 function normalizeCopilotPrefillComponents(value: unknown): InputComponent[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -3292,6 +3298,23 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     affinityEnableDisabledReason,
     showAffinityComputeToggle: !isPeptideDesignWorkflow
   });
+  const peptideResiduePoolAvailable = useMemo(() => {
+    if (!isPeptideDesignWorkflow) return true;
+    const query = new URLSearchParams(runtime.locationSearch);
+    const requestedTaskRowId = readText(query.get('task_row_id')).trim();
+    const taskRow =
+      (requestedTaskRowId
+        ? projectTasks.find((row) => readText(row.id).trim() === requestedTaskRowId)
+        : null) ||
+      requestedStatusTaskRow ||
+      statusContextTaskRow ||
+      activeResultTask ||
+      null;
+    const state = readText(taskRow?.task_state).trim().toUpperCase();
+    if (state && state !== 'DRAFT') return hasExplicitPeptideResiduePool(taskRow);
+    return true;
+  }, [activeResultTask, isPeptideDesignWorkflow, projectTasks, requestedStatusTaskRow, runtime.locationSearch, statusContextTaskRow]);
+
   const {
     projectResultsSectionProps,
     affinityWorkflowSectionProps,
@@ -3422,6 +3445,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     peptideEliteSize: draft.inputConfig.options.peptideEliteSize ?? 5,
     peptideMutationRate: draft.inputConfig.options.peptideMutationRate ?? 0.25,
     peptideResiduePool: draft.inputConfig.options.peptideResiduePool ?? [],
+    peptideResiduePoolAvailable,
     peptideNonNaturalMin: draft.inputConfig.options.peptideNonNaturalMin ?? 0,
     peptideNonNaturalMax: draft.inputConfig.options.peptideNonNaturalMax ?? 0,
     peptideBicyclicLinkerCcd: draft.inputConfig.options.peptideBicyclicLinkerCcd ?? 'SEZ',

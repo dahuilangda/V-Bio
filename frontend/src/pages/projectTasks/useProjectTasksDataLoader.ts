@@ -66,6 +66,34 @@ function hasObjectContent(value: unknown): boolean {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length > 0);
 }
 
+function asObjectRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function hasPeptideCandidateRows(value: unknown): boolean {
+  const confidence = asObjectRecord(value);
+  if (Object.keys(confidence).length === 0) return false;
+  const peptide = asObjectRecord(confidence.peptide_design);
+  const progress = asObjectRecord(confidence.progress);
+  const peptideProgress = asObjectRecord(peptide.progress);
+  const sources = [confidence, peptide, progress, peptideProgress];
+  return sources.some(
+    (source) =>
+      (Array.isArray(source.best_sequences) && source.best_sequences.length > 0) ||
+      (Array.isArray(source.current_best_sequences) && source.current_best_sequences.length > 0) ||
+      (Array.isArray(source.candidates) && source.candidates.length > 0)
+  );
+}
+
+function mergeConfidencePreservingPeptideCandidates(nextValue: unknown, prevValue: unknown): unknown {
+  const next = asObjectRecord(nextValue);
+  const prev = asObjectRecord(prevValue);
+  if (Object.keys(next).length === 0) return prevValue;
+  if (Object.keys(prev).length === 0) return nextValue;
+  if (hasPeptideCandidateRows(prev) && !hasPeptideCandidateRows(next)) return prevValue;
+  return nextValue;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
@@ -151,7 +179,7 @@ function mergeTaskRuntimeFields(next: ProjectTask, prev: ProjectTask): ProjectTa
     const isRuntimeState = nextTaskState === 'QUEUED' || nextTaskState === 'RUNNING';
     return {
       ...next,
-      confidence: hasObjectContent(next.confidence) ? next.confidence : prev.confidence,
+      confidence: hasObjectContent(next.confidence) ? mergeConfidencePreservingPeptideCandidates(next.confidence, prev.confidence) as ProjectTask['confidence'] : prev.confidence,
       affinity: hasObjectContent(next.affinity) ? next.affinity : prev.affinity,
       components: Array.isArray(next.components) && next.components.length > 0 ? next.components : prev.components,
       properties: mergedLeadOptProperties || mergeTaskPropertiesPreservingInputOptions(next.properties, prev.properties),
@@ -167,7 +195,7 @@ function mergeTaskRuntimeFields(next: ProjectTask, prev: ProjectTask): ProjectTa
   if (prevPriority > nextPriority) {
     return {
       ...next,
-      confidence: hasObjectContent(next.confidence) ? next.confidence : prev.confidence,
+      confidence: hasObjectContent(next.confidence) ? mergeConfidencePreservingPeptideCandidates(next.confidence, prev.confidence) as ProjectTask['confidence'] : prev.confidence,
       affinity: hasObjectContent(next.affinity) ? next.affinity : prev.affinity,
       components: Array.isArray(next.components) && next.components.length > 0 ? next.components : prev.components,
       properties: mergedLeadOptProperties || mergeTaskPropertiesPreservingInputOptions(next.properties, prev.properties),
@@ -181,7 +209,7 @@ function mergeTaskRuntimeFields(next: ProjectTask, prev: ProjectTask): ProjectTa
   }
   return {
     ...next,
-    confidence: hasObjectContent(next.confidence) ? next.confidence : prev.confidence,
+    confidence: hasObjectContent(next.confidence) ? mergeConfidencePreservingPeptideCandidates(next.confidence, prev.confidence) as ProjectTask['confidence'] : prev.confidence,
     affinity: hasObjectContent(next.affinity) ? next.affinity : prev.affinity,
     components: Array.isArray(next.components) && next.components.length > 0 ? next.components : prev.components,
     properties: mergedLeadOptProperties || mergeTaskPropertiesPreservingInputOptions(next.properties, prev.properties),

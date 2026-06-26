@@ -1290,27 +1290,31 @@ function parseCandidateModelLabel(row: Record<string, unknown>, fallback: string
 
 function extractRawCandidates(snapshotConfidence: Record<string, unknown>): Array<Record<string, unknown>> {
   const candidatePaths = [
-    'peptide_design.best_sequences',
+    'progress.current_best_sequences',
+    'progress.best_sequences',
+    'peptide_design.progress.current_best_sequences',
+    'peptide_design.progress.best_sequences',
     'peptide_design.current_best_sequences',
-    'peptide_design.candidates',
-    'designer.best_sequences',
-    'designer.current_best_sequences',
-    'designer.candidates',
-    'results.best_sequences',
-    'results.current_best_sequences',
-    'results.candidates',
-    'best_sequences',
     'current_best_sequences',
+    'peptide_design.best_sequences',
+    'best_sequences',
+    'peptide_design.candidates',
+    'designer.current_best_sequences',
+    'designer.best_sequences',
+    'designer.candidates',
+    'results.current_best_sequences',
+    'results.best_sequences',
+    'results.candidates',
     'peptide_candidates',
     'designed_peptides',
     'design_candidates',
     'candidates'
   ];
+  const rows: Array<Record<string, unknown>> = [];
   for (const path of candidatePaths) {
-    const rows = asRecordArray(readObjectPath(snapshotConfidence, path));
-    if (rows.length > 0) return rows;
+    rows.push(...asRecordArray(readObjectPath(snapshotConfidence, path)));
   }
-  return [];
+  return rows;
 }
 
 function candidateIdentity(row: PeptideDesignCandidate): string {
@@ -1592,7 +1596,7 @@ function extractRuntimeContext(params: {
   }
 
   const liveCandidateRows = readFirstRecordArrayFromPaths(
-    [statusPayload, statusProgress, statusPeptide, statusPeptideProgress],
+    [statusPayload, statusProgress, statusPeptide, statusPeptideProgress, snapshotConfidence, confidencePeptide, confidencePeptideProgress],
     [
       'progress.current_best_sequences',
       'progress.best_sequences',

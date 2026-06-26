@@ -152,6 +152,7 @@ interface UseProjectWorkflowSectionPropsInput {
   peptideEliteSize: number;
   peptideMutationRate: number;
   peptideResiduePool: PeptideResiduePoolSelection[];
+  peptideResiduePoolAvailable?: boolean;
   peptideNonNaturalMin: number;
   peptideNonNaturalMax: number;
   peptideBicyclicLinkerCcd: 'SEZ' | '29N' | 'BS3';
@@ -311,6 +312,7 @@ export function useProjectWorkflowSectionProps({
   peptideEliteSize,
   peptideMutationRate,
   peptideResiduePool,
+  peptideResiduePoolAvailable = true,
   peptideNonNaturalMin,
   peptideNonNaturalMax,
   peptideBicyclicLinkerCcd,
@@ -500,6 +502,7 @@ export function useProjectWorkflowSectionProps({
         peptideEliteSize,
         peptideMutationRate,
         peptideResiduePool,
+        peptideResiduePoolAvailable,
         peptideNonNaturalMin,
         peptideNonNaturalMax,
         peptideCustomResidueLibrary: customResidueLibrary,

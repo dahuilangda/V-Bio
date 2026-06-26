@@ -387,6 +387,32 @@ function readRecordUpdatedAt(value: unknown): number {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
+function hasPeptideCandidateRows(value: unknown): boolean {
+  const confidence = asObjectRecord(value);
+  if (Object.keys(confidence).length === 0) return false;
+  const peptide = asObjectRecord(confidence.peptide_design);
+  const progress = asObjectRecord(confidence.progress);
+  const peptideProgress = asObjectRecord(peptide.progress);
+  const sources = [confidence, peptide, progress, peptideProgress];
+  return sources.some(
+    (source) =>
+      (Array.isArray(source.best_sequences) && source.best_sequences.length > 0) ||
+      (Array.isArray(source.current_best_sequences) && source.current_best_sequences.length > 0) ||
+      (Array.isArray(source.candidates) && source.candidates.length > 0)
+  );
+}
+
+function mergeConfidencePreservingPeptideCandidates(nextValue: unknown, prevValue: unknown): unknown {
+  const next = asObjectRecord(nextValue);
+  const prev = asObjectRecord(prevValue);
+  if (Object.keys(next).length === 0) return prevValue;
+  if (Object.keys(prev).length === 0) return nextValue;
+  if (hasPeptideCandidateRows(prev) && !hasPeptideCandidateRows(next)) {
+    return prevValue;
+  }
+  return nextValue;
+}
+
 function mergeLeadOptPredictionMapsByKey(nextValue: unknown, prevValue: unknown): Record<string, unknown> {
   const next = asObjectRecord(nextValue);
   const prev = asObjectRecord(prevValue);
@@ -477,7 +503,9 @@ function mergePayloadFields<T extends object, U extends object>(next: T, prev: U
     merged[key] = prevAny[key];
   };
   if (Object.prototype.hasOwnProperty.call(nextAny, 'confidence') || Object.prototype.hasOwnProperty.call(prevAny, 'confidence')) {
-    merged.confidence = hasObjectContent(nextAny.confidence) ? nextAny.confidence : prevAny.confidence;
+    merged.confidence = hasObjectContent(nextAny.confidence)
+      ? mergeConfidencePreservingPeptideCandidates(nextAny.confidence, prevAny.confidence)
+      : prevAny.confidence;
   }
   if (Object.prototype.hasOwnProperty.call(nextAny, 'affinity') || Object.prototype.hasOwnProperty.call(prevAny, 'affinity')) {
     merged.affinity = hasObjectContent(nextAny.affinity) ? nextAny.affinity : prevAny.affinity;
@@ -1764,14 +1792,14 @@ export function useProjectDetailRuntimeContext() {
     const sourceTaskState = String(sourceRow?.task_state || '').trim().toUpperCase();
     if (sourceTaskState !== 'SUCCESS') return;
 
-    const missingConfidence = !hasObjectContent(sourceRow?.confidence);
+    const missingPeptideCandidates = !hasPeptideCandidateRows(sourceRow?.confidence);
     const missingAffinity = !hasObjectContent(sourceRow?.affinity);
-    if (!missingConfidence && !missingAffinity) return;
+    if (!missingPeptideCandidates && !missingAffinity) return;
 
     const marker = [
       sourceRowId,
       String(sourceRow?.updated_at || '').trim(),
-      missingConfidence ? 'confidence' : '',
+      missingPeptideCandidates ? 'peptide-candidates' : '',
       missingAffinity ? 'affinity' : ''
     ].join('|');
     if (peptideResultHydrationRef.current[sourceRowId] === marker) return;
@@ -1788,7 +1816,7 @@ export function useProjectDetailRuntimeContext() {
           includeProteinSequence: false
         });
         if (cancelled || !detailRow) return;
-        if (!hasObjectContent(detailRow.confidence) && !hasObjectContent(detailRow.affinity)) return;
+        if (!hasPeptideCandidateRows(detailRow.confidence) && !hasObjectContent(detailRow.affinity)) return;
         peptideResultHydrationRef.current[sourceRowId] = marker;
         setProjectTasks((prev) =>
           prev.map((row) =>

@@ -60,6 +60,7 @@ export interface WorkflowRuntimeSettingsSectionProps {
   peptideEliteSize: number;
   peptideMutationRate: number;
   peptideResiduePool: PeptideResiduePoolSelection[];
+  peptideResiduePoolAvailable?: boolean;
   peptideNonNaturalMin: number;
   peptideNonNaturalMax: number;
   peptideCustomResidueLibrary: CustomCcdMoleculeInput[];
@@ -112,6 +113,7 @@ export function WorkflowRuntimeSettingsSection({
   peptideEliteSize,
   peptideMutationRate,
   peptideResiduePool,
+  peptideResiduePoolAvailable = true,
   peptideNonNaturalMin,
   peptideNonNaturalMax,
   peptideCustomResidueLibrary,
@@ -267,11 +269,11 @@ export function WorkflowRuntimeSettingsSection({
     if (Array.isArray(peptideResiduePool)) {
       peptideResiduePool.forEach((item) => selected.add(`${item.kind}:${item.code}`));
     }
-    if (selected.size === 0) {
+    if (peptideResiduePoolAvailable && selected.size === 0) {
       NATURAL_AMINO_ACID_RESIDUES.forEach((item) => selected.add(`natural:${item.ccd}`));
     }
     return selected;
-  }, [peptideResiduePool]);
+  }, [peptideResiduePool, peptideResiduePoolAvailable]);
   const selectedNonNaturalCount = useMemo(
     () =>
       residueCatalogSections
@@ -284,6 +286,7 @@ export function WorkflowRuntimeSettingsSection({
     () => NATURAL_AMINO_ACID_RESIDUES.filter((entry) => selectedResidueKeySet.has(`natural:${entry.ccd}`)).length,
     [selectedResidueKeySet]
   );
+  const residuePoolControlsDisabled = !canEdit;
   const protectedResiduePositions = useMemo(() => {
     const protectedSet = new Set<number>();
     maskChars.forEach((maskChar, idx) => {
@@ -337,7 +340,7 @@ export function WorkflowRuntimeSettingsSection({
   }, [residueCatalogSections, positions, peptideBinderLength, protectedResiduePositions, isBicyclicMode]);
   const clampNonNaturalLimit = (value: number) => Math.max(0, Math.min(peptideBinderLength, Math.floor(Number(value) || 0)));
   const toggleResiduePoolEntry = (entry: ResidueCatalogEntry) => {
-    if (!canEdit) return;
+    if (residuePoolControlsDisabled) return;
     const kind = normalizePoolEntryKind(entry);
     const key = `${kind}:${entry.ccd}`;
     const next = new Set(selectedResidueKeySet);
@@ -358,7 +361,7 @@ export function WorkflowRuntimeSettingsSection({
   };
 
   const setResidueSectionSelection = (sectionKind: PeptideResiduePoolSelection['kind'], entries: ResidueCatalogEntry[], selected: boolean) => {
-    if (!canEdit) return;
+    if (residuePoolControlsDisabled) return;
     const next = new Set(selectedResidueKeySet);
     entries.forEach((entry) => {
       const key = `${sectionKind}:${entry.ccd}`;
@@ -378,7 +381,7 @@ export function WorkflowRuntimeSettingsSection({
 
 
   const saveCustomResidueDraft = () => {
-    if (!canEdit || !customDraftValid) return;
+    if (residuePoolControlsDisabled || !customDraftValid) return;
     const ccd = normalizeCustomResidueCode(customDraftCcd);
     const smiles = customDraftSmiles.trim();
     if (!ccd || !smiles) return;
@@ -409,7 +412,7 @@ export function WorkflowRuntimeSettingsSection({
   };
 
   const deleteCustomResidue = (ccdRaw: string) => {
-    if (!canEdit) return;
+    if (residuePoolControlsDisabled) return;
     const ccd = normalizeCustomResidueCode(ccdRaw);
     onCustomResidueLibraryChange(peptideCustomResidueLibrary.filter((item) => normalizeCustomResidueCode(item.ccd) !== ccd));
     onPeptideResiduePoolChange(peptideResiduePool.filter((item) => !(item.kind === 'custom' && item.code === ccd)));
@@ -543,7 +546,7 @@ export function WorkflowRuntimeSettingsSection({
                   <div className="peptide-residue-config-head">
                     <div className="peptide-residue-config-title">
                       <strong>Residues used for design</strong>
-                      <span>Select the residues available during peptide generation.</span>
+                      <span>Select the residues available for the next peptide generation.</span>
                     </div>
                     <span className="peptide-residue-selection-summary">
                       {selectedNaturalCount} natural / {selectedNonNaturalCount} non-natural selected
@@ -570,7 +573,7 @@ export function WorkflowRuntimeSettingsSection({
                             const nextMin = clampNonNaturalLimit(Number(e.target.value));
                             onPeptideNonNaturalRangeChange(nextMin, Math.max(nextMin, peptideNonNaturalMax));
                           }}
-                          disabled={!canEdit || selectedNonNaturalCount === 0}
+                          disabled={residuePoolControlsDisabled || selectedNonNaturalCount === 0}
                         />
                       </label>
                       <label className="field peptide-residue-usage-field">
@@ -584,11 +587,16 @@ export function WorkflowRuntimeSettingsSection({
                             const nextMax = clampNonNaturalLimit(Number(e.target.value));
                             onPeptideNonNaturalRangeChange(Math.min(peptideNonNaturalMin, nextMax), nextMax);
                           }}
-                          disabled={!canEdit || selectedNonNaturalCount === 0}
+                          disabled={residuePoolControlsDisabled || selectedNonNaturalCount === 0}
                         />
                       </label>
                     </div>
                   </div>
+                  {!peptideResiduePoolAvailable ? (
+                    <div className="muted small peptide-runtime-backend-hint">
+                      The completed task does not contain the original residue-pool snapshot; edits here configure the next submitted task.
+                    </div>
+                  ) : null}
                   <div className="peptide-residue-pool" aria-label="Design residues">
                     {residueCatalogSections.map((section) => {
                       const sectionSelectedCount = section.entries.filter((entry) =>
@@ -605,7 +613,7 @@ export function WorkflowRuntimeSettingsSection({
                                 type="button"
                                 className="btn btn-primary btn-compact"
                                 onClick={() => openCustomResidueEditor()}
-                                disabled={!canEdit}
+                                disabled={residuePoolControlsDisabled}
                               >
                                 Add
                               </button>
@@ -614,7 +622,7 @@ export function WorkflowRuntimeSettingsSection({
                               type="button"
                               className="btn btn-ghost btn-compact"
                               onClick={() => setResidueSectionSelection(section.kind, section.entries, true)}
-                              disabled={!canEdit || section.entries.length === 0}
+                              disabled={residuePoolControlsDisabled || section.entries.length === 0}
                             >
                               Select all
                             </button>
@@ -622,7 +630,7 @@ export function WorkflowRuntimeSettingsSection({
                               type="button"
                               className="btn btn-ghost btn-compact"
                               onClick={() => setResidueSectionSelection(section.kind, section.entries, false)}
-                              disabled={!canEdit || section.entries.length === 0}
+                              disabled={residuePoolControlsDisabled || section.entries.length === 0}
                             >
                               Select none
                             </button>
@@ -635,7 +643,7 @@ export function WorkflowRuntimeSettingsSection({
                               const active = selectedResidueKeySet.has(`${kind}:${entry.ccd}`);
                               const placementStatus = residuePlacementStatusByKey.get(`${kind}:${entry.ccd}`);
                               const unavailable = placementStatus?.selectable === false;
-                              const cardDisabled = !canEdit;
+                              const cardDisabled = residuePoolControlsDisabled;
                               const helpText = [entry.backboneLabel, placementStatus?.reason].filter(Boolean).join(' · ');
                               return (
                                 <button
@@ -671,7 +679,7 @@ export function WorkflowRuntimeSettingsSection({
                                       <button
                                         type="button"
                                         className="btn btn-ghost btn-compact"
-                                        disabled={!canEdit}
+                                        disabled={residuePoolControlsDisabled}
                                         onClick={() => {
                                           const libraryEntry = peptideCustomResidueLibrary.find((item) => normalizeCustomResidueCode(item.ccd) === entry.ccd);
                                           openCustomResidueEditor(libraryEntry);
@@ -682,7 +690,7 @@ export function WorkflowRuntimeSettingsSection({
                                       <button
                                         type="button"
                                         className="btn btn-ghost btn-compact danger"
-                                        disabled={!canEdit}
+                                        disabled={residuePoolControlsDisabled}
                                         onClick={() => deleteCustomResidue(entry.ccd)}
                                       >
                                         Delete
@@ -716,7 +724,7 @@ export function WorkflowRuntimeSettingsSection({
                         <span>CCD</span>
                         <input
                           value={customDraftCcd}
-                          disabled={!canEdit}
+                          disabled={residuePoolControlsDisabled}
                           onChange={(event) => setCustomDraftCcd(normalizeCustomResidueCode(event.target.value))}
                           placeholder="UAA1"
                         />
@@ -725,7 +733,7 @@ export function WorkflowRuntimeSettingsSection({
                         <span>Name</span>
                         <input
                           value={customDraftName}
-                          disabled={!canEdit}
+                          disabled={residuePoolControlsDisabled}
                           onChange={(event) => setCustomDraftName(event.target.value)}
                           placeholder="Custom residue"
                         />
@@ -734,7 +742,7 @@ export function WorkflowRuntimeSettingsSection({
                         <span>Base residue</span>
                         <select
                           value={customDraftBaseResidue}
-                          disabled={!canEdit}
+                          disabled={residuePoolControlsDisabled}
                           onChange={(event) => setCustomDraftBaseResidue(event.target.value)}
                         >
                           {'ARNDCQEGHILKMFPSTWYV'.split('').map((aa) => (
@@ -765,7 +773,7 @@ export function WorkflowRuntimeSettingsSection({
                       <span>Custom Residue SMILES</span>
                       <input
                         value={customDraftSmiles}
-                        disabled={!canEdit}
+                        disabled={residuePoolControlsDisabled}
                         onChange={(event) => setCustomDraftSmiles(event.target.value)}
                       />
                     </label>
@@ -773,7 +781,7 @@ export function WorkflowRuntimeSettingsSection({
                       <button
                         type="button"
                         className="btn btn-primary btn-compact"
-                        disabled={!canEdit || !normalizeCustomResidueCode(customDraftCcd) || !customDraftSmiles.trim() || !customDraftValid}
+                        disabled={residuePoolControlsDisabled || !normalizeCustomResidueCode(customDraftCcd) || !customDraftSmiles.trim() || !customDraftValid}
                         onClick={saveCustomResidueDraft}
                       >
                         Save residue
