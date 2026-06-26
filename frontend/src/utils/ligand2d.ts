@@ -170,6 +170,17 @@ export interface Ligand2DRenderOptions {
   confidenceHint?: number | null;
   highlightQuery?: string | null;
   highlightAtomIndices?: number[] | null;
+  atomLabels?: string[] | null;
+}
+
+function normalizeAtomLabels(atomLabels: string[] | null | undefined, atomCount: number): Record<number, string> {
+  if (!Array.isArray(atomLabels) || atomCount <= 0) return {};
+  const labels: Record<number, string> = {};
+  atomLabels.slice(0, atomCount).forEach((label, index) => {
+    const value = String(label || '').trim();
+    if (value) labels[index] = value;
+  });
+  return labels;
 }
 
 function normalizeSubstructureMatch(value: unknown): number[] {
@@ -218,7 +229,8 @@ export function renderLigand2DSvg(
     atomConfidences = null,
     confidenceHint = null,
     highlightQuery = null,
-    highlightAtomIndices = null
+    highlightAtomIndices = null,
+    atomLabels = null
   }: Ligand2DRenderOptions
 ): string {
   const value = smiles.trim();
@@ -265,6 +277,7 @@ export function renderLigand2DSvg(
     let rawSvg = '';
     if (typeof renderMol.get_svg_with_highlights === 'function') {
       try {
+        const labels = normalizeAtomLabels(atomLabels, atomCount);
         const details: Record<string, unknown> = {
           width,
           height,
@@ -274,9 +287,13 @@ export function renderLigand2DSvg(
           fixedFontSize,
           maxFontSize: 36,
           drawOptions: {
-            padding: depictionPadding
+            padding: depictionPadding,
+            atomLabels: labels
           }
         };
+        if (Object.keys(labels).length > 0) {
+          details.atomLabels = labels;
+        }
 
         if (perAtomConfidence.length > 0) {
           const highlightAtoms: number[] = [];

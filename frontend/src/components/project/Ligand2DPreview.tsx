@@ -10,6 +10,7 @@ interface Ligand2DPreviewProps {
   confidenceHint?: number | null;
   highlightQuery?: string | null;
   highlightAtomIndices?: number[] | null;
+  atomLabels?: string[] | null;
   onAtomClick?: (atomIndex: number) => void;
   onBackgroundClick?: () => void;
 }
@@ -43,11 +44,12 @@ function extractAtomIndexFromElement(target: EventTarget | null, boundary: HTMLE
   let node = target as HTMLElement | null;
   while (node && node !== boundary) {
     const className = String(node.getAttribute('class') || '');
-    const match = className.match(/atom-(\d+)/);
-    if (match) {
-      const atomIndex = Number.parseInt(match[1], 10);
-      if (Number.isFinite(atomIndex) && atomIndex >= 0) return atomIndex;
-    }
+    const matches = Array.from(className.matchAll(/atom-(\d+)/g))
+      .map((match) => Number.parseInt(match[1], 10))
+      .filter((atomIndex) => Number.isFinite(atomIndex) && atomIndex >= 0);
+    const unique = Array.from(new Set(matches));
+    if (unique.length === 1) return unique[0];
+    if (unique.length > 1) return null;
     node = node.parentElement;
   }
   return null;
@@ -61,6 +63,7 @@ export function Ligand2DPreview({
   confidenceHint = null,
   highlightQuery = null,
   highlightAtomIndices = null,
+  atomLabels = null,
   onAtomClick,
   onBackgroundClick
 }: Ligand2DPreviewProps) {
@@ -77,6 +80,11 @@ export function Ligand2DPreview({
     if (!Array.isArray(highlightAtomIndices) || highlightAtomIndices.length === 0) return '';
     return highlightAtomIndices.map((value) => Math.floor(Number(value) || 0)).join(',');
   }, [highlightAtomIndices]);
+
+  const atomLabelSignature = useMemo(() => {
+    if (!Array.isArray(atomLabels) || atomLabels.length === 0) return '';
+    return atomLabels.map((value) => String(value || '').trim()).join('\u001f');
+  }, [atomLabels]);
 
   useEffect(() => {
     let cancelled = false;
@@ -101,7 +109,8 @@ export function Ligand2DPreview({
           atomConfidences,
           confidenceHint,
           highlightQuery,
-          highlightAtomIndices
+          highlightAtomIndices,
+          atomLabels
         });
         if (cancelled) return;
         setSvg(onAtomClick || onBackgroundClick ? injectInteractiveSvgStyle(rendered) : rendered);
@@ -124,6 +133,7 @@ export function Ligand2DPreview({
     highlightQuery,
     atomConfidenceSignature,
     highlightAtomSignature,
+    atomLabelSignature,
     onAtomClick,
     onBackgroundClick
   ]);
