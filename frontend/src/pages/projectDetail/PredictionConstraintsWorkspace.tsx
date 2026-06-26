@@ -28,6 +28,7 @@ function ConstraintSequencePicker({
   components,
   atomOptionsByChain,
   pickedResidue,
+  selectedAtomRefs,
   highlightResidues,
   activeResidue,
   disabled,
@@ -36,6 +37,7 @@ function ConstraintSequencePicker({
   components: InputComponent[];
   atomOptionsByChain: StructureAtomOptionsByChain;
   pickedResidue: { chainId: string; residue: number; atomName?: string } | null;
+  selectedAtomRefs: Array<{ chainId: string; residue: number; atomName: string }>;
   highlightResidues: Array<{ chainId: string; residue: number }>;
   activeResidue: { chainId: string; residue: number } | null;
   disabled: boolean;
@@ -45,6 +47,7 @@ function ConstraintSequencePicker({
   const chainInfos = buildChainInfos(activeComponents);
   const componentById = new Map(activeComponents.map((item) => [item.id, item] as const));
   const highlightKeys = new Set(highlightResidues.map((item) => `${item.chainId}:${item.residue}`));
+  const selectedAtomKeys = new Set(selectedAtomRefs.map((item) => `${item.chainId}:${item.residue}:${String(item.atomName || '').trim().toUpperCase()}`));
   const activeKey = activeResidue ? `${activeResidue.chainId}:${activeResidue.residue}` : '';
   const pickedKey = pickedResidue ? `${pickedResidue.chainId}:${pickedResidue.residue}` : '';
 
@@ -76,7 +79,8 @@ function ConstraintSequencePicker({
                 {(rows[0]?.atoms || []).length > 0 ? (
                   (rows[0]?.atoms || []).map((atom) => {
                     const key = `${chain.id}:1`;
-                    const picked = key === pickedKey && pickedResidue?.atomName === atom;
+                    const atomKey = `${chain.id}:1:${atom}`;
+                    const picked = (key === pickedKey && pickedResidue?.atomName === atom) || selectedAtomKeys.has(atomKey);
                     return (
                       <button
                         key={`${chain.id}:1:${atom}`}
@@ -99,7 +103,7 @@ function ConstraintSequencePicker({
                   })
                 ) : (
                   <div className="constraint-ligand-atoms-empty muted small">
-                    Atom names require a structure-derived CCD or a backend with deterministic SMILES atom naming.
+                    No deterministic atom names are available for this ligand input.
                   </div>
                 )}
               </div>
@@ -164,12 +168,13 @@ export interface PredictionConstraintsWorkspaceProps {
   constraintStructureFormat: 'cif' | 'pdb';
   constraintViewerHighlightResidues: Array<{ chainId: string; residue: number }>;
   constraintViewerActiveResidue: { chainId: string; residue: number } | null;
+  constraintSelectedAtomRefs: Array<{ chainId: string; residue: number; atomName: string }>;
   onApplyPickToSelectedConstraint: (pick: MolstarResiduePick) => void;
   onConstraintsResizerPointerDown: (event: PointerEvent<HTMLDivElement>) => void;
   onConstraintsResizerKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
   onClearConstraintSelection: () => void;
+  onConstraintPickSlotFocus: (constraintId: string, slot: 'first' | 'second') => void;
   components: InputComponent[];
-  backend: string;
   constraints: PredictionConstraint[];
   properties: PredictionProperties;
   activeConstraintId: string | null;
@@ -204,12 +209,13 @@ export function PredictionConstraintsWorkspace({
   constraintStructureFormat,
   constraintViewerHighlightResidues,
   constraintViewerActiveResidue,
+  constraintSelectedAtomRefs,
   onApplyPickToSelectedConstraint,
   onConstraintsResizerPointerDown,
   onConstraintsResizerKeyDown,
   onClearConstraintSelection,
+  onConstraintPickSlotFocus,
   components,
-  backend,
   constraints,
   properties,
   activeConstraintId,
@@ -222,7 +228,7 @@ export function PredictionConstraintsWorkspace({
   onPropertiesChange,
   disabled
 }: PredictionConstraintsWorkspaceProps) {
-  const sequenceAtomOptionsByChain = useMemo(() => buildComponentAtomOptionsByChain(components, backend), [components, backend]);
+  const sequenceAtomOptionsByChain = useMemo(() => buildComponentAtomOptionsByChain(components), [components]);
   const structureAtomOptionsByChain = useMemo(() => {
     if (!hasConstraintStructure || !constraintStructureText.trim()) return sequenceAtomOptionsByChain;
     return extractStructureResidueAtomOptions(constraintStructureText, constraintStructureFormat);
@@ -309,6 +315,7 @@ export function PredictionConstraintsWorkspace({
             components={components}
             atomOptionsByChain={structureAtomOptionsByChain}
             pickedResidue={pickedResidue}
+            selectedAtomRefs={constraintSelectedAtomRefs}
             highlightResidues={constraintViewerHighlightResidues}
             activeResidue={constraintViewerActiveResidue}
             disabled={!canEdit}
@@ -351,6 +358,7 @@ export function PredictionConstraintsWorkspace({
           compatibilityHint={isBondOnlyBackend ? 'Current backend currently supports Bond constraints only.' : undefined}
           onConstraintsChange={onConstraintsChange}
           onPropertiesChange={onPropertiesChange}
+          onPickSlotFocus={onConstraintPickSlotFocus}
           disabled={disabled}
         />
       </section>

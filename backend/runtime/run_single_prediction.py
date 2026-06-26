@@ -4711,7 +4711,9 @@ def run_protenix_backend(
     else:
         print("🔐 Protenix 容器使用默认 root 用户（官方镜像推荐）", file=sys.stderr)
     print("📦 Protenix 资源模式: host-mounted（源码 + 权重 + common）", file=sys.stderr)
-    print(f"🗂️ Protenix 缓存挂载: {protenix_common_cache_dir} -> /cache/common", file=sys.stderr)
+    print(f"🗂️ Protenix 缓存挂载: {protenix_common_cache_mount} -> /cache/common", file=sys.stderr)
+    if protenix_common_cache_mount != protenix_common_cache_dir:
+        print(f"🧬 Protenix 原始 common cache: {protenix_common_cache_dir}", file=sys.stderr)
 
     docker_command.extend(extra_args)
 
@@ -7973,21 +7975,51 @@ def _custom_ccd_mol_atom_names(mol: Chem.Mol, *, include_hydrogens: bool = False
     return names
 
 
-def _custom_ccd_mol_to_cif_block(ccd: str, mol: Chem.Mol, *, kind: str, label: str = "") -> str:
+def _custom_ccd_mol_to_cif_block(
+    ccd: str,
+    mol: Chem.Mol,
+    *,
+    kind: str,
+    label: str = "",
+    base_residue: str = "",
+) -> str:
     formula = rdMolDescriptors.CalcMolFormula(mol)
     weight = Descriptors.MolWt(mol)
     comp_type = "L-PEPTIDE LINKING" if kind == "residue" else "NON-POLYMER"
     name = label or ccd
+    clean_name = name.replace(chr(39), "")
+    base = str(base_residue or "").strip().upper()[:1]
+    if kind == "residue" and base not in "ARNDCQEGHILKMFPSTWYV":
+        raise ValueError(f"Custom residue CCD {ccd} requires a valid base_residue for canonical mapping.")
+    one_letter_code = base if kind == "residue" else "?"
+    parent_comp_id = base if kind == "residue" else "?"
+    three_letter_code = ccd if len(ccd) <= 3 else "?"
     lines: List[str] = [
         f"data_{ccd}",
         "#",
         f"_chem_comp.id {ccd}",
-        f"_chem_comp.name '{name.replace(chr(39), '')}'",
+        f"_chem_comp.name '{clean_name}'",
         f"_chem_comp.type '{comp_type}'",
         f"_chem_comp.formula '{formula}'",
-        "_chem_comp.mon_nstd_parent_comp_id ?",
+        f"_chem_comp.mon_nstd_parent_comp_id {parent_comp_id}",
         "_chem_comp.pdbx_synonyms ?",
+        "_chem_comp.pdbx_formal_charge 0",
+        "_chem_comp.pdbx_initial_date 2026-06-26",
+        "_chem_comp.pdbx_modified_date 2026-06-26",
+        "_chem_comp.pdbx_ambiguous_flag N",
+        "_chem_comp.pdbx_release_status REL",
+        "_chem_comp.pdbx_replaced_by ?",
+        "_chem_comp.pdbx_replaces ?",
         f"_chem_comp.formula_weight {weight:.3f}",
+        f"_chem_comp.one_letter_code {one_letter_code}",
+        f"_chem_comp.three_letter_code {three_letter_code}",
+        "_chem_comp.pdbx_model_coordinates_details ?",
+        "_chem_comp.pdbx_model_coordinates_missing_flag N",
+        "_chem_comp.pdbx_ideal_coordinates_details RDKit",
+        "_chem_comp.pdbx_ideal_coordinates_missing_flag N",
+        "_chem_comp.pdbx_model_coordinates_db_code ?",
+        "_chem_comp.pdbx_subcomponent_list ?",
+        "_chem_comp.pdbx_processing_site V-Bio",
         "#",
         "loop_",
         "_chem_comp_atom.comp_id",
@@ -8047,7 +8079,13 @@ def _build_custom_ccd_bundle(molecules: List[Dict[str, str]]) -> Tuple[str, Dict
         mol = _build_custom_ccd_mol(item["smiles"], kind=kind)
         mol.name = ccd
         mols[ccd] = mol
-        blocks.append(_custom_ccd_mol_to_cif_block(ccd, mol, kind=kind, label=item.get("label") or ccd))
+        blocks.append(_custom_ccd_mol_to_cif_block(
+            ccd,
+            mol,
+            kind=kind,
+            label=item.get("label") or ccd,
+            base_residue=item.get("base_residue") or "",
+        ))
     return "\n".join(blocks), mols
 
 
@@ -8095,21 +8133,29 @@ def _merge_custom_ccd_with_existing_cache(
         if source_item.name in {"components.cif", "components.cif.rdkit_mol.pkl"}:
             continue
         target_item = overlay_common / source_item.name
-        if target_item.exists() or target_item.is_symlink():
-            continue
+        if target_item.is_symlink():
+            target_item.unlink()
         try:
             if source_item.is_dir():
+                if target_item.exists() and not target_item.is_dir():
+                    target_item.unlink()
                 shutil.copytree(source_item, target_item, dirs_exist_ok=True)
-            else:
-                target_item.symlink_to(source_item.resolve())
-        except Exception:
-            try:
-                if source_item.is_dir():
-                    shutil.copytree(source_item, target_item, dirs_exist_ok=True)
-                else:
+            elif source_item.is_file():
+                if target_item.exists():
+                    if not target_item.is_file():
+                        raise RuntimeError(f"Overlay cache target is not a file: {target_item}")
+                    target_item.unlink()
+                try:
+                    os.link(source_item, target_item)
+                except OSError:
                     shutil.copy2(source_item, target_item)
-            except Exception:
-                pass
+            else:
+                continue
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to materialize Protenix common cache entry in overlay: "
+                f"{source_item} -> {target_item}"
+            ) from exc
 
     return overlay_root
 
@@ -8135,7 +8181,7 @@ def _prepare_task_boltz_custom_mols_dir(
 
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
     for item in custom_molecules:
-        custom_mol = _build_custom_ccd_mol(item["smiles"])
+        custom_mol = _build_custom_ccd_mol(item["smiles"], kind=item.get("kind") or "residue")
         aliases = _boltz_custom_ccd_aliases(item["ccd"])
         for alias in aliases:
             mol_path = task_mols / f"{alias}.pkl"

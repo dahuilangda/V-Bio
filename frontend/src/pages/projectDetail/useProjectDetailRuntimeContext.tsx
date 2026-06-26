@@ -1905,7 +1905,8 @@ export function useProjectDetailRuntimeContext() {
     selectedTemplateResidueIndexMap,
     resolveTemplateComponentIdForConstraint,
     constraintViewerHighlightResidues,
-    constraintViewerActiveResidue
+    constraintViewerActiveResidue,
+    constraintSelectedAtomRefs
   } = useConstraintTemplateContext({
     draft,
     proteinTemplates,
@@ -2356,6 +2357,7 @@ export function useProjectDetailRuntimeContext() {
     resolveTemplateComponentIdForConstraint,
     constraintViewerHighlightResidues,
     constraintViewerActiveResidue,
+    constraintSelectedAtomRefs,
     loadProject,
     affinityTargetFile,
     affinityLigandFile,

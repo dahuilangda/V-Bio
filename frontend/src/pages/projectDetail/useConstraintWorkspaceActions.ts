@@ -111,6 +111,11 @@ export function useConstraintWorkspaceActions<TDraft extends DraftLike>(params: 
     selectConstraint(draft.inputConfig.constraints[nextIndex].id);
   };
 
+  const focusConstraintPickSlot = (constraintId: string, slot: 'first' | 'second') => {
+    if (!constraintId) return;
+    constraintPickSlotRef.current[constraintId] = slot;
+  };
+
   const applyPickToSelectedConstraint = (pick: MolstarResiduePick) => {
     applyConstraintResiduePickInteraction({
       pick,
@@ -137,6 +142,7 @@ export function useConstraintWorkspaceActions<TDraft extends DraftLike>(params: 
     selectConstraint,
     jumpToConstraint,
     navigateConstraint,
+    focusConstraintPickSlot,
     applyPickToSelectedConstraint,
   };
 }

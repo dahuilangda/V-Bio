@@ -158,7 +158,7 @@ class AF3Utils:
                 "protein": {
                     "id": chain_ids,
                     "sequence": query_seq,
-                    "modifications": list(query_modifications[i]) if query_modifications and i < len(query_modifications) else [],
+                    "modifications": _af3_json_modifications(query_modifications[i]) if query_modifications and i < len(query_modifications) else [],
                     "templates": [],
                 }
             }
@@ -304,11 +304,20 @@ def _normalize_protein_modifications(raw_modifications: object, sequence_length:
         if position in seen_positions:
             raise ValueError(f"Multiple protein modifications target residue position {position}.")
         seen_positions.add(position)
-        normalized.append({"ptmType": ccd, "ptmPosition": position})
+        normalized_mod: Dict[str, object] = {"ptmType": ccd, "ptmPosition": position}
+        base_residue = str(raw.get("baseResidue") or raw.get("base_residue") or "").strip().upper()[:1]
+        if base_residue:
+            if base_residue not in "ARNDCQEGHILKMFPSTWYV":
+                raise ValueError(f"Protein modification {ccd} has invalid baseResidue: {base_residue}.")
+            normalized_mod["baseResidue"] = base_residue
+        normalized.append(normalized_mod)
     return normalized
 
 
-def _af3_ccd_to_one_letter(ccd: object) -> str:
+def _af3_ccd_to_one_letter(ccd: object, base_residue: object = "") -> str:
+    base = str(base_residue or "").strip().upper()[:1]
+    if base in "ARNDCQEGHILKMFPSTWYV":
+        return base
     code = str(ccd or "").strip().upper()
     if code.startswith("CCD_"):
         code = code[4:]
@@ -317,13 +326,27 @@ def _af3_ccd_to_one_letter(ccd: object) -> str:
     return af3_residue_names.CCD_NAME_TO_ONE_LETTER.get(code, "X")
 
 
+def _af3_json_modifications(modifications: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    json_mods: List[Dict[str, object]] = []
+    for mod in modifications or []:
+        ptm_type = str(mod.get("ptmType") or mod.get("ccd") or "").strip().upper()
+        if not ptm_type:
+            continue
+        ptm_position = _coerce_int(mod.get("ptmPosition", mod.get("position")), f"protein modification {ptm_type} position")
+        json_mods.append({"ptmType": ptm_type, "ptmPosition": ptm_position})
+    return json_mods
+
+
 def _af3_effective_query_sequence(sequence: str, modifications: List[Dict[str, object]]) -> str:
     chars = list(str(sequence or "").strip().upper())
     for mod in modifications or []:
         position = _coerce_int(mod.get("ptmPosition", mod.get("position")), "AF3 modification position")
         if position < 1 or position > len(chars):
             continue
-        chars[position - 1] = _af3_ccd_to_one_letter(mod.get("ptmType", mod.get("ccd")))
+        chars[position - 1] = _af3_ccd_to_one_letter(
+            mod.get("ptmType", mod.get("ccd")),
+            mod.get("baseResidue", mod.get("base_residue")),
+        )
     return "".join(chars)
 
 

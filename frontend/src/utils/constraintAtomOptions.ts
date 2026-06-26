@@ -82,7 +82,7 @@ function uniqueAtoms(values: string[]): string[] {
 }
 
 
-function atomNamesFromSmilesByElementOrder(smiles: string): string[] {
+export function ligandAtomNamesFromSmilesByElementOrder(smiles: string): string[] {
   const elementCounts = new Map<string, number>();
   const atoms: string[] = [];
   const source = String(smiles || '');
@@ -131,7 +131,7 @@ function atomOptionsForProteinResidue(residue: string, mod: ProteinModification 
   };
 }
 
-export function buildComponentAtomOptionsByChain(components: InputComponent[], backend = ''): StructureAtomOptionsByChain {
+export function buildComponentAtomOptionsByChain(components: InputComponent[]): StructureAtomOptionsByChain {
   const activeComponents = components.filter((item) => cleanSequence(item.sequence));
   const chainInfos = buildChainInfos(activeComponents);
   const componentById = new Map(activeComponents.map((item) => [item.id, item] as const));
@@ -145,8 +145,7 @@ export function buildComponentAtomOptionsByChain(components: InputComponent[], b
 
     if (chain.type === 'ligand') {
       const inputMethod = component.inputMethod || 'smiles';
-      const normalizedBackend = String(backend || '').trim().toLowerCase();
-      const atoms = inputMethod === 'ccd' || normalizedBackend === 'protenix' ? atomNamesFromSmilesByElementOrder(component.sequence) : [];
+      const atoms = inputMethod === 'ccd' ? [] : ligandAtomNamesFromSmilesByElementOrder(component.sequence);
       result[chain.id] = [
         {
           chainId: chain.id,

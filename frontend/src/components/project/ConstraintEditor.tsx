@@ -30,6 +30,7 @@ interface ConstraintEditorProps {
   compatibilityHint?: string;
   onConstraintsChange: (constraints: PredictionConstraint[]) => void;
   onPropertiesChange: (properties: PredictionProperties) => void;
+  onPickSlotFocus?: (constraintId: string, slot: 'first' | 'second') => void;
   disabled?: boolean;
 }
 
@@ -138,6 +139,7 @@ export function ConstraintEditor({
   compatibilityHint,
   onConstraintsChange,
   onPropertiesChange,
+  onPickSlotFocus,
   disabled = false
 }: ConstraintEditorProps) {
   const activeComponents = components.filter((item) => item.sequence.trim());
@@ -249,7 +251,7 @@ export function ConstraintEditor({
         <span className="muted small">
           {pickedResidue
             ? `Picked in Mol*: ${pickedResidue.chainId}:${pickedResidue.residue}${pickedResidue.atomName ? `:${pickedResidue.atomName}` : ''}`
-            : 'Tip: click a residue in Mol* preview, then use "Use pick" buttons below.'}
+            : 'Tip: focus a constraint endpoint, then pick in the viewer to fill it.'}
         </span>
 
         <label className="switch-field">
@@ -391,6 +393,7 @@ export function ConstraintEditor({
                       pickedResidue={pickedResidue}
                       structureAtomOptionsByChain={structureAtomOptionsByChain}
                       disabled={disabled}
+                      onPickSlotFocus={(slot) => onPickSlotFocus?.(item.id, slot)}
                       onChange={(next) => replaceAt(item.id, next)}
                     />
                   )}
@@ -402,6 +405,7 @@ export function ConstraintEditor({
                       pickedResidue={pickedResidue}
                       structureAtomOptionsByChain={structureAtomOptionsByChain}
                       disabled={disabled}
+                      onPickSlotFocus={(slot) => onPickSlotFocus?.(item.id, slot)}
                       onChange={(next) => replaceAt(item.id, next)}
                     />
                   )}
@@ -453,6 +457,7 @@ interface SharedFieldsProps<T> {
   pickedResidue?: ConstraintResiduePick | null;
   structureAtomOptionsByChain?: StructureAtomOptionsByChain;
   disabled: boolean;
+  onPickSlotFocus?: (slot: 'first' | 'second') => void;
   onChange: (next: T) => void;
 }
 
@@ -479,14 +484,14 @@ function ChainSelect({
   );
 }
 
-function ContactConstraintFields({ value, chainInfos, pickedResidue, disabled, onChange }: SharedFieldsProps<ContactConstraint>) {
+function ContactConstraintFields({ value, chainInfos, disabled, onPickSlotFocus, onChange }: SharedFieldsProps<ContactConstraint>) {
   return (
     <div className="constraint-grid">
-      <label className="field">
+      <label className="field" onFocusCapture={() => onPickSlotFocus?.('first')} onClick={() => onPickSlotFocus?.('first')}>
         <span>Token 1 Chain</span>
         <ChainSelect value={value.token1_chain} chainInfos={chainInfos} disabled={disabled} onChange={(next) => onChange({ ...value, token1_chain: next })} />
       </label>
-      <label className="field">
+      <label className="field" onFocusCapture={() => onPickSlotFocus?.('first')} onClick={() => onPickSlotFocus?.('first')}>
         <span>Token 1 Residue</span>
         <input
           type="number"
@@ -496,11 +501,11 @@ function ContactConstraintFields({ value, chainInfos, pickedResidue, disabled, o
           onChange={(e) => onChange({ ...value, token1_residue: clampPositiveInt(Number(e.target.value)) })}
         />
       </label>
-      <label className="field">
+      <label className="field" onFocusCapture={() => onPickSlotFocus?.('second')} onClick={() => onPickSlotFocus?.('second')}>
         <span>Token 2 Chain</span>
         <ChainSelect value={value.token2_chain} chainInfos={chainInfos} disabled={disabled} onChange={(next) => onChange({ ...value, token2_chain: next })} />
       </label>
-      <label className="field">
+      <label className="field" onFocusCapture={() => onPickSlotFocus?.('second')} onClick={() => onPickSlotFocus?.('second')}>
         <span>Token 2 Residue</span>
         <input
           type="number"
@@ -530,38 +535,6 @@ function ContactConstraintFields({ value, chainInfos, pickedResidue, disabled, o
         />
         <span>Force</span>
       </label>
-      {pickedResidue && (
-        <>
-          <button
-            type="button"
-            className="btn btn-ghost btn-compact"
-            disabled={disabled}
-            onClick={() =>
-              onChange({
-                ...value,
-                token1_chain: pickedResidue.chainId,
-                token1_residue: pickedResidue.residue
-              })
-            }
-          >
-            Use pick → Token 1
-          </button>
-          <button
-            type="button"
-            className="btn btn-ghost btn-compact"
-            disabled={disabled}
-            onClick={() =>
-              onChange({
-                ...value,
-                token2_chain: pickedResidue.chainId,
-                token2_residue: pickedResidue.residue
-              })
-            }
-          >
-            Use pick → Token 2
-          </button>
-        </>
-      )}
     </div>
   );
 }
@@ -647,7 +620,7 @@ function BondAtomSelect({
   );
 }
 
-function BondConstraintFields({ value, chainInfos, pickedResidue, structureAtomOptionsByChain, disabled, onChange }: SharedFieldsProps<BondConstraint>) {
+function BondConstraintFields({ value, chainInfos, structureAtomOptionsByChain, disabled, onPickSlotFocus, onChange }: SharedFieldsProps<BondConstraint>) {
   const updateAtom1Chain = (chainId: string) => {
     const residues = residueOptionsForChain(structureAtomOptionsByChain, chainId, value.atom1_residue);
     const residue = residues[0]?.residue || value.atom1_residue;
@@ -671,64 +644,30 @@ function BondConstraintFields({ value, chainInfos, pickedResidue, structureAtomO
 
   return (
     <div className="constraint-grid">
-      <label className="field">
+      <label className="field" onFocusCapture={() => onPickSlotFocus?.('first')} onClick={() => onPickSlotFocus?.('first')}>
         <span>Atom 1 Chain</span>
         <ChainSelect value={value.atom1_chain} chainInfos={chainInfos} disabled={disabled} onChange={updateAtom1Chain} />
       </label>
-      <label className="field">
+      <label className="field" onFocusCapture={() => onPickSlotFocus?.('first')} onClick={() => onPickSlotFocus?.('first')}>
         <span>Atom 1 Residue</span>
         <BondResidueSelect chainId={value.atom1_chain} value={value.atom1_residue} structureAtomOptionsByChain={structureAtomOptionsByChain} disabled={disabled} onChange={updateAtom1Residue} />
       </label>
-      <label className="field">
+      <label className="field" onFocusCapture={() => onPickSlotFocus?.('first')} onClick={() => onPickSlotFocus?.('first')}>
         <span>Atom 1 Name</span>
         <BondAtomSelect chainId={value.atom1_chain} residue={value.atom1_residue} value={value.atom1_atom} structureAtomOptionsByChain={structureAtomOptionsByChain} disabled={disabled} onChange={(atom) => onChange({ ...value, atom1_atom: atom })} />
       </label>
-      <label className="field">
+      <label className="field" onFocusCapture={() => onPickSlotFocus?.('second')} onClick={() => onPickSlotFocus?.('second')}>
         <span>Atom 2 Chain</span>
         <ChainSelect value={value.atom2_chain} chainInfos={chainInfos} disabled={disabled} onChange={updateAtom2Chain} />
       </label>
-      <label className="field">
+      <label className="field" onFocusCapture={() => onPickSlotFocus?.('second')} onClick={() => onPickSlotFocus?.('second')}>
         <span>Atom 2 Residue</span>
         <BondResidueSelect chainId={value.atom2_chain} value={value.atom2_residue} structureAtomOptionsByChain={structureAtomOptionsByChain} disabled={disabled} onChange={updateAtom2Residue} />
       </label>
-      <label className="field">
+      <label className="field" onFocusCapture={() => onPickSlotFocus?.('second')} onClick={() => onPickSlotFocus?.('second')}>
         <span>Atom 2 Name</span>
         <BondAtomSelect chainId={value.atom2_chain} residue={value.atom2_residue} value={value.atom2_atom} structureAtomOptionsByChain={structureAtomOptionsByChain} disabled={disabled} onChange={(atom) => onChange({ ...value, atom2_atom: atom })} />
       </label>
-      {pickedResidue && (
-        <>
-          <button
-            type="button"
-            className="btn btn-ghost btn-compact"
-            disabled={disabled}
-            onClick={() =>
-              onChange({
-                ...value,
-                atom1_chain: pickedResidue.chainId,
-                atom1_residue: pickedResidue.residue,
-                atom1_atom: (pickedResidue.atomName || value.atom1_atom || 'CA').toUpperCase()
-              })
-            }
-          >
-            Use pick → Atom 1
-          </button>
-          <button
-            type="button"
-            className="btn btn-ghost btn-compact"
-            disabled={disabled}
-            onClick={() =>
-              onChange({
-                ...value,
-                atom2_chain: pickedResidue.chainId,
-                atom2_residue: pickedResidue.residue,
-                atom2_atom: (pickedResidue.atomName || value.atom2_atom || 'CA').toUpperCase()
-              })
-            }
-          >
-            Use pick → Atom 2
-          </button>
-        </>
-      )}
     </div>
   );
 }

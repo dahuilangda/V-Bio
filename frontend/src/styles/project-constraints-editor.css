@@ -293,11 +293,22 @@
 }
 
 .constraint-sequence-chain-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 6px 10px;
   color: #2e4c3c;
+}
+
+.constraint-sequence-chain-head strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
+}
+
+.constraint-sequence-chain-head .small {
+  white-space: nowrap;
+  line-height: 1.25;
 }
 
 .constraint-sequence-grid {
@@ -362,7 +373,8 @@
 
 .constraint-ligand-atom-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(54px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(56px, 72px));
+  justify-content: start;
   gap: 6px;
   min-width: 0;
 }
@@ -394,11 +406,13 @@
 }
 
 .constraint-ligand-atoms-empty {
+  grid-column: 1 / -1;
   border: 1px dashed #c7d8cc;
   border-radius: 8px;
   padding: 10px;
   background: #fbfdfb;
   line-height: 1.4;
+  max-width: 100%;
 }
 
 .constraint-sequence-residue-letter {

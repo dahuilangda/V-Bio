@@ -1907,6 +1907,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     setConstraintPickModeEnabled,
     constraintViewerHighlightResidues,
     constraintViewerActiveResidue,
+    constraintSelectedAtomRefs,
     handleConstraintsResizerPointerDown,
     handleConstraintsResizerKeyDown,
     allowedConstraintTypes,
@@ -3110,6 +3111,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     selectConstraint,
     jumpToConstraint,
     navigateConstraint,
+    focusConstraintPickSlot,
     applyPickToSelectedConstraint
   } = useConstraintWorkspaceActions({
     draft,
@@ -3261,7 +3263,9 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     constraintStructureFormat,
     constraintViewerHighlightResidues,
     constraintViewerActiveResidue,
+    constraintSelectedAtomRefs,
     applyPickToSelectedConstraint,
+    focusConstraintPickSlot,
     handleConstraintsResizerPointerDown,
     handleConstraintsResizerKeyDown,
     clearConstraintSelection,

@@ -30,12 +30,13 @@ export interface BuildPredictionConstraintsWorkspaceParams {
   constraintStructureFormat: 'cif' | 'pdb';
   constraintViewerHighlightResidues: MolstarResidueHighlight[];
   constraintViewerActiveResidue: MolstarResidueHighlight | null;
+  constraintSelectedAtomRefs: PredictionConstraintsWorkspaceProps['constraintSelectedAtomRefs'];
   applyPickToSelectedConstraint: (pick: MolstarResiduePick) => void;
+  focusConstraintPickSlot: (constraintId: string, slot: 'first' | 'second') => void;
   handleConstraintsResizerPointerDown: (event: PointerEvent<HTMLDivElement>) => void;
   handleConstraintsResizerKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
   clearConstraintSelection: () => void;
   components: InputComponent[];
-  backend: string;
   constraints: PredictionConstraint[];
   properties: PredictionProperties;
   activeConstraintId: string | null;
@@ -70,12 +71,13 @@ export function buildPredictionConstraintsWorkspaceProps(
     constraintStructureFormat,
     constraintViewerHighlightResidues,
     constraintViewerActiveResidue,
+    constraintSelectedAtomRefs,
     applyPickToSelectedConstraint,
+    focusConstraintPickSlot,
     handleConstraintsResizerPointerDown,
     handleConstraintsResizerKeyDown,
     clearConstraintSelection,
     components,
-    backend,
     constraints,
     properties,
     activeConstraintId,
@@ -107,12 +109,13 @@ export function buildPredictionConstraintsWorkspaceProps(
     constraintStructureFormat,
     constraintViewerHighlightResidues,
     constraintViewerActiveResidue,
+    constraintSelectedAtomRefs,
     onApplyPickToSelectedConstraint: applyPickToSelectedConstraint,
+    onConstraintPickSlotFocus: focusConstraintPickSlot,
     onConstraintsResizerPointerDown: handleConstraintsResizerPointerDown,
     onConstraintsResizerKeyDown: handleConstraintsResizerKeyDown,
     onClearConstraintSelection: clearConstraintSelection,
     components,
-    backend,
     constraints,
     properties,
     activeConstraintId,

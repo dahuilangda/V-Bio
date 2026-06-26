@@ -49,7 +49,9 @@ interface UsePredictionWorkspacePropsInput {
   constraintStructureFormat: 'cif' | 'pdb';
   constraintViewerHighlightResidues: MolstarResidueHighlight[];
   constraintViewerActiveResidue: MolstarResidueHighlight | null;
+  constraintSelectedAtomRefs: BuildPredictionConstraintsWorkspaceParams['constraintSelectedAtomRefs'];
   applyPickToSelectedConstraint: (pick: MolstarResiduePick) => void;
+  focusConstraintPickSlot: (constraintId: string, slot: 'first' | 'second') => void;
   handleConstraintsResizerPointerDown: (event: PointerEvent<HTMLDivElement>) => void;
   handleConstraintsResizerKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
   clearConstraintSelection: () => void;
@@ -121,7 +123,9 @@ export function usePredictionWorkspaceProps({
   constraintStructureFormat,
   constraintViewerHighlightResidues,
   constraintViewerActiveResidue,
+  constraintSelectedAtomRefs,
   applyPickToSelectedConstraint,
+  focusConstraintPickSlot,
   handleConstraintsResizerPointerDown,
   handleConstraintsResizerKeyDown,
   clearConstraintSelection,
@@ -179,12 +183,13 @@ export function usePredictionWorkspaceProps({
         constraintStructureFormat,
         constraintViewerHighlightResidues,
         constraintViewerActiveResidue,
+        constraintSelectedAtomRefs,
         applyPickToSelectedConstraint,
+        focusConstraintPickSlot,
         handleConstraintsResizerPointerDown,
         handleConstraintsResizerKeyDown,
         clearConstraintSelection,
         components: draft.inputConfig.components,
-        backend: draft.backend,
         constraints: draft.inputConfig.constraints,
         properties: draft.inputConfig.properties,
         activeConstraintId,

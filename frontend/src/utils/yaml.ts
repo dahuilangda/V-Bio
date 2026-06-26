@@ -1,5 +1,6 @@
 import yaml from 'js-yaml';
 import type { CustomCcdMoleculeInput, InputComponent, PredictionConstraint, PredictionProperties, ProteinModification } from '../types/models';
+import { ligandAtomNamesFromSmilesByElementOrder } from './constraintAtomOptions';
 import { assignChainIdsForComponents } from './chainAssignments';
 
 const YAML_NO_WRAP = -1;
@@ -329,18 +330,8 @@ export function collectCustomCcdMoleculesFromComponents(components: InputCompone
 
 
 function ligandFirstAtomNameForYaml(component: InputComponent): string {
-  const value = String(component.sequence || '').trim();
-  const first = value.match(/\[([^\]]+)\]|Br|Cl|Si|Se|Na|Li|Mg|Ca|Zn|Fe|[BCNOFPSIKbcnops]/);
-  if (!first) return '';
-  const bracket = first[1];
-  let symbol = first[0];
-  if (bracket) {
-    const bracketMatch = bracket.match(/^[0-9]*([A-Z][a-z]?|[cnops])/);
-    if (!bracketMatch) return '';
-    symbol = bracketMatch[1];
-  }
-  const normalized = symbol.length === 1 ? symbol.toUpperCase() : `${symbol[0].toUpperCase()}${symbol.slice(1).toLowerCase()}`;
-  return `${normalized.toUpperCase()}1`;
+  if (component.inputMethod === 'ccd') return '';
+  return ligandAtomNamesFromSmilesByElementOrder(component.sequence)[0] || '';
 }
 
 function ligandCcdForYaml(component: InputComponent): string {

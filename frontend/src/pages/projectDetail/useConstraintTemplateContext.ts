@@ -47,6 +47,7 @@ interface UseConstraintTemplateContextResult {
   constraintHighlightResidues: MolstarResidueHighlight[];
   constraintViewerHighlightResidues: MolstarResidueHighlight[];
   constraintViewerActiveResidue: MolstarResidueHighlight | null;
+  constraintSelectedAtomRefs: Array<{ chainId: string; residue: number; atomName: string }>;
 }
 
 export function useConstraintTemplateContext({
@@ -288,6 +289,30 @@ export function useConstraintTemplateContext({
     return constraintViewerHighlightResidues.find((item) => item.emphasis === 'active') || null;
   }, [selectedTemplatePreview, activeConstraintResidue, constraintViewerHighlightResidues]);
 
+  const constraintSelectedAtomRefs = useMemo<Array<{ chainId: string; residue: number; atomName: string }>>(() => {
+    if (!draft) return [];
+    const selectedIds = new Set<string>(selectedContactConstraintIds);
+    if (activeConstraintId) selectedIds.add(activeConstraintId);
+    if (selectedIds.size === 0) return [];
+
+    const refs: Array<{ chainId: string; residue: number; atomName: string }> = [];
+    for (const constraint of draft.inputConfig.constraints) {
+      if (!selectedIds.has(constraint.id) || constraint.type !== 'bond') continue;
+      const candidates = [
+        { chainId: constraint.atom1_chain, residue: constraint.atom1_residue, atomName: constraint.atom1_atom },
+        { chainId: constraint.atom2_chain, residue: constraint.atom2_residue, atomName: constraint.atom2_atom }
+      ];
+      for (const item of candidates) {
+        const chainId = String(item.chainId || '').trim();
+        const residue = Math.max(1, Math.floor(Number(item.residue) || 0));
+        const atomName = String(item.atomName || '').trim().toUpperCase();
+        if (!chainId || !Number.isFinite(residue) || residue <= 0 || !atomName) continue;
+        refs.push({ chainId, residue, atomName });
+      }
+    }
+    return refs;
+  }, [draft, activeConstraintId, selectedContactConstraintIds]);
+
   return {
     constraintTemplateOptions,
     selectedTemplatePreview,
@@ -296,6 +321,7 @@ export function useConstraintTemplateContext({
     resolveTemplateComponentIdForConstraint,
     constraintHighlightResidues,
     constraintViewerHighlightResidues,
-    constraintViewerActiveResidue
+    constraintViewerActiveResidue,
+    constraintSelectedAtomRefs
   };
 }

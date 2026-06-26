@@ -74,14 +74,7 @@ export function applyConstraintPickToConstraints(input: ApplyConstraintPickInput
     if (!targetIndexSet.has(index)) return item;
 
     if (item.type === 'contact') {
-      const token1Matches = item.token1_chain === resolvedChainId;
-      const token2Matches = item.token2_chain === resolvedChainId;
-      const slot: ConstraintPickSlot =
-        token1Matches && !token2Matches
-          ? 'first'
-          : token2Matches && !token1Matches
-            ? 'second'
-            : nextPickSlots[item.id] || 'first';
+      const slot: ConstraintPickSlot = nextPickSlots[item.id] || 'first';
 
       const updated =
         slot === 'first'
@@ -102,14 +95,7 @@ export function applyConstraintPickToConstraints(input: ApplyConstraintPickInput
     }
 
     if (item.type === 'bond') {
-      const atom1Matches = item.atom1_chain === resolvedChainId;
-      const atom2Matches = item.atom2_chain === resolvedChainId;
-      const slot: ConstraintPickSlot =
-        atom1Matches && !atom2Matches
-          ? 'first'
-          : atom2Matches && !atom1Matches
-            ? 'second'
-            : nextPickSlots[item.id] || 'first';
+      const slot: ConstraintPickSlot = nextPickSlots[item.id] || 'first';
       const atomName = (pickedAtomName || (slot === 'first' ? item.atom1_atom : item.atom2_atom) || 'CA').toUpperCase();
 
       const updated =
