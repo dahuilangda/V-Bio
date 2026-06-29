@@ -182,7 +182,9 @@ export function mergePeptideSummaryIntoParsedConfidence(
     merged.current_best_sequences = baseConfidence.current_best_sequences;
   }
 
-  return merged;
+  return compactResultConfidenceForStorage(merged, {
+    preservePeptideCandidateStructureText: false
+  });
 }
 
 export function derivePersistedResultConfidences(params: {
@@ -196,18 +198,15 @@ export function derivePersistedResultConfidences(params: {
   hasPeptidePayload: boolean;
 } {
   const parsedConfidence = asRecord(params.parsedConfidenceValue);
-  const persistedConfidenceFull = compactResultConfidenceForStorage(parsedConfidence, {
-    preservePeptideCandidateStructureText: true
-  });
   const persistedConfidenceCompact = compactResultConfidenceForStorage(parsedConfidence, {
     preservePeptideCandidateStructureText: false
   });
-  const hasPeptidePayload = hasPeptideSummaryFields(persistedConfidenceFull);
+  const hasPeptidePayload = hasPeptideSummaryFields(persistedConfidenceCompact);
   const baseTaskInputOptions = asRecord(params.baseTaskInputOptions);
   const inputOptionsConfidence = Object.keys(baseTaskInputOptions).length > 0
     ? { request: { options: baseTaskInputOptions } }
     : {};
-  const persistedProjectConfidenceSource = hasPeptidePayload ? persistedConfidenceCompact : persistedConfidenceFull;
+  const persistedProjectConfidenceSource = persistedConfidenceCompact;
   const projectConfidence = mergePeptideSummaryIntoParsedConfidence(
     persistedProjectConfidenceSource,
     {
@@ -239,7 +238,7 @@ export function derivePersistedResultConfidences(params: {
     }
   };
   const taskConfidence = mergePeptideSummaryIntoParsedConfidence(
-    hasPeptidePayload ? persistedConfidenceCompact : persistedConfidenceFull,
+    persistedConfidenceCompact,
     effectiveTaskBase
   );
   return {

@@ -242,10 +242,18 @@ export async function terminateTask(taskId: string): Promise<{
 
 export type DownloadResultMode = 'view' | 'full';
 
-export async function downloadResultBlob(taskId: string, options?: { mode?: DownloadResultMode }): Promise<Blob> {
+export async function downloadResultBlob(
+  taskId: string,
+  options?: { mode?: DownloadResultMode; preferredStructureName?: string }
+): Promise<Blob> {
   const mode = options?.mode || 'full';
   const path = mode === 'view' ? `/results/${taskId}/view` : `/results/${taskId}`;
-  const url = apiUrl(path);
+  const params = new URLSearchParams();
+  const preferredStructureName = String(options?.preferredStructureName || '').trim();
+  if (mode === 'view' && preferredStructureName) {
+    params.set('structure_name', preferredStructureName);
+  }
+  const url = apiUrl(params.size > 0 ? `${path}?${params.toString()}` : path);
   const res = await fetchWithTimeout(url, {
     cache: 'no-store'
   });

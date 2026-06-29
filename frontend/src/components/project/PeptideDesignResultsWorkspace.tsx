@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, X } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent, type RefObject } from 'react';
 import { ensureStructureConfidenceColoringData, stripStructureConfidenceColoringData } from '../../api/backendApi';
 import { MolstarViewer } from './MolstarViewer';
 
@@ -8,6 +8,7 @@ type RuntimeState = 'SUCCESS' | 'RUNNING' | 'QUEUED' | 'FAILURE' | 'UNSCORED';
 type PeptideSortKey = 'rank' | 'generation' | 'score' | 'plddt' | 'interface';
 type ConfidenceTone = 'vhigh' | 'high' | 'low' | 'vlow' | 'na';
 const PEPTIDE_RESULTS_PAGE_SIZE_OPTIONS = [8, 20, 50, 100] as const;
+const EMPTY_RECORD_ROWS: Array<Record<string, unknown>> = [];
 
 interface PeptideDesignResultsWorkspaceProps {
   projectTaskId: string;
@@ -22,6 +23,7 @@ interface PeptideDesignResultsWorkspaceProps {
   progressPercent: number;
   displayStructureText: string;
   displayStructureFormat: 'cif' | 'pdb';
+  displayStructureName: string;
   selectedResultTargetChainId: string | null;
   selectedResultLigandChainId: string | null;
   selectedResultLigandSequence: string;
@@ -29,7 +31,7 @@ interface PeptideDesignResultsWorkspaceProps {
   projectBackend: string;
   fallbackPlddt: number | null;
   fallbackIptm: number | null;
-  onRequestStructure?: () => Promise<void> | void;
+  onRequestStructure?: (options?: { preferredStructureName?: string }) => Promise<void> | void;
 }
 
 interface PeptideDesignCandidateModification {
@@ -94,6 +96,24 @@ function asRecordArray(value: unknown): Array<Record<string, unknown>> {
 function readText(value: unknown): string {
   if (value === null || value === undefined) return '';
   return String(value);
+}
+
+function getBaseName(path: string): string {
+  const parts = path.split(/[\/\\]/);
+  return parts[parts.length - 1] || path;
+}
+
+function normalizeStructureToken(value: string): string {
+  return value.trim().replace(/^[\/\\]+/, '').toLowerCase();
+}
+
+function structureNameMatches(loadedName: string, candidateName: string): boolean {
+  const candidateToken = normalizeStructureToken(candidateName);
+  if (!candidateToken) return false;
+  const loadedToken = normalizeStructureToken(loadedName);
+  if (!loadedToken || loadedToken === '-') return false;
+  if (loadedToken === candidateToken) return true;
+  return normalizeStructureToken(getBaseName(loadedToken)) === normalizeStructureToken(getBaseName(candidateToken));
 }
 
 function readFiniteNumber(value: unknown): number | null {
@@ -654,48 +674,6 @@ function readResiduePlddtByChainSeries(
   return alignResidueSeriesToSequence(best.values, sequenceLength);
 }
 
-interface ResidueConfidenceBucket {
-  seq: number;
-  ins: string;
-  residueName: string;
-  ca: number | null;
-  sum: number;
-  count: number;
-}
-
-function updateResidueBucket(
-  chains: Map<string, Map<string, ResidueConfidenceBucket>>,
-  chainId: string,
-  residueKey: string,
-  seq: number,
-  ins: string,
-  residueName: string,
-  atomName: string,
-  bIso: number
-) {
-  let chain = chains.get(chainId);
-  if (!chain) {
-    chain = new Map<string, ResidueConfidenceBucket>();
-    chains.set(chainId, chain);
-  }
-  const existing = chain.get(residueKey);
-  if (!existing) {
-    chain.set(residueKey, {
-      seq,
-      ins,
-      residueName,
-      ca: atomName === 'CA' ? bIso : null,
-      sum: bIso,
-      count: 1
-    });
-    return;
-  }
-  existing.sum += bIso;
-  existing.count += 1;
-  if (!existing.residueName && residueName) existing.residueName = residueName;
-  if (atomName === 'CA') existing.ca = bIso;
-}
-
 function normalizeChainToken(chainId: string): string {
   return chainId.trim().toUpperCase();
 }
@@ -751,99 +729,6 @@ function sequenceMatchScore(chainSequence: string, peptideSequence: string): num
   return (bestMatches / peptide.length) * 1000 - Math.abs(chain.length - peptide.length) * 2;
 }
 
-function resolveBestChainId(
-  chains: Map<string, Map<string, ResidueConfidenceBucket>>,
-  preferredChainId: string | undefined,
-  candidateSequence: string
-): string | null {
-  if (chains.size === 0) return null;
-
-  const chainEntries = [...chains.entries()].map(([chainId, residueMap]) => {
-    const residues = [...residueMap.values()].sort((a, b) => {
-      if (a.seq !== b.seq) return a.seq - b.seq;
-      return a.ins.localeCompare(b.ins);
-    });
-    const chainSequence = residues.map((item) => residueToOneLetter(item.residueName)).join('');
-    return { chainId, residues, chainSequence };
-  });
-
-  const preferredToken = normalizeChainToken(readText(preferredChainId));
-  const hasCandidateSequence = candidateSequence.trim().length > 0;
-  if (hasCandidateSequence) {
-    let best: { chainId: string; score: number } | null = null;
-    for (const entry of chainEntries) {
-      const score = sequenceMatchScore(entry.chainSequence, candidateSequence);
-      if (!Number.isFinite(score)) continue;
-      if (!best || score > best.score) best = { chainId: entry.chainId, score };
-    }
-    if (best) {
-      if (!preferredToken) return best.chainId;
-      const preferredEntry = chainEntries.find((entry) => normalizeChainToken(entry.chainId) === preferredToken);
-      if (!preferredEntry) return best.chainId;
-      const preferredScore = sequenceMatchScore(preferredEntry.chainSequence, candidateSequence);
-      if (!Number.isFinite(preferredScore) || best.score > preferredScore + 20) return best.chainId;
-      return preferredEntry.chainId;
-    }
-  }
-
-  if (preferredToken) {
-    const preferredEntry = chainEntries.find((entry) => normalizeChainToken(entry.chainId) === preferredToken);
-    if (preferredEntry) return preferredEntry.chainId;
-  }
-
-  let longest = chainEntries[0];
-  for (const entry of chainEntries) {
-    if (entry.residues.length > longest.residues.length) longest = entry;
-  }
-  return longest.chainId;
-}
-
-function selectResidueConfidenceSeries(
-  chains: Map<string, Map<string, ResidueConfidenceBucket>>,
-  sequenceLength: number,
-  preferredChainId?: string,
-  candidateSequence?: string
-): number[] {
-  const selectedChainId = resolveBestChainId(chains, preferredChainId, candidateSequence || '');
-  if (!selectedChainId) return [];
-  const selected = chains.get(selectedChainId);
-  if (!selected) return [];
-  const rows = [...selected.values()].sort((a, b) => {
-    if (a.seq !== b.seq) return a.seq - b.seq;
-    return a.ins.localeCompare(b.ins);
-  });
-  const values = rows
-    .map((row) => (row.ca !== null ? row.ca : row.count > 0 ? row.sum / row.count : null))
-    .map((item) => normalizePlddt(item))
-    .filter((item): item is number => item !== null && Number.isFinite(item));
-  return sequenceLength > 0 ? values.slice(0, sequenceLength) : values;
-}
-
-function parseResidueConfidenceFromPdb(
-  structureText: string,
-  sequenceLength: number,
-  preferredChainId?: string,
-  candidateSequence?: string
-): number[] {
-  const lines = structureText.split(/\r?\n/);
-  const chains = new Map<string, Map<string, ResidueConfidenceBucket>>();
-  for (const line of lines) {
-    if (!line.startsWith('ATOM')) continue;
-    const atomName = line.slice(12, 16).trim().toUpperCase();
-    const chainId = line.slice(21, 22).trim() || '_';
-    const residueName = line.slice(17, 20).trim().toUpperCase();
-    const seqRaw = line.slice(22, 26).trim();
-    const ins = line.slice(26, 27).trim();
-    const bIsoRaw = line.slice(60, 66).trim();
-    const seq = Number(seqRaw);
-    const bIso = Number(bIsoRaw);
-    if (!Number.isFinite(seq) || !Number.isFinite(bIso)) continue;
-    const residueKey = `${seqRaw}:${ins || '_'}`;
-    updateResidueBucket(chains, chainId, residueKey, Math.floor(seq), ins, residueName, atomName, bIso);
-  }
-  return selectResidueConfidenceSeries(chains, sequenceLength, preferredChainId, candidateSequence);
-}
-
 function tokenizeCifRow(line: string): string[] {
   const tokens: string[] = [];
   const re = /'([^']*)'|"([^"]*)"|(\S+)/g;
@@ -852,91 +737,6 @@ function tokenizeCifRow(line: string): string[] {
     tokens.push(match[1] ?? match[2] ?? match[3]);
   }
   return tokens;
-}
-
-function parseResidueConfidenceFromCif(
-  structureText: string,
-  sequenceLength: number,
-  preferredChainId?: string,
-  candidateSequence?: string
-): number[] {
-  const lines = structureText.split(/\r?\n/);
-  const chains = new Map<string, Map<string, ResidueConfidenceBucket>>();
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i].trim();
-    if (line !== 'loop_') continue;
-    const headers: string[] = [];
-    let j = i + 1;
-    while (j < lines.length) {
-      const headerLine = lines[j].trim();
-      if (!headerLine.startsWith('_')) break;
-      headers.push(headerLine);
-      j += 1;
-    }
-    if (!headers.some((header) => header.startsWith('_atom_site.'))) {
-      i = j;
-      continue;
-    }
-    const atomIdIdx = headers.findIndex((header) => header === '_atom_site.label_atom_id' || header === '_atom_site.auth_atom_id');
-    const seqIdx = headers.findIndex((header) => header === '_atom_site.label_seq_id' || header === '_atom_site.auth_seq_id');
-    const chainIdx = headers.findIndex((header) => header === '_atom_site.label_asym_id' || header === '_atom_site.auth_asym_id');
-    const compIdx = headers.findIndex((header) => header === '_atom_site.label_comp_id' || header === '_atom_site.auth_comp_id');
-    const bIsoIdx = headers.findIndex((header) => header === '_atom_site.B_iso_or_equiv');
-    const insIdx = headers.findIndex((header) => header === '_atom_site.pdbx_PDB_ins_code');
-    if (atomIdIdx < 0 || seqIdx < 0 || chainIdx < 0 || compIdx < 0 || bIsoIdx < 0) {
-      i = j;
-      continue;
-    }
-    while (j < lines.length) {
-      const rowLine = lines[j].trim();
-      if (!rowLine || rowLine === '#') {
-        j += 1;
-        continue;
-      }
-      if (rowLine === 'loop_' || rowLine.startsWith('_')) {
-        j -= 1;
-        break;
-      }
-      const tokens = tokenizeCifRow(rowLine);
-      if (tokens.length <= Math.max(atomIdIdx, seqIdx, chainIdx, bIsoIdx)) {
-        j += 1;
-        continue;
-      }
-      const atomName = readText(tokens[atomIdIdx]).trim().toUpperCase();
-      const seqToken = readText(tokens[seqIdx]).trim();
-      const seq = Number(seqToken);
-      const chainId = readText(tokens[chainIdx]).trim() || '_';
-      const residueName = readText(tokens[compIdx]).trim().toUpperCase();
-      const bIso = Number(readText(tokens[bIsoIdx]).trim());
-      const ins = insIdx >= 0 ? readText(tokens[insIdx]).trim() : '';
-      if (!Number.isFinite(seq) || !Number.isFinite(bIso)) {
-        j += 1;
-        continue;
-      }
-      const residueKey = `${seqToken}:${ins || '_'}`;
-      updateResidueBucket(chains, chainId, residueKey, Math.floor(seq), ins, residueName, atomName, bIso);
-      j += 1;
-    }
-    i = j;
-  }
-  return selectResidueConfidenceSeries(chains, sequenceLength, preferredChainId, candidateSequence);
-}
-
-function parseResidueConfidenceFromStructure(
-  structureText: string,
-  structureFormat: 'cif' | 'pdb',
-  sequenceLength: number,
-  preferredChainId?: string,
-  candidateSequence?: string
-): number[] {
-  const text = structureText.trim();
-  if (!text) return [];
-  if (structureFormat === 'pdb') {
-    return parseResidueConfidenceFromPdb(text, sequenceLength, preferredChainId, candidateSequence);
-  }
-  const cifValues = parseResidueConfidenceFromCif(text, sequenceLength, preferredChainId, candidateSequence);
-  if (cifValues.length > 0) return cifValues;
-  return parseResidueConfidenceFromPdb(text, sequenceLength, preferredChainId, candidateSequence);
 }
 
 interface PolymerResidueEntry {
@@ -1109,9 +909,7 @@ function resolvePeptideFocusChainId(
 
 function parseCandidateResiduePlddts(
   row: Record<string, unknown>,
-  sequence: string,
   sequenceLength: number,
-  structure: { structureText: string; structureFormat: 'cif' | 'pdb' },
   preferredChainId?: string
 ): number[] {
   const nested = [
@@ -1171,19 +969,6 @@ function parseCandidateResiduePlddts(
   const byChainSeries = readResiduePlddtByChainSeries(nested, sequenceLength, preferredChainId);
   if (byChainSeries.length > 0) return byChainSeries;
 
-  if (structure.structureText.trim()) {
-    const structureValues = alignResidueSeriesToSequence(
-      parseResidueConfidenceFromStructure(
-        structure.structureText,
-        structure.structureFormat,
-        sequenceLength,
-        preferredChainId,
-        sequence
-      ),
-      sequenceLength
-    );
-    if (structureValues.length > 0) return structureValues;
-  }
 
   return [];
 }
@@ -1241,19 +1026,36 @@ function normalizeRuntimeState(raw: unknown): RuntimeState {
 }
 
 function parseCandidateStructure(row: Record<string, unknown>): { structureText: string; structureFormat: 'cif' | 'pdb'; structureName: string } {
-  const nested = [asRecord(row.result), asRecord(row.prediction), asRecord(row.structure_payload), asRecord(row.structure)];
-  const candidates = [row, ...nested];
-  for (const source of candidates) {
-    const structureText = firstNonEmptyText(source, ['structureText', 'structure_text', 'cif_text', 'pdb_text', 'content']);
-    if (!structureText) continue;
-    const structureFormat = detectStructureFormat(
-      structureText,
-      source.structureFormat ?? source.structure_format ?? source.format
-    );
-    const structureName = firstNonEmptyText(source, ['structureName', 'structure_name', 'name']) || `design.${structureFormat}`;
-    return { structureText, structureFormat, structureName };
+  const nested = [row, asRecord(row.result), asRecord(row.prediction), asRecord(row.structure_payload), asRecord(row.structure)];
+  for (const source of nested) {
+    const structureName = firstNonEmptyText(source, [
+      'structureName',
+      'structure_name',
+      'structure_file',
+      'structure_path',
+      'name'
+    ]);
+    if (!structureName) continue;
+    const formatHint = source.structureFormat ?? source.structure_format ?? source.format ?? structureName;
+    const structureFormat = detectStructureFormat('', formatHint);
+    return { structureText: '', structureFormat, structureName };
   }
   return { structureText: '', structureFormat: 'cif', structureName: '' };
+}
+
+function readCandidateStructureName(row: Record<string, unknown>): string {
+  const nested = [row, asRecord(row.result), asRecord(row.prediction), asRecord(row.structure_payload), asRecord(row.structure)];
+  for (const source of nested) {
+    const structureName = firstNonEmptyText(source, [
+      'structureName',
+      'structure_name',
+      'structure_file',
+      'structure_path',
+      'name'
+    ]);
+    if (structureName) return structureName;
+  }
+  return '';
 }
 
 function normalizeModelLabel(raw: string): string {
@@ -1314,7 +1116,55 @@ function extractRawCandidates(snapshotConfidence: Record<string, unknown>): Arra
   for (const path of candidatePaths) {
     rows.push(...asRecordArray(readObjectPath(snapshotConfidence, path)));
   }
-  return rows;
+  return dedupeRawCandidateRows(rows);
+}
+
+function rawCandidateIdentity(row: Record<string, unknown>, index: number): string {
+  const sequence = firstNonEmptyText(row, [
+    'peptide_sequence',
+    'binder_sequence',
+    'candidate_sequence',
+    'designed_sequence',
+    'sequence'
+  ])
+    .replace(/\s+/g, '')
+    .trim()
+    .toUpperCase();
+  const generation = firstFiniteMetric(row, ['generation', 'iteration', 'iter']);
+  if (sequence) {
+    return generation === null ? `seq:${sequence}` : `seq:${sequence}|gen:${Math.floor(generation)}`;
+  }
+  const structureName = readCandidateStructureName(row);
+  if (structureName) return `structure:${structureName}`;
+  const rowId = readText(row.id).trim();
+  return rowId ? `id:${rowId}` : `row:${index}`;
+}
+
+function rawCandidateRichnessScore(row: Record<string, unknown>): number {
+  let score = 0;
+  if (readCandidateStructureName(row)) score += 100;
+  if (Array.isArray(row.modifications) && row.modifications.length > 0) score += 20;
+  if (firstFiniteMetric(row, ['plddt', 'binder_avg_plddt', 'ligand_mean_plddt', 'mean_plddt']) !== null) score += 8;
+  if (firstFiniteMetric(row, ['pair_iptm_target_binder', 'pairIptmTargetBinder', 'pair_iptm', 'pairIptm', 'iptm']) !== null) score += 8;
+  if (firstFiniteMetric(row, ['composite_score', 'score', 'fitness', 'objective']) !== null) score += 4;
+  const residueSeries = parseNumberList(row.residue_plddts ?? row.residue_plddt ?? row.per_residue_plddt);
+  if (residueSeries.length > 0) score += Math.min(50, residueSeries.length);
+  return score;
+}
+
+function dedupeRawCandidateRows(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const byIdentity = new Map<string, { row: Record<string, unknown>; score: number; index: number }>();
+  rows.forEach((row, index) => {
+    const key = rawCandidateIdentity(row, index);
+    const score = rawCandidateRichnessScore(row);
+    const existing = byIdentity.get(key);
+    if (!existing || score > existing.score) {
+      byIdentity.set(key, { row, score, index: existing?.index ?? index });
+    }
+  });
+  return Array.from(byIdentity.values())
+    .sort((a, b) => a.index - b.index)
+    .map((entry) => entry.row);
 }
 
 function candidateIdentity(row: PeptideDesignCandidate): string {
@@ -1460,9 +1310,7 @@ function parseCandidateRows(
       const structure = parseCandidateStructure(row);
       const residuePlddts = parseCandidateResiduePlddts(
         row,
-        sequence,
         sequence.length,
-        structure,
         preferredLigandChainId
       );
       const modelLabel = parseCandidateModelLabel(row, defaultModelLabel);
@@ -1498,7 +1346,7 @@ function parseCandidateRows(
         source
       } as PeptideDesignCandidate;
     })
-    .filter((row) => Boolean(row.sequence || row.structureText));
+    .filter((row) => Boolean(row.sequence || row.structureName));
 }
 
 function parseProgressPercent(value: number | null): number | null {
@@ -1595,19 +1443,20 @@ function extractRuntimeContext(params: {
     progress = parseProgressPercent(fallbackProgressPercent);
   }
 
-  const liveCandidateRows = readFirstRecordArrayFromPaths(
-    [statusPayload, statusProgress, statusPeptide, statusPeptideProgress, snapshotConfidence, confidencePeptide, confidencePeptideProgress],
-    [
-      'progress.current_best_sequences',
-      'progress.best_sequences',
-      'current_best_sequences',
-      'best_sequences',
-      'current_candidates',
-      'candidates'
-    ]
-  );
-
   const taskState = normalizeRuntimeState(projectTaskState);
+  const liveCandidateRows = shouldUseLivePeptideRows(taskState)
+    ? readFirstRecordArrayFromPaths(
+        [statusPayload, statusProgress, statusPeptide, statusPeptideProgress],
+        [
+          'progress.current_best_sequences',
+          'progress.best_sequences',
+          'current_best_sequences',
+          'best_sequences',
+          'current_candidates',
+          'candidates'
+        ]
+      )
+    : EMPTY_RECORD_ROWS;
 
   return {
     state: taskState,
@@ -1632,6 +1481,64 @@ function extractRuntimeContext(params: {
     stagnantGenerations: stagnantGenerations === null ? null : Math.max(0, Math.floor(stagnantGenerations)),
     liveCandidateRows
   };
+}
+
+function shouldUseLivePeptideRows(state: RuntimeState): boolean {
+  return state === 'RUNNING' || state === 'QUEUED';
+}
+
+function buildRawCandidateRowsSignature(rows: Array<Record<string, unknown>>): string {
+  if (rows.length === 0) return '0';
+  return rows
+    .map((row, index) => {
+      const identity = rawCandidateIdentity(row, index);
+      const rank = firstFiniteMetric(row, ['rank', 'ranking', 'order']);
+      const score = firstFiniteMetric(row, ['composite_score', 'score', 'fitness', 'objective']);
+      const plddt = firstFiniteMetric(row, ['plddt', 'binder_avg_plddt', 'ligand_mean_plddt', 'mean_plddt']);
+      const structureName = readCandidateStructureName(row);
+      return [identity, rank ?? '', score ?? '', plddt ?? '', structureName].join(':');
+    })
+    .join('|');
+}
+
+function buildCandidateRows(
+  finalizedRows: Array<Record<string, unknown>>,
+  liveRows: Array<Record<string, unknown>>,
+  liveDefaultState: RuntimeState,
+  runtimeModelLabel: string,
+  selectedLigandChainId?: string,
+  selectedTargetChainId?: string
+): PeptideDesignCandidate[] {
+  const parsed: PeptideDesignCandidate[] = [
+    ...parseCandidateRows(
+      finalizedRows,
+      'result',
+      'SUCCESS',
+      runtimeModelLabel,
+      selectedLigandChainId,
+      selectedTargetChainId
+    )
+  ];
+  if (liveRows.length > 0) {
+    parsed.push(
+      ...parseCandidateRows(
+        liveRows,
+        'live',
+        liveDefaultState,
+        runtimeModelLabel,
+        selectedLigandChainId,
+        selectedTargetChainId
+      )
+    );
+  }
+  return mergeCandidateRows(parsed)
+    .sort((a, b) => {
+      if (a.score !== null && b.score !== null && a.score !== b.score) return b.score - a.score;
+      if (a.plddt !== null && b.plddt !== null && a.plddt !== b.plddt) return b.plddt - a.plddt;
+      if (a.generation !== null && b.generation !== null && a.generation !== b.generation) return b.generation - a.generation;
+      return a.rank - b.rank;
+    })
+    .map((item, index) => ({ ...item, rank: index + 1 }));
 }
 
 function formatScore(value: number | null): string {
@@ -1697,6 +1604,219 @@ function buildPeptideLigandViewTokens(
   });
 }
 
+
+interface PeptideCandidateTableRowProps {
+  candidate: PeptideDesignCandidate;
+  selected: boolean;
+  cardMode: boolean;
+  scoreMin: number | null;
+  scoreMax: number | null;
+  onOpen: (candidateId: string) => void;
+  onSelect: (candidateId: string) => void;
+}
+
+const PeptideCandidateTableRow = memo(function PeptideCandidateTableRow({
+  candidate,
+  selected,
+  cardMode,
+  scoreMin,
+  scoreMax,
+  onOpen,
+  onSelect
+}: PeptideCandidateTableRowProps) {
+  const scoreTone = confidenceTone(scoreConfidencePercent(candidate.score, scoreMin, scoreMax));
+  const plddtTone = confidenceTone(candidate.plddt);
+  const interfaceTone = confidenceTone(
+    candidate.interfaceMetric === null ? null : candidate.interfaceMetric * 100
+  );
+  const sequenceRows = useMemo(() => {
+    const sequenceTokens = buildPeptideLigandViewTokens(candidate.sequence, candidate.modifications);
+    return Array.from(
+      { length: Math.ceil(sequenceTokens.length / 10) },
+      (_, rowIdx) => sequenceTokens.slice(rowIdx * 10, rowIdx * 10 + 10)
+    );
+  }, [candidate.modifications, candidate.sequence]);
+  const handleRowClick = useCallback(() => {
+    if (cardMode) onSelect(candidate.id);
+  }, [candidate.id, cardMode, onSelect]);
+  const handleOpen = useCallback((event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    onOpen(candidate.id);
+  }, [candidate.id, onOpen]);
+
+  return (
+    <tr
+      className={selected ? 'selected' : ''}
+      onClick={handleRowClick}
+    >
+      <td className="col-rank">{candidate.rank}</td>
+      <td className="col-actions peptide-col-open">
+        <button
+          type="button"
+          className="peptide-ligand-preview-btn"
+          title="Open in 3D card view"
+          aria-label="Open in 3D card view"
+          onClick={handleOpen}
+        >
+          <span className="peptide-ligand-preview-track">
+            {sequenceRows.length > 0 ? (
+              sequenceRows.map((rowTokens, rowIdx) => (
+                <span className="peptide-ligand-preview-row" key={`${candidate.id}-ligand-view-row-${rowIdx}`}>
+                  {rowTokens.map((token, idx) => {
+                    const residueIdx = rowIdx * 10 + idx;
+                    const residuePlddt = candidate.residuePlddts[residueIdx] ?? null;
+                    const residueTone = toneForPlddtValue(residuePlddt);
+                    const isModified = Boolean(token.modifiedLabel);
+                    const title = isModified
+                      ? `#${residueIdx + 1} ${token.residue} -> ${token.modifiedLabel} | pLDDT ${residuePlddt === null ? '-' : residuePlddt.toFixed(1)}`
+                      : `#${residueIdx + 1} ${token.residue} | pLDDT ${residuePlddt === null ? '-' : residuePlddt.toFixed(1)}`;
+                    return (
+                      <span className="peptide-ligand-preview-node-wrap" key={`${candidate.id}-ligand-view-${residueIdx}`}>
+                        {idx > 0 ? (
+                          <span className={`peptide-ligand-preview-link tone-${residueTone}`} aria-hidden="true" />
+                        ) : null}
+                        <span
+                          className={`peptide-ligand-preview-node tone-${residueTone}${isModified ? ' is-modified' : ''}`}
+                          title={title}
+                        >
+                          {token.displayResidue}
+                        </span>
+                      </span>
+                    );
+                  })}
+                </span>
+              ))
+            ) : (
+              <span className="peptide-ligand-preview-empty">-</span>
+            )}
+          </span>
+        </button>
+      </td>
+      <td className="col-n">{candidate.generation !== null ? candidate.generation : '-'}</td>
+      <td className="col-delta">
+        <span className={`peptide-table-value conf-tone-${scoreTone}`}>{formatScore(candidate.score)}</span>
+      </td>
+      <td className="col-insights peptide-col-metric">
+        <span className={`peptide-table-value conf-tone-${plddtTone}`}>{formatPlddt(candidate.plddt)}</span>
+      </td>
+      <td className="col-insights peptide-col-metric">
+        <span className={`peptide-table-value conf-tone-${interfaceTone}`}>
+          {formatInterfaceMetric(candidate.interfaceMetric)}
+        </span>
+      </td>
+    </tr>
+  );
+});
+
+interface PeptideCandidateCardProps {
+  candidate: PeptideDesignCandidate;
+  selected: boolean;
+  scoreMin: number | null;
+  scoreMax: number | null;
+  interfaceMetricHeaderLabel: string;
+  onSelect: (candidateId: string) => void;
+}
+
+const PeptideCandidateCard = memo(function PeptideCandidateCard({
+  candidate,
+  selected,
+  scoreMin,
+  scoreMax,
+  interfaceMetricHeaderLabel,
+  onSelect
+}: PeptideCandidateCardProps) {
+  const scoreTone = confidenceTone(scoreConfidencePercent(candidate.score, scoreMin, scoreMax));
+  const plddtTone = confidenceTone(candidate.plddt);
+  const interfaceTone = confidenceTone(
+    candidate.interfaceMetric === null ? null : candidate.interfaceMetric * 100
+  );
+  const sequenceRows = useMemo(() => {
+    const sequenceTokens = buildPeptideLigandViewTokens(candidate.sequence, candidate.modifications);
+    return Array.from(
+      { length: Math.ceil(sequenceTokens.length / 5) },
+      (_, rowIdx) => sequenceTokens.slice(rowIdx * 5, rowIdx * 5 + 5)
+    );
+  }, [candidate.modifications, candidate.sequence]);
+  const handleSelect = useCallback(() => {
+    onSelect(candidate.id);
+  }, [candidate.id, onSelect]);
+  const handleKeyDown = useCallback((event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    onSelect(candidate.id);
+  }, [candidate.id, onSelect]);
+
+  return (
+    <article
+      className={`lead-opt-result-card peptide-result-card${selected ? ' selected' : ''}`}
+      onClick={handleSelect}
+      onKeyDown={handleKeyDown}
+      role="button"
+      tabIndex={0}
+      aria-label={`Open peptide card ${candidate.rank}`}
+    >
+      <div className="lead-opt-result-card-head">
+        <strong>#{candidate.rank}</strong>
+        <span className="muted small">Gen {candidate.generation !== null ? candidate.generation : '-'}</span>
+      </div>
+      <div className="lead-opt-result-card-media peptide-result-card-media">
+        <span className="peptide-ligand-preview-track peptide-ligand-preview-track--card">
+          {sequenceRows.length > 0 ? (
+            sequenceRows.map((rowTokens, rowIdx) => (
+              <span className="peptide-ligand-preview-row peptide-ligand-preview-row--card" key={`${candidate.id}-card-row-${rowIdx}`}>
+                {rowTokens.map((token, idx) => {
+                  const residueIdx = rowIdx * 5 + idx;
+                  const residuePlddt = candidate.residuePlddts[residueIdx] ?? null;
+                  const residueTone = toneForPlddtValue(residuePlddt);
+                  const isModified = Boolean(token.modifiedLabel);
+                  const title = isModified
+                    ? `#${residueIdx + 1} ${token.residue} -> ${token.modifiedLabel} | pLDDT ${residuePlddt === null ? '-' : residuePlddt.toFixed(1)}`
+                    : `#${residueIdx + 1} ${token.residue} | pLDDT ${residuePlddt === null ? '-' : residuePlddt.toFixed(1)}`;
+                  return (
+                    <span className="peptide-ligand-preview-node-wrap" key={`${candidate.id}-card-${residueIdx}`}>
+                      {idx > 0 ? (
+                        <span className={`peptide-ligand-preview-link tone-${residueTone}`} aria-hidden="true" />
+                      ) : null}
+                      <span
+                        className={`peptide-ligand-preview-node peptide-ligand-preview-node--card tone-${residueTone}${isModified ? ' is-modified' : ''}`}
+                        title={title}
+                      >
+                        {token.displayResidue}
+                      </span>
+                    </span>
+                  );
+                })}
+              </span>
+            ))
+          ) : (
+            <span className="peptide-ligand-preview-empty">-</span>
+          )}
+        </span>
+      </div>
+      <div className="lead-opt-card-metric-strip peptide-card-metric-strip">
+        <span className={`lead-opt-card-pill conf-tone-${scoreTone}`}>
+          <span className="lead-opt-card-pill-key">Score</span>
+          <strong>{formatScore(candidate.score)}</strong>
+        </span>
+        <span className={`lead-opt-card-pill conf-tone-${plddtTone}`}>
+          <span className="lead-opt-card-pill-key">pLDDT</span>
+          <strong>{formatPlddt(candidate.plddt)}</strong>
+        </span>
+        <span className={`lead-opt-card-pill conf-tone-${interfaceTone}`}>
+          <span className="lead-opt-card-pill-key">
+            {candidate.interfaceMetricSource === 'ipsae' ? 'IPSAE' : interfaceMetricHeaderLabel}
+          </span>
+          <strong>{formatInterfaceMetric(candidate.interfaceMetric)}</strong>
+        </span>
+        <span className="lead-opt-card-pill">
+          <span className="lead-opt-card-pill-key">Gen</span>
+          <strong>{candidate.generation !== null ? candidate.generation : '-'}</strong>
+        </span>
+      </div>
+    </article>
+  );
+});
+
 export function PeptideDesignResultsWorkspace({
   projectTaskId,
   resultsGridRef,
@@ -1710,6 +1830,7 @@ export function PeptideDesignResultsWorkspace({
   progressPercent,
   displayStructureText,
   displayStructureFormat,
+  displayStructureName,
   selectedResultTargetChainId,
   selectedResultLigandChainId,
   selectedResultLigandSequence,
@@ -1720,6 +1841,7 @@ export function PeptideDesignResultsWorkspace({
   onRequestStructure
 }: PeptideDesignResultsWorkspaceProps) {
   void selectedResultLigandSequence;
+  void fallbackPlddt;
   void fallbackIptm;
   const runtimeContext = useMemo(
     () =>
@@ -1731,50 +1853,39 @@ export function PeptideDesignResultsWorkspace({
       }),
     [snapshotConfidence, statusInfo, projectTaskState, progressPercent]
   );
+  const runtimeModelLabel = useMemo(
+    () => normalizeModelLabel(confidenceBackend) || normalizeModelLabel(projectBackend) || 'Boltz',
+    [confidenceBackend, projectBackend]
+  );
+  const finalizedCandidateRows = useMemo(
+    () => extractRawCandidates(snapshotConfidence || {}),
+    [snapshotConfidence]
+  );
+  const useLiveCandidateRows = shouldUseLivePeptideRows(runtimeContext.state);
+  const liveCandidateRows = useLiveCandidateRows ? runtimeContext.liveCandidateRows : EMPTY_RECORD_ROWS;
+  const liveCandidateRowsSignature = useMemo(
+    () => buildRawCandidateRowsSignature(liveCandidateRows),
+    [liveCandidateRows]
+  );
+  const liveDefaultState = runtimeContext.state === 'UNSCORED' ? 'RUNNING' : runtimeContext.state;
 
   const candidates = useMemo<PeptideDesignCandidate[]>(() => {
-    const runtimeModelLabel = normalizeModelLabel(confidenceBackend) || normalizeModelLabel(projectBackend) || 'Boltz';
-    const finalizedRows = extractRawCandidates(snapshotConfidence || {});
-    const liveRows = runtimeContext.liveCandidateRows;
-    const liveDefaultState = runtimeContext.state === 'UNSCORED' ? 'RUNNING' : runtimeContext.state;
-
-    const merged = mergeCandidateRows([
-      ...parseCandidateRows(
-        finalizedRows,
-        'result',
-        'SUCCESS',
-        runtimeModelLabel,
-        selectedResultLigandChainId || undefined,
-        selectedResultTargetChainId || undefined
-      ),
-      ...parseCandidateRows(
-        liveRows,
-        'live',
-        liveDefaultState,
-        runtimeModelLabel,
-        selectedResultLigandChainId || undefined,
-        selectedResultTargetChainId || undefined
-      )
-    ])
-      .sort((a, b) => {
-        if (a.score !== null && b.score !== null && a.score !== b.score) return b.score - a.score;
-        if (a.plddt !== null && b.plddt !== null && a.plddt !== b.plddt) return b.plddt - a.plddt;
-        if (a.generation !== null && b.generation !== null && a.generation !== b.generation) return b.generation - a.generation;
-        return a.rank - b.rank;
-      })
-      .map((item, index) => ({ ...item, rank: index + 1 }));
-
-    return merged;
+    void liveCandidateRowsSignature;
+    return buildCandidateRows(
+      finalizedCandidateRows,
+      liveCandidateRows,
+      liveDefaultState,
+      runtimeModelLabel,
+      selectedResultLigandChainId || undefined,
+      selectedResultTargetChainId || undefined
+    );
   }, [
-    snapshotConfidence,
-    selectedResultTargetChainId,
-    selectedResultLigandSequence,
+    finalizedCandidateRows,
+    liveCandidateRowsSignature,
+    liveDefaultState,
+    runtimeModelLabel,
     selectedResultLigandChainId,
-    displayStructureText,
-    displayStructureFormat,
-    fallbackPlddt,
-    fallbackIptm,
-    runtimeContext
+    selectedResultTargetChainId
   ]);
 
   const [selectedCandidateId, setSelectedCandidateId] = useState('');
@@ -1793,6 +1904,7 @@ export function PeptideDesignResultsWorkspace({
   const [pageInput, setPageInput] = useState('1');
   const [pageSize, setPageSize] = useState<(typeof PEPTIDE_RESULTS_PAGE_SIZE_OPTIONS)[number]>(20);
   const [requestingStructure, setRequestingStructure] = useState(false);
+  const [structureRequestError, setStructureRequestError] = useState('');
   const requestedStructureKeyRef = useRef('');
   const interfaceMetricHeaderLabel = useMemo(() => {
     const hasIpsae = candidates.some((candidate) => candidate.interfaceMetricSource === 'ipsae');
@@ -1840,6 +1952,7 @@ export function PeptideDesignResultsWorkspace({
     () => sortedCandidates.slice((clampedPage - 1) * pageSize, clampedPage * pageSize),
     [sortedCandidates, clampedPage, pageSize]
   );
+  const cardCandidates = pagedCandidates;
 
   useEffect(() => {
     setViewerColorMode(initialViewerColorMode);
@@ -1869,6 +1982,7 @@ export function PeptideDesignResultsWorkspace({
     if (!sortedCandidates.length) return null;
     return sortedCandidates.find((item) => item.id === selectedCandidateId) || sortedCandidates[0];
   }, [sortedCandidates, selectedCandidateId]);
+  const selectedCandidateStableId = selectedCandidate?.id || '';
 
   useEffect(() => {
     if (sortedCandidates.length > 0) return;
@@ -1882,22 +1996,36 @@ export function PeptideDesignResultsWorkspace({
     setPageInput('1');
     requestedStructureKeyRef.current = '';
     setRequestingStructure(false);
+    setStructureRequestError('');
   }, [projectTaskId]);
 
   const hasCandidateRows = sortedCandidates.length > 0;
-  const viewerRawStructureText = hasCandidateRows ? selectedCandidate?.structureText || '' : displayStructureText;
-  const viewerStructureFormat = selectedCandidate?.structureText ? selectedCandidate.structureFormat : displayStructureFormat;
+  const selectedStructureName = readText(selectedCandidate?.structureName).trim();
+  const loadedStructureMatchesSelected = structureNameMatches(displayStructureName, selectedStructureName);
+  const selectedCandidateStructureText = readText(selectedCandidate?.structureText).trim();
+  const viewerRawStructureText = cardMode
+    ? selectedCandidateStructureText || (loadedStructureMatchesSelected ? displayStructureText : '')
+    : '';
+  const viewerStructureFormat = cardMode && selectedCandidateStructureText ? selectedCandidate?.structureFormat || 'cif' : displayStructureFormat;
+  const hasViewerRawStructureText = viewerRawStructureText.trim().length > 0;
   const viewerStandardStructureText = useMemo(
-    () => stripStructureConfidenceColoringData(viewerRawStructureText, viewerStructureFormat),
-    [viewerRawStructureText, viewerStructureFormat]
+    () => (cardMode && hasViewerRawStructureText ? stripStructureConfidenceColoringData(viewerRawStructureText, viewerStructureFormat) : ''),
+    [cardMode, hasViewerRawStructureText, viewerRawStructureText, viewerStructureFormat]
   );
   const viewerConfidenceStructureText = useMemo(
-    () => ensureStructureConfidenceColoringData(viewerRawStructureText, viewerStructureFormat, confidenceBackend || projectBackend),
-    [viewerRawStructureText, viewerStructureFormat, confidenceBackend, projectBackend]
+    () =>
+      cardMode && hasViewerRawStructureText
+        ? ensureStructureConfidenceColoringData(viewerRawStructureText, viewerStructureFormat, confidenceBackend || projectBackend)
+        : '',
+    [cardMode, hasViewerRawStructureText, viewerRawStructureText, viewerStructureFormat, confidenceBackend, projectBackend]
   );
-  const viewerStructureText = viewerColorMode === 'alphafold' ? viewerConfidenceStructureText : viewerStandardStructureText;
+  // Load the structure ONCE after the user opens the 3D card. The _ma_qa_metric confidence blocks
+  // are harmless for the element-symbol Std theme, so AF<->Std toggles don't reload the structure.
+  const viewerStructureText = cardMode ? viewerConfidenceStructureText || viewerStandardStructureText : '';
   const canRequestStructure = runtimeContext.state === 'SUCCESS' && Boolean(onRequestStructure);
+  const canRequestSelectedStructure = canRequestStructure && Boolean(selectedStructureName);
   const viewerLigandFocusChainId = useMemo(() => {
+    if (!cardMode) return selectedResultLigandChainId || '';
     const preferredChain = selectedResultLigandChainId || undefined;
     const candidateSequence = readText(selectedCandidate?.sequence || '').trim().toUpperCase();
     const structureTextForFocus = readText(viewerStructureText).trim();
@@ -1909,26 +2037,35 @@ export function PeptideDesignResultsWorkspace({
       preferredChain
     );
     return focusChain || selectedResultLigandChainId || '';
-  }, [selectedCandidate?.sequence, selectedResultLigandChainId, viewerStructureFormat, viewerStructureText]);
+  }, [cardMode, selectedCandidate?.sequence, selectedResultLigandChainId, viewerStructureFormat, viewerStructureText]);
 
   useEffect(() => {
     if (!cardMode) return;
-    if (!canRequestStructure) return;
+    if (!canRequestSelectedStructure) return;
     if (!hasCandidateRows) return;
     if (readText(viewerStructureText).trim()) return;
-    const requestKey = `${projectTaskId}:${selectedCandidate?.id || 'none'}`;
+    const preferredStructureName = selectedStructureName;
+    if (!preferredStructureName) return;
+    const requestKey = `${projectTaskId}:${selectedCandidate?.id || 'none'}:${preferredStructureName || '-'}`;
     if (requestedStructureKeyRef.current === requestKey) return;
     requestedStructureKeyRef.current = requestKey;
+    setStructureRequestError('');
     setRequestingStructure(true);
-    Promise.resolve(onRequestStructure?.())
-      .catch(() => {})
+    Promise.resolve(onRequestStructure?.({ preferredStructureName }))
+      .catch((error) => {
+        setStructureRequestError(error instanceof Error ? error.message : 'Failed to load the requested peptide structure.');
+      })
       .finally(() => setRequestingStructure(false));
-  }, [canRequestStructure, cardMode, hasCandidateRows, onRequestStructure, projectTaskId, selectedCandidate?.id, viewerStructureText]);
+  }, [canRequestSelectedStructure, cardMode, hasCandidateRows, onRequestStructure, projectTaskId, selectedCandidate?.id, selectedStructureName, viewerStructureText]);
 
-  const openCandidateCard = (candidateId: string) => {
+  const openCandidateCard = useCallback((candidateId: string) => {
     setSelectedCandidateId(candidateId);
     setCardMode(true);
-  };
+  }, []);
+
+  const selectCandidateCard = useCallback((candidateId: string) => {
+    setSelectedCandidateId(candidateId);
+  }, []);
 
   const onSort = (key: PeptideSortKey) => {
     if (sortKey === key) {
@@ -2004,87 +2141,18 @@ export function PeptideDesignResultsWorkspace({
             </tr>
           </thead>
           <tbody>
-            {pagedCandidates.map((candidate) => {
-              const isActive = candidate.id === selectedCandidate?.id;
-              const scoreTone = confidenceTone(scoreConfidencePercent(candidate.score, scoreRange.min, scoreRange.max));
-              const plddtTone = confidenceTone(candidate.plddt);
-              const interfaceTone = confidenceTone(
-                candidate.interfaceMetric === null ? null : candidate.interfaceMetric * 100
-              );
-              const sequenceTokens = buildPeptideLigandViewTokens(candidate.sequence, candidate.modifications);
-              const sequenceRows = Array.from(
-                { length: Math.ceil(sequenceTokens.length / 10) },
-                (_, rowIdx) => sequenceTokens.slice(rowIdx * 10, rowIdx * 10 + 10)
-              );
-              return (
-                <tr
-                  key={candidate.id}
-                  className={isActive ? 'selected' : ''}
-                  onClick={() => {
-                    if (cardMode) setSelectedCandidateId(candidate.id);
-                  }}
-                >
-                  <td className="col-rank">{candidate.rank}</td>
-                  <td className="col-actions peptide-col-open">
-                    <button
-                      type="button"
-                      className="peptide-ligand-preview-btn"
-                      title="Open in 3D card view"
-                      aria-label="Open in 3D card view"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        openCandidateCard(candidate.id);
-                      }}
-                    >
-                      <span className="peptide-ligand-preview-track">
-                        {sequenceRows.length > 0 ? (
-                          sequenceRows.map((rowTokens, rowIdx) => (
-                            <span className="peptide-ligand-preview-row" key={`${candidate.id}-ligand-view-row-${rowIdx}`}>
-                              {rowTokens.map((token, idx) => {
-                                const residueIdx = rowIdx * 10 + idx;
-                                const residuePlddt = candidate.residuePlddts[residueIdx] ?? null;
-                                const residueTone = toneForPlddtValue(residuePlddt);
-                                const isModified = Boolean(token.modifiedLabel);
-                                const title = isModified
-                                  ? `#${residueIdx + 1} ${token.residue} -> ${token.modifiedLabel} | pLDDT ${residuePlddt === null ? '-' : residuePlddt.toFixed(1)}`
-                                  : `#${residueIdx + 1} ${token.residue} | pLDDT ${residuePlddt === null ? '-' : residuePlddt.toFixed(1)}`;
-                                return (
-                                  <span className="peptide-ligand-preview-node-wrap" key={`${candidate.id}-ligand-view-${residueIdx}`}>
-                                    {idx > 0 ? (
-                                      <span className={`peptide-ligand-preview-link tone-${residueTone}`} aria-hidden="true" />
-                                    ) : null}
-                                    <span
-                                      className={`peptide-ligand-preview-node tone-${residueTone}${isModified ? ' is-modified' : ''}`}
-                                      title={title}
-                                    >
-                                      {token.displayResidue}
-                                    </span>
-                                  </span>
-                                );
-                              })}
-                            </span>
-                          ))
-                        ) : (
-                          <span className="peptide-ligand-preview-empty">-</span>
-                        )}
-                      </span>
-                    </button>
-                  </td>
-                  <td className="col-n">{candidate.generation !== null ? candidate.generation : '-'}</td>
-                  <td className="col-delta">
-                    <span className={`peptide-table-value conf-tone-${scoreTone}`}>{formatScore(candidate.score)}</span>
-                  </td>
-                  <td className="col-insights peptide-col-metric">
-                    <span className={`peptide-table-value conf-tone-${plddtTone}`}>{formatPlddt(candidate.plddt)}</span>
-                  </td>
-                  <td className="col-insights peptide-col-metric">
-                    <span className={`peptide-table-value conf-tone-${interfaceTone}`}>
-                      {formatInterfaceMetric(candidate.interfaceMetric)}
-                    </span>
-                  </td>
-                </tr>
-              );
-            })}
+            {pagedCandidates.map((candidate) => (
+              <PeptideCandidateTableRow
+                key={candidate.id}
+                candidate={candidate}
+                selected={candidate.id === selectedCandidateStableId}
+                cardMode={cardMode}
+                scoreMin={scoreRange.min}
+                scoreMax={scoreRange.max}
+                onOpen={openCandidateCard}
+                onSelect={selectCandidateCard}
+              />
+            ))}
             {sortedCandidates.length === 0 ? (
               <tr>
                 <td colSpan={6}>
@@ -2207,93 +2275,17 @@ export function PeptideDesignResultsWorkspace({
       ) : (
         <div className="peptide-card-list-wrap">
           <div className="lead-opt-card-list peptide-card-list">
-            {sortedCandidates.map((candidate) => {
-              const scoreTone = confidenceTone(scoreConfidencePercent(candidate.score, scoreRange.min, scoreRange.max));
-              const plddtTone = confidenceTone(candidate.plddt);
-              const interfaceTone = confidenceTone(
-                candidate.interfaceMetric === null ? null : candidate.interfaceMetric * 100
-              );
-              const sequenceTokens = buildPeptideLigandViewTokens(candidate.sequence, candidate.modifications);
-              const sequenceRows = Array.from(
-                { length: Math.ceil(sequenceTokens.length / 5) },
-                (_, rowIdx) => sequenceTokens.slice(rowIdx * 5, rowIdx * 5 + 5)
-              );
-              const isActive = candidate.id === selectedCandidate?.id;
-              return (
-                <article
-                  key={candidate.id}
-                  className={`lead-opt-result-card peptide-result-card${isActive ? ' selected' : ''}`}
-                  onClick={() => setSelectedCandidateId(candidate.id)}
-                  onKeyDown={(event) => {
-                    if (event.key !== 'Enter' && event.key !== ' ') return;
-                    event.preventDefault();
-                    setSelectedCandidateId(candidate.id);
-                  }}
-                  role="button"
-                  tabIndex={0}
-                  aria-label={`Open peptide card ${candidate.rank}`}
-                >
-                  <div className="lead-opt-result-card-head">
-                    <strong>#{candidate.rank}</strong>
-                    <span className="muted small">Gen {candidate.generation !== null ? candidate.generation : '-'}</span>
-                  </div>
-                  <div className="lead-opt-result-card-media peptide-result-card-media">
-                    <span className="peptide-ligand-preview-track peptide-ligand-preview-track--card">
-                      {sequenceRows.length > 0 ? (
-                        sequenceRows.map((rowTokens, rowIdx) => (
-                          <span className="peptide-ligand-preview-row peptide-ligand-preview-row--card" key={`${candidate.id}-card-row-${rowIdx}`}>
-                            {rowTokens.map((token, idx) => {
-                              const residueIdx = rowIdx * 5 + idx;
-                              const residuePlddt = candidate.residuePlddts[residueIdx] ?? null;
-                              const residueTone = toneForPlddtValue(residuePlddt);
-                              const isModified = Boolean(token.modifiedLabel);
-                              const title = isModified
-                                ? `#${residueIdx + 1} ${token.residue} -> ${token.modifiedLabel} | pLDDT ${residuePlddt === null ? '-' : residuePlddt.toFixed(1)}`
-                                : `#${residueIdx + 1} ${token.residue} | pLDDT ${residuePlddt === null ? '-' : residuePlddt.toFixed(1)}`;
-                              return (
-                                <span className="peptide-ligand-preview-node-wrap" key={`${candidate.id}-card-${residueIdx}`}>
-                                  {idx > 0 ? (
-                                    <span className={`peptide-ligand-preview-link tone-${residueTone}`} aria-hidden="true" />
-                                  ) : null}
-                                  <span
-                                    className={`peptide-ligand-preview-node peptide-ligand-preview-node--card tone-${residueTone}${isModified ? ' is-modified' : ''}`}
-                                    title={title}
-                                  >
-                                    {token.displayResidue}
-                                  </span>
-                                </span>
-                              );
-                            })}
-                          </span>
-                        ))
-                      ) : (
-                        <span className="peptide-ligand-preview-empty">-</span>
-                      )}
-                    </span>
-                  </div>
-                  <div className="lead-opt-card-metric-strip peptide-card-metric-strip">
-                    <span className={`lead-opt-card-pill conf-tone-${scoreTone}`}>
-                      <span className="lead-opt-card-pill-key">Score</span>
-                      <strong>{formatScore(candidate.score)}</strong>
-                    </span>
-                    <span className={`lead-opt-card-pill conf-tone-${plddtTone}`}>
-                      <span className="lead-opt-card-pill-key">pLDDT</span>
-                      <strong>{formatPlddt(candidate.plddt)}</strong>
-                    </span>
-                    <span className={`lead-opt-card-pill conf-tone-${interfaceTone}`}>
-                      <span className="lead-opt-card-pill-key">
-                        {candidate.interfaceMetricSource === 'ipsae' ? 'IPSAE' : interfaceMetricHeaderLabel}
-                      </span>
-                      <strong>{formatInterfaceMetric(candidate.interfaceMetric)}</strong>
-                    </span>
-                    <span className="lead-opt-card-pill">
-                      <span className="lead-opt-card-pill-key">Gen</span>
-                      <strong>{candidate.generation !== null ? candidate.generation : '-'}</strong>
-                    </span>
-                  </div>
-                </article>
-              );
-            })}
+            {cardCandidates.map((candidate) => (
+              <PeptideCandidateCard
+                key={candidate.id}
+                candidate={candidate}
+                selected={candidate.id === selectedCandidateStableId}
+                scoreMin={scoreRange.min}
+                scoreMax={scoreRange.max}
+                interfaceMetricHeaderLabel={interfaceMetricHeaderLabel}
+                onSelect={selectCandidateCard}
+              />
+            ))}
           </div>
         </div>
       )}
@@ -2313,7 +2305,7 @@ export function PeptideDesignResultsWorkspace({
       <section className="structure-panel structure-panel--results-compact peptide-results-structure-panel">
         {viewerStructureText.trim() ? (
           <MolstarViewer
-            key={`peptide-results-viewer:${selectedCandidate?.id || 'none'}:${viewerStructureFormat}:${viewerColorMode}:${viewerLigandFocusChainId || '-'}`}
+            key={`peptide-results-viewer:${selectedCandidate?.id || 'none'}:${viewerStructureFormat}`}
             structureText={viewerStructureText}
             format={viewerStructureFormat}
             colorMode={viewerColorMode}
@@ -2326,24 +2318,8 @@ export function PeptideDesignResultsWorkspace({
             showSequence={false}
           />
         ) : (
-          <div className="ligand-preview-empty">
-            <span>{requestingStructure ? 'Loading structure...' : 'Selected peptide has no precomputed structure yet.'}</span>
-            {canRequestStructure ? (
-              <button
-                type="button"
-                className="lead-opt-row-action-btn"
-                disabled={requestingStructure}
-                onClick={() => {
-                  requestedStructureKeyRef.current = '';
-                  setRequestingStructure(true);
-                  Promise.resolve(onRequestStructure?.())
-                    .catch(() => {})
-                    .finally(() => setRequestingStructure(false));
-                }}
-              >
-                {requestingStructure ? 'Loading' : 'Load Structure'}
-              </button>
-            ) : null}
+          <div className={structureRequestError ? 'alert error' : 'ligand-preview-empty'}>
+            <span>{structureRequestError || (requestingStructure ? 'Loading structure...' : canRequestSelectedStructure ? 'Preparing structure...' : 'No structure is available for this peptide.')}</span>
           </div>
         )}
       </section>

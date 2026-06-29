@@ -66,6 +66,109 @@ function hasExplicitPeptideResiduePool(task: ProjectTask | null | undefined): bo
   return Array.isArray(options.peptideResiduePool) || Array.isArray(options.peptide_residue_pool);
 }
 
+
+function readNestedObjectPath(payload: Record<string, unknown>, path: string): unknown {
+  let current: unknown = payload;
+  for (const token of path.split('.')) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return undefined;
+    current = (current as Record<string, unknown>)[token];
+  }
+  return current;
+}
+
+function readFirstRecordArrayFromObjectPaths(payloads: Record<string, unknown>[], paths: string[]): Array<Record<string, unknown>> {
+  for (const payload of payloads) {
+    for (const path of paths) {
+      const rows = asRecordArray(readNestedObjectPath(payload, path));
+      if (rows.length > 0) return rows;
+    }
+  }
+  return [];
+}
+
+function summarizeCopilotComponents(components: InputComponent[] | null | undefined) {
+  if (!Array.isArray(components)) return [];
+  return components.map((component, index) => ({
+    index,
+    id: readText(component.id).trim(),
+    type: readText(component.type).trim(),
+    sequenceLength: readText(component.sequence).trim().length,
+    numCopies: component.numCopies,
+    inputMethod: component.inputMethod || undefined,
+    useMsa: component.useMsa,
+    cyclic: component.cyclic,
+    modificationsCount: Array.isArray(component.modifications) ? component.modifications.length : 0
+  }));
+}
+
+function summarizeCopilotConstraints(constraints: PredictionConstraint[] | null | undefined) {
+  if (!Array.isArray(constraints)) return [];
+  return constraints.map((constraint, index) => ({
+    index,
+    id: readText((constraint as { id?: string }).id).trim(),
+    type: readText((constraint as { type?: string }).type).trim()
+  }));
+}
+
+function summarizePeptideDesignCandidates(confidence: Record<string, unknown>) {
+  const peptide = asRecord(confidence.peptide_design);
+  const rows = readFirstRecordArrayFromObjectPaths(
+    [confidence, peptide, asRecord(peptide.progress), asRecord(confidence.progress)],
+    [
+      'peptide_design.best_sequences',
+      'best_sequences',
+      'current_best_sequences',
+      'progress.best_sequences',
+      'progress.current_best_sequences',
+      'candidates'
+    ]
+  );
+  return {
+    count: rows.length,
+    top: rows.slice(0, 5).map((row, index) => ({
+      index,
+      rank: toFiniteNumber(row.rank ?? row.ranking ?? row.order),
+      generation: toFiniteNumber(row.generation ?? row.iteration ?? row.iter),
+      score: toFiniteNumber(row.score ?? row.composite_score ?? row.fitness ?? row.objective),
+      plddt: normalizePlddtMetric(row.plddt ?? row.binder_avg_plddt ?? row.ligand_mean_plddt ?? row.mean_plddt),
+      interfaceMetric: toFiniteNumber(row.ligand_ipsae_max ?? row.ipsae_dom ?? row.pair_iptm ?? row.pairIptm ?? row.iptm),
+      sequenceLength: readText(row.peptide_sequence ?? row.binder_sequence ?? row.candidate_sequence ?? row.designed_sequence ?? row.sequence).trim().length,
+      structureName: readText(row.structureName ?? row.structure_name ?? row.structure_file ?? row.structure_path).trim()
+    }))
+  };
+}
+
+function summarizeCopilotTask(task: ProjectTask | null | undefined) {
+  if (!task) return null;
+  const confidence = asRecord(task.confidence);
+  return {
+    id: readText(task.id).trim(),
+    project_id: readText(task.project_id).trim(),
+    name: readText(task.name).trim(),
+    summary: readText(task.summary).trim(),
+    task_id: readText(task.task_id).trim(),
+    task_state: readText(task.task_state).trim(),
+    status_text: readText(task.status_text).trim(),
+    error_text: readText(task.error_text).trim(),
+    backend: readText(task.backend).trim(),
+    seed: task.seed,
+    structure_name: readText(task.structure_name).trim(),
+    submitted_at: task.submitted_at,
+    completed_at: task.completed_at,
+    duration_seconds: task.duration_seconds,
+    components: summarizeCopilotComponents(task.components),
+    constraints: summarizeCopilotConstraints(task.constraints),
+    properties: task.properties,
+    affinitySummary: {
+      keys: Object.keys(asRecord(task.affinity)).slice(0, 24)
+    },
+    confidenceSummary: {
+      keys: Object.keys(confidence).slice(0, 24),
+      peptideDesign: summarizePeptideDesignCandidates(confidence)
+    }
+  };
+}
+
 function normalizeCopilotPrefillComponents(value: unknown): InputComponent[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -3159,7 +3262,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     affinityDisplayStructureFormat,
     hasAffinityDisplayStructure,
   } = useProjectResultDisplay({
-    shouldPrepareResultStructure: workspaceTab === 'results' && (isPredictionWorkflow || isPeptideDesignWorkflow),
+    shouldPrepareResultStructure: workspaceTab === 'results' && isPredictionWorkflow,
     shouldPrepareConstraintStructure: workspaceTab === 'constraints',
     shouldPrepareSnapshotCards: workspaceTab === 'results' && (isPredictionWorkflow || isAffinityWorkflow),
     shouldPreparePredictionLigandPreview: workspaceTab === 'results' && isPredictionWorkflow,
@@ -3319,6 +3422,18 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     return true;
   }, [activeResultTask, isPeptideDesignWorkflow, projectTasks, requestedStatusTaskRow, runtime.locationSearch, statusContextTaskRow]);
 
+  const handlePeptideRequestStructure = useCallback(async (options?: { preferredStructureName?: string }) => {
+    const contextTask = activeResultTask || statusContextTaskRow;
+    const taskId = String(contextTask?.task_id || project.task_id || '').trim();
+    if (!taskId) return;
+    await pullResultForViewer(taskId, {
+      taskRowId: contextTask?.id || undefined,
+      persistProject: String(project.task_id || '').trim() === taskId,
+      resultMode: 'view',
+      preferredStructureName: options?.preferredStructureName
+    });
+  }, [activeResultTask, project.task_id, pullResultForViewer, statusContextTaskRow]);
+
   const {
     projectResultsSectionProps,
     affinityWorkflowSectionProps,
@@ -3339,16 +3454,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       String(project.task_id || '').trim(),
     statusInfo: statusInfo || null,
     progressPercent,
-    onPeptideRequestStructure: async () => {
-      const contextTask = activeResultTask || statusContextTaskRow;
-      const taskId = String(contextTask?.task_id || project.task_id || '').trim();
-      if (!taskId) return;
-      await pullResultForViewer(taskId, {
-        taskRowId: contextTask?.id || undefined,
-        persistProject: String(project.task_id || '').trim() === taskId,
-        resultMode: 'view'
-      });
-    },
+    onPeptideRequestStructure: handlePeptideRequestStructure,
     resultsGridRef,
     isResultsResizing,
     resultsGridStyle,
@@ -3359,7 +3465,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     resultChainIds,
     selectedResultTargetChainId,
     selectedResultLigandChainId,
-    displayStructureText,
+    displayStructureText: isPeptideDesignWorkflow ? structureText : displayStructureText,
     displayStructureConfidenceText,
     displayStructureFormat,
     displayStructureColorMode,
@@ -3785,6 +3891,95 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     statusContextTaskRow
   ]);
 
+
+  const copilotContextPayload = useMemo(() => {
+    const statusTaskRowId = readText(statusContextTaskRow?.id).trim();
+    const statusTaskId = readText(statusContextTaskRow?.task_id).trim();
+    const statusTaskState = readText(statusContextTaskRow?.task_state).trim();
+    const activeResultTaskRowId = readText(activeResultTask?.id).trim();
+    const activeResultTaskId = readText(activeResultTask?.task_id).trim();
+    const activeResultTaskState = readText(activeResultTask?.task_state).trim();
+    return {
+      page: {
+        contextType: 'task_detail',
+        workflowKey: workflow.key,
+        workflowTitle: workflow.title,
+        workflowShortTitle: workflow.shortTitle,
+        runLabel: workflow.runLabel,
+        supportsSequenceInputs: workflow.supportsSequenceInputs,
+        availableActions: [
+          'analyze_current_context',
+          'plan_confirmed_parameter_patch',
+          'plan_confirmed_submit',
+          'plan_confirmed_cancel_current_task',
+          'plan_confirmed_delete_current_task',
+          'plan_confirmed_metadata_update',
+          'apply_copilot_uploaded_files_when_supported'
+        ]
+      },
+      project: { id: project.id, name: project.name, task_type: project.task_type, workflow_key: workflow.key },
+      draft: {
+        taskName: draft.taskName,
+        taskSummary: draft.taskSummary,
+        backend: draft.backend,
+        options: draft.inputConfig?.options,
+        components: summarizeCopilotComponents(draft.inputConfig?.components),
+        constraints: summarizeCopilotConstraints(draft.inputConfig?.constraints)
+      },
+      runtime: {
+        displayTaskState,
+        runDisabled: effectiveRunDisabled,
+        runBlockedReason: effectiveRunBlockedReason,
+        activeTaskId: headerRuntimeTaskId,
+        statusTaskRowId,
+        statusTaskId,
+        statusTaskState,
+        activeResultTaskRowId,
+        activeResultTaskId,
+        activeResultTaskState,
+        authoritativeTaskState:
+          readText(displayTaskState).trim() ||
+          statusTaskState ||
+          activeResultTaskState ||
+          readText(project.task_state).trim()
+      },
+      affinityUploads: isAffinityWorkflow
+        ? {
+            targetFileName: affinityTargetFile?.name || '',
+            ligandFileName: affinityLigandFile?.name || '',
+            targetUploaded: Boolean(affinityTargetFile),
+            ligandUploaded: Boolean(affinityLigandFile)
+          }
+        : undefined,
+      currentTask: summarizeCopilotTask(statusContextTaskRow || activeResultTask || null)
+    };
+  }, [
+    activeResultTask,
+    affinityLigandFile,
+    affinityTargetFile,
+    displayTaskState,
+    draft.inputConfig?.components,
+    draft.inputConfig?.constraints,
+    draft.inputConfig?.options,
+    draft.backend,
+    draft.taskName,
+    draft.taskSummary,
+    effectiveRunBlockedReason,
+    effectiveRunDisabled,
+    headerRuntimeTaskId,
+    isAffinityWorkflow,
+    project.id,
+    project.name,
+    project.task_state,
+    project.task_type,
+    statusContextTaskRow,
+    workflow.key,
+    workflow.runLabel,
+    workflow.shortTitle,
+    workflow.supportsSequenceInputs,
+    workflow.title
+  ]);
+
   return (
     <>
     <ProjectDetailLayout
@@ -3884,60 +4079,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
         projectTaskId={readText((activeResultTask || statusContextTaskRow)?.id).trim() || null}
         currentUserId={session.userId}
         currentUsername={session.username}
-        contextPayload={{
-          page: {
-            contextType: 'task_detail',
-            workflowKey: workflow.key,
-            workflowTitle: workflow.title,
-            workflowShortTitle: workflow.shortTitle,
-            runLabel: workflow.runLabel,
-            supportsSequenceInputs: workflow.supportsSequenceInputs,
-            availableActions: [
-              'analyze_current_context',
-              'plan_confirmed_parameter_patch',
-              'plan_confirmed_submit',
-              'plan_confirmed_cancel_current_task',
-              'plan_confirmed_delete_current_task',
-              'plan_confirmed_metadata_update',
-              'apply_copilot_uploaded_files_when_supported'
-            ]
-          },
-          project: { id: project.id, name: project.name, task_type: project.task_type, workflow_key: workflow.key },
-          draft: {
-            taskName: draft.taskName,
-            taskSummary: draft.taskSummary,
-            backend: draft.backend,
-            options: draft.inputConfig?.options,
-            components: draft.inputConfig?.components,
-            constraints: draft.inputConfig?.constraints
-          },
-          runtime: {
-            displayTaskState,
-            runDisabled: effectiveRunDisabled,
-            runBlockedReason: effectiveRunBlockedReason,
-            activeTaskId: headerRuntimeTaskId,
-            statusTaskRowId: readText(statusContextTaskRow?.id).trim(),
-            statusTaskId: readText(statusContextTaskRow?.task_id).trim(),
-            statusTaskState: readText(statusContextTaskRow?.task_state).trim(),
-            activeResultTaskRowId: readText(activeResultTask?.id).trim(),
-            activeResultTaskId: readText(activeResultTask?.task_id).trim(),
-            activeResultTaskState: readText(activeResultTask?.task_state).trim(),
-            authoritativeTaskState:
-              readText(displayTaskState).trim() ||
-              readText(statusContextTaskRow?.task_state).trim() ||
-              readText(activeResultTask?.task_state).trim() ||
-              readText(project.task_state).trim()
-          },
-          affinityUploads: isAffinityWorkflow
-            ? {
-                targetFileName: affinityTargetFile?.name || '',
-                ligandFileName: affinityLigandFile?.name || '',
-                targetUploaded: Boolean(affinityTargetFile),
-                ligandUploaded: Boolean(affinityLigandFile)
-              }
-            : undefined,
-          currentTask: statusContextTaskRow || activeResultTask || null
-        }}
+        contextPayload={copilotContextPayload}
         onApplyPlanAction={applyTaskDetailCopilotAction}
         onSendAttachments={handleCopilotAttachments}
         onOpen={() => setCopilotOpen(true)}

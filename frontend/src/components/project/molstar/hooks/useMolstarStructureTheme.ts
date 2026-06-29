@@ -43,6 +43,10 @@ export function useMolstarStructureTheme({
   const styleRequestIdRef = useRef(0);
   const loadedPrimarySignatureRef = useRef('');
   const loadedOverlaySignatureRef = useRef('');
+  // Track what the appearance pipeline last applied, so a pure AF<->Std color toggle can skip the
+  // heavy clear + representation rebuild (which froze the tab) and just swap the color theme.
+  const lastAppliedStructureVersionRef = useRef(0);
+  const lastAppliedColorModeRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (ready) return;
@@ -149,6 +153,15 @@ export function useMolstarStructureTheme({
         setError(null);
         const viewer = viewerRef.current;
         if (!viewer) return;
+        const structureChanged = lastAppliedStructureVersionRef.current !== structureContentVersion;
+        const colorChanged =
+          lastAppliedColorModeRef.current !== null && lastAppliedColorModeRef.current !== colorMode;
+        // Only (re)build when the structure content OR color mode actually changed since the last
+        // successful apply. This effect also re-runs on prop churn (focusLigandAnchor identity, etc.)
+        // that doesn't change the result; without this guard each re-run re-executed the full heavy
+        // pipeline and froze the browser.
+        if (!structureChanged && !colorChanged) return;
+        const recolorOnly = !structureChanged && colorChanged;
         await applyStructureAppearancePipeline({
           viewer,
           colorMode,
@@ -158,10 +171,15 @@ export function useMolstarStructureTheme({
           suppressAutoFocus,
           autoFocusLigand,
           focusLigandAnchor,
-          isRequestCurrent: () => requestId === styleRequestIdRef.current
+          isRequestCurrent: () => requestId === styleRequestIdRef.current,
+          recolorOnly
         });
         if (requestId !== styleRequestIdRef.current) return;
-        setStructureReadyVersion((prev) => prev + 1);
+        lastAppliedStructureVersionRef.current = structureContentVersion;
+        lastAppliedColorModeRef.current = colorMode;
+        if (!recolorOnly) {
+          setStructureReadyVersion((prev) => prev + 1);
+        }
       } catch (e) {
         if (requestId !== styleRequestIdRef.current) return;
         setError(e instanceof Error ? e.message : 'Unable to update Mol* viewer.');

@@ -507,6 +507,36 @@ export async function tryApplyElementSymbolThemeToCurrentScene(viewer: any): Pro
   if (lastError) throw lastError;
 }
 
+// Swap the color theme of already-built representations in place — NO structure reload, NO
+// representation rebuild, NO viewer.setStyle (which rebuilds in the standalone viewer). Used for
+// cheap AF<->Std recolor toggles. Returns true when existing targets were recolored.
+export async function tryRecolorExistingRepresentations(
+  viewer: any,
+  colorMode: 'alphafold' | 'default'
+): Promise<boolean> {
+  const plugin = viewer?.plugin;
+  const manager = plugin?.managers?.structure?.component;
+  if (typeof manager?.updateRepresentationsTheme !== 'function') return false;
+  const components = collectStructureComponents(viewer);
+  if (components.length === 0) return false;
+  const targetTheme = colorMode === 'alphafold' ? 'plddt-confidence' : 'element-symbol';
+  const variants =
+    targetTheme === 'element-symbol'
+      ? buildBaseElementSymbolThemeVariants()
+      : [
+          { color: targetTheme },
+          { colorTheme: targetTheme },
+          { color: { name: targetTheme } },
+          { colorTheme: { name: targetTheme } }
+        ];
+  try {
+    await updateThemeTargetsWithVariants(manager, components, [], variants);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function tryFocusLikelyLigand(viewer: any): boolean {
   const focusManager = viewer?.plugin?.managers?.structure?.focus;
   if (!focusManager?.setFromLoci) return false;

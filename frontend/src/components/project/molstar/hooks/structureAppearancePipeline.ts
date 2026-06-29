@@ -7,6 +7,7 @@ import {
   tryApplyCartoonPreset,
   tryApplyStandardElementSymbolRepresentations,
   tryBuildRepresentationsFromStructures,
+  tryRecolorExistingRepresentations,
   waitForStructureEntries
 } from '../theme';
 
@@ -22,6 +23,9 @@ interface ApplyStructureAppearancePipelineArgs {
   autoFocusLigand: boolean;
   focusLigandAnchor: (viewer: any) => boolean;
   isRequestCurrent: () => boolean;
+  // True when only the color mode changed since the last successful build (structure unchanged).
+  // Enables an in-place theme swap instead of clearing + rebuilding representations.
+  recolorOnly?: boolean;
 }
 
 const LEAD_OPT_RESULTS_POLYMER_ALPHA = 0.62;
@@ -77,7 +81,8 @@ export async function applyStructureAppearancePipeline({
   suppressAutoFocus,
   autoFocusLigand,
   focusLigandAnchor,
-  isRequestCurrent
+  isRequestCurrent,
+  recolorOnly = false
 }: ApplyStructureAppearancePipelineArgs): Promise<void> {
   const structureEntries = await waitForStructureEntries(viewer);
   if (!isRequestCurrent()) return;
@@ -86,6 +91,14 @@ export async function applyStructureAppearancePipeline({
   if (scenePreset === 'lead_opt') {
     const isResultsVariant = leadOptStyleVariant === 'results';
     if (isResultsVariant) {
+      if (recolorOnly) {
+        // AF<->Std toggle with an already-built structure: swap ONLY the color theme in place.
+        // No clear/reload/rebuild (which froze the tab on large structures).
+        const recolored = await tryRecolorExistingRepresentations(viewer, resolvedColorMode);
+        if (!isRequestCurrent()) return;
+        if (recolored) return;
+        throw new Error('Unable to recolor existing Mol* representations; refusing to rebuild during color-only toggle.');
+      }
       if (resolvedColorMode === 'alphafold') {
         if (hasStaticRepresentationBuilder(viewer)) {
           await clearStructureComponents(viewer);

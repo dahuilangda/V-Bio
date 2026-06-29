@@ -142,6 +142,61 @@ class ResultArchiveService:
         return lower.endswith('.cif') or lower.endswith('.mmcif') or lower.endswith('.pdb')
 
     @staticmethod
+    def _normalize_structure_name_token(value: str) -> str:
+        return str(value or '').strip().lstrip('/\\').lower()
+
+    @classmethod
+    def _find_structure_file_by_name(cls, names: list[str], preferred_structure_name: str | None) -> Optional[str]:
+        token = cls._normalize_structure_name_token(preferred_structure_name or '')
+        if not token:
+            return None
+        basename_token = cls._normalize_structure_name_token(os.path.basename(token))
+        structure_names = [name for name in names if cls._is_structure_file(name)]
+        for name in structure_names:
+            if cls._normalize_structure_name_token(name) == token:
+                return name
+        for name in structure_names:
+            if cls._normalize_structure_name_token(os.path.basename(name)) == basename_token:
+                return name
+        return None
+
+    @staticmethod
+    def _resolve_boltz_confidence_for_structure(names: list[str], structure_path: str | None) -> Optional[str]:
+        if not structure_path:
+            return None
+        structure_base = os.path.basename(structure_path)
+        structure_stem, _ = os.path.splitext(structure_base)
+        if not structure_stem.strip():
+            return None
+        structure_dir = os.path.dirname(structure_path)
+        candidates = [
+            os.path.join(structure_dir, f'confidence_{structure_stem}.json') if structure_dir else f'confidence_{structure_stem}.json',
+            f'confidence_{structure_stem}.json',
+        ]
+        return next((item for item in candidates if item in names), None)
+
+    @staticmethod
+    def _resolve_protenix_confidence_for_structure(names: list[str], structure_path: str | None) -> Optional[str]:
+        if not structure_path:
+            return None
+        canonical_confidence = 'protenix/output/confidence_protenix_model_0.json'
+        if canonical_confidence in names:
+            return canonical_confidence
+        structure_base = os.path.basename(structure_path)
+        sample_match = re.search(r'_sample_(\d+)\.(?:cif|mmcif|pdb)$', structure_base, re.IGNORECASE)
+        if not sample_match:
+            return None
+        structure_dir = os.path.dirname(structure_path)
+        expected_suffix = f'_summary_confidence_sample_{sample_match.group(1)}.json'.lower()
+        for name in names:
+            if not name.lower().endswith(expected_suffix):
+                continue
+            if structure_dir and not name.startswith(f'{structure_dir}/'):
+                continue
+            return name
+        return None
+
+    @staticmethod
     def _collect_peptide_design_structure_files(names: list[str]) -> list[str]:
         scored: list[tuple[int, int, int, str]] = []
         for name in names:
@@ -471,16 +526,20 @@ class ResultArchiveService:
             )
         return structure, selected_summary
 
-    def _build_view_archive_bytes(self, source_zip_path: str) -> bytes:
+    def _build_view_archive_bytes(self, source_zip_path: str, preferred_structure_name: str | None = None) -> bytes:
         with zipfile.ZipFile(source_zip_path, 'r') as src_zip:
             names = [name for name in src_zip.namelist() if not name.endswith('/')]
             lower_names = [name.lower() for name in names]
             is_af3 = any('af3/output/' in name for name in lower_names)
             is_protenix = any('protenix/output/' in name for name in lower_names)
+            preferred_structure_token = self._normalize_structure_name_token(preferred_structure_name or '')
+            preferred_structure = self._find_structure_file_by_name(names, preferred_structure_name)
+            if preferred_structure_token and not preferred_structure:
+                raise RuntimeError(f"Requested structure file was not found in result archive: {preferred_structure_name}")
 
             include: list[str] = []
             if is_af3:
-                structure = self._choose_best_af3_structure_file(names)
+                structure = preferred_structure if preferred_structure_token else self._choose_best_af3_structure_file(names)
                 if structure:
                     include.append(structure)
                 summary_candidates = [
@@ -502,7 +561,11 @@ class ResultArchiveService:
                 if confidences:
                     include.append(confidences)
             elif is_protenix:
-                structure, confidence = self._choose_best_protenix_files(src_zip, names)
+                if preferred_structure:
+                    structure = preferred_structure
+                    confidence = self._resolve_protenix_confidence_for_structure(names, preferred_structure)
+                else:
+                    structure, confidence = self._choose_best_protenix_files(src_zip, names)
                 if structure:
                     include.append(structure)
                 if confidence:
@@ -516,7 +579,11 @@ class ResultArchiveService:
                 if protenix_affinity:
                     include.append(protenix_affinity)
             else:
-                structure, confidence = self._choose_best_boltz_files(src_zip, names)
+                if preferred_structure:
+                    structure = preferred_structure
+                    confidence = self._resolve_boltz_confidence_for_structure(names, preferred_structure)
+                else:
+                    structure, confidence = self._choose_best_boltz_files(src_zip, names)
                 if structure:
                     include.append(structure)
                 if confidence:
@@ -533,7 +600,10 @@ class ResultArchiveService:
                     design_results = self._choose_peptide_design_results_file(names)
                     if design_results:
                         include.append(design_results)
-                    include.extend(self._collect_peptide_design_structure_files(names))
+                    if preferred_structure:
+                        include.append(preferred_structure)
+                    else:
+                        include.extend(self._collect_peptide_design_structure_files(names))
                 affinity_candidates = [name for name in names if name.lower().endswith('.json') and 'affinity' in name.lower()]
                 if affinity_candidates:
                     include.append(sorted(affinity_candidates, key=lambda item: len(item))[0])
@@ -571,10 +641,11 @@ class ResultArchiveService:
             out_buffer.seek(0)
             return out_buffer.getvalue()
 
-    def build_or_get_view_archive(self, source_zip_path: str) -> str:
+    def build_or_get_view_archive(self, source_zip_path: str, preferred_structure_name: str | None = None) -> str:
         src_stat = os.stat(source_zip_path)
-        cache_schema_version = 'view-v9-json-sanitized'
-        cache_seed = f'{cache_schema_version}|{source_zip_path}|{int(src_stat.st_mtime_ns)}|{src_stat.st_size}'
+        cache_schema_version = 'view-v10-preferred-structure'
+        preferred_structure_token = self._normalize_structure_name_token(preferred_structure_name or '')
+        cache_seed = f'{cache_schema_version}|{source_zip_path}|{int(src_stat.st_mtime_ns)}|{src_stat.st_size}|{preferred_structure_token}'
         cache_key = hashlib.sha256(cache_seed.encode('utf-8')).hexdigest()[:24]
         cache_dir = Path('/tmp/boltz_result_view_cache')
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -582,7 +653,7 @@ class ResultArchiveService:
         if cache_path.exists():
             return str(cache_path)
 
-        data = self._build_view_archive_bytes(source_zip_path)
+        data = self._build_view_archive_bytes(source_zip_path, preferred_structure_name=preferred_structure_name)
         temp_path = cache_dir / f'{cache_key}.tmp'
         temp_path.write_bytes(data)
         os.replace(str(temp_path), str(cache_path))

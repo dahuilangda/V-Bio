@@ -1,5 +1,5 @@
 import { Bot, Check, Clock3, LoaderCircle, MessageSquarePlus, MessageSquareText, PanelLeft, Plus, Send, Trash2, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, memo, type PointerEvent as ReactPointerEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -59,6 +59,25 @@ function author(message: ProjectCopilotMessage): string {
   if (message.role === 'assistant') return 'V-Bio Copilot';
   return message.user_name || message.username || 'User';
 }
+
+// Message rendering runs ReactMarkdown (expensive). Memoize so a message only re-renders when its
+// own content changes — not on every unrelated Copilot state update (typing, dragging, resize,
+// caret moves), which otherwise re-parsed markdown for every message and froze the panel.
+const CopilotMessageItem = memo(function CopilotMessageItem({ message }: { message: ProjectCopilotMessage }) {
+  return (
+    <article className={`copilot-message is-${message.role}`}>
+      <div className="copilot-message-meta">
+        <strong>{author(message)}</strong>
+        <span>{formatDateTime(message.created_at)}</span>
+      </div>
+      <div className="copilot-message-body">
+        <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+          {message.content}
+        </ReactMarkdown>
+      </div>
+    </article>
+  );
+});
 
 function createSessionId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -1317,17 +1336,7 @@ export function ProjectCopilotModal({
             null
           ) : (
             sessionMessages.map((message) => (
-              <article key={message.id} className={`copilot-message is-${message.role}`}>
-                <div className="copilot-message-meta">
-                  <strong>{author(message)}</strong>
-                  <span>{formatDateTime(message.created_at)}</span>
-                </div>
-                <div className="copilot-message-body">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
-                    {message.content}
-                  </ReactMarkdown>
-                </div>
-              </article>
+              <CopilotMessageItem key={message.id} message={message} />
             ))
           )}
           {sending ? (

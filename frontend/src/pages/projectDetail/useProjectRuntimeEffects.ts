@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import type { MutableRefObject } from 'react';
 import type { DownloadResultMode } from '../../api/backendTaskApi';
 
@@ -20,24 +20,6 @@ function hasLeadOptMmpOnlySnapshot(task: RuntimeTaskLike | null): boolean {
   return String(task.status_text || '').toUpperCase().includes('MMP');
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
-
-function hasPeptideCandidateRows(confidence: Record<string, unknown> | undefined): boolean {
-  if (!confidence) return false;
-  const peptide = asRecord(confidence.peptide_design);
-  const progress = asRecord(confidence.progress);
-  const peptideProgress = asRecord(peptide.progress);
-  const sources = [confidence, peptide, progress, peptideProgress];
-  return sources.some(
-    (source) =>
-      (Array.isArray(source.best_sequences) && source.best_sequences.length > 0) ||
-      (Array.isArray(source.current_best_sequences) && source.current_best_sequences.length > 0) ||
-      (Array.isArray(source.candidates) && source.candidates.length > 0)
-  );
-}
-
 interface UseProjectRuntimeEffectsInput {
   projectTaskId: string | null;
   projectTaskState: string | null;
@@ -50,7 +32,7 @@ interface UseProjectRuntimeEffectsInput {
   structureText: string;
   pullResultForViewer: (
     taskId: string,
-    options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode }
+    options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode; preferredStructureName?: string }
   ) => Promise<void>;
   isPeptideDesignWorkflow: boolean;
   isLeadOptimizationWorkflow: boolean;
@@ -69,7 +51,6 @@ export function useProjectRuntimeEffects({
   refreshStatus,
   statusContextTaskRow,
   runtimeResultTask,
-  activeResultTask,
   structureTaskId,
   structureText,
   pullResultForViewer,
@@ -82,8 +63,6 @@ export function useProjectRuntimeEffects({
   setSelectedContactConstraintIds,
   constraintSelectionAnchorRef
 }: UseProjectRuntimeEffectsInput) {
-  const peptideAutoPullAttemptRef = useRef('');
-
   useEffect(() => {
     if (isLeadOptimizationWorkflow) return;
     const pollingTaskId = String(statusContextTaskRow?.task_id || runtimeResultTask?.task_id || projectTaskId || '').trim();
@@ -140,24 +119,15 @@ export function useProjectRuntimeEffects({
 
   useEffect(() => {
     if (isLeadOptimizationWorkflow) return;
-    const contextTask = isPeptideDesignWorkflow
-      ? activeResultTask || statusContextTaskRow || runtimeResultTask
-      : statusContextTaskRow || runtimeResultTask;
+    if (isPeptideDesignWorkflow) return;
+    const contextTask = statusContextTaskRow || runtimeResultTask;
     const contextTaskId = String(contextTask?.task_id || '').trim();
     if (!contextTaskId) return;
     if (contextTask?.task_state !== 'SUCCESS') return;
     if (hasLeadOptMmpOnlySnapshot(contextTask)) return;
 
     const hasStructureLoaded = structureTaskId === contextTaskId && structureText.trim().length > 0;
-    if (isPeptideDesignWorkflow) {
-      if (workspaceTab !== 'results') return;
-      if (hasPeptideCandidateRows(contextTask?.confidence)) {
-        peptideAutoPullAttemptRef.current = '';
-        return;
-      }
-      if (peptideAutoPullAttemptRef.current === contextTaskId) return;
-      peptideAutoPullAttemptRef.current = contextTaskId;
-    } else if (hasStructureLoaded) {
+    if (hasStructureLoaded) {
       return;
     }
 
@@ -171,7 +141,6 @@ export function useProjectRuntimeEffects({
   }, [
     statusContextTaskRow,
     runtimeResultTask,
-    activeResultTask,
     projectTaskId,
     structureTaskId,
     structureText,

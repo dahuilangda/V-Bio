@@ -1,10 +1,9 @@
-import { useEffect, useRef } from 'react';
+import { memo, useEffect, useRef } from 'react';
 import { alphafoldLegend } from '../../utils/alphafold';
 import { applyMolstarHighlights } from './molstar/highlight';
 import { useMolstarBootstrap } from './molstar/hooks/useMolstarBootstrap';
 import { useMolstarFocus } from './molstar/hooks/useMolstarFocus';
 import { useMolstarStructureTheme } from './molstar/hooks/useMolstarStructureTheme';
-import { tryApplyElementSymbolThemeToCurrentScene } from './molstar/theme';
 import type { MolstarAtomHighlight, MolstarResidueHighlight, MolstarResiduePick } from './molstar/types';
 
 interface MolstarViewerProps {
@@ -33,7 +32,7 @@ interface MolstarViewerProps {
 
 export type { MolstarResiduePick, MolstarResidueHighlight, MolstarAtomHighlight };
 
-export function MolstarViewer({
+export const MolstarViewer = memo(function MolstarViewer({
   structureText,
   format,
   overlayStructureText,
@@ -130,32 +129,22 @@ export function MolstarViewer({
   useEffect(() => {
     if (!ready || !viewerRef.current || !structureText.trim()) return;
     if (scenePreset !== 'lead_opt' || suppressAutoFocus) return;
+    // Deferred ligand focus after the appearance pipeline settles. We intentionally do NOT
+    // re-apply color themes here — that is the pipeline's job. This effect re-runs on every
+    // colorMode / structureReadyVersion change, and the previous version called
+    // tryApplyElementSymbolThemeToCurrentScene (a 6s poll + viewer.setStyle rebuild) 2-4x per
+    // AF<->Std toggle, which froze the browser on large structures.
     let cancelled = false;
     const timer = window.setTimeout(() => {
-      const viewer = viewerRef.current;
-      if (!viewer || cancelled) return;
-      focusLigandAnchor(viewer);
-      const shouldForceElementTheme = leadOptStyleVariant === 'results' && colorMode !== 'alphafold';
-      if (!shouldForceElementTheme) return;
-      // Focus may create transient interaction sticks after theme pipeline.
-      // Re-apply element-symbol so fragment mode never falls back to AF colors.
-      void tryApplyElementSymbolThemeToCurrentScene(viewer).catch(() => null);
-      const recolorTimer = window.setTimeout(() => {
-        if (cancelled || !viewerRef.current) return;
-        void tryApplyElementSymbolThemeToCurrentScene(viewerRef.current).catch(() => null);
-      }, 180);
-      if (cancelled) {
-        window.clearTimeout(recolorTimer);
-      }
+      if (cancelled || !viewerRef.current) return;
+      focusLigandAnchor(viewerRef.current);
     }, 120);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
   }, [
-    colorMode,
     focusLigandAnchor,
-    leadOptStyleVariant,
     ready,
     scenePreset,
     structureReadyVersion,
@@ -186,4 +175,4 @@ export function MolstarViewer({
       )}
     </>
   );
-}
+});

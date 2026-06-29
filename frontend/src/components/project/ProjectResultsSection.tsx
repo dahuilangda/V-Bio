@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
+import { memo, useEffect, useMemo, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
 import { AffinityResultsWorkspace } from './AffinityWorkspace';
 import type { AffinitySignalCard, ResultsGridStyle } from './AffinityWorkspace';
 import { LigandPropertyGrid } from './LigandPropertyGrid';
@@ -45,10 +45,10 @@ export interface ProjectResultsSectionProps {
   peptideFallbackIptm: number | null;
   statusInfo: Record<string, unknown> | null;
   progressPercent: number;
-  onPeptideRequestStructure?: () => Promise<void> | void;
+  onPeptideRequestStructure?: (options?: { preferredStructureName?: string }) => Promise<void> | void;
 }
 
-export function ProjectResultsSection({
+export const ProjectResultsSection = memo(function ProjectResultsSection({
   isPredictionWorkflow,
   isPeptideDesignWorkflow,
   isAffinityWorkflow,
@@ -70,6 +70,7 @@ export function ProjectResultsSection({
   displayStructureConfidenceText,
   displayStructureFormat,
   displayStructureColorMode,
+  displayStructureName,
   confidenceBackend,
   projectBackend,
   predictionLigandPreview,
@@ -112,6 +113,7 @@ export function ProjectResultsSection({
         snapshotConfidence={snapshotConfidence || {}}
         displayStructureText={displayStructureText}
         displayStructureFormat={displayStructureFormat}
+        displayStructureName={displayStructureName}
         selectedResultTargetChainId={selectedResultTargetChainId}
         selectedResultLigandChainId={selectedResultLigandChainId}
         selectedResultLigandSequence={selectedResultLigandSequence}
@@ -270,4 +272,4 @@ export function ProjectResultsSection({
       </div>
     </section>
   );
-}
+});

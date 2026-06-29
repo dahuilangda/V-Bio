@@ -42,6 +42,7 @@ export function useMolstarBootstrap({
   const recentModifiedPrimaryDownRef = useRef(0);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [bootstrapMs, setBootstrapMs] = useState<number | null>(null);
   const hasResiduePickHandler = Boolean(onResiduePick);
 
   useEffect(() => {
@@ -122,7 +123,10 @@ export function useMolstarBootstrap({
       try {
         if (cancelled || !hostRef.current) return;
 
+        const bootStart = typeof performance !== 'undefined' ? performance.now() : Date.now();
         viewerRef.current = await bootstrapViewerHost(hostRef.current, showSequence);
+        const bootEnd = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        setBootstrapMs(Math.round(bootEnd - bootStart));
         try {
           viewerRef.current?.plugin?.managers?.interactivity?.setProps?.({ granularity: interactionGranularity });
         } catch {
@@ -199,6 +203,7 @@ export function useMolstarBootstrap({
     ready,
     error,
     setError,
-    suppressPickEventsRef
+    suppressPickEventsRef,
+    bootstrapMs
   };
 }

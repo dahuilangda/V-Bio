@@ -20,7 +20,7 @@ def register_task_routes(
     logger,
     find_result_archive: Callable[[str], str | None],
     resolve_result_archive_path: Callable[[str], tuple[str, str]],
-    build_or_get_view_archive: Callable[[str], str],
+    build_or_get_view_archive: Callable[..., str],
     get_tracker_status: Callable[[str], tuple[Dict[str, Any] | None, str | None]],
     get_compact_prediction_metrics: Callable[[str], Dict[str, Any] | None],
     list_known_queues: Callable[[], list[str]],
@@ -276,8 +276,9 @@ def register_task_routes(
             logger.exception('Unexpected error while resolving view source archive for task %s: %s', task_id, exc)
             return jsonify({'error': f'Failed to resolve source result archive for view: {exc}'}), 500
 
+        preferred_structure_name = str(request.args.get('structure_name') or '').strip()
         try:
-            view_path = build_or_get_view_archive(filepath)
+            view_path = build_or_get_view_archive(filepath, preferred_structure_name=preferred_structure_name or None)
         except Exception as exc:
             logger.warning('Failed to build view archive for task %s from %s: %s', task_id, filepath, exc)
             return jsonify({'error': f'Failed to build view archive: {exc}'}), 500

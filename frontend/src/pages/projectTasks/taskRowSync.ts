@@ -126,6 +126,7 @@ const PEPTIDE_RUNTIME_PROGRESS_KEYS = [
   'best_sequences',
   'candidates'
 ] as const;
+const PEPTIDE_CANDIDATE_ROW_KEYS = ['current_best_sequences', 'best_sequences', 'candidates'] as const;
 const RUNTIME_STATUS_BATCH_CHUNK_SIZE = 128;
 const ACTIVE_RUNTIME_STATUS_POLL_MAX_TASKS = 32;
 const RUNNING_RUNTIME_STATUS_POLL_MAX_TASKS = 256;
@@ -193,11 +194,18 @@ function mergePeptideRuntimeStatusIntoConfidence(
   const statusTopOptions = asRecord(info.options);
 
   const setupPatch = pickRecordFields(statusPeptide, PEPTIDE_RUNTIME_SETUP_KEYS);
-  const peptideProgressPatch = {
-    ...pickRecordFields(statusPeptide, PEPTIDE_RUNTIME_PROGRESS_KEYS),
-    ...pickRecordFields(statusPeptideProgress, PEPTIDE_RUNTIME_PROGRESS_KEYS)
+  const pickProgressWithoutCandidateRows = (source: Record<string, unknown>) => {
+    const patch = pickRecordFields(source, PEPTIDE_RUNTIME_PROGRESS_KEYS);
+    for (const key of PEPTIDE_CANDIDATE_ROW_KEYS) {
+      delete patch[key];
+    }
+    return patch;
   };
-  const topProgressPatch = pickRecordFields(statusTopProgress, PEPTIDE_RUNTIME_PROGRESS_KEYS);
+  const peptideProgressPatch = {
+    ...pickProgressWithoutCandidateRows(statusPeptide),
+    ...pickProgressWithoutCandidateRows(statusPeptideProgress)
+  };
+  const topProgressPatch = pickProgressWithoutCandidateRows(statusTopProgress);
   const optionsPatch = Object.keys(statusRequestOptions).length > 0 ? statusRequestOptions : statusTopOptions;
 
   if (

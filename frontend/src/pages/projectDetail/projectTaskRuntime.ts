@@ -394,33 +394,31 @@ function readPeptideCandidateRowsFromPayload(value: unknown): Array<Record<strin
   return asRecordArray(progress.current_best_sequences);
 }
 
+function stripPeptideCandidateRowKeysFromRecord(source: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...source };
+  for (const key of PEPTIDE_CANDIDATE_ROW_KEYS) {
+    delete next[key];
+  }
+  return next;
+}
+
 function injectPeptideCandidateRowsIntoStatusPayload(
   baseValue: unknown,
   rows: Array<Record<string, unknown>>
 ): Record<string, unknown> {
-  const base = asRecord(baseValue);
-  const peptide = asRecord(base.peptide_design);
-  const progress = asRecord(base.progress);
-  const peptideProgress = asRecord(peptide.progress);
+  const base = stripPeptideCandidateRowKeysFromRecord(asRecord(baseValue));
+  const peptide = stripPeptideCandidateRowKeysFromRecord(asRecord(base.peptide_design));
+  const progress = stripPeptideCandidateRowKeysFromRecord(asRecord(base.progress));
+  const peptideProgress = stripPeptideCandidateRowKeysFromRecord(asRecord(peptide.progress));
   return {
     ...base,
     peptide_design: {
       ...peptide,
       best_sequences: rows,
-      current_best_sequences: rows,
-      progress: {
-        ...peptideProgress,
-        best_sequences: rows,
-        current_best_sequences: rows
-      }
+      candidate_count: rows.length,
+      progress: peptideProgress
     },
-    best_sequences: rows,
-    current_best_sequences: rows,
-    progress: {
-      ...progress,
-      best_sequences: rows,
-      current_best_sequences: rows
-    }
+    progress
   };
 }
 
@@ -581,14 +579,14 @@ function mergePeptideRuntimeStatusIntoConfidence(
     };
   }
 
-  const currentPeptide = asRecord(nextConfidence.peptide_design);
+  const currentPeptide = stripPeptideCandidateRowKeysFromRecord(asRecord(nextConfidence.peptide_design));
   const existingCandidateRows = readPeptideCandidateRowsFromPayload(currentConfidence);
   const mergedCandidateRows = mergePeptideCandidateRows(existingCandidateRows, incomingCandidateRows);
-  const mergedPeptideProgress = {
+  const mergedPeptideProgress = stripPeptideCandidateRowKeysFromRecord({
     ...asRecord(currentPeptide.progress),
     ...topProgressPatch,
     ...peptideProgressPatch
-  };
+  });
   const nextPeptide: Record<string, unknown> = {
     ...currentPeptide,
     ...setupPatch,
@@ -597,26 +595,20 @@ function mergePeptideRuntimeStatusIntoConfidence(
   };
   if (mergedCandidateRows.length > 0) {
     nextPeptide.best_sequences = mergedCandidateRows;
-    nextPeptide.current_best_sequences = mergedCandidateRows;
     if (!hasMeaningfulValue(nextPeptide.candidate_count)) {
       nextPeptide.candidate_count = mergedCandidateRows.length;
     }
-    mergedPeptideProgress.best_sequences = mergedCandidateRows;
-    mergedPeptideProgress.current_best_sequences = mergedCandidateRows;
   }
   nextConfidence.peptide_design = nextPeptide;
 
-  const currentTopProgress = asRecord(nextConfidence.progress);
-  const nextProgress: Record<string, unknown> = {
+  const currentTopProgress = stripPeptideCandidateRowKeysFromRecord(asRecord(nextConfidence.progress));
+  const nextProgress: Record<string, unknown> = stripPeptideCandidateRowKeysFromRecord({
     ...currentTopProgress,
     ...topProgressPatch,
     ...peptideProgressPatch
-  };
-  if (mergedCandidateRows.length > 0) {
-    nextConfidence.best_sequences = mergedCandidateRows;
-    nextConfidence.current_best_sequences = mergedCandidateRows;
-    nextProgress.best_sequences = mergedCandidateRows;
-    nextProgress.current_best_sequences = mergedCandidateRows;
+  });
+  for (const key of PEPTIDE_CANDIDATE_ROW_KEYS) {
+    delete nextConfidence[key];
   }
   nextConfidence.progress = nextProgress;
 
@@ -625,7 +617,7 @@ function mergePeptideRuntimeStatusIntoConfidence(
 
 export async function pullResultForViewerTask(params: {
   taskId: string;
-  options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode };
+  options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode; preferredStructureName?: string };
   baseProjectConfidence?: Record<string, unknown> | null;
   baseTaskConfidence?: Record<string, unknown> | null;
   baseTaskProperties?: Record<string, unknown> | null;
@@ -661,8 +653,14 @@ export async function pullResultForViewerTask(params: {
   const resultMode = options?.resultMode || 'view';
   setResultError(null);
   try {
-    const blob = await downloadResultBlob(taskId, { mode: resultMode });
-    const parsed = await parseResultBundle(blob, { preservePeptideCandidateStructureText: true });
+    const blob = await downloadResultBlob(taskId, {
+      mode: resultMode,
+      preferredStructureName: options?.preferredStructureName
+    });
+    const parsed = await parseResultBundle(blob, {
+      preservePeptideCandidateStructureText: false,
+      preferredStructureName: options?.preferredStructureName
+    });
     if (!parsed) {
       throw new Error('No structure file was found in the result archive.');
     }
@@ -684,39 +682,27 @@ export async function pullResultForViewerTask(params: {
     setStructureTaskId(taskId);
 
     if (typeof setStatusInfo === 'function') {
-      const candidateRows = asRecordArray(parsedConfidence.best_sequences);
-      const peptideDesign = asRecord(parsedConfidence.peptide_design);
-      const peptideBestRows = asRecordArray(peptideDesign.best_sequences);
-      const effectiveRows = peptideBestRows.length > 0 ? peptideBestRows : candidateRows;
+      const effectiveRows = readPeptideCandidateRowsFromPayload(parsedConfidence);
       if (effectiveRows.length > 0) {
         setStatusInfo((previous) => {
           const prev = asRecord(previous);
           const previousTaskScope = readStatusScopeTaskId(prev);
           const scopedPrev = previousTaskScope === normalizeTaskId(taskId) ? prev : {};
-          const prevPeptide = asRecord(scopedPrev.peptide_design);
-          const prevProgress = asRecord(scopedPrev.progress);
+          const prevPeptide = stripPeptideCandidateRowKeysFromRecord(asRecord(scopedPrev.peptide_design));
+          const prevProgress = stripPeptideCandidateRowKeysFromRecord(asRecord(scopedPrev.progress));
           const scopedTaskId = normalizeTaskId(taskId);
-          const nextPeptideProgress = {
-            ...asRecord(prevPeptide.progress),
-            best_sequences: effectiveRows,
-            current_best_sequences: effectiveRows
-          };
+          const nextPeptideProgress = stripPeptideCandidateRowKeysFromRecord(asRecord(prevPeptide.progress));
+          const nextStatus = stripPeptideCandidateRowKeysFromRecord(scopedPrev);
           return {
-            ...scopedPrev,
+            ...nextStatus,
             __task_id: scopedTaskId,
             peptide_design: {
               ...prevPeptide,
               best_sequences: effectiveRows,
-              current_best_sequences: effectiveRows,
+              candidate_count: effectiveRows.length,
               progress: nextPeptideProgress
             },
-            best_sequences: effectiveRows,
-            current_best_sequences: effectiveRows,
-            progress: {
-              ...prevProgress,
-              best_sequences: effectiveRows,
-              current_best_sequences: effectiveRows
-            }
+            progress: prevProgress
           };
         });
       }

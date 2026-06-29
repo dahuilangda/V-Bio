@@ -30,7 +30,7 @@ interface UseProjectWorkflowSectionPropsInput {
   projectTaskId: string;
   statusInfo: Record<string, unknown> | null;
   progressPercent: number;
-  onPeptideRequestStructure?: () => Promise<void> | void;
+  onPeptideRequestStructure?: (options?: { preferredStructureName?: string }) => Promise<void> | void;
   resultsGridRef: RefObject<HTMLDivElement>;
   isResultsResizing: boolean;
   resultsGridStyle: CSSProperties;

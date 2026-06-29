@@ -103,7 +103,7 @@ interface UseProjectTaskActionsOutput {
   saveDraft: (event?: FormEvent) => Promise<void>;
   pullResultForViewer: (
     taskId: string,
-    options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode }
+    options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode; preferredStructureName?: string }
   ) => Promise<void>;
   refreshStatus: (options?: { silent?: boolean; taskId?: string }) => Promise<void>;
 }
@@ -327,7 +327,7 @@ export function useProjectTaskActions(input: UseProjectTaskActionsInput): UsePro
   );
 
   const pullResultForViewer = useCallback(
-    async (taskId: string, options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode }) => {
+    async (taskId: string, options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode; preferredStructureName?: string }) => {
       const normalizedTaskRowId = String(options?.taskRowId || '').trim();
       const normalizedTaskId = String(taskId || '').trim();
       const taskRow =
