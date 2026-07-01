@@ -25,7 +25,7 @@ export interface ProjectResultsSectionProps {
   selectedResultTargetChainId: string | null;
   selectedResultLigandChainId: string | null;
   displayStructureText: string;
-  displayStructureConfidenceText?: string;
+  displayStructureConfidenceText: string;
   displayStructureFormat: 'cif' | 'pdb';
   displayStructureColorMode: 'default' | 'alphafold';
   displayStructureName: string;
@@ -101,6 +101,11 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
     setPredictionViewerColorMode(initialPredictionColorMode);
   }, [initialPredictionColorMode, projectTaskId]);
 
+  const predictionViewerStructureText = useMemo(
+    () => displayStructureConfidenceText,
+    [displayStructureConfidenceText]
+  );
+
   if (isPeptideDesignWorkflow) {
     return (
       <PeptideDesignResultsWorkspace
@@ -135,8 +140,8 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
         <div ref={resultsGridRef} className={`results-grid ${isResultsResizing ? 'is-resizing' : ''}`} style={resultsGridStyle}>
           <section className="structure-panel structure-panel--prediction">
             <MolstarViewer
-              key={`prediction-results-viewer:${projectTaskId || '-'}:${predictionViewerColorMode}:${selectedResultLigandChainId || '-'}`}
-              structureText={predictionViewerColorMode === 'alphafold' ? displayStructureConfidenceText || displayStructureText : displayStructureText}
+              key={`prediction-results-viewer:${projectTaskId || '-'}:${selectedResultLigandChainId || '-'}`}
+              structureText={predictionViewerStructureText}
               format={displayStructureFormat}
               colorMode={predictionViewerColorMode}
               confidenceBackend={confidenceBackend || projectBackend}

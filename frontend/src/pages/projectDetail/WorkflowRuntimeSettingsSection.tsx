@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ChangeEvent, type FocusEvent } from 'react';
 import { MemoLigand2DPreview } from '../../components/project/Ligand2DPreview';
 import { JSMEEditor } from '../../components/project/JSMEEditor';
 import { buildCustomResidueCatalog, BUILT_IN_PROTEIN_MODIFICATIONS, NATURAL_AMINO_ACID_RESIDUES, type ResidueCatalogEntry } from '../../components/project/residueCatalog';
@@ -38,6 +38,59 @@ function placementLabel(rule: ResiduePlacementRule): string {
 
 function normalizeCustomResidueCode(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]/g, '').toUpperCase().slice(0, 12);
+}
+
+function clampCommittedNumber(value: number, minValue: number, maxValue: number, fallback: number, step?: number): number {
+  const parsed = Number.isFinite(value) ? value : fallback;
+  const clamped = Math.max(minValue, Math.min(maxValue, parsed));
+  if (step && step > 0) return Number((Math.round(clamped / step) * step).toFixed(6));
+  return Math.floor(clamped);
+}
+
+function CommitNumberInput({
+  value,
+  min,
+  max,
+  step,
+  disabled,
+  onCommit
+}: {
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  disabled?: boolean;
+  onCommit: (value: number) => void;
+}) {
+  const [draftValue, setDraftValue] = useState(String(value));
+
+  useEffect(() => {
+    setDraftValue(String(value));
+  }, [value]);
+
+  const commit = (rawValue: string) => {
+    const next = clampCommittedNumber(Number(rawValue), min, max, value, step);
+    setDraftValue(String(next));
+    if (next !== value) onCommit(next);
+  };
+
+  return (
+    <input
+      type="number"
+      min={min}
+      max={max}
+      step={step}
+      value={draftValue}
+      onChange={(event: ChangeEvent<HTMLInputElement>) => setDraftValue(event.target.value)}
+      onBlur={(event: FocusEvent<HTMLInputElement>) => commit(event.target.value)}
+      onKeyDown={(event) => {
+        if (event.key !== 'Enter') return;
+        commit(event.currentTarget.value);
+        event.currentTarget.blur();
+      }}
+      disabled={disabled}
+    />
+  );
 }
 
 
@@ -521,12 +574,11 @@ export function WorkflowRuntimeSettingsSection({
                 </label>
                 <label className="field">
                   <span>Peptide Length</span>
-                  <input
-                    type="number"
+                  <CommitNumberInput
                     min={peptideDesignMode === 'bicyclic' ? 8 : 5}
                     max={80}
                     value={peptideBinderLength}
-                    onChange={(e) => onPeptideBinderLengthChange(Math.floor(Number(e.target.value) || peptideBinderLength))}
+                    onCommit={onPeptideBinderLengthChange}
                     disabled={!canEdit}
                   />
                 </label>
@@ -564,13 +616,12 @@ export function WorkflowRuntimeSettingsSection({
                     <div className="peptide-residue-usage-controls">
                       <label className="field peptide-residue-usage-field">
                         <span>At least</span>
-                        <input
-                          type="number"
+                        <CommitNumberInput
                           min={0}
                           max={peptideBinderLength}
                           value={peptideNonNaturalMin}
-                          onChange={(e) => {
-                            const nextMin = clampNonNaturalLimit(Number(e.target.value));
+                          onCommit={(value) => {
+                            const nextMin = clampNonNaturalLimit(value);
                             onPeptideNonNaturalRangeChange(nextMin, Math.max(nextMin, peptideNonNaturalMax));
                           }}
                           disabled={residuePoolControlsDisabled || selectedNonNaturalCount === 0}
@@ -578,13 +629,12 @@ export function WorkflowRuntimeSettingsSection({
                       </label>
                       <label className="field peptide-residue-usage-field">
                         <span>At most</span>
-                        <input
-                          type="number"
+                        <CommitNumberInput
                           min={peptideNonNaturalMin}
                           max={peptideBinderLength}
                           value={peptideNonNaturalMax}
-                          onChange={(e) => {
-                            const nextMax = clampNonNaturalLimit(Number(e.target.value));
+                          onCommit={(value) => {
+                            const nextMax = clampNonNaturalLimit(value);
                             onPeptideNonNaturalRangeChange(Math.min(peptideNonNaturalMin, nextMax), nextMax);
                           }}
                           disabled={residuePoolControlsDisabled || selectedNonNaturalCount === 0}
@@ -791,48 +841,42 @@ export function WorkflowRuntimeSettingsSection({
                 )}
                 <label className="field">
                   <span>Iterations</span>
-                  <input
-                    type="number"
+                  <CommitNumberInput
                     min={2}
                     max={100}
                     value={peptideIterations}
-                    onChange={(e) => onPeptideIterationsChange(Math.floor(Number(e.target.value) || peptideIterations))}
+                    onCommit={onPeptideIterationsChange}
                     disabled={!canEdit}
                   />
                 </label>
                 <label className="field">
                   <span>Population Size</span>
-                  <input
-                    type="number"
+                  <CommitNumberInput
                     min={2}
                     max={100}
                     value={peptidePopulationSize}
-                    onChange={(e) =>
-                      onPeptidePopulationSizeChange(Math.floor(Number(e.target.value) || peptidePopulationSize))
-                    }
+                    onCommit={onPeptidePopulationSizeChange}
                     disabled={!canEdit}
                   />
                 </label>
                 <label className="field">
                   <span>Elite Size</span>
-                  <input
-                    type="number"
+                  <CommitNumberInput
                     min={1}
                     max={Math.max(1, peptidePopulationSize - 1)}
                     value={peptideEliteSize}
-                    onChange={(e) => onPeptideEliteSizeChange(Math.floor(Number(e.target.value) || peptideEliteSize))}
+                    onCommit={onPeptideEliteSizeChange}
                     disabled={!canEdit}
                   />
                 </label>
                 <label className="field">
                   <span>Mutation Rate</span>
-                  <input
-                    type="number"
+                  <CommitNumberInput
                     min={0.01}
                     max={1}
                     step={0.01}
                     value={peptideMutationRate}
-                    onChange={(e) => onPeptideMutationRateChange(Number(e.target.value) || peptideMutationRate)}
+                    onCommit={onPeptideMutationRateChange}
                     disabled={!canEdit}
                   />
                 </label>

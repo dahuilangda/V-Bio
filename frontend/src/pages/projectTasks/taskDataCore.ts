@@ -1451,7 +1451,14 @@ function readPeptideCandidateModifications(row: Record<string, unknown>, sequenc
   const raw =
     readObjectPath(row, 'modifications') ??
     readObjectPath(row, 'protein_modifications') ??
-    readObjectPath(row, 'residue_modifications');
+    readObjectPath(row, 'residue_modifications') ??
+    readObjectPath(row, 'residueMods') ??
+    readObjectPath(row, 'residue_mods') ??
+    readObjectPath(row, 'mods') ??
+    readObjectPath(row, 'result.modifications') ??
+    readObjectPath(row, 'prediction.modifications') ??
+    readObjectPath(row, 'metadata.modifications') ??
+    readObjectPath(row, 'structure_payload.modifications');
   if (!Array.isArray(raw)) return [];
   const rows: ProteinModification[] = [];
   const seen = new Set<number>();
@@ -1564,16 +1571,43 @@ function readCandidateResiduePlddts(
   sequenceLength: number,
   preferredChainId: string | null | undefined
 ): number[] | null {
-  const direct = alignResidueSeriesToSequence(
-    toFiniteNumberArray(
-      readObjectPath(row, 'residue_plddts') ??
-        readObjectPath(row, 'residue_plddt') ??
-        readObjectPath(row, 'per_residue_plddt') ??
-        readObjectPath(row, 'plddts')
-    ),
-    sequenceLength
-  );
-  if (direct.length >= Math.min(sequenceLength, 4)) return direct;
+  const directCandidates = [
+    'residue_plddts',
+    'residue_plddt',
+    'per_residue_plddt',
+    'plddts',
+    'residue_confidence',
+    'residue_confidences',
+    'residue_scores',
+    'per_residue_confidence',
+    'binder_residue_plddt',
+    'binder_residue_plddts',
+    'binder_plddt_per_residue',
+    'plddt_per_residue',
+    'plddt_by_residue',
+    'aa_plddt',
+    'aa_plddts',
+    'ligand_residue_plddt',
+    'ligand_residue_plddts',
+    'token_plddt',
+    'token_plddts',
+    'confidence.residue_plddt',
+    'confidence.residue_plddts',
+    'confidence.plddts',
+    'confidence.per_residue_plddt',
+    'confidence.binder_residue_plddt',
+    'confidence.token_plddt',
+    'confidence.token_plddts',
+    'metrics.residue_plddt',
+    'metrics.per_residue_plddt',
+    'scores.plddts',
+    'scores.residue_plddt',
+    'scores.per_residue_plddt'
+  ];
+  for (const path of directCandidates) {
+    const direct = alignResidueSeriesToSequence(toFiniteNumberArray(readObjectPath(row, path)), sequenceLength);
+    if (direct.length >= Math.min(sequenceLength, 4)) return direct;
+  }
 
   const byChainCandidates = [
     readObjectPath(row, 'residue_plddt_by_chain'),
@@ -1581,7 +1615,13 @@ function readCandidateResiduePlddts(
     readObjectPath(row, 'residue_plddts_by_chain'),
     readObjectPath(row, 'chain_residue_plddt'),
     readObjectPath(row, 'chain_plddt'),
-    readObjectPath(row, 'chain_plddts')
+    readObjectPath(row, 'chain_plddts'),
+    readObjectPath(row, 'confidence.residue_plddt_by_chain'),
+    readObjectPath(row, 'confidence.residuePlddtByChain'),
+    readObjectPath(row, 'confidence.residue_plddts_by_chain'),
+    readObjectPath(row, 'confidence.chain_residue_plddt'),
+    readObjectPath(row, 'confidence.chain_plddt'),
+    readObjectPath(row, 'confidence.chain_plddts')
   ];
   for (const candidate of byChainCandidates) {
     const values = readResidueSeriesByChain(candidate, sequenceLength, preferredChainId);
@@ -2065,6 +2105,17 @@ function toFiniteNumberArray(value: unknown): number[] {
       obj.plddts,
       obj.residue_plddt,
       obj.residue_plddts,
+      obj.per_residue_plddt,
+      obj.per_residue_confidence,
+      obj.binder_residue_plddt,
+      obj.binder_residue_plddts,
+      obj.binder_plddt_per_residue,
+      obj.plddt_per_residue,
+      obj.plddt_by_residue,
+      obj.aa_plddt,
+      obj.aa_plddts,
+      obj.ligand_residue_plddt,
+      obj.ligand_residue_plddts,
       obj.token_plddt,
       obj.token_plddts,
       obj.scores

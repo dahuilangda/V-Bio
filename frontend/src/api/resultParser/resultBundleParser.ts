@@ -1710,6 +1710,15 @@ function readObjectPathLoose(payload: Record<string, unknown>, path: string): un
   return current;
 }
 
+const PEPTIDE_CANDIDATE_MODIFICATION_KEYS = [
+  'modifications',
+  'protein_modifications',
+  'residue_modifications',
+  'residueMods',
+  'residue_mods',
+  'mods'
+];
+
 const PEPTIDE_CANDIDATE_RESIDUE_KEYS = [
   'residue_plddt',
   'residue_plddts',
@@ -1759,6 +1768,26 @@ const PEPTIDE_CANDIDATE_RESIDUE_PATH_ALIASES: Array<{ path: string; asKey: strin
   { path: 'confidence.chain_plddts', asKey: 'chain_plddts' }
 ];
 
+
+function extractPeptideCandidateModificationPayload(row: Record<string, unknown>): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  for (const key of PEPTIDE_CANDIDATE_MODIFICATION_KEYS) {
+    const value = row[key];
+    if (Array.isArray(value) && value.length > 0) {
+      payload.modifications = value;
+      return payload;
+    }
+  }
+  for (const path of ['result.modifications', 'prediction.modifications', 'metadata.modifications', 'structure_payload.modifications']) {
+    const value = readObjectPathLoose(row, path);
+    if (Array.isArray(value) && value.length > 0) {
+      payload.modifications = value;
+      return payload;
+    }
+  }
+  return payload;
+}
+
 function extractPeptideCandidateResiduePayload(row: Record<string, unknown>): Record<string, unknown> {
   const payload: Record<string, unknown> = {};
   for (const key of PEPTIDE_CANDIDATE_RESIDUE_KEYS) {
@@ -1774,6 +1803,28 @@ function extractPeptideCandidateResiduePayload(row: Record<string, unknown>): Re
     }
   }
   return payload;
+}
+
+function countLooseFiniteNumbers(value: unknown): number {
+  if (Array.isArray(value)) {
+    return value.reduce<number>((sum, item) => sum + countLooseFiniteNumbers(item), 0);
+  }
+  if (value && typeof value === 'object') {
+    return Object.values(value as Record<string, unknown>).reduce<number>(
+      (sum, item) => sum + countLooseFiniteNumbers(item),
+      0
+    );
+  }
+  return readFiniteNumberLoose(value) !== null ? 1 : 0;
+}
+
+function peptideResiduePayloadHasUsableSeries(payload: Record<string, unknown>, sequenceLength: number): boolean {
+  const minUsableLength = Math.max(1, Math.min(sequenceLength > 0 ? sequenceLength : 4, 4));
+  return Object.values(payload).some((value) => countLooseFiniteNumbers(value) >= minUsableLength);
+}
+
+function hasNonEmptyResiduePlddtByChain(value: Record<string, number[]>): boolean {
+  return Object.values(value).some((series) => Array.isArray(series) && series.length > 0);
 }
 
 function resolveDesignStructurePathFromRow(
@@ -1937,10 +1988,9 @@ async function parsePeptideDesignCandidatesFromBundle(
       byRank.get(rank) ||
       structureFiles[index]?.name ||
       '';
-    const structureText =
-      preservePeptideCandidateStructureText && structurePath ? (await zip.file(structurePath)?.async('text')) || '' : '';
     const structureFormat: 'cif' | 'pdb' = getBaseName(structurePath).toLowerCase().endsWith('.pdb') ? 'pdb' : 'cif';
     const residuePayload = extractPeptideCandidateResiduePayload(row);
+    const modificationPayload = extractPeptideCandidateModificationPayload(row);
     const sequence = firstNonEmptyTextByKeys(row, [
       'peptide_sequence',
       'binder_sequence',
@@ -1948,6 +1998,18 @@ async function parsePeptideDesignCandidatesFromBundle(
       'designed_sequence',
       'sequence'
     ]);
+    const shouldExtractResiduePlddtFromStructure =
+      Boolean(structurePath) && !peptideResiduePayloadHasUsableSeries(residuePayload, sequence.replace(/\s+/g, '').length);
+    const structureText =
+      (preservePeptideCandidateStructureText || shouldExtractResiduePlddtFromStructure) && structurePath
+        ? (await zip.file(structurePath)?.async('text')) || ''
+        : '';
+    const structureResiduePlddtByChain = shouldExtractResiduePlddtFromStructure
+      ? extractResiduePlddtsByChainFromStructure(structureText, structureFormat)
+      : {};
+    if (hasNonEmptyResiduePlddtByChain(structureResiduePlddtByChain)) {
+      residuePayload.residue_plddt_by_chain = structureResiduePlddtByChain;
+    }
     const candidate: Record<string, unknown> = {
       rank,
       generation: readFiniteNumberLoose(row.generation) ?? readFiniteNumberLoose(row.iteration),
@@ -1978,6 +2040,7 @@ async function parsePeptideDesignCandidatesFromBundle(
       target_chain_id: readText(row.target_chain_id),
       binder_chain_id: readText(row.binder_chain_id),
       linker_chain_id: readText(row.linker_chain_id),
+      ...modificationPayload,
       ...residuePayload,
       structure_name: getBaseName(structurePath),
       structure_format: structureFormat
@@ -2086,9 +2149,18 @@ function countCandidateStorageNumbers(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? 1 : 0;
 }
 
+function peptideCandidateHasModifications(row: Record<string, unknown>): boolean {
+  if (PEPTIDE_CANDIDATE_MODIFICATION_KEYS.some((key) => Array.isArray(row[key]) && (row[key] as unknown[]).length > 0)) return true;
+  return ['result.modifications', 'prediction.modifications', 'metadata.modifications', 'structure_payload.modifications'].some((path) => {
+    const value = readObjectPathLoose(row, path);
+    return Array.isArray(value) && value.length > 0;
+  });
+}
+
 function peptideCandidateStorageRichness(row: Record<string, unknown>): number {
   let score = 0;
   if (firstNonEmptyTextByKeys(row, ['structure_name', 'structureName', 'structure_file', 'structure_path', 'name'])) score += 8;
+  if (peptideCandidateHasModifications(row)) score += 10;
   if (readFiniteNumberLoose(row.pair_iptm_target_binder) !== null || readFiniteNumberLoose(row.pair_iptm) !== null) score += 8;
   if (readFiniteNumberLoose(row.binder_avg_plddt) !== null || readFiniteNumberLoose(row.plddt) !== null) score += 6;
   if (readFiniteNumberLoose(row.score) !== null || readFiniteNumberLoose(row.composite_score) !== null) score += 4;

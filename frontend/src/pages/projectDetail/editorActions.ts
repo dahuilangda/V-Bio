@@ -160,6 +160,29 @@ function peptideBackendSupportsMode(backend: string, mode: 'linear' | 'cyclic' |
   return normalizePeptideBackendValue(backend) === 'boltz';
 }
 
+function countSelectedNonNaturalResidues(pool: PeptideResiduePoolSelection[] | undefined): number {
+  if (!Array.isArray(pool)) return 0;
+  return pool.filter((item) => item.kind !== 'natural').length;
+}
+
+function normalizePeptideNonNaturalRange(
+  options: NonNullable<DraftLike['inputConfig']['options']>,
+  pool: PeptideResiduePoolSelection[] = options.peptideResiduePool || []
+): Pick<NonNullable<DraftLike['inputConfig']['options']>, 'peptideNonNaturalMin' | 'peptideNonNaturalMax'> {
+  const binderLength = Math.max(1, Math.floor(Number(options.peptideBinderLength) || 20));
+  if (countSelectedNonNaturalResidues(pool) === 0) {
+    return { peptideNonNaturalMin: 0, peptideNonNaturalMax: 0 };
+  }
+  const min = Math.max(0, Math.min(binderLength, Math.floor(Number(options.peptideNonNaturalMin) || 0)));
+  const rawMax = Number(options.peptideNonNaturalMax);
+  const maxFallback = Math.max(1, min);
+  const max = Math.max(min, Math.min(binderLength, Math.floor(Number.isFinite(rawMax) ? rawMax : maxFallback)));
+  return {
+    peptideNonNaturalMin: min,
+    peptideNonNaturalMax: Math.max(1, max)
+  };
+}
+
 function hasPeptideDesignOptions(options: NonNullable<DraftLike['inputConfig']['options']>): boolean {
   return (
     typeof options.peptideDesignMode === 'string' ||
@@ -359,7 +382,8 @@ export function handleRuntimeBackendChangeAction<TDraft extends DraftLike>(param
                 return {
                   ...updatedOptions,
                   ...normalizePeptideInitializationOptions(updatedOptions),
-                  ...normalizeBicyclicPositions(updatedOptions)
+                  ...normalizeBicyclicPositions(updatedOptions),
+                  ...normalizePeptideNonNaturalRange(updatedOptions)
                 };
               })()
             : options;
@@ -417,7 +441,8 @@ export function handleRuntimePeptideDesignModeChangeAction<TDraft extends DraftL
     const normalizedOptions = {
       ...nextOptions,
       ...normalizePeptideInitializationOptions(nextOptions),
-      ...normalizeBicyclicPositions(nextOptions)
+      ...normalizeBicyclicPositions(nextOptions),
+      ...normalizePeptideNonNaturalRange(nextOptions)
     };
     const nextBackend = peptideBackendSupportsMode(d.backend, peptideDesignMode)
       ? normalizePeptideBackendValue(d.backend)
@@ -448,7 +473,8 @@ export function handleRuntimePeptideBinderLengthChangeAction<TDraft extends Draf
     return {
       ...nextOptions,
       ...normalizePeptideInitializationOptions(nextOptions),
-      ...normalizeBicyclicPositions(nextOptions)
+      ...normalizeBicyclicPositions(nextOptions),
+      ...normalizePeptideNonNaturalRange(nextOptions)
     };
   });
 }
@@ -565,10 +591,16 @@ export function handleRuntimePeptideResiduePoolChangeAction<TDraft extends Draft
   setDraft: Dispatch<SetStateAction<TDraft | null>>;
 }): void {
   const { peptideResiduePool, setDraft } = params;
-  patchDraftOptions(setDraft, (options) => ({
-    ...options,
-    peptideResiduePool
-  }));
+  patchDraftOptions(setDraft, (options) => {
+    const nextOptions = {
+      ...options,
+      peptideResiduePool
+    };
+    return {
+      ...nextOptions,
+      ...normalizePeptideNonNaturalRange(nextOptions, peptideResiduePool)
+    };
+  });
 }
 
 export function handleRuntimePeptideNonNaturalRangeChangeAction<TDraft extends DraftLike>(params: {
@@ -579,8 +611,15 @@ export function handleRuntimePeptideNonNaturalRangeChangeAction<TDraft extends D
   const { min, max, setDraft } = params;
   patchDraftOptions(setDraft, (options) => {
     const binderLength = Math.max(1, Math.floor(Number(options.peptideBinderLength) || 20));
+    if (countSelectedNonNaturalResidues(options.peptideResiduePool) === 0) {
+      return {
+        ...options,
+        peptideNonNaturalMin: 0,
+        peptideNonNaturalMax: 0
+      };
+    }
     const nextMin = Math.max(0, Math.min(binderLength, Math.floor(Number(min) || 0)));
-    const nextMax = Math.max(nextMin, Math.min(binderLength, Math.floor(Number(max) || 0)));
+    const nextMax = Math.max(Math.max(1, nextMin), Math.min(binderLength, Math.floor(Number(max) || 0)));
     return {
       ...options,
       peptideNonNaturalMin: nextMin,

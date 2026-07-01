@@ -1255,7 +1255,14 @@ function parsePeptideCandidateModifications(row: Record<string, unknown>, sequen
   const raw =
     readObjectPath(row, 'modifications') ??
     readObjectPath(row, 'protein_modifications') ??
-    readObjectPath(row, 'residue_modifications');
+    readObjectPath(row, 'residue_modifications') ??
+    readObjectPath(row, 'residueMods') ??
+    readObjectPath(row, 'residue_mods') ??
+    readObjectPath(row, 'mods') ??
+    readObjectPath(row, 'result.modifications') ??
+    readObjectPath(row, 'prediction.modifications') ??
+    readObjectPath(row, 'metadata.modifications') ??
+    readObjectPath(row, 'structure_payload.modifications');
   if (!Array.isArray(raw)) return [];
   const seen = new Set<number>();
   const rows: PeptideDesignCandidateModification[] = [];

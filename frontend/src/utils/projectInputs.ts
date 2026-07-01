@@ -356,6 +356,10 @@ function normalizePeptideSequenceMask(value: unknown, binderLength: number): str
   return normalized.padEnd(binderLength, 'X');
 }
 
+function countPeptideNonNaturalResidues(pool: NonNullable<PredictionOptions['peptideResiduePool']>): number {
+  return pool.filter((item) => item.kind !== 'natural').length;
+}
+
 function normalizePeptideResiduePool(value: unknown): NonNullable<PredictionOptions['peptideResiduePool']> {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
@@ -483,18 +487,23 @@ function normalizeOptions(value: unknown): PredictionOptions {
   const peptideResiduePool = Array.isArray(rawPeptideResiduePool)
     ? normalizePeptideResiduePool(rawPeptideResiduePool)
     : DEFAULT_PEPTIDE_RESIDUE_POOL;
-  const peptideNonNaturalMin = normalizeIntegerOption(
-    raw.peptideNonNaturalMin ?? rawObj.peptide_non_natural_min ?? rawObj.non_natural_min,
-    0,
-    0,
-    peptideBinderLength
-  );
-  const peptideNonNaturalMax = normalizeIntegerOption(
-    raw.peptideNonNaturalMax ?? rawObj.peptide_non_natural_max ?? rawObj.non_natural_max,
-    peptideNonNaturalMin,
-    peptideNonNaturalMin,
-    peptideBinderLength
-  );
+  const hasSelectedNonNaturalResidues = countPeptideNonNaturalResidues(peptideResiduePool) > 0;
+  const peptideNonNaturalMin = hasSelectedNonNaturalResidues
+    ? normalizeIntegerOption(
+        raw.peptideNonNaturalMin ?? rawObj.peptide_non_natural_min ?? rawObj.non_natural_min,
+        0,
+        0,
+        peptideBinderLength
+      )
+    : 0;
+  const peptideNonNaturalMax = hasSelectedNonNaturalResidues
+    ? normalizeIntegerOption(
+        raw.peptideNonNaturalMax ?? rawObj.peptide_non_natural_max ?? rawObj.non_natural_max,
+        Math.max(1, peptideNonNaturalMin),
+        Math.max(1, peptideNonNaturalMin),
+        peptideBinderLength
+      )
+    : 0;
   const peptideBicyclicLinkerCcd = normalizePeptideBicyclicLinkerCcd(
     raw.peptideBicyclicLinkerCcd ?? rawObj.peptide_bicyclic_linker_ccd ?? rawObj.linker_ccd
   );

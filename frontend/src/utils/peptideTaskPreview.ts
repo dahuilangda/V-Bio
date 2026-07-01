@@ -119,7 +119,28 @@ function toFiniteNumberArray(value: unknown): number[] {
       numericKeyEntries.sort((a, b) => a.keyNumber - b.keyNumber);
       return numericKeyEntries.map((entry) => entry.value as number);
     }
-    const nested = [obj.values, obj.value, obj.plddt, obj.plddts, obj.residue_plddt, obj.residue_plddts, obj.scores];
+    const nested = [
+      obj.values,
+      obj.value,
+      obj.plddt,
+      obj.plddts,
+      obj.residue_plddt,
+      obj.residue_plddts,
+      obj.per_residue_plddt,
+      obj.per_residue_confidence,
+      obj.binder_residue_plddt,
+      obj.binder_residue_plddts,
+      obj.binder_plddt_per_residue,
+      obj.plddt_per_residue,
+      obj.plddt_by_residue,
+      obj.aa_plddt,
+      obj.aa_plddts,
+      obj.ligand_residue_plddt,
+      obj.ligand_residue_plddts,
+      obj.token_plddt,
+      obj.token_plddts,
+      obj.scores
+    ];
     for (const item of nested) {
       if (Array.isArray(item)) {
         const parsed = toFiniteNumberArray(item);
@@ -194,13 +215,40 @@ function readResiduePlddtsFromByChain(value: unknown, sequenceLength: number, pr
 
 function readCandidateResiduePlddts(row: Record<string, unknown>, sequenceLength: number, preferredChainId: string): number[] {
   const directCandidates = [
-    readObjectPath(row, 'residue_plddts'),
-    readObjectPath(row, 'residue_plddt'),
-    readObjectPath(row, 'per_residue_plddt'),
-    readObjectPath(row, 'plddts')
+    'residue_plddts',
+    'residue_plddt',
+    'per_residue_plddt',
+    'plddts',
+    'residue_confidence',
+    'residue_confidences',
+    'residue_scores',
+    'per_residue_confidence',
+    'binder_residue_plddt',
+    'binder_residue_plddts',
+    'binder_plddt_per_residue',
+    'plddt_per_residue',
+    'plddt_by_residue',
+    'aa_plddt',
+    'aa_plddts',
+    'ligand_residue_plddt',
+    'ligand_residue_plddts',
+    'token_plddt',
+    'token_plddts',
+    'confidence.residue_plddt',
+    'confidence.residue_plddts',
+    'confidence.plddts',
+    'confidence.per_residue_plddt',
+    'confidence.binder_residue_plddt',
+    'confidence.token_plddt',
+    'confidence.token_plddts',
+    'metrics.residue_plddt',
+    'metrics.per_residue_plddt',
+    'scores.plddts',
+    'scores.residue_plddt',
+    'scores.per_residue_plddt'
   ];
-  for (const candidate of directCandidates) {
-    const parsed = alignResidueSeriesToSequence(toFiniteNumberArray(candidate), sequenceLength);
+  for (const path of directCandidates) {
+    const parsed = alignResidueSeriesToSequence(toFiniteNumberArray(readObjectPath(row, path)), sequenceLength);
     if (parsed.length >= Math.min(sequenceLength, 4)) return parsed;
   }
   const byChainCandidates = [
@@ -209,7 +257,13 @@ function readCandidateResiduePlddts(row: Record<string, unknown>, sequenceLength
     readObjectPath(row, 'residue_plddts_by_chain'),
     readObjectPath(row, 'chain_residue_plddt'),
     readObjectPath(row, 'chain_plddt'),
-    readObjectPath(row, 'chain_plddts')
+    readObjectPath(row, 'chain_plddts'),
+    readObjectPath(row, 'confidence.residue_plddt_by_chain'),
+    readObjectPath(row, 'confidence.residuePlddtByChain'),
+    readObjectPath(row, 'confidence.residue_plddts_by_chain'),
+    readObjectPath(row, 'confidence.chain_residue_plddt'),
+    readObjectPath(row, 'confidence.chain_plddt'),
+    readObjectPath(row, 'confidence.chain_plddts')
   ];
   for (const candidate of byChainCandidates) {
     const parsed = readResiduePlddtsFromByChain(candidate, sequenceLength, preferredChainId);
@@ -231,7 +285,14 @@ function readCandidateModifications(row: Record<string, unknown>, sequenceLength
   const raw =
     readObjectPath(row, 'modifications') ??
     readObjectPath(row, 'protein_modifications') ??
-    readObjectPath(row, 'residue_modifications');
+    readObjectPath(row, 'residue_modifications') ??
+    readObjectPath(row, 'residueMods') ??
+    readObjectPath(row, 'residue_mods') ??
+    readObjectPath(row, 'mods') ??
+    readObjectPath(row, 'result.modifications') ??
+    readObjectPath(row, 'prediction.modifications') ??
+    readObjectPath(row, 'metadata.modifications') ??
+    readObjectPath(row, 'structure_payload.modifications');
   if (!Array.isArray(raw)) return [];
   const rows: Array<Record<string, unknown>> = [];
   const seen = new Set<number>();
