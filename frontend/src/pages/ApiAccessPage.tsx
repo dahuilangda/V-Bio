@@ -1597,7 +1597,8 @@ export function ApiAccessPage() {
           format: entry.format,
           templateChainId: entry.templateChainId,
           targetChainIds: entry.targetChainIds
-        }))
+        })),
+        preserveLigandSmiles: true
       });
     } catch {
       return '# YAML generation failed. Please check component content.';
@@ -1606,7 +1607,7 @@ export function ApiAccessPage() {
   const predictionTemplateFlags = predictionTemplateEnabled
     ? predictionTemplateEntries.map((entry) => ` \\\n  -F "template_files=@${entry.escapedPath}"`).join('')
     : '';
-  const allCustomCcdMolecules = collectCustomCcdMoleculesFromComponents(normalizedYamlBuilderComponents);
+  const allCustomCcdMolecules = collectCustomCcdMoleculesFromComponents(normalizedYamlBuilderComponents, { includeLigandSmiles: false });
   const customCcdMolecules = allCustomCcdMolecules.filter((item) =>
     looksLikeAminoAcidBackboneSmiles(item.smiles)
   );
@@ -2377,7 +2378,7 @@ ${submitTaskIdCapture}`;
                   </span>
                 </div>
                 <div className="api-builder-note muted small">
-                  YAML Builder uses component-based input (type / copies / sequence) and writes templates into generated YAML.
+                  YAML Builder keeps ligand SMILES as smiles in generated prediction YAML; choose CCD only for known CCD ligands.
                 </div>
                 <section className="api-prediction-affinity-panel">
                   <div className="api-prediction-affinity-head">
@@ -2841,7 +2842,7 @@ ${submitTaskIdCapture}`;
           </li>
           <li>
             <strong>YAML format (prediction)</strong>
-            <span className="muted small">Use `version + sequences`; add `constraints/properties/templates` only when needed.</span>
+            <span className="muted small">Use `version + sequences`; ligand entries can use `smiles` or `ccd`; add constraints/properties/templates only when needed.</span>
           </li>
           <li>
             <strong>Track and download</strong>

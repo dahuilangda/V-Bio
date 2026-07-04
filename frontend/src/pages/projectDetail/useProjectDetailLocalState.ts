@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import type { CustomCcdMoleculeInput, InputComponent, Project, ProjectTask, ProteinTemplateUpload } from '../../types/models';
 import type { ConstraintResiduePick } from '../../components/project/ConstraintEditor';
 import { useTaskAttachmentCache } from './useTaskAttachmentCache';
@@ -42,8 +42,18 @@ export function useProjectDetailLocalState() {
   const [activeConstraintId, setActiveConstraintId] = useState<string | null>(null);
   const [selectedContactConstraintIds, setSelectedContactConstraintIds] = useState<string[]>([]);
   const [selectedConstraintTemplateComponentId, setSelectedConstraintTemplateComponentId] = useState<string | null>(null);
-  const [constraintPickModeEnabled, setConstraintPickModeEnabled] = useState(false);
   const constraintPickSlotRef = useRef<Record<string, 'first' | 'second'>>({});
+  // State mirror of constraintPickSlotRef so the active endpoint (Atom 1 / Atom 2) can
+  // render reactively. The ref stays the source of truth for imperative pick logic
+  // (avoids stale closures); updateConstraintPickSlot keeps both in sync.
+  const [constraintPickSlot, setConstraintPickSlotState] = useState<Record<string, 'first' | 'second'>>({});
+  const updateConstraintPickSlot = useCallback(
+    (updater: (prev: Record<string, 'first' | 'second'>) => Record<string, 'first' | 'second'>) => {
+      constraintPickSlotRef.current = updater(constraintPickSlotRef.current);
+      setConstraintPickSlotState(constraintPickSlotRef.current);
+    },
+    []
+  );
   const constraintSelectionAnchorRef = useRef<string | null>(null);
   const statusRefreshInFlightRef = useRef<Set<string>>(new Set());
   const submitInFlightRef = useRef(false);
@@ -124,9 +134,9 @@ export function useProjectDetailLocalState() {
     setSelectedContactConstraintIds,
     selectedConstraintTemplateComponentId,
     setSelectedConstraintTemplateComponentId,
-    constraintPickModeEnabled,
-    setConstraintPickModeEnabled,
     constraintPickSlotRef,
+    constraintPickSlot,
+    updateConstraintPickSlot,
     constraintSelectionAnchorRef,
     statusRefreshInFlightRef,
     submitInFlightRef,

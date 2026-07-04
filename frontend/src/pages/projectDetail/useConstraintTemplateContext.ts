@@ -27,12 +27,33 @@ type ConstraintTemplateOption = {
   content: string;
 };
 
+// The chain+residue the active endpoint slot (Atom 1/Atom 2) points at — bond → atom1/atom2,
+// contact → token1/token2, pocket → binder. This is exactly the selected tab's endpoint, with
+// no substitution; callers decide whether that endpoint is highlightable in a given view.
+function activeSlotEndpoint(
+  constraint: PredictionConstraint,
+  slot: 'first' | 'second'
+): { chainId: string; residue: number } | null {
+  if (constraint.type === 'bond') {
+    return slot === 'second'
+      ? { chainId: constraint.atom2_chain, residue: constraint.atom2_residue }
+      : { chainId: constraint.atom1_chain, residue: constraint.atom1_residue };
+  }
+  if (constraint.type === 'contact') {
+    return slot === 'second'
+      ? { chainId: constraint.token2_chain, residue: constraint.token2_residue }
+      : { chainId: constraint.token1_chain, residue: constraint.token1_residue };
+  }
+  return { chainId: constraint.binder, residue: 1 };
+}
+
 interface UseConstraintTemplateContextInput {
   draft: ConstraintDraftLike | null;
   proteinTemplates: Record<string, ProteinTemplateUpload>;
   selectedConstraintTemplateComponentId: string | null;
   setSelectedConstraintTemplateComponentId: Dispatch<SetStateAction<string | null>>;
   activeConstraintId: string | null;
+  activeConstraintPickSlot: 'first' | 'second';
   selectedContactConstraintIds: string[];
   chainInfoById: Map<string, ChainInfoLite>;
   activeChainInfos: ChainInfoLite[];
@@ -56,6 +77,7 @@ export function useConstraintTemplateContext({
   selectedConstraintTemplateComponentId,
   setSelectedConstraintTemplateComponentId,
   activeConstraintId,
+  activeConstraintPickSlot,
   selectedContactConstraintIds,
   chainInfoById,
   activeChainInfos
@@ -183,6 +205,27 @@ export function useConstraintTemplateContext({
     setSelectedConstraintTemplateComponentId
   ]);
 
+  // The protein residue of the active endpoint slot, or null when the slot points at a
+  // non-protein chain (ligand). Ligands are absent from the protein-template 3D structure, so
+  // there is honestly nothing to highlight for them — no fallback to a different residue. The
+  // 3D simply has no active residue while a ligand endpoint is selected; the right-side 2D
+  // shows the ligand itself. This is the single source that drives the 'active' emphasis.
+  const activeSlotHighlight = useMemo<MolstarResidueHighlight | null>(() => {
+    if (!draft || !activeConstraintId) return null;
+    const activeConstraint = draft.inputConfig.constraints.find((item) => item.id === activeConstraintId);
+    if (!activeConstraint) return null;
+    const slot = activeSlotEndpoint(activeConstraint, activeConstraintPickSlot);
+    if (!slot) return null;
+    const chainId = String(slot.chainId || '').trim();
+    const chain = chainInfoById.get(chainId);
+    if (!chain || chain.type !== 'protein') return null;
+    const residue = Math.max(1, Math.floor(Number(slot.residue) || 0));
+    if (!Number.isFinite(residue) || residue <= 0) return null;
+    return { chainId, residue, emphasis: 'active' };
+  }, [draft, activeConstraintId, activeConstraintPickSlot, chainInfoById]);
+
+  const activeSlotKey = activeSlotHighlight ? `${activeSlotHighlight.chainId}:${activeSlotHighlight.residue}` : '';
+
   const constraintHighlightResidues = useMemo<MolstarResidueHighlight[]>(() => {
     if (!draft) return [];
     const byKey = new Map<string, MolstarResidueHighlight>();
@@ -194,7 +237,7 @@ export function useConstraintTemplateContext({
 
     for (const constraint of draft.inputConfig.constraints) {
       if (!highlightConstraintIds.has(constraint.id)) continue;
-      const isActive = constraint.id === activeConstraintId;
+      const isActiveConstraint = constraint.id === activeConstraintId;
       for (const residueRef of listConstraintResidues(constraint)) {
         const chainId = String(residueRef.chainId || '').trim();
         const residue = Math.max(1, Math.floor(Number(residueRef.residue) || 0));
@@ -202,35 +245,23 @@ export function useConstraintTemplateContext({
         const chainInfo = chainInfoById.get(chainId);
         if (chainInfo && chainInfo.type !== 'protein') continue;
         const key = `${chainId}:${residue}`;
+        // Only the active slot's residue is 'active'; every other constraint residue is a
+        // plain (default) highlight, so the 3D can show the whole constraint without faking
+        // which endpoint is selected.
+        const emphasis = isActiveConstraint && key === activeSlotKey ? 'active' : 'default';
         const existing = byKey.get(key);
         if (!existing) {
-          byKey.set(key, { chainId, residue, emphasis: isActive ? 'active' : 'default' });
+          byKey.set(key, { chainId, residue, emphasis });
           continue;
         }
-        if (isActive && existing.emphasis !== 'active') {
+        if (emphasis === 'active' && existing.emphasis !== 'active') {
           byKey.set(key, { ...existing, emphasis: 'active' });
         }
       }
     }
 
     return Array.from(byKey.values());
-  }, [draft, activeConstraintId, chainInfoById, selectedContactConstraintIds]);
-
-  const activeConstraintResidue = useMemo<MolstarResidueHighlight | null>(() => {
-    if (!draft || !activeConstraintId) return null;
-    const validChains = new Set(activeChainInfos.map((item) => item.id));
-    const activeConstraint = draft.inputConfig.constraints.find((item) => item.id === activeConstraintId);
-    if (!activeConstraint) return null;
-    const first = listConstraintResidues(activeConstraint).find(
-      (item) => validChains.has(item.chainId) && Number.isFinite(Number(item.residue)) && Number(item.residue) > 0
-    );
-    if (!first) return null;
-    return {
-      chainId: first.chainId,
-      residue: Math.max(1, Math.floor(Number(first.residue))),
-      emphasis: 'active'
-    };
-  }, [draft, activeConstraintId, activeChainInfos]);
+  }, [draft, activeConstraintId, chainInfoById, selectedContactConstraintIds, activeSlotKey]);
 
   const constraintViewerHighlightResidues = useMemo<MolstarResidueHighlight[]>(() => {
     if (!selectedTemplatePreview) return constraintHighlightResidues;
@@ -285,9 +316,9 @@ export function useConstraintTemplateContext({
   ]);
 
   const constraintViewerActiveResidue = useMemo<MolstarResidueHighlight | null>(() => {
-    if (!selectedTemplatePreview) return activeConstraintResidue;
+    if (!selectedTemplatePreview) return activeSlotHighlight;
     return constraintViewerHighlightResidues.find((item) => item.emphasis === 'active') || null;
-  }, [selectedTemplatePreview, activeConstraintResidue, constraintViewerHighlightResidues]);
+  }, [selectedTemplatePreview, activeSlotHighlight, constraintViewerHighlightResidues]);
 
   const constraintSelectedAtomRefs = useMemo<Array<{ chainId: string; residue: number; atomName: string }>>(() => {
     if (!draft) return [];

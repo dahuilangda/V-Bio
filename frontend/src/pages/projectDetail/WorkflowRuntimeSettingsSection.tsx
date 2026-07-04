@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState, type ChangeEvent, type FocusEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FocusEvent } from 'react';
 import { MemoLigand2DPreview } from '../../components/project/Ligand2DPreview';
 import { JSMEEditor } from '../../components/project/JSMEEditor';
 import { buildCustomResidueCatalog, BUILT_IN_PROTEIN_MODIFICATIONS, NATURAL_AMINO_ACID_RESIDUES, type ResidueCatalogEntry } from '../../components/project/residueCatalog';
 import { AMINO_ACID_BACKBONE_SMARTS, rdkitMolHasAminoAcidBackbone } from '../../utils/inputValidation';
 import { loadRDKitModule } from '../../utils/rdkit';
-import type { CustomCcdMoleculeInput, PeptideResiduePoolSelection } from '../../types/models';
+import type { CustomCcdMoleculeInput, CustomResidueBackbone, PeptideResiduePoolSelection } from '../../types/models';
 import { normalizePredictionBackend } from './projectDraftUtils';
+import { detectCustomResidueBackbone } from '../../utils/constraintAtomOptions';
+import { useAuth } from '../../hooks/useAuth';
 
 type CysSlot = 'cys1' | 'cys2' | 'cys3';
 type BicyclicLinkerType = 'SEZ' | '29N' | 'BS3';
@@ -39,6 +41,45 @@ function placementLabel(rule: ResiduePlacementRule): string {
 function normalizeCustomResidueCode(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]/g, '').toUpperCase().slice(0, 12);
 }
+
+// System-generated CCD code for a NEW custom residue: deterministic per (user, SMILES) so the
+// same residue has one stable identity under its owner and never collides across users in a
+// shared project. Users cannot author it. Runtime user CCDs override built-ins, so the code
+// only needs to be unique + stable, not avoid the real-CCD namespace. Existing residues keep
+// their original codes — no migration.
+function generateCustomResidueCode(userId: string | null | undefined, smiles: string): string {
+  const input = `${String(userId || 'anon').trim()}${String(smiles || '').trim()}`;
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const fnv1a = (seed: number) => {
+    let hash = seed >>> 0;
+    for (let index = 0; index < input.length; index += 1) {
+      hash ^= input.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return hash >>> 0;
+  };
+  const left = fnv1a(0x811c9dc5);
+  const right = fnv1a(0x9e3779b9);
+  let code = 'U';
+  let a = left;
+  let b = right;
+  for (let index = 0; index < 3; index += 1) {
+    code += alphabet[a % 36];
+    a = Math.floor(a / 36);
+    code += alphabet[b % 36];
+    b = Math.floor(b / 36);
+  }
+  return code; // U + 6 alphanumeric chars
+}
+
+const CUSTOM_BACKBONE_SLOTS = ['n', 'ca', 'c', 'o', 'oxt'] as const;
+const CUSTOM_BACKBONE_SLOT_LABELS: Record<(typeof CUSTOM_BACKBONE_SLOTS)[number], string> = {
+  n: 'N',
+  ca: 'CA',
+  c: 'C',
+  o: 'O',
+  oxt: 'OXT'
+};
 
 function clampCommittedNumber(value: number, minValue: number, maxValue: number, fallback: number, step?: number): number {
   const parsed = Number.isFinite(value) ? value : fallback;
@@ -199,14 +240,21 @@ export function WorkflowRuntimeSettingsSection({
   onPeptideBicyclicCys2PosChange,
   onPeptideBicyclicCys3PosChange
 }: WorkflowRuntimeSettingsSectionProps) {
+  const { session } = useAuth();
+  const currentUserId = session?.userId ?? null;
   const [activeCysSlot, setActiveCysSlot] = useState<CysSlot>('cys1');
   const [customEditorOpen, setCustomEditorOpen] = useState(false);
   const [customEditingCcd, setCustomEditingCcd] = useState('');
-  const [customDraftCcd, setCustomDraftCcd] = useState('');
   const [customDraftName, setCustomDraftName] = useState('Custom residue');
   const [customDraftBaseResidue, setCustomDraftBaseResidue] = useState('A');
   const [customDraftSmiles, setCustomDraftSmiles] = useState(CUSTOM_RESIDUE_SCAFFOLD_SMILES);
   const [customDraftValid, setCustomDraftValid] = useState(false);
+  // Manual backbone atom slots (0-based heavy-atom indices). Auto-prefilled from RDKit when the
+  // SMILES validates; the user corrects by clicking atoms in the 2D. Saved as the authoritative
+  // `backbone` override on the residue (single source of truth end-to-end).
+  const [customDraftBackbone, setCustomDraftBackbone] = useState<Partial<CustomResidueBackbone>>({});
+  const [armedBackboneSlot, setArmedBackboneSlot] = useState<(typeof CUSTOM_BACKBONE_SLOTS)[number] | null>(null);
+  const skipBackboneAutoDetectRef = useRef(false);
   const showFullFields = displayMode === 'full';
   const normalizedBackend = isAffinityWorkflow ? 'boltz' : normalizePredictionBackend(backend);
   const canEditRuntimeIdentity = canEdit || isPredictionWorkflow || isPeptideDesignWorkflow || isAffinityWorkflow;
@@ -273,14 +321,29 @@ export function WorkflowRuntimeSettingsSection({
       const smiles = customDraftSmiles.trim();
       if (!smiles) {
         setCustomDraftValid(false);
+        setCustomDraftBackbone({});
         return;
       }
       try {
         const rdkit = await loadRDKitModule();
         if (cancelled) return;
-        setCustomDraftValid(rdkitMolHasAminoAcidBackbone(rdkit, smiles, true));
+        const valid = rdkitMolHasAminoAcidBackbone(rdkit, smiles, true);
+        setCustomDraftValid(valid);
+        // When opening a residue that already has a stored backbone, keep it (skip one
+        // auto-detect cycle triggered by setting its SMILES). Otherwise pre-fill the slots
+        // from RDKit so a correct detection needs no manual work.
+        if (skipBackboneAutoDetectRef.current) {
+          skipBackboneAutoDetectRef.current = false;
+        } else if (valid) {
+          setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, smiles) ?? {});
+        } else {
+          setCustomDraftBackbone({});
+        }
       } catch {
-        if (!cancelled) setCustomDraftValid(false);
+        if (!cancelled) {
+          setCustomDraftValid(false);
+          setCustomDraftBackbone({});
+        }
       }
     };
     void validate();
@@ -292,19 +355,127 @@ export function WorkflowRuntimeSettingsSection({
   const openCustomResidueEditor = (entry?: CustomCcdMoleculeInput) => {
     const ccd = normalizeCustomResidueCode(entry?.ccd || '');
     setCustomEditingCcd(ccd);
-    setCustomDraftCcd(ccd || `UAA${Math.max(1, peptideCustomResidueLibrary.length + 1)}`.slice(0, 12));
     setCustomDraftName(entry?.label || 'Custom residue');
     setCustomDraftBaseResidue(String(entry?.baseResidue || 'A').trim().toUpperCase().slice(0, 1) || 'A');
     setCustomDraftSmiles(entry?.smiles || CUSTOM_RESIDUE_SCAFFOLD_SMILES);
+    const storedBackbone = entry?.backbone ?? null;
+    if (storedBackbone) {
+      setCustomDraftBackbone(storedBackbone);
+      skipBackboneAutoDetectRef.current = true;
+    } else {
+      setCustomDraftBackbone({});
+    }
+    setArmedBackboneSlot(null);
     setCustomEditorOpen(true);
   };
 
   const closeCustomResidueEditor = () => {
     setCustomEditorOpen(false);
     setCustomEditingCcd('');
+    setCustomDraftBackbone({});
+    setArmedBackboneSlot(null);
   };
 
-  const customResidues = useMemo(() => buildCustomResidueCatalog(peptideCustomResidueLibrary), [peptideCustomResidueLibrary]);
+  // Arm a slot, then click an atom in the 2D to assign it. Clicking the atom already in the
+  // armed slot clears it; an atom already used by another slot is moved. After assigning, the
+  // next unfilled slot is armed automatically (or null once all five are set).
+  const handleBackboneAtomClick = (atomIndex: number) => {
+    if (!armedBackboneSlot) return;
+    const next: Partial<CustomResidueBackbone> = { ...customDraftBackbone };
+    if (next[armedBackboneSlot] === atomIndex) {
+      delete next[armedBackboneSlot];
+    } else {
+      for (const slot of CUSTOM_BACKBONE_SLOTS) {
+        if (next[slot] === atomIndex) delete next[slot];
+      }
+      next[armedBackboneSlot] = atomIndex;
+    }
+    setCustomDraftBackbone(next);
+    const nextUnset = CUSTOM_BACKBONE_SLOTS.find((slot) => next[slot] === undefined);
+    setArmedBackboneSlot(nextUnset ?? null);
+  };
+
+  const resetBackboneToAuto = async () => {
+    const rdkit = await loadRDKitModule();
+    setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, customDraftSmiles.trim()) ?? {});
+    setArmedBackboneSlot(null);
+  };
+
+  // Derived display values for the 2D: highlight the assigned backbone atoms and label them
+  // with their slot letter so the user sees exactly which atom is N/CA/C/O/OXT.
+  const assignedBackboneIndices = CUSTOM_BACKBONE_SLOTS
+    .map((slot) => customDraftBackbone[slot])
+    .filter((idx): idx is number => idx !== undefined);
+  const backboneAtomLabels: string[] | null = assignedBackboneIndices.length
+    ? (() => {
+        const maxIdx = Math.max(...assignedBackboneIndices);
+        const labels: string[] = new Array(maxIdx + 1).fill('');
+        for (const slot of CUSTOM_BACKBONE_SLOTS) {
+          const idx = customDraftBackbone[slot];
+          if (idx !== undefined) labels[idx] = CUSTOM_BACKBONE_SLOT_LABELS[slot];
+        }
+        return labels;
+      })()
+    : null;
+
+  const customResidues = useMemo<ResidueCatalogEntry[]>(() => {
+    const poolSources = (peptideResiduePool || [])
+      .filter((item) => item.kind === 'custom' && String(item.smiles || '').trim())
+      .map((item) => ({
+        ccd: item.code,
+        smiles: String(item.smiles),
+        baseResidue: item.baseResidue,
+        label: item.label,
+        backbone: item.backbone
+      }));
+    return buildCustomResidueCatalog([...poolSources, ...peptideCustomResidueLibrary]);
+  }, [peptideResiduePool, peptideCustomResidueLibrary]);
+
+  // A custom pool entry carries its own CCD SMILES (read straight off the catalog entry,
+  // which is the single merged source) so the definition persists with the selection in
+  // the config and reaches the backends as a CCD.
+  const poolEntryFromCatalog = (
+    entry: ResidueCatalogEntry,
+    kind: PeptideResiduePoolSelection['kind']
+  ): PeptideResiduePoolSelection => {
+    if (kind === 'custom' && entry.smiles) {
+      return {
+        code: entry.ccd,
+        kind: 'custom',
+        smiles: entry.smiles,
+        baseResidue: entry.baseResidue,
+        label: entry.label,
+        backbone: entry.backbone
+      };
+    }
+    return { code: entry.ccd, kind };
+  };
+
+  // Persist the drawn SMILES onto the selection itself: if a custom pool entry lacks a
+  // SMILES but the residue library (where it was drawn) has one, write it into the pool
+  // entry once. After this the pool entry is self-contained and survives reload; the
+  // submit path reads only the pool entry (no runtime fallback).
+  const onPeptideResiduePoolChangeRef = useRef(onPeptideResiduePoolChange);
+  onPeptideResiduePoolChangeRef.current = onPeptideResiduePoolChange;
+  useEffect(() => {
+    if (!isPeptideDesignWorkflow) return;
+    const libraryByCode = new Map<string, CustomCcdMoleculeInput>();
+    for (const item of peptideCustomResidueLibrary) {
+      const code = normalizeCustomResidueCode(item.ccd);
+      if (code && String(item.smiles || '').trim()) libraryByCode.set(code, item);
+    }
+    if (libraryByCode.size === 0) return;
+    let changed = false;
+    const nextPool = peptideResiduePool.map((entry) => {
+      if (entry.kind !== 'custom' || String(entry.smiles || '').trim()) return entry;
+      const lib = libraryByCode.get(normalizeCustomResidueCode(entry.code));
+      if (!lib) return entry;
+      changed = true;
+      return { ...entry, smiles: lib.smiles, baseResidue: lib.baseResidue, label: lib.label, backbone: lib.backbone };
+    });
+    if (changed) onPeptideResiduePoolChangeRef.current(nextPool);
+  }, [isPeptideDesignWorkflow, peptideResiduePool, peptideCustomResidueLibrary]);
+
   const residueCatalogSections = useMemo(
     () => [
       { key: 'natural', title: 'Natural amino acids', kind: 'natural' as const, entries: NATURAL_AMINO_ACID_RESIDUES },
@@ -405,10 +576,7 @@ export function WorkflowRuntimeSettingsSection({
       return;
     }
     const ordered = residueCatalog
-      .map((item) => {
-        const itemKind = normalizePoolEntryKind(item);
-        return { code: item.ccd, kind: itemKind };
-      })
+      .map((item) => poolEntryFromCatalog(item, normalizePoolEntryKind(item)))
       .filter((item) => next.has(`${item.kind}:${item.code}`));
     onPeptideResiduePoolChange(ordered);
   };
@@ -426,7 +594,7 @@ export function WorkflowRuntimeSettingsSection({
     });
     const ordered = residueCatalogSections
       .flatMap((section) =>
-        section.entries.map((entry) => ({ code: entry.ccd, kind: section.kind }))
+        section.entries.map((entry) => poolEntryFromCatalog(entry, section.kind))
       )
       .filter((item) => next.has(`${item.kind}:${item.code}`));
     onPeptideResiduePoolChange(ordered);
@@ -435,15 +603,22 @@ export function WorkflowRuntimeSettingsSection({
 
   const saveCustomResidueDraft = () => {
     if (residuePoolControlsDisabled || !customDraftValid) return;
-    const ccd = normalizeCustomResidueCode(customDraftCcd);
     const smiles = customDraftSmiles.trim();
-    if (!ccd || !smiles) return;
-    const nextEntry: CustomCcdMoleculeInput = {
-      ccd,
-      smiles,
-      baseResidue: customDraftBaseResidue.trim().toUpperCase().slice(0, 1) || undefined,
-      label: customDraftName.trim() || 'Custom residue'
-    };
+    if (!smiles) return;
+    // Existing residues keep their frozen code; new residues get a system-generated code
+    // (deterministic per user + SMILES). Users never author the CCD code.
+    const ccd = customEditingCcd || normalizeCustomResidueCode(generateCustomResidueCode(currentUserId, smiles));
+    if (!ccd) return;
+    const baseResidue = customDraftBaseResidue.trim().toUpperCase().slice(0, 1) || undefined;
+    const label = customDraftName.trim() || 'Custom residue';
+    // The backbone override is authoritative only when all 5 slots are set; otherwise it is
+    // omitted and the backend auto-detects (no partial/ambiguous override).
+    const backbone: CustomResidueBackbone | undefined = CUSTOM_BACKBONE_SLOTS.every(
+      (slot) => customDraftBackbone[slot] !== undefined
+    )
+      ? (customDraftBackbone as CustomResidueBackbone)
+      : undefined;
+    const nextEntry: CustomCcdMoleculeInput = { ccd, smiles, baseResidue, label, backbone };
     const nextLibrary = [
       nextEntry,
       ...peptideCustomResidueLibrary.filter((item) => {
@@ -454,11 +629,19 @@ export function WorkflowRuntimeSettingsSection({
     onCustomResidueLibraryChange(nextLibrary);
     const selectedKeys = new Set(selectedResidueKeySet);
     selectedKeys.add(`custom:${ccd}`);
+    // The freshly drawn residue is the source of truth for its own SMILES; every other
+    // custom residue keeps the SMILES already on its catalog entry.
+    const freshEntry: PeptideResiduePoolSelection = { code: ccd, kind: 'custom', smiles, baseResidue, label, backbone };
     const ordered = residueCatalogSections
-      .flatMap((section) => section.entries.map((entry) => ({ code: entry.ccd, kind: section.kind })))
+      .flatMap((section) =>
+        section.entries.map((entry) => {
+          if (section.kind !== 'custom') return { code: entry.ccd, kind: section.kind };
+          return normalizeCustomResidueCode(entry.ccd) === ccd ? freshEntry : poolEntryFromCatalog(entry, 'custom');
+        })
+      )
       .filter((item) => selectedKeys.has(`${item.kind}:${item.code}`));
-    if (!ordered.some((item) => item.kind === 'custom' && item.code === ccd)) {
-      ordered.push({ code: ccd, kind: 'custom' });
+    if (!ordered.some((item) => item.kind === 'custom' && normalizeCustomResidueCode(item.code) === ccd)) {
+      ordered.push(freshEntry);
     }
     onPeptideResiduePoolChange(ordered);
     closeCustomResidueEditor();
@@ -773,10 +956,9 @@ export function WorkflowRuntimeSettingsSection({
                       <label className="field">
                         <span>CCD</span>
                         <input
-                          value={customDraftCcd}
-                          disabled={residuePoolControlsDisabled}
-                          onChange={(event) => setCustomDraftCcd(normalizeCustomResidueCode(event.target.value))}
-                          placeholder="UAA1"
+                          value={customEditingCcd || generateCustomResidueCode(currentUserId, customDraftSmiles.trim())}
+                          readOnly
+                          title="Auto-generated per user + residue (not editable). User CCDs override built-ins, so this only needs to be unique."
                         />
                       </label>
                       <label className="field">
@@ -812,8 +994,42 @@ export function WorkflowRuntimeSettingsSection({
                           smiles={customDraftSmiles}
                           width={240}
                           height={160}
-                          highlightQuery={AMINO_ACID_BACKBONE_SMARTS}
+                          highlightAtomIndices={assignedBackboneIndices.length ? assignedBackboneIndices : undefined}
+                          atomLabels={backboneAtomLabels}
+                          onAtomClick={armedBackboneSlot && customDraftValid ? handleBackboneAtomClick : undefined}
                         />
+                        <div className="peptide-custom-backbone-slots" role="group" aria-label="Backbone atom slots">
+                          {CUSTOM_BACKBONE_SLOTS.map((slot) => {
+                            const idx = customDraftBackbone[slot];
+                            const armed = armedBackboneSlot === slot;
+                            return (
+                              <button
+                                key={slot}
+                                type="button"
+                                className={`peptide-custom-backbone-slot${armed ? ' armed' : ''}${idx === undefined ? ' empty' : ''}`}
+                                disabled={!customDraftValid}
+                                onClick={() => setArmedBackboneSlot((prev) => (prev === slot ? null : slot))}
+                                title={
+                                  armed
+                                    ? `Click an atom in the 2D to assign ${CUSTOM_BACKBONE_SLOT_LABELS[slot]}`
+                                    : `Set ${CUSTOM_BACKBONE_SLOT_LABELS[slot]}${idx === undefined ? '' : ` (atom #${idx + 1})`}`
+                                }
+                              >
+                                <span className="peptide-custom-backbone-slot-label">{CUSTOM_BACKBONE_SLOT_LABELS[slot]}</span>
+                                <span className="peptide-custom-backbone-slot-value">{idx === undefined ? '—' : `#${idx + 1}`}</span>
+                              </button>
+                            );
+                          })}
+                          <button
+                            type="button"
+                            className="peptide-custom-backbone-reset"
+                            disabled={!customDraftValid}
+                            onClick={() => void resetBackboneToAuto()}
+                            title="Re-run auto backbone detection"
+                          >
+                            Auto
+                          </button>
+                        </div>
                         <span className={customDraftValid ? 'peptide-custom-valid' : 'peptide-custom-invalid'}>
                           {customDraftValid ? 'Amino-acid backbone detected.' : 'Backbone N-CA-C(=O) is required.'}
                         </span>
@@ -831,7 +1047,7 @@ export function WorkflowRuntimeSettingsSection({
                       <button
                         type="button"
                         className="btn btn-primary btn-compact"
-                        disabled={residuePoolControlsDisabled || !normalizeCustomResidueCode(customDraftCcd) || !customDraftSmiles.trim() || !customDraftValid}
+                        disabled={residuePoolControlsDisabled || !customDraftSmiles.trim() || !customDraftValid}
                         onClick={saveCustomResidueDraft}
                       >
                         Save residue

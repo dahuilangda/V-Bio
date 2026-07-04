@@ -25,12 +25,12 @@ export function useConstraintWorkspaceActions<TDraft extends DraftLike>(params: 
   setSidebarConstraintsOpen: Dispatch<SetStateAction<boolean>>;
   scrollToEditorBlock: (elementId: string) => void;
   constraintPickSlotRef: MutableRefObject<Record<string, 'first' | 'second'>>;
+  updateConstraintPickSlot: (updater: (prev: Record<string, 'first' | 'second'>) => Record<string, 'first' | 'second'>) => void;
   activeChainInfos: Array<{ id: string; type: 'protein' | 'ligand' | 'dna' | 'rna'; componentId: string; residueCount?: number }>;
   selectedTemplatePreview: { componentId: string; chainId?: string | null } | null;
   selectedTemplateResidueIndexMap: Record<string, Record<number, number>>;
   setPickedResidue: Dispatch<SetStateAction<any>>;
   canEdit: boolean;
-  constraintPickModeEnabled: boolean;
   ligandChainOptions: Array<{ id: string }>;
   isBondOnlyBackend: boolean;
 }) {
@@ -49,12 +49,12 @@ export function useConstraintWorkspaceActions<TDraft extends DraftLike>(params: 
     setSidebarConstraintsOpen,
     scrollToEditorBlock,
     constraintPickSlotRef,
+    updateConstraintPickSlot,
     activeChainInfos,
     selectedTemplatePreview,
     selectedTemplateResidueIndexMap,
     setPickedResidue,
     canEdit,
-    constraintPickModeEnabled,
     ligandChainOptions,
     isBondOnlyBackend,
   } = params;
@@ -93,6 +93,10 @@ export function useConstraintWorkspaceActions<TDraft extends DraftLike>(params: 
     setActiveConstraintId(nextSelection.activeConstraintId);
     setSelectedContactConstraintIds(nextSelection.selectedContactConstraintIds);
     constraintSelectionAnchorRef.current = nextSelection.anchorConstraintId;
+    // The 2D panel's display source is derived from the active constraint's data + active
+    // slot (activeEndpointTarget in PredictionConstraintsWorkspace), so selecting a
+    // constraint needs no pickedResidue sync here. pickedResidue is updated only by the
+    // pick flow (constraintPickInteraction) as a viewer-click highlight signal.
   };
 
   const jumpToConstraint = (constraintId: string, options?: { toggle?: boolean; range?: boolean }) => {
@@ -113,7 +117,7 @@ export function useConstraintWorkspaceActions<TDraft extends DraftLike>(params: 
 
   const focusConstraintPickSlot = (constraintId: string, slot: 'first' | 'second') => {
     if (!constraintId) return;
-    constraintPickSlotRef.current[constraintId] = slot;
+    updateConstraintPickSlot((prev) => ({ ...prev, [constraintId]: slot }));
   };
 
   const applyPickToSelectedConstraint = (pick: MolstarResiduePick) => {
@@ -123,11 +127,12 @@ export function useConstraintWorkspaceActions<TDraft extends DraftLike>(params: 
       selectedTemplatePreview,
       selectedTemplateResidueIndexMap,
       setPickedResidue,
-      canEdit: canEdit && constraintPickModeEnabled,
+      canEdit,
       draft,
       ligandChainOptions,
       isBondOnlyBackend,
       constraintPickSlotRef,
+      updateConstraintPickSlot,
       constraintSelectionAnchorRef,
       setSelectedContactConstraintIds,
       setActiveConstraintId,

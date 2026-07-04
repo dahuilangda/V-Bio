@@ -41,6 +41,7 @@ import {
   sortProjectTasks
 } from './projectDraftUtils';
 import { inferTaskStateFromStatusPayload, readStatusText } from './projectMetrics';
+import { buildTaskRuntimeFailureMessage } from '../../utils/taskRuntime';
 import { materializeLeadOptCompletedTask } from './projectTaskRuntime';
 
 function normalizeAffinityMode(value: unknown): AffinityScoringMode {
@@ -688,9 +689,10 @@ function overlayRowsWithRuntimeStatus<
 
     const inferredState = inferTaskStateFromStatusPayload(runtimeStatus, row.task_state);
     const runtimeStatusText = String(readStatusText(runtimeStatus) || '').trim();
-    const nextStatusText = runtimeStatusText || String(row.status_text || '');
-    const nextErrorText =
-      inferredState === 'FAILURE' ? runtimeStatusText || String(row.error_text || '') : '';
+    const runtimeFailureText =
+      inferredState === 'FAILURE' ? buildTaskRuntimeFailureMessage(runtimeStatus, runtimeStatusText || 'Task failed.').trim() : '';
+    const nextStatusText = inferredState === 'FAILURE' ? runtimeFailureText || runtimeStatusText || String(row.status_text || '') : runtimeStatusText || String(row.status_text || '');
+    const nextErrorText = inferredState === 'FAILURE' ? runtimeFailureText || runtimeStatusText || String(row.error_text || '') : '';
 
     if (
       String(row.task_state || '').toUpperCase() === inferredState &&
@@ -788,8 +790,8 @@ export function useProjectDetailRuntimeContext() {
     setSelectedContactConstraintIds,
     selectedConstraintTemplateComponentId,
     setSelectedConstraintTemplateComponentId,
-    constraintPickModeEnabled,
-    constraintPickSlotRef,
+    updateConstraintPickSlot,
+    constraintPickSlot,
     constraintSelectionAnchorRef,
     statusRefreshInFlightRef,
     submitInFlightRef,
@@ -1161,6 +1163,8 @@ export function useProjectDetailRuntimeContext() {
                   (runtimeRowState === 'QUEUED' || runtimeRowState === 'RUNNING');
                 if (shouldPersistRuntimeTerminal) {
                   const runtimeStatusText = String(readStatusText(status) || '').trim();
+                  const runtimeFailureText =
+                    inferred === 'FAILURE' ? buildTaskRuntimeFailureMessage(status, runtimeStatusText || 'Task failed.').trim() : '';
                   if (workflowKey === 'lead_optimization' && inferred === 'SUCCESS' && runtimeRow) {
                     try {
                       const materializedRow = await materializeLeadOptCompletedTask({
@@ -1199,11 +1203,12 @@ export function useProjectDetailRuntimeContext() {
                       {
                         task_state: inferred,
                         status_text:
-                          runtimeStatusText ||
-                          (inferred === 'SUCCESS' ? 'Task completed.' : 'Task unavailable or expired.'),
+                          inferred === 'FAILURE'
+                            ? runtimeFailureText || runtimeStatusText || 'Task failed.'
+                            : runtimeStatusText || (inferred === 'SUCCESS' ? 'Task completed.' : 'Task unavailable or expired.'),
                         error_text:
                           inferred === 'FAILURE'
-                            ? runtimeStatusText || 'Task unavailable or expired.'
+                            ? runtimeFailureText || runtimeStatusText || 'Task failed.'
                             : ''
                       },
                       { minimalReturn: true }
@@ -1390,9 +1395,11 @@ export function useProjectDetailRuntimeContext() {
       if (peptideTaskSwitchRef.current === marker) return;
       peptideTaskSwitchRef.current = marker;
 
-      const taskCustomDefinitions = Array.isArray(taskOptions.peptideCustomResidueDefinitions)
-        ? taskOptions.peptideCustomResidueDefinitions.map(normalizeCustomResidueDefinition).filter(Boolean)
-        : [];
+      const taskPoolEntries = Array.isArray(taskOptions.peptideResiduePool) ? taskOptions.peptideResiduePool : [];
+      const taskCustomDefinitions = taskPoolEntries
+        .filter((item) => item && item.kind === 'custom')
+        .map((item) => normalizeCustomResidueDefinition(item))
+        .filter(Boolean);
       if (taskCustomDefinitions.length > 0) {
         setCustomResidueLibrary((prev) => {
           const byCode = new Map<string, typeof taskCustomDefinitions[number]>();
@@ -1913,6 +1920,7 @@ export function useProjectDetailRuntimeContext() {
     selectedConstraintTemplateComponentId,
     setSelectedConstraintTemplateComponentId,
     activeConstraintId,
+    activeConstraintPickSlot: constraintPickSlot[activeConstraintId ?? ''] ?? 'first',
     selectedContactConstraintIds,
     chainInfoById,
     activeChainInfos
@@ -1928,8 +1936,7 @@ export function useProjectDetailRuntimeContext() {
     selectedContactConstraintIds,
     setSelectedContactConstraintIds,
     constraintSelectionAnchorRef,
-    constraintPickModeEnabled,
-    constraintPickSlotRef,
+    updateConstraintPickSlot,
     activeComponentId,
     setActiveComponentId,
     workflowKey,

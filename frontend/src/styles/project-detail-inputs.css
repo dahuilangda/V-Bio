@@ -1064,6 +1064,74 @@
   font-size: 12px;
 }
 
+.peptide-custom-backbone-slots {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.peptide-custom-backbone-slot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid #cfdfce;
+  border-radius: 999px;
+  background: #f6fbf8;
+  color: #2f4438;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.peptide-custom-backbone-slot:hover:not(:disabled) {
+  border-color: #8fb3a0;
+}
+
+.peptide-custom-backbone-slot.empty {
+  border-style: dashed;
+  color: #7a8f80;
+}
+
+.peptide-custom-backbone-slot.armed {
+  border-color: #2f6f4f;
+  background: #e4f3ea;
+  box-shadow: 0 0 0 2px rgba(47, 111, 79, 0.18);
+}
+
+.peptide-custom-backbone-slot:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.peptide-custom-backbone-slot-label {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.peptide-custom-backbone-slot-value {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: #5d756a;
+}
+
+.peptide-custom-backbone-reset {
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid #cfdfce;
+  border-radius: 999px;
+  background: transparent;
+  color: #5d756a;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.peptide-custom-backbone-reset:hover:not(:disabled) {
+  border-color: #8fb3a0;
+  color: #2f4438;
+}
+
 .peptide-custom-invalid {
   color: #9b3a27;
   font-size: 12px;

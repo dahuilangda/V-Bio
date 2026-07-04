@@ -23,6 +23,7 @@ export function applyConstraintResiduePickInteraction<TDraft extends DraftWithCo
   ligandChainOptions: Array<{ id: string }>;
   isBondOnlyBackend: boolean;
   constraintPickSlotRef: MutableRefObject<Record<string, 'first' | 'second'>>;
+  updateConstraintPickSlot: (updater: (prev: Record<string, 'first' | 'second'>) => Record<string, 'first' | 'second'>) => void;
   constraintSelectionAnchorRef: MutableRefObject<string | null>;
   setSelectedContactConstraintIds: Dispatch<SetStateAction<string[]>>;
   setActiveConstraintId: Dispatch<SetStateAction<string | null>>;
@@ -41,6 +42,7 @@ export function applyConstraintResiduePickInteraction<TDraft extends DraftWithCo
     ligandChainOptions,
     isBondOnlyBackend,
     constraintPickSlotRef,
+    updateConstraintPickSlot,
     constraintSelectionAnchorRef,
     setSelectedContactConstraintIds,
     setActiveConstraintId,
@@ -88,7 +90,7 @@ export function applyConstraintResiduePickInteraction<TDraft extends DraftWithCo
       isBondOnlyBackend,
     });
     if (created.type === 'contact') {
-      constraintPickSlotRef.current[created.id] = 'second';
+      updateConstraintPickSlot((prev) => ({ ...prev, [created.id]: 'second' }));
       setSelectedContactConstraintIds([created.id]);
       constraintSelectionAnchorRef.current = created.id;
     }
@@ -107,29 +109,27 @@ export function applyConstraintResiduePickInteraction<TDraft extends DraftWithCo
     return;
   }
 
-  setDraft((prev) => {
-    if (!prev) return prev;
-    const constraints = prev.inputConfig.constraints;
-    if (!constraints.length) return prev;
-
-    const pickResult = applyConstraintPickToConstraints({
-      constraints,
-      activeConstraintId,
-      selectedContactConstraintIds,
-      resolvedChainId,
-      normalizedResidue,
-      pickedAtomName: normalizedPick.atomName,
-      pickSlotByConstraintId: constraintPickSlotRef.current,
-    });
-    constraintPickSlotRef.current = pickResult.nextPickSlotByConstraintId;
-    if (!pickResult.changed) return prev;
-
-    return {
-      ...prev,
-      inputConfig: {
-        ...prev.inputConfig,
-        constraints: pickResult.nextConstraints,
-      },
-    };
+  const pickResult = applyConstraintPickToConstraints({
+    constraints: currentConstraints,
+    activeConstraintId,
+    selectedContactConstraintIds,
+    resolvedChainId,
+    normalizedResidue,
+    pickedAtomName: normalizedPick.atomName,
+    pickSlotByConstraintId: constraintPickSlotRef.current,
   });
+  updateConstraintPickSlot(() => pickResult.nextPickSlotByConstraintId);
+  if (!pickResult.changed) return;
+
+  setDraft((prev) =>
+    prev
+      ? {
+          ...prev,
+          inputConfig: {
+            ...prev.inputConfig,
+            constraints: pickResult.nextConstraints,
+          },
+        }
+      : prev
+  );
 }

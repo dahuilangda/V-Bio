@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight, Dna, FlaskConical, Plus, Trash2 } from 'lucide-react';
-import type { CustomCcdMoleculeInput, InputComponent, LigandInputMethod, MoleculeType, ProteinModification, ProteinModificationInputMethod, ProteinModificationTerminal, ProteinTemplateUpload } from '../../types/models';
+import type { CustomCcdMoleculeInput, CustomResidueBackbone, InputComponent, LigandInputMethod, MoleculeType, ProteinModification, ProteinModificationInputMethod, ProteinModificationTerminal, ProteinTemplateUpload } from '../../types/models';
 import { componentTypeLabel, createInputComponent, normalizeComponentSequence, randomId } from '../../utils/projectInputs';
 import { detectStructureFormat, extractProteinChainSequences } from '../../utils/structureParser';
 import { JSMEEditor } from './JSMEEditor';
 import { LigandPropertyGrid } from './LigandPropertyGrid';
 import { loadRDKitModule } from '../../utils/rdkit';
-import { renderLigand2DSvg } from '../../utils/ligand2d';
-import { AMINO_ACID_BACKBONE_SMARTS, rdkitMolHasAminoAcidBackbone } from '../../utils/inputValidation';
+import { Ligand2DPreview } from './Ligand2DPreview';
+import { rdkitMolHasAminoAcidBackbone } from '../../utils/inputValidation';
+import { detectCustomResidueBackbone } from '../../utils/constraintAtomOptions';
 import { BUILT_IN_PROTEIN_MODIFICATIONS } from './residueCatalog';
 
 interface ComponentInputEditorProps {
@@ -29,6 +30,14 @@ const TYPE_OPTIONS: MoleculeType[] = ['protein', 'ligand', 'dna', 'rna'];
 const LIGAND_INPUT_OPTIONS: LigandInputMethod[] = ['smiles', 'ccd', 'jsme'];
 const QUICK_ADD_TYPES: MoleculeType[] = ['protein', 'ligand', 'dna', 'rna'];
 const CUSTOM_RESIDUE_SCAFFOLD_SMILES = 'N[C@@H](C)C(=O)O';
+const CUSTOM_BACKBONE_SLOTS = ['n', 'ca', 'c', 'o', 'oxt'] as const;
+const CUSTOM_BACKBONE_SLOT_LABELS: Record<(typeof CUSTOM_BACKBONE_SLOTS)[number], string> = {
+  n: 'N',
+  ca: 'CA',
+  c: 'C',
+  o: 'O',
+  oxt: 'OXT'
+};
 
 function hashTextForCode(value: string): string {
   let hash = 2166136261;
@@ -179,18 +188,40 @@ function ProteinSequenceModificationPreview({
   );
 }
 
-function CustomResiduePreview({ smiles, onValidityChange }: { smiles: string; onValidityChange: (valid: boolean) => void }) {
-  const [svg, setSvg] = useState('');
-  const [message, setMessage] = useState('Draw a complete amino-acid residue.');
+function CustomResiduePreview({
+  smiles,
+  onValidityChange,
+  backbone,
+  onBackboneChange,
+  disabled
+}: {
+  smiles: string;
+  onValidityChange: (valid: boolean) => void;
+  backbone: CustomResidueBackbone | undefined;
+  onBackboneChange: (next: CustomResidueBackbone | undefined) => void;
+  disabled?: boolean;
+}) {
   const [valid, setValid] = useState(false);
+  const [armedSlot, setArmedSlot] = useState<(typeof CUSTOM_BACKBONE_SLOTS)[number] | null>(null);
+  // Partial editing state lives here (a residue can't store a half-assigned backbone). It is
+  // committed up via onBackboneChange only once all 5 slots are set (or cleared to undefined).
+  const [slots, setSlots] = useState<Partial<CustomResidueBackbone>>(backbone ?? {});
+
+  const allSlotsSet = (value: Partial<CustomResidueBackbone>) =>
+    CUSTOM_BACKBONE_SLOTS.every((slot) => value[slot] !== undefined);
+
+  // Re-seed the draft when a COMPLETE backbone arrives on the prop (e.g. applying a library
+  // residue). Ignore undefined/partial props so in-progress editing isn't wiped.
+  useEffect(() => {
+    if (backbone && allSlotsSet(backbone)) setSlots(backbone);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backbone]);
 
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
       const text = smiles.trim();
       if (!text) {
-        setSvg('');
-        setMessage('Draw a complete amino-acid residue.');
         setValid(false);
         onValidityChange(false);
         return;
@@ -198,41 +229,106 @@ function CustomResiduePreview({ smiles, onValidityChange }: { smiles: string; on
       try {
         const rdkit = await loadRDKitModule();
         if (cancelled) return;
-        const mol = rdkit.get_mol(text);
-        if (!mol) throw new Error('Invalid SMILES.');
-        mol.delete();
         const hasBackbone = rdkitMolHasAminoAcidBackbone(rdkit, text, true);
-        const rendered = renderLigand2DSvg(rdkit, {
-          smiles: text,
-          width: 360,
-          height: 220,
-          highlightQuery: AMINO_ACID_BACKBONE_SMARTS
-        });
-        if (cancelled) return;
-        setSvg(rendered);
         setValid(hasBackbone);
-        setMessage(hasBackbone ? 'Amino-acid backbone detected.' : 'Missing amino-acid backbone: N-CA-C(=O).');
         onValidityChange(hasBackbone);
-      } catch (error) {
-        if (cancelled) return;
-        setSvg('');
-        setValid(false);
-        setMessage(error instanceof Error ? error.message : 'Unable to validate residue.');
-        onValidityChange(false);
+        // Keep the draft only if every index still fits this structure; otherwise re-detect so a
+        // new/corrected SMILES gets a fresh assignment.
+        const mol = rdkit.get_mol(text);
+        const numAtoms = mol ? (typeof mol.get_num_atoms === 'function' ? mol.get_num_atoms() : 0) : 0;
+        if (mol) mol.delete();
+        const current = CUSTOM_BACKBONE_SLOTS.map((slot) => slots[slot]);
+        const currentValid =
+          numAtoms > 0 &&
+          current.every((idx) => typeof idx === 'number' && Number.isInteger(idx) && idx >= 0 && idx < numAtoms) &&
+          new Set(current).size === 5;
+        if (!currentValid) {
+          const detected = hasBackbone ? detectCustomResidueBackbone(rdkit, text) ?? undefined : undefined;
+          setSlots(detected ?? {});
+          onBackboneChange(detected);
+        }
+      } catch {
+        if (!cancelled) {
+          setValid(false);
+          onValidityChange(false);
+        }
       }
     };
     void run();
     return () => {
       cancelled = true;
     };
-  }, [smiles, onValidityChange]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [smiles]);
+
+  const assignedIndices = CUSTOM_BACKBONE_SLOTS.map((slot) => slots[slot]).filter(
+    (idx): idx is number => idx !== undefined
+  );
+  const atomLabels: string[] | null = assignedIndices.length
+    ? (() => {
+        const maxIdx = Math.max(...assignedIndices);
+        const labels: string[] = new Array(maxIdx + 1).fill('');
+        for (const slot of CUSTOM_BACKBONE_SLOTS) {
+          const idx = slots[slot];
+          if (idx !== undefined) labels[idx] = CUSTOM_BACKBONE_SLOT_LABELS[slot];
+        }
+        return labels;
+      })()
+    : null;
+
+  const handleAtomClick = (atomIndex: number) => {
+    if (!armedSlot) return;
+    const next: Partial<CustomResidueBackbone> = { ...slots };
+    if (next[armedSlot] === atomIndex) {
+      delete next[armedSlot];
+    } else {
+      for (const slot of CUSTOM_BACKBONE_SLOTS) {
+        if (next[slot] === atomIndex) delete next[slot];
+      }
+      next[armedSlot] = atomIndex;
+    }
+    setSlots(next);
+    onBackboneChange(allSlotsSet(next) ? (next as CustomResidueBackbone) : undefined);
+    const nextUnset = CUSTOM_BACKBONE_SLOTS.find((slot) => next[slot] === undefined);
+    setArmedSlot(nextUnset ?? null);
+  };
 
   return (
     <div className={`custom-residue-preview ${valid ? 'valid' : 'invalid'}`}>
-      <div className="custom-residue-preview-canvas" dangerouslySetInnerHTML={svg ? { __html: svg } : undefined}>
-        {!svg ? <span className="muted small">No valid preview.</span> : null}
+      <Ligand2DPreview
+        smiles={smiles}
+        width={360}
+        height={220}
+        highlightAtomIndices={assignedIndices.length ? assignedIndices : undefined}
+        atomLabels={atomLabels}
+        onAtomClick={armedSlot && valid && !disabled ? handleAtomClick : undefined}
+      />
+      <div className="peptide-custom-backbone-slots" role="group" aria-label="Backbone atom slots">
+        {CUSTOM_BACKBONE_SLOTS.map((slot) => {
+          const idx = slots[slot];
+          const armed = armedSlot === slot;
+          return (
+            <button
+              key={slot}
+              type="button"
+              className={`peptide-custom-backbone-slot${armed ? ' armed' : ''}${idx === undefined ? ' empty' : ''}`}
+              disabled={!valid || disabled}
+              onClick={() => setArmedSlot((prev) => (prev === slot ? null : slot))}
+              title={
+                armed
+                  ? `Click an atom in the 2D to assign ${CUSTOM_BACKBONE_SLOT_LABELS[slot]}`
+                  : `Set ${CUSTOM_BACKBONE_SLOT_LABELS[slot]}${idx === undefined ? '' : ` (atom #${idx + 1})`}`
+              }
+            >
+              <span className="peptide-custom-backbone-slot-label">{CUSTOM_BACKBONE_SLOT_LABELS[slot]}</span>
+              <span className="peptide-custom-backbone-slot-value">{idx === undefined ? '—' : `#${idx + 1}`}</span>
+            </button>
+          );
+        })}
       </div>
-      <span className="small custom-residue-preview-status">{message}</span>
+      <span className="small custom-residue-preview-status">
+        {valid ? 'Backbone detected. Click N/CA/C/O/OXT if the auto-pick is wrong.' : 'Missing amino-acid backbone: N-CA-C(=O).'}
+      </span>
     </div>
   );
 }
@@ -379,7 +475,8 @@ export function ComponentInputEditor({
       ccd,
       smiles,
       baseResidue: String(mod.baseResidue || '').toUpperCase().slice(0, 1) || undefined,
-      label: mod.label || 'Custom residue'
+      label: mod.label || 'Custom residue',
+      backbone: mod.backbone
     };
     const nextLibrary = [nextEntry, ...customResidueLibrary.filter((item) => item.ccd !== ccd)].slice(0, 80);
     onCustomResidueLibraryChange(nextLibrary);
@@ -393,7 +490,8 @@ export function ComponentInputEditor({
       ccd: entry.ccd,
       smiles: entry.smiles,
       baseResidue: entry.baseResidue || undefined,
-      label: entry.label || 'Custom residue'
+      label: entry.label || 'Custom residue',
+      backbone: entry.backbone
     });
   };
 
@@ -871,7 +969,10 @@ export function ComponentInputEditor({
                                         ccd: nextMethod === 'jsme' ? buildCustomModificationCode(comp.id, mod.position, mod.smiles || '') : builtin.ccd,
                                         smiles: nextMethod === 'jsme' ? mod.smiles || CUSTOM_RESIDUE_SCAFFOLD_SMILES : undefined,
                                         label: nextMethod === 'jsme' ? 'Custom residue' : builtin.label,
-                                        customEditorCollapsed: nextMethod === 'jsme' ? true : undefined
+                                        customEditorCollapsed: nextMethod === 'jsme' ? true : undefined,
+                                        // Backbone override only applies to a drawn (jsme) residue; reset on any source switch
+                                        // so a stale assignment from another structure/input doesn't carry over.
+                                        backbone: undefined
                                       });
                                     }}
                                   >
@@ -1017,6 +1118,9 @@ export function ComponentInputEditor({
                                           </label>
                                           <CustomResiduePreview
                                             smiles={mod.smiles || CUSTOM_RESIDUE_SCAFFOLD_SMILES}
+                                            backbone={mod.backbone}
+                                            disabled={disabled}
+                                            onBackboneChange={(next) => patchProteinModification(comp.id, mod.id, { backbone: next })}
                                             onValidityChange={(isValid) =>
                                               setCustomResidueValidity((prev) => (prev[mod.id] === isValid ? prev : { ...prev, [mod.id]: isValid }))
                                             }

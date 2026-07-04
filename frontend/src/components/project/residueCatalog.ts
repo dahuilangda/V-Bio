@@ -1,4 +1,4 @@
-import type { CustomCcdMoleculeInput } from '../../types/models';
+import type { CustomCcdMoleculeInput, CustomResidueBackbone } from '../../types/models';
 
 export interface ResidueCatalogEntry {
   ccd: string;
@@ -8,6 +8,7 @@ export interface ResidueCatalogEntry {
   smiles?: string;
   backboneHighlightQuery?: string;
   backboneLabel?: string;
+  backbone?: CustomResidueBackbone;
   placement?: 'any' | 'n_term' | 'c_term' | 'terminal';
   placementLabel?: string;
   custom?: boolean;
@@ -86,6 +87,7 @@ export function buildCustomResidueCatalog(library: CustomCcdMoleculeInput[] = []
       baseResidue: String(item.baseResidue || 'A').trim().toUpperCase().slice(0, 1) || 'A',
       group: 'Custom library',
       smiles,
+      backbone: item.backbone,
       custom: true
     });
   }

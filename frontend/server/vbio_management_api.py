@@ -27,6 +27,7 @@ from management_api.runtime_proxy import RuntimeProxy
 from management_api.jwt_clients import JwtClientStore
 from management_api.jwt_auth import JwtTokenError, JwtUserService, decode_login_jwt
 from management_api.task_store import ProjectTaskStore
+from management_api.ccd_download import build_task_ccd_response
 from management_api.copilot import CopilotAssistant
 from management_api.usage_tracker import UsageTracker
 
@@ -490,6 +491,11 @@ def get_results(task_id: str) -> Tuple[Response, int]:
 @app.get("/vbio-api/results/<task_id>/view")
 def get_results_view(task_id: str) -> Tuple[Response, int]:
     return gateway.forward_task_read(task_id, "/results", "read_results_view")
+
+
+@app.get("/vbio-api/tasks/<task_id>/ccd")
+def get_task_ccd(task_id: str) -> Tuple[Response, int]:
+    return build_task_ccd_response(task_id)
 
 
 register_lead_opt_routes(

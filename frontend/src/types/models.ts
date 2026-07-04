@@ -8,9 +8,27 @@ export type PeptideDesignMode = 'linear' | 'cyclic' | 'bicyclic';
 export type PeptideResiduePoolKind = 'natural' | 'preset' | 'custom';
 export type AffinityScoringMode = 'score' | 'pose' | 'refine' | 'interface';
 
+// Manual backbone atom assignment for a custom non-natural residue, as 0-based RDKit
+// heavy-atom indices — the same index space as the 2D depiction and the backend CCD builder.
+// When present it overrides automatic backbone detection end-to-end (single source of truth).
+export interface CustomResidueBackbone {
+  n: number;
+  ca: number;
+  c: number;
+  o: number;
+  oxt: number;
+}
+
 export interface PeptideResiduePoolSelection {
   code: string;
   kind: PeptideResiduePoolKind;
+  // Custom residues carry their own CCD source (SMILES + parent AA) so the definition
+  // travels with the selection in the persisted config and reaches AF3/Protenix/Boltz
+  // as a CCD regardless of the ephemeral in-memory residue library.
+  smiles?: string;
+  baseResidue?: string;
+  label?: string;
+  backbone?: CustomResidueBackbone;
 }
 
 export interface ProteinModification {
@@ -23,6 +41,7 @@ export interface ProteinModification {
   inputMethod: ProteinModificationInputMethod;
   smiles?: string;
   label?: string;
+  backbone?: CustomResidueBackbone;
 }
 
 export interface InputComponent {
@@ -378,6 +397,7 @@ export interface CustomCcdMoleculeInput {
   baseResidue?: string;
   label?: string;
   kind?: 'residue' | 'ligand';
+  backbone?: CustomResidueBackbone;
 }
 
 export interface AffinityPreviewPayload {

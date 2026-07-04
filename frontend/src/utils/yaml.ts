@@ -227,6 +227,7 @@ interface BuildYamlOptions {
   constraints?: PredictionConstraint[];
   properties?: PredictionProperties;
   templates?: YamlTemplateInput[];
+  preserveLigandSmiles?: boolean;
 }
 
 export interface YamlTemplateInput {
@@ -292,7 +293,15 @@ function buildProteinModificationPayload(modifications: ProteinModification[] | 
   }, []);
 }
 
-export function collectCustomCcdMoleculesFromComponents(components: InputComponent[]): CustomCcdMoleculeInput[] {
+interface CollectCustomCcdMoleculesOptions {
+  includeLigandSmiles?: boolean;
+}
+
+export function collectCustomCcdMoleculesFromComponents(
+  components: InputComponent[],
+  options: CollectCustomCcdMoleculesOptions = {}
+): CustomCcdMoleculeInput[] {
+  const includeLigandSmiles = options.includeLigandSmiles !== false;
   const byCode = new Map<string, CustomCcdMoleculeInput>();
   for (const component of components) {
     if (component.type === 'protein' && Array.isArray(component.modifications)) {
@@ -312,7 +321,7 @@ export function collectCustomCcdMoleculesFromComponents(components: InputCompone
       continue;
     }
 
-    if (component.type === 'ligand' && component.inputMethod !== 'ccd') {
+    if (includeLigandSmiles && component.type === 'ligand' && component.inputMethod !== 'ccd') {
       const smiles = String(component.sequence || '').trim();
       if (!smiles) continue;
       const ccd = customLigandCcdForComponent(component.id, smiles);
@@ -360,6 +369,14 @@ export function buildPredictionYamlFromComponents(components: InputComponent[], 
     const idValue = normalizeId(chainIds);
 
     if (comp.type === 'ligand') {
+      if (options.preserveLigandSmiles && comp.inputMethod !== 'ccd') {
+        return {
+          ligand: {
+            id: idValue,
+            smiles: comp.sequence.trim()
+          }
+        };
+      }
       return {
         ligand: {
           id: idValue,

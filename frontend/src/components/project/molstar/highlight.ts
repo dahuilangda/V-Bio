@@ -149,6 +149,29 @@ export function applyMolstarHighlights({
       }
     }
 
+    // Camera locked (suppressAutoFocus): still distinguish the active endpoint with a
+    // highlight-only on its loci, without moving the camera. Best-effort, wrapped like the
+    // focus calls above; a missing/no-op API leaves the default selection highlight.
+    if (suppressAutoFocus && lociHighlights?.highlightOnly) {
+      try {
+        let activeLoci = null;
+        if (focusAtomTarget) {
+          activeLoci = buildAtomLoci(
+            viewer,
+            focusAtomTarget.chainId,
+            focusAtomTarget.residue,
+            focusAtomTarget.atomName,
+            focusAtomTarget.atomIndex
+          );
+        } else if (focusResidueTarget) {
+          activeLoci = buildResidueLoci(viewer, focusResidueTarget.chainId, focusResidueTarget.residue);
+        }
+        if (activeLoci) lociHighlights.highlightOnly({ loci: activeLoci });
+      } catch {
+        // no-op
+      }
+    }
+
     void applyLigandSpotlight(viewer, normalizedAtoms.length > 0 || normalized.length > 0, 0.28);
   } catch {
     // no-op

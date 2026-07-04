@@ -113,7 +113,8 @@ export function applyConstraintPickToConstraints(input: ApplyConstraintPickInput
               atom2_atom: atomName,
             };
 
-      nextPickSlots[item.id] = slot === 'first' ? 'second' : 'first';
+      // No implicit toggle for bonds: the active endpoint (Atom 1 / Atom 2) is chosen
+      // explicitly via the target chips / field focus, so the slot persists across picks.
       if (
         updated.atom1_chain !== item.atom1_chain ||
         updated.atom1_residue !== item.atom1_residue ||

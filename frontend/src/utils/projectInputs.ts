@@ -372,7 +372,21 @@ function normalizePeptideResiduePool(value: unknown): NonNullable<PredictionOpti
     const key = `${kind}:${code}`;
     if (!code || !VALID_PEPTIDE_POOL_KINDS.has(kind) || seen.has(key)) continue;
     seen.add(key);
-    pool.push({ code, kind: kind as 'natural' | 'preset' | 'custom' });
+    const entry: NonNullable<PredictionOptions['peptideResiduePool']>[number] = {
+      code,
+      kind: kind as 'natural' | 'preset' | 'custom'
+    };
+    if (entry.kind === 'custom') {
+      const smiles = String(raw.smiles || '').trim();
+      if (smiles) {
+        entry.smiles = smiles;
+        const baseResidue = String(raw.baseResidue || '').trim().toUpperCase().slice(0, 1);
+        if (baseResidue) entry.baseResidue = baseResidue;
+        const label = String(raw.label || '').trim().slice(0, 80);
+        if (label) entry.label = label;
+      }
+    }
+    pool.push(entry);
   }
   return pool.slice(0, 160);
 }

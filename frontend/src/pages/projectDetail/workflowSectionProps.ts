@@ -19,8 +19,6 @@ export interface BuildPredictionConstraintsWorkspaceParams {
   constraintTemplateOptions: PredictionConstraintsWorkspaceProps['constraintTemplateOptions'];
   selectedTemplatePreview: PredictionConstraintsWorkspaceProps['selectedTemplatePreview'];
   setSelectedConstraintTemplateComponentId: (componentId: string | null) => void;
-  constraintPickModeEnabled: boolean;
-  setConstraintPickModeEnabled: Dispatch<SetStateAction<boolean>>;
   canEdit: boolean;
   setWorkspaceTab: Dispatch<SetStateAction<'results' | 'basics' | 'components' | 'constraints'>>;
   navigateConstraint: (delta: -1 | 1) => void;
@@ -33,6 +31,7 @@ export interface BuildPredictionConstraintsWorkspaceParams {
   constraintSelectedAtomRefs: PredictionConstraintsWorkspaceProps['constraintSelectedAtomRefs'];
   applyPickToSelectedConstraint: (pick: MolstarResiduePick) => void;
   focusConstraintPickSlot: (constraintId: string, slot: 'first' | 'second') => void;
+  activeConstraintPickSlot: 'first' | 'second';
   handleConstraintsResizerPointerDown: (event: PointerEvent<HTMLDivElement>) => void;
   handleConstraintsResizerKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
   clearConstraintSelection: () => void;
@@ -60,8 +59,6 @@ export function buildPredictionConstraintsWorkspaceProps(
     constraintTemplateOptions,
     selectedTemplatePreview,
     setSelectedConstraintTemplateComponentId,
-    constraintPickModeEnabled,
-    setConstraintPickModeEnabled,
     canEdit,
     setWorkspaceTab,
     navigateConstraint,
@@ -74,6 +71,7 @@ export function buildPredictionConstraintsWorkspaceProps(
     constraintSelectedAtomRefs,
     applyPickToSelectedConstraint,
     focusConstraintPickSlot,
+    activeConstraintPickSlot,
     handleConstraintsResizerPointerDown,
     handleConstraintsResizerKeyDown,
     clearConstraintSelection,
@@ -98,8 +96,6 @@ export function buildPredictionConstraintsWorkspaceProps(
     constraintTemplateOptions,
     selectedTemplatePreview,
     onSelectedConstraintTemplateComponentIdChange: setSelectedConstraintTemplateComponentId,
-    constraintPickModeEnabled,
-    onToggleConstraintPickMode: () => setConstraintPickModeEnabled((prev) => !prev),
     canEdit,
     onBackToComponents: () => setWorkspaceTab('components'),
     onNavigateConstraint: navigateConstraint,
@@ -112,6 +108,7 @@ export function buildPredictionConstraintsWorkspaceProps(
     constraintSelectedAtomRefs,
     onApplyPickToSelectedConstraint: applyPickToSelectedConstraint,
     onConstraintPickSlotFocus: focusConstraintPickSlot,
+    activeConstraintPickSlot,
     onConstraintsResizerPointerDown: handleConstraintsResizerPointerDown,
     onConstraintsResizerKeyDown: handleConstraintsResizerKeyDown,
     onClearConstraintSelection: clearConstraintSelection,
