@@ -29,8 +29,7 @@ interface UseProjectDraftSynchronizersOptions<TDraft extends DraftLike> {
   selectedContactConstraintIds: string[];
   setSelectedContactConstraintIds: Dispatch<SetStateAction<string[]>>;
   constraintSelectionAnchorRef: MutableRefObject<string | null>;
-  constraintPickModeEnabled: boolean;
-  constraintPickSlotRef: MutableRefObject<Record<string, 'first' | 'second'>>;
+  updateConstraintPickSlot: (updater: (prev: Record<string, 'first' | 'second'>) => Record<string, 'first' | 'second'>) => void;
   activeComponentId: string | null;
   setActiveComponentId: Dispatch<SetStateAction<string | null>>;
   workflowKey: string;
@@ -50,8 +49,7 @@ export function useProjectDraftSynchronizers<TDraft extends DraftLike>({
   selectedContactConstraintIds,
   setSelectedContactConstraintIds,
   constraintSelectionAnchorRef,
-  constraintPickModeEnabled,
-  constraintPickSlotRef,
+  updateConstraintPickSlot,
   activeComponentId,
   setActiveComponentId,
   workflowKey,
@@ -159,9 +157,9 @@ export function useProjectDraftSynchronizers<TDraft extends DraftLike>({
   ]);
 
   useEffect(() => {
-    if (!constraintPickModeEnabled || !activeConstraintId) return;
-    constraintPickSlotRef.current[activeConstraintId] = 'first';
-  }, [constraintPickModeEnabled, activeConstraintId, constraintPickSlotRef]);
+    if (!activeConstraintId) return;
+    updateConstraintPickSlot((prev) => ({ ...prev, [activeConstraintId]: 'first' }));
+  }, [activeConstraintId, updateConstraintPickSlot]);
 
   useEffect(() => {
     if (!draft) return;

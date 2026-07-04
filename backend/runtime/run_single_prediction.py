@@ -7819,10 +7819,26 @@ def run_peptide_design_backend(
 
 
 
-def _normalize_custom_ccd_molecules(raw_value: Any) -> List[Dict[str, str]]:
+def _normalize_backbone_override(raw: Any) -> Optional[Dict[str, int]]:
+    """Validate/normalize a manual backbone override (5 non-negative integer slots)."""
+    if not isinstance(raw, dict):
+        return None
+    backbone: Dict[str, int] = {}
+    for slot in ("n", "ca", "c", "o", "oxt"):
+        try:
+            num = int(raw.get(slot))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        if num < 0:
+            return None
+        backbone[slot] = num
+    return backbone
+
+
+def _normalize_custom_ccd_molecules(raw_value: Any) -> List[Dict[str, Any]]:
     if not isinstance(raw_value, list):
         return []
-    molecules: List[Dict[str, str]] = []
+    molecules: List[Dict[str, Any]] = []
     seen: set[str] = set()
     for item in raw_value:
         if not isinstance(item, dict):
@@ -7841,6 +7857,7 @@ def _normalize_custom_ccd_molecules(raw_value: Any) -> List[Dict[str, str]]:
             "base_residue": str(item.get("base_residue") or item.get("baseResidue") or "").strip().upper()[:1],
             "label": str(item.get("label") or "").strip()[:80],
             "kind": kind,
+            "backbone": _normalize_backbone_override(item.get("backbone")),
         })
     return molecules
 
@@ -7984,12 +8001,90 @@ def _set_custom_ccd_atom_properties(mol: Chem.Mol, *, kind: str, residue_topolog
         _set_atom_name(mol.GetAtomWithIdx(atom_idx), backbone_names[offset])
 
 
-def _build_custom_ccd_mol(smiles: str, *, kind: str = "residue") -> Chem.Mol:
+def _residue_topology_from_backbone_override(mol: Chem.Mol, backbone: Dict[str, int]) -> Dict[str, Any]:
+    """Resolve a residue_topology from a user-supplied manual backbone assignment (0-based
+    heavy-atom indices). Authoritative and validated: every slot's element and the carboxyl
+    chemistry must match, else raise — never silently fall back to the topology heuristic.
+    `mol` here is pre-AddHs (heavy atoms only), matching the 2D depiction index space."""
+    if not isinstance(backbone, dict):
+        raise ValueError("Custom residue backbone override must be an object.")
+
+    def _slot_idx(slot: str) -> int:
+        try:
+            num = int(backbone.get(slot))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            raise ValueError(f"Backbone slot '{slot}' must be an integer atom index.")
+        if num < 0 or num >= mol.GetNumAtoms():
+            raise ValueError(
+                f"Backbone slot '{slot}' index {num} is out of range (0..{mol.GetNumAtoms() - 1})."
+            )
+        return num
+
+    n_idx = _slot_idx("n")
+    ca_idx = _slot_idx("ca")
+    c_idx = _slot_idx("c")
+    o_idx = _slot_idx("o")
+    oxt_idx = _slot_idx("oxt")
+    if len({n_idx, ca_idx, c_idx, o_idx, oxt_idx}) != 5:
+        raise ValueError("Backbone slots must each point at a distinct atom.")
+
+    def _atomic_num(idx: int) -> int:
+        return mol.GetAtomWithIdx(idx).GetAtomicNum()
+
+    if _atomic_num(n_idx) != 7:
+        raise ValueError("Backbone N must be a nitrogen atom.")
+    if _atomic_num(ca_idx) not in (6, 7):
+        raise ValueError("Backbone CA must be a carbon or nitrogen atom.")
+    if _atomic_num(c_idx) != 6:
+        raise ValueError("Backbone C must be a carbon atom.")
+    if _atomic_num(o_idx) != 8 or _atomic_num(oxt_idx) != 8:
+        raise ValueError("Backbone O and OXT must be oxygen atoms.")
+
+    # C must be the carboxyl carbon: bonded to both oxygens, with O the carbonyl (C=O) and OXT
+    # the hydroxyl (C-O). OXT is the leaving atom, so this distinction matters for peptide linking.
+    c_neighbors = {b.GetOtherAtomIdx(c_idx) for b in mol.GetAtomWithIdx(c_idx).GetBonds()}
+    if o_idx not in c_neighbors or oxt_idx not in c_neighbors:
+        raise ValueError("Backbone C must be directly bonded to both O and OXT (the carboxyl carbon).")
+
+    def _is_double_bond(a: int, b: int) -> bool:
+        for bond in mol.GetAtomWithIdx(a).GetBonds():
+            if bond.GetOtherAtomIdx(a) == b:
+                return bond.GetBondType() == Chem.BondType.DOUBLE
+        return False
+
+    if not _is_double_bond(c_idx, o_idx):
+        raise ValueError("Backbone O must be the carbonyl oxygen (C=O); OXT must be the hydroxyl oxygen (C-OH).")
+
+    # CA must connect the backbone (bonded to N or C), matching the topology heuristic's path.
+    ca_neighbors = {b.GetOtherAtomIdx(ca_idx) for b in mol.GetAtomWithIdx(ca_idx).GetBonds()}
+    if n_idx not in ca_neighbors and c_idx not in ca_neighbors:
+        raise ValueError("Backbone CA must be bonded to N or C.")
+
+    return {
+        "n_idx": n_idx,
+        "c_idx": c_idx,
+        "o_idx": o_idx,
+        "oxt_idx": oxt_idx,
+        # path[1:-1] is consumed by _set_custom_ccd_atom_properties to name CA; sidechain atoms
+        # beyond CA keep their {ELEMENT}{count} names, matching the frontend picker exactly.
+        "path": [n_idx, ca_idx, c_idx],
+    }
+
+
+def _build_custom_ccd_mol(smiles: str, *, kind: str = "residue", backbone: Optional[Dict[str, int]] = None) -> Chem.Mol:
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         raise ValueError("RDKit failed to parse custom CCD SMILES.")
     Chem.SanitizeMol(mol)
-    residue_topology = _find_residue_backbone_topology(mol) if kind == "residue" else None
+    if kind == "residue":
+        # A manual backbone override (user-clicked atoms) is authoritative and validated; the
+        # topology heuristic is only a fallback when no override is supplied.
+        residue_topology = (
+            _residue_topology_from_backbone_override(mol, backbone)
+            if backbone else _find_residue_backbone_topology(mol)
+        )
+    else:
+        residue_topology = None
     mol = Chem.AddHs(mol)
     _set_custom_ccd_atom_properties(mol, kind=kind, residue_topology=residue_topology)
     try:
@@ -8128,7 +8223,7 @@ def _build_custom_ccd_bundle(molecules: List[Dict[str, str]]) -> Tuple[str, Dict
     for item in _normalize_custom_ccd_molecules(molecules):
         kind = item.get("kind") or "residue"
         ccd = item["ccd"]
-        mol = _build_custom_ccd_mol(item["smiles"], kind=kind)
+        mol = _build_custom_ccd_mol(item["smiles"], kind=kind, backbone=item.get("backbone"))
         mol.name = ccd
         mols[ccd] = mol
         blocks.append(_custom_ccd_mol_to_cif_block(
@@ -8233,7 +8328,7 @@ def _prepare_task_boltz_custom_mols_dir(
 
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
     for item in custom_molecules:
-        custom_mol = _build_custom_ccd_mol(item["smiles"], kind=item.get("kind") or "residue")
+        custom_mol = _build_custom_ccd_mol(item["smiles"], kind=item.get("kind") or "residue", backbone=item.get("backbone"))
         aliases = _boltz_custom_ccd_aliases(item["ccd"])
         for alias in aliases:
             mol_path = task_mols / f"{alias}.pkl"

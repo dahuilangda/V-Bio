@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { MouseEvent } from 'react';
+import type { MouseEvent, ReactNode } from 'react';
 import { ChevronDown, ChevronRight, ChevronsDown, ChevronsUp, Link2, Plus, Radar, Target, Trash2 } from 'lucide-react';
 import type {
   BondConstraint,
@@ -27,10 +27,11 @@ interface ConstraintEditorProps {
   onClearSelection?: () => void;
   showAffinitySection?: boolean;
   allowedConstraintTypes?: PredictionConstraintType[];
-  compatibilityHint?: string;
   onConstraintsChange: (constraints: PredictionConstraint[]) => void;
   onPropertiesChange: (properties: PredictionProperties) => void;
   onPickSlotFocus?: (constraintId: string, slot: 'first' | 'second') => void;
+  endpointTargets?: ReactNode;
+  activeResiduePicker?: ReactNode;
   disabled?: boolean;
 }
 
@@ -136,10 +137,11 @@ export function ConstraintEditor({
   onClearSelection,
   showAffinitySection = true,
   allowedConstraintTypes = ALL_CONSTRAINT_TYPES,
-  compatibilityHint,
   onConstraintsChange,
   onPropertiesChange,
   onPickSlotFocus,
+  endpointTargets,
+  activeResiduePicker,
   disabled = false
 }: ConstraintEditorProps) {
   const activeComponents = components.filter((item) => item.sequence.trim());
@@ -153,10 +155,6 @@ export function ConstraintEditor({
     [allowedConstraintTypes]
   );
   const allowedTypeSet = useMemo(() => new Set(allowedTypes), [allowedTypes]);
-  const blockedTypes = useMemo(
-    () => ALL_CONSTRAINT_TYPES.filter((type) => !allowedTypeSet.has(type)),
-    [allowedTypeSet]
-  );
   const collapsedCount = useMemo(() => constraints.filter((item) => collapsedById[item.id]).length, [constraints, collapsedById]);
   const allCollapsed = constraints.length > 0 && collapsedCount === constraints.length;
 
@@ -236,23 +234,12 @@ export function ConstraintEditor({
           </div>
         )}
       </div>
-      {(compatibilityHint || blockedTypes.length > 0) && (
-        <div className="muted small">
-          {compatibilityHint || `Current backend does not support: ${blockedTypes.map((type) => constraintTypeLabel(type)).join(', ')}.`}
-        </div>
-      )}
-
       {showAffinitySection && (
         <div className="constraint-section panel subtle">
         <div className="constraint-section-title">
           <Radar size={14} />
           <strong>Affinity Scoring</strong>
         </div>
-        <span className="muted small">
-          {pickedResidue
-            ? `Picked in Mol*: ${pickedResidue.chainId}:${pickedResidue.residue}${pickedResidue.atomName ? `:${pickedResidue.atomName}` : ''}`
-            : 'Tip: focus a constraint endpoint, then pick in the viewer to fill it.'}
-        </span>
 
         <label className="switch-field">
           <input
@@ -375,6 +362,8 @@ export function ConstraintEditor({
 
               {!isCollapsed && (
                 <>
+                  {isSelected && endpointTargets}
+                  {isSelected && activeResiduePicker}
                   <label className="field">
                     <span>Constraint Type</span>
                     <select value={item.type} disabled={disabled} onChange={(e) => setType(e.target.value as PredictionConstraintType)}>
@@ -420,6 +409,7 @@ export function ConstraintEditor({
                       onChange={(next) => replaceAt(item.id, next)}
                     />
                   )}
+
                 </>
               )}
             </article>
@@ -472,9 +462,16 @@ function ChainSelect({
   disabled: boolean;
   onChange: (value: string) => void;
 }) {
+  // If the stored chain no longer matches any component (e.g. its component was removed),
+  // render it explicitly as "missing" and selected. A plain <select value="D"> with only
+  // A/B/C options would silently display the first option while the data still says "D",
+  // hiding the stale reference that crashes the predictor at run time.
+  const knownChainIds = new Set(chainInfos.map((info) => info.id));
+  const isStaleChain = Boolean(value) && !knownChainIds.has(value);
   return (
     <select value={value} disabled={disabled || chainInfos.length === 0} onChange={(e) => onChange(e.target.value)}>
       {chainInfos.length === 0 && <option value="">No chain available</option>}
+      {isStaleChain && <option value={value}>{value} · missing component</option>}
       {chainInfos.map((info) => (
         <option key={info.id} value={info.id}>
           {info.id} · {chainLabel(info.type)} · {info.residueCount}

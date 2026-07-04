@@ -34,25 +34,55 @@ function injectInteractiveSvgStyle(svg: string): string {
   }
   const style = [
     '<style>',
+    `.${scopedClass} { cursor: pointer; }`,
     `.${scopedClass} [class*="atom-"] { cursor: pointer; }`,
     '</style>'
   ].join('');
   return `${svg.slice(0, svgTagStart)}${patchedOpenTag}${style}${svg.slice(svgTagEnd + 1)}`;
 }
 
-function extractAtomIndexFromElement(target: EventTarget | null, boundary: HTMLElement | null): number | null {
-  let node = target as HTMLElement | null;
-  while (node && node !== boundary) {
-    const className = String(node.getAttribute('class') || '');
-    const matches = Array.from(className.matchAll(/atom-(\d+)/g))
-      .map((match) => Number.parseInt(match[1], 10))
-      .filter((atomIndex) => Number.isFinite(atomIndex) && atomIndex >= 0);
-    const unique = Array.from(new Set(matches));
-    if (unique.length === 1) return unique[0];
-    if (unique.length > 1) return null;
-    node = node.parentElement;
+// A click anywhere within an adaptive radius of an atom selects that atom (nearest wins), so
+// the tiny rendered glyphs (a <text> symbol or a thin highlight path) are easy to hit. The
+// radius scales with the depiction: sparse molecules get a generous hit zone, dense ones stay
+// small enough not to snap onto a neighbour. Falls back to null (background) far from any atom.
+function findNearestAtomIndex(host: HTMLElement, clientX: number, clientY: number): number | null {
+  const nodes = host.querySelectorAll('[class*="atom-"]');
+  if (nodes.length === 0) return null;
+
+  type Candidate = { index: number; x: number; y: number };
+  const candidates: Candidate[] = [];
+  nodes.forEach((node) => {
+    const el = node as Element;
+    const indices = Array.from(
+      new Set(
+        Array.from(String(el.getAttribute('class') || '').matchAll(/atom-(\d+)/g))
+          .map((match) => Number.parseInt(match[1], 10))
+          .filter((atomIndex) => Number.isFinite(atomIndex) && atomIndex >= 0)
+      )
+    );
+    if (indices.length !== 1) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return;
+    candidates.push({ index: indices[0], x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+  });
+  if (candidates.length === 0) return null;
+
+  // Adaptive threshold from the median nearest-neighbour distance, clamped so a single
+  // residue (sparse) still gets a usable zone and a large ligand (dense) doesn't over-reach.
+  const neighbourDistances = candidates.map((a) => {
+    const others = candidates.filter((b) => b !== a).map((b) => Math.hypot(a.x - b.x, a.y - b.y));
+    return others.length ? Math.min(...others) : Number.POSITIVE_INFINITY;
+  });
+  const sorted = [...neighbourDistances].sort((p, q) => p - q);
+  const medianNeighbour = sorted[Math.floor(sorted.length / 2)] ?? Number.POSITIVE_INFINITY;
+  const threshold = Math.max(12, Math.min(30, medianNeighbour * 0.5));
+
+  let best: { index: number; dist: number } | null = null;
+  for (const candidate of candidates) {
+    const dist = Math.hypot(clientX - candidate.x, clientY - candidate.y);
+    if (!best || dist < best.dist) best = { index: candidate.index, dist };
   }
-  return null;
+  return best && best.dist <= threshold ? best.index : null;
 }
 
 export function Ligand2DPreview({
@@ -159,7 +189,8 @@ export function Ligand2DPreview({
         onClick={
           onAtomClick || onBackgroundClick
             ? (event) => {
-                const atomIndex = extractAtomIndexFromElement(event.target, hostRef.current);
+                const host = hostRef.current;
+                const atomIndex = host ? findNearestAtomIndex(host, event.clientX, event.clientY) : null;
                 if (atomIndex === null) {
                   onBackgroundClick?.();
                   return;

@@ -11,6 +11,7 @@ import type { CustomCcdMoleculeInput, Project, ProjectInputConfig, ProjectTask, 
 import { loadProjectInputConfig, loadProjectUiState } from '../../utils/projectInputs';
 import { getWorkflowDefinition, isPredictionLikeWorkflowKey } from '../../utils/workflows';
 import { resolveRestoredEditorState, resolveTaskSnapshotContext } from './projectLoadHelpers';
+import { enrichPeptideResiduePoolFromLibrary } from './peptideCustomResidues';
 import {
   defaultConfigFromProject,
   mergeTaskSnapshotIntoConfig,
@@ -225,6 +226,10 @@ export async function loadProjectFlow(params: {
     inputConfig: {
       ...taskAlignedConfig,
       constraints: backendConstraints,
+      options: enrichPeptideResiduePoolFromLibrary(
+        taskAlignedConfig.options,
+        savedUiState?.customResidueLibrary || []
+      ),
     },
   };
 

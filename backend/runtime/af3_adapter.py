@@ -681,15 +681,21 @@ def load_unpaired_msa(
     unpaired: List[str] = []
     for index, sequence in enumerate(prep.query_sequences_unique):
         msa_content: Optional[str] = None
-        modifications = prep.query_modifications[index] if index < len(prep.query_modifications) else []
         group_key = prep.query_sequence_keys[index] if index < len(prep.query_sequence_keys) else sequence
         chain_ids = prep.query_group_to_chain_ids.get(group_key) or prep.sequence_to_chain_ids.get(sequence, [])
         for chain_id in chain_ids:
             path = chain_msa_paths.get(chain_id)
             if path and path.exists():
+                # AF3's MSA.from_a3m requires the first (query) sequence to equal the protein
+                # `sequence` field exactly. That field uses the PARENT residue letter (the
+                # modification is supplied separately via `modifications[]`), so normalise the
+                # MSA query to the base sequence — never the PTM-letter-substituted one.
+                # Substituting X (custom CCD has no one-letter code) made AF3 raise
+                # "First MSA sequence LRLRGX is not the query_sequence='LRLRGG'"; Protenix and
+                # Boltz are lenient about this, which is why only AF3 failed.
                 msa_content = _replace_a3m_first_query_sequence(
                     _normalize_a3m_content(path.read_text()),
-                    _af3_effective_query_sequence(sequence, modifications),
+                    sequence,
                 )
                 break
         unpaired.append(msa_content or "")

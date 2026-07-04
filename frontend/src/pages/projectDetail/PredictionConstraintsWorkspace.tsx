@@ -1,5 +1,5 @@
-import { useMemo, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
-import { ArrowLeft } from 'lucide-react';
+import { useEffect, useMemo, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
+import { ArrowLeft, Boxes } from 'lucide-react';
 import { ConstraintEditor } from '../../components/project/ConstraintEditor';
 import { Ligand2DPreview } from '../../components/project/Ligand2DPreview';
 import type { MolstarResiduePick } from '../../components/project/MolstarViewer';
@@ -9,6 +9,7 @@ import { buildChainInfos } from '../../utils/chainAssignments';
 import { BUILT_IN_PROTEIN_MODIFICATIONS, NATURAL_AMINO_ACID_RESIDUES } from '../../components/project/residueCatalog';
 import { buildComponentAtomOptionsByChain } from '../../utils/constraintAtomOptions';
 import { extractStructureResidueAtomOptions, type StructureAtomOptionsByChain } from '../../utils/structureParser';
+import { loadRDKitModule, type RDKitModule } from '../../utils/rdkit';
 
 export interface ConstraintTemplateOption {
   componentId: string;
@@ -60,7 +61,11 @@ function residue2DAtomLabels(component: InputComponent | undefined, row: { resid
   if (!component || !row) return [];
   const mods = modificationByPosition(component.modifications);
   const mod = mods.get(row.residue);
-  if (mod?.inputMethod === 'jsme') return [];
+  // JSME custom residues: row.atoms is already in RDKit depiction (atom-index) order
+  // (customResidueAtomNamesFromSmiles), and residue2DSmiles uses the same SMILES, so
+  // row.atoms[i] is exactly the name of the i-th depicted atom — use directly so the
+  // 2D labels, highlight, and onAtomClick all line up with the atom grid.
+  if (mod?.inputMethod === 'jsme') return row.atoms;
 
   const ccd = String(mod?.ccd || row.residueName || '').trim().toUpperCase();
   const sequenceResidue = cleanSequence(component.sequence)[row.residue - 1] || '';
@@ -78,202 +83,240 @@ function residue2DAtomLabels(component: InputComponent | undefined, row: { resid
   return labels;
 }
 
-function selectedResidueNumberForChain(params: {
-  chainId: string;
-  pickedResidue: { chainId: string; residue: number; atomName?: string } | null;
-  activeResidue: { chainId: string; residue: number } | null;
-}) {
-  const { chainId, pickedResidue, activeResidue } = params;
-  if (pickedResidue?.chainId === chainId) return pickedResidue.residue;
-  if (activeResidue?.chainId === chainId) return activeResidue.residue;
-  return null;
+export interface BondEndpointSummary {
+  chain: string;
+  residue: number;
+  atom: string;
 }
 
-function ConstraintSequencePicker({
+export interface ActiveBondEndpoints {
+  id: string;
+  atom1: BondEndpointSummary;
+  atom2: BondEndpointSummary;
+}
+
+interface PickedResidueLike {
+  chainId: string;
+  residue: number;
+  atomName?: string;
+}
+
+// Left pane: all chains listed as a vertical stack of sections. Each protein/dna/rna chain
+// shows a residue grid; a ligand chain shows an atom-name grid. Clicking any residue/atom
+// button aims the active endpoint at it and picks it. The active endpoint slot's residue
+// (targetResidue) drives the `.active` marker, so the left mirrors the right's Atom 1/Atom 2
+// tab; the right-side 2D (top of the constraint card) is the primary atom picker.
+function ConstraintChainPicker({
   components,
   atomOptionsByChain,
+  targetResidue,
   pickedResidue,
-  selectedAtomRefs,
   highlightResidues,
-  activeResidue,
+  selectedAtomRefs,
   disabled,
   onPick
 }: {
   components: InputComponent[];
   atomOptionsByChain: StructureAtomOptionsByChain;
-  pickedResidue: { chainId: string; residue: number; atomName?: string } | null;
-  selectedAtomRefs: Array<{ chainId: string; residue: number; atomName: string }>;
+  targetResidue: { chainId: string; residue: number } | null;
+  pickedResidue: PickedResidueLike | null;
   highlightResidues: Array<{ chainId: string; residue: number }>;
-  activeResidue: { chainId: string; residue: number } | null;
+  selectedAtomRefs: Array<{ chainId: string; residue: number; atomName: string }>;
   disabled: boolean;
   onPick: (pick: MolstarResiduePick) => void;
 }) {
   const activeComponents = components.filter((item) => cleanSequence(item.sequence));
   const chainInfos = buildChainInfos(activeComponents);
-  const componentById = new Map(activeComponents.map((item) => [item.id, item] as const));
   const highlightKeys = new Set(highlightResidues.map((item) => `${item.chainId}:${item.residue}`));
-  const selectedAtomKeys = new Set(selectedAtomRefs.map((item) => `${item.chainId}:${item.residue}:${String(item.atomName || '').trim().toUpperCase()}`));
-  const activeKey = activeResidue ? `${activeResidue.chainId}:${activeResidue.residue}` : '';
+  // The active residue marker follows the active endpoint slot (targetResidue), so the left
+  // grid highlights the exact residue of the selected Atom 1/Atom 2 (or token1/token2) tab.
+  const activeKey = targetResidue ? `${targetResidue.chainId}:${targetResidue.residue}` : '';
   const pickedKey = pickedResidue ? `${pickedResidue.chainId}:${pickedResidue.residue}` : '';
-  const selectedDetail = (() => {
-    const selectedChains = [pickedResidue?.chainId, activeResidue?.chainId].filter(Boolean) as string[];
-    for (const selectedChainId of selectedChains) {
-      const chain = chainInfos.find((item) => item.id === selectedChainId);
-      if (!chain || chain.type !== 'protein') continue;
-      const component = componentById.get(chain.componentId);
-      const rows = atomOptionsByChain[chain.id] || [];
-      const residue = selectedResidueNumberForChain({ chainId: chain.id, pickedResidue, activeResidue });
-      const row = residue ? rows.find((item) => item.residue === residue) || null : null;
-      const smiles = residue2DSmiles(component, row || undefined);
-      const atomLabels = residue2DAtomLabels(component, row || undefined);
-      if (component && row) return { chain, component, row, smiles, atomLabels };
-    }
-    return null;
-  })();
+  const selectedAtomKeys = new Set(
+    selectedAtomRefs.map((item) => `${item.chainId}:${item.residue}:${String(item.atomName || '').trim().toUpperCase()}`)
+  );
 
   if (chainInfos.length === 0) {
     return (
-      <div className="constraint-viewer-empty muted small">
-        Add Components to enable local picking for constraints.
+      <div className="constraint-viewer-empty">
+        <Boxes size={18} />
+        <span className="muted small">No components</span>
       </div>
     );
   }
 
+  const typeLabel = (type: string) => type.charAt(0).toUpperCase() + type.slice(1);
+
   return (
-    <div className={`constraint-sequence-picker ${selectedDetail ? 'has-selection-detail' : ''}`} aria-label="Constraint sequence picker">
+    <div className="constraint-sequence-picker" aria-label="Constraint chain picker">
       <div className="constraint-sequence-list">
         {chainInfos.map((chain) => {
-          const component = componentById.get(chain.componentId);
           const rows = atomOptionsByChain[chain.id] || [];
-          const sequence = cleanSequence(component?.sequence || '');
-          if (!sequence || rows.length === 0) return null;
-          const title = `${chain.id} · ${chain.type}${chain.copyIndex > 0 ? ` copy ${chain.copyIndex + 1}` : ''}`;
           const isLigand = chain.type === 'ligand';
+          const count = isLigand ? rows[0]?.atoms.length || 0 : rows.length;
+          const title = `${chain.id} · ${typeLabel(chain.type)}${chain.copyIndex > 0 ? ` copy ${chain.copyIndex + 1}` : ''}`;
+          const isPickedChain = targetResidue?.chainId === chain.id;
           return (
-          <section key={`${chain.componentId}-${chain.id}`} className="constraint-sequence-chain">
-            <div className="constraint-sequence-chain-head">
-              <strong>{title}</strong>
-              <span className="muted small">{isLigand ? `${rows[0]?.atoms.length || 0} atoms` : `${rows.length} residues`}</span>
-            </div>
-            {isLigand ? (
-              <div className="constraint-ligand-picker-body">
-                {(rows[0]?.atoms || []).length > 0 && component?.inputMethod !== 'ccd' && (
-                  <div className="constraint-2d-panel constraint-ligand-2d-panel">
-                    <Ligand2DPreview
-                      smiles={component?.sequence || ''}
-                      width={250}
-                      height={170}
-                      atomLabels={(rows[0]?.atoms || []).map((_atom, index) => String(index + 1))}
-                      highlightAtomIndices={(rows[0]?.atoms || []).reduce<number[]>((acc, atom, index) => {
-                        const key = `${chain.id}:1`;
-                        const atomKey = `${chain.id}:1:${atom}`;
-                        if ((key === pickedKey && pickedResidue?.atomName === atom) || selectedAtomKeys.has(atomKey)) acc.push(index);
-                        return acc;
-                      }, [])}
-                      onAtomClick={(atomIndex) => {
-                        const atom = (rows[0]?.atoms || [])[atomIndex];
-                        if (!atom) return;
-                        onPick({
-                          chainId: chain.id,
-                          residue: 1,
-                          atomName: atom,
-                          label: `${chain.id}:1:${atom}`
-                        });
-                      }}
-                    />
-                  </div>
-                )}
-                <div className="constraint-ligand-atom-grid">
-                  {(rows[0]?.atoms || []).length > 0 ? (
-                    (rows[0]?.atoms || []).map((atom, index) => {
-                      const key = `${chain.id}:1`;
-                      const atomKey = `${chain.id}:1:${atom}`;
-                      const picked = (key === pickedKey && pickedResidue?.atomName === atom) || selectedAtomKeys.has(atomKey);
+            <section
+              key={`${chain.componentId}-${chain.id}`}
+              className={`constraint-sequence-chain${isPickedChain ? ' is-picked-chain' : ''}`}
+            >
+              <div className="constraint-sequence-chain-head">
+                <strong>{title}</strong>
+                <span className="muted small">{isLigand ? `${count} atoms` : `${count} residues`}</span>
+              </div>
+              {isLigand ? (
+                count > 0 ? (
+                  <div className="constraint-sequence-grid">
+                    {rows[0].atoms.map((atom, atomIndex) => {
+                      const atomName = String(atom || '').trim().toUpperCase();
+                      const atomKey = `${chain.id}:1:${atomName}`;
+                      const picked =
+                        selectedAtomKeys.has(atomKey) ||
+                        (pickedResidue?.chainId === chain.id &&
+                          pickedResidue.residue === 1 &&
+                          String(pickedResidue.atomName || '').trim().toUpperCase() === atomName);
                       return (
                         <button
-                          key={`${chain.id}:1:${atom}`}
+                          key={atomKey}
                           type="button"
-                          className={`constraint-ligand-atom ${picked ? 'picked' : ''}`}
+                          className={`constraint-sequence-residue is-atom ${picked ? 'picked' : ''}`}
                           disabled={disabled}
-                          onClick={() =>
-                            onPick({
-                              chainId: chain.id,
-                              residue: 1,
-                              atomName: atom,
-                              label: `${chain.id}:1:${atom}`
-                            })
-                          }
-                          title={`${chain.id}:1:${atom}`}
+                          onClick={() => onPick({ chainId: chain.id, residue: 1, atomName, label: atomKey })}
+                          title={atomKey}
                         >
-                          <span className="constraint-atom-index">{index + 1}</span>
-                          <span className="constraint-atom-name">{atom}</span>
+                          <span className="constraint-sequence-residue-index">{atomIndex + 1}</span>
+                          <span className="constraint-sequence-residue-letter">{atom}</span>
                         </button>
                       );
-                    })
-                  ) : (
-                    <div className="constraint-ligand-atoms-empty muted small">
-                      No deterministic atom names are available for this ligand input.
-                    </div>
-                  )}
+                    })}
+                  </div>
+                ) : (
+                  <div className="muted small">No atom names</div>
+                )
+              ) : rows.length > 0 ? (
+                <div className="constraint-sequence-grid">
+                  {rows.map((row) => {
+                    const position = row.residue;
+                    const key = `${chain.id}:${position}`;
+                    const active = key === activeKey;
+                    const picked = key === pickedKey;
+                    const highlighted = highlightKeys.has(key);
+                    const atom = row.atoms[0] || '';
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        className={`constraint-sequence-residue ${highlighted ? 'highlighted' : ''} ${active ? 'active' : ''} ${picked ? 'picked' : ''}`}
+                        disabled={disabled || !atom}
+                        onClick={() =>
+                          atom &&
+                          onPick({
+                            chainId: chain.id,
+                            residue: position,
+                            atomName: atom,
+                            label: `${chain.id}:${position}:${atom}`
+                          })
+                        }
+                        title={`${chain.id}:${position}:${row.residueName}${atom ? `:${atom}` : ''}`}
+                      >
+                        <span className="constraint-sequence-residue-index">{position}</span>
+                        <span className="constraint-sequence-residue-letter">{row.residueName}</span>
+                      </button>
+                    );
+                  })}
                 </div>
-              </div>
-            ) : (
-              <div className="constraint-sequence-grid">
-                {rows.map((row) => {
-                  const position = row.residue;
-                  const key = `${chain.id}:${position}`;
-                  const active = key === activeKey;
-                  const picked = key === pickedKey;
-                  const highlighted = highlightKeys.has(key);
-                  const atom = row.atoms[0] || '';
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      className={`constraint-sequence-residue ${highlighted ? 'highlighted' : ''} ${active ? 'active' : ''} ${picked ? 'picked' : ''}`}
-                      disabled={disabled || !atom}
-                      onClick={() =>
-                        atom &&
-                        onPick({
-                          chainId: chain.id,
-                          residue: position,
-                          atomName: atom,
-                          label: `${chain.id}:${position}:${atom}`
-                        })
-                      }
-                      title={`${chain.id}:${position}:${row.residueName}${atom ? `:${atom}` : ''}`}
-                    >
-                      <span className="constraint-sequence-residue-index">{position}</span>
-                      <span className="constraint-sequence-residue-letter">{row.residueName}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </section>
+              ) : (
+                <div className="muted small">No residues</div>
+              )}
+            </section>
           );
         })}
       </div>
-      {selectedDetail && (
-        <aside className="constraint-selection-detail-panel" aria-label="Selected residue atoms">
-          <div className="constraint-residue-2d-meta">
-            <strong>{selectedDetail.row.residueName}</strong>
-            <span className="muted small">{selectedDetail.chain.id}:{selectedDetail.row.residue}</span>
-          </div>
+    </div>
+  );
+}
+
+// Right pane: show the picked residue's 2D depiction + atom grid, plus bond endpoint
+// chips when a bond constraint is active. pickedResidue drives what is shown, so the 2D
+// follows the user's selection (protein residue or ligand) and never gets stuck.
+function ResidueAtomPicker({
+  components,
+  atomOptionsByChain,
+  targetResidue,
+  pickedResidue,
+  selectedAtomRefs,
+  onPick,
+  disabled
+}: {
+  components: InputComponent[];
+  atomOptionsByChain: StructureAtomOptionsByChain;
+  targetResidue: { chainId: string; residue: number } | null;
+  pickedResidue: PickedResidueLike | null;
+  selectedAtomRefs: Array<{ chainId: string; residue: number; atomName: string }>;
+  onPick: (pick: MolstarResiduePick) => void;
+  disabled: boolean;
+}) {
+  const activeComponents = components.filter((item) => cleanSequence(item.sequence));
+  const chainInfos = buildChainInfos(activeComponents);
+  const componentById = new Map(activeComponents.map((item) => [item.id, item] as const));
+
+  const selectedAtomKeys = new Set(
+    selectedAtomRefs.map((item) => `${item.chainId}:${item.residue}:${String(item.atomName || '').trim().toUpperCase()}`)
+  );
+
+  // The 2D detail view is driven by `targetResidue` — the residue of the constraint's
+  // currently-active endpoint (derived from constraint data + active slot), NOT by
+  // pickedResidue. pickedResidue is only the viewer-click highlight signal. This keeps
+  // the 2D always in sync with the endpoint being edited, with no manual state syncing.
+  const selectedDetail = (() => {
+    const selectedChainId = targetResidue?.chainId;
+    if (!selectedChainId) return null;
+    const chain = chainInfos.find((item) => item.id === selectedChainId);
+    if (!chain) return null;
+    const component = componentById.get(chain.componentId);
+    if (!component) return null;
+    const rows = atomOptionsByChain[chain.id] || [];
+
+    if (chain.type === 'ligand') {
+      const row = rows[0] || null;
+      if (!row) return null;
+      const smiles = component.inputMethod === 'ccd' ? '' : component.sequence || '';
+      const atomLabels = (row.atoms || []).map((_atom, index) => String(index + 1));
+      return { chain, component, row, smiles, atomLabels, isLigand: true };
+    }
+
+    if (chain.type !== 'protein') return null;
+    const residue = targetResidue.residue;
+    const row = residue ? rows.find((item) => item.residue === residue) || null : null;
+    if (!row) return null;
+    const smiles = residue2DSmiles(component, row);
+    const atomLabels = residue2DAtomLabels(component, row);
+    return { chain, component, row, smiles, atomLabels, isLigand: false };
+  })();
+
+  return (
+    <aside className="constraint-selection-detail-panel" aria-label="Selected residue atoms">
+      {selectedDetail ? (
+        <>
           {selectedDetail.smiles && (
             <Ligand2DPreview
               smiles={selectedDetail.smiles}
               width={250}
               height={170}
               atomLabels={selectedDetail.atomLabels}
-              highlightAtomIndices={selectedDetail.atomLabels.reduce<number[]>((acc, atomName, index) => {
-                const atom = String(atomName || '').trim().toUpperCase();
-                if (!atom) return acc;
-                const atomKey = `${selectedDetail.chain.id}:${selectedDetail.row.residue}:${atom}`;
+              highlightAtomIndices={selectedDetail.atomLabels.reduce<number[]>((acc, label, index) => {
+                // Ligand: label is a 1-based index, atom name lives at atoms[index].
+                // Protein: label is the atom name itself.
+                const atomName = selectedDetail.isLigand
+                  ? selectedDetail.row.atoms[index] || ''
+                  : String(label || '').trim().toUpperCase();
+                if (!atomName) return acc;
+                const atomKey = `${selectedDetail.chain.id}:${selectedDetail.row.residue}:${atomName}`;
                 if (
                   (pickedResidue?.chainId === selectedDetail.chain.id &&
                     pickedResidue.residue === selectedDetail.row.residue &&
-                    String(pickedResidue.atomName || '').trim().toUpperCase() === atom) ||
+                    String(pickedResidue.atomName || '').trim().toUpperCase() === atomName) ||
                   selectedAtomKeys.has(atomKey)
                 ) {
                   acc.push(index);
@@ -281,8 +324,11 @@ function ConstraintSequencePicker({
                 return acc;
               }, [])}
               onAtomClick={(atomIndex) => {
-                const atomName = String(selectedDetail.atomLabels[atomIndex] || '').trim().toUpperCase();
-                if (!atomName || !selectedDetail.row.atoms.includes(atomName)) return;
+                const atomName = selectedDetail.isLigand
+                  ? selectedDetail.row.atoms[atomIndex] || ''
+                  : String(selectedDetail.atomLabels[atomIndex] || '').trim().toUpperCase();
+                if (!atomName) return;
+                if (!selectedDetail.isLigand && !selectedDetail.row.atoms.includes(atomName)) return;
                 onPick({
                   chainId: selectedDetail.chain.id,
                   residue: selectedDetail.row.residue,
@@ -323,8 +369,53 @@ function ConstraintSequencePicker({
               })}
             </div>
           )}
-        </aside>
-      )}
+        </>
+      ) : null}
+    </aside>
+  );
+}
+
+// Bond endpoint chips (Atom 1 / Atom 2): the primary entry for choosing which endpoint the
+// next pick fills. Rendered at the top of the active bond constraint card
+// (ConstraintEditor.endpointTargets), above Constraint Type, so both endpoints and the active
+// slot stay visible while editing — pick a chip to aim, then click a residue/atom on the left.
+function BondEndpointTargets({
+  activeBondEndpoints,
+  activeConstraintPickSlot,
+  onEndpointActivate
+}: {
+  activeBondEndpoints: ActiveBondEndpoints | null;
+  activeConstraintPickSlot: 'first' | 'second';
+  onEndpointActivate: (slot: 'first' | 'second') => void;
+}) {
+  if (!activeBondEndpoints) return null;
+  return (
+    <div className="constraint-endpoint-targets" role="group" aria-label="Bond endpoint targets">
+      {(
+        [
+          { slot: 'first', label: 'Atom 1', endpoint: activeBondEndpoints.atom1 },
+          { slot: 'second', label: 'Atom 2', endpoint: activeBondEndpoints.atom2 }
+        ] as const
+      ).map(({ slot, label, endpoint }) => {
+        const isActive = activeConstraintPickSlot === slot;
+        const isEmpty = !endpoint.chain;
+        const value = endpoint.chain
+          ? `${endpoint.chain}:${endpoint.residue}:${endpoint.atom || '—'}`
+          : 'not set';
+        return (
+          <button
+            key={slot}
+            type="button"
+            className={`constraint-endpoint-target ${isActive ? 'active' : ''} ${isEmpty ? 'is-empty' : ''}`}
+            onClick={() => onEndpointActivate(slot)}
+            aria-pressed={isActive}
+            title={`${label} · ${value}`}
+          >
+            <span className="constraint-endpoint-target-label">{label}</span>
+            <span className="constraint-endpoint-target-value">{value}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -339,12 +430,10 @@ export interface PredictionConstraintsWorkspaceProps {
   constraintTemplateOptions: ConstraintTemplateOption[];
   selectedTemplatePreview: SelectedTemplatePreview | null;
   onSelectedConstraintTemplateComponentIdChange: (componentId: string | null) => void;
-  constraintPickModeEnabled: boolean;
-  onToggleConstraintPickMode: () => void;
   canEdit: boolean;
   onBackToComponents: () => void;
   onNavigateConstraint: (delta: -1 | 1) => void;
-  pickedResidue: { chainId: string; residue: number; atomName?: string } | null;
+  pickedResidue: PickedResidueLike | null;
   hasConstraintStructure: boolean;
   constraintStructureText: string;
   constraintStructureFormat: 'cif' | 'pdb';
@@ -356,6 +445,7 @@ export interface PredictionConstraintsWorkspaceProps {
   onConstraintsResizerKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
   onClearConstraintSelection: () => void;
   onConstraintPickSlotFocus: (constraintId: string, slot: 'first' | 'second') => void;
+  activeConstraintPickSlot: 'first' | 'second';
   components: InputComponent[];
   constraints: PredictionConstraint[];
   properties: PredictionProperties;
@@ -380,8 +470,6 @@ export function PredictionConstraintsWorkspace({
   constraintTemplateOptions,
   selectedTemplatePreview,
   onSelectedConstraintTemplateComponentIdChange,
-  constraintPickModeEnabled,
-  onToggleConstraintPickMode,
   canEdit,
   onBackToComponents,
   onNavigateConstraint,
@@ -397,6 +485,7 @@ export function PredictionConstraintsWorkspace({
   onConstraintsResizerKeyDown,
   onClearConstraintSelection,
   onConstraintPickSlotFocus,
+  activeConstraintPickSlot,
   components,
   constraints,
   properties,
@@ -405,21 +494,96 @@ export function PredictionConstraintsWorkspace({
   onSelectedConstraintIdChange,
   onConstraintClick,
   allowedConstraintTypes,
-  isBondOnlyBackend,
   onConstraintsChange,
   onPropertiesChange,
   disabled
 }: PredictionConstraintsWorkspaceProps) {
-  const sequenceAtomOptionsByChain = useMemo(() => buildComponentAtomOptionsByChain(components), [components]);
+  // RDKit resolves custom-residue atom names from the drawn SMILES (mirroring the
+  // backend CCD builder). loadRDKitModule() is a cached promise already started by
+  // Ligand2DPreview in this view, so no extra network cost.
+  const [rdkit, setRdkit] = useState<RDKitModule | null>(null);
+  useEffect(() => {
+    let alive = true;
+    loadRDKitModule()
+      .then((module) => {
+        if (alive) setRdkit(module);
+      })
+      .catch(() => {
+        /* RDKit unavailable: custom residues expose no atom names until it loads */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const sequenceAtomOptionsByChain = useMemo(() => buildComponentAtomOptionsByChain(components, rdkit), [components, rdkit]);
   const structureAtomOptionsByChain = useMemo(() => {
     if (!hasConstraintStructure || !constraintStructureText.trim()) return sequenceAtomOptionsByChain;
     return extractStructureResidueAtomOptions(constraintStructureText, constraintStructureFormat);
   }, [hasConstraintStructure, constraintStructureText, constraintStructureFormat, sequenceAtomOptionsByChain]);
 
+  const activeBondEndpoints = useMemo<ActiveBondEndpoints | null>(() => {
+    if (!activeConstraintId) return null;
+    const constraint = constraints.find((item) => item.id === activeConstraintId);
+    if (!constraint || constraint.type !== 'bond') return null;
+    return {
+      id: constraint.id,
+      atom1: { chain: constraint.atom1_chain, residue: constraint.atom1_residue, atom: constraint.atom1_atom },
+      atom2: { chain: constraint.atom2_chain, residue: constraint.atom2_residue, atom: constraint.atom2_atom }
+    };
+  }, [constraints, activeConstraintId]);
+
+  // 2D display source, derived directly from the active constraint's data + active slot
+  // (bond → atom1/atom2, contact → token1/token2, pocket → binder). Always defined once a
+  // constraint is selected — the 2D never falls back to pickedResidue, which is only the
+  // viewer-click highlight signal. This removes the manual pickedResidue syncing that
+  // previously caused the 2D to go blank.
+  const activeEndpointTarget = useMemo<{ chainId: string; residue: number } | null>(() => {
+    if (!activeConstraintId) return null;
+    const constraint = constraints.find((item) => item.id === activeConstraintId);
+    if (!constraint) return null;
+    if (constraint.type === 'bond') {
+      return activeConstraintPickSlot === 'second'
+        ? { chainId: constraint.atom2_chain, residue: constraint.atom2_residue }
+        : { chainId: constraint.atom1_chain, residue: constraint.atom1_residue };
+    }
+    if (constraint.type === 'contact') {
+      return activeConstraintPickSlot === 'second'
+        ? { chainId: constraint.token2_chain, residue: constraint.token2_residue }
+        : { chainId: constraint.token1_chain, residue: constraint.token1_residue };
+    }
+    return { chainId: constraint.binder, residue: 1 };
+  }, [constraints, activeConstraintId, activeConstraintPickSlot]);
+
+  // Activating a target chip only switches the active endpoint slot; the 2D panel follows
+  // automatically via activeEndpointTarget, so no pickedResidue sync is needed here.
+  const handleEndpointActivate = (slot: 'first' | 'second') => {
+    if (!activeBondEndpoints) return;
+    onConstraintPickSlotFocus(activeBondEndpoints.id, slot);
+  };
+
+  // Rendered inside the active constraint card: endpoint chips (Atom 1/2) at the top, above
+  // Constraint Type, as the primary endpoint selector; the 2D + atom grid below the fields.
+  const bondEndpointTargets = activeBondEndpoints ? (
+    <BondEndpointTargets
+      activeBondEndpoints={activeBondEndpoints}
+      activeConstraintPickSlot={activeConstraintPickSlot}
+      onEndpointActivate={handleEndpointActivate}
+    />
+  ) : null;
+
+  const residueAtomPicker = (
+    <ResidueAtomPicker
+      components={components}
+      atomOptionsByChain={structureAtomOptionsByChain}
+      targetResidue={activeEndpointTarget}
+      pickedResidue={pickedResidue}
+      selectedAtomRefs={constraintSelectedAtomRefs}
+      onPick={onApplyPickToSelectedConstraint}
+      disabled={!canEdit}
+    />
+  );
+
   if (!visible) return null;
-  const pickModeHint = constraintPickModeEnabled
-    ? 'Pick Mode is on: left click in Mol* to auto-fill the selected constraint.'
-    : 'Enable Pick Mode to start selecting residues from Mol*.';
 
   return (
     <div
@@ -435,8 +599,6 @@ export function PredictionConstraintsWorkspace({
               <span className="muted small constraint-nav-counter">
                 {constraintCount === 0 ? 'No constraints' : `${activeConstraintIndex >= 0 ? activeConstraintIndex + 1 : 0}/${constraintCount}`}
               </span>
-              <span className="muted small constraint-nav-pick-hint">{pickModeHint}</span>
-              {pickedResidue && <span className="muted small constraint-nav-picked">Picked: {pickedResidue.chainId}:{pickedResidue.residue}</span>}
             </div>
           </div>
           <div className="constraint-nav-controls">
@@ -456,14 +618,6 @@ export function PredictionConstraintsWorkspace({
               </label>
             )}
             <div className="constraint-nav-actions">
-              <button
-                type="button"
-                className={`btn btn-compact ${constraintPickModeEnabled ? 'btn-primary' : 'btn-ghost'}`}
-                onClick={onToggleConstraintPickMode}
-                disabled={!canEdit}
-              >
-                {constraintPickModeEnabled ? 'Pick: On' : 'Pick: Off'}
-              </button>
               <button type="button" className="btn btn-ghost btn-compact" onClick={onBackToComponents}>
                 <ArrowLeft size={14} />
                 Components
@@ -486,20 +640,20 @@ export function PredictionConstraintsWorkspace({
             pickMode="click"
             highlightResidues={constraintViewerHighlightResidues}
             activeResidue={constraintViewerActiveResidue}
-            lockView={constraintPickModeEnabled}
-            suppressAutoFocus={constraintPickModeEnabled}
+            lockView
+            suppressAutoFocus
             onResiduePick={(pick: MolstarResiduePick) => {
               onApplyPickToSelectedConstraint(pick);
             }}
           />
         ) : (
-          <ConstraintSequencePicker
+          <ConstraintChainPicker
             components={components}
             atomOptionsByChain={structureAtomOptionsByChain}
+            targetResidue={activeEndpointTarget}
             pickedResidue={pickedResidue}
-            selectedAtomRefs={constraintSelectedAtomRefs}
             highlightResidues={constraintViewerHighlightResidues}
-            activeResidue={constraintViewerActiveResidue}
+            selectedAtomRefs={constraintSelectedAtomRefs}
             disabled={!canEdit}
             onPick={onApplyPickToSelectedConstraint}
           />
@@ -537,10 +691,11 @@ export function PredictionConstraintsWorkspace({
           onClearSelection={onClearConstraintSelection}
           showAffinitySection={false}
           allowedConstraintTypes={allowedConstraintTypes}
-          compatibilityHint={isBondOnlyBackend ? 'Current backend currently supports Bond constraints only.' : undefined}
           onConstraintsChange={onConstraintsChange}
           onPropertiesChange={onPropertiesChange}
           onPickSlotFocus={onConstraintPickSlotFocus}
+          endpointTargets={bondEndpointTargets}
+          activeResiduePicker={residueAtomPicker}
           disabled={disabled}
         />
       </section>

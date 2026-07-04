@@ -102,6 +102,23 @@ def _yaml_has_ligand_annotation(yaml_content: str) -> bool:
 
 
 
+def _parse_backbone_override(raw: Any) -> Optional[Dict[str, int]]:
+    """Manual backbone atom assignment (0-based heavy-atom indices) for a custom residue.
+    Returns the 5-slot dict {n,ca,c,o,oxt} or None if absent/malformed."""
+    if not isinstance(raw, dict):
+        return None
+    parsed: Dict[str, int] = {}
+    for slot in ('n', 'ca', 'c', 'o', 'oxt'):
+        try:
+            num = int(raw.get(slot))
+        except (TypeError, ValueError):
+            return None
+        if num < 0:
+            return None
+        parsed[slot] = num
+    return parsed
+
+
 def _parse_custom_ccd_molecules(raw_value: Optional[str]) -> list[Dict[str, Any]]:
     if raw_value is None or not str(raw_value).strip():
         return []
@@ -130,6 +147,7 @@ def _parse_custom_ccd_molecules(raw_value: Optional[str]) -> list[Dict[str, Any]
             'base_residue': str(item.get('baseResidue') or item.get('base_residue') or '').strip().upper()[:1],
             'label': str(item.get('label') or '').strip()[:80],
             'kind': kind,
+            'backbone': _parse_backbone_override(item.get('backbone')),
         })
     return molecules
 

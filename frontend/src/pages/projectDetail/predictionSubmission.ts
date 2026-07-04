@@ -3,58 +3,11 @@ import { submitPrediction } from '../../api/backendApi';
 import { assignChainIdsForComponents } from '../../utils/chainAssignments';
 import { extractPrimaryProteinAndLigand, normalizeProjectInputConfig, PEPTIDE_DESIGNED_LIGAND_TOKEN } from '../../utils/projectInputs';
 import { buildQueuedPeptidePreviewFromOptions, PEPTIDE_TASK_PREVIEW_KEY } from '../../utils/peptideTaskPreview';
-import type { CustomCcdMoleculeInput, InputComponent, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
+import type { CustomCcdMoleculeInput, InputComponent, PredictionConstraint, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
 import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
+import { selectedCustomResidueDefinitions } from './peptideCustomResidues';
 
 export type PredictionWorkspaceTab = 'results' | 'basics' | 'components' | 'constraints';
-
-function normalizeCustomResidueCode(value: unknown): string {
-  return String(value || '').replace(/[^A-Za-z0-9_-]/g, '').toUpperCase().slice(0, 12);
-}
-
-function selectedCustomResidueDefinitions(
-  options: ProjectInputConfig['options'],
-  library: CustomCcdMoleculeInput[]
-): CustomCcdMoleculeInput[] {
-  const selectedCodes = new Set(
-    (options.peptideResiduePool || [])
-      .filter((item) => item.kind === 'custom')
-      .map((item) => normalizeCustomResidueCode(item.code))
-      .filter(Boolean)
-  );
-  if (selectedCodes.size === 0) return [];
-  const seen = new Set<string>();
-  const rows: CustomCcdMoleculeInput[] = [];
-  for (const item of library) {
-    const ccd = normalizeCustomResidueCode(item.ccd);
-    const smiles = String(item.smiles || '').trim();
-    if (!ccd || !smiles || !selectedCodes.has(ccd) || seen.has(ccd)) continue;
-    seen.add(ccd);
-    rows.push({
-      ccd,
-      smiles,
-      baseResidue: String(item.baseResidue || '').trim().toUpperCase().slice(0, 1) || undefined,
-      label: String(item.label || '').trim().slice(0, 80) || undefined
-    });
-  }
-  return rows;
-}
-
-function withPeptideCustomResidueDefinitions(
-  config: ProjectInputConfig,
-  library: CustomCcdMoleculeInput[],
-  enabled: boolean
-): ProjectInputConfig {
-  if (!enabled) return config;
-  const definitions = selectedCustomResidueDefinitions(config.options, library);
-  return {
-    ...config,
-    options: {
-      ...config.options,
-      peptideCustomResidueDefinitions: definitions
-    }
-  };
-}
 
 export interface PredictionDraftFields {
   taskName: string;
@@ -128,6 +81,59 @@ function resolveComponentIdByChainId(components: InputComponent[], chainId: stri
     const chainIds = assignments[index] || [];
     if (!chainIds.includes(normalizedChainId)) continue;
     return components[index]?.id || null;
+  }
+  return null;
+}
+
+// Reject constraints that reference a chain no longer present in the components. A stale
+// reference (e.g. a bond to a chain whose component was removed) is otherwise silently
+// mis-resolved by the runtime input builder and crashes the predictor — e.g. Protenix
+// "No atom found for N1 in entity 2 at position 1" when a dangling chain maps onto the wrong
+// residue. Surface it here instead of submitting invalid input. No fallback, no auto-fix:
+// the user must correct or remove the broken constraint.
+function findInvalidConstraintChainReference(
+  config: ProjectInputConfig,
+  components: InputComponent[]
+): string | null {
+  const constraints = config.constraints || [];
+  if (constraints.length === 0) return null;
+  const validChainIds = new Set(
+    assignChainIdsForComponents(components)
+      .flat()
+      .map((id) => String(id || '').trim())
+      .filter(Boolean)
+  );
+  validChainIds.add(PEPTIDE_DESIGNED_LIGAND_TOKEN);
+
+  type Ref = { chain: string; residue: number; label: string };
+  const refsFor = (constraint: PredictionConstraint): Ref[] => {
+    if (constraint.type === 'bond') {
+      return [
+        { chain: constraint.atom1_chain, residue: constraint.atom1_residue, label: 'Atom 1' },
+        { chain: constraint.atom2_chain, residue: constraint.atom2_residue, label: 'Atom 2' }
+      ];
+    }
+    if (constraint.type === 'contact') {
+      return [
+        { chain: constraint.token1_chain, residue: constraint.token1_residue, label: 'Token 1' },
+        { chain: constraint.token2_chain, residue: constraint.token2_residue, label: 'Token 2' }
+      ];
+    }
+    const refs: Ref[] = [{ chain: constraint.binder, residue: 1, label: 'Binder' }];
+    constraint.contacts.forEach(([chain, residue], index) => {
+      refs.push({ chain: String(chain || ''), residue: Number(residue) || 0, label: `Contact ${index + 1}` });
+    });
+    return refs;
+  };
+
+  for (let index = 0; index < constraints.length; index += 1) {
+    for (const ref of refsFor(constraints[index])) {
+      const chain = String(ref.chain || '').trim();
+      if (!chain) continue;
+      if (!validChainIds.has(chain)) {
+        return `Constraint ${index + 1} references chain "${chain}" (${ref.label}) that does not match any component. Fix or remove it before running.`;
+      }
+    }
   }
   return null;
 }
@@ -214,7 +220,6 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
     isPeptideDesignWorkflow = false,
     workspaceTab,
     proteinTemplates,
-    customResidueLibrary = [],
     submitInFlightRef,
     runRedirectTimerRef,
     runSuccessNoticeTimerRef,
@@ -255,11 +260,7 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
   const submissionBaseConfigRaw = isPeptideDesignWorkflow
     ? normalizeProjectInputConfig({ ...normalizedConfig, options: normalizedConfig.options })
     : normalizedConfig;
-  const submissionBaseConfig = withPeptideCustomResidueDefinitions(
-    submissionBaseConfigRaw,
-    customResidueLibrary,
-    isPeptideDesignWorkflow
-  );
+  const submissionBaseConfig = submissionBaseConfigRaw;
   const submissionConfig = buildPredictionSubmissionConfig(submissionBaseConfig, isPeptideDesignWorkflow);
   const missingOrders = listIncompleteComponentOrders(normalizedConfig.components);
   if (missingOrders.length > 0) {
@@ -278,6 +279,13 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
   const validationError = validateComponents(activeComponents);
   if (validationError) {
     setError(validationError);
+    return;
+  }
+
+  const constraintChainError = findInvalidConstraintChainReference(submissionConfig, activeComponents);
+  if (constraintChainError) {
+    setWorkspaceTab('constraints');
+    setError(constraintChainError);
     return;
   }
 
@@ -300,7 +308,7 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
     const hasMsa = computeUseMsaFlag(activeComponents, draft.use_msa);
     const persistenceWarnings: string[] = [];
     const peptideCustomCcdMolecules = isPeptideDesignWorkflow
-      ? (submissionConfig.options.peptideCustomResidueDefinitions || [])
+      ? selectedCustomResidueDefinitions(submissionConfig.options)
       : [];
 
     saveProjectInputConfig(project.id, submissionBaseConfig);
