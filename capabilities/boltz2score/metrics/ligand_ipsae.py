@@ -13,6 +13,17 @@ import numpy as np
 from utils.result_utils import confidence_model_stem, select_confidence_file
 
 
+# Standard polymer residue codes (20 amino acids + DNA/RNA nucleotides + common caps). Used only
+# by the expanded fallback to tell modified residues (UAAs), which Protenix tokenizes per-atom in
+# the PAE, apart from standard residues that stay one token.
+STANDARD_POLYMER_COMPS = {
+    "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
+    "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
+    "DA", "DG", "DC", "DT", "DI", "DJ", "A", "G", "C", "U",
+    "ACE", "NMA",
+}
+
+
 @dataclass
 class Token:
     token_index: int
@@ -125,12 +136,12 @@ def _build_tokens(cif_path: Path, ligand_chain_id: str) -> tuple[list[Token], li
             dtype=float,
         )
 
-        # Non-polymer atoms map 1:1 to PAE tokens. Protenix writes small-molecule ligands as
-        # HETATM records that still carry a label_seq_id, so for ligand-chain atoms we also
-        # treat HETATM records as atom-level — otherwise the ligand collapses to one token and
-        # the PAE token count no longer matches. Scoped to the ligand chain so protein-chain
-        # atoms keep their existing classification (no behavior change for AF3/Boltz).
-        is_non_polymer = residue_seq_num == "." or (chain_id == ligand_chain_id and group_pdb == "HETATM")
+        # Non-polymer atoms map 1:1 to PAE tokens. Protenix writes ligands AND custom residues
+        # (UAAs on protein chains) as HETATM records that still carry a label_seq_id, so we also
+        # treat HETATM records as atom-level — otherwise they collapse to one residue token and
+        # the PAE token count no longer matches. Safe for AF3/Boltz: their polymer atoms are ATOM
+        # records (unchanged) and their HETATM atoms already have a missing label_seq_id.
+        is_non_polymer = residue_seq_num == "." or group_pdb == "HETATM"
         if is_non_polymer:
             if chain_id == ligand_chain_id:
                 ligand_tokens.append(
@@ -207,6 +218,101 @@ def _build_tokens(cif_path: Path, ligand_chain_id: str) -> tuple[list[Token], li
     return protein_tokens + extra_protein_tokens, ligand_tokens
 
 
+def _build_tokens_expanded(cif_path: Path, ligand_chain_id: str) -> tuple[list[Token], list[Token]]:
+    """Fallback token builder for backends that tokenize modified (non-standard) residues
+    per-atom in the PAE — Protenix does this for custom residues (UAAs) on protein chains, so a
+    CIF with N polymer residues can have many more PAE tokens. Emitting tokens in CIF order and
+    expanding non-standard residues (by comp_id) to one token per atom matches both the PAE token
+    count and ordering. Standard residues stay one token. Only invoked when the default builder's
+    token count does not match the PAE, so AF3/Boltz (which match already) are unaffected.
+    """
+    fields, rows = _read_atom_rows(cif_path)
+    idx = {name: pos for pos, name in enumerate(fields)}
+    chain_field = "auth_asym_id" if "auth_asym_id" in idx else "label_asym_id"
+
+    tokens: list[Token] = []
+    pending_key: tuple[str, str, str] | None = None
+    pending_atoms: list[tuple[str, np.ndarray]] = []
+
+    def flush() -> None:
+        nonlocal pending_key, pending_atoms
+        if pending_key is None:
+            return
+        chain_id, seq, comp = pending_key
+        atoms = pending_atoms
+        preferred = None
+        if comp not in {"ACE", "NMA"}:
+            for name in ("CB", "CA"):
+                preferred = next((atom for atom in atoms if atom[0] == name), None)
+                if preferred is not None:
+                    break
+        if preferred is None:
+            preferred = atoms[0]
+        kind = "ligand_residue" if chain_id == ligand_chain_id else "protein_residue"
+        tokens.append(
+            Token(
+                token_index=-1,
+                chain_id=chain_id,
+                residue_name=comp,
+                residue_seq_num=seq,
+                atom_name=str(preferred[0]),
+                coord=np.asarray(preferred[1], dtype=float),
+                kind=kind,
+                label=f"{chain_id}:{comp}:{seq}:{preferred[0]}",
+            )
+        )
+        pending_key = None
+        pending_atoms = []
+
+    for parts in rows:
+        chain_id = parts[idx[chain_field]]
+        comp = parts[idx["label_comp_id"]]
+        seq = parts[idx["label_seq_id"]]
+        atom_name = parts[idx["label_atom_id"]]
+        group_pdb = parts[idx["group_PDB"]] if "group_PDB" in idx else ""
+        coord = np.array(
+            [float(parts[idx["Cartn_x"]]), float(parts[idx["Cartn_y"]]), float(parts[idx["Cartn_z"]])],
+            dtype=float,
+        )
+        is_non_polymer = seq == "." or group_pdb == "HETATM"
+        is_modified = comp not in STANDARD_POLYMER_COMPS
+        if is_non_polymer or is_modified:
+            flush()
+            if is_non_polymer and comp == "HOH":
+                continue
+            if chain_id == ligand_chain_id:
+                kind = "ligand_atom"
+                label = f"{chain_id}:{comp}:{atom_name}"
+            else:
+                kind = "protein_cofactor_atom" if is_non_polymer else "protein_residue_atom"
+                label = f"{chain_id}:{comp}:{seq}:{atom_name}" if not is_non_polymer else f"{chain_id}:{comp}:{atom_name}"
+            tokens.append(
+                Token(
+                    token_index=-1,
+                    chain_id=chain_id,
+                    residue_name=comp,
+                    residue_seq_num=seq,
+                    atom_name=atom_name,
+                    coord=coord,
+                    kind=kind,
+                    label=label,
+                )
+            )
+            continue
+        res_key = (chain_id, seq, comp)
+        if res_key != pending_key:
+            flush()
+            pending_key = res_key
+        pending_atoms.append((atom_name, coord))
+    flush()
+
+    for token_index, token in enumerate(tokens):
+        token.token_index = token_index
+    protein = [token for token in tokens if token.chain_id != ligand_chain_id]
+    ligand = [token for token in tokens if token.chain_id == ligand_chain_id]
+    return protein, ligand
+
+
 def _resolve_ligand_chain_id(confidence: dict) -> str:
     ligand_chain_id = str(confidence.get("model_ligand_chain_id") or "").strip()
     if ligand_chain_id:
@@ -244,6 +350,11 @@ def compute_ligand_ipsae_from_files(
     pae = np.load(pae_path)["pae"]
 
     protein_tokens, ligand_tokens = _build_tokens(cif_path, ligand_chain_id)
+    if len(protein_tokens) + len(ligand_tokens) != pae.shape[0]:
+        # Backends like Protenix tokenize modified (non-standard) residues per-atom in the PAE,
+        # so the default (one token per polymer residue) undercounts. Retry with the expanded
+        # builder, which emits non-standard residues as one token per atom, in CIF order.
+        protein_tokens, ligand_tokens = _build_tokens_expanded(cif_path, ligand_chain_id)
     if not protein_tokens:
         raise RuntimeError("No protein tokens found for IPSAE.")
     if not ligand_tokens:
