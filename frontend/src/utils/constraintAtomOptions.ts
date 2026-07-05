@@ -161,9 +161,9 @@ export function customResidueAtomNamesFromSmiles(
 
     const names = [...baseNames];
 
-    // Manual backbone override (user-clicked atoms): authoritative — stamp N/CA/C/O/OXT at the
-    // given indices directly and skip the SMARTS heuristic, so the picker's atom names match the
-    // backend CCD exactly (backbone letters + {ELEMENT}{count} sidechain).
+    // Manual backbone (user-clicked atoms): stamp N/CA/C/O/OXT at the given indices and skip the
+    // SMARTS heuristic, so the picker's atom names match the backend CCD (backbone letters +
+    // {ELEMENT}{count} sidechain).
     if (backboneOverride) {
       const slots: Array<[keyof CustomResidueBackbone, string]> = [
         ['n', 'N'],
@@ -221,16 +221,53 @@ export function customResidueAtomNamesFromSmiles(
   }
 }
 
-// Detection SMARTS for the 5 backbone atoms, in query order [N, CA, C, =O(carbonyl), O(hydroxyl)].
-// Used only to pre-fill the manual backbone slots in the editor; the saved manual override is
-// authoritative end-to-end. Mirrors the backend carboxyl SMARTS so a correct detection matches
-// what the backend topology heuristic would pick.
+// SMARTS for the 5 backbone atoms, in query order [N, CA, C, =O (carbonyl), O (hydroxyl)].
+// Mirrors the backend carboxyl pattern so a correct detection lines up with the backend's pick.
 const CUSTOM_BACKBONE_DETECT_SMARTS = '[NX3;!$(NC=O)]-[C;X4]-[CX3](=[OX1])[OX1H0-,OX2H1]';
+const BACKBONE_SLOT_ORDER = ['n', 'ca', 'c', 'o', 'oxt'] as const;
 
-// Auto-detect a custom residue's backbone atoms (0-based heavy-atom indices) for pre-filling the
-// editor slots. Returns null when there is no unique 5-atom match (or the SMILES has explicit H,
-// which would misalign indices) — the user then assigns manually. Same index space as the backend.
-export function detectCustomResidueBackbone(rdkit: RDKitModule, smiles: string): CustomResidueBackbone | null {
+// RDKit returns the list of matches in a few shapes across builds ({atoms: [[...]]}, a list of
+// lists, ...). Normalize to one list of index lists.
+function parseAllBackboneMatches(raw: unknown): number[][] {
+  let value: unknown = raw;
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text || text === '-1' || text === '[]' || text === 'null' || text === '{}') return [];
+    try {
+      value = JSON.parse(text);
+    } catch {
+      return [];
+    }
+  }
+  const normalizeRow = (row: unknown): number[] =>
+    Array.isArray(row) ? row.map((v) => Number(v)).filter((v) => Number.isInteger(v) && v >= 0) : [];
+  if (Array.isArray(value)) {
+    if (value.length > 0 && Array.isArray(value[0])) return value.map(normalizeRow).filter((r) => r.length > 0);
+    const single = normalizeRow(value);
+    return single.length > 0 ? [single] : [];
+  }
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    if (Array.isArray(obj.atoms) && obj.atoms.length > 0 && Array.isArray(obj.atoms[0])) {
+      return (obj.atoms as unknown[]).map(normalizeRow).filter((r) => r.length > 0);
+    }
+    if (Array.isArray(obj.matches) && obj.matches.length > 0 && Array.isArray(obj.matches[0])) {
+      return (obj.matches as unknown[]).map(normalizeRow).filter((r) => r.length > 0);
+    }
+  }
+  return [];
+}
+
+// Detect the backbone atoms for a custom residue. When `anchors` is supplied (atoms the user
+// already picked), the detection treats those as fixed: among all matches it prefers the one that
+// agrees with the most anchors, then forces the anchored slots to the user's atoms, so only the
+// unfilled slots are (re)detected. Returns null when no backbone is found, or when the SMILES has
+// explicit H (its atom indices would not line up with the backend).
+export function detectCustomResidueBackbone(
+  rdkit: RDKitModule,
+  smiles: string,
+  anchors?: Partial<CustomResidueBackbone>
+): CustomResidueBackbone | null {
   const source = String(smiles || '').trim();
   if (!source) return null;
   const mol = rdkit.get_mol(source);
@@ -243,21 +280,52 @@ export function detectCustomResidueBackbone(rdkit: RDKitModule, smiles: string):
       rdkit.get_mol(CUSTOM_BACKBONE_DETECT_SMARTS);
     if (!query) return null;
     try {
-      let raw: unknown = null;
-      if (typeof mol.get_substruct_match === 'function') {
+      let matches: number[][] = [];
+      if (typeof mol.get_substruct_matches === 'function') {
         try {
-          raw = mol.get_substruct_match(query);
+          matches = parseAllBackboneMatches(mol.get_substruct_matches(query));
         } catch {
-          raw = null;
+          matches = [];
         }
       }
-      const match = parseBackboneMatch(raw);
-      if (!match || match.length < 5) return null;
-      const [n, ca, c, o, oxt] = match;
-      const indices = [n, ca, c, o, oxt];
+      if (matches.length === 0 && typeof mol.get_substruct_match === 'function') {
+        try {
+          const single = parseBackboneMatch(mol.get_substruct_match(query));
+          if (single) matches = [single];
+        } catch {
+          matches = [];
+        }
+      }
+      matches = matches.filter((m) => m.length >= 5);
+      if (matches.length === 0) return null;
+
+      const anchorEntries = anchors
+        ? BACKBONE_SLOT_ORDER.map((slot, pos) => ({ pos, idx: anchors[slot] })).filter((e) => e.idx !== undefined)
+        : [];
+      let best: number[] | null = null;
+      let bestScore = -1;
+      for (const match of matches) {
+        let score = 0;
+        for (const entry of anchorEntries) {
+          if (match[entry.pos] === entry.idx) score += 1;
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          best = match;
+        }
+      }
+      if (!best) return null;
+      const result: CustomResidueBackbone = { n: best[0], ca: best[1], c: best[2], o: best[3], oxt: best[4] };
+      // The user's picks take priority: force the anchored slots to their atoms.
+      if (anchors) {
+        BACKBONE_SLOT_ORDER.forEach((slot) => {
+          if (anchors[slot] !== undefined) result[slot] = anchors[slot] as number;
+        });
+      }
+      const indices = [result.n, result.ca, result.c, result.o, result.oxt];
       if (indices.some((idx) => !Number.isInteger(idx) || idx < 0 || idx >= numAtoms)) return null;
       if (new Set(indices).size !== 5) return null;
-      return { n, ca, c, o, oxt };
+      return result;
     } finally {
       if (query) {
         try {

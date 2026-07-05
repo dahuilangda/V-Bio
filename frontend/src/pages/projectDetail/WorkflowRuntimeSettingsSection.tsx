@@ -250,8 +250,8 @@ export function WorkflowRuntimeSettingsSection({
   const [customDraftSmiles, setCustomDraftSmiles] = useState(CUSTOM_RESIDUE_SCAFFOLD_SMILES);
   const [customDraftValid, setCustomDraftValid] = useState(false);
   // Manual backbone atom slots (0-based heavy-atom indices). Auto-prefilled from RDKit when the
-  // SMILES validates; the user corrects by clicking atoms in the 2D. Saved as the authoritative
-  // `backbone` override on the residue (single source of truth end-to-end).
+  // SMILES validates; the user corrects by clicking atoms in the 2D. Saved on the residue as its
+  // `backbone` and used by the backend as-is.
   const [customDraftBackbone, setCustomDraftBackbone] = useState<Partial<CustomResidueBackbone>>({});
   const [armedBackboneSlot, setArmedBackboneSlot] = useState<(typeof CUSTOM_BACKBONE_SLOTS)[number] | null>(null);
   const skipBackboneAutoDetectRef = useRef(false);
@@ -317,39 +317,45 @@ export function WorkflowRuntimeSettingsSection({
 
   useEffect(() => {
     let cancelled = false;
-    const validate = async () => {
-      const smiles = customDraftSmiles.trim();
-      if (!smiles) {
-        setCustomDraftValid(false);
-        setCustomDraftBackbone({});
-        return;
-      }
-      try {
-        const rdkit = await loadRDKitModule();
-        if (cancelled) return;
-        const valid = rdkitMolHasAminoAcidBackbone(rdkit, smiles, true);
-        setCustomDraftValid(valid);
-        // When opening a residue that already has a stored backbone, keep it (skip one
-        // auto-detect cycle triggered by setting its SMILES). Otherwise pre-fill the slots
-        // from RDKit so a correct detection needs no manual work.
-        if (skipBackboneAutoDetectRef.current) {
-          skipBackboneAutoDetectRef.current = false;
-        } else if (valid) {
-          setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, smiles) ?? {});
-        } else {
-          setCustomDraftBackbone({});
-        }
-      } catch {
-        if (!cancelled) {
+    // Debounce so drawing in JSME (many SMILES changes in a row) doesn't flicker the picks.
+    const timer = window.setTimeout(() => {
+      const validate = async () => {
+        const smiles = customDraftSmiles.trim();
+        if (!smiles) {
           setCustomDraftValid(false);
           setCustomDraftBackbone({});
+          return;
         }
-      }
-    };
-    void validate();
+        try {
+          const rdkit = await loadRDKitModule();
+          if (cancelled) return;
+          const valid = rdkitMolHasAminoAcidBackbone(rdkit, smiles, true);
+          setCustomDraftValid(valid);
+          // Skip one cycle when opening a residue that already has a stored backbone (keep it).
+          // Otherwise re-detect anchored on the picks already set: atoms the user chose stay, the
+          // rest are filled — so the picks stay correct as the SMILES changes without overriding
+          // the user's choice.
+          if (skipBackboneAutoDetectRef.current) {
+            skipBackboneAutoDetectRef.current = false;
+          } else if (valid) {
+            setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, smiles, customDraftBackbone) ?? {});
+          } else {
+            setCustomDraftBackbone({});
+          }
+        } catch {
+          if (!cancelled) {
+            setCustomDraftValid(false);
+            setCustomDraftBackbone({});
+          }
+        }
+      };
+      void validate();
+    }, 250);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customDraftSmiles]);
 
   const openCustomResidueEditor = (entry?: CustomCcdMoleculeInput) => {
@@ -397,7 +403,9 @@ export function WorkflowRuntimeSettingsSection({
 
   const resetBackboneToAuto = async () => {
     const rdkit = await loadRDKitModule();
-    setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, customDraftSmiles.trim()) ?? {});
+    // Re-detect with the current picks as anchors: atoms the user already set stay; only the
+    // empty slots are filled.
+    setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, customDraftSmiles.trim(), customDraftBackbone) ?? {});
     setArmedBackboneSlot(null);
   };
 
@@ -611,8 +619,8 @@ export function WorkflowRuntimeSettingsSection({
     if (!ccd) return;
     const baseResidue = customDraftBaseResidue.trim().toUpperCase().slice(0, 1) || undefined;
     const label = customDraftName.trim() || 'Custom residue';
-    // The backbone override is authoritative only when all 5 slots are set; otherwise it is
-    // omitted and the backend auto-detects (no partial/ambiguous override).
+    // The backbone is saved only when all 5 slots are set; otherwise it is omitted and the
+    // backend auto-detects.
     const backbone: CustomResidueBackbone | undefined = CUSTOM_BACKBONE_SLOTS.every(
       (slot) => customDraftBackbone[slot] !== undefined
     )
@@ -1020,6 +1028,8 @@ export function WorkflowRuntimeSettingsSection({
                               </button>
                             );
                           })}
+                        </div>
+                        <div className="peptide-custom-backbone-foot">
                           <button
                             type="button"
                             className="peptide-custom-backbone-reset"
@@ -1029,10 +1039,10 @@ export function WorkflowRuntimeSettingsSection({
                           >
                             Auto
                           </button>
+                          {!customDraftValid ? (
+                            <span className="peptide-custom-invalid">Backbone N-CA-C(=O) is required.</span>
+                          ) : null}
                         </div>
-                        <span className={customDraftValid ? 'peptide-custom-valid' : 'peptide-custom-invalid'}>
-                          {customDraftValid ? 'Amino-acid backbone detected.' : 'Backbone N-CA-C(=O) is required.'}
-                        </span>
                       </div>
                     </div>
                     <label className="field peptide-custom-smiles">
