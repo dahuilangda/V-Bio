@@ -3,6 +3,7 @@ import type {
   MoleculeType,
   ProteinModification,
   CustomCcdMoleculeInput,
+  CustomResidueBackbone,
   PredictionConstraint,
   PredictionOptions,
   PredictionProperties,
@@ -181,6 +182,18 @@ function normalizeProteinModificationCcd(value: unknown): string {
   return typeof value === 'string' ? value.replace(/[^A-Za-z0-9_-]/g, '').toUpperCase().slice(0, 12) : '';
 }
 
+function normalizeBackboneOverride(raw: unknown): CustomResidueBackbone | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const obj = raw as Record<string, unknown>;
+  const backbone = {} as CustomResidueBackbone;
+  for (const slot of ['n', 'ca', 'c', 'o', 'oxt'] as const) {
+    const num = Number(obj[slot]);
+    if (!Number.isFinite(num) || num < 0 || Math.floor(num) !== num) return undefined;
+    backbone[slot] = num;
+  }
+  return backbone;
+}
+
 function normalizeProteinModifications(value: unknown, sequence: string): ProteinModification[] {
   if (!Array.isArray(value)) return [];
   const sequenceLength = sequence.length;
@@ -214,7 +227,8 @@ function normalizeProteinModifications(value: unknown, sequence: string): Protei
       ccd,
       inputMethod,
       smiles: inputMethod === 'jsme' ? smiles : undefined,
-      label: typeof raw.label === 'string' && raw.label.trim() ? raw.label.trim() : undefined
+      label: typeof raw.label === 'string' && raw.label.trim() ? raw.label.trim() : undefined,
+      backbone: inputMethod === 'jsme' ? normalizeBackboneOverride(raw.backbone) : undefined
     });
   });
   return normalized.sort((a, b) => a.position - b.position || a.ccd.localeCompare(b.ccd));
