@@ -4858,6 +4858,8 @@ def run_protenix_backend(
         )
     )
 
+    _append_custom_residues_ccd_from_molecules(extra_files, custom_molecules, temp_dir, "protenix")
+
     create_protenix_archive(
         output_archive_path=output_archive_path,
         protenix_json=protenix_json,
@@ -8217,6 +8219,44 @@ def _custom_ccd_mol_to_cif_block(
     return "\n".join(lines) + "\n"
 
 
+def _append_custom_residues_ccd(
+    extra_files: List[Tuple[Path, str]],
+    cif_text: Optional[str],
+    temp_dir: str,
+    prefix: str,
+) -> None:
+    """Write the custom-residue CCD mmcif (the exact definitions the backend fed to the
+    predictor) into the result archive so users can download them with the structure."""
+    text = str(cif_text or "").strip()
+    if not text:
+        return
+    try:
+        dest = Path(temp_dir) / "custom_residues.cif"
+        dest.write_text(text, encoding="utf-8")
+        extra_files.append((dest, f"{prefix}/custom_residues.cif"))
+    except Exception as err:
+        print(f"⚠️ 写入自定义残基 CCD 失败: {err}", file=sys.stderr)
+
+
+def _append_custom_residues_ccd_from_molecules(
+    extra_files: List[Tuple[Path, str]],
+    custom_molecules: List[Dict[str, Any]],
+    temp_dir: str,
+    prefix: str,
+) -> None:
+    """Re-build the custom-residue CCD mmcif from the (already normalized/merged) molecule list
+    and add it to the archive. Used by backends whose archive is assembled in a different scope
+    from where the bundle was first built."""
+    if not custom_molecules:
+        return
+    try:
+        cif_text, _ = _build_custom_ccd_bundle(custom_molecules)
+    except Exception as err:
+        print(f"⚠️ 构建自定义残基 CCD 失败: {err}", file=sys.stderr)
+        return
+    _append_custom_residues_ccd(extra_files, cif_text, temp_dir, prefix)
+
+
 def _build_custom_ccd_bundle(molecules: List[Dict[str, str]]) -> Tuple[str, Dict[str, Chem.Mol]]:
     blocks: List[str] = []
     mols: Dict[str, Chem.Mol] = {}
@@ -8606,6 +8646,8 @@ def run_boltz_backend(
         )
     except Exception as err:
         print(f"⚠️ 运行 Boltz IPSAE 后处理失败: {err}", file=sys.stderr)
+
+    _append_custom_residues_ccd_from_molecules(extra_archive_files, custom_molecules, temp_dir, "boltz")
 
     create_archive_with_a3m(
         output_archive_path,
@@ -9090,6 +9132,8 @@ except Exception:
             results_root=af3_results_root,
         )
     )
+
+    _append_custom_residues_ccd(extra_archive_files, user_ccd_text, temp_dir, "af3")
 
     create_af3_archive(
         output_archive_path,
