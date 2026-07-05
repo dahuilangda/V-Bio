@@ -2368,6 +2368,28 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
       af3Metrics.iptm = iptm;
     }
 
+    // AF3 exposes PAE only as the per-chain-pair `chain_pair_pae_min` matrix; derive a single
+    // summary (min off-diagonal = the tightest inter-chain expected alignment error, in Å) so
+    // the "PAE (A)" metric has a value, matching how the backend summarizes pair PAE.
+    const chainPairPaeMin = summary?.chain_pair_pae_min;
+    if (Array.isArray(chainPairPaeMin) && chainPairPaeMin.length > 0) {
+      let paeBest: number | null = null;
+      for (let i = 0; i < chainPairPaeMin.length; i += 1) {
+        const row = chainPairPaeMin[i];
+        if (!Array.isArray(row)) continue;
+        for (let j = 0; j < row.length; j += 1) {
+          if (i === j) continue;
+          const value = toFiniteNumber(row[j]);
+          if (value === null) continue;
+          if (paeBest === null || value < paeBest) paeBest = value;
+        }
+      }
+      if (paeBest !== null) {
+        af3Metrics.complex_pae = paeBest;
+        af3Metrics.pae = paeBest;
+      }
+    }
+
     confidence = {
       ...confidence,
       ...af3Metrics,
