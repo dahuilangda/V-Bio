@@ -193,73 +193,99 @@ function CustomResiduePreview({
   onValidityChange,
   backbone,
   onBackboneChange,
-  disabled
+  disabled,
+  onSaveToLibrary,
+  saveDisabled
 }: {
   smiles: string;
   onValidityChange: (valid: boolean) => void;
   backbone: CustomResidueBackbone | undefined;
   onBackboneChange: (next: CustomResidueBackbone | undefined) => void;
   disabled?: boolean;
+  onSaveToLibrary?: () => void;
+  saveDisabled?: boolean;
 }) {
   const [valid, setValid] = useState(false);
   const [armedSlot, setArmedSlot] = useState<(typeof CUSTOM_BACKBONE_SLOTS)[number] | null>(null);
-  // Partial editing state lives here (a residue can't store a half-assigned backbone). It is
-  // committed up via onBackboneChange only once all 5 slots are set (or cleared to undefined).
+  // The five picks, kept here while editing (a residue can only store a complete set). Sent up
+  // via onBackboneChange once all five are filled, or cleared to undefined.
   const [slots, setSlots] = useState<Partial<CustomResidueBackbone>>(backbone ?? {});
 
-  const allSlotsSet = (value: Partial<CustomResidueBackbone>) =>
+  const allSet = (value: Partial<CustomResidueBackbone>) =>
     CUSTOM_BACKBONE_SLOTS.every((slot) => value[slot] !== undefined);
+  const samePicks = (a: CustomResidueBackbone, b: Partial<CustomResidueBackbone>) =>
+    CUSTOM_BACKBONE_SLOTS.every((slot) => a[slot] === b[slot]);
 
-  // Re-seed the draft when a COMPLETE backbone arrives on the prop (e.g. applying a library
-  // residue). Ignore undefined/partial props so in-progress editing isn't wiped.
+  // Skip one detect after adopting a saved assignment (mount or library apply) so it is kept
+  // rather than immediately replaced.
+  const skipNextDetectRef = useRef(Boolean(backbone && allSet(backbone)));
+
+  // A saved assignment arriving on the prop (e.g. reusing a library residue) is adopted only
+  // when it actually differs from the current picks; a matching value is our own update coming
+  // back, which we ignore so nothing churns.
   useEffect(() => {
-    if (backbone && allSlotsSet(backbone)) setSlots(backbone);
+    if (backbone && allSet(backbone) && !samePicks(backbone, slots)) {
+      setSlots(backbone);
+      skipNextDetectRef.current = true;
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backbone]);
 
   useEffect(() => {
     let cancelled = false;
-    const run = async () => {
-      const text = smiles.trim();
-      if (!text) {
-        setValid(false);
-        onValidityChange(false);
-        return;
-      }
-      try {
-        const rdkit = await loadRDKitModule();
-        if (cancelled) return;
-        const hasBackbone = rdkitMolHasAminoAcidBackbone(rdkit, text, true);
-        setValid(hasBackbone);
-        onValidityChange(hasBackbone);
-        // Keep the draft only if every index still fits this structure; otherwise re-detect so a
-        // new/corrected SMILES gets a fresh assignment.
-        const mol = rdkit.get_mol(text);
-        const numAtoms = mol ? (typeof mol.get_num_atoms === 'function' ? mol.get_num_atoms() : 0) : 0;
-        if (mol) mol.delete();
-        const current = CUSTOM_BACKBONE_SLOTS.map((slot) => slots[slot]);
-        const currentValid =
-          numAtoms > 0 &&
-          current.every((idx) => typeof idx === 'number' && Number.isInteger(idx) && idx >= 0 && idx < numAtoms) &&
-          new Set(current).size === 5;
-        if (!currentValid) {
-          const detected = hasBackbone ? detectCustomResidueBackbone(rdkit, text) ?? undefined : undefined;
-          setSlots(detected ?? {});
-          onBackboneChange(detected);
-        }
-      } catch {
-        if (!cancelled) {
+    // Debounce so drawing in JSME (many SMILES changes in a row) doesn't flicker the picks.
+    const timer = window.setTimeout(() => {
+      const run = async () => {
+        const text = smiles.trim();
+        if (!text) {
           setValid(false);
           onValidityChange(false);
+          return;
         }
-      }
-    };
-    void run();
+        try {
+          const rdkit = await loadRDKitModule();
+          if (cancelled) return;
+          const hasBackbone = rdkitMolHasAminoAcidBackbone(rdkit, text, true);
+          setValid(hasBackbone);
+          onValidityChange(hasBackbone);
+          if (skipNextDetectRef.current) {
+            skipNextDetectRef.current = false;
+            return;
+          }
+          // Re-detect for the current structure, anchored on the picks already set: atoms the
+          // user chose stay (when the structure still supports them), the rest are filled. This
+          // keeps the picks correct as the SMILES changes, without overriding the user's choice.
+          const detected = hasBackbone ? detectCustomResidueBackbone(rdkit, text, slots) ?? undefined : undefined;
+          setSlots(detected ?? {});
+          onBackboneChange(detected);
+        } catch {
+          if (!cancelled) {
+            setValid(false);
+            onValidityChange(false);
+          }
+        }
+      };
+      void run();
+    }, 250);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [smiles]);
+
+  const runAutoDetect = async () => {
+    const text = smiles.trim();
+    const rdkit = await loadRDKitModule();
+    // Re-detect with the current picks as anchors: atoms the user already set stay; only the
+    // empty slots are filled.
+    const detected = text && rdkitMolHasAminoAcidBackbone(rdkit, text, true)
+      ? detectCustomResidueBackbone(rdkit, text, slots) ?? undefined
+      : undefined;
+    skipNextDetectRef.current = false;
+    setSlots(detected ?? {});
+    onBackboneChange(detected);
+  };
 
   const assignedIndices = CUSTOM_BACKBONE_SLOTS.map((slot) => slots[slot]).filter(
     (idx): idx is number => idx !== undefined
@@ -288,7 +314,7 @@ function CustomResiduePreview({
       next[armedSlot] = atomIndex;
     }
     setSlots(next);
-    onBackboneChange(allSlotsSet(next) ? (next as CustomResidueBackbone) : undefined);
+    onBackboneChange(allSet(next) ? (next as CustomResidueBackbone) : undefined);
     const nextUnset = CUSTOM_BACKBONE_SLOTS.find((slot) => next[slot] === undefined);
     setArmedSlot(nextUnset ?? null);
   };
@@ -326,9 +352,29 @@ function CustomResiduePreview({
           );
         })}
       </div>
-      <span className="small custom-residue-preview-status">
-        {valid ? 'Backbone detected. Click N/CA/C/O/OXT if the auto-pick is wrong.' : 'Missing amino-acid backbone: N-CA-C(=O).'}
-      </span>
+      <div className="peptide-custom-backbone-foot">
+        <button
+          type="button"
+          className="peptide-custom-backbone-reset"
+          disabled={!valid || disabled}
+          onClick={() => void runAutoDetect()}
+          title="Re-detect the backbone from the current structure"
+        >
+          Auto
+        </button>
+        {onSaveToLibrary ? (
+          <button
+            type="button"
+            className="btn btn-ghost btn-compact"
+            disabled={saveDisabled}
+            onClick={onSaveToLibrary}
+            title="Save this residue to the project library"
+          >
+            Save
+          </button>
+        ) : null}
+        {!valid ? <span className="small custom-residue-preview-status">Missing amino-acid backbone.</span> : null}
+      </div>
     </div>
   );
 }
@@ -1121,28 +1167,12 @@ export function ComponentInputEditor({
                                             backbone={mod.backbone}
                                             disabled={disabled}
                                             onBackboneChange={(next) => patchProteinModification(comp.id, mod.id, { backbone: next })}
+                                            onSaveToLibrary={() => saveModificationToLibrary(mod)}
+                                            saveDisabled={disabled || !String(mod.smiles || '').trim() || !customResidueValidity[mod.id]}
                                             onValidityChange={(isValid) =>
                                               setCustomResidueValidity((prev) => (prev[mod.id] === isValid ? prev : { ...prev, [mod.id]: isValid }))
                                             }
                                           />
-                                          <div className="protein-mod-rules">
-                                            <span>Rules</span>
-                                            <ul>
-                                              <li>Complete residue, not a standalone ligand</li>
-                                              <li>Backbone N-CA-C(=O) must remain present</li>
-                                              <li>Modify the side chain or terminal chemistry as needed</li>
-                                            </ul>
-                                          </div>
-                                          <div className="protein-mod-jsme-actions">
-                                            <button
-                                              type="button"
-                                              className="btn btn-ghost btn-compact"
-                                              disabled={disabled || !String(mod.smiles || '').trim() || !customResidueValidity[mod.id]}
-                                              onClick={() => saveModificationToLibrary(mod)}
-                                            >
-                                              Save to library
-                                            </button>
-                                          </div>
                                         </div>
                                       </>
                                     )}

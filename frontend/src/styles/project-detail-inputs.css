@@ -1116,8 +1116,13 @@
   color: #5d756a;
 }
 
+.peptide-custom-backbone-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .peptide-custom-backbone-reset {
-  margin-left: auto;
   padding: 4px 10px;
   border: 1px solid #cfdfce;
   border-radius: 999px;
