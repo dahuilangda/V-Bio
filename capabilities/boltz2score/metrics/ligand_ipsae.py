@@ -115,6 +115,7 @@ def _build_tokens(cif_path: Path, ligand_chain_id: str) -> tuple[list[Token], li
         residue_name = parts[idx["label_comp_id"]]
         residue_seq_num = parts[idx["label_seq_id"]]
         atom_name = parts[idx["label_atom_id"]]
+        group_pdb = parts[idx["group_PDB"]] if "group_PDB" in idx else ""
         coord = np.array(
             [
                 float(parts[idx["Cartn_x"]]),
@@ -124,7 +125,13 @@ def _build_tokens(cif_path: Path, ligand_chain_id: str) -> tuple[list[Token], li
             dtype=float,
         )
 
-        if residue_seq_num == ".":
+        # Non-polymer atoms map 1:1 to PAE tokens. Protenix writes small-molecule ligands as
+        # HETATM records that still carry a label_seq_id, so for ligand-chain atoms we also
+        # treat HETATM records as atom-level — otherwise the ligand collapses to one token and
+        # the PAE token count no longer matches. Scoped to the ligand chain so protein-chain
+        # atoms keep their existing classification (no behavior change for AF3/Boltz).
+        is_non_polymer = residue_seq_num == "." or (chain_id == ligand_chain_id and group_pdb == "HETATM")
+        if is_non_polymer:
             if chain_id == ligand_chain_id:
                 ligand_tokens.append(
                     Token(

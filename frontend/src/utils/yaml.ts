@@ -315,7 +315,8 @@ export function collectCustomCcdMoleculesFromComponents(
           smiles,
           baseResidue: String(mod.baseResidue || '').trim().toUpperCase().slice(0, 1) || undefined,
           label: mod.label,
-          kind: 'residue'
+          kind: 'residue',
+          backbone: mod.backbone
         });
       }
       continue;
