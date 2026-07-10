@@ -15,7 +15,6 @@ import requests
 import time
 import tarfile
 import io
-import itertools
 import math
 import re
 import base64
@@ -722,7 +721,7 @@ def _ensure_af3_required_fields(cif_text: str) -> str:
 
                         # If we didn't find a place to insert, add at the end
                         if insert_idx == -1:
-                            result_lines.append("_atom_site.pdbx_model_num")
+                            result_lines.append("_atom_site.pdbx_PDB_model_num")
                             model_num_idx = len(atom_site_tags)
 
                         continue
@@ -1629,11 +1628,10 @@ def _infer_affinity_chain_plan(
 
 
 def _load_json_object(path: Path) -> Dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"JSON payload at {path} is not an object: {type(payload).__name__}")
+    return payload
 
 
 def _run_boltz2score_ipsae_postprocess_in_docker(
@@ -2685,9 +2683,13 @@ def _run_boltz2score_affinity_postprocess(
         print("⚠️ Boltz2Score affinity 未产生 affinity JSON，跳过 affinity_data.json。", file=sys.stderr)
         return []
 
-    affinity_result = _load_json_object(affinity_result_path)
+    try:
+        affinity_result = _load_json_object(affinity_result_path)
+    except (json.JSONDecodeError, ValueError, OSError) as exc:
+        print(f"⚠️ 读取 Boltz2Score affinity JSON 失败 ({exc})，跳过 affinity_data.json。", file=sys.stderr)
+        return []
     if not affinity_result:
-        print("⚠️ 读取 Boltz2Score affinity JSON 失败，跳过 affinity_data.json。", file=sys.stderr)
+        print("⚠️ Boltz2Score affinity JSON 为空，跳过 affinity_data.json。", file=sys.stderr)
         return []
 
     affinity_result["source"] = source
@@ -3465,12 +3467,9 @@ def _require_complete_external_msa(yaml_content: str, temp_dir: str, backend_lab
 
 
 def _inject_local_msa_paths_into_yaml(yaml_content: str, temp_dir: str) -> Tuple[str, int]:
-    try:
-        yaml_data = yaml.safe_load(yaml_content) or {}
-    except Exception:
-        return yaml_content, 0
+    yaml_data = yaml.safe_load(yaml_content) or {}
     if not isinstance(yaml_data, dict):
-        return yaml_content, 0
+        raise ValueError("MSA path injection expects a YAML mapping at the top level.")
 
     sequences = yaml_data.get("sequences")
     if not isinstance(sequences, list):
@@ -3719,15 +3718,10 @@ def is_sequence_match(protein_sequence: str, query_sequence: str) -> bool:
     clean_query = query_sequence.replace('-', '').replace(' ', '').upper()
     if clean_protein == clean_query:
         return True
-    
-    # 子序列匹配：查询序列可能是蛋白质序列的一部分
-    if clean_query in clean_protein or clean_protein in clean_query:
-        # 计算相似度
-        similarity = len(set(clean_query) & set(clean_protein)) / max(len(clean_query), len(clean_protein))
-        if similarity > 0.8:  # 80%相似度阈值
-            return True
-    
-    return False
+    # Sub-sequence match only (query is a fragment of the protein or vice versa). A set-intersection
+    # "similarity" is not a sequence alignment — it would match unrelated orders (ACDE ~ EDCA) and
+    # serve a stale MSA for the wrong sequence.
+    return clean_query in clean_protein or clean_protein in clean_query
 
 def find_results_dir(base_dir: str) -> str:
     def _find_deepest_result(root_dir: str, exclude_tokens: List[str]) -> Optional[str]:
@@ -4034,7 +4028,7 @@ def _validate_unique_sequence_chain_ids(yaml_content: str) -> None:
     _extract_sequence_chain_types_from_yaml(yaml_data)
 
 
-def _next_available_chain_id(occupied: set[str]) -> str:
+def _next_available_ligand_chain_id(occupied: set[str]) -> str:
     chain_pool = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
     for token in chain_pool:
         if token not in occupied:
@@ -4048,12 +4042,9 @@ def _next_available_chain_id(occupied: set[str]) -> str:
 
 
 def _normalize_ligand_chain_collisions(yaml_content: str) -> str:
-    try:
-        yaml_data = yaml.safe_load(yaml_content) or {}
-    except Exception:
-        return yaml_content
+    yaml_data = yaml.safe_load(yaml_content) or {}
     if not isinstance(yaml_data, dict):
-        return yaml_content
+        raise ValueError("ligand-chain collision normalization expects a YAML mapping at the top level.")
 
     sequences = yaml_data.get("sequences")
     if not isinstance(sequences, list) or not sequences:
@@ -4092,7 +4083,7 @@ def _normalize_ligand_chain_collisions(yaml_content: str) -> str:
             if chain_id in non_ligand_ids or chain_id in occupied_ids:
                 mapped = ligand_id_mapping.get(chain_id)
                 if not mapped:
-                    mapped = _next_available_chain_id(occupied_ids)
+                    mapped = _next_available_ligand_chain_id(occupied_ids)
                     ligand_id_mapping[chain_id] = mapped
                 next_ids.append(mapped)
                 occupied_ids.add(mapped)
@@ -4144,12 +4135,9 @@ def _normalize_ligand_chain_collisions(yaml_content: str) -> str:
 
 
 def _sanitize_constraints_for_chain_lengths(yaml_content: str) -> str:
-    try:
-        yaml_data = yaml.safe_load(yaml_content) or {}
-    except Exception:
-        return yaml_content
+    yaml_data = yaml.safe_load(yaml_content) or {}
     if not isinstance(yaml_data, dict):
-        return yaml_content
+        raise ValueError("constraint sanitization expects a YAML mapping at the top level.")
     constraints = yaml_data.get("constraints")
     if not isinstance(constraints, list) or not constraints:
         return yaml_content
@@ -4557,6 +4545,7 @@ def run_protenix_backend(
         _normalize_custom_ccd_molecules(custom_ccd_molecules or []),
         yaml_content,
     )
+    _validate_amidated_terminal_constraints(yaml_content, custom_molecules)
     protenix_common_overlay_root: Optional[Path] = None
     if custom_molecules:
         protenix_common_overlay_root = _merge_custom_ccd_with_existing_cache(
@@ -6282,11 +6271,19 @@ def _normalize_peptide_residue_pool(raw_pool: Any, custom_molecules: List[Dict[s
                 if base not in "ARNDCQEGHILKMFPSTWYV":
                     base = "A"
                 if not any(row.get("ccd") == code and row.get("kind") == kind for row in unnatural):
+                    if kind == "preset":
+                        placement = PEPTIDE_PRESET_PLACEMENT_RULES.get(code, "any")
+                    else:
+                        # A C-terminal amidated custom residue has no leaving atom on its backbone C,
+                        # so it can only sit at the C-terminus; _sample_peptide_modifications enforces
+                        # placement == "c_term" -> last position only.
+                        custom_def = custom_by_code.get(code, {})
+                        placement = "c_term" if bool(custom_def.get("cTerminalAmidated") or False) else "any"
                     unnatural.append({
                         "ccd": code,
                         "base": base,
                         "kind": kind,
-                        "placement": PEPTIDE_PRESET_PLACEMENT_RULES.get(code, "any") if kind == "preset" else "any",
+                        "placement": placement,
                     })
     if isinstance(raw_pool, list) and not natural and not unnatural:
         raise ValueError("Peptide residue candidate pool is empty; select at least one natural or non-natural residue.")
@@ -6297,6 +6294,45 @@ def _normalize_peptide_residue_pool(raw_pool: Any, custom_molecules: List[Dict[s
     if not natural:
         raise ValueError("Peptide residue candidate pool has no usable base residues.")
     return natural, unnatural
+
+
+def _validate_amidated_terminal_constraints(yaml_text: str, custom_molecules: List[Dict[str, Any]]) -> None:
+    """C-terminal amidated custom residues carry no leaving atom on the backbone carbon, so they
+    can only occupy the last position of a LINEAR protein chain. Reject them on cyclic chains or at
+    non-terminal positions. The frontend locks this; this function is the backend guard."""
+    amidated_codes = {
+        str(m.get("ccd") or "").upper()
+        for m in custom_molecules or []
+        if isinstance(m, dict) and m.get("cTerminalAmidated")
+    }
+    if not amidated_codes:
+        return
+    data = yaml.safe_load(yaml_text) or {}
+    for entry in data.get("sequences") or []:
+        if not isinstance(entry, dict):
+            continue
+        protein = entry.get("protein")
+        if not isinstance(protein, dict):
+            continue
+        sequence = re.sub(r"\s+", "", str(protein.get("sequence") or ""))
+        seq_len = len(sequence)
+        cyclic = bool(protein.get("cyclic") or False)
+        for mod in protein.get("modifications") or []:
+            if not isinstance(mod, dict):
+                continue
+            ccd = str(mod.get("ccd") or "").upper()
+            if ccd not in amidated_codes:
+                continue
+            if cyclic:
+                raise ValueError(
+                    f"酰胺化残基 {ccd} 不能用于环肽（环肽没有 C 端）。请取消该残基的「C 端酰胺化」，或改用线性链。"
+                )
+            position = int(mod.get("position") or 0)
+            if seq_len > 0 and position != seq_len:
+                raise ValueError(
+                    f"酰胺化残基 {ccd} 只能放在蛋白链的 C 端最后一位（第 {seq_len} 位），"
+                    f"当前位于第 {position} 位。请将该修饰移至 C 端。"
+                )
 
 
 def _peptide_allowed_residues(natural_pool: List[str], design_mode: str) -> List[str]:
@@ -7251,6 +7287,10 @@ def run_peptide_design_backend(
 
     custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
     natural_pool, unnatural_pool = _normalize_peptide_residue_pool(options.get("peptideResiduePool") or options.get("peptide_residue_pool"), custom_molecules)
+    # A C-terminal amidated residue needs a free C-terminus, which cyclic/bicyclic peptides lack.
+    # Reject it up front so the GA does not waste a generation on candidates the engine refuses.
+    if design_mode in ("cyclic", "bicyclic") and any(row.get("placement") == "c_term" for row in unnatural_pool):
+        raise ValueError("C-terminal amidated residues cannot be used in cyclic/bicyclic peptide design (no free C-terminus). Remove them or switch to linear mode.")
     custom_molecules = _merge_selected_peptide_preset_molecules(custom_molecules, unnatural_pool)
     _peptide_allowed_residues(natural_pool, design_mode)
     nonnatural_min = _read_int_option(options, "peptideNonNaturalMin", 0, min_value=0, max_value=binder_length)
@@ -7860,6 +7900,7 @@ def _normalize_custom_ccd_molecules(raw_value: Any) -> List[Dict[str, Any]]:
             "label": str(item.get("label") or "").strip()[:80],
             "kind": kind,
             "backbone": _normalize_backbone_override(item.get("backbone")),
+            "cTerminalAmidated": bool(item.get("cTerminalAmidated")),
         })
     return molecules
 
@@ -7899,12 +7940,21 @@ def _is_amide_like_nitrogen(mol: Chem.Mol, atom_idx: int) -> bool:
     return False
 
 
-def _find_residue_backbone_topology(mol: Chem.Mol) -> Dict[str, Any]:
-    carboxyl_pattern = Chem.MolFromSmarts("[CX3](=O)[OX1H0-,OX2H1]")
-    if carboxyl_pattern is None:
-        raise RuntimeError("Failed to build residue carboxyl SMARTS.")
-    carboxyl_matches = list(mol.GetSubstructMatches(carboxyl_pattern))
-    if not carboxyl_matches:
+def _find_residue_backbone_topology(mol: Chem.Mol, *, amidated: bool = False) -> Dict[str, Any]:
+    # Amidated residues terminate in -C(=O)NH2 (an amide) instead of -C(=O)OH (a carboxyl). The
+    # match is still a 3-tuple (carbon, carbonyl-O, terminal-atom) where the terminal atom is O
+    # for carboxyl or N for amide, so the downstream scoring heuristic below is shared verbatim.
+    terminal_smarts = "[CX3](=[OX1])[NX3H2,NX3H1,NX4H2]" if amidated else "[CX3](=O)[OX1H0-,OX2H1]"
+    terminal_pattern = Chem.MolFromSmarts(terminal_smarts)
+    if terminal_pattern is None:
+        raise RuntimeError("Failed to build residue terminal SMARTS.")
+    terminal_matches = list(mol.GetSubstructMatches(terminal_pattern))
+    if not terminal_matches:
+        if amidated:
+            raise ValueError(
+                "C 端酰胺化自定义残基必须包含末端酰胺基团 C(=O)N"
+                "（请确认已勾选「C 端酰胺化」，且 SMILES 的 C 端为 -C(=O)N）。"
+            )
         raise ValueError("Custom residue must contain a terminal carboxyl group C(=O)O.")
 
     n_candidates = [
@@ -7916,13 +7966,13 @@ def _find_residue_backbone_topology(mol: Chem.Mol) -> Dict[str, Any]:
         raise ValueError("Custom residue must contain a peptide-linkable nitrogen atom.")
 
     best: Dict[str, Any] | None = None
-    excluded_by_carboxyl = {idx for match in carboxyl_matches for idx in match[1:]}
-    for carboxyl in carboxyl_matches:
-        if len(carboxyl) < 3:
+    excluded_by_terminal = {idx for match in terminal_matches for idx in match[1:]}
+    for terminal in terminal_matches:
+        if len(terminal) < 3:
             continue
-        carbon_idx, carbonyl_oxygen_idx, terminal_oxygen_idx = carboxyl[:3]
+        carbon_idx, carbonyl_oxygen_idx, terminal_oxygen_idx = terminal[:3]
         for n_idx in n_candidates:
-            if n_idx == carbon_idx or n_idx in excluded_by_carboxyl:
+            if n_idx == carbon_idx or n_idx in excluded_by_terminal:
                 continue
             try:
                 path = list(Chem.rdmolops.GetShortestPath(mol, n_idx, carbon_idx))
@@ -7930,7 +7980,7 @@ def _find_residue_backbone_topology(mol: Chem.Mol) -> Dict[str, Any]:
                 continue
             if len(path) < 3:
                 continue
-            if any(idx in excluded_by_carboxyl for idx in path[1:-1]):
+            if any(idx in excluded_by_terminal for idx in path[1:-1]):
                 continue
             interior = path[1:-1]
             if not interior:
@@ -7967,7 +8017,7 @@ def _set_atom_name(atom: Chem.Atom, name: str) -> None:
     atom.SetProp("alt_name", name)
 
 
-def _set_custom_ccd_atom_properties(mol: Chem.Mol, *, kind: str, residue_topology: Optional[Dict[str, Any]] = None) -> None:
+def _set_custom_ccd_atom_properties(mol: Chem.Mol, *, kind: str, residue_topology: Optional[Dict[str, Any]] = None, amidated: bool = False) -> None:
     element_count: Dict[str, int] = {}
     for atom in mol.GetAtoms():
         symbol = atom.GetSymbol().upper()
@@ -7993,8 +8043,13 @@ def _set_custom_ccd_atom_properties(mol: Chem.Mol, *, kind: str, residue_topolog
     _set_atom_name(mol.GetAtomWithIdx(c_idx), "C")
     _set_atom_name(mol.GetAtomWithIdx(o_idx), "O")
     terminal = mol.GetAtomWithIdx(oxt_idx)
-    _set_atom_name(terminal, "OXT")
-    terminal.SetProp("leaving_atom", "1")
+    if amidated:
+        # C-terminal amide: the terminal atom is nitrogen (NXT), which is NOT a leaving atom — it
+        # is part of the -CONH2 terminus (PDB convention, e.g. CCD 9AT/ZZJ). leaving_atom stays "0".
+        _set_atom_name(terminal, "NXT")
+    else:
+        _set_atom_name(terminal, "OXT")
+        terminal.SetProp("leaving_atom", "1")
 
     backbone_names = ["CA", "CB", "CG", "CD", "CE", "CZ", "CH", "CI"]
     for offset, atom_idx in enumerate(path[1:-1]):
@@ -8003,7 +8058,7 @@ def _set_custom_ccd_atom_properties(mol: Chem.Mol, *, kind: str, residue_topolog
         _set_atom_name(mol.GetAtomWithIdx(atom_idx), backbone_names[offset])
 
 
-def _residue_topology_from_backbone_override(mol: Chem.Mol, backbone: Dict[str, int]) -> Dict[str, Any]:
+def _residue_topology_from_backbone_override(mol: Chem.Mol, backbone: Dict[str, int], *, amidated: bool = False) -> Dict[str, Any]:
     """Resolve a residue_topology from a user-supplied manual backbone assignment (0-based
     heavy-atom indices). Authoritative and validated: every slot's element and the carboxyl
     chemistry must match, else raise — never silently fall back to the topology heuristic.
@@ -8039,14 +8094,22 @@ def _residue_topology_from_backbone_override(mol: Chem.Mol, backbone: Dict[str, 
         raise ValueError("Backbone CA must be a carbon or nitrogen atom.")
     if _atomic_num(c_idx) != 6:
         raise ValueError("Backbone C must be a carbon atom.")
-    if _atomic_num(o_idx) != 8 or _atomic_num(oxt_idx) != 8:
-        raise ValueError("Backbone O and OXT must be oxygen atoms.")
+    if _atomic_num(o_idx) != 8:
+        raise ValueError("Backbone O must be the carbonyl oxygen atom.")
+    # The terminal (5th) slot is the carboxyl hydroxyl oxygen (OXT) by default, or the C-terminal
+    # amide nitrogen (NXT) when amidated — both bond to the carbonyl carbon C.
+    if amidated:
+        if _atomic_num(oxt_idx) != 7:
+            raise ValueError("C 端酰胺化模式下，第 5 个骨架槽位（NXT）必须是氮原子。")
+    elif _atomic_num(oxt_idx) != 8:
+        raise ValueError("Backbone OXT must be an oxygen atom.")
 
-    # C must be the carboxyl carbon: bonded to both oxygens, with O the carbonyl (C=O) and OXT
-    # the hydroxyl (C-O). OXT is the leaving atom, so this distinction matters for peptide linking.
+    # C must be the carbonyl carbon: bonded to both O and the terminal atom, with O the carbonyl
+    # (C=O). For carboxyl, the terminal OXT is the leaving hydroxyl (C-OH); for amide, NXT is a
+    # single-bonded terminal nitrogen (C-N) that is NOT a leaving atom.
     c_neighbors = {b.GetOtherAtomIdx(c_idx) for b in mol.GetAtomWithIdx(c_idx).GetBonds()}
     if o_idx not in c_neighbors or oxt_idx not in c_neighbors:
-        raise ValueError("Backbone C must be directly bonded to both O and OXT (the carboxyl carbon).")
+        raise ValueError("Backbone C must be directly bonded to both O and the terminal atom (carboxyl/amide carbon).")
 
     def _is_double_bond(a: int, b: int) -> bool:
         for bond in mol.GetAtomWithIdx(a).GetBonds():
@@ -8055,7 +8118,14 @@ def _residue_topology_from_backbone_override(mol: Chem.Mol, backbone: Dict[str, 
         return False
 
     if not _is_double_bond(c_idx, o_idx):
-        raise ValueError("Backbone O must be the carbonyl oxygen (C=O); OXT must be the hydroxyl oxygen (C-OH).")
+        raise ValueError("Backbone O must be the carbonyl oxygen (C=O).")
+
+    if amidated:
+        for bond in mol.GetAtomWithIdx(c_idx).GetBonds():
+            if bond.GetOtherAtomIdx(c_idx) == oxt_idx:
+                if bond.GetBondType() != Chem.BondType.SINGLE:
+                    raise ValueError("C 端酰胺化模式下，C-NXT 必须是单键（酰胺 C-N 单键）。")
+                break
 
     # CA must connect the backbone (bonded to N or C), matching the topology heuristic's path.
     ca_neighbors = {b.GetOtherAtomIdx(ca_idx) for b in mol.GetAtomWithIdx(ca_idx).GetBonds()}
@@ -8073,7 +8143,7 @@ def _residue_topology_from_backbone_override(mol: Chem.Mol, backbone: Dict[str, 
     }
 
 
-def _build_custom_ccd_mol(smiles: str, *, kind: str = "residue", backbone: Optional[Dict[str, int]] = None) -> Chem.Mol:
+def _build_custom_ccd_mol(smiles: str, *, kind: str = "residue", backbone: Optional[Dict[str, int]] = None, amidated: bool = False) -> Chem.Mol:
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         raise ValueError("RDKit failed to parse custom CCD SMILES.")
@@ -8082,29 +8152,24 @@ def _build_custom_ccd_mol(smiles: str, *, kind: str = "residue", backbone: Optio
         # A manual backbone override (user-clicked atoms) is authoritative and validated; the
         # topology heuristic is only a fallback when no override is supplied.
         residue_topology = (
-            _residue_topology_from_backbone_override(mol, backbone)
-            if backbone else _find_residue_backbone_topology(mol)
+            _residue_topology_from_backbone_override(mol, backbone, amidated=amidated)
+            if backbone else _find_residue_backbone_topology(mol, amidated=amidated)
         )
     else:
         residue_topology = None
     mol = Chem.AddHs(mol)
-    _set_custom_ccd_atom_properties(mol, kind=kind, residue_topology=residue_topology)
+    _set_custom_ccd_atom_properties(mol, kind=kind, residue_topology=residue_topology, amidated=amidated)
+    embed_status = AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+    if embed_status == -1:
+        embed_status = AllChem.EmbedMolecule(mol, useRandomCoords=True)
+    if embed_status == -1:
+        raise ValueError(f"RDKit 3D embedding failed for custom CCD SMILES: {smiles}")
     try:
-        embed_status = AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
-        if embed_status == -1:
-            embed_status = AllChem.EmbedMolecule(mol, useRandomCoords=True)
-        if embed_status != -1:
-            try:
-                AllChem.UFFOptimizeMolecule(mol)
-            except Exception:
-                pass
-    except Exception:
-        pass
-    if mol.GetNumConformers() == 0:
-        conf = Chem.Conformer(mol.GetNumAtoms())
-        for idx in range(mol.GetNumAtoms()):
-            conf.SetAtomPosition(idx, (float(idx), 0.0, 0.0))
-        mol.AddConformer(conf, assignId=True)
+        AllChem.UFFOptimizeMolecule(mol)
+    except Exception as exc:
+        # Embedding already succeeded; UFF is geometry refinement only, so a failure leaves an
+        # unoptimized (but valid) conformer. Log it so a malformed custom CCD stays traceable.
+        print(f"⚠️ UFF optimization failed for custom CCD SMILES ({smiles}): {exc}", file=sys.stderr)
     for conformer in mol.GetConformers():
         conformer.SetProp("name", "Ideal")
     mol.atom_map = {atom.GetProp("name"): atom.GetIdx() for atom in mol.GetAtoms() if atom.GetSymbol().upper() not in {"H", "D"}}
@@ -8263,7 +8328,8 @@ def _build_custom_ccd_bundle(molecules: List[Dict[str, str]]) -> Tuple[str, Dict
     for item in _normalize_custom_ccd_molecules(molecules):
         kind = item.get("kind") or "residue"
         ccd = item["ccd"]
-        mol = _build_custom_ccd_mol(item["smiles"], kind=kind, backbone=item.get("backbone"))
+        amidated = bool(item.get("cTerminalAmidated") or False)
+        mol = _build_custom_ccd_mol(item["smiles"], kind=kind, backbone=item.get("backbone"), amidated=amidated)
         mol.name = ccd
         mols[ccd] = mol
         blocks.append(_custom_ccd_mol_to_cif_block(
@@ -8368,7 +8434,8 @@ def _prepare_task_boltz_custom_mols_dir(
 
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
     for item in custom_molecules:
-        custom_mol = _build_custom_ccd_mol(item["smiles"], kind=item.get("kind") or "residue", backbone=item.get("backbone"))
+        amidated = bool(item.get("cTerminalAmidated") or False)
+        custom_mol = _build_custom_ccd_mol(item["smiles"], kind=item.get("kind") or "residue", backbone=item.get("backbone"), amidated=amidated)
         aliases = _boltz_custom_ccd_aliases(item["ccd"])
         for alias in aliases:
             mol_path = task_mols / f"{alias}.pkl"
@@ -8536,6 +8603,7 @@ def run_boltz_backend(
         _normalize_custom_ccd_molecules(custom_ccd_molecules or []),
         normalized_yaml,
     )
+    _validate_amidated_terminal_constraints(normalized_yaml, custom_molecules)
     host_cache_dir = str(BOLTZ2_HOST_CACHE_DIR or "").strip()
     container_cache_dir = str(BOLTZ2_CONTAINER_CACHE_DIR or "/root/.boltz").strip() or "/root/.boltz"
     container_base_mols_dir = "/root/.boltz_base_mols"
@@ -8685,6 +8753,7 @@ def run_alphafold3_backend(
         _normalize_custom_ccd_molecules(custom_ccd_molecules or []),
         yaml_content,
     )
+    _validate_amidated_terminal_constraints(yaml_content, custom_molecules)
     user_ccd_text = None
     if custom_molecules:
         user_ccd_text, _ = _build_custom_ccd_bundle(custom_molecules)

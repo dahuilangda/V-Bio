@@ -192,8 +192,8 @@ def _revoke_registered_peptide_subtasks(parent_task_id: str, *, terminate: bool 
 
     try:
         redis_client.delete(key)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to clear revoked-subtask registry key %s: %s", key, exc)
 
     return result
 
@@ -324,8 +324,8 @@ def _terminate_task_container(container_name: str) -> None:
             stderr=subprocess.DEVNULL,
             check=False,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to remove task container %s: %s", container_name, exc)
 
 
 def _terminate_task_containers_by_task_id(task_id: str) -> None:

@@ -117,25 +117,6 @@ function buildPerAtomConfidence(
   return [];
 }
 
-function normalizeHighlightAtomIndices(atomIndices: number[]): number[] {
-  const normalized = Array.from(
-    new Set(
-      atomIndices
-        .map((value) => Number(value))
-        .filter((value) => Number.isFinite(value) && value >= 0)
-        .map((value) => Math.floor(value))
-    )
-  );
-  return normalized;
-}
-
-function injectAtomRingOverlay(svg: string, atomIndices: number[]): string {
-  // Keep highlighted atoms clean (no extra gray stroke ring).
-  const normalized = normalizeHighlightAtomIndices(atomIndices);
-  if (normalized.length === 0) return svg;
-  return svg;
-}
-
 function injectReadabilityStyle(svg: string): string {
   const svgTagStart = svg.indexOf('<svg');
   if (svgTagStart < 0) return svg;
@@ -383,7 +364,7 @@ export function renderLigand2DSvg(
     if (!rawSvg) {
       throw new Error('RDKit returned empty SVG.');
     }
-    return enforceSvgCanvasFit(injectReadabilityStyle(injectAtomRingOverlay(rawSvg, explicitHighlightAtoms)));
+    return enforceSvgCanvasFit(injectReadabilityStyle(rawSvg));
   } finally {
     mol.delete();
     if (mol !== sourceMol) {

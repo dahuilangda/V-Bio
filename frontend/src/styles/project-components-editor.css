@@ -481,6 +481,27 @@
   white-space: nowrap;
 }
 
+/* C-terminal amidation toggle: keep the checkbox at its native size — the global
+   input{width:100%} rule would otherwise stretch it inside the grid .switch-field. */
+.protein-mod-amidation,
+.peptide-custom-amidation {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+.protein-mod-amidation input[type="checkbox"],
+.peptide-custom-amidation input[type="checkbox"] {
+  width: auto;
+  height: auto;
+  flex: 0 0 auto;
+  margin: 0;
+}
+.protein-mod-amidation span,
+.peptide-custom-amidation span {
+  white-space: normal;
+}
+
 .protein-mod-jsme-main {
   gap: 4px;
 }

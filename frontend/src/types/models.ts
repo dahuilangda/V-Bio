@@ -29,6 +29,10 @@ export interface PeptideResiduePoolSelection {
   baseResidue?: string;
   label?: string;
   backbone?: CustomResidueBackbone;
+  // When true the residue's C-terminus is -CONH2 (amide) instead of -COOH (carboxyl). The 5th
+  // backbone slot then points at the amide nitrogen (NXT, non-leaving); the residue may only
+  // occupy the C-terminal position of a linear chain.
+  cTerminalAmidated?: boolean;
 }
 
 export interface ProteinModification {
@@ -42,6 +46,7 @@ export interface ProteinModification {
   smiles?: string;
   label?: string;
   backbone?: CustomResidueBackbone;
+  cTerminalAmidated?: boolean;
 }
 
 export interface InputComponent {
@@ -398,6 +403,7 @@ export interface CustomCcdMoleculeInput {
   label?: string;
   kind?: 'residue' | 'ligand';
   backbone?: CustomResidueBackbone;
+  cTerminalAmidated?: boolean;
 }
 
 export interface AffinityPreviewPayload {

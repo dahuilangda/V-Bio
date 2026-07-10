@@ -6,6 +6,7 @@ export interface NormalizedCustomResidueDefinition {
   baseResidue?: string;
   label?: string;
   backbone?: CustomResidueBackbone;
+  cTerminalAmidated?: boolean;
 }
 
 export function normalizeCustomResidueCode(value: unknown): string {
@@ -38,7 +39,8 @@ export function normalizeCustomResidueDefinition(value: unknown): NormalizedCust
     smiles,
     baseResidue: String(raw.baseResidue || '').trim().toUpperCase().slice(0, 1) || undefined,
     label: String(raw.label || '').trim().slice(0, 80) || undefined,
-    backbone: normalizeCustomResidueBackbone(raw.backbone) || undefined
+    backbone: normalizeCustomResidueBackbone(raw.backbone) || undefined,
+    cTerminalAmidated: Boolean(raw.cTerminalAmidated) || undefined
   };
 }
 
@@ -65,7 +67,7 @@ export function enrichPeptideResiduePoolFromLibrary(
     const lib = libraryByCode.get(normalizeCustomResidueCode(entry.code));
     if (!lib) return entry;
     changed = true;
-    return { ...entry, smiles: lib.smiles, baseResidue: lib.baseResidue, label: lib.label, backbone: lib.backbone };
+    return { ...entry, smiles: lib.smiles, baseResidue: lib.baseResidue, label: lib.label, backbone: lib.backbone, cTerminalAmidated: lib.cTerminalAmidated };
   });
   if (!changed) return options;
   return { ...options, peptideResiduePool: nextPool };
@@ -92,7 +94,8 @@ export function selectedCustomResidueDefinitions(
       smiles,
       baseResidue: String(item.baseResidue || '').trim().toUpperCase().slice(0, 1) || undefined,
       label: String(item.label || '').trim().slice(0, 80) || undefined,
-      backbone: normalizeCustomResidueBackbone(item.backbone) || undefined
+      backbone: normalizeCustomResidueBackbone(item.backbone) || undefined,
+      cTerminalAmidated: Boolean(item.cTerminalAmidated) || undefined
     });
   }
   return definitions;

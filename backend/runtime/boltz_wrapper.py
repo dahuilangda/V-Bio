@@ -1319,7 +1319,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     sampling_steps: int = 200,
     diffusion_samples: int = 1,
     sampling_steps_affinity: int = 200,
-    diffusion_samples_affinity: int = 3,
+    diffusion_samples_affinity: int = 5,
     max_parallel_samples: Optional[int] = None,
     step_scale: Optional[float] = None,
     write_full_pae: bool = False,
@@ -1530,7 +1530,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     if trainer_precision is not None:
         resolved_precision = 32 if trainer_precision == "32" else trainer_precision
     else:
-        resolved_precision = 32 if model == "boltz2" else 32
+        resolved_precision = 32
 
     # Set up trainer
     trainer = Trainer(
@@ -1665,7 +1665,6 @@ def predict(  # noqa: C901, PLR0915, PLR0912
 
         steering_args = BoltzSteeringParams()
         steering_args.fk_steering = False
-        steering_args.guidance_update = False
         steering_args.physical_guidance_update = False
         steering_args.contact_guidance_update = False
         

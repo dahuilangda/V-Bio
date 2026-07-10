@@ -54,7 +54,7 @@ function chainLabel(type: InputComponent['type']): string {
 }
 
 function defaultChain(chainIds: string[], index = 0): string {
-  if (!chainIds.length) return index === 0 ? 'A' : 'B';
+  if (!chainIds.length) throw new Error('defaultChain called with no chains available');
   if (index < chainIds.length) return chainIds[index];
   return chainIds[0];
 }
@@ -182,7 +182,7 @@ export function ConstraintEditor({
   };
 
   const addConstraint = (type: PredictionConstraintType) => {
-    if (!allowedTypeSet.has(type)) return;
+    if (!allowedTypeSet.has(type) || !chainIds.length) return;
     const next = defaultConstraint(type, chainIds, ligandChainIds);
     onConstraintsChange([...constraints, next]);
     onSelectedConstraintIdChange?.(next.id);
@@ -298,7 +298,7 @@ export function ConstraintEditor({
           const typeOptions = allowedTypeSet.has(item.type) ? allowedTypes : ([item.type, ...allowedTypes] as PredictionConstraintType[]);
           const setType = (nextType: PredictionConstraintType) => {
             if (item.type === nextType) return;
-            if (!allowedTypeSet.has(nextType)) return;
+            if (!allowedTypeSet.has(nextType) || !chainIds.length) return;
             const next = defaultConstraint(nextType, chainIds, ligandChainIds);
             replaceAt(item.id, { ...next, id: item.id });
           };

@@ -1,5 +1,6 @@
 import type { InputComponent } from '../types/models';
 import { normalizeComponentSequence } from './projectInputs';
+import type { RDKitModule } from './rdkit';
 
 
 export const AMINO_ACID_BACKBONE_SMARTS = '[NX3;!$(NC=O)]-[C;X4]-C(=O)[O,N]';
@@ -24,7 +25,7 @@ function hasSubstructureMatchPayload(value: unknown): boolean {
   return false;
 }
 
-export function rdkitMolHasAminoAcidBackbone(rdkit: any, smiles: string, allowTerminal = true): boolean {
+export function rdkitMolHasAminoAcidBackbone(rdkit: RDKitModule, smiles: string, allowTerminal = true): boolean {
   const text = String(smiles || '').trim();
   if (!text || !rdkit) return false;
   const mol = rdkit.get_mol(text);
@@ -53,7 +54,10 @@ export function rdkitMolHasAminoAcidBackbone(rdkit: any, smiles: string, allowTe
 export function looksLikeAminoAcidBackboneSmiles(smiles: string): boolean {
   const compact = String(smiles || '').replace(/\s+/g, '').toUpperCase();
   if (!compact) return false;
-  return /N/.test(compact) && /C\(=O\)(O|\[O-\]|N)/.test(compact);
+  // Fast synchronous pre-check only. RDKit canonicalizes the C-terminal carbonyl several ways
+  // (C(=O)O, C(=O)N, C(N)=O, NC(=O), C(O)=O ...); accept any of them. The authoritative check is
+  // the RDKit SMARTS in rdkitMolHasAminoAcidBackbone, which runs in the editor and the backend.
+  return /N/.test(compact) && /C\(=O\)|C\([^()]*\)=O/.test(compact);
 }
 
 const PRINTABLE_ASCII_REGEX = /^[\x20-\x7E]+$/;
