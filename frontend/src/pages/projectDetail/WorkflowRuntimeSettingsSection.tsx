@@ -7,6 +7,7 @@ import { loadRDKitModule } from '../../utils/rdkit';
 import type { CustomCcdMoleculeInput, CustomResidueBackbone, PeptideResiduePoolSelection } from '../../types/models';
 import { normalizePredictionBackend } from './projectDraftUtils';
 import { detectCustomResidueBackbone } from '../../utils/constraintAtomOptions';
+import { toggleTerminalAmide } from '../../utils/smilesTransform';
 import { useAuth } from '../../hooks/useAuth';
 
 type CysSlot = 'cys1' | 'cys2' | 'cys3';
@@ -253,8 +254,10 @@ export function WorkflowRuntimeSettingsSection({
   // SMILES validates; the user corrects by clicking atoms in the 2D. Saved on the residue as its
   // `backbone` and used by the backend as-is.
   const [customDraftBackbone, setCustomDraftBackbone] = useState<Partial<CustomResidueBackbone>>({});
+  const [customDraftAmidated, setCustomDraftAmidated] = useState(false);
   const [armedBackboneSlot, setArmedBackboneSlot] = useState<(typeof CUSTOM_BACKBONE_SLOTS)[number] | null>(null);
   const skipBackboneAutoDetectRef = useRef(false);
+  const prevCustomDraftAmidatedRef = useRef(customDraftAmidated);
   const showFullFields = displayMode === 'full';
   const normalizedBackend = isAffinityWorkflow ? 'boltz' : normalizePredictionBackend(backend);
   const canEditRuntimeIdentity = canEdit || isPredictionWorkflow || isPeptideDesignWorkflow || isAffinityWorkflow;
@@ -317,6 +320,8 @@ export function WorkflowRuntimeSettingsSection({
 
   useEffect(() => {
     let cancelled = false;
+    const amidatedChanged = prevCustomDraftAmidatedRef.current !== customDraftAmidated;
+    prevCustomDraftAmidatedRef.current = customDraftAmidated;
     // Debounce so drawing in JSME (many SMILES changes in a row) doesn't flicker the picks.
     const timer = window.setTimeout(() => {
       const validate = async () => {
@@ -331,14 +336,18 @@ export function WorkflowRuntimeSettingsSection({
           if (cancelled) return;
           const valid = rdkitMolHasAminoAcidBackbone(rdkit, smiles, true);
           setCustomDraftValid(valid);
-          // Skip one cycle when opening a residue that already has a stored backbone (keep it).
-          // Otherwise re-detect anchored on the picks already set: atoms the user chose stay, the
-          // rest are filled — so the picks stay correct as the SMILES changes without overriding
-          // the user's choice.
-          if (skipBackboneAutoDetectRef.current) {
+          // Skip one cycle when opening a residue that already has a stored backbone (keep it),
+          // unless amidation just toggled (the terminal atom must be re-resolved). Otherwise
+          // re-detect anchored on the picks already set: atoms the user chose stay, the rest are
+          // filled — so the picks stay correct as the SMILES changes without overriding the user.
+          if (skipBackboneAutoDetectRef.current && !amidatedChanged) {
             skipBackboneAutoDetectRef.current = false;
           } else if (valid) {
-            setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, smiles, customDraftBackbone) ?? {});
+            skipBackboneAutoDetectRef.current = false;
+            // On an amidation toggle the SMILES is re-canonicalized and the terminal element
+            // flips, so re-detect from scratch; otherwise keep the current picks as anchors.
+            const anchors = amidatedChanged ? {} : customDraftBackbone;
+            setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, smiles, anchors, customDraftAmidated) ?? {});
           } else {
             setCustomDraftBackbone({});
           }
@@ -356,7 +365,7 @@ export function WorkflowRuntimeSettingsSection({
       window.clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [customDraftSmiles]);
+  }, [customDraftSmiles, customDraftAmidated]);
 
   const openCustomResidueEditor = (entry?: CustomCcdMoleculeInput) => {
     const ccd = normalizeCustomResidueCode(entry?.ccd || '');
@@ -364,6 +373,7 @@ export function WorkflowRuntimeSettingsSection({
     setCustomDraftName(entry?.label || 'Custom residue');
     setCustomDraftBaseResidue(String(entry?.baseResidue || 'A').trim().toUpperCase().slice(0, 1) || 'A');
     setCustomDraftSmiles(entry?.smiles || CUSTOM_RESIDUE_SCAFFOLD_SMILES);
+    setCustomDraftAmidated(Boolean(entry?.cTerminalAmidated));
     const storedBackbone = entry?.backbone ?? null;
     if (storedBackbone) {
       setCustomDraftBackbone(storedBackbone);
@@ -379,6 +389,7 @@ export function WorkflowRuntimeSettingsSection({
     setCustomEditorOpen(false);
     setCustomEditingCcd('');
     setCustomDraftBackbone({});
+    setCustomDraftAmidated(false);
     setArmedBackboneSlot(null);
   };
 
@@ -405,7 +416,7 @@ export function WorkflowRuntimeSettingsSection({
     const rdkit = await loadRDKitModule();
     // Re-detect with the current picks as anchors: atoms the user already set stay; only the
     // empty slots are filled.
-    setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, customDraftSmiles.trim(), customDraftBackbone) ?? {});
+    setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, customDraftSmiles.trim(), customDraftBackbone, customDraftAmidated) ?? {});
     setArmedBackboneSlot(null);
   };
 
@@ -414,13 +425,16 @@ export function WorkflowRuntimeSettingsSection({
   const assignedBackboneIndices = CUSTOM_BACKBONE_SLOTS
     .map((slot) => customDraftBackbone[slot])
     .filter((idx): idx is number => idx !== undefined);
+  const slotLabel = (slot: (typeof CUSTOM_BACKBONE_SLOTS)[number]) =>
+    slot === 'oxt' && customDraftAmidated ? 'NXT' : CUSTOM_BACKBONE_SLOT_LABELS[slot];
+
   const backboneAtomLabels: string[] | null = assignedBackboneIndices.length
     ? (() => {
         const maxIdx = Math.max(...assignedBackboneIndices);
         const labels: string[] = new Array(maxIdx + 1).fill('');
         for (const slot of CUSTOM_BACKBONE_SLOTS) {
           const idx = customDraftBackbone[slot];
-          if (idx !== undefined) labels[idx] = CUSTOM_BACKBONE_SLOT_LABELS[slot];
+          if (idx !== undefined) labels[idx] = slotLabel(slot);
         }
         return labels;
       })()
@@ -434,7 +448,8 @@ export function WorkflowRuntimeSettingsSection({
         smiles: String(item.smiles),
         baseResidue: item.baseResidue,
         label: item.label,
-        backbone: item.backbone
+        backbone: item.backbone,
+        cTerminalAmidated: item.cTerminalAmidated
       }));
     return buildCustomResidueCatalog([...poolSources, ...peptideCustomResidueLibrary]);
   }, [peptideResiduePool, peptideCustomResidueLibrary]);
@@ -453,7 +468,8 @@ export function WorkflowRuntimeSettingsSection({
         smiles: entry.smiles,
         baseResidue: entry.baseResidue,
         label: entry.label,
-        backbone: entry.backbone
+        backbone: entry.backbone,
+        cTerminalAmidated: entry.cTerminalAmidated
       };
     }
     return { code: entry.ccd, kind };
@@ -479,7 +495,7 @@ export function WorkflowRuntimeSettingsSection({
       const lib = libraryByCode.get(normalizeCustomResidueCode(entry.code));
       if (!lib) return entry;
       changed = true;
-      return { ...entry, smiles: lib.smiles, baseResidue: lib.baseResidue, label: lib.label, backbone: lib.backbone };
+      return { ...entry, smiles: lib.smiles, baseResidue: lib.baseResidue, label: lib.label, backbone: lib.backbone, cTerminalAmidated: lib.cTerminalAmidated };
     });
     if (changed) onPeptideResiduePoolChangeRef.current(nextPool);
   }, [isPeptideDesignWorkflow, peptideResiduePool, peptideCustomResidueLibrary]);
@@ -626,7 +642,7 @@ export function WorkflowRuntimeSettingsSection({
     )
       ? (customDraftBackbone as CustomResidueBackbone)
       : undefined;
-    const nextEntry: CustomCcdMoleculeInput = { ccd, smiles, baseResidue, label, backbone };
+    const nextEntry: CustomCcdMoleculeInput = { ccd, smiles, baseResidue, label, backbone, cTerminalAmidated: customDraftAmidated || undefined };
     const nextLibrary = [
       nextEntry,
       ...peptideCustomResidueLibrary.filter((item) => {
@@ -639,7 +655,7 @@ export function WorkflowRuntimeSettingsSection({
     selectedKeys.add(`custom:${ccd}`);
     // The freshly drawn residue is the source of truth for its own SMILES; every other
     // custom residue keeps the SMILES already on its catalog entry.
-    const freshEntry: PeptideResiduePoolSelection = { code: ccd, kind: 'custom', smiles, baseResidue, label, backbone };
+    const freshEntry: PeptideResiduePoolSelection = { code: ccd, kind: 'custom', smiles, baseResidue, label, backbone, cTerminalAmidated: customDraftAmidated || undefined };
     const ordered = residueCatalogSections
       .flatMap((section) =>
         section.entries.map((entry) => {
@@ -1019,11 +1035,11 @@ export function WorkflowRuntimeSettingsSection({
                                 onClick={() => setArmedBackboneSlot((prev) => (prev === slot ? null : slot))}
                                 title={
                                   armed
-                                    ? `Click an atom in the 2D to assign ${CUSTOM_BACKBONE_SLOT_LABELS[slot]}`
-                                    : `Set ${CUSTOM_BACKBONE_SLOT_LABELS[slot]}${idx === undefined ? '' : ` (atom #${idx + 1})`}`
+                                    ? `Click an atom in the 2D to assign ${slotLabel(slot)}`
+                                    : `Set ${slotLabel(slot)}${idx === undefined ? '' : ` (atom #${idx + 1})`}`
                                 }
                               >
-                                <span className="peptide-custom-backbone-slot-label">{CUSTOM_BACKBONE_SLOT_LABELS[slot]}</span>
+                                <span className="peptide-custom-backbone-slot-label">{slotLabel(slot)}</span>
                                 <span className="peptide-custom-backbone-slot-value">{idx === undefined ? '—' : `#${idx + 1}`}</span>
                               </button>
                             );
@@ -1052,6 +1068,24 @@ export function WorkflowRuntimeSettingsSection({
                         disabled={residuePoolControlsDisabled}
                         onChange={(event) => setCustomDraftSmiles(event.target.value)}
                       />
+                    </label>
+                    <label className="switch-field peptide-custom-amidation">
+                      <input
+                        type="checkbox"
+                        checked={customDraftAmidated}
+                        disabled={residuePoolControlsDisabled}
+                        onChange={async (event) => {
+                          const nextAmidated = event.target.checked;
+                          const currentSmiles = String(customDraftSmiles || '').trim() || CUSTOM_RESIDUE_SCAFFOLD_SMILES;
+                          // Flip the backbone's terminal atom (OXT <-> NXT), honoring the user's OXT pick.
+                          // Atomic: if the terminal can't be resolved, leave flag and SMILES unchanged.
+                          const transformed = await toggleTerminalAmide(currentSmiles, customDraftBackbone, nextAmidated);
+                          if (!transformed || transformed === currentSmiles) return;
+                          setCustomDraftAmidated(nextAmidated);
+                          setCustomDraftSmiles(transformed);
+                        }}
+                      />
+                      <span>C-terminal amidation</span>
                     </label>
                     <div className="peptide-custom-editor-actions">
                       <button

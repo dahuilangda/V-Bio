@@ -237,8 +237,6 @@ export function SharingModal({
     }
   };
 
-  if (!open) return null;
-
   const items = mode === 'task' ? taskShares : projectShares;
   const filteredItems = useMemo(() => {
     const query = shareListQuery.trim().toLowerCase();
@@ -249,6 +247,7 @@ export function SharingModal({
       return targetName.includes(query) || targetUsername.includes(query);
     });
   }, [items, shareListQuery]);
+  if (!open) return null;
   const selectedUsername = String(selectedUser?.username || '').trim().toLowerCase();
   const accessOptions: Array<{ value: ShareAccessLevel; label: string; icon: typeof Eye }> = [
     { value: 'viewer', label: 'Viewer', icon: Eye },

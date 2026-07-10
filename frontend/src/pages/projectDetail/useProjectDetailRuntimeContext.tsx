@@ -1147,8 +1147,8 @@ export function useProjectDetailRuntimeContext() {
               const chunk = taskIdsForPoll.slice(i, i + 64);
               try {
                 Object.assign(statusByTaskId, await getTaskStatuses(chunk));
-              } catch {
-                // Keep partial successes from other chunks.
+              } catch (err) {
+                console.error('Task chunk update failed; keeping partial successes.', err);
               }
             }
             for (const [taskId, status] of Object.entries(statusByTaskId)) {
@@ -1176,7 +1176,8 @@ export function useProjectDetailRuntimeContext() {
                             return updated
                               ? ({ ...runtimeRow, ...patch, ...updated } as ProjectTask)
                               : ({ ...runtimeRow, ...patch } as ProjectTask);
-                          } catch {
+                          } catch (err) {
+                            console.error('updateProjectTask persistence failed; showing unsaved state.', err);
                             return { ...runtimeRow, ...patch } as ProjectTask;
                           }
                         }
@@ -1193,8 +1194,8 @@ export function useProjectDetailRuntimeContext() {
                         runtimeRowByTaskId.set(taskId, normalizedMaterializedRow);
                         continue;
                       }
-                    } catch {
-                      // Keep terminal status in memory; a later refresh can retry materialization.
+                    } catch (err) {
+                      console.error('Terminal status materialization failed; keeping in-memory state.', err);
                     }
                   }
                   try {
@@ -1213,8 +1214,8 @@ export function useProjectDetailRuntimeContext() {
                       },
                       { minimalReturn: true }
                     );
-                  } catch {
-                    // Keep runtime overlay in memory even if persistence is temporarily unavailable.
+                  } catch (err) {
+                    console.error('Runtime overlay persistence failed; keeping in-memory overlay.', err);
                   }
                 }
               }
@@ -1226,8 +1227,8 @@ export function useProjectDetailRuntimeContext() {
                 ...statusByTaskId
               }).map((row) => normalizeLeadOptRuntimeRow(row));
             }
-          } catch {
-            // Keep DB snapshot if runtime overlay fails.
+          } catch (err) {
+            console.error('Runtime overlay apply failed; keeping DB snapshot.', err);
           }
         }
 
@@ -1275,8 +1276,8 @@ export function useProjectDetailRuntimeContext() {
                       )
                     : rowsForUi.some((row) => readLeadOptEnumeratedCandidateCount(row) > 0);
                 }
-              } catch {
-                // Keep lightweight summary rows and retry with cooldown.
+              } catch (err) {
+                console.error('Lightweight summary refresh failed; keeping current rows.', err);
               }
             }
           }
@@ -1333,8 +1334,8 @@ export function useProjectDetailRuntimeContext() {
             duration_seconds: nextDurationSeconds
           };
         });
-      } catch {
-        // keep local state and retry on next cycle
+      } catch (err) {
+        console.error('refreshTaskRows polling failed; keeping local state.', err);
       } finally {
         inFlight = false;
         scheduleNext(hasLeadOptSummaryRows, hasLeadOptCandidates);
@@ -1453,8 +1454,8 @@ export function useProjectDetailRuntimeContext() {
           )
         );
         applyTaskSnapshot(detailRow);
-      } catch {
-        // Keep the current editor state if task detail hydration fails.
+      } catch (err) {
+        console.error('Task detail hydration failed; keeping current editor state.', err);
       }
     })();
 
@@ -1531,8 +1532,8 @@ export function useProjectDetailRuntimeContext() {
             inputConfig: mergedConfig
           };
         });
-      } catch {
-        // Keep existing editor state if on-demand task hydration fails.
+      } catch (err) {
+        console.error('On-demand task hydration failed; keeping existing editor state.', err);
       }
     })();
 
@@ -1612,8 +1613,8 @@ export function useProjectDetailRuntimeContext() {
               String(row.id || '').trim() === focusedRowId ? mergeTaskRuntimeFields(detailRow, row) : row
             )
           );
-        } catch {
-          // Keep current lightweight row if warmup fails.
+        } catch (err) {
+          console.error('Warmup failed; keeping current lightweight row.', err);
         }
       })();
     }, 240);
@@ -1670,8 +1671,8 @@ export function useProjectDetailRuntimeContext() {
               String(row.id || '').trim() === focusedRowId ? mergeTaskRuntimeFields(detailRow, row) : row
             )
           );
-        } catch {
-          // Keep the lightweight row; fast results polling will retry shortly.
+        } catch (err) {
+          console.error('Results fetch failed; keeping the lightweight row.', err);
         }
       })();
     }, 120);
@@ -1778,8 +1779,8 @@ export function useProjectDetailRuntimeContext() {
             String(row.id || '').trim() === sourceRowId ? mergeTaskRuntimeFields(detailRow, row) : row
           )
         );
-      } catch {
-        // Keep the current snapshot; a later detail refresh can retry hydration.
+      } catch (err) {
+        console.error('Detail hydration failed; keeping the current snapshot.', err);
       }
     })();
 
@@ -1830,8 +1831,8 @@ export function useProjectDetailRuntimeContext() {
             String(row.id || '').trim() === sourceRowId ? mergeTaskRuntimeFields(detailRow, row) : row
           )
         );
-      } catch {
-        // Keep current snapshot; a later row update can retry hydration.
+      } catch (err) {
+        console.error('Row update hydration failed; keeping current snapshot.', err);
       }
     })();
 

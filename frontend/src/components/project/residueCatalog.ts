@@ -12,6 +12,7 @@ export interface ResidueCatalogEntry {
   placement?: 'any' | 'n_term' | 'c_term' | 'terminal';
   placementLabel?: string;
   custom?: boolean;
+  cTerminalAmidated?: boolean;
 }
 
 export const NATURAL_AMINO_ACID_RESIDUES: ResidueCatalogEntry[] = [
@@ -81,6 +82,7 @@ export function buildCustomResidueCatalog(library: CustomCcdMoleculeInput[] = []
     const smiles = String(item.smiles || '').trim();
     if (!ccd || !smiles || seen.has(ccd)) continue;
     seen.add(ccd);
+    const amidated = Boolean(item.cTerminalAmidated);
     rows.push({
       ccd,
       label: String(item.label || 'Custom residue').trim() || 'Custom residue',
@@ -88,7 +90,10 @@ export function buildCustomResidueCatalog(library: CustomCcdMoleculeInput[] = []
       group: 'Custom library',
       smiles,
       backbone: item.backbone,
-      custom: true
+      custom: true,
+      cTerminalAmidated: amidated || undefined,
+      placement: amidated ? 'c_term' : undefined,
+      placementLabel: amidated ? 'C-terminal only' : undefined
     });
   }
   return rows;

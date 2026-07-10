@@ -213,7 +213,7 @@ function normalizeProteinModifications(value: unknown, sequence: string): Protei
     if (!ccd) return;
     const sequenceResidue = sequence[position - 1]?.toUpperCase() || '';
     const rawBaseResidue = typeof raw.baseResidue === 'string' ? raw.baseResidue : typeof raw.base_residue === 'string' ? raw.base_residue : '';
-    const baseResidue = rawBaseResidue.trim().toUpperCase().slice(0, 1) || sequenceResidue || 'A';
+    const baseResidue = rawBaseResidue.trim().toUpperCase().slice(0, 1) || sequenceResidue;
     if (!VALID_PROTEIN_RESIDUES.has(baseResidue)) return;
     const smiles = typeof raw.smiles === 'string' ? raw.smiles.trim() : '';
     if (inputMethod === 'jsme' && !smiles) return;
@@ -228,7 +228,8 @@ function normalizeProteinModifications(value: unknown, sequence: string): Protei
       inputMethod,
       smiles: inputMethod === 'jsme' ? smiles : undefined,
       label: typeof raw.label === 'string' && raw.label.trim() ? raw.label.trim() : undefined,
-      backbone: inputMethod === 'jsme' ? normalizeBackboneOverride(raw.backbone) : undefined
+      backbone: inputMethod === 'jsme' ? normalizeBackboneOverride(raw.backbone) : undefined,
+      cTerminalAmidated: Boolean(raw.cTerminalAmidated) || undefined
     });
   });
   return normalized.sort((a, b) => a.position - b.position || a.ccd.localeCompare(b.ccd));
@@ -398,6 +399,7 @@ function normalizePeptideResiduePool(value: unknown): NonNullable<PredictionOpti
         if (baseResidue) entry.baseResidue = baseResidue;
         const label = String(raw.label || '').trim().slice(0, 80);
         if (label) entry.label = label;
+        if (raw.cTerminalAmidated) entry.cTerminalAmidated = true;
       }
     }
     pool.push(entry);
@@ -595,7 +597,7 @@ function normalizeOptions(value: unknown): PredictionOptions {
     };
   }
   return {
-    seed: typeof seed === 'number' && Number.isFinite(seed) ? Math.max(0, Math.floor(seed)) : 42,
+    seed: typeof seed === 'number' && Number.isFinite(seed) ? Math.max(0, Math.floor(seed)) : null,
     affinityMode,
     peptideDesignMode,
     peptideBinderLength,
@@ -629,12 +631,15 @@ function normalizeConstraints(value: unknown): PredictionConstraint[] {
       const type = raw.type;
 
       if (type === 'contact') {
+        const token1Chain = typeof raw.token1_chain === 'string' ? raw.token1_chain.trim() : '';
+        const token2Chain = typeof raw.token2_chain === 'string' ? raw.token2_chain.trim() : '';
+        if (!token1Chain || !token2Chain) return null;
         return {
           id,
           type: 'contact' as const,
-          token1_chain: typeof raw.token1_chain === 'string' && raw.token1_chain ? raw.token1_chain : 'A',
+          token1_chain: token1Chain,
           token1_residue: Math.max(1, Number(raw.token1_residue || 1)),
-          token2_chain: typeof raw.token2_chain === 'string' && raw.token2_chain ? raw.token2_chain : 'B',
+          token2_chain: token2Chain,
           token2_residue: Math.max(1, Number(raw.token2_residue || 1)),
           max_distance: Math.max(1, Number(raw.max_distance || 5)),
           force: raw.force === undefined ? true : Boolean(raw.force)
@@ -642,19 +647,24 @@ function normalizeConstraints(value: unknown): PredictionConstraint[] {
       }
 
       if (type === 'bond') {
+        const atom1Chain = typeof raw.atom1_chain === 'string' ? raw.atom1_chain.trim() : '';
+        const atom2Chain = typeof raw.atom2_chain === 'string' ? raw.atom2_chain.trim() : '';
+        if (!atom1Chain || !atom2Chain) return null;
         return {
           id,
           type: 'bond' as const,
-          atom1_chain: typeof raw.atom1_chain === 'string' && raw.atom1_chain ? raw.atom1_chain : 'A',
+          atom1_chain: atom1Chain,
           atom1_residue: Math.max(1, Number(raw.atom1_residue || 1)),
           atom1_atom: typeof raw.atom1_atom === 'string' && raw.atom1_atom ? raw.atom1_atom : 'CA',
-          atom2_chain: typeof raw.atom2_chain === 'string' && raw.atom2_chain ? raw.atom2_chain : 'B',
+          atom2_chain: atom2Chain,
           atom2_residue: Math.max(1, Number(raw.atom2_residue || 1)),
           atom2_atom: typeof raw.atom2_atom === 'string' && raw.atom2_atom ? raw.atom2_atom : 'CA'
         };
       }
 
       if (type === 'pocket') {
+        const binder = typeof raw.binder === 'string' ? raw.binder.trim() : '';
+        if (!binder) return null;
         const contacts = Array.isArray(raw.contacts)
           ? raw.contacts
               .map((c) =>
@@ -667,7 +677,7 @@ function normalizeConstraints(value: unknown): PredictionConstraint[] {
         return {
           id,
           type: 'pocket' as const,
-          binder: typeof raw.binder === 'string' && raw.binder ? raw.binder : 'A',
+          binder,
           contacts,
           max_distance: Math.max(1, Number(raw.max_distance || 6)),
           force: raw.force === undefined ? true : Boolean(raw.force)
@@ -695,7 +705,8 @@ function normalizeCustomResidueLibrary(value: unknown): CustomCcdMoleculeInput[]
       ccd,
       smiles,
       baseResidue: typeof raw.baseResidue === 'string' ? raw.baseResidue.trim().toUpperCase().slice(0, 1) : undefined,
-      label: typeof raw.label === 'string' && raw.label.trim() ? raw.label.trim().slice(0, 80) : undefined
+      label: typeof raw.label === 'string' && raw.label.trim() ? raw.label.trim().slice(0, 80) : undefined,
+      cTerminalAmidated: Boolean(raw.cTerminalAmidated) || undefined
     });
   }
   return normalized;

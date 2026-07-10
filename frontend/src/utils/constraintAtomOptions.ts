@@ -117,6 +117,9 @@ export function ligandAtomNamesFromSmilesByElementOrder(smiles: string): string[
 const BACKBONE_ATOM_NAMES = ['N', 'CA', 'C', 'O', 'OXT'] as const;
 // Element each backbone slot (in SMARTS query order) must sit on: N, alpha-C, carboxyl-C, carbonyl-O, terminal-O.
 const BACKBONE_EXPECTED_ELEMENTS = ['N', 'C', 'C', 'O', 'O'] as const;
+// Amidated variant: the 5th backbone atom is the C-terminal amide nitrogen (NXT) instead of the
+// carboxyl hydroxyl oxygen. Mirrors the backend amide path in _find_residue_backbone_topology.
+const BACKBONE_EXPECTED_ELEMENTS_AMIDATED = ['N', 'C', 'C', 'O', 'N'] as const;
 
 // Parses an RDKit get_substruct_match payload into the ordered atom-index tuple of the
 // first match (indices are in SMARTS query order).
@@ -146,7 +149,8 @@ function parseBackboneMatch(raw: unknown): number[] | null {
 export function customResidueAtomNamesFromSmiles(
   rdkit: RDKitModule,
   smiles: string,
-  backboneOverride?: CustomResidueBackbone
+  backboneOverride?: CustomResidueBackbone,
+  amidated: boolean = false
 ): string[] | null {
   const source = String(smiles || '').trim();
   if (!source) return null;
@@ -170,7 +174,7 @@ export function customResidueAtomNamesFromSmiles(
         ['ca', 'CA'],
         ['c', 'C'],
         ['o', 'O'],
-        ['oxt', 'OXT']
+        ['oxt', amidated ? 'NXT' : 'OXT']
       ];
       for (const [slot, label] of slots) {
         const atomIdx = backboneOverride[slot];
@@ -180,9 +184,12 @@ export function customResidueAtomNamesFromSmiles(
       return uniqueAtoms(names);
     }
 
+    const detectSmarts = amidated ? AMINO_ACID_BACKBONE_SMARTS_AMIDATED : AMINO_ACID_BACKBONE_SMARTS;
+    const expectedElements = amidated ? BACKBONE_EXPECTED_ELEMENTS_AMIDATED : BACKBONE_EXPECTED_ELEMENTS;
+    const backboneNames = amidated ? (['N', 'CA', 'C', 'O', 'NXT'] as const) : BACKBONE_ATOM_NAMES;
     const query =
-      (typeof rdkit.get_qmol === 'function' ? rdkit.get_qmol(AMINO_ACID_BACKBONE_SMARTS) : null) ||
-      rdkit.get_mol(AMINO_ACID_BACKBONE_SMARTS);
+      (typeof rdkit.get_qmol === 'function' ? rdkit.get_qmol(detectSmarts) : null) ||
+      rdkit.get_mol(detectSmarts);
     if (!query) return null;
     try {
       let raw: unknown = null;
@@ -194,15 +201,15 @@ export function customResidueAtomNamesFromSmiles(
         }
       }
       const backbone = parseBackboneMatch(raw);
-      if (!backbone || backbone.length < BACKBONE_ATOM_NAMES.length) return null;
+      if (!backbone || backbone.length < backboneNames.length) return null;
 
-      for (let slot = 0; slot < BACKBONE_ATOM_NAMES.length; slot += 1) {
+      for (let slot = 0; slot < backboneNames.length; slot += 1) {
         const atomIdx = backbone[slot];
         if (!Number.isInteger(atomIdx) || atomIdx < 0 || atomIdx >= names.length) return null;
         // Guard against a match returned out of query order: the slot's element prefix
         // (read from its base name) must match the expected backbone element.
-        if ((names[atomIdx].match(/^[A-Z]+/)?.[0] || '') !== BACKBONE_EXPECTED_ELEMENTS[slot]) return null;
-        names[atomIdx] = BACKBONE_ATOM_NAMES[slot];
+        if ((names[atomIdx].match(/^[A-Z]+/)?.[0] || '') !== expectedElements[slot]) return null;
+        names[atomIdx] = backboneNames[slot];
       }
       return uniqueAtoms(names);
     } finally {
@@ -224,6 +231,8 @@ export function customResidueAtomNamesFromSmiles(
 // SMARTS for the 5 backbone atoms, in query order [N, CA, C, =O (carbonyl), O (hydroxyl)].
 // Mirrors the backend carboxyl pattern so a correct detection lines up with the backend's pick.
 const CUSTOM_BACKBONE_DETECT_SMARTS = '[NX3;!$(NC=O)]-[C;X4]-[CX3](=[OX1])[OX1H0-,OX2H1]';
+const CUSTOM_BACKBONE_DETECT_SMARTS_AMIDATED = '[NX3;!$(NC=O)]-[C;X4]-[CX3](=[OX1])[NX3H2,NX3H1,NX4H2]';
+const AMINO_ACID_BACKBONE_SMARTS_AMIDATED = '[NX3;!$(NC=O)]-[C;X4]-C(=O)N';
 const BACKBONE_SLOT_ORDER = ['n', 'ca', 'c', 'o', 'oxt'] as const;
 
 // RDKit returns the list of matches in a few shapes across builds ({atoms: [[...]]}, a list of
@@ -266,7 +275,8 @@ function parseAllBackboneMatches(raw: unknown): number[][] {
 export function detectCustomResidueBackbone(
   rdkit: RDKitModule,
   smiles: string,
-  anchors?: Partial<CustomResidueBackbone>
+  anchors?: Partial<CustomResidueBackbone>,
+  amidated: boolean = false
 ): CustomResidueBackbone | null {
   const source = String(smiles || '').trim();
   if (!source) return null;
@@ -275,9 +285,10 @@ export function detectCustomResidueBackbone(
   try {
     const numAtoms = typeof mol.get_num_atoms === 'function' ? mol.get_num_atoms() : 0;
     if (numAtoms <= 0 || numAtoms !== ligandAtomNamesFromSmilesByElementOrder(source).length) return null;
+    const detectSmarts = amidated ? CUSTOM_BACKBONE_DETECT_SMARTS_AMIDATED : CUSTOM_BACKBONE_DETECT_SMARTS;
     const query =
-      (typeof rdkit.get_qmol === 'function' ? rdkit.get_qmol(CUSTOM_BACKBONE_DETECT_SMARTS) : null) ||
-      rdkit.get_mol(CUSTOM_BACKBONE_DETECT_SMARTS);
+      (typeof rdkit.get_qmol === 'function' ? rdkit.get_qmol(detectSmarts) : null) ||
+      rdkit.get_mol(detectSmarts);
     if (!query) return null;
     try {
       let matches: number[][] = [];
@@ -370,7 +381,7 @@ function atomOptionsForProteinResidue(
     // no atoms rather than wrong ones; BondAtomSelect keeps any saved selection across
     // that transient empty state.
     const smiles = String(mod.smiles || '').trim();
-    const atoms = rdkit && smiles ? customResidueAtomNamesFromSmiles(rdkit, smiles, mod.backbone) : null;
+    const atoms = rdkit && smiles ? customResidueAtomNamesFromSmiles(rdkit, smiles, mod.backbone, mod.cTerminalAmidated) : null;
     return { residueName: ccd || residue, atoms: atoms || [] };
   }
   return {

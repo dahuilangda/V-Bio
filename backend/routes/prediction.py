@@ -161,6 +161,7 @@ def _parse_custom_ccd_molecules(raw_value: Optional[str]) -> list[Dict[str, Any]
             'label': str(item.get('label') or '').strip()[:80],
             'kind': kind,
             'backbone': _parse_backbone_override(item.get('backbone')),
+            'cTerminalAmidated': bool(item.get('cTerminalAmidated')),
         })
     return molecules
 
@@ -242,11 +243,9 @@ def register_prediction_routes(
         if model_name:
             logger.info('model parameter received: %s for client %s.', model_name, request.remote_addr)
 
-        backend_raw = request.form.get('backend', 'boltz')
-        backend = str(backend_raw).strip().lower()
+        backend = str(request.form.get('backend', 'boltz')).strip().lower()
         if backend not in ['boltz', 'alphafold3', 'protenix']:
-            logger.warning("Invalid backend '%s' provided by client %s. Defaulting to 'boltz'.", backend, request.remote_addr)
-            backend = 'boltz'
+            return jsonify({'error': f"Invalid backend '{backend}'. Must be one of: boltz, alphafold3, protenix."}), 400
         logger.info('backend parameter received: %s for client %s.', backend, request.remote_addr)
 
         if backend in {'boltz', 'alphafold3', 'protenix'}:
@@ -264,13 +263,11 @@ def register_prediction_routes(
                 )
             use_msa_server = True
 
-        workflow_raw = request.form.get('workflow', 'prediction')
-        workflow = str(workflow_raw).strip().lower()
+        workflow = str(request.form.get('workflow', 'prediction')).strip().lower()
         if workflow in {'peptide', 'peptide_designer', 'designer'}:
             workflow = 'peptide_design'
         if workflow not in {'prediction', 'peptide_design'}:
-            logger.warning("Invalid workflow '%s' provided by client %s. Defaulting to 'prediction'.", workflow, request.remote_addr)
-            workflow = 'prediction'
+            return jsonify({'error': f"Invalid workflow '{workflow}'. Must be one of: prediction, peptide_design."}), 400
 
         peptide_design_options = {}
         if workflow == 'peptide_design':

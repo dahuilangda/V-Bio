@@ -85,12 +85,8 @@ function buildConstraintPayload(
   chainIds: string[]
 ): Record<string, unknown>[] {
   const validChainIds = new Set(chainIds);
-  const fallbackChain = chainIds[0] || 'A';
-  const fallbackDistinctChain = chainIds.find((id) => id !== fallbackChain) || fallbackChain;
-  const fallbackLigandChain = chainIds.find((id) => chainTypeById.get(id) === 'ligand') || fallbackChain;
-
-  const normalizeChain = (candidate: string, fallback: string): string =>
-    validChainIds.has(candidate) ? candidate : fallback;
+  const resolveChain = (candidate: string): string =>
+    validChainIds.has(candidate) ? candidate : '';
 
   const normalizeToken = (chainId: string, residueLike: unknown): string | number => {
     if (chainTypeById.get(chainId) === 'ligand') {
@@ -101,8 +97,9 @@ function buildConstraintPayload(
 
   const payloads: Array<Record<string, unknown> | null> = constraints.map((constraint) => {
       if (constraint.type === 'contact') {
-        const token1Chain = normalizeChain(constraint.token1_chain, fallbackChain);
-        const token2Chain = normalizeChain(constraint.token2_chain, fallbackDistinctChain);
+        const token1Chain = resolveChain(constraint.token1_chain);
+        const token2Chain = resolveChain(constraint.token2_chain);
+        if (!token1Chain || !token2Chain) return null;
         const token1Type = chainTypeById.get(token1Chain);
         const token2Type = chainTypeById.get(token2Chain);
 
@@ -139,8 +136,9 @@ function buildConstraintPayload(
       }
 
       if (constraint.type === 'bond') {
-        const atom1Chain = normalizeChain(constraint.atom1_chain, fallbackChain);
-        const atom2Chain = normalizeChain(constraint.atom2_chain, fallbackDistinctChain);
+        const atom1Chain = resolveChain(constraint.atom1_chain);
+        const atom2Chain = resolveChain(constraint.atom2_chain);
+        if (!atom1Chain || !atom2Chain) return null;
         const atom1Type = chainTypeById.get(atom1Chain);
         const atom2Type = chainTypeById.get(atom2Chain);
         const atom1Default = String(constraint.atom1_atom || '').trim().toUpperCase();
@@ -172,7 +170,8 @@ function buildConstraintPayload(
       const contacts: Array<[string, string | number]> = (constraint.contacts || []).reduce<Array<[string, string | number]>>(
         (acc, item) => {
           if (!Array.isArray(item) || item.length < 2 || typeof item[0] !== 'string') return acc;
-          const chainId = normalizeChain(item[0], fallbackChain);
+          const chainId = resolveChain(item[0]);
+          if (!chainId) return acc;
           const token = normalizeToken(chainId, item[1]);
           acc.push([chainId, token]);
           return acc;
@@ -181,7 +180,8 @@ function buildConstraintPayload(
       );
 
       if (contacts.length === 0) return null;
-      const binder = normalizeChain(constraint.binder, fallbackLigandChain);
+      const binder = resolveChain(constraint.binder);
+      if (!binder) return null;
 
       return {
         pocket: {
@@ -316,7 +316,8 @@ export function collectCustomCcdMoleculesFromComponents(
           baseResidue: String(mod.baseResidue || '').trim().toUpperCase().slice(0, 1) || undefined,
           label: mod.label,
           kind: 'residue',
-          backbone: mod.backbone
+          backbone: mod.backbone,
+          cTerminalAmidated: mod.cTerminalAmidated
         });
       }
       continue;

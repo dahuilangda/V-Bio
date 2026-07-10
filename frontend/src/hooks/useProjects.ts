@@ -191,7 +191,8 @@ async function fetchRuntimeStatusesByTaskId(taskIds: string[]): Promise<Record<s
   if (normalizedTaskIds.length === 0) return {};
   try {
     return await getTaskStatuses(normalizedTaskIds);
-  } catch {
+  } catch (err) {
+    console.error('getTaskStatuses failed; returning empty status map.', err);
     return {};
   }
 }
@@ -343,7 +344,8 @@ async function stopProjectRuntimeTasks(taskRows: ProjectTaskRuntimeRow[]): Promi
     try {
       await terminateTask(taskId);
       return;
-    } catch {
+    } catch (err) {
+      console.error(`terminateTask failed for ${taskId}; checking current status.`, err);
       const currentStatus = await fetchRuntimeStatusesByTaskId([taskId]).catch(
         () => ({} as Record<string, TaskStatusResponse>)
       );
@@ -657,7 +659,8 @@ export function useProjects(session: Session | null) {
         queuedTaskIds,
         activeStatusByTaskId
       };
-    } catch {
+    } catch (err) {
+      console.error('Project task data load failed; returning empty state.', err);
       return {
         runtimeRows: [] as ProjectTaskRuntimeRow[],
         leadOptChildRows: [] as ProjectLeadOptChildTaskRow[],

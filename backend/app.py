@@ -66,8 +66,8 @@ def _resolve_cors_origin() -> str:
         return origin or "*"
     if origin and origin in _cors_origin_allowlist:
         return origin
-    # Fall back to first configured origin to keep browser behavior deterministic.
-    return next(iter(_cors_origin_allowlist), "")
+    # Origin not allowlisted: emit no ACAO header so the browser blocks the response.
+    return ""
 
 def _apply_cors_headers(response):
     origin = _resolve_cors_origin()

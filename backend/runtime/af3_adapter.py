@@ -263,7 +263,6 @@ class AF3Preparation:
     query_modifications: List[List[Dict[str, object]]]
     chain_id_label_map: Dict[str, str]
     bond_constraints: List[Tuple[Tuple[str, int, str], Tuple[str, int, str]]]
-    ignored_constraints: List[Dict[str, Any]]
 
 
 def _sanitize_label(label: Optional[str], fallback: str) -> str:
@@ -381,7 +380,6 @@ def parse_yaml_for_af3(
     sequence_index_lookup: Dict[str, int] = {}
     chain_id_label_map: Dict[str, str] = {}
     bond_constraints: List[Tuple[Tuple[str, int, str], Tuple[str, int, str]]] = []
-    ignored_constraints: List[Dict[str, Any]] = []
 
     def prepare_chain_ids(
         raw_ids: Optional[List[str]], default_prefix: str, desired_count: int
@@ -567,7 +565,6 @@ def parse_yaml_for_af3(
         query_modifications=query_modifications,
         chain_id_label_map=chain_id_label_map,
         bond_constraints=bond_constraints,
-        ignored_constraints=ignored_constraints,
     )
 
 

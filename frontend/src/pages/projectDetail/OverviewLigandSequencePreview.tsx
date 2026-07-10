@@ -38,7 +38,7 @@ export function OverviewLigandSequencePreview({
   residuePlddts: number[] | null;
   modifications?: ProteinModification[];
 }) {
-  const residues = sequence.trim().toUpperCase().split('');
+  const residues = useMemo(() => sequence.trim().toUpperCase().split(''), [sequence]);
   const modificationByPosition = useMemo(() => {
     const byPosition = new Map<number, ProteinModification>();
     for (const mod of modifications || []) {

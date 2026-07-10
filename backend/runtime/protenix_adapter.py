@@ -28,7 +28,6 @@ class ProtenixPreparation:
     entity_chain_ids: Dict[int, List[str]]
     entity_kinds: Dict[int, str]
     entity_seq_positions: Dict[int, int]
-    ignored_constraints: List[Dict[str, Any]]
 
 
 def _ensure_unique_label(label: str, used: set[str]) -> str:
@@ -370,7 +369,6 @@ def parse_yaml_for_protenix(
         raise ValueError("Failed to parse any valid sequence entries for Protenix input.")
 
     covalent_bonds: List[Dict[str, Any]] = []
-    ignored_constraints: List[Dict[str, Any]] = []
 
     constraints_data = data.get("constraints") or []
     if constraints_data:
@@ -410,7 +408,6 @@ def parse_yaml_for_protenix(
         entity_chain_ids=entity_chain_ids,
         entity_kinds=entity_kinds,
         entity_seq_positions=entity_seq_positions,
-        ignored_constraints=ignored_constraints,
     )
 
 

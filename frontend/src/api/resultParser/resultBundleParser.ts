@@ -75,7 +75,9 @@ function parseJsonObject(text: string | null | undefined): Record<string, unknow
       const parsed = JSON.parse(normalized) as unknown;
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
       return parsed as Record<string, unknown>;
-    } catch {
+    } catch (exc) {
+      // Surface corrupt backend JSON instead of silently treating it as "no data".
+      console.warn('[resultBundleParser] JSON parse failed after non-finite normalization; treating as absent.', exc);
       return null;
     }
   }

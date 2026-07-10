@@ -66,12 +66,10 @@ def register_affinity_routes(
         if ligand_file is not None and ligand_file.filename != '':
             try:
                 ligand_file.seek(0)
-                try:
-                    ligand_text = ligand_file.read().decode('utf-8')
-                except UnicodeDecodeError:
-                    ligand_file.seek(0)
-                    ligand_text = ligand_file.read().decode('utf-8', errors='replace')
+                ligand_text = ligand_file.read().decode('utf-8')
                 ligand_filename = secure_filename(ligand_file.filename)
+            except UnicodeDecodeError:
+                return jsonify({'error': 'ligand_file is not valid UTF-8 text; provide an SDF/MOL block as UTF-8.'}), 400
             except IOError as exc:
                 logger.exception('Failed to read ligand_file for affinity preview: %s', exc)
                 return jsonify({'error': f'Failed to read ligand_file: {exc}'}), 400
@@ -228,11 +226,9 @@ def register_affinity_routes(
             if has_ligand_file and ligand_file is not None:
                 try:
                     ligand_file.seek(0)
-                    try:
-                        ligand_file_content = ligand_file.read().decode('utf-8')
-                    except UnicodeDecodeError:
-                        ligand_file.seek(0)
-                        ligand_file_content = ligand_file.read().decode('utf-8', errors='replace')
+                    ligand_file_content = ligand_file.read().decode('utf-8')
+                except UnicodeDecodeError:
+                    return jsonify({'error': 'ligand_file is not valid UTF-8 text; provide an SDF/MOL block as UTF-8.'}), 400
                 except IOError as exc:
                     logger.exception('Failed to read ligand_file from request: %s. Client IP: %s', exc, request.remote_addr)
                     return jsonify({'error': f'Failed to read ligand_file: {exc}'}), 400

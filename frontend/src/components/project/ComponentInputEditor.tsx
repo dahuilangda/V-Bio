@@ -9,6 +9,7 @@ import { loadRDKitModule } from '../../utils/rdkit';
 import { Ligand2DPreview } from './Ligand2DPreview';
 import { rdkitMolHasAminoAcidBackbone } from '../../utils/inputValidation';
 import { detectCustomResidueBackbone } from '../../utils/constraintAtomOptions';
+import { toggleTerminalAmide } from '../../utils/smilesTransform';
 import { BUILT_IN_PROTEIN_MODIFICATIONS } from './residueCatalog';
 
 interface ComponentInputEditorProps {
@@ -195,7 +196,8 @@ function CustomResiduePreview({
   onBackboneChange,
   disabled,
   onSaveToLibrary,
-  saveDisabled
+  saveDisabled,
+  amidated
 }: {
   smiles: string;
   onValidityChange: (valid: boolean) => void;
@@ -204,6 +206,7 @@ function CustomResiduePreview({
   disabled?: boolean;
   onSaveToLibrary?: () => void;
   saveDisabled?: boolean;
+  amidated?: boolean;
 }) {
   const [valid, setValid] = useState(false);
   const [armedSlot, setArmedSlot] = useState<(typeof CUSTOM_BACKBONE_SLOTS)[number] | null>(null);
@@ -219,6 +222,9 @@ function CustomResiduePreview({
   // Skip one detect after adopting a saved assignment (mount or library apply) so it is kept
   // rather than immediately replaced.
   const skipNextDetectRef = useRef(Boolean(backbone && allSet(backbone)));
+  // Track amidation so toggling it re-detects the 5th slot (OXT oxygen <-> NXT nitrogen) while
+  // keeping the N/CA/C/O picks.
+  const prevAmidatedRef = useRef(Boolean(amidated));
 
   // A saved assignment arriving on the prop (e.g. reusing a library residue) is adopted only
   // when it actually differs from the current picks; a matching value is our own update coming
@@ -233,6 +239,8 @@ function CustomResiduePreview({
 
   useEffect(() => {
     let cancelled = false;
+    const amidatedChanged = prevAmidatedRef.current !== Boolean(amidated);
+    prevAmidatedRef.current = Boolean(amidated);
     // Debounce so drawing in JSME (many SMILES changes in a row) doesn't flicker the picks.
     const timer = window.setTimeout(() => {
       const run = async () => {
@@ -248,14 +256,16 @@ function CustomResiduePreview({
           const hasBackbone = rdkitMolHasAminoAcidBackbone(rdkit, text, true);
           setValid(hasBackbone);
           onValidityChange(hasBackbone);
-          if (skipNextDetectRef.current) {
+          if (skipNextDetectRef.current && !amidatedChanged) {
             skipNextDetectRef.current = false;
             return;
           }
-          // Re-detect for the current structure, anchored on the picks already set: atoms the
-          // user chose stay (when the structure still supports them), the rest are filled. This
-          // keeps the picks correct as the SMILES changes, without overriding the user's choice.
-          const detected = hasBackbone ? detectCustomResidueBackbone(rdkit, text, slots) ?? undefined : undefined;
+          skipNextDetectRef.current = false;
+          // Re-detect anchored on the current picks so a user's manual choices survive small
+          // SMILES edits. On an amidation toggle the SMILES is re-canonicalized (atom order may
+          // change) and the terminal element flips, so re-detect from scratch.
+          const anchors = amidatedChanged ? {} : slots;
+          const detected = hasBackbone ? detectCustomResidueBackbone(rdkit, text, anchors, amidated) ?? undefined : undefined;
           setSlots(detected ?? {});
           onBackboneChange(detected);
         } catch {
@@ -272,7 +282,7 @@ function CustomResiduePreview({
       window.clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [smiles]);
+  }, [smiles, amidated]);
 
   const runAutoDetect = async () => {
     const text = smiles.trim();
@@ -280,12 +290,15 @@ function CustomResiduePreview({
     // Re-detect with the current picks as anchors: atoms the user already set stay; only the
     // empty slots are filled.
     const detected = text && rdkitMolHasAminoAcidBackbone(rdkit, text, true)
-      ? detectCustomResidueBackbone(rdkit, text, slots) ?? undefined
+      ? detectCustomResidueBackbone(rdkit, text, slots, amidated) ?? undefined
       : undefined;
     skipNextDetectRef.current = false;
     setSlots(detected ?? {});
     onBackboneChange(detected);
   };
+
+  const slotLabel = (slot: (typeof CUSTOM_BACKBONE_SLOTS)[number]) =>
+    slot === 'oxt' && amidated ? 'NXT' : CUSTOM_BACKBONE_SLOT_LABELS[slot];
 
   const assignedIndices = CUSTOM_BACKBONE_SLOTS.map((slot) => slots[slot]).filter(
     (idx): idx is number => idx !== undefined
@@ -296,7 +309,7 @@ function CustomResiduePreview({
         const labels: string[] = new Array(maxIdx + 1).fill('');
         for (const slot of CUSTOM_BACKBONE_SLOTS) {
           const idx = slots[slot];
-          if (idx !== undefined) labels[idx] = CUSTOM_BACKBONE_SLOT_LABELS[slot];
+          if (idx !== undefined) labels[idx] = slotLabel(slot);
         }
         return labels;
       })()
@@ -342,11 +355,11 @@ function CustomResiduePreview({
               onClick={() => setArmedSlot((prev) => (prev === slot ? null : slot))}
               title={
                 armed
-                  ? `Click an atom in the 2D to assign ${CUSTOM_BACKBONE_SLOT_LABELS[slot]}`
-                  : `Set ${CUSTOM_BACKBONE_SLOT_LABELS[slot]}${idx === undefined ? '' : ` (atom #${idx + 1})`}`
+                  ? `Click an atom in the 2D to assign ${slotLabel(slot)}`
+                  : `Set ${slotLabel(slot)}${idx === undefined ? '' : ` (atom #${idx + 1})`}`
               }
             >
-              <span className="peptide-custom-backbone-slot-label">{CUSTOM_BACKBONE_SLOT_LABELS[slot]}</span>
+              <span className="peptide-custom-backbone-slot-label">{slotLabel(slot)}</span>
               <span className="peptide-custom-backbone-slot-value">{idx === undefined ? '—' : `#${idx + 1}`}</span>
             </button>
           );
@@ -466,6 +479,12 @@ export function ComponentInputEditor({
     const modifications = (component.modifications || []).map((mod) => {
       if (mod.id !== modificationId) return mod;
       const next = { ...mod, ...patch };
+      // A C-terminal amidated residue can only occupy the last position (its backbone C has no
+      // leaving atom), so lock it to the C-terminus whenever amidation is on.
+      if (next.cTerminalAmidated) {
+        next.terminal = 'c_term';
+        next.position = sequenceLength(component.sequence) || 1;
+      }
       const terminal = terminalForPosition(Number(next.position), component.sequence, next.terminal);
       const position = positionForTerminal(terminal, Number(next.position), component.sequence);
       const residueAtPosition = readResidueAt(component.sequence, position);
@@ -522,7 +541,8 @@ export function ComponentInputEditor({
       smiles,
       baseResidue: String(mod.baseResidue || '').toUpperCase().slice(0, 1) || undefined,
       label: mod.label || 'Custom residue',
-      backbone: mod.backbone
+      backbone: mod.backbone,
+      cTerminalAmidated: mod.cTerminalAmidated
     };
     const nextLibrary = [nextEntry, ...customResidueLibrary.filter((item) => item.ccd !== ccd)].slice(0, 80);
     onCustomResidueLibraryChange(nextLibrary);
@@ -537,7 +557,8 @@ export function ComponentInputEditor({
       smiles: entry.smiles,
       baseResidue: entry.baseResidue || undefined,
       label: entry.label || 'Custom residue',
-      backbone: entry.backbone
+      backbone: entry.backbone,
+      cTerminalAmidated: entry.cTerminalAmidated
     });
   };
 
@@ -966,7 +987,8 @@ export function ComponentInputEditor({
                                     min={1}
                                     max={Math.max(1, comp.sequence.replace(/\s+/g, '').length || 1)}
                                     value={numberDrafts[`mod-position:${mod.id}`] ?? String(mod.position)}
-                                    disabled={disabled}
+                                    disabled={disabled || Boolean(mod.cTerminalAmidated)}
+                                    title={mod.cTerminalAmidated ? 'Amidated residue is locked to the C-terminus' : undefined}
                                     onChange={(e) => setNumberDraft(`mod-position:${mod.id}`, e.target.value)}
                                     onBlur={() => commitModificationPositionDraft(comp, mod)}
                                     onKeyDown={(e) => {
@@ -982,7 +1004,8 @@ export function ComponentInputEditor({
                                   <span>Site</span>
                                   <select
                                     value={terminal}
-                                    disabled={disabled}
+                                    disabled={disabled || Boolean(mod.cTerminalAmidated)}
+                                    title={mod.cTerminalAmidated ? 'Amidated residue is locked to the C-terminus' : undefined}
                                     onChange={(e) => {
                                       const nextTerminal = e.target.value as ProteinModificationTerminal;
                                       const position = positionForTerminal(nextTerminal, mod.position, comp.sequence);
@@ -1162,9 +1185,27 @@ export function ComponentInputEditor({
                                               onChange={(e) => patchProteinModification(comp.id, mod.id, { smiles: e.target.value })}
                                             />
                                           </label>
+                                          <label className="switch-field protein-mod-amidation">
+                                            <input
+                                              type="checkbox"
+                                              checked={Boolean(mod.cTerminalAmidated)}
+                                              disabled={disabled}
+                                              onChange={async (e) => {
+                                                const nextAmidated = e.target.checked;
+                                                const currentSmiles = String(mod.smiles || '').trim() || CUSTOM_RESIDUE_SCAFFOLD_SMILES;
+                                                // Flip the backbone's terminal atom (OXT <-> NXT), honoring the user's OXT pick.
+                                                // Atomic: if the terminal can't be resolved, leave flag and SMILES unchanged.
+                                                const transformed = await toggleTerminalAmide(currentSmiles, mod.backbone, nextAmidated);
+                                                if (!transformed || transformed === currentSmiles) return;
+                                                patchProteinModification(comp.id, mod.id, { cTerminalAmidated: nextAmidated, smiles: transformed });
+                                              }}
+                                            />
+                                            <span>C-terminal amidation</span>
+                                          </label>
                                           <CustomResiduePreview
                                             smiles={mod.smiles || CUSTOM_RESIDUE_SCAFFOLD_SMILES}
                                             backbone={mod.backbone}
+                                            amidated={mod.cTerminalAmidated}
                                             disabled={disabled}
                                             onBackboneChange={(next) => patchProteinModification(comp.id, mod.id, { backbone: next })}
                                             onSaveToLibrary={() => saveModificationToLibrary(mod)}
