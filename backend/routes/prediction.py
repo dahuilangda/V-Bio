@@ -27,7 +27,6 @@ def _normalize_prediction_property_entry(properties: Dict[str, Any]) -> Optional
     entry: Dict[str, Any] = {
         'ligand': ligand or binder,
         'binder': binder or ligand,
-        'affinity': bool(properties.get('affinity')),
     }
     target = str(properties.get('target') or '').strip()
     if target:
@@ -57,12 +56,26 @@ def _merge_prediction_properties_into_yaml(
 
     merged = False
     for candidate in property_entries:
-        if any(str(candidate.get(key) or '').strip() for key in ('ligand', 'binder', 'target')) or 'affinity' in candidate:
+        if any(str(candidate.get(key) or '').strip() for key in ('ligand', 'binder', 'target')):
             candidate.update(entry)
             merged = True
             break
     if not merged:
         property_entries.insert(0, entry)
+
+    # Boltz-2 的 schema 仅当 properties 中存在「首个 key 为 'affinity' 的独立 property」
+    # (binder 指向配体链) 时才触发亲和力预测；与 ligand/binder 同级的 affinity 布尔值，
+    # 因首个 key 不是 'affinity' 会被 boltz2 忽略，导致亲和力不计算、前端 affinity 面板无值。
+    # AF3/Protenix 的 extract_affinity_config_from_yaml 与 _yaml_has_ligand_annotation
+    # 同样以该 dict 写法为准，故将其作为 affinity 的唯一真相来源。
+    if bool(properties.get('affinity')):
+        ligand_chain = str(entry.get('ligand') or entry.get('binder') or '').strip()
+        has_affinity_property = any(
+            isinstance(prop, dict) and isinstance(prop.get('affinity'), dict)
+            for prop in property_entries
+        )
+        if ligand_chain and not has_affinity_property:
+            property_entries.insert(0, {'affinity': {'binder': ligand_chain}})
 
     data['properties'] = property_entries
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True), True
