@@ -208,7 +208,8 @@ def register_admin_routes(
             try:
                 os.makedirs(cache_dir, exist_ok=True)
             except OSError as exc:
-                logger.error('重建MSA缓存目录失败: %s', exc)
+                logger.exception('重建MSA缓存目录失败: %s', exc)
+                return jsonify({'error': 'Failed to recreate MSA cache directory', 'details': str(exc)}), 500
 
             result = {
                 'removed_files': total_items,

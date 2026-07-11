@@ -33,6 +33,7 @@ import {
   sortProjectTasks
 } from './taskDataUtils';
 import { resolveTaskWorkflowKey } from './taskPresentation';
+import { asRecord } from './recordReaders';
 
 function hasLeadOptMmpOnlySnapshot(task: ProjectTask): boolean {
   const confidence =
@@ -64,10 +65,6 @@ function isTransientRuntimeStatusText(value: unknown): boolean {
 }
 
 type LeadOptTaskSummary = NonNullable<ReturnType<typeof readLeadOptTaskSummary>>;
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
 
 function readFiniteNumber(value: unknown): number | null {
   const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value.trim()) : Number.NaN;
@@ -134,12 +131,14 @@ const PRIORITY_RUNTIME_STATUS_POLL_MAX_TASKS = 48;
 const BACKGROUND_RUNTIME_STATUS_POLL_MAX_TASKS = 128;
 const LEADOPT_STATUS_LIGHT_POLL_MAX_ROWS = 3;
 const STALE_PENDING_RUNTIME_REPAIR_AGE_MS = 2 * 60 * 60 * 1000;
-let runtimeStatusPollCursor = 0;
-let leadOptStatusPollCursor = 0;
 const LEADOPT_PREDICTION_RECORD_KEY_SEPARATOR = '::';
 
 interface SyncRuntimeTaskRowsOptions {
   priorityTaskRowIds?: string[];
+  // Per-instance round-robin cursors owned by the caller (useRef). Omitting them uses a fresh
+  // function-local holder that resets each call — acceptable for one-off invocations.
+  runtimeStatusCursor?: { current: number };
+  leadOptStatusCursor?: { current: number };
 }
 
 type RuntimeTaskStatusPayload = {
@@ -357,7 +356,8 @@ function parseLeadOptPredictionRecordKey(keyInput: unknown): { backend: string; 
   if (!encodedSmiles) return { backend, smiles: '' };
   try {
     return { backend, smiles: decodeURIComponent(encodedSmiles) };
-  } catch {
+  } catch (err) {
+    console.error('decodeURIComponent failed for lead-opt prediction key smiles; keeping encoded value.', err);
     return { backend, smiles: encodedSmiles };
   }
 }
@@ -737,7 +737,8 @@ async function reconcileLeadOptPredictionMapStates(
         updatedAt: Date.now()
       };
       changed = true;
-    } catch {
+    } catch (err) {
+      console.error('Lead-opt prediction map state reconciliation failed; keeping existing state.', err);
       // Keep existing state on transient status errors.
     }
   }
@@ -832,7 +833,8 @@ async function hydrateLeadOptPredictionMetricsFromResult(
       if (!String(task.structure_name || '').trim()) {
         structureNamePatch = String(parsed.structureName || '').trim();
       }
-    } catch {
+    } catch (err) {
+      console.error('Lead-opt prediction result hydration failed; keeping current map.', err);
       // Keep retrying on later sync cycles if result artifact is not ready yet.
     }
   }
@@ -864,6 +866,8 @@ export async function syncRuntimeTaskRows(
   options?: SyncRuntimeTaskRowsOptions
 ) {
   const safeTaskRows = sanitizeTaskRows(taskRows);
+  const runtimeStatusCursor = options?.runtimeStatusCursor ?? { current: 0 };
+  const leadOptStatusCursor = options?.leadOptStatusCursor ?? { current: 0 };
   let nextProject = projectRow;
   let nextTaskRows = [...safeTaskRows];
 
@@ -879,13 +883,13 @@ export async function syncRuntimeTaskRows(
   const leadOptPollSize = Math.min(LEADOPT_STATUS_LIGHT_POLL_MAX_ROWS, leadOptRowsAll.length);
   const leadOptStartCursor =
     leadOptRowsAll.length > 0
-      ? ((leadOptStatusPollCursor % leadOptRowsAll.length) + leadOptRowsAll.length) % leadOptRowsAll.length
+      ? ((leadOptStatusCursor.current % leadOptRowsAll.length) + leadOptRowsAll.length) % leadOptRowsAll.length
       : 0;
   const leadOptRows: ProjectTask[] = [];
   for (let i = 0; i < leadOptPollSize; i += 1) {
     leadOptRows.push(leadOptRowsAll[(leadOptStartCursor + i) % leadOptRowsAll.length]);
   }
-  leadOptStatusPollCursor =
+  leadOptStatusCursor.current =
     leadOptRowsAll.length > 0 ? (leadOptStartCursor + leadOptPollSize) % leadOptRowsAll.length : 0;
 
   for (const row of leadOptRows) {
@@ -1101,7 +1105,8 @@ export async function syncRuntimeTaskRows(
             confidence: workingConfidence
           };
           leadOptChanged = true;
-        } catch {
+        } catch (err) {
+          console.error('Lead-opt lightweight prediction status poll failed; keeping existing state.', err);
           // Keep existing state on transient status errors.
         }
       }
@@ -1322,13 +1327,13 @@ export async function syncRuntimeTaskRows(
   const backgroundPollSize = Math.min(BACKGROUND_RUNTIME_STATUS_POLL_MAX_TASKS, backgroundRuntimeTaskIds.length);
   const backgroundStartCursor =
     backgroundRuntimeTaskIds.length > 0
-      ? ((runtimeStatusPollCursor % backgroundRuntimeTaskIds.length) + backgroundRuntimeTaskIds.length) % backgroundRuntimeTaskIds.length
+      ? ((runtimeStatusCursor.current % backgroundRuntimeTaskIds.length) + backgroundRuntimeTaskIds.length) % backgroundRuntimeTaskIds.length
       : 0;
   const backgroundTaskIdsForPoll: string[] = [];
   for (let i = 0; i < backgroundPollSize; i += 1) {
     backgroundTaskIdsForPoll.push(backgroundRuntimeTaskIds[(backgroundStartCursor + i) % backgroundRuntimeTaskIds.length]);
   }
-  runtimeStatusPollCursor =
+  runtimeStatusCursor.current =
     backgroundRuntimeTaskIds.length > 0 ? (backgroundStartCursor + backgroundPollSize) % backgroundRuntimeTaskIds.length : 0;
   const taskIdsForPoll = Array.from(
     new Set([...activeRuntimeTaskIds, ...runningTaskIdsForPoll, ...prioritizedTaskIdsForPoll, ...backgroundTaskIdsForPoll])
@@ -1621,7 +1626,8 @@ export async function syncInitialRuntimeTaskRows(
       try {
         const nextTask = await persistProjectTaskPatch(runtimeTask, taskPatch);
         nextTaskRows = nextTaskRows.map((row) => (row.id === runtimeTask.id ? nextTask : row));
-      } catch {
+      } catch (err) {
+        console.error('Initial runtime task patch persistence failed; keeping local correction.', err);
         // Keep local correction even if persistence temporarily fails.
       }
     }
@@ -1647,7 +1653,8 @@ export async function syncInitialRuntimeTaskRows(
         } as Project;
         try {
           nextProject = await persistProjectPatch(nextProject, projectPatch);
-        } catch {
+        } catch (err) {
+          console.error('Initial runtime project patch persistence failed; keeping local correction.', err);
           // Keep local correction even if persistence temporarily fails.
         }
       }
@@ -1807,7 +1814,8 @@ export async function hydrateTaskMetricsFromResultRows(
       }
 
       resultHydrationDoneRef.current.add(taskId);
-    } catch {
+    } catch (err) {
+      console.error('Task result bundle hydration failed; keeping current rows.', err);
       // Ignore transient parse/download failures; retry is bounded by attempt count.
     } finally {
       resultHydrationInFlightRef.current.delete(taskId);

@@ -13,6 +13,26 @@ def parse_bool(value: Optional[str], default: bool = False) -> bool:
     return str(value).strip().lower() in {'1', 'true', 'yes', 'y'}
 
 
+def coerce_bool(value: Any, default: bool = False) -> bool:
+    """Type-rich bool parser for task/payload values (bool, int, float, str).
+
+    Single source of truth shared by the Celery worker and the prediction subprocess so
+    flags like low_vram resolve identically in both. Unknown strings fall back to ``default``.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 def parse_int(value: Optional[str], default: Optional[int] = None) -> Optional[int]:
     if value is None or value == '':
         return default
@@ -60,10 +80,7 @@ def normalize_chain_id_list(value: Any) -> list[str]:
 def infer_use_msa_server_from_yaml_text(yaml_content: str) -> bool:
     if not yaml_content.strip():
         return False
-    try:
-        yaml_data = yaml.safe_load(yaml_content) or {}
-    except Exception:
-        return False
+    yaml_data = yaml.safe_load(yaml_content) or {}
     if not isinstance(yaml_data, dict):
         return False
     sequences = yaml_data.get('sequences')
@@ -96,10 +113,7 @@ def infer_use_msa_server_from_yaml_text(yaml_content: str) -> bool:
 
 
 def extract_template_meta_from_yaml(yaml_content: str) -> Dict[str, Dict]:
-    try:
-        yaml_data = yaml.safe_load(yaml_content) or {}
-    except Exception:
-        return {}
+    yaml_data = yaml.safe_load(yaml_content) or {}
     if not isinstance(yaml_data, dict):
         return {}
 

@@ -16,10 +16,7 @@ from capabilities.lead_optimization.mmp_database_registry import (
     resolve_mmp_database,
 )
 
-try:
-    import gemmi
-except Exception:
-    gemmi = None
+import gemmi
 
 
 def _normalize_mmp_catalog_status(raw: Any) -> str:
@@ -65,8 +62,6 @@ def _build_chain_residue_index_map(
     structure_text: str,
     structure_format: str,
 ) -> tuple[Dict[tuple[str, int], int], Dict[str, int], Dict[str, str]]:
-    if gemmi is None:
-        return {}, {}, {}
     text = str(structure_text or "").strip()
     fmt = str(structure_format or "cif").strip().lower()
     if not text:
@@ -80,40 +75,37 @@ def _build_chain_residue_index_map(
         "HIS": "H", "ILE": "I", "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P", "SER": "S",
         "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V", "SEC": "U", "PYL": "O",
     }
-    try:
-        with tempfile.TemporaryDirectory(prefix="leadopt_template_") as temp_dir:
-            temp_path = Path(temp_dir) / f"template{suffix}"
-            temp_path.write_text(text, encoding="utf-8")
-            structure = gemmi.read_structure(str(temp_path))
-            structure.setup_entities()
-            if len(structure) == 0:
-                return {}, {}, {}
-            model = structure[0]
-            for chain in model:
-                chain_id = str(chain.name or "").strip()
-                if not chain_id:
+    with tempfile.TemporaryDirectory(prefix="leadopt_template_") as temp_dir:
+        temp_path = Path(temp_dir) / f"template{suffix}"
+        temp_path.write_text(text, encoding="utf-8")
+        structure = gemmi.read_structure(str(temp_path))
+        structure.setup_entities()
+        if len(structure) == 0:
+            return {}, {}, {}
+        model = structure[0]
+        for chain in model:
+            chain_id = str(chain.name or "").strip()
+            if not chain_id:
+                continue
+            ordinal = 0
+            seen_residues: set[tuple[int, str]] = set()
+            sequence_chars: List[str] = []
+            for residue in chain:
+                if residue.het_flag != "A":
                     continue
-                ordinal = 0
-                seen_residues: set[tuple[int, str]] = set()
-                sequence_chars: List[str] = []
-                for residue in chain:
-                    if residue.het_flag != "A":
-                        continue
-                    residue_key = (int(residue.seqid.num), str(residue.seqid.icode or "").strip())
-                    if residue_key in seen_residues:
-                        continue
-                    seen_residues.add(residue_key)
-                    ordinal += 1
-                    base_key = (chain_id, residue_key[0])
-                    if base_key not in residue_index_map:
-                        residue_index_map[base_key] = ordinal
-                    residue_name = str(residue.name or "").strip().upper()
-                    sequence_chars.append(aa3_to1.get(residue_name, "X"))
-                if ordinal > 0:
-                    chain_lengths[chain_id] = ordinal
-                    chain_sequences[chain_id] = "".join(sequence_chars)
-    except Exception:
-        return {}, {}, {}
+                residue_key = (int(residue.seqid.num), str(residue.seqid.icode or "").strip())
+                if residue_key in seen_residues:
+                    continue
+                seen_residues.add(residue_key)
+                ordinal += 1
+                base_key = (chain_id, residue_key[0])
+                if base_key not in residue_index_map:
+                    residue_index_map[base_key] = ordinal
+                residue_name = str(residue.name or "").strip().upper()
+                sequence_chars.append(aa3_to1.get(residue_name, "X"))
+            if ordinal > 0:
+                chain_lengths[chain_id] = ordinal
+                chain_sequences[chain_id] = "".join(sequence_chars)
     return residue_index_map, chain_lengths, chain_sequences
 
 
@@ -134,7 +126,7 @@ def _remap_pocket_residues_to_sequence_index(
         residue_number_raw = row.get("residue_number")
         try:
             residue_number = int(residue_number_raw)
-        except Exception:
+        except (TypeError, ValueError):
             residue_number = 0
         if not chain_id or residue_number <= 0:
             continue
@@ -831,10 +823,14 @@ def register_lead_opt_mmp_routes(
         normalized_pocket_residues = pocket_residues
 
         if has_reference_template:
-            residue_index_map, chain_lengths, chain_sequences = _build_chain_residue_index_map(
-                resolved_reference_template_text,
-                resolved_reference_template_format,
-            )
+            try:
+                residue_index_map, chain_lengths, chain_sequences = _build_chain_residue_index_map(
+                    resolved_reference_template_text,
+                    resolved_reference_template_format,
+                )
+            except Exception as exc:
+                logger.warning("Failed to parse reference template: %s", exc)
+                return jsonify({"error": "Failed to parse reference template structure. Ensure it is a valid PDB/mmCIF file."}), 400
             if chain_sequences:
                 requested_target_chain = str(target_chain or "").strip()
                 available_chains = sorted(chain_sequences.keys())

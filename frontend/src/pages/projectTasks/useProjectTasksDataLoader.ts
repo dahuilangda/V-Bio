@@ -288,6 +288,16 @@ function collectPendingRuntimeTaskIds(taskRows: ProjectTask[]): Set<string> {
   );
 }
 
+// Avoid re-serializing the (referentially-stable) current state on every hydration tick: cache its
+// JSON signature keyed on the source reference, recomputing only when the source actually changes.
+function memoSignature<S, V>(source: S, value: V, cache: { source: S | null; sig: string }): string {
+  if (cache.source === source) return cache.sig;
+  const sig = JSON.stringify(value);
+  cache.source = source;
+  cache.sig = sig;
+  return sig;
+}
+
 export function useProjectTasksDataLoader({
   projectId,
   sessionUserId,
@@ -305,6 +315,10 @@ export function useProjectTasksDataLoader({
   const lastFullFetchTsRef = useRef(0);
   const projectRef = useRef<Project | null>(null);
   const tasksRef = useRef<ProjectTask[]>([]);
+  const runtimeStatusPollCursorRef = useRef(0);
+  const leadOptStatusPollCursorRef = useRef(0);
+  const currentProjectSigRef = useRef<{ source: Project | null; sig: string }>({ source: null, sig: '' });
+  const currentRowsSigRef = useRef<{ source: ProjectTask[] | null; sig: string }>({ source: null, sig: '' });
   const taskListAccessContextRef = useRef<TaskListAccessContext | null>(null);
   const detailHydrationInFlightRef = useRef<Set<string>>(new Set());
   const resultHydrationInFlightRef = useRef<Set<string>>(new Set());
@@ -354,7 +368,8 @@ export function useProjectTasksDataLoader({
             tasks: pickRuntimeCacheTaskRows(taskRows)
           })
         );
-      } catch {
+      } catch (err) {
+        console.error('Runtime cache localStorage write failed; ignoring storage failure.', err);
         // Ignore storage quota or serialization failures.
       }
     },
@@ -385,7 +400,8 @@ export function useProjectTasksDataLoader({
       setProject(cachedProject);
       setTasks(cachedTasks);
       return true;
-    } catch {
+    } catch (err) {
+      console.error('Runtime cache localStorage parse failed; ignoring malformed storage.', err);
       return false;
     }
   }, [taskListRuntimeCacheKey]);
@@ -393,7 +409,9 @@ export function useProjectTasksDataLoader({
   const syncRuntimeTasks = useCallback(
     async (projectRow: Project, taskRows: ProjectTask[]) =>
       syncRuntimeTaskRows(projectRow, taskRows, {
-        priorityTaskRowIds
+        priorityTaskRowIds,
+        runtimeStatusCursor: runtimeStatusPollCursorRef,
+        leadOptStatusCursor: leadOptStatusPollCursorRef
       }),
     [priorityTaskRowIds]
   );
@@ -605,7 +623,8 @@ export function useProjectTasksDataLoader({
               setTasks(runtimeSettledRows);
               persistRuntimeCache(runtimeSettledProject, runtimeSettledRows);
             }
-          } catch {
+          } catch (err) {
+            console.error('Backend status sync failed; keeping runtime-synced rows.', err);
             // Keep runtime-synced rows if backend status sync fails.
           }
         })();
@@ -671,13 +690,14 @@ export function useProjectTasksDataLoader({
         if (cancelled) return;
         const nextRows = sanitizeTaskRows(hydrated.taskRows);
         const nextProject = hydrated.project;
-        const projectChanged = JSON.stringify(nextProject) !== JSON.stringify(projectRef.current);
-        const rowsChanged = JSON.stringify(nextRows) !== JSON.stringify(currentRows);
+        const projectChanged = JSON.stringify(nextProject) !== memoSignature(projectRef.current, projectRef.current, currentProjectSigRef.current);
+        const rowsChanged = JSON.stringify(nextRows) !== memoSignature(tasksRef.current, currentRows, currentRowsSigRef.current);
         if (!projectChanged && !rowsChanged) return;
         setProject(nextProject);
         setTasks(nextRows);
         persistRuntimeCache(nextProject, nextRows);
-      } catch {
+      } catch (err) {
+        console.error('Background result hydration failed; keeping lightweight rows.', err);
         // Keep lightweight rows if background result hydration fails.
       }
     })();
@@ -805,7 +825,8 @@ export function useProjectTasksDataLoader({
             })
           )
         );
-      } catch {
+      } catch (err) {
+        console.error('Visible-row detail hydration failed; keeping lightweight rows.', err);
         // Keep lightweight rows if visible-row hydration fails.
       } finally {
         taskIdsToHydrate.forEach((taskRowId) => detailHydrationInFlightRef.current.delete(taskRowId));

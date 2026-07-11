@@ -1,0 +1,81 @@
+data_29N
+#
+_chem_comp.id 29N
+_chem_comp.name '29N bicyclic linker'
+_chem_comp.type 'NON-POLYMER'
+_chem_comp.formula 'C12H21N3O3'
+_chem_comp.mon_nstd_parent_comp_id ?
+_chem_comp.pdbx_synonyms ?
+_chem_comp.pdbx_formal_charge 0
+_chem_comp.pdbx_initial_date 2026-06-26
+_chem_comp.pdbx_modified_date 2026-06-26
+_chem_comp.pdbx_ambiguous_flag N
+_chem_comp.pdbx_release_status REL
+_chem_comp.pdbx_replaced_by ?
+_chem_comp.pdbx_replaces ?
+_chem_comp.formula_weight 255.318
+_chem_comp.one_letter_code ?
+_chem_comp.three_letter_code 29N
+_chem_comp.pdbx_model_coordinates_details ?
+_chem_comp.pdbx_model_coordinates_missing_flag N
+_chem_comp.pdbx_ideal_coordinates_details RDKit
+_chem_comp.pdbx_ideal_coordinates_missing_flag N
+_chem_comp.pdbx_model_coordinates_db_code ?
+_chem_comp.pdbx_subcomponent_list ?
+_chem_comp.pdbx_processing_site V-Bio
+#
+loop_
+_chem_comp_atom.comp_id
+_chem_comp_atom.atom_id
+_chem_comp_atom.type_symbol
+_chem_comp_atom.charge
+_chem_comp_atom.pdbx_model_Cartn_x_ideal
+_chem_comp_atom.pdbx_model_Cartn_y_ideal
+_chem_comp_atom.pdbx_model_Cartn_z_ideal
+_chem_comp_atom.pdbx_leaving_atom_flag
+_chem_comp_atom.alt_atom_id
+_chem_comp_atom.pdbx_component_atom_id
+29N N1 N 0 1.2051 -0.5551 0.4338 N N1 N1
+29N C2 C 0 0.9653 0.6817 -0.3220 N C2 C2
+29N N3 N 0 -0.3963 1.1792 -0.0949 N N3 N3
+29N C4 C 0 -1.4935 0.2104 -0.1707 N C4 C4
+29N N5 N 0 -1.1627 -1.0179 0.5642 N N5 N5
+29N C6 C 0 0.1294 -1.1261 1.2558 N C6 C6
+29N C7 C 0 2.5419 -1.0966 0.5269 N C7 C7
+29N C8 C 0 3.6200 -0.6820 -0.4468 N C8 C8
+29N O9 O 0 2.8301 -1.8867 1.4686 N O9 O9
+29N C10 C 0 -2.1775 -2.0246 0.7786 N C10 C10
+29N C11 C 0 -3.4315 -2.0566 -0.0634 N C11 C11
+29N O12 O 0 -2.0395 -2.8593 1.7158 N O12 O12
+29N C13 C 0 -0.6918 2.5861 -0.2172 N C13 C13
+29N C14 C 0 0.2842 3.6292 0.2659 N C14 C14
+29N O15 O 0 -1.7685 2.9502 -0.7666 N O15 O15
+29N C16 C 0 4.7720 -1.6840 -0.5140 N C16 C16
+29N C19 C 0 -4.1510 -3.4036 -0.0042 N C19 C19
+29N C25 C 0 -0.4049 4.9317 0.6697 N C25 C25
+#
+loop_
+_chem_comp_bond.comp_id
+_chem_comp_bond.atom_id_1
+_chem_comp_bond.atom_id_2
+_chem_comp_bond.value_order
+_chem_comp_bond.pdbx_aromatic_flag
+29N C25 C14 SING N
+29N O15 C13 DOUB N
+29N C14 C13 SING N
+29N C13 N3 SING N
+29N C16 C8 SING N
+29N C8 C7 SING N
+29N N3 C2 SING N
+29N N3 C4 SING N
+29N C2 N1 SING N
+29N C7 N1 SING N
+29N C7 O9 DOUB N
+29N N1 C6 SING N
+29N C4 N5 SING N
+29N C19 C11 SING N
+29N N5 C6 SING N
+29N N5 C10 SING N
+29N C11 C10 SING N
+29N C10 O12 DOUB N
+#

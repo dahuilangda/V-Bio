@@ -17,8 +17,8 @@ def _parse_ligand_smiles_map(raw: Optional[str]) -> Dict[str, str]:
     if not isinstance(parsed, dict):
         return mapping
     for key, value in parsed.items():
-        if not isinstance(key, str) or not isinstance(value, str):
-            continue
+        if not isinstance(value, str):
+            raise ValueError(f'ligand_smiles_map entry "{key}" must be a string, got {type(value).__name__}.')
         normalized_key = key.strip()
         normalized_value = value.strip()
         if normalized_key and normalized_value:
@@ -142,7 +142,7 @@ def register_affinity_routes(
             ligand_smiles_map = _parse_ligand_smiles_map(request.form.get('ligand_smiles_map'))
         except Exception as exc:
             logger.error('Invalid ligand_smiles_map JSON from %s: %s', request.remote_addr, exc)
-            return jsonify({'error': "Invalid 'ligand_smiles_map' JSON format."}), 400
+            return jsonify({'error': "Invalid 'ligand_smiles_map' format."}), 400
 
         score_args: Dict[str, Any]
 

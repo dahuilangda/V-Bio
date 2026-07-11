@@ -145,6 +145,7 @@ export interface WorkflowRuntimeSettingsSectionProps {
   isAffinityWorkflow: boolean;
   backend: string;
   seed: number | null;
+  lowVram: boolean;
   peptideDesignMode: 'linear' | 'cyclic' | 'bicyclic';
   peptideBinderLength: number;
   peptideUseInitialSequence: boolean;
@@ -169,6 +170,7 @@ export interface WorkflowRuntimeSettingsSectionProps {
   peptideBicyclicCys3Pos: number;
   onBackendChange: (backend: string) => void;
   onSeedChange: (seed: number | null) => void;
+  onLowVramChange: (lowVram: boolean) => void;
   onPeptideDesignModeChange: (mode: 'linear' | 'cyclic' | 'bicyclic') => void;
   onPeptideBinderLengthChange: (value: number) => void;
   onPeptideUseInitialSequenceChange: (value: boolean) => void;
@@ -198,6 +200,7 @@ export function WorkflowRuntimeSettingsSection({
   isAffinityWorkflow,
   backend,
   seed,
+  lowVram,
   peptideDesignMode,
   peptideBinderLength,
   peptideUseInitialSequence,
@@ -222,6 +225,7 @@ export function WorkflowRuntimeSettingsSection({
   peptideBicyclicCys3Pos,
   onBackendChange,
   onSeedChange,
+  onLowVramChange,
   onPeptideDesignModeChange,
   onPeptideBinderLengthChange,
   onPeptideUseInitialSequenceChange,
@@ -261,8 +265,6 @@ export function WorkflowRuntimeSettingsSection({
   const showFullFields = displayMode === 'full';
   const normalizedBackend = isAffinityWorkflow ? 'boltz' : normalizePredictionBackend(backend);
   const canEditRuntimeIdentity = canEdit || isPredictionWorkflow || isPeptideDesignWorkflow || isAffinityWorkflow;
-  const isLinearOnlyPeptideBackend =
-    isPeptideDesignWorkflow && (normalizedBackend === 'alphafold3' || normalizedBackend === 'protenix');
   const isBicyclicMode = isPeptideDesignWorkflow && peptideDesignMode === 'bicyclic';
   const cys2Max = peptideBicyclicFixTerminalCys
     ? Math.max(1, peptideBinderLength - 2)
@@ -726,8 +728,8 @@ export function WorkflowRuntimeSettingsSection({
                   ]
                 : [
                     { value: 'boltz', label: 'Boltz-2' },
-                    { value: 'alphafold3', label: 'AlphaFold3', disabled: isPeptideDesignWorkflow && peptideDesignMode !== 'linear' },
-                    { value: 'protenix', label: 'Protenix', disabled: isPeptideDesignWorkflow && peptideDesignMode !== 'linear' }
+                    { value: 'alphafold3', label: 'AlphaFold3' },
+                    { value: 'protenix', label: 'Protenix' }
                   ]
               ).map((option) => (
                 <option key={option.value} value={option.value} disabled={Boolean((option as { disabled?: boolean }).disabled)}>
@@ -756,6 +758,18 @@ export function WorkflowRuntimeSettingsSection({
           </label>
         )}
 
+        {showFullFields && (isPredictionWorkflow || isPeptideDesignWorkflow) && normalizedBackend !== 'alphafold3' && (
+          <label className="switch-field runtime-device-toggle">
+            <input
+              type="checkbox"
+              checked={lowVram}
+              onChange={(e) => onLowVramChange(e.target.checked)}
+              disabled={!canEditRuntimeIdentity}
+            />
+            <span>Low VRAM</span>
+          </label>
+        )}
+
         {isPeptideDesignWorkflow && (
           <div className="peptide-runtime-layout">
             <section className="peptide-runtime-group">
@@ -771,12 +785,8 @@ export function WorkflowRuntimeSettingsSection({
                     disabled={!canEdit}
                   >
                     <option value="linear">Linear</option>
-                    <option value="cyclic" disabled={isLinearOnlyPeptideBackend}>
-                      Cyclic
-                    </option>
-                    <option value="bicyclic" disabled={isLinearOnlyPeptideBackend}>
-                      Bicyclic
-                    </option>
+                    <option value="cyclic">Cyclic</option>
+                    <option value="bicyclic">Bicyclic</option>
                   </select>
                 </label>
                 <label className="field">
@@ -790,7 +800,7 @@ export function WorkflowRuntimeSettingsSection({
                   />
                 </label>
                 <div className="muted small peptide-runtime-backend-hint">
-                  AlphaFold3 and Protenix support linear peptides only. Cyclic and bicyclic designs run on Boltz-2.
+                  Cyclic uses a head-to-tail bond; bicyclic uses 3 Cys + a linker (SEZ/29N/BS3). All three backends support every mode.
                 </div>
                 <label className="switch-field peptide-runtime-switch peptide-initial-seq-toggle">
                   <input

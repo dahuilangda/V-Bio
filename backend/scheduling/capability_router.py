@@ -69,7 +69,7 @@ _MAX_TASK_DETAILS_PER_CAPABILITY = 256
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
-    except Exception:
+    except (TypeError, ValueError):
         return default
 
 
@@ -326,18 +326,14 @@ def list_known_queues() -> list[str]:
     return queues
 
 
-def build_worker_capability_snapshot(*, celery_app, logger) -> Dict[str, Any]:
-    try:
-        inspector = celery_app.control.inspect(timeout=1.5)
-        active_queues = inspector.active_queues() or {}
-        active_tasks_by_worker = inspector.active() or {}
-        reserved_tasks_by_worker = inspector.reserved() or {}
-        scheduled_tasks_by_worker = inspector.scheduled() or {}
-        worker_stats = inspector.stats() or {}
-        worker_registered = inspector.registered() or {}
-    except Exception as exc:
-        logger.warning("Failed to inspect worker capability queues: %s", exc)
-        return {"workers": {}, "capabilities": {}, "error": str(exc)}
+def build_worker_capability_snapshot(*, celery_app) -> Dict[str, Any]:
+    inspector = celery_app.control.inspect(timeout=1.5)
+    active_queues = inspector.active_queues() or {}
+    active_tasks_by_worker = inspector.active() or {}
+    reserved_tasks_by_worker = inspector.reserved() or {}
+    scheduled_tasks_by_worker = inspector.scheduled() or {}
+    worker_stats = inspector.stats() or {}
+    worker_registered = inspector.registered() or {}
 
     worker_names = sorted(
         set(active_queues.keys())

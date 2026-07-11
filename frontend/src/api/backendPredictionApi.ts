@@ -80,6 +80,7 @@ export async function submitPrediction(input: PredictionSubmitInput): Promise<st
   if (typeof input.seed === 'number' && Number.isFinite(input.seed)) {
     form.append('seed', String(Math.max(0, Math.floor(input.seed))));
   }
+  form.append('low_vram', String(input.lowVram === true));
   const customCcdMolecules = input.customCcdMolecules || collectCustomCcdMoleculesFromComponents(componentsForYaml);
   if (customCcdMolecules.length > 0) {
     form.append('custom_ccd_molecules', JSON.stringify(customCcdMolecules));

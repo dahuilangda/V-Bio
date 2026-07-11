@@ -388,7 +388,8 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
       backend: draft.backend,
       useMsa: hasMsa,
       templateUploads,
-      customCcdMolecules: peptideCustomCcdMolecules.length > 0 ? peptideCustomCcdMolecules : undefined
+      customCcdMolecules: peptideCustomCcdMolecules.length > 0 ? peptideCustomCcdMolecules : undefined,
+      lowVram: submissionConfig.options.lowVram === true
     });
 
     const queuedAt = new Date().toISOString();

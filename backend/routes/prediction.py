@@ -291,12 +291,6 @@ def register_prediction_routes(
                 design_mode = 'bicyclic'
             elif design_mode != 'linear':
                 design_mode = 'linear'
-            if backend in {'alphafold3', 'protenix'} and design_mode != 'linear':
-                return jsonify({
-                    'error': f"Backend '{backend}' supports linear peptide design only.",
-                    'backend': backend,
-                    'design_mode': design_mode,
-                }), 400
 
         priority = request.form.get('priority', 'default').lower()
         if priority not in ['high', 'default']:
@@ -384,6 +378,7 @@ def register_prediction_routes(
             'backend': backend,
             'seed': seed_value,
             'workflow': workflow,
+            'low_vram': parse_bool(request.form.get('low_vram'), False),
         }
         if workflow == 'peptide_design':
             predict_args['peptide_design_options'] = peptide_design_options

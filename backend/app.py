@@ -99,11 +99,14 @@ MSA_CACHE_CONFIG = {
     'enable_cache': True
 }
 
-try:
-    os.makedirs(config.RESULTS_BASE_DIR, exist_ok=True)
-    logger.info(f"Results base directory ensured: {config.RESULTS_BASE_DIR}")
-except OSError as e:
-    logger.critical(f"Failed to create results directory {config.RESULTS_BASE_DIR}: {e}")
+os.makedirs(config.RESULTS_BASE_DIR, exist_ok=True)
+logger.info(f"Results base directory ensured: {config.RESULTS_BASE_DIR}")
+
+if config.BOLTZ_API_TOKEN == "development-api-token":
+    logger.warning(
+        "BOLTZ_API_TOKEN is the built-in development default; set the BOLTZ_API_TOKEN env var in "
+        "production. The API is currently protected only by a public token."
+    )
 
 result_archive_service = ResultArchiveService(
     app=app,
@@ -155,12 +158,6 @@ def require_api_token(f):
         return f(*args, **kwargs)
     return decorated_function
 
-_parse_bool = parse_bool
-_parse_int = parse_int
-_normalize_chain_id_list = normalize_chain_id_list
-_infer_use_msa_server_from_yaml_text = infer_use_msa_server_from_yaml_text
-_extract_template_meta_from_yaml = extract_template_meta_from_yaml
-
 lead_opt_mmp_service = LeadOptMmpService(
     get_redis_client_fn=get_redis_client,
     logger=logger,
@@ -191,7 +188,7 @@ def _list_known_queues() -> list[str]:
 
 
 def _get_worker_capability_snapshot() -> Dict[str, Dict]:
-    return build_worker_capability_snapshot(celery_app=celery_app, logger=logger)
+    return build_worker_capability_snapshot(celery_app=celery_app)
 
 register_prediction_routes(
     app,
@@ -199,11 +196,11 @@ register_prediction_routes(
     logger=logger,
     config_module=config,
     predict_task=predict_task,
-    parse_int=_parse_int,
-    parse_bool=_parse_bool,
-    infer_use_msa_server_from_yaml_text=_infer_use_msa_server_from_yaml_text,
-    extract_template_meta_from_yaml=_extract_template_meta_from_yaml,
-    normalize_chain_id_list=_normalize_chain_id_list,
+    parse_int=parse_int,
+    parse_bool=parse_bool,
+    infer_use_msa_server_from_yaml_text=infer_use_msa_server_from_yaml_text,
+    extract_template_meta_from_yaml=extract_template_meta_from_yaml,
+    normalize_chain_id_list=normalize_chain_id_list,
     select_queue_for_capability=_select_queue_for_capability,
     capability_from_prediction_backend=_capability_from_prediction_backend,
 )
@@ -228,8 +225,8 @@ register_lead_opt_mmp_routes(
     celery_app=celery_app,
     predict_task=predict_task,
     lead_optimization_mmp_query_task=lead_optimization_mmp_query_task,
-    parse_bool=_parse_bool,
-    parse_int=_parse_int,
+    parse_bool=parse_bool,
+    parse_int=parse_int,
     load_progress=_load_progress,
     has_worker_for_queue=_has_worker_for_queue,
     run_mmp_query_service=run_mmp_query_service,
@@ -256,8 +253,8 @@ register_affinity_routes(
     boltz2score_task=boltz2score_task,
     build_affinity_preview=build_affinity_preview,
     affinity_preview_error_cls=AffinityPreviewError,
-    parse_bool=_parse_bool,
-    parse_int=_parse_int,
+    parse_bool=parse_bool,
+    parse_int=parse_int,
     select_queue_for_capability=_select_queue_for_capability,
 )
 
@@ -298,6 +295,7 @@ register_mmp_lifecycle_admin_routes(
 
 
 if __name__ == '__main__':
-    # For production, use a WSGI server like Gunicorn/uWSGI instead of app.run(debug=True).
-    logger.info("Starting Flask API server...")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # For production, use a WSGI server like Gunicorn/uWSGI instead of app.run().
+    debug = os.environ.get('FLASK_DEBUG', '').lower() in {'1', 'true', 'yes'}
+    logger.info("Starting Flask API server (debug=%s)...", debug)
+    app.run(host='0.0.0.0', port=5000, debug=debug)

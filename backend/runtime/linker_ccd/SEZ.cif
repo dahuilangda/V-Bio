@@ -1,0 +1,63 @@
+data_SEZ
+#
+_chem_comp.id SEZ
+_chem_comp.name 'SEZ bicyclic linker'
+_chem_comp.type 'NON-POLYMER'
+_chem_comp.formula 'C9H12'
+_chem_comp.mon_nstd_parent_comp_id ?
+_chem_comp.pdbx_synonyms ?
+_chem_comp.pdbx_formal_charge 0
+_chem_comp.pdbx_initial_date 2026-06-26
+_chem_comp.pdbx_modified_date 2026-06-26
+_chem_comp.pdbx_ambiguous_flag N
+_chem_comp.pdbx_release_status REL
+_chem_comp.pdbx_replaced_by ?
+_chem_comp.pdbx_replaces ?
+_chem_comp.formula_weight 120.195
+_chem_comp.one_letter_code ?
+_chem_comp.three_letter_code SEZ
+_chem_comp.pdbx_model_coordinates_details ?
+_chem_comp.pdbx_model_coordinates_missing_flag N
+_chem_comp.pdbx_ideal_coordinates_details RDKit
+_chem_comp.pdbx_ideal_coordinates_missing_flag N
+_chem_comp.pdbx_model_coordinates_db_code ?
+_chem_comp.pdbx_subcomponent_list ?
+_chem_comp.pdbx_processing_site V-Bio
+#
+loop_
+_chem_comp_atom.comp_id
+_chem_comp_atom.atom_id
+_chem_comp_atom.type_symbol
+_chem_comp_atom.charge
+_chem_comp_atom.pdbx_model_Cartn_x_ideal
+_chem_comp_atom.pdbx_model_Cartn_y_ideal
+_chem_comp_atom.pdbx_model_Cartn_z_ideal
+_chem_comp_atom.pdbx_leaving_atom_flag
+_chem_comp_atom.alt_atom_id
+_chem_comp_atom.pdbx_component_atom_id
+SEZ C1 C 0 2.8713 -0.1544 0.4838 N C1 C1
+SEZ C2 C 0 -1.3403 2.5895 -0.0086 N C2 C2
+SEZ CD C 0 -1.5327 -2.4360 -0.4657 N CD CD
+SEZ CE C 0 -0.7193 -1.1929 -0.2590 N CE CE
+SEZ CZ1 C 0 0.6008 -1.2758 -0.0233 N CZ1 CZ1
+SEZ CZ2 C 0 -1.3832 0.1325 -0.2408 N CZ2 CZ2
+SEZ CH C 0 0.7881 1.1461 0.2341 N CH CH
+SEZ CT1 C 0 1.4006 -0.0494 0.2087 N CT1 CT1
+SEZ CT2 C 0 -0.6736 1.2460 0.0073 N CT2 CT2
+#
+loop_
+_chem_comp_bond.comp_id
+_chem_comp_bond.atom_id_1
+_chem_comp_bond.atom_id_2
+_chem_comp_bond.value_order
+_chem_comp_bond.pdbx_aromatic_flag
+SEZ C1 CT1 SING N
+SEZ CH CT1 SING Y
+SEZ CH CT2 SING Y
+SEZ C2 CT2 SING N
+SEZ CT1 CZ1 SING Y
+SEZ CT2 CZ2 SING Y
+SEZ CZ1 CE SING Y
+SEZ CZ2 CE SING Y
+SEZ CE CD SING N
+#

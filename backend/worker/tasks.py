@@ -26,6 +26,7 @@ import requests
 from celery.exceptions import Ignore
 from backend.core import config
 from backend.core.celery_app import celery_app
+from backend.services.common_utils import coerce_bool
 from gpu_manager import (
     acquire_gpu,
     release_gpu,
@@ -452,25 +453,9 @@ def _coerce_positive_int(value: Any, default: int, min_value: int = 1) -> int:
     return parsed if parsed >= min_value else default
 
 
-def _coerce_bool(value: Any, default: bool) -> bool:
-    """Parse a bool-like value, otherwise return default."""
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "y", "on"}:
-        return True
-    if text in {"0", "false", "no", "n", "off"}:
-        return False
-    return default
-
-
 class TaskProgressTracker:
     """跟踪任务进度和状态的类"""
-    
+
     def __init__(self, task_id, redis_client):
         self.task_id = task_id
         self.redis_client = redis_client
@@ -1417,12 +1402,14 @@ def peptide_candidate_worker_task(self, worker_payload: dict):
     if not args_path:
         args_path = os.path.join(candidate_dir, "worker_args.json")
 
+    candidate_predict_args = worker_payload.get("predict_args", {}) or {}
+
     payload = {
         "__peptide_candidate_worker__": True,
         "temp_dir": candidate_dir,
         "yaml_content": worker_payload.get("candidate_yaml"),
         "output_archive_path": archive_path,
-        "predict_args": worker_payload.get("predict_args", {}),
+        "predict_args": candidate_predict_args,
         "model_name": worker_payload.get("model_name"),
         "backend": str(worker_payload.get("backend") or "boltz"),
         "__peptide_worker_acquire_gpu__": True,
@@ -1493,10 +1480,8 @@ def get_task_status_info(self, task_id):
         return result
         
     except Exception as e:
-        return {
-            "task_id": task_id,
-            "error": str(e)
-        }
+        logger.error(f"Failed to get status info for task {task_id}: {e}")
+        raise
 
 
 @celery_app.task(bind=True)
@@ -1569,7 +1554,7 @@ def cleanup_stuck_task(self, task_id):
         
     except Exception as e:
         logger.error(f"Failed to cleanup task {task_id}: {e}")
-        return {"status": "error", "message": str(e)}
+        raise
     
 
 @celery_app.task(bind=True)
@@ -1666,7 +1651,7 @@ def boltz2score_task(self, score_args: dict):
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(work_dir, exist_ok=True)
 
-        structure_refine = _coerce_bool(
+        structure_refine = coerce_bool(
             score_args.get('structure_refine'),
             BOLTZ2SCORE_DEFAULT_STRUCTURE_REFINE,
         )
@@ -1674,8 +1659,8 @@ def boltz2score_task(self, score_args: dict):
         if requested_mode not in {'score', 'pose', 'refine', 'interface'}:
             logger.info("Task %s: unsupported mode %r, defaulting to 'score'.", task_id, requested_mode)
             requested_mode = 'score'
-        compute_ipsae = _coerce_bool(score_args.get('compute_ipsae'), False)
-        use_msa_server = _coerce_bool(
+        compute_ipsae = coerce_bool(score_args.get('compute_ipsae'), False)
+        use_msa_server = coerce_bool(
             score_args.get('use_msa_server'),
             True,
         )

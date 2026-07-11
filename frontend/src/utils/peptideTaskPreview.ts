@@ -1,55 +1,17 @@
-export const PEPTIDE_TASK_PREVIEW_KEY = 'peptide_preview';
+import {
+  asRecord,
+  readFiniteNumber,
+  readFirstFinite as firstFiniteMetric,
+  readFirstText as firstTextMetric,
+  readObjectPath,
+  readText,
+} from '../pages/projectTasks/recordReaders';
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
+export const PEPTIDE_TASK_PREVIEW_KEY = 'peptide_preview';
 
 function asRecordArray(value: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object' && !Array.isArray(item)));
-}
-
-function readObjectPath(data: Record<string, unknown>, path: string): unknown {
-  let current: unknown = data;
-  for (const key of path.split('.')) {
-    if (!current || typeof current !== 'object' || Array.isArray(current)) return undefined;
-    current = (current as Record<string, unknown>)[key];
-  }
-  return current;
-}
-
-function readText(value: unknown): string {
-  if (value === null || value === undefined) return '';
-  return String(value).trim();
-}
-
-function readFiniteNumber(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value === 'string') {
-    const parsed = Number(value.trim());
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return null;
-}
-
-function firstFiniteMetric(payloads: Record<string, unknown>[], paths: string[]): number | null {
-  for (const payload of payloads) {
-    for (const path of paths) {
-      const value = readFiniteNumber(readObjectPath(payload, path));
-      if (value !== null) return value;
-    }
-  }
-  return null;
-}
-
-function firstTextMetric(payloads: Record<string, unknown>[], paths: string[]): string {
-  for (const payload of payloads) {
-    for (const path of paths) {
-      const value = readText(readObjectPath(payload, path));
-      if (value) return value;
-    }
-  }
-  return '';
 }
 
 function normalizePlddtValue(value: number | null): number | null {
