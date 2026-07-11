@@ -329,9 +329,8 @@ class ResultArchiveService:
                 temp_path = handle.name
             structure = gemmi.read_structure(temp_path)
             structure.setup_entities()
-        except Exception:
-            if temp_path and os.path.exists(temp_path):
-                os.remove(temp_path)
+        except Exception as exc:
+            self.logger.warning('Failed to read structure %s for ligand pLDDT estimate: %s', structure_name, exc)
             return None
         finally:
             if temp_path and os.path.exists(temp_path):

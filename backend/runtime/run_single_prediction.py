@@ -79,6 +79,7 @@ from backend.core.config import (
     RESULTS_BASE_DIR,
 )
 from backend.scheduling.capability_router import build_capability_queue
+from backend.services.common_utils import coerce_bool
 from backend.runtime.af3_adapter import (
     AF3Preparation,
     build_af3_fasta,
@@ -101,6 +102,25 @@ from Bio.PDB.Polypeptide import is_aa
 import gemmi
 from rdkit import Chem
 from rdkit.Chem import AllChem, Descriptors, rdFMCS, rdMolAlign, rdMolDescriptors
+from backend.runtime.custom_ccd_builder import (
+    CUSTOM_RESIDUE_BACKBONE_SMARTS,
+    _append_custom_residues_ccd,
+    _append_custom_residues_ccd_from_molecules,
+    _boltz_custom_ccd_aliases,
+    _build_custom_ccd_bundle,
+    _build_custom_ccd_mol,
+    _custom_ccd_has_amino_acid_backbone,
+    _custom_ccd_mol_atom_names,
+    _custom_ccd_mol_to_cif_block,
+    _find_residue_backbone_topology,
+    _is_amide_like_nitrogen,
+    _is_carbonyl_carbon,
+    _normalize_backbone_override,
+    _normalize_custom_ccd_molecules,
+    _residue_topology_from_backbone_override,
+    _set_atom_name,
+    _set_custom_ccd_atom_properties,
+)
 
 # MSA 缓存配置
 MSA_CACHE_CONFIG = {
@@ -113,7 +133,6 @@ IPSAE_PAE_CUTOFF = 12.0
 IPSAE_DIST_CUTOFF = 5.0
 _BOLTZ_RESULT_CONF_RE = re.compile(r"^confidence_(.+)_model_(\d+)\.json$", re.IGNORECASE)
 _PROTENIX_SUMMARY_CONF_RE = re.compile(r"_summary_confidence_sample_(\d+)\.json$", re.IGNORECASE)
-CUSTOM_RESIDUE_BACKBONE_SMARTS = "[NX3;!$(NC=O)]-[C;X4]-C(=O)[O,N]"
 
 
 def _normalized_msa_server_url() -> str:
@@ -1241,6 +1260,10 @@ def determine_docker_gpu_arg(visible_devices: Optional[str]) -> str:
         )
 
     return f"device={','.join(tokens)}"
+
+
+def resolve_low_vram(predict_args: Optional[Dict[str, Any]]) -> bool:
+    return coerce_bool((predict_args or {}).get("low_vram"))
 
 
 def collect_gpu_device_group_ids() -> List[int]:
@@ -4526,6 +4549,7 @@ def run_protenix_backend(
     seed: Optional[int] = None,
     task_id: Optional[str] = None,
     custom_ccd_molecules: Optional[List[Dict[str, Any]]] = None,
+    low_vram: bool = False,
 ) -> None:
     print("🚀 Using Protenix backend", file=sys.stderr)
     msa_server_url = _assert_msa_server_configured("protenix")
@@ -4546,12 +4570,17 @@ def run_protenix_backend(
         yaml_content,
     )
     _validate_amidated_terminal_constraints(yaml_content, custom_molecules)
+    linker_codes = _detect_bicyclic_linker_codes(yaml_content)
+    linker_extra_cif = _linker_ccd_mmcif_bundle(linker_codes) if linker_codes else ""
+    linker_extra_mols = _linker_ccd_mols(linker_codes) if linker_codes else {}
     protenix_common_overlay_root: Optional[Path] = None
-    if custom_molecules:
+    if custom_molecules or linker_extra_cif:
         protenix_common_overlay_root = _merge_custom_ccd_with_existing_cache(
             Path(str(PROTENIX_COMMON_CACHE_DIR).strip()),
             protenix_work_root / "protenix_common_overlay",
             custom_molecules,
+            extra_cif_text=linker_extra_cif,
+            extra_mols=linker_extra_mols,
         )
 
     print(f"🧬 开始使用 MSA 服务器生成多序列比对: {msa_server_url}", file=sys.stderr)
@@ -4645,7 +4674,7 @@ def run_protenix_backend(
     try:
         gpu_arg = determine_docker_gpu_arg(visible_devices)
     except RuntimeError as gpu_err:
-        print(f"❌ 无法准备 Protenix GPU 环境: {gpu_err}", file=sys.stderr)
+        print(f"[protenix] GPU env unavailable: {gpu_err}", file=sys.stderr)
         raise
 
     runtime_task_id = str(task_id or os.environ.get("BOLTZ_TASK_ID") or "").strip()
@@ -4662,14 +4691,18 @@ def run_protenix_backend(
     if not runtime_overridden:
         docker_command.extend(["--runtime", "nvidia"])
 
+    protenix_container_env = [
+        f"PYTHONPATH={container_app_dir}",
+        "PROTENIX_ROOT_DIR=/cache",
+    ]
+    if low_vram:
+        protenix_container_env.append("PROTENIX_LOW_VRAM=1")
+
+    docker_command.extend(["--gpus", gpu_arg])
+    for env_kv in protenix_container_env:
+        docker_command.extend(["--env", env_kv])
     docker_command.extend(
         [
-            "--gpus",
-            gpu_arg,
-            "--env",
-            f"PYTHONPATH={container_app_dir}",
-            "--env",
-            "PROTENIX_ROOT_DIR=/cache",
             "--volume",
             f"{protenix_input_dir}:/workspace/protenix_input",
             "--volume",
@@ -5994,10 +6027,50 @@ def _normalize_peptide_backend(raw: Any) -> str:
     return "boltz"
 
 
-def _peptide_backend_supports_design_mode(backend: str, design_mode: str) -> bool:
-    if design_mode == "linear":
-        return True
-    return _normalize_peptide_backend(backend) == "boltz"
+# Bicyclic linkers and the 3 linker atoms each Cys-SG bonds to (matches the atom names in
+# backend/runtime/linker_ccd/<code>.cif, generated from Boltz's CCD cache).
+BICYCLIC_LINKER_ATOM_MAP: Dict[str, List[str]] = {
+    "SEZ": ["CD", "C1", "C2"],
+    "29N": ["C16", "C19", "C25"],
+    "BS3": ["BI", "BI", "BI"],
+}
+
+
+def _detect_bicyclic_linker_codes(yaml_content: str) -> List[str]:
+    data = yaml.safe_load(yaml_content) or {}
+    found: List[str] = []
+    for block in data.get("sequences", []) or []:
+        ligand = block.get("ligand") if isinstance(block, dict) else None
+        if isinstance(ligand, dict):
+            code = str(ligand.get("ccd") or "").strip().upper()
+            if code in BICYCLIC_LINKER_ATOM_MAP and code not in found:
+                found.append(code)
+    return found
+
+
+def _linker_ccd_mmcif_bundle(codes: Iterable[str]) -> str:
+    linker_dir = Path(__file__).resolve().parent / "linker_ccd"
+    parts: List[str] = []
+    for code in codes:
+        path = linker_dir / f"{code}.cif"
+        if not path.is_file():
+            raise FileNotFoundError(f"Bicyclic linker CCD mmcif is missing: {path}")
+        parts.append(path.read_text())
+    return "\n".join(parts)
+
+
+def _linker_ccd_mols(codes: Iterable[str]) -> Dict[str, Chem.Mol]:
+    pkl_path = Path(__file__).resolve().parent / "linker_ccd" / "linker_mols.pkl"
+    if not pkl_path.is_file():
+        raise FileNotFoundError(f"Bicyclic linker CCD mols are missing: {pkl_path}")
+    with pkl_path.open("rb") as handle:
+        mols = pickle.load(handle)
+    if not isinstance(mols, dict):
+        raise RuntimeError(f"Corrupt linker mols cache (expected a dict): {pkl_path}")
+    missing = [code for code in codes if code not in mols]
+    if missing:
+        raise KeyError(f"Bicyclic linker mols missing for: {missing}")
+    return {code: mols[code] for code in codes}
 
 
 def _extract_chain_ids_from_yaml(yaml_data: Dict[str, Any]) -> List[str]:
@@ -6779,6 +6852,7 @@ def _build_peptide_candidate_yaml(
     linker_chain_id: str,
     linker_atom_map: Dict[str, List[str]],
     modifications: Optional[List[Dict[str, Any]]] = None,
+    backend: str = "boltz",
 ) -> str:
     yaml_data = copy.deepcopy(base_yaml_data)
     if not isinstance(yaml_data.get("sequences"), list):
@@ -6807,7 +6881,24 @@ def _build_peptide_candidate_yaml(
         if binder_modifications:
             binder_entry["protein"]["modifications"] = binder_modifications
     if design_mode == "cyclic":
-        binder_entry["protein"]["cyclic"] = True
+        if _normalize_peptide_backend(backend) == "boltz":
+            binder_entry["protein"]["cyclic"] = True
+        else:
+            # AF3/Protenix have no native cyclic flag; express head-to-tail cyclization
+            # as an explicit N(1)-C(L) bond (adapters map YAML bonds → bondedAtomPairs /
+            # covalent_bonds).
+            constraints = yaml_data.get("constraints")
+            if not isinstance(constraints, list):
+                constraints = []
+            constraints.append(
+                {
+                    "bond": {
+                        "atom1": [binder_chain_id, 1, "N"],
+                        "atom2": [binder_chain_id, len(binder_sequence), "C"],
+                    }
+                }
+            )
+            yaml_data["constraints"] = constraints
 
     yaml_data["sequences"].append(binder_entry)
 
@@ -7220,10 +7311,6 @@ def run_peptide_design_backend(
 
     peptide_backend = _normalize_peptide_backend(backend)
     design_mode = _normalize_peptide_design_mode(options.get("peptideDesignMode") or options.get("peptide_design_mode"))
-    if not _peptide_backend_supports_design_mode(peptide_backend, design_mode):
-        raise ValueError(
-            f"Peptide design backend '{peptide_backend}' supports linear peptides only; requested mode='{design_mode}'."
-        )
     min_binder_len = 8 if design_mode == "bicyclic" else 5
     binder_length = _read_int_option(
         options,
@@ -7277,13 +7364,11 @@ def run_peptide_design_backend(
         if cys_position_mode == "manual":
             design_params["cys_positions"] = [cys1_pos - 1, cys2_pos - 1]
 
-    linker_atom_map = {
-        "SEZ": ["CD", "C1", "C2"],
-        "29N": ["C16", "C19", "C25"],
-        "BS3": ["BI", "BI", "BI"],
-    }
+    linker_atom_map = BICYCLIC_LINKER_ATOM_MAP
     if design_mode == "bicyclic" and linker_ccd not in linker_atom_map:
-        linker_ccd = "SEZ"
+        raise ValueError(
+            f"Unsupported bicyclic linker CCD '{linker_ccd}'. Supported: {sorted(linker_atom_map)}."
+        )
 
     custom_molecules = _normalize_custom_ccd_molecules(custom_ccd_molecules or [])
     natural_pool, unnatural_pool = _normalize_peptide_residue_pool(options.get("peptideResiduePool") or options.get("peptide_residue_pool"), custom_molecules)
@@ -7518,6 +7603,7 @@ def run_peptide_design_backend(
                 linker_chain_id=linker_chain_id,
                 linker_atom_map=linker_atom_map,
                 modifications=candidate_modifications,
+                backend=peptide_backend,
             )
             archive_path = os.path.join(candidate_dir, "result.zip")
 
@@ -7861,493 +7947,15 @@ def run_peptide_design_backend(
 
 
 
-def _normalize_backbone_override(raw: Any) -> Optional[Dict[str, int]]:
-    """Validate/normalize a manual backbone override (5 non-negative integer slots)."""
-    if not isinstance(raw, dict):
-        return None
-    backbone: Dict[str, int] = {}
-    for slot in ("n", "ca", "c", "o", "oxt"):
-        try:
-            num = int(raw.get(slot))  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return None
-        if num < 0:
-            return None
-        backbone[slot] = num
-    return backbone
-
-
-def _normalize_custom_ccd_molecules(raw_value: Any) -> List[Dict[str, Any]]:
-    if not isinstance(raw_value, list):
-        return []
-    molecules: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in raw_value:
-        if not isinstance(item, dict):
-            continue
-        ccd = re.sub(r"[^A-Za-z0-9_-]", "", str(item.get("ccd") or "")).upper()[:12]
-        smiles = str(item.get("smiles") or "").strip()
-        if not ccd or not smiles or ccd in seen:
-            continue
-        kind = str(item.get("kind") or "residue").strip().lower()
-        if kind not in {"residue", "ligand"}:
-            kind = "residue"
-        seen.add(ccd)
-        molecules.append({
-            "ccd": ccd,
-            "smiles": smiles,
-            "base_residue": str(item.get("base_residue") or item.get("baseResidue") or "").strip().upper()[:1],
-            "label": str(item.get("label") or "").strip()[:80],
-            "kind": kind,
-            "backbone": _normalize_backbone_override(item.get("backbone")),
-            "cTerminalAmidated": bool(item.get("cTerminalAmidated")),
-        })
-    return molecules
-
-
-def _boltz_custom_ccd_aliases(ccd: str) -> List[str]:
-    code = re.sub(r"[^A-Za-z0-9_-]", "", str(ccd or "")).upper()
-    aliases: List[str] = []
-    for candidate in (code, code[:5]):
-        if candidate and candidate not in aliases:
-            aliases.append(candidate)
-    return aliases
-
-
-def _custom_ccd_has_amino_acid_backbone(mol: Chem.Mol) -> bool:
-    query = Chem.MolFromSmarts(CUSTOM_RESIDUE_BACKBONE_SMARTS)
-    return bool(query is not None and mol.HasSubstructMatch(query))
-
-
-def _is_carbonyl_carbon(mol: Chem.Mol, atom_idx: int) -> bool:
-    atom = mol.GetAtomWithIdx(atom_idx)
-    if atom.GetAtomicNum() != 6:
-        return False
-    for bond in atom.GetBonds():
-        other = bond.GetOtherAtom(atom)
-        if other.GetAtomicNum() == 8 and bond.GetBondType() == Chem.BondType.DOUBLE:
-            return True
-    return False
-
-
-def _is_amide_like_nitrogen(mol: Chem.Mol, atom_idx: int) -> bool:
-    atom = mol.GetAtomWithIdx(atom_idx)
-    if atom.GetAtomicNum() != 7:
-        return False
-    for neighbor in atom.GetNeighbors():
-        if _is_carbonyl_carbon(mol, neighbor.GetIdx()):
-            return True
-    return False
-
-
-def _find_residue_backbone_topology(mol: Chem.Mol, *, amidated: bool = False) -> Dict[str, Any]:
-    # Amidated residues terminate in -C(=O)NH2 (an amide) instead of -C(=O)OH (a carboxyl). The
-    # match is still a 3-tuple (carbon, carbonyl-O, terminal-atom) where the terminal atom is O
-    # for carboxyl or N for amide, so the downstream scoring heuristic below is shared verbatim.
-    terminal_smarts = "[CX3](=[OX1])[NX3H2,NX3H1,NX4H2]" if amidated else "[CX3](=O)[OX1H0-,OX2H1]"
-    terminal_pattern = Chem.MolFromSmarts(terminal_smarts)
-    if terminal_pattern is None:
-        raise RuntimeError("Failed to build residue terminal SMARTS.")
-    terminal_matches = list(mol.GetSubstructMatches(terminal_pattern))
-    if not terminal_matches:
-        if amidated:
-            raise ValueError(
-                "C 端酰胺化自定义残基必须包含末端酰胺基团 C(=O)N"
-                "（请确认已勾选「C 端酰胺化」，且 SMILES 的 C 端为 -C(=O)N）。"
-            )
-        raise ValueError("Custom residue must contain a terminal carboxyl group C(=O)O.")
-
-    n_candidates = [
-        atom.GetIdx()
-        for atom in mol.GetAtoms()
-        if atom.GetAtomicNum() == 7 and atom.GetDegree() > 0
-    ]
-    if not n_candidates:
-        raise ValueError("Custom residue must contain a peptide-linkable nitrogen atom.")
-
-    best: Dict[str, Any] | None = None
-    excluded_by_terminal = {idx for match in terminal_matches for idx in match[1:]}
-    for terminal in terminal_matches:
-        if len(terminal) < 3:
-            continue
-        carbon_idx, carbonyl_oxygen_idx, terminal_oxygen_idx = terminal[:3]
-        for n_idx in n_candidates:
-            if n_idx == carbon_idx or n_idx in excluded_by_terminal:
-                continue
-            try:
-                path = list(Chem.rdmolops.GetShortestPath(mol, n_idx, carbon_idx))
-            except Exception:
-                continue
-            if len(path) < 3:
-                continue
-            if any(idx in excluded_by_terminal for idx in path[1:-1]):
-                continue
-            interior = path[1:-1]
-            if not interior:
-                continue
-            if len(interior) > 8:
-                continue
-            first = mol.GetAtomWithIdx(interior[0])
-            if first.GetAtomicNum() not in {6, 7}:
-                continue
-            hetero_penalty = sum(1 for idx in interior if mol.GetAtomWithIdx(idx).GetAtomicNum() not in {6, 7})
-            amide_penalty = 4 if _is_amide_like_nitrogen(mol, n_idx) else 0
-            score = (amide_penalty, hetero_penalty, len(path))
-            candidate = {
-                "n_idx": n_idx,
-                "c_idx": carbon_idx,
-                "o_idx": carbonyl_oxygen_idx,
-                "oxt_idx": terminal_oxygen_idx,
-                "path": path,
-                "score": score,
-            }
-            if best is None or score < best["score"]:
-                best = candidate
-
-    if best is None:
-        raise ValueError(
-            "Custom residue must contain a peptide-linkable nitrogen connected to a terminal carboxyl group by a reasonable heavy-atom backbone path."
-        )
-    return best
-
-
-def _set_atom_name(atom: Chem.Atom, name: str) -> None:
-    atom.SetProp("name", name)
-    atom.SetProp("atom_name", name)
-    atom.SetProp("alt_name", name)
-
-
-def _set_custom_ccd_atom_properties(mol: Chem.Mol, *, kind: str, residue_topology: Optional[Dict[str, Any]] = None, amidated: bool = False) -> None:
-    element_count: Dict[str, int] = {}
-    for atom in mol.GetAtoms():
-        symbol = atom.GetSymbol().upper()
-        element_count[symbol] = element_count.get(symbol, 0) + 1
-        name = f"{symbol}{element_count[symbol]}"
-        if len(name) > 4:
-            raise ValueError(f"Custom CCD atom name exceeds 4 characters: {name}")
-        _set_atom_name(atom, name)
-        atom.SetProp("leaving_atom", "0")
-
-    if kind != "residue":
-        return
-    if not residue_topology:
-        raise ValueError("Custom residue topology was not resolved.")
-
-    path = [int(idx) for idx in residue_topology.get("path") or []]
-    n_idx = int(residue_topology["n_idx"])
-    c_idx = int(residue_topology["c_idx"])
-    o_idx = int(residue_topology["o_idx"])
-    oxt_idx = int(residue_topology["oxt_idx"])
-
-    _set_atom_name(mol.GetAtomWithIdx(n_idx), "N")
-    _set_atom_name(mol.GetAtomWithIdx(c_idx), "C")
-    _set_atom_name(mol.GetAtomWithIdx(o_idx), "O")
-    terminal = mol.GetAtomWithIdx(oxt_idx)
-    if amidated:
-        # C-terminal amide: the terminal atom is nitrogen (NXT), which is NOT a leaving atom — it
-        # is part of the -CONH2 terminus (PDB convention, e.g. CCD 9AT/ZZJ). leaving_atom stays "0".
-        _set_atom_name(terminal, "NXT")
-    else:
-        _set_atom_name(terminal, "OXT")
-        terminal.SetProp("leaving_atom", "1")
-
-    backbone_names = ["CA", "CB", "CG", "CD", "CE", "CZ", "CH", "CI"]
-    for offset, atom_idx in enumerate(path[1:-1]):
-        if offset >= len(backbone_names):
-            break
-        _set_atom_name(mol.GetAtomWithIdx(atom_idx), backbone_names[offset])
-
-
-def _residue_topology_from_backbone_override(mol: Chem.Mol, backbone: Dict[str, int], *, amidated: bool = False) -> Dict[str, Any]:
-    """Resolve a residue_topology from a user-supplied manual backbone assignment (0-based
-    heavy-atom indices). Authoritative and validated: every slot's element and the carboxyl
-    chemistry must match, else raise — never silently fall back to the topology heuristic.
-    `mol` here is pre-AddHs (heavy atoms only), matching the 2D depiction index space."""
-    if not isinstance(backbone, dict):
-        raise ValueError("Custom residue backbone override must be an object.")
-
-    def _slot_idx(slot: str) -> int:
-        try:
-            num = int(backbone.get(slot))  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            raise ValueError(f"Backbone slot '{slot}' must be an integer atom index.")
-        if num < 0 or num >= mol.GetNumAtoms():
-            raise ValueError(
-                f"Backbone slot '{slot}' index {num} is out of range (0..{mol.GetNumAtoms() - 1})."
-            )
-        return num
-
-    n_idx = _slot_idx("n")
-    ca_idx = _slot_idx("ca")
-    c_idx = _slot_idx("c")
-    o_idx = _slot_idx("o")
-    oxt_idx = _slot_idx("oxt")
-    if len({n_idx, ca_idx, c_idx, o_idx, oxt_idx}) != 5:
-        raise ValueError("Backbone slots must each point at a distinct atom.")
-
-    def _atomic_num(idx: int) -> int:
-        return mol.GetAtomWithIdx(idx).GetAtomicNum()
-
-    if _atomic_num(n_idx) != 7:
-        raise ValueError("Backbone N must be a nitrogen atom.")
-    if _atomic_num(ca_idx) not in (6, 7):
-        raise ValueError("Backbone CA must be a carbon or nitrogen atom.")
-    if _atomic_num(c_idx) != 6:
-        raise ValueError("Backbone C must be a carbon atom.")
-    if _atomic_num(o_idx) != 8:
-        raise ValueError("Backbone O must be the carbonyl oxygen atom.")
-    # The terminal (5th) slot is the carboxyl hydroxyl oxygen (OXT) by default, or the C-terminal
-    # amide nitrogen (NXT) when amidated — both bond to the carbonyl carbon C.
-    if amidated:
-        if _atomic_num(oxt_idx) != 7:
-            raise ValueError("C 端酰胺化模式下，第 5 个骨架槽位（NXT）必须是氮原子。")
-    elif _atomic_num(oxt_idx) != 8:
-        raise ValueError("Backbone OXT must be an oxygen atom.")
-
-    # C must be the carbonyl carbon: bonded to both O and the terminal atom, with O the carbonyl
-    # (C=O). For carboxyl, the terminal OXT is the leaving hydroxyl (C-OH); for amide, NXT is a
-    # single-bonded terminal nitrogen (C-N) that is NOT a leaving atom.
-    c_neighbors = {b.GetOtherAtomIdx(c_idx) for b in mol.GetAtomWithIdx(c_idx).GetBonds()}
-    if o_idx not in c_neighbors or oxt_idx not in c_neighbors:
-        raise ValueError("Backbone C must be directly bonded to both O and the terminal atom (carboxyl/amide carbon).")
-
-    def _is_double_bond(a: int, b: int) -> bool:
-        for bond in mol.GetAtomWithIdx(a).GetBonds():
-            if bond.GetOtherAtomIdx(a) == b:
-                return bond.GetBondType() == Chem.BondType.DOUBLE
-        return False
-
-    if not _is_double_bond(c_idx, o_idx):
-        raise ValueError("Backbone O must be the carbonyl oxygen (C=O).")
-
-    if amidated:
-        for bond in mol.GetAtomWithIdx(c_idx).GetBonds():
-            if bond.GetOtherAtomIdx(c_idx) == oxt_idx:
-                if bond.GetBondType() != Chem.BondType.SINGLE:
-                    raise ValueError("C 端酰胺化模式下，C-NXT 必须是单键（酰胺 C-N 单键）。")
-                break
-
-    # CA must connect the backbone (bonded to N or C), matching the topology heuristic's path.
-    ca_neighbors = {b.GetOtherAtomIdx(ca_idx) for b in mol.GetAtomWithIdx(ca_idx).GetBonds()}
-    if n_idx not in ca_neighbors and c_idx not in ca_neighbors:
-        raise ValueError("Backbone CA must be bonded to N or C.")
-
-    return {
-        "n_idx": n_idx,
-        "c_idx": c_idx,
-        "o_idx": o_idx,
-        "oxt_idx": oxt_idx,
-        # path[1:-1] is consumed by _set_custom_ccd_atom_properties to name CA; sidechain atoms
-        # beyond CA keep their {ELEMENT}{count} names, matching the frontend picker exactly.
-        "path": [n_idx, ca_idx, c_idx],
-    }
-
-
-def _build_custom_ccd_mol(smiles: str, *, kind: str = "residue", backbone: Optional[Dict[str, int]] = None, amidated: bool = False) -> Chem.Mol:
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        raise ValueError("RDKit failed to parse custom CCD SMILES.")
-    Chem.SanitizeMol(mol)
-    if kind == "residue":
-        # A manual backbone override (user-clicked atoms) is authoritative and validated; the
-        # topology heuristic is only a fallback when no override is supplied.
-        residue_topology = (
-            _residue_topology_from_backbone_override(mol, backbone, amidated=amidated)
-            if backbone else _find_residue_backbone_topology(mol, amidated=amidated)
-        )
-    else:
-        residue_topology = None
-    mol = Chem.AddHs(mol)
-    _set_custom_ccd_atom_properties(mol, kind=kind, residue_topology=residue_topology, amidated=amidated)
-    embed_status = AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
-    if embed_status == -1:
-        embed_status = AllChem.EmbedMolecule(mol, useRandomCoords=True)
-    if embed_status == -1:
-        raise ValueError(f"RDKit 3D embedding failed for custom CCD SMILES: {smiles}")
-    try:
-        AllChem.UFFOptimizeMolecule(mol)
-    except Exception as exc:
-        # Embedding already succeeded; UFF is geometry refinement only, so a failure leaves an
-        # unoptimized (but valid) conformer. Log it so a malformed custom CCD stays traceable.
-        print(f"⚠️ UFF optimization failed for custom CCD SMILES ({smiles}): {exc}", file=sys.stderr)
-    for conformer in mol.GetConformers():
-        conformer.SetProp("name", "Ideal")
-    mol.atom_map = {atom.GetProp("name"): atom.GetIdx() for atom in mol.GetAtoms() if atom.GetSymbol().upper() not in {"H", "D"}}
-    mol.name = "custom"
-    mol.sanitized = True
-    mol.ref_conf_id = 0
-    mol.ref_conf_type = "rdkit"
-    mol.ref_mask = np.ones(mol.GetNumAtoms(), dtype=bool)
-    return mol
-
-def _custom_ccd_mol_atom_names(mol: Chem.Mol, *, include_hydrogens: bool = False) -> List[str]:
-    names: List[str] = []
-    for atom in mol.GetAtoms():
-        if not include_hydrogens and atom.GetSymbol().upper() in {"H", "D"}:
-            continue
-        names.append(atom.GetProp("name") if atom.HasProp("name") else f"{atom.GetSymbol().upper()}{atom.GetIdx() + 1}")
-    return names
-
-
-def _custom_ccd_mol_to_cif_block(
-    ccd: str,
-    mol: Chem.Mol,
-    *,
-    kind: str,
-    label: str = "",
-    base_residue: str = "",
-) -> str:
-    formula = rdMolDescriptors.CalcMolFormula(mol)
-    weight = Descriptors.MolWt(mol)
-    comp_type = "L-PEPTIDE LINKING" if kind == "residue" else "NON-POLYMER"
-    name = label or ccd
-    clean_name = name.replace(chr(39), "")
-    base = str(base_residue or "").strip().upper()[:1]
-    if kind == "residue" and base not in "ARNDCQEGHILKMFPSTWYV":
-        raise ValueError(f"Custom residue CCD {ccd} requires a valid base_residue for canonical mapping.")
-    one_letter_code = base if kind == "residue" else "?"
-    parent_comp_id = base if kind == "residue" else "?"
-    three_letter_code = ccd if len(ccd) <= 3 else "?"
-    lines: List[str] = [
-        f"data_{ccd}",
-        "#",
-        f"_chem_comp.id {ccd}",
-        f"_chem_comp.name '{clean_name}'",
-        f"_chem_comp.type '{comp_type}'",
-        f"_chem_comp.formula '{formula}'",
-        f"_chem_comp.mon_nstd_parent_comp_id {parent_comp_id}",
-        "_chem_comp.pdbx_synonyms ?",
-        "_chem_comp.pdbx_formal_charge 0",
-        "_chem_comp.pdbx_initial_date 2026-06-26",
-        "_chem_comp.pdbx_modified_date 2026-06-26",
-        "_chem_comp.pdbx_ambiguous_flag N",
-        "_chem_comp.pdbx_release_status REL",
-        "_chem_comp.pdbx_replaced_by ?",
-        "_chem_comp.pdbx_replaces ?",
-        f"_chem_comp.formula_weight {weight:.3f}",
-        f"_chem_comp.one_letter_code {one_letter_code}",
-        f"_chem_comp.three_letter_code {three_letter_code}",
-        "_chem_comp.pdbx_model_coordinates_details ?",
-        "_chem_comp.pdbx_model_coordinates_missing_flag N",
-        "_chem_comp.pdbx_ideal_coordinates_details RDKit",
-        "_chem_comp.pdbx_ideal_coordinates_missing_flag N",
-        "_chem_comp.pdbx_model_coordinates_db_code ?",
-        "_chem_comp.pdbx_subcomponent_list ?",
-        "_chem_comp.pdbx_processing_site V-Bio",
-        "#",
-        "loop_",
-        "_chem_comp_atom.comp_id",
-        "_chem_comp_atom.atom_id",
-        "_chem_comp_atom.type_symbol",
-        "_chem_comp_atom.charge",
-        "_chem_comp_atom.pdbx_model_Cartn_x_ideal",
-        "_chem_comp_atom.pdbx_model_Cartn_y_ideal",
-        "_chem_comp_atom.pdbx_model_Cartn_z_ideal",
-        "_chem_comp_atom.pdbx_leaving_atom_flag",
-        "_chem_comp_atom.alt_atom_id",
-        "_chem_comp_atom.pdbx_component_atom_id",
-    ]
-    conf = mol.GetConformer(mol.ref_conf_id if hasattr(mol, "ref_conf_id") else 0)
-    for atom in mol.GetAtoms():
-        if atom.GetSymbol().upper() in {"H", "D"}:
-            continue
-        atom_name = atom.GetProp("name")
-        pos = conf.GetAtomPosition(atom.GetIdx())
-        leaving = "Y" if atom.HasProp("leaving_atom") and atom.GetProp("leaving_atom") == "1" else "N"
-        lines.append(
-            f"{ccd} {atom_name} {atom.GetSymbol().upper()} {atom.GetFormalCharge()} {pos.x:.4f} {pos.y:.4f} {pos.z:.4f} {leaving} {atom_name} {atom_name}"
-        )
-    lines.extend([
-        "#",
-        "loop_",
-        "_chem_comp_bond.comp_id",
-        "_chem_comp_bond.atom_id_1",
-        "_chem_comp_bond.atom_id_2",
-        "_chem_comp_bond.value_order",
-        "_chem_comp_bond.pdbx_aromatic_flag",
-    ])
-    bond_order_map = {
-        Chem.BondType.SINGLE: "SING",
-        Chem.BondType.DOUBLE: "DOUB",
-        Chem.BondType.TRIPLE: "TRIP",
-        Chem.BondType.AROMATIC: "SING",
-    }
-    for bond in mol.GetBonds():
-        atom1 = bond.GetBeginAtom()
-        atom2 = bond.GetEndAtom()
-        if atom1.GetSymbol().upper() in {"H", "D"} or atom2.GetSymbol().upper() in {"H", "D"}:
-            continue
-        order = bond_order_map.get(bond.GetBondType(), "SING")
-        aromatic = "Y" if bond.GetIsAromatic() else "N"
-        lines.append(f"{ccd} {atom1.GetProp('name')} {atom2.GetProp('name')} {order} {aromatic}")
-    lines.append("#")
-    return "\n".join(lines) + "\n"
-
-
-def _append_custom_residues_ccd(
-    extra_files: List[Tuple[Path, str]],
-    cif_text: Optional[str],
-    temp_dir: str,
-    prefix: str,
-) -> None:
-    """Write the custom-residue CCD mmcif (the exact definitions the backend fed to the
-    predictor) into the result archive so users can download them with the structure."""
-    text = str(cif_text or "").strip()
-    if not text:
-        return
-    try:
-        dest = Path(temp_dir) / "custom_residues.cif"
-        dest.write_text(text, encoding="utf-8")
-        extra_files.append((dest, f"{prefix}/custom_residues.cif"))
-    except Exception as err:
-        print(f"⚠️ 写入自定义残基 CCD 失败: {err}", file=sys.stderr)
-
-
-def _append_custom_residues_ccd_from_molecules(
-    extra_files: List[Tuple[Path, str]],
-    custom_molecules: List[Dict[str, Any]],
-    temp_dir: str,
-    prefix: str,
-) -> None:
-    """Re-build the custom-residue CCD mmcif from the (already normalized/merged) molecule list
-    and add it to the archive. Used by backends whose archive is assembled in a different scope
-    from where the bundle was first built."""
-    if not custom_molecules:
-        return
-    try:
-        cif_text, _ = _build_custom_ccd_bundle(custom_molecules)
-    except Exception as err:
-        print(f"⚠️ 构建自定义残基 CCD 失败: {err}", file=sys.stderr)
-        return
-    _append_custom_residues_ccd(extra_files, cif_text, temp_dir, prefix)
-
-
-def _build_custom_ccd_bundle(molecules: List[Dict[str, str]]) -> Tuple[str, Dict[str, Chem.Mol]]:
-    blocks: List[str] = []
-    mols: Dict[str, Chem.Mol] = {}
-    for item in _normalize_custom_ccd_molecules(molecules):
-        kind = item.get("kind") or "residue"
-        ccd = item["ccd"]
-        amidated = bool(item.get("cTerminalAmidated") or False)
-        mol = _build_custom_ccd_mol(item["smiles"], kind=kind, backbone=item.get("backbone"), amidated=amidated)
-        mol.name = ccd
-        mols[ccd] = mol
-        blocks.append(_custom_ccd_mol_to_cif_block(
-            ccd,
-            mol,
-            kind=kind,
-            label=item.get("label") or ccd,
-            base_residue=item.get("base_residue") or "",
-        ))
-    return "\n".join(blocks), mols
-
-
 def _merge_custom_ccd_with_existing_cache(
     source_common_dir: Path,
     overlay_root: Path,
     custom_molecules: List[Dict[str, str]],
+    extra_cif_text: str = "",
+    extra_mols: Optional[Dict[str, Chem.Mol]] = None,
 ) -> Optional[Path]:
-    if not custom_molecules:
+    extra_mols = extra_mols or {}
+    if not custom_molecules and not extra_cif_text.strip() and not extra_mols:
         return None
     if not source_common_dir.is_dir():
         raise RuntimeError(f"Protenix common cache directory is missing: {source_common_dir}")
@@ -8362,10 +7970,11 @@ def _merge_custom_ccd_with_existing_cache(
     overlay_common = overlay_root / "common"
     overlay_common.mkdir(parents=True, exist_ok=True)
 
-    custom_cif_text, custom_mols = _build_custom_ccd_bundle(custom_molecules)
-    merged_cif_text = source_components.read_text(encoding="utf-8", errors="replace")
-    if custom_cif_text.strip():
-        merged_cif_text = merged_cif_text.rstrip() + "\n" + custom_cif_text.strip() + "\n"
+    custom_cif_text, custom_mols = _build_custom_ccd_bundle(custom_molecules) if custom_molecules else ("", {})
+    additions = [text for text in (custom_cif_text.strip(), extra_cif_text.strip()) if text]
+    merged_cif_text = source_components.read_text(encoding="utf-8", errors="replace").rstrip()
+    if additions:
+        merged_cif_text = merged_cif_text + "\n" + "\n".join(additions) + "\n"
     (overlay_common / "components.cif").write_text(merged_cif_text, encoding="utf-8")
 
     merged_rdkit_mols: Dict[str, Chem.Mol] = {}
@@ -8378,6 +7987,7 @@ def _merge_custom_ccd_with_existing_cache(
         raise RuntimeError(f"Failed to load Protenix CCD RDKit cache: {source_rdkit}") from exc
 
     merged_rdkit_mols.update(custom_mols)
+    merged_rdkit_mols.update(extra_mols)
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
     with (overlay_common / "components.cif.rdkit_mol.pkl").open("wb") as handle:
         pickle.dump(merged_rdkit_mols, handle)
@@ -8460,6 +8070,7 @@ def run_boltz_backend(
     task_id: Optional[str] = None,
     strict_ligand_confidence_contract: bool = False,
     custom_ccd_molecules: Optional[List[Dict[str, str]]] = None,
+    low_vram: bool = False,
 ) -> None:
     msa_server_url = _assert_msa_server_configured("boltz")
     normalized_yaml = _normalize_ligand_chain_collisions(yaml_content)
@@ -8470,11 +8081,20 @@ def run_boltz_backend(
     _print_constraint_residue_summary(normalized_yaml)
 
     cli_args = dict(predict_args)
+    # low_vram is consumed here, not by the Boltz CLI — drop it so it isn't forwarded unknown.
+    cli_args.pop("low_vram", None)
     if model_name:
         cli_args['model'] = model_name
         print(f"DEBUG: Using model: {model_name}", file=sys.stderr)
     if strict_ligand_confidence_contract:
         cli_args["strict_ligand_confidence_contract"] = True
+    if low_vram:
+        # Two peak-VRAM levers for large complexes on a single GPU: serialize diffusion
+        # samples (default 5 parallel → 1) and drop to bf16-mixed precision. Neither alone
+        # is enough for ~2000+ token complexes; both are needed.
+        cli_args["max_parallel_samples"] = 1
+        if not cli_args.get("trainer_precision"):
+            cli_args["trainer_precision"] = "bf16-mixed"
 
     if 'diffusion_samples' not in cli_args or cli_args['diffusion_samples'] is None:
         effective_model = str(cli_args.get('model') or model_name or 'boltz2').lower()
@@ -8526,8 +8146,7 @@ def run_boltz_backend(
     try:
         gpu_arg = determine_docker_gpu_arg(visible_devices)
     except RuntimeError as gpu_err:
-        print(f"❌ 无法准备 Boltz2 GPU 环境: {gpu_err}", file=sys.stderr)
-        print("   ↳ 请确认此主机安装了 NVIDIA 驱动并正确设置 CUDA_VISIBLE_DEVICES。", file=sys.stderr)
+        print(f"[boltz2] GPU env unavailable: {gpu_err}", file=sys.stderr)
         raise
 
     image = (BOLTZ2_DOCKER_IMAGE or "").strip()
@@ -8734,8 +8353,15 @@ def run_alphafold3_backend(
     template_payloads: Optional[List[dict]] = None,
     task_id: Optional[str] = None,
     custom_ccd_molecules: Optional[List[Dict[str, Any]]] = None,
+    low_vram: bool = False,
 ) -> None:
     print("🚀 Using AlphaFold3 backend (AF3 input preparation)", file=sys.stderr)
+    # AlphaFold3 (JAX/CUDA) has no low-VRAM toggle. Reject explicitly rather than silently
+    # degrading or swapping engines (no 兜底).
+    if low_vram:
+        raise ValueError(
+            "AlphaFold3 不支持低显存模式。如需低显存，请改用 Protenix 或 Boltz2 后端。"
+        )
     msa_server_url = _assert_msa_server_configured("alphafold3")
     if not use_msa_server:
         print("ℹ️ AlphaFold3 已强制启用外部 MSA。", file=sys.stderr)
@@ -8757,6 +8383,10 @@ def run_alphafold3_backend(
     user_ccd_text = None
     if custom_molecules:
         user_ccd_text, _ = _build_custom_ccd_bundle(custom_molecules)
+    linker_codes = _detect_bicyclic_linker_codes(yaml_content)
+    if linker_codes:
+        linker_mmcif = _linker_ccd_mmcif_bundle(linker_codes)
+        user_ccd_text = f"{user_ccd_text}\n{linker_mmcif}" if user_ccd_text else linker_mmcif
 
     print(f"🧬 开始使用 MSA 服务器生成多序列比对: {msa_server_url}", file=sys.stderr)
     _require_complete_external_msa(yaml_content, str(af3_work_root), "AlphaFold3")
@@ -9241,6 +8871,7 @@ def main():
             worker_model_name = predict_args.pop("model_name", None)
             worker_backend = _normalize_peptide_backend(predict_args.pop("backend", "boltz"))
             worker_acquire_gpu = bool(predict_args.pop("__peptide_worker_acquire_gpu__", True))
+            worker_low_vram = resolve_low_vram(worker_predict_args)
             worker_task_id = str(predict_args.pop("__peptide_worker_task_id__", "")).strip() or "peptide-candidate-worker"
             if not isinstance(worker_predict_args, dict):
                 worker_predict_args = {}
@@ -9279,6 +8910,7 @@ def main():
                         seed=worker_seed,
                         task_id=worker_task_id,
                         custom_ccd_molecules=worker_custom_ccd_molecules if isinstance(worker_custom_ccd_molecules, list) else [],
+                        low_vram=worker_low_vram,
                     )
                 elif worker_backend == "protenix":
                     run_protenix_backend(
@@ -9289,6 +8921,7 @@ def main():
                         seed=worker_seed,
                         task_id=worker_task_id,
                         custom_ccd_molecules=worker_custom_ccd_molecules if isinstance(worker_custom_ccd_molecules, list) else [],
+                        low_vram=worker_low_vram,
                     )
                 elif worker_backend == "boltz":
                     if worker_seed is not None:
@@ -9301,6 +8934,7 @@ def main():
                         worker_model_name,
                         task_id=worker_task_id,
                         custom_ccd_molecules=worker_custom_ccd_molecules if isinstance(worker_custom_ccd_molecules, list) else [],
+                        low_vram=worker_low_vram,
                     )
                 else:
                     raise ValueError(f"Unsupported peptide candidate backend: '{worker_backend}'.")
@@ -9319,6 +8953,7 @@ def main():
         backend = str(predict_args.pop("backend", "boltz")).strip().lower()
         if backend not in ("boltz", "alphafold3", "protenix", "pocketxmol"):
             raise ValueError(f"Unsupported backend '{backend}'.")
+        low_vram = resolve_low_vram(predict_args)
         workflow = str(predict_args.pop("workflow", "prediction")).strip().lower()
         if workflow in {"peptide", "peptide_designer", "designer"}:
             workflow = "peptide_design"
@@ -9379,10 +9014,6 @@ def main():
                 peptide_design_mode = _normalize_peptide_design_mode(
                     peptide_design_options.get("peptideDesignMode") or peptide_design_options.get("peptide_design_mode")
                 )
-                if not _peptide_backend_supports_design_mode(backend, peptide_design_mode):
-                    raise ValueError(
-                        f"Peptide design backend '{backend}' supports linear peptides only. Requested mode: '{peptide_design_mode}'."
-                    )
                 validate_template_paths(processed_yaml)
                 peptide_parent_task_id = str(runtime_task_id or os.environ.get("BOLTZ_TASK_ID") or "").strip()
                 try:
@@ -9419,6 +9050,7 @@ def main():
                     template_payloads=af3_template_payloads,
                     task_id=runtime_task_id,
                     custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
+                    low_vram=low_vram,
                 )
             elif backend == "protenix":
                 if template_inputs:
@@ -9431,6 +9063,7 @@ def main():
                     seed=seed,
                     task_id=runtime_task_id,
                     custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
+                    low_vram=low_vram,
                 )
             elif backend == "pocketxmol":
                 run_pocketxmol_backend(
@@ -9453,6 +9086,7 @@ def main():
                     task_id=runtime_task_id,
                     strict_ligand_confidence_contract=strict_ligand_confidence_contract,
                     custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
+                    low_vram=low_vram,
                 )
 
             if not os.path.exists(output_archive_path):

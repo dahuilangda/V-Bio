@@ -101,8 +101,6 @@ def register_task_routes(
                     logger.debug('Task %s is PENDING and waiting for worker pickup.', task_id)
         elif task_result.state == 'SUCCESS':
             response['info'] = info if isinstance(info, dict) else {'result': str(info)}
-            if not isinstance(response['info'], dict):
-                response['info'] = {'result': str(response['info'])}
             if not response['info'].get('result_file'):
                 archive_name = find_result_archive(task_id)
                 if archive_name:
@@ -169,8 +167,6 @@ def register_task_routes(
                 if isinstance(tracker_status, dict):
                     tracker_message = str(tracker_status.get('details') or tracker_status.get('status') or '').strip()
                 info_payload = info if isinstance(info, dict) else {'message': str(info)}
-                if not isinstance(info_payload, dict):
-                    info_payload = {'message': str(info_payload)}
                 candidate_message = str(
                     info_payload.get('status')
                     or info_payload.get('message')

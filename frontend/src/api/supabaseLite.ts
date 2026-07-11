@@ -143,6 +143,15 @@ async function request<T>(
   throw new Error(`Supabase-lite request failed. Tried: ${candidates.join(', ')}.${detail}`);
 }
 
+// A `return=representation` write must return the row; an empty result means nothing matched or
+// RLS blocked the read — surface it instead of returning undefined typed as the row.
+function _requireSingleRow<T>(rows: T[]): T {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new Error('Write returned no rows — the target may not exist or RLS blocked the read.');
+  }
+  return rows[0];
+}
+
 async function listUsersByIds(userIds: string[]): Promise<AppUser[]> {
   const idFilter = buildInFilter(userIds);
   if (!idFilter) return [];
@@ -375,7 +384,7 @@ export async function insertUser(input: Partial<AppUser>): Promise<AppUser> {
       select: '*'
     }
   );
-  return rows[0];
+  return _requireSingleRow(rows);
 }
 
 export async function updateUser(userId: string, patch: Partial<AppUser>): Promise<AppUser> {
@@ -393,7 +402,7 @@ export async function updateUser(userId: string, patch: Partial<AppUser>): Promi
       select: '*'
     }
   );
-  return rows[0];
+  return _requireSingleRow(rows);
 }
 
 interface ListProjectsOptions {
@@ -692,7 +701,7 @@ export async function insertProject(input: Partial<Project>): Promise<Project> {
       select: '*'
     }
   );
-  return rows[0];
+  return _requireSingleRow(rows);
 }
 
 export async function updateProject(projectId: string, patch: Partial<Project>): Promise<Project> {
@@ -710,7 +719,7 @@ export async function updateProject(projectId: string, patch: Partial<Project>):
       select: '*'
     }
   );
-  return rows[0];
+  return _requireSingleRow(rows);
 }
 
 interface ProjectTaskAccessOptions {
@@ -1955,7 +1964,7 @@ export async function insertProjectTask(input: Partial<ProjectTask>): Promise<Pr
       select: '*'
     }
   );
-  return rows[0];
+  return _requireSingleRow(rows);
 }
 
 export async function updateProjectTask(
@@ -1986,7 +1995,7 @@ export async function updateProjectTask(
       updated_at: new Date().toISOString()
     } as ProjectTask;
   }
-  return rows[0];
+  return _requireSingleRow(rows);
 }
 
 export async function findProjectTaskByTaskId(taskId: string, projectId?: string): Promise<ProjectTask | null> {
@@ -2931,7 +2940,7 @@ export async function insertApiToken(input: Partial<ApiToken>): Promise<ApiToken
       select: '*'
     }
   );
-  return rows[0];
+  return _requireSingleRow(rows);
 }
 
 export async function updateApiToken(tokenId: string, patch: Partial<ApiToken>): Promise<ApiToken> {
@@ -2949,7 +2958,7 @@ export async function updateApiToken(tokenId: string, patch: Partial<ApiToken>):
       select: '*'
     }
   );
-  return rows[0];
+  return _requireSingleRow(rows);
 }
 
 export async function revokeApiToken(tokenId: string): Promise<ApiToken> {

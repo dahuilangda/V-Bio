@@ -47,15 +47,19 @@ class TaskMonitor:
 
             task_start_key = f"task_start:{task_id}"
             start_time_str = self.redis_client.get(task_start_key)
-
-            if not start_time_str:
-                start_time = datetime.now() - timedelta(minutes=5)
-                self.redis_client.setex(task_start_key, 86400, start_time.isoformat())
-            else:
-                start_time = datetime.fromisoformat(start_time_str)
-
             last_update_key = f"task_update:{task_id}"
             last_update_str = self.redis_client.get(last_update_key)
+
+            if start_time_str:
+                start_time = datetime.fromisoformat(start_time_str)
+            else:
+                # No start record (task predates monitoring, or the recorder missed it). Do not
+                # fabricate and persist a fake start — fall back to last_update (or now) so the
+                # duration check stays conservative instead of hiding a stuck task behind a fresh
+                # timestamp.
+                self.logger.warning('Task %s has no task_start record; age unknown.', task_id)
+                start_time = datetime.fromisoformat(last_update_str) if last_update_str else datetime.now()
+
             last_update = datetime.fromisoformat(last_update_str) if last_update_str else start_time
 
             now = datetime.now()
@@ -139,7 +143,9 @@ class TaskMonitor:
                             'create_time': datetime.fromtimestamp(proc.create_time()).isoformat(),
                             'cpu_percent': proc.cpu_percent(),
                         })
-                except Exception:
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    # Registered PID vanished or is restricted — expected during cleanup. A corrupt
+                    # task_process blob (JSONDecodeError/ValueError) propagates to the outer handler.
                     pass
         except Exception as exc:
             self.logger.error('查找进程时出错: %s', exc)
@@ -190,7 +196,11 @@ class TaskMonitor:
                 'labels': labels if isinstance(labels, dict) else {},
                 'mount_sources': [str(item.get('Source') or '') for item in mounts if isinstance(item, dict)],
             }
-        except Exception:
+        except Exception as exc:
+            # "No such container" is expected (the container is gone). Anything else (Docker daemon
+            # down, malformed inspect output) is operationally relevant — log it.
+            if 'No such container' not in str(exc):
+                self.logger.warning('docker inspect failed for %s: %s', container_id, exc)
             return None
 
     def _discover_task_containers(self, task_id: str) -> Dict:
@@ -464,14 +474,6 @@ class TaskMonitor:
                 results['failed_to_kill'].append(task_id)
 
         return results
-
-    def _kill_single_task(self, task_id: str, force: bool = False) -> bool:
-        try:
-            termination = self.terminate_task_runtime(task_id, force=force)
-            return bool(termination.get('ok'))
-        except Exception as exc:
-            self.logger.error('清理任务 %s 时出错: %s', task_id, exc)
-            return False
 
     def clean_completed_tasks(self) -> Dict:
         gpu_status = get_gpu_status()

@@ -142,6 +142,7 @@ interface UseProjectWorkflowSectionPropsInput {
   predictionComponentsSidebarProps: ReturnType<typeof buildPredictionWorkflowSectionProps>['componentsSidebarProps'];
   backend: string;
   seed: number | null;
+  lowVram: boolean;
   peptideDesignMode: 'linear' | 'cyclic' | 'bicyclic';
   peptideBinderLength: number;
   peptideUseInitialSequence: boolean;
@@ -164,6 +165,7 @@ interface UseProjectWorkflowSectionPropsInput {
   peptideBicyclicCys3Pos: number;
   onBackendChange: (backend: string) => void;
   onSeedChange: (seed: number | null) => void;
+  onLowVramChange: (lowVram: boolean) => void;
   onPeptideDesignModeChange: (mode: 'linear' | 'cyclic' | 'bicyclic') => void;
   onPeptideBinderLengthChange: (value: number) => void;
   onPeptideUseInitialSequenceChange: (value: boolean) => void;
@@ -300,8 +302,10 @@ export function useProjectWorkflowSectionProps({
   predictionComponentsSidebarProps,
   backend,
   seed,
+  lowVram,
   onBackendChange,
   onSeedChange,
+  onLowVramChange,
   peptideDesignMode,
   peptideBinderLength,
   peptideUseInitialSequence,
@@ -492,6 +496,7 @@ export function useProjectWorkflowSectionProps({
         isAffinityWorkflow,
         backend,
         seed: seed ?? null,
+        lowVram,
         peptideDesignMode,
         peptideBinderLength,
         peptideUseInitialSequence,
@@ -516,6 +521,7 @@ export function useProjectWorkflowSectionProps({
         peptideBicyclicCys3Pos,
         onBackendChange,
         onSeedChange,
+        onLowVramChange,
         onPeptideDesignModeChange,
         onPeptideBinderLengthChange,
         onPeptideUseInitialSequenceChange,

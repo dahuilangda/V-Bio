@@ -205,7 +205,8 @@ def register_lead_opt_routes(
             query_smiles = ''
             try:
                 query_smiles = attachment_fragment_smiles_from_atom_indices(mol, list(parent_atom_indices))
-            except Exception:
+            except Exception as exc:
+                logger.warning('attachment_fragment_smiles failed for %s; falling back to MolFragmentToSmiles: %s', frag_smiles, exc)
                 query_smiles = ''
             if not query_smiles:
                 raw_query_smiles = Chem.MolFragmentToSmiles(
@@ -508,7 +509,13 @@ def register_lead_opt_routes(
                                 'residues': contacts[:8],
                             })
         except Exception as exc:
+            # Pocket/interaction extraction is supplementary to the structure preview. On failure,
+            # drop any partially-collected rows so the response never presents incomplete pocket
+            # data as complete — return empty and log so the operator can trace the root cause.
             logger.warning('Failed to extract reference interactions: %s', exc)
+            pocket_residues = []
+            ligand_atom_contacts = []
+            ligand_atoms = []
 
         pocket_residues.sort(key=lambda item: item['min_distance'])
         pocket_residues = pocket_residues[:80]

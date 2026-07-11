@@ -31,6 +31,7 @@ import {
   handleRuntimePeptideResiduePoolChangeAction,
   handleRuntimePeptideUseInitialSequenceChangeAction,
   handleRuntimeSeedChangeAction,
+  handleRuntimeLowVramChangeAction,
   handleTaskNameChangeAction,
   handleTaskSummaryChangeAction
 } from './editorActions';
@@ -53,6 +54,7 @@ export interface UseProjectEditorHandlersResult {
   handlePredictionTemplateResiduePick: (pick: MolstarResiduePick) => void;
   handleRuntimeBackendChange: (backend: string) => void;
   handleRuntimeSeedChange: (seed: number | null) => void;
+  handleRuntimeLowVramChange: (lowVram: boolean) => void;
   handleRuntimePeptideDesignModeChange: (mode: 'linear' | 'cyclic' | 'bicyclic') => void;
   handleRuntimePeptideBinderLengthChange: (value: number) => void;
   handleRuntimePeptideUseInitialSequenceChange: (value: boolean) => void;
@@ -117,6 +119,13 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
   const handleRuntimeSeedChange = (seed: number | null) => {
     handleRuntimeSeedChangeAction({
       seed,
+      setDraft
+    });
+  };
+
+  const handleRuntimeLowVramChange = (lowVram: boolean) => {
+    handleRuntimeLowVramChangeAction({
+      lowVram,
       setDraft
     });
   };
@@ -268,6 +277,7 @@ export function useProjectEditorHandlers<TDraft extends ProjectWorkspaceDraft>({
     handlePredictionTemplateResiduePick,
     handleRuntimeBackendChange,
     handleRuntimeSeedChange,
+    handleRuntimeLowVramChange,
     handleRuntimePeptideDesignModeChange,
     handleRuntimePeptideBinderLengthChange,
     handleRuntimePeptideUseInitialSequenceChange,

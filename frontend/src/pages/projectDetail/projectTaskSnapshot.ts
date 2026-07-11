@@ -46,7 +46,8 @@ const TASK_INPUT_OPTION_KEYS: Array<keyof PredictionOptions> = [
   'peptideBicyclicIncludeExtraCys',
   'peptideBicyclicCys1Pos',
   'peptideBicyclicCys2Pos',
-  'peptideBicyclicCys3Pos'
+  'peptideBicyclicCys3Pos',
+  'lowVram'
 ];
 
 export interface LeadOptPersistedUpload {

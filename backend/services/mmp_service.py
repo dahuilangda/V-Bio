@@ -408,17 +408,11 @@ class LeadOptMmpService:
 
     @staticmethod
     def attachment_fragment_smiles_from_atom_indices(parent_mol: Any, atom_indices: List[int]) -> str:
-        try:
-            from rdkit import Chem
-        except Exception:
-            return ''
+        from rdkit import Chem
+        from capabilities.lead_optimization.mmp_query_service import derive_attachment_query_from_atom_indices
 
         atom_set = {int(idx) for idx in atom_indices if isinstance(idx, (int, float))}
         if not atom_set:
-            return ''
-        try:
-            from capabilities.lead_optimization.mmp_query_service import derive_attachment_query_from_atom_indices
-        except Exception:
             return ''
         query = derive_attachment_query_from_atom_indices(parent_mol, sorted(atom_set), expand_rings=False)
         if not query or '*' not in query:
@@ -457,20 +451,19 @@ class LeadOptMmpService:
 
     @staticmethod
     def compute_smiles_properties(smiles: str) -> Dict[str, float]:
-        try:
-            from rdkit import Chem
-            from rdkit.Chem import Descriptors
+        from rdkit import Chem
+        from rdkit.Chem import Descriptors
 
-            mol = Chem.MolFromSmiles(smiles)
-            if not mol:
-                return {}
-            return {
-                'molecular_weight': float(Descriptors.MolWt(mol)),
-                'logp': float(Descriptors.MolLogP(mol)),
-                'tpsa': float(Descriptors.TPSA(mol)),
-            }
-        except Exception:
+        mol = Chem.MolFromSmiles(smiles)
+        if not mol:
+            # Invalid SMILES — no properties to compute. Anything else (import failure, descriptor
+            # error) propagates rather than being masked as "no properties".
             return {}
+        return {
+            'molecular_weight': float(Descriptors.MolWt(mol)),
+            'logp': float(Descriptors.MolLogP(mol)),
+            'tpsa': float(Descriptors.TPSA(mol)),
+        }
 
     @staticmethod
     def _percentile(values: List[float], p: float) -> float:

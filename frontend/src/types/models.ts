@@ -139,6 +139,7 @@ export interface PredictionOptions {
   peptideBicyclicCys1Pos?: number;
   peptideBicyclicCys2Pos?: number;
   peptideBicyclicCys3Pos?: number;
+  lowVram?: boolean;
 }
 
 export interface ProjectInputConfig {
@@ -394,6 +395,7 @@ export interface PredictionSubmitInput {
   useMsa: boolean;
   templateUploads?: PredictionTemplateUpload[];
   customCcdMolecules?: CustomCcdMoleculeInput[];
+  lowVram?: boolean;
 }
 
 export interface CustomCcdMoleculeInput {

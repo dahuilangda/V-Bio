@@ -25,6 +25,13 @@ import { buildResultChainConsistencyWarning, resolveSelectedResultLigandChainId,
 import { AFFINITY_UPLOAD_SCOPE_PREFIX, readTaskComponents } from './projectTaskSnapshot';
 import { nonEmptyComponents } from './projectDraftUtils';
 import { readLeadOptTaskSummary } from '../projectTasks/taskDataUtils';
+import {
+  asRecord,
+  readFirstFinite,
+  readFirstText,
+  readObjectPath,
+  readText,
+} from '../projectTasks/recordReaders';
 
 type ChainInfo = ReturnType<typeof buildChainInfos>[number];
 
@@ -126,19 +133,6 @@ function isRuntimeActiveTask(task: ProjectTask | null | undefined): boolean {
   return state === 'QUEUED' || state === 'RUNNING';
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
-
-function readObjectPath(data: Record<string, unknown>, path: string): unknown {
-  let current: unknown = data;
-  for (const key of path.split('.')) {
-    if (!current || typeof current !== 'object' || Array.isArray(current)) return undefined;
-    current = (current as Record<string, unknown>)[key];
-  }
-  return current;
-}
-
 function readRecordArray(value: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object' && !Array.isArray(item)));
@@ -152,40 +146,6 @@ function readFirstRecordArray(payloads: Record<string, unknown>[], paths: string
     }
   }
   return [];
-}
-
-function readText(value: unknown): string {
-  if (value === null || value === undefined) return '';
-  return String(value).trim();
-}
-
-function readFiniteNumber(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value === 'string') {
-    const parsed = Number(value.trim());
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return null;
-}
-
-function readFirstFinite(payloads: Record<string, unknown>[], paths: string[]): number | null {
-  for (const payload of payloads) {
-    for (const path of paths) {
-      const value = readFiniteNumber(readObjectPath(payload, path));
-      if (value !== null) return value;
-    }
-  }
-  return null;
-}
-
-function readFirstText(payloads: Record<string, unknown>[], paths: string[]): string {
-  for (const payload of payloads) {
-    for (const path of paths) {
-      const value = readText(readObjectPath(payload, path));
-      if (value) return value;
-    }
-  }
-  return '';
 }
 
 function readPeptideCandidateSequence(row: Record<string, unknown>): string {

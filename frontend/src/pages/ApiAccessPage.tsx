@@ -1,5 +1,4 @@
 import {
-  CSSProperties,
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
@@ -59,409 +58,65 @@ import {
 } from '../api/supabaseLite';
 import { sha256Hex } from '../utils/crypto';
 import { ENV } from '../utils/env';
-import { componentTypeLabel, createInputComponent, normalizeInputComponents, randomId } from '../utils/projectInputs';
+import { componentTypeLabel, normalizeInputComponents } from '../utils/projectInputs';
 import { getWorkflowDefinition } from '../utils/workflows';
 import { buildPredictionYamlFromComponents, collectCustomCcdMoleculesFromComponents } from '../utils/yaml';
 import { assignChainIdsForComponents } from '../utils/chainAssignments';
 import { loadRDKitModule } from '../utils/rdkit';
 import { rdkitMolHasAminoAcidBackbone, looksLikeAminoAcidBackboneSmiles } from '../utils/inputValidation';
-
-type UsageWindow = '7d' | '30d' | '90d' | 'all';
-type ProjectStatsWorkflowFilter = 'all' | 'prediction' | 'affinity' | 'lead_optimization';
-type ProjectStatsSort = 'calls_desc' | 'calls_asc' | 'success_desc' | 'success_asc' | 'last_desc' | 'last_asc';
-type BuilderWorkflowKey = 'prediction' | 'affinity' | 'lead_optimization';
-type PredictionBackend = 'boltz' | 'alphafold3' | 'protenix';
-type AffinityBackend = 'boltz';
-
-interface ProjectStatsRow {
-  project: Project;
-  workflowKey: ProjectStatsWorkflowFilter;
-  workflowLabel: string;
-  tokenCount: number;
-  activeTokenCount: number;
-  totalCalls: number;
-  successRate: number;
-  lastEventAt: string | null;
-  lastEventTs: number;
-}
-
-interface UsageSummary {
-  total: number;
-  success: number;
-  errors: number;
-  successRate: number;
-  lastEventAt: string | null;
-  lastEventTs: number;
-}
-
-interface CommandHistoryEntry {
-  id: string;
-  createdAt: string;
-  label: string;
-  command: string;
-  workflow: BuilderWorkflowKey;
-  backend: string;
-  projectId: string;
-  projectName: string;
-  tokenId: string;
-  tokenName: string;
-}
-
-interface YamlProteinTemplateConfig {
-  path: string;
-  format: 'auto' | 'pdb' | 'cif';
-  templateChain: string;
-  targetChains: string;
-}
-
-type ApiBuilderGridStyle = CSSProperties & {
-  '--api-builder-left-width'?: string;
-  '--api-yaml-left-width'?: string;
-};
-
-const TOKEN_PAGE_SIZE = 8;
-const EVENT_PAGE_SIZE = 20;
-const DAILY_USAGE_PAGE_SIZE = 30;
-const PROJECT_STATS_PAGE_SIZE = 8;
-const COMMAND_HISTORY_LIMIT = 12;
-const COMMAND_HISTORY_STORAGE_KEY = 'vbio_api_command_history_v1';
-const LEAD_OPT_API_ACCESS_ENABLED: boolean = false;
-const AFFINITY_TARGET_UPLOAD_COMPONENT_ID = '__affinity_target_upload__';
-const AFFINITY_LIGAND_UPLOAD_COMPONENT_ID = '__affinity_ligand_upload__';
-const EMPTY_PREDICTION_PROPERTIES: PredictionProperties = {
-  affinity: false,
-  target: null,
-  ligand: null,
-  binder: null
-};
-
-function normalizePredictionChainValue(value: unknown): string | null {
-  const chainId = String(value || '').trim();
-  return chainId || null;
-}
-
-function isSamePredictionProperties(
-  a: PredictionProperties | null | undefined,
-  b: PredictionProperties | null | undefined
-): boolean {
-  return (
-    Boolean(a?.affinity) === Boolean(b?.affinity) &&
-    normalizePredictionChainValue(a?.target) === normalizePredictionChainValue(b?.target) &&
-    normalizePredictionChainValue(a?.ligand) === normalizePredictionChainValue(b?.ligand) &&
-    normalizePredictionChainValue(a?.binder) === normalizePredictionChainValue(b?.binder)
-  );
-}
-
-function normalizeUsageWindow(value: string | null | undefined): UsageWindow {
-  if (value === '7d' || value === '30d' || value === '90d' || value === 'all') return value;
-  return '90d';
-}
-
-function normalizeProjectStatsWorkflowFilter(value: string | null | undefined): ProjectStatsWorkflowFilter {
-  if (value === 'prediction' || value === 'affinity' || value === 'lead_optimization' || value === 'all') return value;
-  return 'all';
-}
-
-function normalizeProjectStatsSort(value: string | null | undefined): ProjectStatsSort {
-  if (
-    value === 'calls_desc' ||
-    value === 'calls_asc' ||
-    value === 'success_desc' ||
-    value === 'success_asc' ||
-    value === 'last_desc' ||
-    value === 'last_asc'
-  ) {
-    return value;
-  }
-  return 'last_desc';
-}
-
-function normalizePredictionBackend(value: string | null | undefined): PredictionBackend {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (normalized === 'alphafold3') return 'alphafold3';
-  if (normalized === 'protenix') return 'protenix';
-  return 'boltz';
-}
-
-function normalizeAffinityBackend(_value: string | null | undefined): AffinityBackend {
-  return 'boltz';
-}
-
-function normalizeAffinityBuilderMode(value: unknown): AffinityScoringMode {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (normalized === 'pose' || normalized === 'refine' || normalized === 'interface') {
-    return normalized;
-  }
-  return 'score';
-}
-
-function randomAlphaNum(length: number): string {
-  const alphabet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  const bytes = new Uint8Array(length);
-  if (globalThis.crypto?.getRandomValues) {
-    globalThis.crypto.getRandomValues(bytes);
-  } else {
-    for (let i = 0; i < length; i += 1) {
-      bytes[i] = Math.floor(Math.random() * 256);
-    }
-  }
-  let out = '';
-  for (let i = 0; i < length; i += 1) {
-    out += alphabet[bytes[i] % alphabet.length];
-  }
-  return out;
-}
-
-function shortUuidLike(): string {
-  const raw = typeof globalThis.crypto?.randomUUID === 'function'
-    ? globalThis.crypto.randomUUID().replace(/-/g, '')
-    : randomAlphaNum(16).toLowerCase();
-  return `token-${raw.slice(0, 8)}`;
-}
-
-function formatIso(ts: string | null | undefined): string {
-  if (!ts) return '-';
-  const t = Date.parse(ts);
-  if (!Number.isFinite(t)) return ts;
-  return new Date(t).toLocaleString();
-}
-
-function computeUsageSummaryFromDaily(rows: ApiTokenUsageDaily[], lastEventAt?: string | null): UsageSummary {
-  const total = rows.reduce((acc, row) => acc + Math.max(0, Number(row.total_count) || 0), 0);
-  const success = rows.reduce((acc, row) => acc + Math.max(0, Number(row.success_count) || 0), 0);
-  const errors = Math.max(0, total - success);
-  const lastTsRaw = lastEventAt ? Date.parse(lastEventAt) : Number.NaN;
-  const lastEventTs = Number.isFinite(lastTsRaw) ? lastTsRaw : 0;
-  return {
-    total,
-    success,
-    errors,
-    successRate: total > 0 ? (success / total) * 100 : 0,
-    lastEventAt: lastEventTs > 0 ? lastEventAt || null : null,
-    lastEventTs
-  };
-}
-
-function usageSince(window: UsageWindow): string | undefined {
-  if (window === 'all') return undefined;
-  const days = window === '7d' ? 7 : window === '30d' ? 30 : 90;
-  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-}
-
-function normalizeBaseUrl(value: string): string {
-  const text = String(value || '').trim();
-  if (!text) return '';
-  return text.replace(/\/$/, '');
-}
-
-function escapeForDoubleQuotedShell(value: string): string {
-  return String(value || '')
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"');
-}
-
-function extractFileNameFromPath(pathRaw: string): string {
-  const normalized = String(pathRaw || '').trim().replace(/\\/g, '/');
-  if (!normalized) return '';
-  const segments = normalized.split('/').filter(Boolean);
-  return segments.length > 0 ? segments[segments.length - 1] : '';
-}
-
-function inferTemplateFormat(pathRaw: string, selected: 'auto' | 'pdb' | 'cif'): 'pdb' | 'cif' {
-  if (selected === 'pdb' || selected === 'cif') return selected;
-  const lower = extractFileNameFromPath(pathRaw).toLowerCase();
-  if (lower.endsWith('.pdb')) return 'pdb';
-  return 'cif';
-}
-
-function normalizeChainId(value: string, fallback: string): string {
-  const cleaned = String(value || '').trim();
-  return cleaned || fallback;
-}
-
-function createYamlBuilderComponent(type: InputComponent['type'] = 'protein'): InputComponent {
-  const component = createInputComponent(type);
-  if (component.type === 'ligand') {
-    component.inputMethod = 'smiles';
-  }
-  return component;
-}
-
-const BUILDER_CUSTOM_RESIDUE_SCAFFOLD = 'N[C@@H](C)C(=O)O';
-const BUILDER_BUILT_IN_MODIFICATIONS = [
-  { ccd: 'AIB', label: 'AIB', baseResidue: 'A' },
-  { ccd: 'NLE', label: 'NLE', baseResidue: 'L' },
-  { ccd: 'NVA', label: 'NVA', baseResidue: 'V' },
-  { ccd: 'ORN', label: 'ORN', baseResidue: 'K' },
-  { ccd: 'CIT', label: 'CIT', baseResidue: 'R' },
-  { ccd: 'MSE', label: 'MSE', baseResidue: 'M' },
-  { ccd: 'SEC', label: 'SEC', baseResidue: 'C' },
-  { ccd: 'SEP', label: 'SEP', baseResidue: 'S' },
-  { ccd: 'TPO', label: 'TPO', baseResidue: 'T' },
-  { ccd: 'PTR', label: 'PTR', baseResidue: 'Y' },
-  { ccd: 'MLY', label: 'MLY', baseResidue: 'K' },
-  { ccd: 'DAL', label: 'DAL', baseResidue: 'A' }
-];
-
-function normalizeBuilderCcd(value: string): string {
-  return String(value || '').replace(/[^A-Za-z0-9_-]/g, '').toUpperCase().slice(0, 12);
-}
-
-function hashBuilderText(value: string): string {
-  let hash = 2166136261;
-  for (let i = 0; i < value.length; i += 1) {
-    hash ^= value.charCodeAt(i);
-    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
-  }
-  return (hash >>> 0).toString(36).toUpperCase().slice(0, 5);
-}
-
-function buildBuilderCustomCcd(componentId: string, position: number, smiles = ''): string {
-  return `U${Math.max(1, Math.floor(position)).toString(36).toUpperCase()}${hashBuilderText(`${componentId}:${position}:${smiles}`)}`.slice(0, 5);
-}
-
-function cleanProteinSequence(sequence: string): string {
-  return String(sequence || '').replace(/\s+/g, '').toUpperCase();
-}
-
-function builderSequenceLength(sequence: string): number {
-  return cleanProteinSequence(sequence).length;
-}
-
-function clampBuilderModPosition(value: number, sequence: string): number {
-  const max = Math.max(1, builderSequenceLength(sequence) || 1);
-  if (!Number.isFinite(value) || value < 1) return 1;
-  return Math.min(max, Math.floor(value));
-}
-
-function builderResidueAt(sequence: string, position: number): string {
-  return cleanProteinSequence(sequence)[Math.max(0, position - 1)] || '';
-}
-
-function builderPositionForTerminal(terminal: ProteinModificationTerminal, position: number, sequence: string): number {
-  if (terminal === 'n_term') return 1;
-  if (terminal === 'c_term') return Math.max(1, builderSequenceLength(sequence) || 1);
-  return clampBuilderModPosition(position, sequence);
-}
-
-function builderTerminalForPosition(position: number, sequence: string, terminal?: ProteinModificationTerminal): ProteinModificationTerminal {
-  if (terminal === 'n_term' || terminal === 'c_term') return terminal;
-  if (Math.floor(Number(position)) === 1) return 'n_term';
-  if (builderSequenceLength(sequence) > 0 && Math.floor(Number(position)) === builderSequenceLength(sequence)) return 'c_term';
-  return 'internal';
-}
-
-function createBuilderModification(component: InputComponent): ProteinModification {
-  const position = clampBuilderModPosition(1, component.sequence);
-  const residue = builderResidueAt(component.sequence, position);
-  const builtin = BUILDER_BUILT_IN_MODIFICATIONS.find((item) => item.baseResidue === residue) || BUILDER_BUILT_IN_MODIFICATIONS[0];
-  return {
-    id: randomId(),
-    position,
-    terminal: builderTerminalForPosition(position, component.sequence),
-    baseResidue: residue || builtin.baseResidue,
-    ccd: builtin.ccd,
-    inputMethod: 'ccd',
-    label: builtin.label,
-    customEditorCollapsed: true
-  };
-}
-
-function isAffinityUploadComponent(value: unknown): boolean {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const component = value as Record<string, unknown>;
-  const componentId = String(component.id || '').trim();
-  if (componentId === AFFINITY_TARGET_UPLOAD_COMPONENT_ID || componentId === AFFINITY_LIGAND_UPLOAD_COMPONENT_ID) {
-    return true;
-  }
-  const uploadMeta =
-    component.affinityUpload && typeof component.affinityUpload === 'object'
-      ? (component.affinityUpload as Record<string, unknown>)
-      : component.affinity_upload && typeof component.affinity_upload === 'object'
-        ? (component.affinity_upload as Record<string, unknown>)
-        : null;
-  const role = String(uploadMeta?.role || '').trim().toLowerCase();
-  return role === 'target' || role === 'ligand';
-}
-
-function readCommandHistoryFromStorage(): CommandHistoryEntry[] {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = window.localStorage.getItem(COMMAND_HISTORY_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((item) => item && typeof item === 'object')
-      .map((item) => {
-        const record = item as Partial<CommandHistoryEntry>;
-        const legacyTemplate = (record as { template?: string }).template;
-        const normalizedWorkflow = String(record.workflow || legacyTemplate || '').trim().toLowerCase();
-        const workflow: BuilderWorkflowKey = normalizedWorkflow === 'affinity'
-          ? 'affinity'
-          : (normalizedWorkflow === 'lead_optimization' || normalizedWorkflow === 'lead optimization' || normalizedWorkflow === 'leadopt')
-            ? 'lead_optimization'
-            : 'prediction';
-        return {
-          id: String(record.id || ''),
-          createdAt: String(record.createdAt || ''),
-          label: String(record.label || 'Command'),
-          command: String(record.command || ''),
-          workflow,
-          backend: String(record.backend || ''),
-          projectId: String(record.projectId || ''),
-          projectName: String(record.projectName || ''),
-          tokenId: String(record.tokenId || ''),
-          tokenName: String(record.tokenName || '')
-        } as CommandHistoryEntry;
-      })
-      .filter((item) => item.id && item.command);
-  } catch {
-    return [];
-  }
-}
-
-function fallbackCopyText(text: string): boolean {
-  if (typeof document === 'undefined') return false;
-  const active = document.activeElement as HTMLElement | null;
-  const selection = typeof window !== 'undefined' ? window.getSelection() : null;
-  const ranges: Range[] = [];
-  if (selection) {
-    for (let i = 0; i < selection.rangeCount; i += 1) {
-      const range = selection.getRangeAt(i);
-      ranges.push(range.cloneRange());
-    }
-  }
-  const textarea = document.createElement('textarea');
-  textarea.value = text;
-  textarea.setAttribute('readonly', 'true');
-  textarea.style.position = 'fixed';
-  textarea.style.opacity = '0';
-  textarea.style.left = '-9999px';
-  textarea.style.top = '0';
-  document.body.appendChild(textarea);
-  textarea.focus();
-  textarea.select();
-  textarea.setSelectionRange(0, textarea.value.length);
-  let ok = false;
-  try {
-    ok = document.execCommand('copy');
-  } catch {
-    ok = false;
-  } finally {
-    document.body.removeChild(textarea);
-    if (selection) {
-      selection.removeAllRanges();
-      for (const range of ranges) {
-        selection.addRange(range);
-      }
-    }
-    if (active && typeof active.focus === 'function') {
-      active.focus();
-    }
-  }
-  return ok;
-}
+import {
+  ApiBuilderGridStyle,
+  BUILDER_BUILT_IN_MODIFICATIONS,
+  BUILDER_CUSTOM_RESIDUE_SCAFFOLD,
+  BuilderWorkflowKey,
+  COMMAND_HISTORY_LIMIT,
+  COMMAND_HISTORY_STORAGE_KEY,
+  CommandHistoryEntry,
+  DAILY_USAGE_PAGE_SIZE,
+  EMPTY_PREDICTION_PROPERTIES,
+  EVENT_PAGE_SIZE,
+  LEAD_OPT_API_ACCESS_ENABLED,
+  PROJECT_STATS_PAGE_SIZE,
+  PredictionBackend,
+  AffinityBackend,
+  ProjectStatsRow,
+  ProjectStatsSort,
+  ProjectStatsWorkflowFilter,
+  TOKEN_PAGE_SIZE,
+  UsageSummary,
+  UsageWindow,
+  YamlProteinTemplateConfig,
+  buildBuilderCustomCcd,
+  builderPositionForTerminal,
+  builderResidueAt,
+  builderSequenceLength,
+  builderTerminalForPosition,
+  clampBuilderModPosition,
+  computeUsageSummaryFromDaily,
+  createBuilderModification,
+  createYamlBuilderComponent,
+  escapeForDoubleQuotedShell,
+  extractFileNameFromPath,
+  fallbackCopyText,
+  formatIso,
+  inferTemplateFormat,
+  isAffinityUploadComponent,
+  isSamePredictionProperties,
+  normalizeAffinityBackend,
+  normalizeAffinityBuilderMode,
+  normalizeBaseUrl,
+  normalizeBuilderCcd,
+  normalizeChainId,
+  normalizePredictionBackend,
+  normalizePredictionChainValue,
+  normalizeProjectStatsSort,
+  normalizeProjectStatsWorkflowFilter,
+  normalizeUsageWindow,
+  randomAlphaNum,
+  readCommandHistoryFromStorage,
+  shortUuidLike,
+  usageSince
+} from './apiAccessHelpers';
 
 export function ApiAccessPage() {
   const { session } = useAuth();
@@ -487,7 +142,7 @@ export function ApiAccessPage() {
   const [projectLoading, setProjectLoading] = useState(false);
   const [registryOpen, setRegistryOpen] = useState(false);
   const [registryScopeProjectId, setRegistryScopeProjectId] = useState<string | null>(null);
-  const [, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [, setSuccess] = useState<string | null>(null);
 
   const [tokens, setTokens] = useState<ApiToken[]>([]);
@@ -547,6 +202,7 @@ export function ApiAccessPage() {
   const [builderLigandPath, setBuilderLigandPath] = useState('./ligand.sdf');
   const [builderResultPath, setBuilderResultPath] = useState('./result.zip');
   const [builderPredictionBackend, setBuilderPredictionBackend] = useState<PredictionBackend>('boltz');
+  const [builderPredictionLowVram, setBuilderPredictionLowVram] = useState(false);
   const [builderUseMsaAffinity, setBuilderUseMsaAffinity] = useState(true);
   const [builderAffinityMode, setBuilderAffinityMode] = useState<AffinityScoringMode>('score');
   const [builderAffinitySeed, setBuilderAffinitySeed] = useState<number | null>(null);
@@ -1663,6 +1319,10 @@ export function ApiAccessPage() {
     isPredictionWorkflow && allCustomCcdMolecules.length > customCcdMolecules.length
       ? '\n# Some custom residue SMILES were omitted because no amino-acid backbone was detected.'
       : '';
+  const predictionDeviceFlags =
+    effectivePredictionBackend !== 'alphafold3' && isPredictionWorkflow && builderPredictionLowVram
+      ? ` \\\n  -F "low_vram=true"`
+      : '';
   const commandEnv = `export VBIO_API_BASE="${managementApiBaseUrl}"\nexport VBIO_API_TOKEN="${curlToken}"\nexport VBIO_PROJECT_ID="${selectedTokenProjectId}"`;
   const submitTaskIdCapture = `echo "$RESPONSE"
 TASK_ID=$(printf '%s' "$RESPONSE" | tr -d '\\n\\r' | sed -n 's/.*"task_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
@@ -1676,7 +1336,7 @@ fi
   -H "X-API-Token: ${curlToken}" \\
   -F "project_id=${selectedTokenProjectId}"${submitTaskMetaFlags} \\
   -F "yaml_file=@${escapedYamlPath}" \\
-  -F "backend=${effectivePredictionBackend}"${predictionTemplateFlags}${customCcdFlags})
+  -F "backend=${effectivePredictionBackend}"${predictionTemplateFlags}${customCcdFlags}${predictionDeviceFlags})
 ${submitTaskIdCapture}`;
   const commandSubmitAffinityBoltz = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/api/boltz2score" \\
   -H "X-API-Token: ${curlToken}" \\
@@ -1974,6 +1634,34 @@ ${submitTaskIdCapture}`;
 
   return (
     <div className={`page-grid api-access-page ${isProjectScoped ? 'is-project-scope' : ''}`}>
+      {error && (
+        <div
+          role="alert"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+            padding: '10px 14px',
+            marginBottom: 12,
+            background: '#fef2f2',
+            border: '1px solid #fecaca',
+            borderRadius: 6,
+            color: '#b91c1c',
+            fontSize: 13
+          }}
+        >
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            aria-label="Dismiss error"
+            style={{ background: 'none', border: 'none', color: '#b91c1c', cursor: 'pointer', fontSize: 18, lineHeight: 1 }}
+          >
+            ×
+          </button>
+        </div>
+      )}
       <section className="page-header api-access-header">
         <div className="api-access-header-main">
           <div className="api-access-title-row">
@@ -2278,6 +1966,17 @@ ${submitTaskIdCapture}`;
                   <option value="alphafold3">alphafold3</option>
                   <option value="protenix">protenix</option>
                 </select>
+              </label>
+            )}
+
+            {isPredictionWorkflow && effectivePredictionBackend !== 'alphafold3' && (
+              <label className="checkbox-inline">
+                <input
+                  type="checkbox"
+                  checked={builderPredictionLowVram}
+                  onChange={(e) => setBuilderPredictionLowVram(e.target.checked)}
+                />
+                <span>Low VRAM</span>
               </label>
             )}
 

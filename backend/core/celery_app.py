@@ -1,10 +1,15 @@
 # celery_app.py
+import logging
 import multiprocessing
+
+_logger = logging.getLogger(__name__)
 
 try:
     multiprocessing.set_start_method('spawn', force=True)
-except RuntimeError:
-    pass
+except RuntimeError as exc:
+    # spawn is required for CUDA/psutil correctness in workers; silently falling back to fork
+    # would mask CUDA init failures. Log so a misconfigured environment stays visible.
+    _logger.warning('Could not set multiprocessing start method to spawn: %s', exc)
 
 from celery import Celery
 from kombu import Queue
