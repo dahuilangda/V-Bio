@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+from contextlib import nullcontext
 from typing import Optional, Union
 
 import torch
@@ -314,9 +316,16 @@ class ConfidenceHead(nn.Module):
             chunk_size=chunk_size,
         )
 
-        # Upcast after pairformer
-        z_pair = z_pair.to(torch.float32)
-        s_single = s_single.to(torch.float32)
+        # Upcast after pairformer. Under low-VRAM keep z_pair in bf16 and let the outer
+        # autocast run the pae/pde linears in bf16 -- the fp32 path holds several
+        # [N, N, c_z] tensors (~4.7 GiB each at c_z=256) and OOMs here. The pae/pde linears
+        # have no precision override, so they follow autocast. Confidence metrics only.
+        low_vram = os.environ.get("PROTENIX_LOW_VRAM", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        if not low_vram:
+            z_pair = z_pair.to(torch.float32)
+            s_single = s_single.to(torch.float32)
         atom_to_token_idx = input_feature_dict[
             "atom_to_token_idx"
         ]  # in range [0, N_token-1] shape: [N_atom]
@@ -324,7 +333,7 @@ class ConfidenceHead(nn.Module):
             "atom_to_tokatom_idx"
         ]  # in range [0, max_atoms_per_token-1] shape: [N_atom] # influenced by crop
 
-        with torch.amp.autocast("cuda", enabled=False):
+        with (nullcontext() if low_vram else torch.amp.autocast("cuda", enabled=False)):
             pae_pred = self.linear_no_bias_pae(self.pae_ln(z_pair))
             pde_pred = self.linear_no_bias_pde(
                 self.pde_ln(z_pair + z_pair.transpose(-2, -3))

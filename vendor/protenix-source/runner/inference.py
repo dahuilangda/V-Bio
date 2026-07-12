@@ -246,13 +246,27 @@ class InferenceRunner(object):
             logger.info(msg)
 
     def update_model_configs(self, new_configs: Any) -> None:
-        """
-        Update the model's configuration.
+        """Apply per-sample configuration changes to the already-built model.
 
-        Args:
-            new_configs (Any): New configuration object.
+        Most inference knobs (dtype, triangle kernel, chunk thresholds) are read
+        live from ``self.model.configs`` during forward, so rebinding it is enough.
+        The MSA chunk size is different: each ``MSAStack`` copies it into
+        ``self.msa_chunk_size`` at construction and never re-reads the config, so a
+        plain rebind leaves the low-VRAM override (512) stuck at the build-time
+        default (2048). ``MSAStack.inference_forward`` then chunks ``N_msa`` by that
+        stale value and the MSA transition's ``[chunk x N_token, 4*c_m]`` intermediate
+        OOMs -- so sync the baked attribute here.
         """
         self.model.configs = new_configs
+        msa_cfg = getattr(getattr(new_configs, "model", None), "msa_module", None)
+        chunk_size = getattr(msa_cfg, "msa_chunk_size", None)
+        msa_module = getattr(self.model, "msa_module", None)
+        if chunk_size is None or msa_module is None:
+            return
+        for block in msa_module.blocks:
+            msa_stack = getattr(block, "msa_stack", None)
+            if msa_stack is not None and msa_stack.msa_chunk_size != chunk_size:
+                msa_stack.msa_chunk_size = chunk_size
 
 
 def progress_callback(block_num: int, block_size: int, total_size: int) -> None:
@@ -422,22 +436,45 @@ def update_inference_configs(configs: Any, n_token: int) -> Any:
             configs.skip_amp.confidence_head = True
         configs.skip_amp.sample_diffusion = True
 
-    # LMI4Boltz-style aggressive chunking (opt-in): one diffusion sample at a time and
-    # smaller Pairformer/attention chunks. Lower peak VRAM, slower wall time.
+    # LMI4Boltz-style low-VRAM (opt-in via PROTENIX_LOW_VRAM). Three levers, in order of
+    # impact for a 2150-token complex on a 24 GB card:
+    #   1. dtype => "bf16": the trunk otherwise runs in fp32 (the default), so every O(N^2)
+    #      tensor is twice as large as LMI4Boltz's bf16 pair rep. Halving them is what makes
+    #      the pair-transition FFN intermediate (the 8.8 GiB allocation that OOMs) fit, and
+    #      bf16 matmuls are faster on the 4090 tensor cores. Weights stay fp32.
+    #   2. triangle_multiplicative => "torch": the cuequivariance *fused* triangle-multiply
+    #      kernel ignores chunk_size_thresholds and allocates the full O(N^2) output in one
+    #      shot. The torch path runs the chunked, in-place _inference_forward instead, capping
+    #      the peak at ~2.5x z. Triangle attention already chunks via chunk_layer.
+    #   3. chunk_size_thresholds / msa_chunk_size: shrink the remaining chunked triangle ops.
+    # The pair_transition chunk itself is applied in PairformerBlock (it shares this chunk_size),
+    # and the host/peer-GPU offload of z_init/relp/template features lives in
+    # Protenix.get_pairformer_output (protenix.utils.offload.TensorOffloader).
     if low_vram:
-        configs.infer_setting.sample_diffusion_chunk_size = 1
+        configs.dtype = "bf16"
+        configs.triangle_multiplicative = "torch"
         configs.infer_setting.chunk_size_thresholds = {
-            "512": 256,
-            "1024": 128,
-            "1536": 64,
-            "2048": 64,
-            "2560": 32,
+            "1024": 512,
+            "1536": 256,
+            "2048": 128,
+            "2560": 64,
         }
         if hasattr(configs.model, "msa_module"):
             configs.model.msa_module.msa_chunk_size = 512
+        # One diffusion sample at a time: the diffusion transformer attends over N_atom
+        # (17298 here), and batching the default 5 samples at once is a separate OOM risk
+        # from the trunk. This is the diffusion-side analogue of the trunk chunking.
+        configs.infer_setting.sample_diffusion_chunk_size = 1
+        # Run the diffusion stage under the bf16 autocast too. The cached pair_z and its
+        # per-step clone otherwise sit twice on the GPU in fp32 (2 x 8.8 GiB at c_z=256) and
+        # OOM the 200-step denoise loop; halving them is the only thing that fits this
+        # complex on 24 GB. The explicit .to(fp32) upcasts in DiffusionModule.f_forward are
+        # gated off in lockstep so the bf16 actually propagates. Small quality tradeoff.
+        configs.skip_amp.sample_diffusion = False
         logger.warning(
-            "PROTENIX_LOW_VRAM: sample_diffusion_chunk_size=1, aggressive "
-            "chunk_size_thresholds, msa_chunk_size=512 (LMI4Boltz-style)."
+            "PROTENIX_LOW_VRAM: bf16 trunk + diffusion, chunked torch triangle-multiply "
+            "kernel, aggressive chunk thresholds, sample_diffusion_chunk_size=1, "
+            "and trunk tensor offload (z_init/relp/template)."
         )
 
     return configs

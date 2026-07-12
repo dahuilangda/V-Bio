@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import copy
+import os
 import random
 import time
 from typing import Any, Optional
@@ -46,6 +47,7 @@ from protenix.model.modules.primitives import LinearNoBias
 from protenix.model.triangular.layers import LayerNorm
 from protenix.model.utils import simple_merge_dict_list
 from protenix.utils.logger import get_logger
+from protenix.utils.offload import TensorOffloader
 from protenix.utils.permutation.permutation import SymmetricPermutation
 from protenix.utils.torch_utils import autocasting_disable_decorator
 
@@ -230,6 +232,27 @@ class Protenix(nn.Module):
         z = torch.zeros_like(z_init)
         s = torch.zeros_like(s_init)
 
+        # Low-VRAM trunk offload (opt-in via PROTENIX_LOW_VRAM): z_init is read-only and reused
+        # every cycle, relp is dead until diffusion conditioning, and the O(N^2) template features
+        # are only read inside template_embedder. Park all three on the host so they no longer
+        # count against the Pairformer's VRAM peak, then prefetch them back on a side stream that
+        # overlaps compute. See protenix.utils.offload -- host-only by design (a peer GPU would
+        # cost a whole card to warehouse a few tensors for one job).
+        offloader = TensorOffloader(z.device)
+        relp_device = input_feature_dict["relp"].device
+        tpl_keys: list[str] = []
+        if offloader.enabled:
+            z_init = offloader.park(z_init)
+            input_feature_dict["relp"] = offloader.park(input_feature_dict["relp"])
+            if self.template_embedder.n_blocks > 0:
+                tpl_keys = [
+                    k
+                    for k, v in input_feature_dict.items()
+                    if k.startswith("template_") and isinstance(v, torch.Tensor)
+                ]
+                for k in tpl_keys:
+                    input_feature_dict[k] = offloader.park(input_feature_dict[k])
+
         # Line 7-13 recycling
         for cycle_no in range(N_cycle):
             with torch.set_grad_enabled(
@@ -237,23 +260,30 @@ class Protenix(nn.Module):
                 and (not self.train_confidence_only)
                 and cycle_no == (N_cycle - 1)
             ):
+                # Issue the z_init prefetch first so it overlaps the recycle compute below.
+                z_init_dev = offloader.fetch(z_init) if offloader.enabled else z_init
+                z_cycle = self.linear_no_bias_z_cycle(self.layernorm_z_cycle(z))
                 if mc_dropout:
-                    z = z_init + F.dropout(
-                        self.linear_no_bias_z_cycle(self.layernorm_z_cycle(z)),
-                        p=self.configs.mc_dropout_rate,
-                    )
-                else:
-                    z = z_init + self.linear_no_bias_z_cycle(self.layernorm_z_cycle(z))
+                    z_cycle = F.dropout(z_cycle, p=self.configs.mc_dropout_rate)
+                if offloader.enabled:
+                    offloader.wait()
+                z = z_init_dev + z_cycle
+                # Drop the recycle temps now: they're dead for the rest of the cycle but would
+                # otherwise sit on the GPU through the template_embedder / pairformer peaks
+                # (~2.4 GB each at c_z=256). In the default path z_init_dev is just an alias onto
+                # the persistent z_init, so deleting the name frees nothing there.
+                del z_init_dev, z_cycle
                 if inplace_safe:
                     if self.template_embedder.n_blocks > 0:
-                        z += self.template_embedder(
-                            input_feature_dict,
-                            z,
-                            triangle_multiplicative=self.configs.triangle_multiplicative,
-                            triangle_attention=self.configs.triangle_attention,
-                            inplace_safe=inplace_safe,
-                            chunk_size=chunk_size,
-                        )
+                        with offloader.staged(input_feature_dict, tpl_keys):
+                            z += self.template_embedder(
+                                input_feature_dict,
+                                z,
+                                triangle_multiplicative=self.configs.triangle_multiplicative,
+                                triangle_attention=self.configs.triangle_attention,
+                                inplace_safe=inplace_safe,
+                                chunk_size=chunk_size,
+                            )
                     z = self.msa_module(
                         input_feature_dict,
                         z,
@@ -266,14 +296,15 @@ class Protenix(nn.Module):
                     )
                 else:
                     if self.template_embedder.n_blocks > 0:
-                        z = z + self.template_embedder(
-                            input_feature_dict,
-                            z,
-                            triangle_multiplicative=self.configs.triangle_multiplicative,
-                            triangle_attention=self.configs.triangle_attention,
-                            inplace_safe=inplace_safe,
-                            chunk_size=chunk_size,
-                        )
+                        with offloader.staged(input_feature_dict, tpl_keys):
+                            z = z + self.template_embedder(
+                                input_feature_dict,
+                                z,
+                                triangle_multiplicative=self.configs.triangle_multiplicative,
+                                triangle_attention=self.configs.triangle_attention,
+                                inplace_safe=inplace_safe,
+                                chunk_size=chunk_size,
+                            )
                     z = self.msa_module(
                         input_feature_dict,
                         z,
@@ -300,6 +331,12 @@ class Protenix(nn.Module):
             self.template_embedder.train()
             self.msa_module.train()
             self.pairformer_stack.train()
+
+        if offloader.enabled:
+            # relp is consumed again by diffusion conditioning after the trunk.
+            input_feature_dict["relp"] = offloader.restore(
+                input_feature_dict["relp"], relp_device
+            )
 
         return s_inputs, s, z
 
@@ -516,6 +553,7 @@ class Protenix(nn.Module):
                 "deletion_value",
                 "profile",
                 "deletion_mean",
+                "bond_mask",  # only the training loss reads this; ~2.4G dead weight at inference
                 # "token_bonds",
             ]:
                 keys_to_delete.append(key)
@@ -533,13 +571,66 @@ class Protenix(nn.Module):
             N_step=N_step, device=s_inputs.device, dtype=s_inputs.dtype
         )
         cache = dict()
+        low_vram = os.environ.get("PROTENIX_LOW_VRAM", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if low_vram and torch.cuda.is_available():
+            # The diffusion stage is the OOM frontier once the trunk fits. Log what is
+            # resident before conditioning so a future OOM here (or in the transformer
+            # after it) names the big tensors directly instead of guessing.
+            _gib = lambda t: t.nelement() * t.element_size() / 1e9
+            feat_top = sorted(
+                ((k, _gib(v)) for k, v in input_feature_dict.items() if torch.is_tensor(v)),
+                key=lambda kv: -kv[1],
+            )[:4]
+            logger.info(
+                f"[mem] pre-diffusion: alloc={torch.cuda.memory_allocated() / 1e9:.2f}G "
+                f"peak={torch.cuda.max_memory_allocated() / 1e9:.2f}G | "
+                f"z={tuple(z.shape)}{z.dtype} "
+                f"relp={tuple(input_feature_dict['relp'].shape)}"
+                f"{input_feature_dict['relp'].dtype} s={tuple(s.shape)} | "
+                f"top_feat=[" + ", ".join(f"{k}:{b:.2f}G" for k, b in feat_top) + "]"
+            )
+        # Row-chunk the pair conditioning under low-VRAM: pair_z is built in fp32
+        # (autocasting disabled) and the cat/LayerNorm/transition region peaks at
+        # several [chunk, N, 2*c_z] fp32 tensors. With c_z=256 a 512-row chunk is
+        # already ~4.5G, so chunk small (64 rows) to keep the per-chunk peak <1G.
+        # chunk_layer still pre-allocates the full pair_z output -- that is unavoidable.
+        pair_chunk = 64 if low_vram else None
         if self.enable_diffusion_shared_vars_cache:
             # line 1-5 of algorithm 21 calculate z in diffusion conditioning
             cache["pair_z"] = autocasting_disable_decorator(
                 self.configs.skip_amp.sample_diffusion
             )(self.diffusion_module.diffusion_conditioning.prepare_cache)(
-                input_feature_dict["relp"], z, False
+                input_feature_dict["relp"], z, False, chunk_size=pair_chunk
             )
+            # Keep pair_z in bf16 under low-VRAM: prepare_cache's Linears are precision=fp32
+            # so the output is fp32 (~8.8 GiB at c_z=256). Casting it to bf16 halves the cache
+            # and the per-step clone DiffusionConditioning.forward takes (17.6 -> 8.8 GiB
+            # across the 200-step denoise loop). f_forward skips its fp32 upcasts under
+            # low-VRAM, so this bf16 propagates into the transformer instead of being doubled
+            # back to fp32 each step.
+            if low_vram:
+                cache["pair_z"] = cache["pair_z"].to(torch.bfloat16)
+            # z is not consumed during diffusion (sample_diffusion gets z_trunk=None below
+            # because pair_z is cached), but the distogram/confidence heads after diffusion
+            # still read it. Park it on the host for the 200-step denoise loop and restore it
+            # before the heads -- frees the ~2.4 GiB pair tensor for diffusion (the margin it
+            # needs to fit) for a single cheap H2D copy, instead of dropping it for good.
+            if low_vram:
+                z = z.cpu()
+            if low_vram and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                pz = cache["pair_z"]
+                logger.info(
+                    f"[mem] post-pair_z: alloc={torch.cuda.memory_allocated() / 1e9:.2f}G "
+                    f"peak={torch.cuda.max_memory_allocated() / 1e9:.2f}G | "
+                    f"pair_z={tuple(pz.shape)}{pz.dtype} "
+                    f"({pz.nelement() * pz.element_size() / 1e9:.2f}G)"
+                )
             cache["p_lm/c_l"] = autocasting_disable_decorator(
                 self.configs.skip_amp.sample_diffusion
             )(self.diffusion_module.atom_attention_encoder.prepare_cache)(
@@ -576,6 +667,10 @@ class Protenix(nn.Module):
 
         step_diffusion = time.time()
         time_tracker.update({"diffusion": step_diffusion - step_trunk})
+        # Bring the trunk pair tensor back to the GPU for the distogram/confidence heads
+        # (parked on the host during diffusion under low-VRAM above).
+        if z.device.type == "cpu":
+            z = z.to(s_inputs.device)
         # Distogram logits: log contact_probs only, to reduce the dimension
         pred_dict["contact_probs"] = autocasting_disable_decorator(True)(
             sample_confidence.compute_contact_prob

@@ -32,11 +32,35 @@ from protenix.model.triangular.triangular import (
 )
 from protenix.model.utils import (
     checkpoint_blocks,
+    chunk_layer,
     expand_at_dim,
     get_checkpoint_fn,
     pad_at_dim,
     sample_msa_feature_dict_random_without_replacement,
 )
+
+
+def _chunked_transition(
+    transition: Transition, z: torch.Tensor, chunk_size: Optional[int]
+) -> torch.Tensor:
+    """Apply a pair Transition in row-chunks to bound its 4x expansion intermediate.
+
+    A Transition expands the last dim c_z -> 4*c_z, so for a pair tensor
+    ``[..., N, N, c_z]`` the full intermediate is O(N^2 * 4*c_z) -- ~9 GiB in
+    fp32 at N=2150, which is the allocation that OOMs the trunk. Chunking along
+    the leading row dim (treating ``[..., N]`` as batch and keeping
+    ``[N, c_z]`` intact) keeps only ``chunk_size`` rows live at once. With no
+    chunk_size (small complexes that never hit a threshold) it falls back to a
+    plain call, so behaviour is unchanged off the low-VRAM path.
+    """
+    if chunk_size is None:
+        return transition(z)
+    return chunk_layer(
+        transition,
+        {"x": z},
+        chunk_size=chunk_size,
+        no_batch_dims=len(z.shape) - 2,
+    )
 
 
 class PairformerBlock(nn.Module):
@@ -166,7 +190,7 @@ class PairformerBlock(nn.Module):
                 chunk_size=chunk_size,
             )
             z = z.transpose(-2, -3).contiguous()
-            z += self.pair_transition(z)
+            z += _chunked_transition(self.pair_transition, z, chunk_size)
         else:
             tmu_update = self.tri_mul_out(
                 z,
@@ -213,7 +237,7 @@ class PairformerBlock(nn.Module):
             )
             z = z.transpose(-2, -3).contiguous()
 
-            z = z + self.pair_transition(z)
+            z = z + _chunked_transition(self.pair_transition, z, chunk_size)
         if self.c_s > 0:
             s = s + self.attention_pair_bias(
                 a=s,

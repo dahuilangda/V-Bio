@@ -1128,6 +1128,7 @@ def predict_task(self, predict_args: dict):
         _raise_if_task_cancelled(self, redis_client, task_id)
         normalized_workflow = _normalize_prediction_workflow(predict_args.get('workflow'))
         is_peptide_design = normalized_workflow == 'peptide_design'
+        low_vram = coerce_bool(predict_args.get("low_vram"), False)
         if is_peptide_design:
             subprocess_timeout = _resolve_peptide_parent_subprocess_timeout(predict_args)
         if is_peptide_design:
@@ -1148,7 +1149,7 @@ def predict_task(self, predict_args: dict):
             _raise_if_task_cancelled(self, redis_client, task_id)
             allocated_gpu_ids = [gpu_id]
             reported_gpu_id = gpu_id
-            reported_gpu_ids = [gpu_id]
+            reported_gpu_ids = list(allocated_gpu_ids)
             self.update_state(state='PROGRESS', meta={'status': f'Acquired GPU {gpu_id}. Starting computation.'})
             logger.info(f"Task {task_id}: Acquired GPU {gpu_id}. Creating temporary directory.")
             tracker.update_status("gpu_acquired", f"Using GPU {gpu_id}")
