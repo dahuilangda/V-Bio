@@ -1570,6 +1570,18 @@
   gap: 8px;
 }
 
+/* Override global `input { width:100%; padding; border; border-radius }`
+   which otherwise stretches the checkbox into a padded bordered box. */
+.checkbox-inline input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+}
+
 .field.checkbox > span {
   display: inline-flex;
   align-items: center;
