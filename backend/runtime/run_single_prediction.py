@@ -4694,6 +4694,10 @@ def run_protenix_backend(
     protenix_container_env = [
         f"PYTHONPATH={container_app_dir}",
         "PROTENIX_ROOT_DIR=/cache",
+        # Cut CUDA allocator fragmentation (PyTorch caches freed blocks; large pair/template
+        # tensors leave holes that the next ~1 GB alloc can't reuse → OOM with GBs idle).
+        # Zero speed cost; LMI4Boltz sets this by default.
+        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
     ]
     if low_vram:
         protenix_container_env.append("PROTENIX_LOW_VRAM=1")

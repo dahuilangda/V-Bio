@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import Optional, Union
 
 import torch
@@ -25,7 +26,7 @@ from protenix.model.modules.transformer import (
     DiffusionTransformer,
 )
 from protenix.model.triangular.layers import LayerNorm
-from protenix.model.utils import expand_at_dim, get_checkpoint_fn, permute_final_dims
+from protenix.model.utils import chunk_layer, expand_at_dim, get_checkpoint_fn, permute_final_dims
 
 
 class DiffusionConditioning(nn.Module):
@@ -88,23 +89,38 @@ class DiffusionConditioning(nn.Module):
         relp_feature: torch.Tensor,
         z_trunk: torch.Tensor,
         inplace_safe: bool = False,
+        chunk_size: Optional[int] = None,
     ) -> torch.Tensor:
-        # Pair conditioning
-        pair_z = torch.cat(
-            tensors=[
-                z_trunk,
-                self.relpe(relp_feature),
-            ],
-            dim=-1,
-        )  # [..., N_tokens, N_tokens, 2*c_z]
-        pair_z = self.linear_no_bias_z(self.layernorm_z(pair_z))
-        if inplace_safe:
-            pair_z += self.transition_z1(pair_z)
-            pair_z += self.transition_z2(pair_z)
-        else:
-            pair_z = pair_z + self.transition_z1(pair_z)
-            pair_z = pair_z + self.transition_z2(pair_z)
-        return pair_z
+        # Pair conditioning. This is row-independent -- the cat, the projecting Linear
+        # and the two Transitions all act on the trailing c_z dim -- so for large
+        # complexes the caller can pass chunk_size to run it row-by-row. Without that
+        # the cat + LayerNorm + transition region holds several [N, N, 2*c_z] fp32
+        # tensors at once (~8 GiB at N=2150), on top of the trunk outputs, and OOMs.
+        def _condition(rf: torch.Tensor, zt: torch.Tensor) -> torch.Tensor:
+            pair_z = torch.cat(
+                tensors=[
+                    zt,
+                    self.relpe(rf),
+                ],
+                dim=-1,
+            )  # [..., N_tokens, N_tokens, 2*c_z]
+            pair_z = self.linear_no_bias_z(self.layernorm_z(pair_z))
+            if inplace_safe:
+                pair_z += self.transition_z1(pair_z)
+                pair_z += self.transition_z2(pair_z)
+            else:
+                pair_z = pair_z + self.transition_z1(pair_z)
+                pair_z = pair_z + self.transition_z2(pair_z)
+            return pair_z
+
+        if chunk_size is None or z_trunk.shape[-2] <= chunk_size:
+            return _condition(relp_feature, z_trunk)
+        return chunk_layer(
+            _condition,
+            {"rf": relp_feature, "zt": z_trunk},
+            chunk_size=chunk_size,
+            no_batch_dims=len(z_trunk.shape) - 2,
+        )
 
     def forward(
         self,
@@ -371,6 +387,17 @@ class DiffusionModule(nn.Module):
         """
         N_sample = r_noisy.size(-3)
         assert t_hat_noise_level.size(-1) == N_sample
+        # Under low-VRAM the diffusion runs in bf16 (runner/inference.py sets dtype=bf16 and
+        # skip_amp.sample_diffusion=False). The explicit .to(float32) upcasts below would
+        # double the bf16 pair/activation tensors back to fp32 and re-OOM the 200-step denoise
+        # loop, so drop them when low-VRAM is on. Off that path they are no-ops anyway -- the
+        # stage already runs in fp32 (skip_amp.sample_diffusion=True, autocast disabled).
+        _upcast_fp32 = os.environ.get("PROTENIX_LOW_VRAM", "").strip().lower() not in {
+            "1", "true", "yes", "on",
+        }
+
+        def _f32(t: torch.Tensor) -> torch.Tensor:
+            return t.to(dtype=torch.float32) if _upcast_fp32 else t
 
         blocks_per_ckpt = self.blocks_per_ckpt
         if not torch.is_grad_enabled():
@@ -450,8 +477,8 @@ class DiffusionModule(nn.Module):
                 inplace_safe=inplace_safe,
                 chunk_size=chunk_size,
             )
-        # Upcast
-        a_token = a_token.to(dtype=torch.float32)
+        # Upcast (skipped under low-VRAM bf16; see _f32 above)
+        a_token = _f32(a_token)
 
         # Full self-attention on token level.
         if inplace_safe:
@@ -463,13 +490,13 @@ class DiffusionModule(nn.Module):
                 self.layernorm_s(s_single)
             )  # [..., N_sample, N_token, c_token]
         if enable_efficient_fusion:
-            z = self.normalize(z_pair.to(dtype=torch.float32))
+            z = self.normalize(_f32(z_pair))
             z = permute_final_dims(z, [2, 0, 1]).contiguous()
         else:
-            z = z_pair.to(dtype=torch.float32)
+            z = _f32(z_pair)
         a_token = self.diffusion_transformer(
-            a=a_token.to(dtype=torch.float32),  # Upcast all inputs
-            s=s_single.to(dtype=torch.float32),
+            a=_f32(a_token),  # upcast inputs (skipped under low-VRAM bf16)
+            s=_f32(s_single),
             z=z,
             inplace_safe=inplace_safe,
             chunk_size=chunk_size,

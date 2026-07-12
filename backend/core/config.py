@@ -251,7 +251,7 @@ PROTENIX_MODEL_DIR = os.environ.get("PROTENIX_MODEL_DIR")
 PROTENIX_MODEL_NAME = os.environ.get("PROTENIX_MODEL_NAME", "protenix-v2")
 PROTENIX_SOURCE_DIR = os.environ.get(
     "PROTENIX_SOURCE_DIR",
-    "/data/protenix/source-v2"
+    "/data/V-Bio/vendor/protenix-source"
 )
 PROTENIX_DOCKER_EXTRA_ARGS = os.environ.get("PROTENIX_DOCKER_EXTRA_ARGS", "--entrypoint=")
 PROTENIX_INFER_EXTRA_ARGS = os.environ.get("PROTENIX_INFER_EXTRA_ARGS", "")
