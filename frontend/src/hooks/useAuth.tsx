@@ -1,6 +1,16 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import type { AuthLoginInput, AuthRegisterInput, Session } from '../types/models';
-import { clearSession, completeJwtLogin, isSuperAdminIdentity, loadSession, login, register, saveSession } from '../api/authApi';
+import {
+  clearSession,
+  completeJwtLogin,
+  isSuperAdminIdentity,
+  loadSession,
+  login,
+  managementSessionNeedsRefresh,
+  register,
+  renewManagementSession,
+  saveSession
+} from '../api/authApi';
 import { findUserByUsername } from '../api/supabaseLite';
 
 interface AuthContextValue {
@@ -10,6 +20,7 @@ interface AuthContextValue {
   registerAction: (input: AuthRegisterInput) => Promise<void>;
   logoutAction: () => void;
   refreshSession: () => Promise<void>;
+  ensureManagementSession: () => Promise<string | null>;
   completeJwtLoginAction: (token: string) => Promise<void>;
 }
 
@@ -44,9 +55,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       isSuperAdmin,
       loginAt: session.loginAt,
       authProvider: session.authProvider,
+      managementToken: session.managementToken || null
     };
     saveSession(refreshed);
     setSession(refreshed);
+  };
+
+  const ensureManagementSession = async (): Promise<string | null> => {
+    if (!session?.managementToken) return null;
+    if (!managementSessionNeedsRefresh(session.managementToken)) {
+      return session.managementToken;
+    }
+    const managementToken = await renewManagementSession(session.managementToken);
+    const refreshed = { ...session, managementToken };
+    saveSession(refreshed);
+    setSession(refreshed);
+    return managementToken;
   };
 
   const value = useMemo<AuthContextValue>(
@@ -66,6 +90,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setSession(null);
       },
       refreshSession,
+      ensureManagementSession,
       completeJwtLoginAction: async (token) => {
         const next = await completeJwtLogin(token);
         setSession(next);

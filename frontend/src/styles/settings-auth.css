@@ -1836,8 +1836,9 @@
 
 
 .integration-create {
-  grid-template-columns: minmax(160px, 1fr) minmax(140px, 0.9fr) minmax(140px, 0.9fr) minmax(120px, 0.7fr) auto;
+  grid-template-columns: minmax(280px, 420px) auto;
   align-items: end;
+  justify-content: start;
 }
 
 .integration-create .btn {
@@ -1845,6 +1846,21 @@
   min-height: 42px;
 }
 
+
+
+.integration-token-block {
+  gap: 10px;
+}
+
+.integration-jwt-value {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+}
 .integration-actions {
   display: inline-flex;
   align-items: center;

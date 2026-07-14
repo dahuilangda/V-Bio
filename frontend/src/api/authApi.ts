@@ -75,6 +75,39 @@ export function clearSession(): void {
   localStorage.removeItem(SESSION_KEY);
 }
 
+
+export function managementSessionNeedsRefresh(token: string, minValiditySeconds = 60): boolean {
+  try {
+    const body = String(token || '').trim().split('.', 1)[0];
+    if (!body) return true;
+    const normalized = body.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+    const payload = JSON.parse(window.atob(padded)) as { exp?: number };
+    const expiresAt = Number(payload.exp || 0);
+    return !Number.isFinite(expiresAt) || expiresAt <= Math.floor(Date.now() / 1000) + minValiditySeconds;
+  } catch {
+    return true;
+  }
+}
+
+export async function renewManagementSession(managementToken: string): Promise<string> {
+  const token = String(managementToken || '').trim();
+  if (!token) throw new Error('Management session is unavailable.');
+  const res = await requestManagement('/vbio-api/auth/management-session/refresh', {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'X-VBio-Session': token
+    }
+  });
+  const payload = (await res.json().catch(() => ({}))) as { managementToken?: string; error?: string };
+  const refreshed = String(payload.managementToken || '').trim();
+  if (!res.ok || !refreshed) {
+    throw new Error(payload.error || `Management session refresh failed with HTTP ${res.status}.`);
+  }
+  return refreshed;
+}
+
 export function getAuthHeaders(): Record<string, string> {
   return ENV.apiToken ? { 'X-API-Token': ENV.apiToken } : {};
 }

@@ -25,7 +25,7 @@ from management_api.lead_opt_routes import register_lead_opt_routes
 from management_api.postgrest_client import PostgrestClient
 from management_api.runtime_proxy import RuntimeProxy
 from management_api.jwt_clients import JwtClientStore
-from management_api.jwt_auth import JwtTokenError, JwtUserService, decode_login_jwt
+from management_api.jwt_auth import JwtTokenError, JwtUserService, decode_login_jwt, issue_login_jwt
 from management_api.task_store import ProjectTaskStore
 from management_api.ccd_download import build_task_ccd_response
 from management_api.copilot import CopilotAssistant
@@ -78,6 +78,10 @@ COPILOT_MAX_REQUEST_BYTES = int(os.environ.get("VBIO_COPILOT_MAX_REQUEST_BYTES",
 
 JWT_CLIENTS_FILE = os.environ.get("VBIO_JWT_CLIENTS_FILE", "frontend/.run/jwt_clients.json").strip()
 SESSION_SECRET = os.environ.get("VBIO_SESSION_SECRET", "").strip() or RUNTIME_API_TOKEN
+MANAGEMENT_SESSION_TTL_SECONDS = int(os.environ.get("VBIO_MANAGEMENT_SESSION_TTL_SECONDS", str(12 * 60 * 60)))
+MANAGEMENT_SESSION_REFRESH_TTL_SECONDS = int(
+    os.environ.get("VBIO_MANAGEMENT_SESSION_REFRESH_TTL_SECONDS", str(30 * 24 * 60 * 60))
+)
 SUPER_ADMIN_USERNAMES = os.environ.get("VBIO_SUPER_ADMIN_USERNAMES", "").strip() or os.environ.get("VITE_SUPER_ADMIN_USERNAMES", "").strip()
 SUPER_ADMIN_EMAILS = os.environ.get("VBIO_SUPER_ADMIN_EMAILS", "").strip() or os.environ.get("VITE_SUPER_ADMIN_EMAILS", "").strip()
 
@@ -161,7 +165,19 @@ def _sign_management_session(payload: Dict[str, Any]) -> str:
     return f"{body}.{_b64url_encode(signature)}"
 
 
-def _verify_management_session(token: str) -> Dict[str, Any]:
+def _issue_management_session(*, user_id: str, username: str, email: Any) -> str:
+    issued_at = int(time.time())
+    return _sign_management_session({
+        "sub": str(user_id or ""),
+        "username": str(username or ""),
+        "email": email,
+        "iat": issued_at,
+        "exp": issued_at + MANAGEMENT_SESSION_TTL_SECONDS,
+        "refresh_exp": issued_at + MANAGEMENT_SESSION_REFRESH_TTL_SECONDS,
+    })
+
+
+def _verify_management_session(token: str, *, allow_refresh: bool = False) -> Dict[str, Any]:
     if not SESSION_SECRET:
         raise PermissionError("Management sessions are not configured")
     try:
@@ -175,8 +191,16 @@ def _verify_management_session(token: str) -> Dict[str, Any]:
         raise
     except Exception as exc:
         raise PermissionError("Invalid management session") from exc
-    if int(payload.get("exp") or 0) <= int(time.time()):
-        raise PermissionError("Management session expired")
+
+    now = int(time.time())
+    expires_at = int(payload.get("exp") or 0)
+    if expires_at <= now:
+        issued_at = int(payload.get("iat") or 0)
+        refresh_expires_at = int(
+            payload.get("refresh_exp") or (issued_at + MANAGEMENT_SESSION_REFRESH_TTL_SECONDS)
+        )
+        if not allow_refresh or issued_at <= 0 or refresh_expires_at <= now:
+            raise PermissionError("Management session expired")
     if not _is_super_admin(str(payload.get("username") or ""), str(payload.get("email") or "")):
         raise PermissionError("Forbidden")
     return payload
@@ -186,7 +210,6 @@ def _session_from_user_row(row: Dict[str, Any], *, provider: str, login_at: str 
     username = str(row.get("username") or "")
     email = row.get("email")
     is_super_admin = _is_super_admin(username, str(email or ""))
-    issued_at = int(time.time())
     session = {
         "userId": str(row.get("id") or ""),
         "username": username,
@@ -198,13 +221,11 @@ def _session_from_user_row(row: Dict[str, Any], *, provider: str, login_at: str 
         "loginAt": login_at or _utc_now_iso(),
         "authProvider": provider,
     }
-    session["managementToken"] = _sign_management_session({
-        "sub": session["userId"],
-        "username": username,
-        "email": email,
-        "iat": issued_at,
-        "exp": issued_at + 12 * 60 * 60,
-    })
+    session["managementToken"] = _issue_management_session(
+        user_id=session["userId"],
+        username=username,
+        email=email,
+    )
     return session
 
 
@@ -223,6 +244,18 @@ def _find_user_by_identifier(identifier: str) -> Dict[str, Any] | None:
         "GET",
         "app_users",
         query={"select": "*", "email": f"eq.{value}", "limit": "1"},
+    )
+
+    return rows[0] if rows else None
+
+def _find_user_by_id(user_id: str) -> Dict[str, Any] | None:
+    normalized = str(user_id or "").strip()
+    if not normalized:
+        return None
+    rows = postgrest_client.request(
+        "GET",
+        "app_users",
+        query={"select": "*", "id": f"eq.{normalized}", "limit": "1"},
     )
     return rows[0] if rows else None
 
@@ -300,6 +333,33 @@ def complete_local_login() -> Tuple[Response, int]:
         return jsonify({"error": str(exc)}), 500
 
 
+@app.post("/vbio-api/auth/management-session/refresh")
+def refresh_management_session() -> Tuple[Response, int]:
+    token = str(request.headers.get("X-VBio-Session") or "").strip()
+    if not token:
+        return jsonify({"error": "Missing management session"}), 401
+    try:
+        claims = _verify_management_session(token, allow_refresh=True)
+        user = _find_user_by_id(str(claims.get("sub") or ""))
+        if not user or user.get("deleted_at"):
+            return jsonify({"error": "Management user is no longer active"}), 401
+        username = str(user.get("username") or "")
+        email = user.get("email")
+        if not _is_super_admin(username, str(email or "")):
+            return jsonify({"error": "Forbidden"}), 403
+        refreshed = _issue_management_session(
+            user_id=str(user.get("id") or ""),
+            username=username,
+            email=email,
+        )
+        return jsonify({"managementToken": refreshed}), 200
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 401
+    except Exception as exc:
+        logger.exception("Management session refresh failed")
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.post("/vbio-api/auth/jwt")
 def complete_jwt_login() -> Tuple[Response, int]:
     payload = request.get_json(silent=True) or {}
@@ -307,13 +367,11 @@ def complete_jwt_login() -> Tuple[Response, int]:
     try:
         claims = decode_login_jwt(token, jwt_client_store)
         session = jwt_user_service.upsert_user_from_claims(claims)
-        session["managementToken"] = _sign_management_session({
-            "sub": session.get("userId"),
-            "username": session.get("username"),
-            "email": session.get("email"),
-            "iat": int(time.time()),
-            "exp": int(time.time()) + 12 * 60 * 60,
-        })
+        session["managementToken"] = _issue_management_session(
+            user_id=str(session.get("userId") or ""),
+            username=str(session.get("username") or ""),
+            email=session.get("email"),
+        )
         session["isSuperAdmin"] = _is_super_admin(session.get("username"), session.get("email"))
         session["isAdmin"] = bool(session.get("isAdmin") or session.get("isSuperAdmin"))
         return jsonify({"session": session}), 200
@@ -349,13 +407,24 @@ def create_jwt_client() -> Tuple[Response, int]:
     if forbidden:
         return forbidden
     payload = request.get_json(silent=True) or {}
-    client, secret = jwt_client_store.create_client(
+    client, _secret = jwt_client_store.create_client(
         name=str(payload.get("name") or "").strip(),
         issuer=str(payload.get("issuer") or "navigation").strip(),
         audience=str(payload.get("audience") or "vbio").strip(),
         max_ttl_seconds=int(payload.get("max_ttl_seconds") or 300),
     )
-    return jsonify({"client": client.public_dict(), "secret": secret}), 201
+    token, expires_at = issue_login_jwt(
+        client,
+        subject=str(payload.get("subject") or client.client_id),
+        username=str(payload.get("username") or client.client_id),
+        name=str(payload.get("display_name") or client.name),
+        email=str(payload.get("email") or "") or None,
+    )
+    return jsonify({
+        "client": client.public_dict(),
+        "token": token,
+        "expires_at": expires_at,
+    }), 201
 
 
 @app.patch("/vbio-api/admin/jwt-clients/<client_id>")
@@ -371,6 +440,33 @@ def update_jwt_client(client_id: str) -> Tuple[Response, int]:
         return jsonify({"error": "JWT client not found"}), 404
 
 
+
+@app.post("/vbio-api/admin/jwt-clients/<client_id>/token")
+def issue_jwt_client_token(client_id: str) -> Tuple[Response, int]:
+    forbidden = _require_jwt_admin()
+    if forbidden:
+        return forbidden
+    payload = request.get_json(silent=True) or {}
+    client = jwt_client_store.get_client(client_id)
+    if not client:
+        return jsonify({"error": "JWT client not found"}), 404
+    try:
+        token, expires_at = issue_login_jwt(
+            client,
+            subject=str(payload.get("subject") or client.client_id),
+            username=str(payload.get("username") or client.client_id),
+            name=str(payload.get("display_name") or client.name),
+            email=str(payload.get("email") or "") or None,
+            ttl_seconds=int(payload.get("ttl_seconds") or client.max_ttl_seconds),
+        )
+        return jsonify({
+            "client": client.public_dict(),
+            "token": token,
+            "expires_at": expires_at,
+        }), 200
+    except JwtTokenError as exc:
+        return jsonify({"error": str(exc)}), 409
+
 @app.post("/vbio-api/admin/jwt-clients/<client_id>/rotate")
 def rotate_jwt_client(client_id: str) -> Tuple[Response, int]:
     forbidden = _require_jwt_admin()
@@ -378,7 +474,13 @@ def rotate_jwt_client(client_id: str) -> Tuple[Response, int]:
         return forbidden
     try:
         client, secret = jwt_client_store.rotate_secret(client_id)
-        return jsonify({"client": client.public_dict(), "secret": secret}), 200
+        token, expires_at = issue_login_jwt(client)
+        return jsonify({
+            "client": client.public_dict(),
+            "secret": secret,
+            "token": token,
+            "expires_at": expires_at,
+        }), 200
     except KeyError:
         return jsonify({"error": "JWT client not found"}), 404
 
