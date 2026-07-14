@@ -11,10 +11,14 @@ export interface JwtClientRecord {
   updated_at: string;
 }
 
-export interface JwtClientSecretResponse {
+export interface JwtIssuedTokenResponse {
   client: JwtClientRecord;
-  secret: string;
+  token: string;
+  expires_at: number;
+  secret?: string;
 }
+
+export type JwtClientSecretResponse = JwtIssuedTokenResponse;
 
 function adminHeaders(managementToken: string): Record<string, string> {
   return {
@@ -65,6 +69,18 @@ export async function updateJwtClient(
   });
   const payload = await readPayload<{ client: JwtClientRecord }>(res);
   return payload.client;
+
+}
+
+export async function issueJwtClientToken(
+  managementToken: string,
+  clientId: string
+): Promise<JwtIssuedTokenResponse> {
+  const res = await requestManagement(`/vbio-api/admin/jwt-clients/${encodeURIComponent(clientId)}/token`, {
+    method: 'POST',
+    headers: adminHeaders(managementToken)
+  });
+  return readPayload<JwtIssuedTokenResponse>(res);
 }
 
 export async function rotateJwtClient(managementToken: string, clientId: string): Promise<JwtClientSecretResponse> {

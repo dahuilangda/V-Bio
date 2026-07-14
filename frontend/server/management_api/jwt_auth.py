@@ -16,6 +16,60 @@ class JwtTokenError(ValueError):
     pass
 
 
+def _b64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def issue_login_jwt(
+    client: JwtClient,
+    *,
+    subject: str | None = None,
+    username: str | None = None,
+    name: str | None = None,
+    email: str | None = None,
+    ttl_seconds: int | None = None,
+) -> tuple[str, int]:
+    if not client.active:
+        raise JwtTokenError("JWT client is not active")
+
+    now = int(time.time())
+    requested_ttl = int(ttl_seconds or client.max_ttl_seconds or 300)
+    ttl = max(60, min(int(client.max_ttl_seconds or 300), requested_ttl))
+    expires_at = now + ttl
+    resolved_subject = str(subject or client.client_id).strip() or client.client_id
+    resolved_username = str(username or client.client_id).strip() or client.client_id
+    payload: Dict[str, Any] = {
+        "iss": client.issuer,
+        "aud": client.audience,
+        "sub": resolved_subject,
+        "username": resolved_username,
+        "name": str(name or client.name or resolved_username).strip() or resolved_username,
+        "iat": now,
+        "exp": expires_at,
+    }
+    normalized_email = str(email or "").strip().lower()
+    if normalized_email:
+        payload["email"] = normalized_email
+
+    header_part = _b64url_encode(
+        json.dumps(
+            {"alg": "HS256", "typ": "JWT", "kid": client.client_id},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    payload_part = _b64url_encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    signature = hmac.new(
+        client.secret.encode("utf-8"),
+        _signing_input(header_part, payload_part),
+        hashlib.sha256,
+    ).digest()
+    return f"{header_part}.{payload_part}.{_b64url_encode(signature)}", expires_at
+
+
+
 
 def _b64url_decode(value: str) -> bytes:
     padding = "=" * (-len(value) % 4)

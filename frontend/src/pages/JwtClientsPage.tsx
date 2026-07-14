@@ -1,58 +1,79 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { Download, KeyRound, Power, PowerOff, RotateCcw, Trash2 } from 'lucide-react';
+import { Clipboard, KeyRound, Power, PowerOff, Trash2 } from 'lucide-react';
 import {
   createJwtClient,
   deleteJwtClient,
+  issueJwtClientToken,
   listJwtClients,
-  rotateJwtClient,
   updateJwtClient,
   type JwtClientRecord
 } from '../api/jwtClientsApi';
 import { useAuth } from '../hooks/useAuth';
 
 export function JwtClientsPage() {
-  const { session } = useAuth();
-  const managementToken = session?.managementToken || '';
+  const { session, loading: authLoading, ensureManagementSession } = useAuth();
+  const [managementToken, setManagementToken] = useState('');
   const canManage = Boolean(managementToken);
   const [clients, setClients] = useState<JwtClientRecord[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [visibleSecret, setVisibleSecret] = useState<{ clientId: string; secret: string } | null>(null);
-
-  const loadClients = async () => {
-    if (!managementToken) return;
-    setLoading(true);
-    setError(null);
-    setVisibleSecret(null);
-    try {
-      setClients(await listJwtClients(managementToken));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load integrations.');
-    } finally {
-      setLoading(false);
-    }
-  };
+  const [notice, setNotice] = useState<string | null>(null);
+  const [visibleToken, setVisibleToken] = useState<{
+    clientId: string;
+    token: string;
+    expiresAt: number;
+  } | null>(null);
 
   useEffect(() => {
+    if (authLoading) return;
+    let cancelled = false;
+    const loadClients = async () => {
+      setLoading(true);
+      setError(null);
+      setNotice(null);
+      setVisibleToken(null);
+      try {
+        const token = await ensureManagementSession();
+        if (!token) throw new Error('Administrator management session is unavailable.');
+        const nextClients = await listJwtClients(token);
+        if (cancelled) return;
+        setManagementToken(token);
+        setClients(nextClients);
+      } catch (err) {
+        if (cancelled) return;
+        setManagementToken('');
+        setError(err instanceof Error ? err.message : 'Failed to load integrations.');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
     void loadClients();
-  }, [managementToken]);
+    return () => {
+      cancelled = true;
+    };
+  }, [authLoading, session?.userId]);
 
   const onCreateClient = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError(null);
-    setVisibleSecret(null);
+    setNotice(null);
+    setVisibleToken(null);
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
     try {
-      if (!managementToken) throw new Error('Please sign in again.');
+      if (!managementToken) throw new Error('Administrator management session is unavailable.');
       const result = await createJwtClient(managementToken, {
         name: String(form.get('name') || '').trim(),
-        issuer: String(form.get('issuer') || 'navigation').trim(),
-        audience: String(form.get('audience') || 'vbio').trim(),
-        max_ttl_seconds: Number(form.get('max_ttl_seconds') || 300)
+        issuer: 'navigation',
+        audience: 'vbio',
+        max_ttl_seconds: 300
       });
       setClients((prev) => [result.client, ...prev]);
-      setVisibleSecret({ clientId: result.client.client_id, secret: result.secret });
+      setVisibleToken({
+        clientId: result.client.client_id,
+        token: result.token,
+        expiresAt: result.expires_at
+      });
       formElement.reset();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create integration.');
@@ -61,9 +82,10 @@ export function JwtClientsPage() {
 
   const toggleClient = async (client: JwtClientRecord) => {
     setError(null);
-    setVisibleSecret(null);
+    setNotice(null);
+    setVisibleToken(null);
     try {
-      if (!managementToken) throw new Error('Please sign in again.');
+      if (!managementToken) throw new Error('Administrator management session is unavailable.');
       const next = await updateJwtClient(managementToken, client.client_id, { active: !client.active });
       setClients((prev) => prev.map((item) => (item.client_id === next.client_id ? next : item)));
     } catch (err) {
@@ -71,94 +93,41 @@ export function JwtClientsPage() {
     }
   };
 
-  const rotateSecret = async (client: JwtClientRecord) => {
-    if (!window.confirm(`Rotate secret for "${client.name}"? The old secret will stop working.`)) return;
+  const issueToken = async (client: JwtClientRecord) => {
     setError(null);
-    setVisibleSecret(null);
+    setNotice(null);
+    setVisibleToken(null);
     try {
-      if (!managementToken) throw new Error('Please sign in again.');
-      const result = await rotateJwtClient(managementToken, client.client_id);
-      setClients((prev) => prev.map((item) => (item.client_id === result.client.client_id ? result.client : item)));
-      setVisibleSecret({ clientId: result.client.client_id, secret: result.secret });
+      if (!managementToken) throw new Error('Administrator management session is unavailable.');
+      const result = await issueJwtClientToken(managementToken, client.client_id);
+      setVisibleToken({
+        clientId: result.client.client_id,
+        token: result.token,
+        expiresAt: result.expires_at
+      });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to rotate integration secret.');
+      setError(err instanceof Error ? err.message : 'Failed to issue JWT.');
     }
   };
 
-  const buildClientConfigText = (client: JwtClientRecord, clientSecret: string) => {
-    const vbioBaseUrl = typeof window !== 'undefined' ? window.location.origin : 'https://<vbio-host>';
-    const loginUrl = `${vbioBaseUrl}/auth/jwt?token=<JWT>&next=/projects`;
-    return [
-      'V-Bio external login',
-      '',
-      `V-Bio URL: ${vbioBaseUrl}`,
-      `Login redirect: ${loginUrl}`,
-      '',
-      'Client',
-      `name=${client.name}`,
-      `client_id=${client.client_id}`,
-      `secret=${clientSecret}`,
-      `issuer=${client.issuer}`,
-      `audience=${client.audience}`,
-      `ttl_seconds=${client.max_ttl_seconds}`,
-      '',
-      'JWT header',
-      JSON.stringify({ alg: 'HS256', typ: 'JWT', kid: client.client_id }),
-      '',
-      'JWT payload',
-      '{',
-      `  "iss": "${client.issuer}",`,
-      `  "aud": "${client.audience}",`,
-      '  "sub": "<external-user-id>",',
-      '  "username": "<username>",',
-      '  "email": "<user@example.com>",',
-      '  "name": "<display-name>",',
-      '  "iat": "<unix-seconds>",',
-      '  "exp": "<unix-seconds>"',
-      '}',
-      '',
-      'Signing',
-      'algorithm=HS256',
-      'signing_input=base64url(header) + "." + base64url(payload)',
-      'signature=HMAC-SHA256(signing_input, secret)',
-      'jwt=signing_input + "." + base64url(signature)',
-      '',
-      'Call',
-      'After the user signs in to your system, create the JWT on your backend and redirect the browser to:',
-      loginUrl,
-      '',
-      'Do not send the secret to browser code, mobile apps, logs, or URL parameters.'
-    ].join('\n');
-  };
-
-  const downloadClientConfig = (client: JwtClientRecord) => {
-    const clientSecret = visibleSecret?.clientId === client.client_id ? visibleSecret.secret : '';
-    if (!clientSecret) {
-      setError('Rotate this integration, then download the config file with the new secret.');
-      return;
+  const copyVisibleToken = async () => {
+    if (!visibleToken?.token) return;
+    try {
+      await navigator.clipboard.writeText(visibleToken.token);
+      setNotice('JWT copied.');
+      setError(null);
+    } catch {
+      setError('Unable to copy JWT. Select the token and copy it manually.');
     }
-    setError(null);
-    const fileName = `${client.name || client.client_id}-vbio-integration.txt`
-      .replace(/[^a-zA-Z0-9._-]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .toLowerCase();
-    const blob = new Blob([buildClientConfigText(client, clientSecret)], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = fileName || 'vbio-integration.txt';
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
   };
 
   const removeClient = async (client: JwtClientRecord) => {
     if (!window.confirm(`Delete integration "${client.name}"?`)) return;
     setError(null);
-    setVisibleSecret(null);
+    setNotice(null);
+    setVisibleToken(null);
     try {
-      if (!managementToken) throw new Error('Please sign in again.');
+      if (!managementToken) throw new Error('Administrator management session is unavailable.');
       await deleteJwtClient(managementToken, client.client_id);
       setClients((prev) => prev.filter((item) => item.client_id !== client.client_id));
     } catch (err) {
@@ -170,44 +139,47 @@ export function JwtClientsPage() {
     <div className="page-grid users-page">
       <section className="page-header">
         <div>
-          <h1>External Integrations</h1>
+          <h1>JWT Integrations</h1>
+          <p className="muted">Create a short-lived JWT for an external system.</p>
         </div>
       </section>
 
-      {!canManage ? (
-        <div className="alert error">Sign out and sign in again to enable integration management.</div>
+      {!loading && !canManage ? (
+        <div className="alert error">Administrator management session is unavailable.</div>
       ) : null}
       {loading ? <div className="muted">Loading integrations...</div> : null}
 
       <section className="panel">
         <div className="settings-panel-head">
-          <h2><KeyRound size={18} /> Create Integration</h2>
+          <h2><KeyRound size={18} /> Create JWT</h2>
         </div>
         <form className="form-grid integration-create" onSubmit={onCreateClient}>
           <label className="field">
             <span>Name</span>
             <input name="name" placeholder="External system" required />
           </label>
-          <label className="field">
-            <span>Issuer</span>
-            <input name="issuer" defaultValue="navigation" required />
-          </label>
-          <label className="field">
-            <span>Audience</span>
-            <input name="audience" defaultValue="vbio" required />
-          </label>
-          <label className="field">
-            <span>TTL seconds</span>
-            <input name="max_ttl_seconds" type="number" min="60" max="3600" defaultValue="300" required />
-          </label>
-          <button className="btn btn-primary" type="submit" disabled={!canManage}>Create</button>
+          <button className="btn btn-primary" type="submit" disabled={!canManage}>Create JWT</button>
         </form>
-        {visibleSecret ? (
-          <div className="token-plain-block">
-            <strong>Client secret</strong>
-            <code>{visibleSecret.secret}</code>
+
+        {visibleToken ? (
+          <div className="token-plain-block integration-token-block">
+            <strong>JWT</strong>
+            <textarea
+              className="integration-jwt-value"
+              value={visibleToken.token}
+              readOnly
+              rows={4}
+              aria-label="Issued JWT"
+            />
+            <div className="muted small">
+              Expires {new Date(visibleToken.expiresAt * 1000).toLocaleString()}
+            </div>
+            <button className="btn btn-secondary btn-compact" type="button" onClick={() => void copyVisibleToken()}>
+              <Clipboard size={14} /> Copy JWT
+            </button>
           </div>
         ) : null}
+        {notice ? <div className="alert success">{notice}</div> : null}
         {error ? <div className="alert error">{error}</div> : null}
       </section>
 
@@ -219,9 +191,7 @@ export function JwtClientsPage() {
               <tr>
                 <th>Client ID</th>
                 <th>Name</th>
-                <th>Issuer</th>
-                <th>Audience</th>
-                <th>TTL</th>
+                <th>JWT lifetime</th>
                 <th>Status</th>
                 <th>Actions</th>
               </tr>
@@ -231,8 +201,6 @@ export function JwtClientsPage() {
                 <tr key={client.client_id}>
                   <td><code>{client.client_id}</code></td>
                   <td>{client.name}</td>
-                  <td>{client.issuer}</td>
-                  <td>{client.audience}</td>
                   <td>{client.max_ttl_seconds}s</td>
                   <td>{client.active ? 'Active' : 'Disabled'}</td>
                   <td>
@@ -240,11 +208,12 @@ export function JwtClientsPage() {
                       <button
                         className="icon-btn"
                         type="button"
-                        title="Download integration config"
-                        aria-label={`Download config for ${client.name}`}
-                        onClick={() => downloadClientConfig(client)}
+                        title="Issue new JWT"
+                        aria-label={`Issue new JWT for ${client.name}`}
+                        disabled={!client.active}
+                        onClick={() => void issueToken(client)}
                       >
-                        <Download size={14} />
+                        <KeyRound size={14} />
                       </button>
                       <button
                         className="icon-btn"
@@ -254,15 +223,6 @@ export function JwtClientsPage() {
                         onClick={() => void toggleClient(client)}
                       >
                         {client.active ? <PowerOff size={14} /> : <Power size={14} />}
-                      </button>
-                      <button
-                        className="icon-btn"
-                        type="button"
-                        title="Rotate secret"
-                        aria-label={`Rotate secret for ${client.name}`}
-                        onClick={() => void rotateSecret(client)}
-                      >
-                        <RotateCcw size={14} />
                       </button>
                       <button
                         className="icon-btn danger"
