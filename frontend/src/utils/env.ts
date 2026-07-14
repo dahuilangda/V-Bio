@@ -66,7 +66,7 @@ export const ENV = {
   supabaseRestUrl: resolvedSupabaseRestUrl,
   jsmeScriptUrl:
     import.meta.env.VITE_JSME_SCRIPT_URL?.trim() ||
-    '/vendor/jsme/jsme.nocache.js',
+    '/vendor/jsme/jsme.nocache.js?v=pagehide-1',
   molstarScriptUrl:
     import.meta.env.VITE_MOLSTAR_SCRIPT_URL?.trim() ||
     '/vendor/molstar/molstar.js',

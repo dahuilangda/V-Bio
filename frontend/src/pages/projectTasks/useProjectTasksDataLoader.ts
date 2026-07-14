@@ -52,11 +52,21 @@ const TASK_STATE_PRIORITY: Record<string, number> = {
   REVOKED: 3,
 };
 const TASK_LIST_RUNTIME_CACHE_TTL_MS = 5000;
-const TASK_LIST_RUNTIME_CACHE_KEY_VERSION = 'v2';
+const LEGACY_TASK_LIST_RUNTIME_CACHE_KEY_PREFIX = 'vbio:project-tasks-runtime:';
 const TASK_LIST_INITIAL_FETCH_LIMIT = 120;
 const TASK_LIST_BACKGROUND_FETCH_CHUNK_SIZE = 240;
 const TASK_LIST_BACKGROUND_FETCH_DELAY_MS = 80;
 const TASK_LIST_RUNTIME_CACHE_MAX_ROWS = 180;
+const TASK_LIST_RUNTIME_CACHE_MAX_ENTRIES = 8;
+
+interface TaskListRuntimeCacheEntry {
+  savedAt: number;
+  project: Project;
+  tasks: ProjectTask[];
+}
+
+const taskListRuntimeCache = new Map<string, TaskListRuntimeCacheEntry>();
+let legacyRuntimeCacheCleanupDone = false;
 
 function taskStatePriority(value: unknown): number {
   return TASK_STATE_PRIORITY[String(value || '').trim().toUpperCase()] ?? 0;
@@ -249,6 +259,36 @@ function pickRuntimeCacheTaskRows(taskRows: ProjectTask[]): ProjectTask[] {
   return sortProjectTasks(Array.from(selected.values()));
 }
 
+function pruneRuntimeCache(now: number): void {
+  for (const [key, entry] of taskListRuntimeCache.entries()) {
+    if (now - entry.savedAt > TASK_LIST_RUNTIME_CACHE_TTL_MS) {
+      taskListRuntimeCache.delete(key);
+    }
+  }
+  while (taskListRuntimeCache.size > TASK_LIST_RUNTIME_CACHE_MAX_ENTRIES) {
+    const oldestKey = taskListRuntimeCache.keys().next().value;
+    if (typeof oldestKey !== 'string') break;
+    taskListRuntimeCache.delete(oldestKey);
+  }
+}
+
+function removeLegacyRuntimeCacheEntries(): void {
+  if (legacyRuntimeCacheCleanupDone || typeof window === 'undefined') return;
+  legacyRuntimeCacheCleanupDone = true;
+  try {
+    const staleKeys: string[] = [];
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const key = window.localStorage.key(index);
+      if (key?.startsWith(LEGACY_TASK_LIST_RUNTIME_CACHE_KEY_PREFIX)) {
+        staleKeys.push(key);
+      }
+    }
+    staleKeys.forEach((key) => window.localStorage.removeItem(key));
+  } catch {
+    // A storage policy must not prevent the task page from loading.
+  }
+}
+
 function mergeProjectRuntimeFields(next: Project, prev: Project): Project {
   const nextTaskId = String(next.task_id || '').trim();
   const prevTaskId = String(prev.task_id || '').trim();
@@ -332,8 +372,12 @@ export function useProjectTasksDataLoader({
     const sessionIdentity = String(sessionUserId || '').trim().toLowerCase() || '__anonymous__';
     const normalizedProjectId = String(projectId || '').trim();
     if (!normalizedProjectId) return '';
-    return `vbio:project-tasks-runtime:${TASK_LIST_RUNTIME_CACHE_KEY_VERSION}:${sessionIdentity}:${normalizedProjectId}`;
+    return `${sessionIdentity}:${normalizedProjectId}`;
   }, [projectId, sessionUserId]);
+
+  useEffect(() => {
+    removeLegacyRuntimeCacheEntries();
+  }, []);
 
   useEffect(() => {
     projectRef.current = project;
@@ -358,52 +402,37 @@ export function useProjectTasksDataLoader({
 
   const persistRuntimeCache = useCallback(
     (projectRow: Project | null, taskRows: ProjectTask[]) => {
-      if (typeof window === 'undefined' || !taskListRuntimeCacheKey || !projectRow) return;
-      try {
-        window.localStorage.setItem(
-          taskListRuntimeCacheKey,
-          JSON.stringify({
-            saved_at: Date.now(),
-            project: projectRow,
-            tasks: pickRuntimeCacheTaskRows(taskRows)
-          })
-        );
-      } catch (err) {
-        console.error('Runtime cache localStorage write failed; ignoring storage failure.', err);
-        // Ignore storage quota or serialization failures.
-      }
+      if (!taskListRuntimeCacheKey || !projectRow) return;
+      const now = Date.now();
+      pruneRuntimeCache(now);
+      taskListRuntimeCache.delete(taskListRuntimeCacheKey);
+      taskListRuntimeCache.set(taskListRuntimeCacheKey, {
+        savedAt: now,
+        project: projectRow,
+        tasks: pickRuntimeCacheTaskRows(taskRows)
+      });
+      pruneRuntimeCache(now);
     },
     [taskListRuntimeCacheKey]
   );
 
   const hydrateRuntimeCache = useCallback(() => {
-    if (typeof window === 'undefined' || !taskListRuntimeCacheKey) return false;
+    if (!taskListRuntimeCacheKey) return false;
     if (projectRef.current || tasksRef.current.length > 0) return false;
-    try {
-      const raw = window.localStorage.getItem(taskListRuntimeCacheKey);
-      if (!raw) return false;
-      const parsed = JSON.parse(raw) as {
-        saved_at?: number;
-        project?: Project | null;
-        tasks?: ProjectTask[] | null;
-      };
-      const savedAt = Number(parsed?.saved_at || 0);
-      if (!Number.isFinite(savedAt) || Date.now() - savedAt > TASK_LIST_RUNTIME_CACHE_TTL_MS) {
-        window.localStorage.removeItem(taskListRuntimeCacheKey);
-        return false;
-      }
-      const cachedProject = parsed?.project || null;
-      const cachedTasks = sanitizeTaskRows(Array.isArray(parsed?.tasks) ? parsed.tasks : []);
-      if (!cachedProject || cachedTasks.length === 0) return false;
-      projectRef.current = cachedProject;
-      tasksRef.current = cachedTasks;
-      setProject(cachedProject);
-      setTasks(cachedTasks);
-      return true;
-    } catch (err) {
-      console.error('Runtime cache localStorage parse failed; ignoring malformed storage.', err);
+    const now = Date.now();
+    pruneRuntimeCache(now);
+    const cached = taskListRuntimeCache.get(taskListRuntimeCacheKey);
+    if (!cached) return false;
+    const cachedTasks = sanitizeTaskRows(cached.tasks);
+    if (cachedTasks.length === 0) {
+      taskListRuntimeCache.delete(taskListRuntimeCacheKey);
       return false;
     }
+    projectRef.current = cached.project;
+    tasksRef.current = cachedTasks;
+    setProject(cached.project);
+    setTasks(cachedTasks);
+    return true;
   }, [taskListRuntimeCacheKey]);
 
   const syncRuntimeTasks = useCallback(
