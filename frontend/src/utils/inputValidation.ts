@@ -3,8 +3,11 @@ import { normalizeComponentSequence } from './projectInputs';
 import type { RDKitModule } from './rdkit';
 
 
-export const AMINO_ACID_BACKBONE_SMARTS = '[NX3;!$(NC=O)]-[C;X4]-C(=O)[O,N]';
-export const AMINO_ACID_TERMINAL_BACKBONE_SMARTS = '[NX3,NX4,NX2]-[C;X4]-C(=O)[O,N]';
+// α-nitrogen accepts any valence (incl. protonated [NH3+] from JSME zwitterions) — mirrors the
+// backend _find_residue_backbone_topology, which enumerates every N (atomicnum==7) regardless of
+// charge. The backend's [NX3] validity constant (_custom_ccd_has_amino_acid_backbone) is dead code.
+export const AMINO_ACID_BACKBONE_SMARTS = '[N;!$(NC=O)]-[C;X4]-C(=O)[O,N]';
+export const AMINO_ACID_TERMINAL_BACKBONE_SMARTS = '[N]-[C;X4]-C(=O)[O,N]';
 
 function hasSubstructureMatchPayload(value: unknown): boolean {
   if (typeof value === 'string') {

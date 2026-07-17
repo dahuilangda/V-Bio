@@ -6,6 +6,13 @@ function normalizePlddt(value: number): number {
   return Math.max(0, Math.min(100, normalized));
 }
 
+// Faint highlight circle drawn on EVERY atom when the preview is interactive, so it doubles as a
+// click hit-target. Without it, implicit carbons (α-CA, carboxyl C, sidechain C) are unclickable:
+// RDKit depicts them only as bond junctions with no letter glyph and therefore no `atom-N` DOM
+// node for the hit-test to find. Atoms the caller already highlighted keep their own color.
+const INTERACTIVE_HIT_TARGET_COLOR: [number, number, number] = [0.98, 0.94, 0.86];
+const INTERACTIVE_HIT_TARGET_RADIUS = 0.34;
+
 function colorForConfidence(value: number): [number, number, number] {
   const v = normalizePlddt(value);
   // AlphaFold confidence colors:
@@ -152,6 +159,7 @@ export interface Ligand2DRenderOptions {
   highlightQuery?: string | null;
   highlightAtomIndices?: number[] | null;
   atomLabels?: string[] | null;
+  interactiveHitTargets?: boolean;
 }
 
 function normalizeAtomLabels(atomLabels: string[] | null | undefined, atomCount: number): Record<number, string> {
@@ -211,7 +219,8 @@ export function renderLigand2DSvg(
     confidenceHint = null,
     highlightQuery = null,
     highlightAtomIndices = null,
-    atomLabels = null
+    atomLabels = null,
+    interactiveHitTargets = false
   }: Ligand2DRenderOptions
 ): string {
   const value = smiles.trim();
@@ -351,6 +360,27 @@ export function renderLigand2DSvg(
               queryMol.delete();
             }
           }
+        }
+
+        if (interactiveHitTargets && atomCount > 0) {
+          const hitAtoms = Array.isArray(details.highlightAtoms) ? ([...details.highlightAtoms] as number[]) : [];
+          const hitColors = (details.highlightAtomColors || {}) as Record<number, [number, number, number]>;
+          const hitRadii = (details.highlightAtomRadii || {}) as Record<number, number>;
+          for (let i = 0; i < atomCount; i += 1) {
+            if (!hitAtoms.includes(i)) {
+              hitAtoms.push(i);
+              hitColors[i] = INTERACTIVE_HIT_TARGET_COLOR;
+              hitRadii[i] = INTERACTIVE_HIT_TARGET_RADIUS;
+            }
+          }
+          details.atoms = hitAtoms;
+          details.highlightAtoms = hitAtoms;
+          details.highlightAtomColors = hitColors;
+          details.highlightAtomRadii = hitRadii;
+          details.highlightRadii = hitRadii;
+          details.fillHighlights = true;
+          details.atomHighlightsAreCircles = true;
+          details.highlightBonds = Array.isArray(details.highlightBonds) ? details.highlightBonds : [];
         }
 
         rawSvg = renderMol.get_svg_with_highlights(JSON.stringify(details));

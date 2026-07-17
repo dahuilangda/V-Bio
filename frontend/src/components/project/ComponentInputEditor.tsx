@@ -8,7 +8,7 @@ import { LigandPropertyGrid } from './LigandPropertyGrid';
 import { loadRDKitModule } from '../../utils/rdkit';
 import { Ligand2DPreview } from './Ligand2DPreview';
 import { rdkitMolHasAminoAcidBackbone } from '../../utils/inputValidation';
-import { detectCustomResidueBackbone } from '../../utils/constraintAtomOptions';
+import { detectCustomResidueBackbone, validateBackboneSlots } from '../../utils/constraintAtomOptions';
 import { toggleTerminalAmide } from '../../utils/smilesTransform';
 import { BUILT_IN_PROTEIN_MODIFICATIONS } from './residueCatalog';
 
@@ -213,11 +213,16 @@ function CustomResiduePreview({
   // The five picks, kept here while editing (a residue can only store a complete set). Sent up
   // via onBackboneChange once all five are filled, or cleared to undefined.
   const [slots, setSlots] = useState<Partial<CustomResidueBackbone>>(backbone ?? {});
+  // Surfaces why an explicit Auto run found nothing (e.g. a C-terminal amide without the
+  // amidation flag) without wiping the user's manual picks.
+  const [autoStatus, setAutoStatus] = useState<'idle' | 'failed'>('idle');
 
   const allSet = (value: Partial<CustomResidueBackbone>) =>
     CUSTOM_BACKBONE_SLOTS.every((slot) => value[slot] !== undefined);
   const samePicks = (a: CustomResidueBackbone, b: Partial<CustomResidueBackbone>) =>
     CUSTOM_BACKBONE_SLOTS.every((slot) => a[slot] === b[slot]);
+  const slotsDiffer = (a: Partial<CustomResidueBackbone>, b: Partial<CustomResidueBackbone>) =>
+    CUSTOM_BACKBONE_SLOTS.some((slot) => a[slot] !== b[slot]);
 
   // Skip one detect after adopting a saved assignment (mount or library apply) so it is kept
   // rather than immediately replaced.
@@ -225,6 +230,11 @@ function CustomResiduePreview({
   // Track amidation so toggling it re-detects the 5th slot (OXT oxygen <-> NXT nitrogen) while
   // keeping the N/CA/C/O picks.
   const prevAmidatedRef = useRef(Boolean(amidated));
+  // True once the user has clicked any atom themselves. While set, SMILES edits must NOT
+  // auto-detect over their picks — each pick is validated against the new structure instead (kept
+  // if still on the right element, dropped if its atom vanished/shifted). Cleared by the Auto
+  // button so an explicit re-detect is allowed.
+  const manualOverrideRef = useRef(false);
 
   // A saved assignment arriving on the prop (e.g. reusing a library residue) is adopted only
   // when it actually differs from the current picks; a matching value is our own update coming
@@ -256,18 +266,40 @@ function CustomResiduePreview({
           const hasBackbone = rdkitMolHasAminoAcidBackbone(rdkit, text, true);
           setValid(hasBackbone);
           onValidityChange(hasBackbone);
-          if (skipNextDetectRef.current && !amidatedChanged) {
+
+          // Amidation toggle re-canonicalizes the SMILES and flips the terminal element; re-detect
+          // keeping the user's N/CA/C/O picks (the OXT/NXT terminal is re-resolved by the SMARTS).
+          if (amidatedChanged) {
+            skipNextDetectRef.current = false;
+            const anchors = manualOverrideRef.current ? slots : {};
+            const detected = hasBackbone ? detectCustomResidueBackbone(rdkit, text, anchors, amidated) ?? undefined : undefined;
+            setSlots(detected ?? {});
+            onBackboneChange(detected);
+            setAutoStatus('idle');
+            return;
+          }
+
+          // The user has manually picked atoms: do NOT auto-detect over them on a structure edit.
+          // Validate each pick against the new structure and keep only the ones still on the right
+          // element (drops picks whose atom vanished or shifted index).
+          if (manualOverrideRef.current) {
+            const kept = validateBackboneSlots(rdkit, text, slots, Boolean(amidated));
+            if (slotsDiffer(kept, slots)) {
+              setSlots(kept);
+              onBackboneChange(allSet(kept) ? (kept as CustomResidueBackbone) : undefined);
+            }
+            return;
+          }
+
+          if (skipNextDetectRef.current) {
             skipNextDetectRef.current = false;
             return;
           }
-          skipNextDetectRef.current = false;
-          // Re-detect anchored on the current picks so a user's manual choices survive small
-          // SMILES edits. On an amidation toggle the SMILES is re-canonicalized (atom order may
-          // change) and the terminal element flips, so re-detect from scratch.
-          const anchors = amidatedChanged ? {} : slots;
-          const detected = hasBackbone ? detectCustomResidueBackbone(rdkit, text, anchors, amidated) ?? undefined : undefined;
+          // No manual intervention yet — offer a fresh auto-detection as the starting suggestion.
+          const detected = hasBackbone ? detectCustomResidueBackbone(rdkit, text, {}, amidated) ?? undefined : undefined;
           setSlots(detected ?? {});
           onBackboneChange(detected);
+          setAutoStatus('idle');
         } catch {
           if (!cancelled) {
             setValid(false);
@@ -285,6 +317,7 @@ function CustomResiduePreview({
   }, [smiles, amidated]);
 
   const runAutoDetect = async () => {
+    manualOverrideRef.current = false;
     const text = smiles.trim();
     const rdkit = await loadRDKitModule();
     // Re-detect with the current picks as anchors: atoms the user already set stay; only the
@@ -293,8 +326,14 @@ function CustomResiduePreview({
       ? detectCustomResidueBackbone(rdkit, text, slots, amidated) ?? undefined
       : undefined;
     skipNextDetectRef.current = false;
-    setSlots(detected ?? {});
-    onBackboneChange(detected);
+    if (detected) {
+      setSlots(detected);
+      onBackboneChange(detected);
+      setAutoStatus('idle');
+    } else {
+      // Keep the manual picks and explain, rather than silently wiping them.
+      setAutoStatus('failed');
+    }
   };
 
   const slotLabel = (slot: (typeof CUSTOM_BACKBONE_SLOTS)[number]) =>
@@ -317,6 +356,7 @@ function CustomResiduePreview({
 
   const handleAtomClick = (atomIndex: number) => {
     if (!armedSlot) return;
+    manualOverrideRef.current = true;
     const next: Partial<CustomResidueBackbone> = { ...slots };
     if (next[armedSlot] === atomIndex) {
       delete next[armedSlot];
@@ -328,6 +368,7 @@ function CustomResiduePreview({
     }
     setSlots(next);
     onBackboneChange(allSet(next) ? (next as CustomResidueBackbone) : undefined);
+    setAutoStatus('idle');
     const nextUnset = CUSTOM_BACKBONE_SLOTS.find((slot) => next[slot] === undefined);
     setArmedSlot(nextUnset ?? null);
   };
@@ -340,7 +381,7 @@ function CustomResiduePreview({
         height={220}
         highlightAtomIndices={assignedIndices.length ? assignedIndices : undefined}
         atomLabels={atomLabels}
-        onAtomClick={armedSlot && valid && !disabled ? handleAtomClick : undefined}
+        onAtomClick={armedSlot && !disabled ? handleAtomClick : undefined}
       />
       <div className="peptide-custom-backbone-slots" role="group" aria-label="Backbone atom slots">
         {CUSTOM_BACKBONE_SLOTS.map((slot) => {
@@ -351,7 +392,7 @@ function CustomResiduePreview({
               key={slot}
               type="button"
               className={`peptide-custom-backbone-slot${armed ? ' armed' : ''}${idx === undefined ? ' empty' : ''}`}
-              disabled={!valid || disabled}
+              disabled={disabled}
               onClick={() => setArmedSlot((prev) => (prev === slot ? null : slot))}
               title={
                 armed
@@ -369,7 +410,7 @@ function CustomResiduePreview({
         <button
           type="button"
           className="peptide-custom-backbone-reset"
-          disabled={!valid || disabled}
+          disabled={disabled}
           onClick={() => void runAutoDetect()}
           title="Re-detect the backbone from the current structure"
         >
@@ -387,6 +428,11 @@ function CustomResiduePreview({
           </button>
         ) : null}
         {!valid ? <span className="small custom-residue-preview-status">Missing amino-acid backbone.</span> : null}
+        {autoStatus === 'failed' ? (
+          <span className="small custom-residue-preview-status">
+            Auto could not identify the full backbone. Click atoms to set N/CA/C/O/OXT manually — for a C-terminal amide, enable amidation first.
+          </span>
+        ) : null}
       </div>
     </div>
   );

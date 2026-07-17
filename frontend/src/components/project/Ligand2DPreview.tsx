@@ -41,11 +41,42 @@ function injectInteractiveSvgStyle(svg: string): string {
   return `${svg.slice(0, svgTagStart)}${patchedOpenTag}${style}${svg.slice(svgTagEnd + 1)}`;
 }
 
-// A click anywhere within an adaptive radius of an atom selects that atom (nearest wins), so
-// the tiny rendered glyphs (a <text> symbol or a thin highlight path) are easy to hit. The
-// radius scales with the depiction: sparse molecules get a generous hit zone, dense ones stay
-// small enough not to snap onto a neighbour. Falls back to null (background) far from any atom.
+// A class string like "atom-3" or "bond-0 atom-1 atom-2" yields the single atom index when the
+// element belongs to exactly one atom, else null (bond paths carry two and must be ignored).
+function singleAtomIndexFromClass(cls: string): number | null {
+  const indices = Array.from(
+    new Set(
+      Array.from(cls.matchAll(/atom-(\d+)/g))
+        .map((match) => Number.parseInt(match[1], 10))
+        .filter((atomIndex) => Number.isFinite(atomIndex) && atomIndex >= 0)
+    )
+  );
+  return indices.length === 1 ? indices[0] : null;
+}
+
+// Resolve a click to an atom index. Highlight circles (<ellipse>/<circle class="atom-N">) win
+// when present: interactive previews render a faint circle on EVERY atom (including implicit
+// carbons, which have no letter glyph), so each circle is an exact hit zone that finally makes
+// the backbone C and CA clickable. Without circles we fall back to the letter/path glyph scan,
+// which only covers atoms that draw a symbol (N, O, ...).
 function findNearestAtomIndex(host: HTMLElement, clientX: number, clientY: number): number | null {
+  const circles = host.querySelectorAll("ellipse[class*='atom-'], circle[class*='atom-']");
+  if (circles.length > 0) {
+    let best: { index: number; dist: number } | null = null;
+    for (const node of Array.from(circles)) {
+      const index = singleAtomIndexFromClass(node.getAttribute('class') || '');
+      if (index === null) continue;
+      const rect = node.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) continue;
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const radius = Math.max(rect.width, rect.height) / 2;
+      const dist = Math.hypot(clientX - cx, clientY - cy);
+      if (dist <= radius + 6 && (best === null || dist < best.dist)) best = { index, dist };
+    }
+    return best ? best.index : null;
+  }
+
   const nodes = host.querySelectorAll('[class*="atom-"]');
   if (nodes.length === 0) return null;
 
@@ -53,17 +84,11 @@ function findNearestAtomIndex(host: HTMLElement, clientX: number, clientY: numbe
   const candidates: Candidate[] = [];
   nodes.forEach((node) => {
     const el = node as Element;
-    const indices = Array.from(
-      new Set(
-        Array.from(String(el.getAttribute('class') || '').matchAll(/atom-(\d+)/g))
-          .map((match) => Number.parseInt(match[1], 10))
-          .filter((atomIndex) => Number.isFinite(atomIndex) && atomIndex >= 0)
-      )
-    );
-    if (indices.length !== 1) return;
+    const index = singleAtomIndexFromClass(el.getAttribute('class') || '');
+    if (index === null) return;
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) return;
-    candidates.push({ index: indices[0], x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+    candidates.push({ index, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
   });
   if (candidates.length === 0) return null;
 
@@ -140,7 +165,8 @@ export function Ligand2DPreview({
           confidenceHint,
           highlightQuery,
           highlightAtomIndices,
-          atomLabels
+          atomLabels,
+          interactiveHitTargets: Boolean(onAtomClick)
         });
         if (cancelled) return;
         setSvg(onAtomClick || onBackgroundClick ? injectInteractiveSvgStyle(rendered) : rendered);
