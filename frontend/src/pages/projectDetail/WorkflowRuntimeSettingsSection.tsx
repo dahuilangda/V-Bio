@@ -6,7 +6,7 @@ import { AMINO_ACID_BACKBONE_SMARTS, rdkitMolHasAminoAcidBackbone } from '../../
 import { loadRDKitModule } from '../../utils/rdkit';
 import type { CustomCcdMoleculeInput, CustomResidueBackbone, PeptideResiduePoolSelection } from '../../types/models';
 import { normalizePredictionBackend } from './projectDraftUtils';
-import { detectCustomResidueBackbone } from '../../utils/constraintAtomOptions';
+import { detectCustomResidueBackbone, validateBackboneSlots } from '../../utils/constraintAtomOptions';
 import { toggleTerminalAmide } from '../../utils/smilesTransform';
 import { useAuth } from '../../hooks/useAuth';
 
@@ -259,9 +259,15 @@ export function WorkflowRuntimeSettingsSection({
   // `backbone` and used by the backend as-is.
   const [customDraftBackbone, setCustomDraftBackbone] = useState<Partial<CustomResidueBackbone>>({});
   const [customDraftAmidated, setCustomDraftAmidated] = useState(false);
+  // 'failed' surfaces why an explicit Auto run found no backbone (e.g. a C-terminal amide without
+  // the amidation flag): the manual picks are kept and the reason is shown instead of a silent wipe.
+  const [customDraftAutoStatus, setCustomDraftAutoStatus] = useState<'idle' | 'failed'>('idle');
   const [armedBackboneSlot, setArmedBackboneSlot] = useState<(typeof CUSTOM_BACKBONE_SLOTS)[number] | null>(null);
   const skipBackboneAutoDetectRef = useRef(false);
   const prevCustomDraftAmidatedRef = useRef(customDraftAmidated);
+  // True once the user has clicked any atom. While set, SMILES edits validate the picks against
+  // the new structure instead of auto-detecting over them. Cleared by Auto and on opening a residue.
+  const manualOverrideBackboneRef = useRef(false);
   const showFullFields = displayMode === 'full';
   const normalizedBackend = isAffinityWorkflow ? 'boltz' : normalizePredictionBackend(backend);
   const canEditRuntimeIdentity = canEdit || isPredictionWorkflow || isPeptideDesignWorkflow || isAffinityWorkflow;
@@ -338,20 +344,29 @@ export function WorkflowRuntimeSettingsSection({
           if (cancelled) return;
           const valid = rdkitMolHasAminoAcidBackbone(rdkit, smiles, true);
           setCustomDraftValid(valid);
-          // Skip one cycle when opening a residue that already has a stored backbone (keep it),
-          // unless amidation just toggled (the terminal atom must be re-resolved). Otherwise
-          // re-detect anchored on the picks already set: atoms the user chose stay, the rest are
-          // filled — so the picks stay correct as the SMILES changes without overriding the user.
-          if (skipBackboneAutoDetectRef.current && !amidatedChanged) {
+          // Amidation toggle re-canonicalizes the SMILES and flips the terminal element; re-detect
+          // keeping the user's N/CA/C/O picks.
+          if (amidatedChanged) {
+            skipBackboneAutoDetectRef.current = false;
+            const anchors = manualOverrideBackboneRef.current ? customDraftBackbone : {};
+            setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, smiles, anchors, customDraftAmidated) ?? {});
+            setCustomDraftAutoStatus('idle');
+          } else if (manualOverrideBackboneRef.current) {
+            // The user picked atoms: validate them against the edited structure; never auto-detect
+            // over them. Keep picks still on the right element, drop those whose atom shifted.
+            const kept = validateBackboneSlots(rdkit, smiles, customDraftBackbone, customDraftAmidated);
+            if (CUSTOM_BACKBONE_SLOTS.some((slot) => kept[slot] !== customDraftBackbone[slot])) {
+              setCustomDraftBackbone(kept);
+            }
+          } else if (skipBackboneAutoDetectRef.current) {
             skipBackboneAutoDetectRef.current = false;
           } else if (valid) {
-            skipBackboneAutoDetectRef.current = false;
-            // On an amidation toggle the SMILES is re-canonicalized and the terminal element
-            // flips, so re-detect from scratch; otherwise keep the current picks as anchors.
-            const anchors = amidatedChanged ? {} : customDraftBackbone;
-            setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, smiles, anchors, customDraftAmidated) ?? {});
+            // Fresh auto-detection as a starting suggestion (user hasn't intervened).
+            setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, smiles, {}, customDraftAmidated) ?? {});
+            setCustomDraftAutoStatus('idle');
           } else {
             setCustomDraftBackbone({});
+            setCustomDraftAutoStatus('idle');
           }
         } catch {
           if (!cancelled) {
@@ -384,6 +399,7 @@ export function WorkflowRuntimeSettingsSection({
       setCustomDraftBackbone({});
     }
     setArmedBackboneSlot(null);
+    manualOverrideBackboneRef.current = Boolean(storedBackbone);
     setCustomEditorOpen(true);
   };
 
@@ -400,6 +416,7 @@ export function WorkflowRuntimeSettingsSection({
   // next unfilled slot is armed automatically (or null once all five are set).
   const handleBackboneAtomClick = (atomIndex: number) => {
     if (!armedBackboneSlot) return;
+    manualOverrideBackboneRef.current = true;
     const next: Partial<CustomResidueBackbone> = { ...customDraftBackbone };
     if (next[armedBackboneSlot] === atomIndex) {
       delete next[armedBackboneSlot];
@@ -410,15 +427,24 @@ export function WorkflowRuntimeSettingsSection({
       next[armedBackboneSlot] = atomIndex;
     }
     setCustomDraftBackbone(next);
+    setCustomDraftAutoStatus('idle');
     const nextUnset = CUSTOM_BACKBONE_SLOTS.find((slot) => next[slot] === undefined);
     setArmedBackboneSlot(nextUnset ?? null);
   };
 
   const resetBackboneToAuto = async () => {
+    manualOverrideBackboneRef.current = false;
     const rdkit = await loadRDKitModule();
     // Re-detect with the current picks as anchors: atoms the user already set stay; only the
     // empty slots are filled.
-    setCustomDraftBackbone(detectCustomResidueBackbone(rdkit, customDraftSmiles.trim(), customDraftBackbone, customDraftAmidated) ?? {});
+    const detected = detectCustomResidueBackbone(rdkit, customDraftSmiles.trim(), customDraftBackbone, customDraftAmidated);
+    if (detected) {
+      setCustomDraftBackbone(detected);
+      setCustomDraftAutoStatus('idle');
+    } else {
+      // Keep the manual picks and explain, rather than silently wiping them.
+      setCustomDraftAutoStatus('failed');
+    }
     setArmedBackboneSlot(null);
   };
 
@@ -1030,7 +1056,7 @@ export function WorkflowRuntimeSettingsSection({
                           height={160}
                           highlightAtomIndices={assignedBackboneIndices.length ? assignedBackboneIndices : undefined}
                           atomLabels={backboneAtomLabels}
-                          onAtomClick={armedBackboneSlot && customDraftValid ? handleBackboneAtomClick : undefined}
+                          onAtomClick={armedBackboneSlot ? handleBackboneAtomClick : undefined}
                         />
                         <div className="peptide-custom-backbone-slots" role="group" aria-label="Backbone atom slots">
                           {CUSTOM_BACKBONE_SLOTS.map((slot) => {
@@ -1041,7 +1067,6 @@ export function WorkflowRuntimeSettingsSection({
                                 key={slot}
                                 type="button"
                                 className={`peptide-custom-backbone-slot${armed ? ' armed' : ''}${idx === undefined ? ' empty' : ''}`}
-                                disabled={!customDraftValid}
                                 onClick={() => setArmedBackboneSlot((prev) => (prev === slot ? null : slot))}
                                 title={
                                   armed
@@ -1059,7 +1084,6 @@ export function WorkflowRuntimeSettingsSection({
                           <button
                             type="button"
                             className="peptide-custom-backbone-reset"
-                            disabled={!customDraftValid}
                             onClick={() => void resetBackboneToAuto()}
                             title="Re-run auto backbone detection"
                           >
@@ -1067,6 +1091,11 @@ export function WorkflowRuntimeSettingsSection({
                           </button>
                           {!customDraftValid ? (
                             <span className="peptide-custom-invalid">Backbone N-CA-C(=O) is required.</span>
+                          ) : null}
+                          {customDraftAutoStatus === 'failed' ? (
+                            <span className="peptide-custom-invalid">
+                              Auto could not identify the full backbone. Click atoms to set N/CA/C/O/OXT manually — for a C-terminal amide, enable amidation first.
+                            </span>
                           ) : null}
                         </div>
                       </div>

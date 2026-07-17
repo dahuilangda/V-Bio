@@ -230,9 +230,12 @@ export function customResidueAtomNamesFromSmiles(
 
 // SMARTS for the 5 backbone atoms, in query order [N, CA, C, =O (carbonyl), O (hydroxyl)].
 // Mirrors the backend carboxyl pattern so a correct detection lines up with the backend's pick.
-const CUSTOM_BACKBONE_DETECT_SMARTS = '[NX3;!$(NC=O)]-[C;X4]-[CX3](=[OX1])[OX1H0-,OX2H1]';
-const CUSTOM_BACKBONE_DETECT_SMARTS_AMIDATED = '[NX3;!$(NC=O)]-[C;X4]-[CX3](=[OX1])[NX3H2,NX3H1,NX4H2]';
-const AMINO_ACID_BACKBONE_SMARTS_AMIDATED = '[NX3;!$(NC=O)]-[C;X4]-C(=O)N';
+// The α-nitrogen accepts any valence ([NH3+] protonated, [NH2] neutral, ring N …) to mirror the
+// backend _find_residue_backbone_topology, which enumerates every N (atomicnum==7) regardless of
+// charge. The old [NX3] made JSME-drawn zwitterions ([NH3+]…[O-]) silently un-detectable.
+const CUSTOM_BACKBONE_DETECT_SMARTS = '[N;!$(NC=O)]-[C;X4]-[CX3](=[OX1])[OX1H0-,OX2H1]';
+const CUSTOM_BACKBONE_DETECT_SMARTS_AMIDATED = '[N;!$(NC=O)]-[C;X4]-[CX3](=[OX1])[NX3H2,NX3H1,NX4H2]';
+const AMINO_ACID_BACKBONE_SMARTS_AMIDATED = '[N;!$(NC=O)]-[C;X4]-C(=O)N';
 const BACKBONE_SLOT_ORDER = ['n', 'ca', 'c', 'o', 'oxt'] as const;
 
 // RDKit returns the list of matches in a few shapes across builds ({atoms: [[...]]}, a list of
@@ -346,6 +349,83 @@ export function detectCustomResidueBackbone(
         }
       }
     }
+  } finally {
+    try {
+      mol.delete();
+    } catch {
+      /* molecule already disposed */
+    }
+  }
+}
+
+// Parse a V2000 molblock into a per-atom element array (indexed by RDKit atom idx). Used to check
+// that a manual backbone pick still lands on the right element after a SMILES edit, since atom
+// indices can shift when the structure changes.
+function readMolblockElements(mol: { get_molblock?: () => string }): string[] | null {
+  const mb = typeof mol.get_molblock === 'function' ? mol.get_molblock() : '';
+  if (!mb) return null;
+  const lines = mb.split('\n');
+  let countsIdx = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].includes('V2000')) {
+      countsIdx = i;
+      break;
+    }
+  }
+  if (countsIdx < 0) return null;
+  const nAtoms = Number.parseInt((lines[countsIdx].trim().split(/\s+/)[0] || ''), 10);
+  if (!Number.isFinite(nAtoms) || nAtoms <= 0) return null;
+  const elements: string[] = [];
+  for (let i = 0; i < nAtoms; i += 1) {
+    const line = lines[countsIdx + 1 + i];
+    if (!line) return null;
+    const symbol = line.trim().split(/\s+/)[3];
+    if (!symbol) return null;
+    elements.push(symbol.toUpperCase());
+  }
+  return elements;
+}
+
+// Keep only the manual backbone picks whose atom index is still in range AND still points at the
+// right element after a SMILES edit. Picks whose atom vanished or whose slot now sits on a
+// different element are dropped — so the user can keep editing the structure without their
+// selections being wiped or silently re-pointed at the wrong atom. Returns the validated subset.
+export function validateBackboneSlots(
+  rdkit: RDKitModule,
+  smiles: string,
+  slots: Partial<CustomResidueBackbone>,
+  amidated: boolean
+): Partial<CustomResidueBackbone> {
+  const source = String(smiles || '').trim();
+  if (!source) return {};
+  const mol = rdkit.get_mol(source);
+  if (!mol) return {};
+  try {
+    const numAtoms = typeof mol.get_num_atoms === 'function' ? mol.get_num_atoms() : 0;
+    if (numAtoms <= 0) return {};
+    const elements = readMolblockElements(mol);
+    if (!elements) return {};
+    const expected: Record<keyof CustomResidueBackbone, string> = {
+      n: 'N',
+      ca: 'C',
+      c: 'C',
+      o: 'O',
+      oxt: amidated ? 'N' : 'O'
+    };
+    const result: Partial<CustomResidueBackbone> = {};
+    (Object.keys(expected) as (keyof CustomResidueBackbone)[]).forEach((slot) => {
+      const idx = slots[slot];
+      if (
+        idx !== undefined &&
+        Number.isInteger(idx) &&
+        idx >= 0 &&
+        idx < numAtoms &&
+        elements[idx] === expected[slot]
+      ) {
+        result[slot] = idx;
+      }
+    });
+    return result;
   } finally {
     try {
       mol.delete();
