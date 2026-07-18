@@ -1,6 +1,7 @@
 import redis
 from backend.core import config
 import logging
+import math
 import time
 import os
 import shutil
@@ -144,8 +145,17 @@ def _reconcile_in_use_allocations(client: redis.Redis, valid: set[int]) -> dict[
     def _reclaim_if_memory_reclaimed(gpu_id: int, task_id: str, reason: str) -> None:
         # 与 release_gpu 一致：只有确认显存已回收才解除 lease，避免脏卡被重新分配。
         if _wait_gpu_memory_reclaimed(gpu_id, task_id):
-            client.hdel(config.GPU_IN_USE_HASH_KEY, gpu_id)
-            released.append((gpu_id, task_id, reason))
+            # 条件删除：仅当 in_use[gpu_id] 仍为当前 task 时才解除，避免与并发 release_gpu
+            # 双方都通过内存门后重复把 GPU 推回 available（rebuild 也会兜底去重）。
+            script = (
+                "if redis.call('hget', KEYS[1], ARGV[1]) == ARGV[2] "
+                "then return redis.call('hdel', KEYS[1], ARGV[1]) else return 0 end"
+            )
+            removed = client.eval(script, 1, config.GPU_IN_USE_HASH_KEY, str(gpu_id), task_id)
+            if int(removed or 0) > 0:
+                released.append((gpu_id, task_id, reason))
+            else:
+                logger.debug("GPU %s lease 已被并发 release，跳过重复回收。", gpu_id)
         else:
             held_dirty.append((gpu_id, task_id, reason))
             kept[str(gpu_id)] = task_id
@@ -187,6 +197,71 @@ def _reconcile_in_use_allocations(client: redis.Redis, valid: set[int]) -> dict[
         kept[str(gpu_id)] = task_id
 
     return {"released": released, "kept": kept, "held_dirty": held_dirty, "live_tasks": len(live_task_ids)}
+
+
+# acquire 阻塞期间自动回收孤儿 lease 并重建 available，避免 worker 强杀 / NVML 失效等
+# 导致 lease 泄漏后永久死锁。复用现有 reconcile 原语，运行时不重置设备集合。
+RECONCILE_LOCK_KEY = "boltz_gpu_pool:reconcile_lock"  # 不加 namespace：全局单写者
+RECONCILE_LOCK_TTL_SECONDS = 30
+RECONCILE_MIN_INTERVAL_SECONDS = RECONCILE_LOCK_TTL_SECONDS
+
+
+def _try_acquire_reconcile_lock(client: Any, task_id: str) -> bool:
+    """NX 单写者守卫；返回 True 时由本调用方执行 reconcile。"""
+    try:
+        return bool(client.set(RECONCILE_LOCK_KEY, task_id, nx=True, ex=RECONCILE_LOCK_TTL_SECONDS))
+    except Exception:
+        return True  # Redis 抖动时放行一个调用方，避免阻塞所有 acquire
+
+
+def _release_reconcile_lock(client: Any, task_id: str) -> None:
+    try:
+        # 仅在仍持锁时删除，防误删；失败由 TTL 兜底
+        client.eval(
+            "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end",
+            1, RECONCILE_LOCK_KEY, task_id,
+        )
+    except Exception:
+        pass
+
+
+def _run_throttled_reconcile(client: Any, task_id: str, last_reconcile: float) -> float:
+    """按最小间隔 + NX 锁节流执行一次 reconcile，返回更新后的 last_reconcile 时间戳。"""
+    if time.monotonic() - last_reconcile < RECONCILE_MIN_INTERVAL_SECONDS:
+        return last_reconcile
+    if not _try_acquire_reconcile_lock(client, task_id):
+        return last_reconcile
+    try:
+        reconcile_gpu_pool(client)
+        return time.monotonic()
+    except Exception as exc:
+        logger.warning(f"任务 {task_id}: reconcile 失败，继续 blpop: {exc}")
+        return last_reconcile
+    finally:
+        _release_reconcile_lock(client, task_id)
+
+
+def reconcile_gpu_pool(client: Any = None) -> dict:
+    """回收孤儿 lease 并重建 available = valid - in_use。valid 为空时跳过，不抛错。"""
+    client = client or get_redis_client()
+    valid, _available, _in_use_raw = _read_gpu_pool_state(client)
+    if not valid:
+        return {"skipped": True, "valid": []}
+
+    reconcile = _reconcile_in_use_allocations(client, valid)
+    for key, prefix in (
+        ("released", "回收陈旧 GPU 占用"),
+        ("held_dirty", "陈旧占用显存未回收，保留 lease"),
+    ):
+        items = reconcile.get(key) or []
+        if items:
+            msg = "; ".join(f"gpu={g},task={t or '-'},reason={r}" for g, t, r in items)
+            logger.warning("%s: %s", prefix, msg)
+
+    _current_valid, _current_available, in_use_after = _read_gpu_pool_state(client)
+    _rebuild_available_gpu_queue(client, valid, in_use_after)
+    return {"skipped": False, "valid": sorted(valid), **reconcile}
+
 
 def initialize_gpu_pool(devices_to_use: list[int]):
     """
@@ -305,27 +380,27 @@ def ensure_gpu_pool(devices_to_use: list[int]):
 
 
 def acquire_gpu(task_id: str, timeout: int = 3600) -> int:
-    """
-    原子化地从池中获取一个 GPU。
-    """
+    """从池中获取一个 GPU。阻塞期间节流 reconcile 自愈；超时抛 TimeoutError。"""
     client = get_redis_client()
     pool_key = config.GPU_POOL_KEY
-    
-    logger.info(f"任务 {task_id}: 正在尝试获取 GPU (最长等待 {timeout}s)...")
-    
-    # 阻塞式地从列表左侧弹出一个元素
-    result = client.blpop(pool_key, timeout=timeout)
-    
-    if result is None:
-        raise TimeoutError(f"任务 {task_id}: 在 {timeout}s 内未能获取 GPU。")
-        
-    _, gpu_id_str = result
-    gpu_id = int(gpu_id_str)
-    
-    client.hset(config.GPU_IN_USE_HASH_KEY, gpu_id, task_id)
-    
-    logger.info(f"✅ 任务 {task_id}: 已获取 GPU {gpu_id}。")
-    return gpu_id
+    timeout_seconds = max(0, int(timeout))
+    deadline = time.monotonic() + timeout_seconds
+    blpop_slice = 30  # 与 RECONCILE_LOCK_TTL 对齐
+
+    logger.info(f"任务 {task_id}: 正在尝试获取 GPU (最长等待 {timeout_seconds}s)...")
+
+    last_reconcile = 0.0
+    while True:
+        last_reconcile = _run_throttled_reconcile(client, task_id, last_reconcile)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"任务 {task_id}: 在 {timeout_seconds}s 内未能获取 GPU。")
+        result = client.blpop(pool_key, timeout=int(max(1, math.ceil(min(blpop_slice, remaining)))))
+        if result is not None:
+            gpu_id = int(result[1])
+            client.hset(config.GPU_IN_USE_HASH_KEY, gpu_id, task_id)
+            logger.info(f"✅ 任务 {task_id}: 已获取 GPU {gpu_id}。")
+            return gpu_id
 
 
 def register_non_peptide_gpu_waiter(task_id: str) -> None:
@@ -369,6 +444,8 @@ def acquire_gpu_for_peptide_worker(task_id: str, timeout: int = 0, poll_interval
         "disabled" if deadline is None else f"{timeout_seconds}s",
     )
 
+    last_reconcile = 0.0
+
     while True:
         if deadline is None:
             remaining = None
@@ -394,6 +471,8 @@ def acquire_gpu_for_peptide_worker(task_id: str, timeout: int = 0, poll_interval
             blpop_timeout = max(1, min(int(remaining), int(round(sleep_step))))
         result = client.blpop(config.GPU_POOL_KEY, timeout=blpop_timeout)
         if result is None:
+            # 池空：节流 reconcile 自愈后重试。公平性检查（上方）不受影响。
+            last_reconcile = _run_throttled_reconcile(client, task_id, last_reconcile)
             continue
 
         _, gpu_id_str = result
@@ -443,18 +522,27 @@ def _wait_gpu_memory_reclaimed(
     threshold_mib: int = 200,
     timeout_seconds: float = 90.0,
     poll_seconds: float = 1.0,
+    nvml_grace_seconds: float = 5.0,
 ) -> bool:
     deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    nvml_grace_deadline = time.monotonic() + max(0.0, float(nvml_grace_seconds))
+    nvml_unavailable = False
     last_used: int | None = None
     while True:
         used = _query_gpu_used_memory_mib(gpu_id)
         if used is None:
-            logger.critical(
-                "严重: 任务 %s 释放 GPU %s 时无法确认显存状态，保留 in-use lease。",
-                task_id,
-                gpu_id,
-            )
-            return False
+            # NVML 不可用（如 cgroup v2 容器授权失效）。保守保留（return False）会让 release_gpu /
+            # reconcile 全局死锁。调用方已校验 owner / 判定 task 死亡，driver 会回收死进程显存，
+            # 故短暂等待后乐观释放。
+            if not nvml_unavailable:
+                nvml_unavailable = True
+                logger.warning("任务 %s: NVML 不可用，无法查询 GPU %s 显存，短暂等待后乐观释放。", task_id, gpu_id)
+            if time.monotonic() >= nvml_grace_deadline:
+                logger.warning("任务 %s: NVML 持续不可用，乐观释放 GPU %s。", task_id, gpu_id)
+                return True
+            time.sleep(min(max(0.2, float(poll_seconds)), 0.5))
+            continue
+        nvml_unavailable = False
         last_used = used
         if used <= int(threshold_mib):
             logger.info(
