@@ -160,6 +160,7 @@ export interface Ligand2DRenderOptions {
   highlightAtomIndices?: number[] | null;
   atomLabels?: string[] | null;
   interactiveHitTargets?: boolean;
+  highlightAtomColorsOverride?: Record<number, [number, number, number]> | null;
 }
 
 function normalizeAtomLabels(atomLabels: string[] | null | undefined, atomCount: number): Record<number, string> {
@@ -220,6 +221,7 @@ export function renderLigand2DSvg(
     highlightQuery = null,
     highlightAtomIndices = null,
     atomLabels = null,
+    highlightAtomColorsOverride = null,
     interactiveHitTargets = false
   }: Ligand2DRenderOptions
 ): string {
@@ -359,6 +361,35 @@ export function renderLigand2DSvg(
             } finally {
               queryMol.delete();
             }
+          }
+        }
+
+        // Per-atom color override (e.g. a wrongly-assigned backbone atom painted red). Applied
+        // after the explicit/query highlight chain so it wins for those atoms, and before the
+        // interactive hit-target pass — which skips atoms already in the highlight set, so the
+        // override color is preserved.
+        if (highlightAtomColorsOverride) {
+          const overrideAtoms = Array.isArray(details.highlightAtoms)
+            ? ([...details.highlightAtoms] as number[])
+            : [];
+          const overrideColors = (details.highlightAtomColors || {}) as Record<number, [number, number, number]>;
+          const overrideRadii = (details.highlightAtomRadii || {}) as Record<number, number>;
+          Object.entries(highlightAtomColorsOverride).forEach(([key, color]) => {
+            const atomIdx = Math.floor(Number(key));
+            if (!Number.isFinite(atomIdx) || atomIdx < 0 || atomIdx >= atomCount) return;
+            if (!overrideAtoms.includes(atomIdx)) overrideAtoms.push(atomIdx);
+            overrideColors[atomIdx] = color;
+            overrideRadii[atomIdx] = 0.38;
+          });
+          if (overrideAtoms.length > 0) {
+            details.atoms = overrideAtoms;
+            details.highlightAtoms = overrideAtoms;
+            details.highlightAtomColors = overrideColors;
+            details.highlightAtomRadii = overrideRadii;
+            details.highlightRadii = overrideRadii;
+            details.fillHighlights = perAtomConfidence.length > 0;
+            details.atomHighlightsAreCircles = true;
+            details.highlightBonds = [];
           }
         }
 

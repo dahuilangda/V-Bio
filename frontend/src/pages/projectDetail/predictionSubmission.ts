@@ -3,9 +3,11 @@ import { submitPrediction } from '../../api/backendApi';
 import { assignChainIdsForComponents } from '../../utils/chainAssignments';
 import { extractPrimaryProteinAndLigand, normalizeProjectInputConfig, PEPTIDE_DESIGNED_LIGAND_TOKEN } from '../../utils/projectInputs';
 import { buildQueuedPeptidePreviewFromOptions, PEPTIDE_TASK_PREVIEW_KEY } from '../../utils/peptideTaskPreview';
-import type { CustomCcdMoleculeInput, InputComponent, PredictionConstraint, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
+import type { CustomCcdMoleculeInput, InputComponent, PredictionConstraint, Project, ProjectInputConfig, ProjectTask, ProteinModification, ProteinTemplateUpload } from '../../types/models';
 import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
 import { selectedCustomResidueDefinitions } from './peptideCustomResidues';
+import { loadRDKitModule } from '../../utils/rdkit';
+import { firstBackboneSlotError, validateCustomResidueBackbone } from '../../utils/constraintAtomOptions';
 
 export type PredictionWorkspaceTab = 'results' | 'basics' | 'components' | 'constraints';
 
@@ -213,6 +215,40 @@ function buildPredictionSubmissionConfig(
   };
 }
 
+// Validate every manual backbone override that would ship to the backend. Mirrors the backend's
+// _residue_topology_from_backbone_override element+topology checks (run here via RDKit on the same
+// V2000 molblock) so a wrong assignment is blocked at submit with a precise message rather than
+// failing a GPU run. Path 1 (protein modifications) applies to every workflow — it is the shape of
+// the task that motivated this check; path 2 (peptide-design pool) is gated by the workflow flag.
+async function validateAllCustomResidueBackbones(
+  components: InputComponent[],
+  options: ProjectInputConfig['options'],
+  isPeptideDesignWorkflow: boolean
+): Promise<string | null> {
+  const rdkit = await loadRDKitModule();
+  for (const comp of components) {
+    if (comp.type !== 'protein') continue;
+    const modifications = (comp as { modifications?: ProteinModification[] }).modifications || [];
+    for (const mod of modifications) {
+      if (mod.inputMethod !== 'jsme' || !mod.backbone) continue;
+      const smiles = String(mod.smiles || '').trim();
+      if (!smiles) continue;
+      const first = firstBackboneSlotError(validateCustomResidueBackbone(rdkit, smiles, mod.backbone, Boolean(mod.cTerminalAmidated)));
+      if (first) return `自定义残基 ${mod.ccd || '(未命名)'}（位置 ${mod.position}）：${first}`;
+    }
+  }
+  if (isPeptideDesignWorkflow) {
+    for (const def of selectedCustomResidueDefinitions(options)) {
+      if (!def.backbone) continue;
+      const smiles = String(def.smiles || '').trim();
+      if (!smiles) continue;
+      const first = firstBackboneSlotError(validateCustomResidueBackbone(rdkit, smiles, def.backbone, Boolean(def.cTerminalAmidated)));
+      if (first) return `自定义残基 ${def.ccd}：${first}`;
+    }
+  }
+  return null;
+}
+
 export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps): Promise<void> {
   const {
     project,
@@ -286,6 +322,17 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
   if (constraintChainError) {
     setWorkspaceTab('constraints');
     setError(constraintChainError);
+    return;
+  }
+
+  // Manual backbone overrides on custom residues must pass the same element/topology checks the
+  // backend enforces (custom_ccd_builder._residue_topology_from_backbone_override). Block at submit
+  // with a precise message instead of letting a wrong assignment waste a GPU run. Covers both the
+  // protein-modification path (every workflow) and the peptide-design pool path.
+  const backboneError = await validateAllCustomResidueBackbones(activeComponents, submissionConfig.options, isPeptideDesignWorkflow);
+  if (backboneError) {
+    setWorkspaceTab('components');
+    setError(backboneError);
     return;
   }
 

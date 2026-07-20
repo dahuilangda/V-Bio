@@ -6,7 +6,7 @@ import { AMINO_ACID_BACKBONE_SMARTS, rdkitMolHasAminoAcidBackbone } from '../../
 import { loadRDKitModule } from '../../utils/rdkit';
 import type { CustomCcdMoleculeInput, CustomResidueBackbone, PeptideResiduePoolSelection } from '../../types/models';
 import { normalizePredictionBackend } from './projectDraftUtils';
-import { detectCustomResidueBackbone, validateBackboneSlots } from '../../utils/constraintAtomOptions';
+import { detectCustomResidueBackbone, firstBackboneSlotError, validateBackboneSlots, validateCustomResidueBackbone, type BackboneSlotErrors } from '../../utils/constraintAtomOptions';
 import { toggleTerminalAmide } from '../../utils/smilesTransform';
 import { useAuth } from '../../hooks/useAuth';
 
@@ -262,6 +262,9 @@ export function WorkflowRuntimeSettingsSection({
   // 'failed' surfaces why an explicit Auto run found no backbone (e.g. a C-terminal amide without
   // the amidation flag): the manual picks are kept and the reason is shown instead of a silent wipe.
   const [customDraftAutoStatus, setCustomDraftAutoStatus] = useState<'idle' | 'failed'>('idle');
+  // Per-slot errors for the manual backbone override (empty = valid). Mirrors the protein editor
+  // in ComponentInputEditor; blocks Save and surfaces inline. Never silently passes a wrong set.
+  const [customDraftSlotErrors, setCustomDraftSlotErrors] = useState<BackboneSlotErrors>({});
   const [armedBackboneSlot, setArmedBackboneSlot] = useState<(typeof CUSTOM_BACKBONE_SLOTS)[number] | null>(null);
   const skipBackboneAutoDetectRef = useRef(false);
   const prevCustomDraftAmidatedRef = useRef(customDraftAmidated);
@@ -384,6 +387,34 @@ export function WorkflowRuntimeSettingsSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customDraftSmiles, customDraftAmidated]);
 
+  // Recompute backbone slot errors whenever picks/structure/amidation change. A complete-but-wrong
+  // override is reported and blocks Save; an incomplete set yields no error (backend auto-detects).
+  // Never silently passes a wrong assignment.
+  useEffect(() => {
+    let cancelled = false;
+    const recompute = async () => {
+      const backboneComplete = CUSTOM_BACKBONE_SLOTS.every((slot) => customDraftBackbone[slot] !== undefined);
+      if (!backboneComplete) {
+        if (!cancelled) setCustomDraftSlotErrors({});
+        return;
+      }
+      try {
+        const rdkit = await loadRDKitModule();
+        if (cancelled) return;
+        const errors = validateCustomResidueBackbone(rdkit, customDraftSmiles.trim(), customDraftBackbone as CustomResidueBackbone, customDraftAmidated);
+        if (!cancelled) setCustomDraftSlotErrors(errors);
+      } catch {
+        // RDKit not warmed yet; leave the previous verdict rather than silently passing.
+      }
+    };
+    const timer = window.setTimeout(() => { void recompute(); }, 150);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customDraftBackbone, customDraftSmiles, customDraftAmidated]);
+
   const openCustomResidueEditor = (entry?: CustomCcdMoleculeInput) => {
     const ccd = normalizeCustomResidueCode(entry?.ccd || '');
     setCustomEditingCcd(ccd);
@@ -466,6 +497,13 @@ export function WorkflowRuntimeSettingsSection({
         }
         return labels;
       })()
+    : null;
+  const errorBackboneIndices = (CUSTOM_BACKBONE_SLOTS as readonly (keyof CustomResidueBackbone)[])
+    .filter((slot) => Boolean(customDraftSlotErrors[slot]))
+    .map((slot) => customDraftBackbone[slot])
+    .filter((idx): idx is number => typeof idx === 'number');
+  const backboneHighlightColorOverride: Record<number, [number, number, number]> | null = errorBackboneIndices.length
+    ? Object.fromEntries(errorBackboneIndices.map((idx) => [idx, [0.86, 0.18, 0.18]] as [number, [number, number, number]]))
     : null;
 
   const customResidues = useMemo<ResidueCatalogEntry[]>(() => {
@@ -654,7 +692,7 @@ export function WorkflowRuntimeSettingsSection({
 
 
   const saveCustomResidueDraft = () => {
-    if (residuePoolControlsDisabled || !customDraftValid) return;
+    if (residuePoolControlsDisabled || !customDraftValid || firstBackboneSlotError(customDraftSlotErrors)) return;
     const smiles = customDraftSmiles.trim();
     if (!smiles) return;
     // Existing residues keep their frozen code; new residues get a system-generated code
@@ -1055,6 +1093,7 @@ export function WorkflowRuntimeSettingsSection({
                           width={240}
                           height={160}
                           highlightAtomIndices={assignedBackboneIndices.length ? assignedBackboneIndices : undefined}
+                          highlightAtomColorsOverride={backboneHighlightColorOverride}
                           atomLabels={backboneAtomLabels}
                           onAtomClick={armedBackboneSlot ? handleBackboneAtomClick : undefined}
                         />
@@ -1066,7 +1105,7 @@ export function WorkflowRuntimeSettingsSection({
                               <button
                                 key={slot}
                                 type="button"
-                                className={`peptide-custom-backbone-slot${armed ? ' armed' : ''}${idx === undefined ? ' empty' : ''}`}
+                                className={`peptide-custom-backbone-slot${armed ? ' armed' : ''}${idx === undefined ? ' empty' : ''}${customDraftSlotErrors[slot] ? ' error' : ''}`}
                                 onClick={() => setArmedBackboneSlot((prev) => (prev === slot ? null : slot))}
                                 title={
                                   armed
@@ -1080,6 +1119,9 @@ export function WorkflowRuntimeSettingsSection({
                             );
                           })}
                         </div>
+                        {firstBackboneSlotError(customDraftSlotErrors) ? (
+                          <span className="peptide-custom-invalid">{firstBackboneSlotError(customDraftSlotErrors)}</span>
+                        ) : null}
                         <div className="peptide-custom-backbone-foot">
                           <button
                             type="button"
@@ -1130,7 +1172,7 @@ export function WorkflowRuntimeSettingsSection({
                       <button
                         type="button"
                         className="btn btn-primary btn-compact"
-                        disabled={residuePoolControlsDisabled || !customDraftSmiles.trim() || !customDraftValid}
+                        disabled={residuePoolControlsDisabled || !customDraftSmiles.trim() || !customDraftValid || Boolean(firstBackboneSlotError(customDraftSlotErrors))}
                         onClick={saveCustomResidueDraft}
                       >
                         Save residue
