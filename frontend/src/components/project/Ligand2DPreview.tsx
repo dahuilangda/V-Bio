@@ -11,6 +11,7 @@ interface Ligand2DPreviewProps {
   highlightQuery?: string | null;
   highlightAtomIndices?: number[] | null;
   atomLabels?: string[] | null;
+  highlightAtomColorsOverride?: Record<number, [number, number, number]> | null;
   onAtomClick?: (atomIndex: number) => void;
   onBackgroundClick?: () => void;
 }
@@ -119,6 +120,7 @@ export function Ligand2DPreview({
   highlightQuery = null,
   highlightAtomIndices = null,
   atomLabels = null,
+  highlightAtomColorsOverride = null,
   onAtomClick,
   onBackgroundClick
 }: Ligand2DPreviewProps) {
@@ -140,6 +142,14 @@ export function Ligand2DPreview({
     if (!Array.isArray(atomLabels) || atomLabels.length === 0) return '';
     return atomLabels.map((value) => String(value || '').trim()).join('\u001f');
   }, [atomLabels]);
+
+  const highlightColorOverrideSignature = useMemo(() => {
+    if (!highlightAtomColorsOverride) return '';
+    return Object.keys(highlightAtomColorsOverride)
+      .sort((a, b) => Number(a) - Number(b))
+      .map((key) => `${key}:${highlightAtomColorsOverride[Number(key)].join(',')}`)
+      .join('|');
+  }, [highlightAtomColorsOverride]);
 
   useEffect(() => {
     let cancelled = false;
@@ -166,6 +176,7 @@ export function Ligand2DPreview({
           highlightQuery,
           highlightAtomIndices,
           atomLabels,
+          highlightAtomColorsOverride,
           interactiveHitTargets: Boolean(onAtomClick)
         });
         if (cancelled) return;
@@ -190,6 +201,7 @@ export function Ligand2DPreview({
     atomConfidenceSignature,
     highlightAtomSignature,
     atomLabelSignature,
+    highlightColorOverrideSignature,
     onAtomClick,
     onBackgroundClick
   ]);

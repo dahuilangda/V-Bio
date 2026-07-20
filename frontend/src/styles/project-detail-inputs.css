@@ -1100,6 +1100,13 @@
   box-shadow: 0 0 0 2px rgba(47, 111, 79, 0.18);
 }
 
+.peptide-custom-backbone-slot.error {
+  border-color: #c93b3b;
+  background: #fde8e8;
+  box-shadow: 0 0 0 2px rgba(201, 59, 59, 0.20);
+  color: #a52424;
+}
+
 .peptide-custom-backbone-slot:disabled {
   opacity: 0.6;
   cursor: default;

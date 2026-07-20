@@ -386,6 +386,176 @@ function readMolblockElements(mol: { get_molblock?: () => string }): string[] | 
   return elements;
 }
 
+// Parse a V2000 molblock into a bond list (0-based atom indices; order 1=SINGLE, 2=DOUBLE,
+// 3=TRIPLE, 4=AROMATIC). Pairs with readMolblockElements so the frontend can mirror the backend's
+// neighbor-set + bond-order checks in _residue_topology_from_backbone_override, which the RDKit JS
+// binding does not otherwise expose per-atom.
+function readMolblockBonds(mol: { get_molblock?: () => string }): Array<{ a: number; b: number; order: number }> | null {
+  const mb = typeof mol.get_molblock === 'function' ? mol.get_molblock() : '';
+  if (!mb) return null;
+  const lines = mb.split('\n');
+  let countsIdx = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].includes('V2000')) {
+      countsIdx = i;
+      break;
+    }
+  }
+  if (countsIdx < 0) return null;
+  const countsTokens = lines[countsIdx].trim().split(/\s+/);
+  const nAtoms = Number.parseInt(countsTokens[0] || '', 10);
+  const nBonds = Number.parseInt(countsTokens[1] || '', 10);
+  if (!Number.isFinite(nAtoms) || nAtoms <= 0 || !Number.isFinite(nBonds) || nBonds < 0) return null;
+  const bonds: Array<{ a: number; b: number; order: number }> = [];
+  for (let i = 0; i < nBonds; i += 1) {
+    const line = lines[countsIdx + 1 + nAtoms + i];
+    if (!line) return null;
+    const tokens = line.trim().split(/\s+/);
+    const a = Number.parseInt(tokens[0] || '', 10) - 1;
+    const b = Number.parseInt(tokens[1] || '', 10) - 1;
+    const order = Number.parseInt(tokens[2] || '', 10);
+    if (!Number.isFinite(a) || !Number.isFinite(b) || !Number.isFinite(order) || a < 0 || b < 0) return null;
+    bonds.push({ a, b, order });
+  }
+  return bonds;
+}
+
+// Per-slot backbone errors for a manual override. Empty object = all checks pass. Mirrors the
+// backend _residue_topology_from_backbone_override (custom_ccd_builder.py:228-310) check-for-check:
+// range, distinctness, per-slot element, C bonded to O+terminal, C=O double (amide: C-NXT single),
+// CA bonded to N or C. Collects every independent slot error so the editor can mark each wrong
+// pill; submit-time surfacing takes the first error in slot order (n→ca→c→o→oxt). Topology checks
+// are skipped when an atom they depend on has the wrong element, so a wrong element is reported
+// cleanly (and the first-error order matches the backend) instead of cascading into a bond error.
+// A parse failure or a heavy-atom/SMILES-index mismatch yields _parseError rather than passing.
+export type BackboneSlotErrors = Partial<Record<keyof CustomResidueBackbone, string>> & { _parseError?: string };
+
+const BACKBONE_PARSE_ERROR = '无法解析骨架结构，请检查 SMILES 后重试。';
+
+export function firstBackboneSlotError(errors: BackboneSlotErrors): string | null {
+  if (errors._parseError) return errors._parseError;
+  for (const slot of BACKBONE_SLOT_ORDER) {
+    const msg = errors[slot];
+    if (msg) return msg;
+  }
+  return null;
+}
+
+export function validateCustomResidueBackbone(
+  rdkit: RDKitModule,
+  smiles: string,
+  backbone: CustomResidueBackbone,
+  amidated: boolean
+): BackboneSlotErrors {
+  const source = String(smiles || '').trim();
+  if (!source) return { _parseError: BACKBONE_PARSE_ERROR };
+  const mol = rdkit.get_mol(source);
+  if (!mol) return { _parseError: BACKBONE_PARSE_ERROR };
+  try {
+    const numAtoms = typeof mol.get_num_atoms === 'function' ? mol.get_num_atoms() : 0;
+    if (numAtoms <= 0) return { _parseError: BACKBONE_PARSE_ERROR };
+    // Heavy-atom count must align with the SMILES-order index space the picker uses; a mismatch
+    // (e.g. an explicit H) means indices are off and any verdict would be wrong.
+    if (numAtoms !== ligandAtomNamesFromSmilesByElementOrder(source).length) {
+      return { _parseError: BACKBONE_PARSE_ERROR };
+    }
+    const elements = readMolblockElements(mol);
+    const bonds = readMolblockBonds(mol);
+    if (!elements || !bonds) return { _parseError: BACKBONE_PARSE_ERROR };
+
+    const errors: BackboneSlotErrors = {};
+    const idx: Record<keyof CustomResidueBackbone, number> = {
+      n: backbone.n,
+      ca: backbone.ca,
+      c: backbone.c,
+      o: backbone.o,
+      oxt: backbone.oxt
+    };
+    const labelOf = (slot: keyof CustomResidueBackbone) => (slot === 'oxt' && amidated ? 'NXT' : slot.toUpperCase());
+
+    const inRange = (v: number) => Number.isInteger(v) && v >= 0 && v < numAtoms;
+    const elementOf = (v: number) => (inRange(v) ? elements[v] : '');
+
+    // 1) Range (backend _slot_idx, lines 236-245).
+    for (const slot of BACKBONE_SLOT_ORDER) {
+      if (!inRange(idx[slot])) {
+        errors[slot] = `骨架 ${labelOf(slot)} 的原子索引超出范围（0..${numAtoms - 1}）。`;
+      }
+    }
+
+    // 2) Distinctness (backend lines 252-253). Skip slots already flagged out of range.
+    for (let i = 0; i < BACKBONE_SLOT_ORDER.length; i += 1) {
+      for (let j = i + 1; j < BACKBONE_SLOT_ORDER.length; j += 1) {
+        const s1 = BACKBONE_SLOT_ORDER[i];
+        const s2 = BACKBONE_SLOT_ORDER[j];
+        if (idx[s1] === idx[s2] && !errors[s1] && !errors[s2]) {
+          errors[s1] = '每个骨架槽位必须指向不同的原子。';
+        }
+      }
+    }
+
+    // 3) Per-slot element (backend lines 255-272).
+    if (!errors.n && elementOf(idx.n) !== 'N') errors.n = '骨架 N 必须是氮原子。';
+    if (!errors.ca && !['C', 'N'].includes(elementOf(idx.ca))) errors.ca = '骨架 CA 必须是碳或氮原子。';
+    if (!errors.c && elementOf(idx.c) !== 'C') errors.c = '骨架 C 必须是碳原子。';
+    if (!errors.o && elementOf(idx.o) !== 'O') errors.o = '骨架 O 必须是羰基氧。';
+    if (!errors.oxt) {
+      const want = amidated ? 'N' : 'O';
+      if (elementOf(idx.oxt) !== want) {
+        errors.oxt = amidated
+          ? 'C 端酰胺化模式下，第 5 个骨架槽位（NXT）必须是氮原子。'
+          : '骨架 OXT 必须是氧原子。';
+      }
+    }
+
+    const neighborsOf = (v: number): Set<number> => {
+      const set = new Set<number>();
+      for (const bond of bonds) {
+        if (bond.a === v) set.add(bond.b);
+        else if (bond.b === v) set.add(bond.a);
+      }
+      return set;
+    };
+    const bondOrderBetween = (x: number, y: number): number | null => {
+      for (const bond of bonds) {
+        if ((bond.a === x && bond.b === y) || (bond.a === y && bond.b === x)) return bond.order;
+      }
+      return null;
+    };
+
+    // 4) C bonded to O and the terminal atom (backend lines 277-279).
+    if (!errors.c && !errors.o && !errors.oxt) {
+      const cNeighbors = neighborsOf(idx.c);
+      if (!cNeighbors.has(idx.o) || !cNeighbors.has(idx.oxt)) {
+        errors.c = '骨架 C 必须同时与 O 和末端原子（羧基/酰胺碳）成键。';
+      }
+    }
+    // 5) C=O must be a double bond (backend lines 281-288).
+    if (!errors.o && !errors.c && bondOrderBetween(idx.c, idx.o) !== 2) {
+      errors.o = '骨架 O 必须是羰基氧（C=O 双键）。';
+    }
+    // 6) Under amidation, C-NXT must be a single bond (backend lines 290-294).
+    if (amidated && !errors.oxt && !errors.c && bondOrderBetween(idx.c, idx.oxt) !== 1) {
+      errors.oxt = 'C 端酰胺化模式下，C-NXT 必须是单键（酰胺 C-N 单键）。';
+    }
+    // 7) CA bonded to N or C (backend lines 298-300).
+    if (!errors.ca && !errors.n && !errors.c) {
+      const caNeighbors = neighborsOf(idx.ca);
+      if (!caNeighbors.has(idx.n) && !caNeighbors.has(idx.c)) {
+        errors.ca = '骨架 CA 必须与 N 或 C 成键。';
+      }
+    }
+
+    return errors;
+  } finally {
+    try {
+      mol.delete();
+    } catch {
+      /* molecule already disposed */
+    }
+  }
+}
+
 // Keep only the manual backbone picks whose atom index is still in range AND still points at the
 // right element after a SMILES edit. Picks whose atom vanished or whose slot now sits on a
 // different element are dropped — so the user can keep editing the structure without their

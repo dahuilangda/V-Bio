@@ -8,7 +8,7 @@ import { LigandPropertyGrid } from './LigandPropertyGrid';
 import { loadRDKitModule } from '../../utils/rdkit';
 import { Ligand2DPreview } from './Ligand2DPreview';
 import { rdkitMolHasAminoAcidBackbone } from '../../utils/inputValidation';
-import { detectCustomResidueBackbone, validateBackboneSlots } from '../../utils/constraintAtomOptions';
+import { detectCustomResidueBackbone, firstBackboneSlotError, validateBackboneSlots, validateCustomResidueBackbone, type BackboneSlotErrors } from '../../utils/constraintAtomOptions';
 import { toggleTerminalAmide } from '../../utils/smilesTransform';
 import { BUILT_IN_PROTEIN_MODIFICATIONS } from './residueCatalog';
 
@@ -192,6 +192,7 @@ function ProteinSequenceModificationPreview({
 function CustomResiduePreview({
   smiles,
   onValidityChange,
+  onSlotErrorsChange,
   backbone,
   onBackboneChange,
   disabled,
@@ -201,6 +202,7 @@ function CustomResiduePreview({
 }: {
   smiles: string;
   onValidityChange: (valid: boolean) => void;
+  onSlotErrorsChange?: (errors: BackboneSlotErrors) => void;
   backbone: CustomResidueBackbone | undefined;
   onBackboneChange: (next: CustomResidueBackbone | undefined) => void;
   disabled?: boolean;
@@ -216,6 +218,10 @@ function CustomResiduePreview({
   // Surfaces why an explicit Auto run found nothing (e.g. a C-terminal amide without the
   // amidation flag) without wiping the user's manual picks.
   const [autoStatus, setAutoStatus] = useState<'idle' | 'failed'>('idle');
+  // Per-slot errors for the manual backbone override (empty = valid). Recomputed by the dedicated
+  // effect below whenever picks/SMILES/amidation change; surfaced inline (red pill + red atom) and
+  // up to the parent so Save/submit can block. Never silently cleared for a complete-but-wrong set.
+  const [slotErrors, setSlotErrors] = useState<BackboneSlotErrors>({});
 
   const allSet = (value: Partial<CustomResidueBackbone>) =>
     CUSTOM_BACKBONE_SLOTS.every((slot) => value[slot] !== undefined);
@@ -316,6 +322,40 @@ function CustomResiduePreview({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [smiles, amidated]);
 
+  // Recompute backbone slot errors whenever the picks or structure change. Independent of the
+  // detect effect above so a click (which only touches local `slots`) still re-validates. A
+  // complete-but-wrong set is reported, never silently passed; an incomplete set is treated as
+  // "no override yet" (the backend auto-detects) and yields no error.
+  useEffect(() => {
+    let cancelled = false;
+    const recompute = async () => {
+      if (!allSet(slots)) {
+        if (!cancelled) {
+          setSlotErrors({});
+          onSlotErrorsChange?.({});
+        }
+        return;
+      }
+      try {
+        const rdkit = await loadRDKitModule();
+        if (cancelled) return;
+        const errors = validateCustomResidueBackbone(rdkit, smiles.trim(), slots as CustomResidueBackbone, Boolean(amidated));
+        if (!cancelled) {
+          setSlotErrors(errors);
+          onSlotErrorsChange?.(errors);
+        }
+      } catch {
+        // RDKit not warmed yet; leave the previous verdict rather than silently passing.
+      }
+    };
+    const timer = window.setTimeout(() => { void recompute(); }, 150);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slots, smiles, amidated]);
+
   const runAutoDetect = async () => {
     manualOverrideRef.current = false;
     const text = smiles.trim();
@@ -373,6 +413,16 @@ function CustomResiduePreview({
     setArmedSlot(nextUnset ?? null);
   };
 
+  // Wrongly-assigned backbone atoms (any slot with an error) are painted red on top of the
+  // normal pick highlight, matching the red pill + error text below.
+  const errorAtomIndices = (CUSTOM_BACKBONE_SLOTS as readonly (keyof CustomResidueBackbone)[])
+    .filter((slot) => Boolean(slotErrors[slot]))
+    .map((slot) => slots[slot])
+    .filter((idx): idx is number => typeof idx === 'number');
+  const highlightAtomColorsOverride: Record<number, [number, number, number]> | null = errorAtomIndices.length
+    ? Object.fromEntries(errorAtomIndices.map((idx) => [idx, [0.86, 0.18, 0.18]] as [number, [number, number, number]]))
+    : null;
+
   return (
     <div className={`custom-residue-preview ${valid ? 'valid' : 'invalid'}`}>
       <Ligand2DPreview
@@ -380,6 +430,7 @@ function CustomResiduePreview({
         width={360}
         height={220}
         highlightAtomIndices={assignedIndices.length ? assignedIndices : undefined}
+        highlightAtomColorsOverride={highlightAtomColorsOverride}
         atomLabels={atomLabels}
         onAtomClick={armedSlot && !disabled ? handleAtomClick : undefined}
       />
@@ -391,7 +442,7 @@ function CustomResiduePreview({
             <button
               key={slot}
               type="button"
-              className={`peptide-custom-backbone-slot${armed ? ' armed' : ''}${idx === undefined ? ' empty' : ''}`}
+              className={`peptide-custom-backbone-slot${armed ? ' armed' : ''}${idx === undefined ? ' empty' : ''}${slotErrors[slot] ? ' error' : ''}`}
               disabled={disabled}
               onClick={() => setArmedSlot((prev) => (prev === slot ? null : slot))}
               title={
@@ -406,6 +457,9 @@ function CustomResiduePreview({
           );
         })}
       </div>
+      {firstBackboneSlotError(slotErrors) ? (
+        <span className="field-error">{firstBackboneSlotError(slotErrors)}</span>
+      ) : null}
       <div className="peptide-custom-backbone-foot">
         <button
           type="button"
@@ -455,7 +509,7 @@ export function ComponentInputEditor({
   const [templateErrors, setTemplateErrors] = useState<Record<string, string>>({});
   const [collapsedById, setCollapsedById] = useState<Record<string, boolean>>({});
   const [modificationsCollapsedById, setModificationsCollapsedById] = useState<Record<string, boolean>>({});
-  const [customResidueValidity, setCustomResidueValidity] = useState<Record<string, boolean>>({});
+  const [customResidueValidity, setCustomResidueValidity] = useState<Record<string, { hasBackbone: boolean; slotErrorsEmpty: boolean }>>({});
   const [activeModificationId, setActiveModificationId] = useState<string | null>(null);
   const [numberDrafts, setNumberDrafts] = useState<Record<string, string>>({});
   const hasMountedSelectionEffectRef = useRef(false);
@@ -581,7 +635,8 @@ export function ComponentInputEditor({
     if (!onCustomResidueLibraryChange || mod.inputMethod !== 'jsme') return;
     const ccd = normalizeModificationCcd(mod.ccd || '');
     const smiles = String(mod.smiles || '').trim();
-    if (!ccd || !smiles || !customResidueValidity[mod.id]) return;
+    const validity = customResidueValidity[mod.id];
+    if (!ccd || !smiles || !validity || !validity.hasBackbone || !validity.slotErrorsEmpty) return;
     const nextEntry: CustomCcdMoleculeInput = {
       ccd,
       smiles,
@@ -1255,9 +1310,23 @@ export function ComponentInputEditor({
                                             disabled={disabled}
                                             onBackboneChange={(next) => patchProteinModification(comp.id, mod.id, { backbone: next })}
                                             onSaveToLibrary={() => saveModificationToLibrary(mod)}
-                                            saveDisabled={disabled || !String(mod.smiles || '').trim() || !customResidueValidity[mod.id]}
+                                            saveDisabled={disabled || !String(mod.smiles || '').trim() || !customResidueValidity[mod.id]?.hasBackbone || !customResidueValidity[mod.id]?.slotErrorsEmpty}
                                             onValidityChange={(isValid) =>
-                                              setCustomResidueValidity((prev) => (prev[mod.id] === isValid ? prev : { ...prev, [mod.id]: isValid }))
+                                              setCustomResidueValidity((prev) => {
+                                                const cur = prev[mod.id];
+                                                return cur && cur.hasBackbone === isValid
+                                                  ? prev
+                                                  : { ...prev, [mod.id]: { hasBackbone: isValid, slotErrorsEmpty: cur?.slotErrorsEmpty ?? true } };
+                                              })
+                                            }
+                                            onSlotErrorsChange={(errors) =>
+                                              setCustomResidueValidity((prev) => {
+                                                const cur = prev[mod.id];
+                                                const slotErrorsEmpty = firstBackboneSlotError(errors) === null;
+                                                return cur && cur.slotErrorsEmpty === slotErrorsEmpty
+                                                  ? prev
+                                                  : { ...prev, [mod.id]: { hasBackbone: cur?.hasBackbone ?? false, slotErrorsEmpty } };
+                                              })
                                             }
                                           />
                                         </div>
