@@ -13,6 +13,7 @@ const ProjectTasksPage = lazy(() => import('./pages/ProjectTasksPage').then((m) 
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
 const UsersPage = lazy(() => import('./pages/UsersPage').then((m) => ({ default: m.UsersPage })));
 const JwtClientsPage = lazy(() => import('./pages/JwtClientsPage').then((m) => ({ default: m.JwtClientsPage })));
+const AdminMonitorPage = lazy(() => import('./pages/AdminMonitorPage').then((m) => ({ default: m.AdminMonitorPage })));
 const MmpLifecycleAdminPage = lazy(() => import('./pages/MmpLifecycleAdminPage').then((m) => ({ default: m.MmpLifecycleAdminPage })));
 
 function ShellPage({ children }: { children: JSX.Element }) {
@@ -138,6 +139,18 @@ export default function App() {
               </Suspense>
             </ShellPage>
           </SuperAdminRoute>
+        }
+      />
+      <Route
+        path="/admin/monitor"
+        element={
+          <AdminRoute>
+            <ShellPage>
+              <Suspense fallback={<PageLoading />}>
+                <AdminMonitorPage />
+              </Suspense>
+            </ShellPage>
+          </AdminRoute>
         }
       />
       <Route

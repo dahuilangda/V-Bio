@@ -21,6 +21,7 @@ export function applyConstraintResiduePickInteraction<TDraft extends DraftWithCo
   canEdit: boolean;
   draft: TDraft | null;
   ligandChainOptions: Array<{ id: string }>;
+  constraintsSupported: boolean;
   isBondOnlyBackend: boolean;
   constraintPickSlotRef: MutableRefObject<Record<string, 'first' | 'second'>>;
   updateConstraintPickSlot: (updater: (prev: Record<string, 'first' | 'second'>) => Record<string, 'first' | 'second'>) => void;
@@ -40,6 +41,7 @@ export function applyConstraintResiduePickInteraction<TDraft extends DraftWithCo
     canEdit,
     draft,
     ligandChainOptions,
+    constraintsSupported,
     isBondOnlyBackend,
     constraintPickSlotRef,
     updateConstraintPickSlot,
@@ -79,7 +81,7 @@ export function applyConstraintResiduePickInteraction<TDraft extends DraftWithCo
     return nextPicked;
   });
 
-  if (!canEdit) return;
+  if (!canEdit || !constraintsSupported) return;
 
   const currentConstraints = draft?.inputConfig.constraints || [];
   if (currentConstraints.length === 0) {

@@ -7,6 +7,7 @@ import type { LeadOptimizationWorkflowSectionProps } from './LeadOptimizationWor
 import type { PredictionComponentsSidebarProps } from './PredictionComponentsSidebar';
 import type { PredictionConstraintsWorkspaceProps } from './PredictionConstraintsWorkspace';
 import type { PredictionWorkflowSectionProps } from './PredictionWorkflowSection';
+import type { VirtualScreeningWorkflowSectionProps } from './VirtualScreeningWorkflowSection';
 import type { WorkflowRuntimeSettingsSectionProps } from './WorkflowRuntimeSettingsSection';
 import type { MetricTone } from './projectMetrics';
 
@@ -154,6 +155,7 @@ export interface BuildPredictionComponentsSidebarParams {
   constraintCount: number;
   addConstraintFromSidebar: () => void;
   hasActiveChains: boolean;
+  constraintsSupported: boolean;
   constraints: PredictionConstraint[];
   activeConstraintId: string | null;
   selectedContactConstraintIdSet: Set<string>;
@@ -193,6 +195,7 @@ export function buildPredictionComponentsSidebarProps(
     constraintCount,
     addConstraintFromSidebar,
     hasActiveChains,
+    constraintsSupported,
     constraints,
     activeConstraintId,
     selectedContactConstraintIdSet,
@@ -230,6 +233,7 @@ export function buildPredictionComponentsSidebarProps(
     constraintCount,
     onAddConstraint: addConstraintFromSidebar,
     hasActiveChains,
+    constraintsSupported,
     constraints,
     activeConstraintId,
     selectedContactConstraintIdSet,
@@ -276,6 +280,12 @@ export function buildLeadOptimizationWorkflowSectionProps(
 export function buildPredictionWorkflowSectionProps(
   params: Omit<PredictionWorkflowSectionProps, 'visible'>
 ): Omit<PredictionWorkflowSectionProps, 'visible'> {
+  return params;
+}
+
+export function buildVirtualScreeningWorkflowSectionProps(
+  params: Omit<VirtualScreeningWorkflowSectionProps, 'visible'>
+): Omit<VirtualScreeningWorkflowSectionProps, 'visible'> {
   return params;
 }
 

@@ -5,10 +5,16 @@ import { LigandPropertyGrid } from './LigandPropertyGrid';
 import { MetricsPanel } from './MetricsPanel';
 import { MolstarViewer } from './MolstarViewer';
 import { PeptideDesignResultsWorkspace } from './PeptideDesignResultsWorkspace';
+import { VirtualScreeningResultsSection } from './VirtualScreeningResultsSection';
+import type {
+  InputComponent,
+  VirtualScreeningPredictionRecord
+} from '../../types/models';
 
 export interface ProjectResultsSectionProps {
   isPredictionWorkflow: boolean;
   isPeptideDesignWorkflow: boolean;
+  isVirtualScreeningWorkflow: boolean;
   isAffinityWorkflow: boolean;
   workflowTitle: string;
   workflowShortTitle: string;
@@ -21,6 +27,7 @@ export interface ProjectResultsSectionProps {
   onResizerKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
   snapshotCards: AffinitySignalCard[];
   snapshotConfidence: Record<string, unknown>;
+  snapshotAffinity: Record<string, unknown>;
   resultChainIds: string[];
   selectedResultTargetChainId: string | null;
   selectedResultLigandChainId: string | null;
@@ -45,12 +52,17 @@ export interface ProjectResultsSectionProps {
   peptideFallbackIptm: number | null;
   statusInfo: Record<string, unknown> | null;
   progressPercent: number;
+  canPredictStructures: boolean;
+  virtualScreeningComponents: InputComponent[];
+  predictionRecords: Record<string, VirtualScreeningPredictionRecord>;
+  onPredictionRecordsChange?: (records: Record<string, VirtualScreeningPredictionRecord>) => void;
   onPeptideRequestStructure?: (options?: { preferredStructureName?: string }) => Promise<void> | void;
 }
 
 export const ProjectResultsSection = memo(function ProjectResultsSection({
   isPredictionWorkflow,
   isPeptideDesignWorkflow,
+  isVirtualScreeningWorkflow,
   isAffinityWorkflow,
   workflowTitle,
   workflowShortTitle,
@@ -63,6 +75,7 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
   onResizerKeyDown,
   snapshotCards,
   snapshotConfidence,
+  snapshotAffinity,
   resultChainIds,
   selectedResultTargetChainId,
   selectedResultLigandChainId,
@@ -87,6 +100,10 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
   peptideFallbackIptm,
   statusInfo,
   progressPercent,
+  canPredictStructures,
+  virtualScreeningComponents,
+  predictionRecords,
+  onPredictionRecordsChange,
   onPeptideRequestStructure
 }: ProjectResultsSectionProps) {
   const initialPredictionColorMode = useMemo<'default' | 'alphafold'>(
@@ -105,6 +122,25 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
     () => displayStructureConfidenceText,
     [displayStructureConfidenceText]
   );
+  const effectivePredictionBackend = String(confidenceBackend || projectBackend).trim().toLowerCase();
+  const isAffinityOnlyPrediction =
+    effectivePredictionBackend === 'nesso' ||
+    snapshotConfidence.structure_available === false;
+
+  if (isVirtualScreeningWorkflow) {
+    return (
+      <VirtualScreeningResultsSection
+        screening={snapshotAffinity || {}}
+        projectTaskId={projectTaskId}
+        projectTaskState={projectTaskState}
+        progressPercent={progressPercent}
+        canPredictStructures={canPredictStructures}
+        components={virtualScreeningComponents}
+        predictionRecords={predictionRecords}
+        onPredictionRecordsChange={onPredictionRecordsChange}
+      />
+    );
+  }
 
   if (isPeptideDesignWorkflow) {
     return (
@@ -151,6 +187,11 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
               interactionGranularity="element"
               suppressAutoFocus={false}
               showSequence={false}
+              emptyMessage={
+                isAffinityOnlyPrediction
+                  ? 'Nesso-1 produced affinity signals without a 3D structure.'
+                  : undefined
+              }
             />
           </section>
 
@@ -168,7 +209,8 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
             <section className="result-aside-block result-aside-block-ligand">
               <div className="result-aside-head">
                 <div className="result-aside-title">Ligand</div>
-                <div className="prediction-render-mode-switch" role="tablist" aria-label="3D color mode">
+                {!isAffinityOnlyPrediction && (
+                  <div className="prediction-render-mode-switch" role="tablist" aria-label="3D color mode">
                   <button
                     type="button"
                     role="tab"
@@ -193,7 +235,8 @@ export const ProjectResultsSection = memo(function ProjectResultsSection({
                   >
                     Std
                   </button>
-                </div>
+                  </div>
+                )}
               </div>
               <div className="ligand-preview-panel">{predictionLigandPreview}</div>
               {predictionLigandRadarSmiles ? <LigandPropertyGrid smiles={predictionLigandRadarSmiles} variant="radar" /> : null}

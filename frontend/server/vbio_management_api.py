@@ -177,7 +177,7 @@ def _issue_management_session(*, user_id: str, username: str, email: Any) -> str
     })
 
 
-def _verify_management_session(token: str, *, allow_refresh: bool = False) -> Dict[str, Any]:
+def _verify_management_session(token: str, *, allow_refresh: bool = False, require_super_admin: bool = True) -> Dict[str, Any]:
     if not SESSION_SECRET:
         raise PermissionError("Management sessions are not configured")
     try:
@@ -201,7 +201,7 @@ def _verify_management_session(token: str, *, allow_refresh: bool = False) -> Di
         )
         if not allow_refresh or issued_at <= 0 or refresh_expires_at <= now:
             raise PermissionError("Management session expired")
-    if not _is_super_admin(str(payload.get("username") or ""), str(payload.get("email") or "")):
+    if require_super_admin and not _is_super_admin(str(payload.get("username") or ""), str(payload.get("email") or "")):
         raise PermissionError("Forbidden")
     return payload
 
@@ -339,13 +339,13 @@ def refresh_management_session() -> Tuple[Response, int]:
     if not token:
         return jsonify({"error": "Missing management session"}), 401
     try:
-        claims = _verify_management_session(token, allow_refresh=True)
+        claims = _verify_management_session(token, allow_refresh=True, require_super_admin=False)
         user = _find_user_by_id(str(claims.get("sub") or ""))
         if not user or user.get("deleted_at"):
             return jsonify({"error": "Management user is no longer active"}), 401
         username = str(user.get("username") or "")
         email = user.get("email")
-        if not _is_super_admin(username, str(email or "")):
+        if not bool(user.get("is_admin") or _is_super_admin(username, str(email or ""))):
             return jsonify({"error": "Forbidden"}), 403
         refreshed = _issue_management_session(
             user_id=str(user.get("id") or ""),
@@ -391,6 +391,76 @@ def _require_jwt_admin() -> Tuple[Response, int] | None:
         return None
     except PermissionError as exc:
         return jsonify({"error": str(exc)}), 403
+
+def _require_platform_admin() -> Tuple[Response, int] | None:
+    token = str(request.headers.get("X-VBio-Session") or "").strip()
+    if not token:
+        return jsonify({"error": "Missing management session"}), 403
+    try:
+        claims = _verify_management_session(token, require_super_admin=False)
+        user = _find_user_by_id(str(claims.get("sub") or ""))
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    except Exception:
+        logger.exception("Platform administrator verification failed")
+        return jsonify({"error": "Unable to verify administrator session"}), 503
+
+    if not user or user.get("deleted_at"):
+        return jsonify({"error": "Management user is no longer active"}), 403
+    username = str(user.get("username") or "")
+    email = str(user.get("email") or "")
+    if not bool(user.get("is_admin") or _is_super_admin(username, email)):
+        return jsonify({"error": "Forbidden"}), 403
+    return None
+
+
+@app.get("/vbio-api/admin/cluster-overview")
+def get_admin_cluster_overview() -> Tuple[Response, int]:
+    forbidden = _require_platform_admin()
+    if forbidden:
+        return forbidden
+
+    try:
+        window_hours = int(request.args.get("window_hours") or 24)
+    except (TypeError, ValueError):
+        window_hours = 24
+    window_hours = max(1, min(24 * 31, window_hours))
+
+    cluster: Dict[str, Any] = {}
+    cluster_error = ""
+    try:
+        upstream = runtime_proxy.proxy_get("/workers/cluster_status", {})
+        if not upstream.ok:
+            try:
+                details = upstream.json()
+            except Exception:
+                details = upstream.text.strip()
+            if isinstance(details, dict):
+                details = details.get("error") or details.get("details") or details
+            raise RuntimeError(f"Runtime API HTTP {upstream.status_code}: {details}")
+        payload = upstream.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Runtime API returned an invalid cluster snapshot")
+        cluster = payload
+    except Exception as exc:
+        cluster_error = str(exc)
+        logger.warning("Unable to collect cluster snapshot: %s", exc)
+
+    tasks: Dict[str, Any] = {}
+    tasks_error = ""
+    try:
+        tasks = task_store.get_admin_statistics(window_hours=window_hours)
+    except Exception as exc:
+        tasks_error = str(exc)
+        logger.exception("Unable to collect administrator task statistics")
+
+    return jsonify({
+        "generated_at": _utc_now_iso(),
+        "cluster": cluster,
+        "cluster_error": cluster_error,
+        "tasks": tasks,
+        "tasks_error": tasks_error,
+    }), 200
 
 
 @app.get("/vbio-api/admin/jwt-clients")

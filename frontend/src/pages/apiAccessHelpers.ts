@@ -11,10 +11,10 @@ import type {
 import { createInputComponent, randomId } from '../utils/projectInputs';
 
 export type UsageWindow = '7d' | '30d' | '90d' | 'all';
-export type ProjectStatsWorkflowFilter = 'all' | 'prediction' | 'affinity' | 'lead_optimization';
+export type ProjectStatsWorkflowFilter = 'all' | 'prediction' | 'virtual_screening' | 'affinity' | 'lead_optimization';
 export type ProjectStatsSort = 'calls_desc' | 'calls_asc' | 'success_desc' | 'success_asc' | 'last_desc' | 'last_asc';
-export type BuilderWorkflowKey = 'prediction' | 'affinity' | 'lead_optimization';
-export type PredictionBackend = 'boltz' | 'alphafold3' | 'protenix';
+export type BuilderWorkflowKey = 'prediction' | 'virtual_screening' | 'affinity' | 'lead_optimization';
+export type PredictionBackend = 'boltz' | 'alphafold3' | 'protenix' | 'nesso';
 export type AffinityBackend = 'boltz';
 
 export interface ProjectStatsRow {
@@ -102,7 +102,7 @@ export function normalizeUsageWindow(value: string | null | undefined): UsageWin
 }
 
 export function normalizeProjectStatsWorkflowFilter(value: string | null | undefined): ProjectStatsWorkflowFilter {
-  if (value === 'prediction' || value === 'affinity' || value === 'lead_optimization' || value === 'all') return value;
+  if (value === 'prediction' || value === 'virtual_screening' || value === 'affinity' || value === 'lead_optimization' || value === 'all') return value;
   return 'all';
 }
 
@@ -124,6 +124,7 @@ export function normalizePredictionBackend(value: string | null | undefined): Pr
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'alphafold3') return 'alphafold3';
   if (normalized === 'protenix') return 'protenix';
+  if (normalized === 'nesso' || normalized === 'nesso1' || normalized === 'nesso-1') return 'nesso';
   return 'boltz';
 }
 

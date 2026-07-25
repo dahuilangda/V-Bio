@@ -7,7 +7,7 @@
 | `BOLTZ_API_TOKEN` | 后端 API 访问 token。前端的 `VITE_API_TOKEN` 必须与它一致。 |
 | `REDIS_URL` | Redis 地址，例如 `redis://<HOST_IP>:6379/0`。 |
 | `CENTRAL_API_URL` | 中央 API 地址，例如 `http://<HOST_IP>:5000`。 |
-| `GPU_WORKER_CAPABILITIES` | GPU worker 服务列表，例如 `boltz2,alphafold3,protenix`。 |
+| `GPU_WORKER_CAPABILITIES` | GPU worker 服务列表，例如 `boltz2,alphafold3,protenix,nesso`。 |
 | `CPU_WORKER_CAPABILITIES` | CPU worker 服务列表，例如 `lead_opt,peptide_design`。 |
 
 ## 前端与 management API
@@ -48,6 +48,7 @@ docs/apis/external-system-login.md
 | Boltz2 | `BOLTZ2_DOCKER_IMAGE`, `BOLTZ2_HOST_CACHE_DIR` |
 | AlphaFold3 | `ALPHAFOLD3_DOCKER_IMAGE`, `ALPHAFOLD3_MODEL_DIR`, `ALPHAFOLD3_DATABASE_DIR` |
 | Protenix | `PROTENIX_DOCKER_IMAGE`, `PROTENIX_SOURCE_DIR`, `PROTENIX_MODEL_DIR` |
+| Nesso-1 Virtual Screening | `NESSO_DOCKER_IMAGE`, `NESSO_HOST_CACHE_DIR`, `NESSO_MODEL_REVISION` |
 | PocketXMol | `POCKETXMOL_DOCKER_IMAGE`, `POCKETXMOL_ROOT_DIR` |
 | ColabFold MSA | `MSA_SERVER_URL`, `COLABFOLD_JOBS_DIR` |
 | Lead Opt | `LEAD_OPT_MMP_DB_URL`, `LEAD_OPT_MMP_DB_SCHEMA` |

@@ -7,6 +7,8 @@ def normalize_workflow_key(value: Any) -> str:
     token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     if token in {"prediction", "boltz_2_prediction", "boltz_prediction"}:
         return "prediction"
+    if token in {"virtual_screening", "virtualscreening", "screening", "vs"}:
+        return "virtual_screening"
     if token in {"affinity", "affinity_scoring", "boltz_2_affinity"}:
         return "affinity"
     if token in {"peptide", "peptide_design"}:
@@ -15,6 +17,8 @@ def normalize_workflow_key(value: Any) -> str:
         return "lead_optimization"
     if "peptide" in token:
         return "peptide_design"
+    if "screening" in token:
+        return "virtual_screening"
     if "affinity" in token:
         return "affinity"
     if "lead" in token and "opt" in token:

@@ -77,6 +77,14 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
         "execution_boundary": "Allowed patch keys: seed. Execution uses the existing Prediction Run path.",
     },
     {
+        "name": "virtual_screening.submit_plan",
+        "description": "Plan Virtual Screening seed updates and reruns with the fixed Nesso-1 backend.",
+        "trigger": "Virtual Screening rerun, seed change, or request to submit the current screening batch.",
+        "inputs": "Current target sequence, compound library, seed, and run disabled reason.",
+        "confirmation": "Always require explicit user confirmation before applying a seed or running.",
+        "execution_boundary": "Nesso-1 is the only backend. Do not expose structure-prediction backend choices, templates, or component replacement patches.",
+    },
+    {
         "name": "affinity.submit_plan",
         "description": "Plan Affinity workflow mode/seed updates and submission.",
         "trigger": "Affinity score/pose/refine/interface mode change, seed change, or submit request.",
@@ -118,6 +126,11 @@ def render_capability_prompt() -> str:
         "  required: At least one valid structural component. Treat peptide sequences as protein components unless the user explicitly asks for peptide-design workflow options.",
         "  component edits: If the user says only/single/只有 one peptide/protein sequence, plan a component replacement with one protein component containing that sequence; do not copy old components.",
         "  reject: Do not use it for binding affinity-only scoring without a target/ligand affinity question.",
+        "- workflow: virtual_screening",
+        "  purpose: Rank a batch of SMILES compounds against exactly one target protein with Nesso-1.",
+        "  required: One target protein sequence and a non-empty compound library of SMILES records.",
+        "  backend: Nesso-1 is fixed. This workflow produces affinity rankings only and no 3D structure.",
+        "  reject: Do not offer Boltz-2, AlphaFold3, Protenix, templates, constraints, or generic structural component patches.",
         "- workflow: affinity",
         "  purpose: Binding affinity estimation/scoring for a prepared target-ligand setup.",
         "  required: A target structure/sequence context and a ligand or separate affinity inputs, plus affinity mode when relevant.",
@@ -170,6 +183,7 @@ TASK_PARAMETER_SCHEMA: Dict[str, Dict[str, Any]] = {
 
 WORKFLOW_PARAMETER_KEYS: Dict[str, List[str]] = {
     "prediction": ["backend", "seed", "componentsReplacement"],
+    "virtual_screening": ["backend", "seed"],
     "affinity": ["seed", "affinityMode"],
     "peptide_design": [
         "backend",
@@ -193,6 +207,12 @@ WORKFLOW_PARAMETER_KEYS: Dict[str, List[str]] = {
     ],
     "lead_optimization": [],
 }
+
+
+def _backend_values_for_workflow(workflow_key: str) -> List[str]:
+    if normalize_workflow_key(workflow_key) == "virtual_screening":
+        return ["nesso"]
+    return list(TASK_PARAMETER_SCHEMA["backend"]["values"])
 
 
 def render_context_plan_schema_prompt(context_type: str, context_payload: Dict[str, Any]) -> str:
@@ -220,7 +240,7 @@ def _render_task_list_plan_schema() -> str:
         "Decision pattern:\n"
         "1. Classify intent as analysis-only, view update, create new task, copy existing task with patch, open for manual editing, rename, cancel, or delete.\n"
         "2. If a source task is needed, choose it by applying the user's natural-language criterion to context_payload.rows: named task, exact id/task_id, best/worst metric, backend/state, recency, or visible ordering.\n"
-        "3. If the user asks for a new submitted variant based on an existing task, emit tasks:copy_with_patch with only the requested parameterPatch fields.\n"
+        "3. If the user asks for a new submitted variant based on an existing Prediction task, emit tasks:copy_with_patch with only the requested parameterPatch fields.\n"
         "4. If required source task, component value, or workflow compatibility is unclear, return no actions with missing_questions.\n"
         "Rules:\n"
         "- If the user asks for current status, progress, summary, analysis, counts, explanation, or what is happening now, return {\"actions\":[]} unless they explicitly ask to change the view or mutate tasks.\n"
@@ -232,7 +252,7 @@ def _render_task_list_plan_schema() -> str:
         "- Component schema: {type:\"protein|ligand|dna|rna\", sequence:\"...\", numCopies:1, useMsa:true/false, inputMethod:\"smiles|ccd\" for ligand}. For proteins default useMsa=true unless the user says no MSA or the component is clearly a peptide binder.\n"
         "- If the user provides a sequence and wants to predict/submit, use tasks:create_with_sequence only when current workflow is prediction.\n"
         "- If the user asks only to create/fill a task, create the draft action. If they asks to run/submit/predict too, still return the same confirmed create action; the UI will ask for run confirmation after the draft is filled.\n"
-        "- If the user asks to create a new submitted variant from an existing visible task, use tasks:copy_with_patch. Select taskRowId by reasoning over context_payload.rows, not by inventing ids. Put requested changes in payload.parameterPatch.\n"
+        "- If the current workflow is prediction and the user asks to create a new submitted variant from an existing visible task, use tasks:copy_with_patch. Select taskRowId by reasoning over context_payload.rows, not by inventing ids. Put requested changes in payload.parameterPatch.\n"
         "- Supported copy patches: backend, seed, and componentsPatch operations. componentsPatch supports append, update, remove, and replace_all. Legacy componentsAdd/componentsReplacement are accepted, but prefer componentsPatch because it is more general.\n"
         "- For component updates/removals, include a selector using the most stable clue available from the user and rows: id, 1-based index, type, or sequenceContains. If the selector would match multiple components and the user did not disambiguate, ask a question.\n"
         "- Use only fields the user requested; do not copy unchanged row fields into the patch.\n"
@@ -240,7 +260,7 @@ def _render_task_list_plan_schema() -> str:
         "- If the user request is ambiguous or lacks necessary information, return {\"actions\":[],\"missing_questions\":[\"...\"]}. Ask for clarification instead of forcing a confirmation button.\n"
         "- Ambiguous examples: unlabeled uppercase strings that could be peptide/protein/CCD/SMILES; 'new task' without any component; 'delete it' with multiple plausible target tasks; a workflow request that conflicts with current project type.\n"
         "- If context_payload.copilot_attachments exists, the user uploaded files through Copilot. Interpret @filename mentions and nearby words to infer role. For affinity and lead optimization, ask which uploaded file is target/protein/receptor and which is ligand/small molecule if roles are unclear. For peptide design, target/protein/receptor files are target structures; ask which file is the target if unclear. For prediction, a PDB/CIF/MMCIF attachment is a template only when the user labels it template/模板 or otherwise says to use it as a structure template.\n"
-        "- If current workflow is affinity, peptide_design, or lead_optimization and the user asks to predict a lone sequence, return no actions; the assistant message should explain they are in the wrong project function.\n"
+        "- If current workflow is virtual_screening, affinity, peptide_design, or lead_optimization and the user asks to predict a lone sequence, return no actions; the assistant message should explain they are in the wrong project function. Virtual Screening requires its dedicated target-plus-library editor and fixed Nesso-1 backend.\n"
         "- For delete or cancel, identify the target task from context_payload.rows by matching name or task_id.\n"
         "- Use tasks:cancel for stop/terminate/cancel operations on running or queued tasks.\n"
         "- Use tasks:delete for removing task records entirely.\n"
@@ -319,6 +339,16 @@ def _render_project_list_plan_schema() -> str:
 def render_task_submission_schema_prompt(workflow_key: str = "prediction") -> str:
     normalized_workflow = normalize_workflow_key(workflow_key)
     allowed_keys = WORKFLOW_PARAMETER_KEYS.get(normalized_workflow, WORKFLOW_PARAMETER_KEYS["prediction"])
+    backend_instruction = (
+        "Nesso-1 is fixed for Virtual Screening. If the user explicitly requests the backend, set parameter_patch.backend to nesso; do not offer any other backend."
+        if normalized_workflow == "virtual_screening"
+        else "If the user asks to change backend/model engine/provider, set parameter_patch.backend to one of boltz, alphafold3, protenix. For backend aliases: Boltz/Boltz-2 -> boltz; AlphaFold/AF3 -> alphafold3; Protenix -> protenix."
+    )
+    workflow_boundary = (
+        "For Virtual Screening, the target and compound library are edited in the dedicated workspace. Do not emit componentsReplacement, templates, constraints, or structure-prediction backend patches; ask a clarification question when the target or library is missing."
+        if normalized_workflow == "virtual_screening"
+        else ""
+    )
     lines = [
         "Task detail context: the user is viewing/editing a specific task within a project.",
         "They can create new tasks by applying a component replacement to the current draft and then submitting through the validated run path.",
@@ -341,7 +371,8 @@ def render_task_submission_schema_prompt(workflow_key: str = "prediction") -> st
         "For phrases like 新任务/new task with explicit components, do not use a create action. Return capability=task_submission_planning with parameter_patch.componentsReplacement and submit_after_patch=true.",
         "For phrases like 提交/run/submit/predict plus explicit components, include every component in componentsReplacement and set submit_after_patch=true, needs_confirmation=true, execute_now=false.",
         "If the user only asks to edit/fill/change parameters without running, set submit_after_patch=false.",
-        "If the user asks to change backend/model engine/provider, set parameter_patch.backend to one of boltz, alphafold3, protenix. For backend aliases: Boltz/Boltz-2 -> boltz; AlphaFold/AF3 -> alphafold3; Protenix -> protenix.",
+        backend_instruction,
+        workflow_boundary,
         "For peptide design option changes, map natural-language controls into exact parameter_patch keys: binder length -> peptideBinderLength; design mode -> peptideDesignMode; iterations/rounds -> peptideIterations; population size -> peptidePopulationSize; elite/top candidates -> peptideEliteSize; mutation rate -> peptideMutationRate; initial sequence/start sequence -> peptideInitialSequence plus peptideUseInitialSequence=true; sequence mask/fixed positions -> peptideSequenceMask; bicyclic linker -> peptideBicyclicLinkerCcd; automatic/manual cysteine positions -> peptideBicyclicCysPositionMode; fixed terminal cysteine -> peptideBicyclicFixTerminalCys; include extra cysteine -> peptideBicyclicIncludeExtraCys; Cys1/Cys2/Cys3 positions -> peptideBicyclicCys1Pos/peptideBicyclicCys2Pos/peptideBicyclicCys3Pos.",
         "Label mapping: 蛋白/protein/peptide/多肽/氨基酸 -> protein; 小分子/配体/化合物/compound/ligand/drug/SMILES/smiles -> ligand; DNA/dna -> dna; RNA/rna -> rna.",
         "For structure prediction, peptide and protein sequence inputs are both protein components, unless the user explicitly labels the value as ligand/small molecule/SMILES.",
@@ -376,7 +407,7 @@ def render_task_submission_schema_prompt(workflow_key: str = "prediction") -> st
                 '"useMsa":false}],"clearConstraints":true}; use only for explicit component input changes.'
             )
         elif spec["type"] == "enum":
-            detail = ", ".join(spec["values"])
+            detail = ", ".join(_backend_values_for_workflow(normalized_workflow) if key == "backend" else spec["values"])
         elif spec["type"] == "bool":
             detail = "boolean true or false"
         elif spec["type"] == "string":
@@ -466,7 +497,12 @@ def sanitize_task_parameter_patch(candidate: Any, workflow_key: str = "predictio
             continue
         if spec["type"] == "enum":
             token = str(value or "").strip()
-            if token in spec["values"]:
+            if normalized_key == "backend":
+                token = {"nesso1": "nesso", "nesso-1": "nesso"}.get(token, token)
+                allowed_values = _backend_values_for_workflow(normalized_workflow)
+            else:
+                allowed_values = spec["values"]
+            if token in allowed_values:
                 sanitized[normalized_key] = token
             continue
         if spec["type"] == "bool":

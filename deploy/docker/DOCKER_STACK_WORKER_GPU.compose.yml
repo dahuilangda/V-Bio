@@ -14,7 +14,9 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${BOLTZ_HOST_ROOT}:${BOLTZ_HOST_ROOT}
+      - ${RESULTS_BASE_DIR:-/data/boltz_central_results}:${RESULTS_BASE_DIR:-/data/boltz_central_results}
       - ${BOLTZ2_HOST_CACHE_DIR:-/data/boltz_cache}:${BOLTZ2_HOST_CACHE_DIR:-/data/boltz_cache}
+      - ${NESSO_HOST_CACHE_DIR:-/data/nesso_cache}:${NESSO_HOST_CACHE_DIR:-/data/nesso_cache}
       - ${PROTENIX_SOURCE_DIR_HOST:-/data/protenix}:/data/protenix
       - ${ALPHAFOLD3_ROOT_HOST:-/data/alphafold3}:/data/alphafold3
     command: >-

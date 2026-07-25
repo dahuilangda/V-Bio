@@ -116,8 +116,37 @@ export interface PredictionProperties {
   binder: string | null;
 }
 
+export type VirtualScreeningStructureBackend = 'boltz' | 'protenix' | 'alphafold3';
+export type VirtualScreeningStructureState = 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILURE';
+
+// Small, durable metadata for a structure job launched from a virtual-screening hit.
+// The structure itself stays in the runtime result archive and is loaded only when opened.
+export interface VirtualScreeningPredictionRecord {
+  taskId: string;
+  backend: VirtualScreeningStructureBackend;
+  state: VirtualScreeningStructureState;
+  ligandPlddt: number | null;
+  interfaceMetricValue: number | null;
+  interfaceMetricLabel: 'IPSAE' | 'ipTM';
+  pairIptm: number | null;
+  pairPae: number | null;
+  error: string;
+  updatedAt: number;
+  /** Hydrated lazily when a user opens a completed hit. */
+  structureText?: string;
+  structureFormat?: 'cif' | 'pdb';
+  structureName?: string;
+  ligandRenderSmiles?: string;
+  ligandRenderAtomPlddts?: number[];
+  resultBundleHydrated?: boolean;
+}
+
 export interface PredictionOptions {
   seed: number | null;
+  virtualScreeningInput?: string;
+  virtualScreeningInputMode?: 'upload' | 'paste';
+  virtualScreeningInputFileName?: string;
+  virtualScreeningPredictions?: Record<string, VirtualScreeningPredictionRecord>;
   affinityMode?: AffinityScoringMode;
   peptideDesignMode?: PeptideDesignMode;
   peptideBinderLength?: number;
@@ -384,7 +413,8 @@ export interface PredictionSubmitInput {
   projectName: string;
   proteinSequence: string;
   ligandSmiles: string;
-  workflow?: 'prediction' | 'peptide_design';
+  workflow?: 'prediction' | 'peptide_design' | 'virtual_screening';
+  virtualScreeningInput?: string;
   components?: InputComponent[];
   constraints?: PredictionConstraint[];
   properties?: PredictionProperties;

@@ -16,6 +16,8 @@ interface ComponentInputEditorProps {
   components: InputComponent[];
   onChange: (components: InputComponent[]) => void;
   proteinTemplates?: Record<string, ProteinTemplateUpload>;
+  allowProteinMsa?: boolean;
+  allowProteinTemplates?: boolean;
   customResidueLibrary?: CustomCcdMoleculeInput[];
   onCustomResidueLibraryChange?: (library: CustomCcdMoleculeInput[]) => void;
   onProteinTemplateChange?: (componentId: string, upload: ProteinTemplateUpload | null) => void;
@@ -23,6 +25,9 @@ interface ComponentInputEditorProps {
   selectedComponentId?: string | null;
   onSelectedComponentIdChange?: (id: string) => void;
   showQuickAdd?: boolean;
+  disabledComponentTypes?: MoleculeType[];
+  allowProteinCyclic?: boolean;
+  allowProteinModifications?: boolean;
   disabled?: boolean;
   compact?: boolean;
 }
@@ -496,6 +501,8 @@ export function ComponentInputEditor({
   components,
   onChange,
   proteinTemplates = {},
+  allowProteinMsa = true,
+  allowProteinTemplates = true,
   customResidueLibrary = [],
   onCustomResidueLibraryChange,
   onProteinTemplateChange,
@@ -503,6 +510,9 @@ export function ComponentInputEditor({
   selectedComponentId = null,
   onSelectedComponentIdChange,
   showQuickAdd = true,
+  disabledComponentTypes = [],
+  allowProteinCyclic = true,
+  allowProteinModifications = true,
   disabled = false,
   compact = false
 }: ComponentInputEditorProps) {
@@ -513,6 +523,7 @@ export function ComponentInputEditor({
   const [activeModificationId, setActiveModificationId] = useState<string | null>(null);
   const [numberDrafts, setNumberDrafts] = useState<Record<string, string>>({});
   const hasMountedSelectionEffectRef = useRef(false);
+  const disabledComponentTypeSet = new Set(disabledComponentTypes);
 
   useEffect(() => {
     if (!hasMountedSelectionEffectRef.current) {
@@ -550,6 +561,7 @@ export function ComponentInputEditor({
     onChange(
       components.map((comp) => {
         if (comp.id !== id) return comp;
+        if (patch.type && patch.type !== comp.type && disabledComponentTypeSet.has(patch.type)) return comp;
         const nextType = patch.type ?? comp.type;
         const base = { ...comp, ...patch };
         return {
@@ -571,7 +583,10 @@ export function ComponentInputEditor({
     onChange(components.filter((comp) => comp.id !== id));
   };
 
-  const addComponent = (type: MoleculeType) => onChange([...components, createInputComponent(type)]);
+  const addComponent = (type: MoleculeType) => {
+    if (disabledComponentTypeSet.has(type)) return;
+    onChange([...components, createInputComponent(type)]);
+  };
 
   const patchProteinModification = (componentId: string, modificationId: string, patch: Partial<ProteinModification>) => {
     const component = components.find((item) => item.id === componentId);
@@ -805,7 +820,7 @@ export function ComponentInputEditor({
                 key={type}
                 type="button"
                 className={`btn btn-ghost btn-compact component-add-kind type-${type}`}
-                disabled={disabled}
+                disabled={disabled || disabledComponentTypeSet.has(type)}
                 onClick={() => addComponent(type)}
                 title={`Add ${componentTypeLabel(type)}`}
               >
@@ -830,7 +845,8 @@ export function ComponentInputEditor({
             templateUpload && templateUpload.chainId ? templateUpload.chainSequences[templateUpload.chainId] || '' : '';
           const hasLigandJsmeViewer = isLigand && method === 'jsme';
           const proteinModifications = comp.modifications || [];
-          const hasProteinModifications = comp.type === 'protein' && proteinModifications.length > 0;
+          const hasProteinModifications =
+            allowProteinModifications && comp.type === 'protein' && proteinModifications.length > 0;
           const areModificationsCollapsed = Boolean(modificationsCollapsedById[comp.id]);
           const collapsedSummary =
             comp.type === 'ligand'
@@ -900,7 +916,7 @@ export function ComponentInputEditor({
                     }
                   >
                     {TYPE_OPTIONS.map((type) => (
-                      <option key={type} value={type}>
+                      <option key={type} value={type} disabled={disabledComponentTypeSet.has(type)}>
                         {componentTypeLabel(type)}
                       </option>
                     ))}
@@ -929,24 +945,28 @@ export function ComponentInputEditor({
 
                 {comp.type === 'protein' && (
                   <>
-                    <label className="switch-field switch-tight">
-                      <input
-                        type="checkbox"
-                        checked={comp.useMsa !== false}
-                        disabled={disabled}
-                        onChange={(e) => patchOne(comp.id, { useMsa: e.target.checked })}
-                      />
-                      <span>Use MSA</span>
-                    </label>
-                    <label className="switch-field switch-tight">
-                      <input
-                        type="checkbox"
-                        checked={Boolean(comp.cyclic)}
-                        disabled={disabled}
-                        onChange={(e) => patchOne(comp.id, { cyclic: e.target.checked })}
-                      />
-                      <span>Cyclic</span>
-                    </label>
+                    {allowProteinMsa && (
+                      <label className="switch-field switch-tight">
+                        <input
+                          type="checkbox"
+                          checked={comp.useMsa !== false}
+                          disabled={disabled}
+                          onChange={(e) => patchOne(comp.id, { useMsa: e.target.checked })}
+                        />
+                        <span>Use MSA</span>
+                      </label>
+                    )}
+                    {allowProteinCyclic && (
+                      <label className="switch-field switch-tight">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(comp.cyclic)}
+                          disabled={disabled}
+                          onChange={(e) => patchOne(comp.id, { cyclic: e.target.checked })}
+                        />
+                        <span>Cyclic</span>
+                      </label>
+                    )}
                   </>
                 )}
               </div>
@@ -955,6 +975,8 @@ export function ComponentInputEditor({
                 <>
                 <div className="component-content-split">
                   <div className="component-content-main">
+                    {allowProteinTemplates && (
+                    <>
                     <div className="field protein-template-upload">
                       <span>Protein Structure (optional)</span>
                       <input
@@ -962,7 +984,13 @@ export function ComponentInputEditor({
                         className="file-input-unified"
                         accept=".pdb,.cif,.mmcif"
                         disabled={disabled}
-                        onChange={(e) => void handleProteinTemplateUpload(comp.id, e.target.files?.[0] || null)}
+                        onChange={(event) => {
+                          const input = event.currentTarget;
+                          const file = input.files?.[0] || null;
+                          void handleProteinTemplateUpload(comp.id, file).finally(() => {
+                            input.value = '';
+                          });
+                        }}
                       />
                       {templateUpload && (
                         <div className="template-upload-meta">
@@ -1003,6 +1031,8 @@ export function ComponentInputEditor({
                         )}
                       </label>
                     )}
+                    </>
+                    )}
 
                     {!hasProteinModifications ? (
                       <label className="field">
@@ -1017,6 +1047,8 @@ export function ComponentInputEditor({
                       </label>
                     ) : null}
 
+                    {allowProteinModifications ? (
+                      <>
                     <ProteinSequenceModificationPreview
                       sequence={comp.sequence}
                       modifications={proteinModifications}
@@ -1340,9 +1372,11 @@ export function ComponentInputEditor({
                         </div>
                       )}
                     </div>
+                      </>
+                    ) : null}
                   </div>
                 </div>
-                {templateUpload && renderProteinTemplateViewer && (
+                {allowProteinTemplates && templateUpload && renderProteinTemplateViewer && (
                   <div className="field component-template-full">
                     {renderProteinTemplateViewer({ component: comp, upload: templateUpload })}
                   </div>

@@ -7,6 +7,7 @@ import type { CustomCcdMoleculeInput, InputComponent, PredictionConstraint, Proj
 import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
 import { selectedCustomResidueDefinitions } from './peptideCustomResidues';
 import { loadRDKitModule } from '../../utils/rdkit';
+import { parseVirtualScreeningInput, validateVirtualScreeningSmiles } from '../../utils/virtualScreening';
 import { firstBackboneSlotError, validateCustomResidueBackbone } from '../../utils/constraintAtomOptions';
 
 export type PredictionWorkspaceTab = 'results' | 'basics' | 'components' | 'constraints';
@@ -24,6 +25,7 @@ export interface PredictionSubmitDeps {
   project: Project;
   draft: PredictionDraftFields;
   isPeptideDesignWorkflow?: boolean;
+  isVirtualScreeningWorkflow?: boolean;
   workspaceTab: PredictionWorkspaceTab;
   proteinTemplates: Record<string, ProteinTemplateUpload>;
   customResidueLibrary?: CustomCcdMoleculeInput[];
@@ -254,6 +256,7 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
     project,
     draft,
     isPeptideDesignWorkflow = false,
+    isVirtualScreeningWorkflow = false,
     workspaceTab,
     proteinTemplates,
     submitInFlightRef,
@@ -292,13 +295,52 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
     saveProjectInputConfig
   } = deps;
 
-  const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, draft.backend);
+  const effectiveBackend = isVirtualScreeningWorkflow ? 'nesso' : draft.backend;
+  const normalizedConfig = normalizeConfigForBackend(draft.inputConfig, effectiveBackend);
   const submissionBaseConfigRaw = isPeptideDesignWorkflow
     ? normalizeProjectInputConfig({ ...normalizedConfig, options: normalizedConfig.options })
     : normalizedConfig;
   const submissionBaseConfig = submissionBaseConfigRaw;
-  const submissionConfig = buildPredictionSubmissionConfig(submissionBaseConfig, isPeptideDesignWorkflow);
-  const missingOrders = listIncompleteComponentOrders(normalizedConfig.components);
+  let submissionConfig = buildPredictionSubmissionConfig(submissionBaseConfig, isPeptideDesignWorkflow);
+  if (isVirtualScreeningWorkflow) {
+    const proteins = submissionConfig.components.filter((component) => component.type === 'protein');
+    const unsupported = submissionConfig.components.filter(
+      (component) => component.type !== 'protein' && component.type !== 'ligand'
+    );
+    if (unsupported.length > 0) {
+      setWorkspaceTab('components');
+      setError('Nesso-1 Virtual Screening supports protein and ligand components only; remove DNA/RNA components.');
+      return;
+    }
+    if (proteins.length === 0) {
+      setWorkspaceTab('components');
+      setError('Virtual Screening requires at least one target protein component.');
+      return;
+    }
+    if (proteins.some((component) => component.cyclic || (component.modifications || []).length > 0)) {
+      setWorkspaceTab('components');
+      setError('Nesso-1 does not support cyclic or modified protein components.');
+      return;
+    }
+    submissionConfig = {
+      ...submissionConfig,
+      components: submissionConfig.components.map((component) => component.type === 'protein'
+        ? { ...component, useMsa: false, cyclic: false, modifications: [] }
+        : component),
+      constraints: [],
+      properties: {
+        affinity: false,
+        target: null,
+        ligand: null,
+        binder: null
+      },
+      options: {
+        ...submissionConfig.options,
+        lowVram: false
+      }
+    };
+  }
+  const missingOrders = listIncompleteComponentOrders(submissionConfig.components);
   if (missingOrders.length > 0) {
     const maxShown = 3;
     const shown = missingOrders
@@ -316,6 +358,48 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
   if (validationError) {
     setError(validationError);
     return;
+  }
+  if (isVirtualScreeningWorkflow) {
+    const screeningInput = String(submissionConfig.options.virtualScreeningInput || '');
+    const parsedScreening = parseVirtualScreeningInput(screeningInput);
+    if (parsedScreening.errors.length > 0) {
+      setWorkspaceTab('components');
+      setError(parsedScreening.errors.slice(0, 3).join(' '));
+      return;
+    }
+    if (parsedScreening.compounds.length === 0) {
+      setWorkspaceTab('components');
+      setError('Add at least one compound SMILES before running.');
+      return;
+    }
+    if (parsedScreening.compounds.length > 200) {
+      setWorkspaceTab('components');
+      setError('Virtual Screening accepts at most 200 compounds per batch.');
+      return;
+    }
+    const screeningValidation = await validateVirtualScreeningSmiles(parsedScreening.compounds);
+    if (screeningValidation.invalid.length > 0) {
+      setWorkspaceTab('components');
+      setError(screeningValidation.invalid.slice(0, 3).map((item) => item.message).join(' '));
+      return;
+    }
+    const contextLigands = submissionConfig.components
+      .map((component, index) => ({ component, index }))
+      .filter(({ component }) => component.type === 'ligand' && component.inputMethod !== 'ccd')
+      .map(({ component, index }) => ({
+        id: component.id || `context-ligand-${index + 1}`,
+        name: `Context ligand ${index + 1}`,
+        smiles: component.sequence,
+        sourceIndex: index + 1
+      }));
+    if (contextLigands.length > 0) {
+      const contextValidation = await validateVirtualScreeningSmiles(contextLigands);
+      if (contextValidation.invalid.length > 0) {
+        setWorkspaceTab('components');
+        setError(`Invalid context ligand: ${contextValidation.invalid[0].message}`);
+        return;
+      }
+    }
   }
 
   const constraintChainError = findInvalidConstraintChainReference(submissionConfig, activeComponents);
@@ -352,25 +436,27 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
 
   try {
     const { proteinSequence, ligandSmiles } = extractPrimaryProteinAndLigand(submissionConfig);
-    const hasMsa = computeUseMsaFlag(activeComponents, draft.use_msa);
+    const hasMsa = isVirtualScreeningWorkflow ? false : computeUseMsaFlag(activeComponents, draft.use_msa);
     const persistenceWarnings: string[] = [];
     const peptideCustomCcdMolecules = isPeptideDesignWorkflow
       ? selectedCustomResidueDefinitions(submissionConfig.options)
       : [];
+    const persistedInputConfig = isVirtualScreeningWorkflow ? submissionConfig : submissionBaseConfig;
+    const taskProteinTemplates = isVirtualScreeningWorkflow ? {} : proteinTemplates;
 
-    saveProjectInputConfig(project.id, submissionBaseConfig);
+    saveProjectInputConfig(project.id, persistedInputConfig);
     const nextDraft: PredictionDraftFields = {
       taskName: draft.taskName.trim(),
       taskSummary: draft.taskSummary.trim(),
-      backend: draft.backend,
+      backend: effectiveBackend,
       use_msa: hasMsa,
       color_mode: draft.color_mode === 'alphafold' ? 'alphafold' : 'default',
-      inputConfig: submissionBaseConfig
+      inputConfig: persistedInputConfig
     };
     setDraft(nextDraft);
     setSavedDraftFingerprint(createDraftFingerprint(nextDraft));
     setSavedComputationFingerprint(createComputationFingerprint(nextDraft));
-    setSavedTemplateFingerprint(createProteinTemplatesFingerprint(proteinTemplates));
+    setSavedTemplateFingerprint(createProteinTemplatesFingerprint(taskProteinTemplates));
     setRunMenuOpen(false);
 
     try {
@@ -394,20 +480,20 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
     };
     const snapshotComponents = addTemplatesToTaskSnapshotComponents(
       submissionConfigWithTaskOptions.components,
-      proteinTemplates
+      taskProteinTemplates
     );
     const draftTaskRow = await persistDraftTaskSnapshot(submissionConfigWithTaskOptions, {
       statusText: 'Draft snapshot prepared for run',
       reuseTaskRowId: resolveEditableDraftTaskRowId(),
       snapshotComponents
     });
-    rememberTemplatesForTaskRow(draftTaskRow.id, proteinTemplates);
+    rememberTemplatesForTaskRow(draftTaskRow.id, taskProteinTemplates);
 
     const activeAssignments = assignChainIdsForComponents(activeComponents);
     const templateUploads: NonNullable<Parameters<typeof submitPrediction>[0]['templateUploads']> = [];
     activeComponents.forEach((comp, index) => {
       if (comp.type !== 'protein') return;
-      const template = proteinTemplates[comp.id];
+      const template = taskProteinTemplates[comp.id];
       if (!template) return;
       const targetChainIds = activeAssignments[index] || [];
       const suffix = template.format === 'pdb' ? '.pdb' : '.cif';
@@ -425,18 +511,25 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
       projectName: project.name,
       proteinSequence,
       ligandSmiles,
-      workflow: isPeptideDesignWorkflow ? 'peptide_design' : 'prediction',
+      workflow: isPeptideDesignWorkflow
+        ? 'peptide_design'
+        : isVirtualScreeningWorkflow
+          ? 'virtual_screening'
+          : 'prediction',
+      virtualScreeningInput: isVirtualScreeningWorkflow
+        ? submissionConfig.options.virtualScreeningInput
+        : undefined,
       components: activeComponents,
       constraints: submissionConfig.constraints,
       properties: submissionConfig.properties,
       peptideDesignOptions: isPeptideDesignWorkflow ? submissionConfig.options : undefined,
       peptideDesignTargetChainId: isPeptideDesignWorkflow ? submissionConfig.properties.target : null,
       seed: submissionConfig.options.seed,
-      backend: draft.backend,
+      backend: effectiveBackend,
       useMsa: hasMsa,
       templateUploads,
       customCcdMolecules: peptideCustomCcdMolecules.length > 0 ? peptideCustomCcdMolecules : undefined,
-      lowVram: submissionConfig.options.lowVram === true
+      lowVram: !isVirtualScreeningWorkflow && submissionConfig.options.lowVram === true
     });
 
     const queuedAt = new Date().toISOString();
@@ -462,7 +555,7 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
       task_state: 'QUEUED',
       status_text: 'Task submitted and waiting in queue',
       error_text: '',
-      backend: draft.backend,
+      backend: effectiveBackend,
       seed: submissionConfig.options.seed ?? null,
       protein_sequence: proteinSequence,
       ligand_smiles: ligandSmiles,

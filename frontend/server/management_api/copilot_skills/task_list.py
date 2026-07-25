@@ -86,7 +86,7 @@ TASK_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
                         "backend": {
                             "type": "string",
                             "enum": ["boltz", "alphafold3", "protenix"],
-                            "description": "Requested target backend. Map AlphaFold/AF3 to alphafold3.",
+                            "description": "Requested structure-prediction backend. Map AlphaFold/AF3 to alphafold3.",
                         },
                         "seed": {"type": "integer", "minimum": 0, "maximum": 2147483647},
                         "componentsAdd": {
@@ -222,7 +222,7 @@ TASK_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "search": {"type": "string", "description": "Free text for the task search box."},
                 "stateFilter": {"type": "string", "enum": ["all", "DRAFT", "QUEUED", "RUNNING", "SUCCESS", "FAILURE", "REVOKED"]},
-                "workflowFilter": {"type": "string", "enum": ["all", "prediction", "affinity", "peptide_design", "lead_optimization"]},
+                "workflowFilter": {"type": "string", "enum": ["all", "prediction", "virtual_screening", "affinity", "peptide_design", "lead_optimization"]},
                 "backendFilter": {"type": "string", "description": "Backend token from context rows, or all."},
                 "sortKey": {"type": "string", "enum": ["submitted", "plddt", "ipsae", "iptm", "pae", "backend", "seed", "mode"]},
                 "sortDirection": {"type": "string", "enum": ["asc", "desc"]},

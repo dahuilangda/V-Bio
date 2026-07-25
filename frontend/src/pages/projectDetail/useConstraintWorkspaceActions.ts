@@ -32,6 +32,7 @@ export function useConstraintWorkspaceActions<TDraft extends DraftLike>(params: 
   setPickedResidue: Dispatch<SetStateAction<any>>;
   canEdit: boolean;
   ligandChainOptions: Array<{ id: string }>;
+  constraintsSupported: boolean;
   isBondOnlyBackend: boolean;
 }) {
   const {
@@ -56,6 +57,7 @@ export function useConstraintWorkspaceActions<TDraft extends DraftLike>(params: 
     setPickedResidue,
     canEdit,
     ligandChainOptions,
+    constraintsSupported,
     isBondOnlyBackend,
   } = params;
 
@@ -130,6 +132,7 @@ export function useConstraintWorkspaceActions<TDraft extends DraftLike>(params: 
       canEdit,
       draft,
       ligandChainOptions,
+      constraintsSupported,
       isBondOnlyBackend,
       constraintPickSlotRef,
       updateConstraintPickSlot,

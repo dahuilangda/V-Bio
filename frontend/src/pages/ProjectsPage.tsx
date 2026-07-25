@@ -15,6 +15,7 @@ import {
   Plus,
   RefreshCcw,
   Search,
+  ScanSearch,
   Share2,
   SlidersHorizontal,
   Square,
@@ -32,6 +33,7 @@ import type { CopilotPlanAction, Project, TaskState } from '../types/models';
 
 const workflowIconMap: Record<WorkflowKey, JSX.Element> = {
   prediction: <Dna size={16} />,
+  virtual_screening: <ScanSearch size={16} />,
   peptide_design: <Atom size={16} />,
   lead_optimization: <FlaskConical size={16} />,
   affinity: <Beaker size={16} />
@@ -48,7 +50,7 @@ const UPDATED_WITHIN_DAYS_OPTIONS: UpdatedWithinDaysOption[] = ['all', '1', '7',
 const MIN_TASK_COUNT_OPTIONS: MinTaskCountOption[] = ['all', '1', '3', '5', '10'];
 const PROJECTS_PAGE_SIZE_OPTIONS = [8, 12, 20, 50];
 const PROJECT_STATE_FILTER_OPTIONS = ['all', 'DRAFT', 'QUEUED', 'RUNNING', 'SUCCESS', 'FAILURE', 'REVOKED'] as const;
-const PROJECT_TYPE_FILTER_OPTIONS = ['all', 'prediction', 'affinity', 'peptide_design', 'lead_optimization'] as const;
+const PROJECT_TYPE_FILTER_OPTIONS = ['all', 'prediction', 'virtual_screening', 'affinity', 'peptide_design', 'lead_optimization'] as const;
 const PROJECT_ACTIVITY_FILTER_OPTIONS = ['all', 'active', 'completed', 'failed', 'no_tasks'] as const;
 
 function readCopilotText(value: unknown): string {
@@ -80,6 +82,7 @@ function backendLabel(value: string): string {
   if (value === 'alphafold3') return 'AlphaFold3';
   if (value === 'protenix') return 'Protenix';
   if (value === 'boltz') return 'Boltz-2';
+  if (value === 'nesso') return 'Nesso-1';
   return value ? value.toUpperCase() : 'Unknown';
 }
 
@@ -498,7 +501,7 @@ export function ProjectsPage() {
         name,
         summary,
         taskType: workflow,
-        backend: 'boltz',
+        backend: workflow === 'virtual_screening' ? 'nesso' : 'boltz',
         useMsa: false,
         proteinSequence: '',
         ligandSmiles: ''

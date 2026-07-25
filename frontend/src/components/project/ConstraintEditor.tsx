@@ -150,10 +150,7 @@ export function ConstraintEditor({
   const ligandChainIds = chainInfos.filter((item) => item.type === 'ligand').map((item) => item.id);
   const selectedConstraintIdSet = useMemo(() => new Set(selectedConstraintIds), [selectedConstraintIds]);
   const [collapsedById, setCollapsedById] = useState<Record<string, boolean>>({});
-  const allowedTypes = useMemo(
-    () => (allowedConstraintTypes.length > 0 ? allowedConstraintTypes : ALL_CONSTRAINT_TYPES),
-    [allowedConstraintTypes]
-  );
+  const allowedTypes = useMemo(() => allowedConstraintTypes, [allowedConstraintTypes]);
   const allowedTypeSet = useMemo(() => new Set(allowedTypes), [allowedTypes]);
   const collapsedCount = useMemo(() => constraints.filter((item) => collapsedById[item.id]).length, [constraints, collapsedById]);
   const allCollapsed = constraints.length > 0 && collapsedCount === constraints.length;
@@ -418,6 +415,9 @@ export function ConstraintEditor({
       </div>
 
       <div className="constraint-actions">
+        {allowedTypes.length === 0 && (
+          <span className="muted small">The selected backend does not support prediction constraints.</span>
+        )}
         {allowedTypeSet.has('contact') && (
           <button type="button" className="btn btn-ghost" onClick={() => addConstraint('contact')} disabled={disabled}>
             <Plus size={14} />

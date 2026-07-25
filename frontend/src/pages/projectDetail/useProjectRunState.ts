@@ -6,10 +6,13 @@ interface UseProjectRunStateInput {
   workspaceTab: WorkspaceTab;
   isPredictionWorkflow: boolean;
   isPeptideDesignWorkflow: boolean;
+  isVirtualScreeningWorkflow: boolean;
   isAffinityWorkflow: boolean;
   isLeadOptimizationWorkflow: boolean;
   hasIncompleteComponents: boolean;
   componentCompletion: { filledCount: number; total: number };
+  virtualScreeningInput: string;
+  virtualScreeningComponents: InputComponent[];
   submitting: boolean;
   saving: boolean;
   runRedirectTaskId: string | null;
@@ -45,10 +48,13 @@ export function useProjectRunState(input: UseProjectRunStateInput): UseProjectRu
     workspaceTab: input.workspaceTab,
     isPredictionWorkflow: input.isPredictionWorkflow,
     isPeptideDesignWorkflow: input.isPeptideDesignWorkflow,
+    isVirtualScreeningWorkflow: input.isVirtualScreeningWorkflow,
     isAffinityWorkflow: input.isAffinityWorkflow,
     isLeadOptimizationWorkflow: input.isLeadOptimizationWorkflow,
     hasIncompleteComponents: input.hasIncompleteComponents,
     componentCompletion: input.componentCompletion,
+    virtualScreeningInput: input.virtualScreeningInput,
+    virtualScreeningComponents: input.virtualScreeningComponents,
     submitting: input.submitting,
     saving: input.saving,
     isRunRedirecting: Boolean(input.runRedirectTaskId),

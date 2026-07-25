@@ -23,6 +23,7 @@ interface UseProjectSidebarActionsInput {
   constraintSelectionAnchorRef: { current: string | null };
   activeChainInfos: Array<{ id: string }>;
   ligandChainOptions: Array<{ id: string }>;
+  constraintsSupported: boolean;
   isBondOnlyBackend: boolean;
   canEnableAffinityFromWorkspace: boolean;
   workspaceTargetOptions: Array<{ componentId: string; chainId: string }>;
@@ -51,6 +52,7 @@ export function useProjectSidebarActions({
   constraintSelectionAnchorRef,
   activeChainInfos,
   ligandChainOptions,
+  constraintsSupported,
   isBondOnlyBackend,
   canEnableAffinityFromWorkspace,
   workspaceTargetOptions,
@@ -69,6 +71,7 @@ export function useProjectSidebarActions({
   };
 
   const addConstraintFromSidebar = () => {
+    if (!constraintsSupported) return;
     addConstraintFromSidebarAction({
       draft,
       buildDefaultConstraint: (preferredType) =>
@@ -78,6 +81,7 @@ export function useProjectSidebarActions({
           ligandChainOptions,
           isBondOnlyBackend
         }),
+      constraintsSupported,
       isBondOnlyBackend,
       setWorkspaceTab,
       setSidebarConstraintsOpen,

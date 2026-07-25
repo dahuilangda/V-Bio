@@ -55,19 +55,37 @@ def _parse_prediction_properties(raw: Any) -> Dict[str, Any]:
     if not entries:
         return default
 
-    affinity_entry: Optional[Dict[str, Any]] = None
+    affinity_requested = False
+    binder: Optional[str] = None
+    target: Optional[str] = None
+    ligand: Optional[str] = None
     for entry in entries:
         nested = entry.get("affinity")
         if isinstance(nested, dict):
-            affinity_entry = nested
-            break
-    if affinity_entry is None:
-        return default
+            affinity_requested = True
+            if binder is None:
+                binder = str(nested.get("binder") or "").strip() or None
+            if target is None:
+                target = str(nested.get("target") or "").strip() or None
+            if ligand is None:
+                ligand = str(nested.get("ligand") or "").strip() or None
+        elif nested is True:
+            affinity_requested = True
 
-    binder = str(affinity_entry.get("binder") or "").strip() or None
-    target = str(affinity_entry.get("target") or "").strip() or None
-    ligand = str(affinity_entry.get("ligand") or "").strip() or binder
-    affinity_flag = bool(binder)
+        # V-Bio's YAML builder emits binder/ligand/target beside
+        # ``affinity: true``. Nesso inputs may also keep target metadata in a
+        # separate properties entry, so collect the first non-empty value
+        # across the complete list instead of returning at the nested entry.
+        if binder is None:
+            binder = str(entry.get("binder") or "").strip() or None
+        if target is None:
+            target = str(entry.get("target") or "").strip() or None
+        if ligand is None:
+            ligand = str(entry.get("ligand") or "").strip() or None
+
+    binder = binder or ligand
+    ligand = ligand or binder
+    affinity_flag = bool(affinity_requested and binder)
 
     return {
         "affinity": affinity_flag,
@@ -268,6 +286,33 @@ def build_prediction_task_snapshot_from_yaml(request_obj: Any, logger: Any) -> D
 
     properties = _parse_prediction_properties(yaml_data.get("properties"))
     constraints = _parse_prediction_constraints(yaml_data.get("constraints"))
+    screening = yaml_data.get("virtual_screening")
+    if isinstance(screening, dict) and isinstance(screening.get("compounds"), list):
+        screening_records: List[Dict[str, str]] = []
+        screening_lines: List[str] = []
+        for index, raw_compound in enumerate(screening["compounds"]):
+            if not isinstance(raw_compound, dict):
+                continue
+            smiles = str(raw_compound.get("smiles") or "").strip()
+            if not smiles:
+                continue
+            compound_id = str(raw_compound.get("id") or "").strip()
+            name = str(raw_compound.get("name") or compound_id or f"Compound {index + 1}").strip()
+            screening_records.append({
+                "id": compound_id or f"compound-{index + 1}",
+                "name": name,
+                "smiles": smiles,
+            })
+            screening_lines.extend([f">{name}", smiles])
+        if screening_records:
+            properties[TASK_INPUT_OPTIONS_KEY] = {
+                "virtualScreeningInput": "\n".join(screening_lines),
+                "virtualScreening": {
+                    "name": str(screening.get("name") or "Virtual screening").strip(),
+                    "compoundCount": len(screening_records),
+                    "compounds": screening_records,
+                },
+            }
 
     return {
         "protein_sequence": first_protein_sequence,
@@ -361,7 +406,10 @@ def build_affinity_task_snapshot(request_obj: Any, upstream_path: str) -> Dict[s
 def read_seed(request_obj: Any, backend: str = "", default_protenix_predict_seed: int = 42) -> Optional[int]:
     seed_raw = (request_obj.form.get("seed") or "").strip()
     if not seed_raw:
-        if str(backend).strip().lower() == "protenix":
+        normalized_backend = str(backend).strip().lower()
+        if normalized_backend in {"nesso1", "nesso-1"}:
+            normalized_backend = "nesso"
+        if normalized_backend in {"protenix", "nesso"}:
             return int(default_protenix_predict_seed)
         return None
     try:

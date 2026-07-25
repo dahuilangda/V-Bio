@@ -4,6 +4,7 @@ import { ProjectResultsSection, type ProjectResultsSectionProps } from '../../co
 import { AffinityWorkflowSection, type AffinityWorkflowSectionProps } from './AffinityWorkflowSection';
 import { LeadOptimizationWorkflowSection, type LeadOptimizationWorkflowSectionProps } from './LeadOptimizationWorkflowSection';
 import { PredictionWorkflowSection, type PredictionWorkflowSectionProps } from './PredictionWorkflowSection';
+import { VirtualScreeningWorkflowSection, type VirtualScreeningWorkflowSectionProps } from './VirtualScreeningWorkflowSection';
 import { WorkflowRuntimeSettingsSection, type WorkflowRuntimeSettingsSectionProps } from './WorkflowRuntimeSettingsSection';
 import type { WorkspaceTab } from './workspaceTypes';
 
@@ -20,9 +21,11 @@ interface ProjectWorkspaceContentProps {
   affinitySectionProps: Omit<AffinityWorkflowSectionProps, 'visible'>;
   leadOptimizationSectionProps: Omit<LeadOptimizationWorkflowSectionProps, 'visible'>;
   isPredictionWorkflow: boolean;
+  isVirtualScreeningWorkflow: boolean;
   isAffinityWorkflow: boolean;
   isLeadOptimizationWorkflow: boolean;
   predictionSectionProps: Omit<PredictionWorkflowSectionProps, 'visible'>;
+  virtualScreeningSectionProps: Omit<VirtualScreeningWorkflowSectionProps, 'visible'>;
   workflowDescription: string;
   runtimeSettingsProps: Omit<WorkflowRuntimeSettingsSectionProps, 'visible'>;
 }
@@ -40,21 +43,27 @@ export function ProjectWorkspaceContent({
   affinitySectionProps,
   leadOptimizationSectionProps,
   isPredictionWorkflow,
+  isVirtualScreeningWorkflow,
   isAffinityWorkflow,
   isLeadOptimizationWorkflow,
   predictionSectionProps,
+  virtualScreeningSectionProps,
   workflowDescription,
   runtimeSettingsProps
 }: ProjectWorkspaceContentProps) {
   const showLeadOptWorkspace = isLeadOptimizationWorkflow && (workspaceTab === 'components' || workspaceTab === 'results');
   const showNativeResults = workspaceTab === 'results' && !isLeadOptimizationWorkflow;
   const showFlatPredictionWorkspace =
-    isPredictionWorkflow && (workspaceTab === 'components' || workspaceTab === 'constraints');
+    isPredictionWorkflow && !isVirtualScreeningWorkflow &&
+    (workspaceTab === 'components' || workspaceTab === 'constraints');
   const showFlatAffinityWorkspace = isAffinityWorkflow && workspaceTab === 'components';
-  const showFlatWorkspace = showFlatPredictionWorkspace || showFlatAffinityWorkspace;
+  const showFlatVirtualScreeningWorkspace = isVirtualScreeningWorkflow && workspaceTab === 'components';
+  const showFlatWorkspace = showFlatPredictionWorkspace || showFlatVirtualScreeningWorkspace || showFlatAffinityWorkspace;
   const showRuntimeSettingsInComponents =
-    workspaceTab === 'components' && !isLeadOptimizationWorkflow && !isAffinityWorkflow;
-  const showPredictionSection = isPredictionWorkflow && (workspaceTab === 'components' || workspaceTab === 'constraints');
+    workspaceTab === 'components' && !isLeadOptimizationWorkflow && !isAffinityWorkflow && !isVirtualScreeningWorkflow;
+  const showPredictionSection =
+    isPredictionWorkflow && !isVirtualScreeningWorkflow &&
+    (workspaceTab === 'components' || workspaceTab === 'constraints');
   const showAffinitySection = workspaceTab === 'components' && isAffinityWorkflow;
 
   if (showLeadOptWorkspace) {
@@ -83,6 +92,7 @@ export function ProjectWorkspaceContent({
       {showFlatWorkspace && (
         <form className="form-grid" onSubmit={onSaveDraft}>
           {showFlatPredictionWorkspace && <PredictionWorkflowSection visible {...predictionSectionProps} />}
+          {showFlatVirtualScreeningWorkspace && <VirtualScreeningWorkflowSection visible {...virtualScreeningSectionProps} />}
           {showFlatAffinityWorkspace && <AffinityWorkflowSection visible {...affinitySectionProps} />}
           {showFlatPredictionWorkspace && showRuntimeSettingsInComponents ? (
             <WorkflowRuntimeSettingsSection visible {...runtimeSettingsProps} />
@@ -109,6 +119,8 @@ export function ProjectWorkspaceContent({
 
             {showPredictionSection ? (
               <PredictionWorkflowSection visible {...predictionSectionProps} />
+            ) : isVirtualScreeningWorkflow && workspaceTab === 'components' ? (
+              <VirtualScreeningWorkflowSection visible {...virtualScreeningSectionProps} />
             ) : isAffinityWorkflow || isLeadOptimizationWorkflow ? null : (
               <div className="workflow-note">{workflowDescription}</div>
             )}

@@ -1992,6 +1992,42 @@ export async function parseResultBundle(blob: Blob, options?: ParseResultBundleO
   const names = Object.keys(zip.files).filter((name) => !zip.files[name]?.dir);
   const isAf3 = names.some((name) => name.toLowerCase().includes('af3/output/'));
   const isProtenix = names.some((name) => name.toLowerCase().includes('protenix/output/'));
+  const isNesso = names.some((name) => name.toLowerCase() === 'nesso/manifest.json');
+  if (isNesso) {
+    if (preferredStructureName) {
+      throw new Error('Nesso results do not contain a structure file.');
+    }
+    const affinityCandidates = names
+      .filter((name) => {
+        const lower = name.toLowerCase();
+        return lower.endsWith('/affinity.json') && lower.startsWith('nesso/');
+      })
+      .sort((a, b) => {
+        const aCanonical = a.toLowerCase() === 'nesso/affinity.json' ? 0 : 1;
+        const bCanonical = b.toLowerCase() === 'nesso/affinity.json' ? 0 : 1;
+        return aCanonical - bCanonical || a.length - b.length;
+      });
+    const screening = await readZipJson(zip, 'nesso/screening.json');
+    const bestAffinity = await readZipJson(zip, affinityCandidates[0] || null);
+    const affinity = screening || bestAffinity;
+    if (!affinity) return null;
+    const manifest = await readZipJson(zip, 'nesso/manifest.json');
+    const confidence: Record<string, unknown> = {
+      backend: 'nesso',
+      model: 'Nesso-1',
+      structure_available: false,
+      ...(manifest && typeof manifest.seed === 'number' ? { seed: manifest.seed } : {}),
+      ...(manifest && manifest.ligand_chain_id ? { ligand_chain_id: manifest.ligand_chain_id } : {}),
+      ...(manifest && Array.isArray(manifest.target_chain_ids) ? { target_chain_ids: manifest.target_chain_ids } : {})
+    };
+    return {
+      structureText: '',
+      structureFormat: 'cif',
+      structureName: '',
+      confidence,
+      affinity
+    };
+  }
   const preferredStructureFile = findStructureFileByName(names, preferredStructureName);
   if (preferredStructureName && !preferredStructureFile) {
     throw new Error(`Requested structure file was not found in result archive: ${preferredStructureName}`);

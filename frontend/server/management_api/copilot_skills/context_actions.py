@@ -288,7 +288,13 @@ def _context_action_is_allowed(
         return False
     if context_type == "project_list":
         if action_id.startswith("projects:workflow_"):
-            return str(payload.get("workflowFilter") or "") in {"prediction", "affinity", "peptide_design", "lead_optimization"}
+            return str(payload.get("workflowFilter") or "") in {
+                "prediction",
+                "virtual_screening",
+                "affinity",
+                "peptide_design",
+                "lead_optimization",
+            }
         if action_id == "projects:backend_boltz" and str(payload.get("backendFilter") or "").strip().lower() != "boltz":
             return False
     return True

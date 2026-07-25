@@ -531,13 +531,40 @@ class ResultArchiveService:
             lower_names = [name.lower() for name in names]
             is_af3 = any('af3/output/' in name for name in lower_names)
             is_protenix = any('protenix/output/' in name for name in lower_names)
+            is_nesso = 'nesso/manifest.json' in lower_names
             preferred_structure_token = self._normalize_structure_name_token(preferred_structure_name or '')
             preferred_structure = self._find_structure_file_by_name(names, preferred_structure_name)
             if preferred_structure_token and not preferred_structure:
                 raise RuntimeError(f"Requested structure file was not found in result archive: {preferred_structure_name}")
 
             include: list[str] = []
-            if is_af3:
+            if is_nesso:
+                manifest = next(
+                    (name for name in names if name.lower() == 'nesso/manifest.json'),
+                    None,
+                )
+                if manifest:
+                    include.append(manifest)
+                screening = next(
+                    (name for name in names if name.lower() == 'nesso/screening.json'),
+                    None,
+                )
+                if screening:
+                    include.append(screening)
+                canonical_affinity = next(
+                    (name for name in names if name.lower() == 'nesso/affinity.json'),
+                    None,
+                )
+                if canonical_affinity:
+                    include.append(canonical_affinity)
+                else:
+                    affinity_candidates = [
+                        name for name in names
+                        if name.lower().endswith('/affinity.json')
+                    ]
+                    if affinity_candidates:
+                        include.append(sorted(affinity_candidates, key=lambda item: (len(item), item))[0])
+            elif is_af3:
                 structure = preferred_structure if preferred_structure_token else self._choose_best_af3_structure_file(names)
                 if structure:
                     include.append(structure)
@@ -642,7 +669,7 @@ class ResultArchiveService:
 
     def build_or_get_view_archive(self, source_zip_path: str, preferred_structure_name: str | None = None) -> str:
         src_stat = os.stat(source_zip_path)
-        cache_schema_version = 'view-v10-preferred-structure'
+        cache_schema_version = 'view-v12-nesso-screening'
         preferred_structure_token = self._normalize_structure_name_token(preferred_structure_name or '')
         cache_seed = f'{cache_schema_version}|{source_zip_path}|{int(src_stat.st_mtime_ns)}|{src_stat.st_size}|{preferred_structure_token}'
         cache_key = hashlib.sha256(cache_seed.encode('utf-8')).hexdigest()[:24]

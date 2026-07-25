@@ -54,6 +54,7 @@ Targets:
   affinity    affinity GPU worker
   alphafold3  alphafold3 GPU worker
   protenix    protenix GPU worker
+  nesso       Nesso-1 GPU worker
   pocketxmol  pocketxmol GPU worker
 
 Options:
@@ -188,7 +189,7 @@ run_logs() {
   compose_cmd "${compose_file}" "${env_file}" "${args[@]}" "$@"
 }
 
-GPU_PROFILES=(boltz2 boltz2score affinity alphafold3 protenix pocketxmol)
+GPU_PROFILES=(boltz2 boltz2score affinity alphafold3 protenix nesso pocketxmol)
 
 gpu_profile_args() {
   local profiles=("$@")
@@ -207,6 +208,7 @@ gpu_service_name() {
     affinity) echo "gpu-worker-affinity" ;;
     alphafold3) echo "gpu-worker-alphafold3" ;;
     protenix) echo "gpu-worker-protenix" ;;
+    nesso) echo "gpu-worker-nesso" ;;
     pocketxmol) echo "gpu-worker-pocketxmol" ;;
     *) return 1 ;;
   esac
@@ -231,21 +233,23 @@ handle_gpu_caps() {
   local profile_args=()
   while IFS= read -r -d '' item; do profile_args+=("${item}"); done < <(gpu_profile_args "${profiles[@]}")
   local services=()
+  local start_args=()
   local profile
   for profile in "${profiles[@]}"; do
     services+=("$(gpu_service_name "${profile}")")
   done
+  while IFS= read -r -d '' item; do start_args+=("${item}"); done < <(up_args)
 
   case "${ACTION}" in
     start)
-      run_up "${GPU_CAPS_COMPOSE}" "${GPU_CAPS_ENV}" "${profile_args[@]}" "${services[@]}"
+      compose_cmd "${GPU_CAPS_COMPOSE}" "${GPU_CAPS_ENV}" "${profile_args[@]}" "${start_args[@]}" "${services[@]}"
       ;;
     stop)
-      run_stop "${GPU_CAPS_COMPOSE}" "${GPU_CAPS_ENV}" "${profile_args[@]}" "${services[@]}"
+      compose_cmd "${GPU_CAPS_COMPOSE}" "${GPU_CAPS_ENV}" "${profile_args[@]}" stop "${services[@]}"
       ;;
     restart)
       if [[ "${BUILD}" == "1" ]]; then
-        run_up "${GPU_CAPS_COMPOSE}" "${GPU_CAPS_ENV}" "${profile_args[@]}" "${services[@]}"
+        compose_cmd "${GPU_CAPS_COMPOSE}" "${GPU_CAPS_ENV}" "${profile_args[@]}" "${start_args[@]}" "${services[@]}"
       else
         compose_cmd "${GPU_CAPS_COMPOSE}" "${GPU_CAPS_ENV}" "${profile_args[@]}" restart "${services[@]}"
       fi
@@ -298,7 +302,7 @@ for target in "${EXPANDED_TARGETS[@]}"; do
       if ! has_stack_files "${CPU_COMPOSE}" "${CPU_ENV}"; then warn_missing_stack "${target}" "${CPU_COMPOSE}" "${CPU_ENV}"; is_explicit_target "${target}" && exit 1 || continue; fi
       handle_compose "${CPU_COMPOSE}" "${CPU_ENV}" cpu-worker
       ;;
-    boltz2|boltz2score|affinity|alphafold3|protenix|pocketxmol)
+    boltz2|boltz2score|affinity|alphafold3|protenix|nesso|pocketxmol)
       if ! has_stack_files "${GPU_CAPS_COMPOSE}" "${GPU_CAPS_ENV}"; then warn_missing_stack "${target}" "${GPU_CAPS_COMPOSE}" "${GPU_CAPS_ENV}"; is_explicit_target "${target}" && exit 1 || continue; fi
       handle_gpu_caps "${target}"
       ;;

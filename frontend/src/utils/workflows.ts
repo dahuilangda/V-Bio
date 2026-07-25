@@ -1,5 +1,6 @@
 export type WorkflowKey =
   | 'prediction'
+  | 'virtual_screening'
   | 'peptide_design'
   | 'lead_optimization'
   | 'affinity';
@@ -20,8 +21,17 @@ export const WORKFLOWS: WorkflowDefinition[] = [
     taskType: 'prediction',
     title: 'Structure Prediction',
     shortTitle: 'Prediction',
-    description: 'Protein-ligand structure prediction with Boltz-2 / AlphaFold3.',
+    description: 'Protein-ligand structure prediction with Boltz-2 / AlphaFold3 / Protenix.',
     runLabel: 'Run Prediction',
+    supportsSequenceInputs: true
+  },
+  {
+    key: 'virtual_screening',
+    taskType: 'virtual_screening',
+    title: 'Virtual Screening',
+    shortTitle: 'Screening',
+    description: 'Rank a batch of SMILES against one target with Nesso-1 affinity inference.',
+    runLabel: 'Run Virtual Screen',
     supportsSequenceInputs: true
   },
   {
@@ -55,6 +65,11 @@ export const WORKFLOWS: WorkflowDefinition[] = [
 
 const taskTypeAlias: Record<string, WorkflowKey> = {
   prediction: 'prediction',
+  virtual_screening: 'virtual_screening',
+  virtualscreening: 'virtual_screening',
+  'virtual screening': 'virtual_screening',
+  screening: 'virtual_screening',
+  vs: 'virtual_screening',
   structure_prediction: 'prediction',
   structureprediction: 'prediction',
   'boltz-2 prediction': 'prediction',
@@ -94,7 +109,7 @@ export function normalizeWorkflowKey(taskTypeRaw: string | null | undefined): Wo
 
 export function isPredictionLikeWorkflowKey(taskTypeRaw: string | null | undefined): boolean {
   const key = normalizeWorkflowKey(taskTypeRaw);
-  return key === 'prediction' || key === 'peptide_design';
+  return key === 'prediction' || key === 'peptide_design' || key === 'virtual_screening';
 }
 
 export function getWorkflowDefinition(taskTypeRaw: string | null | undefined): WorkflowDefinition {

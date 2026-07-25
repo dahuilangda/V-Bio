@@ -2,7 +2,9 @@
 @import './project-detail.css';
 @import './lead-optimization.css';
 @import './project-workspaces.css';
+@import './virtual-screening.css';
 @import './shares.css';
+@import './admin-monitor.css';
 
 :root {
   --bg: #f4f7f4;

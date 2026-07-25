@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, Optional
 
 import yaml
 from flask import jsonify, request
+from backend.runtime.nesso_backend import normalize_nesso_screening_input_yaml
 
 
 def _parse_prediction_properties(raw_value: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -244,9 +245,47 @@ def register_prediction_routes(
             logger.info('model parameter received: %s for client %s.', model_name, request.remote_addr)
 
         backend = str(request.form.get('backend', 'boltz')).strip().lower()
-        if backend not in ['boltz', 'alphafold3', 'protenix']:
-            return jsonify({'error': f"Invalid backend '{backend}'. Must be one of: boltz, alphafold3, protenix."}), 400
+        if backend in {'nesso1', 'nesso-1'}:
+            backend = 'nesso'
+        if backend not in ['boltz', 'alphafold3', 'protenix', 'nesso']:
+            return jsonify({'error': f"Invalid backend '{backend}'. Must be one of: boltz, alphafold3, protenix, nesso."}), 400
         logger.info('backend parameter received: %s for client %s.', backend, request.remote_addr)
+
+        requested_workflow = str(request.form.get('workflow', 'prediction')).strip().lower()
+        if requested_workflow in {'peptide', 'peptide_designer', 'designer'}:
+            requested_workflow = 'peptide_design'
+        elif requested_workflow in {'virtual screening', 'virtual-screening', 'screening', 'vs'}:
+            requested_workflow = 'virtual_screening'
+        if requested_workflow not in {'prediction', 'peptide_design', 'virtual_screening'}:
+            return jsonify({
+                'error': (
+                    f"Invalid workflow '{requested_workflow}'. Must be one of: "
+                    'prediction, peptide_design, virtual_screening.'
+                )
+            }), 400
+        if backend == 'nesso' and requested_workflow != 'virtual_screening':
+            return jsonify({
+                'error': 'Nesso is an independent Virtual Screening backend; use workflow=virtual_screening.',
+                'backend': backend,
+                'workflow': requested_workflow,
+            }), 400
+        if requested_workflow == 'virtual_screening' and backend != 'nesso':
+            return jsonify({
+                'error': 'Virtual Screening currently requires backend=nesso.',
+                'backend': backend,
+                'workflow': requested_workflow,
+            }), 400
+
+        low_vram = parse_bool(request.form.get('low_vram'), False)
+        if backend == 'nesso':
+            try:
+                # Validate every compound at the API boundary while preserving the
+                # original YAML for canonical preparation inside the worker.
+                normalize_nesso_screening_input_yaml(yaml_content)
+            except ValueError as exc:
+                return jsonify({'error': str(exc), 'backend': backend, 'workflow': 'virtual_screening'}), 400
+            if low_vram:
+                return jsonify({'error': 'Nesso does not support low-VRAM mode.', 'backend': backend}), 400
 
         if backend in {'boltz', 'alphafold3', 'protenix'}:
             msa_server_url = str(getattr(config_module, 'MSA_SERVER_URL', '') or '').strip()
@@ -262,12 +301,16 @@ def register_prediction_routes(
                     request.remote_addr,
                 )
             use_msa_server = True
+        else:
+            # Nesso consumes protein sequences directly and has no MSA input contract.
+            if use_msa_server:
+                logger.info(
+                    'Force use_msa_server=False for backend=nesso (client=%s).',
+                    request.remote_addr,
+                )
+            use_msa_server = False
 
-        workflow = str(request.form.get('workflow', 'prediction')).strip().lower()
-        if workflow in {'peptide', 'peptide_designer', 'designer'}:
-            workflow = 'peptide_design'
-        if workflow not in {'prediction', 'peptide_design'}:
-            return jsonify({'error': f"Invalid workflow '{workflow}'. Must be one of: prediction, peptide_design."}), 400
+        workflow = requested_workflow
 
         peptide_design_options = {}
         if workflow == 'peptide_design':
@@ -329,11 +372,17 @@ def register_prediction_routes(
         )
 
         seed_value = parse_int(request.form.get('seed'), None)
-        if seed_value is None and backend == 'protenix':
+        if seed_value is None and backend in {'protenix', 'nesso'}:
             seed_value = 42
-            logger.info('seed parameter missing for backend=protenix; defaulting to %s for client %s.', seed_value, request.remote_addr)
+            logger.info('seed parameter missing for backend=%s; defaulting to %s for client %s.', backend, seed_value, request.remote_addr)
 
         custom_ccd_molecules = _parse_custom_ccd_molecules(request.form.get('custom_ccd_molecules'))
+
+        if backend == 'nesso' and custom_ccd_molecules:
+            return jsonify({
+                'error': 'Nesso does not support custom CCD residue uploads; use protein sequences and ligand SMILES or standard CCD.',
+                'backend': backend,
+            }), 400
 
         template_inputs = []
         template_meta_raw = request.form.get('template_meta')
@@ -371,6 +420,12 @@ def register_prediction_routes(
                 'content_base64': base64.b64encode(content_bytes).decode('utf-8'),
             })
 
+        if backend == 'nesso' and template_inputs:
+            return jsonify({
+                'error': 'Nesso does not support structure template uploads.',
+                'backend': backend,
+            }), 400
+
         predict_args = {
             'yaml_content': yaml_content,
             'use_msa_server': use_msa_server,
@@ -378,7 +433,7 @@ def register_prediction_routes(
             'backend': backend,
             'seed': seed_value,
             'workflow': workflow,
-            'low_vram': parse_bool(request.form.get('low_vram'), False),
+            'low_vram': low_vram,
         }
         if workflow == 'peptide_design':
             predict_args['peptide_design_options'] = peptide_design_options
