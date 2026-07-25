@@ -192,11 +192,14 @@ class RuntimeProxy:
 
             raw_seed = request_obj.form.get("seed")
             form_backend = str(request_obj.form.get("backend") or "boltz").strip().lower()
-            if (raw_seed is None or not str(raw_seed).strip()) and form_backend == "protenix":
+            if form_backend in {"nesso1", "nesso-1"}:
+                form_backend = "nesso"
+            if (raw_seed is None or not str(raw_seed).strip()) and form_backend in {"protenix", "nesso"}:
                 data.append(("seed", str(self.default_protenix_predict_seed)))
                 self.logger.info(
-                    "Auto-filled seed=%s for /predict because backend=protenix and the form field was missing.",
+                    "Auto-filled seed=%s for /predict because backend=%s and the form field was missing.",
                     self.default_protenix_predict_seed,
+                    form_backend,
                 )
 
         files: List[Tuple[str, Tuple[str, Any, str]]] = []

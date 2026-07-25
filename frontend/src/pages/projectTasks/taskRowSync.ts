@@ -1717,16 +1717,20 @@ export async function hydrateTaskMetricsFromResultRows(
           ? (confidence.residue_plddt_by_chain as Record<string, unknown>)
           : null;
       const hasResidueByChain = Boolean(residueByChain && Object.keys(residueByChain).length > 0);
+      const isNessoBackend =
+        backendValue === 'nesso' || backendValue === 'nesso1' || backendValue === 'nesso-1';
       const needsSummaryHydration = !hasTaskSummaryMetrics(row);
       const needsLigandAtomHydration =
         Boolean(
-          selection.ligandSmiles &&
+          !isNessoBackend &&
+            selection.ligandSmiles &&
             selection.ligandIsSmiles &&
             !hasTaskLigandAtomPlddts(row, selection.ligandChainId, selection.ligandComponentCount <= 1)
         );
       const needsLigandResidueHydration =
         Boolean(
-          selection.ligandSequence &&
+          !isNessoBackend &&
+            selection.ligandSequence &&
             isSequenceLigandType(selection.ligandSequenceType) &&
             !readTaskLigandResiduePlddts(row, selection.ligandChainId)
         );

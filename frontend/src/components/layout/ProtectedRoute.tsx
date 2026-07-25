@@ -18,6 +18,7 @@ export function ProtectedRoute({ children }: { children: JSX.Element }) {
 
 export function AdminRoute({ children }: { children: JSX.Element }) {
   const { session, loading } = useAuth();
+  const location = useLocation();
 
   if (loading) {
     return <div className="centered-page">Loading...</div>;
@@ -29,6 +30,10 @@ export function AdminRoute({ children }: { children: JSX.Element }) {
 
   if (!session.isAdmin) {
     return <Navigate to="/projects" replace />;
+  }
+
+  if (!session.managementToken) {
+    return <Navigate to="/login" replace state={{ from: `${location.pathname}${location.search}` }} />;
   }
 
   return children;

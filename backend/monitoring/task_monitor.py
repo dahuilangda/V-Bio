@@ -409,7 +409,7 @@ class TaskMonitor:
             result['errors'].extend(containers_snapshot['errors'])
 
         if not containers_snapshot.get('docker_available'):
-            if result['backend'] in ('alphafold3', 'protenix'):
+            if result['backend'] in ('alphafold3', 'protenix', 'nesso'):
                 result['errors'].append('Docker CLI unavailable; cannot guarantee container termination for the selected backend.')
         else:
             for container in containers:

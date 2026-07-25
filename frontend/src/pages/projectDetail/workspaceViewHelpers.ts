@@ -590,7 +590,8 @@ export function readBooleanToken(value: unknown): boolean | null {
 export function normalizePredictionBackendStrict(value: unknown): string {
   const token = readText(value).trim().toLowerCase();
   if (token === 'boltz2') return 'boltz';
-  if (token === 'boltz' || token === 'alphafold3' || token === 'protenix' || token === 'pocketxmol') return token;
+  if (token === 'nesso1' || token === 'nesso-1') return 'nesso';
+  if (token === 'boltz' || token === 'alphafold3' || token === 'protenix' || token === 'nesso' || token === 'pocketxmol') return token;
   return '';
 }
 

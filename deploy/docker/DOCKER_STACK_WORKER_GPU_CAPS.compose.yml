@@ -15,6 +15,7 @@ x-gpu-worker-base: &gpu_worker_base
     - ${BOLTZ_HOST_ROOT}:${BOLTZ_HOST_ROOT}
     - ${RESULTS_BASE_DIR:-/data/boltz_central_results}:${RESULTS_BASE_DIR:-/data/boltz_central_results}
     - ${BOLTZ2_HOST_CACHE_DIR:-/data/boltz_cache}:${BOLTZ2_HOST_CACHE_DIR:-/data/boltz_cache}
+    - ${NESSO_HOST_CACHE_DIR:-/data/nesso_cache}:${NESSO_HOST_CACHE_DIR:-/data/nesso_cache}
     - ${PROTENIX_SOURCE_DIR_HOST:-/data/protenix}:/data/protenix
     - ${ALPHAFOLD3_ROOT_HOST:-/data/alphafold3}:/data/alphafold3
   command: >-
@@ -65,6 +66,15 @@ services:
       GPU_WORKER_CAPABILITIES: "protenix"
       MAX_CONCURRENT_TASKS: "${MAX_CONCURRENT_TASKS_PROTENIX:--1}"
       GPU_DEVICE_IDS: "${GPU_DEVICE_IDS_PROTENIX:-}"
+
+  gpu-worker-nesso:
+    <<: *gpu_worker_base
+    profiles: ["nesso"]
+    container_name: vbio-gpu-worker-nesso
+    environment:
+      GPU_WORKER_CAPABILITIES: "nesso"
+      MAX_CONCURRENT_TASKS: "${MAX_CONCURRENT_TASKS_NESSO:--1}"
+      GPU_DEVICE_IDS: "${GPU_DEVICE_IDS_NESSO:-}"
 
   gpu-worker-pocketxmol:
     <<: *gpu_worker_base

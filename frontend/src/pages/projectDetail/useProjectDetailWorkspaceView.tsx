@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { Link } from 'react-router-dom';
-import type { InputComponent, PredictionConstraint, ProjectTask, ProteinTemplateUpload } from '../../types/models';
+import type {
+  InputComponent,
+  PredictionConstraint,
+  ProjectInputConfig,
+  ProjectTask,
+  ProteinTemplateUpload,
+  VirtualScreeningPredictionRecord
+} from '../../types/models';
 import { downloadResultFile, terminateTask as terminateBackendTask } from '../../api/backendApi';
 import { deleteProjectTask } from '../../api/supabaseLite';
-import { createInputComponent } from '../../utils/projectInputs';
+import { createInputComponent, saveProjectInputConfig } from '../../utils/projectInputs';
 import { getWorkflowDefinition } from '../../utils/workflows';
 import { ProjectDetailLayout } from './ProjectDetailLayout';
 import {
@@ -26,7 +33,11 @@ import { useProjectRunState } from './useProjectRunState';
 import { usePredictionWorkspaceProps } from './usePredictionWorkspaceProps';
 import { useProjectDetailRuntimeContext } from './useProjectDetailRuntimeContext';
 import { useAuth } from '../../hooks/useAuth';
-import { buildLeadOptUploadSnapshotComponents, type LeadOptPersistedUploads } from './projectTaskSnapshot';
+import {
+  buildLeadOptUploadSnapshotComponents,
+  mergeTaskInputOptionsIntoProperties,
+  type LeadOptPersistedUploads
+} from './projectTaskSnapshot';
 import {
   buildLeadOptCandidatesUiStateSignature,
   type LeadOptCandidatesUiState
@@ -159,6 +170,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     draft,
     isPredictionWorkflow,
     isPeptideDesignWorkflow,
+    isVirtualScreeningWorkflow,
     isAffinityWorkflow,
     isLeadOptimizationWorkflow,
     workspaceTab,
@@ -376,14 +388,15 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     const patchedByOperations = applyCopilotComponentPatchOperations(draft.inputConfig.components, parameterPatch.componentsPatch);
     const componentOperationsChanged = patchedByOperations !== draft.inputConfig.components;
     const backendPatch = readText(parameterPatch.backend).trim().toLowerCase();
+    const backendPatchAllowed = isVirtualScreeningWorkflow
+      ? backendPatch === 'nesso'
+      : backendPatch === 'boltz' || backendPatch === 'alphafold3' || backendPatch === 'protenix';
     const seedPatch = readFiniteNumber(parameterPatch.seed);
     const hasPatch =
       replacementComponents.length > 0 ||
       addedComponents.length > 0 ||
       componentOperationsChanged ||
-      backendPatch === 'boltz' ||
-      backendPatch === 'alphafold3' ||
-      backendPatch === 'protenix' ||
+      backendPatchAllowed ||
       seedPatch !== null;
     if (nextComponents.length === 0 && !hasPatch) return;
     setDraft((prev) =>
@@ -401,10 +414,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
                 : prev.inputConfig.components;
         return {
           ...prev,
-          backend:
-            backendPatch === 'boltz' || backendPatch === 'alphafold3' || backendPatch === 'protenix'
-              ? backendPatch
-              : prev.backend,
+          backend: backendPatchAllowed ? backendPatch : prev.backend,
           inputConfig: {
             ...prev.inputConfig,
             version: 1,
@@ -436,7 +446,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
               ? [...draft.inputConfig.components, ...addedComponents]
               : draft.inputConfig.components
     });
-  }, [draft, navigate, project, runtime.locationSearch, session?.userId, setDraft]);
+  }, [draft, isVirtualScreeningWorkflow, navigate, project, runtime.locationSearch, session?.userId, setDraft]);
 
   useEffect(() => {
     if (!copilotPrefillSave || !draft) return;
@@ -472,6 +482,8 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
   const leadOptPersistSnapshotByTaskRowRef = useRef<Record<string, Record<string, unknown>>>({});
   const leadOptUiStatePersistKeyRef = useRef('');
   const leadOptMmpContextByTaskIdRef = useRef<Record<string, Record<string, unknown>>>({});
+  const virtualScreeningPredictionPersistSignatureRef = useRef('');
+  const virtualScreeningPredictionPersistQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   const flushLeadOptPredictionPersistQueue = useCallback(() => {
     const pendingEntries = Object.values(leadOptPredictionPersistPendingByTaskRowRef.current);
@@ -561,6 +573,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
 
   useEffect(() => {
     if (workspaceTab !== 'results') return;
+    if (isVirtualScreeningWorkflow) return;
     if (!isPredictionWorkflow && !isAffinityWorkflow) return;
     const contextTask = activeResultTask || statusContextTaskRow;
     const taskId = readText(contextTask?.task_id || project.task_id).trim();
@@ -581,6 +594,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     activeResultTask,
     isAffinityWorkflow,
     isPredictionWorkflow,
+    isVirtualScreeningWorkflow,
     project.confidence,
     project.task_id,
     project.task_state,
@@ -1407,10 +1421,13 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     workspaceTab,
     isPredictionWorkflow,
     isPeptideDesignWorkflow,
+    isVirtualScreeningWorkflow,
     isAffinityWorkflow,
     isLeadOptimizationWorkflow,
     hasIncompleteComponents,
     componentCompletion,
+    virtualScreeningInput: draft.inputConfig.options.virtualScreeningInput || '',
+    virtualScreeningComponents: draft.inputConfig.components,
     submitting: runSubmitting,
     saving,
     runRedirectTaskId,
@@ -1451,6 +1468,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     constraintSelectionAnchorRef,
     activeChainInfos,
     ligandChainOptions,
+    constraintsSupported: allowedConstraintTypes.length > 0,
     isBondOnlyBackend,
     canEnableAffinityFromWorkspace,
     workspaceTargetOptions,
@@ -1486,6 +1504,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     setPickedResidue,
     canEdit,
     ligandChainOptions,
+    constraintsSupported: allowedConstraintTypes.length > 0,
     isBondOnlyBackend
   });
   const {
@@ -1510,10 +1529,12 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     affinityDisplayStructureFormat,
     hasAffinityDisplayStructure,
   } = useProjectResultDisplay({
-    shouldPrepareResultStructure: workspaceTab === 'results' && isPredictionWorkflow,
+    shouldPrepareResultStructure: workspaceTab === 'results' && isPredictionWorkflow && !isVirtualScreeningWorkflow,
     shouldPrepareConstraintStructure: workspaceTab === 'constraints',
-    shouldPrepareSnapshotCards: workspaceTab === 'results' && (isPredictionWorkflow || isAffinityWorkflow),
-    shouldPreparePredictionLigandPreview: workspaceTab === 'results' && isPredictionWorkflow,
+    shouldPrepareSnapshotCards:
+      workspaceTab === 'results' && !isVirtualScreeningWorkflow && (isPredictionWorkflow || isAffinityWorkflow),
+    shouldPreparePredictionLigandPreview:
+      workspaceTab === 'results' && isPredictionWorkflow && !isVirtualScreeningWorkflow,
     shouldPrepareAffinityResultDisplay: workspaceTab === 'results' && isAffinityWorkflow,
     structureText,
     structureFormat,
@@ -1682,15 +1703,86 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     });
   }, [activeResultTask, project.task_id, pullResultForViewer, statusContextTaskRow]);
 
+  const handleVirtualScreeningPredictionsChange = useCallback((
+    records: Record<string, VirtualScreeningPredictionRecord>
+  ) => {
+    if (!isVirtualScreeningWorkflow || !canEdit) return;
+    const normalizedRecords = records || {};
+    const screeningTaskRow = statusContextTaskRow || requestedStatusTaskRow || activeResultTask;
+    const signature = `${project.id}:${readText(screeningTaskRow?.id).trim()}:${JSON.stringify(
+      Object.keys(normalizedRecords)
+        .sort((left, right) => left.localeCompare(right))
+        .map((key) => [key, normalizedRecords[key]])
+    )}`;
+    if (virtualScreeningPredictionPersistSignatureRef.current === signature) return;
+    virtualScreeningPredictionPersistSignatureRef.current = signature;
+
+    const nextOptions: ProjectInputConfig['options'] = {
+      ...draft.inputConfig.options,
+      virtualScreeningPredictions: normalizedRecords
+    };
+    const nextConfig: ProjectInputConfig = {
+      ...draft.inputConfig,
+      options: nextOptions
+    };
+    setDraft((previous) => {
+      if (!previous) return previous;
+      return {
+        ...previous,
+        inputConfig: {
+          ...previous.inputConfig,
+          options: {
+            ...previous.inputConfig.options,
+            virtualScreeningPredictions: normalizedRecords
+          }
+        }
+      };
+    });
+    saveProjectInputConfig(project.id, nextConfig);
+
+    if (!screeningTaskRow?.id) return;
+    const sourceProperties = (screeningTaskRow.properties || nextConfig.properties) as ProjectInputConfig['properties'];
+    const patchPayload = {
+      properties: mergeTaskInputOptionsIntoProperties(sourceProperties, nextOptions)
+    };
+    virtualScreeningPredictionPersistQueueRef.current =
+      virtualScreeningPredictionPersistQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          await patchTask(screeningTaskRow.id, patchPayload);
+        })
+        .catch((persistError) => {
+          setError(
+            persistError instanceof Error
+              ? persistError.message
+              : 'Failed to persist virtual-screening structure jobs.'
+          );
+        });
+  }, [
+    activeResultTask,
+    canEdit,
+    draft.inputConfig,
+    isVirtualScreeningWorkflow,
+    patchTask,
+    project.id,
+    requestedStatusTaskRow,
+    saveProjectInputConfig,
+    setDraft,
+    setError,
+    statusContextTaskRow
+  ]);
+
   const {
     projectResultsSectionProps,
     affinityWorkflowSectionProps,
     leadOptimizationWorkflowSectionProps,
     predictionWorkflowSectionProps,
+    virtualScreeningWorkflowSectionProps,
     workflowRuntimeSettingsSectionProps
   } = useProjectWorkflowSectionProps({
     isPredictionWorkflow,
     isPeptideDesignWorkflow,
+    isVirtualScreeningWorkflow,
     isAffinityWorkflow,
     isLeadOptimizationWorkflow,
     workflowTitle: workflow.title,
@@ -1710,6 +1802,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     onResultsResizerKeyDown: handleResultsResizerKeyDown,
     snapshotCards,
     snapshotConfidence: snapshotConfidence || null,
+    snapshotAffinity: snapshotAffinity || null,
     resultChainIds,
     selectedResultTargetChainId,
     selectedResultLigandChainId,
@@ -1780,6 +1873,12 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     onComponentsResizerKeyDown: handleComponentsResizerKeyDown,
     components: draft.inputConfig.components,
     onComponentsChange: handlePredictionComponentsChange,
+    virtualScreeningInput: draft.inputConfig.options.virtualScreeningInput || '',
+    virtualScreeningInputMode: draft.inputConfig.options.virtualScreeningInputMode || 'upload',
+    virtualScreeningInputFileName: draft.inputConfig.options.virtualScreeningInputFileName || '',
+    virtualScreeningPredictionRecords:
+      draft.inputConfig.options.virtualScreeningPredictions || {},
+    onVirtualScreeningPredictionRecordsChange: handleVirtualScreeningPredictionsChange,
     proteinTemplates,
     customResidueLibrary,
     onCustomResidueLibraryChange: setCustomResidueLibrary,
@@ -1965,7 +2064,10 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       const seed = readFiniteNumber(patch.seed);
       if (seed !== null) handleRuntimeSeedChange(Math.floor(seed));
       const backendPatch = readText(patch.backend).trim().toLowerCase();
-      if (backendPatch === 'boltz' || backendPatch === 'alphafold3' || backendPatch === 'protenix') {
+      const backendPatchAllowed = isVirtualScreeningWorkflow
+        ? backendPatch === 'nesso'
+        : backendPatch === 'boltz' || backendPatch === 'alphafold3' || backendPatch === 'protenix';
+      if (backendPatchAllowed) {
         handleRuntimeBackendChange(backendPatch);
       }
       const affinityModePatch = readText(patch.affinityMode).trim();
@@ -2131,6 +2233,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     handleTaskNameChange,
     handleTaskSummaryChange,
     headerRuntimeTaskId,
+    isVirtualScreeningWorkflow,
     navigate,
     onAffinityModeChange,
     patchTask,
@@ -2247,8 +2350,10 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       taskName={draft.taskName}
       taskSummary={draft.taskSummary}
       isPredictionWorkflow={isPredictionWorkflow}
+      isVirtualScreeningWorkflow={isVirtualScreeningWorkflow}
       isAffinityWorkflow={isAffinityWorkflow}
       isLeadOptimizationWorkflow={isLeadOptimizationWorkflow}
+      constraintsSupported={allowedConstraintTypes.length > 0}
       displayTaskState={displayTaskState}
       isActiveRuntime={isActiveRuntime}
       progressPercent={progressPercent}
@@ -2281,6 +2386,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       affinitySectionProps={affinityWorkflowSectionProps}
       leadOptimizationSectionProps={leadOptimizationWorkflowSectionProps}
       predictionSectionProps={predictionWorkflowSectionProps}
+      virtualScreeningSectionProps={virtualScreeningWorkflowSectionProps}
       runtimeSettingsProps={workflowRuntimeSettingsSectionProps}
       runActionRef={runActionRef as RefObject<HTMLDivElement>}
       topRunButtonRef={topRunButtonRef as RefObject<HTMLButtonElement>}

@@ -125,7 +125,8 @@ function normalizePeptideInitializationOptions(
 }
 
 function normalizePeptideBackendValue(value: unknown): 'boltz' | 'alphafold3' | 'protenix' {
-  return normalizePredictionBackend(value);
+  const normalized = normalizePredictionBackend(value);
+  return normalized === 'nesso' ? 'boltz' : normalized;
 }
 
 function normalizePeptideModeValue(value: unknown): 'linear' | 'cyclic' | 'bicyclic' {
@@ -232,6 +233,7 @@ export function addComponentToDraftAction<TDraft extends DraftLike>(params: {
 export function addConstraintFromSidebarAction<TDraft extends DraftLike>(params: {
   draft: TDraft | null;
   buildDefaultConstraint: (preferredType?: 'contact' | 'bond' | 'pocket') => PredictionConstraint;
+  constraintsSupported: boolean;
   isBondOnlyBackend: boolean;
   setWorkspaceTab: Dispatch<SetStateAction<'results' | 'basics' | 'components' | 'constraints'>>;
   setSidebarConstraintsOpen: Dispatch<SetStateAction<boolean>>;
@@ -243,6 +245,7 @@ export function addConstraintFromSidebarAction<TDraft extends DraftLike>(params:
   const {
     draft,
     buildDefaultConstraint,
+    constraintsSupported,
     isBondOnlyBackend,
     setWorkspaceTab,
     setSidebarConstraintsOpen,
@@ -251,7 +254,7 @@ export function addConstraintFromSidebarAction<TDraft extends DraftLike>(params:
     constraintSelectionAnchorRef,
     setDraft,
   } = params;
-  if (!draft) return;
+  if (!draft || !constraintsSupported) return;
   const next = buildDefaultConstraint(isBondOnlyBackend ? 'bond' : undefined);
   setWorkspaceTab('constraints');
   setSidebarConstraintsOpen(true);

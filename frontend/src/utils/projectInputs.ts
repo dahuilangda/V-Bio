@@ -8,7 +8,8 @@ import type {
   PredictionOptions,
   PredictionProperties,
   ProjectInputConfig,
-  ProteinTemplateUpload
+  ProteinTemplateUpload,
+  VirtualScreeningPredictionRecord
 } from '../types/models';
 
 const COMPONENT_KEY = 'vbio_project_input_config_v1';
@@ -408,7 +409,9 @@ function normalizePeptideResiduePool(value: unknown): NonNullable<PredictionOpti
 }
 
 export function buildDefaultInputConfig(workflowKey: string | null | undefined = 'prediction'): ProjectInputConfig {
-  const isPeptideDesignWorkflow = String(workflowKey || '').trim().toLowerCase() === 'peptide_design';
+  const normalizedWorkflow = String(workflowKey || '').trim().toLowerCase();
+  const isPeptideDesignWorkflow = normalizedWorkflow === 'peptide_design';
+  const isVirtualScreeningWorkflow = normalizedWorkflow === 'virtual_screening';
   return {
     version: 1,
     components: [createInputComponent('protein')],
@@ -421,6 +424,9 @@ export function buildDefaultInputConfig(workflowKey: string | null | undefined =
     },
     options: {
       seed: 42,
+      virtualScreeningInput: isVirtualScreeningWorkflow ? '' : undefined,
+      virtualScreeningInputMode: isVirtualScreeningWorkflow ? 'upload' : undefined,
+      virtualScreeningInputFileName: isVirtualScreeningWorkflow ? '' : undefined,
       affinityMode: DEFAULT_AFFINITY_MODE as 'score' | 'pose' | 'refine' | 'interface',
       peptideDesignMode: DEFAULT_PEPTIDE_DESIGN_MODE,
       peptideBinderLength: DEFAULT_PEPTIDE_BINDER_LENGTH,
@@ -458,10 +464,65 @@ function normalizeProperties(value: unknown): PredictionProperties {
   };
 }
 
+function normalizeVirtualScreeningPredictions(value: unknown): Record<string, VirtualScreeningPredictionRecord> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const normalized: Record<string, VirtualScreeningPredictionRecord> = {};
+  const allowedBackends = new Set(['boltz', 'protenix', 'alphafold3']);
+  const allowedStates = new Set(['QUEUED', 'RUNNING', 'SUCCESS', 'FAILURE']);
+  for (const [rawKey, rawValue] of Object.entries(value as Record<string, unknown>).slice(0, 600)) {
+    if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) continue;
+    const record = rawValue as Record<string, unknown>;
+    const key = String(rawKey || '').trim().slice(0, 600);
+    const taskId = String(record.taskId ?? record.task_id ?? '').trim().slice(0, 240);
+    const backend = String(record.backend || '').trim().toLowerCase();
+    const state = String(record.state || '').trim().toUpperCase();
+    if (!key || !taskId || !allowedBackends.has(backend) || !allowedStates.has(state)) continue;
+    const numberOrNull = (item: unknown): number | null => {
+      if (item === null || item === undefined || item === '' || typeof item === 'boolean') return null;
+      const number = Number(item);
+      return Number.isFinite(number) ? number : null;
+    };
+    normalized[key] = {
+      taskId,
+      backend: backend as VirtualScreeningPredictionRecord['backend'],
+      state: state as VirtualScreeningPredictionRecord['state'],
+      ligandPlddt: numberOrNull(record.ligandPlddt ?? record.ligand_plddt),
+      interfaceMetricValue: numberOrNull(record.interfaceMetricValue ?? record.interface_metric_value),
+      interfaceMetricLabel: String(record.interfaceMetricLabel ?? record.interface_metric_label) === 'ipTM' ? 'ipTM' : 'IPSAE',
+      pairIptm: numberOrNull(record.pairIptm ?? record.pair_iptm),
+      pairPae: numberOrNull(record.pairPae ?? record.pair_pae),
+      error: String(record.error || '').trim().slice(0, 800),
+      updatedAt: Number.isFinite(Number(record.updatedAt ?? record.updated_at))
+        ? Number(record.updatedAt ?? record.updated_at)
+        : 0
+    };
+  }
+  return normalized;
+}
+
 function normalizeOptions(value: unknown): PredictionOptions {
   const rawObj = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
   const raw = rawObj as Partial<PredictionOptions>;
   const seed = raw.seed;
+  const virtualScreeningInput = typeof (raw.virtualScreeningInput ?? rawObj.virtual_screening_input) === 'string'
+    ? String(raw.virtualScreeningInput ?? rawObj.virtual_screening_input).slice(0, 1_000_000)
+    : '';
+  const virtualScreeningInputModeRaw = String(
+    raw.virtualScreeningInputMode ?? rawObj.virtual_screening_input_mode ?? ''
+  ).trim().toLowerCase();
+  const virtualScreeningInputMode = virtualScreeningInputModeRaw === 'paste'
+    ? 'paste'
+    : virtualScreeningInputModeRaw === 'upload'
+      ? 'upload'
+      : virtualScreeningInput
+        ? 'paste'
+        : 'upload';
+  const virtualScreeningInputFileName = String(
+    raw.virtualScreeningInputFileName ?? rawObj.virtual_screening_input_file_name ?? ''
+  ).trim().slice(0, 240);
+  const virtualScreeningPredictions = normalizeVirtualScreeningPredictions(
+    raw.virtualScreeningPredictions ?? rawObj.virtual_screening_predictions
+  );
   const affinityMode = normalizeAffinityMode(raw.affinityMode ?? rawObj.affinity_mode ?? rawObj.mode);
   const peptideDesignMode = normalizePeptideDesignMode(raw.peptideDesignMode ?? rawObj.peptide_design_mode);
   const minPeptideLength = peptideDesignMode === 'bicyclic' ? 8 : 5;
@@ -574,6 +635,10 @@ function normalizeOptions(value: unknown): PredictionOptions {
   if (seed === null) {
     return {
       seed: null,
+      virtualScreeningInput,
+      virtualScreeningInputMode,
+      virtualScreeningInputFileName,
+      virtualScreeningPredictions,
       affinityMode,
       peptideDesignMode,
       peptideBinderLength,
@@ -598,6 +663,10 @@ function normalizeOptions(value: unknown): PredictionOptions {
   }
   return {
     seed: typeof seed === 'number' && Number.isFinite(seed) ? Math.max(0, Math.floor(seed)) : null,
+    virtualScreeningInput,
+    virtualScreeningInputMode,
+    virtualScreeningInputFileName,
+    virtualScreeningPredictions,
     affinityMode,
     peptideDesignMode,
     peptideBinderLength,

@@ -822,7 +822,7 @@ export function WorkflowRuntimeSettingsSection({
           </label>
         )}
 
-        {showFullFields && (isPredictionWorkflow || isPeptideDesignWorkflow) && normalizedBackend !== 'alphafold3' && (
+        {showFullFields && (isPredictionWorkflow || isPeptideDesignWorkflow) && normalizedBackend !== 'alphafold3' && normalizedBackend !== 'nesso' && (
           <label className="switch-field runtime-device-toggle">
             <input
               type="checkbox"

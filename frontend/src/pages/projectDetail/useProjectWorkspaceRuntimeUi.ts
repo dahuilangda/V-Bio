@@ -4,10 +4,12 @@ import type { CustomCcdMoleculeInput, Project, ProteinTemplateUpload, TaskState 
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import { saveProjectUiState } from '../../utils/projectInputs';
 import { getWorkflowDefinition, isPredictionLikeWorkflowKey } from '../../utils/workflows';
+import { allowedConstraintTypesForBackend } from './projectDraftUtils';
 import type { WorkspaceTab } from './workspaceTypes';
 
 interface UseProjectWorkspaceRuntimeUiOptions {
   project: Project | null;
+  backend: string;
   workspaceTab: WorkspaceTab;
   setWorkspaceTab: Dispatch<SetStateAction<WorkspaceTab>>;
   setNowTs: Dispatch<SetStateAction<number>>;
@@ -21,6 +23,7 @@ interface UseProjectWorkspaceRuntimeUiOptions {
 
 export function useProjectWorkspaceRuntimeUi({
   project,
+  backend,
   workspaceTab,
   setWorkspaceTab,
   setNowTs,
@@ -39,14 +42,16 @@ export function useProjectWorkspaceRuntimeUi({
     const isPredictionLikeWorkflow = isPredictionLikeWorkflowKey(workflowDef.key);
     const allowsComponentsTab =
       isPredictionLikeWorkflow || workflowDef.key === 'affinity' || workflowDef.key === 'lead_optimization';
-    const allowsConstraintsTab = isPredictionLikeWorkflow || workflowDef.key === 'lead_optimization';
+    const allowsConstraintsTab =
+      (isPredictionLikeWorkflow && allowedConstraintTypesForBackend(backend).length > 0) ||
+      workflowDef.key === 'lead_optimization';
     if (
       (!allowsComponentsTab && workspaceTab === 'components') ||
       (!allowsConstraintsTab && workspaceTab === 'constraints')
     ) {
       setWorkspaceTab('basics');
     }
-  }, [project, workspaceTab, setWorkspaceTab]);
+  }, [project, backend, workspaceTab, setWorkspaceTab]);
 
   useEffect(() => {
     if (!project) return;

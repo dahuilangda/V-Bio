@@ -21,6 +21,7 @@ cp deploy/docker/DOCKER_STACK_WORKER_CPU.env.example deploy/docker/DOCKER_STACK_
 | `boltz2` / `boltz2score` / `affinity` | 构建 `vbio-boltz2-runtime`；准备 `/data/boltz_cache`，包含 `boltz2_conf.ckpt`, `boltz2_aff.ckpt`, `ccd.pkl`, `mols.tar` | `BOLTZ2_DOCKER_IMAGE`, `BOLTZ2_HOST_CACHE_DIR` |
 | `alphafold3` | 拉取 AF3 镜像；准备模型目录和数据库目录 | `ALPHAFOLD3_DOCKER_IMAGE`, `ALPHAFOLD3_MODEL_DIR`, `ALPHAFOLD3_DATABASE_DIR`, `ALPHAFOLD3_ROOT_HOST` |
 | `protenix` | 构建 `vbio-protenix-v2-runtime:2.0.0`；准备源码、权重和 common cache | `PROTENIX_DOCKER_IMAGE`, `PROTENIX_SOURCE_DIR`, `PROTENIX_MODEL_DIR`, `PROTENIX_COMMON_CACHE_DIR` |
+| `nesso` | Virtual Screening 专用：构建固定 Nesso commit 的 `vbio-nesso-runtime:1.0.0`；准备持久化 Hugging Face/CCD cache | `NESSO_DOCKER_IMAGE`, `NESSO_HOST_CACHE_DIR`, `NESSO_MODEL_REVISION` |
 | `pocketxmol` | 构建 `pocketxmol:cu128`；准备 checkpoint | `POCKETXMOL_DOCKER_IMAGE`, `POCKETXMOL_ROOT_DIR` |
 | ColabFold MSA | 启动独立 MSA 服务 | `MSA_SERVER_URL`, `COLABFOLD_JOBS_DIR` |
 | `lead_opt` | 启动 MMP PostgreSQL；导入目标 schema | `LEAD_OPT_MMP_DB_URL`, `LEAD_OPT_MMP_DB_SCHEMA` |
@@ -30,6 +31,11 @@ cp deploy/docker/DOCKER_STACK_WORKER_CPU.env.example deploy/docker/DOCKER_STACK_
 ```bash
 docker build -f deploy/docker/DOCKER_BOLTZ2_RUNTIME.Dockerfile -t vbio-boltz2-runtime .
 docker build -f deploy/docker/DOCKER_PROTENIX_V2_RUNTIME.Dockerfile -t vbio-protenix-v2-runtime:2.0.0 .
+docker build \
+  --build-arg HTTP_PROXY=http://<proxy-host>:<proxy-port> \
+  --build-arg HTTPS_PROXY=http://<proxy-host>:<proxy-port> \
+  -f deploy/docker/DOCKER_NESSO_RUNTIME.Dockerfile \
+  -t vbio-nesso-runtime:1.0.0 .
 
 cd /data/V-Bio/deploy/docker
 docker compose -f DOCKER_CAP_POCKETXMOL.compose.yml build pocketxmol
@@ -40,7 +46,7 @@ docker compose -f DOCKER_CAP_MMP_POSTGRES.compose.yml --env-file DOCKER_CAP_MMP_
 ## GPU worker 示例
 
 ```env
-GPU_WORKER_CAPABILITIES=boltz2,alphafold3,protenix,pocketxmol
+GPU_WORKER_CAPABILITIES=boltz2,alphafold3,protenix,nesso,pocketxmol
 MSA_SERVER_URL=http://<msa-host>:8080
 
 BOLTZ2_DOCKER_IMAGE=vbio-boltz2-runtime
@@ -57,6 +63,16 @@ PROTENIX_SOURCE_DIR_HOST=/data/protenix
 PROTENIX_MODEL_DIR=/data/protenix/model
 PROTENIX_MODEL_NAME=protenix-v2
 PROTENIX_COMMON_CACHE_DIR=/data/protenix/common_cache
+
+NESSO_DOCKER_IMAGE=vbio-nesso-runtime:1.0.0
+NESSO_HOST_CACHE_DIR=/data/nesso_cache
+NESSO_CONTAINER_CACHE_DIR=/workspace/nesso-cache
+NESSO_MODEL_REVISION=v1.0.0
+NESSO_NO_KERNELS=true
+NESSO_RECYCLING_STEPS=5
+NESSO_NUM_WORKERS=2
+NESSO_PRECISION=bf16-mixed
+# 模型首次下载时，把 HTTP_PROXY/HTTPS_PROXY 同时写入该 env 文件
 
 POCKETXMOL_DOCKER_IMAGE=pocketxmol:cu128
 POCKETXMOL_ROOT_DIR=./capabilities/pocketxmol
@@ -79,7 +95,7 @@ docker run --rm --network host   -v /data/V-Bio:/data/V-Bio   -w /data/V-Bio   v
 ## 启动 worker
 
 ```bash
-docker compose -f deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.compose.yml   --env-file deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env   --profile boltz2 --profile alphafold3 --profile protenix --profile pocketxmol   up -d --build
+docker compose -f deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.compose.yml   --env-file deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env   --profile boltz2 --profile alphafold3 --profile protenix --profile nesso --profile pocketxmol   up -d --build
 
 docker compose -f deploy/docker/DOCKER_STACK_WORKER_CPU.compose.yml   --env-file deploy/docker/DOCKER_STACK_WORKER_CPU.env up -d --build
 ```

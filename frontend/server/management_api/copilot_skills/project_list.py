@@ -155,7 +155,7 @@ PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "search": {"type": "string", "description": "Free text for the project search box."},
-                "typeFilter": {"type": "string", "enum": ["all", "prediction", "affinity", "peptide_design", "lead_optimization"]},
+                "typeFilter": {"type": "string", "enum": ["all", "prediction", "virtual_screening", "affinity", "peptide_design", "lead_optimization"]},
                 "stateFilter": {"type": "string", "enum": ["all", "DRAFT", "QUEUED", "RUNNING", "SUCCESS", "FAILURE", "REVOKED"]},
                 "sortBy": {"type": "string", "enum": ["updated_desc", "updated_asc", "created_desc", "created_asc", "name_asc", "name_desc"]},
                 "backendFilter": {"type": "string", "description": "Backend token from context projects, or all."},
@@ -172,6 +172,12 @@ PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "description": "筛选结构预测 workflow 项目。",
         "payload_keys": ["workflowFilter"],
         "payload_defaults": {"workflowFilter": "prediction"},
+    },
+    "projects:workflow_virtual_screening": {
+        "label": "Virtual Screening 项目",
+        "description": "筛选 Nesso-1 Virtual Screening workflow 项目。",
+        "payload_keys": ["workflowFilter"],
+        "payload_defaults": {"workflowFilter": "virtual_screening"},
     },
     "projects:workflow_affinity": {
         "label": "Affinity 项目",

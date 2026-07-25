@@ -59,6 +59,7 @@ import {
 import { sha256Hex } from '../utils/crypto';
 import { ENV } from '../utils/env';
 import { componentTypeLabel, normalizeInputComponents } from '../utils/projectInputs';
+import { buildVirtualScreeningYaml, VIRTUAL_SCREENING_EXAMPLE } from '../utils/virtualScreening';
 import { getWorkflowDefinition } from '../utils/workflows';
 import { buildPredictionYamlFromComponents, collectCustomCcdMoleculesFromComponents } from '../utils/yaml';
 import { assignChainIdsForComponents } from '../utils/chainAssignments';
@@ -188,6 +189,8 @@ export function ApiAccessPage() {
   const [builderTaskSummary, setBuilderTaskSummary] = useState('');
   const [builderTokenPlainInput, setBuilderTokenPlainInput] = useState('');
   const [builderYamlPath, setBuilderYamlPath] = useState('./config.yaml');
+  const [builderVirtualScreeningProtein, setBuilderVirtualScreeningProtein] = useState('');
+  const [builderVirtualScreeningInput, setBuilderVirtualScreeningInput] = useState(VIRTUAL_SCREENING_EXAMPLE);
   const [builderYamlComponents, setBuilderYamlComponents] = useState<InputComponent[]>([
     createYamlBuilderComponent('protein'),
     createYamlBuilderComponent('ligand')
@@ -647,11 +650,22 @@ export function ApiAccessPage() {
   const selectedBackend = String(selectedProject?.backend || 'boltz').trim().toLowerCase() || 'boltz';
   const isAffinityWorkflow = selectedWorkflow.key === 'affinity';
   const isPredictionWorkflow = selectedWorkflow.key === 'prediction' || selectedWorkflow.key === 'peptide_design';
+  const isVirtualScreeningWorkflow = selectedWorkflow.key === 'virtual_screening';
   const isLeadOptimizationWorkflow = selectedWorkflow.key === 'lead_optimization';
-  const isSupportedSubmitWorkflow = isPredictionWorkflow || isAffinityWorkflow;
-  const effectivePredictionBackend: PredictionBackend = normalizePredictionBackend(builderPredictionBackend);
+  const isSupportedSubmitWorkflow = isPredictionWorkflow || isVirtualScreeningWorkflow || isAffinityWorkflow;
+  const selectedPredictionBackend = normalizePredictionBackend(builderPredictionBackend);
+  const effectivePredictionBackend: PredictionBackend = isVirtualScreeningWorkflow
+    ? 'nesso'
+    : selectedPredictionBackend === 'nesso'
+      ? 'boltz'
+      : selectedPredictionBackend;
+  const isNessoPredictionBackend = isVirtualScreeningWorkflow;
   const effectiveAffinityBackend: AffinityBackend = normalizeAffinityBackend(builderAffinityBackend);
-  const builderWorkflowKey: BuilderWorkflowKey = isAffinityWorkflow ? 'affinity' : 'prediction';
+  const builderWorkflowKey: BuilderWorkflowKey = isAffinityWorkflow
+    ? 'affinity'
+    : isVirtualScreeningWorkflow
+      ? 'virtual_screening'
+      : 'prediction';
   const selectedProjectTokens = useMemo(
     () => tokens.filter((item) => item.project_id === selectedTokenProjectId),
     [tokens, selectedTokenProjectId]
@@ -666,7 +680,11 @@ export function ApiAccessPage() {
       const successCalls = projectTokens.reduce((acc, token) => acc + (usageByTokenId[token.id]?.success || 0), 0);
       const successRate = totalCalls > 0 ? (successCalls / totalCalls) * 100 : 0;
       const workflow = getWorkflowDefinition(project.task_type);
-      const workflowKey: ProjectStatsWorkflowFilter = workflow.key === 'affinity' ? 'affinity' : 'prediction';
+      const workflowKey: ProjectStatsWorkflowFilter = workflow.key === 'affinity'
+        ? 'affinity'
+        : workflow.key === 'virtual_screening'
+          ? 'virtual_screening'
+          : 'prediction';
       const lastEventAt = projectTokens.reduce<string | null>((latest, token) => {
         const current = usageByTokenId[token.id]?.lastEventAt || null;
         if (!current) return latest;
@@ -812,6 +830,12 @@ export function ApiAccessPage() {
   }, [isPredictionWorkflow, selectedTokenProjectId, selectedProject?.protein_sequence, selectedProject?.ligand_smiles]);
 
   useEffect(() => {
+    if (!isVirtualScreeningWorkflow) return;
+    const protein = String(selectedProject?.protein_sequence || '').replace(/\s+/g, '').toUpperCase();
+    if (protein) setBuilderVirtualScreeningProtein(protein);
+  }, [isVirtualScreeningWorkflow, selectedProject?.protein_sequence, selectedTokenProjectId]);
+
+  useEffect(() => {
     if (!LEAD_OPT_API_ACCESS_ENABLED || !isLeadOptimizationWorkflow) return;
     const ligand = String(selectedProject?.ligand_smiles || '').trim();
     if (ligand) {
@@ -874,6 +898,14 @@ export function ApiAccessPage() {
             taskPropertiesRaw.__vbio_input_options_v1 && typeof taskPropertiesRaw.__vbio_input_options_v1 === 'object'
               ? (taskPropertiesRaw.__vbio_input_options_v1 as Record<string, unknown>)
               : {};
+          if (isVirtualScreeningWorkflow) {
+            const screeningInput = String(
+              taskInputOptions.virtualScreeningInput ?? taskInputOptions.virtual_screening_input ?? ''
+            );
+            if (screeningInput.trim()) setBuilderVirtualScreeningInput(screeningInput);
+            const target = taskComponents.find((component) => component.type === 'protein');
+            if (target?.sequence) setBuilderVirtualScreeningProtein(target.sequence.replace(/\s+/g, '').toUpperCase());
+          }
           setBuilderAffinityMode(
             normalizeAffinityBuilderMode(taskInputOptions.affinityMode ?? taskPropertiesRaw.affinityMode ?? taskPropertiesRaw.mode)
           );
@@ -890,7 +922,7 @@ export function ApiAccessPage() {
     return () => {
       cancelled = true;
     };
-  }, [isProjectScoped, scopedProjectId, scopedTaskRowId]);
+  }, [isProjectScoped, isVirtualScreeningWorkflow, scopedProjectId, scopedTaskRowId]);
 
   const filteredTokens = useMemo(() => {
     const keyword = tokenQuery.trim().toLowerCase();
@@ -1241,14 +1273,25 @@ export function ApiAccessPage() {
     });
   }, [isPredictionWorkflow, predictionTargetChainOptions, predictionChainOptions]);
   const yamlBuilderText = (() => {
+    if (isVirtualScreeningWorkflow) {
+      try {
+        return buildVirtualScreeningYaml({
+          proteinSequence: builderVirtualScreeningProtein,
+          rawInput: builderVirtualScreeningInput,
+          batchName: selectedProject?.name || 'Virtual screening'
+        }).yaml;
+      } catch (error) {
+        return `# ${error instanceof Error ? error.message : 'Virtual screening YAML generation failed.'}`;
+      }
+    }
     if (normalizedYamlBuilderComponents.length === 0) {
       return 'version: 1\nsequences: []';
     }
     try {
       return buildPredictionYamlFromComponents(normalizedYamlBuilderComponents, {
-        constraints: builderYamlConstraints,
+        constraints: isNessoPredictionBackend ? [] : builderYamlConstraints,
         properties: builderYamlProperties,
-        templates: predictionTemplateEntries.map((entry) => ({
+        templates: isNessoPredictionBackend ? [] : predictionTemplateEntries.map((entry) => ({
           fileName: entry.fileName,
           format: entry.format,
           templateChainId: entry.templateChainId,
@@ -1260,13 +1303,13 @@ export function ApiAccessPage() {
       return '# YAML generation failed. Please check component content.';
     }
   })();
-  const predictionTemplateFlags = predictionTemplateEnabled
+  const predictionTemplateFlags = !isNessoPredictionBackend && predictionTemplateEnabled
     ? predictionTemplateEntries.map((entry) => ` \\\n  -F "template_files=@${entry.escapedPath}"`).join('')
     : '';
   const allCustomCcdMolecules = collectCustomCcdMoleculesFromComponents(normalizedYamlBuilderComponents, { includeLigandSmiles: false });
-  const customCcdMolecules = allCustomCcdMolecules.filter((item) =>
-    looksLikeAminoAcidBackboneSmiles(item.smiles)
-  );
+  const customCcdMolecules = isNessoPredictionBackend
+    ? []
+    : allCustomCcdMolecules.filter((item) => looksLikeAminoAcidBackboneSmiles(item.smiles));
   const customCcdFlags = customCcdMolecules.length > 0
     ? ` \\
   -F "custom_ccd_molecules=${escapeForDoubleQuotedShell(JSON.stringify(customCcdMolecules))}"`
@@ -1316,11 +1359,11 @@ export function ApiAccessPage() {
       ? '\n# Lead Optimization requires input_compound (SMILES).'
       : '';
   const customResidueHint =
-    isPredictionWorkflow && allCustomCcdMolecules.length > customCcdMolecules.length
+    isPredictionWorkflow && !isNessoPredictionBackend && allCustomCcdMolecules.length > customCcdMolecules.length
       ? '\n# Some custom residue SMILES were omitted because no amino-acid backbone was detected.'
       : '';
   const predictionDeviceFlags =
-    effectivePredictionBackend !== 'alphafold3' && isPredictionWorkflow && builderPredictionLowVram
+    effectivePredictionBackend !== 'alphafold3' && !isNessoPredictionBackend && isPredictionWorkflow && builderPredictionLowVram
       ? ` \\\n  -F "low_vram=true"`
       : '';
   const commandEnv = `export VBIO_API_BASE="${managementApiBaseUrl}"\nexport VBIO_API_TOKEN="${curlToken}"\nexport VBIO_PROJECT_ID="${selectedTokenProjectId}"`;
@@ -1336,7 +1379,8 @@ fi
   -H "X-API-Token: ${curlToken}" \\
   -F "project_id=${selectedTokenProjectId}"${submitTaskMetaFlags} \\
   -F "yaml_file=@${escapedYamlPath}" \\
-  -F "backend=${effectivePredictionBackend}"${predictionTemplateFlags}${customCcdFlags}${predictionDeviceFlags})
+  -F "backend=${effectivePredictionBackend}" \\
+  -F "workflow=${isVirtualScreeningWorkflow ? 'virtual_screening' : selectedWorkflow.key === 'peptide_design' ? 'peptide_design' : 'prediction'}"${predictionTemplateFlags}${customCcdFlags}${predictionDeviceFlags})
 ${submitTaskIdCapture}`;
   const commandSubmitAffinityBoltz = `RESPONSE=$(curl -X POST "${managementApiBaseUrl}/api/boltz2score" \\
   -H "X-API-Token: ${curlToken}" \\
@@ -1350,7 +1394,7 @@ ${submitTaskIdCapture}`;
   -F "priority=high"${affinitySeedFlag}${affinityActivityFlags})
 ${submitTaskIdCapture}`;
   const commandSubmit = !isSupportedSubmitWorkflow
-    ? `# Workflow "${selectedWorkflow.title}" is not supported in Command Builder.\n# Use project workflows: Prediction or Affinity.`
+    ? `# Workflow "${selectedWorkflow.title}" is not supported in Command Builder.\n# Use project workflows: Prediction, Virtual Screening, or Affinity.`
     : (builderWorkflowKey === 'affinity'
       ? commandSubmitAffinityBoltz
       : commandSubmitPrediction);
@@ -1741,6 +1785,7 @@ ${submitTaskIdCapture}`;
               >
                 <option value="all">All</option>
                 <option value="prediction">Prediction</option>
+                <option value="virtual_screening">Virtual Screening</option>
                 <option value="affinity">Affinity</option>
               </select>
             </label>
@@ -1951,25 +1996,32 @@ ${submitTaskIdCapture}`;
 
             {!isSupportedSubmitWorkflow && (
               <div className="api-builder-note muted small">
-                Command Builder currently supports Prediction and Affinity projects.
+                Command Builder currently supports Prediction, Virtual Screening, and Affinity projects.
               </div>
             )}
 
-            {(isPredictionWorkflow || (LEAD_OPT_API_ACCESS_ENABLED && isLeadOptimizationWorkflow)) && (
+            {(isPredictionWorkflow || isVirtualScreeningWorkflow || (LEAD_OPT_API_ACCESS_ENABLED && isLeadOptimizationWorkflow)) && (
               <label className="field">
-                <span>{isLeadOptimizationWorkflow ? 'Lead Opt Backend' : 'Prediction Backend'}</span>
+                <span>{isVirtualScreeningWorkflow ? 'Virtual Screening Backend' : isLeadOptimizationWorkflow ? 'Lead Opt Backend' : 'Prediction Backend'}</span>
                 <select
                   value={effectivePredictionBackend}
                   onChange={(e) => setBuilderPredictionBackend(normalizePredictionBackend(e.target.value))}
+                  disabled={isVirtualScreeningWorkflow}
                 >
-                  <option value="boltz">boltz</option>
-                  <option value="alphafold3">alphafold3</option>
-                  <option value="protenix">protenix</option>
+                  {isVirtualScreeningWorkflow ? (
+                    <option value="nesso">nesso</option>
+                  ) : (
+                    <>
+                      <option value="boltz">boltz</option>
+                      <option value="alphafold3">alphafold3</option>
+                      <option value="protenix">protenix</option>
+                    </>
+                  )}
                 </select>
               </label>
             )}
 
-            {isPredictionWorkflow && effectivePredictionBackend !== 'alphafold3' && (
+            {isPredictionWorkflow && effectivePredictionBackend !== 'alphafold3' && !isNessoPredictionBackend && (
               <label className="checkbox-inline">
                 <input
                   type="checkbox"
@@ -2143,6 +2195,38 @@ ${submitTaskIdCapture}`;
               </>
             )}
 
+            {isVirtualScreeningWorkflow && (
+              <>
+                <label className="field">
+                  <span>YAML file path</span>
+                  <input value={builderYamlPath} onChange={(e) => setBuilderYamlPath(e.target.value)} placeholder="./config.yaml" />
+                </label>
+                <label className="field">
+                  <span>Target protein sequence</span>
+                  <textarea
+                    rows={7}
+                    value={builderVirtualScreeningProtein}
+                    onChange={(e) => setBuilderVirtualScreeningProtein(e.target.value.replace(/\s+/g, '').toUpperCase())}
+                    placeholder="One-letter amino-acid sequence"
+                    spellCheck={false}
+                  />
+                </label>
+                <label className="field">
+                  <span>Compound library</span>
+                  <textarea
+                    rows={10}
+                    value={builderVirtualScreeningInput}
+                    onChange={(e) => setBuilderVirtualScreeningInput(e.target.value)}
+                    placeholder={VIRTUAL_SCREENING_EXAMPLE}
+                    spellCheck={false}
+                  />
+                </label>
+                <div className="api-builder-note muted small">
+                  The generated YAML submits one target and a batch of SMILES to the independent Nesso-1 backend.
+                </div>
+              </>
+            )}
+
             {isAffinityWorkflow && (
               <>
                 <div className="api-yaml-component-flags api-affinity-options">
@@ -2264,7 +2348,7 @@ ${submitTaskIdCapture}`;
                 <pre><code>{commandEnv}</code></pre>
               </article>
 
-              {isPredictionWorkflow && (
+              {(isPredictionWorkflow || isVirtualScreeningWorkflow) && (
                 <article className="api-command-item">
                   <header>
                     <span>YAML Preview</span>
@@ -2277,7 +2361,9 @@ ${submitTaskIdCapture}`;
                       </button>
                     </div>
                   </header>
-                  <p className="muted small">Generated from YAML Builder inputs.</p>
+                  <p className="muted small">
+                    {isVirtualScreeningWorkflow ? 'Generated from target and compound-library inputs.' : 'Generated from YAML Builder inputs.'}
+                  </p>
                   <pre><code>{yamlBuilderText}</code></pre>
                 </article>
               )}
@@ -2289,6 +2375,8 @@ ${submitTaskIdCapture}`;
                       ? selectedWorkflow.shortTitle
                       : builderWorkflowKey === 'prediction'
                         ? `Prediction/${effectivePredictionBackend}`
+                        : builderWorkflowKey === 'virtual_screening'
+                          ? 'Virtual Screening/nesso'
                         : `Affinity/${effectiveAffinityBackend}`})
                   </span>
                   <button
@@ -2303,7 +2391,7 @@ ${submitTaskIdCapture}`;
                 </header>
                 <p className="muted small">
                   {!isSupportedSubmitWorkflow
-                    ? 'Select a Prediction/Affinity project to generate submit command.'
+                    ? 'Select a Prediction, Virtual Screening, or Affinity project to generate submit command.'
                     : 'Generated from project workflow and selected backend. task_name/task_summary are omitted unless you fill them.'}
                 </p>
                 <pre><code>{commandSubmitWithHints}</code></pre>

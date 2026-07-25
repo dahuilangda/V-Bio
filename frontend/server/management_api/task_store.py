@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from management_api.admin_monitor import build_task_statistics
 from management_api.postgrest_client import PostgrestClient
 
 
@@ -199,4 +200,40 @@ class ProjectTaskStore:
             query={"id": f"eq.{normalized_task_row_id}"},
             headers={"Prefer": "return=minimal"},
             expect_json=False,
+        )
+
+    def get_admin_statistics(
+        self,
+        *,
+        window_hours: int = 24,
+        row_limit: int = 10000,
+        recent_limit: int = 20,
+    ) -> Dict[str, Any]:
+        hours = max(1, min(24 * 31, int(window_hours or 24)))
+        limit = max(1, min(50000, int(row_limit or 10000)))
+        now = datetime.now(timezone.utc)
+        window_start = now - timedelta(hours=hours)
+        rows = self.postgrest.request(
+            "GET",
+            "project_tasks_list",
+            query={
+                "select": (
+                    "id,project_id,task_id,name,backend,task_state,status_text,error_text,"
+                    "submitted_at,completed_at,duration_seconds,created_at"
+                ),
+                "task_id": "neq.",
+                "or": (
+                    f"(submitted_at.gte.{window_start.isoformat()},"
+                    f"and(submitted_at.is.null,created_at.gte.{window_start.isoformat()}))"
+                ),
+                "order": "submitted_at.desc.nullslast,created_at.desc",
+                "limit": str(limit),
+            },
+        )
+        return build_task_statistics(
+            rows or [],
+            window_hours=hours,
+            now=now,
+            row_limit=limit,
+            recent_limit=recent_limit,
         )

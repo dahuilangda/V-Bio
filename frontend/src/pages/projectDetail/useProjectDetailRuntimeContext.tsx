@@ -752,7 +752,6 @@ export function useProjectDetailRuntimeContext() {
     setRunRedirectTaskId,
     setRunSuccessNotice,
     setShowFloatingRunButton,
-    structureText,
     setStructureText,
     setStructureFormat,
     structureTaskId,
@@ -890,6 +889,7 @@ export function useProjectDetailRuntimeContext() {
   const workflowKey = useMemo(() => getWorkflowDefinition(project?.task_type).key, [project?.task_type]);
   const isPredictionWorkflow = isPredictionLikeWorkflowKey(workflowKey);
   const isPeptideDesignWorkflow = workflowKey === 'peptide_design';
+  const isVirtualScreeningWorkflow = workflowKey === 'virtual_screening';
   const isAffinityWorkflow = workflowKey === 'affinity';
   const isLeadOptimizationWorkflow = workflowKey === 'lead_optimization';
   const runtimePollingSignature = useMemo(() => buildRuntimePollingSignature(projectTasks), [projectTasks]);
@@ -1979,6 +1979,7 @@ export function useProjectDetailRuntimeContext() {
 
   useProjectWorkspaceRuntimeUi({
     project,
+    backend: draft?.backend || project?.backend || '',
     workspaceTab,
     setWorkspaceTab,
     setNowTs,
@@ -2168,6 +2169,7 @@ export function useProjectDetailRuntimeContext() {
     project,
     draft,
     isPeptideDesignWorkflow,
+    isVirtualScreeningWorkflow,
     workspaceTab,
     affinityTargetFile,
     affinityLigandFile,
@@ -2248,7 +2250,6 @@ export function useProjectDetailRuntimeContext() {
     runtimeResultTask,
     activeResultTask,
     structureTaskId,
-    structureText,
     pullResultForViewer,
     isPeptideDesignWorkflow,
     isLeadOptimizationWorkflow,
@@ -2300,6 +2301,7 @@ export function useProjectDetailRuntimeContext() {
     workflowKey,
     isPredictionWorkflow,
     isPeptideDesignWorkflow,
+    isVirtualScreeningWorkflow,
     isAffinityWorkflow,
     isLeadOptimizationWorkflow,
     requestedStatusTaskRow,

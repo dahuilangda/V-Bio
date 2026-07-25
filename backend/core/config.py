@@ -266,7 +266,21 @@ PROTENIX_COMMON_CACHE_DIR = os.environ.get(
 )
 
 # ==============================================================================
-# 8. PocketXMol Docker 集成
+# 8. Nesso Docker 集成
+# ==============================================================================
+
+NESSO_DOCKER_IMAGE = os.environ.get("NESSO_DOCKER_IMAGE", "vbio-nesso-runtime:1.0.0")
+NESSO_DOCKER_EXTRA_ARGS = os.environ.get("NESSO_DOCKER_EXTRA_ARGS", "")
+NESSO_HOST_CACHE_DIR = os.environ.get("NESSO_HOST_CACHE_DIR", "/data/nesso_cache")
+NESSO_CONTAINER_CACHE_DIR = os.environ.get("NESSO_CONTAINER_CACHE_DIR", "/workspace/nesso-cache")
+NESSO_MODEL_REVISION = os.environ.get("NESSO_MODEL_REVISION", "v1.0.0")
+NESSO_NO_KERNELS = os.environ.get("NESSO_NO_KERNELS", "true")
+NESSO_RECYCLING_STEPS = _parse_int_env("NESSO_RECYCLING_STEPS", 5, minimum=0)
+NESSO_NUM_WORKERS = _parse_int_env("NESSO_NUM_WORKERS", 2, minimum=1)
+NESSO_PRECISION = os.environ.get("NESSO_PRECISION", "bf16-mixed")
+
+# ==============================================================================
+# 9. PocketXMol Docker 集成
 # ==============================================================================
 
 POCKETXMOL_ROOT_DIR = os.environ.get(

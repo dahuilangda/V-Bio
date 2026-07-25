@@ -29,7 +29,6 @@ interface UseProjectRuntimeEffectsInput {
   runtimeResultTask: RuntimeTaskLike | null;
   activeResultTask: RuntimeTaskLike | null;
   structureTaskId: string | null;
-  structureText: string;
   pullResultForViewer: (
     taskId: string,
     options?: { taskRowId?: string; persistProject?: boolean; resultMode?: DownloadResultMode; preferredStructureName?: string }
@@ -52,7 +51,6 @@ export function useProjectRuntimeEffects({
   statusContextTaskRow,
   runtimeResultTask,
   structureTaskId,
-  structureText,
   pullResultForViewer,
   isPeptideDesignWorkflow,
   isLeadOptimizationWorkflow,
@@ -126,8 +124,8 @@ export function useProjectRuntimeEffects({
     if (contextTask?.task_state !== 'SUCCESS') return;
     if (hasLeadOptMmpOnlySnapshot(contextTask)) return;
 
-    const hasStructureLoaded = structureTaskId === contextTaskId && structureText.trim().length > 0;
-    if (hasStructureLoaded) {
+    const hasResultLoaded = structureTaskId === contextTaskId;
+    if (hasResultLoaded) {
       return;
     }
 
@@ -143,7 +141,6 @@ export function useProjectRuntimeEffects({
     runtimeResultTask,
     projectTaskId,
     structureTaskId,
-    structureText,
     pullResultForViewer,
     isPeptideDesignWorkflow,
     isLeadOptimizationWorkflow,

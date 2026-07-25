@@ -577,7 +577,41 @@ function hasTaskLigandAtomPlddts(
   return Boolean(readTaskLigandAtomPlddts(task, preferredLigandChainId, allowFlatFallback)?.length);
 }
 
+function hasNessoAffinitySummary(task: ProjectTask): boolean {
+  const confidence =
+    task.confidence && typeof task.confidence === 'object' && !Array.isArray(task.confidence)
+      ? (task.confidence as Record<string, unknown>)
+      : {};
+  const backend = String(task.backend || confidence.backend || '').trim().toLowerCase();
+  if (backend !== 'nesso' && backend !== 'nesso1' && backend !== 'nesso-1') return false;
+
+  const affinity =
+    task.affinity && typeof task.affinity === 'object' && !Array.isArray(task.affinity)
+      ? (task.affinity as Record<string, unknown>)
+      : {};
+  if (readFirstFiniteMetric(affinity, [
+    'affinity_pred_value',
+    'affinity_pred_value1',
+    'affinity_pred_value2',
+    'affinity_probability_binary'
+  ]) !== null) {
+    return true;
+  }
+  const compounds = Array.isArray(affinity.compounds) ? affinity.compounds : [];
+  return compounds.some((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+    return readFirstFiniteMetric(item as Record<string, unknown>, [
+      'affinity_pred_value',
+      'affinity_pred_value1',
+      'affinity_pred_value2',
+      'affinity_probability_binary'
+    ]) !== null;
+  });
+}
+
 function hasTaskSummaryMetrics(task: ProjectTask): boolean {
+  // Nesso is affinity-only, so structural confidence metrics are intentionally absent.
+  if (hasNessoAffinitySummary(task)) return true;
   const context = resolveTaskSelectionContext(task);
   const metrics = readTaskConfidenceMetrics(task, context);
   const hasAnyMetric = metrics.plddt !== null || metrics.ipsae !== null || metrics.iptm !== null || metrics.pae !== null;
@@ -613,5 +647,6 @@ export {
   readTaskLigandResiduePlddts,
   readTaskLigandAtomPlddts,
   hasTaskLigandAtomPlddts,
+  hasNessoAffinitySummary,
   hasTaskSummaryMetrics
 };

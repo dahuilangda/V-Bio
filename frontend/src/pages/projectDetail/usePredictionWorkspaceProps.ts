@@ -239,6 +239,7 @@ export function usePredictionWorkspaceProps({
         constraintCount,
         addConstraintFromSidebar,
         hasActiveChains,
+        constraintsSupported: allowedConstraintTypes.length > 0,
         constraints: draft.inputConfig.constraints,
         activeConstraintId,
         selectedContactConstraintIdSet,

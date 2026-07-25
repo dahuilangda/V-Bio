@@ -1,5 +1,12 @@
 import type { CSSProperties, Dispatch, KeyboardEvent, PointerEvent, ReactNode, RefObject, SetStateAction } from 'react';
-import type { AffinityScoringMode, CustomCcdMoleculeInput, InputComponent, PeptideResiduePoolSelection, ProteinTemplateUpload } from '../../types/models';
+import type {
+  AffinityScoringMode,
+  CustomCcdMoleculeInput,
+  InputComponent,
+  PeptideResiduePoolSelection,
+  ProteinTemplateUpload,
+  VirtualScreeningPredictionRecord
+} from '../../types/models';
 import type { MolstarResiduePick } from '../../components/project/MolstarViewer';
 import type { AffinitySignalCard } from '../../components/project/AffinityWorkspace';
 import type { LeadOptCandidatesUiState } from '../../components/project/leadopt/LeadOptCandidatesPanel';
@@ -13,6 +20,7 @@ import {
   buildLeadOptimizationWorkflowSectionProps,
   buildPredictionWorkflowSectionProps,
   buildProjectResultsSectionProps,
+  buildVirtualScreeningWorkflowSectionProps,
   buildWorkflowRuntimeSettingsSectionProps
 } from './workflowSectionProps';
 import { handleLeadOptimizationLigandSmilesChangeAction } from './editorActions';
@@ -22,6 +30,7 @@ import type { ProjectWorkspaceDraft, WorkspaceTab } from './workspaceTypes';
 interface UseProjectWorkflowSectionPropsInput {
   isPredictionWorkflow: boolean;
   isPeptideDesignWorkflow: boolean;
+  isVirtualScreeningWorkflow: boolean;
   isAffinityWorkflow: boolean;
   isLeadOptimizationWorkflow: boolean;
   workflowTitle: string;
@@ -38,6 +47,7 @@ interface UseProjectWorkflowSectionPropsInput {
   onResultsResizerKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
   snapshotCards: AffinitySignalCard[];
   snapshotConfidence: Record<string, unknown> | null;
+  snapshotAffinity: Record<string, unknown> | null;
   resultChainIds: string[];
   selectedResultTargetChainId: string | null;
   selectedResultLigandChainId: string | null;
@@ -131,6 +141,13 @@ interface UseProjectWorkflowSectionPropsInput {
   onComponentsResizerKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
   components: InputComponent[];
   onComponentsChange: (components: InputComponent[]) => void;
+  virtualScreeningInput: string;
+  virtualScreeningInputMode: 'upload' | 'paste';
+  virtualScreeningInputFileName: string;
+  virtualScreeningPredictionRecords: Record<string, VirtualScreeningPredictionRecord>;
+  onVirtualScreeningPredictionRecordsChange?: (
+    records: Record<string, VirtualScreeningPredictionRecord>
+  ) => void;
   proteinTemplates: Record<string, ProteinTemplateUpload>;
   customResidueLibrary: CustomCcdMoleculeInput[];
   onCustomResidueLibraryChange: (library: CustomCcdMoleculeInput[]) => void;
@@ -191,6 +208,7 @@ interface UseProjectWorkflowSectionPropsResult {
   affinityWorkflowSectionProps: ReturnType<typeof buildAffinityWorkflowSectionProps>;
   leadOptimizationWorkflowSectionProps: ReturnType<typeof buildLeadOptimizationWorkflowSectionProps>;
   predictionWorkflowSectionProps: ReturnType<typeof buildPredictionWorkflowSectionProps>;
+  virtualScreeningWorkflowSectionProps: ReturnType<typeof buildVirtualScreeningWorkflowSectionProps>;
   workflowRuntimeSettingsSectionProps: ReturnType<typeof buildWorkflowRuntimeSettingsSectionProps>;
 }
 
@@ -200,11 +218,15 @@ const EMPTY_LEAD_OPTIMIZATION_WORKFLOW_SECTION_PROPS = {} as ReturnType<
   typeof buildLeadOptimizationWorkflowSectionProps
 >;
 const EMPTY_PREDICTION_WORKFLOW_SECTION_PROPS = {} as ReturnType<typeof buildPredictionWorkflowSectionProps>;
+const EMPTY_VIRTUAL_SCREENING_WORKFLOW_SECTION_PROPS = {} as ReturnType<
+  typeof buildVirtualScreeningWorkflowSectionProps
+>;
 const EMPTY_WORKFLOW_RUNTIME_SETTINGS_SECTION_PROPS = {} as ReturnType<typeof buildWorkflowRuntimeSettingsSectionProps>;
 
 export function useProjectWorkflowSectionProps({
   isPredictionWorkflow,
   isPeptideDesignWorkflow,
+  isVirtualScreeningWorkflow,
   isAffinityWorkflow,
   isLeadOptimizationWorkflow,
   workflowTitle,
@@ -221,6 +243,7 @@ export function useProjectWorkflowSectionProps({
   onResultsResizerKeyDown,
   snapshotCards,
   snapshotConfidence,
+  snapshotAffinity,
   resultChainIds,
   selectedResultTargetChainId,
   selectedResultLigandChainId,
@@ -291,6 +314,11 @@ export function useProjectWorkflowSectionProps({
   onComponentsResizerKeyDown,
   components,
   onComponentsChange,
+  virtualScreeningInput,
+  virtualScreeningInputMode,
+  virtualScreeningInputFileName,
+  virtualScreeningPredictionRecords,
+  onVirtualScreeningPredictionRecordsChange,
   proteinTemplates,
   customResidueLibrary,
   onCustomResidueLibraryChange,
@@ -360,14 +388,19 @@ export function useProjectWorkflowSectionProps({
   const shouldBuildLeadOptimizationWorkflowSection =
     isLeadOptimizationWorkflow && (workspaceTab === 'components' || workspaceTab === 'results');
   const shouldBuildPredictionWorkflowSection =
-    isPredictionWorkflow && (workspaceTab === 'components' || workspaceTab === 'constraints');
+    isPredictionWorkflow && !isVirtualScreeningWorkflow &&
+    (workspaceTab === 'components' || workspaceTab === 'constraints');
+  const shouldBuildVirtualScreeningWorkflowSection =
+    isVirtualScreeningWorkflow && workspaceTab === 'components';
   const shouldBuildWorkflowRuntimeSettingsSection =
-    workspaceTab === 'components' && !isLeadOptimizationWorkflow;
-
+    workspaceTab === 'components' && !isLeadOptimizationWorkflow && !isVirtualScreeningWorkflow;
+  const normalizedBackend = String(backend || '').trim().toLowerCase();
+  const isNessoBackend = normalizedBackend === 'nesso' || normalizedBackend === 'nesso1' || normalizedBackend === 'nesso-1';
   const projectResultsSectionProps = shouldBuildProjectResultsSection
     ? buildProjectResultsSectionProps({
         isPredictionWorkflow,
         isPeptideDesignWorkflow,
+        isVirtualScreeningWorkflow,
         isAffinityWorkflow,
         workflowTitle,
         workflowShortTitle,
@@ -380,6 +413,7 @@ export function useProjectWorkflowSectionProps({
         onResizerKeyDown: onResultsResizerKeyDown,
         snapshotCards,
         snapshotConfidence: snapshotConfidence || {},
+        snapshotAffinity: snapshotAffinity || {},
         resultChainIds,
         selectedResultTargetChainId,
         selectedResultLigandChainId,
@@ -404,6 +438,12 @@ export function useProjectWorkflowSectionProps({
         peptideFallbackIptm: snapshotSelectedPairIptm,
         statusInfo,
         progressPercent,
+        canPredictStructures: canEdit,
+        virtualScreeningComponents: components,
+        predictionRecords: virtualScreeningPredictionRecords,
+        onPredictionRecordsChange: canEdit
+          ? onVirtualScreeningPredictionRecordsChange
+          : undefined,
         onPeptideRequestStructure
       })
     : EMPTY_PROJECT_RESULTS_SECTION_PROPS;
@@ -478,6 +518,8 @@ export function useProjectWorkflowSectionProps({
         components,
         onComponentsChange,
         proteinTemplates,
+        allowProteinMsa: !isNessoBackend,
+        allowProteinTemplates: !isNessoBackend,
         customResidueLibrary,
         onCustomResidueLibraryChange,
         onProteinTemplateChange,
@@ -488,6 +530,40 @@ export function useProjectWorkflowSectionProps({
         componentsSidebarProps: predictionComponentsSidebarProps
       })
     : EMPTY_PREDICTION_WORKFLOW_SECTION_PROPS;
+  const virtualScreeningWorkflowSectionProps = shouldBuildVirtualScreeningWorkflowSection
+    ? buildVirtualScreeningWorkflowSectionProps({
+        canEdit,
+        componentsWorkspaceRef,
+        isComponentsResizing,
+        componentsGridStyle,
+        onComponentsResizerPointerDown,
+        onComponentsResizerKeyDown,
+        components,
+        onComponentsChange,
+        activeComponentId,
+        onActiveComponentIdChange: (id: string | null) => setActiveComponentId(id),
+        screeningInput: virtualScreeningInput,
+        screeningInputMode: virtualScreeningInputMode,
+        screeningInputFileName: virtualScreeningInputFileName,
+        onScreeningLibraryChange: ({ value, mode, fileName }) => {
+          setDraft((previous) => {
+            if (!previous) return previous;
+            return {
+              ...previous,
+              inputConfig: {
+                ...previous.inputConfig,
+                options: {
+                  ...previous.inputConfig.options,
+                  virtualScreeningInput: value,
+                  virtualScreeningInputMode: mode,
+                  virtualScreeningInputFileName: fileName
+                }
+              }
+            };
+          });
+        }
+      })
+    : EMPTY_VIRTUAL_SCREENING_WORKFLOW_SECTION_PROPS;
   const workflowRuntimeSettingsSectionProps = shouldBuildWorkflowRuntimeSettingsSection
     ? buildWorkflowRuntimeSettingsSectionProps({
         canEdit,
@@ -548,6 +624,7 @@ export function useProjectWorkflowSectionProps({
     affinityWorkflowSectionProps,
     leadOptimizationWorkflowSectionProps,
     predictionWorkflowSectionProps,
+    virtualScreeningWorkflowSectionProps,
     workflowRuntimeSettingsSectionProps
   };
 }

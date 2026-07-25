@@ -98,10 +98,17 @@ export function backendLabel(value: string): string {
   if (value === 'alphafold3') return 'AlphaFold3';
   if (value === 'protenix') return 'Protenix';
   if (value === 'boltz') return 'Boltz-2';
+  if (value === 'nesso') return 'Nesso-1';
   return value ? value.toUpperCase() : 'Unknown';
 }
 
 export function resolveTaskWorkflowKey(task: ProjectTask, fallbackTaskType: string): WorkflowKey {
+  const confidence = hasObjectFields(task.confidence) ? task.confidence as Record<string, unknown> : {};
+  const affinity = hasObjectFields(task.affinity) ? task.affinity as Record<string, unknown> : {};
+  const normalizedBackend = String(task.backend || confidence.backend || affinity.backend || '').trim().toLowerCase();
+  if (normalizedBackend === 'nesso' || normalizedBackend === 'nesso1' || normalizedBackend === 'nesso-1') {
+    return 'virtual_screening';
+  }
   const normalizedFallback = normalizeWorkflowKey(fallbackTaskType);
   if (isPredictionLikeWorkflowKey(normalizedFallback) || normalizedFallback === 'affinity' || normalizedFallback === 'lead_optimization') {
     return normalizedFallback;

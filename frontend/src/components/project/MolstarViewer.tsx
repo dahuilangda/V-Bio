@@ -28,6 +28,7 @@ interface MolstarViewerProps {
   ligandFocusChainId?: string;
   autoFocusLigand?: boolean;
   suppressResidueSelection?: boolean;
+  emptyMessage?: string;
 }
 
 export type { MolstarResiduePick, MolstarResidueHighlight, MolstarAtomHighlight };
@@ -53,7 +54,8 @@ export const MolstarViewer = memo(function MolstarViewer({
   leadOptStyleVariant = 'default',
   ligandFocusChainId = '',
   autoFocusLigand,
-  suppressResidueSelection = false
+  suppressResidueSelection = false,
+  emptyMessage = 'No structure loaded yet. Run prediction and refresh status after completion.'
 }: MolstarViewerProps) {
   const hadExternalHighlightsRef = useRef(false);
   const {
@@ -161,7 +163,7 @@ export const MolstarViewer = memo(function MolstarViewer({
     <>
       <div ref={hostRef} className={`molstar-host ${lockView ? 'molstar-host-locked' : ''}`} />
       {!structureText.trim() && (
-        <div className="muted small top-margin">No structure loaded yet. Run prediction and refresh status after completion.</div>
+        <div className="muted small top-margin">{emptyMessage}</div>
       )}
       {structureText.trim() && colorMode === 'alphafold' && (
         <div className="legend-row">

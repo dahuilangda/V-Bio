@@ -80,6 +80,7 @@ from backend.core.config import (
 )
 from backend.scheduling.capability_router import build_capability_queue
 from backend.services.common_utils import coerce_bool
+from backend.runtime.nesso_backend import run_nesso_backend
 from backend.runtime.af3_adapter import (
     AF3Preparation,
     build_af3_fasta,
@@ -8955,14 +8956,24 @@ def main():
         runtime_task_id = str(predict_args.pop("task_id", "")).strip() or None
         yaml_content = predict_args.pop("yaml_content")
         backend = str(predict_args.pop("backend", "boltz")).strip().lower()
-        if backend not in ("boltz", "alphafold3", "protenix", "pocketxmol"):
+        if backend in {"nesso1", "nesso-1"}:
+            backend = "nesso"
+        if backend not in ("boltz", "alphafold3", "protenix", "nesso", "pocketxmol"):
             raise ValueError(f"Unsupported backend '{backend}'.")
         low_vram = resolve_low_vram(predict_args)
         workflow = str(predict_args.pop("workflow", "prediction")).strip().lower()
         if workflow in {"peptide", "peptide_designer", "designer"}:
             workflow = "peptide_design"
-        if workflow not in {"prediction", "peptide_design"}:
-            workflow = "prediction"
+        elif workflow in {"virtual screening", "virtual-screening", "screening", "vs"}:
+            workflow = "virtual_screening"
+        if workflow not in {"prediction", "peptide_design", "virtual_screening"}:
+            raise ValueError(f"Unsupported workflow '{workflow}'.")
+        if backend == "nesso" and workflow != "virtual_screening":
+            raise ValueError(
+                "Nesso is an independent virtual-screening backend; use workflow=virtual_screening."
+            )
+        if workflow == "virtual_screening" and backend != "nesso":
+            raise ValueError("The virtual_screening workflow requires backend=nesso.")
         peptide_design_options = predict_args.pop("peptide_design_options", {})
         if not isinstance(peptide_design_options, dict):
             peptide_design_options = {}
@@ -9054,6 +9065,19 @@ def main():
                     template_payloads=af3_template_payloads,
                     task_id=runtime_task_id,
                     custom_ccd_molecules=custom_ccd_molecules if isinstance(custom_ccd_molecules, list) else [],
+                    low_vram=low_vram,
+                )
+            elif backend == "nesso":
+                if template_inputs:
+                    raise ValueError("Nesso does not support template files.")
+                if custom_ccd_molecules:
+                    raise ValueError("Nesso does not support custom CCD residue uploads.")
+                run_nesso_backend(
+                    temp_dir=temp_dir,
+                    yaml_content=processed_yaml,
+                    output_archive_path=output_archive_path,
+                    seed=seed,
+                    task_id=runtime_task_id,
                     low_vram=low_vram,
                 )
             elif backend == "protenix":

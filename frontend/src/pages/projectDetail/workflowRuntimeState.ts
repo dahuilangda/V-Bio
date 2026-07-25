@@ -1,11 +1,17 @@
+import { parseVirtualScreeningInput } from '../../utils/virtualScreening';
+import type { InputComponent } from '../../types/models';
+
 export interface BuildRunUiStateParams {
   workspaceTab: 'results' | 'basics' | 'components' | 'constraints';
   isPredictionWorkflow: boolean;
   isPeptideDesignWorkflow: boolean;
+  isVirtualScreeningWorkflow: boolean;
   isAffinityWorkflow: boolean;
   isLeadOptimizationWorkflow: boolean;
   hasIncompleteComponents: boolean;
   componentCompletion: { filledCount: number; total: number };
+  virtualScreeningInput: string;
+  virtualScreeningComponents: InputComponent[];
   submitting: boolean;
   saving: boolean;
   isRunRedirecting: boolean;
@@ -42,10 +48,13 @@ export function buildRunUiState(params: BuildRunUiStateParams): RunUiStateResult
     workspaceTab,
     isPredictionWorkflow,
     isPeptideDesignWorkflow,
+    isVirtualScreeningWorkflow,
     isAffinityWorkflow,
     isLeadOptimizationWorkflow,
     hasIncompleteComponents,
     componentCompletion,
+    virtualScreeningInput,
+    virtualScreeningComponents,
     submitting,
     saving,
     isRunRedirecting,
@@ -92,7 +101,41 @@ export function buildRunUiState(params: BuildRunUiStateParams): RunUiStateResult
                 ? 'Ligand SMILES is required for activity mode.'
                 : '';
 
-  const runBlockedReason = isPeptideDesignWorkflow
+  const parsedScreening = isVirtualScreeningWorkflow
+    ? parseVirtualScreeningInput(virtualScreeningInput)
+    : null;
+  const virtualScreeningProteins = virtualScreeningComponents.filter((component) => component.type === 'protein');
+  const virtualScreeningUnsupported = virtualScreeningComponents.find(
+    (component) => component.type !== 'protein' && component.type !== 'ligand'
+  );
+  const virtualScreeningIncomplete = virtualScreeningComponents.find(
+    (component) => !String(component.sequence || '').trim()
+  );
+  const virtualScreeningInvalidProtein = virtualScreeningProteins.find((component) => {
+    const sequence = String(component.sequence || '').replace(/\s+/g, '').toUpperCase();
+    return Boolean(sequence) && !/^[ACDEFGHIKLMNPQRSTVWY]+$/.test(sequence);
+  });
+  const virtualScreeningReadyReason = !isVirtualScreeningWorkflow
+    ? ''
+    : virtualScreeningUnsupported
+      ? 'Nesso-1 supports protein and ligand components only; remove DNA/RNA.'
+      : virtualScreeningProteins.length === 0
+        ? 'Add at least one target protein component before running.'
+        : virtualScreeningIncomplete
+          ? 'Complete every target-complex component before running.'
+          : virtualScreeningInvalidProtein
+            ? 'A protein contains residue codes unsupported by Nesso-1.'
+      : parsedScreening && parsedScreening.errors.length > 0
+        ? parsedScreening.errors[0]
+        : !parsedScreening || parsedScreening.compounds.length === 0
+          ? 'Add at least one compound SMILES before running.'
+          : parsedScreening.compounds.length > 200
+            ? 'Virtual Screening accepts at most 200 compounds per batch.'
+            : '';
+
+  const runBlockedReason = isVirtualScreeningWorkflow
+    ? virtualScreeningReadyReason
+    : isPeptideDesignWorkflow
     ? hasIncompleteComponents
       ? `Complete all components before run (${componentCompletion.filledCount}/${componentCompletion.total} ready).`
       : ''
@@ -113,7 +156,8 @@ export function buildRunUiState(params: BuildRunUiStateParams): RunUiStateResult
     saving ||
     isRunRedirecting ||
     (!isPredictionWorkflow && !isAffinityWorkflow && !isLeadOptimizationWorkflow) ||
-    (isPredictionWorkflow && hasIncompleteComponents) ||
+    (isVirtualScreeningWorkflow && Boolean(virtualScreeningReadyReason)) ||
+    (isPredictionWorkflow && !isVirtualScreeningWorkflow && hasIncompleteComponents) ||
     (isAffinityWorkflow && Boolean(affinityReadyReason)) ||
     (isLeadOptimizationWorkflow && workspaceTab !== 'components');
 

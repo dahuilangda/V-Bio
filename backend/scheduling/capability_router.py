@@ -12,6 +12,7 @@ KNOWN_CAPABILITIES: tuple[str, ...] = (
     "boltz2",
     "alphafold3",
     "protenix",
+    "nesso",
     "pocketxmol",
     "boltz2score",
     "lead_opt",
@@ -22,6 +23,7 @@ GPU_CAPABILITIES = {
     "boltz2",
     "alphafold3",
     "protenix",
+    "nesso",
     "pocketxmol",
     "boltz2score",
 }
@@ -34,6 +36,9 @@ _CAPABILITY_ALIASES = {
     "alphafold3": "alphafold3",
     "af3": "alphafold3",
     "protenix": "protenix",
+    "nesso": "nesso",
+    "nesso1": "nesso",
+    "nesso-1": "nesso",
     "pocketxmol": "pocketxmol",
     "affinity": "boltz2score",
     "boltz2score": "boltz2score",
@@ -184,7 +189,7 @@ def normalize_capability(capability: str | None) -> str | None:
 
 def capability_from_prediction_backend(backend: str | None) -> str:
     normalized = normalize_capability(str(backend or "").strip().lower())
-    if normalized in {"boltz2", "alphafold3", "protenix", "pocketxmol"}:
+    if normalized in {"boltz2", "alphafold3", "protenix", "nesso", "pocketxmol"}:
         return normalized
     return "boltz2"
 

@@ -7,6 +7,7 @@ interface WorkspaceStepperProps {
   isPredictionWorkflow: boolean;
   isAffinityWorkflow: boolean;
   isLeadOptimizationWorkflow: boolean;
+  constraintsSupported: boolean;
   componentStepLabel: string;
 }
 
@@ -16,11 +17,12 @@ export function WorkspaceStepper({
   isPredictionWorkflow,
   isAffinityWorkflow,
   isLeadOptimizationWorkflow,
+  constraintsSupported,
   componentStepLabel
 }: WorkspaceStepperProps) {
   const componentsLabel = isLeadOptimizationWorkflow ? 'Build' : componentStepLabel;
   const constraintsLabel = isLeadOptimizationWorkflow ? 'Results' : 'Constraints';
-  const showConstraintsStep = isPredictionWorkflow;
+  const showConstraintsStep = isPredictionWorkflow && constraintsSupported;
 
   return (
     <aside className="workspace-stepper" aria-label="Workspace sections">

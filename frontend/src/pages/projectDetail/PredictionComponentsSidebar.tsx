@@ -43,6 +43,7 @@ export interface PredictionComponentsSidebarProps {
   constraintCount: number;
   onAddConstraint: () => void;
   hasActiveChains: boolean;
+  constraintsSupported: boolean;
   constraints: PredictionConstraint[];
   activeConstraintId: string | null;
   selectedContactConstraintIdSet: Set<string>;
@@ -80,6 +81,7 @@ export function PredictionComponentsSidebar({
   constraintCount,
   onAddConstraint,
   hasActiveChains,
+  constraintsSupported,
   constraints,
   activeConstraintId,
   selectedContactConstraintIdSet,
@@ -167,52 +169,54 @@ export function PredictionComponentsSidebar({
         );
       })}
 
-      <section className="component-sidebar-section">
-        <div className="component-tree-row">
-          <button type="button" className="component-sidebar-toggle" onClick={onSidebarConstraintsToggle}>
-            <span className="component-tree-label">
-              {sidebarConstraintsOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-              <strong>Constraints</strong>
-            </span>
-            <span className="muted small">{constraintCount}</span>
-          </button>
-          <button
-            type="button"
-            className="icon-btn component-tree-add"
-            onClick={onAddConstraint}
-            disabled={!canEdit || !hasActiveChains}
-            title="Add constraint"
-          >
-            <Plus size={14} />
-          </button>
-        </div>
-        {sidebarConstraintsOpen && (
-          <div className="component-sidebar-list component-sidebar-list-nested">
-            {constraints.length === 0 ? (
-              <div className="component-sidebar-empty muted small">No constraints yet.</div>
-            ) : (
-              constraints.map((constraint, index) => (
-                <button
-                  key={constraint.id}
-                  type="button"
-                  className={`component-sidebar-link component-sidebar-link-constraint ${
-                    activeConstraintId === constraint.id || selectedContactConstraintIdSet.has(constraint.id) ? 'active' : ''
-                  }`}
-                  onClick={(event) =>
-                    onJumpToConstraint(constraint.id, {
-                      toggle: event.metaKey || event.ctrlKey,
-                      range: event.shiftKey
-                    })
-                  }
-                >
-                  <span>{`${index + 1}. ${constraintLabel(constraint.type)} · ${formatConstraintCombo(constraint)}`}</span>
-                  <span className="muted small">{formatConstraintDetail(constraint)}</span>
-                </button>
-              ))
-            )}
+      {constraintsSupported && (
+        <section className="component-sidebar-section">
+          <div className="component-tree-row">
+            <button type="button" className="component-sidebar-toggle" onClick={onSidebarConstraintsToggle}>
+              <span className="component-tree-label">
+                {sidebarConstraintsOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                <strong>Constraints</strong>
+              </span>
+              <span className="muted small">{constraintCount}</span>
+            </button>
+            <button
+              type="button"
+              className="icon-btn component-tree-add"
+              onClick={onAddConstraint}
+              disabled={!canEdit || !hasActiveChains}
+              title="Add constraint"
+            >
+              <Plus size={14} />
+            </button>
           </div>
-        )}
-      </section>
+          {sidebarConstraintsOpen && (
+            <div className="component-sidebar-list component-sidebar-list-nested">
+              {constraints.length === 0 ? (
+                <div className="component-sidebar-empty muted small">No constraints yet.</div>
+              ) : (
+                constraints.map((constraint, index) => (
+                  <button
+                    key={constraint.id}
+                    type="button"
+                    className={`component-sidebar-link component-sidebar-link-constraint ${
+                      activeConstraintId === constraint.id || selectedContactConstraintIdSet.has(constraint.id) ? 'active' : ''
+                    }`}
+                    onClick={(event) =>
+                      onJumpToConstraint(constraint.id, {
+                        toggle: event.metaKey || event.ctrlKey,
+                        range: event.shiftKey
+                      })
+                    }
+                  >
+                    <span>{`${index + 1}. ${constraintLabel(constraint.type)} · ${formatConstraintCombo(constraint)}`}</span>
+                    <span className="muted small">{formatConstraintDetail(constraint)}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          )}
+        </section>
+      )}
 
       <section className="component-sidebar-section">
         <div className="component-sidebar-toggle component-sidebar-toggle-static">

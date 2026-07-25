@@ -2,6 +2,7 @@ import type { FormEvent, MouseEvent, RefObject } from 'react';
 import type { AffinityWorkflowSectionProps } from './AffinityWorkflowSection';
 import type { LeadOptimizationWorkflowSectionProps } from './LeadOptimizationWorkflowSection';
 import type { PredictionWorkflowSectionProps } from './PredictionWorkflowSection';
+import type { VirtualScreeningWorkflowSectionProps } from './VirtualScreeningWorkflowSection';
 import { ProjectHeaderActions } from './ProjectHeaderActions';
 import { ProjectHeaderMeta } from './ProjectHeaderMeta';
 import { ProjectWorkspaceContent } from './ProjectWorkspaceContent';
@@ -26,8 +27,10 @@ export interface ProjectDetailLayoutProps {
   taskName: string;
   taskSummary: string;
   isPredictionWorkflow: boolean;
+  isVirtualScreeningWorkflow: boolean;
   isAffinityWorkflow: boolean;
   isLeadOptimizationWorkflow: boolean;
+  constraintsSupported: boolean;
   displayTaskState: string;
   isActiveRuntime: boolean;
   progressPercent: number;
@@ -56,6 +59,7 @@ export interface ProjectDetailLayoutProps {
   affinitySectionProps: Omit<AffinityWorkflowSectionProps, 'visible'>;
   leadOptimizationSectionProps: Omit<LeadOptimizationWorkflowSectionProps, 'visible'>;
   predictionSectionProps: Omit<PredictionWorkflowSectionProps, 'visible'>;
+  virtualScreeningSectionProps: Omit<VirtualScreeningWorkflowSectionProps, 'visible'>;
   runtimeSettingsProps: Omit<WorkflowRuntimeSettingsSectionProps, 'visible'>;
   runActionRef: RefObject<HTMLDivElement>;
   topRunButtonRef: RefObject<HTMLButtonElement>;
@@ -86,8 +90,10 @@ export function ProjectDetailLayout({
   taskName,
   taskSummary,
   isPredictionWorkflow,
+  isVirtualScreeningWorkflow,
   isAffinityWorkflow,
   isLeadOptimizationWorkflow,
+  constraintsSupported,
   displayTaskState,
   isActiveRuntime,
   progressPercent,
@@ -116,6 +122,7 @@ export function ProjectDetailLayout({
   affinitySectionProps,
   leadOptimizationSectionProps,
   predictionSectionProps,
+  virtualScreeningSectionProps,
   runtimeSettingsProps,
   runActionRef,
   topRunButtonRef,
@@ -206,6 +213,7 @@ export function ProjectDetailLayout({
           isPredictionWorkflow={isPredictionWorkflow}
           isAffinityWorkflow={isAffinityWorkflow}
           isLeadOptimizationWorkflow={isLeadOptimizationWorkflow}
+          constraintsSupported={constraintsSupported}
           componentStepLabel={componentStepLabel}
         />
 
@@ -222,9 +230,11 @@ export function ProjectDetailLayout({
           affinitySectionProps={affinitySectionProps}
           leadOptimizationSectionProps={leadOptimizationSectionProps}
           isPredictionWorkflow={isPredictionWorkflow}
+          isVirtualScreeningWorkflow={isVirtualScreeningWorkflow}
           isAffinityWorkflow={isAffinityWorkflow}
           isLeadOptimizationWorkflow={isLeadOptimizationWorkflow}
           predictionSectionProps={predictionSectionProps}
+          virtualScreeningSectionProps={virtualScreeningSectionProps}
           workflowDescription={workflow.description}
           runtimeSettingsProps={runtimeSettingsProps}
         />

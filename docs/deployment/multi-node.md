@@ -26,7 +26,7 @@ cp deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env.example deploy/docker/DOCKER_S
 docker compose -f deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.compose.yml   --env-file deploy/docker/DOCKER_STACK_WORKER_GPU_CAPS.env   --profile boltz2 --profile alphafold3   up -d --build
 ```
 
-可用 profile：`boltz2`, `boltz2score`, `affinity`, `alphafold3`, `protenix`, `pocketxmol`。
+可用 profile：`boltz2`, `boltz2score`, `affinity`, `alphafold3`, `protenix`, `nesso`, `pocketxmol`。
 
 ## CPU worker
 

@@ -68,6 +68,7 @@ export function createWorkflowSubmitters(c: WorkflowSubmitterContext) {
       project: c.project,
       draft: c.draft,
       isPeptideDesignWorkflow: Boolean(c.isPeptideDesignWorkflow),
+      isVirtualScreeningWorkflow: Boolean(c.isVirtualScreeningWorkflow),
       workspaceTab: c.workspaceTab,
       proteinTemplates: c.proteinTemplates,
       customResidueLibrary: c.customResidueLibrary,

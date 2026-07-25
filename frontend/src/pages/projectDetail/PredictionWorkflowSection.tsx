@@ -20,6 +20,8 @@ export interface PredictionWorkflowSectionProps {
   components: InputComponent[];
   onComponentsChange: (components: InputComponent[]) => void;
   proteinTemplates: Record<string, ProteinTemplateUpload>;
+  allowProteinMsa: boolean;
+  allowProteinTemplates: boolean;
   customResidueLibrary: CustomCcdMoleculeInput[];
   onCustomResidueLibraryChange: (library: CustomCcdMoleculeInput[]) => void;
   onProteinTemplateChange: (componentId: string, upload: ProteinTemplateUpload | null) => void;
@@ -42,6 +44,8 @@ export function PredictionWorkflowSection({
   components,
   onComponentsChange,
   proteinTemplates,
+  allowProteinMsa,
+  allowProteinTemplates,
   customResidueLibrary,
   onCustomResidueLibraryChange,
   onProteinTemplateChange,
@@ -67,6 +71,8 @@ export function PredictionWorkflowSection({
             components={components}
             onChange={onComponentsChange}
             proteinTemplates={proteinTemplates}
+            allowProteinMsa={allowProteinMsa}
+            allowProteinTemplates={allowProteinTemplates}
             customResidueLibrary={customResidueLibrary}
             onCustomResidueLibraryChange={onCustomResidueLibraryChange}
             onProteinTemplateChange={onProteinTemplateChange}

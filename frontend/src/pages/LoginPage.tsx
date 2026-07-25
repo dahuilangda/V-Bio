@@ -4,10 +4,10 @@ import { FlaskConical, Lock, User } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
 
 export function LoginPage() {
-  const { loginAction } = useAuth();
+  const { loginAction, session } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const [identifier, setIdentifier] = useState('');
+  const [identifier, setIdentifier] = useState(session?.username || '');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);

@@ -28,7 +28,7 @@ const TASK_SUBMITTED_WITHIN_OPTIONS = ['all', '1', '7', '30', '90'] as const;
 const TASK_SEED_FILTER_OPTIONS = ['all', 'with_seed', 'without_seed'] as const;
 const TASK_PAGE_SIZE_OPTIONS = [8, 12, 20, 50] as const;
 const TASK_METRIC_COLUMN_OPTIONS = ['plddt', 'ipsae', 'iptm', 'pae'] as const;
-const WORKFLOW_FILTER_OPTIONS = ['all', 'prediction', 'affinity', 'peptide_design', 'lead_optimization'] as const;
+const WORKFLOW_FILTER_OPTIONS = ['all', 'prediction', 'virtual_screening', 'affinity', 'peptide_design', 'lead_optimization'] as const;
 
 function readCopilotText(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -274,7 +274,8 @@ export function ProjectTasksPage() {
     () => (project ? getWorkflowDefinition(project.task_type).key : null),
     [project]
   );
-  const supportsApiAccess = projectWorkflowKey === 'prediction' || projectWorkflowKey === 'affinity';
+  const supportsApiAccess =
+    projectWorkflowKey === 'prediction' || projectWorkflowKey === 'virtual_screening' || projectWorkflowKey === 'affinity';
   const apiAccessDisabledReason = useMemo(() => {
     if (projectWorkflowKey === 'lead_optimization') {
       return 'Lead Optimization does not support API Access.';
@@ -282,7 +283,7 @@ export function ProjectTasksPage() {
     if (projectWorkflowKey === 'peptide_design') {
       return 'Peptide Design does not support API Access.';
     }
-    return 'API Access is only available for Prediction and Affinity Scoring.';
+    return 'API Access is available for Prediction, Virtual Screening, and Affinity Scoring.';
   }, [projectWorkflowKey]);
 
   const applyTaskListCopilotAction = useCallback(async (action: CopilotPlanAction) => {
