@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 
-def normalize_workflow_key(value: Any) -> str:
+def normalize_workflow_key(value: Any, *, default: str = "prediction") -> str:
     token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     if token in {"prediction", "boltz_2_prediction", "boltz_prediction"}:
         return "prediction"
@@ -23,21 +23,23 @@ def normalize_workflow_key(value: Any) -> str:
         return "affinity"
     if "lead" in token and "opt" in token:
         return "lead_optimization"
-    return "prediction"
+    return default
 
 
-def infer_workflow_key(context_payload: Dict[str, Any]) -> str:
+def infer_workflow_key(context_payload: Dict[str, Any], *, default: str = "prediction") -> str:
     if not isinstance(context_payload, dict):
-        return "prediction"
+        return default
     direct = context_payload.get("workflow") or context_payload.get("workflow_key")
     if direct:
-        return normalize_workflow_key(direct)
+        return normalize_workflow_key(direct, default=default)
     page = context_payload.get("page")
     if isinstance(page, dict):
         page_workflow = page.get("workflowKey") or page.get("workflow_key") or page.get("workflow") or page.get("workflowTitle")
         if page_workflow:
-            return normalize_workflow_key(page_workflow)
+            return normalize_workflow_key(page_workflow, default=default)
     project = context_payload.get("project")
     if isinstance(project, dict):
-        return normalize_workflow_key(project.get("task_type") or project.get("workflow") or project.get("workflow_key"))
-    return "prediction"
+        value = project.get("task_type") or project.get("workflow") or project.get("workflow_key")
+        if value:
+            return normalize_workflow_key(value, default=default)
+    return default

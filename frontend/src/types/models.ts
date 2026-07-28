@@ -374,9 +374,13 @@ export interface ProjectCopilotState {
 
 export interface CopilotPlanAction {
   id: string;
+  operation_id?: string;
+  plan_id?: string;
+  sequence?: number;
   label: string;
   description: string;
   payload?: Record<string, unknown>;
+  effect?: string;
   needs_confirmation?: boolean;
   execute_now?: boolean;
 }

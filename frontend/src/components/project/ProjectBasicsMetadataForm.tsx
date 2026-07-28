@@ -1,3 +1,5 @@
+import { limitTaskSummary, TASK_SUMMARY_MAX_LENGTH } from '../../utils/taskMetadata';
+
 interface ProjectBasicsMetadataFormProps {
   canEdit: boolean;
   taskName: string;
@@ -13,6 +15,8 @@ export function ProjectBasicsMetadataForm({
   onTaskNameChange,
   onTaskSummaryChange
 }: ProjectBasicsMetadataFormProps) {
+  const limitedTaskSummary = limitTaskSummary(taskSummary);
+
   return (
     <section className="panel subtle basics-panel">
       <label className="field">
@@ -23,8 +27,17 @@ export function ProjectBasicsMetadataForm({
       </label>
 
       <label className="field">
-        <span>Task Summary</span>
-        <textarea value={taskSummary} rows={3} onChange={(e) => onTaskSummaryChange(e.target.value)} disabled={!canEdit} />
+        <span className="task-summary-field-label">
+          Task Summary
+          <small className="task-summary-counter">{limitedTaskSummary.length}/{TASK_SUMMARY_MAX_LENGTH}</small>
+        </span>
+        <textarea
+          value={limitedTaskSummary}
+          rows={3}
+          maxLength={TASK_SUMMARY_MAX_LENGTH}
+          onChange={(e) => onTaskSummaryChange(limitTaskSummary(e.target.value))}
+          disabled={!canEdit}
+        />
       </label>
     </section>
   );

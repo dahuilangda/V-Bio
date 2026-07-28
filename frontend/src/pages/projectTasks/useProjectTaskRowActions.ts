@@ -5,6 +5,7 @@ import type { Project, ProjectTask } from '../../types/models';
 import { getTaskStatus } from '../../api/backendApi';
 import { deleteProjectTask, getProjectTaskById, updateProject, updateProjectTask } from '../../api/supabaseLite';
 import { canEditTask } from '../../utils/accessControl';
+import { normalizeTaskSummary } from '../../utils/taskMetadata';
 import { getWorkflowDefinition } from '../../utils/workflows';
 import {
   isProjectTaskRow,
@@ -211,7 +212,7 @@ export function useProjectTaskRowActions({
     if (!canEditTask(task)) return;
     const nextPatch: Partial<ProjectTask> = {};
     if (typeof patch.name === 'string') nextPatch.name = patch.name.trim();
-    if (typeof patch.summary === 'string') nextPatch.summary = patch.summary.trim();
+    if (typeof patch.summary === 'string') nextPatch.summary = normalizeTaskSummary(patch.summary);
     if (!Object.keys(nextPatch).length) return;
     setSavingTaskNameId(task.id);
     setError(null);

@@ -94,6 +94,97 @@ export async function getCopilotConfig(): Promise<{ enabled: boolean }> {
   return { enabled: payload.enabled === true };
 }
 
+
+const COPILOT_TURN_STATES = new Set(['continue', 'await_confirmation', 'needs_input', 'complete']);
+
+export interface CopilotTurnResult {
+  content: string;
+  actions: CopilotPlanAction[];
+  state: 'continue' | 'await_confirmation' | 'needs_input' | 'complete';
+  questions: string[];
+  planId: string;
+}
+
+export async function requestCopilotTurn(input: {
+  contextType: string;
+  contextPayload: Record<string, unknown>;
+  userId: string;
+  username: string;
+  content: string;
+}): Promise<CopilotTurnResult> {
+  const res = await requestManagement(
+    '/vbio-api/copilot/turn',
+    {
+      method: 'POST',
+      headers: {
+        ...API_HEADERS,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        context_type: input.contextType,
+        context_payload: sanitizeCopilotContextPayload(input.contextPayload),
+        user_id: input.userId,
+        username: input.username,
+        content: input.content
+      })
+    },
+    180000
+  );
+  const payload = (await res.json()) as {
+    content?: string;
+    actions?: unknown;
+    state?: string;
+    questions?: unknown;
+    plan_id?: string;
+    error?: string;
+  };
+  if (!res.ok) {
+    throw new Error(payload.error || `Copilot turn failed with HTTP ${res.status}.`);
+  }
+  const content = String(payload.content || '').trim();
+  const state = String(payload.state || '').trim();
+  const planId = String(payload.plan_id || '').trim();
+  if (!content) throw new Error('Copilot turn returned an empty response.');
+  if (!COPILOT_TURN_STATES.has(state)) throw new Error('Copilot turn returned an invalid state.');
+  if (!planId) throw new Error('Copilot turn returned no plan identity.');
+  if (!Array.isArray(payload.questions) || payload.questions.some((question) => typeof question !== 'string')) {
+    throw new Error('Copilot turn returned invalid questions.');
+  }
+  if (!Array.isArray(payload.actions)) {
+    throw new Error('Copilot turn returned invalid confirmation operations.');
+  }
+  const operationKeys = new Set<string>();
+  const actions = payload.actions.map((item) => {
+    if (!item || typeof item !== 'object') {
+      throw new Error('Copilot turn returned an invalid confirmation operation.');
+    }
+    const action = item as CopilotPlanAction;
+    const operationId = String(action.operation_id || '').trim();
+    const operationKey = `${planId}:${operationId}`;
+    if (
+      String(action.plan_id || '').trim() !== planId ||
+      !operationId ||
+      !String(action.id || '').trim() ||
+      !String(action.label || '').trim() ||
+      !String(action.description || '').trim() ||
+      typeof action.sequence !== 'number' || !Number.isInteger(action.sequence) ||
+      operationKeys.has(operationKey) ||
+      action.needs_confirmation !== true ||
+      action.execute_now !== false
+    ) {
+      throw new Error('Copilot turn returned an invalid confirmation operation.');
+    }
+    operationKeys.add(operationKey);
+    return action;
+  });
+  return {
+    content,
+    actions,
+    state: state as CopilotTurnResult['state'],
+    questions: payload.questions,
+    planId
+  };
+}
 export async function requestCopilotAssistant(input: {
   contextType: string;
   contextPayload: Record<string, unknown>;

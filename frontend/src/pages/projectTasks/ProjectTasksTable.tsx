@@ -126,7 +126,7 @@ export function ProjectTasksTable({
                     ))}
                   </>
                 )}
-                <th>
+                <th className="task-th-submitted">
                   <button type="button" className={`task-th-sort ${sortKey === 'submitted' ? 'active' : ''}`} onClick={() => onSort('submitted')}>
                     <span className="project-th"><Clock3 size={13} /> Submitted <span className="task-th-arrow">{sortMark('submitted')}</span></span>
                   </button>

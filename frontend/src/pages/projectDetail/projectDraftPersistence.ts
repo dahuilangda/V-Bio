@@ -1,6 +1,7 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type { InputComponent, Project, ProjectInputConfig, ProjectTask } from '../../types/models';
 import { extractPrimaryProteinAndLigand } from '../../utils/projectInputs';
+import { normalizeTaskSummary } from '../../utils/taskMetadata';
 import { getWorkflowDefinition } from '../../utils/workflows';
 import { mergeTaskInputOptionsIntoProperties, mergeTaskPropertiesPreservingInputOptions } from './projectTaskSnapshot';
 
@@ -190,7 +191,7 @@ export async function persistDraftTaskSnapshotRecord(params: {
   const basePayload: Partial<ProjectTask> = {
     project_id: project.id,
     name: draft.taskName.trim(),
-    summary: draft.taskSummary.trim(),
+    summary: normalizeTaskSummary(draft.taskSummary),
     task_id: '',
     task_state: 'DRAFT',
     status_text: statusText,

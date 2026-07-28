@@ -1,4 +1,4 @@
-import { Bot, Check, Clock3, LoaderCircle, MessageSquarePlus, MessageSquareText, PanelLeft, Plus, Send, Trash2, X } from 'lucide-react';
+import { Bot, Check, CheckCheck, Clock3, LoaderCircle, MessageSquarePlus, MessageSquareText, PanelLeft, Plus, Send, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, memo, type PointerEvent as ReactPointerEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -11,7 +11,7 @@ import {
   listProjectCopilotMessages,
   upsertProjectCopilotState
 } from '../../api/supabaseLite';
-import { requestCopilotAssistant, requestCopilotPlanActions } from '../../api/copilotApi';
+import { requestCopilotTurn } from '../../api/copilotApi';
 import type { CopilotContextType, CopilotPlanAction, ProjectCopilotMessage } from '../../types/models';
 import { formatDateTime } from '../../utils/date';
 import './ProjectCopilotModal.css';
@@ -95,34 +95,70 @@ function readSessionId(message: ProjectCopilotMessage): string {
 function readPlanActions(value: unknown): CopilotPlanAction[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
-  return value
-    .map((item) => (item && typeof item === 'object' ? (item as CopilotPlanAction) : null))
-    .filter((item): item is CopilotPlanAction => {
-      if (!item?.id || !item.label) return false;
-      const key = `${item.id}:${JSON.stringify(item.payload || {})}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+  const actions: CopilotPlanAction[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const action = item as CopilotPlanAction;
+    const key = planActionKey(action);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    actions.push(action);
+  }
+  return actions.sort(comparePlanActions);
 }
 
-function readAppliedActionKey(message: ProjectCopilotMessage): string {
-  const applied = message.metadata?.applied_action;
-  if (!applied || typeof applied !== 'object') return '';
-  const action = applied as CopilotPlanAction;
-  return `${String(action.id || '').trim()}:${JSON.stringify(action.payload || {})}`;
+type CopilotActionResolutionStatus = 'applied' | 'cancelled';
+
+interface CopilotActionResolution {
+  plan_id: string;
+  operation_id: string;
+  status: CopilotActionResolutionStatus;
 }
 
-function filterAppliedPlanActions(messages: ProjectCopilotMessage[], sessionId: string, actions: CopilotPlanAction[]): CopilotPlanAction[] {
+function planActionKey(action: CopilotPlanAction): string {
+  const planId = String(action.plan_id || '').trim();
+  const operationId = String(action.operation_id || '').trim();
+  return planId && operationId ? `${planId}:${operationId}` : '';
+}
+
+function comparePlanActions(left: CopilotPlanAction, right: CopilotPlanAction): number {
+  const leftSequence = Number(left.sequence);
+  const rightSequence = Number(right.sequence);
+  if (Number.isFinite(leftSequence) && Number.isFinite(rightSequence) && leftSequence !== rightSequence) {
+    return leftSequence - rightSequence;
+  }
+  return planActionKey(left).localeCompare(planActionKey(right));
+}
+
+function readActionResolutions(message: ProjectCopilotMessage): CopilotActionResolution[] {
+  const value = message.metadata?.action_resolutions;
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const resolution = item as Partial<CopilotActionResolution>;
+    const planId = String(resolution.plan_id || '').trim();
+    const operationId = String(resolution.operation_id || '').trim();
+    const status = resolution.status;
+    if (!planId || !operationId || (status !== 'applied' && status !== 'cancelled')) return [];
+    return [{ plan_id: planId, operation_id: operationId, status }];
+  });
+}
+
+function readSessionResolutionMap(messages: ProjectCopilotMessage[], sessionId: string): Map<string, CopilotActionResolutionStatus> {
+  const resolutions = new Map<string, CopilotActionResolutionStatus>();
+  for (const message of messages) {
+    if (readSessionId(message) !== sessionId) continue;
+    for (const resolution of readActionResolutions(message)) {
+      resolutions.set(`${resolution.plan_id}:${resolution.operation_id}`, resolution.status);
+    }
+  }
+  return resolutions;
+}
+
+function filterResolvedPlanActions(messages: ProjectCopilotMessage[], sessionId: string, actions: CopilotPlanAction[]): CopilotPlanAction[] {
   if (actions.length === 0) return [];
-  const appliedKeys = new Set(
-    messages
-      .filter((message) => readSessionId(message) === sessionId)
-      .map(readAppliedActionKey)
-      .filter(Boolean)
-  );
-  if (appliedKeys.size === 0) return actions;
-  return actions.filter((action) => !appliedKeys.has(`${action.id}:${JSON.stringify(action.payload || {})}`));
+  const resolutions = readSessionResolutionMap(messages, sessionId);
+  return actions.filter((action) => !resolutions.has(planActionKey(action)));
 }
 
 function getSessionTitle(messages: ProjectCopilotMessage[], sessionId: string): string {
@@ -172,13 +208,6 @@ function copilotActiveSessionStorageKey(userId: string): string {
   return `vbio:copilot-active-session:v1:${String(userId || 'anonymous').trim().toLowerCase() || 'anonymous'}`;
 }
 
-function copilotContinuationStorageKey(userId: string, projectId?: string | null): string {
-  return `vbio:copilot-continuation:v1:${String(userId || 'anonymous').trim().toLowerCase() || 'anonymous'}:${String(projectId || 'project-null')}`;
-}
-
-function copilotContinuationDbKey(projectId?: string | null): string {
-  return `continuation:${String(projectId || 'project-null')}`;
-}
 
 function copilotTaskPrefillStorageKey(userId: string, projectId?: string | null): string {
   return `vbio:copilot-task-prefill:v1:${String(userId || 'anonymous').trim().toLowerCase() || 'anonymous'}:${String(projectId || 'project-null')}`;
@@ -253,14 +282,6 @@ function clearStoredCopilotActiveSession(userId: string): void {
   void deleteProjectCopilotState(userId, copilotActiveSessionStateDbKey());
 }
 
-type CopilotContinuationState = {
-  sessionId: string;
-  sourceContextType: CopilotContextType;
-  sourceProjectTaskId: string;
-  createdAt: number;
-  appliedAction: CopilotPlanAction | null;
-  followUpActions: CopilotPlanAction[];
-};
 
 type CopilotTaskPrefillState = {
   sessionId: string;
@@ -270,90 +291,6 @@ type CopilotTaskPrefillState = {
   createdAt: number;
 };
 
-function parseCopilotContinuation(value: unknown): CopilotContinuationState | null {
-  const parsed = value && typeof value === 'object' ? (value as {
-    sessionId?: string;
-    sourceContextType?: CopilotContextType;
-    sourceProjectTaskId?: string;
-    createdAt?: number;
-    appliedAction?: CopilotPlanAction;
-    followUpActions?: unknown;
-  }) : null;
-  const sessionId = String(parsed?.sessionId || '').trim();
-  const sourceProjectTaskId = String(parsed?.sourceProjectTaskId || '').trim();
-  const sourceContextType = parsed?.sourceContextType === 'task_list' || parsed?.sourceContextType === 'project_list'
-    ? parsed.sourceContextType
-    : 'task_detail';
-  const createdAt = Number(parsed?.createdAt || 0);
-  if (!sessionId || !sourceProjectTaskId || !Number.isFinite(createdAt)) return null;
-  if (Date.now() - createdAt > 10 * 60 * 1000) return null;
-  const appliedAction = parsed?.appliedAction && typeof parsed.appliedAction === 'object' ? parsed.appliedAction : null;
-  const followUpActions = readPlanActions(parsed?.followUpActions);
-  return { sessionId, sourceContextType, sourceProjectTaskId, createdAt, appliedAction, followUpActions };
-}
-
-function readCopilotContinuationLocal(userId: string, projectId?: string | null): CopilotContinuationState | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    return parseCopilotContinuation(JSON.parse(window.localStorage.getItem(copilotContinuationStorageKey(userId, projectId)) || 'null'));
-  } catch {
-    return null;
-  }
-}
-
-async function readCopilotContinuation(userId: string, projectId?: string | null): Promise<CopilotContinuationState | null> {
-  const local = readCopilotContinuationLocal(userId, projectId);
-  if (local) return local;
-  const persisted = await getProjectCopilotState(userId, copilotContinuationDbKey(projectId));
-  return parseCopilotContinuation(persisted);
-}
-
-function writeCopilotContinuation(userId: string, projectId: string | null | undefined, value: {
-  sessionId: string;
-  sourceContextType: CopilotContextType;
-  sourceProjectTaskId: string;
-  appliedAction?: CopilotPlanAction;
-  followUpActions?: CopilotPlanAction[];
-}): void {
-  if (typeof window === 'undefined') return;
-  const payload = { ...value, createdAt: Date.now() };
-  window.localStorage.setItem(
-    copilotContinuationStorageKey(userId, projectId),
-    JSON.stringify(payload)
-  );
-  void upsertProjectCopilotState(userId, copilotContinuationDbKey(projectId), payload);
-}
-
-function buildSubmitCurrentFollowUpAction(params?: {
-  description?: string;
-  sourceActionId?: string;
-  sequence?: unknown;
-}): CopilotPlanAction {
-  const { description, sourceActionId = 'copilot:follow_up', sequence } = params || {};
-  const normalizedSequence = String(sequence || '').trim().toUpperCase();
-  return {
-    id: 'task_detail:submit_current',
-    label: '开始运行',
-    description: description || (normalizedSequence
-      ? `新任务已填写序列 ${normalizedSequence}，确认后开始结构预测。`
-      : '当前任务内容已填写完成，确认后开始运行。'),
-    payload: {
-      schemaVersion: 'vbio-copilot-action-v2',
-      contextType: 'task_detail',
-      workflowKey: 'prediction',
-      sourceActionId,
-      destructive: false
-    },
-    needs_confirmation: true,
-    execute_now: false
-  };
-}
-
-function clearCopilotContinuation(userId: string, projectId?: string | null): void {
-  if (typeof window === 'undefined') return;
-  window.localStorage.removeItem(copilotContinuationStorageKey(userId, projectId));
-  void deleteProjectCopilotState(userId, copilotContinuationDbKey(projectId));
-}
 
 function parseCopilotTaskPrefill(value: unknown, projectId?: string | null): CopilotTaskPrefillState | null {
   const parsed = value && typeof value === 'object' ? (value as {
@@ -393,19 +330,6 @@ export function clearStoredCopilotTaskPrefill(userId: string, projectId?: string
   window.localStorage.removeItem(copilotTaskPrefillStorageKey(userId, projectId));
 }
 
-function writeStoredCopilotTaskPrefill(
-  userId: string,
-  projectId: string | null | undefined,
-  value: Omit<CopilotTaskPrefillState, 'createdAt' | 'projectId'>
-): void {
-  if (typeof window === 'undefined') return;
-  const normalizedProjectId = String(projectId || '').trim();
-  if (!normalizedProjectId || !Array.isArray(value.components) || value.components.length === 0) return;
-  window.localStorage.setItem(
-    copilotTaskPrefillStorageKey(userId, normalizedProjectId),
-    JSON.stringify({ ...value, projectId: normalizedProjectId, createdAt: Date.now() })
-  );
-}
 
 function readStoredCopilotPanelState(userId: string): CopilotPanelState {
   if (typeof window === 'undefined') return {};
@@ -494,9 +418,21 @@ function currentContextMetadata(input: {
 
 function actionMatchesContext(action: CopilotPlanAction, contextType: CopilotContextType): boolean {
   const actionContext = String(action.payload?.contextType || '').trim();
-  return !actionContext || actionContext === contextType;
+  return actionContext === contextType;
 }
 
+
+function actionHasPendingDependency(action: CopilotPlanAction, pendingActions: CopilotPlanAction[]): boolean {
+  const planId = String(action.plan_id || '').trim();
+  const dependencies = Array.isArray(action.payload?.dependsOn) ? action.payload.dependsOn : [];
+  if (!planId || dependencies.length === 0) return false;
+  const pendingOperationIds = new Set(
+    pendingActions
+      .filter((candidate) => String(candidate.plan_id || '').trim() === planId)
+      .map((candidate) => String(candidate.operation_id || '').trim())
+  );
+  return dependencies.some((dependency) => pendingOperationIds.has(String(dependency || '').trim()));
+}
 function compactCopilotText(value: unknown, limit: number): string {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
   if (text.length <= limit) return text;
@@ -559,7 +495,8 @@ export function ProjectCopilotModal({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pendingActions, setPendingActions] = useState<CopilotPlanAction[]>([]);
-  const [applyingActionId, setApplyingActionId] = useState<string | null>(null);
+  const [applyingActionKey, setApplyingActionKey] = useState<string | null>(null);
+  const [bulkAction, setBulkAction] = useState<'apply' | 'cancel' | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -617,7 +554,7 @@ export function ProjectCopilotModal({
       .reverse()
       .find((message) => readSessionId(message) === sessionId && message.role === 'assistant');
     setPendingActions(
-      filterAppliedPlanActions(nextMessages, sessionId, readPlanActions(latestAssistant?.metadata?.candidate_plan_actions))
+      filterResolvedPlanActions(nextMessages, sessionId, readPlanActions(latestAssistant?.metadata?.candidate_plan_actions))
         .filter((action) => actionMatchesContext(action, contextType))
     );
   }, [contextType]);
@@ -636,10 +573,10 @@ export function ProjectCopilotModal({
     }
     focusComposerFrameRef.current = window.requestAnimationFrame(() => {
       focusComposerFrameRef.current = null;
-      if (!open || sending || applyingActionId) return;
+      if (!open || sending || applyingActionKey || bulkAction) return;
       textareaRef.current?.focus({ preventScroll: true });
     });
-  }, [applyingActionId, open, sending]);
+  }, [applyingActionKey, bulkAction, open, sending]);
 
   useEffect(() => {
     return () => {
@@ -660,49 +597,13 @@ export function ProjectCopilotModal({
     }
     setError(null);
     try {
-      let loaded = await listProjectCopilotMessages(messageScope);
+      const loaded = await listProjectCopilotMessages(messageScope);
       const storedActiveSessionId = await readStoredCopilotActiveSession(currentUserId);
-      const continuation = contextType === 'task_detail'
-        ? await readCopilotContinuation(currentUserId, projectId)
-        : null;
-      let preferredSessionId = '';
-      if (
-        continuation &&
-        projectTaskId &&
-        continuation.sourceProjectTaskId &&
-        continuation.sourceProjectTaskId !== (projectTaskId || 'task-detail:null')
-      ) {
-        preferredSessionId = continuation.sessionId;
-        const alreadyInserted = loaded.some(
-          (message) =>
-            readSessionId(message) === continuation.sessionId &&
-            String(message.metadata?.continued_into_project_task_id || '') === projectTaskId
-        );
-        if (!alreadyInserted && continuation.followUpActions.length > 0) {
-          await insertProjectCopilotMessage({
-            ...messageScope,
-            userId: null,
-            role: 'assistant',
-            content: '新任务已经填写并保存为 draft。请检查当前 task 的组件和参数；如果没问题，可以点击下方按钮开始运行。',
-            metadata: {
-              ...sourceContext,
-              session_id: continuation.sessionId,
-              owner_user_id: currentUserId,
-              candidate_plan_actions: continuation.followUpActions,
-              continued_from_project_task_id: continuation.sourceProjectTaskId,
-              continued_into_project_task_id: projectTaskId
-            }
-          });
-        }
-        loaded = await listProjectCopilotMessages(messageScope);
-        clearCopilotContinuation(currentUserId, projectId);
-      }
       setMessages(loaded);
       setActiveSessionId((currentSessionId) => {
         const sessionIds = Array.from(new Set(loaded.map(readSessionId)));
         const latestLoadedSessionId = loaded.length > 0 ? readSessionId(loaded[loaded.length - 1]) : '';
         const nextSessionId =
-          (preferredSessionId && sessionIds.includes(preferredSessionId) ? preferredSessionId : '') ||
           (storedActiveSessionId && sessionIds.includes(storedActiveSessionId) ? storedActiveSessionId : '') ||
           (sessionIds.includes(currentSessionId) ? currentSessionId : '') ||
           latestLoadedSessionId ||
@@ -718,7 +619,7 @@ export function ProjectCopilotModal({
     } finally {
       setLoading(false);
     }
-  }, [contextType, currentUserId, messageScope, open, projectId, projectTaskId, restoreSessionActions, sourceContext]);
+  }, [currentUserId, messageScope, open, restoreSessionActions]);
 
   useEffect(() => {
     if (!open) return;
@@ -772,9 +673,9 @@ export function ProjectCopilotModal({
   }, [sessionMessages.length, open]);
 
   useEffect(() => {
-    if (!open || sending || applyingActionId) return;
+    if (!open || sending || applyingActionKey || bulkAction) return;
     focusComposer();
-  }, [applyingActionId, focusComposer, open, sending]);
+  }, [applyingActionKey, bulkAction, focusComposer, open, sending]);
 
   useEffect(() => {
     const localDraft = readStoredCopilotDraftLocal(draftScope);
@@ -908,7 +809,7 @@ export function ProjectCopilotModal({
 
   const sendMessage = async () => {
     const content = draft.trim();
-    if (!content) return;
+    if (!content || applyingActionKey || bulkAction) return;
     const attachmentMetadata = uploadedAttachments.map((attachment) => ({
       id: attachment.id,
       name: attachment.name,
@@ -923,8 +824,10 @@ export function ProjectCopilotModal({
     setDraft('');
     writeStoredCopilotDraftLocal(draftScope, '');
     void deleteProjectCopilotState(currentUserId, copilotDraftDbKey());
-    setPendingActions([]);
     try {
+      if (pendingActions.length > 0) {
+        await persistActionResolutions([...pendingActions].sort(comparePlanActions), 'cancelled');
+      }
       const userMessage = await insertProjectCopilotMessage({
         ...messageScope,
         userId: currentUserId,
@@ -934,8 +837,7 @@ export function ProjectCopilotModal({
       });
       setMessages((prev) => [...prev, { ...userMessage, username: currentUsername }]);
 
-      let planActions: CopilotPlanAction[] = [];
-      planActions = await requestCopilotPlanActions({
+      const turn = await requestCopilotTurn({
         contextType,
         contextPayload: {
           ...contextPayload,
@@ -946,33 +848,24 @@ export function ProjectCopilotModal({
         username: currentUsername,
         content
       });
-      let assistantContent = '';
-      try {
-        assistantContent = await requestCopilotAssistant({
-          contextType,
-          contextPayload: {
-              ...contextPayload,
-              copilot_conversation: conversationContext,
-              ...(attachmentMetadata.length > 0 ? { copilot_attachments: attachmentMetadata } : {}),
-              candidate_plan_actions: planActions
-          },
-          userId: currentUserId,
-          username: currentUsername,
-          content
-        });
-      } catch (err) {
-        if (planActions.length === 0) throw err;
-        assistantContent = '已生成确认操作。请检查下方按钮，确认后执行。';
-      }
+      const planActions = turn.actions;
       const assistantMessage = await insertProjectCopilotMessage({
         ...messageScope,
         userId: null,
         role: 'assistant',
-        content: assistantContent,
-        metadata: { ...sourceContext, session_id: activeSessionId, owner_user_id: currentUserId, candidate_plan_actions: planActions }
+        content: turn.content,
+        metadata: {
+          ...sourceContext,
+          session_id: activeSessionId,
+          owner_user_id: currentUserId,
+          candidate_plan_actions: planActions,
+          plan_id: turn.planId,
+          planner_state: turn.state,
+          planner_questions: turn.questions
+        }
       });
       setMessages((prev) => [...prev, assistantMessage]);
-      setPendingActions(planActions.filter((action) => actionMatchesContext(action, contextType)));
+      setPendingActions(planActions);
       focusComposer();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send Copilot message.');
@@ -1130,103 +1023,112 @@ export function ProjectCopilotModal({
     }
   };
 
-  const applyAction = async (action: CopilotPlanAction) => {
-    if (!onApplyPlanAction && !(action.id === 'task_detail:apply_copilot_attachments' && onSendAttachments)) return;
-    setApplyingActionId(action.id);
+  async function persistActionResolutions(
+    actions: CopilotPlanAction[],
+    status: CopilotActionResolutionStatus
+  ): Promise<void> {
+    const resolutions = actions.map((action) => {
+      const planId = String(action.plan_id || '').trim();
+      const operationId = String(action.operation_id || '').trim();
+      if (!planId || !operationId) {
+        throw new Error('Copilot confirmation operation is missing its plan identity.');
+      }
+      return { plan_id: planId, operation_id: operationId, status };
+    });
+    const receipt = await insertProjectCopilotMessage({
+      ...messageScope,
+      userId: currentUserId,
+      role: 'system',
+      content: status === 'applied'
+        ? `Applied ${actions.length} confirmed operation${actions.length === 1 ? '' : 's'}.`
+        : `Cancelled ${actions.length} pending operation${actions.length === 1 ? '' : 's'}.`,
+      metadata: {
+        ...sourceContext,
+        session_id: activeSessionId,
+        owner_user_id: currentUserId,
+        action_resolutions: resolutions
+      }
+    });
+    const resolvedKeys = new Set(actions.map(planActionKey));
+    setMessages((prev) => [...prev, receipt]);
+    setPendingActions((prev) => prev.filter((item) => !resolvedKeys.has(planActionKey(item))));
+  }
+
+  const executeAction = async (action: CopilotPlanAction): Promise<void> => {
+    if (action.id === 'task_detail:apply_copilot_attachments') {
+      if (!onSendAttachments) throw new Error('This page cannot apply Copilot file attachments.');
+      const rawApplications = action.payload?.attachmentApplications;
+      if (!Array.isArray(rawApplications) || rawApplications.length === 0) {
+        throw new Error('Copilot attachment operation does not satisfy its declared contract.');
+      }
+      const attachmentsById = new Map(uploadedAttachments.map((attachment) => [attachment.id, attachment]));
+      const applications = rawApplications.map((item) => {
+        if (!item || typeof item !== 'object') {
+          throw new Error('Copilot attachment operation does not satisfy its declared contract.');
+        }
+        const row = item as Record<string, unknown>;
+        const attachmentId = String(row.attachmentId || '').trim();
+        const fileName = String(row.fileName || '').trim();
+        const role = String(row.role || '').trim();
+        if (!attachmentId || !fileName || (role !== 'target' && role !== 'ligand' && role !== 'template')) {
+          throw new Error('Copilot attachment operation does not satisfy its declared contract.');
+        }
+        return { attachmentId, fileName, role } as CopilotAttachmentApplication;
+      });
+      const selectedAttachments = applications.map((application) => {
+        const attachment = attachmentsById.get(application.attachmentId);
+        if (!attachment || attachment.name !== application.fileName) {
+          throw new Error('A referenced Copilot attachment is no longer available.');
+        }
+        return attachment;
+      });
+      await onSendAttachments(selectedAttachments, '', applications);
+      return;
+    }
+    if (!onApplyPlanAction) throw new Error('This Copilot action cannot be applied on the current page.');
+    await onApplyPlanAction(action);
+  };
+
+  const applyAction = async (action: CopilotPlanAction): Promise<boolean> => {
+    const actionKey = planActionKey(action);
+    setApplyingActionKey(actionKey);
     setError(null);
     try {
-      if (
-        (contextType === 'task_detail' &&
-          projectTaskId &&
-          (action.id === 'task_detail:submit_current' || action.id === 'task_detail:apply_patch_and_submit')) ||
-        (contextType === 'task_list' && (action.id === 'tasks:create_with_sequence' || action.id === 'tasks:copy_with_patch'))
-      ) {
-        const actionComponents = Array.isArray(action.payload?.components) ? action.payload.components : [];
-        if (contextType === 'task_list' && action.id === 'tasks:create_with_sequence') {
-          writeStoredCopilotTaskPrefill(currentUserId, projectId, {
-            sessionId: activeSessionId,
-            sourceActionId: action.id,
-            components: actionComponents
-          });
-        }
-        const firstProteinComponent = actionComponents.find((component) => {
-          if (!component || typeof component !== 'object') return false;
-          return String((component as Record<string, unknown>).type || '').trim() === 'protein';
-        }) as Record<string, unknown> | undefined;
-        const followUpActions = contextType === 'task_list'
-          ? [buildSubmitCurrentFollowUpAction({
-              sourceActionId: action.id,
-              sequence: firstProteinComponent?.sequence ?? action.payload?.protein_sequence,
-              description: action.id === 'tasks:copy_with_patch'
-                ? '新任务已从源任务复制并应用参数修改。请检查当前 task；如果没问题，可以点击下方按钮开始运行。'
-                : '新任务内容已填写完成，确认后开始结构预测。'
-            })]
-          : [];
-        writeCopilotContinuation(currentUserId, projectId, {
-          sessionId: activeSessionId,
-          sourceContextType: contextType,
-          sourceProjectTaskId: projectTaskId || `__${contextType}__`,
-          appliedAction: action,
-          followUpActions
-        });
-      }
-      if (action.id === 'task_detail:apply_copilot_attachments') {
-        if (!onSendAttachments) throw new Error('This page cannot apply Copilot file attachments.');
-        const rawApplications = Array.isArray(action.payload?.attachmentApplications)
-          ? action.payload.attachmentApplications
-          : [];
-        const applications = rawApplications
-          .map((item) => {
-            if (!item || typeof item !== 'object') return null;
-            const row = item as Record<string, unknown>;
-            const role = String(row.role || '').trim();
-            if (role !== 'target' && role !== 'ligand' && role !== 'template') return null;
-            return {
-              attachmentId: String(row.attachmentId || '').trim(),
-              fileName: String(row.fileName || '').trim(),
-              role
-            } as CopilotAttachmentApplication;
-          })
-          .filter((item): item is CopilotAttachmentApplication => Boolean(item?.attachmentId || item?.fileName));
-        if (applications.length === 0) throw new Error('Copilot did not provide a file-role plan to apply.');
-        const selectedAttachments = uploadedAttachments.filter((attachment) =>
-          applications.some((item) => item.attachmentId === attachment.id || item.fileName === attachment.name)
-        );
-        if (selectedAttachments.length === 0) throw new Error('The referenced uploaded files are no longer available in this chat composer.');
-        await onSendAttachments(selectedAttachments, String(action.payload?.sourceContent || ''), applications);
-      } else {
-        if (!onApplyPlanAction) throw new Error('This Copilot action cannot be applied on the current page.');
-        await onApplyPlanAction(action);
-      }
-      setPendingActions((prev) => prev.filter((item) => item.id !== action.id));
-      const receipt = await insertProjectCopilotMessage({
-        ...messageScope,
-        userId: currentUserId,
-        role: 'system',
-        content: `Confirmed action: ${action.label}`,
-        metadata: { ...sourceContext, session_id: activeSessionId, owner_user_id: currentUserId, applied_action: action }
-      });
-      let nextMessages = [...messages, receipt];
-      if (contextType === 'task_detail' && action.id === 'task_detail:apply_parameter_patch') {
-        const followUpAction = buildSubmitCurrentFollowUpAction({
-          sourceActionId: action.id,
-          description: '组件或参数已更新完成。请检查当前 task；如果没问题，可以点击下方按钮开始运行。'
-        });
-        const followUp = await insertProjectCopilotMessage({
-          ...messageScope,
-          userId: null,
-          role: 'assistant',
-          content: '组件或参数已更新完成。请检查当前 task；如果没问题，可以点击下方按钮开始运行。',
-          metadata: { ...sourceContext, session_id: activeSessionId, owner_user_id: currentUserId, candidate_plan_actions: [followUpAction] }
-        });
-        nextMessages = [...nextMessages, followUp];
-        setPendingActions([followUpAction]);
-      }
-      setMessages(nextMessages);
+      await executeAction(action);
+      await persistActionResolutions([action], 'applied');
+      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to apply Copilot action.');
+      return false;
     } finally {
-      setApplyingActionId(null);
+      setApplyingActionKey(null);
+    }
+  };
+
+  const cancelPendingActions = async () => {
+    if (pendingActions.length === 0 || applyingActionKey || bulkAction) return;
+    setBulkAction('cancel');
+    setError(null);
+    try {
+      await persistActionResolutions([...pendingActions].sort(comparePlanActions), 'cancelled');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to cancel Copilot operations.');
+    } finally {
+      setBulkAction(null);
+    }
+  };
+
+  const applyAllActions = async () => {
+    if (pendingActions.length === 0 || applyingActionKey || bulkAction) return;
+    setBulkAction('apply');
+    setError(null);
+    try {
+      for (const action of [...pendingActions].sort(comparePlanActions)) {
+        const applied = await applyAction(action);
+        if (!applied) break;
+      }
+    } finally {
+      setBulkAction(null);
     }
   };
 
@@ -1350,20 +1252,50 @@ export function ProjectCopilotModal({
         </div>
 
         {pendingActions.length > 0 ? (
-          <div className="copilot-action-stack">
-            {pendingActions.length > 0 ? (
-              <div className="copilot-plan-actions">
-                {pendingActions.map((action) => (
-                  <button key={action.id} type="button" onClick={() => void applyAction(action)} disabled={Boolean(applyingActionId)}>
-                    {applyingActionId === action.id ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}
+          <div className="copilot-action-stack" aria-label="Pending confirmation operations">
+            <div className="copilot-plan-actions">
+              {pendingActions.map((action) => {
+                const actionKey = planActionKey(action);
+                const waitingForDependency = actionHasPendingDependency(action, pendingActions);
+                const isApplying = applyingActionKey === actionKey;
+                return (
+                  <button
+                    className="copilot-plan-action"
+                    key={actionKey}
+                    type="button"
+                    onClick={() => void applyAction(action)}
+                    disabled={Boolean(applyingActionKey || bulkAction || waitingForDependency)}
+                    title={waitingForDependency ? '等待前置操作' : '应用此操作'}
+                  >
+                    {isApplying ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}
                     <span>
                       <strong>{action.label}</strong>
                       <small>{action.description}</small>
                     </span>
                   </button>
-                ))}
-              </div>
-            ) : null}
+                );
+              })}
+            </div>
+            <div className="copilot-action-footer">
+              <button
+                className="copilot-action-cancel"
+                type="button"
+                onClick={() => void cancelPendingActions()}
+                disabled={Boolean(applyingActionKey || bulkAction)}
+              >
+                {bulkAction === 'cancel' ? <LoaderCircle size={14} className="spin" /> : <X size={14} />}
+                取消
+              </button>
+              <button
+                className="copilot-action-apply-all"
+                type="button"
+                onClick={() => void applyAllActions()}
+                disabled={Boolean(applyingActionKey || bulkAction)}
+              >
+                {bulkAction === 'apply' ? <LoaderCircle size={14} className="spin" /> : <CheckCheck size={14} />}
+                全部应用
+              </button>
+            </div>
           </div>
         ) : null}
 
@@ -1432,7 +1364,7 @@ export function ProjectCopilotModal({
                 className="copilot-attach-btn"
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={sending}
+                disabled={Boolean(sending || applyingActionKey || bulkAction)}
                 aria-label="Attach file"
                 title="Attach file"
               >
@@ -1505,13 +1437,13 @@ export function ProjectCopilotModal({
                   syncMentionCaretFromTextarea();
                 }}
                 placeholder="输入消息…"
-                disabled={sending}
+                disabled={Boolean(sending || applyingActionKey || bulkAction)}
               />
               <button
                 className="copilot-send-btn"
                 type="button"
                 onClick={() => void sendMessage()}
-                disabled={sending || !draft.trim()}
+                disabled={Boolean(sending || applyingActionKey || bulkAction || !draft.trim())}
                 aria-label="Send"
                 title="Send"
               >

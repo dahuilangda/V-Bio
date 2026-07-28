@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
+from backend.services.common_utils import ProteinMsaMode, classify_protein_msa
+
 
 _ELEMENT_SYMBOL_RE = re.compile(r"^[A-Za-z]{1,2}$")
 
@@ -28,6 +30,7 @@ class ProtenixPreparation:
     entity_chain_ids: Dict[int, List[str]]
     entity_kinds: Dict[int, str]
     entity_seq_positions: Dict[int, int]
+    entity_msa_modes: Dict[int, ProteinMsaMode]
 
 
 def _ensure_unique_label(label: str, used: set[str]) -> str:
@@ -220,6 +223,7 @@ def parse_yaml_for_protenix(
     entity_chain_ids: Dict[int, List[str]] = {}
     entity_kinds: Dict[int, str] = {}
     entity_seq_positions: Dict[int, int] = {}
+    entity_msa_modes: Dict[int, ProteinMsaMode] = {}
 
     sequences_payload: List[Dict[str, Any]] = []
     entity_index = 0
@@ -272,6 +276,7 @@ def parse_yaml_for_protenix(
                 "count": len(chain_ids),
             }
             raw_msa = info.get("msa")
+            entity_msa_modes[entity_index] = classify_protein_msa(raw_msa)
             if raw_msa is not None:
                 if isinstance(raw_msa, dict):
                     legacy_msa = dict(raw_msa)
@@ -408,12 +413,14 @@ def parse_yaml_for_protenix(
         entity_chain_ids=entity_chain_ids,
         entity_kinds=entity_kinds,
         entity_seq_positions=entity_seq_positions,
+        entity_msa_modes=entity_msa_modes,
     )
 
 
 def apply_protein_msa_paths(
     prep: ProtenixPreparation,
     chain_msa_paths: Dict[str, str],
+    disabled_msa_path: Optional[str] = None,
 ) -> int:
     if not prep.payload:
         return 0
@@ -435,6 +442,12 @@ def apply_protein_msa_paths(
         protein.pop("pairedMsaPath", None)
         protein.pop("unpairedMsaPath", None)
         protein.pop("msa", None)
+
+        mode = prep.entity_msa_modes[entity_index]
+        if mode is ProteinMsaMode.DISABLED:
+            if disabled_msa_path:
+                protein["unpairedMsaPath"] = disabled_msa_path
+            continue
 
         selected_path: Optional[str] = None
         for chain_id in chain_ids:

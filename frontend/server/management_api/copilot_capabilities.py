@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from management_api.copilot_skill_harness import CopilotSkillDefinition
 from management_api.copilot_skills.context_actions import (
     ACTION_SCHEMA_VERSION,
     CONTEXT_ACTION_SCHEMAS,
@@ -215,6 +216,168 @@ def _backend_values_for_workflow(workflow_key: str) -> List[str]:
     return list(TASK_PARAMETER_SCHEMA["backend"]["values"])
 
 
+def _task_parameter_json_schema(workflow_key: str) -> Dict[str, Any]:
+    normalized_workflow = normalize_workflow_key(workflow_key) if str(workflow_key or "").strip() else ""
+    properties: Dict[str, Any] = {}
+    component_schema = {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"},
+            "type": {"type": "string", "enum": ["protein", "dna", "rna", "ligand"]},
+            "sequence": {"type": "string", "minLength": 1},
+            "numCopies": {"type": "integer", "minimum": 1},
+            "useMsa": {"type": "boolean"},
+            "cyclic": {"type": "boolean"},
+            "inputMethod": {"type": "string", "enum": ["smiles", "ccd"]},
+        },
+        "required": ["type", "sequence"],
+        "additionalProperties": False,
+    }
+    for key in WORKFLOW_PARAMETER_KEYS.get(normalized_workflow, []):
+        spec = TASK_PARAMETER_SCHEMA[key]
+        if spec["type"] == "enum":
+            values = _backend_values_for_workflow(normalized_workflow) if key == "backend" else spec["values"]
+            properties[key] = {"type": "string", "enum": values}
+        elif spec["type"] == "bool":
+            properties[key] = {"type": "boolean"}
+        elif spec["type"] == "string":
+            properties[key] = {"type": "string", "minLength": 1, "maxLength": spec["max_length"]}
+        elif spec["type"] == "int":
+            properties[key] = {"type": "integer", "minimum": spec["min"], "maximum": spec["max"]}
+        elif spec["type"] == "float":
+            properties[key] = {"type": "number", "minimum": spec["min"], "maximum": spec["max"]}
+        elif spec["type"] == "component_replacement":
+            properties[key] = {
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "const": "replace"},
+                    "components": {"type": "array", "minItems": 1, "items": component_schema},
+                    "clearConstraints": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["mode", "components"],
+                "additionalProperties": False,
+            }
+    return {
+        "type": "object",
+        "properties": properties,
+        "minProperties": 1,
+        "additionalProperties": False,
+    }
+
+
+def build_task_detail_skill_definitions(workflow_key: str) -> List[CopilotSkillDefinition]:
+    """Return atomic host operations for the current task-detail workflow."""
+
+    normalized_workflow = normalize_workflow_key(workflow_key) if str(workflow_key or "").strip() else ""
+    empty_input = {"type": "object", "properties": {}, "additionalProperties": False}
+    definitions = [
+        CopilotSkillDefinition(
+            name="task_detail:submit_current",
+            label="开始运行",
+            description="通过当前页面的校验路径提交任务。",
+            input_schema=empty_input,
+            effect="execute",
+            context_type="task_detail",
+        ),
+        CopilotSkillDefinition(
+            name="task_detail:save_draft",
+            label="保存草稿",
+            description="保存当前任务草稿。",
+            input_schema=empty_input,
+            effect="update",
+            context_type="task_detail",
+        ),
+        CopilotSkillDefinition(
+            name="task_detail:cancel_current",
+            label="取消当前任务",
+            description="取消当前运行或排队任务。",
+            input_schema=empty_input,
+            effect="update",
+            context_type="task_detail",
+            destructive=True,
+        ),
+        CopilotSkillDefinition(
+            name="task_detail:delete_current",
+            label="删除当前任务",
+            description="删除当前任务记录。",
+            input_schema=empty_input,
+            effect="delete",
+            context_type="task_detail",
+            destructive=True,
+        ),
+        CopilotSkillDefinition(
+            name="task_detail:apply_metadata_patch",
+            label="更新任务信息",
+            description="更新当前任务的元数据。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "metadataPatch": {
+                        "type": "object",
+                        "properties": {
+                            "taskName": {"type": "string", "minLength": 1},
+                            "taskSummary": {"type": "string"},
+                        },
+                        "minProperties": 1,
+                        "additionalProperties": False,
+                    }
+                },
+                "required": ["metadataPatch"],
+                "additionalProperties": False,
+            },
+            effect="update",
+            context_type="task_detail",
+        ),
+        CopilotSkillDefinition(
+            name="task_detail:apply_copilot_attachments",
+            label="应用上传文件",
+            description="按声明的角色应用当前对话中上传的文件。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "attachmentApplications": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "attachmentId": {"type": "string", "minLength": 1},
+                                "fileName": {"type": "string", "minLength": 1},
+                                "role": {"type": "string", "enum": ["target", "ligand", "template"]},
+                            },
+                            "required": ["attachmentId", "fileName", "role"],
+                            "additionalProperties": False,
+                        },
+                    }
+                },
+                "required": ["attachmentApplications"],
+                "additionalProperties": False,
+            },
+            effect="update",
+            context_type="task_detail",
+        ),
+    ]
+    parameter_schema = _task_parameter_json_schema(normalized_workflow)
+    if parameter_schema["properties"]:
+        definitions.append(
+            CopilotSkillDefinition(
+                name="task_detail:apply_parameter_patch",
+                label="更新任务参数",
+                description="更新当前任务的结构化参数。",
+                input_schema={
+                    "type": "object",
+                    "properties": {"parameterPatch": parameter_schema},
+                    "required": ["parameterPatch"],
+                    "additionalProperties": False,
+                },
+                effect="update",
+                context_type="task_detail",
+            )
+        )
+    return definitions
+
+
 def render_context_plan_schema_prompt(context_type: str, context_payload: Dict[str, Any]) -> str:
     if context_type == "task_detail":
         workflow_key = infer_workflow_key(context_payload)
@@ -246,8 +409,8 @@ def _render_task_list_plan_schema() -> str:
         "- If the user asks for current status, progress, summary, analysis, counts, explanation, or what is happening now, return {\"actions\":[]} unless they explicitly ask to change the view or mutate tasks.\n"
         "- Component extraction is semantic, not regex-only. First honor explicit labels in the user message, then infer from the value shape only when no label is present.\n"
         "- Label mapping: 蛋白/protein/peptide/多肽/氨基酸 -> protein; 小分子/配体/化合物/compound/ligand/drug/SMILES/smiles -> ligand; DNA/dna/脱氧核糖核酸 -> dna; RNA/rna/核糖核酸 -> rna.\n"
-        "- A protein/peptide sequence is usually 2+ letters from the amino acid alphabet (ACDEFGHIKLMNPQRSTVWY), but an explicitly labeled ligand wins over this rule. Example: 小分子为 ATP is ligand, not protein.\n"
-        "- Ligands may be lowercase, uppercase, mixed-case, symbolic SMILES such as CN1C=NC2=C1C(=O)N(C)C(=O)N2C, or CCD IDs such as ATP/NAD/HEM. Preserve ligand text exactly except surrounding whitespace.\n"
+        "- Explicit component labels take precedence over inference from the value's shape.\n"
+        "- Ligands may use SMILES or CCD input. Preserve user-provided ligand text exactly except surrounding whitespace.\n"
         "- Preserve every user-provided component in order. If the user provides multiple proteins/ligands/DNA/RNA items, payload.components must include all of them; do not merge, drop, or copy old components.\n"
         "- Component schema: {type:\"protein|ligand|dna|rna\", sequence:\"...\", numCopies:1, useMsa:true/false, inputMethod:\"smiles|ccd\" for ligand}. For proteins default useMsa=true unless the user says no MSA or the component is clearly a peptide binder.\n"
         "- If the user provides a sequence and wants to predict/submit, use tasks:create_with_sequence only when current workflow is prediction.\n"
@@ -258,7 +421,7 @@ def _render_task_list_plan_schema() -> str:
         "- Use only fields the user requested; do not copy unchanged row fields into the patch.\n"
         "- If the user asks to inspect or manually edit an existing task from the task list without requesting a new submitted variant, identify the target row and use tasks:open.\n"
         "- If the user request is ambiguous or lacks necessary information, return {\"actions\":[],\"missing_questions\":[\"...\"]}. Ask for clarification instead of forcing a confirmation button.\n"
-        "- Ambiguous examples: unlabeled uppercase strings that could be peptide/protein/CCD/SMILES; 'new task' without any component; 'delete it' with multiple plausible target tasks; a workflow request that conflicts with current project type.\n"
+        "- If ambiguity prevents one schema-valid action, return missing_questions instead of selecting an interpretation arbitrarily.\n"
         "- If context_payload.copilot_attachments exists, the user uploaded files through Copilot. Interpret @filename mentions and nearby words to infer role. For affinity and lead optimization, ask which uploaded file is target/protein/receptor and which is ligand/small molecule if roles are unclear. For peptide design, target/protein/receptor files are target structures; ask which file is the target if unclear. For prediction, a PDB/CIF/MMCIF attachment is a template only when the user labels it template/模板 or otherwise says to use it as a structure template.\n"
         "- If current workflow is virtual_screening, affinity, peptide_design, or lead_optimization and the user asks to predict a lone sequence, return no actions; the assistant message should explain they are in the wrong project function. Virtual Screening requires its dedicated target-plus-library editor and fixed Nesso-1 backend.\n"
         "- For delete or cancel, identify the target task from context_payload.rows by matching name or task_id.\n"
@@ -266,44 +429,8 @@ def _render_task_list_plan_schema() -> str:
         "- Use tasks:delete for removing task records entirely.\n"
         "- Use tasks:update_view for combined task list search, state/workflow/backend filters, page size, advanced filters, metric column visibility, and sort direction. Use the most specific payload fields only.\n"
         "- If the user asks to restore the list, show all tasks, remove/clear/reset filters, or says 不要过滤/不过滤/不筛选/取消筛选, use tasks:clear_filters.\n"
+        "- External database identifiers and URLs are references, not component sequences or ligand values. Resolve them through the registered read-only skills before planning a mutating action.\n"
         "- All actions require user confirmation (needs_confirmation=true, execute_now=false).\n"
-        "Examples are patterns, not hard rules. Adapt source selection and patch fields to the user's exact words and visible rows:\n"
-        "- protein-only task / 只有一条蛋白 / predict this peptide:\n"
-        "  {\"actions\":[{\"id\":\"tasks:create_with_sequence\",\"label\":\"新建预测任务\",\"description\":\"创建包含蛋白序列 MEEPQSDPSV 的新预测任务\",\"payload\":{\"create\":true,\"components\":[{\"type\":\"protein\",\"sequence\":\"MEEPQSDPSV\",\"numCopies\":1,\"useMsa\":true}]}}]}\n"
-        "- protein plus explicitly labeled small molecule, including uppercase ligand-like text:\n"
-        "  {\"actions\":[{\"id\":\"tasks:create_with_sequence\",\"label\":\"新建预测任务\",\"description\":\"创建包含蛋白序列 GSHMKWVTFISLLFLFSSAYSRGV 和小分子 ATP 的新预测任务\",\"payload\":{\"create\":true,\"components\":[{\"type\":\"protein\",\"sequence\":\"GSHMKWVTFISLLFLFSSAYSRGV\",\"numCopies\":1,\"useMsa\":true},{\"type\":\"ligand\",\"sequence\":\"ATP\",\"numCopies\":1,\"inputMethod\":\"ccd\"}]}}]}\n"
-        "- protein plus drug-like SMILES / compound CN1C=NC2=C1C(=O)N(C)C(=O)N2C / ligand NAD:\n"
-        "  {\"actions\":[{\"id\":\"tasks:create_with_sequence\",\"label\":\"新建预测任务\",\"description\":\"创建包含蛋白和 ligand 的新预测任务\",\"payload\":{\"create\":true,\"components\":[{\"type\":\"protein\",\"sequence\":\"MEEPQSDPSV\",\"numCopies\":1,\"useMsa\":true},{\"type\":\"ligand\",\"sequence\":\"CN1C=NC2=C1C(=O)N(C)C(=O)N2C\",\"numCopies\":1,\"inputMethod\":\"smiles\"},{\"type\":\"ligand\",\"sequence\":\"NAD\",\"numCopies\":1,\"inputMethod\":\"ccd\"}]}}]}\n"
-        "- mixed biomolecules / DNA and RNA are not proteins:\n"
-        "  {\"actions\":[{\"id\":\"tasks:create_with_sequence\",\"label\":\"新建预测任务\",\"description\":\"创建包含蛋白、DNA 和 RNA 的新预测任务\",\"payload\":{\"create\":true,\"components\":[{\"type\":\"protein\",\"sequence\":\"MSTNPKPQR\",\"numCopies\":1,\"useMsa\":true},{\"type\":\"dna\",\"sequence\":\"ATCGATCG\",\"numCopies\":1},{\"type\":\"rna\",\"sequence\":\"AUGCUU\",\"numCopies\":1}]}}]}\n"
-        "- user asks to show failed tasks:\n"
-        "  {\"actions\":[{\"id\":\"tasks:failure\",\"label\":\"显示失败任务\",\"description\":\"筛选 FAILURE 状态的任务\",\"payload\":{\"stateFilter\":\"FAILURE\"}}]}\n"
-        "- user asks to restore all tasks / 不要过滤 / 取消筛选 / show everything:\n"
-        "  {\"actions\":[{\"id\":\"tasks:clear_filters\",\"label\":\"显示全部任务\",\"description\":\"清除任务列表筛选并恢复默认排序\",\"payload\":{\"stateFilter\":\"all\",\"workflowFilter\":\"all\",\"backendFilter\":\"all\",\"sortKey\":\"submitted\",\"clearAdvancedFilters\":true,\"clearSearch\":true}}]}\n"
-        "- user asks to sort by pLDDT / 按 pLDDT 排序 / 按 置信度 排序:\n"
-        "  {\"actions\":[{\"id\":\"tasks:sort_plddt\",\"label\":\"按 pLDDT 排序\",\"description\":\"按置信度 pLDDT 从高到低排序\",\"payload\":{\"sortKey\":\"plddt\"}}]}\n"
-        "- user asks to sort by ipTM / 按 ipTM 排序:\n"
-        "  {\"actions\":[{\"id\":\"tasks:sort_iptm\",\"label\":\"按 ipTM 排序\",\"description\":\"按界面 ipTM 从高到低排序\",\"payload\":{\"sortKey\":\"iptm\"}}]}\n"
-        "- user asks to delete a task:\n"
-        "  {\"actions\":[{\"id\":\"tasks:delete\",\"label\":\"删除任务\",\"description\":\"删除任务 xxx\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\"}}]}\n"
-        "- user asks to cancel/stop/terminate a task / 取消/停止 任务:\n"
-        "  {\"actions\":[{\"id\":\"tasks:cancel\",\"label\":\"取消任务\",\"description\":\"取消正在运行的任务 xxx\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\"}}]}\n"
-        "- user asks to submit a new task by rerunning the visible task with highest ipTM using AlphaFold3 / 最高 ipTM 的任务换成 AlphaFold3 重新提交:\n"
-        "  {\"actions\":[{\"id\":\"tasks:copy_with_patch\",\"label\":\"复制并用 AlphaFold3 重新运行\",\"description\":\"复制当前可见列表中 ipTM 最高的任务，并将 backend 切换为 AlphaFold3 后继续提交\",\"payload\":{\"taskRowId\":\"<row-id-with-highest-iptm>\",\"taskName\":\"<matched-name>\",\"parameterPatch\":{\"backend\":\"alphafold3\"}}}]}\n"
-        "- user asks to rerun the best pLDDT task with Protenix and seed 77:\n"
-        "  {\"actions\":[{\"id\":\"tasks:copy_with_patch\",\"label\":\"复制最佳任务并修改参数\",\"description\":\"复制当前可见列表中 pLDDT 最高的任务，将 backend 切换为 Protenix 并设置 seed 77 后继续提交\",\"payload\":{\"taskRowId\":\"<row-id-selected-by-plddt>\",\"taskName\":\"<matched-name>\",\"parameterPatch\":{\"backend\":\"protenix\",\"seed\":77}}}]}\n"
-        "- user asks to add one ligand component to a named task and rerun:\n"
-        "  {\"actions\":[{\"id\":\"tasks:copy_with_patch\",\"label\":\"复制任务并追加组分\",\"description\":\"复制任务 xxx，追加 ligand 组分 ATP 后继续提交\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\",\"parameterPatch\":{\"componentsPatch\":[{\"op\":\"append\",\"component\":{\"type\":\"ligand\",\"sequence\":\"ATP\",\"numCopies\":1,\"inputMethod\":\"ccd\"}}]}}}]}\n"
-        "- user asks to change seed on a copied task and rerun:\n"
-        "  {\"actions\":[{\"id\":\"tasks:copy_with_patch\",\"label\":\"复制任务并修改 seed\",\"description\":\"复制任务 xxx，将 seed 改为 123 后继续提交\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\",\"parameterPatch\":{\"seed\":123}}}]}\n"
-        "- user asks to update the second protein component sequence and rerun:\n"
-        "  {\"actions\":[{\"id\":\"tasks:copy_with_patch\",\"label\":\"复制任务并更新组分\",\"description\":\"复制任务 xxx，将第 2 个 protein 组分序列更新后继续提交\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\",\"parameterPatch\":{\"componentsPatch\":[{\"op\":\"update\",\"selector\":{\"index\":2,\"type\":\"protein\"},\"component\":{\"sequence\":\"MEEPQSDPSV\",\"useMsa\":true}}]}}}]}\n"
-        "- user asks to remove ligand components and rerun:\n"
-        "  {\"actions\":[{\"id\":\"tasks:copy_with_patch\",\"label\":\"复制任务并移除组分\",\"description\":\"复制任务 xxx，移除 ligand 组分后继续提交\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\",\"parameterPatch\":{\"componentsPatch\":[{\"op\":\"remove\",\"selector\":{\"type\":\"ligand\"}}]}}}]}\n"
-        "- user asks to replace only one component but does not specify the full final component list:\n"
-        "  {\"actions\":[],\"missing_questions\":[\"请提供替换后的完整组件列表，或说明要替换哪一个组件以及新序列/配体值。\"]}\n"
-        "- user asks to open an existing task for manual edits:\n"
-        "  {\"actions\":[{\"id\":\"tasks:open\",\"label\":\"打开任务\",\"description\":\"打开任务 xxx 查看或手动编辑\",\"payload\":{\"taskRowId\":\"<matched-id>\",\"taskName\":\"xxx\"}}]}\n"
         "Return JSON only. Do not explain."
     )
 
@@ -327,11 +454,6 @@ def _render_project_list_plan_schema() -> str:
         "- If the user asks to submit/predict/run a task, return no actions from project_list; they must open the right project/task function first.\n"
         "- All create and delete actions require user confirmation (needs_confirmation=true, execute_now=false).\n"
         "- Filter/sort actions also require user confirmation.\n"
-        "Examples:\n"
-        "- user asks to create a project:\n"
-        "  {\"actions\":[{\"id\":\"projects:create\",\"label\":\"新建项目\",\"description\":\"创建一个新项目\",\"payload\":{\"create\":true}}]}\n"
-        "- user asks to delete a project:\n"
-        "  {\"actions\":[{\"id\":\"projects:delete\",\"label\":\"删除项目\",\"description\":\"删除项目 xxx\",\"payload\":{\"projectId\":\"<matched-id>\",\"projectName\":\"xxx\"}}]}\n"
         "Return JSON only. Do not explain."
     )
 
@@ -377,26 +499,9 @@ def render_task_submission_schema_prompt(workflow_key: str = "prediction") -> st
         "Label mapping: 蛋白/protein/peptide/多肽/氨基酸 -> protein; 小分子/配体/化合物/compound/ligand/drug/SMILES/smiles -> ligand; DNA/dna -> dna; RNA/rna -> rna.",
         "For structure prediction, peptide and protein sequence inputs are both protein components, unless the user explicitly labels the value as ligand/small molecule/SMILES.",
         "When the user asks for only/single/只有/rewrite/replace components, replace the component list and clear constraints unless they explicitly ask to keep constraints. Do not copy old components.",
-        "If the user gives multiple components, preserve all components in order. Uppercase ligand text such as ATP/NAD/HEM remains ligand when labeled 小分子/ligand/CCD/SMILES.",
+        "If the user gives multiple components, preserve all components in order. Explicitly labeled ligand text remains ligand regardless of letter case.",
         "If the type or value of a component is unclear, or the user asks to run but required inputs are missing, set capability=clarification_needed with missing_questions instead of producing a confirmation action.",
         "If context_payload.copilot_attachments exists, use @filename mentions and nearby role words. Do not assume file roles from upload order. If roles are clear, return capability=attachment_application with attachment_applications using exact attachment IDs and filenames from context_payload.copilot_attachments. In affinity and lead optimization, target/protein/receptor files are target structures and ligand/small molecule/compound files are ligand structures. In peptide design, target/protein/receptor files are target structures for peptide binder design; ask which file is the target if unclear. In prediction, PDB/CIF/MMCIF files are templates only when explicitly described as template/模板. If uploaded file roles are unclear, ask a clarifying question.",
-        "Broad examples, adapt them to the exact user labels and values:",
-        "- replace with one protein sequence:",
-        '{"capability":"task_submission_planning","parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"<PROTEIN_SEQUENCE>","numCopies":1,"useMsa":true}],"clearConstraints":true}},"submit_after_patch":true,"needs_confirmation":true,"execute_now":false}',
-        "- change backend to Protenix and rerun current draft:",
-        '{"capability":"task_submission_planning","parameter_patch":{"backend":"protenix"},"submit_after_patch":true,"needs_confirmation":true,"execute_now":false}',
-        "- replace with protein plus explicitly labeled small molecule ligand, preserving uppercase ligand text:",
-        '{"capability":"task_submission_planning","parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"GSHMKWVTFISLLFLFSSAYSRGV","numCopies":1,"useMsa":true},{"type":"ligand","sequence":"ATP","numCopies":1,"inputMethod":"ccd"}],"clearConstraints":true}},"submit_after_patch":true,"needs_confirmation":true,"execute_now":false}',
-        "- replace with multiple ligands or SMILES strings:",
-        '{"capability":"task_submission_planning","parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"<PROTEIN_SEQUENCE>","numCopies":1,"useMsa":true},{"type":"ligand","sequence":"CN1C=NC2=C1C(=O)N(C)C(=O)N2C","numCopies":1,"inputMethod":"smiles"},{"type":"ligand","sequence":"NAD","numCopies":1,"inputMethod":"ccd"}],"clearConstraints":true}},"submit_after_patch":true,"needs_confirmation":true,"execute_now":false}',
-        "- replace with protein plus DNA/RNA components:",
-        '{"capability":"task_submission_planning","parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"<PROTEIN_SEQUENCE>","numCopies":1,"useMsa":true},{"type":"dna","sequence":"ATCGATCG","numCopies":1},{"type":"rna","sequence":"AUGCUU","numCopies":1}],"clearConstraints":true}},"submit_after_patch":true,"needs_confirmation":true,"execute_now":false}',
-        "- protein plus peptide binder; peptide is represented as another protein component:",
-        '{"capability":"task_submission_planning","parameter_patch":{"componentsReplacement":{"mode":"replace","components":[{"type":"protein","sequence":"<TARGET_PROTEIN_SEQUENCE>","numCopies":1,"useMsa":true},{"type":"protein","sequence":"<PEPTIDE_SEQUENCE>","numCopies":1,"useMsa":false}],"clearConstraints":true}},"submit_after_patch":true,"needs_confirmation":true,"execute_now":false}',
-        "- peptide design: use an initial sequence, mask, and rerun:",
-        '{"capability":"task_submission_planning","parameter_patch":{"peptideUseInitialSequence":true,"peptideInitialSequence":"ACDEFGHIK","peptideSequenceMask":"ACDXXXXXX"},"submit_after_patch":true,"needs_confirmation":true,"execute_now":false}',
-        "- peptide design: switch to bicyclic linker and manual cysteine positions:",
-        '{"capability":"task_submission_planning","parameter_patch":{"peptideDesignMode":"bicyclic","peptideBicyclicLinkerCcd":"BS3","peptideBicyclicCysPositionMode":"manual","peptideBicyclicCys1Pos":3,"peptideBicyclicCys2Pos":8,"peptideBicyclicCys3Pos":15},"submit_after_patch":true,"needs_confirmation":true,"execute_now":false}',
         "Allowed parameter_patch keys for this workflow:",
     ]
     for key in allowed_keys:

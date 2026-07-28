@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from typing import Any, Dict, List
 
 import requests
 
 from management_api.copilot_capabilities import (
     build_context_actions,
+    build_task_detail_skill_definitions,
     build_task_submission_actions,
     infer_workflow_key,
     render_capability_prompt,
     render_context_plan_schema_prompt,
 )
+from management_api.copilot_skill_harness import CopilotSkillHarness
+from management_api.copilot_skills.context_actions import build_context_skill_definitions
+from management_api.copilot_skills.online_databases import OnlineDatabaseSkills
 
 
 MAX_CONTEXT_STRING_CHARS = 1600
@@ -282,6 +287,7 @@ class CopilotAssistant:
         timeout_seconds: float,
         session: requests.Session,
         logger: Any,
+        max_planner_rounds: int = 8,
     ) -> None:
         self.chat_api_url = chat_api_url.rstrip("/")
         self.chat_api_key = chat_api_key.strip()
@@ -289,8 +295,19 @@ class CopilotAssistant:
         self.timeout_seconds = float(timeout_seconds)
         self.session = session
         self.logger = logger
+        self.max_planner_rounds = max(1, min(20, int(max_planner_rounds)))
+        self.skill_harness = CopilotSkillHarness(
+            skills=OnlineDatabaseSkills(session=session, timeout_seconds=min(self.timeout_seconds, 30.0))
+        )
 
-    def _call_model(self, messages: List[Dict[str, str]], *, strip_internal: bool = True, json_response: bool = False) -> str:
+    def _call_model(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        strip_internal: bool = True,
+        json_response: bool = False,
+        allow_empty: bool = False,
+    ) -> str:
         if not self.chat_api_url:
             raise RuntimeError("Copilot API URL is not configured.")
         messages = normalize_chat_messages_for_template(messages)
@@ -360,6 +377,8 @@ class CopilotAssistant:
                     return strip_internal_capability_lines(content)
                 return content
             saw_reasoning_empty = saw_reasoning_empty or _payload_has_reasoning_without_content(payload)
+            if allow_empty:
+                return ""
             finish_reason = choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
             self.logger.warning(
                 "Copilot model returned an empty message; retrying with response_format=%s disable_thinking=%s attempt=%s finish_reason=%s payload=%s",
@@ -370,6 +389,152 @@ class CopilotAssistant:
                 compact_text(payload, 1000),
             )
         raise RuntimeError("Chat model returned an empty message.")
+
+    @staticmethod
+    def _parse_planner_turn(raw_content: str) -> Dict[str, Any]:
+        try:
+            candidate = json.loads(str(raw_content or "").strip())
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"planner output is not valid JSON: {exc.msg}") from exc
+        if not isinstance(candidate, dict):
+            raise ValueError("planner output must be a JSON object")
+        return candidate
+
+    def plan_turn(
+        self,
+        *,
+        context_type: str,
+        context_payload: Dict[str, Any],
+        user_id: str,
+        username: str,
+        content: str,
+    ) -> Dict[str, Any]:
+        normalized_content = str(content or "").strip()
+        if not normalized_content:
+            raise ValueError("content is required.")
+        normalized_context = str(context_type or "").strip()
+        safe_context_payload = sanitize_context_payload(context_payload)
+        workflow_key = infer_workflow_key(safe_context_payload, default="")
+        if normalized_context == "task_detail":
+            host_definitions = build_task_detail_skill_definitions(workflow_key)
+        else:
+            host_definitions = build_context_skill_definitions(
+                normalized_context,
+                safe_context_payload,
+                workflow_key=workflow_key,
+            )
+        definitions = self.skill_harness.definitions(host_definitions)
+        protocol = self.skill_harness.render_protocol_prompt(definitions)
+        system_prompt = (
+            "You are the V-Bio Copilot planner. Reason from the user's request, conversation context, current page "
+            "state, and registered skills. Skills are atomic operations; compose as many ordered operations as the "
+            "request requires. Use read-only skills when more authoritative information is needed. The harness will "
+            "return observations and audit issues for another planning round. Any operation that creates, updates, "
+            "deletes, navigates, submits, or otherwise changes host state must remain pending for explicit user "
+            "confirmation. The message field is user-visible: do not expose planner, harness, skill names, operation "
+            "ids, schemas, or internal context fields. Do not invent an operation or an observation.\n\n"
+            f"{protocol}"
+        )
+        context_json = json.dumps(safe_context_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        context_block = (
+            f"context_type: {normalized_context}\n"
+            f"context_payload: {context_json}"
+        )
+        planner_messages: List[Dict[str, str]] = [
+            {"role": "system", "content": f"{system_prompt}\n\n{context_block}"},
+            {"role": "user", "content": f"{username or user_id}: {normalized_content}"},
+        ]
+        observations: Dict[str, Dict[str, Any]] = {}
+        last_issues: List[str] = []
+
+        for round_index in range(self.max_planner_rounds):
+            raw_content = self._call_model(planner_messages, strip_internal=False, json_response=True, allow_empty=True)
+            try:
+                candidate = self._parse_planner_turn(raw_content)
+            except ValueError as exc:
+                last_issues = [str(exc)]
+                planner_messages.extend(
+                    [
+                        {"role": "assistant", "content": raw_content},
+                        {
+                            "role": "system",
+                            "content": json.dumps(
+                                {"harness": "audit", "round": round_index + 1, "issues": last_issues},
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                        },
+                    ]
+                )
+                continue
+
+            audit = self.skill_harness.audit_plan(
+                candidate,
+                definitions,
+                observations=observations,
+                context_type=normalized_context,
+            )
+            message = str(candidate.get("message") or "").strip()
+            audit_issues = list(audit.issues)
+            if not message:
+                audit_issues.append("message must be non-empty")
+            if audit_issues:
+                last_issues = audit_issues
+                planner_messages.extend(
+                    [
+                        {"role": "assistant", "content": raw_content},
+                        {
+                            "role": "system",
+                            "content": json.dumps(
+                                {"harness": "audit", "round": round_index + 1, "issues": audit_issues},
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                        },
+                    ]
+                )
+                continue
+
+            read_operations = [item for item in audit.operations if item.definition.read_only]
+            if read_operations:
+                round_observations = self.skill_harness.execute_operations(read_operations)
+                observations.update(round_observations)
+                planner_messages.extend(
+                    [
+                        {"role": "assistant", "content": raw_content},
+                        {
+                            "role": "system",
+                            "content": json.dumps(
+                                {
+                                    "harness": "observations",
+                                    "round": round_index + 1,
+                                    "observations": round_observations,
+                                },
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                        },
+                    ]
+                )
+                continue
+
+            plan_id = uuid.uuid4().hex
+            actions = self.skill_harness.build_confirmation_actions(
+                audit.operations,
+                plan_id=plan_id,
+                context_type=normalized_context,
+                workflow_key=workflow_key,
+            )
+            return {
+                "content": message,
+                "actions": actions,
+                "state": str(candidate.get("state") or ""),
+                "questions": candidate.get("questions") if isinstance(candidate.get("questions"), list) else [],
+                "plan_id": plan_id,
+            }
+
+        detail = "; ".join(last_issues) if last_issues else "planner did not reach a terminal state"
+        raise ValueError(f"Copilot planner exhausted its audited operation loop: {detail}")
 
     def answer_context(self, *, context_type: str, context_payload: Dict[str, Any], user_id: str, username: str, content: str) -> str:
         normalized_content = compact_text(content, 6000)

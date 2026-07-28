@@ -154,7 +154,13 @@ function buildTriageComponents(components: InputComponent[], candidateSmiles: st
     .filter((component) => component.type === 'protein' || component.type === 'ligand')
     .filter((component) => Boolean(String(component.sequence || '').trim()))
     .map((component) => component.type === 'protein'
-      ? { ...component, useMsa: true, cyclic: false, modifications: [] }
+      ? {
+          ...component,
+          // Preserve the target's MSA choice for per-hit structure prediction.
+          useMsa: component.useMsa !== false,
+          cyclic: false,
+          modifications: []
+        }
       : { ...component });
   return [
     ...targetComplex,
@@ -368,7 +374,9 @@ export function useVirtualScreeningPredictions({
           binder: chains.ligandChain
         },
         backend,
-        useMsa: true,
+        useMsa: predictionComponents.some(
+          (component) => component.type === 'protein' && component.useMsa !== false
+        ),
         seed: null,
         lowVram: false
       });

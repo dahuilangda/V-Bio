@@ -34,8 +34,8 @@
   height: min(680px, calc(100vh - 24px));
   max-width: calc(100vw - 16px);
   max-height: calc(100vh - 16px);
-  min-width: 340px;
-  min-height: 360px;
+  min-width: min(340px, calc(100vw - 16px));
+  min-height: min(360px, calc(100vh - 16px));
   resize: both;
   overflow: hidden;
   border-radius: 8px;
@@ -385,25 +385,32 @@
 
 .copilot-chat-window .copilot-action-stack {
   display: grid;
-  gap: 7px;
+  gap: 8px;
   flex-shrink: 0;
   padding: 8px;
   border: 1px solid #d6e2db;
-  border-radius: 10px;
+  border-radius: 8px;
   background: #f9fcfa;
 }
 
 .copilot-chat-window .copilot-plan-actions {
   display: grid;
   gap: 7px;
+  max-height: min(240px, 32vh);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding-right: 2px;
 }
 
-.copilot-chat-window .copilot-plan-actions button {
+.copilot-chat-window .copilot-plan-action {
+  width: 100%;
+  min-height: 52px;
   border: 1px solid #cddbd3;
   background: #fff;
   border-radius: 8px;
   padding: 8px 9px;
-  display: flex;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
   align-items: center;
   gap: 9px;
   color: #243d32;
@@ -412,18 +419,77 @@
   cursor: pointer;
 }
 
-.copilot-chat-window .copilot-plan-actions button:hover:not(:disabled) {
+.copilot-chat-window .copilot-plan-action:hover:not(:disabled) {
   background: #eef6f1;
 }
 
-.copilot-chat-window .copilot-plan-actions button span {
-  display: grid;
-  gap: 2px;
+.copilot-chat-window .copilot-plan-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
 }
 
-.copilot-chat-window .copilot-plan-actions button small {
+.copilot-chat-window .copilot-plan-action > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.copilot-chat-window .copilot-plan-action strong,
+.copilot-chat-window .copilot-plan-action small {
+  overflow-wrap: anywhere;
+}
+
+.copilot-chat-window .copilot-plan-action small {
   color: var(--muted);
   font-size: var(--text-xs);
+}
+
+.copilot-chat-window .copilot-action-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  padding-top: 8px;
+  border-top: 1px solid #e1ebe5;
+}
+
+.copilot-chat-window .copilot-action-footer button {
+  min-width: 92px;
+  height: 32px;
+  border-radius: 8px;
+  padding: 0 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.copilot-chat-window .copilot-action-footer button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.copilot-chat-window .copilot-action-cancel {
+  border: 1px solid #cddbd3;
+  background: #fff;
+  color: #435b50;
+}
+
+.copilot-chat-window .copilot-action-cancel:hover:not(:disabled) {
+  background: #f1f6f3;
+}
+
+.copilot-chat-window .copilot-action-apply-all {
+  border: 1px solid #1f4f3f;
+  background: #1f4f3f;
+  color: #fff;
+}
+
+.copilot-chat-window .copilot-action-apply-all:hover:not(:disabled) {
+  background: #245d49;
 }
 
 .copilot-chat-window .copilot-composer {

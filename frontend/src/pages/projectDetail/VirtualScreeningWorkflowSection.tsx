@@ -62,6 +62,9 @@ interface SidebarComponentEntry {
   typeOrder: number;
 }
 
+const VIRTUAL_SCREENING_VALIDATION_LIMIT = 200;
+const VIRTUAL_SCREENING_LIBRARY_PREVIEW_LIMIT = 12;
+
 const COMPONENT_TYPES: MoleculeType[] = ['protein', 'ligand', 'dna', 'rna'];
 const DISABLED_COMPONENT_TYPES: MoleculeType[] = ['dna', 'rna'];
 const NESSO_PROTEIN_ALPHABET = /^[ACDEFGHIKLMNPQRSTVWY]+$/;
@@ -173,7 +176,7 @@ export function VirtualScreeningWorkflowSection({
     }
     setValidationState('checking');
     const timer = window.setTimeout(() => {
-      void validateVirtualScreeningSmiles(parsed.compounds)
+      void validateVirtualScreeningSmiles(parsed.compounds.slice(0, VIRTUAL_SCREENING_VALIDATION_LIMIT))
         .then((result) => {
           if (cancelled) return;
           setInvalidIndexes(new Set(result.invalid.map((item) => item.index)));
@@ -250,7 +253,11 @@ export function VirtualScreeningWorkflowSection({
     onScreeningLibraryChange({ value: VIRTUAL_SCREENING_EXAMPLE, mode: 'paste', fileName: '' });
   };
 
-  const validCount = Math.max(0, parsed.compounds.length - invalidIndexes.size);
+  const validatedCompoundCount = Math.min(
+    parsed.compounds.length,
+    VIRTUAL_SCREENING_VALIDATION_LIMIT
+  );
+  const validCount = Math.max(0, validatedCompoundCount - invalidIndexes.size);
   const workspaceClassName = [
     'inputs-workspace',
     'components-resizable',
@@ -392,8 +399,8 @@ export function VirtualScreeningWorkflowSection({
           <div className="virtual-screening-validation" aria-live="polite">
             {parsed.errors[0] ? (
               <span className="text-error">{parsed.errors[0]}</span>
-            ) : parsed.compounds.length > 200 ? (
-              <span className="text-warning">Maximum batch size is 200 ligands.</span>
+            ) : parsed.compounds.length > VIRTUAL_SCREENING_VALIDATION_LIMIT ? (
+              <span className="text-warning">Batch limit is 200 ligands; the first 200 were checked.</span>
             ) : validationState === 'checking' ? (
               <span className="muted">Checking SMILES...</span>
             ) : validationState === 'ready' && invalidIndexes.size ? (
@@ -424,7 +431,7 @@ export function VirtualScreeningWorkflowSection({
                     </tr>
                   </thead>
                   <tbody>
-                    {parsed.compounds.slice(0, 12).map((compound, index) => (
+                    {parsed.compounds.slice(0, VIRTUAL_SCREENING_LIBRARY_PREVIEW_LIMIT).map((compound, index) => (
                       <tr
                         key={compound.id + '-' + index}
                         className={invalidIndexes.has(index) ? 'is-invalid' : ''}
@@ -437,9 +444,10 @@ export function VirtualScreeningWorkflowSection({
                   </tbody>
                 </table>
               </div>
-              {parsed.compounds.length > 12 ? (
+              {parsed.compounds.length > VIRTUAL_SCREENING_LIBRARY_PREVIEW_LIMIT ? (
                 <p className="small muted virtual-screening-library-more">
-                  +{parsed.compounds.length - 12} ligands
+                  Previewing first {VIRTUAL_SCREENING_LIBRARY_PREVIEW_LIMIT.toLocaleString()} of{' '}
+                  {parsed.compounds.length.toLocaleString()} ligands.
                 </p>
               ) : null}
             </>

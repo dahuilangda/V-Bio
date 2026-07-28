@@ -1,6 +1,7 @@
 import type { CustomCcdMoleculeInput, InputComponent, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import { extractPrimaryProteinAndLigand, saveProjectInputConfig } from '../../utils/projectInputs';
+import { normalizeTaskSummary } from '../../utils/taskMetadata';
 import { getWorkflowDefinition, isPredictionLikeWorkflowKey } from '../../utils/workflows';
 import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
 
@@ -139,7 +140,7 @@ export async function saveProjectDraftFromWorkspace(deps: SaveDraftDeps): Promis
   saveProjectInputConfig(next.id, normalizedConfig);
   const nextDraft: SaveDraftFields = {
     taskName: draft.taskName.trim(),
-    taskSummary: draft.taskSummary.trim(),
+    taskSummary: normalizeTaskSummary(draft.taskSummary),
     backend: next.backend,
     use_msa: next.use_msa,
     color_mode: next.color_mode === 'alphafold' ? 'alphafold' : 'default',

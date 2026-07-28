@@ -288,19 +288,29 @@ def register_prediction_routes(
                 return jsonify({'error': 'Nesso does not support low-VRAM mode.', 'backend': backend}), 400
 
         if backend in {'boltz', 'alphafold3', 'protenix'}:
-            msa_server_url = str(getattr(config_module, 'MSA_SERVER_URL', '') or '').strip()
-            if not msa_server_url:
-                return jsonify({
-                    'error': 'MSA_SERVER_URL is required for backend execution.',
-                    'backend': backend,
-                }), 503
-            if not use_msa_server:
-                logger.info(
-                    'Force use_msa_server=True for backend=%s (client=%s).',
-                    backend,
-                    request.remote_addr,
-                )
-            use_msa_server = True
+            yaml_requires_msa = infer_use_msa_server_from_yaml_text(yaml_content)
+            if yaml_requires_msa:
+                msa_server_url = str(getattr(config_module, 'MSA_SERVER_URL', '') or '').strip()
+                if not msa_server_url:
+                    return jsonify({
+                        'error': 'MSA_SERVER_URL is required for backend execution.',
+                        'backend': backend,
+                    }), 503
+                if not use_msa_server:
+                    logger.info(
+                        'Set use_msa_server=True for backend=%s because the YAML requires external MSA generation (client=%s).',
+                        backend,
+                        request.remote_addr,
+                    )
+                use_msa_server = True
+            else:
+                if use_msa_server:
+                    logger.info(
+                        'Set use_msa_server=False for backend=%s because the YAML does not require external MSA generation (client=%s).',
+                        backend,
+                        request.remote_addr,
+                    )
+                use_msa_server = False
         else:
             # Nesso consumes protein sequences directly and has no MSA input contract.
             if use_msa_server:

@@ -79,7 +79,13 @@ from backend.core.config import (
     RESULTS_BASE_DIR,
 )
 from backend.scheduling.capability_router import build_capability_queue
-from backend.services.common_utils import coerce_bool
+from backend.services.common_utils import (
+    ProteinMsaMode,
+    coerce_bool,
+    extract_protein_msa_policies,
+    infer_use_msa_server_from_yaml_text,
+    is_msa_disabled,
+)
 from backend.runtime.nesso_backend import run_nesso_backend
 from backend.runtime.af3_adapter import (
     AF3Preparation,
@@ -98,8 +104,7 @@ from backend.runtime.protenix_adapter import (
     serialize_protenix_json,
 )
 from Bio import Align
-from Bio.PDB import PDBParser, MMCIFParser, Select
-from Bio.PDB.Polypeptide import is_aa
+from Bio.PDB import PDBParser, Select
 import gemmi
 from rdkit import Chem
 from rdkit.Chem import AllChem, Descriptors, rdFMCS, rdMolAlign, rdMolDescriptors
@@ -129,7 +134,6 @@ MSA_CACHE_CONFIG = {
     'enable_cache': True
 }
 
-MANDATORY_COLABFOLD_MSA_BACKENDS = {"boltz", "alphafold3", "protenix"}
 IPSAE_PAE_CUTOFF = 12.0
 IPSAE_DIST_CUTOFF = 5.0
 _BOLTZ_RESULT_CONF_RE = re.compile(r"^confidence_(.+)_model_(\d+)\.json$", re.IGNORECASE)
@@ -456,23 +460,29 @@ def build_af3_model_seeds(seed: Optional[int], count: int = AF3_DEFAULT_MODEL_SE
 
 def extract_chain_sequences_from_structure(content: str, fmt: str) -> Dict[str, str]:
     fmt = (fmt or "").lower()
-    parser = PDBParser(QUIET=True) if fmt == "pdb" else MMCIFParser(QUIET=True)
-    structure = parser.get_structure("template", io.StringIO(content))
+    if fmt == "pdb":
+        structure = gemmi.read_pdb_string(content)
+    elif fmt in {"cif", "mmcif"}:
+        document = gemmi.cif.read_string(content)
+        if len(document) == 0:
+            return {}
+        structure = gemmi.make_structure_from_block(document.sole_block())
+    else:
+        raise ValueError(f"Unsupported structure format: {fmt}")
+
     sequences: Dict[str, str] = {}
-    first_model = next(iter(structure), None)
-    if first_model is None:
+    if len(structure) == 0:
         return sequences
 
-    for chain in first_model:
+    for chain in structure[0]:
         seq_chars: List[str] = []
         for residue in chain:
-            if not is_aa(residue, standard=False):
+            aa = _pdb_resname_to_one_letter(residue.name)
+            if aa is None:
                 continue
-            resname = residue.get_resname()
-            aa = AMINO_ACID_MAPPING.get(resname.upper(), "X")
             seq_chars.append(aa)
         if seq_chars:
-            sequences[chain.id] = "".join(seq_chars)
+            sequences[chain.name] = "".join(seq_chars)
     return sequences
 
 
@@ -628,9 +638,6 @@ def _build_single_chain_structure(
     structure.remove_hydrogens()
     structure.remove_alternative_conformations()
     structure.remove_empty_chains()
-    # Drop any pre-existing sequence tables that may not match the selected chain
-    structure.clear_sequences()
-    structure.setup_entities()
 
     chain = model[selected_chain]
     removed_count, renamed_count = _sanitize_template_chain_residues(chain)
@@ -643,14 +650,26 @@ def _build_single_chain_structure(
         raise ValueError(
             f"Template chain '{selected_chain}' has no supported amino-acid residues after cleanup."
         )
+
+    # Some model/mmCIF providers preserve source PDB residue numbers (for
+    # example 241..625) while their ``_entity_poly_seq`` table starts at 1.
+    # AF3 joins atoms to the polymer scheme using these numbers, so normalize
+    # the sanitized single chain before rebuilding its entity sequence tables.
+    for residue_index, residue in enumerate(chain, start=1):
+        residue.seqid = gemmi.SeqId(residue_index, ' ')
+        residue.label_seq = residue_index
+
+    # Drop any pre-existing sequence tables that may not match the selected
+    # chain, then rebuild the entity sequence from the residues we retained.
+    structure.clear_sequences()
+    structure.setup_entities()
     residue_names = [gemmi.Entity.first_mon(res.name) for res in chain]
     subchains = {res.subchain for res in chain}
     for entity in structure.entities:
         if any(sc in entity.subchains for sc in subchains):
-            if not entity.full_sequence or len(entity.full_sequence) < len(residue_names):
-                entity.full_sequence = residue_names
+            entity.full_sequence = list(residue_names)
 
-    # Ensure label_seq_id and related tables are consistent with the sequence
+    # Ensure label_seq_id and related tables are consistent with the sequence.
     try:
         structure.assign_label_seq_id()
     except Exception:
@@ -3384,20 +3403,31 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
     try:
         print(f"🧬 开始为蛋白质序列生成 MSA", file=sys.stderr)
 
-        # 解析 YAML 获取蛋白质序列
-        yaml_data = yaml.safe_load(yaml_content) or {}
-        protein_sequences = {}
-
-        for entity in yaml_data.get('sequences', []):
-            if entity.get('protein', {}).get('id'):
-                protein_id = entity['protein']['id']
-                sequence = entity['protein'].get('sequence', '')
-                if sequence:
-                    protein_sequences[protein_id] = sequence
+        protein_sequences: Dict[str, str] = {}
+        output_names: Dict[str, str] = {}
+        for policy in extract_protein_msa_policies(yaml_content):
+            if policy.mode is not ProteinMsaMode.EXTERNAL:
+                continue
+            if not policy.sequence:
+                raise ValueError("External MSA generation requires a protein sequence.")
+            if not policy.chain_ids:
+                raise ValueError("External MSA generation requires explicit protein chain IDs.")
+            for chain_id in policy.chain_ids:
+                output_name = f"{safe_filename(chain_id)}_msa.a3m"
+                previous_chain = output_names.get(output_name)
+                if previous_chain is not None and previous_chain != chain_id:
+                    raise ValueError(
+                        f"Protein chain IDs resolve to the same MSA file: {previous_chain}, {chain_id}"
+                    )
+                previous_sequence = protein_sequences.get(chain_id)
+                if previous_sequence is not None and previous_sequence != policy.sequence:
+                    raise ValueError(f"Protein chain ID is assigned more than one sequence: {chain_id}")
+                output_names[output_name] = chain_id
+                protein_sequences[chain_id] = policy.sequence
 
         if not protein_sequences:
-            print("❌ 未找到蛋白质序列，跳过 MSA 生成", file=sys.stderr)
-            return False
+            print("ℹ️ 没有需要外部 MSA 的蛋白质序列，跳过 MSA 生成", file=sys.stderr)
+            return True
 
         msa_timeout = MSA_SERVER_TIMEOUT_SECONDS if MSA_SERVER_TIMEOUT_SECONDS > 0 else 600
         print(f"🔍 找到 {len(protein_sequences)} 个蛋白质序列需要生成 MSA", file=sys.stderr)
@@ -3408,8 +3438,7 @@ def generate_msa_for_sequences(yaml_content: str, temp_dir: str) -> bool:
         for protein_id, sequence in protein_sequences.items():
             print(f"🧬 正在为蛋白质 {protein_id} 生成 MSA...", file=sys.stderr)
 
-            # 检查临时目录中是否已经存在
-            output_path = os.path.join(temp_dir, f"{protein_id}_msa.a3m")
+            output_path = os.path.join(temp_dir, f"{safe_filename(protein_id)}_msa.a3m")
             if os.path.exists(output_path):
                 if _ensure_nonempty_a3m_file(
                     output_path,
@@ -3499,13 +3528,6 @@ def _inject_local_msa_paths_into_yaml(yaml_content: str, temp_dir: str) -> Tuple
     if not isinstance(sequences, list):
         return yaml_content, 0
 
-    local_files: Dict[str, str] = {}
-    for root, _, files in os.walk(temp_dir):
-        for file_name in files:
-            if not (file_name.endswith(".a3m") or file_name.endswith(".csv")):
-                continue
-            local_files[file_name] = os.path.join(root, file_name)
-
     injected = 0
     for entity in sequences:
         if not isinstance(entity, dict):
@@ -3514,6 +3536,8 @@ def _inject_local_msa_paths_into_yaml(yaml_content: str, temp_dir: str) -> Tuple
         if not isinstance(protein, dict):
             continue
         current_msa = protein.get("msa")
+        if is_msa_disabled(current_msa):
+            continue
         if isinstance(current_msa, str) and current_msa.strip() and current_msa.strip() not in {"0", "empty"}:
             continue
         ids = protein.get("id")
@@ -3523,31 +3547,25 @@ def _inject_local_msa_paths_into_yaml(yaml_content: str, temp_dir: str) -> Tuple
             chain_ids = [str(ids or "").strip()] if str(ids or "").strip() else []
         if not chain_ids:
             continue
-        selected_path = ""
+
+        selected_path: Optional[Path] = None
         for chain_id in chain_ids:
-            candidates = (
-                f"{chain_id}_msa.a3m",
-                f"{chain_id}.a3m",
-                f"{chain_id}_msa.csv",
-                f"{chain_id}.csv",
-            )
-            for candidate in candidates:
-                candidate_path = local_files.get(candidate, "")
-                if candidate_path:
-                    if candidate_path.endswith(".a3m") and not _ensure_nonempty_a3m_file(
-                        candidate_path,
-                        protein.get("sequence", ""),
-                        context=f"{chain_id} 注入校验",
-                        header=chain_id,
-                    ):
-                        continue
-                    selected_path = candidate_path
-                    break
+            candidate_path = Path(temp_dir) / f"{safe_filename(chain_id)}_msa.a3m"
+            if not candidate_path.is_file():
+                continue
+            if not _ensure_nonempty_a3m_file(
+                str(candidate_path),
+                protein.get("sequence", ""),
+                context=f"{chain_id} 注入校验",
+                header=chain_id,
+            ):
+                continue
+            selected_path = candidate_path
             if selected_path:
                 break
         if not selected_path:
             continue
-        protein["msa"] = selected_path
+        protein["msa"] = str(selected_path)
         injected += 1
 
     if injected <= 0:
@@ -3556,196 +3574,82 @@ def _inject_local_msa_paths_into_yaml(yaml_content: str, temp_dir: str) -> Tuple
 
 
 def cache_msa_files_from_temp_dir(temp_dir: str, yaml_content: str):
-    """
-    从临时目录中缓存生成的MSA文件
-    支持从colabfold server生成的CSV格式MSA文件
-    为每个蛋白质组分单独缓存MSA，适用于结构预测和分子设计
-    """
+    """Cache the declared external A3M output for each protein chain."""
     if not MSA_CACHE_CONFIG['enable_cache']:
         return
-    
+
     try:
-        # 解析YAML获取蛋白质序列
-        yaml_data = yaml.safe_load(yaml_content)
-        protein_sequences = {}
-        
-        # 提取所有蛋白质序列（支持结构预测和分子设计）
-        for entity in yaml_data.get('sequences', []):
-            if entity.get('protein', {}).get('id'):
-                protein_id = entity['protein']['id']
-                sequence = entity['protein'].get('sequence', '')
-                if sequence:
-                    protein_sequences[protein_id] = sequence
-        
+        protein_sequences: Dict[str, str] = {}
+        for policy in extract_protein_msa_policies(yaml_content):
+            if policy.mode is not ProteinMsaMode.EXTERNAL:
+                continue
+            if not policy.sequence or not policy.chain_ids:
+                raise ValueError("External MSA caching requires protein sequences and chain IDs.")
+            for chain_id in policy.chain_ids:
+                previous_sequence = protein_sequences.get(chain_id)
+                if previous_sequence is not None and previous_sequence != policy.sequence:
+                    raise ValueError(f"Protein chain ID is assigned more than one sequence: {chain_id}")
+                protein_sequences[chain_id] = policy.sequence
+
         if not protein_sequences:
-            print("未找到蛋白质序列，跳过MSA缓存", file=sys.stderr)
+            print("没有需要缓存的外部 MSA，跳过缓存", file=sys.stderr)
             return
-        
-        print(f"需要缓存的蛋白质组分: {list(protein_sequences.keys())}", file=sys.stderr)
-        
-        # 设置缓存目录
+
+        print(f"需要缓存的蛋白质组分: {list(protein_sequences)}", file=sys.stderr)
         cache_dir = MSA_CACHE_CONFIG['cache_dir']
         os.makedirs(cache_dir, exist_ok=True)
-        
-        # 递归搜索临时目录中的MSA文件
-        print(f"递归搜索临时目录中的MSA文件: {temp_dir}", file=sys.stderr)
-        
-        # 为每个蛋白质组分单独查找对应的MSA文件
-        protein_msa_map = {}  # protein_id -> [msa_files]
-        
-        # 搜索所有MSA文件
-        all_msa_files = []
-        for root, dirs, files in os.walk(temp_dir):
-            for file in files:
-                if file.endswith('.csv') or file.endswith('.a3m'):
-                    file_path = os.path.join(root, file)
-                    all_msa_files.append(file_path)
-        
-        if not all_msa_files:
-            print(f"在临时目录中未找到任何MSA文件: {temp_dir}", file=sys.stderr)
-            return
-        
-        print(f"找到 {len(all_msa_files)} 个MSA文件: {[os.path.basename(f) for f in all_msa_files]}", file=sys.stderr)
-        
-        # 为每个蛋白质组分匹配对应的MSA文件
-        for protein_id in protein_sequences.keys():
-            protein_msa_map[protein_id] = []
-            
-            for msa_file in all_msa_files:
-                filename = os.path.basename(msa_file)
-                
-                # 精确匹配：文件名包含protein ID
-                if protein_id.lower() in filename.lower():
-                    protein_msa_map[protein_id].append(msa_file)
-                    continue
-                    
-                # 索引匹配：如果protein_id是字母，尝试匹配对应的数字索引
-                # 例如：protein A -> _0.csv, protein B -> _1.csv
-                if len(protein_id) == 1 and protein_id.isalpha():
-                    protein_index = ord(protein_id.upper()) - ord('A')
-                    if f"_{protein_index}." in filename:
-                        protein_msa_map[protein_id].append(msa_file)
-                        continue
-                
-                # 通用匹配：如果只有一个蛋白质组分，使用通用MSA文件
-                if len(protein_sequences) == 1 and any(pattern in filename.lower() for pattern in ['msa', '_0.csv', '_0.a3m']):
-                    protein_msa_map[protein_id].append(msa_file)
-        
-        # 处理每个蛋白质组分的MSA文件
+
         cached_count = 0
-        for protein_id, msa_files in protein_msa_map.items():
-            if not msa_files:
-                print(f"❌ 蛋白质组分 {protein_id} 未找到对应的MSA文件", file=sys.stderr)
+        for protein_id, sequence in protein_sequences.items():
+            msa_path = Path(temp_dir) / f"{safe_filename(protein_id)}_msa.a3m"
+            if not msa_path.is_file():
+                print(f"❌ 蛋白质组分 {protein_id} 缺少声明的 A3M 文件", file=sys.stderr)
                 continue
-                
-            print(f"🔍 处理蛋白质组分 {protein_id} 的 {len(msa_files)} 个MSA文件", file=sys.stderr)
-            
-            for msa_file in msa_files:
-                if cache_single_protein_msa(protein_id, protein_sequences[protein_id], msa_file, cache_dir):
-                    cached_count += 1
-                    break  # 成功缓存一个就够了
-        
+            if cache_single_protein_msa(protein_id, sequence, str(msa_path), cache_dir):
+                cached_count += 1
+
         print(f"✅ MSA缓存完成，成功缓存 {cached_count}/{len(protein_sequences)} 个蛋白质组分", file=sys.stderr)
-                
+
     except Exception as e:
         print(f"❌ 缓存MSA文件失败: {e}", file=sys.stderr)
 
 def cache_single_protein_msa(protein_id: str, protein_sequence: str, msa_file: str, cache_dir: str) -> bool:
-    """
-    为单个蛋白质组分缓存MSA文件
-    返回是否成功缓存
-    """
+    """Validate and cache one explicitly selected A3M file."""
     try:
-        filename = os.path.basename(msa_file)
-        file_ext = os.path.splitext(filename)[1].lower()
-        
+        source_path = Path(msa_file)
+        filename = source_path.name
         print(f"  📂 处理MSA文件: {filename}", file=sys.stderr)
-        
-        if file_ext == '.csv':
-            # 处理CSV格式的MSA文件（来自colabfold server）
-            with open(msa_file, 'r') as f:
-                reader = csv.reader(f)
-                header = next(reader, None)
-                if header and len(header) >= 2 and 'sequence' in header:
-                    sequences = []
-                    for row in reader:
-                        if len(row) >= 2 and row[1]:
-                            sequences.append(row[1])
-                    
-                    if sequences:
-                        # 第一个序列通常是查询序列
-                        query_sequence = sequences[0]
-                        print(f"    从CSV提取的查询序列: {query_sequence[:50]}...", file=sys.stderr)
-                        
-                        # 验证序列是否匹配
-                        if is_sequence_match(protein_sequence, query_sequence):
-                            # 转换CSV格式到A3M格式
-                            a3m_content = f">{protein_id}\n{query_sequence}\n"
-                            for i, seq in enumerate(sequences[1:], 1):
-                                a3m_content += f">seq_{i}\n{seq}\n"
-                            
-                            # 缓存转换后的A3M文件
-                            seq_hash = get_sequence_hash(protein_sequence)
-                            cache_path = os.path.join(cache_dir, f"msa_{seq_hash}.a3m")
-                            with open(cache_path, 'w') as cache_file:
-                                cache_file.write(sanitize_a3m_content(a3m_content, context=f"{protein_id} CSV 转换"))
-                            print(f"    ✅ 成功缓存蛋白质组分 {protein_id} 的MSA (从CSV转换): {cache_path}", file=sys.stderr)
-                            print(f"       序列哈希: {seq_hash}", file=sys.stderr)
-                            print(f"       MSA序列数: {len(sequences)}", file=sys.stderr)
-                            return True
-                        else:
-                            print(f"    ❌ CSV文件中的查询序列与蛋白质组分 {protein_id} 不匹配", file=sys.stderr)
-                            return False
-        
-        elif file_ext == '.a3m':
-            # 处理A3M格式的MSA文件
-            sanitize_a3m_file(msa_file, context=f"{protein_id} 源MSA")
-            with open(msa_file, 'r') as f:
-                msa_content = sanitize_a3m_content(f.read(), context=msa_file)
-            
-            # 从MSA内容中提取查询序列（第一个序列）
-            lines = msa_content.strip().split('\n')
-            if len(lines) >= 2 and lines[0].startswith('>'):
-                query_sequence = lines[1]
-                
-                # 验证序列是否匹配
-                if is_sequence_match(protein_sequence, query_sequence):
-                    # 缓存MSA文件
-                    seq_hash = get_sequence_hash(protein_sequence)
-                    cache_path = os.path.join(cache_dir, f"msa_{seq_hash}.a3m")
-                    with open(cache_path, 'w') as cache_file:
-                        cache_file.write(msa_content)
-                    print(f"    ✅ 成功缓存蛋白质组分 {protein_id} 的MSA: {cache_path}", file=sys.stderr)
-                    print(f"       序列哈希: {seq_hash}", file=sys.stderr)
-                    return True
-                else:
-                    print(f"    ❌ A3M文件中的查询序列与蛋白质组分 {protein_id} 不匹配", file=sys.stderr)
-                    return False
-        
-        return False
-        
+        if source_path.suffix.lower() != '.a3m' or not source_path.is_file():
+            return False
+
+        sanitize_a3m_file(str(source_path), context=f"{protein_id} 源MSA")
+        msa_content = sanitize_a3m_content(source_path.read_text(), context=str(source_path))
+        entries = parse_a3m_content(msa_content)
+        if not entries:
+            return False
+
+        query_sequence = str(entries[0].get('sequence') or '')
+        if not is_sequence_match(protein_sequence, query_sequence):
+            print(f"    ❌ A3M文件中的查询序列与蛋白质组分 {protein_id} 不匹配", file=sys.stderr)
+            return False
+
+        seq_hash = get_sequence_hash(protein_sequence)
+        cache_path = Path(cache_dir) / f"msa_{seq_hash}.a3m"
+        cache_path.write_text(msa_content)
+        print(f"    ✅ 成功缓存蛋白质组分 {protein_id} 的MSA: {cache_path}", file=sys.stderr)
+        print(f"       序列哈希: {seq_hash}", file=sys.stderr)
+        return True
     except Exception as e:
         print(f"    ❌ 处理蛋白质组分 {protein_id} 的MSA文件失败 {msa_file}: {e}", file=sys.stderr)
         return False
 
+
 def is_sequence_match(protein_sequence: str, query_sequence: str) -> bool:
-    """
-    检查蛋白质序列和查询序列是否匹配
-    支持完全匹配、容错匹配和相似度匹配
-    """
-    # 完全匹配
-    if protein_sequence == query_sequence:
-        return True
-    
-    # 容错匹配：去除空格和特殊字符后比较
+    """Compare normalized protein and A3M query sequences."""
     clean_protein = protein_sequence.replace('-', '').replace(' ', '').upper()
     clean_query = query_sequence.replace('-', '').replace(' ', '').upper()
-    if clean_protein == clean_query:
-        return True
-    # Sub-sequence match only (query is a fragment of the protein or vice versa). A set-intersection
-    # "similarity" is not a sequence alignment — it would match unrelated orders (ACDE ~ EDCA) and
-    # serve a stale MSA for the wrong sequence.
-    return clean_query in clean_protein or clean_protein in clean_query
+    return clean_protein == clean_query
+
 
 def find_results_dir(base_dir: str) -> str:
     def _find_deepest_result(root_dir: str, exclude_tokens: List[str]) -> Optional[str]:
@@ -3866,56 +3770,47 @@ def assert_boltz_preprocessing_succeeded(base_dir: str, yaml_content: str) -> No
 
 
 def get_cached_a3m_files(yaml_content: str) -> list:
-    """
-    获取与当前预测任务相关的a3m缓存文件
-    返回缓存文件路径列表
-    """
+    """Collect sequence-addressed A3M cache files for declared MSA inputs."""
     cached_a3m_files = []
-    
+
     if not MSA_CACHE_CONFIG['enable_cache']:
         return cached_a3m_files
-    
+
     try:
-        # 解析YAML获取蛋白质序列
-        yaml_data = yaml.safe_load(yaml_content)
-        protein_sequences = {}
-        
-        # 提取所有蛋白质序列
-        for entity in yaml_data.get('sequences', []):
-            if entity.get('protein', {}).get('id'):
-                protein_id = entity['protein']['id']
-                sequence = entity['protein'].get('sequence', '')
-                if sequence:
-                    protein_sequences[protein_id] = sequence
-        
+        protein_sequences: Dict[str, str] = {}
+        for policy in extract_protein_msa_policies(yaml_content):
+            if policy.mode is ProteinMsaMode.DISABLED:
+                continue
+            for chain_id in policy.chain_ids:
+                if policy.sequence:
+                    protein_sequences[chain_id] = policy.sequence
+
         if not protein_sequences:
             print("未找到蛋白质序列，跳过a3m文件收集", file=sys.stderr)
             return cached_a3m_files
-        
-        cache_dir = MSA_CACHE_CONFIG['cache_dir']
-        if not os.path.exists(cache_dir):
+
+        cache_dir = Path(MSA_CACHE_CONFIG['cache_dir'])
+        if not cache_dir.is_dir():
             return cached_a3m_files
-        
-        print(f"查找缓存的a3m文件，蛋白质组分: {list(protein_sequences.keys())}", file=sys.stderr)
-        
-        # 为每个蛋白质序列查找对应的缓存文件
+
+        print(f"查找缓存的a3m文件，蛋白质组分: {list(protein_sequences)}", file=sys.stderr)
         for protein_id, sequence in protein_sequences.items():
             seq_hash = get_sequence_hash(sequence)
-            cache_file_path = os.path.join(cache_dir, f"msa_{seq_hash}.a3m")
-            
-            if os.path.exists(cache_file_path):
+            cache_file_path = cache_dir / f"msa_{seq_hash}.a3m"
+
+            if cache_file_path.is_file():
                 cached_a3m_files.append({
-                    'path': cache_file_path,
+                    'path': str(cache_file_path),
                     'protein_id': protein_id,
-                    'filename': f"{protein_id}_msa.a3m"
+                    'filename': f"{safe_filename(protein_id)}_msa.a3m",
                 })
                 print(f"找到缓存文件: {protein_id} -> {cache_file_path}", file=sys.stderr)
-        
+
         print(f"总共找到 {len(cached_a3m_files)} 个a3m缓存文件", file=sys.stderr)
-        
+
     except Exception as e:
         print(f"获取a3m缓存文件失败: {e}", file=sys.stderr)
-    
+
     return cached_a3m_files
 
 def create_archive_with_a3m(
@@ -4553,13 +4448,26 @@ def run_protenix_backend(
     low_vram: bool = False,
 ) -> None:
     print("🚀 Using Protenix backend", file=sys.stderr)
-    msa_server_url = _assert_msa_server_configured("protenix")
-    if not use_msa_server:
-        print("ℹ️ Protenix 已强制启用外部 MSA。", file=sys.stderr)
-    use_msa_server = True
-
     prep = parse_yaml_for_protenix(yaml_content)
     protenix_json = prep.payload
+    protein_entity_indices = {
+        entity_index
+        for entity_index, kind in prep.entity_kinds.items()
+        if str(kind).lower() == "protein"
+    }
+    if not protein_entity_indices:
+        raise RuntimeError("Protenix input does not contain protein entities.")
+    required_msa_entity_indices = {
+        entity_index
+        for entity_index in protein_entity_indices
+        if prep.entity_msa_modes[entity_index] is not ProteinMsaMode.DISABLED
+    }
+    external_msa_entity_indices = {
+        entity_index
+        for entity_index in protein_entity_indices
+        if prep.entity_msa_modes[entity_index] is ProteinMsaMode.EXTERNAL
+    }
+    use_msa_server = bool(external_msa_entity_indices)
 
     chain_msa_paths_local: Dict[str, str] = {}
     host_msa_paths_for_archive: Dict[str, str] = {}
@@ -4584,11 +4492,15 @@ def run_protenix_backend(
             extra_mols=linker_extra_mols,
         )
 
-    print(f"🧬 开始使用 MSA 服务器生成多序列比对: {msa_server_url}", file=sys.stderr)
-    _require_complete_external_msa(yaml_content, str(protenix_work_root), "Protenix")
-    print("✅ MSA 生成成功，将用于 Protenix 输入", file=sys.stderr)
-    if MSA_CACHE_CONFIG["enable_cache"]:
-        cache_msa_files_from_temp_dir(str(protenix_work_root), yaml_content)
+    if use_msa_server:
+        msa_server_url = _assert_msa_server_configured("protenix")
+        print(f"🧬 开始使用 MSA 服务器生成多序列比对: {msa_server_url}", file=sys.stderr)
+        _require_complete_external_msa(yaml_content, str(protenix_work_root), "Protenix")
+        print("✅ MSA 生成成功，将用于 Protenix 输入", file=sys.stderr)
+        if MSA_CACHE_CONFIG["enable_cache"]:
+            cache_msa_files_from_temp_dir(str(protenix_work_root), yaml_content)
+    else:
+        print("ℹ️ Protenix 输入不需要外部 MSA 生成。", file=sys.stderr)
 
     protenix_input_dir = str(protenix_work_root / "input")
     protenix_output_dir = str(protenix_results_root / "output")
@@ -4597,7 +4509,6 @@ def run_protenix_backend(
     os.makedirs(protenix_output_dir, exist_ok=True)
     os.makedirs(protenix_msa_dir, exist_ok=True)
 
-    # Reuse AF3 chain-MSA lookup logic (same YAML chain semantics).
     try:
         af3_prep = parse_yaml_for_af3(yaml_content, default_jobname=prep.input_name)
         cache_dir = MSA_CACHE_CONFIG["cache_dir"] if MSA_CACHE_CONFIG["enable_cache"] else None
@@ -4613,19 +4524,26 @@ def run_protenix_backend(
     except Exception as msa_err:
         raise RuntimeError(f"Protenix MSA path resolution failed: {msa_err}") from msa_err
 
-    assigned_count = apply_protein_msa_paths(prep, chain_msa_paths_local)
-    protenix_json = prep.payload
-    required_protein_entities = sum(
-        1 for kind in prep.entity_kinds.values() if str(kind).lower() == "protein"
+    effective_use_msa = bool(required_msa_entity_indices)
+    disabled_msa_path_local: Optional[str] = None
+    if effective_use_msa and required_msa_entity_indices != protein_entity_indices:
+        disabled_msa_host_path = Path(protenix_msa_dir) / "_disabled.a3m"
+        disabled_msa_host_path.write_text("")
+        disabled_msa_path_local = "/workspace/protenix_input/msa/_disabled.a3m"
+
+    assigned_count = apply_protein_msa_paths(
+        prep,
+        chain_msa_paths_local,
+        disabled_msa_path=disabled_msa_path_local,
     )
-    if required_protein_entities <= 0:
-        raise RuntimeError("Protenix input does not contain protein entities.")
+    protenix_json = prep.payload
+    required_protein_entities = len(required_msa_entity_indices)
     if assigned_count != required_protein_entities:
         raise RuntimeError(
             f"Protenix external MSA assignment incomplete: assigned={assigned_count}, required={required_protein_entities}"
         )
-    effective_use_msa = True
-    print(f"✅ 已为 {assigned_count} 个蛋白实体挂载外部 MSA", file=sys.stderr)
+    if assigned_count:
+        print(f"✅ 已为 {assigned_count} 个蛋白实体挂载 MSA", file=sys.stderr)
 
     input_json_path = os.path.join(protenix_input_dir, "input.json")
     with open(input_json_path, "w", encoding="utf-8") as f:
@@ -8077,7 +7995,6 @@ def run_boltz_backend(
     custom_ccd_molecules: Optional[List[Dict[str, str]]] = None,
     low_vram: bool = False,
 ) -> None:
-    msa_server_url = _assert_msa_server_configured("boltz")
     normalized_yaml = _normalize_ligand_chain_collisions(yaml_content)
     _validate_unique_sequence_chain_ids(normalized_yaml)
     normalized_yaml = _remap_constraints_by_template_alignment(normalized_yaml)
@@ -8086,6 +8003,9 @@ def run_boltz_backend(
     _print_constraint_residue_summary(normalized_yaml)
 
     cli_args = dict(predict_args)
+    requested_use_msa = coerce_bool(cli_args.pop("use_msa_server", None), False)
+    cli_args.pop("msa_server_url", None)
+    requires_external_msa = infer_use_msa_server_from_yaml_text(normalized_yaml)
     # low_vram is consumed here, not by the Boltz CLI — drop it so it isn't forwarded unknown.
     cli_args.pop("low_vram", None)
     if model_name:
@@ -8113,14 +8033,20 @@ def run_boltz_backend(
     results_root = _resolve_backend_results_root("boltz", task_id, temp_dir)
     work_root = _resolve_backend_work_root(results_root)
 
-    print(f"🧬 开始使用 MSA 服务器生成多序列比对: {msa_server_url}", file=sys.stderr)
-    _require_complete_external_msa(normalized_yaml, str(work_root), "Boltz2")
-    print("✅ MSA 生成成功，将用于结构预测", file=sys.stderr)
-    normalized_yaml, injected_count = _inject_local_msa_paths_into_yaml(normalized_yaml, str(work_root))
-    if injected_count > 0:
-        print(f"ℹ️ Injected local MSA paths into YAML: {injected_count}", file=sys.stderr)
-    cli_args['use_msa_server'] = True
-    cli_args['msa_server_url'] = msa_server_url
+    if requires_external_msa:
+        msa_server_url = _assert_msa_server_configured("boltz")
+        if not requested_use_msa:
+            print("ℹ️ Boltz2 输入缺少 MSA，已启用外部 MSA。", file=sys.stderr)
+        print(f"🧬 开始使用 MSA 服务器生成多序列比对: {msa_server_url}", file=sys.stderr)
+        _require_complete_external_msa(normalized_yaml, str(work_root), "Boltz2")
+        print("✅ MSA 生成成功，将用于结构预测", file=sys.stderr)
+        normalized_yaml, injected_count = _inject_local_msa_paths_into_yaml(normalized_yaml, str(work_root))
+        if injected_count > 0:
+            print(f"ℹ️ Injected local MSA paths into YAML: {injected_count}", file=sys.stderr)
+        cli_args['use_msa_server'] = True
+        cli_args['msa_server_url'] = msa_server_url
+    else:
+        print("ℹ️ Boltz2 输入已禁用或提供 MSA，跳过外部 MSA 生成。", file=sys.stderr)
 
     tmp_yaml_path = str(work_root / 'data.yaml')
     with open(tmp_yaml_path, 'w') as tmp_yaml:
@@ -8361,16 +8287,22 @@ def run_alphafold3_backend(
     low_vram: bool = False,
 ) -> None:
     print("🚀 Using AlphaFold3 backend (AF3 input preparation)", file=sys.stderr)
-    # AlphaFold3 (JAX/CUDA) has no low-VRAM toggle. Reject explicitly rather than silently
-    # degrading or swapping engines (no 兜底).
     if low_vram:
         raise ValueError(
             "AlphaFold3 不支持低显存模式。如需低显存，请改用 Protenix 或 Boltz2 后端。"
         )
-    msa_server_url = _assert_msa_server_configured("alphafold3")
-    if not use_msa_server:
-        print("ℹ️ AlphaFold3 已强制启用外部 MSA。", file=sys.stderr)
-    use_msa_server = True
+    prep = parse_yaml_for_af3(yaml_content)
+    required_chain_ids = [
+        chain_id
+        for chain_id, mode in prep.chain_id_to_msa_mode.items()
+        if mode is not ProteinMsaMode.DISABLED
+    ]
+    external_chain_ids = [
+        chain_id
+        for chain_id, mode in prep.chain_id_to_msa_mode.items()
+        if mode is ProteinMsaMode.EXTERNAL
+    ]
+    use_msa_server = bool(external_chain_ids)
 
     try:
         yaml_data = yaml.safe_load(yaml_content) or {}
@@ -8393,21 +8325,22 @@ def run_alphafold3_backend(
         linker_mmcif = _linker_ccd_mmcif_bundle(linker_codes)
         user_ccd_text = f"{user_ccd_text}\n{linker_mmcif}" if user_ccd_text else linker_mmcif
 
-    print(f"🧬 开始使用 MSA 服务器生成多序列比对: {msa_server_url}", file=sys.stderr)
-    _require_complete_external_msa(yaml_content, str(af3_work_root), "AlphaFold3")
-    print("✅ MSA 生成成功，将用于 AF3 输入", file=sys.stderr)
-    if MSA_CACHE_CONFIG['enable_cache']:
-        # 尽早缓存，方便按序列哈希回查
-        cache_msa_files_from_temp_dir(str(af3_work_root), yaml_content)
+    if use_msa_server:
+        msa_server_url = _assert_msa_server_configured("alphafold3")
+        print(f"🧬 开始使用 MSA 服务器生成多序列比对: {msa_server_url}", file=sys.stderr)
+        _require_complete_external_msa(yaml_content, str(af3_work_root), "AlphaFold3")
+        print("✅ MSA 生成成功，将用于 AF3 输入", file=sys.stderr)
+        if MSA_CACHE_CONFIG['enable_cache']:
+            cache_msa_files_from_temp_dir(str(af3_work_root), yaml_content)
+    else:
+        print("ℹ️ AlphaFold3 输入不需要外部 MSA 生成。", file=sys.stderr)
 
-    prep = parse_yaml_for_af3(yaml_content)
     cache_dir = MSA_CACHE_CONFIG['cache_dir'] if MSA_CACHE_CONFIG['enable_cache'] else None
     chain_msa_paths = collect_chain_msa_paths(prep, str(af3_work_root), cache_dir)
-    required_chain_ids = [chain_id for protein in prep.proteins for chain_id in protein.ids]
     missing_chain_ids = [chain_id for chain_id in required_chain_ids if chain_id not in chain_msa_paths]
     if missing_chain_ids:
         raise RuntimeError(
-            f"AlphaFold3 external MSA assignment incomplete; missing chains: {', '.join(sorted(set(missing_chain_ids)))}"
+            f"AlphaFold3 MSA assignment incomplete; missing chains: {', '.join(sorted(set(missing_chain_ids)))}"
         )
     unpaired_msa = load_unpaired_msa(prep, chain_msa_paths)
 
@@ -8843,7 +8776,7 @@ except Exception:
         output_archive_path,
         fasta_content,
         af3_json,
-        chain_msa_paths if use_msa_server else {},
+        chain_msa_paths,
         yaml_content,
         prep,
         af3_output_dir=af3_output_dir,
@@ -9003,11 +8936,11 @@ def main():
             use_msa_server = bool(use_msa_raw)
         else:
             use_msa_server = str(use_msa_raw).strip().lower() in {"1", "true", "yes", "y"}
-        if backend in MANDATORY_COLABFOLD_MSA_BACKENDS:
-            if not use_msa_server:
-                print(f"ℹ️ backend={backend} 已强制启用外部 MSA。", file=sys.stderr)
-            use_msa_server = True
-            _assert_msa_server_configured(backend)
+        if backend in {"boltz", "alphafold3", "protenix"}:
+            use_msa_server = infer_use_msa_server_from_yaml_text(yaml_content)
+            predict_args["use_msa_server"] = use_msa_server
+            if use_msa_server:
+                _assert_msa_server_configured(backend)
 
         runtime_temp_parent = str(Path(output_archive_path).resolve().parent)
         os.makedirs(runtime_temp_parent, exist_ok=True)

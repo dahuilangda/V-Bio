@@ -214,7 +214,7 @@ export function useTaskListFiltering(
       }
       if (
         typeof saved.workflowFilter === 'string' &&
-        ['all', 'prediction', 'peptide_design', 'affinity', 'lead_optimization'].includes(saved.workflowFilter)
+        ['all', 'prediction', 'peptide_design', 'virtual_screening', 'affinity', 'lead_optimization'].includes(saved.workflowFilter)
       ) {
         setWorkflowFilter(saved.workflowFilter as TaskWorkflowFilter);
       }

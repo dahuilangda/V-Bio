@@ -30,6 +30,8 @@ const WINDOW_OPTIONS = [
   { value: 24 * 30, label: '30d' }
 ] as const;
 
+const ADMIN_MONITOR_REFRESH_INTERVAL_MS = 60_000;
+
 const EMPTY_STATES: AdminTaskStateCounts = {
   queued: 0,
   running: 0,
@@ -112,7 +114,7 @@ function MonitorMetric({
   tone?: 'neutral' | 'success' | 'warning';
 }) {
   return (
-    <article className={`admin-monitor-metric tone-${tone}`}>
+    <article className={`admin-monitor-metric metric-tone-${tone}`}>
       <span className="admin-monitor-metric-icon" aria-hidden="true"><Icon size={17} /></span>
       <div className="admin-monitor-metric-copy">
         <span>{label}</span>
@@ -140,7 +142,12 @@ function TaskTimeline({
         <span><i className="tone-failure" />Failed</span>
         <span><i className="tone-other" />Other states</span>
       </div>
-      <div className="admin-monitor-timeline" role="img" aria-label="Task volume over time">
+      <div
+        className="admin-monitor-timeline"
+        role="img"
+        aria-label="Task volume over time"
+        style={{ gridTemplateColumns: `repeat(${Math.max(points.length, 1)}, minmax(0, 1fr))` }}
+      >
         {points.map((point, index) => {
           const success = Math.max(0, Number(point.success) || 0);
           const failure = Math.max(0, Number(point.failure) || 0);
@@ -151,7 +158,7 @@ function TaskTimeline({
           const showLabel = index === 0 || index === points.length - 1 || index % labelEvery === 0;
           return (
             <div
-              className="admin-monitor-timeline-column"
+              className={`admin-monitor-timeline-column${index === 0 ? ' is-first' : ''}${index === points.length - 1 ? ' is-last' : ''}`}
               key={point.start}
               title={`${formatDateTime(point.start)} · ${point.total} total · ${success} success · ${failure} failed`}
             >
@@ -221,12 +228,26 @@ export function AdminMonitorPage() {
 
   useEffect(() => {
     if (authLoading) return;
-    void loadOverview(true);
-    const timer = window.setInterval(() => {
-      void loadOverview(false);
-    }, 30000);
+
+    const refreshIfVisible = (initial = false) => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      void loadOverview(initial);
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void loadOverview(false);
+      }
+    };
+
+    refreshIfVisible(true);
+    const timer = window.setInterval(
+      () => refreshIfVisible(false),
+      ADMIN_MONITOR_REFRESH_INTERVAL_MS
+    );
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       requestSequence.current += 1;
     };
   }, [authLoading, loadOverview, session?.userId]);

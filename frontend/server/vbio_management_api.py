@@ -572,6 +572,29 @@ def _copilot_request_too_large() -> bool:
     return content_length is not None and content_length > COPILOT_MAX_REQUEST_BYTES
 
 
+@app.post("/vbio-api/copilot/turn")
+def copilot_turn() -> Tuple[Response, int]:
+    if not COPILOT_CONFIGURED:
+        return jsonify({"error": "Copilot is not configured."}), 404
+    if _copilot_request_too_large():
+        return jsonify({"error": "Copilot request is too large. Attach files by reference instead of sending file content."}), 413
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = copilot_assistant.plan_turn(
+            context_type=str(payload.get("context_type") or "").strip(),
+            context_payload=payload.get("context_payload") if isinstance(payload.get("context_payload"), dict) else {},
+            user_id=str(payload.get("user_id") or "").strip(),
+            username=str(payload.get("username") or "").strip(),
+            content=str(payload.get("content") or "").strip(),
+        )
+        return jsonify(result), 200
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        logger.exception("Copilot turn failed")
+        return jsonify({"error": str(exc)}), 502
+
+
 @app.post("/vbio-api/copilot/assistant")
 def copilot_assistant_answer() -> Tuple[Response, int]:
     if not COPILOT_CONFIGURED:

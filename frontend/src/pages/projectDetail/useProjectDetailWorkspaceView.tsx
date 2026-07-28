@@ -11,6 +11,7 @@ import type {
 import { downloadResultFile, terminateTask as terminateBackendTask } from '../../api/backendApi';
 import { deleteProjectTask } from '../../api/supabaseLite';
 import { createInputComponent, saveProjectInputConfig } from '../../utils/projectInputs';
+import { normalizeTaskSummary } from '../../utils/taskMetadata';
 import { getWorkflowDefinition } from '../../utils/workflows';
 import { ProjectDetailLayout } from './ProjectDetailLayout';
 import {
@@ -1263,8 +1264,14 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     async (attachments: CopilotUploadedAttachment[], _content: string, applications?: CopilotAttachmentApplication[]) => {
       if (!canEdit || attachments.length === 0) return;
       if (!applications || applications.length === 0) return;
+      const applicationsById = new Map(
+        applications.map((application) => [application.attachmentId, application])
+      );
       const roleEntries = attachments.map((attachment) => {
-        const application = applications?.find((item) => item.attachmentId === attachment.id || item.fileName === attachment.name);
+        const application = applicationsById.get(attachment.id);
+        if (application && application.fileName !== attachment.name) {
+          throw new Error('Copilot attachment declaration does not match the selected file.');
+        }
         return {
           attachment,
           role: application?.role || null
@@ -2040,25 +2047,26 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
 
   const applyTaskDetailCopilotAction = useCallback(async (action: CopilotPlanAction) => {
     const patch = asRecord(action.payload?.parameterPatch);
-    const applyMetadataPatch = () => {
+    const applyMetadataPatch = async () => {
       const metadataPatch = asRecord(action.payload?.metadataPatch);
+      const hasNamePatch = Object.prototype.hasOwnProperty.call(metadataPatch, 'taskName');
+      const hasSummaryPatch = Object.prototype.hasOwnProperty.call(metadataPatch, 'taskSummary');
       const nextName = readText(metadataPatch.taskName).trim();
-      const nextSummary = readText(metadataPatch.taskSummary).trim();
-      if (!nextName && !nextSummary) throw new Error('No task name or description update was provided.');
+      const nextSummary = normalizeTaskSummary(readText(metadataPatch.taskSummary));
+      if (!hasNamePatch && !hasSummaryPatch) throw new Error('No task name or description update was provided.');
+      if (hasNamePatch && !nextName) throw new Error('Task name cannot be empty.');
       if (!canEdit) throw new Error('This project is read-only for your account.');
 
       const taskRow = activeResultTask || statusContextTaskRow;
       if (!taskRow?.id) throw new Error('No current task to update.');
 
-      if (nextName) handleTaskNameChange(nextName);
-      if (nextSummary) handleTaskSummaryChange(nextSummary);
+      if (hasNamePatch) handleTaskNameChange(nextName);
+      if (hasSummaryPatch) handleTaskSummaryChange(nextSummary);
 
       const payload: Partial<ProjectTask> = {};
-      if (nextName) payload.name = nextName;
-      if (nextSummary) payload.summary = nextSummary;
-      void patchTask(taskRow.id, payload).catch((err) => {
-        setError(err instanceof Error ? err.message : 'Failed to update task information.');
-      });
+      if (hasNamePatch) payload.name = nextName;
+      if (hasSummaryPatch) payload.summary = nextSummary;
+      await patchTask(taskRow.id, payload);
     };
     const applyPatch = () => {
       const seed = readFiniteNumber(patch.seed);
@@ -2143,7 +2151,7 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       return;
     }
     if (action.id === 'task_detail:apply_metadata_patch') {
-      applyMetadataPatch();
+      await applyMetadataPatch();
       return;
     }
     if (action.id === 'task_detail:save_draft') {
@@ -2186,8 +2194,6 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       const taskRow = activeResultTask || statusContextTaskRow;
       if (!taskRow) throw new Error('No current task to delete.');
       if (!canEdit) throw new Error('This project is read-only for your account.');
-      const taskName = String(taskRow.name || taskRow.task_id || taskRow.id || '').trim();
-      if (!window.confirm(`Delete task "${taskName}"?`)) return;
       const runtimeTaskId = String(taskRow.task_id || '').trim();
       const runtimeState = String(taskRow.task_state || displayTaskState || '').trim().toUpperCase();
       if ((runtimeState === 'QUEUED' || runtimeState === 'RUNNING') && !runtimeTaskId) {

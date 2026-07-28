@@ -45,6 +45,20 @@
   grid-column: 1 / -1;
 }
 
+.task-summary-field-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-summary-counter {
+  color: #71857a;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
 .component-runtime-settings {
   margin-top: 2px;
 }

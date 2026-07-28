@@ -3,6 +3,12 @@
   white-space: normal;
 }
 
+.task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-th-submitted,
+.task-table:not(.task-table--leadopt):not(.task-table--peptide) .task-col-submitted {
+  width: 280px;
+  max-width: 280px;
+}
+
 .task-table.task-table--leadopt .task-col-submitted {
   min-width: 380px;
 }
@@ -10,6 +16,7 @@
 .task-submitted-cell {
   display: grid;
   gap: 4px;
+  min-width: 0;
 }
 
 .task-submitted-title {
@@ -25,6 +32,9 @@
   text-align: left;
   display: inline-flex;
   align-items: center;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
   gap: 6px;
   cursor: text;
 }
@@ -60,6 +70,10 @@
   color: #4d685b;
   font-size: var(--text-2xs);
   line-height: 1.25;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .task-submitted-main {
