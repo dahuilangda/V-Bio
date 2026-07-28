@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import yaml
 
@@ -31,6 +33,17 @@ def coerce_bool(value: Any, default: bool = False) -> bool:
     if text in {"0", "false", "no", "n", "off"}:
         return False
     return default
+
+
+def is_msa_disabled(value: Any) -> bool:
+    """Return whether a YAML MSA value explicitly requests no MSA generation."""
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (int, float)):
+        return value == 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"0", "empty", "none", "null"}
+    return False
 
 
 def parse_int(value: Optional[str], default: Optional[int] = None) -> Optional[int]:
@@ -77,39 +90,64 @@ def normalize_chain_id_list(value: Any) -> list[str]:
     return [normalized] if normalized else []
 
 
-def infer_use_msa_server_from_yaml_text(yaml_content: str) -> bool:
+class ProteinMsaMode(str, Enum):
+    EXTERNAL = "external"
+    DISABLED = "disabled"
+    PROVIDED = "provided"
+
+
+@dataclass(frozen=True)
+class ProteinMsaPolicy:
+    chain_ids: Tuple[str, ...]
+    sequence: str
+    mode: ProteinMsaMode
+    value: Any = None
+
+
+def classify_protein_msa(value: Any) -> ProteinMsaMode:
+    if is_msa_disabled(value):
+        return ProteinMsaMode.DISABLED
+    if isinstance(value, (bool, int, float)):
+        return ProteinMsaMode.EXTERNAL
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return ProteinMsaMode.EXTERNAL
+    return ProteinMsaMode.PROVIDED
+
+
+def extract_protein_msa_policies(yaml_content: str) -> list[ProteinMsaPolicy]:
     if not yaml_content.strip():
-        return False
+        return []
     yaml_data = yaml.safe_load(yaml_content) or {}
     if not isinstance(yaml_data, dict):
-        return False
+        return []
     sequences = yaml_data.get('sequences')
     if not isinstance(sequences, list):
-        return False
+        return []
 
-    has_protein = False
-    needs_external_msa = False
+    policies: list[ProteinMsaPolicy] = []
     for item in sequences:
         if not isinstance(item, dict):
             continue
         protein = item.get('protein')
         if not isinstance(protein, dict):
             continue
-        has_protein = True
-        msa_value = protein.get('msa')
-        if msa_value is None:
-            needs_external_msa = True
-            continue
-        if isinstance(msa_value, str):
-            normalized = msa_value.strip().lower()
-            if not normalized:
-                needs_external_msa = True
-                continue
-            if normalized in {'empty', 'none', 'null'}:
-                continue
-            continue
+        value = protein.get('msa')
+        policies.append(
+            ProteinMsaPolicy(
+                chain_ids=tuple(normalize_chain_id_list(protein.get('id'))),
+                sequence=str(protein.get('sequence') or '').strip(),
+                mode=classify_protein_msa(value),
+                value=value,
+            )
+        )
+    return policies
 
-    return has_protein and needs_external_msa
+
+def infer_use_msa_server_from_yaml_text(yaml_content: str) -> bool:
+    return any(
+        policy.mode is ProteinMsaMode.EXTERNAL
+        for policy in extract_protein_msa_policies(yaml_content)
+    )
 
 
 def extract_template_meta_from_yaml(yaml_content: str) -> Dict[str, Dict]:

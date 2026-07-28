@@ -6,6 +6,7 @@ import { canEditTask } from '../../utils/accessControl';
 import { getWorkflowDefinition } from '../../utils/workflows';
 import { isDraftTaskSnapshot } from '../projectDetail/projectTaskSnapshot';
 import type { TaskListRow, TaskWorkflowFilter, WorkspacePairPreference } from './taskListTypes';
+import { readVirtualScreeningRuntimeSignature, readVirtualScreeningTaskRowSummary } from './taskDataVirtualScreening';
 import { resolveTaskWorkflowKey } from './taskPresentation';
 import {
   alignConfidenceSeriesToLength,
@@ -72,7 +73,8 @@ function readTaskRowRuntimeCacheSignature(task: ProjectTask): string {
     peptideDesign,
     peptideProgress,
     topProgress,
-    peptidePreview
+    peptidePreview,
+    virtualScreeningPredictions: readVirtualScreeningRuntimeSignature(task)
   });
 }
 
@@ -215,17 +217,24 @@ export function useProjectTasksWorkspaceContext({
       const workflowKey =
         resolvedWorkflow === 'affinity' ||
         resolvedWorkflow === 'lead_optimization' ||
-        resolvedWorkflow === 'peptide_design'
+        resolvedWorkflow === 'peptide_design' ||
+        resolvedWorkflow === 'virtual_screening'
           ? resolvedWorkflow
           : 'prediction';
+      const virtualScreening = workflowKey === 'virtual_screening'
+        ? readVirtualScreeningTaskRowSummary(task)
+        : null;
       const selection = resolveTaskSelectionContext(task, workspacePairPreference, workflowKey);
-      const ligandAtomPlddts = readTaskLigandAtomPlddts(task, selection.ligandChainId, selection.ligandComponentCount <= 1);
+      const ligandAtomPlddts =
+        virtualScreening?.ligandRenderAtomPlddts ??
+        readTaskLigandAtomPlddts(task, selection.ligandChainId, selection.ligandComponentCount <= 1);
       const ligandRenderSmiles =
-        workflowKey === 'peptide_design'
+        virtualScreening?.ligandRenderSmiles ||
+        (workflowKey === 'peptide_design'
           ? ''
           : workflowKey === 'prediction' || workflowKey === 'affinity'
             ? readTaskLigandRenderSmiles(task, selection.ligandChainId) || selection.ligandSmiles
-            : selection.ligandSmiles;
+            : selection.ligandSmiles);
       const peptideBest = workflowKey === 'peptide_design' ? readPeptideBestCandidatePreview(task) : null;
       const resolvedLigandSequence =
         workflowKey === 'peptide_design' && peptideBest?.sequence
@@ -250,7 +259,8 @@ export function useProjectTasksWorkspaceContext({
         workflowKey === 'peptide_design' && peptideBest?.binderChainId
           ? { ...selection, ligandChainId: peptideBest.binderChainId }
           : selection;
-      const metrics = readTaskConfidenceMetrics(task, { ...metricSelection, strictPairIptm: true });
+      const metrics = virtualScreening?.metrics ??
+        readTaskConfidenceMetrics(task, { ...metricSelection, strictPairIptm: true });
       const ligandMeanPlddt = mean(ligandAtomPlddts);
       const ligandSequenceMeanPlddt = mean(ligandResiduePlddts);
       const plddt =
@@ -280,10 +290,14 @@ export function useProjectTasksWorkspaceContext({
         },
         submittedTs,
         backendValue: resolveTaskBackendValue(task, project?.backend || ''),
-        modeValue: readAffinityModeValue(task, workflowKey),
-        ligandSmiles: workflowKey === 'peptide_design' ? '' : selection.ligandSmiles,
+        modeValue: virtualScreening?.modeValue || readAffinityModeValue(task, workflowKey),
+        ligandSmiles:
+          virtualScreening?.ligandSmiles ||
+          (workflowKey === 'peptide_design' ? '' : selection.ligandSmiles),
         ligandRenderSmiles,
-        ligandIsSmiles: workflowKey === 'peptide_design' ? false : selection.ligandIsSmiles,
+        ligandIsSmiles: virtualScreening
+          ? Boolean(virtualScreening.ligandSmiles)
+          : workflowKey === 'peptide_design' ? false : selection.ligandIsSmiles,
         ligandAtomPlddts,
         ligandRenderAtomPlddts: ligandAtomPlddts,
         ligandSequence: resolvedLigandSequence,

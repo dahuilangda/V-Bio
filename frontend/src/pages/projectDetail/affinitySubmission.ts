@@ -2,6 +2,7 @@ import type { MutableRefObject } from 'react';
 import { submitAffinityScoring } from '../../api/backendApi';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import type { AffinityPreviewPayload, InputComponent, Project, ProjectInputConfig, ProjectTask, ProteinTemplateUpload } from '../../types/models';
+import { normalizeTaskSummary } from '../../utils/taskMetadata';
 import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
 
 export type AffinityWorkspaceTab = 'results' | 'basics' | 'components' | 'constraints';
@@ -230,7 +231,7 @@ export async function submitAffinityTaskFromDraft(deps: AffinitySubmitDeps): Pro
     saveProjectInputConfig(project.id, configWithAffinity);
     const nextDraft: AffinityDraftFields = {
       taskName: draft.taskName.trim(),
-      taskSummary: draft.taskSummary.trim(),
+      taskSummary: normalizeTaskSummary(draft.taskSummary),
       backend: activeAffinityBackend,
       use_msa: hasMsa,
       color_mode: draft.color_mode === 'alphafold' ? 'alphafold' : 'default',

@@ -126,11 +126,20 @@ export function resolveSelectedResultLigandChainId(params: {
   } = params;
   const shouldPreferSequenceLigand = Boolean(preferSequenceLigand);
 
-  const preferred = typeof resultPairPreference?.ligand === 'string' ? resultPairPreference.ligand.trim() : '';
+  const preferred = typeof resultPairPreference?.ligand === 'string'
+    ? resultPairPreference.ligand.trim()
+    : typeof resultPairPreference?.binder === 'string'
+      ? resultPairPreference.binder.trim()
+      : '';
   const affinityModelLigand = readFirstNonEmptyStringMetric(affinityData, ['model_ligand_chain_id']);
   const affinityLigand = readFirstNonEmptyStringMetric(affinityData, ['requested_ligand_chain', 'ligand_chain']);
   const confidenceModelLigand = readFirstNonEmptyStringMetric(confidenceData, ['model_ligand_chain_id']);
-  const confidenceLigand = readFirstNonEmptyStringMetric(confidenceData, ['ligand_chain_id']);
+  const typedLigandOptions = resultComponentOptions.filter(
+    (item) => item.type === 'ligand' && item.chainId && item.chainId !== selectedResultTargetChainId
+  );
+  const hasTypedLigand = !shouldPreferSequenceLigand && typedLigandOptions.length > 0;
+
+  const confidenceLigand = readFirstNonEmptyStringMetric(confidenceData, ['requested_ligand_chain_id', 'ligand_chain_id']);
   const { knownChainIdByKey, knownChainIds } = buildKnownChainMaps(resultChainIds, confidenceData);
 
   const confidenceLigandIds =
@@ -162,8 +171,9 @@ export function resolveSelectedResultLigandChainId(params: {
   for (const candidate of preferredCandidates) {
     const chain = resolveChainCandidate(candidate, resultChainInfoById, knownChainIdByKey, knownChainIds, resultComponentOptions);
     if (chain && chain !== selectedResultTargetChainId) {
-      if (!shouldPreferSequenceLigand) return chain;
       const option = resultComponentOptions.find((item) => item.chainId === chain) || null;
+      if (hasTypedLigand && option?.type !== 'ligand') continue;
+      if (!shouldPreferSequenceLigand) return chain;
       if (option && option.type === 'ligand') continue;
       return chain;
     }
@@ -185,6 +195,14 @@ export function resolveSelectedResultLigandChainId(params: {
     optionsWithoutTarget[0] ||
     resultComponentOptions[0] ||
     null;
+
+  if (hasTypedLigand) {
+    return (
+      typedLigandOptions.find((item) => item.isSmiles)?.chainId ||
+      typedLigandOptions[0]?.chainId ||
+      null
+    );
+  }
 
   if (shouldPreferSequenceLigand && defaultSequenceOption?.chainId) {
     return defaultSequenceOption.chainId;

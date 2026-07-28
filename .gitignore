@@ -99,3 +99,4 @@ capabilities/boltz2score_v2
 capabilities/boltz2score/.venv/
 capabilities/boltz2score/data/
 frontend/server/tests/
+backend/tests/

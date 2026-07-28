@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 
+from management_api.copilot_skill_harness import CopilotSkillDefinition
 from management_api.copilot_skills.project_list import PROJECT_LIST_ACTION_SCHEMAS
 from management_api.copilot_skills.task_list import TASK_LIST_ACTION_SCHEMAS
 from management_api.copilot_skills.workflows import infer_workflow_key
@@ -151,6 +152,8 @@ def _sanitize_prediction_components(value: Any) -> List[Dict[str, Any]]:
             component["inputMethod"] = input_method if input_method in {"smiles", "ccd"} else "smiles"
         components.append(component)
     return components
+
+
 
 
 def _sanitize_component_selector(value: Any) -> Dict[str, Any]:
@@ -372,6 +375,63 @@ def render_context_action_tool_schema(context_type: str) -> str:
             }
         )
     return json.dumps(rendered, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def build_context_skill_definitions(
+    context_type: str,
+    context_payload: Dict[str, Any],
+    *,
+    workflow_key: str | None = None,
+) -> List[CopilotSkillDefinition]:
+    """Expose page operations as atomic, schema-backed planner skills."""
+
+    normalized_context = str(context_type or "").strip()
+    resolved_workflow_key = (
+        infer_workflow_key(context_payload)
+        if workflow_key is None
+        else str(workflow_key or "").strip()
+    )
+    definitions: List[CopilotSkillDefinition] = []
+    for action_id, schema in CONTEXT_ACTION_SCHEMAS.get(normalized_context, {}).items():
+        required_workflows = schema.get("requires_workflow")
+        if isinstance(required_workflows, list) and resolved_workflow_key not in required_workflows:
+            continue
+        input_schema = schema.get("input_schema")
+        if not isinstance(input_schema, dict):
+            properties: Dict[str, Any] = {}
+            for key in schema.get("payload_keys") or []:
+                default = (schema.get("payload_defaults") or {}).get(key)
+                property_schema: Dict[str, Any] = {"description": f"Payload field {key}."}
+                if isinstance(default, bool):
+                    property_schema.update({"type": "boolean", "const": default})
+                elif default is not None:
+                    property_schema.update({"type": "string", "enum": [str(default)]})
+                else:
+                    property_schema.update({"type": "string"})
+                properties[key] = property_schema
+            input_schema = {
+                "type": "object",
+                "properties": properties,
+                "required": list(schema.get("requires_payload") or []),
+                "additionalProperties": False,
+            }
+        defaults = dict(schema.get("payload_defaults") or {})
+        effect = str(schema.get("effect") or "").strip().lower()
+        if not effect:
+            effect = "create" if defaults.get("create") is True else "delete" if schema.get("destructive") else "update"
+        definitions.append(
+            CopilotSkillDefinition(
+                name=action_id,
+                label=str(schema.get("label") or "").strip(),
+                description=str(schema.get("description") or "").strip(),
+                input_schema=input_schema,
+                effect=effect,
+                context_type=normalized_context,
+                payload_defaults=defaults,
+                destructive=bool(schema.get("destructive", False)),
+            )
+        )
+    return definitions
 
 
 def build_context_actions(

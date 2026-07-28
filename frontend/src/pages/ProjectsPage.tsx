@@ -342,12 +342,10 @@ export function ProjectsPage() {
     }
     if (action.id === 'projects:delete') {
       const projectId = String(action.payload?.projectId || '').trim();
-      const projectName = String(action.payload?.projectName || '').trim();
       const target = projects.find((p) => p.id === projectId);
       if (!target) throw new Error('Could not find the project referenced by Copilot.');
       const canRemove = canDeleteProject(target, session?.userId || null);
       if (!canRemove) throw new Error('Only the project owner can delete this project.');
-      if (!window.confirm(`Delete project "${projectName || target.name}"?`)) return;
       await softDeleteProject(projectId);
       return;
     }

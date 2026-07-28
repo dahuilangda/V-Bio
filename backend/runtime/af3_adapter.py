@@ -17,6 +17,7 @@ if _AF3_SRC_DIR.exists():
         sys.path.insert(0, af3_src)
 
 from alphafold3.constants import residue_names as af3_residue_names
+from backend.services.common_utils import ProteinMsaMode, classify_protein_msa
 
 
 class MolType(Enum):
@@ -263,6 +264,9 @@ class AF3Preparation:
     query_modifications: List[List[Dict[str, object]]]
     chain_id_label_map: Dict[str, str]
     bond_constraints: List[Tuple[Tuple[str, int, str], Tuple[str, int, str]]]
+    chain_id_to_msa_mode: Dict[str, ProteinMsaMode]
+    chain_id_to_msa_value: Dict[str, Any]
+    query_msa_modes: List[ProteinMsaMode]
 
 
 def _sanitize_label(label: Optional[str], fallback: str) -> str:
@@ -349,10 +353,19 @@ def _af3_effective_query_sequence(sequence: str, modifications: List[Dict[str, o
     return "".join(chars)
 
 
-def _protein_group_key(sequence: str, modifications: List[Dict[str, object]]) -> str:
-    if not modifications:
-        return sequence
-    return f"{sequence}|mods={json.dumps(modifications, sort_keys=True, separators=(',', ':'))}"
+def _protein_group_key(
+    sequence: str,
+    modifications: List[Dict[str, object]],
+    msa_mode: ProteinMsaMode,
+    msa_value: Any,
+) -> str:
+    parts = [sequence]
+    if modifications:
+        parts.append(f"mods={json.dumps(modifications, sort_keys=True, separators=(',', ':'))}")
+    parts.append(f"msa={msa_mode.value}")
+    if msa_mode is ProteinMsaMode.PROVIDED:
+        parts.append(f"source={str(msa_value).strip()}")
+    return "|".join(parts)
 
 
 def parse_yaml_for_af3(
@@ -380,6 +393,9 @@ def parse_yaml_for_af3(
     sequence_index_lookup: Dict[str, int] = {}
     chain_id_label_map: Dict[str, str] = {}
     bond_constraints: List[Tuple[Tuple[str, int, str], Tuple[str, int, str]]] = []
+    chain_id_to_msa_mode: Dict[str, ProteinMsaMode] = {}
+    chain_id_to_msa_value: Dict[str, Any] = {}
+    query_msa_modes: List[ProteinMsaMode] = []
 
     def prepare_chain_ids(
         raw_ids: Optional[List[str]], default_prefix: str, desired_count: int
@@ -425,11 +441,13 @@ def parse_yaml_for_af3(
                 raise ValueError("Protein entries must include a non-empty sequence.")
 
             modifications = _normalize_protein_modifications(info.get("modifications"), len(sequence))
+            msa_value = info.get("msa")
+            msa_mode = classify_protein_msa(msa_value)
             count = len(raw_ids_list) if raw_ids_list else 1
             sanitized_ids = prepare_chain_ids(raw_ids_list, "CHAIN", count)
             proteins.append(ProteinComponent(ids=sanitized_ids, sequence=sequence, modifications=modifications))
 
-            group_key = _protein_group_key(sequence, modifications)
+            group_key = _protein_group_key(sequence, modifications, msa_mode, msa_value)
             index = sequence_index_lookup.get(group_key)
             if index is None:
                 sequence_index_lookup[group_key] = len(query_sequences_unique)
@@ -437,6 +455,7 @@ def parse_yaml_for_af3(
                 query_sequences_cardinality.append(len(sanitized_ids))
                 query_sequence_keys.append(group_key)
                 query_modifications.append(modifications)
+                query_msa_modes.append(msa_mode)
             else:
                 query_sequences_cardinality[index] += len(sanitized_ids)
             query_group_to_chain_ids.setdefault(group_key, []).extend(sanitized_ids)
@@ -446,6 +465,8 @@ def parse_yaml_for_af3(
                 sequence_parts.append(sequence)
                 chain_id_to_sequence[chain_id] = sequence
                 sequence_to_chain_ids.setdefault(sequence, []).append(chain_id)
+                chain_id_to_msa_mode[chain_id] = msa_mode
+                chain_id_to_msa_value[chain_id] = msa_value
 
         elif entity_type in {"dna", "rna"}:
             sequence = str(info.get("sequence", "")).strip().upper()
@@ -565,6 +586,9 @@ def parse_yaml_for_af3(
         query_modifications=query_modifications,
         chain_id_label_map=chain_id_label_map,
         bond_constraints=bond_constraints,
+        chain_id_to_msa_mode=chain_id_to_msa_mode,
+        chain_id_to_msa_value=chain_id_to_msa_value,
+        query_msa_modes=query_msa_modes,
     )
 
 
@@ -581,15 +605,32 @@ def collect_chain_msa_paths(
     cache_path = Path(cache_dir) if cache_dir else None
     chain_to_path: Dict[str, Path] = {}
 
-    for chain_id, sequence in prep.chain_id_to_sequence.items():
-        candidate = temp_path / f"{chain_id}_msa.a3m"
+    for chain_id, mode in prep.chain_id_to_msa_mode.items():
+        sequence = prep.chain_id_to_sequence[chain_id]
+
+        if mode is ProteinMsaMode.DISABLED:
+            continue
+
+        if mode is ProteinMsaMode.PROVIDED:
+            declared_value = prep.chain_id_to_msa_value[chain_id]
+            if not isinstance(declared_value, str) or not declared_value.strip():
+                raise ValueError("Precomputed protein MSA must be declared as an A3M path.")
+            declared_path = Path(declared_value.strip()).expanduser()
+            if declared_path.suffix.lower() != ".a3m":
+                raise ValueError("Precomputed protein MSA must use the .a3m format.")
+            candidate = declared_path if declared_path.is_absolute() else temp_path / declared_path
+            if candidate.is_file():
+                chain_to_path[chain_id] = candidate
+            continue
+
+        candidate = temp_path / f"{safe_filename(chain_id)}_msa.a3m"
         if candidate.exists():
             chain_to_path[chain_id] = candidate
             continue
 
-        if cache_path:
+        if cache_path is not None:
             hash_path = cache_path / f"msa_{_sequence_hash(sequence)}.a3m"
-            if hash_path.exists():
+            if hash_path.is_file():
                 chain_to_path[chain_id] = hash_path
 
     return chain_to_path
@@ -677,6 +718,11 @@ def load_unpaired_msa(
 ) -> List[str]:
     unpaired: List[str] = []
     for index, sequence in enumerate(prep.query_sequences_unique):
+        mode = prep.query_msa_modes[index]
+        if mode is ProteinMsaMode.DISABLED:
+            unpaired.append("")
+            continue
+
         msa_content: Optional[str] = None
         group_key = prep.query_sequence_keys[index] if index < len(prep.query_sequence_keys) else sequence
         chain_ids = prep.query_group_to_chain_ids.get(group_key) or prep.sequence_to_chain_ids.get(sequence, [])
@@ -695,7 +741,11 @@ def load_unpaired_msa(
                     sequence,
                 )
                 break
-        unpaired.append(msa_content or "")
+        if msa_content is None:
+            raise RuntimeError(
+                f"Protein MSA path is missing for chains: {', '.join(chain_ids)}"
+            )
+        unpaired.append(msa_content)
     return unpaired
 
 

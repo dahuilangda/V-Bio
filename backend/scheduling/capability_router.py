@@ -338,7 +338,6 @@ def build_worker_capability_snapshot(*, celery_app) -> Dict[str, Any]:
     reserved_tasks_by_worker = inspector.reserved() or {}
     scheduled_tasks_by_worker = inspector.scheduled() or {}
     worker_stats = inspector.stats() or {}
-    worker_registered = inspector.registered() or {}
 
     worker_names = sorted(
         set(active_queues.keys())
@@ -346,7 +345,6 @@ def build_worker_capability_snapshot(*, celery_app) -> Dict[str, Any]:
         | set(reserved_tasks_by_worker.keys())
         | set(scheduled_tasks_by_worker.keys())
         | set(worker_stats.keys())
-        | set(worker_registered.keys())
     )
 
     workers: Dict[str, Dict[str, Any]] = {}
@@ -449,8 +447,6 @@ def build_worker_capability_snapshot(*, celery_app) -> Dict[str, Any]:
         total_gpu_slots += gpu_slots_total
         total_cpu_slots += cpu_slots_total
 
-        registered_payload = worker_registered.get(worker_name)
-        registered_list = registered_payload if isinstance(registered_payload, list) else []
 
         worker_payload = {
             "server": worker_name,
@@ -493,12 +489,8 @@ def build_worker_capability_snapshot(*, celery_app) -> Dict[str, Any]:
                 "pid": _safe_int(worker_stats_payload.get("pid"), 0),
                 "clock": _safe_int(worker_stats_payload.get("clock"), 0),
             },
-            "registered_task_count": len(registered_list),
-            "registered_tasks_sample": [
-                str(item).strip()
-                for item in registered_list[:32]
-                if str(item).strip()
-            ],
+            "registered_task_count": 0,
+            "registered_tasks_sample": [],
         }
         workers[worker_name] = worker_payload
 

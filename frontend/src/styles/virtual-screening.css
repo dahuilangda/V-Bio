@@ -474,14 +474,15 @@
 }
 
 .virtual-screening-result-table {
-  min-width: 1280px;
+  min-width: 1120px;
 }
 
 .virtual-screening-result-table .virtual-screening-col-compound {
-  width: 260px;
+  width: 210px;
 }
 
-.virtual-screening-result-table .virtual-screening-col-affinity {
+.virtual-screening-result-table .virtual-screening-col-affinity,
+.virtual-screening-result-table .col-insights-model {
   width: 190px;
   min-width: 190px;
 }

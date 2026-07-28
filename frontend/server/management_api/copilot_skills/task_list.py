@@ -76,7 +76,7 @@ TASK_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "taskRowId": {
                     "type": "string",
-                    "description": "ID copied exactly from context_payload.rows[].id for the task selected by the user's criterion, e.g. highest ipTM.",
+                    "description": "ID copied exactly from the selected task row in the provided context.",
                 },
                 "taskName": {"type": "string"},
                 "parameterPatch": {

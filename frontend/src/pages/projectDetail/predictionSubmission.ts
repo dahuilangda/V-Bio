@@ -8,6 +8,7 @@ import { mergeTaskInputOptionsIntoProperties } from './projectTaskSnapshot';
 import { selectedCustomResidueDefinitions } from './peptideCustomResidues';
 import { loadRDKitModule } from '../../utils/rdkit';
 import { parseVirtualScreeningInput, validateVirtualScreeningSmiles } from '../../utils/virtualScreening';
+import { normalizeTaskSummary } from '../../utils/taskMetadata';
 import { firstBackboneSlotError, validateCustomResidueBackbone } from '../../utils/constraintAtomOptions';
 
 export type PredictionWorkspaceTab = 'results' | 'basics' | 'components' | 'constraints';
@@ -447,7 +448,7 @@ export async function submitPredictionTaskFromDraft(deps: PredictionSubmitDeps):
     saveProjectInputConfig(project.id, persistedInputConfig);
     const nextDraft: PredictionDraftFields = {
       taskName: draft.taskName.trim(),
-      taskSummary: draft.taskSummary.trim(),
+      taskSummary: normalizeTaskSummary(draft.taskSummary),
       backend: effectiveBackend,
       use_msa: hasMsa,
       color_mode: draft.color_mode === 'alphafold' ? 'alphafold' : 'default',

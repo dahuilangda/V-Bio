@@ -1,8 +1,18 @@
+import json
 import os
 import logging
+import threading
+import time
+from contextlib import contextmanager
 from functools import wraps
 from typing import Any, Dict, Optional
 from flask import Flask, request, jsonify, send_from_directory
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - production runs on Linux.
+    fcntl = None
+
 from backend.core import config
 from backend.core.celery_app import celery_app
 from backend.worker.tasks import (
@@ -49,6 +59,20 @@ logger = logging.getLogger(__name__)
 # 创建全局任务监控实例
 task_monitor = TaskMonitor(logger=logger)
 
+try:
+    _WORKER_SNAPSHOT_CACHE_TTL_SECONDS = max(
+        1.0,
+        min(300.0, float(os.environ.get("WORKER_SNAPSHOT_CACHE_TTL_SECONDS", "60"))),
+    )
+except (TypeError, ValueError):
+    _WORKER_SNAPSHOT_CACHE_TTL_SECONDS = 60.0
+_WORKER_SNAPSHOT_CACHE_FILE = os.environ.get(
+    "WORKER_SNAPSHOT_CACHE_FILE",
+    "/tmp/vbio-worker-snapshot-cache.json",
+)
+_worker_snapshot_lock = threading.Lock()
+_worker_snapshot_cache: Optional[Dict[str, Any]] = None
+_worker_snapshot_expires_at = 0.0
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = config.RESULTS_BASE_DIR
 
@@ -187,8 +211,75 @@ def _list_known_queues() -> list[str]:
     return list_known_queues()
 
 
-def _get_worker_capability_snapshot() -> Dict[str, Dict]:
-    return build_worker_capability_snapshot(celery_app=celery_app)
+@contextmanager
+def _worker_snapshot_process_lock():
+    if fcntl is None:
+        yield
+        return
+
+    lock_path = f"{_WORKER_SNAPSHOT_CACHE_FILE}.lock"
+    with open(lock_path, "a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _read_shared_worker_snapshot(now: float) -> tuple[Dict[str, Any], float] | None:
+    try:
+        with open(_WORKER_SNAPSHOT_CACHE_FILE, "r", encoding="utf-8") as cache_file:
+            cached = json.load(cache_file)
+        expires_at = float(cached.get("expires_at") or 0)
+        payload = cached.get("payload")
+        if expires_at > now and isinstance(payload, dict):
+            return payload, expires_at
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def _write_shared_worker_snapshot(payload: Dict[str, Any], expires_at: float) -> None:
+    with open(_WORKER_SNAPSHOT_CACHE_FILE, "w", encoding="utf-8") as cache_file:
+        json.dump({"expires_at": expires_at, "payload": payload}, cache_file)
+
+
+def _get_worker_capability_snapshot() -> Dict[str, Any]:
+    global _worker_snapshot_cache, _worker_snapshot_expires_at
+
+    with _worker_snapshot_lock:
+        monotonic_now = time.monotonic()
+        if (
+            _worker_snapshot_cache is not None
+            and monotonic_now < _worker_snapshot_expires_at
+        ):
+            return _worker_snapshot_cache
+
+        try:
+            with _worker_snapshot_process_lock():
+                wall_now = time.time()
+                shared = _read_shared_worker_snapshot(wall_now)
+                if shared is not None:
+                    payload, shared_expires_at = shared
+                    _worker_snapshot_cache = payload
+                    _worker_snapshot_expires_at = monotonic_now + max(
+                        0.0,
+                        shared_expires_at - wall_now,
+                    )
+                    return payload
+
+                payload = build_worker_capability_snapshot(celery_app=celery_app)
+                shared_expires_at = time.time() + _WORKER_SNAPSHOT_CACHE_TTL_SECONDS
+                _write_shared_worker_snapshot(payload, shared_expires_at)
+        except OSError as exc:
+            logger.warning("Worker snapshot shared cache unavailable: %s", exc)
+            payload = build_worker_capability_snapshot(celery_app=celery_app)
+
+        _worker_snapshot_cache = payload
+        _worker_snapshot_expires_at = (
+            time.monotonic() + _WORKER_SNAPSHOT_CACHE_TTL_SECONDS
+        )
+        return payload
 
 register_prediction_routes(
     app,

@@ -3,6 +3,7 @@ import type { MolstarResiduePick } from '../../components/project/MolstarViewer'
 import type { InputComponent, PeptideResiduePoolSelection, PredictionConstraint, PredictionOptions } from '../../types/models';
 import type { ProteinTemplateUpload } from '../../types/models';
 import { PEPTIDE_DESIGNED_LIGAND_TOKEN } from '../../utils/projectInputs';
+import { limitTaskSummary } from '../../utils/taskMetadata';
 import { normalizePredictionBackend } from './projectDraftUtils';
 
 interface DraftLike {
@@ -727,7 +728,7 @@ export function handleTaskSummaryChangeAction<TDraft extends { taskSummary: stri
   setDraft: Dispatch<SetStateAction<TDraft | null>>;
 }): void {
   const { value, setDraft } = params;
-  setDraft((d) => (d ? { ...d, taskSummary: value } : d));
+  setDraft((d) => (d ? { ...d, taskSummary: limitTaskSummary(value) } : d));
 }
 
 export function handleOpenTaskHistoryAction(params: {

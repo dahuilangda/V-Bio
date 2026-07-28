@@ -679,15 +679,27 @@ function resolveTaskSelectionContext(
   ];
   const selectedLigandOption = (() => {
     if (useBindingPreference) {
+      const typedLigandOptions = componentOptions.filter((item) => item.type === 'ligand' && item.chainId);
+      if (typedLigandOptions.length > 0) {
+        for (const candidate of predictionBindingCandidates) {
+          const resolved = resolveComponentFromCandidate(candidate);
+          if (resolved) return resolved;
+        }
+        const confidenceLigand = resolveComponentFromCandidate(confidenceLigandHint);
+        if (confidenceLigand) return confidenceLigand;
+        return (
+          typedLigandOptions.find((item) => item.isSmiles) ||
+          typedLigandOptions[0] ||
+          null
+        );
+      }
+
+      // Without a small-molecule component, an explicit binder may be any
+      // chain type (for example a protein/protein or peptide binding task).
       for (const candidate of predictionBindingCandidates) {
         const resolved = resolveComponentFromCandidate(candidate, { allowAnyType: true });
         if (resolved) return resolved;
       }
-      const firstLigandComponent =
-        componentOptions.find((item) => item.type === 'ligand' && item.chainId && item.isSmiles) ||
-        componentOptions.find((item) => item.type === 'ligand' && item.chainId) ||
-        null;
-      if (firstLigandComponent) return firstLigandComponent;
       return null;
     }
     if (workflow === 'affinity') return resolveWorkflowUploadLigandComponent('affinity');

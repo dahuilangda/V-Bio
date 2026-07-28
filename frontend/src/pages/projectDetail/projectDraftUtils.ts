@@ -8,6 +8,7 @@ import type {
 } from '../../types/models';
 import type { AffinityPersistedUploads } from '../../hooks/useAffinityWorkflow';
 import { normalizeInputComponents } from '../../utils/projectInputs';
+import { normalizeTaskSummary } from '../../utils/taskMetadata';
 
 export interface DraftFingerprintFields {
   taskName: string;
@@ -113,7 +114,7 @@ export function createDraftFingerprint(draft: DraftFingerprintFields): string {
   const hasMsa = computeUseMsaFlag(normalizedConfig.components, draft.use_msa);
   return JSON.stringify({
     taskName: draft.taskName.trim(),
-    taskSummary: draft.taskSummary.trim(),
+    taskSummary: normalizeTaskSummary(draft.taskSummary),
     backend: draft.backend,
     use_msa: hasMsa,
     color_mode: draft.color_mode === 'alphafold' ? 'alphafold' : 'default',

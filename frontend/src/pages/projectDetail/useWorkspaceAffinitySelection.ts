@@ -107,7 +107,10 @@ export function useWorkspaceAffinitySelection(
         }
       ];
     }
-    return workspaceAffinityOptions;
+    const typedLigands = workspaceAffinityOptions.filter((item) => item.type === 'ligand');
+    // Prefer real ligand components whenever present. Falling back to every
+    // non-target component preserves protein/protein and peptide binders.
+    return typedLigands.length > 0 ? typedLigands : workspaceAffinityOptions;
   }, [isPeptideDesignWorkflow, workspaceAffinityOptions]);
 
   const resolveChainFromProperty = useCallback(

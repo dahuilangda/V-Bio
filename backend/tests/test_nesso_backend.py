@@ -24,6 +24,7 @@ from management_api.task_snapshot import (
 )
 from backend.routes.prediction import register_prediction_routes
 from backend.runtime import nesso_backend
+from backend.services.common_utils import infer_use_msa_server_from_yaml_text, is_msa_disabled
 from backend.scheduling.capability_router import (
     build_capability_queue,
     capability_from_prediction_backend,
@@ -48,7 +49,10 @@ virtual_screening:
 """
 
 
-def _register_test_app() -> tuple[Flask, mock.Mock]:
+def _register_test_app(
+    *,
+    msa_server_url: str = "",
+) -> tuple[Flask, mock.Mock]:
     app = Flask(__name__)
     predict_task = mock.Mock()
     predict_task.apply_async.return_value = SimpleNamespace(id="task-1")
@@ -56,11 +60,11 @@ def _register_test_app() -> tuple[Flask, mock.Mock]:
         app,
         require_api_token=lambda handler: handler,
         logger=mock.Mock(),
-        config_module=SimpleNamespace(MSA_SERVER_URL=""),
+        config_module=SimpleNamespace(MSA_SERVER_URL=msa_server_url),
         predict_task=predict_task,
         parse_bool=lambda value, default: default if value is None else str(value).lower() == "true",
         parse_int=lambda value, default: default if value is None else int(value),
-        infer_use_msa_server_from_yaml_text=lambda _source: False,
+        infer_use_msa_server_from_yaml_text=infer_use_msa_server_from_yaml_text,
         extract_template_meta_from_yaml=lambda _source: {},
         normalize_chain_id_list=lambda _value: [],
         select_queue_for_capability=lambda capability, priority: {
@@ -70,6 +74,91 @@ def _register_test_app() -> tuple[Flask, mock.Mock]:
         capability_from_prediction_backend=capability_from_prediction_backend,
     )
     return app, predict_task
+
+
+class BoltzMsaPolicyTests(unittest.TestCase):
+    EMPTY_MSA_INPUT = """\
+version: 1
+sequences:
+  - protein:
+      id: A
+      sequence: AAAAAAA
+      msa: empty
+"""
+
+    EXTERNAL_MSA_INPUT = """\
+version: 1
+sequences:
+  - protein:
+      id: A
+      sequence: ACDEFGHIKLMNPQRSTVWY
+"""
+
+    def _post(
+        self,
+        app: Flask,
+        yaml_content: str,
+        *,
+        backend: str,
+        use_msa_server: bool = True,
+    ) -> object:
+        return app.test_client().post(
+            "/predict",
+            data={
+                "backend": backend,
+                "workflow": "prediction",
+                "use_msa_server": str(use_msa_server).lower(),
+                "yaml_file": (io.BytesIO(yaml_content.encode("utf-8")), "input.yaml"),
+            },
+            content_type="multipart/form-data",
+        )
+
+    def test_explicit_empty_msa_does_not_require_server(self) -> None:
+        for backend in ("boltz", "alphafold3", "protenix"):
+            with self.subTest(backend=backend):
+                app, predict_task = _register_test_app(msa_server_url="")
+                response = self._post(app, self.EMPTY_MSA_INPUT, backend=backend)
+
+                self.assertEqual(response.status_code, 202)
+                submitted_args = predict_task.apply_async.call_args.kwargs["args"][0]
+                self.assertFalse(submitted_args["use_msa_server"])
+
+    def test_protein_without_msa_still_requires_server(self) -> None:
+        for backend in ("boltz", "alphafold3", "protenix"):
+            with self.subTest(backend=backend):
+                app, predict_task = _register_test_app(msa_server_url="")
+                response = self._post(
+                    app,
+                    self.EXTERNAL_MSA_INPUT,
+                    backend=backend,
+                    use_msa_server=False,
+                )
+
+                self.assertEqual(response.status_code, 503)
+                self.assertIn("MSA_SERVER_URL", response.get_json()["error"])
+                predict_task.apply_async.assert_not_called()
+
+    def test_protein_without_msa_forces_configured_server(self) -> None:
+        for backend in ("boltz", "alphafold3", "protenix"):
+            with self.subTest(backend=backend):
+                app, predict_task = _register_test_app(msa_server_url="http://msa.test:8080")
+                response = self._post(
+                    app,
+                    self.EXTERNAL_MSA_INPUT,
+                    backend=backend,
+                    use_msa_server=False,
+                )
+
+                self.assertEqual(response.status_code, 202)
+                submitted_args = predict_task.apply_async.call_args.kwargs["args"][0]
+                self.assertTrue(submitted_args["use_msa_server"])
+
+    def test_msa_value_helpers_distinguish_empty_and_external_inputs(self) -> None:
+        self.assertTrue(is_msa_disabled("empty"))
+        self.assertTrue(is_msa_disabled(0))
+        self.assertFalse(is_msa_disabled("/tmp/query.a3m"))
+        self.assertFalse(infer_use_msa_server_from_yaml_text(self.EMPTY_MSA_INPUT))
+        self.assertTrue(infer_use_msa_server_from_yaml_text(self.EXTERNAL_MSA_INPUT))
 
 
 class NessoScreeningInputTests(unittest.TestCase):
