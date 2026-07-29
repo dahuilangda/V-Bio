@@ -13,6 +13,8 @@ services:
     volumes:
       - ${BOLTZ_HOST_ROOT}:${BOLTZ_HOST_ROOT}
       - ${RESULTS_BASE_DIR:-/data/boltz_central_results}:${RESULTS_BASE_DIR:-/data/boltz_central_results}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: >-
       bash -lc "cd ${BOLTZ_HOST_ROOT} && python -m backend.scripts.runtime_entrypoint api"
     ports:
@@ -27,12 +29,9 @@ services:
     working_dir: ${BOLTZ_HOST_ROOT}
     env_file:
       - ./DOCKER_STACK_CENTRAL_DECOUPLED.env
-    environment:
-      MONITOR_API_URL: http://api:5000
     volumes:
       - ${BOLTZ_HOST_ROOT}:${BOLTZ_HOST_ROOT}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: >-
       bash -lc "cd ${BOLTZ_HOST_ROOT} && python -m backend.scripts.runtime_entrypoint monitor"
-    depends_on:
-      api:
-        condition: service_started

@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 import requests
 
 from management_api.copilot_capabilities import (
+    build_registered_capability_catalog,
     build_context_actions,
     build_task_detail_skill_definitions,
     build_task_submission_actions,
@@ -17,7 +18,7 @@ from management_api.copilot_capabilities import (
 )
 from management_api.copilot_skill_harness import CopilotSkillHarness
 from management_api.copilot_skills.context_actions import build_context_skill_definitions
-from management_api.copilot_skills.online_databases import OnlineDatabaseSkills
+from management_api.copilot_skills.online_databases import OnlineDatabaseSkills, OnlineSkillDefinition
 
 
 MAX_CONTEXT_STRING_CHARS = 1600
@@ -54,6 +55,12 @@ FILE_METADATA_KEYS = {
     "target_chain_ids",
     "targetchainids",
 }
+
+CAPABILITY_CATALOG_SKILL = "platform.capability_catalog"
+
+
+def _read_registered_capability_catalog(_arguments: Dict[str, Any]) -> Dict[str, Any]:
+    return build_registered_capability_catalog()
 
 
 def compact_text(value: Any, limit: int = 1800) -> str:
@@ -296,9 +303,23 @@ class CopilotAssistant:
         self.session = session
         self.logger = logger
         self.max_planner_rounds = max(1, min(20, int(max_planner_rounds)))
-        self.skill_harness = CopilotSkillHarness(
-            skills=OnlineDatabaseSkills(session=session, timeout_seconds=min(self.timeout_seconds, 30.0))
+        skills = OnlineDatabaseSkills(session=session, timeout_seconds=min(self.timeout_seconds, 30.0))
+        skills.register(
+            OnlineSkillDefinition(
+                name=CAPABILITY_CATALOG_SKILL,
+                description=(
+                    "Read the canonical platform workflow, operation, input, parameter, and option catalog "
+                    "from the registered schemas before answering what the platform supports."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            ),
+            _read_registered_capability_catalog,
         )
+        self.skill_harness = CopilotSkillHarness(skills=skills)
 
     def _call_model(
         self,
@@ -432,7 +453,10 @@ class CopilotAssistant:
             "return observations and audit issues for another planning round. Any operation that creates, updates, "
             "deletes, navigates, submits, or otherwise changes host state must remain pending for explicit user "
             "confirmation. The message field is user-visible: do not expose planner, harness, skill names, operation "
-            "ids, schemas, or internal context fields. Do not invent an operation or an observation.\n\n"
+            "ids, schemas, or internal context fields. Do not invent an operation or an observation. Before completing "
+            "a question about what the platform supports, use the registered capability-catalog read operation and "
+            "ground the answer in its observation. Answer the requested scope directly instead of replacing it with "
+            "a general feature menu.\n\n"
             f"{protocol}"
         )
         context_json = json.dumps(safe_context_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import socket
 import subprocess
 import sys
 from typing import List
@@ -94,7 +95,7 @@ def run_api() -> None:
 
 
 def run_monitor() -> None:
-    from backend.monitoring.monitor_daemon import main as monitor_main
+    from backend.monitoring.monitor_collector import main as monitor_main
 
     monitor_main()
 
@@ -122,6 +123,8 @@ def run_gpu_worker() -> None:
         in_use_count,
     )
 
+    env = os.environ.copy()
+    env["CELERY_WORKER_NAME"] = f"gpu@{socket.gethostname()}"
     _exec_or_die(
         [
             "celery",
@@ -138,7 +141,8 @@ def run_gpu_worker() -> None:
             queue_list,
             "--max-tasks-per-child",
             "1",
-        ]
+        ],
+        env=env,
     )
 
 
@@ -148,6 +152,7 @@ def run_cpu_worker(cli_concurrency: str | None) -> None:
     concurrency = _resolve_cpu_worker_concurrency(cli_concurrency)
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = ""
+    env["CELERY_WORKER_NAME"] = f"cpu@{socket.gethostname()}"
 
     _exec_or_die(
         [

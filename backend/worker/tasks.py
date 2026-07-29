@@ -26,6 +26,7 @@ import requests
 from celery.exceptions import Ignore
 from backend.core import config
 from backend.core.celery_app import celery_app
+from backend.monitoring.event_transport import publish_task_heartbeat, publish_task_status
 from backend.services.common_utils import coerce_bool
 from gpu_manager import (
     acquire_gpu,
@@ -496,6 +497,7 @@ class TaskProgressTracker:
             try:
                 current_time = datetime.now().isoformat()
                 self.redis_client.setex(self.heartbeat_key, HEARTBEAT_INTERVAL * 2, current_time)
+                publish_task_heartbeat(self.redis_client, task_id=self.task_id)
                 time.sleep(HEARTBEAT_INTERVAL)
             except Exception as e:
                 logger.error(f"Heartbeat error for task {self.task_id}: {e}")
@@ -512,6 +514,13 @@ class TaskProgressTracker:
             if isinstance(payload, dict) and payload:
                 status_data["payload"] = payload
             self.redis_client.setex(self.status_key, TASK_STATUS_TTL_SECONDS, json.dumps(status_data))
+            publish_task_status(
+                self.redis_client,
+                task_id=self.task_id,
+                status=status,
+                details_text=status_data["details"],
+                details=payload,
+            )
             logger.info(f"Task {self.task_id}: Status updated to {status}")
         except Exception as e:
             logger.error(f"Failed to update status for task {self.task_id}: {e}")

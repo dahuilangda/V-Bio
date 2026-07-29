@@ -3,6 +3,8 @@ import {
   Activity,
   AlertTriangle,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
   Cpu,
   Gauge,
@@ -14,6 +16,7 @@ import {
 } from 'lucide-react';
 import {
   fetchAdminClusterOverview,
+  streamAdminClusterOverview,
   type AdminClusterOverview,
   type AdminTaskBucket,
   type AdminTaskStateCounts,
@@ -30,7 +33,8 @@ const WINDOW_OPTIONS = [
   { value: 24 * 30, label: '30d' }
 ] as const;
 
-const ADMIN_MONITOR_REFRESH_INTERVAL_MS = 60_000;
+const RECENT_TASK_LIMIT = 50;
+const RECENT_TASK_PAGE_SIZE = 10;
 
 const EMPTY_STATES: AdminTaskStateCounts = {
   queued: 0,
@@ -200,7 +204,10 @@ export function AdminMonitorPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [streamState, setStreamState] = useState<'connecting' | 'live' | 'error'>('connecting');
+  const [recentTaskPage, setRecentTaskPage] = useState(1);
   const requestSequence = useRef(0);
+  const streamSequence = useRef(0);
 
   const loadOverview = useCallback(async (initial = false) => {
     const sequence = ++requestSequence.current;
@@ -228,33 +235,113 @@ export function AdminMonitorPage() {
 
   useEffect(() => {
     if (authLoading) return;
+    const controller = new AbortController();
+    const sequence = ++streamSequence.current;
+    let stopped = false;
 
-    const refreshIfVisible = (initial = false) => {
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-      void loadOverview(initial);
-    };
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        void loadOverview(false);
+    const waitForReconnect = (delayMs: number) => new Promise<void>((resolve) => {
+      if (controller.signal.aborted) {
+        resolve();
+        return;
+      }
+      const onAbort = () => {
+        window.clearTimeout(timer);
+        resolve();
+      };
+      const timer = window.setTimeout(() => {
+        controller.signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, delayMs);
+      controller.signal.addEventListener('abort', onAbort, { once: true });
+    });
+
+    const runStream = async () => {
+      setLoading(true);
+      setError(null);
+      setStreamState('connecting');
+      try {
+        let managementToken = await ensureManagementSession();
+        if (!managementToken) {
+          throw new Error('Administrator management session is unavailable. Sign in again to continue.');
+        }
+        const initial = await fetchAdminClusterOverview(managementToken, windowHours);
+        if (stopped || streamSequence.current !== sequence) return;
+        setOverview(initial);
+        setLoading(false);
+        let cursor = initial.sequence;
+        let reconnectDelay = 1_000;
+        while (!stopped && !controller.signal.aborted) {
+          try {
+            managementToken = await ensureManagementSession();
+            if (!managementToken) {
+              throw new Error('Administrator management session is unavailable. Sign in again to continue.');
+            }
+            cursor = await streamAdminClusterOverview({
+              managementToken,
+              windowHours,
+              cursor,
+              signal: controller.signal,
+              onOpen: () => {
+                if (!stopped) {
+                  setStreamState('live');
+                  setError(null);
+                }
+              },
+              onOverview: (next) => {
+                if (stopped || streamSequence.current !== sequence) return;
+                setOverview(next);
+                setStreamState('live');
+                setError(null);
+              }
+            });
+            reconnectDelay = 1_000;
+          } catch (streamError) {
+            if (controller.signal.aborted || stopped) return;
+            setStreamState('error');
+            setError(streamError instanceof Error ? streamError.message : 'Monitor stream disconnected.');
+            await waitForReconnect(reconnectDelay);
+            reconnectDelay = Math.min(15_000, reconnectDelay * 2);
+            if (!stopped) setStreamState('connecting');
+          }
+        }
+      } catch (initialError) {
+        if (controller.signal.aborted || stopped) return;
+        setError(initialError instanceof Error ? initialError.message : 'Unable to load cluster overview.');
+        setStreamState('error');
+        setLoading(false);
       }
     };
 
-    refreshIfVisible(true);
-    const timer = window.setInterval(
-      () => refreshIfVisible(false),
-      ADMIN_MONITOR_REFRESH_INTERVAL_MS
-    );
-    document.addEventListener('visibilitychange', handleVisibilityChange);
+    void runStream();
     return () => {
-      window.clearInterval(timer);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      requestSequence.current += 1;
+      stopped = true;
+      controller.abort();
+      if (streamSequence.current === sequence) streamSequence.current += 1;
     };
-  }, [authLoading, loadOverview, session?.userId]);
+  }, [authLoading, ensureManagementSession, session?.userId, windowHours]);
 
   const cluster = overview?.cluster || null;
   const tasks = overview?.tasks || null;
   const states = tasks?.states || EMPTY_STATES;
+  const recentTasks = useMemo(
+    () => (tasks?.recent_tasks || []).slice(0, RECENT_TASK_LIMIT),
+    [tasks?.recent_tasks]
+  );
+  const recentTaskPageCount = Math.max(1, Math.ceil(recentTasks.length / RECENT_TASK_PAGE_SIZE));
+  const recentTaskPageStart = (recentTaskPage - 1) * RECENT_TASK_PAGE_SIZE;
+  const visibleRecentTasks = recentTasks.slice(
+    recentTaskPageStart,
+    recentTaskPageStart + RECENT_TASK_PAGE_SIZE
+  );
+
+  useEffect(() => {
+    setRecentTaskPage((current) => Math.min(current, recentTaskPageCount));
+  }, [recentTaskPageCount]);
+
+  useEffect(() => {
+    setRecentTaskPage(1);
+  }, [windowHours]);
+
   const workers = useMemo(
     () => Object.values(cluster?.workers || {}).sort((left, right) => left.server.localeCompare(right.server)),
     [cluster]
@@ -311,8 +398,8 @@ export function AdminMonitorPage() {
           </button>
           {overview?.generated_at ? (
             <div className="admin-monitor-updated" aria-live="polite">
-              <span className={error ? 'is-error' : 'is-live'} />
-              Updated {formatDateTime(overview.generated_at)}
+              <span className={streamState === 'live' ? 'is-live' : 'is-error'} />
+              {streamState === 'live' ? 'Live' : streamState === 'connecting' ? 'Connecting' : 'Disconnected'} · {formatDateTime(overview.generated_at)}
             </div>
           ) : null}
         </div>
@@ -562,7 +649,7 @@ export function AdminMonitorPage() {
               <div className="admin-monitor-section-head">
                 <div>
                   <h2>Recent tasks</h2>
-                  <p className="muted small">Newest submitted tasks across projects</p>
+                  <p className="muted small">Up to 50 newest submitted tasks across projects</p>
                 </div>
               </div>
               <div className="table-wrap admin-monitor-table-wrap">
@@ -577,7 +664,7 @@ export function AdminMonitorPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {(tasks?.recent_tasks || []).map((task) => (
+                    {visibleRecentTasks.map((task) => (
                       <tr key={task.id || task.task_id}>
                         <td>
                           <div className="admin-monitor-task-name">
@@ -592,12 +679,42 @@ export function AdminMonitorPage() {
                         <td>{formatDuration(task.duration_seconds)}</td>
                       </tr>
                     ))}
-                    {!tasks?.recent_tasks?.length ? (
+                    {!recentTasks.length ? (
                       <tr><td colSpan={5}><div className="admin-monitor-empty">No recent submitted tasks.</div></td></tr>
                     ) : null}
                   </tbody>
                 </table>
               </div>
+              {recentTasks.length ? (
+                <div className="project-pagination">
+                  <div className="project-pagination-info muted small">
+                    {recentTaskPageStart + 1}-{Math.min(recentTaskPageStart + RECENT_TASK_PAGE_SIZE, recentTasks.length)} of {recentTasks.length}
+                  </div>
+                  <div className="project-pagination-controls">
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      aria-label="Previous recent tasks page"
+                      title="Previous page"
+                      disabled={recentTaskPage <= 1}
+                      onClick={() => setRecentTaskPage((current) => Math.max(1, current - 1))}
+                    >
+                      <ChevronLeft size={15} />
+                    </button>
+                    <span className="muted small">Page {recentTaskPage} / {recentTaskPageCount}</span>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      aria-label="Next recent tasks page"
+                      title="Next page"
+                      disabled={recentTaskPage >= recentTaskPageCount}
+                      onClick={() => setRecentTaskPage((current) => Math.min(recentTaskPageCount, current + 1))}
+                    >
+                      <ChevronRight size={15} />
+                    </button>
+                  </div>
+                </div>
+              ) : null}
             </article>
           </section>
         </>
