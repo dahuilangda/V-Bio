@@ -13,10 +13,17 @@ import hmac
 import json
 import logging
 import os
+from pathlib import Path
+import sys
 import time
 from typing import Any, Dict, Tuple
 
-from flask import Flask, Response, jsonify, request
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from flask import Flask, Response, jsonify, request, stream_with_context
+from backend.monitoring.monitor_store import MonitorStore
 from management_api.auth_service import AuthService
 from management_api.gateway_handlers import GatewayHandlers
 from management_api.http_session import create_pooled_session
@@ -30,6 +37,7 @@ from management_api.task_store import ProjectTaskStore
 from management_api.ccd_download import build_task_ccd_response
 from management_api.copilot import CopilotAssistant
 from management_api.usage_tracker import UsageTracker
+from management_api.monitor_stream import MonitorNotificationBroker, sse_frames
 
 LOG_LEVEL = os.environ.get("VBIO_MGMT_LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -49,6 +57,7 @@ RUNTIME_API_TOKEN = (
 RUNTIME_TIMEOUT_SECONDS = float(os.environ.get("VBIO_RUNTIME_TIMEOUT_SECONDS", "180"))
 RUNTIME_HTTP_POOL_SIZE = int(os.environ.get("VBIO_RUNTIME_HTTP_POOL_SIZE", "64"))
 POSTGREST_HTTP_POOL_SIZE = int(os.environ.get("VBIO_POSTGREST_HTTP_POOL_SIZE", "32"))
+VBIO_MONITOR_DATABASE_URL = os.environ.get("VBIO_MONITOR_DATABASE_URL", "").strip()
 RUNTIME_MAX_INFLIGHT_REQUESTS = int(os.environ.get("VBIO_RUNTIME_MAX_INFLIGHT_REQUESTS", "128"))
 RUNTIME_STATUS_HISTORY_SIZE = int(os.environ.get("VBIO_RUNTIME_STATUS_HISTORY_SIZE", "200"))
 
@@ -108,6 +117,12 @@ postgrest_client = PostgrestClient(
 auth_service = AuthService(postgrest_client)
 usage_tracker = UsageTracker(postgrest_client, logger)
 task_store = ProjectTaskStore(postgrest_client)
+monitor_store = MonitorStore(VBIO_MONITOR_DATABASE_URL) if VBIO_MONITOR_DATABASE_URL else None
+monitor_broker = (
+    MonitorNotificationBroker(VBIO_MONITOR_DATABASE_URL, monitor_store)
+    if monitor_store is not None
+    else None
+)
 jwt_user_service = JwtUserService(postgrest_client)
 jwt_client_store = JwtClientStore(JWT_CLIENTS_FILE)
 runtime_proxy = RuntimeProxy(
@@ -281,6 +296,7 @@ def healthz() -> Tuple[Response, int]:
             "ok": True,
             "runtime_api_base_url": RUNTIME_API_BASE_URL,
             "postgrest_url": VBIO_POSTGREST_URL,
+            "monitor_postgresql_configured": monitor_store is not None,
         }
     ), 200
 
@@ -426,41 +442,47 @@ def get_admin_cluster_overview() -> Tuple[Response, int]:
         window_hours = 24
     window_hours = max(1, min(24 * 31, window_hours))
 
-    cluster: Dict[str, Any] = {}
-    cluster_error = ""
+    if monitor_store is None:
+        return jsonify({"error": "PostgreSQL monitor store is not configured"}), 503
     try:
-        upstream = runtime_proxy.proxy_get("/workers/cluster_status", {})
-        if not upstream.ok:
-            try:
-                details = upstream.json()
-            except Exception:
-                details = upstream.text.strip()
-            if isinstance(details, dict):
-                details = details.get("error") or details.get("details") or details
-            raise RuntimeError(f"Runtime API HTTP {upstream.status_code}: {details}")
-        payload = upstream.json()
-        if not isinstance(payload, dict):
-            raise RuntimeError("Runtime API returned an invalid cluster snapshot")
-        cluster = payload
+        return jsonify(monitor_store.get_overview(window_hours=window_hours)), 200
     except Exception as exc:
-        cluster_error = str(exc)
-        logger.warning("Unable to collect cluster snapshot: %s", exc)
+        logger.exception("Unable to read PostgreSQL monitor snapshot")
+        return jsonify({"error": str(exc)}), 503
 
-    tasks: Dict[str, Any] = {}
-    tasks_error = ""
+
+@app.get("/vbio-api/admin/monitor-stream")
+def stream_admin_monitor() -> Response | Tuple[Response, int]:
+    forbidden = _require_platform_admin()
+    if forbidden:
+        return forbidden
+    if monitor_store is None or monitor_broker is None:
+        return jsonify({"error": "PostgreSQL monitor store is not configured"}), 503
+
     try:
-        tasks = task_store.get_admin_statistics(window_hours=window_hours)
-    except Exception as exc:
-        tasks_error = str(exc)
-        logger.exception("Unable to collect administrator task statistics")
+        window_hours = max(1, min(24 * 31, int(request.args.get("window_hours") or 24)))
+    except (TypeError, ValueError):
+        window_hours = 24
+    cursor_value = request.headers.get("Last-Event-ID") or request.args.get("cursor") or "0"
+    try:
+        event_cursor = max(0, int(cursor_value))
+    except (TypeError, ValueError):
+        event_cursor = 0
 
-    return jsonify({
-        "generated_at": _utc_now_iso(),
-        "cluster": cluster,
-        "cluster_error": cluster_error,
-        "tasks": tasks,
-        "tasks_error": tasks_error,
-    }), 200
+    try:
+        subscription = monitor_broker.subscribe(event_cursor)
+    except Exception as exc:
+        logger.exception("Unable to subscribe to PostgreSQL monitor notifications")
+        return jsonify({"error": str(exc)}), 503
+
+    frames = sse_frames(
+        subscription,
+        lambda: monitor_store.get_overview(window_hours=window_hours),
+    )
+    response = Response(stream_with_context(frames), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache, no-transform"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
 
 
 @app.get("/vbio-api/admin/jwt-clients")

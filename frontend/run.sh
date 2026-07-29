@@ -17,6 +17,7 @@ VBIO_FRONTEND_PORT="${VBIO_FRONTEND_PORT:-5173}"
 VBIO_MGMT_HOST="${VBIO_MGMT_HOST:-0.0.0.0}"
 VBIO_MGMT_PORT="${VBIO_MGMT_PORT:-5055}"
 VBIO_MGMT_WORKERS="${VBIO_MGMT_WORKERS:-2}"
+VBIO_MGMT_THREADS="${VBIO_MGMT_THREADS:-8}"
 VBIO_MGMT_TIMEOUT="${VBIO_MGMT_TIMEOUT:-180}"
 
 is_running() {
@@ -129,13 +130,31 @@ load_frontend_env() {
 
 start_supabase() {
   if ! command -v docker >/dev/null 2>&1; then
-    echo "[supabase-lite] docker not found, skip startup." >&2
-    return 0
+    echo "[supabase-lite] docker is required." >&2
+    return 1
   fi
   echo "[supabase-lite] starting db/rest..."
   (
     cd "${VBIO_DIR}/supabase-lite"
-    docker compose up -d db rest >/dev/null
+    docker compose up -d --wait --wait-timeout 120 db rest >/dev/null
+  )
+}
+
+run_postgres_migrations() {
+  load_frontend_env
+  activate_python_env
+  if [[ -z "${VBIO_MONITOR_DATABASE_URL:-}" ]]; then
+    echo "VBIO_MONITOR_DATABASE_URL is required." >&2
+    return 1
+  fi
+  if [[ -z "${VBIO_MONITOR_MIGRATION_DATABASE_URL:-}" ]]; then
+    echo "VBIO_MONITOR_MIGRATION_DATABASE_URL is required." >&2
+    return 1
+  fi
+  echo "[postgres] applying verified migrations..."
+  (
+    cd "${ROOT_DIR}"
+    python -m backend.monitoring.migration_runner
   )
 }
 
@@ -153,24 +172,28 @@ start_management_api() {
   export VBIO_RUNTIME_API_BASE_URL="${VBIO_RUNTIME_API_BASE_URL:-http://127.0.0.1:5000}"
   export VBIO_RUNTIME_API_TOKEN="${VBIO_RUNTIME_API_TOKEN:-${BOLTZ_API_TOKEN:-${VITE_API_TOKEN:-}}}"
 
-  echo "[management-api] starting on ${VBIO_MGMT_HOST}:${VBIO_MGMT_PORT}..."
-  if command -v gunicorn >/dev/null 2>&1; then
-    (
-      cd "${VBIO_DIR}/server"
-      nohup gunicorn \
-        --workers "${VBIO_MGMT_WORKERS}" \
-        --bind "${VBIO_MGMT_HOST}:${VBIO_MGMT_PORT}" \
-        --timeout "${VBIO_MGMT_TIMEOUT}" \
-        "vbio_management_api:app" >"${MGMT_LOG}" 2>&1 &
-      echo $! >"${MGMT_PID_FILE}"
-    )
-  else
-    (
-      cd "${VBIO_DIR}/server"
-      nohup python ./vbio_management_api.py >"${MGMT_LOG}" 2>&1 &
-      echo $! >"${MGMT_PID_FILE}"
-    )
+  if [[ -z "${VBIO_MONITOR_DATABASE_URL:-}" ]]; then
+    echo "VBIO_MONITOR_DATABASE_URL is required." >&2
+    return 1
   fi
+
+  echo "[management-api] starting on ${VBIO_MGMT_HOST}:${VBIO_MGMT_PORT}..."
+  if ! command -v gunicorn >/dev/null 2>&1; then
+    echo "gunicorn is required for the management API." >&2
+    return 1
+  fi
+  (
+    cd "${VBIO_DIR}/server"
+    nohup gunicorn \
+      --workers "${VBIO_MGMT_WORKERS}" \
+      --worker-class gthread \
+      --threads "${VBIO_MGMT_THREADS}" \
+      --bind "${VBIO_MGMT_HOST}:${VBIO_MGMT_PORT}" \
+      --timeout "${VBIO_MGMT_TIMEOUT}" \
+      --keep-alive 75 \
+      "vbio_management_api:app" >"${MGMT_LOG}" 2>&1 &
+    echo $! >"${MGMT_PID_FILE}"
+  )
   echo "[management-api] started (pid: $(cat "${MGMT_PID_FILE}"))."
 }
 
@@ -233,6 +256,7 @@ status_all() {
 
 start_prod() {
   start_supabase
+  run_postgres_migrations
   start_management_api
   start_frontend_prod
   echo "frontend: http://127.0.0.1:${VBIO_FRONTEND_PORT}"
@@ -241,6 +265,7 @@ start_prod() {
 
 start_dev() {
   start_supabase
+  run_postgres_migrations
   start_management_api
   start_frontend_dev
   echo "frontend (dev): http://127.0.0.1:${VBIO_FRONTEND_PORT}"

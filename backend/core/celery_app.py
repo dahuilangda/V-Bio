@@ -53,12 +53,56 @@ celery_app.conf.update(
     task_track_started=True,
     worker_send_task_events=True,
     task_send_sent_event=True,
+    worker_heartbeat=15.0,
 )
 
 # Ensure workers request tasks one at a time to avoid queue starvation and
 # provide fair interleaving when multiple jobs are waiting.
 celery_app.conf.worker_prefetch_multiplier = 1
 app = celery_app
+
+
+def _worker_slot_count(sender) -> int:
+    pool = getattr(sender, "pool", None)
+    for value in (getattr(pool, "limit", None), getattr(pool, "num_processes", None)):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed >= 0:
+            return parsed
+    return 0
+
+
+try:
+    from celery.signals import worker_ready, worker_shutdown
+    from backend.monitoring.event_transport import publish_worker_metadata
+
+    @worker_ready.connect(weak=False)
+    def _publish_monitor_worker_ready(sender=None, **_kwargs):
+        worker_id = str(getattr(sender, "hostname", "") or "").strip()
+        if not worker_id:
+            return
+        try:
+            publish_worker_metadata(
+                event_type="worker-ready",
+                worker_id=worker_id,
+                slots_total=_worker_slot_count(sender),
+            )
+        except Exception:
+            _logger.exception("Failed to publish worker-ready monitor event for %s", worker_id)
+
+    @worker_shutdown.connect(weak=False)
+    def _publish_monitor_worker_shutdown(sender=None, **_kwargs):
+        worker_id = str(getattr(sender, "hostname", "") or "").strip()
+        if not worker_id:
+            return
+        try:
+            publish_worker_metadata(event_type="worker-shutdown", worker_id=worker_id)
+        except Exception:
+            _logger.exception("Failed to publish worker-shutdown monitor event for %s", worker_id)
+except ImportError:  # pragma: no cover - Celery is a required production dependency.
+    _logger.exception("Unable to register worker monitor signals")
 
 if __name__ == '__main__':
     celery_app.start()

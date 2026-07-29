@@ -210,6 +210,28 @@ WORKFLOW_PARAMETER_KEYS: Dict[str, List[str]] = {
 }
 
 
+def build_registered_capability_catalog() -> Dict[str, Any]:
+    """Build a read-only catalog directly from the registered capability schemas."""
+
+    return {
+        "operations": [dict(capability) for capability in COPILOT_CAPABILITIES],
+        "workflows": [
+            {
+                "workflow": workflow,
+                "parameters": [
+                    {
+                        "field": field,
+                        "schema": dict(TASK_PARAMETER_SCHEMA[field]),
+                    }
+                    for field in fields
+                    if field in TASK_PARAMETER_SCHEMA
+                ],
+            }
+            for workflow, fields in WORKFLOW_PARAMETER_KEYS.items()
+        ],
+    }
+
+
 def _backend_values_for_workflow(workflow_key: str) -> List[str]:
     if normalize_workflow_key(workflow_key) == "virtual_screening":
         return ["nesso"]
