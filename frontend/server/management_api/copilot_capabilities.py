@@ -3,12 +3,6 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from management_api.copilot_skill_harness import CopilotSkillDefinition
-from management_api.copilot_skills.context_actions import (
-    ACTION_SCHEMA_VERSION,
-    CONTEXT_ACTION_SCHEMAS,
-    build_context_actions,
-    render_context_action_tool_schema,
-)
 from management_api.copilot_skills.workflows import infer_workflow_key, normalize_workflow_key
 
 
@@ -110,53 +104,6 @@ COPILOT_CAPABILITIES: List[Dict[str, str]] = [
         "execution_boundary": "No generic patch keys are allowed yet. Dedicated candidate/MMP tools must be implemented separately.",
     },
 ]
-
-
-def render_capability_prompt() -> str:
-    lines = [
-        "Available Copilot capabilities are modular and skill-like. Select the smallest matching capability.",
-        "Never expose capability names, tool names, or internal skill identifiers to the user.",
-        "Do not write labels such as capability used, 能力使用, 能力调用, or internal action ids.",
-        "Authoritative page workflow: context_payload.page.workflowKey and context_payload.page.workflowTitle. If task/result fields conflict with page workflow, trust the page workflow.",
-        "Capability boundary: do not promise to generate, return, export, download, or compute molecule coordinates or structure/result files unless a schema action or explicit context field provides that exact page ability.",
-        "Do not suggest generic download buttons or result-file downloads unless context_payload.page.availableActions or context_payload.resultDownloads explicitly includes a download capability.",
-        "Before planning any task submission, validate whether the user's requested input matches the current workflow and identify missing required inputs.",
-        "Workflow input requirements:",
-        "- workflow: prediction",
-        "  purpose: Structure prediction for protein, peptide, nucleic-acid, ligand, and complex inputs.",
-        "  required: At least one valid structural component. Treat peptide sequences as protein components unless the user explicitly asks for peptide-design workflow options.",
-        "  component edits: If the user says only/single/只有 one peptide/protein sequence, plan a component replacement with one protein component containing that sequence; do not copy old components.",
-        "  reject: Do not use it for binding affinity-only scoring without a target/ligand affinity question.",
-        "- workflow: virtual_screening",
-        "  purpose: Rank a batch of SMILES compounds against exactly one target protein with Nesso-1.",
-        "  required: One target protein sequence and a non-empty compound library of SMILES records.",
-        "  backend: Nesso-1 is fixed. This workflow produces affinity rankings only and no 3D structure.",
-        "  reject: Do not offer Boltz-2, AlphaFold3, Protenix, templates, constraints, or generic structural component patches.",
-        "- workflow: affinity",
-        "  purpose: Binding affinity estimation/scoring for a prepared target-ligand setup.",
-        "  required: A target structure/sequence context and a ligand or separate affinity inputs, plus affinity mode when relevant.",
-        "  reject: A lone peptide/protein sequence is not enough for Affinity Scoring and must not be submitted as an affinity task.",
-        "- workflow: peptide_design",
-        "  purpose: Design new peptide binders against a target.",
-        "  required: Target context plus design options such as binder length/mode. A user-provided sequence alone is incomplete unless they ask to seed/constrain an existing design workflow.",
-        "  reject: Do not treat a single sequence as a complete peptide-design submission unless target/design intent is clear.",
-        "- workflow: lead_optimization",
-        "  purpose: Optimize ligand candidates using dedicated MMP/candidate tools.",
-        "  required: Lead compound/candidate context and the dedicated lead optimization operation.",
-        "  reject: Do not expose generic submission actions.",
-    ]
-    for item in COPILOT_CAPABILITIES:
-        lines.extend(
-            [
-                f"- name: {item['name']}",
-                f"  description: {item['description']}",
-                f"  trigger: {item['trigger']}",
-                f"  inputs: {item['inputs']}",
-                f"  confirmation: {item['confirmation']}",
-                f"  execution_boundary: {item['execution_boundary']}",
-            ]
-        )
-    return "\n".join(lines)
 
 
 TASK_PARAMETER_SCHEMA: Dict[str, Dict[str, Any]] = {
@@ -296,24 +243,24 @@ def build_task_detail_skill_definitions(workflow_key: str) -> List[CopilotSkillD
     definitions = [
         CopilotSkillDefinition(
             name="task_detail:submit_current",
-            label="开始运行",
-            description="通过当前页面的校验路径提交任务。",
+            label="Start run",
+            description="Submit the task through the current page's validation path.",
             input_schema=empty_input,
             effect="execute",
             context_type="task_detail",
         ),
         CopilotSkillDefinition(
             name="task_detail:save_draft",
-            label="保存草稿",
-            description="保存当前任务草稿。",
+            label="Save draft",
+            description="Save the current task draft.",
             input_schema=empty_input,
             effect="update",
             context_type="task_detail",
         ),
         CopilotSkillDefinition(
             name="task_detail:cancel_current",
-            label="取消当前任务",
-            description="取消当前运行或排队任务。",
+            label="Cancel current task",
+            description="Cancel the current running or queued task.",
             input_schema=empty_input,
             effect="update",
             context_type="task_detail",
@@ -321,8 +268,8 @@ def build_task_detail_skill_definitions(workflow_key: str) -> List[CopilotSkillD
         ),
         CopilotSkillDefinition(
             name="task_detail:delete_current",
-            label="删除当前任务",
-            description="删除当前任务记录。",
+            label="Delete current task",
+            description="Delete the current task record.",
             input_schema=empty_input,
             effect="delete",
             context_type="task_detail",
@@ -330,8 +277,8 @@ def build_task_detail_skill_definitions(workflow_key: str) -> List[CopilotSkillD
         ),
         CopilotSkillDefinition(
             name="task_detail:apply_metadata_patch",
-            label="更新任务信息",
-            description="更新当前任务的元数据。",
+            label="Update task metadata",
+            description="Update the current task's metadata.",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -353,8 +300,8 @@ def build_task_detail_skill_definitions(workflow_key: str) -> List[CopilotSkillD
         ),
         CopilotSkillDefinition(
             name="task_detail:apply_copilot_attachments",
-            label="应用上传文件",
-            description="按声明的角色应用当前对话中上传的文件。",
+            label="Apply uploaded files",
+            description="Apply files uploaded in the current conversation using their declared roles.",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -379,14 +326,72 @@ def build_task_detail_skill_definitions(workflow_key: str) -> List[CopilotSkillD
             effect="update",
             context_type="task_detail",
         ),
+        CopilotSkillDefinition(
+            name="task_detail:apply_structure_template",
+            label="Apply structure as template",
+            description=(
+                "Fetch a structure file from a URL and attach it as the template for the protein component of the "
+                "current prediction task. Pass the structureUrl returned by a prior rcsb.resolve / rcsb.search / "
+                "alphafold.resolve observation (its pdbUrl or cifUrl); the URL must point to a .pdb, .cif, or .mmcif "
+                "file. Prediction tasks only."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "structureUrl": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "fileName": {"type": "string", "minLength": 1, "maxLength": 128},
+                },
+                "required": ["structureUrl"],
+                "additionalProperties": False,
+            },
+            effect="update",
+            context_type="task_detail",
+        ),
+        CopilotSkillDefinition(
+            name="task_detail:apply_affinity_target_structure",
+            label="Apply structure as affinity target",
+            description=(
+                "Fetch a structure file from a URL and set it as the target/receptor structure for the current "
+                "affinity task. Pass the structureUrl from a prior rcsb.resolve / rcsb.search / alphafold.resolve "
+                "observation (pdbUrl or cifUrl); the URL must point to a .pdb, .cif, or .mmcif file. Affinity tasks "
+                "only."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "structureUrl": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "fileName": {"type": "string", "minLength": 1, "maxLength": 128},
+                },
+                "required": ["structureUrl"],
+                "additionalProperties": False,
+            },
+            effect="update",
+            context_type="task_detail",
+        ),
+        CopilotSkillDefinition(
+            name="task_detail:apply_affinity_ligand_smiles",
+            label="Set affinity binder (SMILES)",
+            description=(
+                "Set the binder / ligand for the current affinity task from a SMILES string. Pass the smiles from a "
+                "prior pubchem.search observation. Affinity tasks only."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"smiles": {"type": "string", "minLength": 1, "maxLength": 2048}},
+                "required": ["smiles"],
+                "additionalProperties": False,
+            },
+            effect="update",
+            context_type="task_detail",
+        ),
     ]
     parameter_schema = _task_parameter_json_schema(normalized_workflow)
     if parameter_schema["properties"]:
         definitions.append(
             CopilotSkillDefinition(
                 name="task_detail:apply_parameter_patch",
-                label="更新任务参数",
-                description="更新当前任务的结构化参数。",
+                label="Update task parameters",
+                description="Update the current task's structured parameters.",
                 input_schema={
                     "type": "object",
                     "properties": {"parameterPatch": parameter_schema},
@@ -398,451 +403,3 @@ def build_task_detail_skill_definitions(workflow_key: str) -> List[CopilotSkillD
             )
         )
     return definitions
-
-
-def render_context_plan_schema_prompt(context_type: str, context_payload: Dict[str, Any]) -> str:
-    if context_type == "task_detail":
-        workflow_key = infer_workflow_key(context_payload)
-        return render_task_submission_schema_prompt(workflow_key)
-    if context_type == "task_list":
-        return _render_task_list_plan_schema()
-    if context_type == "project_list":
-        return _render_project_list_plan_schema()
-    return "No planning schema available for this context. Return {\"actions\":[]}."
-
-
-def _render_task_list_plan_schema() -> str:
-    return (
-        "Current context: task_list (a project's task list page).\n"
-        "Use the page workflow to decide whether an operation is valid. The current project workflow is in context_payload.project.task_type.\n"
-        "Schema: return a JSON object with an \"actions\" array.\n"
-        "Each action must look like {\"id\":\"tasks:<verb>\",\"label\":\"<short label>\",\"description\":\"<detail>\",\"payload\":{...},\"needs_confirmation\":true,\"execute_now\":false}.\n"
-        "Treat the following as tool definitions. Choose only one or two smallest matching actions; copy IDs exactly from context when required:\n"
-        f"{render_context_action_tool_schema('task_list')}\n"
-        "Task-list planning skill:\n"
-        "Goal: convert a user request into the smallest schema action. Let the model reason over context_payload.rows; do not rely on fixed keyword filters.\n"
-        "Inputs to inspect: page workflow, visible task rows, task ids/names/task_id values, state/backend/seed/options, metrics such as ipTM/pLDDT/IPSAE/PAE, and explicit user-provided components.\n"
-        "Decision pattern:\n"
-        "1. Classify intent as analysis-only, view update, create new task, copy existing task with patch, open for manual editing, rename, cancel, or delete.\n"
-        "2. If a source task is needed, choose it by applying the user's natural-language criterion to context_payload.rows: named task, exact id/task_id, best/worst metric, backend/state, recency, or visible ordering.\n"
-        "3. If the user asks for a new submitted variant based on an existing Prediction task, emit tasks:copy_with_patch with only the requested parameterPatch fields.\n"
-        "4. If required source task, component value, or workflow compatibility is unclear, return no actions with missing_questions.\n"
-        "Rules:\n"
-        "- If the user asks for current status, progress, summary, analysis, counts, explanation, or what is happening now, return {\"actions\":[]} unless they explicitly ask to change the view or mutate tasks.\n"
-        "- Component extraction is semantic, not regex-only. First honor explicit labels in the user message, then infer from the value shape only when no label is present.\n"
-        "- Label mapping: 蛋白/protein/peptide/多肽/氨基酸 -> protein; 小分子/配体/化合物/compound/ligand/drug/SMILES/smiles -> ligand; DNA/dna/脱氧核糖核酸 -> dna; RNA/rna/核糖核酸 -> rna.\n"
-        "- Explicit component labels take precedence over inference from the value's shape.\n"
-        "- Ligands may use SMILES or CCD input. Preserve user-provided ligand text exactly except surrounding whitespace.\n"
-        "- Preserve every user-provided component in order. If the user provides multiple proteins/ligands/DNA/RNA items, payload.components must include all of them; do not merge, drop, or copy old components.\n"
-        "- Component schema: {type:\"protein|ligand|dna|rna\", sequence:\"...\", numCopies:1, useMsa:true/false, inputMethod:\"smiles|ccd\" for ligand}. For proteins default useMsa=true unless the user says no MSA or the component is clearly a peptide binder.\n"
-        "- If the user provides a sequence and wants to predict/submit, use tasks:create_with_sequence only when current workflow is prediction.\n"
-        "- If the user asks only to create/fill a task, create the draft action. If they asks to run/submit/predict too, still return the same confirmed create action; the UI will ask for run confirmation after the draft is filled.\n"
-        "- If the current workflow is prediction and the user asks to create a new submitted variant from an existing visible task, use tasks:copy_with_patch. Select taskRowId by reasoning over context_payload.rows, not by inventing ids. Put requested changes in payload.parameterPatch.\n"
-        "- Supported copy patches: backend, seed, and componentsPatch operations. componentsPatch supports append, update, remove, and replace_all. Legacy componentsAdd/componentsReplacement are accepted, but prefer componentsPatch because it is more general.\n"
-        "- For component updates/removals, include a selector using the most stable clue available from the user and rows: id, 1-based index, type, or sequenceContains. If the selector would match multiple components and the user did not disambiguate, ask a question.\n"
-        "- Use only fields the user requested; do not copy unchanged row fields into the patch.\n"
-        "- If the user asks to inspect or manually edit an existing task from the task list without requesting a new submitted variant, identify the target row and use tasks:open.\n"
-        "- If the user request is ambiguous or lacks necessary information, return {\"actions\":[],\"missing_questions\":[\"...\"]}. Ask for clarification instead of forcing a confirmation button.\n"
-        "- If ambiguity prevents one schema-valid action, return missing_questions instead of selecting an interpretation arbitrarily.\n"
-        "- If context_payload.copilot_attachments exists, the user uploaded files through Copilot. Interpret @filename mentions and nearby words to infer role. For affinity and lead optimization, ask which uploaded file is target/protein/receptor and which is ligand/small molecule if roles are unclear. For peptide design, target/protein/receptor files are target structures; ask which file is the target if unclear. For prediction, a PDB/CIF/MMCIF attachment is a template only when the user labels it template/模板 or otherwise says to use it as a structure template.\n"
-        "- If current workflow is virtual_screening, affinity, peptide_design, or lead_optimization and the user asks to predict a lone sequence, return no actions; the assistant message should explain they are in the wrong project function. Virtual Screening requires its dedicated target-plus-library editor and fixed Nesso-1 backend.\n"
-        "- For delete or cancel, identify the target task from context_payload.rows by matching name or task_id.\n"
-        "- Use tasks:cancel for stop/terminate/cancel operations on running or queued tasks.\n"
-        "- Use tasks:delete for removing task records entirely.\n"
-        "- Use tasks:update_view for combined task list search, state/workflow/backend filters, page size, advanced filters, metric column visibility, and sort direction. Use the most specific payload fields only.\n"
-        "- If the user asks to restore the list, show all tasks, remove/clear/reset filters, or says 不要过滤/不过滤/不筛选/取消筛选, use tasks:clear_filters.\n"
-        "- External database identifiers and URLs are references, not component sequences or ligand values. Resolve them through the registered read-only skills before planning a mutating action.\n"
-        "- All actions require user confirmation (needs_confirmation=true, execute_now=false).\n"
-        "Return JSON only. Do not explain."
-    )
-
-
-def _render_project_list_plan_schema() -> str:
-    return (
-        "Current context: project_list (all projects overview page).\n"
-        "The user can create new projects, delete projects, and analyze/project statistics. "
-        "The user CANNOT submit specific tasks from this page.\n"
-        "Schema: return a JSON object with an \"actions\" array.\n"
-        "Each action must look like {\"id\":\"projects:<verb>\",\"label\":\"<short label>\",\"description\":\"<detail>\",\"payload\":{...},\"needs_confirmation\":true,\"execute_now\":false}.\n"
-        "Treat the following as tool definitions. Choose only one or two smallest matching actions; copy IDs exactly from context when required:\n"
-        f"{render_context_action_tool_schema('project_list')}\n"
-        "Rules:\n"
-        "- If the user asks for current status, progress, summary, analysis, counts, explanation, or what is happening now, return {\"actions\":[]} unless they explicitly ask to change the view or mutate projects.\n"
-        "- For open/delete/cancel_active, identify the target project from context_payload.projects by matching name or id.\n"
-        "- If the user asks for affinity-related projects, use projects:workflow_affinity, not projects:backend_boltz.\n"
-        "- Use projects:backend_boltz only when the user explicitly asks for Boltz backend.\n"
-        "- Use projects:update_view for combined project list search, type/state/backend/activity/recency/min-task filters, page size, and non-default sort orders. Use the most specific payload fields only.\n"
-        "- If the user asks to restore the list, show all projects, remove/clear/reset filters, or says 不要过滤/不过滤/不筛选/取消筛选, use projects:clear_filters.\n"
-        "- If the user asks to submit/predict/run a task, return no actions from project_list; they must open the right project/task function first.\n"
-        "- All create and delete actions require user confirmation (needs_confirmation=true, execute_now=false).\n"
-        "- Filter/sort actions also require user confirmation.\n"
-        "Return JSON only. Do not explain."
-    )
-
-
-def render_task_submission_schema_prompt(workflow_key: str = "prediction") -> str:
-    normalized_workflow = normalize_workflow_key(workflow_key)
-    allowed_keys = WORKFLOW_PARAMETER_KEYS.get(normalized_workflow, WORKFLOW_PARAMETER_KEYS["prediction"])
-    backend_instruction = (
-        "Nesso-1 is fixed for Virtual Screening. If the user explicitly requests the backend, set parameter_patch.backend to nesso; do not offer any other backend."
-        if normalized_workflow == "virtual_screening"
-        else "If the user asks to change backend/model engine/provider, set parameter_patch.backend to one of boltz, alphafold3, protenix. For backend aliases: Boltz/Boltz-2 -> boltz; AlphaFold/AF3 -> alphafold3; Protenix -> protenix."
-    )
-    workflow_boundary = (
-        "For Virtual Screening, the target and compound library are edited in the dedicated workspace. Do not emit componentsReplacement, templates, constraints, or structure-prediction backend patches; ask a clarification question when the target or library is missing."
-        if normalized_workflow == "virtual_screening"
-        else ""
-    )
-    lines = [
-        "Task detail context: the user is viewing/editing a specific task within a project.",
-        "They can create new tasks by applying a component replacement to the current draft and then submitting through the validated run path.",
-        "Schema: return exactly one JSON object. In task_detail context, never return an actions array; use capability plus parameter_patch instead.",
-        "If the user wants to modify parameters or submit:",
-        '{"capability":"task_submission_planning","intent":"...",'
-        '"parameter_patch":{},"submit_after_patch":false,"missing_questions":[],"risks":[],"needs_confirmation":true,"execute_now":false}',
-        "If the user wants to delete the current task:",
-        '{"capability":"task_deletion","intent":"delete","needs_confirmation":true,"execute_now":false}',
-        "If the user wants to cancel/stop/terminate the current running or queued task:",
-        '{"capability":"task_cancellation","intent":"cancel_current","needs_confirmation":true,"execute_now":false}',
-        "If the user wants to rename or update description for the current task:",
-        '{"capability":"task_metadata_patch","intent":"rename","metadata_patch":{"taskName":"<NEW_NAME>","taskSummary":"<NEW_DESCRIPTION>"},"needs_confirmation":true,"execute_now":false}',
-        "If the user wants to apply uploaded Copilot files to the current task:",
-        '{"capability":"attachment_application","intent":"apply_uploaded_files","attachment_applications":[{"attachmentId":"<ID_FROM_CONTEXT>","fileName":"<FILENAME>","role":"target|ligand|template"}],"missing_questions":[],"needs_confirmation":true,"execute_now":false}',
-        "If the request is ambiguous or missing necessary information:",
-        '{"capability":"clarification_needed","intent":"ask_clarifying_question","missing_questions":["<QUESTION_TO_ASK_USER>"],"needs_confirmation":false,"execute_now":false}',
-        "If the user asks for current status, progress, summary, analysis, counts, explanation, or what is happening now, return {\"capability\":\"analysis_only\",\"intent\":\"answer_status\",\"needs_confirmation\":false,\"execute_now\":false}.",
-        "Interpret user-requested input changes into parameter_patch schema. Component extraction is semantic: first honor explicit labels, then infer from value shape only when no label is present.",
-        "For phrases like 新任务/new task with explicit components, do not use a create action. Return capability=task_submission_planning with parameter_patch.componentsReplacement and submit_after_patch=true.",
-        "For phrases like 提交/run/submit/predict plus explicit components, include every component in componentsReplacement and set submit_after_patch=true, needs_confirmation=true, execute_now=false.",
-        "If the user only asks to edit/fill/change parameters without running, set submit_after_patch=false.",
-        backend_instruction,
-        workflow_boundary,
-        "For peptide design option changes, map natural-language controls into exact parameter_patch keys: binder length -> peptideBinderLength; design mode -> peptideDesignMode; iterations/rounds -> peptideIterations; population size -> peptidePopulationSize; elite/top candidates -> peptideEliteSize; mutation rate -> peptideMutationRate; initial sequence/start sequence -> peptideInitialSequence plus peptideUseInitialSequence=true; sequence mask/fixed positions -> peptideSequenceMask; bicyclic linker -> peptideBicyclicLinkerCcd; automatic/manual cysteine positions -> peptideBicyclicCysPositionMode; fixed terminal cysteine -> peptideBicyclicFixTerminalCys; include extra cysteine -> peptideBicyclicIncludeExtraCys; Cys1/Cys2/Cys3 positions -> peptideBicyclicCys1Pos/peptideBicyclicCys2Pos/peptideBicyclicCys3Pos.",
-        "Label mapping: 蛋白/protein/peptide/多肽/氨基酸 -> protein; 小分子/配体/化合物/compound/ligand/drug/SMILES/smiles -> ligand; DNA/dna -> dna; RNA/rna -> rna.",
-        "For structure prediction, peptide and protein sequence inputs are both protein components, unless the user explicitly labels the value as ligand/small molecule/SMILES.",
-        "When the user asks for only/single/只有/rewrite/replace components, replace the component list and clear constraints unless they explicitly ask to keep constraints. Do not copy old components.",
-        "If the user gives multiple components, preserve all components in order. Explicitly labeled ligand text remains ligand regardless of letter case.",
-        "If the type or value of a component is unclear, or the user asks to run but required inputs are missing, set capability=clarification_needed with missing_questions instead of producing a confirmation action.",
-        "If context_payload.copilot_attachments exists, use @filename mentions and nearby role words. Do not assume file roles from upload order. If roles are clear, return capability=attachment_application with attachment_applications using exact attachment IDs and filenames from context_payload.copilot_attachments. In affinity and lead optimization, target/protein/receptor files are target structures and ligand/small molecule/compound files are ligand structures. In peptide design, target/protein/receptor files are target structures for peptide binder design; ask which file is the target if unclear. In prediction, PDB/CIF/MMCIF files are templates only when explicitly described as template/模板. If uploaded file roles are unclear, ask a clarifying question.",
-        "Allowed parameter_patch keys for this workflow:",
-    ]
-    for key in allowed_keys:
-        spec = TASK_PARAMETER_SCHEMA[key]
-        if spec["type"] == "component_replacement":
-            detail = (
-                'object {"mode":"replace","components":[{"type":"protein","sequence":"<SEQUENCE>","numCopies":1,'
-                '"useMsa":false}],"clearConstraints":true}; use only for explicit component input changes.'
-            )
-        elif spec["type"] == "enum":
-            detail = ", ".join(_backend_values_for_workflow(normalized_workflow) if key == "backend" else spec["values"])
-        elif spec["type"] == "bool":
-            detail = "boolean true or false"
-        elif spec["type"] == "string":
-            detail = f"string max length {spec['max_length']}"
-        else:
-            detail = f"{spec['type']} range {spec['min']}..{spec['max']}"
-        lines.append(f"- {key}: {detail}")
-    if not allowed_keys:
-        lines.append("- none. Ask follow-up questions or explain that this workflow needs a dedicated tool.")
-    lines.append("All modifications and submissions must set needs_confirmation=true and execute_now=false.")
-    return "\n".join(lines)
-
-
-def _finite_number(value: Any) -> float | None:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    if parsed != parsed or parsed in (float("inf"), float("-inf")):
-        return None
-    return parsed
-
-
-def _sanitize_component_replacement(value: Any) -> Dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    if str(value.get("mode") or "replace").strip().lower() != "replace":
-        return None
-    components_raw = value.get("components")
-    if not isinstance(components_raw, list):
-        return None
-    components: List[Dict[str, Any]] = []
-    for item in components_raw[:12]:
-        if not isinstance(item, dict):
-            continue
-        component_type = str(item.get("type") or "protein").strip().lower()
-        if component_type in {"peptide", "polypeptide"}:
-            component_type = "protein"
-        if component_type not in {"protein", "dna", "rna", "ligand"}:
-            continue
-        sequence = "".join(str(item.get("sequence") or "").split()).upper()
-        if component_type == "ligand":
-            sequence = str(item.get("sequence") or "").strip()
-        if not sequence:
-            continue
-        component: Dict[str, Any] = {
-            "id": str(item.get("id") or f"copilot-{component_type}-{len(components) + 1}"),
-            "type": component_type,
-            "sequence": sequence,
-            "numCopies": max(1, int(_finite_number(item.get("numCopies")) or 1)),
-        }
-        if component_type == "protein":
-            component["useMsa"] = item.get("useMsa") is not False
-            component["cyclic"] = bool(item.get("cyclic", False))
-        if component_type == "ligand":
-            component["inputMethod"] = str(item.get("inputMethod") or "smiles")
-        components.append(component)
-    if not components:
-        return None
-    return {
-        "mode": "replace",
-        "reason": str(value.get("reason") or "User requested component input changes."),
-        "components": components,
-        "clearConstraints": value.get("clearConstraints", True) is not False,
-    }
-
-
-def sanitize_task_parameter_patch(candidate: Any, workflow_key: str = "prediction") -> Dict[str, Any]:
-    if not isinstance(candidate, dict):
-        return {}
-    normalized_workflow = normalize_workflow_key(workflow_key)
-    allowed_keys = set(WORKFLOW_PARAMETER_KEYS.get(normalized_workflow, WORKFLOW_PARAMETER_KEYS["prediction"]))
-    sanitized: Dict[str, Any] = {}
-    for key, value in candidate.items():
-        normalized_key = str(key)
-        if normalized_key not in allowed_keys:
-            continue
-        spec = TASK_PARAMETER_SCHEMA.get(normalized_key)
-        if not spec:
-            continue
-        if spec["type"] == "component_replacement":
-            if normalized_workflow != "prediction":
-                continue
-            replacement = _sanitize_component_replacement(value)
-            if replacement:
-                sanitized[normalized_key] = replacement
-            continue
-        if spec["type"] == "enum":
-            token = str(value or "").strip()
-            if normalized_key == "backend":
-                token = {"nesso1": "nesso", "nesso-1": "nesso"}.get(token, token)
-                allowed_values = _backend_values_for_workflow(normalized_workflow)
-            else:
-                allowed_values = spec["values"]
-            if token in allowed_values:
-                sanitized[normalized_key] = token
-            continue
-        if spec["type"] == "bool":
-            if isinstance(value, bool):
-                sanitized[normalized_key] = value
-            continue
-        if spec["type"] == "string":
-            text = str(value or "").strip()
-            if text:
-                sanitized[normalized_key] = text[: int(spec["max_length"])]
-            continue
-        number = _finite_number(value)
-        if number is None:
-            continue
-        min_value = float(spec["min"])
-        max_value = float(spec["max"])
-        if number < min_value or number > max_value:
-            continue
-        if spec["type"] == "int":
-            sanitized[normalized_key] = int(number)
-        else:
-            sanitized[normalized_key] = float(number)
-    return sanitized
-
-
-def _sanitize_attachment_applications(candidate: Any, workflow_key: str = "prediction") -> List[Dict[str, str]]:
-    if not isinstance(candidate, dict):
-        return []
-    raw_items = candidate.get("attachment_applications")
-    if raw_items is None:
-        raw_items = candidate.get("attachmentApplications")
-    if not isinstance(raw_items, list):
-        return []
-    normalized_workflow = normalize_workflow_key(workflow_key)
-    if normalized_workflow == "prediction":
-        allowed_roles = {"template"}
-    elif normalized_workflow == "peptide_design":
-        allowed_roles = {"target"}
-    elif normalized_workflow in {"affinity", "lead_optimization"}:
-        allowed_roles = {"target", "ligand"}
-    else:
-        allowed_roles = set()
-    applications: List[Dict[str, str]] = []
-    seen = set()
-    for item in raw_items[:8]:
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role") or "").strip().lower()
-        if role not in allowed_roles:
-            continue
-        attachment_id = str(item.get("attachmentId") or item.get("attachment_id") or item.get("id") or "").strip()
-        file_name = str(item.get("fileName") or item.get("file_name") or item.get("name") or "").strip()
-        if not attachment_id and not file_name:
-            continue
-        key = (attachment_id, file_name, role)
-        if key in seen:
-            continue
-        seen.add(key)
-        applications.append({"attachmentId": attachment_id, "fileName": file_name, "role": role})
-    return applications
-
-
-def build_task_submission_actions(candidate: Dict[str, Any], user_content: str, workflow_key: str = "prediction") -> List[Dict[str, Any]]:
-    normalized_workflow = normalize_workflow_key(workflow_key)
-    capability = str(candidate.get("capability") or "").strip().lower()
-    missing_questions = candidate.get("missing_questions") if isinstance(candidate, dict) else []
-    if capability == "clarification_needed" or (
-        isinstance(missing_questions, list) and any(str(item or "").strip() for item in missing_questions)
-    ):
-        return []
-    if capability == "task_deletion":
-        return [
-            {
-                "id": "task_detail:delete_current",
-                "label": "删除当前任务",
-                "description": "确认删除当前正在查看的任务",
-                "payload": {
-                    "schemaVersion": ACTION_SCHEMA_VERSION,
-                    "contextType": "task_detail",
-                    "workflowKey": normalized_workflow,
-                    "destructive": True,
-                },
-                "needs_confirmation": True,
-                "execute_now": False,
-            }
-        ]
-    if capability == "task_cancellation":
-        return [
-            {
-                "id": "task_detail:cancel_current",
-                "label": "取消当前任务",
-                "description": "确认取消当前正在运行或排队的任务",
-                "payload": {
-                    "schemaVersion": ACTION_SCHEMA_VERSION,
-                    "contextType": "task_detail",
-                    "workflowKey": normalized_workflow,
-                    "destructive": True,
-                },
-                "needs_confirmation": True,
-                "execute_now": False,
-            }
-        ]
-    if capability == "task_metadata_patch":
-        raw_patch = candidate.get("metadata_patch") if isinstance(candidate.get("metadata_patch"), dict) else {}
-        task_name = str(raw_patch.get("taskName") or raw_patch.get("name") or "").strip()
-        task_summary = str(raw_patch.get("taskSummary") or raw_patch.get("summary") or "").strip()
-        metadata_patch = {
-            key: value
-            for key, value in {
-                "taskName": task_name,
-                "taskSummary": task_summary,
-            }.items()
-            if value
-        }
-        if not metadata_patch:
-            return []
-        parts = []
-        if task_name:
-            parts.append(f"name: {task_name}")
-        if task_summary:
-            parts.append(f"description: {task_summary}")
-        return [
-            {
-                "id": "task_detail:apply_metadata_patch",
-                "label": "更新任务信息",
-                "description": ", ".join(parts),
-                "payload": {
-                    "metadataPatch": metadata_patch,
-                    "workflowKey": normalized_workflow,
-                    "schemaVersion": ACTION_SCHEMA_VERSION,
-                    "contextType": "task_detail",
-                    "destructive": False,
-                },
-                "needs_confirmation": True,
-                "execute_now": False,
-            }
-        ]
-    if capability == "attachment_application":
-        applications = _sanitize_attachment_applications(candidate, normalized_workflow)
-        if not applications:
-            return []
-        role_labels = {
-            "target": "target",
-            "ligand": "ligand",
-            "template": "template",
-        }
-        description = ", ".join(
-            f"{item.get('fileName') or item.get('attachmentId')} as {role_labels.get(item.get('role'), item.get('role'))}"
-            for item in applications
-        )
-        return [
-            {
-                "id": "task_detail:apply_copilot_attachments",
-                "label": "应用上传文件",
-                "description": description,
-                "payload": {
-                    "attachmentApplications": applications,
-                    "sourceContent": str(user_content or ""),
-                    "workflowKey": normalized_workflow,
-                    "schemaVersion": ACTION_SCHEMA_VERSION,
-                    "contextType": "task_detail",
-                    "destructive": False,
-                },
-                "needs_confirmation": True,
-                "execute_now": False,
-            }
-        ]
-    patch = sanitize_task_parameter_patch(candidate.get("parameter_patch"), normalized_workflow)
-    if not patch:
-        return []
-    description_parts: List[str] = []
-    for key, value in patch.items():
-        if key == "componentsReplacement" and isinstance(value, dict):
-            components = value.get("components") if isinstance(value.get("components"), list) else []
-            first = components[0] if components and isinstance(components[0], dict) else {}
-            sequence = str(first.get("sequence") or "").strip()
-            description_parts.append(
-                f"components: replace with one protein component {sequence}" if sequence else "components: replace"
-            )
-        else:
-            description_parts.append(f"{key}: {value}")
-    description = ", ".join(description_parts)
-    wants_submit = candidate.get("submit_after_patch") is True
-    if wants_submit:
-        return [
-            {
-                "id": "task_detail:apply_patch_and_submit",
-                "label": "Confirm changes and run",
-                "description": f"Apply {description}, then use the existing validated run action.",
-                "payload": {
-                    "parameterPatch": patch,
-                    "workflowKey": normalized_workflow,
-                    "schemaVersion": ACTION_SCHEMA_VERSION,
-                    "contextType": "task_detail",
-                    "destructive": False,
-                },
-                "needs_confirmation": True,
-                "execute_now": False,
-            }
-        ]
-    return [
-        {
-            "id": "task_detail:apply_parameter_patch",
-            "label": "Confirm parameter changes",
-            "description": description,
-            "payload": {
-                "parameterPatch": patch,
-                "workflowKey": normalized_workflow,
-                "schemaVersion": ACTION_SCHEMA_VERSION,
-                "contextType": "task_detail",
-                "destructive": False,
-            },
-            "needs_confirmation": True,
-            "execute_now": False,
-        }
-    ]

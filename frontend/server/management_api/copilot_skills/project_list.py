@@ -5,8 +5,8 @@ from typing import Any, Dict
 
 PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "projects:create": {
-        "label": "新建项目",
-        "description": "打开新建项目窗口。",
+        "label": "New project",
+        "description": "Open the new-project dialog.",
         "payload_keys": ["create"],
         "payload_defaults": {"create": True},
         "input_schema": {
@@ -17,8 +17,8 @@ PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
     },
     "projects:open": {
-        "label": "打开项目",
-        "description": "打开匹配的项目。",
+        "label": "Open project",
+        "description": "Open the matching project.",
         "payload_keys": ["projectId", "projectName"],
         "requires_payload": ["projectId"],
         "input_schema": {
@@ -32,8 +32,8 @@ PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
     },
     "projects:delete": {
-        "label": "删除项目",
-        "description": "删除匹配的项目。",
+        "label": "Delete project",
+        "description": "Delete the matching project.",
         "payload_keys": ["projectId", "projectName"],
         "requires_payload": ["projectId"],
         "destructive": True,
@@ -48,8 +48,8 @@ PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
     },
     "projects:cancel_active": {
-        "label": "取消项目运行",
-        "description": "取消匹配项目中的 active runtime 任务。",
+        "label": "Cancel project runs",
+        "description": "Cancel the active runtime tasks in the matching project.",
         "payload_keys": ["projectId", "projectName"],
         "requires_payload": ["projectId"],
         "destructive": True,
@@ -65,8 +65,8 @@ PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
     },
     "projects:failed": {
-        "label": "失败项目",
-        "description": "筛选包含失败任务的项目。",
+        "label": "Failed projects",
+        "description": "Filter for projects that contain failed tasks.",
         "payload_keys": ["activityFilter"],
         "payload_defaults": {"activityFilter": "failed"},
         "input_schema": {
@@ -77,8 +77,8 @@ PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
     },
     "projects:active": {
-        "label": "运行中项目",
-        "description": "筛选包含排队或运行任务的项目。",
+        "label": "Active projects",
+        "description": "Filter for projects with queued or running tasks.",
         "payload_keys": ["activityFilter"],
         "payload_defaults": {"activityFilter": "active"},
         "input_schema": {
@@ -89,8 +89,8 @@ PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
     },
     "projects:clear_filters": {
-        "label": "显示全部项目",
-        "description": "清除项目列表筛选并恢复默认排序。",
+        "label": "Show all projects",
+        "description": "Clear project-list filters and restore the default sorting.",
         "payload_keys": [
             "search",
             "typeFilter",
@@ -127,8 +127,8 @@ PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
     },
     "projects:update_view": {
-        "label": "更新项目视图",
-        "description": "按用户要求组合更新项目列表搜索、筛选、排序、分页和高级筛选。",
+        "label": "Update project view",
+        "description": "Combine and update the project-list search, filters, sorting, paging, and advanced filters as requested by the user.",
         "payload_keys": [
             "search",
             "typeFilter",
@@ -168,50 +168,50 @@ PROJECT_LIST_ACTION_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
     },
     "projects:workflow_prediction": {
-        "label": "Prediction 项目",
-        "description": "筛选结构预测 workflow 项目。",
+        "label": "Prediction projects",
+        "description": "Filter for structure-prediction workflow projects.",
         "payload_keys": ["workflowFilter"],
         "payload_defaults": {"workflowFilter": "prediction"},
     },
     "projects:workflow_virtual_screening": {
-        "label": "Virtual Screening 项目",
-        "description": "筛选 Nesso-1 Virtual Screening workflow 项目。",
+        "label": "Virtual Screening projects",
+        "description": "Filter for Nesso-1 Virtual Screening workflow projects.",
         "payload_keys": ["workflowFilter"],
         "payload_defaults": {"workflowFilter": "virtual_screening"},
     },
     "projects:workflow_affinity": {
-        "label": "Affinity 项目",
-        "description": "筛选 Affinity Scoring workflow 项目。",
+        "label": "Affinity projects",
+        "description": "Filter for Affinity Scoring workflow projects.",
         "payload_keys": ["workflowFilter"],
         "payload_defaults": {"workflowFilter": "affinity"},
     },
     "projects:workflow_peptide_design": {
-        "label": "Peptide Design 项目",
-        "description": "筛选 Peptide Design workflow 项目。",
+        "label": "Peptide Design projects",
+        "description": "Filter for Peptide Design workflow projects.",
         "payload_keys": ["workflowFilter"],
         "payload_defaults": {"workflowFilter": "peptide_design"},
     },
     "projects:workflow_lead_optimization": {
-        "label": "Lead Optimization 项目",
-        "description": "筛选 Lead Optimization workflow 项目。",
+        "label": "Lead Optimization projects",
+        "description": "Filter for Lead Optimization workflow projects.",
         "payload_keys": ["workflowFilter"],
         "payload_defaults": {"workflowFilter": "lead_optimization"},
     },
     "projects:updated_desc": {
-        "label": "最新更新",
-        "description": "按最近更新时间降序排序。",
+        "label": "Newest updated",
+        "description": "Sort by most-recently-updated, descending.",
         "payload_keys": ["sortBy"],
         "payload_defaults": {"sortBy": "updated_desc"},
     },
     "projects:updated_asc": {
-        "label": "最早更新",
-        "description": "按最近更新时间升序排序。",
+        "label": "Oldest updated",
+        "description": "Sort by most-recently-updated, ascending.",
         "payload_keys": ["sortBy"],
         "payload_defaults": {"sortBy": "updated_asc"},
     },
     "projects:backend_boltz": {
-        "label": "Boltz 项目",
-        "description": "筛选 Boltz backend 项目。",
+        "label": "Boltz projects",
+        "description": "Filter for Boltz-backend projects.",
         "payload_keys": ["backendFilter"],
         "payload_defaults": {"backendFilter": "boltz"},
     },

@@ -1609,6 +1609,29 @@ def prepare_structure_for_affinity(source_path: Path, work_dir: Path) -> Path:
     return sanitized_path
 
 
+def _stage_structure_for_affinity_container(source_path: Path, work_dir: Path) -> Path:
+    """Place the scoring input inside the directory mounted into Boltz2Score."""
+    source_path = Path(source_path)
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    source_resolved = source_path.resolve()
+    work_dir_resolved = work_dir.resolve()
+    try:
+        source_resolved.relative_to(work_dir_resolved)
+        return source_path
+    except ValueError:
+        pass
+
+    staged_path = work_dir / source_path.name
+    shutil.copy2(source_path, staged_path)
+    print(
+        f"📦 已将亲和力评分输入暂存到 Boltz2Score 容器挂载目录: {staged_path}",
+        file=sys.stderr,
+    )
+    return staged_path
+
+
 def _is_protein_like_residue_name(resname: str) -> bool:
     normalized = str(resname or "").strip().upper()
     return normalized in AMINO_ACID_MAPPING
@@ -2553,7 +2576,10 @@ def _run_boltz2score_affinity_postprocess(
     work_dir.mkdir(parents=True, exist_ok=True)
     sanitized_struct_dir.mkdir(parents=True, exist_ok=True)
 
-    model_for_affinity = prepare_structure_for_affinity(model_path, sanitized_struct_dir)
+    model_for_affinity = _stage_structure_for_affinity_container(
+        prepare_structure_for_affinity(model_path, sanitized_struct_dir),
+        sanitized_struct_dir,
+    )
     chain_plan = _infer_affinity_chain_plan(model_for_affinity, requested_ligand_chain)
     if not chain_plan:
         print(

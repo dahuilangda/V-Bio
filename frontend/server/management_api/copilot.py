@@ -2,23 +2,39 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Tuple
 
 import requests
 
 from management_api.copilot_capabilities import (
     build_registered_capability_catalog,
-    build_context_actions,
     build_task_detail_skill_definitions,
-    build_task_submission_actions,
     infer_workflow_key,
-    render_capability_prompt,
-    render_context_plan_schema_prompt,
 )
-from management_api.copilot_skill_harness import CopilotSkillHarness
+from management_api.copilot_skill_harness import (
+    CopilotSkillHarness,
+    RECORD_IDENTITY_FIELDS,
+    RECORD_LONG_FIELDS,
+    RECORD_NUMERIC_FIELDS,
+)
 from management_api.copilot_skills.context_actions import build_context_skill_definitions
+from management_api.copilot_skills.compute_skills import register_compute_skills
 from management_api.copilot_skills.online_databases import OnlineDatabaseSkills, OnlineSkillDefinition
+from management_api.copilot_trace import (
+    TRACE_AUDIT_REJECTED,
+    TRACE_FALLBACK,
+    TRACE_MALFORMED_OUTPUT,
+    TRACE_MODEL_REQUEST,
+    TRACE_NO_CONVERGENCE,
+    TRACE_SKILL_OBSERVATIONS,
+    TRACE_TERMINAL,
+    PlannerTrace,
+    compact_observations,
+    compact_operations,
+    compact_usage,
+)
 
 
 MAX_CONTEXT_STRING_CHARS = 1600
@@ -58,16 +74,69 @@ FILE_METADATA_KEYS = {
 
 CAPABILITY_CATALOG_SKILL = "platform.capability_catalog"
 
+# Cap on how many prior-turn records are carried forward as copilot_memory — enough for continuity
+# on a follow-up, small enough to stay well under the context budget.
+MAX_MEMORY_RECORDS = 20
+
+
+def _compact_memory_records(observations: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Project a turn's observations into compact, carry-forwardable records for copilot_memory.
+
+    Uses the shared RECORD_*_FIELDS registry (single source of truth for record identity). Each
+    record keeps its source + identity fields (≤80 chars) and truncated long fields (≤60), so a
+    follow-up turn can recognize a previously retrieved entity without re-searching, while no full
+    sequence/SMILES body is hauled across turns. General — projects whatever the skills returned.
+    """
+    records: List[Dict[str, Any]] = []
+    for observation in observations.values():
+        if not isinstance(observation, dict) or not observation.get("ok"):
+            continue
+        for value in observation.get("values") or []:
+            if not isinstance(value, dict):
+                continue
+            nested = value.get("results")
+            candidates = nested if isinstance(nested, list) else [value]
+            source = str(value.get("source") or "")
+            for record in candidates:
+                if not isinstance(record, dict):
+                    continue
+                entry: Dict[str, Any] = {}
+                if source:
+                    entry["source"] = source
+                for field in RECORD_IDENTITY_FIELDS:
+                    text = str(record.get(field) or "").strip()
+                    if text:
+                        entry[field] = text[:80]
+                for field in RECORD_LONG_FIELDS:
+                    text = str(record.get(field) or "").strip()
+                    if text:
+                        entry[field] = text[:60]
+                if len(entry) > (1 if source else 0):
+                    records.append(entry)
+                    if len(records) >= MAX_MEMORY_RECORDS:
+                        return records
+    return records
+
+# JSON-schema constraint keys the model-server grammar decoder cannot enforce. The harness
+# audit validates the full schema, so these are stripped from the server-side grammar only,
+# loosening generation-time constraints without weakening correctness.
+_GRAMMAR_UNSUPPORTED_KEYS = frozenset({"uniqueItems", "pattern", "format"})
+
+
+def _sanitize_schema_for_grammar(schema: Any) -> Any:
+    if isinstance(schema, dict):
+        return {
+            key: _sanitize_schema_for_grammar(value)
+            for key, value in schema.items()
+            if key not in _GRAMMAR_UNSUPPORTED_KEYS
+        }
+    if isinstance(schema, list):
+        return [_sanitize_schema_for_grammar(item) for item in schema]
+    return schema
+
 
 def _read_registered_capability_catalog(_arguments: Dict[str, Any]) -> Dict[str, Any]:
     return build_registered_capability_catalog()
-
-
-def compact_text(value: Any, limit: int = 1800) -> str:
-    text = str(value or "").strip()
-    if len(text) <= limit:
-        return text
-    return f"{text[:limit]}..."
 
 
 def _compact_string(value: str, limit: int = MAX_CONTEXT_STRING_CHARS) -> str:
@@ -126,17 +195,6 @@ def sanitize_context_payload(value: Any, *, depth: int = 0, parent: Dict[str, An
     return _compact_string(str(value))
 
 
-def compact_context_payload(value: Any, limit: int = 5000) -> str:
-    safe_value = sanitize_context_payload(value)
-    try:
-        text = json.dumps(safe_value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    except (TypeError, ValueError):
-        text = str(safe_value)
-    if len(text) <= limit:
-        return text
-    return f"{text[:limit]}... [context truncated, original_chars={len(text)}]"
-
-
 def normalize_chat_messages_for_template(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
     system_parts: List[str] = []
     non_system: List[Dict[str, str]] = []
@@ -152,14 +210,6 @@ def normalize_chat_messages_for_template(messages: List[Dict[str, str]]) -> List
     if not system_parts:
         return non_system
     return [{"role": "system", "content": "\n\n".join(system_parts)}] + non_system
-
-
-def _candidate_requests_clarification(candidate: Dict[str, Any]) -> bool:
-    capability = str(candidate.get("capability") or "").strip().lower()
-    missing_questions = candidate.get("missing_questions")
-    return capability == "clarification_needed" or (
-        isinstance(missing_questions, list) and any(str(item or "").strip() for item in missing_questions)
-    )
 
 
 def _extract_chat_message_content(message: Any) -> str:
@@ -187,101 +237,21 @@ def _extract_chat_message_content(message: Any) -> str:
     return ""
 
 
-def _payload_has_reasoning_without_content(payload: Any) -> bool:
-    choices = payload.get("choices") if isinstance(payload, dict) else None
-    if not choices or not isinstance(choices[0], dict):
-        return False
-    message = choices[0].get("message")
-    if not isinstance(message, dict) or _extract_chat_message_content(message):
-        return False
-    for key in ("reasoning", "reasoning_content"):
-        value = message.get(key)
-        if isinstance(value, str) and value.strip():
-            return True
-    return False
+def _extract_first_json_object(text: str) -> Any:
+    """Return the first complete JSON object in ``text``, or None.
 
-
-def _error_mentions_field(text: Any, field: str) -> bool:
-    normalized = str(text or "").lower()
-    return field.lower() in normalized and any(token in normalized for token in ("unsupported", "unknown", "extra", "unexpected", "not permitted", "unrecognized"))
-
-
-def _candidate_declares_confirmable_task_action(candidate: Any) -> bool:
-    if not isinstance(candidate, dict):
-        return False
-    capability = str(candidate.get("capability") or "").strip().lower()
-    if capability in {"task_submission_planning", "task_deletion", "task_metadata_patch", "attachment_application"}:
-        return True
-    if candidate.get("needs_confirmation") is True:
-        return True
-    return isinstance(candidate.get("parameter_patch"), dict) or isinstance(candidate.get("metadata_patch"), dict)
-
-
-def _candidate_declares_context_actions(candidate: Any) -> bool:
-    if not isinstance(candidate, dict):
-        return False
-    planned = candidate.get("actions") or candidate.get("plan_actions")
-    if isinstance(planned, dict):
-        return True
-    return isinstance(planned, list) and any(isinstance(item, dict) for item in planned)
-
-
-def _read_authoritative_workflow_key(context_payload: Any) -> str:
-    if not isinstance(context_payload, dict):
-        return ""
-    page = context_payload.get("page")
-    if isinstance(page, dict):
-        value = page.get("workflowKey") or page.get("workflow_key") or page.get("workflow")
-        if value:
-            return str(value or "").strip().lower()
-    project = context_payload.get("project")
-    if isinstance(project, dict):
-        value = project.get("workflow_key") or project.get("workflow") or project.get("task_type")
-        if value:
-            return str(value or "").strip().lower()
-    return ""
-
-
-def remove_page_workflow_conflicts(context_payload: Any) -> Any:
-    if not isinstance(context_payload, dict):
-        return context_payload
-    workflow_key = _read_authoritative_workflow_key(context_payload)
-    if not workflow_key or "affinity" in workflow_key:
-        return context_payload
-    current_task = context_payload.get("currentTask")
-    if not isinstance(current_task, dict):
-        return context_payload
-    cleaned_task = dict(current_task)
-    cleaned_task.pop("affinity", None)
-    properties = cleaned_task.get("properties")
-    if isinstance(properties, dict):
-        cleaned_properties = dict(properties)
-        cleaned_properties.pop("affinityMode", None)
-        cleaned_properties.pop("affinity_mode", None)
-        cleaned_task["properties"] = cleaned_properties
-    cleaned_task["_copilot_context_note"] = (
-        "Workflow-incompatible affinity result fields were omitted because the authoritative page workflow is "
-        f"{workflow_key}."
-    )
-    cleaned = dict(context_payload)
-    cleaned["currentTask"] = cleaned_task
-    return cleaned
-
-
-def strip_internal_capability_lines(content: str) -> str:
-    cleaned_lines: List[str] = []
-    internal_label_pattern = re.compile(
-        r"^\s*(?:[*_`#>\-\s]*)(?:能力使用|能力调用|capability\s*(?:used|call)?|tool\s*(?:used|call)?)\s*[:：]",
-        re.IGNORECASE,
-    )
-    internal_id_pattern = re.compile(
-        r"\b(?:project_list_analysis|project_list_filter_sort|task_list_analysis|task_list_filter_sort|task_result_analysis|task_submission_planning|prediction\.submit_plan|affinity\.submit_plan|peptide_design\.submit_plan|lead_optimization\.submit_plan)\b"
-    )
-    for line in str(content or "").splitlines():
-        if internal_label_pattern.search(line) or internal_id_pattern.search(line):
+    Used for thinking-mode planner output, which is free prose around the JSON. Unlike a greedy
+    ``{.*}`` regex, ``json.JSONDecoder().raw_decode`` parses one object from a position and ignores
+    trailing data, so stray braces in surrounding prose don't corrupt the extraction.
+    """
+    decoder = json.JSONDecoder()
+    for start in (index for index, char in enumerate(text) if char == "{"):
+        try:
+            obj, _consumed = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
             continue
-        cleaned_lines.append(line)
-    return "\n".join(cleaned_lines).strip()
+        return obj
+    return None
 
 
 class CopilotAssistant:
@@ -295,6 +265,8 @@ class CopilotAssistant:
         session: requests.Session,
         logger: Any,
         max_planner_rounds: int = 8,
+        max_malformed_retries: int = 3,
+        enable_thinking: bool = False,
     ) -> None:
         self.chat_api_url = chat_api_url.rstrip("/")
         self.chat_api_key = chat_api_key.strip()
@@ -303,6 +275,10 @@ class CopilotAssistant:
         self.session = session
         self.logger = logger
         self.max_planner_rounds = max(1, min(20, int(max_planner_rounds)))
+        self.max_malformed_retries = max(0, min(6, int(max_malformed_retries)))
+        # Let the model reason before emitting structured output. Improves grounding/multi-step for models that
+        # can think AND conform to a strict schema; gemma4-31b conforms worse with thinking on, so default off.
+        self.enable_thinking = bool(enable_thinking)
         skills = OnlineDatabaseSkills(session=session, timeout_seconds=min(self.timeout_seconds, 30.0))
         skills.register(
             OnlineSkillDefinition(
@@ -319,16 +295,16 @@ class CopilotAssistant:
             ),
             _read_registered_capability_catalog,
         )
+        register_compute_skills(skills)
         self.skill_harness = CopilotSkillHarness(skills=skills)
 
     def _call_model(
         self,
         messages: List[Dict[str, str]],
         *,
-        strip_internal: bool = True,
-        json_response: bool = False,
-        allow_empty: bool = False,
-    ) -> str:
+        response_schema: Dict[str, Any],
+        schema_name: str = "vbio_copilot_turn",
+    ) -> Tuple[str, Dict[str, Any]]:
         if not self.chat_api_url:
             raise RuntimeError("Copilot API URL is not configured.")
         messages = normalize_chat_messages_for_template(messages)
@@ -338,85 +314,64 @@ class CopilotAssistant:
         headers = {"Content-Type": "application/json"}
         if self.chat_api_key:
             headers["Authorization"] = f"Bearer {self.chat_api_key}"
-        attempts = [
-            {"response_format": json_response, "disable_thinking": False, "requires_reasoning_empty": False},
-            {"response_format": json_response, "disable_thinking": True, "requires_reasoning_empty": True},
-            {"response_format": False, "disable_thinking": True, "requires_reasoning_empty": True},
-            {"response_format": False, "disable_thinking": False, "requires_reasoning_empty": False},
-        ] if json_response else [
-            {"response_format": False, "disable_thinking": False, "requires_reasoning_empty": False},
-            {"response_format": False, "disable_thinking": True, "requires_reasoning_empty": True},
-            {"response_format": False, "disable_thinking": False, "requires_reasoning_empty": False},
-        ]
-        saw_reasoning_empty = False
-        for attempt, options in enumerate(attempts):
-            if options["requires_reasoning_empty"] and not saw_reasoning_empty:
-                continue
-            request_messages = messages
-            if attempt > 0:
-                retry_instruction = (
-                    "The previous response was empty. Return a non-empty response. "
-                    "If JSON output is requested, return exactly one valid JSON object matching the schema."
-                )
-                request_messages = normalize_chat_messages_for_template(
-                    [{"role": "system", "content": retry_instruction}] + messages
-                )
-            body: Dict[str, Any] = {
-                "model": self.chat_model,
-                "messages": request_messages,
-                "max_tokens": 900,
-                "temperature": 0.2,
+        body: Dict[str, Any] = {
+            "model": self.chat_model,
+            "messages": messages,
+            "max_tokens": 4096 if self.enable_thinking else 2048,
+            "temperature": 0,
+            "chat_template_kwargs": {"enable_thinking": self.enable_thinking},
+        }
+        # When thinking is enabled, omit the strict json_schema grammar constraint — the grammar
+        # engine conflicts with the model's reasoning tokens, causing conformance failures. Without
+        # it the model reasons freely and emits parseable JSON naturally (the harness validates).
+        if not self.enable_thinking:
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema_name,
+                    "strict": True,
+                    "schema": _sanitize_schema_for_grammar(response_schema),
+                },
             }
-            if options["disable_thinking"]:
-                body["chat_template_kwargs"] = {"enable_thinking": False}
-            if options["response_format"]:
-                body["response_format"] = {"type": "json_object"}
-            response = self.session.post(
-                self.chat_api_url,
-                headers=headers,
-                json=body,
-                timeout=self.timeout_seconds,
+        response = self.session.post(
+            self.chat_api_url,
+            headers=headers,
+            json=body,
+            timeout=self.timeout_seconds,
+        )
+        if not response.ok:
+            self.logger.error(
+                "Copilot model rejected the required structured-output contract: status=%s response=%s",
+                response.status_code,
+                str(response.text or "")[:1000],
             )
-            if not response.ok:
-                retry_body = dict(body)
-                if response.status_code == 400 and "chat_template_kwargs" in retry_body and _error_mentions_field(response.text, "chat_template_kwargs"):
-                    retry_body.pop("chat_template_kwargs", None)
-                if response.status_code == 400 and "response_format" in retry_body and _error_mentions_field(response.text, "response_format"):
-                    retry_body.pop("response_format", None)
-                if retry_body != body:
-                    response = self.session.post(self.chat_api_url, headers=headers, json=retry_body, timeout=self.timeout_seconds)
-                if not response.ok:
-                    raise RuntimeError(f"Chat model HTTP {response.status_code}: {response.text[:500]}")
+            raise RuntimeError("Copilot model rejected the required structured-output contract.")
+        try:
             payload = response.json()
-            choices = payload.get("choices") if isinstance(payload, dict) else None
-            if not choices:
-                raise RuntimeError("Chat model returned no choices.")
-            message = choices[0].get("message") if isinstance(choices[0], dict) else None
-            content = _extract_chat_message_content(message)
-            if content:
-                if strip_internal:
-                    return strip_internal_capability_lines(content)
-                return content
-            saw_reasoning_empty = saw_reasoning_empty or _payload_has_reasoning_without_content(payload)
-            if allow_empty:
-                return ""
-            finish_reason = choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
-            self.logger.warning(
-                "Copilot model returned an empty message; retrying with response_format=%s disable_thinking=%s attempt=%s finish_reason=%s payload=%s",
-                bool(body.get("response_format")),
-                bool(body.get("chat_template_kwargs")),
-                attempt + 1,
-                finish_reason,
-                compact_text(payload, 1000),
-            )
-        raise RuntimeError("Chat model returned an empty message.")
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Copilot model returned an invalid protocol response.") from exc
+        choices = payload.get("choices") if isinstance(payload, dict) else None
+        if not choices or not isinstance(choices[0], dict):
+            raise RuntimeError("Copilot model returned no planner choice.")
+        content = _extract_chat_message_content(choices[0].get("message"))
+        if not content:
+            raise RuntimeError("Copilot model returned an empty structured response.")
+        usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        return content, usage
 
     @staticmethod
     def _parse_planner_turn(raw_content: str) -> Dict[str, Any]:
+        text = str(raw_content or "").strip()
+        # Fast path: direct JSON parse (strict-schema mode emits a single clean object).
         try:
-            candidate = json.loads(str(raw_content or "").strip())
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"planner output is not valid JSON: {exc.msg}") from exc
+            candidate = json.loads(text)
+        except json.JSONDecodeError:
+            # Slow path: thinking mode emits free text — extract the FIRST complete JSON object.
+            # raw_decode parses one object and tolerates trailing prose/braces (a greedy {.*} match
+            # would span stray trailing braces and fail). Scanning from each '{' finds the real one.
+            candidate = _extract_first_json_object(text)
+            if candidate is None:
+                raise ValueError("planner output contains no JSON object")
         if not isinstance(candidate, dict):
             raise ValueError("planner output must be a JSON object")
         return candidate
@@ -429,6 +384,8 @@ class CopilotAssistant:
         user_id: str,
         username: str,
         content: str,
+        on_event: Callable[[Dict[str, Any]], None] | None = None,
+        abort: threading.Event | None = None,
     ) -> Dict[str, Any]:
         normalized_content = str(content or "").strip()
         if not normalized_content:
@@ -446,17 +403,32 @@ class CopilotAssistant:
             )
         definitions = self.skill_harness.definitions(host_definitions)
         protocol = self.skill_harness.render_protocol_prompt(definitions)
+        if self.enable_thinking:
+            response_schema = self.skill_harness.planner_output_schema_simple(definitions)
+        else:
+            response_schema = self.skill_harness.planner_output_schema(definitions)
         system_prompt = (
             "You are the V-Bio Copilot planner. Reason from the user's request, conversation context, current page "
-            "state, and registered skills. Skills are atomic operations; compose as many ordered operations as the "
-            "request requires. Use read-only skills when more authoritative information is needed. The harness will "
-            "return observations and audit issues for another planning round. Any operation that creates, updates, "
-            "deletes, navigates, submits, or otherwise changes host state must remain pending for explicit user "
-            "confirmation. The message field is user-visible: do not expose planner, harness, skill names, operation "
-            "ids, schemas, or internal context fields. Do not invent an operation or an observation. Before completing "
-            "a question about what the platform supports, use the registered capability-catalog read operation and "
-            "ground the answer in its observation. Answer the requested scope directly instead of replacing it with "
-            "a general feature menu.\n\n"
+            "state, and registered skills. Skills are atomic operations; compose the smallest complete operation set "
+            "for the request. Use read-only skills when authoritative information is required. The harness may return "
+            "observations or audit issues for another planning round. Every non-read-only operation remains pending "
+            "until the user explicitly confirms it in the host application. The message is user-visible: do not expose "
+            "planner or harness internals, skill names, operation ids, schemas, or internal context fields. Do not invent "
+            "an operation or observation. Ground platform-capability claims in the registered capability catalog. "
+            "Answer the requested scope directly. "
+            "The context_payload may include copilot_memory: discrete records retrieved earlier in this same "
+            "conversation. You may cite a memory record to answer a follow-up about that exact entity, but any "
+            "compound or protein the user newly names still requires a fresh search — memory is for continuity, "
+            "never a substitute for a new lookup. "
+            "When resolving biological or chemical identifiers, use the registered search and resolve skills. "
+            "Use your own knowledge to recognize what kind of identifier the user gave you, and choose the skill "
+            "argument that matches its kind. Never fabricate, partially extract, or coerce an identifier into a "
+            "different form or namespace. Always run a search skill for any compound or protein the user names — "
+            "never claim a record is missing without searching first, and never answer a structure or sequence "
+            "question from memory. If a search or resolve returns no authoritative match, report that plainly; "
+            "never substitute a different record. Your answer must report exactly what the skill observation "
+            "returned: use the identity, SMILES, and sequence from the observation verbatim, and never substitute "
+            "your own belief about what an identifier names.\n\n"
             f"{protocol}"
         )
         context_json = json.dumps(safe_context_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -469,27 +441,55 @@ class CopilotAssistant:
             {"role": "user", "content": f"{username or user_id}: {normalized_content}"},
         ]
         observations: Dict[str, Dict[str, Any]] = {}
+        trace = PlannerTrace(on_step=on_event)
         last_issues: List[str] = []
+        rejected_audits: set[tuple[str, ...]] = set()
 
+        malformed_attempts = 0
         for round_index in range(self.max_planner_rounds):
-            raw_content = self._call_model(planner_messages, strip_internal=False, json_response=True, allow_empty=True)
+            # An SSE consumer that disconnected sets the abort event; stop before the next (costly)
+            # model call rather than running the whole round budget for a client that's gone.
+            if abort is not None and abort.is_set():
+                raise RuntimeError("planner aborted")
+            raw_content, usage = self._call_model(planner_messages, response_schema=response_schema)
+            trace.record(
+                round_index,
+                TRACE_MODEL_REQUEST,
+                messages_chars=sum(len(str(msg.get("content") or "")) for msg in planner_messages),
+                usage=compact_usage(usage),
+            )
             try:
                 candidate = self._parse_planner_turn(raw_content)
             except ValueError as exc:
-                last_issues = [str(exc)]
+                # The model returned unparseable/truncated JSON. Nudge it to re-emit valid JSON instead of
+                # failing the whole turn on a transient protocol slip (bounded by the round budget).
+                malformed_attempts += 1
+                self.logger.warning(
+                    "Copilot model returned unparseable planner JSON (attempt %d): %s",
+                    malformed_attempts,
+                    str(exc),
+                )
+                trace.record(round_index, TRACE_MALFORMED_OUTPUT, attempt=malformed_attempts, error=str(exc))
                 planner_messages.extend(
                     [
-                        {"role": "assistant", "content": raw_content},
+                        {"role": "assistant", "content": str(raw_content or "")[:2000]},
                         {
                             "role": "system",
-                            "content": json.dumps(
-                                {"harness": "audit", "round": round_index + 1, "issues": last_issues},
-                                ensure_ascii=False,
-                                sort_keys=True,
+                            "content": (
+                                "Your previous response was not valid JSON for the required schema (it was "
+                                "truncated or malformed). Re-emit ONLY the complete JSON object — no prose, no "
+                                "code fences. Keep it CONCISE: reference every retrieved sequence, SMILES, or long "
+                                "value with {\"$fromObservation\": \"<id>\", \"field\": \"<field>\", \"index\": <n>} "
+                                "and never paste long values into the output."
                             ),
                         },
                     ]
                 )
+                last_issues = [f"planner output was not valid JSON: {exc}"]
+                if malformed_attempts > self.max_malformed_retries:
+                    # Stop retrying unparseable output so the user gets a graceful message instead of a long hang.
+                    self.logger.error("Copilot exceeded malformed-JSON retry budget (%d).", self.max_malformed_retries)
+                    break
                 continue
 
             audit = self.skill_harness.audit_plan(
@@ -500,17 +500,21 @@ class CopilotAssistant:
             )
             message = str(candidate.get("message") or "").strip()
             audit_issues = list(audit.issues)
-            if not message:
-                audit_issues.append("message must be non-empty")
             if audit_issues:
                 last_issues = audit_issues
+                audit_signature = tuple(audit_issues)
+                if audit_signature in rejected_audits:
+                    self.logger.warning("Copilot planner repeated a rejected plan: %s", "; ".join(audit_issues))
+                    break
+                rejected_audits.add(audit_signature)
+                trace.record(round_index, TRACE_AUDIT_REJECTED, issues=audit_issues)
                 planner_messages.extend(
                     [
                         {"role": "assistant", "content": raw_content},
                         {
                             "role": "system",
                             "content": json.dumps(
-                                {"harness": "audit", "round": round_index + 1, "issues": audit_issues},
+                                {"event": "audit_rejected", "round": round_index + 1, "issues": audit_issues},
                                 ensure_ascii=False,
                                 sort_keys=True,
                             ),
@@ -523,19 +527,21 @@ class CopilotAssistant:
             if read_operations:
                 round_observations = self.skill_harness.execute_operations(read_operations)
                 observations.update(round_observations)
+                trace.record(
+                    round_index,
+                    TRACE_SKILL_OBSERVATIONS,
+                    observations=compact_observations(round_observations),
+                )
                 planner_messages.extend(
                     [
                         {"role": "assistant", "content": raw_content},
                         {
                             "role": "system",
-                            "content": json.dumps(
-                                {
-                                    "harness": "observations",
-                                    "round": round_index + 1,
-                                    "observations": round_observations,
-                                },
-                                ensure_ascii=False,
-                                sort_keys=True,
+                            "content": (
+                                "Authoritative skill observations for this turn. These results override any "
+                                "prior knowledge: your next message must be grounded in them and must quote "
+                                "the identity, SMILES, and sequence they contain verbatim, never a substitute.\n\n"
+                                + CopilotAssistant._summarize_observations(round_observations)
                             ),
                         },
                     ]
@@ -549,182 +555,227 @@ class CopilotAssistant:
                 context_type=normalized_context,
                 workflow_key=workflow_key,
             )
+            trace.record(
+                round_index,
+                TRACE_TERMINAL,
+                state=audit.state,
+                operations=compact_operations(audit.operations),
+                message_chars=len(message),
+            )
+            self.logger.info(trace.summary())
             return {
                 "content": message,
                 "actions": actions,
-                "state": str(candidate.get("state") or ""),
-                "questions": candidate.get("questions") if isinstance(candidate.get("questions"), list) else [],
+                "state": audit.state,
+                "questions": list(candidate.get("questions") or []),
                 "plan_id": plan_id,
+                "trace": trace.steps(),
+                "observations": _compact_memory_records(observations),
+            }
+
+        # Structured planning did not converge. As a last resort, let the model answer
+        # conversationally (no schema pressure) using the context + any observations gathered.
+        # The grounding guard still checks the answer against observations, so this cannot
+        # surface a hallucination that ignores retrieved data.
+        fallback_content = self._fallback_answer(planner_messages, observations)
+        trace.record(self.max_planner_rounds, TRACE_FALLBACK)
+        if fallback_content:
+            trace.record(
+                self.max_planner_rounds,
+                TRACE_TERMINAL,
+                state="complete",
+                operations=[],
+                message_chars=len(fallback_content),
+            )
+            self.logger.info(trace.summary())
+            return {
+                "content": fallback_content,
+                "actions": [],
+                "state": "complete",
+                "questions": [],
+                "plan_id": uuid.uuid4().hex,
+                "trace": trace.steps(),
+                "observations": _compact_memory_records(observations),
+            }
+
+        # Last resort: if observations were gathered, present them to the user so the data
+        # is not lost — the model failed to compose an answer, but the authoritative retrieved
+        # data is still valuable. This is NOT a fallback/substitution: it presents what the
+        # database returned, transparently, when the model could not ground its answer.
+        if observations:
+            summary = self._summarize_observations(observations)
+            trace.record(
+                self.max_planner_rounds,
+                TRACE_TERMINAL,
+                state="complete",
+                operations=[],
+                message_chars=len(summary),
+                surfaced_observations=True,
+            )
+            self.logger.info(trace.summary())
+            return {
+                "content": (
+                    "I retrieved the following data but could not reliably compose a complete answer. "
+                    "Here is what the databases returned:\n\n" + summary
+                ),
+                "actions": [],
+                "state": "complete",
+                "questions": [],
+                "plan_id": uuid.uuid4().hex,
+                "trace": trace.steps(),
+                "observations": _compact_memory_records(observations),
             }
 
         detail = "; ".join(last_issues) if last_issues else "planner did not reach a terminal state"
-        raise ValueError(f"Copilot planner exhausted its audited operation loop: {detail}")
+        trace.record(self.max_planner_rounds, TRACE_NO_CONVERGENCE, reason=detail)
+        self.logger.info(trace.summary())
+        self.logger.error("Copilot planner did not reach a terminal state: %s", detail)
+        raise RuntimeError("Copilot could not complete an auditable plan. No operation was executed.")
 
-    def answer_context(self, *, context_type: str, context_payload: Dict[str, Any], user_id: str, username: str, content: str) -> str:
-        normalized_content = compact_text(content, 6000)
-        if not normalized_content:
-            raise ValueError("content is required.")
-        safe_context_payload = remove_page_workflow_conflicts(sanitize_context_payload(context_payload))
-        system_prompt = (
-            "你是 V-Bio Copilot，也是协作留言助手和任务操作规划助手。"
-            "根据能力定义选择最小可用能力。"
-            "不要向用户展示内部能力名、工具名、skill 名、action id、schema 字段名或 context 字段名，也不要写“能力使用”或“能力调用”。"
-            "页面模块必须以 context_payload.page.workflowKey / page.workflowTitle 为准；如果 currentTask、历史结果、properties 或 affinity 字段与 page 冲突，不能用它们覆盖当前页面模块。"
-            "回答当前所在功能时，优先引用 page.workflowTitle；不要因为结果记录里存在 affinity/score 字段就说用户在 Affinity 页面。"
-            "任何提交、取消、删除、修改参数、筛选排序等动作都必须通过 candidate_plan_actions 的 schema 按钮执行，先给出计划并等待用户确认，不能声称已经执行。"
-            "如果用户不在正确的 project 功能页或 task 功能页，明确指出当前功能不适合该操作，并告诉用户应进入哪个功能；不要编造可执行按钮。"
-            "只有当 context_payload.candidate_plan_actions 是非空数组时，才允许说明界面会在消息下方显示确认按钮；否则不要提确认按钮。"
-            "context_payload.page.availableActions 只是页面能力清单，不是已经生成的按钮；不能据此声称有确认按钮。"
-            "如果 context_payload.candidate_plan_actions 是空数组或不存在，明确当作没有可确认按钮；对用户只说“当前没有确认按钮/确认操作”，不要暴露字段名。"
-            "如果没有 candidate_plan_actions，但用户要求提交、运行、删除或修改，说明当前没有生成可执行确认操作，不要声称已经规划出按钮。"
-            "回答 task_detail 状态时，以 context_payload.runtime.authoritativeTaskState / displayTaskState / statusTaskState 为准；draft.taskName 或 currentTask 为 DRAFT 不能覆盖运行态。"
-            "只能承诺本 Copilot schema 和页面已有功能能完成的事：分析当前上下文、规划需确认的参数/组件修改、提交/删除/重命名、应用已上传文件。"
-            "不要承诺生成、返回、导出、下载或计算化合物坐标、结构文件、后台结果文件；除非 context_payload 或 candidate_plan_actions 明确提供了对应能力。"
-            "不要泛泛建议“通过下载按钮/下载选项获取结果文件”；只有当 context_payload.page.availableActions 或 context_payload.resultDownloads 明确包含下载能力时才可以提下载。"
-            "Affinity Scoring 不是仅凭一个多肽/蛋白序列做结构预测；如果用户只给序列并要求提交结构预测，不要把它解释为 affinity 提交。"
-            "回答要明确区分：分析结论、计划、确认项。优先使用中文。\n\n"
-            f"{render_capability_prompt()}"
+    @staticmethod
+    def _summarize_observations(observations: Dict[str, Dict[str, Any]]) -> str:
+        """Render observations as a concise, human-readable summary instead of a raw JSON blob.
+
+        This makes the key data (compound name, accession, SMILES, etc.) immediately
+        visible to the model, so it can ground its answer without parsing nested JSON.
+        """
+        lines: List[str] = []
+        for obs_id, obs in observations.items():
+            if not isinstance(obs, dict) or not obs.get("ok"):
+                continue
+            skill = str(obs.get("skill") or obs_id)
+            values = obs.get("values") or []
+            records: List[Dict[str, Any]] = []
+            for val in values:
+                if not isinstance(val, dict):
+                    continue
+                nested = val.get("results")
+                if isinstance(nested, list) and nested:
+                    records.extend(r for r in nested if isinstance(r, dict))
+                else:
+                    records.append(val)
+            first_val = values[0] if values and isinstance(values[0], dict) else {}
+            query = first_val.get("query") or first_val.get("name") or first_val.get("identifier") or first_val.get("text") or ""
+            header = f'Observation "{obs_id}" [{skill}'
+            if query:
+                header += f"({query})"
+            header += f"] {len(records)} result(s):"
+            lines.append(header)
+            for rec in records[:3]:
+                parts: List[str] = []
+                for key in RECORD_IDENTITY_FIELDS:
+                    v = str(rec.get(key) or "").strip()
+                    if v and len(v) <= 80:
+                        parts.append(f"{key}={v}")
+                for key in RECORD_LONG_FIELDS:
+                    v = str(rec.get(key) or "").strip()
+                    if v:
+                        parts.append(f"{key}={v[:50]}..." if len(v) > 50 else f"{key}={v}")
+                for key in RECORD_NUMERIC_FIELDS:
+                    v = rec.get(key)
+                    if v is not None:
+                        parts.append(f"{key}={v}")
+                if parts:
+                    lines.append("  - " + " | ".join(parts))
+            if len(records) > 3:
+                lines.append(f"  ... and {len(records) - 3} more.")
+        return "\n".join(lines) if lines else "(no observations)"
+
+    def _fallback_answer(
+        self,
+        planner_messages: List[Dict[str, str]],
+        observations: Dict[str, Dict[str, Any]],
+    ) -> str:
+        """Try an unstructured chat completion when structured planning fails.
+
+        Returns the model's conversational answer if it passes the grounding guard
+        (or if no observations exist to guard against). Returns empty string on any
+        failure so the caller falls through to graceful degradation.
+        """
+        if not self.chat_api_url:
+            return ""
+        fallback_messages = list(planner_messages)
+        fallback_messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Structured planning did not converge. Answer the user's question directly and "
+                    "conversationally. Use any observations above verbatim. If you do not have the "
+                    "data, say so plainly."
+                ),
+            }
         )
-        context_block = f"context_type: {context_type}\ncontext_payload: {compact_context_payload(safe_context_payload, 5000)}"
-        model_messages = [
-            {"role": "system", "content": f"{system_prompt}\n\n{context_block}"},
-            {"role": "user", "content": f"{username or user_id}: {normalized_content}"},
-        ]
-        return self._call_model(model_messages)
-
-    def _parse_json_response(self, raw_content: str) -> Dict[str, Any]:
-        cleaned = raw_content.strip()
-        fence_match = re.match(r"^```(?:json)?\s*\n(.*)```\s*$", cleaned, re.DOTALL)
-        if fence_match:
-            cleaned = fence_match.group(1).strip()
+        headers = {"Content-Type": "application/json"}
+        if self.chat_api_key:
+            headers["Authorization"] = f"Bearer {self.chat_api_key}"
+        body: Dict[str, Any] = {
+            "model": self.chat_model,
+            "messages": normalize_chat_messages_for_template(fallback_messages),
+            "max_tokens": 1024,
+            "temperature": 0,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
         try:
-            candidate = json.loads(cleaned)
-        except json.JSONDecodeError:
-            start = cleaned.find("{")
-            end = cleaned.rfind("}")
-            if start < 0 or end <= start:
-                self.logger.warning("Copilot plan_actions: failed to extract JSON from model response: %s", raw_content[:500])
-                raise ValueError("Model did not return valid JSON plan.")
-            candidate = json.loads(cleaned[start : end + 1])
-        if not isinstance(candidate, dict):
-            raise ValueError("Model plan must be a JSON object.")
-        if candidate.get("execute_now") is True:
-            raise ValueError("Model attempted to execute without confirmation.")
-        return candidate
+            response = self.session.post(
+                self.chat_api_url,
+                headers=headers,
+                json=body,
+                timeout=self.timeout_seconds,
+            )
+            if not response.ok:
+                return ""
+            payload = response.json()
+            choices = payload.get("choices") if isinstance(payload, dict) else None
+            if not choices or not isinstance(choices[0], dict):
+                return ""
+            content = _extract_chat_message_content(choices[0].get("message"))
+            if not content or not content.strip():
+                return ""
+            content = content.strip()
+            # If observations were gathered, the fallback answer must still be grounded.
+            if observations:
+                grounding_issue = self.skill_harness._grounding_issue(content, observations)
+                if grounding_issue:
+                    self.logger.warning("Copilot fallback answer was not grounded; rejecting.")
+                    return ""
+            return content
+        except Exception:
+            return ""
 
-    def _repair_plan_json(
+    def answer_context(
         self,
         *,
-        system_prompt: str,
-        context_block: str,
-        username: str,
+        context_type: str,
+        context_payload: Dict[str, Any],
         user_id: str,
+        username: str,
         content: str,
-        previous_output: Any,
-        reason: str,
-    ) -> Dict[str, Any]:
-        repair_hint = (
-            "The previous planning output did not satisfy the schema. "
-            "Return one valid JSON object only. Do not include markdown or prose. "
-            "For task_detail component replacement, use parameter_patch.componentsReplacement.components and preserve every explicitly labeled component. "
-            "For task_list creation, use actions[].payload.components and preserve every explicitly labeled component. "
-            f"Failure reason: {compact_text(reason, 1000)}\n"
-            f"Previous output: {compact_text(previous_output, 2500)}"
+    ) -> str:
+        turn = self.plan_turn(
+            context_type=context_type,
+            context_payload=context_payload,
+            user_id=user_id,
+            username=username,
+            content=content,
         )
-        repair_messages = [
-            {"role": "system", "content": f"{system_prompt}\n\n{context_block}\n\n{repair_hint}"},
-            {"role": "user", "content": f"{username or user_id}: {content}"},
-        ]
-        repaired_raw_content = self._call_model(repair_messages, strip_internal=False, json_response=True)
-        return self._parse_json_response(repaired_raw_content)
+        if turn["actions"]:
+            raise ValueError("This request requires the confirmation-capable Copilot turn endpoint.")
+        return str(turn["content"])
 
-    def plan_actions(self, *, context_type: str, context_payload: Dict[str, Any], user_id: str, username: str, content: str) -> List[Dict[str, Any]]:
-        normalized_content = compact_text(content, 6000)
-        if not normalized_content:
-            raise ValueError("content is required.")
-        normalized_ctx = str(context_type or "").strip()
-        safe_context_payload = remove_page_workflow_conflicts(sanitize_context_payload(context_payload))
-
-        system_prompt = (
-            "You are a deterministic planning adapter for V-Bio Copilot. "
-            "Return JSON only. Do not explain. Do not include markdown. "
-            "Treat the provided action input_schema as the contract for every payload. "
-            "If the user asks to create a prediction task, extract all structural components into payload.components; "
-            "do not use legacy protein-only shortcuts and do not omit small molecules or other component types.\n\n"
-            f"{render_context_plan_schema_prompt(normalized_ctx, safe_context_payload)}"
+    def plan_actions(
+        self,
+        *,
+        context_type: str,
+        context_payload: Dict[str, Any],
+        user_id: str,
+        username: str,
+        content: str,
+    ) -> List[Dict[str, Any]]:
+        turn = self.plan_turn(
+            context_type=context_type,
+            context_payload=context_payload,
+            user_id=user_id,
+            username=username,
+            content=content,
         )
-        context_block = f"context_payload: {compact_context_payload(safe_context_payload, 5000)}"
-        model_messages = [
-            {"role": "system", "content": f"{system_prompt}\n\n{context_block}"},
-            {"role": "user", "content": f"{username or user_id}: {normalized_content}"},
-        ]
-        raw_content = self._call_model(model_messages, strip_internal=False, json_response=True)
-        try:
-            candidate = self._parse_json_response(raw_content)
-        except ValueError as exc:
-            candidate = self._repair_plan_json(
-                system_prompt=system_prompt,
-                context_block=context_block,
-                username=username,
-                user_id=user_id,
-                content=normalized_content,
-                previous_output=raw_content,
-                reason=str(exc),
-            )
-
-        if normalized_ctx == "task_detail":
-            workflow_key = infer_workflow_key(safe_context_payload)
-            actions = build_task_submission_actions(candidate, normalized_content, workflow_key)
-            if actions:
-                return actions
-            if _candidate_requests_clarification(candidate):
-                return []
-            repaired_candidate = candidate
-            for repair_index in range(2):
-                if repair_index > 0 and not _candidate_declares_confirmable_task_action(repaired_candidate):
-                    break
-                repaired_candidate = self._repair_plan_json(
-                    system_prompt=system_prompt,
-                    context_block=context_block,
-                    username=username,
-                    user_id=user_id,
-                    content=normalized_content,
-                    previous_output=repaired_candidate,
-                    reason="The JSON parsed successfully but produced no valid task_detail action after schema validation.",
-                )
-                repaired_actions = build_task_submission_actions(repaired_candidate, normalized_content, workflow_key)
-                if repaired_actions:
-                    return repaired_actions
-                if _candidate_requests_clarification(repaired_candidate):
-                    return []
-            if _candidate_declares_confirmable_task_action(candidate) or _candidate_declares_confirmable_task_action(repaired_candidate):
-                self.logger.warning(
-                    "Copilot plan_actions: model failed task_detail schema after repair. candidate=%s repaired=%s",
-                    compact_text(candidate, 1000),
-                    compact_text(repaired_candidate, 1000),
-                )
-                raise ValueError("Copilot could not produce a valid confirmation action from the task-detail schema.")
-            return []
-
-        # task_list / project_list — generic action builder
-        actions = build_context_actions(normalized_ctx, candidate, safe_context_payload, normalized_content)
-        if actions or not _candidate_declares_context_actions(candidate):
-            return actions
-
-        repaired_candidate = candidate
-        for _ in range(2):
-            repaired_candidate = self._repair_plan_json(
-                system_prompt=system_prompt,
-                context_block=context_block,
-                username=username,
-                user_id=user_id,
-                content=normalized_content,
-                previous_output=repaired_candidate,
-                reason="The JSON parsed successfully but produced no valid context action after schema validation.",
-            )
-            repaired_actions = build_context_actions(normalized_ctx, repaired_candidate, safe_context_payload, normalized_content)
-            if repaired_actions:
-                return repaired_actions
-            if _candidate_requests_clarification(repaired_candidate) or not _candidate_declares_context_actions(repaired_candidate):
-                return []
-        return []
+        return list(turn["actions"])
