@@ -372,6 +372,20 @@ export interface ProjectCopilotState {
   updated_at: string;
 }
 
+export type CopilotOperationEffect = 'create' | 'update' | 'delete' | 'execute' | 'navigate';
+
+/**
+ * One observable step in the planner loop (model call → harness audit → read-skill
+ * observation → terminal). Returned by the Copilot turn endpoint as a `trace[]` so the
+ * UI can show how the planner reasoned, general and domain-agnostic (event names + compact
+ * detail, never payload bodies). Mirrors the agent-trace pattern (OTel GenAI / agent SDKs).
+ */
+export interface CopilotTraceStep {
+  round: number;
+  event: string;
+  detail?: Record<string, unknown>;
+}
+
 export interface CopilotPlanAction {
   id: string;
   operation_id?: string;
@@ -379,8 +393,9 @@ export interface CopilotPlanAction {
   sequence?: number;
   label: string;
   description: string;
+  arguments?: Record<string, unknown>;
   payload?: Record<string, unknown>;
-  effect?: string;
+  effect?: CopilotOperationEffect;
   needs_confirmation?: boolean;
   execute_now?: boolean;
 }

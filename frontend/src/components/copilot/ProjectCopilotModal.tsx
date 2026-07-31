@@ -11,9 +11,10 @@ import {
   listProjectCopilotMessages,
   upsertProjectCopilotState
 } from '../../api/supabaseLite';
-import { requestCopilotTurn } from '../../api/copilotApi';
-import type { CopilotContextType, CopilotPlanAction, ProjectCopilotMessage } from '../../types/models';
+import { streamCopilotTurn } from '../../api/copilotApi';
+import type { CopilotContextType, CopilotPlanAction, CopilotTraceStep, ProjectCopilotMessage } from '../../types/models';
 import { formatDateTime } from '../../utils/date';
+import { collectCopilotMemory, formatTraceStep, readPlannerTrace, readSessionId } from './copilotTraceUi';
 import './ProjectCopilotModal.css';
 
 interface ProjectCopilotModalProps {
@@ -60,10 +61,13 @@ function author(message: ProjectCopilotMessage): string {
   return message.user_name || message.username || 'User';
 }
 
+// Planner trace + memory helpers live in ./copilotTraceUi (pure + unit-tested).
+
 // Message rendering runs ReactMarkdown (expensive). Memoize so a message only re-renders when its
 // own content changes — not on every unrelated Copilot state update (typing, dragging, resize,
 // caret moves), which otherwise re-parsed markdown for every message and froze the panel.
 const CopilotMessageItem = memo(function CopilotMessageItem({ message }: { message: ProjectCopilotMessage }) {
+  const trace = message.role === 'assistant' ? readPlannerTrace(message.metadata?.planner_trace) : [];
   return (
     <article className={`copilot-message is-${message.role}`}>
       <div className="copilot-message-meta">
@@ -75,6 +79,16 @@ const CopilotMessageItem = memo(function CopilotMessageItem({ message }: { messa
           {message.content}
         </ReactMarkdown>
       </div>
+      {trace.length > 0 && (
+        <details className="copilot-trace">
+          <summary>Reasoning ({trace.length})</summary>
+          <ol>
+            {trace.map((step, index) => (
+              <li key={`${step.round}-${step.event}-${index}`}>{formatTraceStep(step)}</li>
+            ))}
+          </ol>
+        </details>
+      )}
     </article>
   );
 });
@@ -84,12 +98,6 @@ function createSessionId(): string {
     return crypto.randomUUID();
   }
   return `session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function readSessionId(message: ProjectCopilotMessage): string {
-  const value = message.metadata?.session_id;
-  const normalized = typeof value === 'string' ? value.trim() : '';
-  return normalized || 'default';
 }
 
 function readPlanActions(value: unknown): CopilotPlanAction[] {
@@ -421,6 +429,12 @@ function actionMatchesContext(action: CopilotPlanAction, contextType: CopilotCon
   return actionContext === contextType;
 }
 
+function confirmationArgumentText(action: CopilotPlanAction): string {
+  const args = action.arguments;
+  if (!args || Object.keys(args).length === 0) return '';
+  return JSON.stringify(args, null, 2);
+}
+
 
 function actionHasPendingDependency(action: CopilotPlanAction, pendingActions: CopilotPlanAction[]): boolean {
   const planId = String(action.plan_id || '').trim();
@@ -493,6 +507,7 @@ export function ProjectCopilotModal({
   const [draft, setDraft] = useState(() => readStoredCopilotDraftLocal(draftScope));
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
+  const [liveTrace, setLiveTrace] = useState<CopilotTraceStep[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [pendingActions, setPendingActions] = useState<CopilotPlanAction[]>([]);
   const [applyingActionKey, setApplyingActionKey] = useState<string | null>(null);
@@ -819,8 +834,10 @@ export function ProjectCopilotModal({
       mentioned: content.includes(`@${attachment.name}`)
     }));
     const conversationContext = buildCopilotConversationContext(sessionMessages);
+    const copilotMemory = collectCopilotMemory(sessionMessages, activeSessionId);
     setSending(true);
     setError(null);
+    setLiveTrace([]);
     setDraft('');
     writeStoredCopilotDraftLocal(draftScope, '');
     void deleteProjectCopilotState(currentUserId, copilotDraftDbKey());
@@ -837,17 +854,21 @@ export function ProjectCopilotModal({
       });
       setMessages((prev) => [...prev, { ...userMessage, username: currentUsername }]);
 
-      const turn = await requestCopilotTurn({
-        contextType,
-        contextPayload: {
-          ...contextPayload,
-          copilot_conversation: conversationContext,
-          ...(attachmentMetadata.length > 0 ? { copilot_attachments: attachmentMetadata } : {})
+      const turn = await streamCopilotTurn(
+        {
+          contextType,
+          contextPayload: {
+            ...contextPayload,
+            copilot_conversation: conversationContext,
+            ...(copilotMemory.length > 0 ? { copilot_memory: copilotMemory } : {}),
+            ...(attachmentMetadata.length > 0 ? { copilot_attachments: attachmentMetadata } : {})
+          },
+          userId: currentUserId,
+          username: currentUsername,
+          content
         },
-        userId: currentUserId,
-        username: currentUsername,
-        content
-      });
+        (step) => setLiveTrace((prev) => [...prev, step])
+      );
       const planActions = turn.actions;
       const assistantMessage = await insertProjectCopilotMessage({
         ...messageScope,
@@ -861,7 +882,9 @@ export function ProjectCopilotModal({
           candidate_plan_actions: planActions,
           plan_id: turn.planId,
           planner_state: turn.state,
-          planner_questions: turn.questions
+          planner_questions: turn.questions,
+          planner_trace: turn.trace,
+          planner_observations: turn.observations
         }
       });
       setMessages((prev) => [...prev, assistantMessage]);
@@ -873,6 +896,7 @@ export function ProjectCopilotModal({
       focusComposer();
     } finally {
       setSending(false);
+      setLiveTrace([]);
     }
   };
 
@@ -1246,6 +1270,13 @@ export function ProjectCopilotModal({
               <div className="copilot-message-body copilot-thinking">
                 <LoaderCircle size={14} className="spin" />
                 Planning
+                {liveTrace.length > 0 && (
+                  <ol className="copilot-live-trace">
+                    {liveTrace.map((step, index) => (
+                      <li key={`${step.round}-${step.event}-${index}`}>{formatTraceStep(step)}</li>
+                    ))}
+                  </ol>
+                )}
               </div>
             </article>
           ) : null}
@@ -1258,9 +1289,11 @@ export function ProjectCopilotModal({
                 const actionKey = planActionKey(action);
                 const waitingForDependency = actionHasPendingDependency(action, pendingActions);
                 const isApplying = applyingActionKey === actionKey;
+                const argumentText = confirmationArgumentText(action);
+                const isDestructive = action.payload?.destructive === true;
                 return (
                   <button
-                    className="copilot-plan-action"
+                    className={`copilot-plan-action${isDestructive ? ' is-destructive' : ''}`}
                     key={actionKey}
                     type="button"
                     onClick={() => void applyAction(action)}
@@ -1271,6 +1304,7 @@ export function ProjectCopilotModal({
                     <span>
                       <strong>{action.label}</strong>
                       <small>{action.description}</small>
+                      {argumentText ? <small className="copilot-plan-action-arguments">{argumentText}</small> : null}
                     </span>
                   </button>
                 );

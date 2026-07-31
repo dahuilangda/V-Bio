@@ -13,7 +13,7 @@ from rdkit.Chem import Descriptors
 
 from boltz.data import const
 from boltz.data.module.inferencev2 import Boltz2InferenceDataModule
-from boltz.data.types import AffinityInfo, Manifest, Record
+from boltz.data.types import AffinityInfo, Manifest, Record, StructureV2
 from boltz.data.write.writer import BoltzAffinityWriter
 import boltz.model.loss.diffusionv2 as diffusionv2_loss_mod
 import boltz.model.modules.diffusionv2 as diffusionv2_mod
@@ -190,7 +190,7 @@ def _resolve_affinity_ligand_mw(
             "Failed to resolve ligand molecule for affinity MW calculation. "
             f"record_id={record_id}, ligand_chain_id={ligand_chain_id}"
         )
-    mol_no_h = Chem.RemoveHs(Chem.Mol(mol))
+    mol_no_h = Chem.RemoveHs(Chem.Mol(mol), sanitize=False)
     return float(Descriptors.MolWt(mol_no_h))
 
 

@@ -1,5 +1,5 @@
-import { API_HEADERS, requestManagement } from './backendClient';
-import type { CopilotPlanAction } from '../types/models';
+import { API_HEADERS, fetchWithTimeout, managementApiUrl, requestManagement } from './backendClient';
+import type { CopilotPlanAction, CopilotTraceStep } from '../types/models';
 
 const MAX_CONTEXT_STRING_CHARS = 1600;
 const MAX_CONTEXT_LIST_ITEMS = 40;
@@ -96,6 +96,26 @@ export async function getCopilotConfig(): Promise<{ enabled: boolean }> {
 
 
 const COPILOT_TURN_STATES = new Set(['continue', 'await_confirmation', 'needs_input', 'complete']);
+const COPILOT_CONFIRMATION_EFFECTS = new Set(['create', 'update', 'delete', 'execute', 'navigate']);
+
+/**
+ * Validate the planner trace defensively: it is observability, so a malformed trace must never
+ * fail a turn — drop anything that is not a {round, event} object and return the clean tail.
+ */
+export function parseCopilotTrace(value: unknown): CopilotTraceStep[] {
+  if (!Array.isArray(value)) return [];
+  const trace: CopilotTraceStep[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const step = item as Record<string, unknown>;
+    const event = String(step.event || '').trim();
+    const round = Number(step.round);
+    if (!event || !Number.isInteger(round)) continue;
+    const detail = step.detail;
+    trace.push({ round, event, ...(detail && typeof detail === 'object' ? { detail: detail as Record<string, unknown> } : {}) });
+  }
+  return trace;
+}
 
 export interface CopilotTurnResult {
   content: string;
@@ -103,6 +123,78 @@ export interface CopilotTurnResult {
   state: 'continue' | 'await_confirmation' | 'needs_input' | 'complete';
   questions: string[];
   planId: string;
+  /** Planner reasoning/audit trajectory. Observability only; never affects execution. */
+  trace: CopilotTraceStep[];
+  /** Compact records retrieved this turn, carried forward as copilot_memory for follow-up turns. */
+  observations: Record<string, unknown>[];
+}
+
+/** Validate a raw Copilot turn payload into a CopilotTurnResult, or throw with a concrete reason.
+ * Shared by the buffered (/turn) and streaming (/stream) transports so both apply identical checks. */
+export function validateCopilotTurnPayload(payload: Record<string, unknown>): CopilotTurnResult {
+  const content = String(payload.content || '').trim();
+  const state = String(payload.state || '').trim();
+  const planId = String(payload.plan_id || '').trim();
+  if (!content) throw new Error('Copilot turn returned an empty response.');
+  if (!COPILOT_TURN_STATES.has(state)) throw new Error('Copilot turn returned an invalid state.');
+  if (!planId) throw new Error('Copilot turn returned no plan identity.');
+  const rawQuestions = payload.questions;
+  if (!Array.isArray(rawQuestions) || rawQuestions.some((question) => typeof question !== 'string')) {
+    throw new Error('Copilot turn returned invalid questions.');
+  }
+  const rawActions = payload.actions;
+  if (!Array.isArray(rawActions)) {
+    throw new Error('Copilot turn returned invalid confirmation operations.');
+  }
+  const operationKeys = new Set<string>();
+  const actions = rawActions.map((item) => {
+    if (!item || typeof item !== 'object') {
+      throw new Error('Copilot turn returned an invalid confirmation operation.');
+    }
+    const action = item as CopilotPlanAction;
+    const operationId = String(action.operation_id || '').trim();
+    const operationKey = `${planId}:${operationId}`;
+    const effect = String(action.effect || '').trim();
+    const actionArguments = action.arguments;
+    const actionPayload = action.payload;
+    if (
+      String(action.plan_id || '').trim() !== planId ||
+      !operationId ||
+      !String(action.id || '').trim() ||
+      !String(action.label || '').trim() ||
+      !String(action.description || '').trim() ||
+      typeof action.sequence !== 'number' || !Number.isInteger(action.sequence) ||
+      operationKeys.has(operationKey) ||
+      !COPILOT_CONFIRMATION_EFFECTS.has(effect) ||
+      !actionArguments || typeof actionArguments !== 'object' || Array.isArray(actionArguments) ||
+      !actionPayload || typeof actionPayload !== 'object' || Array.isArray(actionPayload) ||
+      String(actionPayload.planId || '').trim() !== planId ||
+      String(actionPayload.operationId || '').trim() !== operationId ||
+      String(actionPayload.effect || '').trim() !== effect ||
+      typeof actionPayload.destructive !== 'boolean' ||
+      action.needs_confirmation !== true ||
+      action.execute_now !== false
+    ) {
+      throw new Error('Copilot turn returned an invalid confirmation operation.');
+    }
+    operationKeys.add(operationKey);
+    return action;
+  });
+  const rawObservations = payload.observations;
+  const observations: Record<string, unknown>[] = Array.isArray(rawObservations)
+    ? rawObservations.filter(
+        (item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item)
+      )
+    : [];
+  return {
+    content,
+    actions,
+    state: state as CopilotTurnResult['state'],
+    questions: rawQuestions as string[],
+    planId,
+    trace: parseCopilotTrace(payload.trace),
+    observations
+  };
 }
 
 export async function requestCopilotTurn(input: {
@@ -130,60 +222,107 @@ export async function requestCopilotTurn(input: {
     },
     180000
   );
-  const payload = (await res.json()) as {
-    content?: string;
-    actions?: unknown;
-    state?: string;
-    questions?: unknown;
-    plan_id?: string;
-    error?: string;
-  };
+  const payload = (await res.json()) as Record<string, unknown> & { error?: string };
   if (!res.ok) {
     throw new Error(payload.error || `Copilot turn failed with HTTP ${res.status}.`);
   }
-  const content = String(payload.content || '').trim();
-  const state = String(payload.state || '').trim();
-  const planId = String(payload.plan_id || '').trim();
-  if (!content) throw new Error('Copilot turn returned an empty response.');
-  if (!COPILOT_TURN_STATES.has(state)) throw new Error('Copilot turn returned an invalid state.');
-  if (!planId) throw new Error('Copilot turn returned no plan identity.');
-  if (!Array.isArray(payload.questions) || payload.questions.some((question) => typeof question !== 'string')) {
-    throw new Error('Copilot turn returned invalid questions.');
+  return validateCopilotTurnPayload(payload);
+}
+
+export function parseOneTraceStep(value: unknown): CopilotTraceStep | null {
+  if (!value || typeof value !== 'object') return null;
+  const step = value as Record<string, unknown>;
+  const event = String(step.event || '').trim();
+  const round = Number(step.round);
+  if (!event || !Number.isInteger(round)) return null;
+  const detail = step.detail;
+  return { round, event, ...(detail && typeof detail === 'object' ? { detail: detail as Record<string, unknown> } : {}) };
+}
+
+export function parseSseFrame(frame: string): { event: string; data: string } | null {
+  let event = '';
+  let data = '';
+  for (const line of frame.split('\n')) {
+    if (line.startsWith('event: ')) event = line.slice('event: '.length);
+    else if (line.startsWith('data: ')) data += line.slice('data: '.length);
   }
-  if (!Array.isArray(payload.actions)) {
-    throw new Error('Copilot turn returned invalid confirmation operations.');
+  return event ? { event, data } : null;
+}
+
+function parseJsonSafe(value: string): unknown {
+  try {
+    return value ? JSON.parse(value) : null;
+  } catch {
+    return null;
   }
-  const operationKeys = new Set<string>();
-  const actions = payload.actions.map((item) => {
-    if (!item || typeof item !== 'object') {
-      throw new Error('Copilot turn returned an invalid confirmation operation.');
+}
+
+/**
+ * Stream a Copilot turn over SSE: ``onTrace`` fires for each planner trace step as it happens
+ * (live reasoning/lookups), then the promise resolves with the validated terminal turn result.
+ * Uses fetch + ReadableStream (not EventSource) because the request needs the X-API-Token header.
+ */
+export async function streamCopilotTurn(
+  input: {
+    contextType: string;
+    contextPayload: Record<string, unknown>;
+    userId: string;
+    username: string;
+    content: string;
+  },
+  onTrace: (step: CopilotTraceStep) => void
+): Promise<CopilotTurnResult> {
+  const res = await fetchWithTimeout(
+    managementApiUrl('/vbio-api/copilot/stream'),
+    {
+      method: 'POST',
+      headers: {
+        ...API_HEADERS,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        context_type: input.contextType,
+        context_payload: sanitizeCopilotContextPayload(input.contextPayload),
+        user_id: input.userId,
+        username: input.username,
+        content: input.content
+      })
+    },
+    180000
+  );
+  if (!res.ok) {
+    const payload = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(payload.error || `Copilot stream failed with HTTP ${res.status}.`);
+  }
+  if (!res.body) throw new Error('Copilot stream returned no response body.');
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let result: CopilotTurnResult | null = null;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let separator = buffer.indexOf('\n\n');
+    while (separator >= 0) {
+      const frame = buffer.slice(0, separator);
+      buffer = buffer.slice(separator + 2);
+      separator = buffer.indexOf('\n\n');
+      const parsed = parseSseFrame(frame);
+      if (!parsed) continue;
+      if (parsed.event === 'trace') {
+        const step = parseOneTraceStep(parseJsonSafe(parsed.data));
+        if (step) onTrace(step);
+      } else if (parsed.event === 'result') {
+        result = validateCopilotTurnPayload((parseJsonSafe(parsed.data) as Record<string, unknown>) || {});
+      } else if (parsed.event === 'error') {
+        const errorPayload = (parseJsonSafe(parsed.data) as { error?: string }) || {};
+        throw new Error(errorPayload.error || 'Copilot stream reported an error.');
+      }
     }
-    const action = item as CopilotPlanAction;
-    const operationId = String(action.operation_id || '').trim();
-    const operationKey = `${planId}:${operationId}`;
-    if (
-      String(action.plan_id || '').trim() !== planId ||
-      !operationId ||
-      !String(action.id || '').trim() ||
-      !String(action.label || '').trim() ||
-      !String(action.description || '').trim() ||
-      typeof action.sequence !== 'number' || !Number.isInteger(action.sequence) ||
-      operationKeys.has(operationKey) ||
-      action.needs_confirmation !== true ||
-      action.execute_now !== false
-    ) {
-      throw new Error('Copilot turn returned an invalid confirmation operation.');
-    }
-    operationKeys.add(operationKey);
-    return action;
-  });
-  return {
-    content,
-    actions,
-    state: state as CopilotTurnResult['state'],
-    questions: payload.questions,
-    planId
-  };
+  }
+  if (!result) throw new Error('Copilot stream ended without a result.');
+  return result;
 }
 export async function requestCopilotAssistant(input: {
   contextType: string;

@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import sys
 import time
+import uuid
 from typing import Any, Dict, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -36,6 +37,7 @@ from management_api.jwt_auth import JwtTokenError, JwtUserService, decode_login_
 from management_api.task_store import ProjectTaskStore
 from management_api.ccd_download import build_task_ccd_response
 from management_api.copilot import CopilotAssistant
+from management_api.copilot_stream import copilot_event_stream
 from management_api.usage_tracker import UsageTracker
 from management_api.monitor_stream import MonitorNotificationBroker, sse_frames
 
@@ -84,6 +86,7 @@ COPILOT_ENABLED = os.environ.get("VBIO_COPILOT_ENABLED", "").strip().lower()
 COPILOT_CONFIGURED = COPILOT_ENABLED not in {"0", "false", "no", "off"} and bool(COPILOT_API_URL)
 COPILOT_TIMEOUT_SECONDS = float(os.environ.get("VBIO_COPILOT_TIMEOUT_SECONDS", "90"))
 COPILOT_MAX_REQUEST_BYTES = int(os.environ.get("VBIO_COPILOT_MAX_REQUEST_BYTES", "524288"))
+COPILOT_ENABLE_THINKING = os.environ.get("VBIO_COPILOT_ENABLE_THINKING", "").strip().lower() in {"1", "true", "yes", "on"}
 
 JWT_CLIENTS_FILE = os.environ.get("VBIO_JWT_CLIENTS_FILE", "frontend/.run/jwt_clients.json").strip()
 SESSION_SECRET = os.environ.get("VBIO_SESSION_SECRET", "").strip() or RUNTIME_API_TOKEN
@@ -150,6 +153,7 @@ copilot_assistant = CopilotAssistant(
     timeout_seconds=COPILOT_TIMEOUT_SECONDS,
     session=runtime_http,
     logger=logger,
+    enable_thinking=COPILOT_ENABLE_THINKING,
 )
 
 
@@ -613,8 +617,62 @@ def copilot_turn() -> Tuple[Response, int]:
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:
+        # A model that cannot settle on an auditable plan (repeated rejections or round-budget
+        # exhaustion) is a transient planning failure, not a server fault. Degrade to an honest
+        # user-visible message instead of a hard error, while still logging the cause.
+        if "auditable plan" in str(exc):
+            logger.warning("Copilot planning did not reach a terminal state: %s", str(exc)[:300])
+            return jsonify({
+                "content": "I could not reliably produce a plan for this request. Please rephrase it or break it into a smaller step.",
+                "actions": [],
+                "state": "complete",
+                "questions": [],
+                "plan_id": uuid.uuid4().hex,
+            }), 200
         logger.exception("Copilot turn failed")
         return jsonify({"error": str(exc)}), 502
+
+
+@app.post("/vbio-api/copilot/stream")
+def copilot_stream() -> Response:
+    if not COPILOT_CONFIGURED:
+        return jsonify({"error": "Copilot is not configured."}), 404
+    if _copilot_request_too_large():
+        return jsonify({"error": "Copilot request is too large. Attach files by reference instead of sending file content."}), 413
+    payload = request.get_json(silent=True) or {}
+    context_type = str(payload.get("context_type") or "").strip()
+    context_payload = payload.get("context_payload") if isinstance(payload.get("context_payload"), dict) else {}
+    user_id = str(payload.get("user_id") or "").strip()
+    username = str(payload.get("username") or "").strip()
+    content = str(payload.get("content") or "").strip()
+
+    def plan(on_step, abort):
+        try:
+            return copilot_assistant.plan_turn(
+                context_type=context_type,
+                context_payload=context_payload,
+                user_id=user_id,
+                username=username,
+                content=content,
+                on_event=on_step,
+                abort=abort,
+            )
+        except Exception as exc:
+            # Match the buffered /turn endpoint: a non-converging planner is a routine failure, not a
+            # hard error — degrade to a helpful rephrase prompt (emitted as event:result, not error).
+            if "auditable plan" in str(exc):
+                return {
+                    "content": "I could not reliably produce a plan for this request. Please rephrase it or break it into a smaller step.",
+                    "actions": [],
+                    "state": "complete",
+                    "questions": [],
+                    "plan_id": uuid.uuid4().hex,
+                    "trace": [],
+                    "observations": [],
+                }
+            raise
+
+    return Response(stream_with_context(copilot_event_stream(plan)), mimetype="text/event-stream")
 
 
 @app.post("/vbio-api/copilot/assistant")

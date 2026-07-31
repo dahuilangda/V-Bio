@@ -432,6 +432,29 @@ export function ProjectTasksPage() {
       navigate(url.pathname + url.search);
       return;
     }
+    if (action.id === 'tasks:create_virtual_screening') {
+      if (!canEdit) throw new Error('This project is read-only for your account.');
+      const components = Array.isArray(action.payload?.components) ? action.payload.components : [];
+      const compounds = Array.isArray(action.payload?.screeningCompounds) ? action.payload.screeningCompounds : [];
+      const url = new URL(createTaskHref, window.location.origin);
+      if (components.length > 0) {
+        url.searchParams.set('copilot_components', JSON.stringify(components));
+      }
+      if (compounds.length > 0) {
+        const screeningInput = compounds
+          .map((compound: { smiles?: unknown; name?: unknown }, index: number) => {
+            const smiles = String(compound?.smiles || '').trim();
+            if (!smiles) return '';
+            const name = String(compound?.name || '').trim() || `Compound ${index + 1}`;
+            return `>${name}\n${smiles}`;
+          })
+          .filter(Boolean)
+          .join('\n');
+        if (screeningInput) url.searchParams.set('copilot_screening_input', screeningInput);
+      }
+      navigate(url.pathname + url.search);
+      return;
+    }
     if (action.id === 'tasks:copy_with_patch') {
       if (!canEdit) throw new Error('This project is read-only for your account.');
       if (!project) throw new Error('Project is not loaded.');

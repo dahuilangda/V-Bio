@@ -347,6 +347,52 @@
   overflow-wrap: anywhere;
 }
 
+/* Planner reasoning trace: a collapsed, optional disclosure under an assistant message.
+   Observability only — shows how the planner reasoned (lookups, audit fixes, terminal state). */
+.copilot-chat-window .copilot-trace {
+  margin-top: 6px;
+  border-top: 1px dashed rgba(0, 0, 0, 0.08);
+  padding-top: 4px;
+  font-size: 0.82em;
+  color: #5a6b62;
+}
+.copilot-chat-window .copilot-trace > summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  opacity: 0.85;
+}
+.copilot-chat-window .copilot-trace > summary::-webkit-details-marker {
+  display: none;
+}
+.copilot-chat-window .copilot-trace[open] > summary {
+  margin-bottom: 4px;
+}
+.copilot-chat-window .copilot-trace ol {
+  margin: 0;
+  padding-left: 18px;
+}
+.copilot-chat-window .copilot-trace li {
+  margin: 0;
+}
+.copilot-chat-window .copilot-trace li + li {
+  margin-top: 1px;
+}
+
+/* Live trace shown inside the "Planning" bubble as trace steps stream in. */
+.copilot-chat-window .copilot-thinking .copilot-live-trace {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  font-size: 0.82em;
+  opacity: 0.82;
+}
+.copilot-chat-window .copilot-thinking .copilot-live-trace li {
+  margin: 0;
+}
+.copilot-chat-window .copilot-thinking .copilot-live-trace li + li {
+  margin-top: 1px;
+}
+
 .copilot-chat-window .copilot-message-body p {
   margin: 0 0 4px;
 }
@@ -423,6 +469,15 @@
   background: #eef6f1;
 }
 
+.copilot-chat-window .copilot-plan-action.is-destructive {
+  border-color: #e1b8b8;
+  background: #fffafa;
+}
+
+.copilot-chat-window .copilot-plan-action.is-destructive:hover:not(:disabled) {
+  background: #fff1f1;
+}
+
 .copilot-chat-window .copilot-plan-action:disabled {
   cursor: not-allowed;
   opacity: 0.62;
@@ -442,6 +497,18 @@
 .copilot-chat-window .copilot-plan-action small {
   color: var(--muted);
   font-size: var(--text-xs);
+}
+
+.copilot-chat-window .copilot-plan-action .copilot-plan-action-arguments {
+  margin-top: 4px;
+  padding: 5px 6px;
+  border: 1px solid #e3e8e5;
+  border-radius: 4px;
+  background: #f7f9f8;
+  color: #33413a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  line-height: 1.35;
+  white-space: pre-wrap;
 }
 
 .copilot-chat-window .copilot-action-footer {

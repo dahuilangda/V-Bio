@@ -337,16 +337,18 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     const copilotComponentsRaw = String(query.get('copilot_components') || '').trim();
     const copilotSequence = String(query.get('copilot_sequence') || '').trim();
     const copilotParameterPatchRaw = String(query.get('copilot_parameter_patch') || '').trim();
+    const copilotScreeningInput = String(query.get('copilot_screening_input') || '').trim();
     const storedCopilotPrefill =
       session?.userId && project?.id
         ? readStoredCopilotTaskPrefill(session.userId, project.id)
         : null;
-    if ((!copilotComponentsRaw && !copilotSequence && !copilotParameterPatchRaw && !storedCopilotPrefill) || !draft || !project) return;
+    if ((!copilotComponentsRaw && !copilotSequence && !copilotParameterPatchRaw && !copilotScreeningInput && !storedCopilotPrefill) || !draft || !project) return;
     copilotSequenceAppliedRef.current = true;
     const aminoAcidPattern = /^[ACDEFGHIKLMNPQRSTVWY]+$/i;
     query.delete('copilot_components');
     query.delete('copilot_sequence');
     query.delete('copilot_parameter_patch');
+    query.delete('copilot_screening_input');
     const nextSearch = query.toString();
     navigate(
       { pathname: window.location.pathname, search: nextSearch ? `?${nextSearch}` : '' },
@@ -426,7 +428,10 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
                 : prev.inputConfig.constraints,
             options: {
               ...prev.inputConfig.options,
-              ...(seedPatch !== null ? { seed: Math.max(0, Math.floor(seedPatch)) } : {})
+              ...(seedPatch !== null ? { seed: Math.max(0, Math.floor(seedPatch)) } : {}),
+              ...(copilotScreeningInput
+                ? { virtualScreeningInput: copilotScreeningInput, virtualScreeningInputMode: 'paste' as const }
+                : {})
             }
           },
         };
@@ -2154,6 +2159,57 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
       await applyMetadataPatch();
       return;
     }
+    if (action.id === 'task_detail:apply_structure_template') {
+      if (!canEdit) throw new Error('This project is read-only for your account.');
+      if (!isPredictionWorkflow) throw new Error('Structure templates are only supported for prediction tasks.');
+      const structureUrl = String(action.payload?.structureUrl || '').trim();
+      if (!structureUrl) throw new Error('No structure URL was provided.');
+      const targetProteinComponent = (draft.inputConfig?.components || []).find((component) => component.type === 'protein') || null;
+      if (!targetProteinComponent) throw new Error('This prediction task has no protein component to attach a template to.');
+      let fileName = String(action.payload?.fileName || '').trim();
+      if (!fileName) fileName = (structureUrl.split('/').pop() || 'template').split('?')[0];
+      const format = detectStructureFormat(fileName);
+      if (!format) throw new Error('The structure URL must point to a .pdb, .cif, or .mmcif file.');
+      const response = await fetch(structureUrl);
+      if (!response.ok) throw new Error(`Could not download the structure (HTTP ${response.status}).`);
+      const contentText = await response.text();
+      const chainSequences = extractProteinChainSequences(contentText, format);
+      const chainIds = Object.keys(chainSequences).sort((a, b) => a.localeCompare(b));
+      if (!chainIds.length) throw new Error('No protein chain could be parsed from the fetched structure.');
+      const upload: ProteinTemplateUpload = {
+        fileName,
+        format,
+        content: contentText,
+        chainId: chainIds[0],
+        chainSequences
+      };
+      setProteinTemplates((prev) => ({ ...prev, [targetProteinComponent.id]: upload }));
+      return;
+    }
+    if (action.id === 'task_detail:apply_affinity_target_structure') {
+      if (!canEdit) throw new Error('This project is read-only for your account.');
+      if (!isAffinityWorkflow) throw new Error('Affinity target structures are only supported for affinity tasks.');
+      const structureUrl = String(action.payload?.structureUrl || '').trim();
+      if (!structureUrl) throw new Error('No structure URL was provided.');
+      let fileName = String(action.payload?.fileName || '').trim();
+      if (!fileName) fileName = (structureUrl.split('/').pop() || 'target').split('?')[0];
+      const format = detectStructureFormat(fileName);
+      if (!format) throw new Error('The structure URL must point to a .pdb, .cif, or .mmcif file.');
+      const response = await fetch(structureUrl);
+      if (!response.ok) throw new Error(`Could not download the structure (HTTP ${response.status}).`);
+      const contentText = await response.text();
+      const file = new File([contentText], fileName, { type: format === 'pdb' ? 'chemical/x-pdb' : 'chemical/x-cif' });
+      onAffinityTargetFileChange(file);
+      return;
+    }
+    if (action.id === 'task_detail:apply_affinity_ligand_smiles') {
+      if (!canEdit) throw new Error('This project is read-only for your account.');
+      if (!isAffinityWorkflow) throw new Error('Affinity binder SMILES are only supported for affinity tasks.');
+      const smiles = String(action.payload?.smiles || '').trim();
+      if (!smiles) throw new Error('No SMILES was provided.');
+      setAffinityLigandSmiles(smiles);
+      return;
+    }
     if (action.id === 'task_detail:save_draft') {
       await saveDraft();
       return;
@@ -2213,8 +2269,14 @@ function ProjectDetailWorkspaceLoaded({ runtime }: { runtime: WorkspaceRuntimeRe
     activeResultTask,
     canEdit,
     displayTaskState,
+    draft,
     effectiveRunBlockedReason,
     effectiveRunDisabled,
+    isAffinityWorkflow,
+    isPredictionWorkflow,
+    onAffinityTargetFileChange,
+    setAffinityLigandSmiles,
+    setProteinTemplates,
     handleHeaderRunAction,
     handleRuntimePeptideBinderLengthChange,
     handleRuntimeBackendChange,

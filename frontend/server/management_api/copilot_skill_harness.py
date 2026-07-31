@@ -1,13 +1,37 @@
 from __future__ import annotations
 
+import copy
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
-from management_api.copilot_skills.online_databases import OnlineDatabaseSkills, OnlineSkillDefinition
+from management_api.copilot_skills.online_databases import OnlineDatabaseSkills
 
 
-READ_EFFECTS = {"read", "observe", "resolve", "inspect"}
+READ_EFFECTS = frozenset({"read", "observe", "resolve", "inspect"})
+CONFIRMATION_EFFECTS = frozenset({"create", "update", "delete", "execute", "navigate"})
+KNOWN_EFFECTS = READ_EFFECTS | CONFIRMATION_EFFECTS
+
+# Canonical fields of a retrieved record, in identity/display priority order. This is the single
+# source of truth for "which fields identify a record" — used both to summarize observations for the
+# model (copilot._summarize_observations) and to derive anti-hallucination grounding anchors
+# (_grounding_issue). General by construction: a new skill's normalized record fields surface
+# automatically once named here, instead of being hardcoded per consumer.
+RECORD_IDENTITY_FIELDS: Tuple[str, ...] = (
+    "accession",
+    "cid",
+    "pdbId",
+    "pmid",
+    "nctId",
+    "entryName",
+    "geneNames",
+    "proteinName",
+    "title",
+    "organism",
+)
+RECORD_LONG_FIELDS: Tuple[str, ...] = ("smiles", "sequence")
+RECORD_NUMERIC_FIELDS: Tuple[str, ...] = ("avgPlddt", "resolution", "value", "length")
 
 
 @dataclass(frozen=True)
@@ -17,7 +41,7 @@ class CopilotSkillDefinition:
     name: str
     description: str
     input_schema: Dict[str, Any]
-    effect: str = "write"
+    effect: str
     label: str = ""
     context_type: str | None = None
     payload_defaults: Dict[str, Any] = field(default_factory=dict)
@@ -58,6 +82,7 @@ class PlanAudit:
     operations: Tuple[PreparedOperation, ...]
     issues: Tuple[str, ...]
     candidate: Dict[str, Any]
+    state: str
 
 
 class CopilotSkillHarness:
@@ -99,7 +124,118 @@ class CopilotSkillHarness:
             if definition.name in result:
                 raise ValueError(f"Duplicate skill definition: {definition.name}")
             result[definition.name] = definition
+        for definition in result.values():
+            self._validate_definition(definition)
         return result
+
+    @staticmethod
+    def _validate_definition(definition: CopilotSkillDefinition) -> None:
+        name = str(definition.name or "").strip()
+        if not name:
+            raise ValueError("Skill name is required.")
+        effect = str(definition.effect or "").strip().lower()
+        if effect not in KNOWN_EFFECTS:
+            raise ValueError(f"Skill {name} declares an unsupported effect: {definition.effect}")
+        if not isinstance(definition.input_schema, Mapping) or definition.input_schema.get("type") != "object":
+            raise ValueError(f"Skill {name} must declare an object input schema.")
+        if definition.destructive and effect in READ_EFFECTS:
+            raise ValueError(f"Destructive skill {name} cannot be read-only.")
+        if effect in CONFIRMATION_EFFECTS:
+            if not str(definition.label or "").strip():
+                raise ValueError(f"Confirmation skill {name} must declare a label.")
+            if not str(definition.description or "").strip():
+                raise ValueError(f"Confirmation skill {name} must declare a description.")
+
+    def planner_output_schema(
+        self,
+        definitions: Mapping[str, CopilotSkillDefinition],
+    ) -> Dict[str, Any]:
+        """Build the strict planner envelope from the authoritative skill registry."""
+
+        operation_variants: List[Dict[str, Any]] = []
+        for definition in definitions.values():
+            self._validate_definition(definition)
+            operation_variants.append(
+                {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "minLength": 1, "maxLength": 128},
+                        "skill": {"type": "string", "const": definition.name},
+                        "arguments": copy.deepcopy(definition.input_schema),
+                        "depends_on": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1, "maxLength": 128},
+                            "maxItems": self.max_calls_per_round,
+                        },
+                    },
+                    "required": ["id", "skill", "arguments", "depends_on"],
+                    "additionalProperties": False,
+                }
+            )
+        if not operation_variants:
+            raise ValueError("At least one registered skill is required to build the planner contract.")
+        return {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "minLength": 1},
+                "questions": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "maxItems": 3,
+                },
+                "operations": {
+                    "type": "array",
+                    "items": {"oneOf": operation_variants},
+                    "maxItems": self.max_calls_per_round,
+                },
+            },
+            "required": ["message", "questions", "operations"],
+            "additionalProperties": False,
+        }
+
+    def planner_output_schema_simple(
+        self,
+        definitions: Mapping[str, CopilotSkillDefinition],
+    ) -> Dict[str, Any]:
+        """A leaner schema: one operation shape with skill:enum and permissive arguments.
+
+        Used when thinking is enabled — the oneOf with per-skill argument schemas creates too much
+        grammar complexity for a model that is simultaneously reasoning, causing conformance failures.
+        The harness audit still validates each operation's arguments against the real input_schema.
+        """
+        skill_names = sorted(definitions.keys())
+        return {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "minLength": 1},
+                "questions": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "maxItems": 3,
+                },
+                "operations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "minLength": 1, "maxLength": 128},
+                            "skill": {"type": "string", "enum": skill_names},
+                            "arguments": {"type": "object"},
+                            "depends_on": {
+                                "type": "array",
+                                "items": {"type": "string", "minLength": 1, "maxLength": 128},
+                                "maxItems": self.max_calls_per_round,
+                            },
+                        },
+                        "required": ["id", "skill", "arguments", "depends_on"],
+                        "additionalProperties": False,
+                    },
+                    "maxItems": self.max_calls_per_round,
+                },
+            },
+            "required": ["message", "questions", "operations"],
+            "additionalProperties": False,
+        }
 
     def render_protocol_prompt(
         self,
@@ -108,32 +244,6 @@ class CopilotSkillHarness:
         import json
 
         available = definitions if definitions is not None else self._definitions
-        output_schema = {
-            "type": "object",
-            "properties": {
-                "message": {"type": "string"},
-                "state": {"type": "string", "enum": ["continue", "await_confirmation", "needs_input", "complete"]},
-                "questions": {"type": "array", "items": {"type": "string"}},
-                "operations": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string", "minLength": 1},
-                            "skill": {"type": "string", "minLength": 1},
-                            "arguments": {"type": "object"},
-                            "label": {"type": "string", "minLength": 1},
-                            "description": {"type": "string", "minLength": 1},
-                            "depends_on": {"type": "array", "items": {"type": "string"}},
-                        },
-                        "required": ["id", "skill", "arguments"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "required": ["message", "state", "operations"],
-            "additionalProperties": False,
-        }
         catalog = [
             {
                 "name": definition.name,
@@ -146,85 +256,27 @@ class CopilotSkillHarness:
             for definition in available.values()
         ]
         return (
-            "Plan one turn as a sequence of atomic operations. The planner composes operations; "
-            "the harness executes read-only operations and presents every write operation for confirmation. "
-            "Use only registered skill contracts, keep operation ids unique, preserve operation order, and "
-            "declare dependencies on earlier observations. Do not execute a write operation and do not emit "
-            "undocumented fields. Return one JSON object matching this contract:\n"
-            f"{json.dumps(output_schema, ensure_ascii=False, sort_keys=True)}\n"
-            "Registered skills:\n"
+            "Plan one turn with registered atomic skills. Return a user-visible message, unresolved questions, "
+            "and ordered operations. Use questions only when required input is missing, and do not combine questions "
+            "with operations. Use only skill names and argument fields declared by the registry. Operation ids must be "
+            "unique across the planning loop, and dependencies may reference only earlier operations or observations. "
+            "The harness derives the turn state, executes only read-only skills, and converts every non-read-only skill "
+            "into a pending confirmation. The planner must never claim that a non-read-only operation already ran. "
+            "The harness executes your read-only operations and returns their observations as a system message for the "
+            "next round. Read what you need straight from those observations: most lookups finish in a single search "
+            "operation whose observation already holds the answer (a SMILES or a protein sequence), so then return the "
+            "final message with no further operations. Each round, emit only NEW operations with NEW ids; never repeat "
+            "an operation id whose observation you have already received, and never invent template placeholders such "
+            "as {{...}}. When a later operation needs a value a prior observation retrieved, you MUST reference it "
+            "with {\"$fromObservation\": \"<id>\", \"field\": \"<field>\", \"index\": <n>} (record 0 is the top hit; "
+            "common fields are sequence, smiles, accession, cid, geneNames) and set depends_on to that id — never "
+            "paste a retrieved sequence, SMILES, or other long value into an argument. Run read-only lookups first; "
+            "once their observations return, emit the non-read-only operation that consumes them in a later round — "
+            "a single round may contain read-only operations OR non-read-only operations, never both. "
+            "The output structure is enforced separately by the model server and must contain data only, never schema "
+            "keywords or protocol metadata. Registered skill contracts:\n"
             f"{json.dumps(catalog, ensure_ascii=False, sort_keys=True)}"
         )
-
-    def prepare(self, candidate: Dict[str, Any]) -> Tuple[List[PreparedSkillCall], List[str]]:
-        calls: List[PreparedSkillCall] = []
-        errors: List[str] = []
-        raw_calls = candidate.get("skill_calls") if isinstance(candidate.get("skill_calls"), list) else []
-        raw_loops = candidate.get("skill_loops") if isinstance(candidate.get("skill_loops"), list) else []
-
-        for position, raw in enumerate(raw_calls):
-            if not isinstance(raw, dict):
-                errors.append(f"skill_calls[{position}] must be an object")
-                continue
-            calls.extend(self._prepare_call(raw, position, errors))
-
-        for loop_position, raw_loop in enumerate(raw_loops):
-            if not isinstance(raw_loop, dict):
-                errors.append(f"skill_loops[{loop_position}] must be an object")
-                continue
-            loop_id = str(raw_loop.get("id") or "").strip()
-            skill = str(raw_loop.get("skill") or "").strip()
-            if str(raw_loop.get("op") or "").strip() != "foreach":
-                errors.append(f"skill_loops[{loop_position}].op must be foreach")
-                continue
-            items = raw_loop.get("items") if isinstance(raw_loop.get("items"), list) else []
-            if not loop_id or not items:
-                errors.append(f"skill_loops[{loop_position}] requires a non-empty id and items")
-                continue
-            for item_position, raw_item in enumerate(items):
-                item = raw_item if isinstance(raw_item, dict) else {}
-                prepared = {
-                    "id": loop_id,
-                    "skill": skill,
-                    "arguments": item.get("arguments"),
-                    "metadata": item.get("metadata"),
-                }
-                calls.extend(self._prepare_call(prepared, item_position, errors))
-
-        if len(calls) > self.max_calls_per_round:
-            errors.append(
-                f"planner requested {len(calls)} skill calls; the per-round limit is {self.max_calls_per_round}"
-            )
-            return [], errors
-        return calls, errors
-
-    def _prepare_call(
-        self,
-        raw: Dict[str, Any],
-        index: int,
-        errors: List[str],
-    ) -> List[PreparedSkillCall]:
-        observation_id = str(raw.get("id") or "").strip()
-        skill = str(raw.get("skill") or "").strip()
-        arguments = raw.get("arguments") if isinstance(raw.get("arguments"), dict) else {}
-        metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
-        definition = self._definitions.get(skill)
-        if not observation_id or definition is None:
-            errors.append(f"skill call at index {index} has an invalid id or skill")
-            return []
-        argument_errors = self._validate_arguments(arguments, definition)
-        if argument_errors:
-            errors.extend(f"{observation_id}[{index}]: {error}" for error in argument_errors)
-            return []
-        return [PreparedSkillCall(observation_id, skill, dict(arguments), dict(metadata), index)]
-
-    @classmethod
-    def _validate_arguments(
-        cls,
-        arguments: Dict[str, Any],
-        definition: OnlineSkillDefinition | CopilotSkillDefinition,
-    ) -> List[str]:
-        return cls._validate_schema(arguments, definition.input_schema)
 
     def audit_plan(
         self,
@@ -236,23 +288,27 @@ class CopilotSkillHarness:
     ) -> PlanAudit:
         issues: List[str] = []
         if not isinstance(candidate, dict):
-            return PlanAudit((), ("planner output must be an object",), {})
+            return PlanAudit((), ("planner output must be an object",), {}, "")
 
-        allowed_fields = {"message", "state", "questions", "operations"}
+        allowed_fields = {"message", "questions", "operations"}
         issues.extend(f"planner output field is not declared: {key}" for key in candidate if key not in allowed_fields)
-        state = str(candidate.get("state") or "").strip().lower()
-        if state not in {"continue", "await_confirmation", "needs_input", "complete"}:
-            issues.append("state must be one of continue, await_confirmation, needs_input, complete")
-        if not isinstance(candidate.get("message"), str):
-            issues.append("message must be a string")
-        questions = candidate.get("questions", [])
+        if not isinstance(candidate.get("message"), str) or not str(candidate.get("message") or "").strip():
+            issues.append("message must be a non-empty string")
+        if "questions" not in candidate:
+            issues.append("questions is required")
+        questions = candidate.get("questions")
         if not isinstance(questions, list) or any(not isinstance(item, str) for item in questions):
             issues.append("questions must be an array of strings")
             questions = []
+        elif any(not item.strip() for item in questions):
+            issues.append("questions must not contain empty strings")
+        elif len(questions) > 3:
+            issues.append("questions must contain at most 3 items")
         raw_operations = candidate.get("operations")
         if not isinstance(raw_operations, list):
             issues.append("operations must be an array")
-            return PlanAudit((), tuple(issues), dict(candidate))
+            state = "needs_input" if questions else "complete"
+            return PlanAudit((), tuple(issues), dict(candidate), state)
         if len(raw_operations) > self.max_calls_per_round:
             issues.append(
                 f"planner requested {len(raw_operations)} operations; the per-round limit is {self.max_calls_per_round}"
@@ -267,19 +323,25 @@ class CopilotSkillHarness:
             if not isinstance(raw, dict):
                 issues.append(f"{path} must be an object")
                 continue
-            unknown_fields = set(raw) - {"id", "skill", "arguments", "label", "description", "depends_on"}
+            unknown_fields = set(raw) - {"id", "skill", "arguments", "depends_on"}
             issues.extend(f"{path}.{key} is not declared" for key in sorted(unknown_fields))
             operation_id = str(raw.get("id") or "").strip()
             skill_name = str(raw.get("skill") or "").strip()
             if not operation_id:
                 issues.append(f"{path}.id is required")
                 continue
+            if len(operation_id) > 128:
+                issues.append(f"{path}.id is longer than the declared maximum")
+                continue
             if operation_id in seen_ids:
                 issues.append(f"{path}.id must be unique")
                 continue
             seen_ids.add(operation_id)
             if operation_id in observation_map:
-                issues.append(f"{path}.id was already used by an earlier operation")
+                # The planner re-emitted an operation that already produced an observation.
+                # Weaker planners routinely repeat a completed read instead of moving on;
+                # treat it as already satisfied and carry the existing observation forward
+                # rather than rejecting the whole turn (which would deadlock the loop).
                 continue
             definition = definitions.get(skill_name)
             if definition is None:
@@ -306,30 +368,28 @@ class CopilotSkillHarness:
                 f"{path}.arguments: {error}"
                 for error in self._validate_schema(arguments, definition.input_schema)
             )
-            dependencies = raw.get("depends_on", [])
-            if dependencies is None:
-                dependencies = []
+            if "depends_on" not in raw:
+                issues.append(f"{path}.depends_on is required")
+            dependencies = raw.get("depends_on")
             if not isinstance(dependencies, list) or any(not isinstance(item, str) for item in dependencies):
                 issues.append(f"{path}.depends_on must be an array of strings")
                 dependencies = []
+            elif len(dependencies) > self.max_calls_per_round:
+                issues.append(f"{path}.depends_on has more items than the declared maximum")
+            elif len(dependencies) != len(set(dependencies)):
+                issues.append(f"{path}.depends_on must contain unique items")
             for dependency in dependencies:
                 if dependency in observation_map and not observation_map[dependency].get("ok"):
                     issues.append(f"{path}.depends_on references a failed observation: {dependency}")
                 elif dependency not in prior_ids and dependency not in observation_map:
                     issues.append(f"{path}.depends_on references an unknown prior operation: {dependency}")
-            label = str(raw.get("label") or "").strip()
-            description = str(raw.get("description") or "").strip()
-            if definition.requires_confirmation and not label:
-                issues.append(f"{path}.label is required for a confirmation operation")
-            if definition.requires_confirmation and not description:
-                issues.append(f"{path}.description is required for a confirmation operation")
             prepared.append(
                 PreparedOperation(
                     operation_id=operation_id,
                     skill=skill_name,
                     arguments=arguments,
-                    label=label,
-                    description=description,
+                    label=str(definition.label or "").strip(),
+                    description=str(definition.description or "").strip(),
                     depends_on=tuple(dependencies),
                     index=index,
                     definition=definition,
@@ -343,17 +403,76 @@ class CopilotSkillHarness:
             issues.append("a turn must contain either read-only operations or confirmation operations, not both")
         if questions and raw_operations:
             issues.append("questions cannot accompany operations")
-        if state == "continue" and not read_operations:
-            issues.append("state continue requires at least one read-only operation")
-        if state == "await_confirmation" and not write_operations:
-            issues.append("state await_confirmation requires at least one write operation")
-        if state == "needs_input" and (raw_operations or not questions):
-            issues.append("state needs_input requires questions and no operations")
-        if state == "complete" and raw_operations:
-            issues.append("state complete requires no operations")
-        return PlanAudit(tuple(prepared), tuple(issues), dict(candidate))
+        if questions:
+            state = "needs_input"
+        elif read_operations:
+            state = "continue"
+        elif write_operations:
+            state = "await_confirmation"
+        else:
+            state = "complete"
+        # Guard against an ungrounded final answer: when the turn ends with a plain message and
+        # the skills retrieved exactly one discrete record, the message must reference that record
+        # (identity or SMILES/sequence). This refuses a confident-but-ungrounded answer (e.g. a
+        # hallucination that ignores the retrieved compound) instead of showing it to the user.
+        if state == "complete" and observations:
+            grounding_issue = self._grounding_issue(candidate.get("message"), observations)
+            if grounding_issue:
+                issues.append(grounding_issue)
+        return PlanAudit(tuple(prepared), tuple(issues), dict(candidate), state)
 
-    audit = audit_plan
+    @staticmethod
+    def _grounding_issue(message: Any, observations: Mapping[str, Dict[str, Any]]) -> str | None:
+        """Return an audit issue when a final message ignores the one record a skill retrieved.
+
+        General, record-driven (no hardcoded identifiers): enforced only when the successful
+        observations contain exactly one discrete record. Multi-record list answers are left alone
+        because a weaker model often summarizes a list without quoting an exact identifier, and
+        rejecting those would hurt UX more than the rare list-hallucination it would catch.
+        """
+        import re
+
+        normalized_message = str(message or "").strip().lower()
+        if not normalized_message:
+            return None
+        records: List[Dict[str, Any]] = []
+        for observation in (observations or {}).values():
+            if not isinstance(observation, dict) or not observation.get("ok"):
+                continue
+            for value in observation.get("values") or []:
+                if not isinstance(value, dict):
+                    continue
+                nested = value.get("results")
+                if isinstance(nested, list) and nested:
+                    records.extend(item for item in nested if isinstance(item, dict))
+                else:
+                    records.append(value)
+        if len(records) != 1:
+            return None
+        record = records[0]
+        anchors: List[str] = []
+        for field in RECORD_IDENTITY_FIELDS:
+            text = str(record.get(field) or "").strip().lower()
+            if not text:
+                continue
+            if field == "title":
+                # A free-text title (e.g. a drug name) is matched by its alphanumeric tokens, so naming
+                # the compound in the answer counts as grounding without the full title verbatim.
+                anchors.extend(token for token in re.findall(r"[a-z0-9]+", text) if len(token) >= 4)
+            elif len(text) >= 3:
+                anchors.append(text)
+        for field in RECORD_LONG_FIELDS:
+            text = str(record.get(field) or "").strip().lower()
+            if len(text) >= 8:
+                anchors.append(text[:15])
+        if not anchors:
+            return None
+        if not any(anchor in normalized_message for anchor in anchors):
+            return (
+                "the answer does not reference the single record the skill retrieved; re-answer using that "
+                "record's identity, SMILES, or sequence verbatim, or state plainly that you cannot resolve it"
+            )
+        return None
 
     def execute_operations(self, operations: Sequence[PreparedOperation]) -> Dict[str, Dict[str, Any]]:
         operation_ids = {operation.operation_id for operation in operations}
@@ -452,6 +571,7 @@ class CopilotSkillHarness:
                     "sequence": operation.index,
                     "label": operation.label,
                     "description": operation.description,
+                    "arguments": dict(operation.arguments),
                     "payload": payload,
                     "effect": operation.definition.effect,
                     "needs_confirmation": True,
@@ -512,18 +632,68 @@ class CopilotSkillHarness:
             return [self.materialize_observations(item, observations) for item in value]
         if not isinstance(value, dict):
             return value
-        if set(value) == {"$fromObservation"}:
-            observation_id = str(value.get("$fromObservation") or "").strip()
-            observation = observations.get(observation_id)
-            if observation is None:
-                raise ValueError(f"Unknown observation reference: {observation_id}")
-            if not observation.get("ok"):
-                raise ValueError(f"Observation {observation_id} contains failed skill calls")
-            return list(observation.get("values") or [])
+        if "$fromObservation" in value:
+            return self._resolve_observation_reference(value, observations)
         return {
             key: self.materialize_observations(child, observations)
             for key, child in value.items()
         }
+
+    @staticmethod
+    def _observation_records(observation: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Flatten an observation's values into its discrete entity records.
+
+        Search skills return {results: [record, ...]}; resolve skills return the record itself.
+        Flattening lets a caller index records uniformly (record 0 is the top hit).
+        """
+        records: List[Dict[str, Any]] = []
+        for value in observation.get("values") or []:
+            if not isinstance(value, dict):
+                continue
+            nested = value.get("results")
+            if isinstance(nested, list) and nested:
+                records.extend(item for item in nested if isinstance(item, dict))
+            else:
+                records.append(value)
+        return records
+
+    @classmethod
+    def _resolve_observation_reference(cls, value: Dict[str, Any], observations: Dict[str, Dict[str, Any]]) -> Any:
+        observation_id = str(value.get("$fromObservation") or "").strip()
+        observation = observations.get(observation_id)
+        if observation is None:
+            raise ValueError(f"Unknown observation reference: {observation_id}")
+        if not observation.get("ok"):
+            raise ValueError(f"Observation {observation_id} contains failed skill calls")
+        records = cls._observation_records(observation)
+        field = value.get("field")
+        if field is None:
+            # No field: hand back the whole value list (legacy list-forwarding form).
+            return list(observation.get("values") or [])
+        if value.get("all") is True:
+            # Column form: the field's value across every record (record 0 first), so a later skill
+            # can consume a whole retrieved collection — e.g. compute.aggregate over a numeric column.
+            column = [
+                record.get(field)
+                for record in records
+                if isinstance(record, dict) and record.get(field) is not None
+            ]
+            if not column:
+                raise ValueError(f"Observation {observation_id} has no records with field {field!r}")
+            return column
+        try:
+            index = int(value.get("index", 0))
+        except (TypeError, ValueError):
+            index = 0
+        if index < 0 or index >= len(records):
+            raise ValueError(
+                f"Observation {observation_id} has no record at index {index} (have {len(records)})"
+            )
+        record = records[index]
+        extracted = record.get(field) if isinstance(record, dict) else None
+        if extracted is None:
+            raise ValueError(f"Observation {observation_id} record {index} has no field {field!r}")
+        return extracted
 
     @classmethod
     def _validate_schema(cls, value: Any, schema: Mapping[str, Any], path: str = "arguments") -> List[str]:
@@ -544,11 +714,27 @@ class CopilotSkillHarness:
                 errors.append(f"{path} is shorter than the declared minimum")
             if schema.get("maxLength") is not None and len(value) > int(schema["maxLength"]):
                 errors.append(f"{path} is longer than the declared maximum")
+            pattern = schema.get("pattern")
+            if isinstance(pattern, str) and pattern:
+                # The grammar strips `pattern` (it can't enforce regex); the harness re-validates so a
+                # skill schema's pattern constraint is actually honored. JSON Schema `pattern` is
+                # unanchored — a match anywhere satisfies it. An invalid pattern in the schema itself
+                # is treated as no constraint rather than crashing the audit.
+                try:
+                    if re.search(pattern, value) is None:
+                        errors.append(f"{path} does not match the declared pattern")
+                except re.error:
+                    pass
         if isinstance(value, (int, float)) and not isinstance(value, bool):
-            if schema.get("minimum") is not None and value < schema["minimum"]:
-                errors.append(f"{path} is below the declared minimum")
-            if schema.get("maximum") is not None and value > schema["maximum"]:
-                errors.append(f"{path} is above the declared maximum")
+            # A malformed schema (non-numeric minimum/maximum) must not crash the audit — surface it
+            # as an issue instead, upholding the "audit never raises" contract.
+            try:
+                if schema.get("minimum") is not None and value < schema["minimum"]:
+                    errors.append(f"{path} is below the declared minimum")
+                if schema.get("maximum") is not None and value > schema["maximum"]:
+                    errors.append(f"{path} is above the declared maximum")
+            except TypeError:
+                errors.append(f"{path} declares a non-numeric minimum or maximum")
         if isinstance(value, list):
             if schema.get("minItems") is not None and len(value) < int(schema["minItems"]):
                 errors.append(f"{path} has fewer items than the declared minimum")
