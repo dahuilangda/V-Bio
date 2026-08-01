@@ -179,6 +179,32 @@ def build_registered_capability_catalog() -> Dict[str, Any]:
     }
 
 
+def build_capability_orientation(
+    capabilities: List[Dict[str, str]] = COPILOT_CAPABILITIES,
+    *,
+    max_items: int = 14,
+    per_item_chars: int = 95,
+) -> str:
+    """Compact, general orientation to V-Bio's capability surface, derived from the registered
+    catalog (single source of truth).
+
+    Used by the inline auto-completer so its prompt never hardcodes or drifts from the planner's
+    catalog, and never bakes in specific compounds/proteins/examples (which overfit). Domain-
+    general by construction: it only reshapes the catalog's own descriptions.
+    """
+    lines: List[str] = []
+    for capability in capabilities[:max_items]:
+        name = str(capability.get("name") or "").strip()
+        description = str(capability.get("description") or capability.get("trigger") or "").strip()
+        description = " ".join(description.split())
+        if not name and not description:
+            continue
+        if len(description) > per_item_chars:
+            description = description[:per_item_chars].rstrip() + "…"
+        lines.append(f"- {name}: {description}" if name else f"- {description}")
+    return "\n".join(lines)
+
+
 def _backend_values_for_workflow(workflow_key: str) -> List[str]:
     if normalize_workflow_key(workflow_key) == "virtual_screening":
         return ["nesso"]

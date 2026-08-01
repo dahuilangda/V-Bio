@@ -86,12 +86,12 @@ function sanitizeCopilotContextPayload(payload: Record<string, unknown>): Record
   return sanitized && typeof sanitized === 'object' && !Array.isArray(sanitized) ? sanitized as Record<string, unknown> : {};
 }
 
-export async function getCopilotConfig(): Promise<{ enabled: boolean }> {
+export async function getCopilotConfig(): Promise<{ enabled: boolean; completionEnabled: boolean }> {
   const res = await requestManagement('/vbio-api/copilot/config', { method: 'GET', headers: API_HEADERS }, 10000);
-  const payload = (await res.json().catch(() => ({}))) as { enabled?: boolean };
-  if (res.status === 404) return { enabled: true };
-  if (!res.ok) return { enabled: false };
-  return { enabled: payload.enabled === true };
+  const payload = (await res.json().catch(() => ({}))) as { enabled?: boolean; completionEnabled?: boolean };
+  if (res.status === 404) return { enabled: true, completionEnabled: false };
+  if (!res.ok) return { enabled: false, completionEnabled: false };
+  return { enabled: payload.enabled === true, completionEnabled: payload.completionEnabled === true };
 }
 
 
@@ -388,4 +388,53 @@ export async function requestCopilotPlanActions(input: {
     throw new Error(payload.error || `Copilot action planning failed with HTTP ${res.status}.`);
   }
   return Array.isArray(payload.actions) ? payload.actions : [];
+}
+
+/**
+ * Fetch a short inline-completion suggestion for the in-progress draft. Best-effort: returns "" on
+ * any failure (timeout, abort, non-ok, parse error) so the composer never blocks. Uses its own
+ * short timeout and links an external AbortSignal so a newer keystroke can cancel an in-flight call.
+ */
+export async function requestCopilotCompletion(
+  input: {
+    contextType: string;
+    contextPayload: Record<string, unknown>;
+    userId: string;
+    username: string;
+    content: string;
+  },
+  signal?: AbortSignal
+): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4000);
+  const onExternalAbort = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) {
+      controller.abort();
+    } else {
+      signal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
+  try {
+    const res = await fetch(managementApiUrl('/vbio-api/copilot/complete'), {
+      method: 'POST',
+      headers: { ...API_HEADERS, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        context_type: input.contextType,
+        context_payload: sanitizeCopilotContextPayload(input.contextPayload),
+        user_id: input.userId,
+        username: input.username,
+        content: input.content
+      }),
+      signal: controller.signal
+    });
+    if (!res.ok) return '';
+    const payload = (await res.json().catch(() => ({}))) as { suggestion?: string };
+    return typeof payload.suggestion === 'string' ? payload.suggestion : '';
+  } catch {
+    return '';
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', onExternalAbort);
+  }
 }

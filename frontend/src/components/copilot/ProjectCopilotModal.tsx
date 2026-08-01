@@ -1,4 +1,4 @@
-import { Bot, Check, CheckCheck, Clock3, LoaderCircle, MessageSquarePlus, MessageSquareText, PanelLeft, Plus, Send, Trash2, X } from 'lucide-react';
+import { AlertTriangle, Bot, Check, CheckCheck, ChevronRight, Clock3, LoaderCircle, MessageSquare, MessageSquarePlus, MessageSquareText, PanelLeft, Plus, RefreshCw, Search, Send, ShieldAlert, Sparkles, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, memo, type PointerEvent as ReactPointerEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -11,10 +11,18 @@ import {
   listProjectCopilotMessages,
   upsertProjectCopilotState
 } from '../../api/supabaseLite';
-import { streamCopilotTurn } from '../../api/copilotApi';
+import { getCopilotConfig, requestCopilotCompletion, streamCopilotTurn } from '../../api/copilotApi';
 import type { CopilotContextType, CopilotPlanAction, CopilotTraceStep, ProjectCopilotMessage } from '../../types/models';
 import { formatDateTime } from '../../utils/date';
 import { collectCopilotMemory, formatTraceStep, readPlannerTrace, readSessionId } from './copilotTraceUi';
+import {
+  appendInputHistory,
+  nextInputHistoryNav,
+  readStoredInputHistory,
+  shouldNavigateHistory,
+  writeStoredInputHistory,
+  type InputHistoryNav
+} from './copilotInputHistory';
 import './ProjectCopilotModal.css';
 
 interface ProjectCopilotModalProps {
@@ -63,6 +71,77 @@ function author(message: ProjectCopilotMessage): string {
 
 // Planner trace + memory helpers live in ./copilotTraceUi (pure + unit-tested).
 
+// Per-event tone + icon for the reasoning timeline (icon-led, like Claude's thinking panel).
+type TraceTone = 'think' | 'lookup' | 'retry' | 'revise' | 'chat' | 'done' | 'warn' | 'other';
+type LucideIcon = typeof Sparkles;
+const TRACE_EVENT_META: Record<string, { tone: TraceTone; Icon: LucideIcon }> = {
+  model_request: { tone: 'think', Icon: Sparkles },
+  malformed_output: { tone: 'retry', Icon: RefreshCw },
+  audit_rejected: { tone: 'revise', Icon: ShieldAlert },
+  skill_observations: { tone: 'lookup', Icon: Search },
+  fallback: { tone: 'chat', Icon: MessageSquare },
+  terminal: { tone: 'done', Icon: Check },
+  no_convergence: { tone: 'warn', Icon: AlertTriangle },
+};
+
+function traceMeta(event: string): { tone: TraceTone; Icon: LucideIcon } {
+  return TRACE_EVENT_META[event] || { tone: 'other', Icon: Sparkles };
+}
+
+// Icon-led reasoning steps — muted and minimal (Claude/ChatGPT-style), no busy rail/tags. The latest
+// streaming step pulses gently.
+function TraceStepList({ steps, highlightLast }: { steps: CopilotTraceStep[]; highlightLast?: boolean }) {
+  return (
+    <ol className="copilot-trace-list">
+      {steps.map((step, index) => {
+        const meta = traceMeta(step.event);
+        const isLast = highlightLast && index === steps.length - 1;
+        const Icon = meta.Icon;
+        return (
+          <li
+            key={`${step.round}-${step.event}-${index}`}
+            className={`copilot-trace-item tone-${meta.tone}${isLast ? ' is-current' : ''}`}
+          >
+            <Icon className="copilot-trace-icon" size={13} aria-hidden="true" />
+            <span className="copilot-trace-text">{formatTraceStep(step)}</span>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+// Collapsible "Thinking / Reasoning" card — mirrors Claude's reasoning panel: an animated sparkle
+// header while live, a quiet dimmed body of steps, smooth expand/collapse. Used for both the live
+// planning bubble and the per-message reasoning disclosure.
+function CopilotThinkingCard({ steps, live }: { steps: CopilotTraceStep[]; live?: boolean }) {
+  const [open, setOpen] = useState(live ?? true);
+  const label = live ? 'Thinking' : 'Reasoning';
+  const count = steps.length;
+  return (
+    <div className={`copilot-thinking-card${live ? ' is-live' : ''}${open ? ' is-open' : ''}`}>
+      <button
+        type="button"
+        className="copilot-thinking-head"
+        onClick={() => setOpen((prev) => !prev)}
+        aria-expanded={open}
+      >
+        <Sparkles className="copilot-thinking-spark" size={14} aria-hidden="true" />
+        <span className="copilot-thinking-title">{label}</span>
+        <span className="copilot-thinking-meta">
+          {count} {count === 1 ? 'step' : 'steps'}
+        </span>
+        <ChevronRight className="copilot-thinking-chev" size={13} aria-hidden="true" />
+      </button>
+      <div className="copilot-thinking-body">
+        <div className="copilot-thinking-body-inner">
+          <TraceStepList steps={steps} highlightLast={live} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Message rendering runs ReactMarkdown (expensive). Memoize so a message only re-renders when its
 // own content changes — not on every unrelated Copilot state update (typing, dragging, resize,
 // caret moves), which otherwise re-parsed markdown for every message and froze the panel.
@@ -79,16 +158,7 @@ const CopilotMessageItem = memo(function CopilotMessageItem({ message }: { messa
           {message.content}
         </ReactMarkdown>
       </div>
-      {trace.length > 0 && (
-        <details className="copilot-trace">
-          <summary>Reasoning ({trace.length})</summary>
-          <ol>
-            {trace.map((step, index) => (
-              <li key={`${step.round}-${step.event}-${index}`}>{formatTraceStep(step)}</li>
-            ))}
-          </ol>
-        </details>
-      )}
+      {trace.length > 0 && <CopilotThinkingCard steps={trace} />}
     </article>
   );
 });
@@ -538,6 +608,18 @@ export function ProjectCopilotModal({
   const [mentionCaret, setMentionCaret] = useState(0);
   const [mentionActiveIndex, setMentionActiveIndex] = useState(0);
   const [mentionDismissedDraft, setMentionDismissedDraft] = useState<string | null>(null);
+  // ↑/↓ sent-input history (per-user, persisted) + the navigation cursor (null = not navigating).
+  const inputHistoryRef = useRef<string[]>([]);
+  const historyNavRef = useRef<InputHistoryNav | null>(null);
+  // Inline LLM auto-complete: the current ghost suffix + its fetch orchestration.
+  const [completion, setCompletion] = useState('');
+  const [completionEnabled, setCompletionEnabled] = useState(false);
+  const completionTimerRef = useRef<number | null>(null);
+  const completionAbortRef = useRef<AbortController | null>(null);
+  const completionTokenRef = useRef(0);
+  const draftRef = useRef(draft);
+  const contextPayloadRef = useRef(contextPayload);
+  const ghostOverlayInnerRef = useRef<HTMLDivElement | null>(null);
 
   const sourceContext = useMemo(
     () => currentContextMetadata({ contextType, projectId: projectId || null, projectTaskId: projectTaskId || null }),
@@ -727,6 +809,107 @@ export function ProjectCopilotModal({
     };
   }, [currentUserId, draft, draftScope]);
 
+  // Keep a ref of the latest draft so the async completion callback can detect mid-flight typing.
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+
+  // Load this user's sent-input history once the user is known; reset any navigation cursor.
+  useEffect(() => {
+    inputHistoryRef.current = readStoredInputHistory(currentUserId);
+    historyNavRef.current = null;
+  }, [currentUserId, draftScope]);
+
+  // Discover whether inline completion is enabled on the backend (one cheap GET per open).
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void getCopilotConfig()
+      .then((config) => {
+        if (!cancelled) setCompletionEnabled(config.completionEnabled);
+      })
+      .catch(() => {
+        // Completion is optional; absence is indistinguishable from disabled.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  // Inline @-mention detection for uploaded attachments. Computed from draft + caret; null when no
+  // active mention. Hoisted above the completion effect because that effect gates on this value.
+  const attachmentMentionState = useMemo(() => {
+    if (uploadedAttachments.length === 0) return null;
+    if (mentionDismissedDraft === draft) return null;
+    const caret = Math.max(0, Math.min(mentionCaret, draft.length));
+    const beforeCaret = draft.slice(0, caret);
+    const asciiAtIndex = beforeCaret.lastIndexOf('@');
+    const fullwidthAtIndex = beforeCaret.lastIndexOf('＠');
+    const atIndex = Math.max(asciiAtIndex, fullwidthAtIndex);
+    if (atIndex < 0) return null;
+    const prefix = atIndex > 0 ? beforeCaret[atIndex - 1] : '';
+    if (prefix && !/\s|[(\[{,;:]/.test(prefix)) return null;
+    const query = beforeCaret.slice(atIndex + 1);
+    if (/[\r\n\t]/.test(query)) return null;
+    if (query.includes('  ')) return null;
+    const normalizedQuery = query.trim().toLowerCase();
+    const options = uploadedAttachments
+      .filter((attachment) => {
+        if (!normalizedQuery) return true;
+        return attachment.name.toLowerCase().includes(normalizedQuery);
+      })
+      .slice(0, 6);
+    if (options.length === 0) return null;
+    return { start: atIndex, end: caret, query, options };
+  }, [draft, mentionCaret, mentionDismissedDraft, uploadedAttachments]);
+
+  // Debounced inline-completion fetch. On every draft change: cancel anything in flight, clear the
+  // current ghost, then after a short pause ask the model for a continuation. Best-effort — a stale
+  // or aborted result is dropped, and any failure leaves the ghost empty. ``contextPayload`` is read
+  // via a ref because parents pass an inline object (new identity each render); depending on it would
+  // re-run this effect — and clear the ghost — on every unrelated parent re-render.
+  useEffect(() => {
+    if (completionTimerRef.current !== null) {
+      window.clearTimeout(completionTimerRef.current);
+      completionTimerRef.current = null;
+    }
+    completionAbortRef.current?.abort();
+    completionAbortRef.current = null;
+    setCompletion('');
+
+    if (!completionEnabled || !open || sending || applyingActionKey || bulkAction || attachmentMentionState) {
+      return;
+    }
+    const snapshot = draft;
+    if (!snapshot.trim()) return;
+    const token = ++completionTokenRef.current;
+    completionTimerRef.current = window.setTimeout(() => {
+      completionTimerRef.current = null;
+      const controller = new AbortController();
+      completionAbortRef.current = controller;
+      void requestCopilotCompletion(
+        { contextType, contextPayload: contextPayloadRef.current, userId: currentUserId, username: currentUsername, content: snapshot },
+        controller.signal
+      ).then((suffix) => {
+        if (token !== completionTokenRef.current || controller.signal.aborted) return;
+        if (suffix && draftRef.current === snapshot) setCompletion(suffix);
+      });
+    }, 400);
+    return () => {
+      if (completionTimerRef.current !== null) {
+        window.clearTimeout(completionTimerRef.current);
+        completionTimerRef.current = null;
+      }
+      completionAbortRef.current?.abort();
+      completionAbortRef.current = null;
+    };
+  }, [attachmentMentionState, applyingActionKey, bulkAction, completionEnabled, contextType, currentUserId, currentUsername, draft, open, sending]);
+
+  // Keep the contextPayload ref current (parents pass an inline object, so this is frequent + cheap).
+  useEffect(() => {
+    contextPayloadRef.current = contextPayload;
+  }, [contextPayload]);
+
   useEffect(() => {
     if (!open || position) return;
     if (typeof window === 'undefined') return;
@@ -841,6 +1024,10 @@ export function ProjectCopilotModal({
     setDraft('');
     writeStoredCopilotDraftLocal(draftScope, '');
     void deleteProjectCopilotState(currentUserId, copilotDraftDbKey());
+    // Record the sent input for ↑/↓ recall and exit any history navigation.
+    inputHistoryRef.current = appendInputHistory(inputHistoryRef.current, content);
+    writeStoredInputHistory(currentUserId, inputHistoryRef.current);
+    historyNavRef.current = null;
     try {
       if (pendingActions.length > 0) {
         await persistActionResolutions([...pendingActions].sort(comparePlanActions), 'cancelled');
@@ -938,31 +1125,6 @@ export function ProjectCopilotModal({
     focusComposer();
   }, [focusComposer]);
 
-  const attachmentMentionState = useMemo(() => {
-    if (uploadedAttachments.length === 0) return null;
-    if (mentionDismissedDraft === draft) return null;
-    const caret = Math.max(0, Math.min(mentionCaret, draft.length));
-    const beforeCaret = draft.slice(0, caret);
-    const asciiAtIndex = beforeCaret.lastIndexOf('@');
-    const fullwidthAtIndex = beforeCaret.lastIndexOf('＠');
-    const atIndex = Math.max(asciiAtIndex, fullwidthAtIndex);
-    if (atIndex < 0) return null;
-    const prefix = atIndex > 0 ? beforeCaret[atIndex - 1] : '';
-    if (prefix && !/\s|[(\[{,;:]/.test(prefix)) return null;
-    const query = beforeCaret.slice(atIndex + 1);
-    if (/[\r\n\t]/.test(query)) return null;
-    if (query.includes('  ')) return null;
-    const normalizedQuery = query.trim().toLowerCase();
-    const options = uploadedAttachments
-      .filter((attachment) => {
-        if (!normalizedQuery) return true;
-        return attachment.name.toLowerCase().includes(normalizedQuery);
-      })
-      .slice(0, 6);
-    if (options.length === 0) return null;
-    return { start: atIndex, end: caret, query, options };
-  }, [draft, mentionCaret, mentionDismissedDraft, uploadedAttachments]);
-
   useEffect(() => {
     if (!attachmentMentionState) {
       setMentionActiveIndex(0);
@@ -1001,7 +1163,30 @@ export function ProjectCopilotModal({
     const textarea = textareaRef.current;
     if (!textarea) return;
     textarea.style.height = 'auto';
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 132)}px`;
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 220)}px`;
+  }, []);
+
+  // The ghost overlay mirrors the textarea's scroll so its suffix stays glued to the caret when the
+  // draft exceeds the composer's max height.
+  const syncGhostScroll = useCallback(() => {
+    const inner = ghostOverlayInnerRef.current;
+    const textarea = textareaRef.current;
+    if (inner && textarea) {
+      inner.style.transform = `translateY(${-textarea.scrollTop}px)`;
+    }
+  }, []);
+
+  // Apply a recalled history value: set the draft and park the caret at the end so a further ↑/↓ is
+  // a single predictable step.
+  const applyHistoryValue = useCallback((value: string) => {
+    setDraft(value);
+    setMentionCaret(value.length);
+    window.requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus({ preventScroll: true });
+      textarea.setSelectionRange(value.length, value.length);
+    });
   }, []);
 
   useEffect(() => {
@@ -1016,6 +1201,7 @@ export function ProjectCopilotModal({
     void deleteProjectCopilotState(currentUserId, copilotDraftDbKey());
     setPendingActions([]);
     setError(null);
+    historyNavRef.current = null;
     focusComposer();
   };
 
@@ -1026,6 +1212,7 @@ export function ProjectCopilotModal({
     void deleteProjectCopilotState(currentUserId, copilotDraftDbKey());
     setError(null);
     restoreSessionActions(messages, sessionId);
+    historyNavRef.current = null;
     focusComposer();
   };
 
@@ -1268,15 +1455,7 @@ export function ProjectCopilotModal({
           {sending ? (
             <article className="copilot-message is-assistant">
               <div className="copilot-message-body copilot-thinking">
-                <LoaderCircle size={14} className="spin" />
-                Planning
-                {liveTrace.length > 0 && (
-                  <ol className="copilot-live-trace">
-                    {liveTrace.map((step, index) => (
-                      <li key={`${step.round}-${step.event}-${index}`}>{formatTraceStep(step)}</li>
-                    ))}
-                  </ol>
-                )}
+                <CopilotThinkingCard steps={liveTrace} live />
               </div>
             </article>
           ) : null}
@@ -1415,12 +1594,23 @@ export function ProjectCopilotModal({
                   event.currentTarget.value = '';
                 }}
               />
-              <textarea
-                ref={textareaRef}
+              <div className="copilot-input-wrap">
+                {completion ? (
+                  <div className="copilot-ghost-overlay" aria-hidden="true">
+                    <div className="copilot-ghost-overlay-inner" ref={ghostOverlayInnerRef}>
+                      <span className="copilot-ghost-spacer">{draft}</span>
+                      <span className="copilot-ghost-suffix">{completion}</span>
+                    </div>
+                  </div>
+                ) : null}
+                <textarea
+                  ref={textareaRef}
                 value={draft}
                 rows={1}
                 onChange={(event) => {
                   setDraft(event.target.value);
+                  // Any manual edit exits history-recall mode so the next ↑ starts from the newest.
+                  historyNavRef.current = null;
                   setMentionDismissedDraft(null);
                   setMentionCaret(event.target.selectionStart ?? event.target.value.length);
                   if (typeof window !== 'undefined') {
@@ -1453,6 +1643,51 @@ export function ProjectCopilotModal({
                       return;
                     }
                   }
+                  // Inline-completion accept/dismiss (only with the @mention menu closed and not composing).
+                  if (!event.nativeEvent.isComposing && completion) {
+                    if (event.key === 'Tab') {
+                      event.preventDefault();
+                      const accepted = completion;
+                      const next = `${draft}${accepted}`;
+                      setCompletion('');
+                      historyNavRef.current = null;
+                      setDraft(next);
+                      setMentionCaret(next.length);
+                      window.requestAnimationFrame(() => {
+                        textareaRef.current?.focus({ preventScroll: true });
+                        textareaRef.current?.setSelectionRange(next.length, next.length);
+                      });
+                      return;
+                    }
+                    if (event.key === 'Escape') {
+                      event.preventDefault();
+                      setCompletion('');
+                      return;
+                    }
+                  }
+                  // ↑/↓ sent-input history (caret on first/last line, not composing).
+                  if (
+                    !event.nativeEvent.isComposing &&
+                    (event.key === 'ArrowUp' || event.key === 'ArrowDown') &&
+                    shouldNavigateHistory(
+                      event.key === 'ArrowUp' ? 'up' : 'down',
+                      draft,
+                      event.currentTarget.selectionStart ?? draft.length
+                    )
+                  ) {
+                    const result = nextInputHistoryNav(
+                      inputHistoryRef.current,
+                      historyNavRef.current,
+                      draft,
+                      event.key === 'ArrowUp' ? 'up' : 'down'
+                    );
+                    if (result) {
+                      event.preventDefault();
+                      historyNavRef.current = result.nav;
+                      applyHistoryValue(result.value);
+                    }
+                    return;
+                  }
                   if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                     event.preventDefault();
                     void sendMessage();
@@ -1470,9 +1705,11 @@ export function ProjectCopilotModal({
                   if (event.key === 'Escape') return;
                   syncMentionCaretFromTextarea();
                 }}
+                onScroll={syncGhostScroll}
                 placeholder="输入消息…"
                 disabled={Boolean(sending || applyingActionKey || bulkAction)}
               />
+              </div>
               <button
                 className="copilot-send-btn"
                 type="button"

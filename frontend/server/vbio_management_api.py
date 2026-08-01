@@ -37,6 +37,7 @@ from management_api.jwt_auth import JwtTokenError, JwtUserService, decode_login_
 from management_api.task_store import ProjectTaskStore
 from management_api.ccd_download import build_task_ccd_response
 from management_api.copilot import CopilotAssistant
+from management_api.copilot_complete import CopilotCompleter, completion_config_from_env
 from management_api.copilot_stream import copilot_event_stream
 from management_api.usage_tracker import UsageTracker
 from management_api.monitor_stream import MonitorNotificationBroker, sse_frames
@@ -87,6 +88,15 @@ COPILOT_CONFIGURED = COPILOT_ENABLED not in {"0", "false", "no", "off"} and bool
 COPILOT_TIMEOUT_SECONDS = float(os.environ.get("VBIO_COPILOT_TIMEOUT_SECONDS", "90"))
 COPILOT_MAX_REQUEST_BYTES = int(os.environ.get("VBIO_COPILOT_MAX_REQUEST_BYTES", "524288"))
 COPILOT_ENABLE_THINKING = os.environ.get("VBIO_COPILOT_ENABLE_THINKING", "").strip().lower() in {"1", "true", "yes", "on"}
+# Inline auto-complete model. Optional VBIO_COPILOT_COMPLETE_* overrides let a smaller/faster model
+# serve per-keystroke completions; each falls back to the planner value when unset.
+_COPILOT_COMPLETE_API_URL, _COPILOT_COMPLETE_API_KEY, _COPILOT_COMPLETE_MODEL = completion_config_from_env(os.environ.get)
+COPILOT_COMPLETE_API_URL = _COPILOT_COMPLETE_API_URL or COPILOT_API_URL
+COPILOT_COMPLETE_API_KEY = _COPILOT_COMPLETE_API_KEY or COPILOT_API_KEY
+COPILOT_COMPLETE_MODEL = _COPILOT_COMPLETE_MODEL or COPILOT_MODEL
+COPILOT_COMPLETE_TIMEOUT_SECONDS = float(os.environ.get("VBIO_COPILOT_COMPLETE_TIMEOUT_SECONDS", "8"))
+COPILOT_COMPLETE_MAX_REQUEST_BYTES = int(os.environ.get("VBIO_COPILOT_COMPLETE_MAX_REQUEST_BYTES", "32768"))
+COPILOT_COMPLETE_ENABLED = COPILOT_CONFIGURED and bool(COPILOT_COMPLETE_API_URL and COPILOT_COMPLETE_MODEL)
 
 JWT_CLIENTS_FILE = os.environ.get("VBIO_JWT_CLIENTS_FILE", "frontend/.run/jwt_clients.json").strip()
 SESSION_SECRET = os.environ.get("VBIO_SESSION_SECRET", "").strip() or RUNTIME_API_TOKEN
@@ -154,6 +164,14 @@ copilot_assistant = CopilotAssistant(
     session=runtime_http,
     logger=logger,
     enable_thinking=COPILOT_ENABLE_THINKING,
+)
+copilot_completer = CopilotCompleter(
+    chat_api_url=COPILOT_COMPLETE_API_URL,
+    chat_api_key=COPILOT_COMPLETE_API_KEY,
+    chat_model=COPILOT_COMPLETE_MODEL,
+    timeout_seconds=COPILOT_COMPLETE_TIMEOUT_SECONDS,
+    session=runtime_http,
+    logger=logger,
 )
 
 
@@ -318,7 +336,7 @@ def runtime_status() -> Tuple[Response, int]:
 
 @app.get("/vbio-api/copilot/config")
 def copilot_config() -> Tuple[Response, int]:
-    return jsonify({"enabled": COPILOT_CONFIGURED}), 200
+    return jsonify({"enabled": COPILOT_CONFIGURED, "completionEnabled": COPILOT_COMPLETE_ENABLED}), 200
 
 
 
@@ -721,6 +739,27 @@ def copilot_plan_actions() -> Tuple[Response, int]:
     except Exception as exc:
         logger.exception("Copilot action planning failed")
         return jsonify({"error": str(exc), "actions": []}), 502
+
+
+@app.post("/vbio-api/copilot/complete")
+def copilot_complete() -> Tuple[Response, int]:
+    # Inline auto-complete is best-effort assistance: it never blocks the composer or surfaces an
+    # error to the user. When disabled or on any failure it returns an empty suggestion.
+    if not COPILOT_COMPLETE_ENABLED:
+        return jsonify({"suggestion": ""}), 200
+    content_length = request.content_length
+    if content_length is not None and content_length > COPILOT_COMPLETE_MAX_REQUEST_BYTES:
+        return jsonify({"suggestion": ""}), 200
+    payload = request.get_json(silent=True) or {}
+    try:
+        suggestion = copilot_completer.complete(
+            context_type=str(payload.get("context_type") or "").strip(),
+            content=str(payload.get("content") or "").strip(),
+        )
+        return jsonify({"suggestion": suggestion}), 200
+    except Exception as exc:  # never 5xx — autocomplete must degrade silently to "no suggestion"
+        logger.debug("Copilot completion failed: %s", str(exc)[:300])
+        return jsonify({"suggestion": ""}), 200
 
 
 @app.post("/vbio-api/predict")

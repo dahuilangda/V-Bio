@@ -2,24 +2,38 @@
 
 Production LLM systems ship an eval harness (OpenAI Evals, Inspect AI, promptfoo, LangSmith) that
 codifies the agent's behavioral contract into a registry of cases run repeatedly. This module is
-that artifact for the V-Bio Copilot: a reusable scorer over ``PlanAudit``, a registry of
-*archetypal* planner behaviors (not domain-specific fixtures — every case is a structural planner
-situation), and a runner that produces a pass/fail report and a CLI entry point.
+that artifact for the V-Bio Copilot. It mirrors the Inspect shape — *dataset* (archetypal cases) +
+*scorer* (multi-dimensional, over both the final ``PlanAudit`` and the planner *trajectory*) +
+*metrics* (per-dimension pass rates) — so the gate reports the industry-standard dimensions
+(outcome, state, tool-selection, efficiency, loop-health) rather than a single pass/fail.
 
-The suite evaluates the harness audit + grounding layer (the ``harness`` in planner+skills+harness)
-against invariants the hand-written unit tests assert one-at-a-time. Adding a case is one registry
-entry; CI can run ``python -m management_api.copilot_eval`` as a gate.
+The suite evaluates the harness audit + grounding + trajectory layer (the ``harness`` in
+planner+skills+harness) against invariants the hand-written unit tests assert one-at-a-time. Every
+case is a *structural* planner situation — never a specific compound/protein — so the suite exercises
+the contract itself rather than memorized answers. Adding a case is one registry entry; CI can run
+``python -m management_api.copilot_eval`` as a gate.
 """
 
 from __future__ import annotations
 
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, Tuple
 
 from management_api.copilot_skill_harness import CopilotSkillDefinition, CopilotSkillHarness, PlanAudit
 from management_api.copilot_skills.compute_skills import register_compute_skills
 from management_api.copilot_skills.online_databases import OnlineSkillDefinition
+from management_api.copilot_trace import (
+    TRACE_AUDIT_REJECTED,
+    TRACE_FALLBACK,
+    TRACE_MALFORMED_OUTPUT,
+    TRACE_MODEL_REQUEST,
+    TRACE_NO_CONVERGENCE,
+    TRACE_SKILL_OBSERVATIONS,
+    TRACE_TERMINAL,
+    PlannerTraceStep,
+)
 
 
 # Skill names the eval harness provisions. The cases below reference only these, so the registry
@@ -116,8 +130,12 @@ def _turn(message: str, operations=None, questions=None) -> Dict[str, Any]:
 
 @dataclass(frozen=True)
 class EvalCase:
-    """One archetypal planner scenario. ``expect_rejected`` asserts the audit surfaces an issue;
-    ``expect_state`` (if set) asserts the derived turn state."""
+    """One archetypal planner scenario scored over its final ``PlanAudit``.
+
+    ``expect_rejected`` asserts the audit surfaces an issue; ``expect_state`` the derived turn state.
+    ``expect_skills`` / ``expect_operation_count`` add the tool-selection and efficiency dimensions
+    (the industry-standard agent-eval metrics) when set.
+    """
 
     name: str
     description: str
@@ -125,6 +143,8 @@ class EvalCase:
     observations: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     expect_state: str = ""
     expect_rejected: bool = False
+    expect_skills: Tuple[str, ...] = ()
+    expect_operation_count: int = -1
 
 
 @dataclass(frozen=True)
@@ -139,6 +159,7 @@ class EvalCaseResult:
     name: str
     passed: bool
     dimensions: Tuple[EvalDimension, ...]
+    metrics: Tuple[Tuple[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -153,8 +174,19 @@ class EvalReport:
     def all_passed(self) -> bool:
         return self.passed_count == len(self.results)
 
+    def dimension_summary(self) -> str:
+        """Per-dimension pass-rate rollup — the Inspect-style metric surface."""
+        counts: Counter[str] = Counter()
+        totals: Counter[str] = Counter()
+        for result in self.results:
+            for dim in result.dimensions:
+                totals[dim.name] += 1
+                if dim.passed:
+                    counts[dim.name] += 1
+        return ", ".join(f"{name}={counts[name]}/{totals[name]}" for name in sorted(totals))
+
     def render(self) -> str:
-        lines = [f"copilot eval: {self.passed_count}/{len(self.results)} cases passed"]
+        lines = [f"copilot eval: {self.passed_count}/{len(self.results)} cases passed [{self.dimension_summary()}]"]
         for result in self.results:
             marker = "PASS" if result.passed else "FAIL"
             lines.append(f"  [{marker}] {result.name}")
@@ -165,8 +197,14 @@ class EvalReport:
 
 
 def score_audit(audit: PlanAudit, case: EvalCase) -> EvalCaseResult:
-    """Score a PlanAudit against a case's expectations. General — works on any audit/case pair."""
+    """Score a PlanAudit against a case's expectations across multiple dimensions.
+
+    General — works on any audit/case pair. Each PreparedOperation already carries its own
+    ``definition``, so tool-selection is derivable without a separate registry argument.
+    """
+    selected_skills = {op.skill for op in audit.operations}
     has_issues = bool(audit.issues)
+
     dimensions: list[EvalDimension] = [
         EvalDimension(
             "outcome",
@@ -178,7 +216,90 @@ def score_audit(audit: PlanAudit, case: EvalCase) -> EvalCaseResult:
         dimensions.append(
             EvalDimension("state", audit.state == case.expect_state, f"state={audit.state}, expected={case.expect_state}")
         )
-    return EvalCaseResult(case.name, all(dimension.passed for dimension in dimensions), tuple(dimensions))
+    # Tool-selection accuracy: the planner picked exactly the expected skill set.
+    if case.expect_skills:
+        matches = selected_skills == set(case.expect_skills)
+        dimensions.append(
+            EvalDimension(
+                "tool_selection",
+                matches,
+                f"selected={sorted(selected_skills)}, expected={sorted(case.expect_skills)}",
+            )
+        )
+    # Step efficiency: the plan uses the expected number of operations (no redundant work).
+    if case.expect_operation_count >= 0:
+        op_count = len(audit.operations)
+        dimensions.append(
+            EvalDimension("efficiency", op_count == case.expect_operation_count, f"ops={op_count}, expected={case.expect_operation_count}")
+        )
+
+    metrics: Tuple[Tuple[str, Any], ...] = (
+        ("ops", len(audit.operations)),
+        ("skills", ",".join(sorted(selected_skills))),
+        ("issues", len(audit.issues)),
+        ("state", audit.state),
+    )
+    return EvalCaseResult(case.name, all(dim.passed for dim in dimensions), tuple(dimensions), metrics)
+
+
+# ----------------------------------------------------------------------------------------------- #
+# Trajectory scoring — loop-health over the planner trace (not just the final audit).
+# Production agent evals score the whole path: BFCL-v3 multi-turn, Anthropic agentevals trace JSON,
+# LangSmith trajectory evaluators. This is the deterministic, CI-friendly analogue.
+# ----------------------------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class TrajectoryCase:
+    """A synthetic planner trajectory scored for loop-health invariants."""
+
+    name: str
+    description: str
+    steps: Tuple[PlannerTraceStep, ...]
+    expect_terminal: bool = True
+    max_rounds: int = 8
+
+
+def _step(round_: int, event: str, **detail: Any) -> PlannerTraceStep:
+    return PlannerTraceStep(round=round_, event=event, detail=detail)
+
+
+def score_trajectory(case: TrajectoryCase) -> EvalCaseResult:
+    """Score loop-health invariants over a planner trajectory."""
+    steps = case.steps
+    rounds = [step.round for step in steps]
+    events = [step.event for step in steps]
+    max_seen = max(rounds) if rounds else 0
+
+    dimensions: list[EvalDimension] = [
+        EvalDimension(
+            "round_budget",
+            max_seen <= case.max_rounds,
+            f"max_round_seen={max_seen}, budget={case.max_rounds}",
+        )
+    ]
+    terminal_events = {TRACE_TERMINAL, TRACE_FALLBACK}
+    reached_terminal = any(event in terminal_events for event in events)
+    dimensions.append(
+        EvalDimension(
+            "reached_terminal",
+            reached_terminal == case.expect_terminal,
+            f"reached={reached_terminal}, expected_terminal={case.expect_terminal}",
+        )
+    )
+    # A healthy loop must not spin on repeated rejections without progress. Allow some retries, but
+    # never a number approaching the round budget.
+    rejected = sum(1 for event in events if event == TRACE_AUDIT_REJECTED)
+    dimensions.append(
+        EvalDimension("rejection_loop", rejected < case.max_rounds, f"audit_rejected={rejected}")
+    )
+
+    metrics: Tuple[Tuple[str, Any], ...] = (
+        ("steps", len(steps)),
+        ("rounds", max_seen),
+        ("events", ",".join(events)),
+    )
+    return EvalCaseResult(case.name, all(dim.passed for dim in dimensions), tuple(dimensions), metrics)
 
 
 # The registry: archetypal planner behaviors. Each is a structural situation, never a specific
@@ -189,24 +310,30 @@ ARCHETYPAL_CASES: Tuple[EvalCase, ...] = (
         "A read-only operation yields the continue state for a follow-up observation round.",
         candidate=_turn("Looking up.", [_read_op()]),
         expect_state="continue",
+        expect_skills=(_READ_SKILL,),
+        expect_operation_count=1,
     ),
     EvalCase(
         "write_op_awaits_confirmation",
         "A non-read-only operation becomes a pending confirmation.",
         candidate=_turn("Awaiting confirmation.", [_write_op()]),
         expect_state="await_confirmation",
+        expect_skills=(_WRITE_SKILL,),
+        expect_operation_count=1,
     ),
     EvalCase(
         "missing_input_requests_input",
         "Unresolved questions with no operations request input.",
         candidate=_turn("I need more detail.", questions=["Which target?"]),
         expect_state="needs_input",
+        expect_operation_count=0,
     ),
     EvalCase(
         "empty_turn_completes",
         "A message with no operations and no questions completes.",
         candidate=_turn("Here is a general answer."),
         expect_state="complete",
+        expect_operation_count=0,
     ),
     EvalCase(
         "unknown_skill_is_rejected",
@@ -216,7 +343,7 @@ ARCHETYPAL_CASES: Tuple[EvalCase, ...] = (
     ),
     EvalCase(
         "mixed_read_and_write_rejected",
-        "A turn may not mix read-only and confirmation operations.",
+        "A turn may not mix read-only and confirmation operations (boundary violation).",
         candidate=_turn("Mix.", [_read_op(), _write_op()]),
         expect_rejected=True,
     ),
@@ -264,12 +391,14 @@ ARCHETYPAL_CASES: Tuple[EvalCase, ...] = (
         ),
         observations={"find": {"ok": True, "values": [{"results": [dict(_GROUNDED_RECORD)]}]}},
         expect_state="await_confirmation",
+        expect_skills=(_WRITE_SKILL,),
     ),
     EvalCase(
         "pattern_constraint_accepts_matching_value",
         "A skill schema's pattern constraint accepts a matching argument.",
         candidate=_turn("Valid.", [{"id": "p1", "skill": _PATTERNED_SKILL, "arguments": {"code": "EVAL1"}, "depends_on": []}]),
         expect_state="continue",
+        expect_skills=(_PATTERNED_SKILL,),
     ),
     EvalCase(
         "pattern_constraint_rejects_non_matching_value",
@@ -293,12 +422,59 @@ ARCHETYPAL_CASES: Tuple[EvalCase, ...] = (
         ),
         observations={"nums": {"ok": True, "values": [{"results": [{"value": 10.0}, {"value": 20.0}, {"value": 30.0}]}]}},
         expect_state="continue",
+        expect_skills=("compute.aggregate",),
+    ),
+)
+
+
+# Trajectory registry: structural loop-health situations (no LLM needed — synthetic traces).
+TRAJECTORY_CASES: Tuple[TrajectoryCase, ...] = (
+    TrajectoryCase(
+        "healthy_read_then_complete",
+        "A healthy turn: model request → skill observation → terminal, within budget.",
+        steps=(
+            _step(0, TRACE_MODEL_REQUEST, input_tokens=120, output_tokens=40),
+            _step(0, TRACE_SKILL_OBSERVATIONS),
+            _step(1, TRACE_MODEL_REQUEST, input_tokens=200, output_tokens=60),
+            _step(1, TRACE_TERMINAL, state="complete"),
+        ),
+    ),
+    TrajectoryCase(
+        "malformed_then_recovers",
+        "A malformed output is retried once and the turn still reaches a terminal state.",
+        steps=(
+            _step(0, TRACE_MODEL_REQUEST),
+            _step(0, TRACE_MALFORMED_OUTPUT),
+            _step(1, TRACE_MODEL_REQUEST),
+            _step(1, TRACE_TERMINAL, state="complete"),
+        ),
+    ),
+    TrajectoryCase(
+        "non_converging_repeats_then_fallback",
+        "Repeated audit rejections exhaust the budget; the turn ends via conversational fallback (terminal-ish).",
+        steps=(
+            _step(0, TRACE_MODEL_REQUEST),
+            _step(0, TRACE_AUDIT_REJECTED, issues=["x"]),
+            _step(1, TRACE_MODEL_REQUEST),
+            _step(1, TRACE_AUDIT_REJECTED, issues=["x"]),
+            _step(2, TRACE_FALLBACK),
+        ),
+        max_rounds=8,
+    ),
+    TrajectoryCase(
+        "stuck_no_terminal",
+        "A pathological trace that never reaches any terminal/fallback event within budget.",
+        steps=(
+            _step(0, TRACE_MODEL_REQUEST),
+            _step(0, TRACE_NO_CONVERGENCE),
+        ),
+        expect_terminal=False,
     ),
 )
 
 
 def run_eval() -> EvalReport:
-    """Run the full archetypal registry against a real harness and return the scored report."""
+    """Run the archetypal registry against a real harness and return the scored report."""
     harness, definitions = build_eval_harness()
     results: list[EvalCaseResult] = []
     for case in ARCHETYPAL_CASES:
@@ -307,7 +483,14 @@ def run_eval() -> EvalReport:
     return EvalReport(tuple(results))
 
 
+def run_trajectory_eval() -> EvalReport:
+    """Run the trajectory registry through the loop-health scorer."""
+    return EvalReport(tuple(score_trajectory(case) for case in TRAJECTORY_CASES))
+
+
 if __name__ == "__main__":
-    report = run_eval()
-    print(report.render())
-    sys.exit(0 if report.all_passed else 1)
+    audit_report = run_eval()
+    trajectory_report = run_trajectory_eval()
+    print(audit_report.render())
+    print(trajectory_report.render())
+    sys.exit(0 if (audit_report.all_passed and trajectory_report.all_passed) else 1)
