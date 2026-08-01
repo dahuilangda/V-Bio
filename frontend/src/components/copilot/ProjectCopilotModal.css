@@ -355,6 +355,25 @@
   padding-top: 7px;
   border-top: 1px solid #edf2ef;
 }
+/* The live card is the only content of its bubble (no answer above it yet), so the divider that
+   separates answer-from-reasoning would float above nothing — drop it there. */
+.copilot-chat-window .copilot-thinking > .copilot-thinking-card {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+/* Bare "思考中…" indicator shown before the first trace step arrives (no chrome, no empty body). */
+.copilot-chat-window .copilot-thinking-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.9em;
+  color: #6b7d73;
+}
+.copilot-chat-window .copilot-thinking-inline .copilot-thinking-spark {
+  color: #5d8e74;
+  animation: copilotSparkPulse 1.5s ease-in-out infinite;
+}
 .copilot-chat-window .copilot-thinking-head {
   display: inline-flex;
   align-items: center;
@@ -409,50 +428,51 @@
   padding-top: 5px;
 }
 
-/* Icon-led reasoning steps: muted, indented under a faint left rule that groups them. */
+/* Reasoning steps — a vertical workflow: one faint rail with a node (circle) per step, so the
+   sequence reads as a connected process instead of loose lines. Stays muted to match the chat. */
 .copilot-chat-window .copilot-trace-list {
-  margin: 0;
-  padding: 1px 0 1px 11px;
+  position: relative;
+  margin: 2px 0 0;
+  padding: 0;
   list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  border-left: 2px solid #edf2ef;
+}
+.copilot-chat-window .copilot-trace-list::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 13px;
+  bottom: 9px;
+  width: 2px;
+  background: #e6ece8;
+  border-radius: 2px;
 }
 .copilot-chat-window .copilot-trace-item {
-  display: grid;
-  grid-template-columns: 15px minmax(0, 1fr);
-  gap: 7px;
-  align-items: start;
-  padding: 2px 0;
-}
-.copilot-chat-window .copilot-trace-icon {
-  margin-top: 2px;
-  color: #b6c4ba;
-  flex: 0 0 auto;
-}
-.copilot-chat-window .copilot-trace-text {
+  position: relative;
+  padding: 4px 0 4px 20px;
   font-size: 0.82em;
-  line-height: 1.45;
-  color: #8a9a91;
+  line-height: 1.4;
+  color: #97a89e;
   word-break: break-word;
 }
-/* The latest streaming step pulses and brightens. */
-.copilot-chat-window .copilot-trace-item.is-current .copilot-trace-icon {
+/* Node on the rail; the surface-colored ring punches through the line for a clean connected look. */
+.copilot-chat-window .copilot-trace-item::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 9px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #c6d3cb;
+  box-shadow: 0 0 0 2px var(--surface, #fff);
+}
+.copilot-chat-window .copilot-trace-item.is-current {
+  color: #5d7268;
+}
+.copilot-chat-window .copilot-trace-item.is-current::before {
+  background: #5d8e74;
   animation: copilotSparkPulse 1.4s ease-in-out infinite;
 }
-.copilot-chat-window .copilot-trace-item.is-current .copilot-trace-text {
-  color: #4a5d54;
-}
-
-/* Event tones tint the icon (kept muted to match the chat palette). */
-.copilot-chat-window .copilot-trace-item.tone-think .copilot-trace-icon { color: #7d9a8b; }
-.copilot-chat-window .copilot-trace-item.tone-lookup .copilot-trace-icon { color: #6f97ad; }
-.copilot-chat-window .copilot-trace-item.tone-retry .copilot-trace-icon,
-.copilot-chat-window .copilot-trace-item.tone-revise .copilot-trace-icon { color: #bd9a55; }
-.copilot-chat-window .copilot-trace-item.tone-chat .copilot-trace-icon { color: #97a0a8; }
-.copilot-chat-window .copilot-trace-item.tone-done .copilot-trace-icon { color: #6fa484; }
-.copilot-chat-window .copilot-trace-item.tone-warn .copilot-trace-icon { color: #b57070; }
 
 @keyframes copilotSparkPulse {
   0%, 100% { opacity: 0.6; transform: scale(1); }
@@ -896,9 +916,31 @@
 }
 
 @media (max-width: 700px) {
+  /* Small screens: the floating panel becomes a true full-screen sheet (overrides the persisted
+     position/size, which would otherwise push the composer off-screen). Drag/resize are visually
+     disabled via !important. */
+  .copilot-floating-panel {
+    left: 0 !important;
+    top: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    height: 100dvh !important;
+    max-width: 100vw !important;
+    max-height: 100vh !important;
+    max-height: 100dvh !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    border: 0;
+    border-radius: 0;
+    resize: none;
+  }
+
   .copilot-modal.copilot-chat-window {
     width: 100%;
-    height: calc(100vh - 20px);
+    height: 100%;
+    padding: 12px 12px calc(12px + env(safe-area-inset-bottom, 0px));
   }
 
   .copilot-modal.copilot-chat-window.history-open {

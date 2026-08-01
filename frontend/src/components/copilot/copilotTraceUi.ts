@@ -50,49 +50,37 @@ export function collectCopilotMemory(
   return chronological.length > cap ? chronological.slice(chronological.length - cap) : chronological;
 }
 
-/** Render a trace step as one concise, general phrase. Generic — any skill maps to the same UI. */
+/** Render a trace step as one short, user-friendly phrase. Generic — any skill maps to the same UI.
+ *  Deliberately hides developer-only detail (token counts, internal skill names, audit issue text,
+ *  terminal state codes): the reasoning panel is for the user, not the developer. */
 export function formatTraceStep(step: CopilotTraceStep): string {
-  const detail = (step.detail && typeof step.detail === 'object' ? step.detail : {}) as Record<string, unknown>;
   switch (step.event) {
-    case 'model_request': {
-      const usage = detail.usage;
-      const tokens = usage && typeof usage === 'object'
-        ? [(usage as Record<string, unknown>).input_tokens, (usage as Record<string, unknown>).output_tokens].filter(
-            (v): v is number => typeof v === 'number'
-          )
-        : [];
-      return tokens.length === 2 ? `Considered the request (${tokens[0]}→${tokens[1]} tokens)` : 'Considered the request';
-    }
+    case 'model_request':
+      return 'Analyzing request';
     case 'malformed_output':
-      return 'Retried after a malformed response';
-    case 'audit_rejected': {
-      const issues = Array.isArray(detail.issues) ? detail.issues.filter((item) => typeof item === 'string') : [];
-      return issues.length ? `Revised plan: ${String(issues[0])}` : 'Revised the plan after a check';
-    }
-    case 'skill_observations': {
-      const observations = Array.isArray(detail.observations) ? detail.observations : [];
-      const parts = observations
-        .map((item) => {
-          if (!item || typeof item !== 'object') return '';
-          const observation = item as Record<string, unknown>;
-          const skill = String(observation.skill || 'a database').replace(/^.*\./, '');
-          const ok = observation.ok === true;
-          const count = Number(observation.count);
-          const success = Number(observation.successCount);
-          const label = skill || 'lookup';
-          if (!ok) return `${label}: no result`;
-          const countLabel = Number.isInteger(count) && count > 0 ? `${Number.isInteger(success) ? success : count} result(s)` : 'ok';
-          return `${label}: ${countLabel}`;
-        })
-        .filter(Boolean);
-      return parts.length ? `Looked up — ${parts.join('; ')}` : 'Ran a lookup';
-    }
+      return 'Regenerating';
+    case 'audit_rejected':
+      return 'Adjusting plan';
     case 'fallback':
-      return 'Answered conversationally';
+      return 'Composing answer';
     case 'terminal':
-      return `Finalized${detail.state ? ` (${String(detail.state)})` : ''}`;
+      return 'Done';
     case 'no_convergence':
       return 'Could not settle on a plan';
+    case 'skill_observations': {
+      const detail = (step.detail && typeof step.detail === 'object' ? step.detail : {}) as Record<string, unknown>;
+      const observations = Array.isArray(detail.observations) ? detail.observations : [];
+      let total = 0;
+      for (const item of observations) {
+        if (!item || typeof item !== 'object') continue;
+        const observation = item as Record<string, unknown>;
+        if (observation.ok !== true) continue;
+        const success = Number(observation.successCount);
+        const count = Number(observation.count);
+        total += Number.isInteger(success) ? success : Number.isInteger(count) ? count : 0;
+      }
+      return total > 0 ? `Found ${total} result${total === 1 ? '' : 's'}` : 'No results found';
+    }
     default:
       return step.event;
   }
