@@ -1,4 +1,4 @@
-import { AlertTriangle, Bot, Check, CheckCheck, ChevronRight, Clock3, LoaderCircle, MessageSquare, MessageSquarePlus, MessageSquareText, PanelLeft, Plus, RefreshCw, Search, Send, ShieldAlert, Sparkles, Trash2, X } from 'lucide-react';
+import { Bot, Check, CheckCheck, ChevronRight, Clock3, LoaderCircle, MessageSquarePlus, MessageSquareText, PanelLeft, Plus, Send, Sparkles, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, memo, type PointerEvent as ReactPointerEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -71,39 +71,20 @@ function author(message: ProjectCopilotMessage): string {
 
 // Planner trace + memory helpers live in ./copilotTraceUi (pure + unit-tested).
 
-// Per-event tone + icon for the reasoning timeline (icon-led, like Claude's thinking panel).
-type TraceTone = 'think' | 'lookup' | 'retry' | 'revise' | 'chat' | 'done' | 'warn' | 'other';
-type LucideIcon = typeof Sparkles;
-const TRACE_EVENT_META: Record<string, { tone: TraceTone; Icon: LucideIcon }> = {
-  model_request: { tone: 'think', Icon: Sparkles },
-  malformed_output: { tone: 'retry', Icon: RefreshCw },
-  audit_rejected: { tone: 'revise', Icon: ShieldAlert },
-  skill_observations: { tone: 'lookup', Icon: Search },
-  fallback: { tone: 'chat', Icon: MessageSquare },
-  terminal: { tone: 'done', Icon: Check },
-  no_convergence: { tone: 'warn', Icon: AlertTriangle },
-};
-
-function traceMeta(event: string): { tone: TraceTone; Icon: LucideIcon } {
-  return TRACE_EVENT_META[event] || { tone: 'other', Icon: Sparkles };
-}
-
-// Icon-led reasoning steps — muted and minimal (Claude/ChatGPT-style), no busy rail/tags. The latest
-// streaming step pulses gently.
+// Reasoning steps — plain muted text, one short phrase per step (wording in formatTraceStep).
+// The latest streaming step brightens; everything else stays quiet so the panel reads as part of
+// the message instead of a debug log.
 function TraceStepList({ steps, highlightLast }: { steps: CopilotTraceStep[]; highlightLast?: boolean }) {
   return (
     <ol className="copilot-trace-list">
       {steps.map((step, index) => {
-        const meta = traceMeta(step.event);
         const isLast = highlightLast && index === steps.length - 1;
-        const Icon = meta.Icon;
         return (
           <li
             key={`${step.round}-${step.event}-${index}`}
-            className={`copilot-trace-item tone-${meta.tone}${isLast ? ' is-current' : ''}`}
+            className={`copilot-trace-item${isLast ? ' is-current' : ''}`}
           >
-            <Icon className="copilot-trace-icon" size={13} aria-hidden="true" />
-            <span className="copilot-trace-text">{formatTraceStep(step)}</span>
+            {formatTraceStep(step)}
           </li>
         );
       })}
@@ -111,13 +92,21 @@ function TraceStepList({ steps, highlightLast }: { steps: CopilotTraceStep[]; hi
   );
 }
 
-// Collapsible "Thinking / Reasoning" card — mirrors Claude's reasoning panel: an animated sparkle
-// header while live, a quiet dimmed body of steps, smooth expand/collapse. Used for both the live
-// planning bubble and the per-message reasoning disclosure.
+// Collapsible "思考过程 / 思考中" disclosure — a quiet inline section of the message: a small
+// animated sparkle toggle while live, muted step text below, smooth expand/collapse.
 function CopilotThinkingCard({ steps, live }: { steps: CopilotTraceStep[]; live?: boolean }) {
   const [open, setOpen] = useState(live ?? true);
+  // Live with no steps yet: a bare "Thinking…" indicator. No card chrome, no divider, no empty
+  // expandable body — those would float above nothing and read as a stray line / empty box.
+  if (live && steps.length === 0) {
+    return (
+      <span className="copilot-thinking-inline">
+        <Sparkles className="copilot-thinking-spark" size={13} aria-hidden="true" />
+        <span className="copilot-thinking-title">Thinking…</span>
+      </span>
+    );
+  }
   const label = live ? 'Thinking' : 'Reasoning';
-  const count = steps.length;
   return (
     <div className={`copilot-thinking-card${live ? ' is-live' : ''}${open ? ' is-open' : ''}`}>
       <button
@@ -126,12 +115,10 @@ function CopilotThinkingCard({ steps, live }: { steps: CopilotTraceStep[]; live?
         onClick={() => setOpen((prev) => !prev)}
         aria-expanded={open}
       >
-        <Sparkles className="copilot-thinking-spark" size={14} aria-hidden="true" />
+        <Sparkles className="copilot-thinking-spark" size={13} aria-hidden="true" />
         <span className="copilot-thinking-title">{label}</span>
-        <span className="copilot-thinking-meta">
-          {count} {count === 1 ? 'step' : 'steps'}
-        </span>
-        <ChevronRight className="copilot-thinking-chev" size={13} aria-hidden="true" />
+        <span className="copilot-thinking-meta">{steps.length} {steps.length === 1 ? 'step' : 'steps'}</span>
+        <ChevronRight className="copilot-thinking-chev" size={12} aria-hidden="true" />
       </button>
       <div className="copilot-thinking-body">
         <div className="copilot-thinking-body-inner">
@@ -584,6 +571,9 @@ export function ProjectCopilotModal({
   const [bulkAction, setBulkAction] = useState<'apply' | 'cancel' | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Whether the message list is pinned to the bottom. Auto-scroll only when the user is already
+  // at (or near) the bottom, so reading history mid-answer isn't yanked away.
+  const stickToBottomRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const focusComposerFrameRef = useRef<number | null>(null);
@@ -759,15 +749,25 @@ export function ProjectCopilotModal({
     };
   }, [currentUserId]);
 
+  // Keep the conversation pinned to the newest content: when a message arrives, when the live
+  // Thinking bubble appears, and as its trace steps stream in — but only if the user hasn't
+  // scrolled up to read earlier messages.
   useEffect(() => {
     if (!open) {
       setError(null);
       return;
     }
-    window.setTimeout(() => {
-      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-    }, 0);
-  }, [sessionMessages.length, open]);
+    if (!stickToBottomRef.current) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    window.setTimeout(() => el.scrollTo({ top: el.scrollHeight }), 0);
+  }, [sessionMessages.length, liveTrace.length, sending, open]);
+
+  const handleMessagesScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  }, []);
 
   useEffect(() => {
     if (!open || sending || applyingActionKey || bulkAction) return;
@@ -1439,7 +1439,7 @@ export function ProjectCopilotModal({
           </aside>
         ) : null}
 
-        <div className="copilot-messages" ref={scrollRef}>
+        <div className="copilot-messages" ref={scrollRef} onScroll={handleMessagesScroll}>
           {loading ? (
             <div className="copilot-empty">
               <LoaderCircle size={16} className="spin" />

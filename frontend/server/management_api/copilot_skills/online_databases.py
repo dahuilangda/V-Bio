@@ -219,10 +219,11 @@ class OnlineDatabaseSkills:
             OnlineSkillDefinition(
                 name="chembl.bioactivity",
                 description=(
-                    "Look up a compound's known biological activity from ChEMBL: search the compound by name, then "
-                    "return its ranked targets with measured potency (IC50 / Ki / Kd / EC50). Use this to answer "
-                    "what targets a drug hits or how potent it is. Returns no results when the compound or its "
-                    "activity is unknown."
+                    "Compound-directed bioactivity: given a COMPOUND (drug name / ChEMBL molecule), return the "
+                    "TARGETS it hits ranked by measured potency (IC50 / Ki / Kd / EC50). Answers 'what does drug X "
+                    "target?' or 'how potent is X against Y?'. For the inverse question — 'find compounds / "
+                    "inhibitors for target Y' — use chembl.target_activity instead. Returns no results when the "
+                    "compound or its activity is unknown."
                 ),
                 input_schema={
                     "type": "object",
@@ -235,6 +236,61 @@ class OnlineDatabaseSkills:
                 },
             ),
             self._chembl_bioactivity,
+        )
+        self.register(
+            OnlineSkillDefinition(
+                name="chembl.target_activity",
+                description=(
+                    "Target-directed bioactivity: find known active compounds (inhibitors / ligands) for a "
+                    "biological TARGET and return them ranked by measured potency (IC50 / Ki / Kd / EC50), each "
+                    "with name and canonical SMILES. Answers 'what inhibits / binds / hits target X?' or 'find me "
+                    "inhibitors of X'. Resolve the target one of three ways, most precise first: (1) a UniProt "
+                    "accession in 'accession' (e.g. Q92918) — resolve a gene symbol such as HPK1 or its alias "
+                    "MAP4K1 to an accession with uniprot.search first, then pass that accession here; (2) a ChEMBL "
+                    "target id in 'target_chembl_id'; (3) a free-text protein name in 'query' alone, matched on "
+                    "ChEMBL's preferred name (gene symbols rarely match — prefer the accession path). Defaults to "
+                    "Homo sapiens. Returns no results when the target or its activity is unknown."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                            "description": "The user-facing target label (name or gene symbol). Echoed in the result.",
+                        },
+                        "accession": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64,
+                            "description": "UniProt accession (e.g. Q92918). Most precise target key.",
+                        },
+                        "target_chembl_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64,
+                            "description": "A ChEMBL target id (e.g. CHEMBL4618), used directly when already known.",
+                        },
+                        "organism": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "description": "Preferred organism scientific name to disambiguate targets; defaults to Homo sapiens.",
+                        },
+                        "activity_type": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "description": "Comma-separated ChEMBL standard_type values (default IC50,Ki,Kd,EC50,AC50).",
+                        },
+                        "size": {"type": "integer", "minimum": 1, "maximum": 10},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            ),
+            self._chembl_target_activity,
         )
         self.register(
             OnlineSkillDefinition(
@@ -277,12 +333,60 @@ class OnlineDatabaseSkills:
             self._search_clinical_trials,
         )
 
+    # A descriptive User-Agent is requested by EBI/NCBI for programmatic traffic and helps
+    # their fair-use throttling distinguish legitimate research clients.
+    _HTTP_USER_AGENT = "V-Bio-Copilot/1.0 (read-only research lookups)"
+    # Transient-failure retry, mirroring the official chembl_webresource_client guidance: EBI,
+    # NCBI, and RCSB read APIs intermittently return HTTP 5xx or drop connections mid-request
+    # (a long-standing ChEMBL condition — see chembl_webresource_client issues #134/#120, whose
+    # recommended workaround is bounded retry with exponential backoff). 4xx is deterministic
+    # (404 = no authoritative match) and must NOT be retried, so per-skill honest-empty handling
+    # stays intact.
+    _RETRY_MAX_ATTEMPTS = 3
+    _RETRY_BACKOFF_SECONDS = 0.4
+    _RETRY_BACKOFF_FACTOR = 2.5
+
+    def _request_with_retry(self, method: str, url: str, *, data: str | None = None) -> Any:
+        """Issue one HTTP request, retrying transient failures with bounded exponential backoff.
+
+        Retries HTTP 5xx, timeouts, and connection errors up to ``_RETRY_MAX_ATTEMPTS`` and
+        returns the final response (success or the last 4xx). Raises ``RuntimeError`` only when
+        the source stays unreachable after every attempt, so the caller can surface an honest
+        "source unavailable" signal instead of a raw transport exception.
+        """
+        headers = {"Accept": "application/json", "User-Agent": self._HTTP_USER_AGENT}
+        if method != "GET":
+            headers["Content-Type"] = "application/json"
+        backoff = self._RETRY_BACKOFF_SECONDS
+        response: Any = None
+        for attempt in range(self._RETRY_MAX_ATTEMPTS):
+            try:
+                if method == "GET":
+                    response = self._session.get(url, headers=headers, timeout=self._timeout_seconds)
+                else:
+                    response = self._session.post(url, headers=headers, data=data, timeout=self._timeout_seconds)
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+                if attempt + 1 == self._RETRY_MAX_ATTEMPTS:
+                    raise RuntimeError(f"online source unreachable: {exc}") from exc
+                time.sleep(backoff)
+                backoff *= self._RETRY_BACKOFF_FACTOR
+                continue
+            # Retry only transient server errors; 4xx is deterministic and returned as-is.
+            if 500 <= getattr(response, "status_code", 0) < 600 and attempt + 1 < self._RETRY_MAX_ATTEMPTS:
+                time.sleep(backoff)
+                backoff *= self._RETRY_BACKOFF_FACTOR
+                continue
+            return response
+        return response
+
     def _get_json(self, url: str) -> Dict[str, Any]:
-        response = self._session.get(
-            url,
-            headers={"Accept": "application/json", "User-Agent": "V-Bio-Copilot/1.0"},
-            timeout=self._timeout_seconds,
-        )
+        return self._fetch_json("GET", url)
+
+    def _post_json(self, url: str, body: str) -> Dict[str, Any]:
+        return self._fetch_json("POST", url, data=body)
+
+    def _fetch_json(self, method: str, url: str, *, data: str | None = None) -> Dict[str, Any]:
+        response = self._request_with_retry(method, url, data=data)
         if not response.ok:
             detail = " ".join(str(getattr(response, "text", "") or "").split())[:240]
             raise RuntimeError(f"HTTP {response.status_code}{': ' + detail if detail else ''}")
@@ -484,18 +588,9 @@ class OnlineDatabaseSkills:
                 "request_options": {"paginate": {"start": 0, "rows": size}},
             }
         )
-        response = self._session.post(
-            "https://search.rcsb.org/rcsbsearch/v2/query",
-            headers={"Accept": "application/json", "Content-Type": "application/json", "User-Agent": "V-Bio-Copilot/1.0"},
-            data=search_body,
-            timeout=self._timeout_seconds,
+        payload = self._post_json(
+            "https://search.rcsb.org/rcsbsearch/v2/query", search_body
         )
-        if not response.ok:
-            detail = " ".join(str(getattr(response, "text", "") or "").split())[:240]
-            raise RuntimeError(f"HTTP {response.status_code}{': ' + detail if detail else ''}")
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise RuntimeError("RCSB search returned a non-object JSON response.")
         result_set = payload.get("result_set") if isinstance(payload.get("result_set"), list) else []
         results: List[Dict[str, Any]] = []
         for hit in result_set:
@@ -515,11 +610,7 @@ class OnlineDatabaseSkills:
     def _resolve_alphafold(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         accession = _required_string(arguments, "identifier", label="AlphaFold resolve").upper()
         url = f"https://alphafold.ebi.ac.uk/api/prediction/{quote(accession, safe='')}"
-        response = self._session.get(
-            url,
-            headers={"Accept": "application/json", "User-Agent": "V-Bio-Copilot/1.0"},
-            timeout=self._timeout_seconds,
-        )
+        response = self._request_with_retry("GET", url)
         if not response.ok:
             detail = " ".join(str(getattr(response, "text", "") or "").split())[:240]
             raise RuntimeError(f"HTTP {response.status_code}{': ' + detail if detail else ''}")
@@ -595,6 +686,176 @@ class OnlineDatabaseSkills:
             "source": "chembl",
             "query": query,
             "compound": {"chemblId": chembl_id, "name": str(compound.get("pref_name") or query).strip()},
+            "count": len(results),
+            "results": results,
+        }
+
+    # ------------------------------------------------------------------ #
+    # Target-directed bioactivity (inverse of _chembl_bioactivity).
+    # Canonical ChEMBL "target report card" join, all on the stable filter
+    # API (target -> activity -> molecule), the same chain TeachOpenCADD
+    # T001 teaches: resolve target_chembl_id, pull activities ordered by
+    # potency, then hydrate the molecules for canonical SMILES.
+    # ------------------------------------------------------------------ #
+
+    _CHEMBL_DATA_API = "https://www.ebi.ac.uk/chembl/api/data"
+
+    def _resolve_chembl_target(
+        self,
+        *,
+        query: str,
+        accession: str | None,
+        target_chembl_id: str | None,
+        organism: str,
+    ) -> Dict[str, Any] | None:
+        """Resolve a target to one ChEMBL target record.
+
+        Precision order: an explicit ``target_chembl_id`` (direct lookup), then a UniProt
+        ``accession`` (``target_components__accession`` — the most reliable cross-link), then a
+        free-text ``query`` matched on preferred name. When several targets match, prefer the
+        requested organism and the most specific (single-protein) record — a general ranking
+        principle, not a per-query rule.
+        """
+        if target_chembl_id:
+            payload = self._get_json(
+                f"{self._CHEMBL_DATA_API}/target/{quote(target_chembl_id, safe='')}.json"
+            )
+            raw_targets = [payload] if isinstance(payload, dict) and payload.get("target_chembl_id") else []
+        elif accession:
+            payload = self._get_json(
+                f"{self._CHEMBL_DATA_API}/target.json?"
+                f"target_components__accession={quote(accession, safe='')}&limit=25"
+            )
+            raw_targets = payload.get("targets") if isinstance(payload.get("targets"), list) else []
+        else:
+            payload = self._get_json(
+                f"{self._CHEMBL_DATA_API}/target.json?"
+                f"pref_name__icontains={quote(query, safe='')}&limit=25"
+            )
+            raw_targets = payload.get("targets") if isinstance(payload.get("targets"), list) else []
+
+        candidates: List[Dict[str, Any]] = []
+        for raw in raw_targets:
+            if not isinstance(raw, dict):
+                continue
+            chembl_id = str(raw.get("target_chembl_id") or "").strip()
+            if not chembl_id:
+                continue
+            target_organism = str(raw.get("organism") or "").strip()
+            target_type = str(raw.get("target_type") or "").strip()
+            pref_name = str(raw.get("pref_name") or "").strip()
+            candidates.append(
+                {
+                    "chemblId": chembl_id,
+                    "name": pref_name or chembl_id,
+                    "organism": target_organism,
+                    "type": target_type,
+                    # rank-only fields stripped before returning
+                    "_organism_mismatch": bool(organism) and target_organism.lower() != organism.lower(),
+                    "_not_single_protein": target_type.upper() != "SINGLE PROTEIN",
+                }
+            )
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item["_organism_mismatch"], item["_not_single_protein"]))
+        chosen = candidates[0]
+        return {key: value for key, value in chosen.items() if not key.startswith("_")}
+
+    def _hydrate_chembl_molecules(self, molecule_ids: List[str]) -> Dict[str, Dict[str, str]]:
+        """Fetch canonical SMILES + preferred name for a batch of ChEMBL molecule ids."""
+        if not molecule_ids:
+            return {}
+        ids_param = quote(",".join(molecule_ids), safe="")
+        payload = self._get_json(
+            f"{self._CHEMBL_DATA_API}/molecule.json?"
+            f"molecule_chembl_id__in={ids_param}&limit={len(molecule_ids)}"
+        )
+        molecules = payload.get("molecules") if isinstance(payload.get("molecules"), list) else []
+        hydrated: Dict[str, Dict[str, str]] = {}
+        for raw in molecules:
+            if not isinstance(raw, dict):
+                continue
+            chembl_id = str(raw.get("molecule_chembl_id") or "").strip()
+            if not chembl_id:
+                continue
+            structures = raw.get("molecule_structures") if isinstance(raw.get("molecule_structures"), dict) else {}
+            hydrated[chembl_id] = {
+                "name": str(raw.get("pref_name") or "").strip(),
+                "smiles": str(structures.get("canonical_smiles") or "").strip(),
+            }
+        return hydrated
+
+    def _chembl_target_activity(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        query = _required_string(arguments, "query", label="ChEMBL target activity search")
+        size = _resolve_size(arguments, 5)
+        accession = str(arguments.get("accession") or "").strip().upper() or None
+        target_chembl_id = str(arguments.get("target_chembl_id") or "").strip().upper() or None
+        organism = str(arguments.get("organism") or "Homo sapiens").strip() or "Homo sapiens"
+        activity_type = str(arguments.get("activity_type") or "IC50,Ki,Kd,EC50,AC50").strip() or "IC50,Ki,Kd,EC50,AC50"
+
+        target = self._resolve_chembl_target(
+            query=query, accession=accession, target_chembl_id=target_chembl_id, organism=organism
+        )
+        if target is None:
+            return {"source": "chembl", "query": query, "count": 0, "results": []}
+
+        activity_payload = self._get_json(
+            f"{self._CHEMBL_DATA_API}/activity.json?"
+            f"target_chembl_id={quote(target['chemblId'], safe='')}"
+            f"&standard_type__in={quote(activity_type, safe=',')}"
+            "&standard_value__isnull=false"
+            "&molecule_chembl_id__isnull=false"
+            f"&order_by=standard_value&limit={size * 8}"
+        )
+        activities = activity_payload.get("activities") if isinstance(activity_payload.get("activities"), list) else []
+        # Keep the most potent (lowest) measured value per compound. The source is pre-sorted
+        # ascending by standard_value, so the first occurrence of each molecule is its best.
+        best_by_molecule: Dict[str, Dict[str, Any]] = {}
+        for item in activities:
+            if not isinstance(item, dict):
+                continue
+            molecule_id = str(item.get("molecule_chembl_id") or "").strip()
+            try:
+                value = float(item.get("standard_value"))
+            except (TypeError, ValueError):
+                continue
+            if not molecule_id:
+                continue
+            existing = best_by_molecule.get(molecule_id)
+            if existing is None or value < existing["value"]:
+                best_by_molecule[molecule_id] = {
+                    "molecule_chembl_id": molecule_id,
+                    "type": str(item.get("standard_type") or "").strip(),
+                    "value": value,
+                    "units": str(item.get("standard_units") or "nM").strip(),
+                    "name_hint": str(item.get("molecule_pref_name") or "").strip(),
+                }
+        ranked = list(best_by_molecule.values())[:size]
+        if not ranked:
+            return {"source": "chembl", "query": query, "target": target, "count": 0, "results": []}
+
+        hydrated = self._hydrate_chembl_molecules([row["molecule_chembl_id"] for row in ranked])
+        results: List[Dict[str, Any]] = []
+        for row in ranked:
+            info = hydrated.get(row["molecule_chembl_id"], {})
+            results.append(
+                {
+                    "compound": {
+                        "chemblId": row["molecule_chembl_id"],
+                        "name": info.get("name") or row["name_hint"] or row["molecule_chembl_id"],
+                        "smiles": info.get("smiles", ""),
+                    },
+                    "activity": {
+                        "type": row["type"],
+                        "value": row["value"],
+                        "units": row["units"],
+                    },
+                }
+            )
+        return {
+            "source": "chembl",
+            "query": query,
+            "target": target,
             "count": len(results),
             "results": results,
         }

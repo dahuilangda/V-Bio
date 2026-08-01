@@ -642,12 +642,49 @@ class CopilotAssistant:
 
         This makes the key data (compound name, accession, SMILES, etc.) immediately
         visible to the model, so it can ground its answer without parsing nested JSON.
+
+        Failed observations (ok=False) are surfaced explicitly as a source/transport error —
+        distinct from an authoritative "no match" (which returns ok=True with zero results). A
+        transient upstream outage (HTTP 5xx, timeout, connection drop) must not be reported to
+        the user as "nothing found", so the model is told the source was unavailable.
         """
         lines: List[str] = []
         for obs_id, obs in observations.items():
-            if not isinstance(obs, dict) or not obs.get("ok"):
+            if not isinstance(obs, dict):
                 continue
             skill = str(obs.get("skill") or obs_id)
+            items = obs.get("items") if isinstance(obs.get("items"), list) else []
+            first_item = items[0] if items and isinstance(items[0], dict) else {}
+            label_args = first_item.get("arguments") if isinstance(first_item.get("arguments"), dict) else {}
+            label_query = str(
+                label_args.get("query")
+                or label_args.get("identifier")
+                or label_args.get("text")
+                or label_args.get("accession")
+                or label_args.get("name")
+                or ""
+            ).strip()
+
+            if not obs.get("ok"):
+                errors = obs.get("errors") if isinstance(obs.get("errors"), list) else []
+                error_messages = [
+                    str(err.get("error") or "").strip()
+                    for err in errors
+                    if isinstance(err, dict) and err.get("error")
+                ] or ["unknown error"]
+                header = f'Observation "{obs_id}" [{skill}'
+                if label_query:
+                    header += f"({label_query})"
+                header += "] SOURCE UNAVAILABLE — a transport/source error, NOT an authoritative no-match:"
+                lines.append(header)
+                for message in error_messages[:2]:
+                    lines.append(f"  - error: {message[:300]}")
+                lines.append(
+                    "  The data source could not be reached; it may be temporarily down. Tell the user the "
+                    "lookup could not be completed and to retry shortly — do NOT claim the data is absent."
+                )
+                continue
+
             values = obs.get("values") or []
             records: List[Dict[str, Any]] = []
             for val in values:
