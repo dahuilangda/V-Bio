@@ -355,13 +355,6 @@
   padding-top: 7px;
   border-top: 1px solid #edf2ef;
 }
-/* The live card is the only content of its bubble (no answer above it yet), so the divider that
-   separates answer-from-reasoning would float above nothing — drop it there. */
-.copilot-chat-window .copilot-thinking > .copilot-thinking-card {
-  margin-top: 0;
-  padding-top: 0;
-  border-top: 0;
-}
 /* Bare "思考中…" indicator shown before the first trace step arrives (no chrome, no empty body). */
 .copilot-chat-window .copilot-thinking-inline {
   display: inline-flex;
@@ -428,8 +421,8 @@
   padding-top: 5px;
 }
 
-/* Reasoning steps — a vertical workflow: one faint rail with a node (circle) per step, so the
-   sequence reads as a connected process instead of loose lines. Stays muted to match the chat. */
+/* Reasoning steps — a single quiet vertical rail; no per-step node markers (the dots read as
+   clutter against the line). The latest streaming step brightens; the rest stay muted for chat. */
 .copilot-chat-window .copilot-trace-list {
   position: relative;
   margin: 2px 0 0;
@@ -440,38 +433,22 @@
   content: "";
   position: absolute;
   left: 5px;
-  top: 13px;
-  bottom: 9px;
+  top: 6px;
+  bottom: 6px;
   width: 2px;
   background: #e6ece8;
   border-radius: 2px;
 }
 .copilot-chat-window .copilot-trace-item {
   position: relative;
-  padding: 4px 0 4px 20px;
+  padding: 4px 0 4px 12px;
   font-size: 0.82em;
   line-height: 1.4;
   color: #97a89e;
   word-break: break-word;
 }
-/* Node on the rail; the surface-colored ring punches through the line for a clean connected look. */
-.copilot-chat-window .copilot-trace-item::before {
-  content: "";
-  position: absolute;
-  left: 2px;
-  top: 9px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #c6d3cb;
-  box-shadow: 0 0 0 2px var(--surface, #fff);
-}
 .copilot-chat-window .copilot-trace-item.is-current {
   color: #5d7268;
-}
-.copilot-chat-window .copilot-trace-item.is-current::before {
-  background: #5d8e74;
-  animation: copilotSparkPulse 1.4s ease-in-out infinite;
 }
 
 @keyframes copilotSparkPulse {
