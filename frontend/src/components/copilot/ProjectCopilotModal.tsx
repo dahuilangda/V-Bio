@@ -565,6 +565,9 @@ export function ProjectCopilotModal({
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [liveTrace, setLiveTrace] = useState<CopilotTraceStep[]>([]);
+  // Stable timestamp for the streaming bubble's meta header, so the header doesn't pop in when
+  // the finished assistant message replaces the live bubble.
+  const [streamStartedAt, setStreamStartedAt] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [pendingActions, setPendingActions] = useState<CopilotPlanAction[]>([]);
   const [applyingActionKey, setApplyingActionKey] = useState<string | null>(null);
@@ -1019,6 +1022,7 @@ export function ProjectCopilotModal({
     const conversationContext = buildCopilotConversationContext(sessionMessages);
     const copilotMemory = collectCopilotMemory(sessionMessages, activeSessionId);
     setSending(true);
+    setStreamStartedAt(new Date().toISOString());
     setError(null);
     setLiveTrace([]);
     setDraft('');
@@ -1084,6 +1088,7 @@ export function ProjectCopilotModal({
     } finally {
       setSending(false);
       setLiveTrace([]);
+      setStreamStartedAt('');
     }
   };
 
@@ -1454,9 +1459,14 @@ export function ProjectCopilotModal({
           )}
           {sending ? (
             <article className="copilot-message is-assistant">
-              <div className="copilot-message-body copilot-thinking">
-                <CopilotThinkingCard steps={liveTrace} live />
+              <div className="copilot-message-meta">
+                <strong>V-Bio Copilot</strong>
+                <span>{formatDateTime(streamStartedAt)}</span>
               </div>
+              {/* Same shape as a finished assistant message (meta + body + reasoning sibling) so
+                  completion only fills the body instead of restructuring the bubble — no jitter. */}
+              <div className="copilot-message-body copilot-thinking" />
+              <CopilotThinkingCard steps={liveTrace} live />
             </article>
           ) : null}
         </div>
