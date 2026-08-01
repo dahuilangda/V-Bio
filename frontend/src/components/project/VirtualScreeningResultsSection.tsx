@@ -195,6 +195,7 @@ export function VirtualScreeningResultsSection({
   const [query, setQuery] = useState('');
   const [stateFilter, setStateFilter] = useState<StateFilter>('all');
   const [selectedBackend, setSelectedBackend] = useState<VirtualScreeningStructureBackend>('boltz');
+  const [viewerColorMode, setViewerColorMode] = useState<'alphafold' | 'default'>('alphafold');
   const [sortKey, setSortKey] = useState<SortKey>('rank');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [page, setPage] = useState(1);
@@ -474,19 +475,45 @@ export function VirtualScreeningResultsSection({
       >
         <section className="lead-opt-mmp-viewer">
           {selectedStructureReady ? (
-            <MolstarViewer
-              key={`${selectedRecord.taskId}:${selectedRecord.structureName || selectedRow.id}`}
-              structureText={selectedRecord.structureText || ''}
-              format={selectedRecord.structureFormat || 'cif'}
-              colorMode="alphafold"
-              confidenceBackend={selectedBackend}
-              scenePreset="lead_opt"
-              leadOptStyleVariant="results"
-              ligandFocusChainId={ligandChain}
-              interactionGranularity="element"
-              suppressAutoFocus={false}
-              showSequence={false}
-            />
+            <>
+              <MolstarViewer
+                key={`${selectedRecord.taskId}:${selectedRecord.structureName || selectedRow.id}`}
+                structureText={selectedRecord.structureText || ''}
+                format={selectedRecord.structureFormat || 'cif'}
+                colorMode={viewerColorMode}
+                confidenceBackend={selectedBackend}
+                scenePreset="lead_opt"
+                leadOptStyleVariant="results"
+                ligandFocusChainId={ligandChain}
+                interactionGranularity="element"
+                suppressAutoFocus={false}
+                showSequence={false}
+              />
+              <div className="vs-viewer-color-mode-overlay">
+                <div className="prediction-render-mode-switch" role="tablist" aria-label="3D color mode">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={viewerColorMode === 'alphafold'}
+                    className={`prediction-render-mode-btn ${viewerColorMode === 'alphafold' ? 'active' : ''}`}
+                    onClick={() => setViewerColorMode('alphafold')}
+                    title="Color structure by model confidence"
+                  >
+                    AF
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={viewerColorMode === 'default'}
+                    className={`prediction-render-mode-btn ${viewerColorMode === 'default' ? 'active' : ''}`}
+                    onClick={() => setViewerColorMode('default')}
+                    title="Use standard element colors"
+                  >
+                    Std
+                  </button>
+                </div>
+              </div>
+            </>
           ) : (
             <div className="virtual-screening-viewer-loading" role="status">
               {selectedLoading ? <Loader2 size={22} className="spinning" /> : <AlertTriangle size={22} />}

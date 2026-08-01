@@ -347,50 +347,116 @@
   overflow-wrap: anywhere;
 }
 
-/* Planner reasoning trace: a collapsed, optional disclosure under an assistant message.
-   Observability only — shows how the planner reasoned (lookups, audit fixes, terminal state). */
-.copilot-chat-window .copilot-trace {
-  margin-top: 6px;
-  border-top: 1px dashed rgba(0, 0, 0, 0.08);
-  padding-top: 4px;
-  font-size: 0.82em;
-  color: #5a6b62;
+/* Planner reasoning — a quiet inline disclosure that belongs to the message, not a boxed widget.
+   It lives inside the chat bubble; only a hairline divider and a muted toggle set it off from the
+   answer, so it reads as part of the message instead of a pasted-on card. */
+.copilot-chat-window .copilot-thinking-card {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid #edf2ef;
 }
-.copilot-chat-window .copilot-trace > summary {
+.copilot-chat-window .copilot-thinking-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 0;
+  background: transparent;
+  border: 0;
   cursor: pointer;
-  user-select: none;
-  list-style: none;
-  opacity: 0.85;
+  font: inherit;
+  font-size: 0.8em;
+  color: #9aaca1;
+  text-align: left;
+  transition: color 0.14s ease;
 }
-.copilot-chat-window .copilot-trace > summary::-webkit-details-marker {
-  display: none;
+.copilot-chat-window .copilot-thinking-head:hover {
+  color: #647b6f;
 }
-.copilot-chat-window .copilot-trace[open] > summary {
-  margin-bottom: 4px;
+.copilot-chat-window .copilot-thinking-spark {
+  color: #a9bbaf;
+  flex: 0 0 auto;
 }
-.copilot-chat-window .copilot-trace ol {
-  margin: 0;
-  padding-left: 18px;
+.copilot-chat-window .copilot-thinking-card.is-live .copilot-thinking-spark {
+  color: #5d8e74;
+  animation: copilotSparkPulse 1.5s ease-in-out infinite;
 }
-.copilot-chat-window .copilot-trace li {
-  margin: 0;
+.copilot-chat-window .copilot-thinking-title {
+  font-weight: 500;
 }
-.copilot-chat-window .copilot-trace li + li {
-  margin-top: 1px;
+.copilot-chat-window .copilot-thinking-meta {
+  color: #b6c2bb;
+  font-variant-numeric: tabular-nums;
+}
+.copilot-chat-window .copilot-thinking-chev {
+  color: #b6c2bb;
+  transition: transform 0.2s ease;
+}
+.copilot-chat-window .copilot-thinking-card.is-open .copilot-thinking-chev {
+  transform: rotate(90deg);
 }
 
-/* Live trace shown inside the "Planning" bubble as trace steps stream in. */
-.copilot-chat-window .copilot-thinking .copilot-live-trace {
-  margin: 4px 0 0;
-  padding-left: 16px;
-  font-size: 0.82em;
-  opacity: 0.82;
+/* Smooth collapse via the grid 0fr→1fr trick (no height measurement needed). */
+.copilot-chat-window .copilot-thinking-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.22s ease;
 }
-.copilot-chat-window .copilot-thinking .copilot-live-trace li {
+.copilot-chat-window .copilot-thinking-card.is-open .copilot-thinking-body {
+  grid-template-rows: 1fr;
+}
+.copilot-chat-window .copilot-thinking-body-inner {
+  overflow: hidden;
+  padding-top: 5px;
+}
+
+/* Icon-led reasoning steps: muted, indented under a faint left rule that groups them. */
+.copilot-chat-window .copilot-trace-list {
   margin: 0;
+  padding: 1px 0 1px 11px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-left: 2px solid #edf2ef;
 }
-.copilot-chat-window .copilot-thinking .copilot-live-trace li + li {
-  margin-top: 1px;
+.copilot-chat-window .copilot-trace-item {
+  display: grid;
+  grid-template-columns: 15px minmax(0, 1fr);
+  gap: 7px;
+  align-items: start;
+  padding: 2px 0;
+}
+.copilot-chat-window .copilot-trace-icon {
+  margin-top: 2px;
+  color: #b6c4ba;
+  flex: 0 0 auto;
+}
+.copilot-chat-window .copilot-trace-text {
+  font-size: 0.82em;
+  line-height: 1.45;
+  color: #8a9a91;
+  word-break: break-word;
+}
+/* The latest streaming step pulses and brightens. */
+.copilot-chat-window .copilot-trace-item.is-current .copilot-trace-icon {
+  animation: copilotSparkPulse 1.4s ease-in-out infinite;
+}
+.copilot-chat-window .copilot-trace-item.is-current .copilot-trace-text {
+  color: #4a5d54;
+}
+
+/* Event tones tint the icon (kept muted to match the chat palette). */
+.copilot-chat-window .copilot-trace-item.tone-think .copilot-trace-icon { color: #7d9a8b; }
+.copilot-chat-window .copilot-trace-item.tone-lookup .copilot-trace-icon { color: #6f97ad; }
+.copilot-chat-window .copilot-trace-item.tone-retry .copilot-trace-icon,
+.copilot-chat-window .copilot-trace-item.tone-revise .copilot-trace-icon { color: #bd9a55; }
+.copilot-chat-window .copilot-trace-item.tone-chat .copilot-trace-icon { color: #97a0a8; }
+.copilot-chat-window .copilot-trace-item.tone-done .copilot-trace-icon { color: #6fa484; }
+.copilot-chat-window .copilot-trace-item.tone-warn .copilot-trace-icon { color: #b57070; }
+
+@keyframes copilotSparkPulse {
+  0%, 100% { opacity: 0.6; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.12); }
 }
 
 .copilot-chat-window .copilot-message-body p {
@@ -423,9 +489,7 @@
 }
 
 .copilot-chat-window .copilot-thinking {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
+  display: block;
   color: var(--muted);
 }
 
@@ -746,7 +810,7 @@
   width: 100%;
   min-height: 30px;
   height: auto;
-  max-height: 132px;
+  max-height: 220px;
   resize: none;
   border: 0;
   border-radius: 0;
@@ -755,10 +819,51 @@
   line-height: 1.35;
   outline: none;
   overflow-y: auto;
+  transition: height 0.08s linear;
 }
 
 .copilot-chat-window .copilot-composer textarea:focus {
   box-shadow: none;
+}
+
+/* Inline auto-complete ghost overlay. The textarea stays fully native (visible text, caret,
+   selection, IME); the overlay sits behind it with a transparent "spacer" that renders the draft
+   in invisible text so the grey suffix lands exactly at the caret. Font/padding/line-height mirror
+   the textarea rule above so wrapping aligns pixel-for-pixel. */
+.copilot-input-wrap {
+  position: relative;
+  min-width: 0;
+}
+.copilot-input-wrap > textarea {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+  /* The wrap is a plain block (not a grid cell), so override the textarea's default inline-block,
+     whose baseline gap would push it below the top-aligned ghost overlay. */
+  display: block;
+}
+.copilot-ghost-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  padding: 5px 2px;
+  font: inherit;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  color: var(--muted);
+}
+.copilot-ghost-spacer {
+  color: transparent;
+}
+.copilot-ghost-suffix {
+  opacity: 0.75;
 }
 
 .copilot-send-btn {

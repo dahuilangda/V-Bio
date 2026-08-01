@@ -41,6 +41,10 @@ MAX_CONTEXT_STRING_CHARS = 1600
 MAX_CONTEXT_LIST_ITEMS = 40
 MAX_CONTEXT_DICT_KEYS = 80
 MAX_MODEL_MESSAGE_CHARS = 64000
+# Authoritative long fields (sequence, SMILES) fed back to the planner must be passed in full —
+# the model can only quote verbatim what it actually receives. A 50-char preview would make a
+# "give me the sequence" answer impossible. The cap only guards against pathological sizes.
+MAX_OBSERVATION_LONG_CHARS = 4000
 REDACTED_FILE_TEXT_KEYS = {
     "content",
     "structure_text",
@@ -669,8 +673,14 @@ class CopilotAssistant:
                         parts.append(f"{key}={v}")
                 for key in RECORD_LONG_FIELDS:
                     v = str(rec.get(key) or "").strip()
-                    if v:
-                        parts.append(f"{key}={v[:50]}..." if len(v) > 50 else f"{key}={v}")
+                    if not v:
+                        continue
+                    # Pass the full authoritative value so the model can quote it verbatim. Only
+                    # bound pathological lengths; never reduce a real sequence/SMILES to a preview.
+                    if len(v) > MAX_OBSERVATION_LONG_CHARS:
+                        parts.append(f"{key}={v[:MAX_OBSERVATION_LONG_CHARS]}... [truncated, {len(v)} chars total]")
+                    else:
+                        parts.append(f"{key}={v}")
                 for key in RECORD_NUMERIC_FIELDS:
                     v = rec.get(key)
                     if v is not None:

@@ -22,15 +22,37 @@
   --draft: #6d6d6d;
   --radius: 12px;
 
-  --text-2xs: 11px;
-  --text-xs: 12px;
-  --text-sm: 13px;
-  --text-md: 14px;
-  --text-lg: 16px;
-  --text-xl: 18px;
-  --text-2xl: 24px;
+  /* Fluid type scale: scales smoothly from phone to wide desktop. Tokens keep
+     their names so every existing consumer becomes fluid automatically. */
+  --text-2xs: clamp(10.5px, 0.66rem + 0.1vw, 11px);
+  --text-xs: clamp(11.5px, 0.72rem + 0.12vw, 12px);
+  --text-sm: clamp(12.5px, 0.78rem + 0.15vw, 13px);
+  --text-md: clamp(13.5px, 0.84rem + 0.2vw, 14.5px);
+  --text-lg: clamp(15px, 0.92rem + 0.3vw, 16.5px);
+  --text-xl: clamp(17px, 1.04rem + 0.45vw, 19px);
+  --text-2xl: clamp(21px, 1.28rem + 0.8vw, 25px);
+  --text-3xl: clamp(26px, 1.5rem + 1.4vw, 32px);
   --lh-tight: 1.2;
   --lh-normal: 1.45;
+
+  /* Breakpoint scale (single source of truth; viewport media queries use these
+     via @media declarations — CSS vars can't be used in media conditions, so
+     these document the canonical values for authors). */
+  --bp-sm: 600px;
+  --bp-md: 900px;
+  --bp-lg: 1200px;
+  --bp-xl: 1480px;
+
+  /* Fluid spacing scale. */
+  --space-xs: clamp(4px, 0.3rem + 0.1vw, 6px);
+  --space-sm: clamp(8px, 0.5rem + 0.2vw, 10px);
+  --space-md: clamp(12px, 0.7rem + 0.4vw, 16px);
+  --space-lg: clamp(16px, 0.9rem + 0.8vw, 24px);
+  --space-xl: clamp(24px, 1.3rem + 1.6vw, 36px);
+
+  /* App content ceiling + gutters. */
+  --content-max: 1480px;
+  --gutter: clamp(14px, 1rem + 1.6vw, 28px);
 }
 
 html {
@@ -87,11 +109,12 @@ h3 {
 
 .app-shell {
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .top-nav {
   height: 64px;
-  padding: 0 20px;
+  padding: 0 var(--gutter);
   border-bottom: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.93);
   backdrop-filter: blur(8px);
@@ -141,6 +164,43 @@ h3 {
 .top-link:hover {
   background: var(--surface-2);
   color: var(--text);
+}
+
+.top-nav-links {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+
+.nav-hamburger {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  transition: background-color 0.16s ease, border-color 0.16s ease;
+}
+
+.nav-hamburger:hover {
+  background: var(--surface-2);
+  border-color: #c2d3c8;
+}
+
+.nav-hamburger:focus-visible {
+  outline: 2px solid #c2d6c8;
+  outline-offset: 2px;
+}
+
+@keyframes navDrawerDown {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .user-chip {
@@ -268,9 +328,9 @@ h3 {
 }
 
 .main-content {
-  max-width: 1480px;
-  margin: 24px auto;
-  padding: 0 18px 24px;
+  max-width: var(--content-max);
+  margin: clamp(16px, 1.4vw, 28px) auto;
+  padding: 0 var(--gutter) clamp(20px, 1.6vw, 28px);
 }
 
 .page-grid {
@@ -2027,16 +2087,46 @@ select:focus {
   }
 
   .top-nav {
-    height: auto;
-    padding: 12px;
-    align-items: flex-start;
-    gap: 12px;
-    flex-direction: column;
+    height: 56px;
+    padding: 0 var(--gutter);
+    flex-wrap: nowrap;
+  }
+
+  .top-nav-left {
+    gap: 8px;
+    min-width: 0;
   }
 
   .top-nav-right {
-    width: 100%;
-    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .nav-hamburger {
+    display: inline-flex;
+  }
+
+  .top-nav:not(.nav-open) .top-nav-links {
+    display: none;
+  }
+
+  .top-nav.nav-open .top-nav-links {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+    padding: 8px var(--gutter) 12px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--line);
+    box-shadow: 0 16px 30px rgba(26, 56, 43, 0.12);
+    animation: navDrawerDown 0.16s ease;
+  }
+
+  .top-nav.nav-open .top-nav-links .top-link {
+    padding: 11px 12px;
+    border-radius: 10px;
   }
 
   .user-menu-popover {
